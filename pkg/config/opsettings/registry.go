@@ -31,6 +31,13 @@ type Section struct {
 	Schema     *jsonschema.Schema
 	KoanfPaths []string
 	New        func() any
+
+	// RestartRequired lists the koanf paths of this section whose saved
+	// value takes effect only after a hub restart. Every other key is
+	// applied to the running hub when it is saved (ptone/scion#3904). A
+	// save reports a changed restart-required key as pending a restart.
+	// Each entry must also be listed in KoanfPaths.
+	RestartRequired []string
 }
 
 // dns1123SubdomainOrEmptyPattern mirrors the pattern used for
@@ -195,6 +202,8 @@ func init() {
 			Name:       "endpoints",
 			KoanfPaths: []string{"server.hub.public_url", "server.hub.hub_name", "image_registry", "server.hub.monitoring_dashboard_url"},
 			New:        func() any { return &EndpointsSettings{} },
+			// public_url is resolved into the hub endpoint at startup.
+			RestartRequired: []string{"server.hub.public_url"},
 		},
 		{
 			Name: "github_app",
@@ -204,6 +213,9 @@ func init() {
 				"server.github_app.private_key_path",
 			},
 			New: func() any { return &GitHubAppSettings{} },
+			// The agent dispatcher sets up its GitHub App token minter at
+			// startup, and only when an app_id is configured then.
+			RestartRequired: []string{"server.github_app.app_id"},
 		},
 		{
 			Name:       "notifications",
@@ -335,6 +347,22 @@ func IsLayer1Key(koanfKey string) bool {
 	return OwningSection(koanfKey) != ""
 }
 
+// IsRestartRequired reports whether a saved value of the given Layer-1 koanf
+// key takes effect only after a hub restart (Section.RestartRequired). A key
+// nested under a restart-required path is restart-required too.
+func IsRestartRequired(koanfKey string) bool {
+	sec := SectionByName(OwningSection(koanfKey))
+	if sec == nil {
+		return false
+	}
+	for _, p := range sec.RestartRequired {
+		if koanfKey == p || strings.HasPrefix(koanfKey, p+".") {
+			return true
+		}
+	}
+	return false
+}
+
 // --- Schema compilation and validation ---
 
 var schemaCompileErr error
@@ -350,6 +378,9 @@ var rawSchemas map[string]map[string]interface{}
 type SectionSchemaInfo struct {
 	Schema     interface{} `json:"schema"`
 	KoanfPaths []string    `json:"koanf_paths"`
+	// RestartRequired lists the koanf paths whose saved value applies only
+	// after a hub restart (Section.RestartRequired).
+	RestartRequired []string `json:"restart_required,omitempty"`
 }
 
 // SchemaInfo returns the raw JSON-schema fragment and koanf paths for every
@@ -365,7 +396,8 @@ func SchemaInfo() map[string]SectionSchemaInfo {
 	result := make(map[string]SectionSchemaInfo, len(Registry))
 	for _, s := range Registry {
 		info := SectionSchemaInfo{
-			KoanfPaths: s.KoanfPaths,
+			KoanfPaths:      s.KoanfPaths,
+			RestartRequired: s.RestartRequired,
 		}
 		if info.KoanfPaths == nil {
 			info.KoanfPaths = []string{}
