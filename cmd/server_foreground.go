@@ -386,6 +386,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			_ = hubSrv.CloseAuditWriter(closeCtx)
 		}()
 
+		// /healthz cloud_logging: present only when initServerLogging
+		// configured a Cloud Logging handler (P2).
+		wireCloudLoggingHealth(hubSrv, serverCloudWriter())
+
 		// The co-located broker registers (startRuntimeBroker, step 13)
 		// only after the Hub API is serving. Mark it as expected now, under
 		// the same condition startRuntimeBroker registers it, so gates that
@@ -2174,10 +2178,15 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 
 	// Decision logging (remaining-audit P1): the audit writer's
 	// scion.logging.* series and the decision-log disposition counter.
+	// The same instruments carry writer=cloud (P2): the Cloud Logging
+	// counters are process atomics read at collection, so counts recorded
+	// before this MeterProvider existed are exported too. Without a Cloud
+	// handler they stay zero and export no series.
 	if writeRec, err := logging.NewWriteMetrics(mp); err != nil {
 		log.Printf("WARNING: hub audit log writer metrics disabled: %v", err)
 	} else {
 		hubSrv.SetAuditWriterMetrics(writeRec)
+		writeRec.ObserveCloud(serverCloudWriter())
 	}
 	if decisionRec, err := hub.NewOTelDecisionAuditMetrics(mp); err != nil {
 		log.Printf("WARNING: hub decision audit metrics disabled: %v", err)
@@ -2186,6 +2195,23 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 	}
 
 	return hubDBRec
+}
+
+// serverCloudWriter returns the writer=cloud counters the server exports
+// and reports on /healthz: logging.CloudWriter() in production. A var so
+// cmd tests can substitute standalone counters instead of the process-wide
+// ones.
+var serverCloudWriter = logging.CloudWriter
+
+// wireCloudLoggingHealth injects the cloud_logging /healthz provider when a
+// Cloud Logging handler is configured (its circuit breaker registered with
+// cs). Without one the key stays absent. The key is non-critical: it can
+// only degrade /healthz.
+func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
+	if hubSrv == nil || cs == nil || !cs.Configured() {
+		return
+	}
+	hubSrv.SetCloudLoggingHealth(func() string { return cs.HealthStatus(time.Now()) })
 }
 
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {

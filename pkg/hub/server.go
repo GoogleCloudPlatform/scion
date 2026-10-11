@@ -1564,6 +1564,11 @@ type Server struct {
 	auditWriter         *asyncwrite.Writer[logging.AsyncRecord]
 	decisionAuditLogger *decisionAuditLogger
 
+	// cloudLoggingHealth reports the direct Cloud Logging path for the
+	// cloud_logging /healthz key (P2). Injected by cmd only when a Cloud
+	// handler is configured; nil means the key is absent.
+	cloudLoggingHealth atomic.Pointer[func() string]
+
 	// githubWebhookNoSecretWarnOnce ensures the "no webhook secret configured"
 	// rejection is logged at most once per process, so a hub being repeatedly
 	// probed on the GitHub webhook endpoint does not fill its log.

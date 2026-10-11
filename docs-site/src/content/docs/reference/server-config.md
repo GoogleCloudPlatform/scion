@@ -160,7 +160,7 @@ server:
     perf_trace: true
 ```
 
-**Observe only.** Tracing never changes an authorization decision, a decision-audit record (content, count or delivery), a response body, filtering, sorting, redaction or lineage. The only change a client can see is the extra response headers described below, and only an unscoped local platform admin who asks for them can see it.
+**Observe only.** Tracing never changes an authorization decision, a decision-audit record (content, count or delivery; records are delivered asynchronously and can be lost, see [Log delivery guarantees](#log-delivery-guarantees)), a response body, filtering, sorting, redaction or lineage. The only change a client can see is the extra response headers described below, and only an unscoped local platform admin who asks for them can see it.
 
 **What it records.** Each Hub API request writes one `perf_trace` log line (subsystem `hub.perf-trace`); an SSE connection writes one at connect and one at close (`sse_stage`). A line holds:
 
@@ -865,12 +865,56 @@ These environment variables control server-side logging behavior. They are not p
 | `SCION_LOG_LEVEL` | Log level: `debug`, `info`, `warn` or `error`, optionally followed by per-component levels such as `info,hub.auth=debug`. See [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level). | `info` |
 | `SCION_DEBUG` | Deprecated alias for `SCION_LOG_LEVEL=debug`. Any non-empty value enables it, and a warning is printed to stderr once. `SCION_LOG_LEVEL` wins if both are set. Ignored (no warning) by `scion` commands in agent CLI mode; see [Debugging an agent](/scion/hosted/single-node/observability/#debugging-an-agent). | - |
 | `SCION_CLOUD_LOGGING` | Send logs directly to Cloud Logging via client library | `false` |
-| `SCION_CLOUD_LOGGING_LOG_ID` | Log name in Cloud Logging for application logs | `scion` |
+| `SCION_CLOUD_LOGGING_LOG_ID` | Log name in Cloud Logging for application logs | `scion-server` |
 | `SCION_GCP_PROJECT_ID` | GCP project ID for Cloud Logging (priority 1) | auto-detect |
 | `GOOGLE_CLOUD_PROJECT` | GCP project ID for Cloud Logging (priority 2) | - |
 | `SCION_SERVER_REQUEST_LOG_PATH` | Write HTTP request logs to a file at this path. Each line is a JSON object in `HttpRequest` format. When not set, request logs follow the default routing (stdout in background mode, suppressed in foreground mode, Cloud Logging when enabled). | (disabled) |
 
 See the [Local Development Logging guide](/scion/contributing/logging/) for details on log formats, request log fields, and Cloud Logging integration.
+
+### Log delivery guarantees
+
+Server logging is best effort. Losses in the modes below are counted, never retried, and there is no exactly-once delivery: a record can be lost, and on some platforms it can appear twice (see **Duplicates** below). This section describes what the code guarantees; nothing here is a measured ingestion rate.
+
+**Local acceptance is not remote ingestion.** A record counts as written when the local handler accepts it: the stdout write returned, or the Cloud Logging client put the entry in its in-memory buffer (8 MiB for application logs). The client sends buffered entries to Cloud Logging later, in the background. Nothing in the Hub confirms that an entry reached Cloud Logging, so no metric reports a delivery ratio for the Cloud path.
+
+**Paths.**
+
+- **stdout** (plain JSON, or Cloud Logging JSON with `SCION_LOG_GCP=true`): written synchronously by the logging call. On Cloud Run and GKE the platform ships stdout to Cloud Logging; on other hosts that depends on the host's log agent (for example the Ops Agent on Compute Engine). That shipping is outside the Hub.
+- **Direct Cloud Logging** (`SCION_CLOUD_LOGGING=true`): the client library buffers and sends entries asynchronously. A circuit breaker probes the client by flushing it every 30 seconds; after 3 consecutive failed flushes it opens and the Hub stops feeding the Cloud path (stdout logging continues where a stdout handler is configured; see the `circuit_open` row). It probes again at the first 30-second check at least 60 seconds after opening (about 90 seconds with the defaults, and about every 90 seconds while probes keep failing) and closes when a probe succeeds. The request log (`scion_request_log`) and message log (`scion-messages`) share the same client and circuit.
+- **Decision-log audit records** (`scion.audit`, only when the `hub.authorization_decision_audit_v2` experiment is on): queued on a bounded asynchronous writer (2,048 records, 2 MiB) with one worker, a 2-second write budget per record and a 5-second drain at shutdown. The worker writes to the same handler chain as other logs, so the stdout and Cloud rules above apply after it.
+
+**Loss modes.** Each loss mode below increments `scion.logging.write.failures{writer, reason}`. Losses outside these modes are not counted, for example: a process ended by `SIGTERM` or by a fatal startup error (see **Shutdown**), a process killed by `SIGKILL` or the OOM killer, an unrecovered panic, a failed stdout write outside the audit writer, an OTel log export failure, and a request-log file write failure.
+
+| `writer` | `reason` | Meaning |
+| :--- | :--- | :--- |
+| `audit` | `queue_full` | The writer's queue was full (record count or bytes); the new record was dropped. |
+| `audit` | `oversize` | The record exceeded the per-record limits; it was rejected, not truncated. |
+| `audit` | `unsupported` | The record held a value kind the writer does not copy; it was rejected. |
+| `audit` | `closed` | The record arrived after the writer closed (shutdown). |
+| `audit` | `error` | The inner handler returned an error or panicked. |
+| `audit` | `timeout` | The write exceeded its 2-second budget. The record may still be written later; it is counted once, as a timeout. |
+| `audit` | `shutdown` | The record was still queued when the 5-second shutdown drain ended. |
+| `cloud` | `error` | The Cloud Logging client reported an error (a failed batch send, an invalid or oversized entry). One count per reported error, not per record. Under an error storm the client skips some reports, so this undercounts. |
+| `cloud` | `queue_full` | The client's buffer was full and it dropped the entry. |
+| `cloud` | `circuit_open` | The record was dropped from the Cloud path because the circuit breaker was open or probing. Application and message logs still go to stdout, except on Cloud Run, where the Hub leaves out their stdout handler (see **Duplicates**). The request log has no stdout copy while Cloud Logging is on; it keeps a file copy only if `SCION_SERVER_REQUEST_LOG_PATH` is set. Otherwise the dropped record is lost from Cloud Logging and stdout (an OTel log copy, when OTel logging is enabled, is unaffected). |
+| `cloud` | `flush_error` | A periodic, probe or shutdown flush failed, timed out, or was skipped because an earlier flush was still running. A failed flush usually reports errors the client already counted as `error`, so the two can count the same incident. |
+
+`scion.logging.write.records{writer="audit"}` counts records the audit writer's handler accepted. There is no `records` series for `writer="cloud"`, because a client buffer accept is not ingestion. Cloud Logging client errors are counted in `scion.logging.write.failures{writer=cloud,reason=error|queue_full}` and printed once to stderr as `logging client: <error>`. They are deliberately not sent through the structured logger (stdout JSON, OTel or Cloud Logging), to avoid feeding errors back into a failing Cloud Logging pipeline. Under an error storm the client drops some errors before the hook, so the count may be low.
+
+**State signals.**
+
+- `scion.logging.writer.stalled{writer}` is 1 while an audit write has been in flight longer than its budget. Records keep queuing, then drop as `queue_full`.
+- `scion.logging.writer.circuit_open{writer="cloud"}` is 1 while the circuit breaker is open or probing.
+- `scion.logging.queue.depth{writer}` and `scion.logging.write.late_returns{writer}` (writes that finished after being counted as timeouts; not failures).
+- `/healthz` key `audit_log_writer`: `healthy`, `degraded: recent write failures` (a failure in the last 5 minutes), `degraded: writer stalled` or `degraded: writer closed`.
+- `/healthz` key `cloud_logging`, present only when direct Cloud Logging is configured: `healthy`, `degraded: circuit open` or `degraded: recent write failures` (any `writer="cloud"` failure in the last 5 minutes).
+
+Both health keys are non-critical: they can make `/healthz` report `degraded`, never `unhealthy`, and they do not affect `/readyz`. The metrics are exported only when Hub metrics export is on (`server.hub.gcp_project_id`, metric group `SCION_METRICS_LOGGING`); the counters and health keys work without it. `deploy/monitoring/alert-policies.yaml` defines WARNING policies for write failures, a stalled writer and an open circuit. They take effect only when applied to Cloud Monitoring.
+
+**Shutdown.** On a clean shutdown (Ctrl+C / `SIGINT`) the Hub drains its servers, closes the audit writer (up to 5 seconds), flushes and shuts down metrics and traces, then flushes the message and request logs, stops the circuit breaker, and flushes and closes the Cloud Logging client. Because the metric exporter has already shut down, failures counted during these final log flushes are never exported; a failed final flush of the main Cloud log still prints `error flushing Cloud Logging: ...` to stderr. `scion server start` (the Hub, Web and co-located broker process) handles only `SIGINT`. Other signals, including `SIGTERM` (what systemd, Kubernetes and Cloud Run send to stop a process), end that process without these steps: queued audit records and buffered Cloud Logging entries are lost and not counted. To stop the Hub cleanly, send `SIGINT` or use `scion server stop`. A foreground runtime broker started with `scion broker start --foreground` converts `SIGTERM` into the same ordered shutdown (when it owns the broker's port record, the normal case). A fatal startup error after logging starts (`Hub server failed to start`) exits through `log.Fatalf`, which skips the deferred log flush, so buffered Cloud Logging entries from startup can be lost. Known third-party hazard (pre-existing, not observed): in the Cloud Logging client (`cloud.google.com/go/logging` v1.13.2), a record logged after the client is closed whose send then fails reports the error on a closed channel, which panics; whether this can happen during Hub shutdown has not been determined.
+
+**Duplicates.** When direct Cloud Logging is on and the `K_SERVICE` environment variable is set (Cloud Run), the Hub leaves out the stdout handler for application logs and the message log, so it sends each of those records on one path only (the direct client) and does not itself create a duplicate. Without `K_SERVICE` (GKE, Compute Engine, other hosts) both paths stay on. If that platform also ships stdout to Cloud Logging, each record can appear twice, once per path. This follows from the code; it has not been observed on a deployment. To avoid it there, turn off one of the two paths: direct Cloud Logging, or the platform's stdout collection.
 
 ### Boolean Environment Variable Parsing (`parseBoolEnv`)
 
