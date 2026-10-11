@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
@@ -150,6 +151,10 @@ type Options struct {
 	NoPTY bool
 	// PTYUser is who the default SpawnPTY runs the tmux client as.
 	PTYUser PTYUser
+	// SSH is the embedded SSH server that serves ssh streams (design
+	// §3.8). When nil the agent neither advertises nor serves the ssh
+	// kind. New validates it.
+	SSH *sshd.Config
 	// OnSession is called after each admitted session's grant keys are
 	// installed. Optional.
 	OnSession func(*conduitv1.Welcome)
@@ -211,6 +216,11 @@ func New(opts Options) (*Agent, error) {
 	if opts.DialLocal == nil {
 		d := &net.Dialer{Timeout: localDialTimeout}
 		opts.DialLocal = d.DialContext
+	}
+	if opts.SSH != nil {
+		if err := opts.SSH.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	if opts.NoPTY && opts.SpawnPTY != nil {
 		return nil, errors.New("conduit: NoPTY and SpawnPTY are mutually exclusive")

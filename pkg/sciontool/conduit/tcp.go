@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -29,13 +28,16 @@ import (
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
-// ReservedPorts are never a TCP stream target, whatever the grant says:
-// the hub API (9810) and the metadata server (18380).
-var ReservedPorts = []int{9810, 18380}
+// ReservedPorts are never a TCP stream target, whatever the grant says.
+// It is the deny-list shared with the SSH server's direct-tcpip channels
+// (localpolicy.ReservedPorts): the hub API (9810) and the metadata server
+// (18380).
+var ReservedPorts = localpolicy.ReservedPorts
 
 // loopbackHost is the logical loopback target a TCP grant names (design
 // §3.10: TCP happens only on in-container loopback, at the sciontool end).
@@ -68,6 +70,10 @@ func (a *Agent) handleStream(ctx context.Context, open *conduitv1.StreamOpen, ps
 	case conduitv1.StreamKind_STREAM_KIND_PTY:
 		if a.opts.SpawnPTY != nil {
 			return a.handlePTY(ctx, open, ps)
+		}
+	case conduitv1.StreamKind_STREAM_KIND_SSH:
+		if a.opts.SSH != nil {
+			return a.handleSSH(ctx, open, ps)
 		}
 	}
 	return ps.Reject(core.CloseProtocolError, reasonUnsupportedKind)
@@ -149,7 +155,7 @@ func TCPTarget(params map[string]string) (int, error) {
 	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != raw {
 		return 0, fmt.Errorf("invalid tcp port %q", raw)
 	}
-	if slices.Contains(ReservedPorts, port) {
+	if localpolicy.IsReservedPort(port) {
 		return 0, fmt.Errorf("tcp port %d is reserved", port)
 	}
 	return port, nil

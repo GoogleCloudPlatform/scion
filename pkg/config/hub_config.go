@@ -598,6 +598,13 @@ type DatabaseConfig struct {
 	// request after an idle period stalls waiting for a dead connection to time
 	// out. Empty means no idle limit.
 	ConnMaxIdleTime string `json:"conn_max_idle_time" yaml:"conn_max_idle_time" koanf:"conn_max_idle_time"`
+
+	// AllowShadowedSchema lets the hub start on PostgreSQL when
+	// current_schema() has no hub tables but a later schema on the
+	// connection's search_path does. The startup migration would then create
+	// a new, empty table set that hides the existing one, so by default the
+	// hub refuses to start; with this set it logs a warning and continues.
+	AllowShadowedSchema bool `json:"allowShadowedSchema" yaml:"allowShadowedSchema" koanf:"allowShadowedSchema"`
 }
 
 // ConnMaxLifetimeDuration parses ConnMaxLifetime into a time.Duration.
@@ -1542,6 +1549,7 @@ var snakeCaseFields = map[string]string{
 	"debounceinterval":           "debounce_interval",
 	"authzrecheckinterval":       "authz_recheck_interval",
 	"lifetimecap":                "lifetime_cap",
+	"shutdowngrace":              "shutdown_grace",
 	"proxysessionmaxage":         "proxy_session_max_age",
 	"streamauthzmax":             "stream_authz_max",
 	"portproxy":                  "port_proxy",
@@ -1608,6 +1616,7 @@ var camelCaseFields = map[string]string{
 	"agentrunscope":                 "agentRunScope",
 	"agentrunscopelegacyuntil":      "agentRunScopeLegacyUntil",
 	"allowcontainerscriptharnesses": "allowContainerScriptHarnesses",
+	"allowshadowedschema":           "allowShadowedSchema",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
 	"asyncagentlaunch":              "asyncAgentLaunch",
@@ -1659,6 +1668,7 @@ var camelCaseFields = map[string]string{
 	"reconnectwindow":               "reconnectWindow",
 	"authzrecheckinterval":          "authzRecheckInterval",
 	"lifetimecap":                   "lifetimeCap",
+	"shutdowngrace":                 "shutdownGrace",
 	"proxysessionmaxage":            "proxySessionMaxAge",
 	"streamauthzmax":                "streamAuthzMax",
 	"portproxy":                     "portProxy",

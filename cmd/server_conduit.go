@@ -23,9 +23,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
@@ -176,6 +178,54 @@ func conduitProxySessionMaxAgeSetting(cfg *config.GlobalConfig) time.Duration {
 	return d
 }
 
+// conduitShutdownDrainSetting returns the platform shutdown grace
+// (server.hub.conduit.shutdown_grace) and whether it is set. It has no
+// default: only a set grace caps the SIGTERM drain (design §3.3); unset,
+// the drain deadline stays 30s. validateServerPreflight has already
+// rejected a malformed value.
+func conduitShutdownDrainSetting(cfg *config.GlobalConfig) (time.Duration, bool) {
+	d, set, err := cfg.Hub.Conduit.ShutdownGraceDuration()
+	if err != nil {
+		return 0, false
+	}
+	return d, set
+}
+
+// Test seams for startConduit and its SIGTERM trap.
+var (
+	conduitSignalNotify = signal.Notify
+	conduitSignalStop   = signal.Stop
+	// startConduitRelayFn starts the relay (startConduitRelay).
+	startConduitRelayFn = startConduitRelay
+	// conduitShutdownDrain is the trap's drain: the hub's SIGTERM drain
+	// with the configured grace.
+	conduitShutdownDrain = func(hubSrv *hub.Server, grace time.Duration, capDrain bool) {
+		hubSrv.DrainConduitForShutdown(grace, capDrain)
+	}
+)
+
+// trapConduitSIGTERM handles SIGTERM while the conduit relay runs (design
+// §3.3): drain sends GoAway to every relay session, and only then is the
+// server context cancelled, so every session has its GoAway before any
+// listener closes. The trap is removed when ctx ends. os.Interrupt is
+// handled elsewhere and is not affected.
+func trapConduitSIGTERM(ctx context.Context, cancel context.CancelFunc, drain func(), wg *sync.WaitGroup) {
+	ch := make(chan os.Signal, 1)
+	conduitSignalNotify(ch, syscall.SIGTERM)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer conduitSignalStop(ch)
+		select {
+		case sig := <-ch:
+			slog.Info("Received signal; draining conduit sessions before shutting down", "signal", sig.String())
+			drain()
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+}
+
 // conduitAdvertiseEndpoint derives the internal endpoint other hub nodes
 // use to reach this node: the configured internal_advertise, else
 // http://<host>:<port> where host is the listen host when it is a specific
@@ -221,18 +271,21 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 }
 
 // startConduit opens the internal listener (if configured) and starts the
-// hub's conduit relay when hub.conduit is on. With the flag off it does
-// nothing. In hosted-HA mode every failure is returned and the server
-// exits non-zero (C8); elsewhere a failure is logged and the hub serves
+// hub's conduit relay when hub.conduit is on; once the relay runs, SIGTERM
+// drains it before cancel stops the server. With the flag off it does
+// nothing (SIGTERM is not trapped). In hosted-HA mode every failure is
+// returned and the server exits non-zero (C8); elsewhere a failure is logged and the hub serves
 // without a relay. A relay that stops on its own (superseded) reports on
 // errCh so the process exits and restarts.
-func startConduit(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error) error {
+func startConduit(ctx context.Context, cancel context.CancelFunc, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error) error {
 	if hubSrv == nil || !hubSrv.ConduitEnabled() {
 		return nil
 	}
 	requireHA := hostedHAGuardsRequired(cfg)
-	err := startConduitRelay(ctx, cfg, hubSrv, hubEndpoint, wg, errCh, requireHA)
+	err := startConduitRelayFn(ctx, cfg, hubSrv, hubEndpoint, wg, errCh, requireHA)
 	if err == nil {
+		grace, capDrain := conduitShutdownDrainSetting(cfg)
+		trapConduitSIGTERM(ctx, cancel, func() { conduitShutdownDrain(hubSrv, grace, capDrain) }, wg)
 		return nil
 	}
 	if requireHA {
