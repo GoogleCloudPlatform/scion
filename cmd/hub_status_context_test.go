@@ -37,7 +37,7 @@ func TestHubEndpointScope_Context(t *testing.T) {
 			setupContextTest(t)
 			saveTestContext(t, ctxTestHub, ctxTestProjectID)
 			hubEndpoint = tc.flag
-			resolveInvocationTarget(findCommand(t, "hub", "status"), ModeHuman)
+			require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "status"), ModeHuman))
 			scope := getHubEndpointScope("", true, nil)
 			assert.Equal(t, tc.wantSource, scope.Source)
 			assert.False(t, scope.Inherited)
@@ -63,7 +63,7 @@ func TestHubStatusJSON_ContextSource(t *testing.T) {
 	srv.Close()
 	saveTestContext(t, url, ctxTestProjectID)
 	status := findCommand(t, "hub", "status")
-	resolveInvocationTarget(status, ModeHuman)
+	require.NoError(t, resolveInvocationTarget(status, ModeHuman))
 	outputFormat = "json"
 
 	out := captureStdout(t, func() { require.NoError(t, runHubStatus(status, nil)) })

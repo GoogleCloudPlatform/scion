@@ -137,3 +137,13 @@ func TestBrokerRegistrationCapabilities_IncludesAgentMove(t *testing.T) {
 		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include agentMove", brokerRegistrationCapabilities())
 	}
 }
+
+// TestBrokerRegistrationCapabilities_IncludesAsyncLaunch pins that the
+// broker CLI reports asyncLaunch at join, as its heartbeat does
+// (runtimebroker.StaticCapabilities), so the Hub knows it before the first
+// heartbeat (ptone/scion#2918).
+func TestBrokerRegistrationCapabilities_IncludesAsyncLaunch(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "asyncLaunch") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include asyncLaunch", brokerRegistrationCapabilities())
+	}
+}

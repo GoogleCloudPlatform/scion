@@ -286,7 +286,9 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	// Runtime hooks (design §3.8.3, §3.8.4): a Hub-answered checkpoint
 	// immediately before each resource-creating call, and each created
 	// resource recorded for CleanupLaunch.
-	lc.opts.Checkpoint = sender.Checkpoint
+	// A flat instance's ownership mirror checkpoint (installed by
+	// buildStartContext) runs first.
+	lc.opts.Checkpoint = chainCheckpoint(lc.opts.Checkpoint, sender.Checkpoint)
 	lc.opts.OnResourceCreated = rec.AddHandle
 	if sender.IsAborted() {
 		s.handleKeepaliveAbort(sender, rec, lc)
@@ -303,7 +305,13 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	}
 	startCh := make(chan startResult, 1)
 	go func() {
+		ownedKey := s.ownedRunKeyFor(lc.opts.RunID)
+		rec.ownedRunMu.Lock()
+		rec.ownedRun = ownedKey
+		rec.ownedRunMu.Unlock()
 		info, err := lc.mgr.Start(ctx, lc.opts)
+		// The async failure path cleans up the launch's journaled handles.
+		err = s.completeOwnedStart(ctx, lc.mgr, lc.opts.RunID, err, false)
 		startCh <- startResult{info, err}
 	}()
 
@@ -481,6 +489,17 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 	if rec.Kind != store.LaunchKindCreate || lc.opts.ProjectPath == "" {
 		return
 	}
+	// The ownership checks and the removal run under the process-wide
+	// workspace lock on the agent's files.
+	lockCtx, cancelLock := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelLock()
+	unlock, err := s.lockAgentFiles(lockCtx, lc.opts.ProjectPath, lc.opts.Name)
+	if err != nil {
+		s.agentLifecycleLog.Warn("runLaunch: skipped agent file cleanup: the agent's workspace lock is unavailable",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+		return
+	}
+	defer unlock()
 	if !launchMarkerMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID) {
 		// A newer launch's marker write means this one's files are no
 		// longer this launch's to delete (design §3.8.4).
@@ -504,10 +523,17 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := mgr.CleanupLaunch(cleanupCtx, rec.HandlesSnapshot()); err != nil {
+	handles := rec.HandlesSnapshot()
+	if err := mgr.CleanupLaunch(cleanupCtx, handles); err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up launch resources",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+		return
 	}
+	// A flat instance finishes only this launch's run in its records.
+	rec.ownedRunMu.Lock()
+	key := rec.ownedRun
+	rec.ownedRunMu.Unlock()
+	s.finishCleanedRun(key, handles)
 }
 
 // terminalContext returns a fresh context bounded at deadline + 10 min

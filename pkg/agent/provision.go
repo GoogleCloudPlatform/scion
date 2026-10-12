@@ -31,6 +31,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -646,7 +647,7 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 // A2). A List error is not treated as "not running" by the caller — see the
 // call site's comment.
 func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (bool, error) {
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": name})
+	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": name})
 	if err != nil {
 		return false, err
 	}
@@ -720,6 +721,7 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 //   - a sibling agent's directory (both branches resolve strictly this
 //     agent's own agentDir via checkAgentDirContained/CheckAgentDirContained).
 func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	ctx = m.withWorkspaceLock(ctx)
 	hasGitClone := opts.GitClone != nil
 	if !api.ReincarnateEligible(hasGitClone, opts.Workspace, opts.EmptyPerAgentWorkspace) {
 		return nil, fmt.Errorf("%w: agent %q is neither clone-per-agent, empty-per-agent, nor has an explicit workspace; reincarnate currently supports those workspace modes only", ErrReprovisionRefused, opts.Name)
@@ -934,6 +936,7 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	ctx = m.withWorkspaceLock(ctx)
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
 	if err != nil {
@@ -1060,6 +1063,11 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		return nil, fmt.Errorf("failed to load template: %w", err)
 	}
 
+	// Each template contributes its job keys only (ptone/scion#4524):
+	// templateJobConfig drops its environment keys (reported) and its env,
+	// which is the separate template env layer Start applies as a final
+	// fill. Template env is therefore never merged into the agent config or
+	// persisted in scion-agent.json.
 	finalScionCfg := &api.ScionConfig{}
 	for _, tpl := range chain {
 		// Load scion-agent config from this template and merge it
@@ -1073,7 +1081,7 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 			return nil, fmt.Errorf("template %s: %w", templateRef(tpl), err)
 		}
 
-		finalScionCfg = config.MergeScionConfig(finalScionCfg, tplCfg)
+		finalScionCfg = config.MergeScionConfig(finalScionCfg, templateJobConfig(ctx, tpl, tplCfg))
 	}
 
 	if inlineCfg != nil {
@@ -1157,7 +1165,9 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 		templateName = defaultTemplate
 	}
 
-	_, err = resolveTemplateAndHarnessConfig(ctx, templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
+	// The real provisioning repeats this resolution and reports any ignored
+	// template environment keys; stay quiet here so each is reported once.
+	_, err = resolveTemplateAndHarnessConfig(withQuietTemplateEnvWarnings(ctx), templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
 	return err
 }
 
@@ -1641,6 +1651,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	} else if isGit {
 		// Case 2: Git Repository (and no explicit workspace)
+		// A flat Runtime Broker instance serializes the repository's
+		// worktree and sharer changes with every instance of its host (the
+		// host's workspace lock), through the rest of provisioning.
+		if repoRoot, rootErr := util.RepoRootDir(projectDir); rootErr == nil && repoRoot != "" {
+			unlockRepo, lockErr := lockWorkspace(ctx, repoRoot)
+			if lockErr != nil {
+				return "", "", nil, fmt.Errorf("workspace lock: %w", lockErr)
+			}
+			defer unlockRepo()
+		}
 		targetBranch := branch
 		if targetBranch == "" {
 			// Use slugified agent name for valid git branch names
@@ -2462,20 +2482,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	// Record each image input at its own tier (ptone/scion#1799), so Start
 	// never has to reuse the merged finalScionCfg.Image — which folds in
-	// the inline, settings and profile values of this moment — as if it
-	// were the template's. Image provenance is recorded in broker-side agent
+	// the inline, settings and profile values of this moment. No template
+	// image is recorded: a template's image is an ignored environment key
+	// (ptone/scion#4524). Image provenance is recorded in broker-side agent
 	// state (the agent dir), never in the agent home, which is inside a
 	// container mount.
-	tplImage, tplPullPolicy := templateChainImage(chain)
 	if err := writeImageProvenance(agentDir, imageProvenance{
-		RequestImage:            agentImage,
-		TemplateImage:           tplImage,
-		TemplateImagePullPolicy: tplPullPolicy,
-		InlineImage:             explicitImage,
-		InlineImagePullPolicy:   explicitPullPolicy,
-		Profile:                 profileName,
-		Template:                displayTemplateName,
-		TemplateHash:            templateHash,
+		RequestImage:          agentImage,
+		InlineImage:           explicitImage,
+		InlineImagePullPolicy: explicitPullPolicy,
+		Profile:               profileName,
+		Template:              displayTemplateName,
+		TemplateHash:          templateHash,
 	}); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write image provenance: %w", err)
 	}
@@ -2487,7 +2505,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if finalScionCfg.Info != nil {
 		infoData, err := json.MarshalIndent(finalScionCfg.Info, "", "  ")
 		if err == nil {
-			_ = os.WriteFile(filepath.Join(agentHome, "agent-info.json"), infoData, 0644)
+			// Temp file and rename, so a reader never sees a truncated
+			// file (#4681). No container runs during provisioning; the
+			// lock keeps the write ordered with any other host writer.
+			infoPath := filepath.Join(agentHome, "agent-info.json")
+			if err := agentinfolock.Update(infoPath, agentinfolock.Options{}, func() error {
+				return writeAgentInfoFile(infoPath, infoData, 0o644)
+			}); err != nil {
+				slog.Warn("Provision: failed to write agent-info.json",
+					"agent", agentName, "error", err)
+			}
 		}
 	}
 
@@ -2825,7 +2852,7 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 	if opts.Env != nil {
 		projectID = opts.Env["SCION_PROJECT_ID"]
 	}
-	entries, err := m.Runtime.List(ctx, map[string]string{"scion.name": api.Slugify(opts.Name)})
+	entries, err := m.listRuntime(ctx, map[string]string{"scion.name": api.Slugify(opts.Name)})
 	if err != nil {
 		return true
 	}
@@ -2918,31 +2945,42 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 
 	// If agent-info.json doesn't exist, we can't update it.
 	// This might happen if provisioning failed or hasn't finished.
-	mode := os.FileMode(0o644)
-	if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+	// Checked before the lock too, so no lock file is left in a home
+	// that has no agent-info.json.
+	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
 		return nil
-	} else if err == nil {
-		mode = fi.Mode().Perm()
 	}
 
-	data, err := os.ReadFile(agentInfoPath)
-	if err != nil {
-		return err
-	}
+	// The read, update and write run under the agent-info lock, so a
+	// concurrent writer in the container (sciontool) or another host
+	// process cannot lose this update or have its own lost (#4681).
+	return agentinfolock.Update(agentInfoPath, agentinfolock.Options{}, func() error {
+		mode := os.FileMode(0o644)
+		if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+			return nil
+		} else if err == nil {
+			mode = fi.Mode().Perm()
+		}
 
-	var info api.AgentInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return err
-	}
+		data, err := os.ReadFile(agentInfoPath)
+		if err != nil {
+			return err
+		}
 
-	update(&info)
+		var info api.AgentInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			return err
+		}
 
-	newData, err := marshalAgentInfoKeepUnknown(data, &info)
-	if err != nil {
-		return err
-	}
+		update(&info)
 
-	return writeAgentInfoFile(agentInfoPath, newData, mode)
+		newData, err := marshalAgentInfoKeepUnknown(data, &info)
+		if err != nil {
+			return err
+		}
+
+		return writeAgentInfoFile(agentInfoPath, newData, mode)
+	})
 }
 
 func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
@@ -3101,6 +3139,18 @@ func RestoreAgentDeleteState(agentName string, projectPath string, st AgentDelet
 		}
 		info.Phase = st.Phase
 		info.DeletedAt = st.DeletedAt
+	})
+}
+
+// MarkAgentSoftDeleted sets Phase "deleted" and, when deletedAt is not
+// zero, DeletedAt in one locked update of agent-info.json, so a concurrent
+// writer never sees or keeps only half of the soft-delete mark.
+func MarkAgentSoftDeleted(agentName string, projectPath string, deletedAt time.Time) error {
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		info.Phase = "deleted"
+		if !deletedAt.IsZero() {
+			info.DeletedAt = deletedAt
+		}
 	})
 }
 
@@ -4058,6 +4108,10 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		return agentDir, agentHome, agentWorkspace, agentCfg, nil
 	}
 
+	// Each template contributes its job keys only (ptone/scion#4524):
+	// templateJobConfig drops its environment keys and its env, so a restart
+	// never reintroduces them under the stored config. Start applies the
+	// live template env as a final fill.
 	mergedCfg := &api.ScionConfig{}
 	for _, tpl := range chain {
 		tplCfg, err := tpl.LoadConfig()
@@ -4065,7 +4119,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 			fmt.Fprintf(os.Stderr, "Warning: failed to load config from template %s, skipping: %v\n", templateRef(tpl), err)
 			continue
 		}
-		mergedCfg = config.MergeScionConfig(mergedCfg, tplCfg)
+		mergedCfg = config.MergeScionConfig(mergedCfg, templateJobConfig(ctx, tpl, tplCfg))
 	}
 
 	finalCfg := config.MergeScionConfig(mergedCfg, agentCfg)

@@ -127,6 +127,37 @@ func RuntimeBrokerNameConflict(ctx context.Context, s RuntimeBrokerStore, name, 
 	}
 }
 
+// RuntimeTargetHolder returns the Runtime Broker row, other than
+// excludeID, that holds the runtime target ID targetID, or nil when none
+// does. The store's unique index keeps one runtime target ID on at most one
+// row; this finds that row so a refusal can say the target is in use.
+//
+// Cost: like RuntimeBrokerNameConflict, it pages through every Runtime
+// Broker row (200 per page); it runs only on flat registrations that would
+// create a row.
+func RuntimeTargetHolder(ctx context.Context, s RuntimeBrokerStore, targetID, excludeID string) (*RuntimeBroker, error) {
+	if targetID == "" {
+		return nil, nil
+	}
+	cursor := ""
+	for {
+		page, err := s.ListRuntimeBrokers(ctx, RuntimeBrokerFilter{}, ListOptions{Limit: 200, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return nil, err
+		}
+		for i := range page.Items {
+			b := &page.Items[i]
+			if b.ID != excludeID && b.IsFlat() && b.RuntimeTarget.ID == targetID {
+				return b, nil
+			}
+		}
+		if page.NextCursor == "" || len(page.Items) == 0 {
+			return nil, nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
 // ComputeAgentPinnedRuntimeTarget returns the read-only API view of a's
 // pinned placement, or nil when a is not pinned. It reports the pin as
 // stored: a stale pin (PinnedRuntimeBrokerID differing from RuntimeBrokerID)

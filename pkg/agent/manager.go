@@ -162,6 +162,10 @@ type AgentManager struct {
 	// alone.
 	tmuxVersionOK sync.Map
 
+	// owner, when set, restricts the manager to one flat Runtime Broker
+	// instance's objects (SetOwner, owner.go).
+	owner *OwnerScope
+
 	// readyTimings overrides the harness-readiness wait timings; the zero
 	// value uses the defaults. Tests set it. See waitHarnessReady.
 	readyTimings harnessReadyTimings
@@ -373,7 +377,7 @@ func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID str
 	// not support lookup-by-name (e.g. Apple's `container` CLI) receive
 	// the actual container ID.  This mirrors the resolution logic in Delete().
 	slug := api.Slugify(agentID)
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if runID != "" {
 		// A run-scoped stop never falls back to the bare name: the name may
 		// now belong to an agent recreated under a different run.
@@ -407,7 +411,14 @@ func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID str
 		}
 	}
 	// Fallback: agentID may already be a container ID, or the list
-	// failed — pass it through directly.
+	// failed — pass it through directly. An owned manager never passes an
+	// unresolved name or ID to the runtime.
+	if m.owner != nil {
+		if err != nil {
+			return fmt.Errorf("failed to list agents for stop of %q: %w", agentID, err)
+		}
+		return fmt.Errorf("stop %q: %w", agentID, ErrNotOwned)
+	}
 	return m.Runtime.Stop(ctx, runtime.RunRef{ID: agentID})
 }
 
@@ -444,7 +455,7 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	util.Debugf("delete: listing containers in mgr.Delete for %s", agentID)
 	listStart := time.Now()
 	slug := api.Slugify(agentID)
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	util.Debugf("delete: mgr.Delete container list completed in %v", time.Since(listStart))
 	var target runtime.RunRef
 	if err == nil {
@@ -522,7 +533,22 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 // Runtime.Delete. It is a no-op for a runtime that does not implement
 // runtime.AgentResourceCleaner. See that interface for the scoping rules,
 // including runID's.
+//
+// An owned (flat instance) manager removes only objects carrying its
+// instance's owner label (runtime.OwnedAgentResourceCleaner), with the same
+// runID scoping; on a runtime without that variant it removes nothing (never
+// the unscoped cleanup) and logs a warning.
 func (m *AgentManager) CleanupAgentResources(ctx context.Context, agentName, projectID, runID string) error {
+	if m.owner != nil {
+		if c, ok := m.Runtime.(runtime.OwnedAgentResourceCleaner); ok {
+			return c.CleanupOwnedAgentResources(ctx, agentName, projectID, m.owner.RuntimeBrokerID, runID)
+		}
+		if _, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
+			slog.Warn("Leftover agent objects not removed: the runtime cannot limit the cleanup to this Runtime Broker instance's objects",
+				"agent", agentName, "project_id", projectID, "run_id", runID, "runtime_broker_id", m.owner.RuntimeBrokerID, "runtime", m.Runtime.Name())
+		}
+		return nil
+	}
 	if c, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
 		return c.CleanupAgentResources(ctx, agentName, projectID, runID)
 	}
@@ -589,7 +615,7 @@ func (m *AgentManager) checkDeliveryTarget(ctx context.Context, agentID, project
 	if projectID != "" {
 		filter["scion.project_id"] = projectID
 	}
-	agents, err := m.Runtime.List(ctx, filter)
+	agents, err := m.listRuntime(ctx, filter)
 	if err != nil {
 		slog.Warn("message target lookup failed; using buffered delivery",
 			"agent", agentID, "project_id", projectID, "error", err)
@@ -1314,8 +1340,12 @@ type deliveryStep struct {
 // messages (called by the MessageBuffer when the debounce timer fires).
 func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
 	// 1. Find the agent, scoped to project to prevent cross-project delivery
-	agent, err := m.findMessageTarget(ctx, agentID, projectID)
+	agent, matches, err := m.findMessageTargetCounted(ctx, agentID, projectID)
 	if err != nil {
+		return err
+	}
+
+	if err := m.refuseAmbiguousOwnedTarget(agentID, projectID, matches); err != nil {
 		return err
 	}
 
@@ -1467,24 +1497,46 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	return nil
 }
 
-// findMessageTarget resolves the container a message for agentID is
+// refuseAmbiguousOwnedTarget refuses a message target on an owned (flat
+// instance) manager when no project is given and several of its agents
+// match the name: such a manager never picks among agents of that name in
+// different projects. It returns nil otherwise, and always for a legacy
+// manager.
+func (m *AgentManager) refuseAmbiguousOwnedTarget(agentID, projectID string, matches int) error {
+	if m.owner != nil && projectID == "" && matches > 1 {
+		return fmt.Errorf("agent %q is ambiguous without a project: %d agents of this Runtime Broker instance have that name", agentID, matches)
+	}
+	return nil
+}
+
+// findMessageTargetCounted resolves the container a message for agentID is
 // delivered to, scoped to projectID (when set) to prevent cross-project
-// delivery.
-func (m *AgentManager) findMessageTarget(ctx context.Context, agentID, projectID string) (*api.AgentInfo, error) {
+// delivery: the first listed agent that matches agentID. It also returns how
+// many listed agents match, so callers can refuse an ambiguous name on an
+// owned manager (refuseAmbiguousOwnedTarget).
+func (m *AgentManager) findMessageTargetCounted(ctx context.Context, agentID, projectID string) (*api.AgentInfo, int, error) {
 	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
 	if projectID != "" {
 		filter["scion.project_id"] = projectID
 	}
 	agents, err := m.List(ctx, filter)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	var target *api.AgentInfo
+	matches := 0
 	for _, a := range agents {
 		if matchesAgentID(a, agentID) {
-			return &a, nil
+			matches++
+			if target == nil {
+				target = &a
+			}
 		}
 	}
-	return nil, errNoRunningContainer(agentID)
+	if target == nil {
+		return nil, 0, errNoRunningContainer(agentID)
+	}
+	return target, matches, nil
 }
 
 func matchesAgentID(a api.AgentInfo, id string) bool {

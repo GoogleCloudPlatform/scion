@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	yamlv3 "gopkg.in/yaml.v3"
 
@@ -41,10 +42,6 @@ const (
 	RuntimeTargetTypeDocker     = "docker"
 	RuntimeTargetTypeKubernetes = "kubernetes"
 )
-
-// MaxRuntimeBrokerInstances is the number of instances one process may host
-// in this release (P2 lifts it).
-const MaxRuntimeBrokerInstances = 1
 
 // ErrRuntimeBrokerInstancesInServerYAML is returned by LoadGlobalConfig when a
 // legacy server.yaml configures runtimeBroker.instances.
@@ -69,16 +66,11 @@ func (e *RuntimeBrokerHostingError) Error() string {
 }
 
 // ValidateRuntimeBrokerInstances checks server.broker.instances and returns
-// one ValidationError per problem, each naming its settings path. Duplicate
-// keys are reported even when the count rule also fails.
+// one ValidationError per problem, each naming its settings path. There is
+// no policy limit on the number of instances (P2.1); each key must be
+// unique.
 func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) []ValidationError {
 	var errs []ValidationError
-	if len(instances) > MaxRuntimeBrokerInstances {
-		errs = append(errs, ValidationError{
-			Path:    "server.broker.instances",
-			Message: fmt.Sprintf("only %d Runtime Broker instance is supported in this release", MaxRuntimeBrokerInstances),
-		})
-	}
 	firstIndex := map[string]int{}
 	for i, inst := range instances {
 		p := fmt.Sprintf("server.broker.instances[%d]", i)
@@ -86,8 +78,7 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 			errs = append(errs, ValidationError{Path: p + ".key",
 				Message: fmt.Sprintf("invalid instance key %q (must match %s)", inst.Key, RuntimeBrokerInstanceKeyPattern)})
 		} else if j, dup := firstIndex[inst.Key]; dup {
-			errs = append(errs, ValidationError{Path: p + ".key",
-				Message: fmt.Sprintf("duplicate instance key %q (also at index %d)", inst.Key, j)})
+			errs = append(errs, duplicateInstanceKeyError(i, j, inst.Key))
 		} else {
 			firstIndex[inst.Key] = i
 		}
@@ -101,23 +92,65 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 		}
 		switch t.Type {
 		case RuntimeTargetTypeDocker:
-			if t.Context != "" {
-				errs = append(errs, ValidationError{Path: p + ".runtime_target.context",
-					Message: "field not valid for runtime target type docker"})
+			for _, f := range []struct{ field, v string }{{"context", t.Context}, {"namespace", t.Namespace}, {"kubeconfig", t.Kubeconfig},
+				{"kubernetes_block_service_account", t.KubernetesBlockServiceAccount}} {
+				if field, v := f.field, f.v; v != "" {
+					errs = append(errs, ValidationError{Path: p + ".runtime_target." + field,
+						Message: "field not valid for runtime target type docker"})
+				}
 			}
-			if t.Namespace != "" {
-				errs = append(errs, ValidationError{Path: p + ".runtime_target.namespace",
+			if len(t.KubernetesServiceAccountMappings) > 0 {
+				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubernetes_service_account_mappings",
 					Message: "field not valid for runtime target type docker"})
 			}
 		case RuntimeTargetTypeKubernetes:
-			errs = append(errs, ValidationError{Path: p + ".runtime_target.type",
-				Message: "Kubernetes Runtime Broker instances are not implemented yet"})
+			if t.Kubeconfig != "" && !validInstanceKubeconfigPath(t.Kubeconfig) {
+				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubeconfig",
+					Message: fmt.Sprintf("kubeconfig must be one absolute local file path (no ~, environment variables or path list): %q", t.Kubeconfig)})
+			}
+			if t.KubernetesBlockServiceAccount != "" {
+				if err := ValidateKubernetesBlockServiceAccount(t.KubernetesBlockServiceAccount); err != nil {
+					errs = append(errs, ValidationError{Path: p + ".runtime_target.kubernetes_block_service_account", Message: err.Error()})
+				}
+			}
+			if err := ValidateKubernetesServiceAccountMappings(t.KubernetesServiceAccountMappings); err != nil {
+				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubernetes_service_account_mappings", Message: err.Error()})
+			}
 		default:
 			errs = append(errs, ValidationError{Path: p + ".runtime_target.type",
-				Message: fmt.Sprintf("unsupported runtime target type %q (supported: docker)", t.Type)})
+				Message: fmt.Sprintf("unsupported runtime target type %q (supported: docker, kubernetes)", t.Type)})
 		}
 	}
 	sort.SliceStable(errs, func(a, b int) bool { return errs[a].Path < errs[b].Path })
+	return errs
+}
+
+// validInstanceKubeconfigPath reports whether p is one absolute local file
+// path. It is never expanded (~, environment variables) and never a path
+// list; the file itself is checked when the instance's runtime is built.
+func validInstanceKubeconfigPath(p string) bool {
+	return strings.HasPrefix(p, "/") && !strings.ContainsRune(p, filepath.ListSeparator) && strings.Trim(p, "/") != ""
+}
+
+func duplicateInstanceKeyError(i, j int, key string) ValidationError {
+	return ValidationError{Path: fmt.Sprintf("server.broker.instances[%d].key", i),
+		Message: fmt.Sprintf("duplicate instance key %q (also at index %d)", key, j)}
+}
+
+// RuntimeBrokerInstanceDuplicateKeys reports every repeated instance key.
+// The JSON schema cannot express key uniqueness, so scion config validate
+// (ValidateSettings) runs this after the schema pass, keeping the schema and
+// ValidateRuntimeBrokerInstances in agreement.
+func RuntimeBrokerInstanceDuplicateKeys(instances []V1RuntimeBrokerInstanceConfig) []ValidationError {
+	var errs []ValidationError
+	firstIndex := map[string]int{}
+	for i, inst := range instances {
+		if j, dup := firstIndex[inst.Key]; dup {
+			errs = append(errs, duplicateInstanceKeyError(i, j, inst.Key))
+		} else {
+			firstIndex[inst.Key] = i
+		}
+	}
 	return errs
 }
 
@@ -283,10 +316,13 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 		o := RuntimeBrokerInstanceConfig{Key: i.Key, Name: i.Name}
 		if i.RuntimeTarget != nil {
 			o.RuntimeTarget = &RuntimeTargetConfig{
-				Type:        i.RuntimeTarget.Type,
-				DisplayName: i.RuntimeTarget.DisplayName,
-				Context:     i.RuntimeTarget.Context,
-				Namespace:   i.RuntimeTarget.Namespace,
+				Type:                             i.RuntimeTarget.Type,
+				DisplayName:                      i.RuntimeTarget.DisplayName,
+				Context:                          i.RuntimeTarget.Context,
+				Namespace:                        i.RuntimeTarget.Namespace,
+				Kubeconfig:                       i.RuntimeTarget.Kubeconfig,
+				KubernetesBlockServiceAccount:    i.RuntimeTarget.KubernetesBlockServiceAccount,
+				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
 			}
 		}
 		out = append(out, o)
@@ -304,10 +340,13 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 		o := V1RuntimeBrokerInstanceConfig{Key: i.Key, Name: i.Name}
 		if i.RuntimeTarget != nil {
 			o.RuntimeTarget = &V1RuntimeTargetConfig{
-				Type:        i.RuntimeTarget.Type,
-				DisplayName: i.RuntimeTarget.DisplayName,
-				Context:     i.RuntimeTarget.Context,
-				Namespace:   i.RuntimeTarget.Namespace,
+				Type:                             i.RuntimeTarget.Type,
+				DisplayName:                      i.RuntimeTarget.DisplayName,
+				Context:                          i.RuntimeTarget.Context,
+				Namespace:                        i.RuntimeTarget.Namespace,
+				Kubeconfig:                       i.RuntimeTarget.Kubeconfig,
+				KubernetesBlockServiceAccount:    i.RuntimeTarget.KubernetesBlockServiceAccount,
+				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
 			}
 		}
 		out = append(out, o)
@@ -320,4 +359,16 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 // comparison against GlobalConfig.RuntimeBroker.Instances.
 func RuntimeBrokerInstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInstanceConfig {
 	return v1InstancesToGlobal(in)
+}
+
+// copyStringMap returns a copy of m (nil for an empty map).
+func copyStringMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
