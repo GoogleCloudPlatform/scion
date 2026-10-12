@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -43,7 +42,12 @@ import (
 // some local setups (see the caveat on provisionedWorktreeStateFile in
 // provision.go, e.g. an explicit --workspace pointed at the project root).
 // Readers must therefore treat the content as data to validate, not as a
-// trusted input, and ReadHostState refuses a symlinked file.
+// trusted input. ReadHostState and UpdateHostState refuse a symlinked file,
+// cap reads at 64 KiB, and on unix refuse a symlink in any component of
+// agentDir. A host-state.json with more than one hard link is accepted: the
+// write replaces the name, so another link to the old file is left as it
+// was. Serialization of concurrent updates is best effort (see
+// UpdateHostState).
 //
 // UpdateHostState is the only writer.
 const HostStateFile = "host-state.json"
@@ -65,16 +69,41 @@ func HostStatePath(agentDir string) string {
 	return filepath.Join(agentDir, HostStateFile)
 }
 
-// errHostStateSymlink is returned when HostStateFile is a symlink.
-var errHostStateSymlink = errors.New("host state file is a symlink")
+// maxHostStateSize caps how much of HostStateFile is read. A larger file
+// is an error, the same as a corrupt one.
+const maxHostStateSize = 64 << 10
 
-// ReadHostState reads HostStateFile from agentDir without following a
-// symlink at the file itself. Only a missing file gives the zero HostState
-// and a nil error; a symlinked, non-regular, unreadable or corrupt file
-// returns an error.
+var (
+	// errHostStateSymlink is returned when HostStateFile is a symlink.
+	errHostStateSymlink = errors.New("host state file is a symlink")
+	// errHostStateTooLarge is returned when HostStateFile is larger than
+	// maxHostStateSize.
+	errHostStateTooLarge = errors.New("host state file is too large")
+)
+
+// ReadHostState reads HostStateFile from agentDir. On unix it opens
+// agentDir without following a symlink in any path component and opens the
+// file relative to that directory without following a symlink at it; on
+// other platforms only a symlink at the file itself is refused. Only a
+// missing file (or a missing agentDir) gives the zero HostState and a nil
+// error; a symlinked, non-regular, unreadable, corrupt or too large (over
+// 64 KiB) file returns an error.
 func ReadHostState(agentDir string) (HostState, error) {
-	path := HostStatePath(agentDir)
-	data, err := readHostStateBytes(path)
+	d, err := openHostStateDir(agentDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return HostState{}, nil
+		}
+		return HostState{}, err
+	}
+	defer d.close()
+	return readHostStateIn(d)
+}
+
+// readHostStateIn reads and decodes HostStateFile in d. A missing file
+// gives the zero HostState.
+func readHostStateIn(d *hostStateDir) (HostState, error) {
+	data, err := readHostStateBytes(d)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return HostState{}, nil
@@ -83,15 +112,16 @@ func ReadHostState(agentDir string) (HostState, error) {
 	}
 	var hs HostState
 	if err := hs.decode(data); err != nil {
-		return HostState{}, fmt.Errorf("host state file %s: %w", path, err)
+		return HostState{}, fmt.Errorf("host state file %s: %w", HostStatePath(d.path), err)
 	}
 	return hs, nil
 }
 
-// readHostStateBytes returns the content of the regular file at path,
-// refusing a symlink at path.
-func readHostStateBytes(path string) ([]byte, error) {
-	f, err := openNoFollow(path)
+// readHostStateBytes returns the content of HostStateFile in d, which must
+// be a regular file of at most maxHostStateSize bytes.
+func readHostStateBytes(d *hostStateDir) ([]byte, error) {
+	path := HostStatePath(d.path)
+	f, err := d.openFile()
 	if err != nil {
 		return nil, err
 	}
@@ -103,24 +133,41 @@ func readHostStateBytes(path string) ([]byte, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("host state file %s is not a regular file", path)
 	}
-	data, err := io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, maxHostStateSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("host state file %s: %w", path, err)
+	}
+	if len(data) > maxHostStateSize {
+		return nil, fmt.Errorf("%w: %s", errHostStateTooLarge, path)
 	}
 	return data, nil
 }
 
 // UpdateHostState is the only writer of HostStateFile. It runs a
-// read-modify-write of the file in agentDir under the agentinfolock lock on
+// read-modify-write of the file in agentDir through agentinfolock.Update on
 // the file: it reads the current state (as ReadHostState does), calls
 // mutate, and writes the result through a temp file in agentDir and a
-// rename, with mode 0600. When mutate returns an error, nothing is written
-// and the error is returned. A symlinked, unreadable or corrupt file is
-// refused and left as it is.
+// rename, with mode 0600. On unix the lock, the read, the temp create and
+// the rename all go through agentDir opened without following a symlink in
+// any path component (openat, renameat), so a symlinked agentDir or parent
+// is refused and nothing is written outside agentDir. When mutate returns
+// an error, nothing is written and the error is returned. A symlinked,
+// unreadable, corrupt or too large file is refused and left as it is.
+//
+// The serialization is best effort, as agentinfolock documents: on unix
+// the update runs unlocked when the lock file is unusable or another holder
+// keeps the lock past the wait, and on other platforms there is no lock.
+// Two concurrent updates can then lose one of their writes. Each write is
+// still atomic (temp file and rename), so the file is never torn.
 func UpdateHostState(agentDir string, mutate func(*HostState) error) error {
-	path := HostStatePath(agentDir)
-	return agentinfolock.Update(path, agentinfolock.Options{}, func() error {
-		hs, err := ReadHostState(agentDir)
+	opts := agentinfolock.Options{NoFollowParent: hostStateNoFollowParent}
+	return agentinfolock.Update(HostStatePath(agentDir), opts, func() error {
+		d, err := openHostStateDir(agentDir)
+		if err != nil {
+			return err
+		}
+		defer d.close()
+		hs, err := readHostStateIn(d)
 		if err != nil {
 			return err
 		}
@@ -131,45 +178,8 @@ func UpdateHostState(agentDir string, mutate func(*HostState) error) error {
 		if err != nil {
 			return err
 		}
-		return writeHostStateFile(agentDir, path, data)
+		return d.writeFile(data)
 	})
-}
-
-// writeHostStateFile writes data to path through a temp file in agentDir
-// and a rename. The rename replaces a symlink at path rather than writing
-// through it, and UpdateHostState has already refused one.
-func writeHostStateFile(agentDir, path string, data []byte) error {
-	tmp, err := os.CreateTemp(agentDir, "."+HostStateFile+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			_ = tmp.Close()
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		ok = true
-		return err
-	}
-	ok = true
-	return nil
 }
 
 var (

@@ -21,10 +21,28 @@ import (
 	"os"
 )
 
-// openNoFollow opens path read-only, refusing a symlink at path itself.
+// hostStateNoFollowParent is passed as agentinfolock.Options.NoFollowParent;
+// agentinfolock has no lock on these platforms, so it has no effect.
+const hostStateNoFollowParent = true
+
+// hostStateDir is agentDir by path. Without openat, symlinks in parent
+// components are followed on these platforms; only a symlink at
+// HostStateFile itself is refused.
+type hostStateDir struct {
+	path string
+}
+
+func openHostStateDir(agentDir string) (*hostStateDir, error) {
+	return &hostStateDir{path: agentDir}, nil
+}
+
+func (d *hostStateDir) close() {}
+
+// openFile opens HostStateFile read-only, refusing a symlink at it.
 // Without O_NOFOLLOW the check is an Lstat before the open, so it is not
 // atomic.
-func openNoFollow(path string) (*os.File, error) {
+func (d *hostStateDir) openFile() (*os.File, error) {
+	path := HostStatePath(d.path)
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -33,4 +51,10 @@ func openNoFollow(path string) (*os.File, error) {
 		return nil, fmt.Errorf("%w: %s", errHostStateSymlink, path)
 	}
 	return os.Open(path)
+}
+
+// writeFile writes data to HostStateFile with writeAgentInfoFile, the
+// package's temp-file-and-rename helper (random temp name in agentDir).
+func (d *hostStateDir) writeFile(data []byte) error {
+	return writeAgentInfoFile(HostStatePath(d.path), data, 0o600)
 }

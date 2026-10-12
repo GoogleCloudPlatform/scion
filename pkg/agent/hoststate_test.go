@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -29,7 +30,7 @@ import (
 )
 
 func TestHostStateMissingFileIsZero(t *testing.T) {
-	dir := t.TempDir()
+	dir := hostStateTempDir(t)
 	hs, err := ReadHostState(dir)
 	if err != nil {
 		t.Fatalf("ReadHostState: %v", err)
@@ -48,7 +49,7 @@ func TestHostStateCorruptFileErrors(t *testing.T) {
 		"badtype": `{"runId": 7}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := hostStateTempDir(t)
 			path := HostStatePath(dir)
 			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 				t.Fatal(err)
@@ -73,7 +74,7 @@ func TestHostStateUnreadableFileErrors(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("needs a non-root unix user")
 	}
-	dir := t.TempDir()
+	dir := hostStateTempDir(t)
 	if err := os.WriteFile(HostStatePath(dir), []byte(`{"runId":"x"}`), 0o000); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +84,7 @@ func TestHostStateUnreadableFileErrors(t *testing.T) {
 }
 
 func TestHostStateRunIDRoundTrip(t *testing.T) {
-	dir := t.TempDir()
+	dir := hostStateTempDir(t)
 	if err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "run-123"; return nil }); err != nil {
 		t.Fatalf("UpdateHostState: %v", err)
 	}
@@ -104,7 +105,7 @@ func TestHostStateRunIDRoundTrip(t *testing.T) {
 }
 
 func TestHostStateMutateErrorWritesNothing(t *testing.T) {
-	dir := t.TempDir()
+	dir := hostStateTempDir(t)
 	want := errors.New("boom")
 	err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "x"; return want })
 	if !errors.Is(err, want) {
@@ -116,7 +117,7 @@ func TestHostStateMutateErrorWritesNothing(t *testing.T) {
 }
 
 func TestHostStateUnknownFieldsSurviveUpdate(t *testing.T) {
-	dir := t.TempDir()
+	dir := hostStateTempDir(t)
 	orig := `{"runId":"old","futureKey":{"a":[1,2]},"other":"v"}`
 	if err := os.WriteFile(HostStatePath(dir), []byte(orig), 0o600); err != nil {
 		t.Fatal(err)
@@ -140,7 +141,7 @@ func TestHostStateSymlinkRefused(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks need privileges on windows")
 	}
-	dir := t.TempDir()
+	dir := hostStateTempDir(t)
 	target := filepath.Join(t.TempDir(), "target.json")
 	const content = `{"runId":"target"}`
 	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
@@ -168,7 +169,7 @@ func TestHostStateFileMode0600(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix permissions")
 	}
-	dir := t.TempDir()
+	dir := hostStateTempDir(t)
 	// A pre-existing file with a wider mode is replaced by a 0600 one.
 	if err := os.WriteFile(HostStatePath(dir), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -201,7 +202,7 @@ func TestHostStateParallelUpdatesLoseNothing(t *testing.T) {
 		t.Skip("agentinfolock has no flock on this platform")
 	}
 	t.Setenv(agentinfolock.TestWaitEnv, "30s")
-	dir := t.TempDir()
+	dir := hostStateTempDir(t)
 	const workers, rounds = 8, 25
 	var wg sync.WaitGroup
 	errs := make(chan error, workers*rounds)
@@ -241,6 +242,89 @@ func TestHostStateParallelUpdatesLoseNothing(t *testing.T) {
 	if len(raw) != workers*rounds+1 {
 		t.Fatalf("have %d keys, want %d", len(raw), workers*rounds+1)
 	}
+}
+
+func TestHostStateTooLargeErrors(t *testing.T) {
+	dir := hostStateTempDir(t)
+	big := `{"runId":"x","pad":"` + strings.Repeat("a", maxHostStateSize) + `"}`
+	if err := os.WriteFile(HostStatePath(dir), []byte(big), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadHostState(dir); !errors.Is(err, errHostStateTooLarge) {
+		t.Fatalf("ReadHostState: err=%v, want errHostStateTooLarge", err)
+	}
+	err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "y"; return nil })
+	if !errors.Is(err, errHostStateTooLarge) {
+		t.Fatalf("UpdateHostState: err=%v, want errHostStateTooLarge", err)
+	}
+	if got, _ := os.ReadFile(HostStatePath(dir)); string(got) != big {
+		t.Fatal("too large file changed")
+	}
+
+	// Exactly at the cap is accepted.
+	exact := `{"pad":"`
+	exact += strings.Repeat("a", maxHostStateSize-len(exact)-2) + `"}`
+	if len(exact) != maxHostStateSize {
+		t.Fatalf("test setup: len %d", len(exact))
+	}
+	if err := os.WriteFile(HostStatePath(dir), []byte(exact), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadHostState(dir); err != nil {
+		t.Fatalf("ReadHostState at cap: %v", err)
+	}
+}
+
+func TestHostStateKnownKeyOtherCase(t *testing.T) {
+	dir := hostStateTempDir(t)
+	if err := os.WriteFile(HostStatePath(dir), []byte(`{"RunID":"old","other":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hs, err := ReadHostState(dir)
+	if err != nil {
+		t.Fatalf("ReadHostState: %v", err)
+	}
+	if hs.RunID != "old" {
+		t.Fatalf("RunID = %q, want old", hs.RunID)
+	}
+	if err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "new"; return nil }); err != nil {
+		t.Fatalf("UpdateHostState: %v", err)
+	}
+	raw := readRawHostState(t, dir)
+	if _, ok := raw["RunID"]; ok {
+		t.Fatalf("other-case known key kept as unknown: %v", raw)
+	}
+	if string(raw["runId"]) != `"new"` || string(raw["other"]) != "1" || len(raw) != 2 {
+		t.Fatalf("got %v", raw)
+	}
+}
+
+func TestHostStateDirectoryAtPathErrors(t *testing.T) {
+	dir := hostStateTempDir(t)
+	if err := os.Mkdir(HostStatePath(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadHostState(dir); err == nil {
+		t.Fatal("ReadHostState: want error for a directory at the path")
+	}
+	if err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "x"; return nil }); err == nil {
+		t.Fatal("UpdateHostState: want error for a directory at the path")
+	}
+	if fi, err := os.Lstat(HostStatePath(dir)); err != nil || !fi.IsDir() {
+		t.Fatalf("directory replaced: fi=%v err=%v", fi, err)
+	}
+}
+
+// hostStateTempDir returns a temp dir with symlinks resolved: on unix the
+// host state code refuses a symlink in any component of agentDir, and on
+// macOS t.TempDir() is under the symlink /var.
+func hostStateTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func readRawHostState(t *testing.T, dir string) map[string]json.RawMessage {
