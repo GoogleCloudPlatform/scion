@@ -25,6 +25,7 @@ Terraform's control.
 | `agent-runtime-k8s` | the agent namespace `<hub>`, the agent KSA's Workload Identity binding, and the NFS PV/PVC. With `create_hub_rbac = false`, the chart owns the hub's RBAC instead |
 | `hub-lb` | global IP (`prevent_destroy`), managed cert, HTTPS proxy and forwarding rule, HTTP->HTTPS redirect, health check (`/readyz` on 8080), health-check firewall rule (destination: the pod range only), backend service (IAP, Google-managed OAuth client), and IAP accessor grants |
 | `hub-gke` | namespace `<hub>-system`, the NEG Service, the session secret, the artifacts bucket and the `helm_release` |
+| `hub-test-runner` | only with `test_runner.enabled` (off by default): service accounts `<hub>-uat` and `<hub>-issuer`, token-creator grants for the impersonators, IAP access for `<hub>-uat` on this hub's backend service, and optional alert objects. See "Test hubs (optional)" |
 
 **Front-door contract.** `hub-gke` takes exactly two values from the front
 door: `public_url` and `iap_audience`. It references no other `hub-lb`
@@ -245,6 +246,46 @@ accepted because Autopilot offers no tighter scope without manual steps.
 A single shared-infra rule, replacing the per-hub rules, is tracked in
 ptone/scion#3519.
 
+## Test hubs (optional)
+
+Two independent settings, both off by default. With defaults, neither adds a
+resource or changes the chart values.
+
+**`test_identities_enabled`** sets the chart's `hub.testIdentities.enabled`,
+which lets the hub issue test identities. When false (the default), the value
+is left out of the chart values and the chart's own default (false) applies.
+This is unrelated to test login, which the chart does not offer.
+
+**`test_runner`** creates test-runner identities through
+`modules/hub-test-runner`, so an agent on another hub can run user-surface
+tests against this hub using only its own assigned service account:
+
+```hcl
+test_runner = {
+  enabled                     = true
+  impersonators               = ["serviceAccount:<dedicated-runner>@<project>.iam.gserviceaccount.com"]
+  alert_notification_channels = []   # optional
+}
+```
+
+- `impersonators` must be non-empty when enabled, and every entry must be a
+  `serviceAccount:` member. `group:` and `user:` are rejected.
+- The plan fails unless the project records `DATA_READ` audit logs for
+  `iamcredentials.googleapis.com` (or `allServices`). Apply
+  `configurations/shared-infra` with `iamcredentials_data_access_logs = true`
+  first.
+- The module passes this hub's backend service name from `hub-lb` at the root.
+  `modules/hub-gke` itself still takes only the front-door contract.
+- Outputs `test_runner_uat_email`, `test_runner_uat_unique_id`,
+  `test_runner_issuer_email` and `test_runner_issuer_unique_id` are null while
+  disabled.
+
+Read `../../modules/hub-test-runner/README.md` before enabling it: the
+impersonating service account must be dedicated and assigned only to the
+testing agent (the module does not enforce this), logs on this side
+attribute calls only to that account, and the audit-log check runs only at
+plan time.
+
 ## Outputs
 
 | Output | Meaning |
@@ -257,6 +298,7 @@ ptone/scion#3519.
 | `hub_image` | `<repo>/scion-hub-gke@<digest>` |
 | `chart_values` | every non-secret value handed to the chart |
 | `neg_zones` | zones the NEGs are created in and read from (the cluster's `node_locations`) |
+| `test_runner_uat_email`, `test_runner_uat_unique_id`, `test_runner_issuer_email`, `test_runner_issuer_unique_id` | the test-runner accounts; null unless `test_runner.enabled` |
 
 ## Destroy
 
@@ -279,5 +321,7 @@ The tests run with mock providers and need no credentials. They prove the root
 composes and plans, the front-door contract, the LB's timeout and health check,
 the digest pin, `auth=password`, `create_hub_rbac = false`, both
 first-install states, the NEG zones (from `node_locations`) and the GKE version
-check, and the firewall's pod-range destination. They cannot prove the APIs accept the resources, the NEG
+check, the firewall's pod-range destination, that the test-hub settings add
+nothing by default, the `test_runner` validations, module wiring and
+pass-through outputs, and the `hub.testIdentities.enabled` chart value. They cannot prove the APIs accept the resources, the NEG
 timing, or that the hub boots. Those are live checks.

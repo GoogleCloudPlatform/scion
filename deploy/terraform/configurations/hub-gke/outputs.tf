@@ -60,3 +60,23 @@ output "neg_zones" {
   description = "Zones the hub's NEGs are created in (the NEG annotation's \"zones\") and read from: always the cluster's node_locations."
   value       = local.neg_zones
 }
+
+output "test_runner_uat_email" {
+  description = "Email of <hub>-uat (modules/hub-test-runner). null unless test_runner.enabled."
+  value       = one(module.hub_test_runner[*].uat_email)
+}
+
+output "test_runner_uat_unique_id" {
+  description = "Unique ID of <hub>-uat. null unless test_runner.enabled."
+  value       = one(module.hub_test_runner[*].uat_unique_id)
+}
+
+output "test_runner_issuer_email" {
+  description = "Email of <hub>-issuer (modules/hub-test-runner). null unless test_runner.enabled."
+  value       = one(module.hub_test_runner[*].issuer_email)
+}
+
+output "test_runner_issuer_unique_id" {
+  description = "Unique ID of <hub>-issuer. null unless test_runner.enabled."
+  value       = one(module.hub_test_runner[*].issuer_unique_id)
+}
