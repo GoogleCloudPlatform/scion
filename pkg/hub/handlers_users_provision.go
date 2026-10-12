@@ -75,9 +75,11 @@ const (
 	// test-identity domain.
 	provisionReasonReservedTestIdentity = "reserved_test_identity_domain"
 	// provisionReasonEmailNotAllowed: the email can never be a hub user (a
-	// proxy driver principal). Generic on purpose: the settings API does not
-	// reveal the driver list, so the answer does not either; the specific
-	// reason is logged (logProxyDriverCreateRefusal).
+	// proxy driver principal). The reason does not name drivers or the
+	// driver list; a caller with provisioning rights can still infer that
+	// the email is refused as a transport identity, which is accepted (see
+	// proxyDriverPrincipalUserMessage). The specific reason is logged
+	// (logProxyDriverCreateRefusal).
 	provisionReasonEmailNotAllowed = "email_not_allowed"
 )
 

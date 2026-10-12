@@ -726,7 +726,21 @@ func TestTIWebIAP_DriverIsNeverAUserOnOtherPaths(t *testing.T) {
 		const another = "provisioned-browser-driver@example.com"
 		f := newProvisionFixture(t) // provisioning needs a hub without dev auth
 		f.srv.proxyDrivers = newDriverPrincipalSet([]string{another})
+		logs := tiWebCaptureLogs(t)
 		rec := provisionAs(t, f.srv, f.superAdmin, map[string]interface{}{"email": another})
+		// The refusal is attributable in the log: one line with the
+		// endpoint, the actor, the email and the specific reason.
+		var refusal string
+		for _, line := range strings.Split(logs.String(), "\n") {
+			if strings.Contains(line, "user creation refused") {
+				assert.Empty(t, refusal, "exactly one refusal line")
+				refusal = line
+			}
+		}
+		assert.Contains(t, refusal, `endpoint="user provisioning"`)
+		assert.Contains(t, refusal, "actor="+f.superAdmin.ID)
+		assert.Contains(t, refusal, "email="+another)
+		assert.Contains(t, refusal, "reason="+proxyDriverPrincipalLogReason)
 		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
 		var resp ErrorResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))

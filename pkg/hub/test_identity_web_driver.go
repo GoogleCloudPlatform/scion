@@ -80,10 +80,16 @@ const (
 	testIdentityWebNoDriversLogLine = "test-identity web sessions unavailable: proxy auth mode with no driverPrincipals"
 
 	// proxyDriverPrincipalUserMessage is the message of an admin request
-	// that would create a user for a proxy driver principal. It is generic
-	// on purpose: the settings API does not reveal the driver list, so the
-	// user-facing answer does not either. The specific reason is logged.
+	// that would create a user for a proxy driver principal. The message and
+	// the reason never name drivers or the driver list (the settings API
+	// hides the list). The refusal itself still tells a caller with invite
+	// or provisioning rights that the email is refused as a transport
+	// identity; that inference is accepted, as with the platform service
+	// account's reserved_identity provisioning warning. The specific reason
+	// is logged (logProxyDriverCreateRefusal).
 	proxyDriverPrincipalUserMessage = "this email cannot be a hub user"
+	// proxyDriverPrincipalLogReason is the log reason of such a refusal.
+	proxyDriverPrincipalLogReason = "proxy_driver_principal"
 
 	// testIdentityRedeemEmailKeyPrefix starts the redeem rate-limit key of
 	// a verified proxy assertion email, keeping it apart from source IP
@@ -159,7 +165,7 @@ func (r *GoogleIdentityResolver) isTransportIdentity(email string) bool {
 // caller stays generic (proxyDriverPrincipalUserMessage).
 func logProxyDriverCreateRefusal(endpoint, actorID, email string) {
 	slog.Warn("user creation refused: the email is a proxy driver principal",
-		"endpoint", endpoint, "actor", actorID, "email", email, "reason", "proxy_driver_principal")
+		"endpoint", endpoint, "actor", actorID, "email", email, "reason", proxyDriverPrincipalLogReason)
 }
 
 // writeDriverPrincipalRefusal answers a driver principal request that has no
