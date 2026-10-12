@@ -344,7 +344,11 @@ func TestListSkipLocate(t *testing.T) {
 			}
 		}
 		sort.Strings(want)
-		if got != strings.Join(want, "\n")+"\n" && !(len(want) == 0 && got == "") {
+		wantOut := ""
+		if len(want) > 0 {
+			wantOut = strings.Join(want, "\n") + "\n"
+		}
+		if got != wantOut {
 			t.Errorf("-list %d = %q, want %v", k, got, want)
 		}
 	}

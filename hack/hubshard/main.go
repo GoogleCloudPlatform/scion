@@ -294,11 +294,7 @@ func runUntag(root, dir string, stdout io.Writer) error {
 }
 
 func splitTags(s string) []string {
-	var tags []string
-	for _, t := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
-		tags = append(tags, t)
-	}
-	return tags
+	return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' })
 }
 
 func printLines(w io.Writer, lines []string) error {
