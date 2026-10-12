@@ -576,7 +576,14 @@ func (s *Server) dispatchRoutedRecipient(
 	retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrBrokerTimeout) {
+	// The record is logged from a copy carrying the effective conversation,
+	// before dispatch, so the dispatched message is unchanged.
+	recordMsg := *msg
+	if effectiveConv != nil {
+		recordMsg.ConversationID = effectiveConv.ConversationID
+	}
+	logMessageRecord(s.recordLog(), agent, &recordMsg)
+	if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrBrokerTimeout) {
 		result.Status = "error"
 		result.Error = "broker unreachable after 30s deadline"
 		return result

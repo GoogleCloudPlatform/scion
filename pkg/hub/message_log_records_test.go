@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -215,7 +216,10 @@ func TestMessageLog_OutboundMessageSent_HasSenderAndRecipient(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return len(messageRecords(t, messageLogEntries(t, buf))) >= 1
 	}, 5*time.Second, 10*time.Millisecond, "no message record written")
-	time.Sleep(50 * time.Millisecond)
+	// A late duplicate must not follow.
+	require.Never(t, func() bool {
+		return len(messageRecords(t, messageLogEntries(t, buf))) > 1
+	}, 200*time.Millisecond, 10*time.Millisecond, "a second message record was written")
 	entries := messageLogEntries(t, buf)
 	recs := messageRecords(t, entries)
 	require.Len(t, recs, 1, "exactly one message record: %v", entries)
@@ -452,7 +456,10 @@ func TestMessageLog_OutboundToUser_BrokerPath_OneRecord(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return len(messageRecords(t, messageLogEntries(t, buf))) >= 1
 	}, 5*time.Second, 10*time.Millisecond, "no message record written")
-	time.Sleep(50 * time.Millisecond)
+	// A late duplicate must not follow.
+	require.Never(t, func() bool {
+		return len(messageRecords(t, messageLogEntries(t, buf))) > 1
+	}, 200*time.Millisecond, 10*time.Millisecond, "a second message record was written")
 	entries := messageLogEntries(t, buf)
 	recs := messageRecords(t, entries)
 	require.Len(t, recs, 1, "exactly one message record: %v", entries)
@@ -625,11 +632,237 @@ func TestMessageLog_BroadcastProxy_RecordPerRecipient(t *testing.T) {
 		return len(recordsForRecipient(t, entries, "agent:rec-bproxy-a")) >= 1 &&
 			len(recordsForRecipient(t, entries, "agent:rec-bproxy-b")) >= 1
 	}, 5*time.Second, 10*time.Millisecond, "per-recipient records not written")
-	time.Sleep(50 * time.Millisecond)
+	// No late duplicate or summary record may follow.
+	require.Never(t, func() bool {
+		return len(messageRecords(t, messageLogEntries(t, buf))) > 2
+	}, 200*time.Millisecond, 10*time.Millisecond, "an extra message record was written")
 	entries := messageLogEntries(t, buf)
 	assert.Len(t, recordsForRecipient(t, entries, "agent:rec-bproxy-a"), 1, "%v", entries)
 	assert.Len(t, recordsForRecipient(t, entries, "agent:rec-bproxy-b"), 1, "%v", entries)
 	assert.Len(t, messageRecords(t, entries), 2, "no summary record: %v", entries)
 	summary := findMessageLogEntry(t, entries, "broadcast message published")
 	assert.Equal(t, logging.LogKindEvent, summary[logging.AttrLogKind])
+}
+
+// newRecordTestProxy builds a broker proxy whose message log is captured.
+func newRecordTestProxy(t *testing.T, s store.Store, dispatcher AgentDispatcher) (*MessageBrokerProxy, *syncBuffer) {
+	t.Helper()
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = b.Close() })
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	logger, buf := newJSONMessageLogger()
+	proxy.messageLog = logger
+	return proxy, buf
+}
+
+// The proxy's agent delivery writes one record before the migration gate
+// and the dispatch outcome: a deferred (migrating) recipient and a failed
+// dispatch each keep exactly one record.
+func TestMessageLog_DeliverToAgent_DeferredAndFailed_OneRecord(t *testing.T) {
+	t.Run("deferred", func(t *testing.T) {
+		s := newBrokerTestStore(t)
+		projectID := setupBrokerTestProject(t, s)
+		sender := setupBrokerTestAgent(t, s, projectID, "rec-dta-sender", "running")
+		target := setupBrokerTestAgent(t, s, projectID, "rec-dta-target", string(state.PhaseStopping))
+		target.ReincarnationState = store.ReincarnationStatePending
+		require.NoError(t, s.UpdateAgent(context.Background(), target))
+		dispatcher := &brokerMockDispatcher{}
+		proxy, buf := newRecordTestProxy(t, s, dispatcher)
+
+		msg := messages.NewInstruction("agent:"+sender.Slug, "agent:"+target.Slug, "records deferred")
+		msg.SenderID = sender.ID
+		msg.RecipientID = target.ID
+		proxy.deliverToAgent(context.Background(), projectID, target.Slug, msg)
+
+		for _, d := range dispatcher.getMessages() {
+			require.NotEqual(t, target.Slug, d.agentSlug, "a migrating agent must not be dispatched to")
+		}
+		recs := recordsForRecipient(t, messageLogEntries(t, buf), "agent:"+target.Slug)
+		require.Len(t, recs, 1)
+		assert.Equal(t, "records deferred", recs[0]["message_content"])
+	})
+	t.Run("dispatch failed", func(t *testing.T) {
+		s := newBrokerTestStore(t)
+		projectID := setupBrokerTestProject(t, s)
+		target := setupBrokerTestAgent(t, s, projectID, "rec-dtf-target", "running")
+		proxy, buf := newRecordTestProxy(t, s, &recordingDispatcher{returnErr: errors.New("broker refused")})
+
+		msg := messages.NewInstruction("user:alice", "agent:"+target.Slug, "records failed")
+		msg.RecipientID = target.ID
+		proxy.deliverToAgent(context.Background(), projectID, target.Slug, msg)
+
+		entries := messageLogEntries(t, buf)
+		recs := recordsForRecipient(t, entries, "agent:"+target.Slug)
+		require.Len(t, recs, 1, "%v", entries)
+		assert.Equal(t, "records failed", recs[0]["message_content"])
+		for _, e := range entries {
+			assert.NotEqual(t, "broker message delivered", e["msg"], "a failed dispatch is not delivered")
+		}
+	})
+}
+
+// The legacy broker inbound endpoint writes one record before the
+// dispatch: one on success (the delivered line is an event) and one when
+// the dispatch fails.
+func TestMessageLog_BrokerInbound_OneRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		dispErr  error
+		wantCode int
+	}{
+		{"delivered", nil, http.StatusOK},
+		{"dispatch failed", errors.New("broker refused"), http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupDEF135(t)
+			f.dispatcher.returnErr = tc.dispErr
+			logger, buf := newJSONMessageLogger()
+			f.srv.SetMessageLogger(logger)
+
+			msg := &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "discord",
+				Sender:    f.senderRef,
+				Recipient: "agent:" + f.agent.Slug,
+				Msg:       "records inbound",
+				Type:      messages.TypeInstruction,
+			}
+			rec := f.sendBrokerInbound(t, msg, "", "", "")
+			require.Equal(t, tc.wantCode, rec.Code, "body: %s", rec.Body.String())
+
+			entries := messageLogEntries(t, buf)
+			recs := messageRecords(t, entries)
+			require.Len(t, recs, 1, "%v", entries)
+			assert.Equal(t, "message handed to delivery", recs[0]["msg"])
+			assert.Equal(t, "agent:"+f.agent.Slug, recs[0][logging.AttrRecipient])
+			assert.Equal(t, "records inbound", recs[0]["message_content"])
+			if tc.dispErr == nil {
+				delivered := findMessageLogEntry(t, entries, "inbound broker message delivered")
+				assert.Equal(t, logging.LogKindEvent, delivered[logging.AttrLogKind])
+			}
+		})
+	}
+}
+
+// chatV2RecordEnv sets up a project owner and returns a send helper for
+// web chat v2 (sendAgentRouted) on the project's topic.
+func chatV2RecordEnv(t *testing.T, srv *Server, s store.Store, prefix string) (*store.Project, func(content string, agents []*store.Agent, mentionNames []string)) {
+	t.Helper()
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	broker := &store.RuntimeBroker{ID: tid(prefix + "-b"), Name: prefix + "-b", Slug: prefix + "-b", Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{ID: tid(prefix + "-p"), Slug: prefix + "-p", Name: prefix + "-p", Created: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, project))
+	userID := api.NewUUID()
+	owner := NewAuthenticatedUser(userID, prefix+"@test.com", "Owner", "member", "cli")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: prefix + "@test.com", DisplayName: "Owner"}))
+	ensureHubMembership(ctx, s, userID)
+	srv.seedProjectCreatorMembership(ctx, project)
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, userID))
+
+	send := func(content string, agents []*store.Agent, mentionNames []string) {
+		var mentionResults []messages.MentionResult
+		for _, n := range mentionNames {
+			mentionResults = append(mentionResults, messages.MentionResult{Slug: n, Status: "delivered"})
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/conversations/topic:"+project.ID+"/messages", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), owner))
+		rr := httptest.NewRecorder()
+		writeChatSendOutcome(rr)(srv.sendAgentRouted(req.Context(), "topic:"+project.ID, project.ID, owner,
+			content, "Owner", agents, mentionNames, mentionResults, nil, time.Now(), "", nil, chatSendOptions{}))
+	}
+	return project, send
+}
+
+// chatV2RecordAgent creates an agent on the env's project and broker.
+func chatV2RecordAgent(t *testing.T, s store.Store, project *store.Project, prefix, slug, phase string) *store.Agent {
+	t.Helper()
+	a := &store.Agent{
+		ID: tid(slug), Slug: slug, Name: slug, ProjectID: project.ID,
+		Phase: phase, RuntimeBrokerID: tid(prefix + "-b"),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), a))
+	return a
+}
+
+// Web chat v2 writes the primary's and each mention's record before the
+// migration gate and the dispatch outcome: a migrating primary, a
+// migrating mention and failed dispatches each keep exactly one record.
+func TestMessageLog_ChatV2_ReincarnatingOrFailed_OneRecord(t *testing.T) {
+	t.Run("primary reincarnating", func(t *testing.T) {
+		srv, s := testServer(t)
+		project, send := chatV2RecordEnv(t, srv, s, "rec-c2p")
+		primary := chatV2RecordAgent(t, s, project, "rec-c2p", "rec-c2p-primary", string(state.PhaseProvisioning))
+		setReincarnationState(t, s, primary, store.ReincarnationStateProvisioning)
+		dispatcher := &brokerMockDispatcher{}
+		srv.SetDispatcher(dispatcher)
+		logger, buf := newJSONMessageLogger()
+		srv.SetMessageLogger(logger)
+
+		send("records primary deferred", []*store.Agent{primary}, nil)
+
+		require.Empty(t, dispatcher.getMessages(), "a migrating primary must not be dispatched to")
+		entries := messageLogEntries(t, buf)
+		require.Len(t, recordsForRecipient(t, entries, "agent:"+primary.Slug), 1, "%v", entries)
+	})
+	t.Run("mention reincarnating", func(t *testing.T) {
+		srv, s := testServer(t)
+		project, send := chatV2RecordEnv(t, srv, s, "rec-c2m")
+		primary := chatV2RecordAgent(t, s, project, "rec-c2m", "rec-c2m-primary", string(state.PhaseRunning))
+		second := chatV2RecordAgent(t, s, project, "rec-c2m", "rec-c2m-second", string(state.PhaseProvisioning))
+		setReincarnationState(t, s, second, store.ReincarnationStateProvisioning)
+		dispatcher := &brokerMockDispatcher{}
+		srv.SetDispatcher(dispatcher)
+		logger, buf := newJSONMessageLogger()
+		srv.SetMessageLogger(logger)
+
+		send("records @rec-c2m-second", []*store.Agent{primary, second}, []string{"rec-c2m-second"})
+
+		for _, d := range dispatcher.getMessages() {
+			require.NotEqual(t, second.Slug, d.agentSlug, "a migrating secondary must not be dispatched to")
+		}
+		entries := messageLogEntries(t, buf)
+		require.Len(t, recordsForRecipient(t, entries, "agent:"+primary.Slug), 1, "%v", entries)
+		require.Len(t, recordsForRecipient(t, entries, "agent:"+second.Slug), 1, "%v", entries)
+	})
+	t.Run("dispatch failed", func(t *testing.T) {
+		srv, s := testServer(t)
+		project, send := chatV2RecordEnv(t, srv, s, "rec-c2f")
+		primary := chatV2RecordAgent(t, s, project, "rec-c2f", "rec-c2f-primary", string(state.PhaseRunning))
+		second := chatV2RecordAgent(t, s, project, "rec-c2f", "rec-c2f-second", string(state.PhaseRunning))
+		srv.SetDispatcher(&recordingDispatcher{returnErr: errors.New("broker refused")})
+		logger, buf := newJSONMessageLogger()
+		srv.SetMessageLogger(logger)
+
+		send("records @rec-c2f-second", []*store.Agent{primary, second}, []string{"rec-c2f-second"})
+
+		entries := messageLogEntries(t, buf)
+		require.Len(t, recordsForRecipient(t, entries, "agent:"+primary.Slug), 1, "%v", entries)
+		require.Len(t, recordsForRecipient(t, entries, "agent:"+second.Slug), 1, "%v", entries)
+	})
+}
+
+// The proxy's user delivery still writes one record when write-deny
+// refuses to persist a DM to a non-UUID recipient.
+func TestMessageLog_DeliverToUser_NotPersisted_OneRecord(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	sender := setupBrokerTestAgent(t, s, projectID, "rec-dtu-sender", "running")
+	proxy, buf := newRecordTestProxy(t, s, &brokerMockDispatcher{})
+	proxy.writeDenyEnabled = func() bool { return true }
+
+	msg := messages.NewInstruction("agent:"+sender.Slug, "user:alice", "records not persisted")
+	msg.SenderID = sender.ID
+	msg.RecipientID = "alice" // not a canonical UUID
+	proxy.deliverToUser(context.Background(), projectID, "records-topic", msg)
+
+	recs := messageRecords(t, messageLogEntries(t, buf))
+	require.Len(t, recs, 1)
+	assert.Equal(t, "user message handed to delivery", recs[0]["msg"])
+	assert.Equal(t, false, recs[0]["persisted"])
+	assert.Equal(t, "records not persisted", recs[0]["message_content"])
 }

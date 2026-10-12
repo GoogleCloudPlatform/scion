@@ -472,7 +472,15 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	agentReincarnating := reincarnationInFlight(agent)
 	// The hub's message record, written before the gate and the dispatch
 	// outcome (see logMessageRecord); the delivered line below is an event.
-	logMessageRecord(s.recordLog(), agent, req.Message)
+	// Logged from a copy carrying the hub's recipient and conversation, so
+	// the dispatched message is unchanged.
+	recordMsg := *req.Message
+	recordMsg.Recipient = "agent:" + agent.Slug
+	recordMsg.RecipientID = agent.ID
+	if effectiveConv != nil {
+		recordMsg.ConversationID = effectiveConv.ConversationID
+	}
+	logMessageRecord(s.recordLog(), agent, &recordMsg)
 	if !agentReincarnating {
 		retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer retryCancel()

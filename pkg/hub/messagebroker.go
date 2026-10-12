@@ -665,9 +665,9 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		if recorded || p.messageLog == nil {
 			return
 		}
-		attrs := []any{"project_id", projectID, "topic", topic, "source", "broker"}
+		attrs := []any{"project_id", projectID, "topic", topic, "source", "broker", "persisted", false}
 		attrs = append(attrs, msg.LogAttrs()...)
-		p.messageLog.Info("user message not persisted", attrs...)
+		p.messageLog.Info("user message handed to delivery", attrs...)
 	}()
 
 	// Persist to message store (write-through; non-fatal if store fails).
