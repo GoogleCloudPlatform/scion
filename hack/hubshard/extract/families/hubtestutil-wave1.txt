@@ -1,0 +1,80 @@
+# P1-7 wave 1 (ptone/scion#4361): generic pkg/hub test helpers that use no
+# pkg/hub declaration move to pkg/hub/internal/hubtestutil, so future
+# pkg/hub/<area> packages can use them. pkg/hub keeps their names through
+# zz_alias_hubtestutil_test.go.
+#
+#   extract export -dir pkg/hub -to pkg/hub/internal/hubtestutil -family hack/hubshard/extract/families/hubtestutil-wave1.txt
+
+rename tid=TID
+rename tidSlugSafe=TIDSlugSafe
+rename requireUUID=RequireUUID
+
+# test_server_cleanup_test.go reads .total and .ids of leak-guard results.
+field leakGuardResult.total=Total
+field leakGuardResult.ids=IDs
+
+# id_helpers_test.go
+tid
+tidSlugSafe
+requireUUID
+
+# memsqlite_helpers_test.go
+openTestMemorySQLite
+
+# testmigrate_helpers_test.go
+migrateTestStore
+autoMigrateTestClient
+testMigrateMu
+testMigrator
+
+# mem_guard_helpers_test.go
+memGuardDefaultCap
+memGuardCapEnv
+memGuardIntervalEnv
+memGuardMinSoftLimit
+memGuardDefaultInterval
+memGuardMetricTotal
+memGuardMetricReleased
+memGuardRunning
+startMemGuard
+runMemGuard
+memGuardUsage
+memGuardRSS
+memGuardAbort
+
+# leak_guard_helpers_test.go
+leakGuardMaxGoroutines
+leakGuardSettle
+leakGuardReportEnv
+leakGuardDisableEnv
+leakGuardSignatures
+leakGuardStoreSignature
+leakGuardResult
+scanLeakedGoroutines
+scanStacks
+goroutineID
+allGoroutineStacks
+checkPackageLeaks
+checkLeaksExcluding
+runLeakGuard
+
+# git_lsremote_helpers_test.go
+errGitLsRemoteDisabled
+installHermeticGitLsRemote
+gitLsRemoteStub
+stubGitLsRemote
+errGitSparseCheckoutDisabled
+installHermeticGitSparseCheckout
+gitSparseCheckoutCall
+gitSparseCheckoutStub
+stubGitSparseCheckout
+
+# cloud_log_env_helpers_test.go (its two Test funcs stay)
+ambientGCPProjectEnvKeys
+clearAmbientGCPProjectEnv
+
+# store_fault_helpers_test.go (installStoreFault and the probe stores stay)
+storeFaultSwitch
+
+# syncbuffer_helpers_test.go
+syncBuffer

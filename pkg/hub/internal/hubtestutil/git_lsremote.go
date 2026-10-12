@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package hubtestutil
 
 import (
 	"context"
@@ -31,40 +31,40 @@ import (
 // stub the seam still behave deterministically, without touching the network.
 var errGitLsRemoteDisabled = errors.New("pkg/hub tests: real git ls-remote is disabled (ptone/scion#3670); use stubGitLsRemote")
 
-// installHermeticGitLsRemote replaces pkg/config's git ls-remote runner for
+// InstallHermeticGitLsRemote replaces pkg/config's git ls-remote runner for
 // the whole pkg/hub test binary so no test can shell out to a real
 // `git ls-remote https://github.com/...` (which hit the network and could hang
 // with no deadline, ptone/scion#3670). Called from TestMain; returns a restore
 // func.
-func installHermeticGitLsRemote() (restore func()) {
+func InstallHermeticGitLsRemote() (restore func()) {
 	return config.SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
 		return nil, errGitLsRemoteDisabled
 	})
 }
 
-// gitLsRemoteStub records the repo URLs passed to a stubbed ls-remote runner.
-type gitLsRemoteStub struct {
+// GitLsRemoteStub records the repo URLs passed to a stubbed ls-remote runner.
+type GitLsRemoteStub struct {
 	mu   sync.Mutex
 	urls []string
 }
 
 // URLs returns a copy of the repo URLs the stub was called with.
-func (s *gitLsRemoteStub) URLs() []string {
+func (s *GitLsRemoteStub) URLs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.urls...)
 }
 
-// stubGitLsRemote makes pkg/config's git ls-remote runner return the canned
+// StubGitLsRemote makes pkg/config's git ls-remote runner return the canned
 // `git ls-remote --heads` output for the rest of the test, restoring the
 // previous runner via t.Cleanup. Tests should assert on the returned stub's
 // URLs so a regression that bypasses the seam (and would exec real git) fails
 // loudly instead of silently hitting the network.
 //
 // Not safe for t.Parallel(): it mutates package-global state in pkg/config.
-func stubGitLsRemote(t *testing.T, output string) *gitLsRemoteStub {
+func StubGitLsRemote(t *testing.T, output string) *GitLsRemoteStub {
 	t.Helper()
-	stub := &gitLsRemoteStub{}
+	stub := &GitLsRemoteStub{}
 	restore := config.SetGitLsRemoteForTest(func(_ context.Context, repoURL string) ([]byte, error) {
 		stub.mu.Lock()
 		stub.urls = append(stub.urls, repoURL)
@@ -81,49 +81,49 @@ func stubGitLsRemote(t *testing.T, output string) *gitLsRemoteStub {
 // hits it without stubbing gets a clear error instead of a real `git fetch`.
 var errGitSparseCheckoutDisabled = errors.New("pkg/hub tests: real git sparse checkout is disabled (ptone/scion#3750); use stubGitSparseCheckout")
 
-// installHermeticGitSparseCheckout replaces pkg/config's sparse git checkout
+// InstallHermeticGitSparseCheckout replaces pkg/config's sparse git checkout
 // runner for the whole pkg/hub test binary so no test can shell out to a real
 // `git fetch https://github.com/...` (ptone/scion#3750). Called from TestMain;
 // returns a restore func.
-func installHermeticGitSparseCheckout() (restore func()) {
+func InstallHermeticGitSparseCheckout() (restore func()) {
 	return config.SetGitSparseCheckoutForTest(func(context.Context, *config.GitHubURLParts, string, string) error {
 		return errGitSparseCheckoutDisabled
 	})
 }
 
-// gitSparseCheckoutCall is one recorded call to a stubbed sparse checkout.
-type gitSparseCheckoutCall struct {
+// GitSparseCheckoutCall is one recorded call to a stubbed sparse checkout.
+type GitSparseCheckoutCall struct {
 	Parts    config.GitHubURLParts
 	DestPath string
 	Token    string
 }
 
-// gitSparseCheckoutStub records calls made to a stubbed sparse checkout.
-type gitSparseCheckoutStub struct {
+// GitSparseCheckoutStub records calls made to a stubbed sparse checkout.
+type GitSparseCheckoutStub struct {
 	mu    sync.Mutex
-	calls []gitSparseCheckoutCall
+	calls []GitSparseCheckoutCall
 }
 
 // Calls returns a copy of the recorded calls.
-func (s *gitSparseCheckoutStub) Calls() []gitSparseCheckoutCall {
+func (s *GitSparseCheckoutStub) Calls() []GitSparseCheckoutCall {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]gitSparseCheckoutCall(nil), s.calls...)
+	return append([]GitSparseCheckoutCall(nil), s.calls...)
 }
 
-// stubGitSparseCheckout makes pkg/config's sparse checkout runner write files
+// StubGitSparseCheckout makes pkg/config's sparse checkout runner write files
 // (path relative to the checked-out folder -> contents) into destPath for the
 // rest of the test, restoring the previous runner via t.Cleanup. Use it for
 // tests that exercise the git fallback after a failed tarball download, and
 // assert on the returned stub's Calls.
 //
 // Not safe for t.Parallel(): it mutates package-global state in pkg/config.
-func stubGitSparseCheckout(t *testing.T, files map[string]string) *gitSparseCheckoutStub {
+func StubGitSparseCheckout(t *testing.T, files map[string]string) *GitSparseCheckoutStub {
 	t.Helper()
-	stub := &gitSparseCheckoutStub{}
+	stub := &GitSparseCheckoutStub{}
 	restore := config.SetGitSparseCheckoutForTest(func(_ context.Context, parts *config.GitHubURLParts, destPath, token string) error {
 		stub.mu.Lock()
-		stub.calls = append(stub.calls, gitSparseCheckoutCall{Parts: *parts, DestPath: destPath, Token: token})
+		stub.calls = append(stub.calls, GitSparseCheckoutCall{Parts: *parts, DestPath: destPath, Token: token})
 		stub.mu.Unlock()
 		for rel, body := range files {
 			p := filepath.Join(destPath, filepath.FromSlash(rel))

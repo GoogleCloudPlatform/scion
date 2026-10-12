@@ -415,7 +415,15 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 
 // errHubNotConfigured is returned by requireHub when the command needs a hub
 // but none is in use (hub not enabled, or --no-hub was given).
-var errHubNotConfigured = errors.New("this command needs a hub; run 'scion server start' or 'scion hub enable'")
+var errHubNotConfigured error = hubNotConfiguredError{}
+
+// hubNotConfiguredError is the type of errHubNotConfigured. Its message is
+// a full sentence that names the ways to select a hub.
+type hubNotConfiguredError struct{}
+
+func (hubNotConfiguredError) Error() string {
+	return "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'."
+}
 
 // requireHub is CheckHubAvailability for commands that only work against a
 // hub. It never returns a nil HubContext without an error: when no hub is in
