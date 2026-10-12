@@ -1158,13 +1158,17 @@ func TestThreadGroupMigration_ProjectLookupErrorDefersUser(t *testing.T) {
 		q.ID:      {tgmPG("a2", "Ops", q1)},
 	}), "")
 	f.setPrefs("u-b", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("b1", "Release", t2)}}), "")
+	// u-c has entries only in the failing project: the cached error defers
+	// it too.
+	f.setPrefs("u-c", groupsDoc(t, map[string][]personalThreadGroup{q.ID: {tgmPG("c1", "Ops", q1)}}), "")
 	faulty.projectID.Store(q.ID)
 	fault.Arm()
 
 	st := f.pass()
-	assert.Equal(t, 1, st.UsersDeferred)
+	assert.Equal(t, 2, st.UsersDeferred)
 	assert.Equal(t, 1, st.UsersMarked)
 	assert.False(t, f.prefs("u-a").ThreadGroupsMigrated, "the deferred user stays unmarked")
+	assert.False(t, f.prefs("u-c").ThreadGroupsMigrated, "a second user of the failing project is deferred too")
 	assert.True(t, f.prefs("u-b").ThreadGroupsMigrated)
 	assert.Equal(t, []string{f.conv(t2)}, tgmMembers(f.group(f.proj.ID, "Release")), "nothing of the deferred user is filed, even in the project that was fine")
 	assert.Empty(t, f.groups(q.ID))
@@ -1174,9 +1178,13 @@ func TestThreadGroupMigration_ProjectLookupErrorDefersUser(t *testing.T) {
 	faulty.projectID.Store("")
 	st = f.pass()
 	assert.Zero(t, st.UsersDeferred)
+	assert.Equal(t, 2, st.UsersMarked)
 	assert.True(t, f.prefs("u-a").ThreadGroupsMigrated)
+	assert.True(t, f.prefs("u-c").ThreadGroupsMigrated)
 	assert.Equal(t, tgmSorted(f.conv(t1), f.conv(t2)), tgmMembers(f.group(f.proj.ID, "Release")))
-	assert.Equal(t, []string{f.conv(q1)}, tgmMembers(f.group(q.ID, "Ops")))
+	ops := f.group(q.ID, "Ops")
+	assert.Equal(t, []string{f.conv(q1)}, tgmMembers(ops))
+	assert.Equal(t, f.id("u-a"), ops.CreatedBy, "u-a and u-c both had Ops; the first by user ID creates it")
 }
 
 // An indeterminate access decision (a store fault inside the authz layer)
