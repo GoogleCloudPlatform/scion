@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/scanner"
 	"go/token"
 	"io"
@@ -327,7 +328,16 @@ func commentOnlyDiff(before, after string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", n, err)
 		}
-		bt, at = dropComments(bt), dropComments(at)
+		bc, err := importsC(string(bs))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", n, err)
+		}
+		ac, err := importsC(string(as))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", n, err)
+		}
+		cgo := bc || ac
+		bt, at = dropComments(bt, cgo), dropComments(at, cgo)
 		if len(bt) != len(at) {
 			out = append(out, fmt.Sprintf("%s: %d code tokens before, %d after", n, len(bt), len(at)))
 			continue
@@ -347,15 +357,10 @@ func commentOnlyDiff(before, after string) ([]string, error) {
 // reads stay in the stream, so a change to them is reported as a code
 // change: build constraints (//go:build, // +build), other //go: directives
 // (//go:embed, //go:linkname, //go:generate, ...), line directives
-// (//line, /*line), and cgo's //export. In a file that imports "C" every
-// comment stays, because the cgo preamble is a comment.
-func dropComments(ts []tok) []tok {
-	cgo := false
-	for i := 0; i+1 < len(ts); i++ {
-		if ts[i].t == token.IMPORT && ts[i+1].t == token.STRING && ts[i+1].lit == `"C"` {
-			cgo = true
-		}
-	}
+// (//line, /*line), and cgo's //export. With cgo set (the file imports
+// "C" on either side) every comment stays, because the cgo preamble is a
+// comment.
+func dropComments(ts []tok, cgo bool) []tok {
 	var out []tok
 	for _, t := range ts {
 		if t.t != token.COMMENT || cgo || isDirectiveComment(t.lit) {
@@ -373,4 +378,19 @@ func isDirectiveComment(c string) bool {
 		}
 	}
 	return false
+}
+
+// importsC reports whether a Go source file imports "C", in any import
+// declaration form (single or grouped).
+func importsC(src string) (bool, error) {
+	f, err := parser.ParseFile(token.NewFileSet(), "", src, parser.ImportsOnly)
+	if err != nil {
+		return false, err
+	}
+	for _, s := range f.Imports {
+		if s.Path.Value == `"C"` {
+			return true, nil
+		}
+	}
+	return false, nil
 }
