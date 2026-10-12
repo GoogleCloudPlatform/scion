@@ -106,7 +106,8 @@ type leakGuardResult struct {
 
 // scanLeakedGoroutines returns the live goroutines that match
 // leakGuardSignatures. A goroutine counts once, under the first signature
-// it matches. Goroutines whose ID is in exclude are skipped; Go never
+// it matches. Goroutines whose ID is in exclude are skipped (a block
+// whose ID cannot be parsed is never excluded or recorded); Go never
 // reuses a goroutine ID within a process, so an excluded ID can only ever
 // refer to the goroutine it was taken from.
 func scanLeakedGoroutines(exclude map[string]bool) leakGuardResult {
@@ -114,7 +115,7 @@ func scanLeakedGoroutines(exclude map[string]bool) leakGuardResult {
 	for _, block := range strings.Split(string(allGoroutineStacks()), "\n\n") {
 		block = strings.TrimSpace(block)
 		id := goroutineID(block)
-		if exclude[id] {
+		if id != "" && exclude[id] {
 			continue
 		}
 		for _, sig := range leakGuardSignatures {
@@ -122,7 +123,9 @@ func scanLeakedGoroutines(exclude map[string]bool) leakGuardResult {
 				res.counts[sig]++
 				res.total++
 				res.stacks = append(res.stacks, block)
-				res.ids[id] = true
+				if id != "" {
+					res.ids[id] = true
+				}
 				break
 			}
 		}
