@@ -176,8 +176,8 @@ function expectPageRendered(e: Page): void {
   const root = e.shadowRoot!;
   expect(root.querySelector('.error-state')).toBeNull();
   expect(root.textContent).not.toContain('Failed to Load');
-  const titles = Array.from(migrationsSection(e)?.querySelectorAll('.card-title') ?? []).map(
-    (t) => t.textContent?.trim()
+  const titles = Array.from(migrationsSection(e)?.querySelectorAll('.card-title') ?? []).map((t) =>
+    t.textContent?.trim()
   );
   expect(titles).toContain('Migration A');
 }
