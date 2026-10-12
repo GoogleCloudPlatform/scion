@@ -29,13 +29,15 @@ Start the Workstation server:
 scion server start
 ```
 
-On a machine that has not been set up yet, Scion prints the web URL and **automatically opens your browser** to the wizard:
+While onboarding is not complete (Scion asks the Hub for its onboarding status), Scion prints the web URL and **automatically opens your browser** to the wizard. Once onboarding is complete, it opens the Web Dashboard instead:
 
 ```
 http://127.0.0.1:8080/onboarding
 ```
 
 If the browser does not open (for example over SSH, in a headless environment, or when `SCION_NO_BROWSER` is set), open that URL manually. The port is `8080` by default.
+
+If no image registry is configured yet, the server starts the Hub and the web UI without the Runtime Broker and prints a warning, so you can set the registry in the wizard. Run `scion server restart` afterwards to start the Runtime Broker.
 
 :::tip[You can leave and come back]
 The wizard saves your progress. If you close the tab or restart setup, reopening `/onboarding` resumes past the steps you have already completed.

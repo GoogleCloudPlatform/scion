@@ -51,7 +51,11 @@ In a team environment, a **Project** represents a shared project. You link your 
 scion hub link
 ```
 
-If the project is already registered (matched by Git remote), Scion will link it automatically. If not, it will prompt you to register a new Project.
+If the project is already registered (matched by Git remote), Scion will link it automatically. If not, it will prompt you to register a new Project. On the local workstation Hub there is no prompt: the project is linked at once. With no Hub endpoint configured, `scion hub link` prints one line telling you to start the local Hub with `scion server start` or to set a remote one with `scion config set hub.endpoint <url>`.
+
+When a project with existing local agents is linked, they are imported to the Hub. An agent whose container is running is adopted as it is. Other agents are imported without being started (as stopped, or as created when they have no container), so the import never restarts dormant agents or re-sends their task.
+
+`scion hub unlink` only clears the link for this directory (it sets `hub.linked: false` and removes the Hub project ID). It does not turn Hub mode off and does not remove the project or its agents from the Hub. Agent commands in an unlinked project refuse and point you to `scion hub link`.
 
 ### Project Configuration
 

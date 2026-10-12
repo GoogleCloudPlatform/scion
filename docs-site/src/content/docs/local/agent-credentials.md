@@ -292,6 +292,16 @@ The fallback applies only to **automatic** resolution. If you selected an auth t
 [Explicit Path](#the-explicit-path), the fallback is disabled — the required credentials must be
 present or the agent fails to start with an actionable error.
 
+**Runtime Broker check before the container starts.** A Runtime Broker checks the staged auth
+candidates before it creates the container, and fails the start at once when the harness's
+provisioner would certainly reject it: an explicitly selected auth type whose credentials are all
+missing, or, for a harness that has no no-auth fallback, no satisfied auth type at all. The error
+names the harness, the auth type and the credential names it looks for (for example the expected
+environment keys), never their values. An auth type that declares `required_files` is never
+rejected by this check, because a credential file can reach the container by routes the Runtime
+Broker cannot see (volumes, file secrets, a persistent home, pre-start hooks). All shipped harness
+configs declare a no-auth fallback, so for them only an explicit auth type can fail this way.
+
 :::note[Git Credentials and GCP Service Accounts in No-Auth Fallback]
 * **Git Credentials Exemption**: During a no-auth fallback (when LLM credentials are not yet found or captured), Scion previously suppressed all secrets. Now, Git credentials (specifically `GITHUB_TOKEN`) are **exempt from suppression**. Scion will resolve `GITHUB_TOKEN` from project secrets (with a fallback to user-scoped secrets) so that repository cloning in `clone-per-agent` workspaces succeeds even when running in no-auth fallback mode.
 * **GCP Service Account Check**: To prevent false no-auth fallback triggers, Scion skips explicit environment variable checks for GCP-backed auth types when a verified Google Cloud Service Account (SA) is assigned to the agent.
@@ -453,6 +463,12 @@ The harness couldn't find any usable credentials through the automatic implicit 
 
 ### "auth type selected but..."
 You have configured the **Explicit Path** (e.g., selecting `vertex-ai`) but the specific credentials required for that path (like `GOOGLE_CLOUD_PROJECT`) are missing. The explicit path disables fallback, so ensure all required sources for the chosen explicit type are provided.
+
+### "no auth method satisfied"
+The Runtime Broker refused the start before creating a container (see [No-Auth Fallback](#no-auth-fallback)). The message names the harness, the selected or accepted auth types and the credential names they need. Provide one of them (as a Hub secret, an environment setting, or with `--env`), or select a different auth type with `--harness-auth`.
+
+### "agent secrets could not be resolved" or "agent environment settings could not be read"
+In Hub mode, create, start, restart and reincarnate fail closed with `503` when the Hub cannot resolve the agent's configured secrets or read its stored environment settings, instead of starting the agent without them. The agent is left as it was. This points to a secret backend or database problem on the Hub, not a missing credential (an agent with no secrets or settings starts normally). Retry once the Hub's backend is healthy; the Hub's server log has the cause.
 
 ### "unknown auth type"
 The value you passed to `--harness-auth` (or `auth_selectedType`) is not one this harness supports. Valid universal types are `api-key`, `oauth-token`, `auth-file`, and `vertex-ai`, but each harness only accepts a subset — see the [auth capability matrix](/scion/supported-harnesses/#feature-capability-matrix).
