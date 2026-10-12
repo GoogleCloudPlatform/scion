@@ -57,9 +57,11 @@ import {
   artifactFileUrl,
   artifactPagePath,
   formatArtifactRef,
+  isRemoteFile,
   rendererFor,
   type ArtifactFile,
   type ArtifactResponse,
+  type ViewResponse,
 } from '../../../client/artifacts.js';
 import { principalLabel, principalName, projectName } from '../../../client/principal-names.js';
 import '../code-editor.js';
@@ -143,7 +145,20 @@ interface ArtifactInfo {
    * which keeps every image on the hub; these are the frame's inputs.
    */
   markdown?: { id: string; seq: number; files: ArtifactFile[] };
+  /**
+   * Set for an HTML entry. Artifact HTML is rendered only through a view
+   * minted for the version, in the same sandboxed frame the artifact page
+   * uses (see renderArtifactHtml); its bytes are never fetched here.
+   */
+  htmlView?: { url: string; remoteImages: boolean; fileCount: number };
 }
+
+/**
+ * The HTML view frame's sandbox, the same as the artifact page's: scripts
+ * run, but on the view's own origin and never with allow-same-origin, so the
+ * content cannot reach Scion's origin, cookies or storage.
+ */
+export const HTML_VIEW_SANDBOX = 'allow-scripts';
 
 /** Image MIME types rendered inline (mirrors chat-message.ts's IMAGE_MIMES). */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -687,6 +702,10 @@ export class ScionChatFilePreview extends LitElement {
         homeProject: data.artifact.scopeRef,
       };
       const renderer = rendererFor(entry.mediaType);
+      if (renderer === 'html') {
+        await this.loadArtifactView(data, version.seq, version.files, artifact, base, gen, controller);
+        return;
+      }
       if (
         renderer === 'download' ||
         (renderer !== 'image' && entry.size > TEXT_PREVIEW_MAX_BYTES)
@@ -750,6 +769,88 @@ export class ScionChatFilePreview extends LitElement {
       if (gen !== this.generation || controller.signal.aborted) return;
       this.loadState = { ...base, status: 'error', error: 'Failed to load artifact.' };
     }
+  }
+
+  /**
+   * Loads an HTML entry the way the artifact page does: mints a view for
+   * the version under the viewer's own session and shows its URL in the
+   * sandboxed frame. The entry's bytes are not fetched, and the text size
+   * cap does not apply (the page renders any size). A refused or missing
+   * version is the same "unavailable" state as every other path.
+   */
+  private async loadArtifactView(
+    data: ArtifactResponse,
+    seq: number,
+    files: ArtifactFile[],
+    artifact: ArtifactInfo,
+    base: LoadState,
+    gen: number,
+    controller: AbortController
+  ): Promise<void> {
+    const viewUrl = `/api/v1/artifacts/${encodeURIComponent(data.artifact.id)}/versions/${seq}/view`;
+    const res = await apiFetch(viewUrl, { method: 'POST', signal: controller.signal });
+    if (gen !== this.generation) return;
+    if (res.status === 403 || res.status === 404) {
+      this.loadState = { ...base, status: 'error', error: ARTIFACT_UNAVAILABLE_MESSAGE, unavailable: true };
+      return;
+    }
+    if (!res.ok) {
+      this.loadState = {
+        ...base,
+        status: 'error',
+        error: await extractApiError(res, `Could not open the view (HTTP ${res.status})`),
+        artifact,
+      };
+      return;
+    }
+    const view = (await res.json()) as ViewResponse;
+    if (gen !== this.generation) return;
+    this.loadState = {
+      ...base,
+      status: 'ready',
+      artifact: {
+        ...artifact,
+        htmlView: {
+          url: view.url,
+          remoteImages: view.remoteImages === true,
+          fileCount: files.filter((f) => !isRemoteFile(f)).length,
+        },
+      },
+    };
+  }
+
+  /**
+   * An HTML entry: the artifact page's view frame, with the same
+   * attributes and untrusted-content bar (artifact-detail.ts renderHtmlView).
+   */
+  private renderArtifactHtml(info: ArtifactInfo, view: NonNullable<ArtifactInfo['htmlView']>) {
+    const owner = principalLabel(
+      info.ownerKind,
+      info.ownerRef,
+      this.artifactNames.owner,
+      this.currentUserId
+    );
+    return html`
+      ${view.remoteImages
+        ? html`<sl-alert class="notice" variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            Remote images are not loaded in HTML artifacts; include them in the bundle.
+          </sl-alert>`
+        : nothing}
+      <div class="untrusted">
+        <div class="untrusted-bar">
+          <sl-icon name="shield-lock"></sl-icon>
+          Content published by ${owner} · runs sandboxed, isolated from Scion
+          ${view.fileCount > 1 ? html`· bundle of ${view.fileCount} files` : nothing}
+        </div>
+        <iframe
+          title=${`${info.title} (sandboxed)`}
+          sandbox=${HTML_VIEW_SANDBOX}
+          referrerpolicy="no-referrer"
+          src=${view.url}
+        ></iframe>
+      </div>
+    `;
   }
 
   /**
@@ -914,6 +1015,9 @@ export class ScionChatFilePreview extends LitElement {
       return html`<scion-markdown-preview
         .content=${state.content ?? ''}
       ></scion-markdown-preview>`;
+    }
+    if (state.artifact?.htmlView) {
+      return this.renderArtifactHtml(state.artifact, state.artifact.htmlView);
     }
     const md = state.artifact?.markdown;
     if (md) {
@@ -1093,6 +1197,32 @@ export class ScionChatFilePreview extends LitElement {
       max-width: 100%;
       max-height: calc(var(--scion-app-height, 100dvh) * 0.75);
       object-fit: contain;
+    }
+    .notice {
+      margin: 0.5rem;
+    }
+    .untrusted {
+      border: 2px solid var(--sl-color-warning-500, #f59e0b);
+      background: var(--scion-surface, #ffffff);
+      display: flex;
+      flex-direction: column;
+    }
+    .untrusted-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.3rem 0.75rem;
+      font-size: 0.75rem;
+      color: var(--sl-color-warning-800, #92400e);
+      background: var(--sl-color-warning-50, #fffbeb);
+      border-bottom: 1px solid var(--sl-color-warning-300, #fcd34d);
+    }
+    .untrusted iframe {
+      display: block;
+      width: 100%;
+      height: calc(var(--scion-app-height, 100dvh) * 0.65);
+      border: none;
+      background: #ffffff;
     }
     .artifact-label {
       display: inline-flex;
