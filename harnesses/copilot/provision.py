@@ -103,6 +103,9 @@ def _config_holds_sign_in(raw: bytes) -> bool:
     Mirrors the host's copilotConfigHoldsSignIn. Lines that start with "//"
     (after leading whitespace) are dropped and the rest is parsed as JSON.
     Top-level keys are compared lowercased, as copilot lowercases them.
+    One known difference: Python and Go lowercase U+0130 differently, so a
+    key spelled with it is unknown here (fail open, signed in) while the
+    host may read it as a credential key.
 
       - copilot_tokens holding a string value that is not blank, or a
         non-empty string in copilot_hmac_key or capi_hmac_key, is sign-in.
@@ -114,7 +117,7 @@ def _config_holds_sign_in(raw: bytes) -> bool:
         future copilot version may keep a credential under a new key.
       - Content that is not a JSON object (unparseable, an array, null, or
         empty) is not sign-in: copilot cannot read sign-in from it, and
-        _ensure_settings replaces such a file.
+        _ensure_settings replaces unparseable JSON.
 
     Values are only tested for emptiness; they are never logged or returned.
     """

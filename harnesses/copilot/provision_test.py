@@ -398,6 +398,9 @@ class ConfigFileMayHoldCredentialTest(unittest.TestCase):
         self.assertFalse(self._check(b'{"trustedFolders": []}\xff'))
 
     def test_deep_nesting_is_not_sign_in(self) -> None:
+        # Too deep for Python's decoder, so unparseable here. Go's limit is
+        # 10000 levels; which shallower depths still differ from the host
+        # depends on the decoder (with the C decoder, only 9998-9999).
         self.assertFalse(self._check('{"placeholder_key": ' + "[" * 100000 + "]" * 100000 + "}"))
 
     def test_unreadable_fails_open(self) -> None:
