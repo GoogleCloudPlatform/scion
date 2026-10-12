@@ -335,8 +335,14 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 // The project directory gets a .scion marker file, and the actual project
 // data lives under ~/.scion/project-configs/.
 func initExternalProject(projectDir string, opt InitProjectOpts) error {
-	// projectDir is the intended <project>/.scion path.
-	projectRoot := filepath.Dir(projectDir)
+	// projectDir is the intended <project>/.scion path. Resolve it first so
+	// a relative target (for example ".scion") names the containing
+	// directory rather than ".", the same as the equivalent absolute target.
+	absProjectDir, err := filepath.Abs(projectDir)
+	if err != nil {
+		return fmt.Errorf("cannot initialize project: failed to resolve %s: %w", projectDir, err)
+	}
+	projectRoot := filepath.Dir(absProjectDir)
 	markerPath := filepath.Join(projectRoot, DotScion)
 
 	// TODO(project-migration): Remove this check after a few releases.
@@ -367,6 +373,9 @@ func initExternalProject(projectDir string, opt InitProjectOpts) error {
 	projectID := opt.newProjectID()
 	projectName := filepath.Base(projectRoot)
 	projectSlug := api.Slugify(projectName)
+	if projectSlug == "" {
+		return fmt.Errorf("cannot initialize project: the directory name %q of %s gives an empty project slug; use a directory name that contains letters or digits", projectName, projectRoot)
+	}
 
 	marker := &ProjectMarker{
 		ProjectID:   projectID,
@@ -382,12 +391,11 @@ func initExternalProject(projectDir string, opt InitProjectOpts) error {
 
 	// Write settings with workspace-path and project_id before ensureProjectDirs
 	// (which would create a settings.yaml without workspace_path if one doesn't exist yet).
-	absProjectRoot, _ := filepath.Abs(projectRoot)
 	if err := mkdirUnderProjectConfigs(externalPath, 0755); err != nil {
 		return fmt.Errorf("failed to create external project directory: %w", err)
 	}
 	if GetSettingsPath(externalPath) == "" {
-		if err := writeProjectSettings(externalPath, absProjectRoot, projectID, opt); err != nil {
+		if err := writeProjectSettings(externalPath, projectRoot, projectID, opt); err != nil {
 			return err
 		}
 	}
