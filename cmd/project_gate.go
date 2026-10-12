@@ -176,5 +176,5 @@ func isHubDispatchInvocation(projectPath string) bool {
 	if err != nil || settings == nil {
 		return false
 	}
-	return GetHubEndpoint(settings) != ""
+	return hubConfigured(settings)
 }

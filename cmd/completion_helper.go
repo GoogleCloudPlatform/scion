@@ -127,11 +127,11 @@ func fetchHubAgentsForCompletion(projectPath string) []string {
 		return nil
 	}
 
-	// Get Hub endpoint; without one there is no hub to ask
-	endpoint := GetHubEndpoint(settings)
-	if endpoint == "" {
+	// Without a hub there is nothing to ask
+	if !hubConfigured(settings) {
 		return nil
 	}
+	endpoint := GetHubEndpoint(settings)
 
 	// Generate cache key for this project
 	cacheKey := agentcache.GenerateCacheKey(projectPath)

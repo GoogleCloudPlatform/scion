@@ -706,7 +706,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 			"endpoint":          endpoint,
 			"endpointSource":    endpointScope.Source,
 			"endpointInherited": endpointScope.Inherited,
-			"configured":        endpoint != "",
+			"configured":        hubConfigured(settings),
 			"localWorkstation":  localWorkstation,
 			"projectId":         settings.ProjectID,
 			"scionVersionLocal": version.Short(),
@@ -794,7 +794,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	case endpointScope.Source != "none":
 		fmt.Printf("            (from %s settings)\n", endpointScope.Source)
 	}
-	if endpoint == "" {
+	if !hubConfigured(settings) {
 		fmt.Println("            " + errHubNotConfigured.Error())
 	} else {
 		fmt.Printf("Local workstation: %s\n", yesNo(localWorkstation))
@@ -2666,7 +2666,7 @@ func unlinkGateOpen(ownLinked *bool) bool {
 // with this directory's project ID, used only to word the unlink output. Any
 // failure (no endpoint, unreachable hub, not found) returns false.
 func hubHasProjectForUnlink(settings *config.Settings) bool {
-	if settings == nil || settings.ProjectID == "" || GetHubEndpoint(settings) == "" {
+	if settings == nil || settings.ProjectID == "" || !hubConfigured(settings) {
 		return false
 	}
 	client, err := getHubClient(settings)

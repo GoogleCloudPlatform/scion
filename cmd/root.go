@@ -580,7 +580,7 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 	}
 
 	// No hub configured: nothing to warn about.
-	if GetHubEndpoint(settings) == "" {
+	if !hubConfigured(settings) {
 		return
 	}
 

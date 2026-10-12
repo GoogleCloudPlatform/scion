@@ -30,6 +30,17 @@ func isLocalWorkstationEndpoint(endpoint string) bool {
 // is configured: the same not-configured error every hub command returns.
 var errHubLinkNoEndpoint = hubsync.ErrHubNotConfigured
 
+// hubConfigured reports whether a hub is configured for this invocation:
+// an endpoint resolves from --hub, the settings or the environment (see
+// GetHubEndpoint). Local-only mode was removed, so a configured endpoint is
+// what makes the CLI use a hub; the deprecated hub.enabled is not read.
+// Every cmd "is a hub configured?" check goes through this one function, so
+// that a later change to where hub configuration comes from replaces only
+// its body.
+func hubConfigured(settings interface{ GetHubEndpoint() string }) bool {
+	return GetHubEndpoint(settings) != ""
+}
+
 // deprecatedHubModeKeys lists the removed mode switches that settings still
 // set: hub.enabled and hub.local_only are deprecated and ignored since
 // local-only mode was removed. 'scion hub status' notes them.

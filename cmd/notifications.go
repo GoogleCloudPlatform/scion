@@ -197,7 +197,7 @@ func requireHubClient() (*config.Settings, hubclient.Client, error) {
 		return nil, nil, fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	if GetHubEndpoint(settings) == "" {
+	if !hubConfigured(settings) {
 		return nil, nil, errHubNotConfigured
 	}
 

@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -276,3 +277,28 @@ func TestPromptHubRegistration_NoHubIsANote(t *testing.T) {
 		})
 	}
 }
+
+// TestHubConfigured checks the single "is a hub configured?" check: an
+// endpoint from --hub, the settings or the environment counts; the
+// deprecated hub.enabled does not.
+func TestHubConfigured(t *testing.T) {
+	hermeticCLIEnv(t)
+	origEP := hubEndpoint
+	t.Cleanup(func() { hubEndpoint = origEP })
+	hubEndpoint = ""
+
+	disabled := false
+	assert.False(t, hubConfigured(&config.Settings{}), "nothing configured")
+	assert.False(t, hubConfigured(&config.Settings{Hub: &config.HubClientConfig{Enabled: boolPtrForTest(true)}}), "hub.enabled alone is not a hub")
+	assert.True(t, hubConfigured(&config.Settings{Hub: &config.HubClientConfig{Endpoint: "https://hub.example.com", Enabled: &disabled}}),
+		"an endpoint counts even with a stale hub.enabled=false")
+
+	t.Setenv("SCION_HUB_ENDPOINT", "https://env-hub.example.com")
+	assert.True(t, hubConfigured(&config.Settings{}), "endpoint from the environment")
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+
+	hubEndpoint = "https://flag-hub.example.com"
+	assert.True(t, hubConfigured(&config.Settings{}), "endpoint from --hub")
+}
+
+func boolPtrForTest(b bool) *bool { return &b }
