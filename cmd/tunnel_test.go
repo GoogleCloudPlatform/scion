@@ -243,6 +243,7 @@ func TestTunnelCredentialLookupIsNormalised(t *testing.T) {
 		{"different scheme, https to http login", "https://plain.example.com"},
 		{"different host", "https://hub2.example.com/hub"},
 		{"different port", "https://hub.example.com:8443/hub"},
+		{"other scheme's default port", "https://hub.example.com:80/hub"},
 		{"different path", "https://hub.example.com/other"},
 		{"path case differs", "https://hub.example.com/HUB"},
 		{"no path", "https://hub.example.com"},
