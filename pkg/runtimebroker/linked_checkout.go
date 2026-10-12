@@ -46,10 +46,15 @@ type linkedCheckoutInput struct {
 	Colocated bool
 	// RuntimeName is the runtime this dispatch resolved to.
 	RuntimeName string
-	// HasBrokerWorktree reports that a start or restart is for an agent
-	// that already has a broker-managed worktree (tryProvisionWorktree's
-	// layout). That agent keeps its workspace.
-	HasBrokerWorktree bool
+	// HasExistingNonLocalWorkspace reports that a start or restart is for
+	// an agent whose workspace already exists in another form: a
+	// broker-managed worktree of its own or one it joined, or a clone (see
+	// existingNonLocalWorkspace). That agent keeps its current path.
+	HasExistingNonLocalWorkspace bool
+	// WorkstationMode reports that this broker runs in a workstation-mode
+	// server (ServerConfig.WorkstationMode). Hosted servers are never
+	// routed.
+	WorkstationMode bool
 
 	// eligibilityOverride, when non-nil, replaces runtime.WorktreeModeEligible
 	// (git >= 2.48). Used in tests.
@@ -111,14 +116,17 @@ func resolveLinkedCheckout(in linkedCheckoutInput) linkedCheckoutDecision {
 	if isHubManagedProjectPath(in.ProjectPath) {
 		return linkedCheckoutDecision{Reason: "hub-managed project directory, not a linked checkout"}
 	}
+	if !in.WorkstationMode {
+		return linkedCheckoutDecision{Reason: "not a workstation-mode server"}
+	}
 	if !in.Colocated {
 		return linkedCheckoutDecision{Reason: "dispatch is not from the co-located hub"}
 	}
 	if isKubernetesRuntimeName(in.RuntimeName) {
 		return linkedCheckoutDecision{Reason: "kubernetes runtime"}
 	}
-	if in.HasBrokerWorktree {
-		return linkedCheckoutDecision{Reason: "agent already has a broker-managed worktree"}
+	if in.HasExistingNonLocalWorkspace {
+		return linkedCheckoutDecision{Reason: "agent already has a broker-managed worktree or a clone"}
 	}
 
 	eligCheck := runtime.WorktreeModeEligible
@@ -126,64 +134,118 @@ func resolveLinkedCheckout(in linkedCheckoutInput) linkedCheckoutDecision {
 		eligCheck = in.eligibilityOverride
 	}
 	if ok, reason := eligCheck(); !ok {
-		return linkedCheckoutDecision{Refusal: linkedCheckoutErrPrefix +
-			"git 2.48 or newer is required for local worktrees (" + reason + "); upgrade git on this machine"}
+		return linkedCheckoutDecision{Refusal: linkedCheckoutErrPrefix + reason +
+			"; upgrade git on this machine"}
 	}
 
 	// Resolve the project directory the way ProvisionAgent does, so the
 	// checkout verified here is the one its worktree case uses.
-	projectDir, err := config.GetResolvedProjectDir(in.ProjectPath)
-	if err != nil || !util.IsGitRepoDir(projectDir) {
-		return linkedCheckoutDecision{Refusal: linkedCheckoutErrPrefix +
-			"the project's local path " + in.ProjectPath + " is not in a git checkout; " +
-			"restore the checkout there, or run 'scion hub link' from the project's git checkout"}
+	repoRoot := ""
+	if projectDir, err := config.GetResolvedProjectDir(in.ProjectPath); err == nil && util.IsGitRepoDir(projectDir) {
+		repoRoot, _ = util.RepoRootDir(projectDir)
 	}
-	repoRoot, err := util.RepoRootDir(projectDir)
-	if err != nil || repoRoot == "" {
+	if repoRoot == "" {
 		return linkedCheckoutDecision{Refusal: linkedCheckoutErrPrefix +
 			"the project's local path " + in.ProjectPath + " is not in a git checkout; " +
 			"restore the checkout there, or run 'scion hub link' from the project's git checkout"}
 	}
 
-	// Both sides are compared and shown normalised, which also strips any
-	// credentials from either URL.
-	want := util.NormalizeGitRemote(in.GitClone.URL)
-	origin := util.NormalizeGitRemote(util.GetGitRemoteDir(repoRoot))
-	if origin == "" {
+	// The remotes are compared normalised; they are shown with any
+	// credentials removed (redactRemoteForDisplay).
+	wantRaw := in.GitClone.URL
+	originRaw := util.GetGitRemoteDir(repoRoot)
+	if originRaw == "" {
 		return linkedCheckoutDecision{Refusal: linkedCheckoutErrPrefix +
-			"the project's checkout at " + repoRoot + " has no origin remote, but the hub project's repository is " + want +
-			"; add it with 'git remote add origin <url>'"}
+			"the project's checkout at " + repoRoot + " has no origin remote, but the hub project's repository is " +
+			redactRemoteForDisplay(wantRaw) + "; add it with 'git remote add origin <url>'"}
 	}
-	if origin != want {
+	if util.NormalizeGitRemote(originRaw) != util.NormalizeGitRemote(wantRaw) {
 		return linkedCheckoutDecision{Refusal: linkedCheckoutErrPrefix +
-			"the project's checkout at " + repoRoot + " has origin " + origin + ", but the hub project's repository is " + want +
+			"the project's checkout at " + repoRoot + " has origin " + redactRemoteForDisplay(originRaw) +
+			", but the hub project's repository is " + redactRemoteForDisplay(wantRaw) +
 			"; point origin at the hub project's repository, or link this checkout as its own project"}
 	}
 	return linkedCheckoutDecision{Route: true, RepoRoot: repoRoot}
 }
 
-// brokerManagedWorktreeExists reports whether the agent of a start or
-// restart already has a worktree in tryProvisionWorktree's layout
-// (<project>/workspace/worktrees/<agent-id>), i.e. it was created on the
-// broker's base clone before linked checkouts were routed to local
-// worktrees.
-func brokerManagedWorktreeExists(in startContextInputs) bool {
-	if in.ProjectPath == "" || in.ProjectPathFromContainer ||
-		!isSingleCleanPathElement(in.AgentID) || !isSingleCleanPathElement(in.ProjectID) {
+// existingNonLocalWorkspace reports whether the agent of a start or restart
+// already has a workspace that is not a local worktree of the checkout, so
+// it must keep its current path rather than be routed by
+// resolveLinkedCheckout. It mirrors tryProvisionWorktree's own pre-existing
+// worktree checks:
+//   - the agent's own broker-managed worktree
+//     (<project>/workspace/worktrees/<agent-id>) exists;
+//   - the sharer registry of that base records an existing worktree for the
+//     agent's branch (an agent that joined another agent's worktree), or
+//     the registry refuses the branch's entry (tryProvisionWorktree then
+//     fails closed on it);
+//   - the agent's workspace (<project>/agents/<name>/workspace) is a clone,
+//     i.e. its .git is a directory (an agent that fell back to an
+//     in-container clone).
+func existingNonLocalWorkspace(in startContextInputs) bool {
+	if in.ProjectPath == "" || in.ProjectPathFromContainer {
 		return false
 	}
-	mode := store.SharingModeWorktreePerAgent
-	resolved, err := runtime.SelectWorkspaceBackend(nil, mode).Resolve(runtime.ResolveInput{
-		ProjectDir: in.ProjectPath,
-		ProjectID:  in.ProjectID,
-		AgentID:    in.AgentID,
-		Mode:       mode,
-	})
-	if err != nil || resolved.HostPath == "" {
-		return false
+	if isSingleCleanPathElement(in.AgentID) && isSingleCleanPathElement(in.ProjectID) {
+		mode := store.SharingModeWorktreePerAgent
+		resolved, err := runtime.SelectWorkspaceBackend(nil, mode).Resolve(runtime.ResolveInput{
+			ProjectDir: in.ProjectPath,
+			ProjectID:  in.ProjectID,
+			AgentID:    in.AgentID,
+			Mode:       mode,
+		})
+		if err == nil && resolved.HostPath != "" {
+			if _, statErr := os.Lstat(provision.WorktreePath(resolved.HostPath, in.AgentID)); statErr == nil {
+				return true
+			}
+			// The branch is the sharer-registry key tryProvisionWorktree
+			// uses (resolveWorktreeProvision's AgentName).
+			branch := in.Name
+			if in.Config != nil && in.Config.Branch != "" {
+				branch = in.Config.Branch
+			}
+			if branch == "" {
+				branch = in.AgentID
+			}
+			_, regPath, listErr := provision.ListSharersForJoin(resolved.HostPath, branch)
+			if listErr != nil {
+				return true
+			}
+			if regPath != "" {
+				if _, statErr := os.Lstat(regPath); statErr == nil {
+					return true
+				}
+			}
+		}
 	}
-	_, statErr := os.Lstat(provision.WorktreePath(resolved.HostPath, in.AgentID))
-	return statErr == nil
+	if projectDir, err := config.GetResolvedProjectDir(in.ProjectPath); err == nil {
+		if agentDir, err := config.AgentDirForProject(projectDir, in.Name, false, ""); err == nil {
+			if info, statErr := os.Lstat(filepath.Join(agentDir, "workspace", ".git")); statErr == nil && info.IsDir() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// redactRemoteForDisplay returns a git remote (URL or scp-like form) for a
+// client-facing message with any credentials removed: everything between
+// the scheme and the last '@' is dropped, and so are a query string and a
+// fragment. It errs on the side of dropping too much, so it does not rely
+// on the remote being well-formed.
+func redactRemoteForDisplay(raw string) string {
+	s := strings.TrimSpace(raw)
+	scheme := ""
+	if i := strings.Index(s, "://"); i >= 0 {
+		scheme, s = s[:i+3], s[i+3:]
+	}
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[i+1:]
+	}
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		s = s[:i]
+	}
+	return scheme + s
 }
 
 // isHubManagedProjectPath reports whether projectPath is a hub-managed

@@ -1043,28 +1043,31 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Worktree-per-agent mode, linked checkout on the workstation ---
-	// A worktree-per-agent create for a linked project, dispatched by the
+	// A worktree-per-agent dispatch for a linked project, sent by the
 	// co-located hub to a non-Kubernetes runtime, gets a worktree of the
 	// project's own checkout from ProvisionAgent's local worktree engine
 	// (<repo>/.scion/agents/<slug>/workspace): no clone, no base clone, and
 	// the user's local commits and branches are visible. GitClone and
 	// Workspace stay empty so ProvisionAgent takes that path. If the
-	// checkout fails verification the create is refused rather than falling
+	// checkout fails verification the dispatch is refused rather than falling
 	// back to a clone; see resolveLinkedCheckout. Start and restart re-send
 	// the same workspace inputs and are routed the same way, so
-	// ProvisionAgent reuses the agent's worktree by branch; an agent that
-	// already has a broker-managed worktree keeps it.
+	// ProvisionAgent reuses the agent's worktree by branch; an agent whose
+	// workspace is a broker-managed worktree (its own or joined) or a clone
+	// keeps it (existingNonLocalWorkspace). Only workstation-mode servers
+	// route.
 	linkedCheckout := false
 	if in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		decision := resolveLinkedCheckout(linkedCheckoutInput{
-			WorkspaceMode:            in.WorkspaceMode,
-			GitClone:                 in.Config.GitClone,
-			ProjectPath:              in.ProjectPath,
-			ProjectPathFromContainer: in.ProjectPathFromContainer,
-			HubGlobalProject:         in.HubGlobalProject,
-			Colocated:                s.dispatchFromColocatedHub(ctx, in.HTTPRequest, hubConn),
-			RuntimeName:              dispatchRuntimeType,
-			HasBrokerWorktree:        in.Operation != opCreate && brokerManagedWorktreeExists(in),
+			WorkspaceMode:                in.WorkspaceMode,
+			GitClone:                     in.Config.GitClone,
+			ProjectPath:                  in.ProjectPath,
+			ProjectPathFromContainer:     in.ProjectPathFromContainer,
+			HubGlobalProject:             in.HubGlobalProject,
+			Colocated:                    s.dispatchFromColocatedHub(ctx, in.HTTPRequest, hubConn),
+			RuntimeName:                  dispatchRuntimeType,
+			HasExistingNonLocalWorkspace: in.Operation != opCreate && existingNonLocalWorkspace(in),
+			WorkstationMode:              s.config.WorkstationMode,
 		})
 		switch {
 		case decision.Refusal != "":

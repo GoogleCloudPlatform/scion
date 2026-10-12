@@ -85,14 +85,17 @@ func TestResolveLinkedCheckout(t *testing.T) {
 
 	base := func() linkedCheckoutInput {
 		return linkedCheckoutInput{
-			WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
-			GitClone:      &api.GitCloneConfig{URL: linkedTestRemote, Branch: "main"},
-			ProjectPath:   dotScion,
-			Colocated:     true,
-			RuntimeName:   "docker",
+			WorkspaceMode:   store.WorkspaceModeWorktreePerAgent,
+			GitClone:        &api.GitCloneConfig{URL: linkedTestRemote, Branch: "main"},
+			ProjectPath:     dotScion,
+			Colocated:       true,
+			WorkstationMode: true,
+			RuntimeName:     "docker",
 		}
 	}
-	tooOld := func() (bool, string) { return false, "found 2.40.1" }
+	tooOld := func() (bool, string) {
+		return false, "git >= 2.48.0 required for worktree-per-agent mode (--relative-paths), found 2.40.1"
+	}
 
 	tests := []struct {
 		name        string
@@ -114,18 +117,23 @@ func TestResolveLinkedCheckout(t *testing.T) {
 		{name: "hub global project", mutate: func(in *linkedCheckoutInput) { in.HubGlobalProject = true }},
 		{name: "hub-managed project dir", mutate: func(in *linkedCheckoutInput) { in.ProjectPath = hubManaged }},
 		{name: "not co-located", mutate: func(in *linkedCheckoutInput) { in.Colocated = false }},
+		{name: "hosted-mode server", mutate: func(in *linkedCheckoutInput) { in.WorkstationMode = false }},
 		{name: "kubernetes runtime", mutate: func(in *linkedCheckoutInput) { in.RuntimeName = "kubernetes" }},
-		{name: "agent already has a broker worktree", mutate: func(in *linkedCheckoutInput) { in.HasBrokerWorktree = true }},
+		{name: "agent already has a broker worktree or clone", mutate: func(in *linkedCheckoutInput) { in.HasExistingNonLocalWorkspace = true }},
+		{name: "existing workspace wins over git too old", mutate: func(in *linkedCheckoutInput) {
+			in.HasExistingNonLocalWorkspace = true
+			in.eligibilityOverride = tooOld
+		}},
 		{name: "git too old", mutate: func(in *linkedCheckoutInput) { in.eligibilityOverride = tooOld },
-			wantRefusal: "git 2.48 or newer is required for local worktrees (found 2.40.1)"},
+			wantRefusal: "found 2.40.1; upgrade git on this machine"},
 		{name: "not a git checkout", mutate: func(in *linkedCheckoutInput) { in.ProjectPath = plainDir },
 			wantRefusal: "the project's local path " + plainDir + " is not in a git checkout"},
 		{name: "path missing", mutate: func(in *linkedCheckoutInput) { in.ProjectPath = filepath.Join(plainDir, "gone", ".scion") },
 			wantRefusal: "is not in a git checkout"},
 		{name: "remote mismatch", mutate: func(in *linkedCheckoutInput) { in.ProjectPath = otherScion },
-			wantRefusal: "has origin github.com/acme/other, but the hub project's repository is github.com/acme/widgets"},
+			wantRefusal: "has origin github.com:acme/other.git, but the hub project's repository is https://github.com/acme/widgets.git"},
 		{name: "no origin", mutate: func(in *linkedCheckoutInput) { in.ProjectPath = noOriginScion },
-			wantRefusal: "has no origin remote, but the hub project's repository is github.com/acme/widgets"},
+			wantRefusal: "has no origin remote, but the hub project's repository is https://github.com/acme/widgets.git"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -159,41 +167,111 @@ func TestResolveLinkedCheckout(t *testing.T) {
 		})
 	}
 
-	t.Run("refusal never shows clone URL credentials", func(t *testing.T) {
+	t.Run("refusal never shows credentials", func(t *testing.T) {
+		// Passwords containing '/' (unencoded) and a numeric prefix that a
+		// URL parser can mistake for a port.
+		_, credScion := newLinkedCheckout(t, "https://user:123/or1g-pw@github.com/acme/other.git")
 		in := base()
-		in.ProjectPath = otherScion
-		in.GitClone.URL = "https://x-access-token:s3cr3t@github.com/acme/widgets.git"
+		in.ProjectPath = credScion
+		in.GitClone.URL = "https://x-access-token:45/s3cr3t@github.com/acme/widgets.git?token=q7#frag"
 		got := resolveLinkedCheckout(in)
-		if got.Refusal == "" || strings.Contains(got.Refusal, "s3cr3t") {
-			t.Errorf("Refusal = %q, want a refusal without the credential", got.Refusal)
+		if got.Refusal == "" {
+			t.Fatal("expected a remote-mismatch refusal")
+		}
+		for _, secret := range []string{"s3cr3t", "45/", "or1g-pw", "123/", "x-access-token", "user:", "q7", "frag"} {
+			if strings.Contains(got.Refusal, secret) {
+				t.Errorf("Refusal %q contains %q", got.Refusal, secret)
+			}
+		}
+		if !strings.Contains(got.Refusal, "has origin https://github.com/acme/other.git") ||
+			!strings.Contains(got.Refusal, "repository is https://github.com/acme/widgets.git") {
+			t.Errorf("Refusal %q does not show the redacted remotes", got.Refusal)
 		}
 	})
 }
 
-func TestBrokerManagedWorktreeExists(t *testing.T) {
-	dotScion := filepath.Join(t.TempDir(), ".scion")
-	in := startContextInputs{ProjectPath: dotScion, ProjectID: "p1", AgentID: "agent-uuid"}
-	if brokerManagedWorktreeExists(in) {
-		t.Fatal("reported a broker worktree before one exists")
+func TestRedactRemoteForDisplay(t *testing.T) {
+	tests := map[string]string{
+		"https://github.com/acme/w.git":                     "https://github.com/acme/w.git",
+		"https://tok@github.com/acme/w.git":                 "https://github.com/acme/w.git",
+		"https://u:p@ss@github.com/acme/w.git":              "https://github.com/acme/w.git",
+		"https://u:123/x@github.com/acme/w.git":             "https://github.com/acme/w.git",
+		"https://u:p?w@github.com/acme/w.git":               "https://github.com/acme/w.git",
+		"https://github.com/acme/w.git?access_token=abc":    "https://github.com/acme/w.git",
+		"https://github.com/acme/w.git#frag":                "https://github.com/acme/w.git",
+		"ssh://git@github.com/acme/w.git":                   "ssh://github.com/acme/w.git",
+		"git@github.com:acme/w.git":                         "github.com:acme/w.git",
+		"/srv/git/w.git":                                    "/srv/git/w.git",
+		"  https://u:p@github.com/acme/w.git  ":             "https://github.com/acme/w.git",
+		"https://x-access-token:a/b/c@host.example/r.git":   "https://host.example/r.git",
+		"git@host.example:team/repo-with-dash_and.dots.git": "host.example:team/repo-with-dash_and.dots.git",
 	}
-	if err := os.MkdirAll(provision.WorktreePath(filepath.Join(dotScion, "workspace"), "agent-uuid"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if !brokerManagedWorktreeExists(in) {
-		t.Error("did not report the existing broker worktree")
-	}
-	for name, mutate := range map[string]func(*startContextInputs){
-		"no agent id":         func(in *startContextInputs) { in.AgentID = "" },
-		"agent id traversal":  func(in *startContextInputs) { in.AgentID = "../x" },
-		"no project id":       func(in *startContextInputs) { in.ProjectID = "" },
-		"path from container": func(in *startContextInputs) { in.ProjectPathFromContainer = true },
-	} {
-		c := in
-		mutate(&c)
-		if brokerManagedWorktreeExists(c) {
-			t.Errorf("%s: reported a broker worktree", name)
+	for in, want := range tests {
+		if got := redactRemoteForDisplay(in); got != want {
+			t.Errorf("redactRemoteForDisplay(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+func TestExistingNonLocalWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	newIn := func(t *testing.T) startContextInputs {
+		dotScion := filepath.Join(t.TempDir(), ".scion")
+		if err := os.MkdirAll(dotScion, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return startContextInputs{Name: "a1", ProjectPath: dotScion, ProjectID: "p1", AgentID: "agent-uuid"}
+	}
+
+	t.Run("nothing on disk", func(t *testing.T) {
+		if existingNonLocalWorkspace(newIn(t)) {
+			t.Error("reported an existing workspace")
+		}
+	})
+	t.Run("own broker worktree", func(t *testing.T) {
+		in := newIn(t)
+		if err := os.MkdirAll(provision.WorktreePath(filepath.Join(in.ProjectPath, "workspace"), "agent-uuid"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if !existingNonLocalWorkspace(in) {
+			t.Error("did not report the agent's broker worktree")
+		}
+		for name, mutate := range map[string]func(*startContextInputs){
+			"no agent id":         func(in *startContextInputs) { in.AgentID = "" },
+			"agent id traversal":  func(in *startContextInputs) { in.AgentID = "../x" },
+			"no project id":       func(in *startContextInputs) { in.ProjectID = "" },
+			"path from container": func(in *startContextInputs) { in.ProjectPathFromContainer = true },
+		} {
+			c := in
+			mutate(&c)
+			if existingNonLocalWorkspace(c) {
+				t.Errorf("%s: reported an existing workspace", name)
+			}
+		}
+	})
+	t.Run("clone in the agent workspace", func(t *testing.T) {
+		in := newIn(t)
+		ws := filepath.Join(in.ProjectPath, "agents", "a1", "workspace")
+		if err := os.MkdirAll(filepath.Join(ws, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if !existingNonLocalWorkspace(in) {
+			t.Error("did not report the agent's clone")
+		}
+	})
+	t.Run("local worktree in the agent workspace is not a clone", func(t *testing.T) {
+		in := newIn(t)
+		ws := filepath.Join(in.ProjectPath, "agents", "a1", "workspace")
+		if err := os.MkdirAll(ws, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(ws, ".git"), []byte("gitdir: ../../../../.git/worktrees/workspace\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if existingNonLocalWorkspace(in) {
+			t.Error("reported a local worktree (.git file) as an existing non-local workspace")
+		}
+	})
 }
 
 // TestDispatchFromColocatedHub_IgnoresHostCredentialPolicy: the co-located
@@ -222,6 +300,7 @@ func linkedStartContextServer(t *testing.T, remote string, gitInit, colocated bo
 	t.Helper()
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
+	cfg.WorkstationMode = true
 	srv := newTestServerForStartContextRuntime(t, cfg, "docker")
 	wd, err := os.Getwd()
 	if err != nil {
@@ -242,20 +321,54 @@ func linkedStartContextServer(t *testing.T, remote string, gitInit, colocated bo
 }
 
 func linkedStartInputs(dotScion, cloneURL string, op startOperation) startContextInputs {
+	return linkedStartInputsFor(dotScion, cloneURL, op, "a1", "a1-uuid", "")
+}
+
+func linkedStartInputsFor(dotScion, cloneURL string, op startOperation, name, agentID, branch string) startContextInputs {
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	r.Header.Set("X-Scion-Hub-Connection", "hub-1")
 	return startContextInputs{
-		Name:          "a1",
-		AgentID:       "a1-uuid",
+		Name:          name,
+		AgentID:       agentID,
 		ProjectID:     "p1",
 		ProjectSlug:   "widgets",
 		ProjectPath:   dotScion,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config: &CreateAgentConfig{
 			GitClone: &api.GitCloneConfig{URL: cloneURL, Branch: "main", Depth: intPtr(1)},
+			Branch:   branch,
 		},
 		HTTPRequest: r,
 		Operation:   op,
+	}
+}
+
+func assertRoutedToLocalWorktree(t *testing.T, sc *startContext) {
+	t.Helper()
+	if sc.Opts.GitClone != nil {
+		t.Errorf("Opts.GitClone = %+v, want nil", sc.Opts.GitClone)
+	}
+	if sc.Opts.Workspace != "" {
+		t.Errorf("Opts.Workspace = %q, want empty", sc.Opts.Workspace)
+	}
+	for _, k := range []string{"SCION_GIT_CLONE_URL", "SCION_GIT_BRANCH", "SCION_GIT_DEPTH"} {
+		if v, ok := sc.Opts.Env[k]; ok {
+			t.Errorf("%s = %q, want unset", k, v)
+		}
+	}
+	if got := sc.Opts.Env["SCION_WORKSPACE_GIT"]; got != "true" {
+		t.Errorf("SCION_WORKSPACE_GIT = %q, want true", got)
+	}
+	if sc.ProvisionedWorktreeRepoRoot != "" {
+		t.Errorf("ProvisionedWorktreeRepoRoot = %q, want empty", sc.ProvisionedWorktreeRepoRoot)
+	}
+}
+
+func assertBrokerWorktree(t *testing.T, sc *startContext, dotScion string) {
+	t.Helper()
+	wantPrefix := filepath.Join(dotScion, "workspace", provision.WorktreesSubdir) + string(filepath.Separator)
+	if !strings.HasPrefix(sc.Opts.Workspace, wantPrefix) {
+		t.Errorf("Opts.Workspace = %q, want a broker-managed worktree under %s", sc.Opts.Workspace, wantPrefix)
 	}
 }
 
@@ -274,23 +387,7 @@ func TestBuildStartContext_LinkedCheckoutRoutesToLocalWorktree(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildStartContext: %v", err)
 			}
-			if sc.Opts.GitClone != nil {
-				t.Errorf("Opts.GitClone = %+v, want nil", sc.Opts.GitClone)
-			}
-			if sc.Opts.Workspace != "" {
-				t.Errorf("Opts.Workspace = %q, want empty", sc.Opts.Workspace)
-			}
-			for _, k := range []string{"SCION_GIT_CLONE_URL", "SCION_GIT_BRANCH", "SCION_GIT_DEPTH"} {
-				if v, ok := sc.Opts.Env[k]; ok {
-					t.Errorf("%s = %q, want unset", k, v)
-				}
-			}
-			if got := sc.Opts.Env["SCION_WORKSPACE_GIT"]; got != "true" {
-				t.Errorf("SCION_WORKSPACE_GIT = %q, want true", got)
-			}
-			if sc.ProvisionedWorktreeRepoRoot != "" {
-				t.Errorf("ProvisionedWorktreeRepoRoot = %q, want empty", sc.ProvisionedWorktreeRepoRoot)
-			}
+			assertRoutedToLocalWorktree(t, sc)
 			if _, err := os.Lstat(filepath.Join(dotScion, "workspace")); !os.IsNotExist(err) {
 				t.Errorf("base clone dir %s exists (stat err: %v)", filepath.Join(dotScion, "workspace"), err)
 			}
@@ -310,10 +407,111 @@ func TestBuildStartContext_LinkedCheckoutNotColocatedKeepsExistingPath(t *testin
 	if err != nil {
 		t.Fatalf("buildStartContext: %v", err)
 	}
-	wantPrefix := filepath.Join(dotScion, "workspace", provision.WorktreesSubdir) + string(filepath.Separator)
-	if !strings.HasPrefix(sc.Opts.Workspace, wantPrefix) {
-		t.Errorf("Opts.Workspace = %q, want a broker-managed worktree under %s", sc.Opts.Workspace, wantPrefix)
+	assertBrokerWorktree(t, sc, dotScion)
+}
+
+// TestBuildStartContext_LinkedCheckoutHostedModeKeepsExistingPath: a hosted
+// server is never routed, even with a co-located loopback hub.
+func TestBuildStartContext_LinkedCheckoutHostedModeKeepsExistingPath(t *testing.T) {
+	requireWorktreeGit(t)
+	clearSCIONEnv(t)
+	bare := initBareRepoWithCommit(t)
+	srv, dotScion := linkedStartContextServer(t, bare, true, true)
+	srv.config.WorkstationMode = false
+	sc, err := srv.buildStartContext(context.Background(), linkedStartInputs(dotScion, bare, opCreate))
+	if err != nil {
+		t.Fatalf("buildStartContext: %v", err)
 	}
+	assertBrokerWorktree(t, sc, dotScion)
+}
+
+// TestBuildStartContext_LinkedCheckoutExistingAgentsKeepTheirWorkspace: on
+// the co-located workstation broker, a start or restart of an agent whose
+// workspace already exists as a broker-managed worktree (its own, or one it
+// joined) or as a clone keeps that path, with no refusal. A create is
+// routed even when a stale broker worktree directory exists.
+func TestBuildStartContext_LinkedCheckoutExistingAgentsKeepTheirWorkspace(t *testing.T) {
+	requireWorktreeGit(t)
+
+	// provisionBrokerWorktree creates agent a1's broker-managed worktree
+	// through today's path, by dispatching its create while routing is off.
+	provisionBrokerWorktree := func(t *testing.T) (*Server, string, string) {
+		t.Helper()
+		clearSCIONEnv(t)
+		bare := initBareRepoWithCommit(t)
+		srv, dotScion := linkedStartContextServer(t, bare, true, true)
+		srv.config.WorkstationMode = false
+		sc, err := srv.buildStartContext(context.Background(), linkedStartInputs(dotScion, bare, opCreate))
+		if err != nil {
+			t.Fatalf("provision a1: %v", err)
+		}
+		assertBrokerWorktree(t, sc, dotScion)
+		srv.config.WorkstationMode = true
+		return srv, dotScion, bare
+	}
+
+	for _, op := range []startOperation{opHTTPStart, opHTTPRestart} {
+		t.Run("own broker worktree/"+string(op), func(t *testing.T) {
+			srv, dotScion, bare := provisionBrokerWorktree(t)
+			sc, err := srv.buildStartContext(context.Background(), linkedStartInputs(dotScion, bare, op))
+			if err != nil {
+				t.Fatalf("buildStartContext: %v", err)
+			}
+			assertBrokerWorktree(t, sc, dotScion)
+		})
+	}
+
+	t.Run("joined broker worktree", func(t *testing.T) {
+		srv, dotScion, bare := provisionBrokerWorktree(t)
+		// b1 shares a1's branch, so its registry entry is a1's worktree and
+		// it has no worktree of its own.
+		in := linkedStartInputsFor(dotScion, bare, opHTTPStart, "b1", "b1-uuid", "a1")
+		if !existingNonLocalWorkspace(in) {
+			t.Fatal("setup: b1 is not seen as joined to a1's worktree")
+		}
+		sc, err := srv.buildStartContext(context.Background(), in)
+		if err != nil {
+			t.Fatalf("buildStartContext: %v", err)
+		}
+		if sc.Opts.GitClone == nil && sc.Opts.Workspace == "" {
+			t.Error("joined agent was routed to a local worktree")
+		}
+	})
+
+	t.Run("clone in the agent workspace", func(t *testing.T) {
+		clearSCIONEnv(t)
+		bare := initBareRepoWithCommit(t)
+		srv, dotScion := linkedStartContextServer(t, bare, true, true)
+		gitInitWithOrigin(t, mkdirAll(t, filepath.Join(dotScion, "agents", "c1", "workspace")), bare)
+		for _, op := range []startOperation{opHTTPStart, opHTTPRestart} {
+			sc, err := srv.buildStartContext(context.Background(), linkedStartInputsFor(dotScion, bare, op, "c1", "c1-uuid", ""))
+			if err != nil {
+				t.Fatalf("%s: buildStartContext: %v", op, err)
+			}
+			if sc.Opts.GitClone == nil && sc.Opts.Workspace == "" {
+				t.Errorf("%s: clone agent was routed to a local worktree", op)
+			}
+		}
+	})
+
+	t.Run("create with a stale broker worktree dir is routed", func(t *testing.T) {
+		clearSCIONEnv(t)
+		srv, dotScion := linkedStartContextServer(t, linkedTestRemote, true, true)
+		mkdirAll(t, provision.WorktreePath(filepath.Join(dotScion, "workspace"), "a1-uuid"))
+		sc, err := srv.buildStartContext(context.Background(), linkedStartInputs(dotScion, linkedTestRemote, opCreate))
+		if err != nil {
+			t.Fatalf("buildStartContext: %v", err)
+		}
+		assertRoutedToLocalWorktree(t, sc)
+	})
+}
+
+func mkdirAll(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // TestBuildStartContext_LinkedCheckoutFailsClosed: when the routing
@@ -329,7 +527,7 @@ func TestBuildStartContext_LinkedCheckoutFailsClosed(t *testing.T) {
 		want    string
 	}{
 		{name: "remote mismatch", gitInit: true, origin: "https://github.com/acme/other.git",
-			want: "has origin github.com/acme/other, but the hub project's repository is github.com/acme/widgets"},
+			want: "has origin https://github.com/acme/other.git, but the hub project's repository is https://github.com/acme/widgets.git"},
 		{name: "no origin", gitInit: true, want: "has no origin remote"},
 		{name: "not a git checkout", gitInit: false, want: "is not in a git checkout"},
 	}
