@@ -15,7 +15,6 @@
 package tunnelclient
 
 import (
-	"errors"
 	"io"
 	"testing"
 
@@ -48,9 +47,8 @@ func TestSSHStdioClosedByPolicyExits7(t *testing.T) {
 		t.Fatalf("exit %d (%v), want %d", got, err, ExitPolicyClosed)
 	}
 	const wantLine = "tunnel closed by policy (authz_expired)"
-	var e *Error
-	if !errors.As(err, &e) || e.Msg != wantLine {
-		t.Fatalf("error %q, want exactly %q", err, wantLine)
+	if err == nil || err.Error() != wantLine {
+		t.Fatalf("error %v, want exactly %q", err, wantLine)
 	}
 	if out.String() != banner {
 		t.Fatalf("stdout = %q, want %q", out.String(), banner)
