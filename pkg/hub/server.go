@@ -2870,6 +2870,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// See platformAuthSA above: shared by the GE exchange endpoint and the
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
+	// Same policy as isUserAuthorized above, in its code-returning form,
+	// so a refusal's audit entry records the code the decision returned.
+	googleResolver.SetSignInDenial(srv.signInDenial)
 	// Give the resolver's existing-record-by-email branch the same
 	// account-state handling (invited activation, role re-evaluation,
 	// super-admin binding, grant sync, audit) that provisionUser's
