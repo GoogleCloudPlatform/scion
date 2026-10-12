@@ -312,7 +312,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// `server start` invocation regardless of which components it enables.
 	// On-disk layout migration is expected to run at this same hook point.
 	config.WarnRemovedLegacyEnvOnce(os.Getenv, config.NewSlogReporter())
-	// Per-project migration (config.ReadProjectID, as projects load) reports
+	// Legacy settings and marker key migration (as projects load) reports
 	// through slog here too. This is already the default, but set it
 	// explicitly so all three boot hooks (CLI, hub, broker) are visible at
 	// their call sites.
