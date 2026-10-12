@@ -76,7 +76,7 @@ _Avoid_: agent tool, scion-tool
 ## Runtime & Workspace
 
 **Agent Port Forwarding**:
-A feature that allows exposing local HTTP ports running inside an agent container through the Hub as authenticated, reverse-proxied URLs. Built on an outbound WebSocket reverse tunnel.
+A feature that allows exposing local HTTP ports running inside an agent container through the Hub as authenticated, reverse-proxied URLs. Built on an outbound WebSocket connection from the container.
 _Avoid_: agent tunnel, port proxy, hub reverse tunnel, web access (for raw TCP or SSH access through `scion tunnel`, see **Tunnel (Conduit user tunnel)**)
 _See also_: sciontool, Tunnel (Conduit user tunnel)
 
@@ -212,7 +212,7 @@ _Avoid_: credential, vault, secret store, env secret
 _See also_: Harness-config, Profile
 
 **Port Forwarding**:
-The feature that allows users, developers, and external systems to access HTTP services running inside agent containers securely via the Hub's reverse proxy. Requests are routed over a persistent, authenticated WebSocket-based reverse tunnel established from within the container to the Hub.
+The feature that allows users, developers, and external systems to access HTTP services running inside agent containers securely via the Hub's reverse proxy. Requests are routed over a persistent, authenticated outbound WebSocket connection from the container to the Hub.
 _Avoid_: tunnel (that term is reserved for **Tunnel (Conduit user tunnel)**), docker proxy, ingress
 _See also_: Auto-Expose, Hub, Tunnel (Conduit user tunnel)
 

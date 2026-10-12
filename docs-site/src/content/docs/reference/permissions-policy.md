@@ -137,7 +137,7 @@ Permission IDs are defined in one registry, `pkg/hub/permissions/registry.go`. F
 
 ### Last constraint admin protection
 
-The Hub refuses any change that would leave a scope with no active user holding `access_constraint.admin`, now or once scheduled constraints activate: suspending or deleting that user, or removing or downgrading their admin role binding. The refusal is `409` with code `constraint_admin_lockout`; grant the permission to another user first. Only active users count as constraint admins, so a suspended user never keeps a scope administrable.
+The Hub refuses any change that would leave a scope with no active user holding `access_constraint.admin`, now or once scheduled constraints activate, by suspending or deleting that user. The refusal is `409` with code `constraint_admin_lockout`; grant the permission to another user first. Only active users count as constraint admins, so a suspended user never keeps a scope administrable.
 
 ---
 
