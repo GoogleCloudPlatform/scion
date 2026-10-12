@@ -307,6 +307,9 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 	// deliberately.
 	checkDir := ""
 	if targetDir != "" {
+		// Clean first so a trailing separator does not shift the
+		// directory checked here or the Lstat below.
+		targetDir = filepath.Clean(targetDir)
 		checkDir = filepath.Dir(targetDir)
 	}
 
@@ -469,15 +472,15 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 	case err == nil:
 		if opt.ProjectID != "" && existingID != opt.ProjectID {
 			if err := WriteProjectID(projectDir, opt.ProjectID); err != nil {
-				return fmt.Errorf("failed to write project-id: %w", err)
+				return fmt.Errorf("cannot initialize project: failed to write project-id: %w", err)
 			}
 		}
 	case os.IsNotExist(err):
 		if err := WriteProjectID(projectDir, opt.newProjectID()); err != nil {
-			return fmt.Errorf("failed to write project-id: %w", err)
+			return fmt.Errorf("cannot initialize project: failed to write project-id: %w", err)
 		}
 	default:
-		return fmt.Errorf("failed to read project-id: %w", err)
+		return fmt.Errorf("cannot initialize project: failed to read project-id: %w", err)
 	}
 
 	// Seed settings.yaml in the external config dir (machine-specific, not committed)
@@ -505,14 +508,16 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 		}
 	}
 
-	// Create in-repo agents dir for git worktrees only
-	if err := os.MkdirAll(filepath.Join(projectDir, "agents"), 0755); err != nil {
-		return fmt.Errorf("failed to create agents directory: %w", err)
+	// Create in-repo agents dir for git worktrees only. Like the project-id
+	// file above, it is created through an os.Root on projectDir so project
+	// setup writes stay inside the project directory.
+	if err := mkdirAllInDir(projectDir, "agents", 0755); err != nil {
+		return fmt.Errorf("cannot initialize project: failed to create agents directory: %w", err)
 	}
 
 	// Create in-repo templates dir — lives in-repo so project templates can be committed
-	if err := os.MkdirAll(filepath.Join(projectDir, "templates"), 0755); err != nil {
-		return fmt.Errorf("failed to create templates directory: %w", err)
+	if err := mkdirAllInDir(projectDir, "templates", 0755); err != nil {
+		return fmt.Errorf("cannot initialize project: failed to create templates directory: %w", err)
 	}
 
 	return nil

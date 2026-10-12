@@ -102,7 +102,7 @@ func TestInitProject_ExplicitTargetPlainFromInsideRepoUsesExternalLayout(t *test
 }
 
 func TestInitProject_ExplicitTargetLeavesGitignoreUntouched(t *testing.T) {
-	home, clone := ownershipTestEnvNamed(t, "clone")
+	_, clone := ownershipTestEnvNamed(t, "clone")
 	setupGitRepoDir(t, clone)
 	const content = "build/\n"
 	gitignore := filepath.Join(clone, ".gitignore")
@@ -110,7 +110,10 @@ func TestInitProject_ExplicitTargetLeavesGitignoreUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitCommitAll(t, clone)
-	t.Chdir(plainDir(t, home, "elsewhere"))
+	// Run from inside the clone, so the current directory's repository is
+	// the one that holds the target: only the explicit target keeps its
+	// .gitignore unchanged.
+	t.Chdir(clone)
 
 	if err := InitProject(filepath.Join(clone, DotScion), nil, InitProjectOpts{SkipRuntimeCheck: true, ProjectID: api.NewUUID()}); err != nil {
 		t.Fatalf("InitProject: %v", err)
@@ -229,6 +232,9 @@ func TestInitProject_ExplicitTargetRelativeAndSubdirectory(t *testing.T) {
 		{name: "relative target in a repository", inRepo: true, target: DotScion, wantDir: true},
 		{name: "relative subdirectory target in a repository", inRepo: true, target: filepath.Join("sub", DotScion), wantDir: true},
 		{name: "absolute subdirectory target in a repository", inRepo: true, target: filepath.Join("sub", DotScion), abs: true, wantDir: true},
+		{name: "relative target with a trailing separator in a repository", inRepo: true, target: DotScion + string(filepath.Separator), wantDir: true},
+		{name: "absolute target with a trailing separator in a repository", inRepo: true, target: DotScion + string(filepath.Separator), abs: true, wantDir: true},
+		{name: "relative target with a trailing separator in a plain directory", target: DotScion + string(filepath.Separator), wantDir: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home, repo := ownershipTestEnvNamed(t, "repo")
@@ -269,11 +275,13 @@ func TestInitProject_ExplicitTargetRelativeAndSubdirectory(t *testing.T) {
 // through it.
 func TestInitProject_ExplicitTargetSymlinkRefused(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		toFile bool
+		name          string
+		toFile        bool
+		trailingSlash bool
 	}{
-		{"link to a directory", false},
-		{"link to a file", true},
+		{"link to a directory", false, false},
+		{"link to a file", true, false},
+		{"link to a directory, target with a trailing separator", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home, clone := ownershipTestEnvNamed(t, "clone")
@@ -293,7 +301,11 @@ func TestInitProject_ExplicitTargetSymlinkRefused(t *testing.T) {
 			gitCommitAll(t, clone)
 			t.Chdir(plainDir(t, home, "elsewhere"))
 
-			err := InitProject(scionDir, nil, InitProjectOpts{SkipRuntimeCheck: true, ProjectID: api.NewUUID()})
+			target := scionDir
+			if tc.trailingSlash {
+				target += string(filepath.Separator)
+			}
+			err := InitProject(target, nil, InitProjectOpts{SkipRuntimeCheck: true, ProjectID: api.NewUUID()})
 			if err == nil || !strings.Contains(err.Error(), "is a symbolic link") {
 				t.Fatalf("InitProject: got %v, want a symbolic link error", err)
 			}
@@ -316,6 +328,99 @@ func TestInitProject_ExplicitTargetSymlinkRefused(t *testing.T) {
 			}
 			if info, err := os.Lstat(scionDir); err != nil || info.Mode()&os.ModeSymlink == 0 {
 				t.Errorf("expected %s to stay a symbolic link, stat err = %v", scionDir, err)
+			}
+		})
+	}
+}
+
+// Entries of a committed .scion directory that are symbolic links leading
+// out of it are refused: InitProject reports an error and leaves everything
+// outside the project directory unchanged.
+func TestInitProject_ExplicitTargetEntryLinksOutsideRefused(t *testing.T) {
+	otherID := api.NewUUID()
+	for _, tc := range []struct {
+		name  string
+		entry string // entry of .scion that is a link to dest
+		// destKind is what exists at dest before InitProject: "none",
+		// "file" (holding otherID) or "dir" (empty).
+		destKind string
+	}{
+		{"project-id link to a missing path", "project-id", "none"},
+		{"project-id link to a file holding another project ID", "project-id", "file"},
+		{"agents link to a directory", "agents", "dir"},
+		{"agents link to a missing path", "agents", "none"},
+		{"templates link to a directory", "templates", "dir"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, clone := ownershipTestEnvNamed(t, "clone")
+			setupGitRepoDir(t, clone)
+			outside := plainDir(t, home, "outside")
+			dest := filepath.Join(outside, "dest")
+			switch tc.destKind {
+			case "file":
+				if err := os.WriteFile(dest, []byte(otherID+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "dir":
+				if err := os.Mkdir(dest, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			scionDir := filepath.Join(clone, DotScion)
+			if err := os.Mkdir(scionDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// Keep the directory in the commit even when the link is the
+			// only other entry.
+			if err := os.WriteFile(filepath.Join(scionDir, "README"), []byte("x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(dest, filepath.Join(scionDir, tc.entry)); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			gitCommitAll(t, clone)
+			t.Chdir(plainDir(t, home, "elsewhere"))
+
+			err := InitProject(scionDir, nil, InitProjectOpts{SkipRuntimeCheck: true, ProjectID: api.NewUUID()})
+			if err == nil || !strings.Contains(err.Error(), "cannot initialize project") {
+				t.Fatalf("InitProject: got %v, want a cannot initialize project error", err)
+			}
+
+			switch tc.destKind {
+			case "none":
+				if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+					t.Errorf("expected nothing created at the link destination, stat err = %v", err)
+				}
+			case "file":
+				got, err := os.ReadFile(dest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != otherID+"\n" {
+					t.Errorf("link destination file changed to %q, want %q", got, otherID+"\n")
+				}
+			case "dir":
+				entries, err := os.ReadDir(dest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(entries) != 0 {
+					t.Errorf("link destination has %d entries, want none", len(entries))
+				}
+			}
+			entries, err := os.ReadDir(outside)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if tc.destKind != "none" {
+				want = 1
+			}
+			if len(entries) != want {
+				t.Errorf("directory outside the project has %d entries, want %d", len(entries), want)
+			}
+			if info, err := os.Lstat(filepath.Join(scionDir, tc.entry)); err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("expected %s to stay a symbolic link, stat err = %v", tc.entry, err)
 			}
 		})
 	}

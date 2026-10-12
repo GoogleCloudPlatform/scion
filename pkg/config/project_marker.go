@@ -253,7 +253,7 @@ func ReadProjectID(projectDir string) (string, error) {
 	overrides := MigrateLegacyProject(projectDir, currentProjectMigrationReporter())
 
 	path := filepath.Join(projectDir, projectkeys.ProjectIDFile)
-	data, err := os.ReadFile(path)
+	data, err := readFileInDir(projectDir, projectkeys.ProjectIDFile)
 	if err == nil {
 		return checkedProjectID(path, strings.TrimSpace(string(data)))
 	}
@@ -307,8 +307,41 @@ func mkdirUnderProjectConfigs(dir string, perm os.FileMode) error {
 }
 
 // WriteProjectID writes a project-id file to a git project's .scion directory.
+// The file is written through an os.Root opened on projectDir, so a
+// project-id entry that is a symbolic link leading out of projectDir is
+// refused rather than followed.
 func WriteProjectID(projectDir string, projectID string) error {
-	return os.WriteFile(filepath.Join(projectDir, projectkeys.ProjectIDFile), []byte(projectID+"\n"), 0644)
+	root, err := os.OpenRoot(projectDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.WriteFile(projectkeys.ProjectIDFile, []byte(projectID+"\n"), 0644)
+}
+
+// readFileInDir reads the file name inside dir through an os.Root opened on
+// dir, so an entry that is a symbolic link leading out of dir is refused
+// rather than followed. A missing dir or file reports an error for which
+// os.IsNotExist is true.
+func readFileInDir(dir, name string) ([]byte, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	return root.ReadFile(name)
+}
+
+// mkdirAllInDir creates the directory name, and any missing parents, inside
+// dir through an os.Root opened on dir, so an existing entry that is a
+// symbolic link leading out of dir is refused rather than followed.
+func mkdirAllInDir(dir, name string, perm os.FileMode) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.MkdirAll(name, perm)
 }
 
 // GetGitProjectExternalConfigDir returns the external config directory for a git project.
