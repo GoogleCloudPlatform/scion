@@ -44,8 +44,15 @@ func TestAgentInfoHostAndContainerWritersLoseNoField(t *testing.T) {
 	// agentinfolock.TestWaitEnv) keeps both writers out of the unlocked
 	// fallback however they interleave, so the result does not depend on
 	// timing. The fallback is covered by the held-lock timeout test.
+	//
+	// With the lock this test is deterministic. Without it (the regression
+	// it guards against) the failure is probabilistic: it needs two
+	// read-modify-writes to overlap within n iterations per writer. With
+	// tight loops that is very likely, and n is set high to make it more so,
+	// but a pass is not proof the lock is present; TestUpdateHoldsLockDuringRMW
+	// in pkg/agentinfolock is the deterministic check.
 	t.Setenv("SCION_TEST_AGENTINFO_LOCK_WAIT", "10s")
-	const n = 50
+	const n = 200
 	var doneHost, doneCtr atomic.Int64
 	doneHost.Store(-1)
 	doneCtr.Store(-1)

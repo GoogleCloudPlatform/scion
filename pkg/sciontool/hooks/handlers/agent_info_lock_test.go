@@ -54,8 +54,15 @@ func TestStatusHandlerParallelWritersLoseNoField(t *testing.T) {
 	// agentinfolock.TestWaitEnv) keeps both writers out of the unlocked
 	// fallback however they interleave, so the result does not depend on
 	// timing. The fallback is covered by the held-lock timeout test.
+	//
+	// With the lock this test is deterministic. Without it (the regression
+	// it guards against) the failure is probabilistic: it needs two
+	// read-modify-writes to overlap within n iterations per writer. With
+	// tight loops that is very likely, and n is set high to make it more so,
+	// but a pass is not proof the lock is present; TestUpdateHoldsLockDuringRMW
+	// in pkg/agentinfolock is the deterministic check.
 	t.Setenv("SCION_TEST_AGENTINFO_LOCK_WAIT", "10s")
-	const n = 50
+	const n = 200
 	var doneA, doneB atomic.Int64
 	doneA.Store(-1)
 	doneB.Store(-1)
@@ -114,8 +121,12 @@ func TestStatusHandlerParallelWritersLoseNoField(t *testing.T) {
 // workload replaced with a symlink, FIFO or directory is not used: the
 // update runs at once, unlocked, and the entry is left alone. The symlink
 // points at a file this test holds locked, so following it would stall the
-// update for the whole lock wait.
+// update for the whole (10s) lock wait.
 func TestStatusHandlerSkipsNonRegularLockFile(t *testing.T) {
+	// A long lock wait: following the symlink to the held lock would stall
+	// the update for 10s, far past the 5s bound below, so the check does not
+	// depend on a tight wall-clock margin.
+	t.Setenv("SCION_TEST_AGENTINFO_LOCK_WAIT", "10s")
 	newHome := func(t *testing.T) (*StatusHandler, string) {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), "agent-info.json")
@@ -169,7 +180,7 @@ func TestStatusHandlerSkipsNonRegularLockFile(t *testing.T) {
 			start := time.Now()
 			require.NoError(t, h.SetMessage("skipped"))
 			elapsed := time.Since(start)
-			assert.Less(t, elapsed, 150*time.Millisecond, "update must not wait on a non-regular lock path")
+			assert.Less(t, elapsed, 5*time.Second, "update must not wait on a non-regular lock path")
 
 			info := readInfo(t, path)
 			detail, _ := info["detail"].(map[string]any)
@@ -187,6 +198,8 @@ func TestStatusHandlerSkipsNonRegularLockFile(t *testing.T) {
 // test and checks that an update first waits for it, then gives up after a
 // short bounded wait and writes anyway.
 func TestStatusHandlerHeldLockTimesOutAndStillWrites(t *testing.T) {
+	// Use the default 200ms wait even if the test env wait is exported.
+	t.Setenv("SCION_TEST_AGENTINFO_LOCK_WAIT", "")
 	path := filepath.Join(t.TempDir(), "agent-info.json")
 	require.NoError(t, os.WriteFile(path, []byte(`{"template":"tpl"}`), 0o644))
 

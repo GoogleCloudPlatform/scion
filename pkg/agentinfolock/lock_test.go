@@ -70,6 +70,8 @@ func TestUpdateReturnsRMWError(t *testing.T) {
 }
 
 func TestUpdateTimeoutLogsAndRunsUnlocked(t *testing.T) {
+	// An explicit Options.Wait takes precedence over the test env wait.
+	t.Setenv(TestWaitEnv, "10s")
 	info := filepath.Join(t.TempDir(), "agent-info.json")
 	f, err := os.OpenFile(LockPath(info), os.O_CREATE|os.O_RDWR, 0o666)
 	if err != nil {
@@ -95,7 +97,13 @@ func TestUpdateTimeoutLogsAndRunsUnlocked(t *testing.T) {
 
 func TestUpdateSkipsNonRegularLockAndLogs(t *testing.T) {
 	info := filepath.Join(t.TempDir(), "agent-info.json")
-	if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere"), LockPath(info)); err != nil {
+	// The symlink points at an existing regular file, so code that followed
+	// it would open and lock that file instead of logging a skip.
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, LockPath(info)); err != nil {
 		t.Fatal(err)
 	}
 	var sink logSink
@@ -106,8 +114,12 @@ func TestUpdateSkipsNonRegularLockAndLogs(t *testing.T) {
 	if !ran || !strings.Contains(sink.joined(), "skipping lock") {
 		t.Fatalf("ran=%v log=%q", ran, sink.joined())
 	}
-	if _, err := os.Lstat(filepath.Join(filepath.Dir(info), "elsewhere")); !os.IsNotExist(err) {
-		t.Fatalf("symlink target was created")
+	fi, err := os.Lstat(target)
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 || fi.Size() != 0 {
+		t.Fatalf("symlink target changed: %v, %v", fi, err)
+	}
+	if link, err := os.Readlink(LockPath(info)); err != nil || link != target {
+		t.Fatalf("lock path changed: %q, %v", link, err)
 	}
 }
 

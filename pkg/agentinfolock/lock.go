@@ -64,21 +64,22 @@ type Options struct {
 	Logf func(format string, args ...any)
 }
 
-// TestWaitEnv overrides the lock wait in test binaries only (it is ignored
-// unless testing.Testing() reports true). Tests that must never reach the
+// TestWaitEnv sets the lock wait in test binaries only (it is ignored
+// unless testing.Testing() reports true) when Options.Wait is zero; an
+// explicit Options.Wait takes precedence. Tests that must never reach the
 // unlocked fallback set it long, for example "10s". It is an environment
 // variable rather than a Go API so the same tests also build against code
 // without this package.
 const TestWaitEnv = "SCION_TEST_AGENTINFO_LOCK_WAIT"
 
 func (o Options) wait() time.Duration {
+	if o.Wait > 0 {
+		return o.Wait
+	}
 	if testing.Testing() {
 		if d, err := time.ParseDuration(os.Getenv(TestWaitEnv)); err == nil && d > 0 {
 			return d
 		}
-	}
-	if o.Wait > 0 {
-		return o.Wait
 	}
 	return DefaultWait
 }

@@ -2437,9 +2437,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			// file (#4681). No container runs during provisioning; the
 			// lock keeps the write ordered with any other host writer.
 			infoPath := filepath.Join(agentHome, "agent-info.json")
-			_ = agentinfolock.Update(infoPath, agentinfolock.Options{}, func() error {
+			if err := agentinfolock.Update(infoPath, agentinfolock.Options{}, func() error {
 				return writeAgentInfoFile(infoPath, infoData, 0o644)
-			})
+			}); err != nil {
+				slog.Warn("Provision: failed to write agent-info.json",
+					"agent", agentName, "error", err)
+			}
 		}
 	}
 
