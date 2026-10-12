@@ -136,6 +136,42 @@ func publicURLFromSectionDoc(doc json.RawMessage) string {
 	return d.PublicURL
 }
 
+// publicURLInEffectDoc returns the endpoints document doc with public_url
+// set to the bootstrap value when doc leaves it unset, for comparing the
+// value in effect before and after a save. With no public_url stored, the
+// hub resolves its endpoint from the bootstrap material at startup
+// (StoredPublicURL), so a row that omits the key does not change it. doc is
+// returned as it is when it sets public_url, when there is no bootstrap
+// value, or when it cannot be decoded.
+func publicURLInEffectDoc(ops *OperationalSettings, doc json.RawMessage) json.RawMessage {
+	if ops == nil || ops.bootstrapKoanf == nil || publicURLFromSectionDoc(doc) != "" {
+		return doc
+	}
+	boot := ops.bootstrapKoanf.String(config.PublicURLKey)
+	if boot == "" {
+		return doc
+	}
+	m := map[string]json.RawMessage{}
+	if len(doc) > 0 {
+		if err := json.Unmarshal(doc, &m); err != nil {
+			return doc
+		}
+	}
+	v, err := json.Marshal(boot)
+	if err != nil {
+		return doc
+	}
+	if m == nil {
+		m = map[string]json.RawMessage{}
+	}
+	m["public_url"] = v
+	out, err := json.Marshal(m)
+	if err != nil {
+		return doc
+	}
+	return out
+}
+
 // auditPublicURLChange records a change to the stored server.hub.public_url
 // before it is written, through the hub settings audit path the GCP
 // permission-check settings use: a hub_setting_update mutation audit record

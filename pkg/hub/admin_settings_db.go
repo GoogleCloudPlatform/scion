@@ -427,6 +427,8 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		return nil
 	}
 
+	publicURLPinned := s.HubEndpoints().Pin != ""
+
 	// Load individual layers for source attribution.
 	seedEnvK := config.LoadSeedEnvKoanf()
 	serverEnvK := config.LoadEnvKoanf()
@@ -453,6 +455,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
+			if sec.Name == "endpoints" && key == "public_url" && publicURLPinned {
+				// An operator setting pins the endpoint on this node, so
+				// the database value does not supersede it; the field's
+				// pinned badge says so (ptone/scion#3905).
+				continue
+			}
 			dbVal, exists := dbMap[key]
 			if !exists && bootstrapAppliesWhenAbsent(sec.Name, key) {
 				// The DB row does not override this key; the bootstrap
@@ -484,10 +492,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 // bootstrapAppliesWhenAbsent reports whether a section key keeps its
 // bootstrap value when a managed DB row omits it. That is the case for
-// endpoints hub_name: a managed endpoints row carries hub_name only after
-// an admin changes it, and Snapshot falls back to the bootstrap value.
+// endpoints hub_name and public_url: a managed endpoints row carries them
+// only after an admin sets them, and Snapshot falls back to the bootstrap
+// value (for public_url, so does the hub's endpoint resolution at startup,
+// ptone/scion#3905).
 func bootstrapAppliesWhenAbsent(section, key string) bool {
-	return section == "endpoints" && key == "hub_name"
+	return section == "endpoints" && (key == "hub_name" || key == "public_url")
 }
 
 // applyRunningValuesForUnsetKeys sets, in a GET response, the running value
@@ -1486,6 +1496,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	writtenDocs := make(map[string]json.RawMessage, len(written))
 	for sec := range written {
 		writtenDocs[sec] = sectionDocs[sec]
+	}
+	// A row without public_url leaves the bootstrap value in effect, so the
+	// report compares that value, not its absence (ptone/scion#3905).
+	if doc, ok := beforeDocs["endpoints"]; ok {
+		beforeDocs["endpoints"] = publicURLInEffectDoc(ops, doc)
+	}
+	if doc, ok := writtenDocs["endpoints"]; ok {
+		writtenDocs["endpoints"] = publicURLInEffectDoc(ops, doc)
 	}
 	keyReport := reportSavedKeys(beforeDocs, writtenDocs)
 

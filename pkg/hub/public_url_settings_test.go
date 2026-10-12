@@ -132,6 +132,12 @@ func TestPutServerConfigDB_BootstrapPublicURLNotStored(t *testing.T) {
 				assert.Equal(t, "managed", row.Origin, "the save made the endpoints row managed")
 				assert.Empty(t, publicURLFromSectionDoc(row.Value), "the bootstrap public URL is not stored")
 				assert.Empty(t, audits.records(), "no public URL change is recorded")
+				report := saveReport(t, rr)
+				assert.NotContains(t, report.PendingRestart, config.PublicURLKey, "the value in effect does not change, so it is not reported")
+				assert.NotContains(t, report.AppliedKeys, config.PublicURLKey)
+				_, err = ops.Refresh(context.Background())
+				require.NoError(t, err)
+				assert.Equal(t, fileURL, getPublicURL(t, srv, ops), "GET keeps showing the value in effect")
 
 				stored, err := StoredPublicURL(context.Background(), fake)
 				require.NoError(t, err)
@@ -142,6 +148,100 @@ func TestPutServerConfigDB_BootstrapPublicURLNotStored(t *testing.T) {
 			})
 		}
 	}
+}
+
+// publicURLSaveReport is the key-level report of a settings save.
+type publicURLSaveReport struct {
+	AppliedKeys    []string `json:"applied_keys"`
+	PendingRestart []string `json:"pending_restart"`
+}
+
+// saveReport decodes the key-level report of a successful settings save.
+func saveReport(t *testing.T, rr *httptest.ResponseRecorder) publicURLSaveReport {
+	t.Helper()
+	var resp struct {
+		Reload publicURLSaveReport `json:"reload"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), rr.Body.String())
+	return resp.Reload
+}
+
+// getPublicURL returns the server.hub.public_url the GET view shows.
+func getPublicURL(t *testing.T, srv *Server, ops *OperationalSettings) string {
+	t.Helper()
+	resp := getServerConfigDB(t, srv, ops)
+	require.NotNil(t, resp.Server)
+	require.NotNil(t, resp.Server.Hub)
+	return resp.Server.Hub.PublicURL
+}
+
+// publicURLSuperseded reports whether a GET response lists the public URL
+// among the superseded endpoints keys.
+func publicURLSuperseded(resp ServerConfigDBResponse) bool {
+	for _, sk := range resp.SupersededKeys["endpoints"] {
+		if sk.Key == config.PublicURLKey {
+			return true
+		}
+	}
+	return false
+}
+
+// newManagedPublicURLServer boots a DB-mode server whose bootstrap material
+// sets server.hub.public_url to bootURL, with a managed endpoints row that
+// stores savedURL, and endpoints resolved with the operator pin pin ("" for
+// none).
+func newManagedPublicURLServer(t *testing.T, bootURL, savedURL, pin string) (*Server, *OperationalSettings) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	fake := newFakeHubSettingStore()
+	fake.seedWithOrigin("endpoints", json.RawMessage(`{"public_url":"`+savedURL+`"}`), "managed")
+	ops := NewOperationalSettings(fake, newFileKoanf(t, map[string]any{config.PublicURLKey: bootURL}), emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	source := "file"
+	if pin != "" {
+		source = "env"
+	}
+	srv.config.HubEndpoints = &HubEndpoints{Operator: bootURL, OperatorSource: source, Pin: pin, Public: bootURL, PublicSource: source}
+	srv.SetOperationalSettings(ops)
+	withSettingsAuditStore(srv)
+	return srv, ops
+}
+
+// TestGetServerConfigDB_PinnedPublicURLNotSuperseded checks that a saved
+// public URL is not reported as superseding the bootstrap value while an
+// operator setting pins the endpoint (the pinned value wins), and is
+// reported when nothing pins it (ptone/scion#3905).
+func TestGetServerConfigDB_PinnedPublicURLNotSuperseded(t *testing.T) {
+	const bootURL, savedURL = "https://env.example.com", "https://saved.example.com"
+
+	srv, ops := newManagedPublicURLServer(t, bootURL, savedURL, "SCION_SERVER_HUB_ENDPOINT")
+	assert.False(t, publicURLSuperseded(getServerConfigDB(t, srv, ops)),
+		"a pinned public URL is not superseded by the database value")
+
+	srv, ops = newManagedPublicURLServer(t, bootURL, savedURL, "")
+	assert.True(t, publicURLSuperseded(getServerConfigDB(t, srv, ops)),
+		"without a pin the saved value supersedes the bootstrap value")
+}
+
+// TestPutServerConfigDB_ClearedPublicURLNotSuperseded checks that clearing
+// a saved public URL leaves the bootstrap value in effect: GET shows it, it
+// is no longer reported as superseded, and the save reports the change as
+// pending a restart (ptone/scion#3905).
+func TestPutServerConfigDB_ClearedPublicURLNotSuperseded(t *testing.T) {
+	const bootURL, savedURL = "https://file.example.com", "https://saved.example.com"
+	srv, ops := newManagedPublicURLServer(t, bootURL, savedURL, "")
+	require.True(t, publicURLSuperseded(getServerConfigDB(t, srv, ops)))
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":""}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, []string{config.PublicURLKey}, saveReport(t, rr).PendingRestart)
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	assert.False(t, publicURLSuperseded(getServerConfigDB(t, srv, ops)), "a cleared public URL supersedes nothing")
+	assert.Equal(t, bootURL, getPublicURL(t, srv, ops), "GET shows the bootstrap value now in effect")
 }
 
 // publicURLAuditFixture is a DB-mode server with a SQLite store for audit
