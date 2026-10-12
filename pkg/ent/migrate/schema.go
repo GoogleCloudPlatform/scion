@@ -2788,6 +2788,11 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{ThreadGroupMembersColumns[1]},
 			},
+			{
+				Name:    "threadgroupmember_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{ThreadGroupMembersColumns[2]},
+			},
 		},
 	}
 	// UsageReservationsColumns holds the columns for the "usage_reservations" table.
