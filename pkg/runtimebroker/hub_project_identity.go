@@ -189,7 +189,14 @@ func recordHubProjectIdentity(projectPath, slug, projectID string, inUse func() 
 // The starting agent is matched by agentKey, as in newProjectAgentsInUse,
 // because AgentInfo.ID can be empty or a pod name. A listing failure counts
 // as in use.
+//
+// A flat Runtime Broker instance lists only its own objects, so for one
+// the project also counts as in use while another instance of this host
+// sharing its workspace lock service has live agents in it (or cannot say).
 func (s *Server) otherProjectAgentsInUse(ctx context.Context, projectID, agentID string) (bool, error) {
+	if s.ownership != nil && s.locks().projectInUseByOthers(s, projectID) {
+		return true, nil
+	}
 	mgr := s.currentManager()
 	if mgr == nil {
 		return true, nil
