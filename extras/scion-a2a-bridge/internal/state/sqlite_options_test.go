@@ -16,27 +16,16 @@ package state
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 )
-
-func newTestSQLite(t *testing.T) *SQLiteStore {
-	t.Helper()
-	s, err := NewSQLite(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("NewSQLite: %v", err)
-	}
-	t.Cleanup(func() { s.Close() })
-	return s
-}
 
 // TestSQLiteConnectionOptions verifies that every connection option in the
 // data source name takes effect. The driver silently ignores options it does
 // not recognize, so a DSN written in another driver's syntax would open fine
 // and leave every setting at its default.
 func TestSQLiteConnectionOptions(t *testing.T) {
-	s := newTestSQLite(t)
+	s := newTestSQLiteStore(t).(*SQLiteStore)
 
 	tests := []struct {
 		pragma string
@@ -65,7 +54,7 @@ func TestSQLiteConnectionOptions(t *testing.T) {
 // stored, so rows written before and after the driver change compare and sort
 // consistently (for example in ListStaleActiveTasks).
 func TestSQLiteTimeStorageFormat(t *testing.T) {
-	s := newTestSQLite(t)
+	s := newTestSQLiteStore(t).(*SQLiteStore)
 	ctx := context.Background()
 
 	ts := time.Date(2026, 1, 2, 3, 4, 5, 600000000, time.UTC)
@@ -100,5 +89,22 @@ func TestSQLiteTimeStorageFormat(t *testing.T) {
 	}
 	if !got.UpdatedAt.Equal(ts) {
 		t.Errorf("GetTask UpdatedAt = %v, want %v", got.UpdatedAt, ts)
+	}
+
+	// The driver may return a "+00:00" value in time.Local or in an unnamed
+	// zero-offset zone rather than time.UTC. Only the instant and the stored
+	// text matter here, so writing a time read back from the store must store
+	// the same text as the original.
+	copied := *got
+	copied.ID = "task-time-format-copy"
+	if err := s.CreateTask(ctx, &copied); err != nil {
+		t.Fatalf("CreateTask (copy): %v", err)
+	}
+	var rawCopy string
+	if err := s.db.QueryRow(`SELECT CAST(updated_at AS TEXT) FROM tasks WHERE id = ?`, copied.ID).Scan(&rawCopy); err != nil {
+		t.Fatalf("select raw updated_at (copy): %v", err)
+	}
+	if rawCopy != raw {
+		t.Errorf("re-written updated_at = %q, want %q", rawCopy, raw)
 	}
 }

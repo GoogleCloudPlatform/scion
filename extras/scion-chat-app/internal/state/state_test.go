@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -318,7 +319,7 @@ func TestGetThreadDefault_ReturnsEmptyWhenNotSet(t *testing.T) {
 func TestSetThreadDefault_InsertAndRetrieve(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "my-agent", "user@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "my-agent", "test@example.com"); err != nil {
 		t.Fatalf("set thread default: %v", err)
 	}
 
@@ -334,10 +335,10 @@ func TestSetThreadDefault_InsertAndRetrieve(t *testing.T) {
 func TestSetThreadDefault_ReplaceExisting(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-a", "user@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-a", "test@example.com"); err != nil {
 		t.Fatalf("set initial: %v", err)
 	}
-	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-b", "user@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-b", "test@example.com"); err != nil {
 		t.Fatalf("set replacement: %v", err)
 	}
 
@@ -353,10 +354,10 @@ func TestSetThreadDefault_ReplaceExisting(t *testing.T) {
 func TestSetThreadDefault_IsolatedPerThread(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-a", "user@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-a", "test@example.com"); err != nil {
 		t.Fatalf("set thread-1: %v", err)
 	}
-	if err := s.SetThreadDefault("space-1", "thread-2", "google_chat", "agent-b", "user@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-2", "google_chat", "agent-b", "test@example.com"); err != nil {
 		t.Fatalf("set thread-2: %v", err)
 	}
 
@@ -374,7 +375,7 @@ func TestSetThreadDefault_IsolatedPerThread(t *testing.T) {
 func TestDeleteThreadDefault(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "my-agent", "user@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "my-agent", "test@example.com"); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	if err := s.DeleteThreadDefault("space-1", "thread-1", "google_chat"); err != nil {
@@ -445,5 +446,64 @@ func TestNew_ConnectionOptions(t *testing.T) {
 	}
 	if got != 5000 {
 		t.Errorf("PRAGMA busy_timeout = %d, want 5000", got)
+	}
+}
+
+// TestNew_TimeStorageFormat verifies that time.Time values are written in the
+// "2006-01-02 15:04:05.999999999-07:00" text form that earlier releases
+// stored, and that a time read back from the store is written again as the
+// same text.
+func TestNew_TimeStorageFormat(t *testing.T) {
+	s := newTestStore(t)
+
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 600000000, time.UTC)
+	m := &UserMapping{
+		PlatformUserID: "user-time-format",
+		Platform:       "googlechat",
+		HubUserID:      "hub-user-1",
+		HubUserEmail:   "test@example.com",
+		RegisteredAt:   ts,
+		RegisteredBy:   "manual",
+	}
+	if err := s.SetUserMapping(m); err != nil {
+		t.Fatalf("SetUserMapping: %v", err)
+	}
+
+	rawRegisteredAt := func(platformUserID string) string {
+		t.Helper()
+		var raw string
+		if err := s.db.QueryRow(
+			`SELECT CAST(registered_at AS TEXT) FROM user_mappings WHERE platform_user_id = ? AND platform = ?`,
+			platformUserID, m.Platform,
+		).Scan(&raw); err != nil {
+			t.Fatalf("select raw registered_at: %v", err)
+		}
+		return raw
+	}
+	raw := rawRegisteredAt(m.PlatformUserID)
+	if want := "2026-01-02 03:04:05.6+00:00"; raw != want {
+		t.Errorf("stored registered_at = %q, want %q", raw, want)
+	}
+
+	got, err := s.GetUserMapping(m.PlatformUserID, m.Platform)
+	if err != nil {
+		t.Fatalf("GetUserMapping: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetUserMapping returned nil")
+	}
+	if !got.RegisteredAt.Equal(ts) {
+		t.Errorf("GetUserMapping RegisteredAt = %v, want %v", got.RegisteredAt, ts)
+	}
+
+	// The driver may return the value in time.Local or an unnamed zero-offset
+	// zone rather than time.UTC; writing it back must store the same text.
+	copied := *got
+	copied.PlatformUserID = "user-time-format-copy"
+	if err := s.SetUserMapping(&copied); err != nil {
+		t.Fatalf("SetUserMapping (copy): %v", err)
+	}
+	if rawCopy := rawRegisteredAt(copied.PlatformUserID); rawCopy != raw {
+		t.Errorf("re-written registered_at = %q, want %q", rawCopy, raw)
 	}
 }
