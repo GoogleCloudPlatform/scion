@@ -523,7 +523,7 @@ func TestTemplateAgentConfig_LazyDeriveAndBackfill(t *testing.T) {
 	srv, s := newCommitTestServer(t, newCommitTestStorage(t))
 	agentYAML := "model: lazy-model\nmessage_mode: lineage\nimage: lazy-image:v1\n"
 
-	lazy := tiersCommittedTemplate(t, srv, "lazy-tmpl", map[string]string{"scion-agent.yaml": agentYAML})
+	lazy := tiersCommittedTemplate(t, srv, s, "lazy-tmpl", map[string]string{"scion-agent.yaml": agentYAML})
 	jc := srv.templateJobConfigByID(ctx, lazy.ID)
 	require.NotNil(t, jc, "a missing snapshot is derived at read time")
 	assert.Equal(t, "lazy-model", jc.Model)
@@ -535,7 +535,7 @@ func TestTemplateAgentConfig_LazyDeriveAndBackfill(t *testing.T) {
 	assert.Equal(t, "lazy-image:v1", row.AgentConfig.Image, "the stored snapshot stays a faithful parse")
 	assert.Equal(t, lazy.ContentHash, row.ContentHash, "content is unchanged")
 
-	pending := tiersCommittedTemplate(t, srv, "backfill-tmpl", map[string]string{"scion-agent.yaml": "model: backfill-model\n"})
+	pending := tiersCommittedTemplate(t, srv, s, "backfill-tmpl", map[string]string{"scion-agent.yaml": "model: backfill-model\n"})
 	_ = seedCommittedTemplate(t, srv, "no-config-tmpl", store.TemplateScopeGlobal, "", map[string]string{"README.md": "hi"})
 
 	assert.Equal(t, 1, srv.BackfillTemplateAgentConfigs(ctx), "only the row without a snapshot is derived")
