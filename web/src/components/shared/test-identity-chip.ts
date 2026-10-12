@@ -33,9 +33,7 @@ export function testIdentityChipText(user: User | null | undefined): string | nu
   const expiresAt = user?.testIdentity?.expiresAt;
   if (!user || !expiresAt) return null;
   const when = formatInstantWithZone(expiresAt, 'datetime');
-  return when
-    ? `Test identity ${user.email} · expires ${when}`
-    : `Test identity ${user.email}`;
+  return when ? `Test identity ${user.email} · expires ${when}` : `Test identity ${user.email}`;
 }
 
 /** The chip, or `nothing` (no element) for any session that is not a test identity's. */

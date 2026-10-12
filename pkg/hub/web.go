@@ -3342,8 +3342,16 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 			res := ws.classifyTestIdentitySession(r, session, nil)
 			switch res.state {
 			case tiSessionStoreError:
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "internal error", nil)
-				return
+				// /auth/me grants no authority, so a store error on an
+				// unhinted session keeps the existing degraded answer
+				// (session fields only, below). A hinted session (any
+				// test identity hint) is refused. Every authority
+				// surface (sessionToBearer, page routes, dev auth, the
+				// event stream) fails closed on a store error.
+				if ws.isTestIdentitySessionCandidate(r, session) {
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "internal error", nil)
+					return
+				}
 			case tiSessionUnverifiable:
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)

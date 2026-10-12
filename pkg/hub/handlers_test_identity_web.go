@@ -351,7 +351,6 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 		return s.testIdentities.hooks.writeAudit(ctx, tx, record)
 	})
 	if err != nil {
-		code = ""
 		switch {
 		case errors.Is(err, store.ErrAlreadyExists), isTransientIssuanceConflict(err):
 			w.Header().Set("Retry-After", "1")
@@ -524,6 +523,11 @@ type tiSessionResult struct {
 // test identity hint (a scion_ti cookie, marker values, a reserved-domain
 // session email). Such a session is honoured only when fixtureSessionValid
 // passes. The session's own email is never what admits it.
+//
+// On a store error the classifier answers tiSessionStoreError; every
+// authority surface fails closed on it. /auth/me alone, which grants no
+// authority, keeps its degraded session-fields answer for an unhinted
+// session (handleAuthMe).
 //
 // With no store wired the row cannot be read. While test identities are
 // on that is tiSessionUnverifiable (callers deny); while they are off,

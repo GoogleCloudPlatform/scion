@@ -1088,7 +1088,7 @@ func TestTestIdentityWeb_DeathWithRow(t *testing.T) {
 		}
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		closed := make(chan struct{})
 		go func() {
@@ -1295,7 +1295,15 @@ func TestTestIdentityWeb_UnmarkedSessionDecidedFromRow(t *testing.T) {
 		rec := e.apiMe(jar)
 		assert.Equal(t, http.StatusInternalServerError, rec.Code)
 		assert.Empty(t, minted(e), "no token minted on a store error")
-		assert.Equal(t, http.StatusInternalServerError, e.webMe(jar).Code)
+		// /auth/me grants no authority: an unhinted session keeps the
+		// degraded session-fields answer (TestWebAuthMe_StoreError...),
+		// while a hinted one is refused.
+		assert.Equal(t, http.StatusOK, e.webMe(jar).Code)
+		hinted := loginSession(t, e.ws, fx.Identity.ID, fx.Identity.Email, "member")
+		assert.NotEqual(t, http.StatusOK, e.webMe(hinted).Code, "hinted + store error is refused")
+		rec = e.apiMe(hinted)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.Empty(t, minted(e), "no token minted for a hinted session on a store error")
 
 		// The event stream refuses at accept time on a store error.
 		e.ws.events = NewChannelEventPublisher()
