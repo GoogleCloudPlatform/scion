@@ -535,4 +535,20 @@ func TestCommentOnlyDiff(t *testing.T) {
 	if d, _ := commentOnlyDiff(b, gone); len(d) != 1 {
 		t.Fatalf("removed file not reported: %v", d)
 	}
+	for name, a := range map[string]string{
+		"go:build added": "//go:build ignore\n\npackage p\n\n// f does x.\nfunc f() int { return 1 } // one\n",
+		"+build added":   "// +build ignore\n\npackage p\n\n// f does x.\nfunc f() int { return 1 } // one\n",
+		"go:linkname":    "package p\n\n// f does x.\n//go:noinline\nfunc f() int { return 1 } // one\n",
+		"line directive": "package p\n\n//line other.go:10\nfunc f() int { return 1 } // one\n",
+		"cgo preamble":   "package p\n\n// #include <stdio.h>\nimport \"C\"\n\n// f does x.\nfunc f() int { return 1 } // one\n",
+	} {
+		before := b
+		if name == "cgo preamble" {
+			before = writePkg(t, map[string]string{"a.go": "package p\n\n// #include <stdlib.h>\nimport \"C\"\n\n// f does x.\nfunc f() int { return 1 } // one\n", "b.go": "package p\n"})
+		}
+		after := writePkg(t, map[string]string{"a.go": a, "b.go": "package p\n"})
+		if d, err := commentOnlyDiff(before, after); err != nil || len(d) != 1 {
+			t.Errorf("%s: a toolchain-read comment change must be reported, got %v %v", name, d, err)
+		}
+	}
 }

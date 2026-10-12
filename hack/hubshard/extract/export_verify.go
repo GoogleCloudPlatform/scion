@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // exportReport is the result of verifyExport.
@@ -342,15 +343,34 @@ func commentOnlyDiff(before, after string) ([]string, error) {
 	return out, nil
 }
 
-// dropComments removes comment tokens. A comment that ends a line stands
-// in for the automatic semicolon in the scanner's output, so the remaining
-// stream is the same whether or not a line ends with a comment.
+// dropComments removes ordinary comment tokens. Comments that the toolchain
+// reads stay in the stream, so a change to them is reported as a code
+// change: build constraints (//go:build, // +build), other //go: directives
+// (//go:embed, //go:linkname, //go:generate, ...), line directives
+// (//line, /*line), and cgo's //export. In a file that imports "C" every
+// comment stays, because the cgo preamble is a comment.
 func dropComments(ts []tok) []tok {
+	cgo := false
+	for i := 0; i+1 < len(ts); i++ {
+		if ts[i].t == token.IMPORT && ts[i+1].t == token.STRING && ts[i+1].lit == `"C"` {
+			cgo = true
+		}
+	}
 	var out []tok
 	for _, t := range ts {
-		if t.t != token.COMMENT {
+		if t.t != token.COMMENT || cgo || isDirectiveComment(t.lit) {
 			out = append(out, t)
 		}
 	}
 	return out
+}
+
+// isDirectiveComment reports whether a comment is read by the Go toolchain.
+func isDirectiveComment(c string) bool {
+	for _, p := range []string{"//go:", "// +build", "//line ", "/*line ", "//export "} {
+		if strings.HasPrefix(c, p) {
+			return true
+		}
+	}
+	return false
 }

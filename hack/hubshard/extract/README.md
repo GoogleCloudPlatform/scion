@@ -235,7 +235,16 @@ comments that still use the old names) goes in its own commit, and
 `comment-only` checks it touches nothing but comments:
 
 ```sh
-mkdir -p /tmp/gen && git archive <generated commit> pkg/hub | tar -x -C /tmp/gen
-/tmp/extract comment-only -before /tmp/gen/pkg/hub -after pkg/hub
-/tmp/extract comment-only -before /tmp/gen/pkg/hub/internal/hubtestutil -after pkg/hub/internal/hubtestutil
+mkdir -p /tmp/gen /tmp/cmt
+git archive <generated commit> pkg/hub | tar -x -C /tmp/gen
+git archive <comment-only commit> pkg/hub | tar -x -C /tmp/cmt
+/tmp/extract comment-only -before /tmp/gen/pkg/hub -after /tmp/cmt/pkg/hub
+/tmp/extract comment-only -before /tmp/gen/pkg/hub/internal/hubtestutil -after /tmp/cmt/pkg/hub/internal/hubtestutil
 ```
+
+Compare two archives of commits, not the working tree: later commits (or
+uncommitted edits) would otherwise show up as differences, or hide them.
+Comments the toolchain reads count as code: `//go:` directives (build
+constraints, `//go:embed`, `//go:linkname`, ...), `// +build`, line
+directives and cgo's `//export`, and every comment of a file that imports
+`"C"` (the cgo preamble).
