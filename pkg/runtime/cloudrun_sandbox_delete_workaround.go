@@ -110,7 +110,7 @@ func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id strin
 	// processes holding a pipe's write end would block cmd.Wait.
 	outFile := newSandboxDeleteOutput()
 	if outFile != nil {
-		defer outFile.Close()
+		defer func() { _ = outFile.Close() }()
 		cmd.Stdout = outFile
 		cmd.Stderr = outFile
 	}

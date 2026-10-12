@@ -1424,7 +1424,7 @@ func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string) err
 	cmd := exec.CommandContext(ctx, r.bin, "delete", "--force", id)
 	outFile := newSandboxDeleteOutput()
 	if outFile != nil {
-		defer outFile.Close()
+		defer func() { _ = outFile.Close() }()
 		cmd.Stdout = outFile
 		cmd.Stderr = outFile
 	}
