@@ -356,7 +356,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 10. Resolve hub endpoint
-	hubEndpoint, hubEndpointSrc := resolveHubEndpointWithSource(cfg, brokerSettings)
+	hubEndpoint, hubEndpointSrc := resolveServerHubEndpoint(cfg, brokerSettings)
 
 	// Parse admin emails
 	adminEmailList := parseAdminEmails(cfg)
@@ -1832,14 +1832,64 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 // resolveHubEndpointWithSource determines the Hub's public endpoint URL and
 // reports which input it came from.
 func resolveHubEndpointWithSource(cfg *config.GlobalConfig, brokerSettings *config.Settings) (string, hubEndpointSource) {
+	return resolveHubEndpointFrom(cfg, currentServerEndpointMode(), brokerSettings.GetHubEndpoint(), log.Printf)
+}
+
+// serverEndpointMode is the part of the server's mode that decides how its
+// hub endpoints resolve. currentServerEndpointMode fills it from the
+// 'server start' flags; 'scion doctor' builds it without them.
+type serverEndpointMode struct {
+	hubEnabled    bool
+	brokerEnabled bool
+	webEnabled    bool
+	hosted        bool
+	webPort       int
+	baseURLFlag   string // --base-url
+	debug         bool
+}
+
+// currentServerEndpointMode returns the mode of the running 'server start'.
+func currentServerEndpointMode() serverEndpointMode {
+	return serverEndpointMode{
+		hubEnabled:    enableHub,
+		brokerEnabled: enableRuntimeBroker,
+		webEnabled:    enableWeb,
+		hosted:        hostedMode,
+		webPort:       webPort,
+		baseURLFlag:   webBaseURL,
+		debug:         enableDebug,
+	}
+}
+
+// hubListenPort is the port the hub is served on in mode m: the web port
+// when the web frontend is enabled, else the hub's own port, and 0 when the
+// hub is not enabled. See resolveHubListenPort.
+func (m serverEndpointMode) hubListenPort(cfg *config.GlobalConfig) int {
+	if !m.hubEnabled {
+		return 0
+	}
+	if m.webEnabled {
+		return m.webPort
+	}
+	return cfg.Hub.Port
+}
+
+// resolveHubEndpointFrom is resolveHubEndpointWithSource for an explicit
+// mode. legacyEndpoint is the settings hub.endpoint (which koanf also fills
+// from SCION_HUB_ENDPOINT); passing "" resolves as if that fallback were
+// gone. logf receives the resolution log lines; nil discards them.
+func resolveHubEndpointFrom(cfg *config.GlobalConfig, m serverEndpointMode, legacyEndpoint string, logf func(string, ...any)) (string, hubEndpointSource) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	if cfg.Hub.Endpoint != "" {
 		return cfg.Hub.Endpoint, hubEndpointSourceConfig
 	}
 
-	if !enableHub {
-		hubEndpoint := brokerSettings.GetHubEndpoint()
-		if hubEndpoint != "" && enableDebug {
-			log.Printf("Hub endpoint resolved from project settings: %s", hubEndpoint)
+	if !m.hubEnabled {
+		hubEndpoint := legacyEndpoint
+		if hubEndpoint != "" && m.debug {
+			logf("Hub endpoint resolved from project settings: %s", hubEndpoint)
 		}
 		if hubEndpoint == "" {
 			return "", hubEndpointSourceNone
@@ -1847,18 +1897,18 @@ func resolveHubEndpointWithSource(cfg *config.GlobalConfig, brokerSettings *conf
 		return hubEndpoint, hubEndpointSourceBrokerSettings
 	}
 
-	if webBaseURL != "" {
-		hubEndpoint := strings.TrimRight(webBaseURL, "/")
-		if enableDebug {
-			log.Printf("Hub endpoint resolved from --base-url flag: %s", hubEndpoint)
+	if m.baseURLFlag != "" {
+		hubEndpoint := strings.TrimRight(m.baseURLFlag, "/")
+		if m.debug {
+			logf("Hub endpoint resolved from --base-url flag: %s", hubEndpoint)
 		}
 		return hubEndpoint, hubEndpointSourceBaseURLFlag
 	}
 
 	if baseURL := os.Getenv("SCION_SERVER_BASE_URL"); baseURL != "" {
 		hubEndpoint := strings.TrimRight(baseURL, "/")
-		if enableDebug {
-			log.Printf("Hub endpoint resolved from SCION_SERVER_BASE_URL: %s", hubEndpoint)
+		if m.debug {
+			logf("Hub endpoint resolved from SCION_SERVER_BASE_URL: %s", hubEndpoint)
 		}
 		return hubEndpoint, hubEndpointSourceBaseURLEnv
 	}
@@ -1866,9 +1916,9 @@ func resolveHubEndpointWithSource(cfg *config.GlobalConfig, brokerSettings *conf
 	// Check settings (e.g. SCION_HUB_ENDPOINT env var) before falling back
 	// to localhost. On combo servers the settings-level endpoint is typically
 	// the public URL and should be used for agent dispatch.
-	if hubEndpoint := brokerSettings.GetHubEndpoint(); hubEndpoint != "" {
-		if enableDebug {
-			log.Printf("Hub endpoint resolved from settings (SCION_HUB_ENDPOINT): %s", hubEndpoint)
+	if hubEndpoint := legacyEndpoint; hubEndpoint != "" {
+		if m.debug {
+			logf("Hub endpoint resolved from settings (SCION_HUB_ENDPOINT): %s", hubEndpoint)
 		}
 		return hubEndpoint, hubEndpointSourceSettings
 	}
@@ -1878,28 +1928,24 @@ func resolveHubEndpointWithSource(cfg *config.GlobalConfig, brokerSettings *conf
 	// unreachable from GKE-dispatched agents. GCLB/GKE audiences carry no
 	// routing information and cannot be converted to a URL, so they fall
 	// through to the HA warning below.
-	if hostedMode && cfg.Auth.Proxy != nil && cfg.Auth.Proxy.IAP != nil && cfg.Auth.Proxy.IAP.Audience != "" {
+	if m.hosted && cfg.Auth.Proxy != nil && cfg.Auth.Proxy.IAP != nil && cfg.Auth.Proxy.IAP.Audience != "" {
 		if cloudRunURL := iapAudienceToCloudRunURL(cfg.Auth.Proxy.IAP.Audience); cloudRunURL != "" {
-			log.Printf("Hub endpoint derived from IAP audience: %s", cloudRunURL)
+			logf("Hub endpoint derived from IAP audience: %s", cloudRunURL)
 			return cloudRunURL, hubEndpointSourceIAPAudience
 		}
 	}
 
-	port := cfg.Hub.Port
-	if enableWeb {
-		port = webPort
-	}
-	hubEndpoint := fmt.Sprintf("http://localhost:%d", port)
+	hubEndpoint := fmt.Sprintf("http://localhost:%d", m.hubListenPort(cfg))
 	// Any hosted multi-instance deployment reaching this fallback has no
 	// usable public URL: dispatched agents would resolve the loopback address
 	// inside their own container. This is not specific to IAP — a GCLB
 	// audience cannot be converted to a URL, and a hub doing its own
 	// OAuth/OIDC has no audience to derive one from at all.
-	if hostedHAGuardsRequired(cfg) {
-		log.Printf("Warning: hosted HA deployment has no explicit hub base URL; falling back to %s, which is unreachable from dispatched agents. Set SCION_SERVER_BASE_URL or server.hub.public_url.", hubEndpoint)
+	if m.hosted && m.hubEnabled && isHADeployment(cfg) {
+		logf("Warning: hosted HA deployment has no explicit hub base URL; falling back to %s, which is unreachable from dispatched agents. Set SCION_SERVER_BASE_URL or server.hub.public_url.", hubEndpoint)
 	}
-	if enableDebug {
-		log.Printf("Auto-computed hub endpoint for combo mode: %s", hubEndpoint)
+	if m.debug {
+		logf("Auto-computed hub endpoint for combo mode: %s", hubEndpoint)
 	}
 	return hubEndpoint, hubEndpointSourceLocalhost
 }
@@ -4047,21 +4093,16 @@ func resolveBrokerName(cfg *config.GlobalConfig, settings *config.Settings, vsBr
 // in standalone hub mode it is --port. Returns 0 when the hub is not
 // co-located (enableHub false).
 //
-// This is the single source of truth for the hub's listen port. Two callers
-// depend on it: resolveHubEndpointForBroker (which formats it into a
-// localhost URL for the broker's own hub communication) and the broker config's
+// serverEndpointMode.hubListenPort is the single source of truth for the
+// hub's listen port. Its callers: resolveBrokerHubEndpointFrom and the
+// hub's localhost fallback in resolveHubEndpointFrom (which format it into a
+// localhost URL), and, through this function, the broker config's
 // HubListenPort (which cloudrunSandboxHubEndpoint uses to construct the
-// link-local endpoint for sandboxes). Keeping the derivation here rather
+// link-local endpoint for sandboxes). Keeping the derivation there rather
 // than duplicating it prevents one caller from drifting when the other is
 // updated — a failure whose symptom is agents that start but never register.
 func resolveHubListenPort(cfg *config.GlobalConfig) int {
-	if !enableHub {
-		return 0
-	}
-	if enableWeb {
-		return webPort
-	}
-	return cfg.Hub.Port
+	return currentServerEndpointMode().hubListenPort(cfg)
 }
 
 // resolveHubEndpointForBroker determines the Hub endpoint URL for the
@@ -4069,15 +4110,21 @@ func resolveHubListenPort(cfg *config.GlobalConfig) int {
 // In co-located mode (enableHub true), this always resolves to localhost
 // so the broker never routes through the external public URL.
 func resolveHubEndpointForBroker(cfg *config.GlobalConfig, settings *config.Settings) string {
+	return resolveBrokerHubEndpointFrom(cfg, currentServerEndpointMode(), settings.GetHubEndpoint(), log.Printf)
+}
+
+// resolveBrokerHubEndpointFrom is resolveHubEndpointForBroker for an
+// explicit mode. legacyEndpoint is the settings hub.endpoint; passing ""
+// resolves as if that fallback were gone. logf may be nil.
+func resolveBrokerHubEndpointFrom(cfg *config.GlobalConfig, m serverEndpointMode, legacyEndpoint string, logf func(string, ...any)) string {
 	hubEndpointForRH := cfg.RuntimeBroker.HubEndpoint
-	if hubEndpointForRH == "" && enableHub {
-		port := resolveHubListenPort(cfg)
-		hubEndpointForRH = fmt.Sprintf("http://localhost:%d", port)
-		if enableDebug {
-			log.Printf("Co-located Hub detected: using %s for heartbeat and template hydration", hubEndpointForRH)
+	if hubEndpointForRH == "" && m.hubEnabled {
+		hubEndpointForRH = fmt.Sprintf("http://localhost:%d", m.hubListenPort(cfg))
+		if m.debug && logf != nil {
+			logf("Co-located Hub detected: using %s for heartbeat and template hydration", hubEndpointForRH)
 		}
-	} else if hubEndpointForRH == "" && settings.Hub != nil {
-		hubEndpointForRH = settings.Hub.Endpoint
+	} else if hubEndpointForRH == "" {
+		hubEndpointForRH = legacyEndpoint
 	}
 	return hubEndpointForRH
 }
@@ -4190,13 +4237,20 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 //  2. SCION_MAINTENANCE_IMAGE_REGISTRY env var
 //  3. image_registry in versioned settings (settings.yaml)
 func requireImageRegistryForBroker() error {
+	return requireImageRegistryForBrokerAt("")
+}
+
+// requireImageRegistryForBrokerAt is requireImageRegistryForBroker with the
+// settings resolved for projectPath (see config.LoadEffectiveSettings) instead
+// of the project found from the working directory.
+func requireImageRegistryForBrokerAt(projectPath string) error {
 	if v := os.Getenv("SCION_IMAGE_REGISTRY"); v != "" {
 		return nil
 	}
 	if v := os.Getenv("SCION_MAINTENANCE_IMAGE_REGISTRY"); v != "" {
 		return nil
 	}
-	vs, _, err := config.LoadEffectiveSettings("")
+	vs, _, err := config.LoadEffectiveSettings(projectPath)
 	if err != nil {
 		slog.Debug("Failed to load settings while checking image registry", "error", err)
 	}

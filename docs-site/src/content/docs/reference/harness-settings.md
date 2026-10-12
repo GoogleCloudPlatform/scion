@@ -15,7 +15,7 @@ Each agent has a dedicated "Home" directory that is mounted into the container. 
 
 ## Seeding from Harness-Configs & Templates
 When an agent is created, Scion composes its home directory by layering files from multiple sources:
-1.  **Harness-Config**: Base settings for the specific LLM tool (from `~/.scion/harness-configs/<name>/home/`).
+1.  **Harness-Config**: Base settings for the specific LLM tool (from `~/.scion/harness-configs/<name>/home/`, or another [harness-config location](#managing-harness-configs)).
 2.  **Template**: Role-specific prompts and configuration (from `.scion/templates/<name>/home/`).
 3.  **Common Files**: Shared dotfiles like `.tmux.conf` and `.zshrc`.
 
@@ -28,7 +28,11 @@ A **harness-config** is a named, versioned bundle that defines a harness: its `c
 (the `home/` directory, `provision.py`, `dialect.yaml`, `capture_auth.py`, and the shared
 `scion_harness.py` library). Bundles live in `~/.scion/harness-configs/<name>/` (global) or
 `.scion/harness-configs/<name>/` (project-level); project-level configs override global ones with
-the same name.
+the same name. A template can also bundle harness-configs in its own `harness-configs/<name>/`
+directories, and these take precedence over both project and global configs of the same name (any
+directory that fails to load is skipped and the next one is tried). When a Hub dispatch names a
+Hub harness-config, the Hub's copy is used instead of any of these directories; if the Runtime
+Broker cannot fetch it, the start fails rather than falling back to them.
 
 Since all harnesses are now provisioned via container-script (see
 [Supported Agent Harnesses](/scion/supported-harnesses/)), harness-configs are the unit you

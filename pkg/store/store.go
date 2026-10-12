@@ -518,7 +518,8 @@ type AgentStore interface {
 
 	// AdoptAgentRunID is CompareAndSwapAgentRunID (expectedRunID to
 	// newRunID, clearing PreviousRunIDs) for the hub's heartbeat adoption
-	// of a stranded run (ptone/scion#3661). It swaps only while
+	// of a stranded run (ptone/scion#3661) and for the settle of a
+	// succeeded launch report (ptone/scion#2965). It swaps only while
 	// RunIDUpdatedAt is set and no later than unchangedSince, so a run_id
 	// that changed and changed back after the caller's read is not
 	// adopted. Like SetAgentRunID, it writes nothing while the row is
@@ -3382,9 +3383,11 @@ type DelegationEdgeStore interface {
 	ListAllDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*DelegationEdge, error)
 
 	// DeactivateDelegationEdgeGuarded deactivates edgeID with cause and
-	// opID only when it is active and satisfies guard. It reports false,
-	// with no write, when the precondition does not hold; ErrNotFound when
-	// the edge does not exist.
+	// opID only when it is active and satisfies guard. guard.UpdatedAt is
+	// compared as an instant, and the write's WHERE holds the exact stored
+	// value just read, so a concurrent change refuses rather than being
+	// overwritten. It reports false, with no write, when the precondition
+	// does not hold; ErrNotFound when the edge does not exist.
 	DeactivateDelegationEdgeGuarded(ctx context.Context, edgeID string, guard DelegationEdgeDeactivateGuard, cause EdgeDeactivationCause, opID string) (bool, error)
 
 	// ReactivateDelegationEdge reactivates edgeID and clears its
