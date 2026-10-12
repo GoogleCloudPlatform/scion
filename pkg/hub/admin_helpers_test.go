@@ -93,6 +93,13 @@ func githubAppRowRaw(t *testing.T, f *fakeHubSettingStore) map[string]interface{
 // fakeHubSettingStore and OperationalSettings wired up for testing.
 func newTestDBServer(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings) {
 	t.Helper()
+	return newTestDBServerWithStore(t, nil)
+}
+
+// newTestDBServerWithStore is newTestDBServer with st as the server's store,
+// set when the server is built.
+func newTestDBServerWithStore(t *testing.T, st store.Store) (*Server, *fakeHubSettingStore, *OperationalSettings) {
+	t.Helper()
 	fakeStore := newFakeHubSettingStore()
 	fileK := emptyKoanf()
 	envK := emptyKoanf()
@@ -102,6 +109,7 @@ func newTestDBServer(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalS
 	srv := &Server{
 		dbDriver:    "postgres",
 		maintenance: NewMaintenanceState(false, ""),
+		store:       st,
 	}
 	srv.SetOperationalSettings(ops)
 
@@ -220,7 +228,9 @@ func fileModePutServerConfig(t *testing.T, srv *Server, body string) (*httptest.
 // makes, for tests whose server has no other store. A change to the stored
 // public URL is recorded before it is written and is not made when the
 // record cannot be written (ptone/scion#3905), so such a save needs a store.
-// Its other store methods are not implemented.
+// Its other store methods are not implemented. Tests give it to the server
+// when the server is built (newTestDBServerWithStore, or store: in the
+// Server literal).
 type settingsAuditStore struct {
 	store.Store
 	mu   sync.Mutex
@@ -239,11 +249,4 @@ func (s *settingsAuditStore) records() []*store.MutationAuditRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]*store.MutationAuditRecord(nil), s.recs...)
-}
-
-// withSettingsAuditStore gives srv a settingsAuditStore and returns it.
-func withSettingsAuditStore(srv *Server) *settingsAuditStore {
-	st := &settingsAuditStore{}
-	srv.store = st
-	return st
 }

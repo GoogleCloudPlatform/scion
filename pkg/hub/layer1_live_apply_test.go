@@ -311,8 +311,7 @@ func TestAutoExposePorts_ClearRevertsToStartupValue(t *testing.T) {
 // The save response lists the changed keys applied to the running hub and
 // the changed keys pending a restart.
 func TestPutServerConfigDB_ReportsAppliedAndPendingRestartKeys(t *testing.T) {
-	srv, _, ops := newTestDBServer(t)
-	withSettingsAuditStore(srv)
+	srv, _, ops := newTestDBServerWithStore(t, &settingsAuditStore{})
 	rr := putHubNameServerConfigDB(t, srv, ops,
 		`{"server":{"hub":{"hub_name":"report-hub","public_url":"https://report.example.com","soft_delete_retention":"2h"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())

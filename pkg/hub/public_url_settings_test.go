@@ -77,8 +77,7 @@ func TestPutServerConfigDB_PublicURLRejected(t *testing.T) {
 // pending a restart.
 func TestPutServerConfigDB_PublicURLNormalized(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	srv, fake, ops := newTestDBServer(t)
-	withSettingsAuditStore(srv)
+	srv, fake, ops := newTestDBServerWithStore(t, &settingsAuditStore{})
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"HTTPS://hub.example.com/"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	got, ok := storedEndpointsPublicURL(t, fake)
@@ -90,8 +89,9 @@ func TestPutServerConfigDB_PublicURLNormalized(t *testing.T) {
 // newBootstrapPublicURLServer boots a DB-mode server whose settings.yaml sets
 // server.hub.public_url to fileURL. With seeded true, the endpoints row is
 // seeded from that bootstrap, as syncHubSettings seeds it at every start;
-// otherwise there is no row.
-func newBootstrapPublicURLServer(t *testing.T, fileURL string, seeded bool) (*Server, *fakeHubSettingStore, *OperationalSettings) {
+// otherwise there is no row. The server's store is the returned
+// settingsAuditStore.
+func newBootstrapPublicURLServer(t *testing.T, fileURL string, seeded bool) (*Server, *fakeHubSettingStore, *OperationalSettings, *settingsAuditStore) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	fake := newFakeHubSettingStore()
@@ -103,9 +103,10 @@ func newBootstrapPublicURLServer(t *testing.T, fileURL string, seeded bool) (*Se
 	ops := NewOperationalSettings(fake, newFileKoanf(t, map[string]any{config.PublicURLKey: fileURL}), emptyKoanf())
 	_, err := ops.Refresh(context.Background())
 	require.NoError(t, err)
-	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	audits := &settingsAuditStore{}
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, ""), store: audits}
 	srv.SetOperationalSettings(ops)
-	return srv, fake, ops
+	return srv, fake, ops, audits
 }
 
 // TestPutServerConfigDB_BootstrapPublicURLNotStored checks that a settings
@@ -122,8 +123,7 @@ func TestPutServerConfigDB_BootstrapPublicURLNotStored(t *testing.T) {
 			"image registry":     `{"image_registry":"registry.example.com"}`,
 		} {
 			t.Run(fmt.Sprintf("seeded=%v/%s", seeded, name), func(t *testing.T) {
-				srv, fake, ops := newBootstrapPublicURLServer(t, fileURL, seeded)
-				audits := withSettingsAuditStore(srv)
+				srv, fake, ops, audits := newBootstrapPublicURLServer(t, fileURL, seeded)
 				rr := putServerConfigDB(t, srv, ops, body)
 				require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
@@ -198,14 +198,13 @@ func newManagedPublicURLServer(t *testing.T, bootURL, savedURL, pin string) (*Se
 	ops := NewOperationalSettings(fake, newFileKoanf(t, map[string]any{config.PublicURLKey: bootURL}), emptyKoanf())
 	_, err := ops.Refresh(context.Background())
 	require.NoError(t, err)
-	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, ""), store: &settingsAuditStore{}}
 	source := "file"
 	if pin != "" {
 		source = "env"
 	}
 	srv.config.HubEndpoints = &HubEndpoints{Operator: bootURL, OperatorSource: source, Pin: pin, Public: bootURL, PublicSource: source}
 	srv.SetOperationalSettings(ops)
-	withSettingsAuditStore(srv)
 	return srv, ops
 }
 
@@ -245,14 +244,18 @@ func TestPutServerConfigDB_ClearedPublicURLNotSuperseded(t *testing.T) {
 }
 
 // publicURLAuditFixture is a DB-mode server with a SQLite store for audit
-// records.
-func publicURLAuditFixture(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings, store.Store) {
+// records. The store is installed behind a publicURLFailingAuditStore whose
+// audit writes fail once the returned switch is armed.
+func publicURLAuditFixture(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings, store.Store, *storeFaultSwitch) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	srv, fake, ops := newTestDBServer(t)
 	st := newGCPIdentitySettingsStore(t)
-	srv.store = st
-	return srv, fake, ops, st
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *publicURLFailingAuditStore {
+		require.Nil(t, inner, "the DB-mode test server has no store of its own")
+		return &publicURLFailingAuditStore{Store: st, fault: f}
+	})
+	return srv, fake, ops, st, fault
 }
 
 // publicURLAudits returns the audit records of mutationType for the public
@@ -283,7 +286,7 @@ func resetEndpoints(t *testing.T, srv *Server) *httptest.ResponseRecorder {
 // audit path with the actor and the old and new values, and that an
 // unchanged value records nothing.
 func TestPublicURLWrites_Audited(t *testing.T) {
-	srv, _, ops, st := publicURLAuditFixture(t)
+	srv, _, ops, st, _ := publicURLAuditFixture(t)
 
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"https://one.example.com"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -314,7 +317,7 @@ func TestPublicURLWrites_Audited(t *testing.T) {
 // hits a revision conflict leaves the change recorded as not applied, as
 // the GCP permission-check settings do.
 func TestPublicURLWrites_ConflictRecordsNotApplied(t *testing.T) {
-	srv, fake, ops, st := publicURLAuditFixture(t)
+	srv, fake, ops, st, _ := publicURLAuditFixture(t)
 
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"https://new.example.com"}},"expected_revisions":{"endpoints":99}}`)
 	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
@@ -331,7 +334,7 @@ func TestPublicURLWrites_ConflictRecordsNotApplied(t *testing.T) {
 // seeded endpoints row records nothing: it holds bootstrap material, not a
 // saved value.
 func TestPublicURLWrites_SeededResetRecordsNothing(t *testing.T) {
-	srv, fake, ops, st := publicURLAuditFixture(t)
+	srv, fake, ops, st, _ := publicURLAuditFixture(t)
 	_, err := fake.UpsertHubSetting(context.Background(), "endpoints",
 		json.RawMessage(`{"public_url":"https://file.example.com"}`), "seed", -1, "seeded")
 	require.NoError(t, err)
@@ -344,12 +347,17 @@ func TestPublicURLWrites_SeededResetRecordsNothing(t *testing.T) {
 	assert.Empty(t, publicURLAudits(t, st, gcpIAMNotAppliedMutation))
 }
 
-// publicURLFailingAuditStore is a store whose audit writes fail.
+// publicURLFailingAuditStore is a store whose audit writes fail while its
+// fault switch is armed.
 type publicURLFailingAuditStore struct {
 	store.Store
+	fault *storeFaultSwitch
 }
 
-func (publicURLFailingAuditStore) CreateMutationAudit(context.Context, *store.MutationAuditRecord) error {
+func (f *publicURLFailingAuditStore) CreateMutationAudit(ctx context.Context, rec *store.MutationAuditRecord) error {
+	if !f.fault.Active() {
+		return f.Store.CreateMutationAudit(ctx, rec)
+	}
 	return errors.New("injected audit failure")
 }
 
@@ -357,13 +365,13 @@ func (publicURLFailingAuditStore) CreateMutationAudit(context.Context, *store.Mu
 // change whose audit record cannot be written is not made, by a save or by
 // a reset.
 func TestPublicURLWrites_AuditFailureBlocksChange(t *testing.T) {
-	srv, fake, ops, st := publicURLAuditFixture(t)
+	srv, fake, ops, _, fault := publicURLAuditFixture(t)
 	_, err := fake.UpsertHubSetting(context.Background(), "endpoints",
 		json.RawMessage(`{"public_url":"https://saved.example.com"}`), "admin@example.com", -1, "managed")
 	require.NoError(t, err)
 	_, err = ops.Refresh(context.Background())
 	require.NoError(t, err)
-	srv.store = publicURLFailingAuditStore{Store: st}
+	fault.Arm()
 
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"https://new.example.com"}}}`)
 	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
@@ -403,7 +411,7 @@ func (f *publicURLFailingSettingStore) DeleteHubSetting(ctx context.Context, sec
 // public URL change whose write fails with a store error, by a save or by a
 // reset, returns 500 and leaves one not-applied record each.
 func TestPublicURLWrites_StoreErrorRecordsNotApplied(t *testing.T) {
-	srv, fake, ops, st := publicURLAuditFixture(t)
+	srv, fake, ops, st, _ := publicURLAuditFixture(t)
 	_, err := fake.UpsertHubSetting(context.Background(), "endpoints",
 		json.RawMessage(`{"public_url":"https://saved.example.com"}`), "admin@example.com", -1, "managed")
 	require.NoError(t, err)

@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,7 +33,14 @@ import (
 // server synchronously, as on the writing replica in production.
 func newMonitoringDBServer(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings) {
 	t.Helper()
-	srv, fakeStore, ops := newTestDBServer(t)
+	return newMonitoringDBServerWithStore(t, nil)
+}
+
+// newMonitoringDBServerWithStore is newMonitoringDBServer with st as the
+// server's store.
+func newMonitoringDBServerWithStore(t *testing.T, st store.Store) (*Server, *fakeHubSettingStore, *OperationalSettings) {
+	t.Helper()
+	srv, fakeStore, ops := newTestDBServerWithStore(t, st)
 	ops.server = srv
 	return srv, fakeStore, ops
 }
@@ -79,8 +87,7 @@ func TestMonitoringDashboardURL_SaveAppliesLive(t *testing.T) {
 }
 
 func TestMonitoringDashboardURL_WriteSemantics(t *testing.T) {
-	srv, fakeStore, ops := newMonitoringDBServer(t)
-	withSettingsAuditStore(srv)
+	srv, fakeStore, ops := newMonitoringDBServerWithStore(t, &settingsAuditStore{})
 	rr := putMonitoringConfig(t, srv, ops, `{"server":{"hub":{"monitoring_dashboard_url":"`+testDashboardURL+`"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
@@ -173,9 +180,8 @@ func TestMonitoringDashboardURL_BootstrapAppliesAndIsKept(t *testing.T) {
 	ops := NewOperationalSettings(fakeStore, bootstrapK, emptyKoanf())
 	_, err := ops.Refresh(context.Background())
 	require.NoError(t, err)
-	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, ""), store: &settingsAuditStore{}}
 	srv.SetOperationalSettings(ops)
-	withSettingsAuditStore(srv)
 	ops.server = srv
 	ApplySnapshot(srv, ops.Snapshot())
 	assert.Equal(t, testDashboardURL, srv.monitoringDashboardURL())
@@ -271,9 +277,8 @@ func TestMonitoringDashboardURL_EnvOverrideNotWrittenToRow(t *testing.T) {
 	ops := NewOperationalSettings(fakeStore, newFileKoanf(t, flat), newEnvKoanf(t, flat))
 	_, err := ops.Refresh(context.Background())
 	require.NoError(t, err)
-	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, ""), store: &settingsAuditStore{}}
 	srv.SetOperationalSettings(ops)
-	withSettingsAuditStore(srv)
 	ops.server = srv
 
 	assert.Contains(t, ops.EnvOverriddenKeys(), config.MonitoringDashboardURLKey)

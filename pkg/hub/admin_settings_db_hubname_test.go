@@ -48,9 +48,8 @@ func newHubNameDBServer(t *testing.T, bootstrapHubName string) (*Server, *fakeHu
 	_, err = ops.Refresh(context.Background())
 	require.NoError(t, err)
 
-	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, ""), store: &settingsAuditStore{}}
 	srv.SetOperationalSettings(ops)
-	withSettingsAuditStore(srv)
 	return srv, fakeStore, ops
 }
 
