@@ -30,6 +30,7 @@
 3 admin_settings_db_merge_test.go
 6 admin_settings_db_test.go
 1 admin_settings_db_unpersisted_test.go
+3 admin_settings_durations_test.go
 3 admin_settings_lifecycle_carry_test.go
 2 admin_settings_mask_test.go
 6 admin_settings_merge_test.go
