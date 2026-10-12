@@ -279,9 +279,9 @@ func (s *recordingStore) ListGrants(ctx context.Context, id string) ([]Grant, er
 	return s.Store.ListGrants(ctx, id)
 }
 
-func (s *recordingStore) RevokeLink(ctx context.Context, artifactID, linkID string) error {
+func (s *recordingStore) RevokeLink(ctx context.Context, artifactID, linkID string, actor *Actor) error {
 	s.record("RevokeLink")
-	return s.Store.RevokeLink(ctx, artifactID, linkID)
+	return s.Store.RevokeLink(ctx, artifactID, linkID, actor)
 }
 
 func (s *recordingStore) LinkActive(ctx context.Context, artifactID, linkID string, now time.Time) (bool, error) {
@@ -1220,9 +1220,9 @@ func TestGrantKindsEachCount(t *testing.T) {
 	}
 }
 
-func (s *recordingStore) DeleteGrant(ctx context.Context, artifactID, grantID string) error {
+func (s *recordingStore) DeleteGrant(ctx context.Context, artifactID, grantID string, actor *Actor) error {
 	s.record("DeleteGrant")
-	return s.Store.DeleteGrant(ctx, artifactID, grantID)
+	return s.Store.DeleteGrant(ctx, artifactID, grantID, actor)
 }
 
 // noExpiryStore returns resolved link grants without an expiry.
