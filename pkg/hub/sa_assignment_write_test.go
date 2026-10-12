@@ -576,10 +576,22 @@ func TestSAParentCeiling_HostPassthroughWritesGCPIdentity(t *testing.T) {
 	rec = doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agent.ID,
 		map[string]interface{}{"gcp_identity": map[string]string{"metadata_mode": "passthrough"}})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"gcp_identity"}, patchDisposition(t, rec).Applied)
 	rows = activeAssignments(t, s, agent.ID)
 	require.Len(t, rows, 1)
 	assert.Equal(t, store.SAAssignmentOriginHostPassthroughTranslation, rows[0].Origin)
 	assert.Equal(t, agentAssignedServiceAccountID(mustGetAgent(t, s, agent.ID)), rows[0].ServiceAccountID)
+
+	// The same PATCH again translates to the identical identity and
+	// re-records the row, so gcp_identity is listed although its value
+	// is unchanged.
+	rec = doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+		map[string]interface{}{"gcp_identity": map[string]string{"metadata_mode": "passthrough"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"gcp_identity"}, patchDisposition(t, rec).Applied)
+	rows = activeAssignments(t, s, agent.ID)
+	require.Len(t, rows, 1)
+	assert.Equal(t, store.SAAssignmentOriginHostPassthroughTranslation, rows[0].Origin)
 }
 
 func TestSAParentCeiling_HostPassthroughAssignmentInSameTx(t *testing.T) {
