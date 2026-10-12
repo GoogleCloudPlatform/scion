@@ -42,28 +42,30 @@ server:
     port: 9800
   hub:
     auto_suspend_stalled: %s
+    stalled_threshold: 7m
 telemetry:
   cloud:
     tls:
       enabled: true
-    stalled_threshold: 7m
 `
 
 const badValueWarning = "value does not parse"
 
 // setupBadValueProject writes a settings.yaml under a fresh HOME, clears
-// the SCION_* variables the tests use, and captures slog output.
+// every SCION_* variable, and captures slog output.
 func setupBadValueProject(t *testing.T, cloneDepth, autoSuspendStalled string) (string, *bytes.Buffer) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
-	unsetTestEnv(t,
-		"SCION_DEFAULT_TEMPLATE", "SCION_CLI_AUTOHELP",
-		"SCION_SERVER_BROKER_PORT", "SCION_SERVER_BROKER_BROKER_NAME",
-		"SCION_SERVER_HUB_AUTO_SUSPEND_STALLED", "SCION_SERVER_HUB_STALLED_THRESHOLD",
-		"SCION_OTEL_INSECURE", "SCION_OTEL_SKIP_TLS_VERIFY",
-		"SCION_PROJECT", "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID",
-		"CLOUD_RUN_INSTANCE")
+	// An agent container exports many SCION_* variables (telemetry, hub,
+	// project). Clear them all so each test sees only what it sets.
+	names := []string{"CLOUD_RUN_INSTANCE"}
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "SCION_") {
+			names = append(names, name)
+		}
+	}
+	unsetTestEnv(t, names...)
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 	content := []byte(fmt.Sprintf(badValueSettingsYAML, cloneDepth, autoSuspendStalled))

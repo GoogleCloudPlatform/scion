@@ -2956,6 +2956,12 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		if value == "" {
 			return "", nil
 		}
+		// SCION_OTEL_INSECURE is applied below, inverted. Mapped here as
+		// is, a value that is not a bool would stay on tls.enabled and
+		// replace the configured value.
+		if key == "SCION_OTEL_INSECURE" {
+			return "", nil
+		}
 		return versionedEnvKeyMapper(key), value
 	}), nil)
 	splitKoanfListKeys(k, conduitV1EnvListKeys)
