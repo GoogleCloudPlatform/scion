@@ -77,8 +77,8 @@ _Avoid_: agent tool, scion-tool
 
 **Agent Port Forwarding**:
 A feature that allows exposing local HTTP ports running inside an agent container through the Hub as authenticated, reverse-proxied URLs. Built on an outbound WebSocket reverse tunnel.
-_Avoid_: agent tunnel, port proxy, hub reverse tunnel, web access
-_See also_: sciontool
+_Avoid_: agent tunnel, port proxy, hub reverse tunnel, web access (for raw TCP or SSH access through `scion tunnel`, see **Tunnel (Conduit user tunnel)**)
+_See also_: sciontool, Tunnel (Conduit user tunnel)
 
 **Runtime**:
 The container technology that executes an agent's container: Docker, Podman, Apple Container, Kubernetes, Cloud Run Instances, or Substrate (Agent Substrate actors on GKE).
@@ -213,8 +213,13 @@ _See also_: Harness-config, Profile
 
 **Port Forwarding**:
 The feature that allows users, developers, and external systems to access HTTP services running inside agent containers securely via the Hub's reverse proxy. Requests are routed over a persistent, authenticated WebSocket-based reverse tunnel established from within the container to the Hub.
-_Avoid_: tunnel, docker proxy, ingress
-_See also_: Auto-Expose, Hub
+_Avoid_: tunnel (that term is reserved for **Tunnel (Conduit user tunnel)**), docker proxy, ingress
+_See also_: Auto-Expose, Hub, Tunnel (Conduit user tunnel)
+
+**Tunnel (Conduit user tunnel)**:
+A raw TCP or SSH connection from a user's machine to a port or the SSH service inside an agent, opened with `scion tunnel` over a Conduit session with the Hub (behind the `hub.conduit` experiment). The local end is a `127.0.0.1` listener or stdin/stdout. Distinct from **Port Forwarding**, which serves HTTP through the Hub's proxy URLs.
+_Avoid_: port forward (for this feature), SSH proxy
+_See also_: Port Forwarding, sciontool
 
 **Auto-Expose**:
 A sub-feature of port forwarding where `sciontool` periodically scans for listening TCP sockets inside the agent container (by reading `/proc/net/tcp` and `/proc/net/tcp6`), filters them by policy, and registers them with the Hub using the `auto-scan` label. Stale registrations are automatically cleaned up when the service stops listening.

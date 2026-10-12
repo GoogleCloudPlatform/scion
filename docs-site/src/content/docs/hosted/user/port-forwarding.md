@@ -175,9 +175,9 @@ scion tunnel status
 
 The local listener binds to `127.0.0.1` only. The tunnel stays open until you stop the command (Ctrl-C).
 
-**How it works.** The CLI opens one Conduit session to the Hub (`GET /api/v1/conduit`, with your usual Hub credential) and asks for each tunnel over it. The Hub checks each tunnel on its own and connects it to the agent's own Conduit session, so the agent's ports are never opened to the network. One CLI session can carry many tunnels to different agents. Closing a tunnel closes only that tunnel.
+**How it works.** The CLI opens one Conduit session to the Hub (`GET /api/v1/conduit`, with your usual Hub credential) and asks for each tunnel over it. The Hub checks each tunnel on its own and connects it to the agent's own Conduit session, so the agent's ports are never opened to the network. A `scion tunnel` process targets one agent; its session carries one tunnel per accepted local connection, up to the session's limit. Closing a tunnel closes only that tunnel.
 
-**Who may open a tunnel.** A TCP tunnel needs `agent.port_access` on the agent, and the target must be an agent-local port you may reach: an exposed port or one the operator allow-listed, never the reserved ports below. An SSH tunnel needs `agent.attach`. The agent must be running and have a Conduit session; otherwise the command exits with a specific code (see [`scion tunnel`](/scion/reference/cli/#scion-tunnel)). Open tunnels are re-checked like other Conduit user streams and close when your access is withdrawn.
+**Who may open a tunnel.** A TCP tunnel needs `agent.port_access` on the agent, and the target must be an agent-local port you may reach: an exposed port or one the operator allow-listed, never the reserved ports below. An SSH tunnel needs `agent.attach` and `agent.port_access`. The agent must be running and have a Conduit session; otherwise the command exits with a specific code (see [`scion tunnel`](/scion/reference/cli/#scion-tunnel)). Open tunnels are re-checked like other Conduit user streams and close when your access is withdrawn.
 
 ### SSH into an agent
 
