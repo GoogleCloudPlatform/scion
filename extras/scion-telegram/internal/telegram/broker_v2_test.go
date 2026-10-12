@@ -2152,6 +2152,72 @@ func TestV2_Configure_WebhookMode_MissingURL(t *testing.T) {
 	assert.Contains(t, err.Error(), "webhook_url is required")
 }
 
+func TestV2_Configure_WebhookMode_MissingSecret(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config map[string]string
+	}{
+		{"absent", map[string]string{}},
+		{"empty", map[string]string{"webhook_secret": ""}},
+		{"absent standalone HA", map[string]string{"skip_set_webhook": "true"}},
+		{"empty standalone HA", map[string]string{"skip_set_webhook": "true", "webhook_secret": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tgSrv := newFakeTGServerV2(t)
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+
+			b := NewV2(slog.Default())
+			defer b.Close()
+
+			cfg := map[string]string{
+				"bot_token":      "test-token",
+				"api_base_url":   tgSrv.srv.URL,
+				"db_path":        dbPath,
+				"inbound_mode":   "webhook",
+				"webhook_url":    "https://example.com/telegram/webhook",
+				"webhook_listen": ":0",
+			}
+			for k, v := range tc.config {
+				cfg[k] = v
+			}
+
+			err := b.Configure(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), `webhook_secret is required when inbound_mode is "webhook"`)
+			assert.Nil(t, b.webhookServer, "webhook listener must not start without a secret")
+
+			tgSrv.mu.Lock()
+			assert.Empty(t, tgSrv.webhookURL, "setWebhook must not be called without a secret")
+			tgSrv.mu.Unlock()
+		})
+	}
+}
+
+func TestV2_Configure_WebhookMode_StandaloneHAWithSecret(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":        "test-token",
+		"api_base_url":     tgSrv.srv.URL,
+		"db_path":          dbPath,
+		"inbound_mode":     "webhook",
+		"webhook_url":      "https://example.com/telegram/webhook",
+		"webhook_listen":   ":0",
+		"webhook_secret":   "test-secret",
+		"skip_set_webhook": "true",
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, b.webhookServer)
+
+	tgSrv.mu.Lock()
+	assert.Empty(t, tgSrv.webhookURL, "standalone HA mode must not call setWebhook from Configure")
+	tgSrv.mu.Unlock()
+}
+
 func TestV2_Configure_InvalidInboundMode(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -2201,6 +2267,7 @@ func TestV2_WebhookMode_PollingDoesNotStart(t *testing.T) {
 		"inbound_mode":   "webhook",
 		"webhook_url":    "https://example.com/telegram/webhook",
 		"webhook_listen": ":0",
+		"webhook_secret": "test-secret",
 	})
 	require.NoError(t, err)
 
@@ -2316,6 +2383,7 @@ func TestV2_WebhookMode_Close(t *testing.T) {
 		"inbound_mode":   "webhook",
 		"webhook_url":    "https://example.com/telegram/webhook",
 		"webhook_listen": ":0",
+		"webhook_secret": "test-secret",
 	})
 	require.NoError(t, err)
 

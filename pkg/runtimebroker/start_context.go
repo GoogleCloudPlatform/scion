@@ -273,6 +273,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// recorded profile is computed (ptone/scion#1799): see
 	// verifySharedProjectIdentity.
 	if in.SharedWorkspace || (in.Config != nil && in.Config.SharedWorkspace) {
+		// A marker naming an earlier ID of the same project (a re-link) is
+		// carried over to the current ID first (ptone/scion#4440).
+		if err := s.relinkSharedProjectIdentity(ctx, in.ProjectPath, in.ProjectSlug, in.ProjectID, in.Name); err != nil {
+			span.SetStatus(codes.Error, "shared-workspace project re-link failed")
+			return nil, projectRelinkStartContextError(err)
+		}
 		if err := verifySharedProjectIdentity(in.ProjectPath, in.ProjectID); err != nil {
 			span.SetStatus(codes.Error, "shared-workspace project identity check failed")
 			return nil, s.projectIdentityStartContextError(err, in.Name)

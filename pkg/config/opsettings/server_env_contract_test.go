@@ -407,19 +407,20 @@ var envContractGaps = map[string]string{
 // objects. No single env string can set them, so they are outside the
 // contract. The test checks this list against the schema in both directions.
 var envContractStructuredKeys = map[string]bool{
-	"default_resources":                    true, // object
-	"harness_configs":                      true, // map of objects
-	"profiles":                             true, // map of objects
-	"runtimes":                             true, // map of objects
-	"server.broker.instances":              true, // list of objects
-	"server.federation.trusted_issuers":    true, // list of objects (ptone/scion#3836)
-	"server.notification_channels":         true, // list of objects
-	"server.plugins.broker":                true, // map of objects
-	"server.shared_dir_storage.nfs.shares": true, // list of objects
-	"server.workspace_storage.nfs.shares":  true, // list of objects
-	"telemetry.cloud.headers":              true, // map
-	"telemetry.filter.sampling.rates":      true, // map
-	"telemetry.resource":                   true, // map
+	"default_resources":                 true, // object
+	"harness_configs":                   true, // map of objects
+	"profiles":                          true, // map of objects
+	"runtimes":                          true, // map of objects
+	"server.broker.instances":           true, // list of objects
+	"server.federation.trusted_issuers": true, // list of objects (ptone/scion#3836)
+	"server.hub.test_identities.workload_issuers": true, // list of objects (ptone/scion#4240)
+	"server.notification_channels":                true, // list of objects
+	"server.plugins.broker":                       true, // map of objects
+	"server.shared_dir_storage.nfs.shares":        true, // list of objects
+	"server.workspace_storage.nfs.shares":         true, // list of objects
+	"telemetry.cloud.headers":                     true, // map
+	"telemetry.filter.sampling.rates":             true, // map
+	"telemetry.resource":                          true, // map
 }
 
 // schemaNode is a settings-v1 schema property with local $refs merged in.

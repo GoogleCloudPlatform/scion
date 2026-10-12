@@ -1566,7 +1566,7 @@ func TestTestIdentityWeb_LogoutClears(t *testing.T) {
 func TestTestIdentityWeb_Indicator(t *testing.T) {
 	e := newTIWebEnv(t)
 	status := doRequestNoAuth(t, e.srv, http.MethodGet, "/api/v1/test-infra/status", nil)
-	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":true}`, status.Body.String())
+	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":true,"testIssuerAudience":""}`, status.Body.String())
 
 	rec := doRequest(t, e.srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

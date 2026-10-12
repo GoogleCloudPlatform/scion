@@ -101,7 +101,6 @@ pkg/hub/platform_skills_seed_test.go | 1
 pkg/hub/project_clone_default_broker_test.go | 1
 pkg/hub/project_owner_grant_test.go | 2
 pkg/hub/project_profile_default_sa_test.go | 2
-pkg/hub/project_settings_handlers_test.go | 1
 pkg/hub/provider_localpath_test.go | 1
 pkg/hub/provisioned_start_test.go | 2
 pkg/hub/pty_conduit_test.go | 2
