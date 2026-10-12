@@ -423,8 +423,9 @@ def warn_vertex_location_conflict(
     read returns the value of an env name ("" when unset). Returns True when
     a warning was emitted.
     """
-    location = (read(VERTEX_LOCATION_KEY) or "").strip()
-    region = (read(VERTEX_REGION_KEY) or "").strip()
+    # Compare raw values, as the Go resolver does (pkg/harness/auth.go).
+    location = read(VERTEX_LOCATION_KEY) or ""
+    region = read(VERTEX_REGION_KEY) or ""
     if location and region and location != region:
         warn_fn(
             f"{VERTEX_LOCATION_KEY}={location!r} and {VERTEX_REGION_KEY}={region!r} "

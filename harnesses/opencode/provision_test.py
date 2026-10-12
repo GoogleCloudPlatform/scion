@@ -548,7 +548,7 @@ class VertexLocationPrecedenceTest(unittest.TestCase):
             os.makedirs(os.path.join(bundle, "inputs"))
             with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w", encoding="utf-8") as f:
                 json.dump({"env_vars": list(env)}, f)
-            clear = {k: "" for k in ("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "VERTEX_LOCATION")}
+            clear = {k: "" for k in ("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "VERTEX_LOCATION")}
             with unittest.mock.patch.dict(os.environ, {**clear, **env}):
                 ctx = scion_harness.ProvisionContext("opencode", {"harness_bundle_dir": bundle})
                 warnings: list[str] = []
@@ -578,6 +578,16 @@ class VertexLocationPrecedenceTest(unittest.TestCase):
             "GOOGLE_CLOUD_LOCATION": "europe-west4",
         })
         self.assertEqual(overlay["VERTEX_LOCATION"], "${GOOGLE_CLOUD_LOCATION}")
+        self.assertEqual(warnings, [])
+
+    def test_cloud_ml_region_not_read(self) -> None:
+        # opencode does not read CLOUD_ML_REGION; VERTEX_LOCATION is chosen.
+        overlay, warnings = self._overlay({
+            "GOOGLE_CLOUD_PROJECT": "proj-1",
+            "CLOUD_ML_REGION": "europe-west4",
+            "VERTEX_LOCATION": "asia-east1",
+        })
+        self.assertEqual(overlay["VERTEX_LOCATION"], "${VERTEX_LOCATION}")
         self.assertEqual(warnings, [])
 
 

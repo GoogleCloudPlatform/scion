@@ -2446,7 +2446,6 @@ class TestAtomicWriteJsonSymlinkGuards(unittest.TestCase):
         self.assertTrue(second.startswith(".out.json.tmp-"))
 
 
-
 class VertexLocationPrecedenceTest(unittest.TestCase):
     """GOOGLE_CLOUD_LOCATION > GOOGLE_CLOUD_REGION > CLOUD_ML_REGION (ptone/scion#4719)."""
 
@@ -2490,6 +2489,12 @@ class VertexLocationPrecedenceTest(unittest.TestCase):
         self.assertIn("GOOGLE_CLOUD_LOCATION='us-east5'", warnings[0])
         self.assertIn("GOOGLE_CLOUD_REGION='us-central1'", warnings[0])
 
+    def test_conflict_compares_raw_values(self) -> None:
+        # Same rule as the Go resolver: values are compared untrimmed.
+        got, warnings = self._resolve({"GOOGLE_CLOUD_LOCATION": "us-east5 ", "GOOGLE_CLOUD_REGION": "us-east5"})
+        self.assertEqual(got, ("GOOGLE_CLOUD_LOCATION", "us-east5 "))
+        self.assertEqual(len(warnings), 1)
+
     def test_neither(self) -> None:
         self.assertEqual(self._resolve({}), (("", ""), []))
 
@@ -2518,6 +2523,7 @@ class VertexLocationPrecedenceTest(unittest.TestCase):
     def test_no_warn_fn_is_silent(self) -> None:
         env = {"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-central1"}
         self.assertEqual(sh.resolve_vertex_location(env.get), ("GOOGLE_CLOUD_LOCATION", "us-east5"))
+
 
 if __name__ == "__main__":
     unittest.main()

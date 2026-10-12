@@ -120,7 +120,6 @@ def _has_disk_oauth_token(ctx: scion_harness.ProvisionContext) -> bool:
     return os.path.isfile(path)
 
 
-
 def _resolve_location(ctx: scion_harness.ProvisionContext) -> str:
     """Return the Vertex AI location: GOOGLE_CLOUD_LOCATION, else
     GOOGLE_CLOUD_REGION, warning when both are set and differ
@@ -131,6 +130,7 @@ def _resolve_location(ctx: scion_harness.ProvisionContext) -> str:
         include_ml_region=False,
     )
     return location
+
 
 def provision(ctx: scion_harness.ProvisionContext) -> None:
     ctx.info(
