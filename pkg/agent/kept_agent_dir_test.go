@@ -224,6 +224,31 @@ func TestHandleAgentDirWithoutConfig_LinkedMarkerIsIgnored(t *testing.T) {
 	}
 }
 
+// readKeptAgentDirRecord accepts a regular marker file and refuses a link
+// to one, which the removal's re-check relies on.
+func TestReadKeptAgentDirRecord_LinkedMarkerIsRefused(t *testing.T) {
+	base := t.TempDir()
+	regular := filepath.Join(base, "regular")
+	linked := filepath.Join(base, "linked")
+	for _, d := range []string{regular, linked} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keptAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	writeMarkerT(t, regular, keptAt)
+	if err := os.Symlink(filepath.Join(regular, keptAgentDirMarker), filepath.Join(linked, keptAgentDirMarker)); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec, ok := readKeptAgentDirRecord(regular); !ok || !rec.KeptAt.Equal(keptAt) {
+		t.Fatalf("regular marker: got %+v, %v; want keptAt %v", rec, ok, keptAt)
+	}
+	if rec, ok := readKeptAgentDirRecord(linked); ok {
+		t.Fatalf("linked marker was read as %+v, want it refused", rec)
+	}
+}
+
 // A kept dir whose external home has data since is not removed after the
 // window: the home rules apply instead.
 func TestPurgeExpiredKeptAgentDir_HomeDataKeepsDir(t *testing.T) {
@@ -243,13 +268,16 @@ func TestPurgeExpiredKeptAgentDir_HomeDataKeepsDir(t *testing.T) {
 }
 
 // The sweep removes another agent's expired kept dir, and leaves a dir
-// without a marker, a dir inside its window, and a dir with a config file.
+// without a marker, a dir inside its window, a dir with a config file, an
+// entry named like a removal in progress, and a link to a dir.
 func TestSweepExpiredKeptAgentDirs(t *testing.T) {
 	keptTestRetention(t, time.Hour)
 	now := keptTestClock(t)
-	root := filepath.Join(t.TempDir(), "agents")
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "agents")
 	dirs := map[string]string{}
-	for _, name := range []string{"expired", "nomarker", "recent", "configured", "self"} {
+	inFlight := keptAgentDirPurgePrefix + "0123456789ab"
+	for _, name := range []string{"expired", "nomarker", "recent", "configured", "self", inFlight} {
 		d := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Join(d, "workspace"), 0o755); err != nil {
 			t.Fatal(err)
@@ -264,6 +292,19 @@ func TestSweepExpiredKeptAgentDirs(t *testing.T) {
 	writeMarkerT(t, dirs["recent"], now.Add(-30*time.Minute))
 	writeMarkerT(t, dirs["configured"], old)
 	writeMarkerT(t, dirs["self"], old)
+	writeMarkerT(t, dirs[inFlight], old)
+	linkTarget := filepath.Join(tmp, "outside")
+	if err := os.MkdirAll(filepath.Join(linkTarget, "workspace"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(linkTarget, "workspace", "work.txt"), []byte("w\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeMarkerT(t, linkTarget, old)
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(linkTarget, link); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dirs["configured"], "scion-agent.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -271,12 +312,26 @@ func TestSweepExpiredKeptAgentDirs(t *testing.T) {
 	sweepExpiredKeptAgentDirs(root, "self", func(name string) string { return filepath.Join(root, name, "home") })
 
 	requireRemoved(t, dirs["expired"])
-	for _, name := range []string{"nomarker", "recent", "configured", "self"} {
+	for _, name := range []string{"nomarker", "recent", "configured", "self", inFlight} {
 		if _, err := os.Stat(filepath.Join(dirs[name], "workspace", "work.txt")); err != nil {
 			t.Errorf("expected %s to be kept: %v", name, err)
 		}
 	}
-	requireNoPurgeLeftovers(t, root)
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("expected the link entry to be kept: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkTarget, "workspace", "work.txt")); err != nil {
+		t.Errorf("expected the link target to be kept: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), keptAgentDirPurgePrefix) && e.Name() != inFlight {
+			t.Errorf("unexpected leftover %s in %s", e.Name(), root)
+		}
+	}
 }
 
 // A dir that no longer shows an expired marker once moved aside (another

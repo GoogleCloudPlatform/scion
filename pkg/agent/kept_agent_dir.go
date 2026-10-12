@@ -61,9 +61,10 @@ const (
 )
 
 // keptAgentDirDefaultRetention is the window used when
-// server.hub.soft_delete_retention is unset (or invalid). Zero keeps kept
-// directories forever, as before ptone/scion#4742; it mirrors the hub,
-// whose purge skips soft-deleted agents while the retention is 0.
+// server.hub.soft_delete_retention is unset (or invalid). Zero, or an unset
+// value, keeps kept directories forever, as before ptone/scion#4742,
+// pending a maintainer decision. This differs from the hub on purpose: there
+// a retention of 0 turns soft-delete off and deletes agents at once.
 const keptAgentDirDefaultRetention time.Duration = 0
 
 // keptAgentDirRetentionEnv is the environment form of
@@ -237,7 +238,7 @@ func purgeExpiredKeptAgentDir(agentName, agentDir, agentHome string, retention t
 		ok = keptAgentHomesEmpty(tomb, extHome)
 	}
 	if !ok {
-		if err := os.Rename(tomb, agentDir); err != nil {
+		if err := os.Rename(tomb, agentDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			slog.Warn("GetAgent: could not restore an agent directory moved for a kept-directory check",
 				"agent", agentName, "agent_dir", agentDir, "moved_to", tomb, "error", err)
 		}
@@ -252,6 +253,8 @@ func purgeExpiredKeptAgentDir(agentName, agentDir, agentHome string, retention t
 
 // sweepExpiredKeptAgentDirs removes the expired kept directories in
 // agentsRoot other than skipName's (GetAgent handles that one itself).
+// Entries named like a directory being removed are skipped: they may belong
+// to another process's removal in progress.
 // homeOf returns an agent's home path. Only plain directories holding a
 // marker are considered; the retention is resolved only when one is found.
 func sweepExpiredKeptAgentDirs(agentsRoot, skipName string, homeOf func(name string) string) {
@@ -261,7 +264,7 @@ func sweepExpiredKeptAgentDirs(agentsRoot, skipName string, homeOf func(name str
 	}
 	var candidates []string
 	for _, e := range entries {
-		if !e.IsDir() || e.Name() == skipName {
+		if !e.IsDir() || e.Name() == skipName || strings.HasPrefix(e.Name(), keptAgentDirPurgePrefix) {
 			continue
 		}
 		if hasKeptAgentDirMarker(filepath.Join(agentsRoot, e.Name())) {
