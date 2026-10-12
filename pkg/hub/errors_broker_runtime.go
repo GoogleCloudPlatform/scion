@@ -102,6 +102,10 @@ func brokerRuntimeCauseDetails(err error) map[string]interface{} {
 		return nil
 	}
 	code, _ := se.brokerErrorDetails()["cause"].(string)
+	// The api.IsBrokerRuntimeCause allowlist is the real filter: only its
+	// fixed codes may reach the client. The brokerCodePattern check cannot
+	// reject a code the allowlist accepts today; it is an extra safeguard,
+	// not a replacement, so keep the allowlist.
 	if !api.IsBrokerRuntimeCause(code) || !brokerCodePattern.MatchString(code) {
 		return nil
 	}
