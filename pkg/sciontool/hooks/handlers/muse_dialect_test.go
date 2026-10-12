@@ -6,12 +6,11 @@ package handlers
 
 import (
 	"context"
-	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -34,9 +33,7 @@ import (
 func TestMuseCodeHookTokensReachUsageMetric(t *testing.T) {
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 
-	_, file, _, _ := runtime.Caller(0)
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	specPath := filepath.Join(root, "harnesses", "muse-code", "dialect.yaml")
+	specPath := testutil.HarnessDialectPath(t, "muse-code")
 	md, err := dialects.LoadMappingDialect(specPath)
 	if err != nil {
 		t.Fatalf("LoadMappingDialect(%s): %v", specPath, err)

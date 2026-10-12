@@ -16,6 +16,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -96,12 +97,7 @@ func loadOpencodeHookPayloadFixture(t *testing.T) []map[string]interface{} {
 
 func loadOpencodeDialect(t *testing.T) *dialects.MappingDialect {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	specPath := filepath.Join(root, "harnesses", "opencode", "dialect.yaml")
+	specPath := testutil.HarnessDialectPath(t, "opencode")
 	md, err := dialects.LoadMappingDialect(specPath)
 	if err != nil {
 		t.Fatalf("LoadMappingDialect(%s): %v", specPath, err)
@@ -360,12 +356,7 @@ func TestOpencodeHandlerHasNoDedupeReplayDoubles(t *testing.T) {
 // expose its parsed spec) so a future edit that reintroduces one of these
 // keys fails loudly instead of silently zeroing a token type.
 func TestOpencodeDialectStepFinishMappingOmitsExtractTokensFields(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	specPath := filepath.Join(root, "harnesses", "opencode", "dialect.yaml")
+	specPath := testutil.HarnessDialectPath(t, "opencode")
 
 	data, err := os.ReadFile(specPath)
 	if err != nil {

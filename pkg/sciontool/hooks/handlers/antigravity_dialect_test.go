@@ -16,6 +16,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -29,9 +30,7 @@ import (
 func loadAntigravityFixture(t *testing.T) (*dialects.MappingDialect, []*hooks.Event) {
 	t.Helper()
 
-	_, file, _, _ := runtime.Caller(0)
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	specPath := filepath.Join(root, "harnesses", "antigravity", "dialect.yaml")
+	specPath := testutil.HarnessDialectPath(t, "antigravity")
 	md, err := dialects.LoadMappingDialect(specPath)
 	if err != nil {
 		t.Fatalf("LoadMappingDialect(%s): %v", specPath, err)
@@ -40,6 +39,8 @@ func loadAntigravityFixture(t *testing.T) (*dialects.MappingDialect, []*hooks.Ev
 		t.Fatalf("dialect name = %q, want antigravity", md.Name())
 	}
 
+	_, file, _, _ := runtime.Caller(0)
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
 	fixturePath := filepath.Join(root, "pkg", "sciontool", "hooks", "dialects",
 		"testdata", "antigravity", "hook-payloads-1.2.12.jsonl")
 	f, err := os.Open(fixturePath)
@@ -395,9 +396,7 @@ func TestAntigravityFixture_UsageSourceUnsetPublishesNothing(t *testing.T) {
 // and friends) and is simply ignored rather than panicking or coercing
 // garbage into a number.
 func TestAntigravityDialect_MalformedTokenFieldsAreIgnored(t *testing.T) {
-	_, file, _, _ := runtime.Caller(0)
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	specPath := filepath.Join(root, "harnesses", "antigravity", "dialect.yaml")
+	specPath := testutil.HarnessDialectPath(t, "antigravity")
 	md, err := dialects.LoadMappingDialect(specPath)
 	if err != nil {
 		t.Fatalf("LoadMappingDialect(%s): %v", specPath, err)
