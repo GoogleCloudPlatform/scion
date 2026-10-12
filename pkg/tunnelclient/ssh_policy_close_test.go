@@ -15,8 +15,8 @@
 package tunnelclient
 
 import (
+	"errors"
 	"io"
-	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -47,8 +47,10 @@ func TestSSHStdioClosedByPolicyExits7(t *testing.T) {
 	if got := CodeOf(err); got != ExitPolicyClosed {
 		t.Fatalf("exit %d (%v), want %d", got, err, ExitPolicyClosed)
 	}
-	if err == nil || !strings.Contains(err.Error(), "tunnel closed by policy (authz_expired)") {
-		t.Fatalf("error %v does not name the policy close", err)
+	const wantLine = "tunnel closed by policy (authz_expired)"
+	var e *Error
+	if !errors.As(err, &e) || e.Msg != wantLine {
+		t.Fatalf("error %q, want exactly %q", err, wantLine)
 	}
 	if out.String() != banner {
 		t.Fatalf("stdout = %q, want %q", out.String(), banner)
