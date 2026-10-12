@@ -68,6 +68,7 @@
 1 agent_delegation_chain_test.go
 1 agent_delegation_test.go
 4 agent_delete_engine_deferred_test.go
+3 agent_delete_engine_finalizing_test.go
 4 agent_delete_engine_routed_test.go
 6 agent_delete_engine_t1_test.go
 3 agent_delete_engine_test.go
