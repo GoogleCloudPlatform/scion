@@ -390,3 +390,20 @@ func TestPersistentPreRun_ConfigSubcommandGlobalSeesGlobalEndpoint(t *testing.T)
 	assert.Empty(t, hubEndpoint, "the context hub must not fill in under --global")
 	assert.Empty(t, hubSource)
 }
+
+// TestPersistentPreRun_ConfigOutsideProjectKeepsError: outside any project,
+// a config subcommand that needs a project fails exactly as without a
+// current context, rather than acting on the context project's UUID as a
+// path.
+func TestPersistentPreRun_ConfigOutsideProjectKeepsError(t *testing.T) {
+	setupContextTest(t)
+	saveTestContext(t, ctxTestHub, ctxTestProjectID)
+	list := findCommand(t, "config", "list")
+	restoreSilenceUsage(t, list)
+
+	err := rootCmd.PersistentPreRunE(list, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project")
+	assert.Empty(t, projectPath, "no project is injected for config")
+	assert.Equal(t, ctxTestHub, hubEndpoint, "the context hub still applies")
+}
