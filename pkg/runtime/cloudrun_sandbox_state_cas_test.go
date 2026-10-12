@@ -388,6 +388,7 @@ func TestSandboxState_TwoInstancesKeepEachOthersWrites(t *testing.T) {
 		{"legacy mark stopped", "legacy", mark, stopped},
 		{"legacy reconcile removal", "legacy", reconcile, gone},
 		{"legacy removal after plain delete", "legacy", del(false), gone},
+		{"legacy removal after workaround delete", "legacy", del(true), gone},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -523,6 +524,9 @@ func TestSandboxReconcile_StaleSnapshotKeepsNewerEntry(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestSandboxState_CorruptFileNeverOverwritten(t *testing.T) {
+	var logs bytes.Buffer
+	setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
+
 	path := filepath.Join(t.TempDir(), "state.json")
 	corrupt := []byte(`{"dev": {"sandbox_name": "dev", `)
 	if err := os.WriteFile(path, corrupt, 0600); err != nil {
@@ -565,6 +569,9 @@ func TestSandboxState_CorruptFileNeverOverwritten(t *testing.T) {
 	unchanged(t, "Delete")
 	if calls := sandboxCalls(t, log); calls != "" {
 		t.Errorf("sandbox CLI called on a corrupt state file:\n%s", calls)
+	}
+	if got := logs.String(); strings.Count(got, "level=ERROR") < 3 || !strings.Contains(got, "state file is unreadable") {
+		t.Errorf("want an ERROR naming the unreadable state file at load, Run and Delete:\n%s", got)
 	}
 }
 
@@ -718,6 +725,8 @@ esac`, deleting, ack))
 // Mutant G2-strict: no re-read/retry (a benign change fails the start).
 // Mutant G2-blind: the retry skips the held check.
 // Mutant G2-delete: on a conflict the start deletes the sandbox by name.
+// Mutant G2-nocleanup: on a state read or write failure (not a nonce
+// mismatch) the start does not delete its own sandbox.
 // -----------------------------------------------------------------------
 
 func TestCloudRunSandboxRun_RecordAfterConcurrentChange(t *testing.T) {
@@ -739,6 +748,28 @@ func TestCloudRunSandboxRun_RecordAfterConcurrentChange(t *testing.T) {
 		e := readStateForTest(t, rt.state.path)["dev"]
 		if e == nil || e.Labels[api.LabelRunID] != "run-a" || e.Stopped {
 			t.Errorf("file entry = %+v, want run A's live entry", e)
+		}
+	})
+
+	t.Run("state write fails: own sandbox deleted", func(t *testing.T) {
+		rt, log := newFenceSandboxRuntime(t, 0)
+		corrupt := []byte(`{"dev": `)
+		setAfterLaunchHook(t, func(string) {
+			// The state file becomes unreadable between the held check and
+			// the record, so the put fails with a read error.
+			if err := os.WriteFile(rt.state.path, corrupt, 0600); err != nil {
+				t.Errorf("corrupt state file: %v", err)
+			}
+		})
+		_, err := rt.Run(context.Background(), fenceRunConfig(t, "run-a"))
+		if err == nil || errors.Is(err, ErrRunConflict) || errors.Is(err, errStateChanged) {
+			t.Fatalf("Run A = %v, want a state read error", err)
+		}
+		if calls := sandboxCalls(t, log); !strings.Contains(calls, "delete") {
+			t.Errorf("Run A left its unrecorded sandbox running (no delete); calls:\n%s", calls)
+		}
+		if got, _ := os.ReadFile(rt.state.path); !bytes.Equal(got, corrupt) {
+			t.Errorf("corrupt state file overwritten: %q", got)
 		}
 	})
 

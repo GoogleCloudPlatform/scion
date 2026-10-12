@@ -192,6 +192,14 @@ var errStateChanged = errors.New("sandbox state entry changed")
 // is not fenced (ptone/scion#3951).
 var sandboxStateFileLocks sync.Map // state path -> *sync.Mutex
 
+// logUnreadableSandboxState logs, at ERROR, a state file that cannot be
+// read. Every Run and Delete fails closed until it is fixed by hand.
+func logUnreadableSandboxState(path string, err error) {
+	runtimeLog().Error("sandbox state file is unreadable; every cloudrun-sandbox start and delete fails until it is fixed: "+
+		"inspect it, then move it aside (its entries are then forgotten)",
+		"path", path, "error", err)
+}
+
 // lockStateFile takes the file mutex for path and returns its unlock.
 func lockStateFile(path string) func() {
 	v, _ := sandboxStateFileLocks.LoadOrStore(path, &sync.Mutex{})
@@ -224,7 +232,9 @@ func readSandboxStateFile(path string) (map[string]*sandboxStateEntry, error) {
 
 // writeSandboxStateFile atomically replaces the state file at path: it
 // writes a unique temporary file in the same directory (0600, audit M1)
-// and renames it over path (audit M2).
+// and renames it over path (audit M2). There is no fsync, as before (the
+// default path is under /tmp). A crash between the create and the rename
+// leaves a "<name>.tmp-*" file behind; it is never read.
 func writeSandboxStateFile(path string, entries map[string]*sandboxStateEntry) error {
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
@@ -413,7 +423,7 @@ func (s *sandboxStateStore) load() {
 	entries, err := readSandboxStateFile(s.path)
 	unlock()
 	if err != nil {
-		runtimeLog().Warn("sandbox state store: failed to load", "path", s.path, "error", err)
+		logUnreadableSandboxState(s.path, err)
 		return
 	}
 	s.mu.Lock()
@@ -1270,34 +1280,67 @@ func sandboxHeldByOtherRun(entry *sandboxStateEntry, runID string) string {
 // re-applied: if the key is now held by another run's live entry, recordRun
 // returns ErrRunConflict and never deletes by name; otherwise it retries
 // the put once against the re-read nonce.
+//
+// A sandbox with no state entry is untracked: reconcile, List and a
+// run-scoped Delete all work from entries, and the CLI has no list, so
+// only a by-name delete removes it. When the state cannot be read or
+// written at all (not a nonce mismatch), the held check already passed
+// under the name lock, so the sandbox named slug is the one this Run
+// launched: it is deleted by name, best effort, as the dead-on-arrival
+// cleanup does. After ErrRunConflict or a second mismatch the key holds
+// an entry this Run did not write, so nothing is deleted and the sandbox
+// is left untracked (logged at WARN).
 func (r *CloudRunSandboxRuntime) recordRun(slug, runID string, observed sandboxNonce, entry *sandboxStateEntry) (sandboxNonce, error) {
 	nonce, err := r.state.casPut(slug, observed, entry)
 	if err == nil {
 		return nonce, nil
 	}
 	if !errors.Is(err, errStateChanged) {
-		runtimeLog().Warn("cloudrun-sandbox: could not record the started sandbox; it may be untracked until reconcile",
-			"sandbox", slug, "run_id", runID, "error", err)
-		return nonceAbsent, fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, err)
+		return nonceAbsent, r.cleanupUnrecordedRun(slug, runID, err)
 	}
-	cur, curNonce, err := r.state.diskEntry(slug)
-	if err != nil {
-		runtimeLog().Warn("cloudrun-sandbox: could not record the started sandbox; it may be untracked until reconcile",
-			"sandbox", slug, "run_id", runID, "error", err)
-		return nonceAbsent, fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, err)
+	cur, curNonce, readErr := r.state.diskEntry(slug)
+	if readErr != nil {
+		return nonceAbsent, r.cleanupUnrecordedRun(slug, runID, readErr)
 	}
 	if other := sandboxHeldByOtherRun(cur, runID); other != "" {
-		runtimeLog().Warn("cloudrun-sandbox: another run's sandbox took the name during this start; this start's sandbox may be untracked until reconcile",
+		runtimeLog().Warn("cloudrun-sandbox: another run's sandbox took the name during this start; "+
+			"this start's sandbox is live but untracked (no state entry): remove it with a by-name delete (sandbox delete --force <name>)",
 			"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
 		return nonceAbsent, fmt.Errorf("cloudrun-sandbox: sandbox %s belongs to run %q, not %q: %w", slug, other, runID, ErrRunConflict)
 	}
 	nonce, err = r.state.casPut(slug, curNonce, entry)
-	if err != nil {
-		runtimeLog().Warn("cloudrun-sandbox: could not record the started sandbox; it may be untracked until reconcile",
+	switch {
+	case err == nil:
+		return nonce, nil
+	case errors.Is(err, errStateChanged):
+		runtimeLog().Warn("cloudrun-sandbox: the sandbox's state entry changed again during this start; "+
+			"this start's sandbox is live but untracked (no state entry): remove it with a by-name delete (sandbox delete --force <name>)",
 			"sandbox", slug, "run_id", runID, "error", err)
 		return nonceAbsent, fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, err)
+	default:
+		return nonceAbsent, r.cleanupUnrecordedRun(slug, runID, err)
 	}
-	return nonce, nil
+}
+
+// cleanupUnrecordedRun handles a launched sandbox whose state entry could
+// not be read or written (cause): it deletes the sandbox by name, best
+// effort, with a fresh 10 s context, and returns the record error. The
+// caller holds the name lock and has passed the held check, so the
+// sandbox named slug is the one its Run launched.
+func (r *CloudRunSandboxRuntime) cleanupUnrecordedRun(slug, runID string, cause error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	out, err := runSimpleCommand(cleanupCtx, r.bin, "delete", "--force", slug)
+	cancel()
+	if err != nil {
+		runtimeLog().Warn("cloudrun-sandbox: could not record the started sandbox, and deleting it failed; "+
+			"it is live but untracked (no state entry): remove it with a by-name delete (sandbox delete --force <name>)",
+			"sandbox", slug, "run_id", runID, "error", cause, "delete_error", err,
+			"delete_output", sandboxDeleteOutputForLog(out))
+	} else {
+		runtimeLog().Warn("cloudrun-sandbox: could not record the started sandbox; deleted it",
+			"sandbox", slug, "run_id", runID, "error", cause)
+	}
+	return fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, cause)
 }
 
 // sandboxAfterLaunchHook, if set, runs after `sandbox run` returns and
@@ -1306,10 +1349,6 @@ func (r *CloudRunSandboxRuntime) recordRun(slug, runID string, observed sandboxN
 var sandboxAfterLaunchHook func(name string)
 
 func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
-	// Fold resolved secrets into cfg.Env before anything is created and
-	// before envFor reads it, so they reach the sandbox as --env values and
-	// are covered by the error-output redaction (externalEnvValues reads
-	// cfg.Env).
 	slug := sanitizeSandboxName(cfg.Name)
 	runID := cfg.Labels[api.LabelRunID]
 
@@ -1322,6 +1361,10 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	}
 	defer unlock()
 
+	// Fold resolved secrets into cfg.Env before anything is created and
+	// before envFor reads it, so they reach the sandbox as --env values and
+	// are covered by the error-output redaction (externalEnvValues reads
+	// cfg.Env).
 	secretKeys, err := applyResolvedSecretsToEnv(&cfg, sandboxEnvLimit, sandboxRuntimeEnvKeys...)
 	if err != nil {
 		return "", fmt.Errorf("cloudrun-sandbox: %w", err)
@@ -1333,6 +1376,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// anything is created.
 	current, observed, err := r.state.diskEntry(slug)
 	if err != nil {
+		logUnreadableSandboxState(r.state.path, err)
 		return "", fmt.Errorf("cloudrun-sandbox: %w", err)
 	}
 
@@ -1634,6 +1678,7 @@ func (r *CloudRunSandboxRuntime) Delete(ctx context.Context, ref RunRef) error {
 	// The state file, not this instance's cache, is authoritative.
 	entry, nonce, err := r.state.diskEntry(id)
 	if err != nil {
+		logUnreadableSandboxState(r.state.path, err)
 		return fmt.Errorf("cloudrun-sandbox: %w", err)
 	}
 	if proceed, err := sandboxRunCheck(ref, entry); !proceed {
@@ -1739,6 +1784,12 @@ func (r *CloudRunSandboxRuntime) removeAfterDelete(id string, obs sandboxObserve
 		return
 	}
 	if err := r.state.casRemove(id, curNonce); err != nil {
+		if errors.Is(err, errStateChanged) {
+			// Benign: e.g. another instance's reconcile removed it first.
+			runtimeLog().Info("cloudrun-sandbox: state entry changed again during the delete; leaving it",
+				"sandbox", id, "error", err)
+			return
+		}
 		runtimeLog().Warn("cloudrun-sandbox: failed to remove the deleted sandbox's state entry",
 			"sandbox", id, "error", err)
 	}
@@ -2068,10 +2119,14 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string, 
 		}
 	}
 
-	// Clean up the cancel function from the map.
-	r.watchMu.Lock()
-	delete(r.watchCancels, name)
-	r.watchMu.Unlock()
+	// Clean up the cancel function from the map, unless the entry changed
+	// since this watcher started: the map may then hold a newer run's
+	// cancel for the name, which must stay.
+	if !errors.Is(markErr, errStateChanged) {
+		r.watchMu.Lock()
+		delete(r.watchCancels, name)
+		r.watchMu.Unlock()
+	}
 }
 
 // -----------------------------------------------------------------------
