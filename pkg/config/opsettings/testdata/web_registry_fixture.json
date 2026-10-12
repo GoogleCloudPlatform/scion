@@ -148,6 +148,7 @@
     "server.hub.hub_id",
     "server.hub.gcp_project_id",
     "server.hub.class",
+    "server.hub.test_identities",
     "server.log_level",
     "server.log_format",
     "server.hub.cors",

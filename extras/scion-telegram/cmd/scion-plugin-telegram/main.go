@@ -94,7 +94,7 @@ func main() {
 	fmt.Println("  DATABASE_URL                Postgres connection URL (required)")
 	fmt.Println("  TELEGRAM_BOT_TOKEN          Telegram bot token (required)")
 	fmt.Println("  TELEGRAM_WEBHOOK_URL        Public webhook URL (required)")
-	fmt.Println("  TELEGRAM_WEBHOOK_SECRET     Secret token for webhook validation")
+	fmt.Println("  TELEGRAM_WEBHOOK_SECRET     Secret token for webhook validation (required)")
 	fmt.Println("  TELEGRAM_WEBHOOK_LISTEN     Listen address for webhook (default :9094)")
 	fmt.Println("  TELEGRAM_HUB_URL            Hub API URL")
 	fmt.Println("  TELEGRAM_HMAC_KEY           HMAC key for hub auth")
