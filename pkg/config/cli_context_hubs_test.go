@@ -67,7 +67,11 @@ func TestCLIContextAddHub_NameValidation(t *testing.T) {
 }
 
 func TestCLIContextAddHub_URLValidation(t *testing.T) {
-	for _, u := range []string{"", "hub.example.com", "ftp://hub.example.com", "https://", "prod"} {
+	for _, u := range []string{
+		"", "hub.example.com", "ftp://hub.example.com", "https://", "prod",
+		"https://user:pw@hub.example.com", "https://user@hub.example.com",
+		"https://hub.example.com/?token=x", "https://hub.example.com?", "https://hub.example.com/#frag", "https://hub.example.com#",
+	} {
 		c := newCLIContext()
 		err := c.AddHub("prod", u)
 		if err == nil || !strings.Contains(err.Error(), "invalid hub URL") {
@@ -213,9 +217,9 @@ func importNamer(endpoint string) string {
 	return DeriveHubName(endpoint)
 }
 
-// The global hub.endpoint becomes a hub entry and the current hub, the
-// transport is copied onto it, the import is written once and recorded,
-// and the settings file is not changed.
+// The global hub.endpoint becomes a hub entry, but not the current hub;
+// the transport is copied onto it, the import is written once and
+// recorded, and the settings file is not changed.
 func TestLoadCLIContextImported_ImportsGlobalEndpoint(t *testing.T) {
 	ctxPath := cliContextTestHome(t)
 	settings := "hub:\n  endpoint: https://Hub.Example.com/\n  transport:\n    mode: iap\n    audience: aud-1\n"
@@ -225,8 +229,11 @@ func TestLoadCLIContextImported_ImportsGlobalEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.CurrentHub != "hub" || c.Hubs["hub"] == nil || c.Hubs["hub"].Endpoint != "https://hub.example.com" {
+	if c.Hubs["hub"] == nil || c.Hubs["hub"].Endpoint != "https://hub.example.com" {
 		t.Fatalf("imported context = %+v", c)
+	}
+	if c.CurrentHub != "" {
+		t.Errorf("current hub = %q, want none: the import never selects a hub", c.CurrentHub)
 	}
 	want := &HubTransportConfig{Mode: "iap", Audience: "aud-1"}
 	if !reflect.DeepEqual(c.Hubs["hub"].Transport, want) {
@@ -241,7 +248,7 @@ func TestLoadCLIContextImported_ImportsGlobalEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if onDisk.CurrentHub != "hub" || !onDisk.GlobalImported() || onDisk.Hubs["hub"].Transport == nil {
+	if onDisk.CurrentHub != "" || !onDisk.GlobalImported() || onDisk.Hubs["hub"] == nil || onDisk.Hubs["hub"].Transport == nil {
 		t.Fatalf("context.yaml = %+v", onDisk)
 	}
 	if got := readFileString(t, settingsPath); got != settings {
@@ -249,15 +256,16 @@ func TestLoadCLIContextImported_ImportsGlobalEndpoint(t *testing.T) {
 	}
 
 	// Once: a later change to the global endpoint is not imported again,
-	// and the file is not rewritten.
+	// and the file is not rewritten. With no current hub, the CLI keeps
+	// following the global hub.endpoint itself (tested in cmd).
 	before := readFileString(t, ctxPath)
 	writeGlobalSettingsFile(t, "hub:\n  endpoint: https://other.example.com\n")
 	c, err = LoadCLIContextImported(importNamer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Hubs) != 1 || c.CurrentHub != "hub" {
-		t.Errorf("second load re-imported: %+v", c.Hubs)
+	if len(c.Hubs) != 1 || c.CurrentHub != "" {
+		t.Errorf("second load re-imported or selected: %+v, current %q", c.Hubs, c.CurrentHub)
 	}
 	if got := readFileString(t, ctxPath); got != before {
 		t.Errorf("second load rewrote context.yaml:\n%s", got)
@@ -271,7 +279,7 @@ func TestLoadCLIContextImported_LocalName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.CurrentHub != "local" || c.Hubs["local"].Endpoint != "http://127.0.0.1:8080" || c.Hubs["local"].Transport != nil {
+	if c.CurrentHub != "" || c.Hubs["local"] == nil || c.Hubs["local"].Endpoint != "http://127.0.0.1:8080" || c.Hubs["local"].Transport != nil {
 		t.Errorf("imported context = %+v", c.Hubs)
 	}
 }
@@ -309,7 +317,8 @@ func TestLoadCLIContextImported_IgnoresEnv(t *testing.T) {
 }
 
 // An existing current hub stays current; a name collision is de-duplicated;
-// an entry that already has the endpoint is reused and keeps its transport.
+// an entry that already has the endpoint is reused, keeps its transport and
+// is not selected.
 func TestLoadCLIContextImported_ExistingEntries(t *testing.T) {
 	t.Run("collision", func(t *testing.T) {
 		cliContextTestHome(t)
@@ -347,7 +356,7 @@ func TestLoadCLIContextImported_ExistingEntries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(c.Hubs) != 1 || c.CurrentHub != "prod" || c.Hubs["prod"].Transport.Mode != "cloudrun_invoker" {
+		if len(c.Hubs) != 1 || c.CurrentHub != "" || c.Hubs["prod"].Transport.Mode != "cloudrun_invoker" {
 			t.Errorf("hubs = %+v, current %q", c.Hubs, c.CurrentHub)
 		}
 	})
@@ -403,7 +412,7 @@ func TestLoadCLIContextImported_SaveFailureKeepsView(t *testing.T) {
 	if !errors.Is(err, ErrCLIContextImport) {
 		t.Fatalf("err = %v, want ErrCLIContextImport", err)
 	}
-	if c.CurrentHub != "hub" || c.Hubs["hub"] == nil {
+	if c.Hubs["hub"] == nil || c.CurrentHub != "" {
 		t.Errorf("context = %+v, want the imported view", c)
 	}
 }

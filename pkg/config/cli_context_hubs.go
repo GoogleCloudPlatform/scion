@@ -51,10 +51,12 @@ func ValidateHubName(name string) error {
 }
 
 // ValidateHubURL returns an error when endpoint is not an http or https URL
-// with a host.
+// with a host. User info, a query and a fragment are refused too: the hub
+// list holds no credentials, and a hub URL needs neither.
 func ValidateHubURL(endpoint string) error {
 	u, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(endpoint, "#") {
 		return fmt.Errorf("invalid hub URL %q: use an http:// or https:// URL", endpoint)
 	}
 	return nil
@@ -164,14 +166,15 @@ func (c *CLIContext) GlobalImported() bool {
 
 // ImportGlobalHub records the global settings' hub endpoint as a hub entry
 // (named baseName, de-duplicated, unless an entry already has that
-// endpoint), makes it the current hub when none is set, copies transport
-// onto the entry when the entry has none, and records the import time. It
-// returns the entry's name.
+// endpoint), copies transport onto the entry when the entry has none, and
+// records the import time. It returns the entry's name.
+//
+// It does not make the entry the current hub. While the CLI still reads
+// hub.endpoint from settings, a user who never selected a hub keeps
+// following the global hub.endpoint outside projects, including later
+// changes to it. Only an explicit selection sets the current hub.
 func (c *CLIContext) ImportGlobalHub(endpoint string, transport *HubTransportConfig, baseName string, now time.Time) string {
 	name, _ := c.EnsureHub(endpoint, baseName)
-	if c.CurrentHubEntry() == nil {
-		c.CurrentHub = name
-	}
 	if h := c.Hubs[name]; transport != nil && h.Transport == nil && (transport.Mode != "" || transport.Audience != "") {
 		t := *transport
 		h.Transport = &t
@@ -202,8 +205,9 @@ var globalHubSettings = func() (string, *HubTransportConfig) {
 // global settings' hub.endpoint (and hub.transport) into the hub list. The
 // import runs when it has not run before and the global settings file has
 // an endpoint; it is written under the lock, once. baseName names the new
-// entry (callers name the local workstation hub "local"). No settings file
-// is changed.
+// entry (callers name the local workstation hub "local"). The import does
+// not set the current hub (see ImportGlobalHub). No settings file is
+// changed.
 //
 // A file that cannot be read returns the same error as LoadCLIContext, and
 // a file written by a newer version is returned without the import. When
