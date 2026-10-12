@@ -237,8 +237,10 @@ What `verify-export` checks, independently of the rendering:
 - the alias file, the edited source files and the target files are exactly
   what a fresh `export` on the before tree writes (no hand edits).
 
-Then `make hubshard`, since deleted helper files leave stale
-`assignment.txt` entries.
+No shard bookkeeping follows an export: shard tags are no longer
+committed (GCP#3364). CI generates them in an overlay on every run, so
+deleted helper files and the new alias file are picked up automatically;
+`make hubshard-parity` checks the result.
 
 A hand-written comment fix on top of a generated export (for example doc
 comments that still use the old names) goes in its own commit, and
