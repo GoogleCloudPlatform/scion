@@ -24,7 +24,8 @@ Terraform's control.
 | `cloudsql-database` | the hub's database, user and password |
 | `agent-runtime-k8s` | the agent namespace `<hub>`, the agent KSA's Workload Identity binding, and the NFS PV/PVC. With `create_hub_rbac = false`, the chart owns the hub's RBAC instead |
 | `hub-lb` | global IP (`prevent_destroy`), managed cert, HTTPS proxy and forwarding rule, HTTP->HTTPS redirect, health check (`/readyz` on 8080), health-check firewall rule (destination: the pod range only), backend service (IAP, Google-managed OAuth client), and IAP accessor grants |
-| `hub-gke` | namespace `<hub>-system`, the NEG Service, the session secret, the artifacts bucket and the `helm_release` |
+| `hub-gke` | namespace `<hub>-system`, the NEG Service, the session secret, the artifacts bucket and the `helm_release` (which mounts this hub's NFS export in the hub pod; see "Workspace storage") |
+| `hub-test-runner` | only with `test_runner.enabled` (off by default): service accounts `<hub>-uat` and `<hub>-issuer`, token-creator grants for the impersonators, IAP access for `<hub>-uat` on this hub's backend service, and optional alert objects. See "Test hubs (optional)" |
 
 **Front-door contract.** `hub-gke` takes exactly two values from the front
 door: `public_url` and `iap_audience`. It references no other `hub-lb`
@@ -213,11 +214,42 @@ switch to a two-phase apply (NEG Service first, then everything else).
   hub GSA. `hub-identity` grants that one KSA `roles/iam.workloadIdentityUser`
   on the hub GSA. The hub reaches Secret Manager (`gcpsm`), Cloud SQL (through
   the proxy sidecar) and GCS as the hub GSA.
+- The proxy connects over the instance's private IP. If its log says
+  "instance does not have IP of type PUBLIC", `cloudsql.privateIp` isn't true.
 - The release depends on those grants existing (`boot_prerequisites`), but IAM
   takes time to propagate. If the first pod starts before it has, expect
   restarts until it settles. There is no sleep for it.
 - The chart renders its own Role/RoleBinding in the agent namespace `<hub>` for
   its KSA, so `agent-runtime-k8s` runs with `create_hub_rbac = false`.
+
+## Workspace storage
+
+- `hub-gke` sets the chart's `workspaceStorage.nfs` value. From that one value
+  the chart renders settings.yaml `server.workspace_storage` (backend `nfs`)
+  and mounts the export in the hub pod at `<mount_root>/<hub_name>`
+  (`/mnt/scion-nfs/<hub>` by default), so the settings and the mount cannot
+  drift apart.
+- The share is the one `agent-runtime-k8s` builds: the Filestore server from
+  `shared-lookup`, the export `<share_path>/<hub>`, and the claim `<hub>-nfs`
+  in the agent namespace `<hub>`. The share ID is the hub name. The plan fails
+  if the server is empty or the export is not an absolute path (`hub-gke`'s
+  `nfs` variable validations; an empty server means the shared Filestore
+  instance reported no IP, so check `shared_prefix`), or if the share ID,
+  export and claim disagree with what `agent-runtime-k8s` derives
+  (preconditions on the `nfs_workspace` output).
+- With backend `nfs`, the hub's `/readyz` returns 503 until
+  `<mount_root>/<hub>` exists in the hub container. The load balancer's health
+  check and the chart's probes use `/readyz`, so a hub whose mount fails never
+  becomes ready. If the pod stays unready, check the pod's events for a mount
+  error and the `/readyz` response for its reason.
+- `nfs_uid`/`nfs_gid` set both the owner of the export (the
+  `agent-runtime-k8s` init Job chowns it) and the hub's
+  `hub.securityContext.runAsUser`/`runAsGroup`, which the chart also renders as
+  the share's uid/gid. They come from one place because the hub writes
+  workspaces that agents later read. The hub-gke image assumes 1000:1000.
+- If agent create times out and a `scion-shared-*` claim in `<hub>` shows
+  `ProvisioningFailed`, the hub isn't getting `workspace_storage`: check
+  `chart_values.workspaceStorage.nfs` and the rendered settings.yaml.
 
 ## Rotating the DB password
 
@@ -245,6 +277,48 @@ accepted because Autopilot offers no tighter scope without manual steps.
 A single shared-infra rule, replacing the per-hub rules, is tracked in
 ptone/scion#3519.
 
+## Test hubs (optional)
+
+Two independent settings, both off by default. With defaults, neither adds a
+resource or changes the chart values.
+
+**`test_identities_enabled`** sets the chart's `hub.testIdentities.enabled`,
+which lets the hub issue test identities. When false (the default), the value
+is left out of the chart values and the chart's own default (false) applies.
+This is unrelated to test login, which the chart does not offer.
+
+**`test_runner`** creates test-runner identities through
+`modules/hub-test-runner`, so an agent on another hub can run user-surface
+tests against this hub using only its own assigned service account:
+
+```hcl
+test_runner = {
+  enabled                     = true
+  impersonators               = ["serviceAccount:<dedicated-runner>@<project>.iam.gserviceaccount.com"]
+  alert_notification_channels = []   # optional
+}
+```
+
+- `impersonators` must be non-empty when enabled, and every entry must be a
+  `serviceAccount:` member with a lowercase email. `group:` and `user:` are
+  rejected. This validation lives only in `modules/hub-test-runner`.
+- The plan fails unless the project records `DATA_READ` audit logs for
+  `iamcredentials.googleapis.com` (or `allServices`) without exempting an
+  impersonator in either config. Apply
+  `configurations/shared-infra` with `iamcredentials_data_access_logs = true`
+  first.
+- The module passes this hub's backend service name from `hub-lb` at the root.
+  `modules/hub-gke` itself still takes only the front-door contract.
+- Outputs `test_runner_uat_email`, `test_runner_uat_unique_id`,
+  `test_runner_issuer_email` and `test_runner_issuer_unique_id` are null while
+  disabled.
+
+Read `../../modules/hub-test-runner/README.md` before enabling it: the
+impersonating service account must be dedicated and assigned only to the
+testing agent (the module does not enforce this), logs on this side
+attribute calls only to that account, and the audit-log check runs only at
+plan time.
+
 ## Outputs
 
 | Output | Meaning |
@@ -257,6 +331,7 @@ ptone/scion#3519.
 | `hub_image` | `<repo>/scion-hub-gke@<digest>` |
 | `chart_values` | every non-secret value handed to the chart |
 | `neg_zones` | zones the NEGs are created in and read from (the cluster's `node_locations`) |
+| `test_runner_uat_email`, `test_runner_uat_unique_id`, `test_runner_issuer_email`, `test_runner_issuer_unique_id` | the test-runner accounts; null unless `test_runner.enabled` |
 
 ## Destroy
 
@@ -279,5 +354,9 @@ The tests run with mock providers and need no credentials. They prove the root
 composes and plans, the front-door contract, the LB's timeout and health check,
 the digest pin, `auth=password`, `create_hub_rbac = false`, both
 first-install states, the NEG zones (from `node_locations`) and the GKE version
-check, and the firewall's pod-range destination. They cannot prove the APIs accept the resources, the NEG
-timing, or that the hub boots. Those are live checks.
+check, the firewall's pod-range destination, that the test-hub settings add
+nothing by default, the `test_runner` module wiring and
+pass-through outputs, and the `hub.testIdentities.enabled` chart value (the
+`test_runner.impersonators` validations are tested in the module). They
+cannot prove the APIs accept the resources, the NEG timing, or that the hub
+boots. Those are live checks.

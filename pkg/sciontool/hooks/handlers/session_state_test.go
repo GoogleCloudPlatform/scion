@@ -67,6 +67,7 @@ func toolEvent(sessionID, tool string) *hooks.Event {
 }
 
 func TestFileSessionState_CarriesCountsAcrossHandlers(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks") // model-end events carry the usage
 	store := NewFileSessionState(t.TempDir())
 
@@ -108,6 +109,7 @@ func TestFileSessionState_CarriesCountsAcrossHandlers(t *testing.T) {
 // Parallel hook processes (for example PostToolUse for parallel tool calls)
 // must serialize on the lock and lose no counts.
 func TestFileSessionState_ConcurrentRunsLoseNoCounts(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
 
@@ -134,6 +136,7 @@ func TestFileSessionState_ConcurrentRunsLoseNoCounts(t *testing.T) {
 }
 
 func TestFileSessionState_UnusableFileStartsFresh(t *testing.T) {
+	scrubTelemetryEnv(t)
 	for name, content := range map[string]string{
 		"corrupt":       "{not json",
 		"wrong version": `{"version":99,"aggregator":{"session_id":"old","open":true,"turn_count":7}}`,
@@ -161,6 +164,7 @@ func TestFileSessionState_UnusableFileStartsFresh(t *testing.T) {
 
 // A session-start with a new ID replaces a stale, unreported session.
 func TestFileSessionState_NewSessionStartResetsStaleState(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "old"))
 	hookRun(t, store, toolEvent("old", "Bash"))
@@ -215,6 +219,7 @@ func TestFileSessionState_LockUnavailableStillApplies(t *testing.T) {
 // merged into the next session when that session's session-start is also
 // missed: any event with a different session ID discards the stale state.
 func TestFileSessionState_DifferentSessionIDDiscardsStaleStateWithoutStart(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "old"))
 	hookRun(t, store, toolEvent("old", "Bash"))
@@ -237,6 +242,7 @@ func TestFileSessionState_DifferentSessionIDDiscardsStaleStateWithoutStart(t *te
 // Events without a session ID cannot be attributed elsewhere, so they keep
 // counting into the persisted session.
 func TestFileSessionState_EventWithoutSessionIDKeepsState(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
 	hookRun(t, store, toolEvent("", "Bash"))
@@ -249,6 +255,7 @@ func TestFileSessionState_EventWithoutSessionIDKeepsState(t *testing.T) {
 // If the lock cannot be taken on session-end, the summary would be built
 // without the session's persisted counts, so it is not reported.
 func TestFileSessionState_LockUnavailableOnSessionEndSkipsReport(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
 	hookRun(t, store, toolEvent("s1", "Bash"))
@@ -290,6 +297,7 @@ func TestFileSessionState_LockWaitDefault(t *testing.T) {
 // A repeated session-start with the same ID (Claude on /compact or resume)
 // keeps the session's counts across hook processes.
 func TestFileSessionState_SameIDSessionStartKeepsCounts(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
 	hookRun(t, store, toolEvent("s1", "Bash"))

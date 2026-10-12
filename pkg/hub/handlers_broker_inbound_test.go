@@ -792,8 +792,8 @@ func TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState(t *testing.T
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	srv.SetDispatcher(&brokerMockDispatcher{})

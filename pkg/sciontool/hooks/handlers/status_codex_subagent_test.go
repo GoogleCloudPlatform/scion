@@ -9,13 +9,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -34,10 +34,7 @@ const (
 // staged into codex agents, so these tests follow its event mapping.
 func loadCodexDialect(t *testing.T) *dialects.MappingDialect {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	require.True(t, ok, "runtime.Caller failed")
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	specPath := filepath.Join(root, "harnesses", "codex", "dialect.yaml")
+	specPath := testutil.HarnessDialectPath(t, "codex")
 	md, err := dialects.LoadMappingDialect(specPath)
 	require.NoError(t, err, "LoadMappingDialect(%s)", specPath)
 	require.Equal(t, "codex", md.Name())

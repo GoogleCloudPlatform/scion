@@ -38,11 +38,14 @@ var hubUserLevelCommands = map[string]bool{
 // hubOnlyCommands are top-level commands that need only the hub endpoint,
 // the credential and an agent reference: they never resolve, create,
 // register or sync a local project, even when --project names one. One
-// command per line.
+// command per line. (expose and unexpose act as the calling agent, with
+// its own hub identity and no agent reference.)
 var hubOnlyCommands = map[string]bool{
 	"tunnel":     true,
 	"ssh":        true,
 	"ssh-config": true,
+	"expose":     true,
+	"unexpose":   true,
 }
 
 // brokerMachineLevelCommands are "scion runtime-broker" subcommands that act

@@ -113,7 +113,7 @@ const PLATFORM_SECRETS: Record<string, PlatformSecretDef[]> = {
     {
       key: 'webhook_secret',
       label: 'Webhook Secret',
-      description: 'Secret for webhook verification (webhook mode only)',
+      description: 'Secret for webhook verification (required in webhook mode)',
     },
   ],
   discord: [
@@ -2010,6 +2010,9 @@ export class ScionPageAdminIntegrations extends LitElement {
     // For A2A, the api_key secret is only relevant when auth_scheme is apiKey or bearer.
     const authScheme = platform === 'a2a' ? (this.editedSettings['auth_scheme'] ?? 'none') : '';
     const apiKeyRelevant = authScheme === 'apiKey' || authScheme === 'bearer';
+    // The Telegram plugin refuses to start in webhook mode without webhook_secret.
+    const telegramWebhook =
+      platform === 'telegram' && this.editedSettings['inbound_mode'] === 'webhook';
 
     return html`
       <div class="section">
@@ -2019,9 +2022,12 @@ export class ScionPageAdminIntegrations extends LitElement {
           if (platform === 'a2a' && key === 'api_key' && !apiKeyRelevant) return nothing;
           const def = secretDefMap.get(key);
           const label = def?.label ?? key;
-          // For A2A, mark api_key as required when the scheme needs it.
-          const isRequired =
-            platform === 'a2a' && key === 'api_key' ? apiKeyRelevant : (def?.required ?? false);
+          // Some secrets are required only in the mode that uses them: A2A
+          // api_key when the scheme needs it, Telegram webhook_secret in
+          // webhook mode.
+          let isRequired = def?.required ?? false;
+          if (platform === 'a2a' && key === 'api_key') isRequired = apiKeyRelevant;
+          if (platform === 'telegram' && key === 'webhook_secret') isRequired = telegramWebhook;
           const isConfigured = d.has_secrets?.[key];
           return html`
             <div class="secret-row">

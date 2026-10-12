@@ -433,3 +433,47 @@ func TestLoadCLIContextImported_InvalidEndpointNotImported(t *testing.T) {
 		t.Errorf("context.yaml was created: %v", err)
 	}
 }
+
+// Hand-edited files: a hub key with no entry is refused as corrupt (so no
+// caller ever sees a nil hub entry), while a current hub or a known project
+// naming a hub that is not in the list loads and resolves to no entry.
+func TestCLIContextHandEditedHubReferences(t *testing.T) {
+	t.Run("hub with no entry is corrupt", func(t *testing.T) {
+		path := cliContextTestHome(t)
+		writeCLIContextFile(t, path, "version: 1\nhubs:\n  prod:\n")
+		_, err := LoadCLIContext()
+		if !errors.Is(err, ErrCLIContextCorrupt) || !strings.Contains(err.Error(), `hub "prod" has no entry`) {
+			t.Fatalf("err = %v, want a corrupt-file error naming the hub", err)
+		}
+		c, _ := LoadCLIContextImported(importNamer)
+		if c == nil || len(c.Hubs) != 0 {
+			t.Fatalf("context = %+v, want an empty, non-nil context", c)
+		}
+	})
+	t.Run("dangling references", func(t *testing.T) {
+		path := cliContextTestHome(t)
+		writeCLIContextFile(t, path, "version: 1\ncurrent_hub: ghost\nhubs:\n  prod: {}\nprojects:\n  - {hub: missing, id: p1, slug: foo}\n")
+		c, err := LoadCLIContext()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.CurrentHubEntry() != nil {
+			t.Errorf("current hub entry = %+v, want nil for a hub that is not in the list", c.CurrentHubEntry())
+		}
+		if name, h := c.LookupHub("ghost"); name != "" || h != nil {
+			t.Errorf("LookupHub(ghost) = %q, %+v", name, h)
+		}
+		if c.Hubs["prod"] == nil || c.Hubs["prod"].Endpoint != "" {
+			t.Errorf("prod = %+v, want an entry with no endpoint", c.Hubs["prod"])
+		}
+		if _, _, err := c.RemoveHub("missing"); err == nil {
+			t.Error("removing a hub that is not in the list must fail")
+		}
+		if err := c.RenameHub("ghost", "x"); err == nil {
+			t.Error("renaming a hub that is not in the list must fail")
+		}
+		if hub, cleared := c.ClearCurrentProject(); hub != "ghost" || cleared != nil {
+			t.Errorf("ClearCurrentProject = %q, %+v", hub, cleared)
+		}
+	})
+}

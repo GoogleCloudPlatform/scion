@@ -880,3 +880,58 @@ func TestHubURLWithUserInfoNotRegistered(t *testing.T) {
 		assert.True(t, os.IsNotExist(statErr), "nothing is written")
 	})
 }
+
+// Hand-edited context.yaml: a current hub or a known project naming a hub
+// that is not in the list, and a hub entry without an endpoint, never make a
+// command panic or silently drop --hub; a hub key with no entry makes the
+// file unreadable, which the commands report.
+func TestHubCommands_HandEditedContext(t *testing.T) {
+	t.Run("dangling references and an entry without endpoint", func(t *testing.T) {
+		setupRegistryTest(t)
+		require.NoError(t, os.MkdirAll(filepath.Dir(contextFilePath()), 0o700))
+		require.NoError(t, os.WriteFile(contextFilePath(), []byte("version: 1\ncurrent_hub: ghost\nhubs:\n  prod: {}\n  ok:\n    endpoint: "+ctxTestHub+"\nprojects:\n  - {hub: missing, id: p1, slug: foo}\n"), 0o600))
+
+		stdout, _, err := runScion(t, "hub", "list")
+		require.NoError(t, err)
+		assert.Contains(t, stdout, " ok ")
+		assert.Contains(t, stdout, " prod ")
+		assert.NotContains(t, stdout, "*", "no hub is current: current_hub names a hub that is not in the list")
+
+		stdout, _, err = runScion(t, "use")
+		require.NoError(t, err)
+		assert.Equal(t, noHubSelectedMessage+"\n", stdout)
+
+		const noEndpoint = "hub 'prod' has no endpoint; remove it with 'scion hub remove prod' and add it again with 'scion hub add prod <url>'"
+		_, _, err = runScion(t, "--hub", "prod", "use")
+		require.Error(t, err)
+		assert.Equal(t, noEndpoint, err.Error())
+		_, err = hubAuthURLFlag("prod")
+		require.Error(t, err)
+		assert.Equal(t, noEndpoint, err.Error())
+
+		_, _, err = runScion(t, "hub", "remove", "ghost")
+		require.Error(t, err)
+		assert.Equal(t, "unknown hub 'ghost'; registered hubs: ok, prod", err.Error())
+
+		_, _, err = runScion(t, "hub", "remove", "prod")
+		require.NoError(t, err)
+		_, _, err = runScion(t, "use", "--hub", "ok")
+		require.NoError(t, err)
+		assert.Equal(t, "ok", readTestContext(t).CurrentHub)
+	})
+	t.Run("hub key with no entry", func(t *testing.T) {
+		setupRegistryTest(t)
+		require.NoError(t, os.MkdirAll(filepath.Dir(contextFilePath()), 0o700))
+		require.NoError(t, os.WriteFile(contextFilePath(), []byte("version: 1\nhubs:\n  prod:\n"), 0o600))
+
+		stdout, stderr, err := runScion(t, "hub", "list")
+		require.NoError(t, err)
+		assert.Contains(t, stderr, "Warning: ignoring the current context")
+		assert.Contains(t, stderr, `hub "prod" has no entry`)
+		assert.Equal(t, "No hubs registered. Add one with 'scion hub add <name> <url>'.\n", stdout)
+
+		_, _, err = runScion(t, "--hub", "prod", "use")
+		require.ErrorIs(t, err, config.ErrCLIContextCorrupt)
+		assert.Contains(t, err.Error(), "cannot look up hub 'prod'")
+	})
+}

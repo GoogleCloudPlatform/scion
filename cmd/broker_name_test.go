@@ -424,11 +424,6 @@ func TestServerStatus_BrokerOnSettingsPort(t *testing.T) {
 	port := newFakeBrokerHealthServer(t, "healthy")
 	writeGlobalSettings(t, globalDir, "schema_version: \"1\"\nserver:\n  broker:\n    port: "+strconv.Itoa(port)+"\n")
 
-	savedJSON := serverStatusJSON
-	t.Cleanup(func() { serverStatusJSON = savedJSON })
-	serverStatusJSON = true
-	out := captureStdout(t, func() { require.NoError(t, runServerStatus(serverStatusCmd, nil)) })
-	var info serverStatusInfo
-	require.NoError(t, json.Unmarshal([]byte(out), &info), "status output: %s", out)
+	info := runServerStatusJSON(t)
 	assert.True(t, info.BrokerRunning, "broker on port %d is found", port)
 }

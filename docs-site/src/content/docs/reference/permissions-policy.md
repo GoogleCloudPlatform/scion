@@ -135,6 +135,10 @@ Permission IDs are defined in one registry, `pkg/hub/permissions/registry.go`. F
 * **Point `Enforcement` at the real check.** If several permissions go through one shared function (for example, the artifact service's `Authorize`), that function alone doesn't show that a given permission is checked. Also name the call site that passes the permission. For artifact rows, `TestArtifactPermissionsConsumedUnlessReserved` requires each non-reserved row to be used in `pkg/artifacts` or `pkg/hub` (through its `pkg/artifacts` constant or its ID as a string), and each reserved row to be unused.
 * **New agent scopes in an existing bundle are ceiling-optional.** If you add a new agent scope to an existing agent role bundle (`ScopesForRole`), list it in `ceilingOptionalRoleScopes`. The exception is a scope already within the authority of the principal that creates the agent. A ceiling-optional scope never decides whether a role fits a creator's ceiling. A mint drops the scope when the source ceiling lacks its permission. This way, a token that fit a role before the scope was added still fits it.
 
+### Last constraint admin protection
+
+The Hub refuses to suspend or delete a user when that would leave a scope with no active user holding `access_constraint.admin`, now or once scheduled constraints activate. The refusal is `409` with code `constraint_admin_lockout`; grant the permission to another user first. Only active users count as constraint admins, so a suspended user never keeps a scope administrable.
+
 ---
 
 ## Offline Authorization Recovery

@@ -142,3 +142,28 @@ func TestRemove_AllSpellings(t *testing.T) {
 		t.Error("the removed hub is still authenticated")
 	}
 }
+
+// A credentials file without hubs (missing or null) loads as an empty map:
+// Load reports not authenticated, and Store and Remove work on it.
+func TestCredentialsFileWithoutHubs(t *testing.T) {
+	for _, content := range []string{`{"version":1}`, `{"version":1,"hubs":null}`} {
+		t.Run(content, func(t *testing.T) {
+			path := useTempCredentials(t)
+			if err := os.WriteFile(path, []byte(content), FileMode); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load("https://hub.example.com"); err != ErrNotAuthenticated {
+				t.Fatalf("Load = %v, want ErrNotAuthenticated", err)
+			}
+			if err := Remove("https://hub.example.com"); err != nil {
+				t.Fatalf("Remove = %v", err)
+			}
+			if err := Store("https://hub.example.com", &TokenResponse{AccessToken: "tok", ExpiresIn: time.Hour}); err != nil {
+				t.Fatalf("Store = %v", err)
+			}
+			if got := GetAccessToken("https://Hub.example.com/"); got != "tok" {
+				t.Errorf("token = %q", got)
+			}
+		})
+	}
+}
