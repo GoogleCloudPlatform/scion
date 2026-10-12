@@ -385,7 +385,7 @@ New work for the base repo:
 | Worktree add (host, relative) | `util.CreateWorktree` | `pkg/util/git.go`, `provision.go:470` |
 | Worktree add (NFS, with reuse) | `nfsBackend.ensureWorktree` | `workspace_backend_nfs.go:318-376` |
 | Branch name from agent | `api.Slugify` / `sanitizeBranchName` | `workspace_backend_nfs.go:378-393` |
-| First-access guard | sentinel + `store.AdvisoryLocker` | `workspace_backend_nfs.go:141-268` |
+| First-access guard | sentinel + `.scion-provision.lock` file lock (`acquireProvisionLock`) | `pkg/provision/provision.go` |
 | Dual mount (`.git` + worktree) | runtime mount registration | `common.go:181-189` |
 | Worktree teardown + prune | `RemoveWorktree`/`PruneWorktreesIn`/`DeleteBranchIn` | `provision.go:35-146` |
 | In-container worktree guard | `SCION_HOST_UID` → `isGit=false` | `provision.go:303-309` |

@@ -30,7 +30,9 @@ import (
 )
 
 // testLockClassID is a per-object advisory lock class ID used only by these
-// tests. It is not a production key.
+// tests. It is not a production key. It has the same value as testLockClassID
+// in pkg/store/concurrency_test.go, whose reserved-value check fails if a
+// production key takes it.
 const testLockClassID store.AdvisoryLockKey = 0x5C10F001
 
 // On SQLite the advisory lock is a no-op that always succeeds, because the

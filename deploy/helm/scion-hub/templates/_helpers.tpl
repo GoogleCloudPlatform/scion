@@ -685,11 +685,12 @@ the mechanism was sound and only the justification was invented:
     driver this chart already renders; the workspace-share phase lands the RWX
     volume.
     Concurrency correctness becomes a live question at that point, and it is
-    answered there by Postgres advisory locks - by the hub, not by this chart:
-    the ProvisionInput.Locker field (store.AdvisoryLocker), whose doc comment
-    says pg_try_advisory_lock is "for cross-node mutual exclusion", and the
-    blocking pg_advisory_lock on store.LockSchemaMigration taken by
-    migrateStore. If a refusal is ever warranted here, it will be warranted
+    answered there by the hub and the provisioner, not by this chart: the hub
+    start claim (ClaimAgentStart), which admits one start of an agent at a
+    time across replicas; the .scion-provision.lock file lock
+    (acquireProvisionLock in pkg/provision), which serializes workspace
+    provisioning on the shared volume; and the blocking pg_advisory_lock on
+    store.LockSchemaMigration taken by migrateStore. If a refusal is ever warranted here, it will be warranted
     then, and it will need a harm found in that tree.
     CITED BY SYMBOL, NOT BY OFFSET, AND THE REASON IS THAT BOTH OFFSETS THIS
     PARAGRAPH ORIGINALLY CARRIED HAD ALREADY EXPIRED. It said provision.go
