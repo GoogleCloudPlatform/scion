@@ -16,11 +16,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auth"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -94,6 +97,11 @@ already has hub settings, or with an explicit --global=false. An existing
 hub.endpoint is never overwritten. If hub mode is off, an interactive login
 offers to enable it (in the same settings); otherwise run 'scion hub enable'.
 
+--hub-url and --hub accept a hub nickname ('scion hub list'). A hub URL
+given with either flag that is not in the hub list yet is added to it after
+a successful login, with a nickname derived from its host; it does not
+become the current hub.
+
 Example:
   scion hub auth login
   scion hub auth login --hub-url https://hub.example.com
@@ -117,14 +125,19 @@ func init() {
 	hubAuthCmd.AddCommand(hubAuthLogoutCmd)
 
 	// Flags for login command
-	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Hub server URL; takes precedence over --hub, SCION_HUB_ENDPOINT, hub.endpoint in settings and SCION_HUB_URL")
+	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Hub nickname or server URL; takes precedence over --hub, SCION_HUB_ENDPOINT, hub.endpoint in settings and SCION_HUB_URL")
 	hubAuthLoginCmd.Flags().BoolVar(&hubAuthNoBrowser, "no-browser", false, "Use device flow instead of opening a browser")
 	hubAuthLoginCmd.Flags().String("provider", "", "OAuth provider to use (google or github)")
 }
 
 func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 	// Resolve hub URL: --hub-url, --hub, SCION_HUB_ENDPOINT, settings, SCION_HUB_URL.
-	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
+	// Both flags accept a hub nickname.
+	hubURLFlag, err := hubAuthURLFlag(hubAuthHubURL)
+	if err != nil {
+		return err
+	}
+	hubURL := resolveHubAuthURL(hubURLFlag, hubEndpoint, os.Getenv, settingsHubEndpoint)
 	if hubURL == "" {
 		return fmt.Errorf("hub URL not specified, use --hub-url, --hub, SCION_HUB_ENDPOINT, hub.endpoint in settings or SCION_HUB_URL")
 	}
@@ -165,9 +178,53 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 	if err := storeTokenAndPrintResult(hubURL, tokenResp); err != nil {
 		return err
 	}
+	if loginHubURLGivenExplicitly() {
+		registerLoginHub(os.Stdout, os.Stderr, hubURL)
+	}
 	recordLoginEndpoint(cmd, hubURL)
 	return nil
 }
+
+// loginHubURLGivenExplicitly reports whether 'hub auth login' got its hub
+// as a URL in --hub-url or --hub (not as a nickname, and not from the
+// environment, settings or the current context). Only such a URL is added
+// to the hub list.
+func loginHubURLGivenExplicitly() bool {
+	if hubAuthHubURL != "" {
+		return !isHubNickname(hubAuthHubURL)
+	}
+	return hubFlagEndpoint() != "" && hubFlagName == ""
+}
+
+// registerLoginHub adds a hub entry for hubURL, after a successful login,
+// when no entry has that endpoint. The nickname is derived from the host
+// and printed. It does not change the current hub. A failure is a warning:
+// the login itself succeeded.
+func registerLoginHub(out, stderr io.Writer, hubURL string) {
+	if contextDisabled(resolveMode()) {
+		return
+	}
+	var name string
+	var created bool
+	err := config.UpdateCLIContext(func(c *config.CLIContext) error {
+		name, created = c.EnsureHub(hubURL, useHubBaseName(hubURL))
+		if !created {
+			return errLoginHubKnown
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, errLoginHubKnown):
+	case err != nil:
+		_, _ = fmt.Fprintf(stderr, "Warning: could not add %s to the hub list: %v\n", hubURL, err)
+	case created:
+		printRegisteredHub(out, name, config.NormalizeEndpoint(hubURL))
+	}
+}
+
+// errLoginHubKnown stops the context update of registerLoginHub when the
+// hub already has an entry, so the file is not rewritten.
+var errLoginHubKnown = errors.New("hub already registered")
 
 // recordLoginEndpoint makes a successful login usable by the rest of the
 // CLI. When the hub came from the current context ('scion use'; no

@@ -56,7 +56,7 @@ func TestRecordLoginEndpoint_ContextHubLeavesSettings(t *testing.T) {
 	globalFile, projectFile := setupLoginContextTest(t)
 	globalBefore, projectBefore := readFileT(t, globalFile), readFileT(t, projectFile)
 
-	resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman)
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
 	require.Equal(t, targetSourceContext, hubSource)
 	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
 	require.Equal(t, ctxTestHub, hubURL)
@@ -73,7 +73,7 @@ func TestRecordLoginEndpoint_HubURLStillPersists(t *testing.T) {
 	globalFile, _ := setupLoginContextTest(t)
 	hubAuthHubURL = "https://other.example.com"
 
-	resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman)
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
 	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
 	require.Equal(t, "https://other.example.com", hubURL)
 

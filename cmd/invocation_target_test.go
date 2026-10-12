@@ -39,7 +39,7 @@ const (
 // look like a --hub or --project flag in the next.
 func resetContextTargets() {
 	hubEndpoint, projectPath = "", ""
-	hubSource, projectSource, contextProjectID = "", "", ""
+	hubSource, projectSource, contextProjectID, hubFlagName = "", "", "", ""
 	contextWarned = false
 }
 
@@ -289,7 +289,7 @@ func TestResolveInvocationTarget(t *testing.T) {
 			if mode == "" {
 				mode = ModeHuman
 			}
-			resolveInvocationTarget(findCommand(t, tt.cmd...), mode)
+			require.NoError(t, resolveInvocationTarget(findCommand(t, tt.cmd...), mode))
 			assert.Equal(t, want.hub, hubEndpoint, "hubEndpoint")
 			assert.Equal(t, want.hubSource, hubSource, "hubSource")
 			assert.Equal(t, want.project, projectPath, "projectPath")
@@ -307,7 +307,7 @@ func writeHomeGlobalSettings(t *testing.T, content string) {
 
 func TestResolveInvocationTarget_NoContextFile(t *testing.T) {
 	setupContextTest(t)
-	resolveInvocationTarget(findCommand(t, "list"), ModeHuman)
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	assert.Empty(t, hubEndpoint)
 	assert.Empty(t, projectPath)
 	assert.Empty(t, hubSource)
@@ -317,7 +317,7 @@ func TestResolveInvocationTarget_NoContextFile(t *testing.T) {
 func TestResolveInvocationTarget_HubWithoutProject(t *testing.T) {
 	setupContextTest(t)
 	saveTestContext(t, ctxTestHub, "")
-	resolveInvocationTarget(findCommand(t, "list"), ModeHuman)
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	assert.Equal(t, ctxTestHub, hubEndpoint)
 	assert.Empty(t, projectPath)
 }
@@ -327,7 +327,7 @@ func TestResolveInvocationTarget_CorruptContextIsAWarning(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "context.yaml"), []byte("version: [1\n"), 0o600))
 	stderr := captureStderr(t, func() {
-		resolveInvocationTarget(findCommand(t, "list"), ModeHuman)
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	})
 	assert.Contains(t, stderr, "Warning: ignoring the current context")
 	assert.Empty(t, hubEndpoint)

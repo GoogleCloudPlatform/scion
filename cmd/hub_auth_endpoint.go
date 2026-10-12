@@ -34,8 +34,8 @@ import (
 // settings loading applies it as an override of hub.endpoint. After
 // --hub-url it is the order every other hub command uses (GetHubEndpoint).
 const hubAuthURLPrecedence = `The hub URL is taken from, in order:
-  1. --hub-url
-  2. the root --hub flag
+  1. --hub-url (a URL or a hub nickname)
+  2. the root --hub flag (a URL or a hub nickname)
   3. the SCION_HUB_ENDPOINT environment variable (applied as an override
      of hub.endpoint when settings are loaded)
   4. hub.endpoint in settings (the current project's, else global)
@@ -62,6 +62,27 @@ func resolveHubAuthURL(hubURLFlag, rootHubFlag string, getenv func(string) strin
 		return env
 	}
 	return getenv("SCION_HUB_URL")
+}
+
+// hubAuthURLFlag returns the hub URL a --hub-url value names: the value
+// itself for a URL, or the endpoint of the hub entry for a nickname. An
+// unknown nickname is an error that lists the registered names. The root
+// --hub flag is resolved the same way by resolveInvocationTarget;
+// --hub-url is a subcommand flag, so it is resolved here, before
+// resolveHubAuthURL.
+func hubAuthURLFlag(v string) (string, error) {
+	if !isHubNickname(v) || contextDisabled(resolveMode()) {
+		return v, nil
+	}
+	c, err := config.LoadCLIContext()
+	if err != nil {
+		return "", fmt.Errorf("cannot look up hub '%s': %w", v, err)
+	}
+	h := c.Hubs[v]
+	if h == nil {
+		return "", unknownHubError(v, c)
+	}
+	return h.Endpoint, nil
 }
 
 // settingsHubEndpoint returns hub.endpoint from the settings of the current

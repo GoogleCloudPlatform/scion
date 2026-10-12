@@ -310,11 +310,7 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	tunnelSSHHostKeyHint(cmd, tunnelSSH, endpoint, project, args[0])
-	var ts *transportauth.TransportSettings
-	if settings != nil && settings.Hub != nil && settings.Hub.Transport != nil {
-		ts = &transportauth.TransportSettings{Mode: settings.Hub.Transport.Mode, Audience: settings.Hub.Transport.Audience}
-	}
-	src, mode, err := tunnelTransportSource(ts)
+	src, mode, err := tunnelTransportSource(hubTransportSettings(settings, endpoint))
 	if err != nil {
 		return tunnelclient.Errorf(tunnelclient.ExitError, "resolving transport auth: %v", err)
 	}
