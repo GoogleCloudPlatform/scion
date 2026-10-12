@@ -29,12 +29,20 @@ import (
 // badValueSettingsYAML has valid values next to the ones each test breaks.
 const badValueSettingsYAML = `schema_version: "1"
 default_template: file-template
+profiles:
+  local:
+    runtime: docker
+    clone_depth: %s
 server:
   broker:
     broker_name: file-broker
     port: 9800
   hub:
     auto_suspend_stalled: %s
+telemetry:
+  cloud:
+    tls:
+      enabled: true
     stalled_threshold: 7m
 `
 
@@ -42,7 +50,7 @@ const badValueWarning = "value does not parse"
 
 // setupBadValueProject writes a settings.yaml under a fresh HOME, clears
 // the SCION_* variables the tests use, and captures slog output.
-func setupBadValueProject(t *testing.T, autoSuspendStalled string) (string, *bytes.Buffer) {
+func setupBadValueProject(t *testing.T, cloneDepth, autoSuspendStalled string) (string, *bytes.Buffer) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
@@ -50,11 +58,12 @@ func setupBadValueProject(t *testing.T, autoSuspendStalled string) (string, *byt
 		"SCION_DEFAULT_TEMPLATE", "SCION_CLI_AUTOHELP",
 		"SCION_SERVER_BROKER_PORT", "SCION_SERVER_BROKER_BROKER_NAME",
 		"SCION_SERVER_HUB_AUTO_SUSPEND_STALLED", "SCION_SERVER_HUB_STALLED_THRESHOLD",
+		"SCION_OTEL_INSECURE", "SCION_OTEL_SKIP_TLS_VERIFY",
 		"SCION_PROJECT", "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID",
 		"CLOUD_RUN_INSTANCE")
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
-	content := []byte(fmt.Sprintf(badValueSettingsYAML, autoSuspendStalled))
+	content := []byte(fmt.Sprintf(badValueSettingsYAML, cloneDepth, autoSuspendStalled))
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), content, 0644))
 
 	var buf bytes.Buffer
@@ -68,7 +77,7 @@ func setupBadValueProject(t *testing.T, autoSuspendStalled string) (string, *byt
 // environment and a bool from the settings file that do not parse must not
 // fail the load. Only those two fields fall back; the rest still load.
 func TestLoadVersionedSettings_BadValueFallsBackPerField(t *testing.T) {
-	projectDir, logs := setupBadValueProject(t, "maybe")
+	projectDir, logs := setupBadValueProject(t, "5", "maybe")
 	t.Setenv("SCION_SERVER_BROKER_PORT", "abc")
 
 	vs, err := LoadVersionedSettings(projectDir)
@@ -94,7 +103,7 @@ func TestLoadVersionedSettings_BadValueFallsBackPerField(t *testing.T) {
 // TestLoadVersionedSettings_BadValueRestoresEmbeddedDefault: a key that has
 // an embedded default falls back to that default, not to the zero value.
 func TestLoadVersionedSettings_BadValueRestoresEmbeddedDefault(t *testing.T) {
-	projectDir, logs := setupBadValueProject(t, "true")
+	projectDir, logs := setupBadValueProject(t, "5", "true")
 	t.Setenv("SCION_CLI_AUTOHELP", "notabool")
 
 	vs, err := LoadVersionedSettings(projectDir)
@@ -110,7 +119,7 @@ func TestLoadVersionedSettings_BadValueRestoresEmbeddedDefault(t *testing.T) {
 // TestLoadVersionedSettings_GoodValuesUnchanged guards the normal path: valid
 // settings load as before and no fallback warning is logged.
 func TestLoadVersionedSettings_GoodValuesUnchanged(t *testing.T) {
-	projectDir, logs := setupBadValueProject(t, "true")
+	projectDir, logs := setupBadValueProject(t, "5", "true")
 
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
@@ -121,5 +130,48 @@ func TestLoadVersionedSettings_GoodValuesUnchanged(t *testing.T) {
 	require.NotNil(t, vs.Server.Hub.AutoSuspendStalled)
 	assert.True(t, *vs.Server.Hub.AutoSuspendStalled)
 	assert.Equal(t, "7m", vs.Server.Hub.StalledThreshold)
+	assert.Equal(t, "5", string(vs.Profiles["local"].CloneDepth))
 	assert.NotContains(t, logs.String(), badValueWarning)
+}
+
+// TestLoadVersionedSettings_BadOtelInsecureFallsBack: a SCION_OTEL_INSECURE
+// value that is not a bool must not fail the load. The switch is ignored, so
+// telemetry.cloud.tls.enabled keeps its settings value.
+func TestLoadVersionedSettings_BadOtelInsecureFallsBack(t *testing.T) {
+	projectDir, logs := setupBadValueProject(t, "5", "true")
+	t.Setenv("SCION_OTEL_INSECURE", "sometimes")
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err, "an unparseable SCION_OTEL_INSECURE must not fail the whole load")
+
+	assert.Equal(t, "file-broker", vs.Server.Broker.BrokerName)
+	require.NotNil(t, vs.Telemetry)
+	require.NotNil(t, vs.Telemetry.Cloud)
+	require.NotNil(t, vs.Telemetry.Cloud.TLS)
+	require.NotNil(t, vs.Telemetry.Cloud.TLS.Enabled)
+	assert.True(t, *vs.Telemetry.Cloud.TLS.Enabled)
+
+	out := logs.String()
+	assert.Contains(t, out, badValueWarning)
+	assert.Contains(t, out, "SCION_OTEL_INSECURE")
+	assert.NotContains(t, out, "sometimes", "the bad value must not be logged")
+}
+
+// TestLoadVersionedSettings_BadCloneDepthFallsBack: a profiles.*.clone_depth
+// value that cannot be normalized (a list) must not drop all settings. Only
+// that field falls back to unset, which means the default depth.
+func TestLoadVersionedSettings_BadCloneDepthFallsBack(t *testing.T) {
+	projectDir, logs := setupBadValueProject(t, "[1, 2]", "true")
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err, "an unparseable clone_depth must not fail the whole load")
+
+	assert.Equal(t, "file-broker", vs.Server.Broker.BrokerName)
+	require.Contains(t, vs.Profiles, "local")
+	assert.Equal(t, "docker", vs.Profiles["local"].Runtime)
+	assert.Empty(t, vs.Profiles["local"].CloneDepth, "bad clone_depth falls back to unset")
+
+	out := logs.String()
+	assert.Contains(t, out, badValueWarning)
+	assert.Contains(t, out, "profiles.local.clone_depth")
 }

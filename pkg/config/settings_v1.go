@@ -2961,11 +2961,12 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
 	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
-		plaintext, err := strconv.ParseBool(raw)
-		if err != nil {
-			return nil, fmt.Errorf("SCION_OTEL_INSECURE: %w", err)
+		if plaintext, err := strconv.ParseBool(raw); err != nil {
+			// Keep the settings value for telemetry.cloud.tls.enabled.
+			warnUnparseableSetting("SCION_OTEL_INSECURE")
+		} else {
+			_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
 		}
-		_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
 	}
 
 	// For git projects, the project_id is stored in a project-id file inside the
@@ -3007,6 +3008,8 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 // koanf decoder is weakly typed and would turn clone_depth: true into "1";
 // normalizing first gives the settings loader the same value the schema
 // validator and the template loader see (true stays "true", 5.0 is "5").
+// A clone_depth value that cannot be normalized (a list, for example) is
+// dropped with a warning, so the profile falls back to the default depth.
 func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) error {
 	normalized := map[string]interface{}{}
 	for _, key := range k.Keys() {
@@ -3016,7 +3019,9 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 		}
 		cd, err := api.CloneDepthFromValue(k.Get(key))
 		if err != nil {
-			return fmt.Errorf("%s: %w", key, err)
+			warnUnparseableSetting(key)
+			k.Delete(key)
+			continue
 		}
 		normalized[key] = string(cd)
 	}
@@ -3025,11 +3030,10 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 			return err
 		}
 	}
-	err := k.Unmarshal("", settings)
-	if err == nil {
+	if err := k.Unmarshal("", settings); err == nil {
 		return nil
 	}
-	return unmarshalSkippingBadSettings(k, settings, err)
+	return unmarshalSkippingBadSettings(k, settings)
 }
 
 // unmarshalSkippingBadSettings handles a decode failure in
@@ -3040,11 +3044,12 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 // embedded default, or dropped when there is none, with a warning that names
 // the key. The value is never logged, since it may be a secret. The rest of
 // the settings then decode as usual.
-func unmarshalSkippingBadSettings(k *koanf.Koanf, settings *VersionedSettings, decodeErr error) error {
+func unmarshalSkippingBadSettings(k *koanf.Koanf, settings *VersionedSettings) error {
 	bad := undecodableSettingsKeys(k)
 	if len(bad) == 0 {
-		// The failure is not tied to a single key. Report it as before.
-		return decodeErr
+		// The failure is not tied to a single key. The decoder's error
+		// quotes the offending value, so it is not returned as is.
+		return errSettingsDoNotDecode
 	}
 
 	defaults := koanf.New(".")
@@ -3052,7 +3057,7 @@ func unmarshalSkippingBadSettings(k *koanf.Koanf, settings *VersionedSettings, d
 		_ = defaults.Load(rawbytes.Provider(data), yaml.Parser())
 	}
 	for _, key := range bad {
-		slog.Warn("settings: value does not parse; using the default for this setting", "key", key)
+		warnUnparseableSetting(key)
 		k.Delete(key)
 		if defaults.Exists(key) {
 			if err := k.Set(key, defaults.Get(key)); err != nil {
@@ -3068,7 +3073,21 @@ func unmarshalSkippingBadSettings(k *koanf.Koanf, settings *VersionedSettings, d
 		HarnessConfigs: make(map[string]HarnessConfigEntry),
 		Profiles:       make(map[string]V1ProfileConfig),
 	}
-	return k.Unmarshal("", settings)
+	if err := k.Unmarshal("", settings); err != nil {
+		return errSettingsDoNotDecode
+	}
+	return nil
+}
+
+// errSettingsDoNotDecode reports a decode failure that no single setting
+// explains. It names no values, since callers log it.
+var errSettingsDoNotDecode = errors.New("settings: values do not decode into the settings structure")
+
+// warnUnparseableSetting logs that the setting named by key has a value that
+// does not parse and that its default is used instead. The value itself is
+// never logged, since it may be a secret.
+func warnUnparseableSetting(key string) {
+	slog.Warn("settings: value does not parse; using the default for this setting", "key", key)
 }
 
 // undecodableSettingsKeys returns the keys of k whose value fails to decode
