@@ -19,16 +19,17 @@ import (
 )
 
 // scrubHubEnvKeys lists the environment variables scrubHubEnv clears.
-// SCION_AGENT_ID, SCION_PROJECT and SCION_PROJECT_ID are agent identity
-// values the container sets ambiently; handlers stamp some of them onto
-// telemetry, so leaving them set would make results depend on where the
-// tests run.
+// SCION_AGENT_ID, SCION_HARNESS, SCION_PROJECT and SCION_PROJECT_ID are
+// agent identity values the container sets ambiently; handlers stamp some
+// of them onto telemetry, so leaving them set would make results depend on
+// where the tests run.
 var scrubHubEnvKeys = []string{
 	"SCION_HUB_ENDPOINT",
 	"SCION_HUB_URL",
 	"SCION_AUTH_TOKEN",
 	"SCION_AGENT_ID",
 	"SCION_AGENT_MODE",
+	"SCION_HARNESS",
 	"SCION_PROJECT",
 	projectkeys.EnvProjectID,
 }
