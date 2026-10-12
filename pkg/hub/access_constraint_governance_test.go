@@ -1623,3 +1623,66 @@ func TestConstraintAdminLockout_ProjectMemberPrincipalPut(t *testing.T) {
 	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
 	requireBindingExists(t, s, bindings[1].ID, true)
 }
+
+// lockoutProjectBinding creates a project-scoped binding and returns it.
+func lockoutProjectBinding(t *testing.T, s store.Store, roleDefID, principalType, principalID, projectID string) *store.RoleBinding {
+	t.Helper()
+	b, err := s.CreateRoleBinding(context.Background(), &store.RoleBinding{
+		RoleDefinitionID: roleDefID,
+		PrincipalType:    principalType,
+		PrincipalID:      principalID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	return b
+}
+
+// Removing a group binding that carries access_constraint.admin counts the
+// group's members as losing that authority.
+func TestConstraintAdminLockout_GroupBindingDelete(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	now := time.Now()
+	projectID := pvSeedProject(t, s, "lockout-grp-rb-project")
+	rd := createTestRoleDefinition(t, s, "lockout-grp-rb-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin})
+	groupID := pvSeedGroup(t, s, "lockout-grp-rb")
+	groupBinding := lockoutProjectBinding(t, s, rd.ID, "group", groupID, projectID)
+	member := pvSeedUser(t, s, "lockout-grp-rb-member")
+	pvSeedGroupMember(t, s, groupID, store.GroupMemberTypeUser, member)
+
+	err := checkRoleBindingRemovalAdminLockout(ctx, s, now, groupBinding)
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, "the only admin group binding cannot be removed")
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+
+	other := pvSeedUser(t, s, "lockout-grp-rb-other")
+	pvSeedRoleBinding(t, s, rd.ID, "user", other, store.RoleScopeProject, projectID)
+	assert.NoError(t, checkRoleBindingRemovalAdminLockout(ctx, s, now, groupBinding))
+}
+
+// Only admin bindings at the removed binding's scope count as keeping the
+// user an admin there.
+func TestConstraintAdminLockout_OtherScopeAdminNotCounted(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	now := time.Now()
+	projectID := pvSeedProject(t, s, "lockout-scope-p1")
+	otherProjectID := pvSeedProject(t, s, "lockout-scope-p2")
+	rd := createTestRoleDefinition(t, s, "lockout-scope-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin})
+	user := pvSeedUser(t, s, "lockout-scope-user")
+	binding := lockoutProjectBinding(t, s, rd.ID, "user", user, projectID)
+	pvSeedRoleBinding(t, s, rd.ID, "user", user, store.RoleScopeProject, otherProjectID)
+
+	err := checkRoleBindingRemovalAdminLockout(ctx, s, now, binding)
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, "an admin binding at another scope does not count")
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+
+	other := pvSeedUser(t, s, "lockout-scope-other")
+	pvSeedRoleBinding(t, s, rd.ID, "user", other, store.RoleScopeProject, projectID)
+	assert.NoError(t, checkRoleBindingRemovalAdminLockout(ctx, s, now, binding))
+}
