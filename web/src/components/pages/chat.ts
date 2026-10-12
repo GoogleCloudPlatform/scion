@@ -42,7 +42,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 
-import type { PageData, Agent } from '../../shared/types.js';
+import type { PageData, Agent, Project } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
 import { browserPath, stripBasePath } from '../../client/navigation.js';
@@ -2447,11 +2447,9 @@ export class ScionPageChat extends LitElement {
     try {
       const res = await apiFetch(`/api/v1/projects?slug=${encodeURIComponent(slug)}&limit=1`);
       if (res.ok) {
-        const data = (await res.json()) as {
-          items?: Array<{ id: string; slug: string; name: string }>;
-        };
-        if (data.items && data.items.length > 0) {
-          const project = data.items[0];
+        const data = (await res.json()) as { projects?: Project[] };
+        const project = data.projects?.[0];
+        if (project?.slug) {
           this._slugToProjectId.set(project.slug, project.id);
           this._projectIdToSlug.set(project.id, project.slug);
           this._refreshPaletteAgentRows();
