@@ -64,15 +64,28 @@ func OpenParentNoFollow(path string) (dirFd int, leaf string, err error) {
 	if err != nil {
 		return -1, "", fmt.Errorf("dirfd: open /: %w", err)
 	}
+	fd, err = walkNoFollow(fd, dirs)
+	if err != nil {
+		return -1, "", err
+	}
+	return fd, leaf, nil
+}
+
+// walkNoFollow descends from fd through each name in dirs, opening every
+// one with O_DIRECTORY|O_NOFOLLOW relative to the previous descriptor. It
+// takes ownership of fd: every intermediate descriptor, including fd
+// itself, is closed as the walk proceeds, and on error nothing is left
+// open. On success the caller owns the returned descriptor.
+func walkNoFollow(fd int, dirs []string) (int, error) {
 	for _, name := range dirs {
 		child, oerr := unix.Openat(fd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		_ = syscall.Close(fd)
 		if oerr != nil {
-			return -1, "", fmt.Errorf("dirfd: open %s: %w", name, oerr)
+			return -1, fmt.Errorf("dirfd: open %s: %w", name, oerr)
 		}
 		fd = child
 	}
-	return fd, leaf, nil
+	return fd, nil
 }
 
 // CreateExclAt creates name in the directory referenced by dirFd with
