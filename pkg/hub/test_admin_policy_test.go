@@ -1102,3 +1102,71 @@ func TestTestAdminPolicy_AgentSecretsOnlyInRootMemberProject(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok)
 }
+
+// Advisor / ti-a2-rev (fix4): the dispatch-time secret paths
+// (resolveSecrets and resolveAsNeededForKeys, both after
+// secretBackend.Resolve, with no per-secret authz for a top-level agent)
+// clamp agents rooted at an admin-kind test identity: no project secrets
+// outside a project where the root is a member, project secrets in its own
+// project, never hub- or runtime_broker-scope secrets, its own user-scope
+// secrets as usual. Human-rooted agents are unchanged; a kind read error
+// withholds every non-user scope.
+func TestTestAdminPolicy_DispatchSecretsClamp(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-ds-iss", store.SystemRoleSuperAdmin)
+	superKind := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	root := superKind.Identity.ID
+	ownProject := tid("tsa-ds-own")
+	taProject(t, s, ownProject, root)
+	otherProject := tid("tsa-ds-other")
+	taProject(t, s, otherProject, issuer.ID)
+
+	mk := func(name, scope, mode string) secret.SecretWithValue {
+		return secret.SecretWithValue{SecretMeta: secret.SecretMeta{Name: name, SecretType: "environment", Target: name,
+			Scope: scope, ScopeID: "x", InjectionMode: mode}, Value: "v-" + name}
+	}
+	d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, nil)
+	d.SetHubID("test-hub")
+	d.SetAuthzService(srv.authzService)
+	d.SetSecretBackend(&mockSecretBackend{secrets: []secret.SecretWithValue{
+		mk("B_S", secret.ScopeRuntimeBroker, "always"), mk("H_S", "hub", "always"),
+		mk("P_S", secret.ScopeProject, "always"), mk("U_S", secret.ScopeUser, "always"),
+		mk("B_AN", secret.ScopeRuntimeBroker, "as_needed"), mk("H_AN", "hub", "as_needed"),
+		mk("P_AN", secret.ScopeProject, "as_needed"), mk("U_AN", secret.ScopeUser, "as_needed"),
+	}})
+	agentFor := func(rootID, projectID string) *store.Agent {
+		return &store.Agent{ID: generateID(), Name: "tsa-ds", Slug: "tsa-ds-" + generateID()[:6], ProjectID: projectID,
+			OwnerID: rootID, Ancestry: []string{rootID}, RuntimeBrokerID: "broker-x", AppliedConfig: &store.AgentAppliedConfig{}}
+	}
+	first := func(a *store.Agent) map[string]bool {
+		resolved, _, err := d.resolveSecrets(ctx, a)
+		require.NoError(t, err)
+		got := map[string]bool{}
+		for _, r := range resolved {
+			got[r.Name] = true
+		}
+		return got
+	}
+	second := func(a *store.Agent) map[string]string {
+		return d.resolveAsNeededForKeys(ctx, a, []string{"B_AN", "H_AN", "P_AN", "U_AN"}, nil)
+	}
+
+	// Not a member: user scope only.
+	got := first(agentFor(root, otherProject))
+	assert.Equal(t, map[string]bool{"U_S": true}, got, "test super-admin root outside its projects")
+	assert.Equal(t, map[string]string{"U_AN": "v-U_AN"}, second(agentFor(root, otherProject)))
+	// Its own project: project and user scope, never hub or broker.
+	got = first(agentFor(root, ownProject))
+	assert.Equal(t, map[string]bool{"P_S": true, "U_S": true}, got, "test super-admin root in its own project")
+	assert.Equal(t, map[string]string{"P_AN": "v-P_AN", "U_AN": "v-U_AN"}, second(agentFor(root, ownProject)))
+	// A human root is unchanged.
+	got = first(agentFor(issuer.ID, otherProject))
+	for _, n := range []string{"B_S", "H_S", "P_S", "U_S"} {
+		assert.True(t, got[n], "human root keeps %s", n)
+	}
+	assert.Len(t, second(agentFor(issuer.ID, otherProject)), 4)
+	// A kind read error (an unrecognized kind) withholds every non-user scope.
+	unknown := taRawUnknownKindUser(t, s, store.UserRoleMember)
+	assert.Equal(t, map[string]bool{"U_S": true}, first(agentFor(unknown, otherProject)))
+}

@@ -50,6 +50,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // testAdminPolicy is the classification of one power for the admin test
@@ -783,4 +785,63 @@ func (s *Server) testAdminSettingsWriteGuard(ctx context.Context, section string
 	}
 	s.recordTestAdminPolicyDenial(ctx, uid, "settings", "section:"+section)
 	return fmt.Errorf("%w: section %s", errTestAdminSettingsRefused, section)
+}
+
+// restrictTestAdminRootedSecrets is the dispatch-time secret clamp for
+// agents rooted at an admin-kind test identity (both dispatch paths call
+// it after secretBackend.Resolve: resolveSecrets for the first pass and
+// resolveAsNeededForKeys for the as_needed pass). The provenance root is
+// Ancestry[0] (set by the hub), or the owner when the agent has no
+// ancestry, read through kindForPrincipal. For an admin-kind root:
+//   - hub- and runtime_broker-scope secrets are withheld (the test-admin
+//     policy denies hub secret and environment reads, so injecting them
+//     into a test admin's agents would reopen that);
+//   - project-scope secrets are injected only where the root is a member
+//     of the agent's project, as the runtime fetch path requires (material
+//     precheck check 5, where system authority does not admit an
+//     admin-kind root);
+//   - user-scope secrets (the root's own) resolve as usual.
+//
+// A kind or membership read error withholds every non-user scope (fail
+// closed). Agents with a human root are unchanged.
+func (d *HTTPAgentDispatcher) restrictTestAdminRootedSecrets(ctx context.Context, agent *store.Agent, resolved []secret.SecretWithValue) []secret.SecretWithValue {
+	if d.authzService == nil || agent == nil || len(resolved) == 0 {
+		return resolved
+	}
+	root := agent.OwnerID
+	if len(agent.Ancestry) > 0 {
+		root = agent.Ancestry[0]
+	}
+	if root == "" {
+		return resolved
+	}
+	caged, err := d.authzService.principalIsCagedTestAdmin(ctx, root)
+	if err == nil && !caged {
+		return resolved
+	}
+	projectAllowed := false
+	if err == nil {
+		member, _, merr := d.authzService.ProjectMembershipEvidence(ctx, PrincipalContext{Kind: PrincipalKindUser, ID: root}, agent.ProjectID)
+		projectAllowed = merr == nil && member
+	}
+	out := resolved[:0:0]
+	var withheld []string
+	seen := map[string]bool{}
+	for _, sv := range resolved {
+		switch {
+		case sv.Scope == secret.ScopeUser:
+		case sv.Scope == secret.ScopeProject && projectAllowed:
+		default:
+			if !seen[sv.Scope] {
+				seen[sv.Scope] = true
+				withheld = append(withheld, sv.Scope)
+			}
+			continue
+		}
+		out = append(out, sv)
+	}
+	if len(withheld) > 0 {
+		d.authzService.reportTestAdminPolicyDenial(ctx, root, "secrets", "agent:"+agent.ID+" project:"+agent.ProjectID+" withheld scopes:"+strings.Join(withheld, ","))
+	}
+	return out
 }
