@@ -701,7 +701,9 @@ type hubEndpointScope struct {
 
 // getHubEndpointScope determines where the hub endpoint comes from.
 func getHubEndpointScope(resolvedPath string, isGlobal bool, settings *config.Settings) hubEndpointScope {
-	// --hub flag takes top priority
+	// --hub flag takes top priority. hubEndpoint also holds the hub selected
+	// with 'scion use' (hubSource == targetSourceContext), which is reported
+	// as "flag" here until hub status adopts the 'scion use' source labels.
 	if hubEndpoint != "" {
 		return hubEndpointScope{Endpoint: hubEndpoint, Source: "flag"}
 	}

@@ -140,6 +140,12 @@ func TestResolveInvocationTarget(t *testing.T) {
 			cmd:   []string{"list"},
 		},
 		{
+			name:  "SCION_HUB_ENDPOINT equal to the context hub uses its remembered project",
+			setup: func(t *testing.T) { t.Setenv("SCION_HUB_ENDPOINT", ctxTestHub) },
+			cmd:   []string{"list"},
+			want:  want{project: ctxTestProjectID, projectSource: targetSourceContext},
+		},
+		{
 			name:  "SCION_HUB_URL beats the context",
 			setup: func(t *testing.T) { t.Setenv("SCION_HUB_URL", "https://env.example.com") },
 			cmd:   []string{"list"},
@@ -331,17 +337,20 @@ func TestPersistentPreRun_ContextProjectSatisfiesProjectRequirement(t *testing.T
 
 // TestPersistentPreRun_AgentContainerIgnoresContext covers the acceptance
 // item: inside an agent container with a context.yaml in HOME, nothing
-// changes.
+// changes. The container's hub is the context hub, so without the
+// SCION_HOST_UID guard the remembered project would be injected through the
+// environment hub (see the "SCION_HUB_ENDPOINT equal to the context hub"
+// case of TestResolveInvocationTarget).
 func TestPersistentPreRun_AgentContainerIgnoresContext(t *testing.T) {
 	setupContextTest(t)
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
 	t.Setenv("SCION_HOST_UID", "1000")
-	t.Setenv("SCION_HUB_ENDPOINT", "https://agent-hub.example.com")
+	t.Setenv("SCION_HUB_ENDPOINT", ctxTestHub)
 	list := findCommand(t, "list")
 	restoreSilenceUsage(t, list)
-	_ = rootCmd.PersistentPreRunE(list, nil)
+	require.NoError(t, rootCmd.PersistentPreRunE(list, nil))
 	assert.Empty(t, hubEndpoint)
-	assert.NotEqual(t, ctxTestProjectID, projectPath)
+	assert.Empty(t, projectPath)
 	assert.Empty(t, projectSource)
 }
 
@@ -355,4 +364,20 @@ func TestCommandRequiresProject_TopLevelUse(t *testing.T) {
 	root := &cobra.Command{Use: "scion"}
 	root.AddCommand(parent)
 	assert.True(t, commandRequiresProject(nested))
+}
+
+// TestPersistentPreRun_ConfigSubcommandGlobalSeesGlobalEndpoint: a config
+// subcommand's own --global counts as --global for the hook, so the global
+// settings endpoint beats the context hub, as with the root --global.
+func TestPersistentPreRun_ConfigSubcommandGlobalSeesGlobalEndpoint(t *testing.T) {
+	setupContextTest(t)
+	restoreAllSilenceUsage(t)
+	resetConfigSetFlags(t)
+	writeGlobalSettings(t, "hub:\n  endpoint: http://global.example.com\n")
+	saveTestContext(t, ctxTestHub, ctxTestProjectID)
+
+	rootCmd.SetArgs([]string{"config", "set", "--global", "image_registry", "registry.example.test/team"})
+	require.NoError(t, rootCmd.Execute())
+	assert.Empty(t, hubEndpoint, "the context hub must not fill in under --global")
+	assert.Empty(t, hubSource)
 }

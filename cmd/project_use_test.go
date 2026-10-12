@@ -384,3 +384,29 @@ func TestUseRefusedInsideAgent(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not available inside an agent")
 }
+
+// TestUseShow_CorruptContextWarnsOnce: an unreadable context.yaml is
+// reported once per invocation, not by both the hook and 'scion use'.
+func TestUseShow_CorruptContextWarnsOnce(t *testing.T) {
+	setupUseTest(t)
+	path := filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("version: [1\n"), 0o600))
+	_, stderr, err := runScion(t, "use")
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(stderr, "Warning: ignoring the current context"), stderr)
+}
+
+// TestUseSelectProject_EnvHubNote: with SCION_HUB_ENDPOINT set, the project
+// is selected on that hub, which becomes the saved current hub, and a note
+// says so.
+func TestUseSelectProject_EnvHubNote(t *testing.T) {
+	srv, _ := setupUseTest(t)
+	writeGlobalSettings(t, "")
+	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+	stdout, stderr, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'local' ("+srv.URL+").\n", stdout)
+	assert.Contains(t, stderr, "Note: selected on the hub from SCION_HUB_ENDPOINT; it is now the current hub.")
+	assert.NotContains(t, stderr, "overrides the current hub")
+	assert.Equal(t, "local", readTestContext(t).CurrentHub)
+}

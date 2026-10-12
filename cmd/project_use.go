@@ -84,8 +84,7 @@ func init() {
 }
 
 // noHubSelectedMessage is printed by bare 'scion use' when no hub is
-// configured. Phase 2 of the current-context work (the hub registry) changes
-// it to name 'scion hub add'.
+// configured. Name 'scion hub add' here once the hub registry exists.
 const noHubSelectedMessage = "No hub selected. Start a local hub with 'scion server start', or log in to a hub with 'scion hub auth login --hub-url <url>' and run 'scion use <project>'."
 
 func runProjectUse(cmd *cobra.Command, args []string) error {
@@ -119,10 +118,10 @@ func updateUseContext(fn func(*config.CLIContext) error) error {
 }
 
 // loadUseContext reads context.yaml for display, warning about an
-// unreadable file.
+// unreadable file unless resolveInvocationTarget already did.
 func loadUseContext(stderr io.Writer) *config.CLIContext {
 	c, err := config.LoadCLIContext()
-	if err != nil {
+	if err != nil && !contextWarned {
 		_, _ = fmt.Fprintf(stderr, "Warning: ignoring the current context: %v\n", err)
 	}
 	return c
@@ -512,8 +511,14 @@ func runUseSelect(out, stderr io.Writer, ref string) error {
 		_, _ = fmt.Fprintf(out, "Note: in this directory, project '%s' (%s, hub '%s') takes precedence; '%s' applies outside scion project directories.\n",
 			config.GetProjectName(dir), displayProjectDir(dir), dirHub, shown)
 	}
-	if envHub, envName := envHubEndpoint(); envHub != "" && !sameHubURL(envHub, endpoint) {
-		_, _ = fmt.Fprintf(stderr, "Note: %s is set and overrides the current hub in this shell.\n", envName)
+	if envHub, envName := envHubEndpoint(); envHub != "" {
+		if hubEndpoint == "" {
+			// No --hub and no context fill: the effective hub is the
+			// environment's, and it is now the saved current hub.
+			_, _ = fmt.Fprintf(stderr, "Note: selected on the hub from %s; it is now the current hub.\n", envName)
+		} else if !sameHubURL(envHub, endpoint) {
+			_, _ = fmt.Fprintf(stderr, "Note: %s is set and overrides the current hub in this shell.\n", envName)
+		}
 	}
 	return nil
 }

@@ -37,6 +37,9 @@ var (
 	// contextProjectID is the hub project UUID resolveInvocationTarget
 	// injected as projectPath, or "".
 	contextProjectID string
+	// contextWarned records that resolveInvocationTarget already warned
+	// about an unreadable context.yaml in this invocation.
+	contextWarned bool
 )
 
 // isContextProject reports whether path is the project that
@@ -87,10 +90,15 @@ func filesystemProject() (dir string, ok bool) {
 }
 
 // walkedProject returns the project found by walking up from the working
-// directory, unless that is the global directory.
+// directory, unless that is the global directory. The synthetic path
+// FindProjectRoot returns when SCION_HUB_ENDPOINT or SCION_HUB_URL is set
+// and no .scion exists is not a project either.
 func walkedProject() (string, bool) {
 	p, ok := config.FindProjectRoot()
 	if !ok {
+		return "", false
+	}
+	if _, err := os.Stat(p); err != nil {
 		return "", false
 	}
 	if g, err := config.GetGlobalDir(); err == nil && p == g {
@@ -138,35 +146,53 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
 	hubSource = ""
 	projectSource = ""
 	contextProjectID = ""
+	contextWarned = false
 	if contextDisabled(mode) || contextSkippedSubtrees[topLevelName(cmd)] {
 		return
 	}
 	// --no-hub turns the hub off, and a context project is a hub project.
-	// Local-mode removal phase 3 removes --no-hub, and this check with it.
+	// Remove this check together with the --no-hub flag.
 	if noHub {
 		return
 	}
 	ctx, err := config.LoadCLIContext()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: ignoring the current context: %v\n", err)
+		contextWarned = true
+		return
+	}
+	// Without hub entries the context can fill nothing: skip the project
+	// walk and settings load below, so users who never ran 'scion use' pay
+	// nothing.
+	if len(ctx.Hubs) == 0 {
 		return
 	}
 	envHub, _ := envHubEndpoint()
-	dir, inDir := filesystemProject()
+	// The filesystem project is looked up at most once, and only when a
+	// tier below it can still fill something.
+	var dir string
+	var inDir, looked bool
+	inFilesystemProject := func() bool {
+		if !looked {
+			dir, inDir = filesystemProject()
+			looked = true
+		}
+		return inDir
+	}
 
-	if hubEndpoint == "" && envHub == "" && (!inDir || mergedHubEndpoint(dir) == "") {
-		if h := ctx.CurrentHubEntry(); h != nil && h.Endpoint != "" {
+	if h := ctx.CurrentHubEntry(); h != nil && h.Endpoint != "" && hubEndpoint == "" && envHub == "" {
+		if !inFilesystemProject() || mergedHubEndpoint(dir) == "" {
 			hubEndpoint = h.Endpoint
 			hubSource = targetSourceContext
 		}
 	}
 
-	if projectPath == "" && !globalMode && !inDir && commandRequiresProject(cmd) {
+	if projectPath == "" && !globalMode && commandRequiresProject(cmd) {
 		effectiveHub := hubEndpoint
 		if effectiveHub == "" {
 			effectiveHub = envHub
 		}
-		if p := ctx.ProjectFor(effectiveHub); p != nil {
+		if p := ctx.ProjectFor(effectiveHub); p != nil && !inFilesystemProject() {
 			projectPath = p.ID
 			projectSource = targetSourceContext
 			contextProjectID = p.ID
