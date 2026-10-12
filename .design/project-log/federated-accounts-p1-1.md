@@ -60,3 +60,11 @@
   still holds: that identity's ID is `<issuer>:<sub>`, never a local UUID.
 - Display code must show `federated_email` with the issuer, never the
   synthetic address (not needed yet: visitors are refused everywhere).
+
+## Merge-forward (2026-10-12)
+
+- Merged upstream main (4cefb876a) into the branch. Conflicts were limited
+  to `pkg/experiments/registry.go` and `registry_test.go` (both experiments
+  kept) and `pkg/ent/mutation.go` (regenerated with `go generate ./pkg/ent`;
+  `make ent-check` clean). Upstream's removal of committed hub test shard
+  tags carried over; the test files this branch adds carry none.
