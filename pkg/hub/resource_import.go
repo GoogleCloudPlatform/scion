@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/templateimport"
+	"github.com/GoogleCloudPlatform/scion/pkg/ghauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -297,41 +298,76 @@ func checkResourceDirsContent(dirs []resourceDir, kind resourceImportKind) error
 }
 
 // fetchRemoteForImport fetches a remote source URL to a local cache directory,
-// authenticating against GitHub when possible. It first tries a GitHub App
-// installation token for the project, then falls back to the project's
-// GITHUB_TOKEN secret. The fallback applies to both resource kinds — closing the
-// gap where harness-config remote import previously skipped the secret fallback.
-// The caller owns the returned cache path and must remove it.
-//
-// projectID may be "" for global-scope (hub-level) imports, which have no project
-// to authenticate against; in that case the fetch is unauthenticated.
+// authenticating against GitHub with the credential importCredential selects.
+// It applies to both resource kinds (templates and harness-configs) and to
+// skill directory discovery. The caller owns the returned cache path and must
+// remove it.
 func (s *Server) fetchRemoteForImport(ctx context.Context, projectID, sourceURL string) (string, error) {
-	var authToken string
+	return config.FetchRemoteTemplate(ctx, sourceURL, s.importCredential(ctx, projectID, sourceURL))
+}
 
-	if projectID != "" {
-		// Prefer a GitHub App installation token if the project has one.
-		project, err := s.store.GetProject(ctx, projectID)
-		if err == nil && project != nil && project.GitHubInstallationID != nil {
-			if token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, project); mintErr == nil && token != "" {
-				authToken = token
+// importCredential returns the GitHub credential for fetching sourceURL on
+// behalf of projectID, or "" to fetch unauthenticated. It mirrors the skill
+// resolver's project-scope cascade:
+//
+//  1. For a GitHub folder URL, the repo-specific project secret
+//     GH_{OWNER}__{REPO}, then the owner-level GH_{OWNER} (see pkg/ghauth).
+//  2. A GitHub App installation token for the project, if it has one.
+//  3. The project's GITHUB_TOKEN secret.
+//
+// projectID may be "" for global-scope (hub-level) imports, which have no
+// project to authenticate against; in that case the fetch is unauthenticated.
+// Credential values are never logged; only the secret name is.
+func (s *Server) importCredential(ctx context.Context, projectID, sourceURL string) string {
+	if projectID == "" {
+		return ""
+	}
+
+	if owner, repo, ok := config.GitHubRepoForURL(sourceURL); ok {
+		for _, key := range []string{ghauth.RepoKey(owner, repo), ghauth.OwnerKey(owner)} {
+			if val := s.projectSecretForImport(ctx, projectID, key); val != "" {
+				s.resourceLog.Info("using project credential for resource import", "projectID", projectID, "secret", key)
+				return val
 			}
+		}
+	}
+
+	// Prefer a GitHub App installation token if the project has one.
+	project, err := s.store.GetProject(ctx, projectID)
+	if err == nil && project != nil && project.GitHubInstallationID != nil {
+		if token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, project); mintErr == nil && token != "" {
+			return token
 		}
 	}
 
 	// Fall back to the project GITHUB_TOKEN secret if no App token was minted.
-	if authToken == "" && projectID != "" {
-		if sb := s.GetSecretBackend(); sb != nil {
-			sec, secErr := sb.Get(ctx, "GITHUB_TOKEN", secret.ScopeProject, projectID)
-			if secErr == nil && sec != nil && sec.Value != "" {
-				authToken = sec.Value
-				s.resourceLog.Info("using project GITHUB_TOKEN for resource import", "projectID", projectID)
-			} else if secErr != nil && !errors.Is(secErr, store.ErrNotFound) {
-				s.resourceLog.Warn("Failed to retrieve GITHUB_TOKEN from secret backend", "projectID", projectID, "error", secErr)
-			}
-		}
+	if val := s.projectSecretForImport(ctx, projectID, ghauth.DefaultKey); val != "" {
+		s.resourceLog.Info("using project credential for resource import", "projectID", projectID, "secret", ghauth.DefaultKey)
+		return val
 	}
+	return ""
+}
 
-	return config.FetchRemoteTemplate(ctx, sourceURL, authToken)
+// projectSecretForImport returns the value of the project secret named key,
+// or "" if it is unset, empty, or no secret backend is configured. A lookup
+// failure other than not-found is logged (without any value) and treated as
+// unset, so the cascade falls through to the next source.
+func (s *Server) projectSecretForImport(ctx context.Context, projectID, key string) string {
+	sb := s.GetSecretBackend()
+	if sb == nil {
+		return ""
+	}
+	sec, err := sb.Get(ctx, key, secret.ScopeProject, projectID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.resourceLog.Warn("Failed to retrieve project secret for resource import", "projectID", projectID, "secret", key, "error", err)
+		}
+		return ""
+	}
+	if sec == nil {
+		return ""
+	}
+	return sec.Value
 }
 
 // discoverResourceDirs returns the resource directories at root, classifying by

@@ -87,6 +87,36 @@ func TestDetectRemoteType(t *testing.T) {
 	}
 }
 
+// TestGitHubRepoForURL verifies that only GitHub folder URLs yield an
+// owner/repo for credential lookup; archives (even on github.com), rclone and
+// other hosts do not.
+func TestGitHubRepoForURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		uri       string
+		wantOwner string
+		wantRepo  string
+		wantOK    bool
+	}{
+		{"tree URL", "https://github.com/acme-corp/templates/tree/main/.scion/templates", "acme-corp", "templates", true},
+		{"repo root", "https://github.com/acme-corp/templates", "acme-corp", "templates", true},
+		{"direct path", "https://github.com/acme-corp/templates/harnesses/claude", "acme-corp", "templates", true},
+		{"github archive", "https://github.com/acme-corp/templates/archive/main.tar.gz", "", "", false},
+		{"owner only", "https://github.com/acme-corp", "", "", false},
+		{"other host", "https://example.com/acme-corp/templates", "", "", false},
+		{"archive elsewhere", "https://example.com/template.tgz", "", "", false},
+		{"rclone", ":gcs:bucket/path", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, repo, ok := GitHubRepoForURL(tt.uri)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantOwner, owner)
+			assert.Equal(t, tt.wantRepo, repo)
+		})
+	}
+}
+
 func TestParseGitHubURL(t *testing.T) {
 	tests := []struct {
 		name        string

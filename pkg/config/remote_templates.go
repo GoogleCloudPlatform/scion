@@ -506,6 +506,21 @@ func parseGitHubURL(uri string) (*GitHubURLParts, error) {
 	return result, nil
 }
 
+// GitHubRepoForURL returns the owner and repository of uri when
+// FetchRemoteTemplate would fetch it as a GitHub folder (the only remote type
+// that sends a credential). ok is false for archive, rclone and other URLs,
+// and for GitHub URLs without an owner/repo path.
+func GitHubRepoForURL(uri string) (owner, repo string, ok bool) {
+	if DetectRemoteType(uri) != RemoteTypeGitHub {
+		return "", "", false
+	}
+	parts, err := parseGitHubURL(uri)
+	if err != nil || parts.Owner == "" || parts.Repo == "" {
+		return "", "", false
+	}
+	return parts.Owner, parts.Repo, true
+}
+
 // GitSparseCheckoutFunc performs a sparse checkout of parts (a GitHub repo,
 // branch and optional sub-path) into destPath, authenticating with token when
 // it is non-empty. It is the signature of the sparse-checkout seam used by

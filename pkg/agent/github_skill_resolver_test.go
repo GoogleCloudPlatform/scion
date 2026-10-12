@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ghauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -1928,79 +1929,6 @@ func TestGitHubSkillResolver_SharedCacheSingleton(t *testing.T) {
 	}
 }
 
-// TestNormalizeGitHubName verifies the character normalization used in
-// convention-based key derivation.
-func TestNormalizeGitHubName(t *testing.T) {
-	tests := []struct {
-		in   string
-		want string
-	}{
-		{"scion-frontiers", "SCION_FRONTIERS"},
-		{"scion-repo-contrib", "SCION_REPO_CONTRIB"},
-		{"GoogleCloudPlatform", "GOOGLECLOUDPLATFORM"},
-		{"ptone", "PTONE"},
-		{"my-org", "MY_ORG"},
-		{"my.repo", "MY_REPO"},
-		{"my_repo", "MY_REPO"},
-		{"my.special.repo", "MY_SPECIAL_REPO"},
-		{"a-b.c_d", "A_B_C_D"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.in, func(t *testing.T) {
-			got := normalizeGitHubName(tt.in)
-			if got != tt.want {
-				t.Errorf("normalizeGitHubName(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestDeriveGitHubTokenKey verifies the convention-based key derivation
-// for repo-specific credentials (GH_OWNER__REPO).
-func TestDeriveGitHubTokenKey(t *testing.T) {
-	tests := []struct {
-		owner, repo string
-		want        string
-	}{
-		{"scion-frontiers", "scion-repo-contrib", "GH_SCION_FRONTIERS__SCION_REPO_CONTRIB"},
-		{"GoogleCloudPlatform", "scion", "GH_GOOGLECLOUDPLATFORM__SCION"},
-		{"ptone", "scion", "GH_PTONE__SCION"},
-		{"my-org", "my.repo", "GH_MY_ORG__MY_REPO"},
-		{"my-org", "my.special.repo", "GH_MY_ORG__MY_SPECIAL_REPO"},
-	}
-	for _, tt := range tests {
-		name := tt.owner + "/" + tt.repo
-		t.Run(name, func(t *testing.T) {
-			got := deriveGitHubTokenKey(tt.owner, tt.repo)
-			if got != tt.want {
-				t.Errorf("deriveGitHubTokenKey(%q, %q) = %q, want %q", tt.owner, tt.repo, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestDeriveGitHubOwnerKey verifies the convention-based key derivation
-// for owner-level credentials (GH_OWNER).
-func TestDeriveGitHubOwnerKey(t *testing.T) {
-	tests := []struct {
-		owner string
-		want  string
-	}{
-		{"scion-frontiers", "GH_SCION_FRONTIERS"},
-		{"GoogleCloudPlatform", "GH_GOOGLECLOUDPLATFORM"},
-		{"ptone", "GH_PTONE"},
-		{"my-org", "GH_MY_ORG"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.owner, func(t *testing.T) {
-			got := deriveGitHubOwnerKey(tt.owner)
-			if got != tt.want {
-				t.Errorf("deriveGitHubOwnerKey(%q) = %q, want %q", tt.owner, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestTokenForRef_ConventionKeys verifies the updated tokenForRef resolution
 // precedence including convention-based key lookup.
 func TestTokenForRef_ConventionKeys(t *testing.T) {
@@ -2969,7 +2897,7 @@ func TestGitHubSkillResolver_SameProjectSameUserDifferentTokenIsolation(t *testi
 					// supplies a credential, under the same key name for
 					// both callers but a different value each.
 					r.token = ""
-					r.provisionCredentials = map[string]string{deriveGitHubTokenKey("acme", "private"): tok}
+					r.provisionCredentials = map[string]string{ghauth.RepoKey("acme", "private"): tok}
 				} else {
 					r.token = tok
 					r.provisionCredentials = nil
@@ -3124,7 +3052,7 @@ func TestGitHubSkillResolver_ScopeLayeringIsolation(t *testing.T) {
 				r.token = sharedToken
 				r.resolutionCache = cache
 				if tc.namedSource {
-					r.provisionCredentials = map[string]string{deriveGitHubTokenKey("acme", "shared"): sharedToken}
+					r.provisionCredentials = map[string]string{ghauth.RepoKey("acme", "shared"): sharedToken}
 				} else {
 					r.provisionCredentials = nil
 				}
