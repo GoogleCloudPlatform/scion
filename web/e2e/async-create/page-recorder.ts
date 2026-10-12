@@ -19,7 +19,7 @@
  * - SSE: window.EventSource is wrapped. Each `update` event whose data
  *   names an agent is recorded (time, subject, agentId, phase, activity,
  *   launch) in window.__e2eSse. Only those fields are kept.
- * - DOM: a sampler reads the agent page every 50 ms (through shadow roots)
+ * - DOM: a sampler reads the agent page's shadow root every 50 ms
  *   and appends a row to window.__e2eTimeline whenever what it reads
  *   changes: path, Status tab phase, header status badge, launch banner and
  *   step, incomplete create panel and its code.
@@ -135,11 +135,24 @@ function installRecorders(sel: RecorderSelectors): void {
     }
     return null;
   };
+  // The agent page element is found once (a full shadow-tree walk) and
+  // kept while it stays connected; every selector read below lives directly
+  // in its shadow root, so a sample is a few querySelector calls.
+  let pageEl: Element | null = null;
+  let lastLookup = 0;
   let last = '';
   const sample = (): void => {
-    const page = deepQuery(document, 'scion-page-agent-detail');
-    const root: ParentNode | null = page?.shadowRoot ?? null;
-    const q = (s: string): Element | null => (root ? deepQuery(root, s) : null);
+    if (!pageEl?.isConnected) {
+      pageEl = null;
+      const now = Date.now();
+      // Walk the tree at most every 200 ms while the page is not there.
+      if (now - lastLookup >= 200) {
+        lastLookup = now;
+        pageEl = deepQuery(document, 'scion-page-agent-detail');
+      }
+    }
+    const root: ParentNode | null = pageEl?.shadowRoot ?? null;
+    const q = (s: string): Element | null => (root ? root.querySelector(s) : null);
     const text = (s: string): string => (q(s)?.textContent ?? '').replace(/\s+/g, ' ').trim();
     let phase = '';
     if (root) {

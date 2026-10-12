@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 /**
  * Async agent create from the web form (ptone/scion#4664), end to end.
  *
@@ -70,8 +69,10 @@ import {
   type SseLaunchRecord,
   type TimelineRow,
 } from './page-recorder.js';
+import { classifyRead, isGone, parseTimeoutMs, type ReadState } from './journey-lib.js';
 import {
   FORBIDDEN_HEADER_ACTIONS,
+  IMAGE_FAILURE_CODES,
   KNOWN_LAUNCH_ERROR_CODES,
   LAUNCH_PHASES,
   SELECTORS,
@@ -90,7 +91,11 @@ import {
 } from './state.js';
 
 /** How long a launch may take to reach running or to fail. */
-const LAUNCH_TIMEOUT = Number(process.env.E2E_LAUNCH_TIMEOUT_MS || 300_000);
+const LAUNCH_TIMEOUT = parseTimeoutMs(
+  process.env.E2E_LAUNCH_TIMEOUT_MS,
+  300_000,
+  'E2E_LAUNCH_TIMEOUT_MS'
+);
 
 /** POST of the create (the form uses /api/v1/agents; the project path is accepted too). */
 const CREATE_PATH = /^\/api\/v1\/(projects\/[^/]+\/)?agents$/;
@@ -176,6 +181,7 @@ function resolveTarget(): JourneyTarget {
     hub,
     launchCapable: suite.launchCapable,
     launchCapableReason: suite.launchCapableReason,
+    noRuntimeConfirmed: !suite.launchCapable,
     badImage: suite.badImage,
     agentImage: suite.agentImage,
     harnessConfig: suite.harnessConfig,
@@ -232,14 +238,14 @@ async function trackedPage(): Promise<TrackedPage> {
 async function chooseOption(page: Page, selectSelector: string, text: string): Promise<void> {
   const select = page.locator(SELECTORS.createPage).locator(selectSelector);
   await select.click();
-  await select.locator('sl-option').filter({ hasText: text }).first().click();
+  await select.locator(SELECTORS.selectOption).filter({ hasText: text }).first().click();
 }
 
 /** Picks an option of a Shoelace select by its value. */
 async function chooseOptionValue(page: Page, selectSelector: string, value: string): Promise<void> {
   const select = page.locator(SELECTORS.createPage).locator(selectSelector);
   await select.click();
-  await select.locator(`sl-option[value="${value}"]`).click();
+  await select.locator(`${SELECTORS.selectOption}[value="${value}"]`).click();
   await expect(select).toHaveJSProperty('value', value);
 }
 
@@ -255,10 +261,10 @@ async function submitCreateForm(
   });
   const form = page.locator(SELECTORS.createPage);
   await expect(form.locator(SELECTORS.createName)).toBeVisible();
-  await form.locator(SELECTORS.createName).locator('input').fill(opts.name);
+  await form.locator(SELECTORS.createNameInput).fill(opts.name);
   if (opts.templateName) await chooseOption(page, SELECTORS.createTemplate, opts.templateName);
   if (t.harnessConfig) await chooseOptionValue(page, SELECTORS.createHarness, t.harnessConfig);
-  await form.locator(SELECTORS.createTask).locator('textarea').fill(opts.task);
+  await form.locator(SELECTORS.createTaskInput).fill(opts.task);
 
   const createResponse = page.waitForResponse(
     (res) =>
@@ -344,25 +350,39 @@ async function expectFailedCreatePanel(page: Page): Promise<{ code: string; mess
   return { code, message };
 }
 
-/** Whether the agent is gone: GET answers 404, or it is absent from the project's list. */
+/**
+ * What a direct GET of the agent says: gone only on a 404 or a soft-deleted
+ * record (classifyRead). The member's session is used; after it ends,
+ * the local hub's admin.
+ */
+async function agentReadState(
+  request: APIRequestContext | null,
+  agentId: string
+): Promise<ReadState> {
+  const urlPath = `/api/v1/agents/${agentId}`;
+  if (request) {
+    const res = await request.get(urlPath);
+    const body: unknown = await res.json().catch(() => null);
+    return classifyRead(res.status(), body, 'agent');
+  }
+  const hub = localHub();
+  if (!hub) throw new Error('no request context and no local hub');
+  const res = await adminRequest(hub, 'GET', urlPath);
+  return classifyRead(res.status, res.body, 'agent');
+}
+
 async function agentGone(request: APIRequestContext | null, agentId: string): Promise<boolean> {
-  const get = async (urlPath: string): Promise<{ status: number; body: unknown }> => {
-    const hub = localHub();
-    if (request) {
-      const res = await request.get(urlPath);
-      const body: unknown = await res.json().catch(() => null);
-      return { status: res.status(), body };
-    }
-    if (!hub) throw new Error('no request context and no local hub');
-    return adminRequest(hub, 'GET', urlPath);
-  };
-  const one = await get(`/api/v1/agents/${agentId}`);
-  if (one.status === 404) return true;
-  const list = await get(`/api/v1/agents?projectId=${encodeURIComponent(journey.projectId!)}`);
-  const agents = ((list.body as { agents?: Array<{ id: string }> } | null)?.agents ?? []).map(
-    (a) => a.id
-  );
-  return list.status === 200 && !agents.includes(agentId);
+  return isGone(await agentReadState(request, agentId));
+}
+
+/** The final state of the agent page: failed-create panel, running, or neither yet. */
+async function finalPageState(page: Page): Promise<'failed' | 'running' | ''> {
+  if ((await page.locator(SELECTORS.incompleteBanner).count()) > 0) return 'failed';
+  const badge = phaseBadge(page);
+  if ((await badge.count()) > 0 && (await badge.getAttribute('status')) === 'running') {
+    return 'running';
+  }
+  return '';
 }
 
 /** Deletes the agent from the failed-create panel and checks it is gone. */
@@ -480,8 +500,8 @@ test.describe.serial('async agent create from the web form', () => {
       codeFile = path.join(journey.tmpDir, 'code.txt');
       runScionCLI(hub, ['hub', 'test-identity', 'web-code', issued.identity.id, '--out', codeFile]);
     } else {
-      codeFile = t.codeFile!;
-      journey.email = t.identityEmail;
+      codeFile = t.codeFile ?? '';
+      journey.email = t.identityEmail ?? '';
     }
 
     journey.context = await browser.newContext({ baseURL: t.baseURL });
@@ -517,6 +537,18 @@ test.describe.serial('async agent create from the web form', () => {
     };
     await expectAsyncSubmit(tracked, submit);
     await expectNoStartNoReload(tracked, submit);
+    if (!target().launchCapable) {
+      // A2 (which re-checks the whole window) is skipped here: follow the
+      // launch to its end, then check the window from submit to the end.
+      await expect
+        .poll(() => finalPageState(tracked.page), {
+          message: 'the A1 launch reaches a final state',
+          timeout: LAUNCH_TIMEOUT,
+        })
+        .not.toBe('');
+      journey.evidence.a1FinalState = await finalPageState(tracked.page);
+      await expectNoStartNoReload(tracked, submit);
+    }
     await assertTestIdentity(tracked.page, { email: journey.email!, role: 'member' });
   });
 
@@ -603,6 +635,11 @@ test.describe.serial('async agent create from the web form', () => {
       t.launchCapable,
       'Agents can start here: the failed-create panel is checked by A4 with a bad image'
     );
+    test.skip(
+      !t.noRuntimeConfirmed,
+      'Not known to lack a container runtime (set E2E_LAUNCH_CAPABLE=0 for a remote target)'
+    );
+    test.setTimeout(LAUNCH_TIMEOUT + 360_000);
     const template = await badImageTemplate();
     const tracked = await trackedPage();
     const submit = await submitCreateForm(tracked, {
@@ -634,6 +671,7 @@ test.describe.serial('async agent create from the web form', () => {
       !t.launchCapable,
       `A4 NOT COVERED: needs a broker that can start containers (${t.launchCapableReason})`
     );
+    test.setTimeout(LAUNCH_TIMEOUT + 360_000);
     const template = await badImageTemplate();
     const tracked = await trackedPage();
     const submit = await submitCreateForm(tracked, {
@@ -646,6 +684,10 @@ test.describe.serial('async agent create from the web form', () => {
     await expectAsyncSubmit(tracked, submit);
     expect(submit.template, 'the agent uses the fixture template').toBe(template);
     const panel = await expectFailedCreatePanel(tracked.page);
+    expect(
+      IMAGE_FAILURE_CODES as readonly string[],
+      `code ${panel.code} is an image failure code`
+    ).toContain(panel.code);
     await expectNoStartNoReload(tracked, submit);
     journey.evidence.a4 = {
       status: submit.status,
@@ -663,14 +705,25 @@ test.describe.serial('async agent create from the web form', () => {
   // eslint-disable-next-line no-empty-pattern -- Playwright needs the fixtures argument
   test.afterAll('A5: cleanup is verified by absence', async ({}, testInfo) => {
     const residue: string[] = [];
+    const violations: string[] = [];
     const cleanup: Record<string, unknown> = {};
     const t = journey.target;
     const hub = t?.hub;
 
+    // A1's no-/start rule over the whole window, whatever the mode: from
+    // the submit until the page closes here.
+    if (journey.a1Page && journey.a1Submit?.agentId) {
+      const starts = journey.a1Page.requests.filter(
+        (r) => r.method === 'POST' && startPath(journey.a1Submit!.agentId).test(r.path)
+      );
+      cleanup.a1StartRequestsWholeWindow = starts.length;
+      if (starts.length > 0) violations.push(`A1 browser sent ${starts.length} POST .../start`);
+    }
+
     for (const page of journey.context?.pages() ?? []) await page.close();
 
-    // Agents, as the member (the admin on a local hub if that fails).
-    for (const agent of journey.agents) {
+    // Agents, as the member.
+    for (const agent of journey.context ? journey.agents : []) {
       if (!(await agentGone(member(), agent.id))) {
         const res = await member().delete(`/api/v1/agents/${agent.id}`);
         cleanup[`agent ${agent.check}`] = `DELETE ${res.status()}`;
@@ -682,6 +735,7 @@ test.describe.serial('async agent create from the web form', () => {
           () => true,
           () => false
         );
+      cleanup[`agent ${agent.check} state`] = await agentReadState(member(), agent.id);
       if (!gone) residue.push(`agent ${agent.id} (${agent.check})`);
     }
 
@@ -689,15 +743,18 @@ test.describe.serial('async agent create from the web form', () => {
     if (journey.projectCreated && journey.projectId) {
       const res = await member().delete(`/api/v1/projects/${journey.projectId}`);
       cleanup.project = `DELETE ${res.status()}`;
+      const projectState = async (): Promise<ReadState> => {
+        const get = await member().get(`/api/v1/projects/${journey.projectId}`);
+        return classifyRead(get.status(), await get.json().catch(() => null), 'project');
+      };
       const gone = await expect
-        .poll(async () => (await member().get(`/api/v1/projects/${journey.projectId}`)).status(), {
-          timeout: 60_000,
-        })
-        .toBe(404)
+        .poll(async () => isGone(await projectState()), { timeout: 60_000 })
+        .toBe(true)
         .then(
           () => true,
           () => false
         );
+      cleanup.projectState = await projectState();
       if (!gone) residue.push(`project ${journey.projectId}`);
     }
 
@@ -706,7 +763,9 @@ test.describe.serial('async agent create from the web form', () => {
       const del = await adminRequest(hub, 'DELETE', `/api/v1/templates/${journey.template.id}`);
       cleanup.template = `DELETE ${del.status}`;
       const get = await adminRequest(hub, 'GET', `/api/v1/templates/${journey.template.id}`);
-      if (get.status !== 404) residue.push(`template ${journey.template.name}`);
+      const templateState = classifyRead(get.status, get.body, 'template');
+      cleanup.templateState = templateState;
+      if (!isGone(templateState)) residue.push(`template ${journey.template.name}`);
     }
 
     // The test identity (local hub). Without --purge the delete is refused
@@ -733,19 +792,22 @@ test.describe.serial('async agent create from the web form', () => {
       ]);
       if (listed.includes(journey.identityId)) residue.push(`test identity ${journey.identityId}`);
     } else if (t?.mode === 'remote') {
-      cleanup.identity = 'remote target: the runner deletes the identity out of band';
+      cleanup.identity =
+        'remote target: NOT verified here; the runner deletes the identity out of band, ' +
+        'and this evidence is written before that';
     }
 
     await journey.context?.close();
     if (journey.tmpDir) fs.rmSync(journey.tmpDir, { recursive: true, force: true });
 
     // Evidence only now, after the identity is deleted.
-    journey.evidence.cleanup = { ...cleanup, residue };
+    journey.evidence.cleanup = { ...cleanup, residue, violations };
     const evidenceFile = testInfo.outputPath('async-create-evidence.json');
     fs.writeFileSync(evidenceFile, JSON.stringify(journey.evidence, null, 2));
     console.info(`[journey] evidence: ${evidenceFile}`);
     console.info(`[journey] cleanup: ${JSON.stringify(journey.evidence.cleanup)}`);
 
+    expect(violations, 'A1: no POST .../start over the whole window').toEqual([]);
     expect(residue, 'A5: nothing left behind').toEqual([]);
   });
 });

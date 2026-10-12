@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 /**
  * Credential guard for the local hub: the hub process inherits every
  * non-SCION_* variable of the runner, so a harness credential in the

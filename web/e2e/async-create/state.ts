@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 /**
  * Suite state shared by global setup, the spec and the teardown, and the
  * target the journey runs against.
@@ -62,7 +61,14 @@ export interface JourneyTarget {
   /** Local only: the throwaway hub (CLI access as the dev-auth admin). */
   hub?: HubState;
   launchCapable: boolean;
+  /** Why launchCapable is what it is (shown in skips and the evidence). */
   launchCapableReason: string;
+  /**
+   * Whether the target is known to have no usable container runtime, so
+   * the no-runtime failure panel check applies (local: !launchCapable;
+   * remote: only with E2E_LAUNCH_CAPABLE=0).
+   */
+  noRuntimeConfirmed: boolean;
   /** Local only: image of the bad image fixture template. */
   badImage?: string;
   /** Local only: the image the harness resolves to (for the evidence). */
@@ -128,22 +134,36 @@ export function isRemoteTarget(): boolean {
  */
 export function remoteTargetFromEnv(): JourneyTarget {
   const env = process.env;
-  const missing = ['E2E_TEST_IDENTITY_CODE_FILE', 'E2E_TEST_IDENTITY_EMAIL'].filter((k) => !env[k]);
+  const targetURL = env.E2E_TARGET_URL ?? '';
+  const codeFile = env.E2E_TEST_IDENTITY_CODE_FILE ?? '';
+  const identityEmail = env.E2E_TEST_IDENTITY_EMAIL ?? '';
+  const missing = [
+    ['E2E_TEST_IDENTITY_CODE_FILE', codeFile],
+    ['E2E_TEST_IDENTITY_EMAIL', identityEmail],
+  ]
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
   if (missing.length > 0) {
     throw new Error(`E2E_TARGET_URL is set; also set ${missing.join(', ')}`);
   }
-  const launchCapable = env.E2E_LAUNCH_CAPABLE === '1';
+  const capable = env.E2E_LAUNCH_CAPABLE;
+  const launchCapable = capable === '1';
   return {
     mode: 'remote',
-    baseURL: new URL(env.E2E_TARGET_URL!).origin,
+    baseURL: new URL(targetURL).origin,
     launchCapable,
     launchCapableReason: launchCapable
       ? 'E2E_LAUNCH_CAPABLE=1'
-      : 'remote target without E2E_LAUNCH_CAPABLE=1',
-    badImageTemplate: env.E2E_BAD_IMAGE_TEMPLATE || undefined,
-    projectId: env.E2E_TARGET_PROJECT_ID || undefined,
-    codeFile: env.E2E_TEST_IDENTITY_CODE_FILE,
-    identityEmail: env.E2E_TEST_IDENTITY_EMAIL,
-    harnessConfig: env.E2E_HARNESS_CONFIG || undefined,
+      : capable === '0'
+        ? 'E2E_LAUNCH_CAPABLE=0'
+        : 'remote target without E2E_LAUNCH_CAPABLE=1',
+    // Only an explicit E2E_LAUNCH_CAPABLE=0 says the remote hub cannot run
+    // agents; without it the no-runtime check would be mislabelled.
+    noRuntimeConfirmed: capable === '0',
+    codeFile,
+    identityEmail,
+    ...(env.E2E_BAD_IMAGE_TEMPLATE ? { badImageTemplate: env.E2E_BAD_IMAGE_TEMPLATE } : {}),
+    ...(env.E2E_TARGET_PROJECT_ID ? { projectId: env.E2E_TARGET_PROJECT_ID } : {}),
+    ...(env.E2E_HARNESS_CONFIG ? { harnessConfig: env.E2E_HARNESS_CONFIG } : {}),
   };
 }

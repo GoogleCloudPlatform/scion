@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 import { defineConfig } from '@playwright/test';
 
 const CI = !!process.env.CI;
 
-// Self-test of the shared e2e harness (../harness/hub.ts): startHub's
-// options checked against a stand-in hub binary (a Node script written by
-// the spec), so it needs neither Go nor a browser. No global setup.
+// Self-tests of e2e support code, needing neither Go nor a browser: the
+// shared harness's startHub options against a stand-in hub binary (a Node
+// script written by the spec), and the async create journey's pure
+// helpers. No global setup. Run in the ci.yml web job (test:e2e-support).
 export default defineConfig({
   testDir: '.',
   testMatch: '**/*.pw.ts',

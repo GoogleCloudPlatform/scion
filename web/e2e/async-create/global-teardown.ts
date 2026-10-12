@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 /** Global teardown of the async create journey: stops the local hub. */
 
 import { stopHub } from '../harness/hub.js';
 import { readSuiteState, removeStateDir } from './state.js';
 
+// eslint-disable-next-line @typescript-eslint/require-await -- Playwright calls this as an async teardown hook; it stays async so it keeps returning a Promise
 async function globalTeardown(): Promise<void> {
   const state = readSuiteState();
   if (state) stopHub(state.hubStateFile);

@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 import { defineConfig } from '@playwright/test';
+
+import { parseTimeoutMs } from './journey-lib.js';
 
 const CI = !!process.env.CI;
 
@@ -36,7 +37,9 @@ const CI = !!process.env.CI;
 export default defineConfig({
   testDir: '.',
   testMatch: '**/*.pw.ts',
-  timeout: Number(process.env.E2E_LAUNCH_TIMEOUT_MS || 300_000) + 120_000,
+  // One launch plus the panel, delete and cleanup waits around it.
+  timeout:
+    parseTimeoutMs(process.env.E2E_LAUNCH_TIMEOUT_MS, 300_000, 'E2E_LAUNCH_TIMEOUT_MS') + 300_000,
   workers: 1,
   retries: 0,
   globalTimeout: CI ? 30 * 60_000 : 0,

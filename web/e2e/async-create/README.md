@@ -36,7 +36,10 @@ Existing non-IAP hub: set `E2E_TARGET_URL`, `E2E_TEST_IDENTITY_CODE_FILE`
 and `E2E_TEST_IDENTITY_EMAIL` for a member test identity issued out of
 band (`scion hub test-identity issue` / `web-code --out`), plus
 `E2E_LAUNCH_CAPABLE=1`, `E2E_BAD_IMAGE_TEMPLATE` and optionally
-`E2E_TARGET_PROJECT_ID`. The runner deletes that identity afterwards.
+`E2E_TARGET_PROJECT_ID`. The redeem removes the code file (the code is
+single-use). The runner deletes that identity afterwards; the spec cannot
+verify that, and its evidence is written before it. The no-runtime failure
+panel check runs on a remote target only with `E2E_LAUNCH_CAPABLE=0`.
 
 ## Evidence
 

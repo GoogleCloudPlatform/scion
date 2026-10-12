@@ -54,10 +54,13 @@ export const SELECTORS = {
   // Create form.
   createPage: 'scion-page-agent-create',
   createName: 'sl-input#name',
+  createNameInput: 'sl-input#name input',
   createTemplate: 'sl-select#template',
   createHarness: 'sl-select#harness',
   createBroker: 'sl-select#broker',
   createTask: 'sl-textarea#task',
+  createTaskInput: 'sl-textarea#task textarea',
+  selectOption: 'sl-option',
   createSubmit: '.form-actions sl-button[variant="primary"]',
   createError: '.form-card .error-banner',
 
