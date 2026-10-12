@@ -34,6 +34,13 @@ type testInfraGates struct {
 	// has its hub-local web session key, and it is not in proxy auth mode
 	// (testIdentityWebSessionGate).
 	TestIdentityWebSessions bool
+	// TestIssuerAudience is the audience a workload ID token must carry to
+	// prove a test identity issuer delegation on this hub
+	// ("scion-test-issuer:<hub id>"), or "" when the hub accepts no
+	// workload delegation (member tier off, or no workload issuer
+	// configured). It is not a secret: it reveals that the hub accepts
+	// workload delegation and its resolved hub id (part of the audience).
+	TestIssuerAudience string
 }
 
 // testInfraGates returns the hub's test-identity gates. It is the single
@@ -45,23 +52,37 @@ func (s *Server) testInfraGates() testInfraGates {
 		TestHubAdmin:            s.testAdminTierEnabled(testAdminKindHubAdmin),
 		TestSuperAdmin:          s.testAdminTierEnabled(testAdminKindSuperAdmin),
 		TestIdentityWebSessions: webSessions,
+		TestIssuerAudience:      s.testIssuerAudienceIfAccepted(),
 	}
 }
 
+// testIssuerAudienceIfAccepted returns the hub's issuer audience while the
+// member tier is on and at least one workload issuer is configured, and ""
+// otherwise.
+func (s *Server) testIssuerAudienceIfAccepted() string {
+	if !s.testIdentities.enabled || s.workloadIssuer == nil || len(s.workloadIssuer.allowlist) == 0 {
+		return ""
+	}
+	return s.workloadIssuer.audience
+}
+
 // TestInfraStatusResponse is the body of GET /api/v1/test-infra/status:
-// exactly four booleans, and no other hub data.
+// exactly four booleans and the issuer audience string, and no other hub
+// data.
 type TestInfraStatusResponse struct {
-	TestIdentities          bool `json:"testIdentities"`
-	TestHubAdmin            bool `json:"testHubAdmin"`
-	TestSuperAdmin          bool `json:"testSuperAdmin"`
-	TestIdentityWebSessions bool `json:"testIdentityWebSessions"`
+	TestIdentities          bool   `json:"testIdentities"`
+	TestHubAdmin            bool   `json:"testHubAdmin"`
+	TestSuperAdmin          bool   `json:"testSuperAdmin"`
+	TestIdentityWebSessions bool   `json:"testIdentityWebSessions"`
+	TestIssuerAudience      string `json:"testIssuerAudience"`
 }
 
 // handleTestInfraStatus handles GET /api/v1/test-infra/status.
 //
 // The route is public and read-only, so the web client can show the
 // test-hub banner on every page, the login page included, for every user.
-// On a hub without test identities it returns all false.
+// On a hub without test identities it returns all false and an empty
+// issuer audience.
 func (s *Server) handleTestInfraStatus(w http.ResponseWriter, _ *http.Request) {
 	// A conversion, so the two types must keep the same fields in the
 	// same order; a field added to either one stops this compiling.

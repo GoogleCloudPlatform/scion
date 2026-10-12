@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -384,10 +384,10 @@ func sqliteMigrationRecords(t *testing.T, db *sql.DB, name string) int {
 // thread_id backfill and thread_id index migrations are not recorded as
 // completed, and that they run on the next Init once the table exists.
 func TestSQLiteWebChatStore_ThreadMigrationsWaitForMessagesTable(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 	const legacyID = "msg-legacy-1"
 
-	require.NoError(t, NewWebChatStore(db, "sqlite3").Init())
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
 	assert.Zero(t, sqliteMigrationRecords(t, db, "thread_id_backfill"),
 		"backfill must not be recorded while messages does not exist")
 	assert.Zero(t, sqliteMigrationRecords(t, db, "thread_id_index"),
@@ -400,7 +400,7 @@ func TestSQLiteWebChatStore_ThreadMigrationsWaitForMessagesTable(t *testing.T) {
 	require.False(t, sqliteIndexExists(db, "idx_messages_thread_id"))
 
 	// The next store start runs both migrations and records them.
-	require.NoError(t, NewWebChatStore(db, "sqlite3").Init())
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
 	assert.Equal(t, "dm:agent:agent-a:user:user-1", sqliteMessageThreadID(t, db, legacyID),
 		"backfill must run once messages exists")
 	assert.True(t, sqliteIndexExists(db, "idx_messages_thread_id"),
@@ -413,7 +413,7 @@ func TestSQLiteWebChatStore_ThreadMigrationsWaitForMessagesTable(t *testing.T) {
 // present the thread_id migrations run on the first Init and are recorded,
 // and that a later Init does not run them again.
 func TestSQLiteWebChatStore_ThreadMigrationsRunOnce(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 	const firstID = "msg-first"
 	const laterID = "msg-later"
 
@@ -421,7 +421,7 @@ func TestSQLiteWebChatStore_ThreadMigrationsRunOnce(t *testing.T) {
 	require.NoError(t, err)
 	insertSQLiteLegacyAgentThreadMessage(t, db, firstID)
 
-	require.NoError(t, NewWebChatStore(db, "sqlite3").Init())
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
 	assert.Equal(t, "dm:agent:agent-a:user:user-1", sqliteMessageThreadID(t, db, firstID))
 	assert.True(t, sqliteIndexExists(db, "idx_messages_thread_id"))
 	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_backfill"))
@@ -430,7 +430,7 @@ func TestSQLiteWebChatStore_ThreadMigrationsRunOnce(t *testing.T) {
 	// A recorded migration does not run again: a legacy row written after
 	// the first Init is left as it is, and nothing is recorded twice.
 	insertSQLiteLegacyAgentThreadMessage(t, db, laterID)
-	require.NoError(t, NewWebChatStore(db, "sqlite3").Init())
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
 	assert.Equal(t, "agent:agent-a", sqliteMessageThreadID(t, db, laterID),
 		"a recorded backfill must not run again")
 	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_backfill"))
@@ -482,6 +482,9 @@ func setSQLiteSchemaReadDenied(t *testing.T, db *sql.DB, deny bool) {
 // mark the migration completed, so it would never run.
 func TestSQLiteWebChatStore_TableExistsError_Surfaces(t *testing.T) {
 	newStore := func(t *testing.T) (*sqliteWebChatStore, *sql.DB) {
+		// Stays on mattn/go-sqlite3: the fault injection needs an
+		// authorizer hook (setSQLiteSchemaReadDenied), which
+		// modernc.org/sqlite, the production driver, does not expose.
 		db := openTestMemorySQLite(t, "sqlite3")
 		s := &sqliteWebChatStore{db: db}
 		require.NoError(t, s.Init())

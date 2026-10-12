@@ -373,6 +373,18 @@ type ServerConfig struct {
 	// DEC-8), or the reason there is none. Without a usable key, test
 	// identity web sessions are unavailable; the member tier is unaffected.
 	TestIdentityWebSessionKey TestIdentityWebSessionKey
+	// TestIdentityWorkloadIssuers is the startup allowlist of workload
+	// subjects a human issuer may pin a test identity issuer delegation to
+	// (server.hub.test_identities.workload_issuers, ptone/scion#4240 phase
+	// X2). New validates it (config.ValidateTestIdentityWorkloadIssuers, a
+	// resolved HubID, and an issuer audience distinct from every other
+	// configured token audience) and refuses to build a Server otherwise.
+	// It is accepted only while EnableTestIdentities is true; it is never
+	// writable through the API.
+	TestIdentityWorkloadIssuers []config.TestIdentityWorkloadIssuer
+	// TestIdentityWorkloadValidator verifies workload Google ID tokens.
+	// Nil means the production Google validator; tests set a fake.
+	TestIdentityWorkloadValidator GoogleCredentialValidator
 	// TestAdminGate is the validated test admin tier gate (--test-mode=admin,
 	// ptone/scion#4240 phase A0). cmd's resolveTestMode builds it; New
 	// re-checks it, verifies every signing-key class is hub-local, and
@@ -1775,6 +1787,10 @@ type Server struct {
 	// testIdentityWeb is the test identity web session state (WS1): the
 	// marker cookie codec built from the hub-local key, fixed in New.
 	testIdentityWeb testIdentityWebState
+	// workloadIssuer is the workload-bound issuer delegation state
+	// (test_identity_workload_issuer.go), fixed at startup. Nil when no
+	// workload issuer is configured.
+	workloadIssuer *workloadIssuerAuthenticator
 
 	// testAdminGate is the immutable test admin tier gate captured by New
 	// (test_admin_gate.go). It has no setter: testAdminTierEnabled reads
@@ -2143,6 +2159,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := ValidateTestModeConfig(cfg); err != nil {
 		return nil, err
 	}
+	// Workload issuer allowlist and issuer audience (X2): refuse a
+	// malformed allowlist, an admin-tier entry, a missing hub id, or an
+	// issuer audience shared with another accepted token audience.
+	if err := validateTestIdentityWorkloadIssuers(cfg); err != nil {
+		return nil, err
+	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -2428,6 +2450,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.testIdentityWeb = newTestIdentityWebState(cfg.TestIdentityWebSessionKey)
 	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
+	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() })
+	if srv.workloadIssuer != nil && !cfg.EnableTestIdentities {
+		slog.Warn("Test identity workload issuers are configured but test identities are off; workload delegation stays unavailable")
+	}
 
 	// Store transport token minter if configured
 	if cfg.TransportMinter != nil {
@@ -2823,6 +2849,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// Agent delegated credentials (scion_adt_ bearers); refused while
 		// hub.agent_delegation is off.
 		DelegatedAgentAuth: srv.authenticateDelegatedAgentCredential,
+
+		// Workload-bound issuer delegations (test identities phase X2).
+		WorkloadIssuer: srv.workloadIssuer,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {
@@ -2899,6 +2928,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// See platformAuthSA above: shared by the GE exchange endpoint and the
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
+	// Same policy as isUserAuthorized above, in its code-returning form,
+	// so a refusal's audit entry records the code the decision returned.
+	googleResolver.SetSignInDenial(srv.signInDenial)
 	// Give the resolver's existing-record-by-email branch the same
 	// account-state handling (invited activation, role re-evaluation,
 	// super-admin binding, grant sync, audit) that provisionUser's
@@ -6687,6 +6719,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin", s.handleIssueTestAdminIdentity)))
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin/revoke-all", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin/revoke-all", s.handleRevokeAllTestAdminIdentities)))
 	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
+	// Workload-bound issuer delegations (phase X2), behind the same flag.
+	s.mux.HandleFunc("POST /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identity-delegations", s.handleCreateTestIdentityDelegation)))
+	s.mux.HandleFunc("GET /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identity-delegations", s.handleListTestIdentityDelegations)))
+	s.mux.HandleFunc("DELETE /api/v1/test-identity-delegations/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identity-delegations/{id}", s.handleRevokeTestIdentityDelegation)))
 
 	// Telegram account linking endpoints
 	s.mux.HandleFunc("/api/v1/telegram/link", s.guarded("/api/v1/telegram/link", s.handleTelegramLink))

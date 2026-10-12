@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_6
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -188,6 +186,9 @@ var routePermissionClassifications = map[string]string{
 	"DELETE /api/v1/test-identities/{id}":            "hub-admin:test-identity",
 	"POST /api/v1/test-identities/admin":             "hub-admin:test-identity",
 	"POST /api/v1/test-identities/admin/revoke-all":  "hub-admin:test-identity",
+	"POST /api/v1/test-identity-delegations":         "hub-admin:test-identity",
+	"GET /api/v1/test-identity-delegations":          "hub-admin:test-identity",
+	"DELETE /api/v1/test-identity-delegations/{id}":  "hub-admin:test-identity",
 	"/api/v1/telegram/link":                          "authenticated:account-link",
 	"/api/v1/telegram/link/verify":                   "authenticated:account-link",
 	"/api/v1/telegram/link/status":                   "authenticated:account-link",

@@ -73,7 +73,7 @@ hub:
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `enabled` | bool | Whether to enable Hub integration for this project. |
+| `enabled` | bool | Whether to enable Hub integration for this project. A Runtime Broker ignores `hub.enabled` and still uses the project's Hub endpoint. `scion hub unlink` does not change it. |
 | `endpoint` | string | The Hub API endpoint URL. Can be overridden per-agent in `scion-agent.yaml`. |
 | `project_id` | string | The unique identifier for this project on the Hub. |
 | `local_only` | bool | If `true`, forces local-only operation even if the Hub is configured. |

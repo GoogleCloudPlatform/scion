@@ -48,8 +48,11 @@ func (RoleBinding) Fields() []ent.Field {
 			Values("system", "project"),
 		field.String("scope_id").
 			Default(""),
-		// Lifecycle fields: the store persists these but does NOT evaluate them.
-		// Activation evaluation is the kernel's job (AK1).
+		// Lifecycle fields: role binding reads return these as stored, and
+		// activation evaluation for authorization is the kernel's job (AK1).
+		// The project membership reads (GetProjectMembership,
+		// ListProjectMembers, IsProjectMember) count only bindings active
+		// under the kernel's rule.
 		field.Time("not_before").
 			Optional().
 			Nillable(),

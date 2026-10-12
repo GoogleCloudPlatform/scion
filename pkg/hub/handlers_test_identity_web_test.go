@@ -1,4 +1,4 @@
-//go:build !no_sqlite && (!hubshard || hubshard_3)
+//go:build !no_sqlite
 
 // Copyright 2026 Google LLC
 //
@@ -1074,7 +1074,7 @@ func TestTestIdentityWeb_DeathWithRow(t *testing.T) {
 	t.Run("open event stream closes within one heartbeat", func(t *testing.T) {
 		e := newTIWebEnv(t)
 		e.ws.events = NewChannelEventPublisher()
-		e.ws.sseHeartbeat = 100 * time.Millisecond
+		e.ws.config.SSEHeartbeatInterval = 100 * time.Millisecond
 		fx := e.issue()
 		jar := e.login(fx.Identity.ID)
 		server := httptest.NewServer(e.ws.Handler())
@@ -1566,7 +1566,7 @@ func TestTestIdentityWeb_LogoutClears(t *testing.T) {
 func TestTestIdentityWeb_Indicator(t *testing.T) {
 	e := newTIWebEnv(t)
 	status := doRequestNoAuth(t, e.srv, http.MethodGet, "/api/v1/test-infra/status", nil)
-	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":true}`, status.Body.String())
+	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":true,"testIssuerAudience":""}`, status.Body.String())
 
 	rec := doRequest(t, e.srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

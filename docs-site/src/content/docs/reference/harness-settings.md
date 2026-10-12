@@ -15,11 +15,25 @@ Each agent has a dedicated "Home" directory that is mounted into the container. 
 
 ## Seeding from Harness-Configs & Templates
 When an agent is created, Scion composes its home directory by layering files from multiple sources:
-1.  **Harness-Config**: Base settings for the specific LLM tool (from `~/.scion/harness-configs/<name>/home/`).
+1.  **Harness-Config**: Base settings for the specific LLM tool (from `~/.scion/harness-configs/<name>/home/`, or another [harness-config location](#managing-harness-configs)).
 2.  **Template**: Role-specific prompts and configuration (from `.scion/templates/<name>/home/`).
 3.  **Common Files**: Shared dotfiles like `.tmux.conf` and `.zshrc`.
 
 This multi-layered approach allows you to define a "base" Gemini configuration once, and then overlay different "roles" (like Code Reviewer or Security Auditor) on top of it.
+
+### When harness-config changes reach an agent
+
+A harness-config has two parts that reach an agent at different times:
+
+- **`home/` files** (for example `home/.claude/settings.json`, which registers the Claude Code hooks) are copied into the agent home only when the agent is provisioned: when it is created, and when it is [reincarnated](/scion/local/agent-lifecycle/#reincarnating-an-agent). Starting an existing agent reuses its agent home and does not copy them again.
+- **The provisioning bundle** (`config.yaml` and the provisioner scripts) is cleared and staged again from the harness-config on every start.
+
+So after you change a harness-config's `home/` files, an existing agent keeps its old copies through stops and starts. Reincarnate or recreate the agent to pick up the change.
+
+Where the start reads the harness-config from depends on the mode:
+
+- **Workstation:** a local agent uses the harness-config on disk (template-bundled, then project, then global). When the workstation server starts, it syncs the global harness-configs (`~/.scion/harness-configs/`) to the Hub: it imports each one the Hub does not have yet (except a built-in that was deleted on the Hub) and re-uploads each one whose content hash changed.
+- **Hosted:** the Hub stores each harness-config as a record plus its files in storage, written by `scion harness-config sync` (alias `push`) or re-imported by `scion harness-config update`. When the Runtime Broker creates, starts or restarts an agent, it fetches the Hub's current version of the agent's harness-config (cached on the broker by content hash), not the version the agent was created with. A start still keeps the agent's existing `home/` files.
 
 ## Managing Harness-Configs
 
@@ -28,7 +42,11 @@ A **harness-config** is a named, versioned bundle that defines a harness: its `c
 (the `home/` directory, `provision.py`, `dialect.yaml`, `capture_auth.py`, and the shared
 `scion_harness.py` library). Bundles live in `~/.scion/harness-configs/<name>/` (global) or
 `.scion/harness-configs/<name>/` (project-level); project-level configs override global ones with
-the same name.
+the same name. A template can also bundle harness-configs in its own `harness-configs/<name>/`
+directories, and these take precedence over both project and global configs of the same name (any
+directory that fails to load is skipped and the next one is tried). When a Hub dispatch names a
+Hub harness-config, the Hub's copy is used instead of any of these directories; if the Runtime
+Broker cannot fetch it, the start fails rather than falling back to them.
 
 Since all harnesses are now provisioned via container-script (see
 [Supported Agent Harnesses](/scion/supported-harnesses/)), harness-configs are the unit you
@@ -168,6 +186,44 @@ The force paths still replace the whole config, and they write through symlinks.
 
 To customize a provisioner, publish it as your own harness-config under a different name. Do
 not edit the bundled scripts in place.
+
+### Changing a harness config affects new agents only
+
+By design, an agent keeps the harness setup it was created with. Its home directory is composed
+once, when the agent is created (see [Seeding from Harness-Configs &
+Templates](#seeding-from-harness-configs--templates)). That directory holds the harness-config's
+`home/` dotfiles, such as Claude's `.claude/settings.json` with its hook registrations, and the
+agent's skills. The skills come from the template chain (including skill references it declares)
+and the platform skills, not from the harness-config. Stopping and starting the agent does not
+copy them again. For a harness that uses container-script provisioning, each start re-stages the
+provisioner bundle (for example `config.yaml`, `provision.py`, `scion_harness.py`,
+`dialect.yaml` and the capture-auth assets) and the hook wrapper script, and then runs
+`provision.py`. Changes to `home/` dotfiles, including hook registrations kept there, therefore
+reach new agents only. Harnesses whose provisioner writes its hook configuration at start (for
+example Copilot, Antigravity and Grok Build) pick up changes to the provisioner on the agent's
+next start.
+
+To give an existing agent the new setup:
+
+1. **Update the harness-config.**
+   - **Local mode:** run `scion harness-config upgrade <name>`. It changes only the local copy
+     in `~/.scion/harness-configs/<name>/`. It adds missing files and settings, but an existing
+     file that changed in the new defaults (for example `home/.claude/settings.json`) keeps your
+     version. To take the new defaults, run `scion harness-config upgrade <name> --force`. This
+     overwrites every file that ships in the embedded defaults, discarding your edits to those
+     files. Files you added yourself are kept.
+   - **Workstation and hosted:** agents use the Hub's copy, which `upgrade` does not change. The
+     Hub refreshes its copy of a built-in harness-config from the binary's defaults when it
+     restarts. In Workstation mode, that restart also resets the bundled configs in
+     `~/.scion/harness-configs/` to the defaults. Publish a harness-config you changed yourself
+     with `scion harness-config sync <name>`.
+2. **Rebuild the agent's home.**
+   - **With a Hub:** run [`scion reincarnate <agent>`](/scion/reference/cli/#scion-reincarnate).
+     It keeps the agent's identity and workspace and copies the harness-config's home files, the
+     skills from the template chain (including skill references it declares) and the platform
+     skills in again. It overlays files: files that the new version no longer has stay in place.
+   - **Without a Hub, or in a worktree-per-agent project** (where reincarnate is not available):
+     save the agent's work, then delete the agent with `scion delete` and start it again.
 
 ### Deleting
 

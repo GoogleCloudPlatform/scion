@@ -341,11 +341,24 @@ func TestAgentInfoKnownKeySet(t *testing.T) {
 			t.Errorf("isKnownAgentInfoKey(%q) = true, want false", k)
 		}
 	}
-	got := slices.Clone(jsonFieldNames(typ))
+	// jsonFieldNames builds a fresh slice on every call, so sorting it in
+	// place is safe.
+	got := jsonFieldNames(typ)
 	slices.Sort(got)
 	wantSorted := slices.Clone(want)
 	slices.Sort(wantSorted)
 	if !slices.Equal(got, wantSorted) {
-		t.Errorf("jsonFieldNames(api.AgentInfo) has %d names, want %d:\ngot  %v\nwant %v", len(got), len(wantSorted), got, wantSorted)
+		var missing, extra []string
+		for _, k := range wantSorted {
+			if !slices.Contains(got, k) {
+				missing = append(missing, k)
+			}
+		}
+		for _, k := range got {
+			if !slices.Contains(wantSorted, k) {
+				extra = append(extra, k)
+			}
+		}
+		t.Errorf("jsonFieldNames(api.AgentInfo) differs from the exported JSON field names: missing %v, extra %v\ngot  %v\nwant %v", missing, extra, got, wantSorted)
 	}
 }
