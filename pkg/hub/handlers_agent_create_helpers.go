@@ -401,8 +401,11 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 //
 // Per-field precedence differs by field, because of where each tier is
 // applied:
-//   - Model: request > project > hub > template. Project and hub run here,
-//     BEFORE resolveDerivedConfig's template fill.
+//   - Model: request > project > template > hub (ptone/scion#4222). The
+//     template rung (from the template's AgentConfig snapshot) runs here,
+//     after applyProjectDefaults and before applyHubAgentDefaults, so the
+//     hub default fills only when the template and the project both leave
+//     the model unset.
 //   - HarnessConfig: request > project > template > hub. The template rung
 //     also runs here, but BEFORE applyHubAgentDefaults, so the hub-wide
 //     default only fills a slot that request, project, AND template all
@@ -445,10 +448,25 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 			"agent", agent.Name, "agent_id", agent.ID, "profile", dropped, "runtime_broker_id", agent.PinnedRuntimeBrokerID)
 	}
 
+	// Template model rung — after the request and project tiers, before the
+	// hub default (ptone/scion#4222): request > project > template > hub.
+	// The model is a job key read from the template's job config (its
+	// stripped AgentConfig snapshot).
+	if agent.AppliedConfig.Model == "" {
+		if jc := s.templateJobConfig(ctx, resolvedTemplate); jc != nil && jc.Model != "" {
+			agent.AppliedConfig.Model = jc.Model
+		}
+	}
+
+	// A templateTiers broker gets only the requester's telemetry on/off
+	// (dispatchTelemetry); say so when the request set more.
+	s.warnRequesterTelemetryDropped(ctx, agent)
+
 	// Hub operational agent_defaults — strictly between applyProjectDefaults
-	// and populateAgentConfig. See applyHubAgentDefaults for why that
-	// placement is the whole point: running it before the template rung
-	// above would let the hub default beat the template for HarnessConfig.
+	// (and the template model rung) and populateAgentConfig. See
+	// applyHubAgentDefaults for why that placement is the whole point:
+	// running it before the template rungs above would let the hub default
+	// beat the template for HarnessConfig and Model.
 	if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
 		ctx = withHubDefaultHarnessConfig(ctx)
 	}
@@ -457,8 +475,7 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 }
 
 // resolveDerivedConfig is fill-if-empty, not recompute-against-the-catalog:
-// for most fields (Image, Model, Env entries, HarnessConfigID/Hash,
-// ProjectPreStartHookID/Script, template-derived InlineConfig.Telemetry) it
+// for most fields (HarnessConfigID/Hash, ProjectPreStartHookID/Script) it
 // only writes a slot on agent.AppliedConfig that is still empty, and leaves
 // an already-populated slot alone. Calling it on an agent's EXISTING
 // (already-derived) AppliedConfig therefore keeps every stale value from
@@ -485,9 +502,8 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 //
 // For context, not as a substitute for reusing deriveAgentConfig: the
 // resulting per-field precedence differs by field, because of *where* each
-// tier is applied. Model is request > project > hub > template, because the
-// project and hub tiers (applyProjectDefaults, then applyHubAgentDefaults)
-// run before this function's template fill. HarnessConfig is
+// tier is applied. Model is request > project > template > hub, all four
+// applied by deriveAgentConfig before this function runs. HarnessConfig is
 // request > project > template > hub, because deriveAgentConfig fills the
 // harness-config rung (request > project annotation > template) before
 // applyProjectDefaults/applyHubAgentDefaults run — so the hub-wide
@@ -510,9 +526,6 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 //   - The auto-no-auth fallback can flip NoAuth to true and HarnessAuth from
 //     "" to "none" based on a live credential check, and, once written, that
 //     result is indistinguishable from an explicit --harness-auth none.
-//   - The project's TelemetryEnabled annotation, when set to a valid bool,
-//     overwrites InlineConfig.Telemetry.Enabled, even when the requester set
-//     it inline.
 //   - InlineConfig.Skills is always rewritten by mergeInjectedSkills, and it
 //     is neither fill-if-empty nor additive: whatever is already in Skills
 //     on entry is relabeled Scope="template" (highest precedence), merged
@@ -534,20 +547,18 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // InlineConfig is not a record of the requester's explicit inputs after this
 // runs: this function creates it when nil (mergeInjectedSkills always does,
 // which is why a bare create's InlineConfig is never nil) and writes into it
-// — template/hub/project telemetry defaults, the resolved Model alias, and
-// InlineConfig.Skills (see above). The create path's config builder,
-// buildAppliedConfig, sets AppliedConfig.InlineConfig to req.Config itself,
-// so every InlineConfig write listed above also mutates the request.
-// InlineConfig.Telemetry can also be aliased, by this function's own
-// template-telemetry fill, to resolvedTemplate.Config.Telemetry, so the
-// project TelemetryEnabled write above can mutate the template object through
-// that shared pointer. A caller that needs the original explicit request
+// — the resolved Model alias and InlineConfig.Skills (see above). It no
+// longer writes InlineConfig.Telemetry: hub and project telemetry are
+// resolved per dispatch (dispatchTelemetry, ptone/scion#4222). The create
+// path's config builder, buildAppliedConfig, sets AppliedConfig.InlineConfig
+// to req.Config itself, so every InlineConfig write listed above also
+// mutates the request. A caller that needs the original explicit request
 // inputs (reincarnate does) must capture them before this runs, not read them
 // back out of InlineConfig afterward.
 //
 // InlineConfig.Env is the exception: nothing here writes it. AppliedConfig.Env
-// is a separate map (buildAppliedConfig clones it), so the template-env merge
-// and the SCION_AUTO_EXPOSE_PORTS project tier (resolveAutoExposeEnv) land in
+// is a separate map (buildAppliedConfig clones it), so the
+// SCION_AUTO_EXPOSE_PORTS project tier (resolveAutoExposeEnv) land in
 // AppliedConfig.Env only, and InlineConfig.Env keeps the requester's explicit
 // keys.
 //
@@ -580,41 +591,13 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 			}
 		}
 
-		// Merge template-level config values as defaults into AppliedConfig.
-		// These act as pre-populated defaults for the advanced config form and
-		// ensure the hub agent record reflects the effective configuration.
-		// Explicit request values (already set) take precedence.
-		if resolvedTemplate.Image != "" && agent.AppliedConfig.Image == "" {
-			agent.AppliedConfig.Image = resolvedTemplate.Image
-		}
-		if resolvedTemplate.Config != nil {
-			if resolvedTemplate.Config.Image != "" && agent.AppliedConfig.Image == "" {
-				agent.AppliedConfig.Image = resolvedTemplate.Config.Image
-			}
-			if resolvedTemplate.Config.Model != "" && agent.AppliedConfig.Model == "" {
-				agent.AppliedConfig.Model = resolvedTemplate.Config.Model
-			}
-			// Merge template env vars as defaults (don't overwrite explicit config env)
-			if len(resolvedTemplate.Config.Env) > 0 {
-				if agent.AppliedConfig.Env == nil {
-					agent.AppliedConfig.Env = make(map[string]string)
-				}
-				for k, v := range resolvedTemplate.Config.Env {
-					if _, exists := agent.AppliedConfig.Env[k]; !exists {
-						agent.AppliedConfig.Env[k] = v
-					}
-				}
-			}
-			// Merge template telemetry config as default (don't overwrite explicit inline telemetry)
-			if resolvedTemplate.Config.Telemetry != nil {
-				if agent.AppliedConfig.InlineConfig == nil {
-					agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
-				}
-				if agent.AppliedConfig.InlineConfig.Telemetry == nil {
-					agent.AppliedConfig.InlineConfig.Telemetry = resolvedTemplate.Config.Telemetry
-				}
-			}
-		}
+		// The template's job keys are not copied here. Its model is filled
+		// by deriveAgentConfig's template rung, from the AgentConfig
+		// snapshot. Its image, env and telemetry are not copied at all, for
+		// any broker (ptone/scion#4222): image and telemetry are
+		// environment keys a template cannot set (ptone/scion#4524), and
+		// the template's own env reaches the agent from its file on the
+		// broker, ranked by the environment-variable order.
 	}
 
 	// Populate harness config ID and hash for broker hydration.
@@ -809,42 +792,13 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 		}
 	}
 
-	// Merge hub-level telemetry config as lowest-priority default.
-	// Only applies when no per-agent or template telemetry config is set.
-	s.mu.RLock()
-	hubTelemetry := s.config.TelemetryConfig
-	s.mu.RUnlock()
-	if hubTelemetry != nil {
-		if agent.AppliedConfig.InlineConfig == nil {
-			agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
-		}
-		if agent.AppliedConfig.InlineConfig.Telemetry == nil {
-			// Deep copy to avoid sharing the pointer with the server config.
-			copied := *hubTelemetry
-			agent.AppliedConfig.InlineConfig.Telemetry = &copied
-		}
-	}
+	// Telemetry is not written here (ptone/scion#4222). The hub telemetry
+	// default and the project's TelemetryEnabled policy are resolved at each
+	// dispatch from their live sources (dispatchTelemetry), so the agent
+	// record keeps only the requester's own telemetry.
 
-	// Apply project-level TelemetryEnabled override. This takes effect regardless
-	// of where the telemetry config came from (inline, template, or hub), so
-	// project admins can enable/disable telemetry for all agents in the project.
-	if project != nil && project.Annotations != nil {
-		if val, ok := project.Annotations[projectSettingTelemetryEnabled]; ok {
-			if b, err := strconv.ParseBool(val); err == nil {
-				if agent.AppliedConfig.InlineConfig == nil {
-					agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
-				}
-				if agent.AppliedConfig.InlineConfig.Telemetry == nil {
-					agent.AppliedConfig.InlineConfig.Telemetry = &api.TelemetryConfig{}
-				}
-				agent.AppliedConfig.InlineConfig.Telemetry.Enabled = &b
-			}
-		}
-	}
-
-	// SCION_AUTO_EXPOSE_PORTS: explicit and project tiers. Runs after the
-	// template-env fill above so the project tier can overwrite a template
-	// value. The hub default is never written here; see resolveAutoExposeEnv.
+	// SCION_AUTO_EXPOSE_PORTS: explicit and project tiers. The hub default
+	// is never written here; see resolveAutoExposeEnv.
 	// Explicit keys come from explicitEnvOf.
 	if agent.AppliedConfig != nil {
 		resolveAutoExposeEnv(agent.AppliedConfig, project, explicitEnvOf(agent.AppliedConfig))
@@ -856,8 +810,8 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 
 	// Writer (a) of ExplicitTimezone, run unconditionally and last so that
 	// creates with or without a template or harness config are covered: a
-	// create-time TZ (request config.env, else the hub template merged
-	// above, else the hub harness config) becomes the agent's pin, and TZ
+	// create-time TZ (request config.env, else the hub harness config; a
+	// template cannot set TZ, ptone/scion#4524) becomes the agent's pin, and TZ
 	// leaves the env records. Every create entry point (HTTP create,
 	// scheduled spawn and reincarnate) reaches this via deriveAgentConfig.
 	s.captureCreateTimezone(ctx, agent, resolvedHC)

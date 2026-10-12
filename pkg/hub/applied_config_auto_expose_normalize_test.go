@@ -106,8 +106,9 @@ func TestAutoExposeEnvNormalize_MatchesReincarnate(t *testing.T) {
 		{name: "inline-only hub stamp drops to inherited", want: ""},
 		{name: "inline-only stamp, project annotation wins", projectAnno: "true", want: "true"},
 		{name: "stamp in both maps drops to inherited", appliedAE: "false", want: ""},
-		{name: "stamp in both maps, template tier re-derived", templateEnv: map[string]string{aeKey: "false"}, appliedAE: "true", want: "false"},
-		{name: "stamp in both maps, project beats template", projectAnno: "false", templateEnv: map[string]string{aeKey: "true"}, appliedAE: "true", want: "false"},
+		// A template is not a tier (ptone/scion#4222): its value is ignored.
+		{name: "stamp in both maps, template value ignored", templateEnv: map[string]string{aeKey: "false"}, appliedAE: "true", want: ""},
+		{name: "stamp in both maps, project applies, template ignored", projectAnno: "false", templateEnv: map[string]string{aeKey: "true"}, appliedAE: "true", want: "false"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -322,11 +323,12 @@ func TestAutoExposeEnvNormalize_ProjectLookup(t *testing.T) {
 	})
 }
 
-// TestAutoExposeEnvNormalize_TemplateRepushed covers N3: the
-// template is resolved by the agent's template reference, as reincarnate
-// does, so a template deleted and re-pushed under a new ID still supplies
-// its tier.
-func TestAutoExposeEnvNormalize_TemplateRepushed(t *testing.T) {
+// TestAutoExposeEnvNormalize_TemplateIsNotATier: a template's
+// SCION_AUTO_EXPOSE_PORTS is a reserved key the hub never copies
+// (ptone/scion#4222, ptone/scion#4524), so normalization drops a stamp to
+// inherited even when the agent's template sets the key, exactly as
+// reincarnate does.
+func TestAutoExposeEnvNormalize_TemplateIsNotATier(t *testing.T) {
 	srv, s, project, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
 		templateEnv:  map[string]string{aeKey: "false"},
 		templateID:   tid("template-deleted-before-repush"),
@@ -336,10 +338,10 @@ func TestAutoExposeEnvNormalize_TemplateRepushed(t *testing.T) {
 	})
 	fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
 	require.NoError(t, err)
-	require.Equal(t, "false", fresh.Env[aeKey])
+	require.NotContains(t, fresh.Env, aeKey)
 
 	runAENormalize(t, s, nil)
-	assert.Equal(t, "false", reloadAgent(t, s, agent.ID).AppliedConfig.Env[aeKey])
+	assert.NotContains(t, reloadAgent(t, s, agent.ID).AppliedConfig.Env, aeKey)
 }
 
 // templateLookupStore makes GetTemplate fail with err.
@@ -352,10 +354,10 @@ func (s *templateLookupStore) GetTemplate(ctx context.Context, id string) (*stor
 	return nil, s.err
 }
 
-// TestAutoExposeEnvNormalize_TemplateLookupError covers N2: a
-// template lookup failure skips the agent rather than dropping the template
-// tier.
-func TestAutoExposeEnvNormalize_TemplateLookupError(t *testing.T) {
+// TestAutoExposeEnvNormalize_IgnoresTemplateLookup: normalization reads no
+// template (it is not a tier), so a failing template lookup does not skip
+// the agent.
+func TestAutoExposeEnvNormalize_IgnoresTemplateLookup(t *testing.T) {
 	_, s, _, agent := setupAENormalizeAgent(t, aeNormalizeAgent{
 		templateEnv:  map[string]string{aeKey: "false"},
 		appliedEnv:   map[string]string{"KEEP": "1"},
@@ -363,11 +365,10 @@ func TestAutoExposeEnvNormalize_TemplateLookupError(t *testing.T) {
 		createInputs: explicitKeep(),
 	})
 	log := runAENormalize(t, &templateLookupStore{Store: s, err: errors.New("db down")}, nil)
-	assert.Contains(t, log, "WARN agent="+agent.ID+" - skipped, retried by the next run")
-	assert.Contains(t, log, "skipped 1 agent(s)")
+	assert.Contains(t, log, "re-derived auto-expose on 1 agent(s)")
 	got := reloadAgent(t, s, agent.ID)
-	assert.Equal(t, "true", inlineEnv(got)[aeKey])
-	assert.Equal(t, agent.StateVersion, got.StateVersion)
+	assert.NotContains(t, inlineEnv(got), aeKey)
+	assert.NotContains(t, got.AppliedConfig.Env, aeKey)
 }
 
 // failingUpdateStore rejects every agent update.

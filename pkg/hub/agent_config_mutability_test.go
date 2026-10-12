@@ -85,6 +85,7 @@ var wantEditTier = map[string]EditTier{
 	"config.config_dir":                EditTierImmutable,
 	"config.detached":                  EditTierImmutable,
 	"config.hub":                       EditTierImmutable,
+	"config.message_mode":              EditTierImmutable,
 }
 
 // wantSessionSensitive lists the keys a resume applies but whose effect on

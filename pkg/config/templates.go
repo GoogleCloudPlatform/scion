@@ -163,6 +163,10 @@ func (t *Template) LoadConfig() (*api.ScionConfig, error) {
 		return nil, fmt.Errorf("invalid config in %s: %w", configPath, err)
 	}
 
+	if err := api.ValidateMessageMode(cfg.MessageMode); err != nil {
+		return nil, fmt.Errorf("invalid config in %s: %w", configPath, err)
+	}
+
 	return &cfg, nil
 }
 

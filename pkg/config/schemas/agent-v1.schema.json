@@ -81,6 +81,11 @@
       "type": "string",
       "description": "Model size alias (small, medium, large) or concrete model name. Prefer size aliases for portability — they are resolved to harness-specific model names at provision time via the harness-config's model_aliases map. Concrete names are passed through unchanged but tie the template to a specific harness."
     },
+    "message_mode": {
+      "type": "string",
+      "enum": ["none", "lineage", "branch", "project", "hub"],
+      "description": "Initial message mode for agents created from this template on a Hub, used when the create request names none."
+    },
     "args": {
       "type": "array",
       "items": { "type": "string" }

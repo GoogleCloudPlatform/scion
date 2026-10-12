@@ -92,9 +92,10 @@ func TestExplicitDispatchImage(t *testing.T) {
 }
 
 // TestDispatch_TemplateImageNotSentAsTopTier pins ptone/scion#1799 end to
-// end on the hub: resolveDerivedConfig still records a template's image on
-// AppliedConfig.Image (for display), but the create dispatch must not carry
-// it as Config.Image, which the broker maps to its top tier (opts.Image).
+// end on the hub: resolveDerivedConfig no longer records a template's image
+// on AppliedConfig.Image (ptone/scion#4222), and the create dispatch must
+// not carry it as Config.Image, which the broker maps to its top tier
+// (opts.Image).
 // The broker resolves the template image from the template itself at the
 // template tier, where an explicit profile harness override can beat it.
 func TestDispatch_TemplateImageNotSentAsTopTier(t *testing.T) {
@@ -130,8 +131,8 @@ func TestDispatch_TemplateImageNotSentAsTopTier(t *testing.T) {
 	// Template image only.
 	derived := newAgent("img-derived", nil)
 	require.NoError(t, srv.populateAgentConfig(ctx, derived, project, template))
-	require.Equal(t, "template-image:v1", derived.AppliedConfig.Image,
-		"AppliedConfig.Image still records the template image for display")
+	require.Empty(t, derived.AppliedConfig.Image,
+		"a template image is an environment key the hub no longer copies (ptone/scion#4222)")
 	req, err := d.buildCreateRequest(ctx, derived, "test")
 	require.NoError(t, err)
 	require.NotNil(t, req.Config)

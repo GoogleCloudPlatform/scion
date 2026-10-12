@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,6 +64,10 @@ type inheritedGoldenCase struct {
 type inheritedSources struct {
 	Template struct {
 		Config *store.TemplateConfig `json:"config"`
+		// AgentConfig is the template's own scion-agent.yaml snapshot,
+		// the hub's only source of a template's job keys
+		// (ptone/scion#4222).
+		AgentConfig *api.ScionConfig `json:"agentConfig"`
 	} `json:"template"`
 	ProjectSettings json.RawMessage `json:"projectSettings"`
 	HubSettings     struct {
@@ -163,6 +168,7 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		Config:      src.Template.Config,
+		AgentConfig: src.Template.AgentConfig,
 	}
 	require.NoError(t, s.CreateTemplate(ctx, tmpl))
 
@@ -223,7 +229,10 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 	if _, ok := ps["defaultAgentRole"]; ok {
 		dispatched["agentRole"] = resp.Agent.AppliedConfig.AgentRole
 	}
-	if src.Template.Config != nil && src.Template.Config.MessageMode != "" {
+	// The row's config.messageMode is recorded too, so a case can assert
+	// that it no longer contributes (ptone/scion#4222).
+	if (src.Template.Config != nil && src.Template.Config.MessageMode != "") ||
+		(src.Template.AgentConfig != nil && src.Template.AgentConfig.MessageMode != "") {
 		dispatched["messageMode"] = resp.Agent.MessageMode
 	}
 	return dispatched

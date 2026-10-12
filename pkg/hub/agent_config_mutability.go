@@ -185,6 +185,9 @@ var agentEditFields = []agentEditField{
 	{Key: "config.config_dir", Tier: EditTierImmutable, LockedReason: editReasonInternal},
 	{Key: "config.detached", Tier: EditTierImmutable, LockedReason: editReasonInternal},
 	{Key: "config.hub", Tier: EditTierImmutable, LockedReason: editReasonInternal},
+	// A template key: the hub reads it from the template's snapshot at
+	// create (ptone/scion#4222). An agent's mode is the top-level messageMode.
+	{Key: "config.message_mode", Tier: EditTierImmutable, LockedReason: "Set the agent's message mode with messageMode."},
 }
 
 // agentEditFieldByKey indexes agentEditFields by wire key.

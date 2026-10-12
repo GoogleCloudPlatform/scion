@@ -496,3 +496,182 @@ func removeTemplateFile(files []store.TemplateFile, p string) []store.TemplateFi
 	}
 	return out
 }
+
+// Template job config (ptone/scion#4222).
+//
+// The hub reads a template's job keys (model, secrets, message_mode, skills)
+// from its AgentConfig snapshot, never from the template's storage files at
+// dispatch and never from the row's API-written Config. Every such read goes
+// through templateJobConfig, which passes the snapshot through
+// config.StripTemplateEnvironmentKeys with no harness credentials: on the
+// hub that strips the fixed reserved keys, and the broker strips again with
+// the harness credentials. The snapshot itself stays a faithful parse.
+//
+// A row committed before the snapshot existed has none. The first read
+// derives it from the row's agent config file and persists it
+// (ensureTemplateAgentConfig), and BackfillTemplateAgentConfigs does the
+// same for every active row at startup, so rows touched only by the repair
+// path are covered too.
+
+// templateJobConfig returns tmpl's job config: its AgentConfig snapshot,
+// derived and persisted first when the row has none, without environment
+// keys. Nil when the template has no usable agent config. tmpl may be nil.
+func (s *Server) templateJobConfig(ctx context.Context, tmpl *store.Template) *api.ScionConfig {
+	if tmpl == nil {
+		return nil
+	}
+	cfg, _ := config.StripTemplateEnvironmentKeys(s.ensureTemplateAgentConfig(ctx, tmpl), nil)
+	return cfg
+}
+
+// templateJobConfigByID is templateJobConfig for a template ID. A lookup
+// failure yields nil.
+func (s *Server) templateJobConfigByID(ctx context.Context, templateID string) *api.ScionConfig {
+	if templateID == "" {
+		return nil
+	}
+	tmpl, err := s.store.GetTemplate(ctx, templateID)
+	if err != nil || tmpl == nil {
+		return nil
+	}
+	return s.templateJobConfig(ctx, tmpl)
+}
+
+// templateHasAgentConfigFile reports whether tmpl's manifest lists an agent
+// config file.
+func templateHasAgentConfigFile(tmpl *store.Template) bool {
+	for _, name := range scionAgentConfigNames {
+		if _, ok := templateFileByPath(tmpl.Files, name); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureTemplateAgentConfig returns tmpl.AgentConfig. When the row has no
+// snapshot but its manifest lists an agent config file, it derives the
+// snapshot the way a commit does (deriveTemplateIndex), sets it on tmpl, and
+// persists it with a compare-and-swap on the content hash and layout read,
+// so a concurrent commit always wins. Only AgentConfig is written; the
+// row's other derived fields are left as stored. A file that cannot be read
+// or does not parse yields nil and writes nothing. Calling it again on a row
+// that has its snapshot is a no-op, so it is idempotent.
+func (s *Server) ensureTemplateAgentConfig(ctx context.Context, tmpl *store.Template) *api.ScionConfig {
+	if tmpl == nil {
+		return nil
+	}
+	if tmpl.AgentConfig != nil || !templateHasAgentConfigFile(tmpl) {
+		return tmpl.AgentConfig
+	}
+	stor := s.GetStorage()
+	if stor == nil {
+		return nil
+	}
+	read := func(ctx context.Context, p string) ([]byte, error) {
+		f, ok := templateFileByPath(tmpl.Files, p)
+		if !ok {
+			return nil, storage.ErrNotFound
+		}
+		return readDispatchTemplateFile(ctx, stor, templateObjectPath(tmpl, f))
+	}
+	data, name, err := readTemplateAgentConfig(ctx, read, tmpl.Files)
+	if err != nil {
+		slog.WarnContext(ctx, "template agent config: cannot read the agent config to derive the snapshot",
+			"template", tmpl.Name, "template_id", tmpl.ID, "error", err)
+		return nil
+	}
+	idx := deriveTemplateIndex(data, name, tmpl.Name)
+	if idx.AgentConfig == nil {
+		return nil
+	}
+	tmpl.AgentConfig = idx.AgentConfig
+	s.persistTemplateAgentConfig(ctx, tmpl.ID, tmpl.ContentHash, tmpl.Layout, idx.AgentConfig)
+	return tmpl.AgentConfig
+}
+
+// persistTemplateAgentConfig writes cfg as the AgentConfig of template id,
+// only while the stored row still has no snapshot and the content hash and
+// layout it was derived from. Failures are logged; the caller already has
+// the derived value.
+func (s *Server) persistTemplateAgentConfig(ctx context.Context, id, contentHash, layout string, cfg *api.ScionConfig) {
+	row, err := s.store.GetTemplate(ctx, id)
+	if err != nil || row == nil {
+		return
+	}
+	if row.AgentConfig != nil || row.ContentHash != contentHash || row.Layout != layout {
+		return
+	}
+	row.AgentConfig = cfg
+	err = s.store.UpdateTemplateContent(ctx, row, store.TemplateContentPrecondition{ContentHash: contentHash, Layout: layout})
+	switch {
+	case err == nil:
+		slog.InfoContext(ctx, "template agent config: derived and stored the missing snapshot",
+			"template", row.Name, "template_id", row.ID)
+	case errors.Is(err, store.ErrTemplateConflict), errors.Is(err, store.ErrNotFound):
+		// A concurrent commit or delete won; it owns the row now.
+	default:
+		slog.WarnContext(ctx, "template agent config: cannot store the derived snapshot",
+			"template", row.Name, "template_id", row.ID, "error", err)
+	}
+}
+
+// templateAgentConfigBackfillLimit bounds one startup backfill pass.
+const templateAgentConfigBackfillLimit = 1000
+
+// BackfillTemplateAgentConfigs derives and stores the AgentConfig snapshot of
+// every active template row that lists an agent config file but has no
+// snapshot (ensureTemplateAgentConfig), at most
+// templateAgentConfigBackfillLimit rows per call, sequentially. It returns
+// the number of rows that gained a snapshot. Rows that already have one are
+// skipped, so a second call does nothing (idempotent).
+func (s *Server) BackfillTemplateAgentConfigs(ctx context.Context) int {
+	if s.GetStorage() == nil {
+		return 0
+	}
+	result, err := s.store.ListTemplates(ctx, store.TemplateFilter{
+		Status: store.TemplateStatusActive,
+	}, store.ListOptions{Limit: templateAgentConfigBackfillLimit})
+	if err != nil {
+		s.resourceLog.Warn("template agent config backfill: failed to list templates", "error", err)
+		return 0
+	}
+	if result == nil {
+		return 0
+	}
+	derived := 0
+	for i := range result.Items {
+		if ctx.Err() != nil {
+			break
+		}
+		t := &result.Items[i]
+		if t.AgentConfig != nil || !templateHasAgentConfigFile(t) {
+			continue
+		}
+		if s.ensureTemplateAgentConfig(ctx, t) != nil {
+			derived++
+		}
+	}
+	if derived > 0 {
+		s.resourceLog.Info("template agent config backfill: derived missing snapshots", "count", derived)
+	}
+	return derived
+}
+
+// templateJobConfig returns a Hub template's job config for dispatch: the
+// server's provider (Server.templateJobConfigByID, which derives a missing
+// snapshot once) when one is registered, otherwise the row's stored
+// snapshot without environment keys.
+func (d *HTTPAgentDispatcher) templateJobConfig(ctx context.Context, templateID string) *api.ScionConfig {
+	if templateID == "" {
+		return nil
+	}
+	if d.templateJobConfigProvider != nil {
+		return d.templateJobConfigProvider(ctx, templateID)
+	}
+	tmpl, err := d.store.GetTemplate(ctx, templateID)
+	if err != nil || tmpl == nil {
+		return nil
+	}
+	cfg, _ := config.StripTemplateEnvironmentKeys(tmpl.AgentConfig, nil)
+	return cfg
+}
