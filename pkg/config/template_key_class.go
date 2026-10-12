@@ -174,7 +174,9 @@ func StripTemplateEnvironmentKeys(cfg *api.ScionConfig, authMeta *HarnessAuthMet
 	out.Resources = nil
 	out.Kubernetes = nil
 	out.Volumes = nil
-	if len(reservedEnv) > 0 {
+	// Env is always rebuilt in the copy, never shared with cfg, so a caller
+	// that mutates the stripped config's Env cannot reach cfg's map.
+	if cfg.Env != nil {
 		env := make(map[string]string, len(cfg.Env)-len(reservedEnv))
 		for k, v := range cfg.Env {
 			if !IsReservedTemplateEnvKey(k, credKeys) {

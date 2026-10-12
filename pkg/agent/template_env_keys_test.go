@@ -202,3 +202,15 @@ func TestStripTemplateEnvironment_DedupesWarnings(t *testing.T) {
 		t.Errorf("warnings = %q, want %q", got, want)
 	}
 }
+
+// A collector built without its seen map still records and dedupes.
+func TestStripTemplateEnvironment_ZeroValueCollector(t *testing.T) {
+	c := &templateEnvWarnings{}
+	ctx := context.WithValue(context.Background(), templateEnvWarningsKey{}, c)
+	tpl := &config.Template{Name: "z", Path: t.TempDir()}
+	_ = stripTemplateEnvironment(ctx, tpl, &api.ScionConfig{Image: "x"}, nil)
+	_ = stripTemplateEnvironment(ctx, tpl, &api.ScionConfig{Image: "x"}, nil)
+	if got := c.Warnings(); len(got) != 1 {
+		t.Errorf("warnings = %q, want exactly one", got)
+	}
+}

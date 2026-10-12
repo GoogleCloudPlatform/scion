@@ -176,3 +176,29 @@ func TestTemplateEnvironmentKeysWarning(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// The stripped copy never shares Env with the input, also when only
+// top-level environment keys are dropped and no env key is reserved.
+func TestStripTemplateEnvironmentKeys_CopyDoesNotAliasEnv(t *testing.T) {
+	cfg := &api.ScionConfig{Image: "tpl:1", Env: map[string]string{"MY_FLAG": "1"}}
+	got, ignored := StripTemplateEnvironmentKeys(cfg, nil)
+	if !reflect.DeepEqual(ignored, []string{"image"}) {
+		t.Fatalf("ignored = %v, want [image]", ignored)
+	}
+	if !reflect.DeepEqual(got.Env, map[string]string{"MY_FLAG": "1"}) {
+		t.Fatalf("Env = %v, want the non-reserved key kept", got.Env)
+	}
+	got.Env["MY_FLAG"] = "changed"
+	got.Env["NEW"] = "x"
+	if !reflect.DeepEqual(cfg.Env, map[string]string{"MY_FLAG": "1"}) {
+		t.Errorf("mutating the stripped copy's Env changed the input: %v", cfg.Env)
+	}
+}
+
+// A dropped key with a nil Env leaves Env nil in the copy.
+func TestStripTemplateEnvironmentKeys_NilEnvStaysNil(t *testing.T) {
+	got, _ := StripTemplateEnvironmentKeys(&api.ScionConfig{Image: "tpl:1"}, nil)
+	if got.Env != nil {
+		t.Errorf("Env = %v, want nil", got.Env)
+	}
+}

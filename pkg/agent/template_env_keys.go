@@ -91,6 +91,9 @@ func stripTemplateEnvironment(ctx context.Context, tpl *config.Template, tplCfg 
 	msg := config.TemplateEnvironmentKeysWarning(name, ignored)
 	if c != nil {
 		c.mu.Lock()
+		if c.seen == nil {
+			c.seen = map[string]struct{}{}
+		}
 		_, dup := c.seen[msg]
 		if !dup {
 			c.seen[msg] = struct{}{}
