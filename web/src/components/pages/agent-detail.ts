@@ -46,6 +46,8 @@ import {
   canMessageAgent,
   isTerminalAvailable,
   isAgentRunning,
+  isAgentLaunching,
+  isIncompleteCreate,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
@@ -100,6 +102,28 @@ import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { DEFAULT_TRIGGERS } from '../../shared/notification-triggers.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
+
+/** Display text for a launch step the broker reported. */
+function launchStepLabel(step: string): string {
+  return step.replace(/_/g, ' ');
+}
+
+/** Display text for how a launch ended (store.LaunchEndReason*). */
+function launchEndReasonLabel(endReason?: string): string | undefined {
+  switch (endReason) {
+    case 'failed':
+      return 'failed';
+    case 'timed_out':
+      return 'timed out';
+    case 'lost':
+      return 'broker lost';
+    case undefined:
+    case '':
+      return undefined;
+    default:
+      return endReason.replace(/_/g, ' ');
+  }
+}
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -354,6 +378,73 @@ export class ScionPageAgentDetail extends LitElement {
       font-size: 0.875rem;
       color: var(--sl-color-danger-600, #dc2626);
       font-family: var(--scion-font-mono, monospace);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .agent-error-banner .error-code {
+      font-size: 0.8125rem;
+      font-family: var(--scion-font-mono, monospace);
+      color: var(--sl-color-danger-700, #b91c1c);
+      margin-bottom: 0.25rem;
+    }
+    .agent-error-banner .error-hint {
+      font-size: 0.875rem;
+      color: var(--scion-text-secondary, #475569);
+      margin-top: 0.5rem;
+    }
+    .agent-error-banner .error-recreate {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 0.25rem 0.75rem;
+      margin: 0.5rem 0 0;
+      font-size: 0.875rem;
+    }
+    .agent-error-banner .error-recreate dt {
+      font-weight: 600;
+      color: var(--scion-text-secondary, #475569);
+    }
+    .agent-error-banner .error-recreate dd {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .agent-error-banner .error-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+    .agent-error-banner .error-actions sl-icon {
+      color: inherit;
+      font-size: inherit;
+      margin-top: 0;
+    }
+    .agent-launch-banner {
+      background: var(--sl-color-primary-50, #eff6ff);
+      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
+      border-radius: var(--scion-radius-lg, 0.75rem);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+    }
+    .agent-launch-banner sl-spinner {
+      font-size: 1.25rem;
+      flex-shrink: 0;
+      margin-top: 0.125rem;
+    }
+    .agent-launch-banner .launch-content {
+      flex: 1;
+      min-width: 0;
+    }
+    .agent-launch-banner .launch-title {
+      font-weight: 600;
+      color: var(--sl-color-primary-700, #1d4ed8);
+      margin-bottom: 0.25rem;
+    }
+    .agent-launch-banner .launch-message {
+      font-size: 0.875rem;
+      color: var(--scion-text-secondary, #475569);
       white-space: pre-wrap;
       word-break: break-word;
     }
@@ -1288,6 +1379,111 @@ export class ScionPageAgentDetail extends LitElement {
   // Render
   // ---------------------------------------------------------------------------
 
+  /**
+   * The banner under the header: a create that did not complete, an async
+   * launch in progress, or the generic error banner.
+   */
+  private renderStateBanner(): TemplateResult | typeof nothing {
+    const agent = this.agent!;
+    const message = agent.detail?.message || agent.message;
+    if (isIncompleteCreate(agent)) {
+      return this.renderIncompleteCreateBanner(agent, message);
+    }
+    if (isAgentLaunching(agent)) {
+      const step = agent.launch?.step;
+      return html`
+        <div class="agent-launch-banner" data-testid="agent-launch-banner">
+          <sl-spinner></sl-spinner>
+          <div class="launch-content">
+            <div class="launch-title">Launching${step ? html`: ${launchStepLabel(step)}` : ''}</div>
+            ${message ? html`<div class="launch-message">${message}</div>` : nothing}
+          </div>
+        </div>
+      `;
+    }
+    if (agent.phase === 'error' && message) {
+      return html`
+        <div class="agent-error-banner">
+          <sl-icon name="exclamation-octagon"></sl-icon>
+          <div class="error-content">
+            <div class="error-title">Agent Error</div>
+            <div class="error-message">${message}</div>
+          </div>
+        </div>
+      `;
+    }
+    return nothing;
+  }
+
+  /**
+   * A failed async create (ptone/scion#4664). The hub keeps the agent but
+   * refuses to start it, so the banner shows the failure code and message,
+   * what the agent was created with, and offers delete and create again.
+   */
+  private renderIncompleteCreateBanner(agent: Agent, message?: string): TemplateResult {
+    const launch = agent.launch!;
+    const code = launch.error;
+    const reason = launch.active ? 'stopping' : launchEndReasonLabel(launch.endReason);
+    const task = agent.appliedConfig?.task;
+    const canDelete = can(agent._capabilities, 'delete') && !this.deletionLease.isDeleting(agent);
+    return html`
+      <div class="agent-error-banner" data-testid="incomplete-create-banner">
+        <sl-icon name="exclamation-octagon"></sl-icon>
+        <div class="error-content">
+          <div class="error-title">Agent create did not complete</div>
+          ${code || reason
+            ? html`<div class="error-code" data-testid="launch-error-code">
+                ${code ?? ''}${code && reason ? ' — ' : ''}${reason ?? ''}
+              </div>`
+            : nothing}
+          ${message ? html`<div class="error-message">${message}</div>` : nothing}
+          <div class="error-hint">
+            This agent cannot be started or resumed. Delete it and create it again.
+          </div>
+          ${agent.template || task
+            ? html`
+                <dl class="error-recreate">
+                  ${agent.template
+                    ? html`<dt>Template</dt>
+                        <dd>${agent.template}</dd>`
+                    : nothing}
+                  ${task
+                    ? html`<dt>Task</dt>
+                        <dd>${task}</dd>`
+                    : nothing}
+                </dl>
+              `
+            : nothing}
+          <div class="error-actions">
+            ${canDelete
+              ? html`
+                  <sl-button
+                    variant="danger"
+                    size="small"
+                    ?loading=${this.actionLoading['delete']}
+                    ?disabled=${this.actionLoading['delete']}
+                    @click=${(e: MouseEvent) => this.handleAction('delete', e)}
+                  >
+                    <sl-icon slot="prefix" name="trash"></sl-icon>
+                    Delete
+                  </sl-button>
+                `
+              : nothing}
+            <a
+              href="/agents/new?projectId=${encodeURIComponent(agent.projectId)}"
+              style="text-decoration: none;"
+            >
+              <sl-button variant="default" size="small">
+                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                Create again
+              </sl-button>
+            </a>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   override render() {
     if (this.deleted) {
       return this.renderDeletedState();
@@ -1302,18 +1498,7 @@ export class ScionPageAgentDetail extends LitElement {
     }
 
     return html`
-      ${this.renderHeader()} ${this.renderDeletionBanner()}
-      ${this.agent.phase === 'error' && (this.agent.detail?.message || this.agent.message)
-        ? html`
-            <div class="agent-error-banner">
-              <sl-icon name="exclamation-octagon"></sl-icon>
-              <div class="error-content">
-                <div class="error-title">Agent Error</div>
-                <div class="error-message">${this.agent.detail?.message || this.agent.message}</div>
-              </div>
-            </div>
-          `
-        : ''}
+      ${this.renderHeader()} ${this.renderDeletionBanner()} ${this.renderStateBanner()}
 
       <sl-tab-group @sl-tab-show=${this.handleTabShow}>
         <sl-tab slot="nav" panel="status">Status</sl-tab>
@@ -1469,6 +1654,10 @@ export class ScionPageAgentDetail extends LitElement {
     // While the hub is deleting, hide every lifecycle action and Delete.
     const deleting = this.deletionLease.isDeleting(agent);
     const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
+    // Start and Resume are hidden while the hub launches the agent, and for
+    // a create that did not complete, which the hub refuses to start (409
+    // agent_create_incomplete); the launch banner offers delete instead.
+    const startOk = lifecycleOk && !isAgentLaunching(agent) && !isIncompleteCreate(agent);
     return html`
       <scion-detail-header heading=${agent.name}>
         <scion-back-link
@@ -1594,7 +1783,7 @@ export class ScionPageAgentDetail extends LitElement {
                   : nothing}
               `
             : agent.phase === 'suspended'
-              ? lifecycleOk
+              ? startOk
                 ? html`
                     <sl-button
                       variant="success"
@@ -1608,7 +1797,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing
-              : lifecycleOk
+              : startOk
                 ? html`
                     ${agent.phase === 'error'
                       ? html`

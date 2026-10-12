@@ -29,7 +29,13 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Project, RuntimeBroker, Template } from '../../shared/types.js';
+import type {
+  AgentLaunch,
+  AgentPhase,
+  Project,
+  RuntimeBroker,
+  Template,
+} from '../../shared/types.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -40,7 +46,7 @@ interface HarnessConfigEntry {
   scope: string;
 }
 
-import { isSharedWorkspace } from '../../shared/types.js';
+import { isAgentLaunching, isIncompleteCreate, isSharedWorkspace } from '../../shared/types.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { defaultTriggersHint } from '../../shared/notification-triggers.js';
@@ -851,6 +857,10 @@ export class ScionPageAgentCreate extends LitElement {
         projectId: this.projectId,
         harnessConfig: this.resolvedHarness,
         notify: this.notify,
+        // Take the hub's async launch path when it has it on
+        // (server.hub.async_agent_launch); a hub with it off ignores this
+        // and answers synchronously as before.
+        acceptAsyncLaunch: true,
       };
 
       if (this.templateId) body.template = this.templateId;
@@ -891,7 +901,7 @@ export class ScionPageAgentCreate extends LitElement {
       }
 
       const result = (await response.json()) as {
-        agent?: { id: string; status?: string; phase?: string };
+        agent?: { id: string; status?: string; phase?: AgentPhase; launch?: AgentLaunch };
         id?: string;
       };
       const agent = result.agent;
@@ -902,9 +912,14 @@ export class ScionPageAgentCreate extends LitElement {
       }
 
       // Start the agent unless the create response shows it already started.
+      // An async launch the hub accepted is the hub's to finish: while it
+      // runs, and after it failed (the hub refuses that start with 409
+      // agent_create_incomplete), the agent page shows its progress or
+      // failure instead.
       const startedPhases = ['running', 'provisioning', 'cloning', 'starting'];
       const alreadyStarted = agent?.phase ? startedPhases.includes(agent.phase) : false;
-      if (!alreadyStarted) {
+      const hubLaunch = !!agent && (isAgentLaunching(agent) || isIncompleteCreate(agent));
+      if (!alreadyStarted && !hubLaunch) {
         // The agent exists, so a failed start, including a rejected fetch,
         // is reported and its page still opens, where the user can start
         // it again without creating a second agent. The toast stack

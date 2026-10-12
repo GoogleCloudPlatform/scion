@@ -52,8 +52,17 @@ interface StartResponse {
   reject?: Error;
 }
 
-/** Accepts the create request and records every POST for inspection. */
-function stubFetch(createdPhase?: string, start: StartResponse = { ok: true, status: 200 }): void {
+/**
+ * Accepts the create request and records every POST for inspection. `created`
+ * is the created agent's phase, or extra fields of the created agent (e.g. an
+ * async `launch`).
+ */
+function stubFetch(
+  created?: string | Record<string, unknown>,
+  start: StartResponse = { ok: true, status: 200 }
+): void {
+  const createdAgent =
+    typeof created === 'object' ? { id: 'agent-1', ...created } : { id: 'agent-1', phase: created };
   requests = [];
   vi.stubGlobal(
     'fetch',
@@ -73,7 +82,7 @@ function stubFetch(createdPhase?: string, start: StartResponse = { ok: true, sta
           return Promise.resolve({
             ok: true,
             status: 201,
-            json: () => Promise.resolve({ agent: { id: 'agent-1', phase: createdPhase } }),
+            json: () => Promise.resolve({ agent: createdAgent }),
           } as Response);
         }
         if (url.endsWith('/start')) {
@@ -258,6 +267,84 @@ describe('Create Agent form actions', () => {
     expect(requests.map((r) => r.url)).toEqual(['/api/v1/agents']);
     expect(requests[0].body).not.toHaveProperty('provisionOnly');
     expect(showToast).not.toHaveBeenCalled();
+    expect(navigations).toEqual(['/agents/agent-1']);
+  });
+
+  it('asks the hub for its async launch path', async () => {
+    const el = await mountAgentCreate();
+    const page = el as unknown as AgentCreateInternals;
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+
+    await clickStart(el);
+
+    expect(requests[0].url).toBe('/api/v1/agents');
+    expect(requests[0].body).toHaveProperty('acceptAsyncLaunch', true);
+  });
+
+  // ptone/scion#4664: an accepted async launch is the hub's to finish.
+  it('does not start an agent the hub is launching, and opens its page', async () => {
+    stubFetch({
+      phase: 'created',
+      launch: { id: 'l-1', state: 'active', active: true, kind: 'create', step: 'claim' },
+    });
+    const el = await mountAgentCreate();
+    const page = el as unknown as AgentCreateInternals;
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+
+    await clickStart(el);
+
+    expect(requests.map((r) => r.url)).toEqual(['/api/v1/agents']);
+    expect(showToast).not.toHaveBeenCalled();
+    expect(navigations).toEqual(['/agents/agent-1']);
+  });
+
+  it('does not start an async create that already failed, and opens its page', async () => {
+    stubFetch({
+      phase: 'error',
+      message: 'launching: runtime error',
+      launch: {
+        id: 'l-1',
+        state: 'ended',
+        active: false,
+        kind: 'create',
+        error: 'runtime_error',
+        endReason: 'failed',
+      },
+    });
+    const el = await mountAgentCreate();
+    const page = el as unknown as AgentCreateInternals & { error: string | null };
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+
+    await clickStart(el);
+
+    expect(requests.map((r) => r.url)).toEqual(['/api/v1/agents']);
+    expect(showToast).not.toHaveBeenCalled();
+    expect(navigations).toEqual(['/agents/agent-1']);
+    expect(page.error).toBeFalsy();
+  });
+
+  it('still starts the agent when the hub answered synchronously after not launching', async () => {
+    stubFetch({
+      phase: 'created',
+      launch: {
+        id: 'l-1',
+        state: 'ended',
+        active: false,
+        kind: 'create',
+        endReason: 'not_launched',
+      },
+    });
+    const el = await mountAgentCreate();
+    const page = el as unknown as AgentCreateInternals;
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+
+    await clickStart(el);
+
+    expect(requests.map((r) => r.url)).toEqual(['/api/v1/agents', '/api/v1/agents/agent-1/start']);
     expect(navigations).toEqual(['/agents/agent-1']);
   });
 });
