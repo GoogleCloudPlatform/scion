@@ -35,10 +35,10 @@ gives the full image reference instead.
 Existing non-IAP hub: set `E2E_TARGET_URL`, `E2E_TEST_IDENTITY_CODE_FILE`
 and `E2E_TEST_IDENTITY_EMAIL` for a member test identity issued out of
 band (`scion hub test-identity issue` / `web-code --out`), plus
-`E2E_LAUNCH_CAPABLE=1` and `E2E_BAD_IMAGE_TEMPLATE`. Optional:
-`E2E_TARGET_PROJECT_ID`, and `E2E_BAD_IMAGE` (that template's image ref,
-so A4 asserts it exactly; without it, A4 asserts the same harness config
-as A2 and a different, non-empty image). The redeem removes the code file
+`E2E_LAUNCH_CAPABLE=1`, `E2E_BAD_IMAGE_TEMPLATE` and `E2E_BAD_IMAGE`
+(that template's image ref; A4 asserts it exactly). `E2E_BAD_IMAGE` is
+required while D1 is open (see below): A2's image is then unknown, and
+without the exact ref A4 fails. Optional: `E2E_TARGET_PROJECT_ID`. The redeem removes the code file
 (the code is single-use). The runner deletes that identity afterwards; the spec cannot
 verify that, and its evidence is written before it. The no-runtime failure
 panel check runs on a remote target only with `E2E_LAUNCH_CAPABLE=0`.

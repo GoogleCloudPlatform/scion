@@ -1047,23 +1047,24 @@ test.describe.serial('async agent create from the web form', () => {
       a2AppliedConfigImageMissing: observedImage === '',
     };
     journey.a2Running = { image: observedImage, harnessConfig: applied?.harnessConfig ?? '' };
-    expectNoAuth(applied);
-    expect(applied?.harnessConfig ?? '', 'A2 appliedConfig.harnessConfig is set').not.toBe('');
-    // TODO(D1, ptone/scion#4818 (part of #2153)): restore the hard
-    // assertion that appliedConfig.image is set once the hub applies the succeeded launch
-    // report's agent info on async creates. Today it drops it (image
-    // included) while the sync path records it, so the image is recorded
-    // and an empty one is annotated and flagged, never silently passed.
+    // TODO(D1, ptone/scion#4818 (part of #2153)): restore the hard assertion
+    // that appliedConfig.image is set once the hub applies the succeeded
+    // launch report's agent info on async creates. Today it drops it (image
+    // included) while the sync path records it, so the image is recorded and
+    // an empty one is annotated and flagged, never silently passed. The
+    // annotation comes before the hard checks below, so a run that fails
+    // them still shows D1.
     if (observedImage === '') {
       test.info().annotations.push({
-        type:
-          'D1: async create did not record the resolved image, ' +
-          'ptone/scion#4818 (part of #2153)',
+        type: 'D1',
         description:
-          'appliedConfig.image is empty after an async create that used the harness default ' +
-          'image: the hub does not apply the succeeded launch report agent info',
+          'ptone/scion#4818 (part of #2153): appliedConfig.image is empty after an async ' +
+          'create that used the harness default image; the hub does not apply the ' +
+          'succeeded launch report agent info',
       });
     }
+    expectNoAuth(applied);
+    expect(applied?.harnessConfig ?? '', 'A2 appliedConfig.harnessConfig is set').not.toBe('');
 
     // A1b over the whole launch, and no reload.
     await expectNoStartNoReload(tracked, submit);
@@ -1160,6 +1161,16 @@ test.describe.serial('async agent create from the web form', () => {
           : 'not pinned',
       a2HarnessConfig: a2?.harnessConfig ?? null,
     };
+    // Written before the checks, so a failing A4 (e.g. "not pinned") still
+    // carries its evidence; the rest is added after them.
+    const a4Evidence: Record<string, unknown> = {
+      status: submit.status,
+      launch: submit.launch,
+      appliedConfig: a4Applied,
+      code: panel.code,
+      messageLength: panel.message.length,
+    };
+    journey.evidence.a4 = a4Evidence;
     expectNoAuth(applied);
     // Serial mode: A2 reached running before A4 runs. Same harness config,
     // no credentials, and the image is what differs between the launches.
@@ -1181,19 +1192,13 @@ test.describe.serial('async agent create from the web form', () => {
       ).not.toBe('');
     }
     await expectNoStartNoReload(tracked, submit);
-    const a4Evidence: Record<string, unknown> = {
-      status: submit.status,
-      launch: submit.launch,
-      appliedConfig: a4Applied,
-      code: panel.code,
-      messageLength: panel.message.length,
+    Object.assign(a4Evidence, {
       stateSequence: stateSequence(await timelineRows(tracked.page, submit.agentId)),
       reload: await reloadCheck(tracked, submit),
       timeline: await timelineRows(tracked.page, submit.agentId),
       sse: await sseRecords(tracked.page, submit.agentId),
       requests: requestsSinceSubmit(tracked, submit),
-    };
-    journey.evidence.a4 = a4Evidence;
+    });
     await deleteFromPanel(tracked, submit.agentId, 'A4 (panel Delete)', a4Evidence);
     await tracked.page.close();
   });
