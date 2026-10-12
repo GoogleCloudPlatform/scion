@@ -1044,7 +1044,7 @@ func TestTIWebIAP_EventStream(t *testing.T) {
 	setup := func(t *testing.T) (*tiIAPEnv, TestIdentityTokenResponse, []*http.Cookie) {
 		e := newTIIAPEnv(t, []string{tiDriverEmail, tiDriver2Email})
 		e.ws.events = NewChannelEventPublisher()
-		e.ws.sseHeartbeat = 100 * time.Millisecond
+		e.ws.config.SSEHeartbeatInterval = 100 * time.Millisecond
 		fx := e.issue()
 		return e, fx, e.loginAs(tiDriverEmail, fx.Identity.ID)
 	}

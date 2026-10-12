@@ -644,22 +644,18 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	if err := hooks.checkpoint(ctx, CheckpointStepPreClean); err != nil {
 		return "", err
 	}
-	// NFS-home agents: one start at a time per agent, across brokers that
-	// share the store, from before the previous pod is removed until the new
-	// pod exists, so two pods never write to the same home.
+	// NFS-home agents: two pods must never write to the same home. The hub
+	// start claim admits one start of an agent at a time, across hub
+	// replicas and brokers. Here, the pre-clean waits until the previous
+	// pod's termination is confirmed before the new pod is created (and
+	// refuses with previous_pod_unconfirmed otherwise), and every object
+	// carries this start's ID, so the cleanup of a failed start never
+	// removes a newer start's pod and mark-seeded refuses once a newer start
+	// owns the home.
 	nfsHomeStart, err := nfsHomePod(config)
 	if err != nil {
 		return "", err
 	}
-	releaseHomeLock := func() {}
-	if nfsHomeStart {
-		release, err := acquireHomeStartLock(ctx, config)
-		if err != nil {
-			return "", err
-		}
-		releaseHomeLock = release
-	}
-	defer func() { releaseHomeLock() }()
 
 	if runID := config.Labels[api.LabelRunID]; runID != "" {
 		// Run-scoped pre-clean (ptone/scion#2550), with the same NFS-home
@@ -829,8 +825,6 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	podCreated = true
 	r.trackCreatedPod(createdPod)
 	hooks.created(api.ResourceHandle{Kind: api.ResourceKindPod, Namespace: namespace, Name: createdPod.Name, UID: string(createdPod.UID)})
-	releaseHomeLock()
-	releaseHomeLock = func() {}
 	runtimeLog.Info("Pod created", "agent", config.Name, "namespace", namespace,
 		"phase", "pod-create", "elapsed_ms", time.Since(podCreateStart).Milliseconds())
 

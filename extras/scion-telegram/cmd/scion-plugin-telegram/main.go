@@ -177,16 +177,10 @@ func serveStandalone() {
 		Integration: "telegram",
 		DatabaseURL: databaseURL,
 		ConfigFile:  os.Getenv("CONFIG_FILE"),
-		EnvPrefix:   "TELEGRAM",
-		EnvKeys: []string{
-			"bot_token", "webhook_url", "webhook_secret", "webhook_listen",
-			"hub_url", "hmac_key", "broker_id",
-			"api_base_url", "agent_cache_ttl", "send_queue_size",
-			"send_min_delay",
-			"transport_mode", "transport_audience",
-		},
-		UpdateHook: os.Getenv("UPDATE_HOOK"),
-		Log:        log,
+		EnvPrefix:   standaloneEnvPrefix,
+		EnvKeys:     standaloneEnvKeys,
+		UpdateHook:  os.Getenv("UPDATE_HOOK"),
+		Log:         log,
 	})
 
 	rctx, err := rt.Start(ctx)
@@ -233,15 +227,11 @@ func serveStandalone() {
 		return broker.Configure(newCfg)
 	})
 
-	// Resolve webhook URL and secret for RegisterWebhook.
+	// Webhook URL and secret for RegisterWebhook. The runtime has already
+	// merged TELEGRAM_WEBHOOK_URL and TELEGRAM_WEBHOOK_SECRET into cfg, and
+	// Configure rejected the config if either is empty.
 	webhookURL := cfg["webhook_url"]
-	if webhookURL == "" {
-		webhookURL = os.Getenv("TELEGRAM_WEBHOOK_URL")
-	}
 	webhookSecret := cfg["webhook_secret"]
-	if webhookSecret == "" {
-		webhookSecret = os.Getenv("TELEGRAM_WEBHOOK_SECRET")
-	}
 
 	// F1+F5: Use the shared lock loop. Only the lock holder calls setWebhook;
 	// all instances serve webhook HTTP traffic.
@@ -305,6 +295,19 @@ func serveStandalone() {
 	lockLoop.ReleaseHandle()
 
 	log.Info("Standalone Telegram bot stopped")
+}
+
+// standaloneEnvPrefix and standaloneEnvKeys select the environment variables
+// the integration runtime merges into the standalone config: each key is read
+// from standaloneEnvPrefix + "_" + UPPER(key), e.g. TELEGRAM_WEBHOOK_SECRET.
+const standaloneEnvPrefix = "TELEGRAM"
+
+var standaloneEnvKeys = []string{
+	"bot_token", "webhook_url", "webhook_secret", "webhook_listen",
+	"hub_url", "hmac_key", "broker_id",
+	"api_base_url", "agent_cache_ttl", "send_queue_size",
+	"send_min_delay",
+	"transport_mode", "transport_audience",
 }
 
 var errPollRejected = errors.New("HA/standalone Telegram requires webhook mode; inbound_mode=poll is not supported")

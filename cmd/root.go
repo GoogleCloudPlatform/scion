@@ -139,7 +139,9 @@ return an error instead of blocking.`,
 		// project chose them. It runs after every --global form is known
 		// and before the project requirement check, so a selected project
 		// satisfies it.
-		resolveInvocationTarget(cmd, mode)
+		if err := resolveInvocationTarget(cmd, mode); err != nil {
+			return err
+		}
 
 		if globalMode && projectPath == "" {
 			projectPath = "global"
@@ -458,7 +460,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&outputFormat, "format", "", "Output format (e.g., json)")
 
 	// Hub integration flags
-	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub API endpoint URL (overrides SCION_HUB_ENDPOINT)")
+	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub nickname or API endpoint URL (overrides SCION_HUB_ENDPOINT)")
 	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Disable Hub integration for this invocation (local-only mode)")
 
 	// Confirmation and non-interactive flags
