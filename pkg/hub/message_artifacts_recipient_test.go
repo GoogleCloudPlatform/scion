@@ -21,10 +21,21 @@ package hub
 // readable by the message's direct recipient. The check is warning-only.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -225,27 +236,74 @@ func TestDirectUserRecipient(t *testing.T) {
 	assert.Equal(t, artifactRecipient{}, directUserRecipient(&r, agentID), "agent peer")
 }
 
+// moduleFuncKey names a function by its file's path from the module root.
+type moduleFuncKey struct{ path, function string }
+
 // recipientCheckSymbols are the warning-only recipient check entry points,
-// each with the only pkg/hub functions that may reference it.
-var recipientCheckSymbols = map[string]map[stripSiteKey]bool{
-	"RecipientMayNotRead": {{"message_artifacts.go", "artifactRecipientWarning"}: true},
-	"recipientIdentity": {
-		{"artifacts_recipient.go", "RecipientPermits"}:   true,
-		{"artifacts_recipient.go", "RecipientAuthorize"}: true,
-	},
-	"artifactRecipientWarning": {{"message_artifacts.go", "admitMessageArtifacts"}: true},
+// each with the only functions in the module that may call it.
+var recipientCheckSymbols = map[string]map[moduleFuncKey]bool{
+	"RecipientMayNotRead":      {{"pkg/hub/message_artifacts.go", "artifactRecipientWarning"}: true},
+	"ResolveRecipient":         {{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}: true},
+	"recipientIdentity":        {{"pkg/hub/artifacts_recipient.go", "ResolveRecipient"}: true},
+	"recipientChainAllows":     {{"pkg/hub/artifacts_recipient.go", "Permits"}: true},
+	"artifactRecipientWarning": {{"pkg/hub/message_artifacts.go", "admitMessageArtifacts"}: true},
 }
 
-// TestArtifactRecipientCheckIsWarningOnly pins that the recipient check
-// only ever feeds the sender's warning: RecipientMayNotRead is called only
-// by artifactRecipientWarning, whose result admitMessageArtifacts only
-// appends to the warning; recipientIdentity only by the two
-// RecipientAuthority methods; and no other pkg/hub code calls
-// RecipientPermits or RecipientAuthorize (the artifact service reaches
-// them only through RecipientMayNotRead).
+// forEachModuleGoFile runs fn over every non-test Go file of this module,
+// named by its slash path from the module root. Nested modules (a directory
+// with its own go.mod), web assets, testdata and dot directories are
+// skipped.
+func forEachModuleGoFile(t *testing.T, fn func(path string, f *ast.File)) {
+	t.Helper()
+	root := filepath.Clean(filepath.Join(findHubDir(t), "..", ".."))
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Fatalf("module root %s has no go.mod: %v", root, err)
+	}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if p == root {
+				return nil
+			}
+			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "testdata" || name == "web" || name == "docs-site" {
+				return filepath.SkipDir
+			}
+			if _, err := os.Stat(filepath.Join(p, "go.mod")); err == nil {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), p, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", p, err)
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		fn(filepath.ToSlash(rel), f)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestArtifactRecipientCheckIsWarningOnly pins, across the whole module,
+// that the recipient check only ever feeds the sender's warning:
+// RecipientMayNotRead is called only by artifactRecipientWarning, whose
+// result admitMessageArtifacts only appends to the warning;
+// ResolveRecipient only by RecipientMayNotRead; and the hub's recipient
+// identity and chain walk only from the resolved recipient's own methods.
 func TestArtifactRecipientCheckIsWarningOnly(t *testing.T) {
 	seen := map[string]int{}
-	forEachHubFile(t, func(name string, _ *token.FileSet, f *ast.File) {
+	forEachModuleGoFile(t, func(path string, f *ast.File) {
 		for _, decl := range f.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
 			if !ok || fd.Body == nil {
@@ -257,16 +315,13 @@ func TestArtifactRecipientCheckIsWarningOnly(t *testing.T) {
 					return true
 				}
 				sym := extractCallSymbol(call)
-				if sym == "RecipientPermits" || sym == "RecipientAuthorize" {
-					t.Errorf("%s:%s calls %s; only the artifact service may", name, fd.Name.Name, sym)
-				}
 				allowed, pinned := recipientCheckSymbols[sym]
 				if !pinned {
 					return true
 				}
 				seen[sym]++
-				if !allowed[stripSiteKey{name, fd.Name.Name}] {
-					t.Errorf("%s:%s calls %s; it is warning-only and may be called only from %v", name, fd.Name.Name, sym, allowed)
+				if !allowed[moduleFuncKey{path, fd.Name.Name}] {
+					t.Errorf("%s:%s calls %s; it is warning-only and may be called only from %v", path, fd.Name.Name, sym, allowed)
 				}
 				return true
 			})
@@ -393,4 +448,108 @@ func hubFuncDecl(t *testing.T, file, fn string) *ast.FuncDecl {
 		t.Fatalf("%s:%s not found", file, fn)
 	}
 	return out
+}
+
+// onStack reports whether a function whose name ends in "."+fn is a caller
+// of the current goroutine's stack.
+func onStack(fn string) bool {
+	pcs := make([]uintptr, 64)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		fr, more := frames.Next()
+		if strings.HasSuffix(fr.Function, "."+fn) {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+// TestArtifactRecipientWarning_ChainWalkFailureIsSilent: a store failure
+// while walking a recipient agent's delegation chain is an error, not a
+// refusal, so the sender gets no recipient warning (and admission is
+// unchanged). The subject's Permits returns the error itself.
+func TestArtifactRecipientWarning_ChainWalkFailureIsSilent(t *testing.T) {
+	srv, s, _, project, _, target, ctx, _, elsewhere := recipientWarningSetup(t)
+	readyRecipientAgent(t, s, target)
+	md := refsMD(artifacts.MessageRef{ArtifactID: elsewhere})
+	to := directAgentRecipient(target, "")
+
+	fst := &materialFailingStore{Store: s}
+	srv.store, srv.authzService.store = fst, fst
+	t.Cleanup(func() { srv.store, srv.authzService.store = s, s })
+
+	// Healthy run: find the first delegation edge read made by the
+	// recipient's chain walk.
+	first := 0
+	fst.getDelegationEdgesForDelegateHook = func(call int) {
+		if first == 0 && onStack("recipientChainAllows") {
+			first = call
+		}
+	}
+	_, admitted, warning := srv.admitMessageArtifacts(ctx, md, to)
+	require.Len(t, admitted, 1)
+	require.Equal(t, fmt.Sprintf(artifactRefsRecipientWarning, 1, target.Slug), warning, "healthy baseline warns")
+	require.Positive(t, first, "the recipient's chain walk reads delegation edges")
+
+	// Fail that read and every later one.
+	fst.getDelegationEdgesForDelegateHook = nil
+	fst.getDelegationEdgesForDelegateCalls = 0
+	fst.getDelegationEdgesForDelegateErr = errors.New("edge store unavailable")
+	fst.getDelegationEdgesForDelegateErrAfterCalls = first - 1
+	_, admitted, warning = srv.admitMessageArtifacts(ctx, md, to)
+	assert.Len(t, admitted, 1, "admission is unchanged")
+	assert.Empty(t, warning, "a failed chain walk gives no warning")
+
+	// The resolved subject's Permits returns the chain walk's error.
+	fst.getDelegationEdgesForDelegateErr = nil
+	subject, err := newArtifactHost(srv).ResolveRecipient(context.Background(), artifacts.PrincipalKindAgent, target.ID)
+	require.NoError(t, err)
+	fst.getDelegationEdgesForDelegateErr = errors.New("edge store unavailable")
+	fst.getDelegationEdgesForDelegateErrAfterCalls = 0 // every read fails from here on
+	require.NotNil(t, subject)
+	ok, err := subject.Permits(context.Background(), project.ID, artifacts.PermissionRead)
+	assert.False(t, ok)
+	assert.Error(t, err, "a failed chain walk is an error, not a refusal")
+}
+
+// TestArtifactRecipientWarning_OutboundToNonMemberUser: an agent's outbound
+// DM to one user, through the full hub handler with the agent's real token.
+// The user is not a member of the artifact's home project, so the sender is
+// warned (the user is taken from the direct conversation's key), and the
+// reference is still admitted and recorded.
+func TestArtifactRecipientWarning_OutboundToNonMemberUser(t *testing.T) {
+	srv, s := testServer(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	p := artifactProject(t, s, "msgart-rcpt")
+	a, tok := artifactAgent(t, srv, s, p.ID, "msgart-rcpt-agent", AgentRoleBaseline)
+	user := &store.User{ID: tid("msgart-rcpt-user"), Email: "rcpt-user@test.example", DisplayName: "R", Role: store.UserRoleMember, Status: "active", Created: time.Now()}
+	require.NoError(t, s.CreateUser(context.Background(), user))
+	own := seedMessageArtifact(t, st, p.ID, artifacts.PrincipalKindAgent, a.ID, "Agent doc")
+
+	body, err := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:" + user.Email, Msg: "see doc", Type: "instruction",
+		Metadata: map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})},
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+a.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Agent-Token", tok)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, fmt.Sprintf(artifactRefsRecipientWarning, 1, user.Email), resp["artifact_warning"])
+	msgID, _ := resp["message_id"].(string)
+	require.NotEmpty(t, msgID)
+	// The warning counts only admitted references, and the reference is
+	// recorded for the message.
+	want := []artifacts.MessageRef{{ArtifactID: own}}
+	assert.Eventually(t, func() bool {
+		recorded, err := st.ListMessageRefs(context.Background(), []string{msgID})
+		return err == nil && len(recorded[msgID]) == 1 && recorded[msgID][0] == want[0]
+	}, 5*time.Second, 20*time.Millisecond, "the reference is still admitted and recorded")
 }

@@ -31,58 +31,97 @@ import (
 // message, not for the caller of ctx. They are WARNING-ONLY: their answers
 // reach the sender only as the count in artifactRefsRecipientWarning, and
 // nothing here grants access, serves content or is consulted by any read
-// route. The identity each builds (recipientIdentity) is passed only as the
-// subject of a policy read (CheckAccess, the delegation chain walk and the
-// agent scope check) and never enters a context, so it can never be taken
-// for the caller: the artifact service learns its caller only from ctx
-// (artifactHost.Principal), which still refuses every in-process identity.
-// TestRecipientIdentityNeverEntersAContext pins that.
+// route. The identity ResolveRecipient builds (recipientIdentity) is used
+// only as the subject of policy reads (CheckAccess, the delegation chain
+// walk and the agent scope check) and never enters a context, so it can
+// never be taken for the caller: the artifact service learns its caller
+// only from ctx (artifactHost.Principal), which still refuses every
+// in-process identity. TestRecipientIdentityNeverEntersAContext pins that.
 
 var _ artifacts.RecipientAuthority = (*artifactHost)(nil)
 
-// RecipientPermits implements artifacts.RecipientAuthority: whether a
-// credential the principal would hold next allows permission on artifacts
-// homed in scopeRef. A user's session allows every artifact permission
-// (Permits); an agent's next token must carry one of the permission's
-// agent scopes (the scopes a mint would issue now: role and configured
-// scopes, filtered by the delegation chain's ceiling) and its delegation
-// chain must allow the permission, as Permits requires of a live token.
-func (h *artifactHost) RecipientPermits(ctx context.Context, kind, ref, scopeRef, permission string) (bool, error) {
+// ResolveRecipient implements artifacts.RecipientAuthority: it builds the
+// recipient's subject identity once (recipientIdentity) for every question
+// one recipient check asks. A nil subject means the principal can read
+// nothing (unknown kind; missing, deleted or inactive principal; an agent
+// whose chain ceiling structurally refuses a mint).
+func (h *artifactHost) ResolveRecipient(ctx context.Context, kind, ref string) (artifacts.RecipientSubject, error) {
+	identity, err := h.recipientIdentity(ctx, kind, ref)
+	if err != nil || identity == nil {
+		return nil, err
+	}
+	return &recipientSubject{host: h, identity: identity}, nil
+}
+
+// recipientSubject is a resolved recipient: artifacts.RecipientSubject
+// answered from its subject identity.
+type recipientSubject struct {
+	host     *artifactHost
+	identity Identity
+}
+
+// Permits implements artifacts.RecipientSubject: whether a credential the
+// principal would hold next allows permission on artifacts homed in
+// scopeRef. A user's session allows every artifact permission (Permits);
+// an agent's next token must carry one of the permission's agent scopes
+// (the scopes a mint would issue now: role and configured scopes, filtered
+// by the delegation chain's ceiling) and its delegation chain must allow
+// the permission, as Permits requires of a live token. A failed chain walk
+// is returned as an error, not as a refusal.
+func (r *recipientSubject) Permits(ctx context.Context, scopeRef, permission string) (bool, error) {
 	perm, ok := artifactPermission(permission)
 	if !ok || scopeRef == "" {
 		return false, nil
 	}
-	identity, err := h.recipientIdentity(ctx, kind, ref)
-	if err != nil || identity == nil {
-		return false, err
-	}
-	agent, isAgent := identity.(*agentIdentityWrapper)
+	agent, isAgent := r.identity.(*agentIdentityWrapper)
 	if !isAgent {
 		return true, nil
 	}
-	return agentHasAnyScope(agent, perm.AgentScopes) && h.agentChainAllows(ctx, agent, perm), nil
+	if !agentHasAnyScope(agent, perm.AgentScopes) {
+		return false, nil
+	}
+	return r.host.recipientChainAllows(ctx, agent, perm)
 }
 
-// RecipientAuthorize implements artifacts.RecipientAuthority: whether
-// policy lets the principal exercise permission on artifacts in scopeRef,
-// decided by AuthzService.CheckAccess with the principal as the subject,
-// the same question Authorize asks for a caller (without the credential
-// step, which RecipientPermits answers).
-func (h *artifactHost) RecipientAuthorize(ctx context.Context, kind, ref, scopeRef, permission string) (bool, error) {
+// Authorize implements artifacts.RecipientSubject: whether policy lets the
+// principal exercise permission on artifacts in scopeRef, decided by
+// AuthzService.CheckAccess with the principal as the subject, the same
+// question Authorize asks for a caller (without the credential step, which
+// Permits answers). CheckAccess reports no lookup error: a policy
+// evaluation that cannot complete is a deny, so it may count toward the
+// warning.
+func (r *recipientSubject) Authorize(ctx context.Context, scopeRef, permission string) (bool, error) {
 	perm, ok := artifactPermission(permission)
+	h := r.host
 	if !ok || scopeRef == "" || h.server == nil || h.server.authzService == nil {
 		return false, nil
 	}
-	identity, err := h.recipientIdentity(ctx, kind, ref)
-	if err != nil || identity == nil {
-		return false, err
-	}
-	decision := h.server.authzService.CheckAccess(ctx, identity, Resource{
+	decision := h.server.authzService.CheckAccess(ctx, r.identity, Resource{
 		Type:       permissions.ResourceArtifact,
 		ParentType: permissions.ResourceProject,
 		ParentID:   scopeRef,
 	}, Action(perm.Action))
 	return decision.Allowed, nil
+}
+
+// recipientChainAllows is agentChainAllows for a recipient agent, with the
+// chain walk's lookup error returned instead of taken for a refusal, so the
+// recipient check stays silent on a failure.
+func (h *artifactHost) recipientChainAllows(ctx context.Context, agent *agentIdentityWrapper, perm permissions.Permission) (bool, error) {
+	if h.server == nil || h.server.authzService == nil {
+		return false, nil
+	}
+	project := agent.ProjectID()
+	if project == "" || agent.ID() == "" {
+		return false, nil
+	}
+	resource := Resource{Type: permissions.ResourceArtifact, ParentType: permissions.ResourceProject, ParentID: project}
+	allowed, _, err := h.server.authzService.walkDelegationChainWithCause(ctx, resource, Action(perm.Action), perm.ID,
+		agent.ID(), AncestryIsHubAttested(agent), store.RoleScopeProject, project, nil, nil)
+	if err != nil {
+		return false, err
+	}
+	return allowed, nil
 }
 
 // recipientIdentity builds the subject identity for a recipient check, from
@@ -95,8 +134,9 @@ func (h *artifactHost) RecipientAuthorize(ctx context.Context, kind, ref, scopeR
 // principal, or an agent whose chain ceiling structurally refuses a mint;
 // an error only for a failed lookup.
 //
-// The result must only ever be passed as the subject of a policy read and
-// never be stored in a context (TestRecipientIdentityNeverEntersAContext).
+// It is called once per recipient check (ResolveRecipient). The result
+// must only ever be used as the subject of a policy read and never be
+// stored in a context (TestRecipientIdentityNeverEntersAContext).
 func (h *artifactHost) recipientIdentity(ctx context.Context, kind, ref string) (Identity, error) {
 	if h.server == nil || h.server.store == nil || h.server.authzService == nil || ref == "" {
 		return nil, nil

@@ -23,42 +23,64 @@ import (
 	"github.com/google/uuid"
 )
 
-// recipientHost is fakeHost plus RecipientAuthority, answered from the same
-// tables for a named principal rather than for the caller of ctx.
-type recipientHost struct {
+// fakeRecipientHost is fakeHost plus RecipientAuthority, answered from the
+// same tables for a named principal rather than for the caller of ctx.
+type fakeRecipientHost struct {
 	*fakeHost
-	// err, when set, makes every RecipientAuthority call fail.
+	// err, when set, makes every RecipientSubject question fail.
 	err error
-	// asked records "permits|authorize principalRef scope" per call.
+	// resolveErr, when set, makes ResolveRecipient fail.
+	resolveErr error
+	// unknown lists principal refs ResolveRecipient does not know.
+	unknown map[string]bool
+	// asked records "resolve|permits|authorize principalRef [scope]" per call.
 	asked []string
 }
 
-func (h *recipientHost) RecipientPermits(_ context.Context, kind, ref, scope, perm string) (bool, error) {
-	h.asked = append(h.asked, "permits "+PrincipalRef(kind, ref)+" "+scope)
-	if h.err != nil {
-		return false, h.err
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return scope != "" && !h.denied[PrincipalRef(kind, ref)+" "+scope+" "+perm], nil
+type fakeRecipientSubject struct {
+	h         *fakeRecipientHost
+	kind, ref string
 }
 
-func (h *recipientHost) RecipientAuthorize(_ context.Context, kind, ref, scope, perm string) (bool, error) {
-	h.asked = append(h.asked, "authorize "+PrincipalRef(kind, ref)+" "+scope)
+func (h *fakeRecipientHost) ResolveRecipient(_ context.Context, kind, ref string) (RecipientSubject, error) {
+	h.asked = append(h.asked, "resolve "+PrincipalRef(kind, ref))
+	if h.resolveErr != nil {
+		return nil, h.resolveErr
+	}
+	if h.unknown[ref] {
+		return nil, nil
+	}
+	return &fakeRecipientSubject{h: h, kind: kind, ref: ref}, nil
+}
+
+func (s *fakeRecipientSubject) Permits(_ context.Context, scope, perm string) (bool, error) {
+	h := s.h
+	h.asked = append(h.asked, "permits "+PrincipalRef(s.kind, s.ref)+" "+scope)
 	if h.err != nil {
 		return false, h.err
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.perms[PrincipalRef(kind, ref)][scope][perm], nil
+	return scope != "" && !h.denied[PrincipalRef(s.kind, s.ref)+" "+scope+" "+perm], nil
+}
+
+func (s *fakeRecipientSubject) Authorize(_ context.Context, scope, perm string) (bool, error) {
+	h := s.h
+	h.asked = append(h.asked, "authorize "+PrincipalRef(s.kind, s.ref)+" "+scope)
+	if h.err != nil {
+		return false, h.err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.perms[PrincipalRef(s.kind, s.ref)][scope][perm], nil
 }
 
 // newRecipientFixture is newFixture with a host that implements
 // RecipientAuthority.
-func newRecipientFixture(t *testing.T) (*fixture, *recipientHost) {
+func newRecipientFixture(t *testing.T) (*fixture, *fakeRecipientHost) {
 	t.Helper()
 	f := newFixture(t, false)
-	h := &recipientHost{fakeHost: f.host}
+	h := &fakeRecipientHost{fakeHost: f.host, unknown: map[string]bool{}}
 	svc := NewService(h)
 	svc.SetStore(f.store)
 	svc.SetBlobStorage(f.blobs, "hub-1")
@@ -197,14 +219,20 @@ func TestRecipientMayNotReadCounts(t *testing.T) {
 	if n := f.mayNotRead(refs, agentB); n != 2 {
 		t.Errorf("count = %d, want 2 (both references to b)", n)
 	}
-	permits := 0
+	// The recipient is resolved once per call, and each artifact is decided
+	// once: canReadWith asks the credential of the home scope twice per
+	// artifact (step 1, and again inside Authorize), never more.
+	count := map[string]int{}
 	for _, q := range h.asked {
-		if len(q) > 8 && q[:8] == "permits " {
-			permits++
-		}
+		count[q]++
 	}
-	if permits != 2 {
-		t.Errorf("credential asked %d times, want once per artifact (2): %v", permits, h.asked)
+	if count["resolve "+PrincipalRef(agentB.kind, agentB.ref)] != 1 {
+		t.Errorf("recipient resolved %d times, want 1: %v", count["resolve "+PrincipalRef(agentB.kind, agentB.ref)], h.asked)
+	}
+	for _, scope := range []string{"project-1", "project-2"} {
+		if n := count["permits "+PrincipalRef(agentB.kind, agentB.ref)+" "+scope]; n != 2 {
+			t.Errorf("credential in %s asked %d times, want 2 (each artifact decided once): %v", scope, n, h.asked)
+		}
 	}
 }
 
@@ -228,6 +256,19 @@ func TestRecipientMayNotReadSilentCases(t *testing.T) {
 	if n, err := f.svc.RecipientMayNotRead(ctx, refs, "", ""); n != 0 || err != nil {
 		t.Errorf("no recipient: %d, %v; want 0, nil", n, err)
 	}
+
+	h.resolveErr = errors.New("principal lookup failed")
+	if n, err := f.svc.RecipientMayNotRead(ctx, refs, outside.kind, outside.ref); n != 0 || err == nil {
+		t.Errorf("recipient lookup failure: %d, %v; want 0 and the error", n, err)
+	}
+	h.resolveErr = nil
+
+	// An unknown recipient can read nothing: counted, not an error.
+	h.unknown[outside.ref] = true
+	if n, err := f.svc.RecipientMayNotRead(ctx, refs, outside.kind, outside.ref); n != 1 || err != nil {
+		t.Errorf("unknown recipient: %d, %v; want 1, nil", n, err)
+	}
+	delete(h.unknown, outside.ref)
 
 	h.err = errors.New("authz unavailable")
 	if n, err := f.svc.RecipientMayNotRead(ctx, refs, outside.kind, outside.ref); n != 0 || err == nil {
@@ -255,5 +296,79 @@ func TestRecipientMayNotReadNeverAsksForTheCaller(t *testing.T) {
 	n, err := f.svc.RecipientMayNotRead(ctx, []MessageRef{{ArtifactID: id}}, outside.kind, outside.ref)
 	if err != nil || n != 1 {
 		t.Errorf("with the owner as caller: %d, %v; want 1, nil", n, err)
+	}
+}
+
+// TestRecipientMayNotReadParity: for each case, the recipient check and
+// the caller read check (canReadErr, the one GET applies) agree for the
+// same principal, because both evaluate canReadWith; the expected answer
+// pins that each case means what it says.
+func TestRecipientMayNotReadParity(t *testing.T) {
+	past := time.Now().Add(-time.Hour).UTC().Format(sqliteTimeLayout)
+	cases := []struct {
+		name     string
+		who      principal
+		setup    func(f *fixture, id string)
+		readable bool
+	}{
+		{"owner", agentA, nil, true},
+		{"home member", agentB, nil, true},
+		{"other-project agent", agentX, nil, false},
+		{"principal grant", outside, func(f *fixture, id string) { f.grantPrincipal(id, outside) }, true},
+		{"scope grant", agentX, func(f *fixture, id string) { f.grantScope(id, "project-2") }, true},
+		{"expired grant", outside, func(f *fixture, id string) {
+			f.grantPrincipal(id, outside)
+			f.execSQL(`UPDATE artifact_grant SET expires_at = ? WHERE artifact_id = ?`, past, id)
+		}, false},
+		{"expired artifact", agentB, func(f *fixture, id string) {
+			f.execSQL(`UPDATE artifact SET expires_at = ? WHERE id = ?`, past, id)
+		}, false},
+		{"expired artifact, owner", agentA, func(f *fixture, id string) {
+			f.execSQL(`UPDATE artifact SET expires_at = ? WHERE id = ?`, past, id)
+		}, false},
+		{"unfinalized", agentB, func(f *fixture, id string) {
+			f.execSQL(`UPDATE artifact SET current_seq = NULL WHERE id = ?`, id)
+		}, false},
+		{"unfinalized, owner", agentA, func(f *fixture, id string) {
+			f.execSQL(`UPDATE artifact SET current_seq = NULL WHERE id = ?`, id)
+		}, true},
+		{"credential deny", agentB, func(f *fixture, id string) { f.host.deny(agentB, "project-1", PermissionRead) }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _ := newRecipientFixture(t)
+			id := f.publish(agentA, "design.md", []byte("# v1"), "").Artifact.ID
+			if tc.setup != nil {
+				tc.setup(f, id)
+			}
+			ctx := context.Background()
+			b, _ := f.svc.backend()
+			a, err := f.store.GetArtifact(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			asCaller, err := f.svc.canReadErr(context.WithValue(ctx, principalKey{}, tc.who), b, a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n, err := f.svc.RecipientMayNotRead(ctx, []MessageRef{{ArtifactID: id}}, tc.who.kind, tc.who.ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			asRecipient := n == 0
+			if asCaller != tc.readable {
+				t.Errorf("caller read = %v, want %v", asCaller, tc.readable)
+			}
+			if asRecipient != asCaller {
+				t.Errorf("recipient check says readable=%v, caller read says %v", asRecipient, asCaller)
+			}
+		})
+	}
+}
+
+func (f *fixture) execSQL(query string, args ...any) {
+	f.t.Helper()
+	if _, err := f.db.Exec(query, args...); err != nil {
+		f.t.Fatal(err)
 	}
 }
