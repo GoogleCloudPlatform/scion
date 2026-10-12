@@ -99,7 +99,7 @@ func parseExposePort(arg string) (int, error) {
 		return 0, fmt.Errorf("invalid port %q", arg)
 	}
 	if port < 1 || port > 65535 {
-		return 0, fmt.Errorf("invalid port %d: must be between 1 and 65535", port)
+		return 0, fmt.Errorf("invalid port %q: must be between 1 and 65535", arg)
 	}
 	return port, nil
 }

@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -241,7 +242,7 @@ func TestExpose_PortOutOfRange(t *testing.T) {
 	t.Cleanup(func() { newExposeHubClient = orig })
 
 	for _, arg := range []string{"0", "65536", "-1"} {
-		want := "invalid port " + arg + ": must be between 1 and 65535"
+		want := `invalid port "` + arg + `": must be between 1 and 65535`
 		_, err := runExposeTest(t, runExpose, arg)
 		require.EqualError(t, err, want, "expose %s", arg)
 		_, err = runExposeTest(t, runUnexpose, arg)
@@ -256,6 +257,8 @@ func TestExpose_PortRangeBounds(t *testing.T) {
 		useExposeHub(t, hub.start(t))
 		_, err := runExposeTest(t, runExpose, arg)
 		require.NoError(t, err, "expose %s", arg)
+		wantPort, _ := strconv.Atoi(arg)
+		assert.Equal(t, float64(wantPort), hub.lastRegister["port"])
 		_, err = runExposeTest(t, runUnexpose, arg)
 		require.NoError(t, err, "unexpose %s", arg)
 		assert.Equal(t, "/api/v1/agents/"+exposeTestAgentID+"/ports/"+arg, hub.lastDeletePath)
