@@ -165,8 +165,22 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 	if err := storeTokenAndPrintResult(hubURL, tokenResp); err != nil {
 		return err
 	}
-	persistLoginEndpointForInvocation(cmd, hubURL)
+	recordLoginEndpoint(cmd, hubURL)
 	return nil
+}
+
+// recordLoginEndpoint makes a successful login usable by the rest of the
+// CLI. When the hub came from the current context ('scion use'; no
+// --hub-url, --hub or environment variable chose it), the settings are left
+// alone: the context already targets that hub, and writing it to the global
+// hub.endpoint would make the workstation server advertise it. Otherwise
+// persistLoginEndpointForInvocation saves the endpoint as before.
+func recordLoginEndpoint(cmd *cobra.Command, hubURL string) {
+	if hubAuthHubURL == "" && hubSource == targetSourceContext {
+		fmt.Printf("Logged in to %s (current hub, selected with 'scion use'); settings unchanged.\n", hubURL)
+		return
+	}
+	persistLoginEndpointForInvocation(cmd, hubURL)
 }
 
 func newDeviceFlowAuth(authSvc hubclient.AuthService, provider string) *auth.DeviceFlowAuth {
