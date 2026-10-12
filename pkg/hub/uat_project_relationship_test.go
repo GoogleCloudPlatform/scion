@@ -240,8 +240,10 @@ func TestProjectUAT_AttachDeniedForOtherMembersAgents(t *testing.T) {
 // TestProjectUAT_OwnerAdminPortAccessOnMembersAgent pins use-time behaviour
 // of owner and admin user access tokens on another member's agent. The
 // project-owner and project-admin roles carry agent.port_access, so an
-// agent:port_access token opens the member's already-exposed ports. The same
-// token cannot attach, manage ports, open the tunnel, exec or read env; an
+// agent:port_access token opens the member's already-exposed ports and,
+// with agent.port_access on the agent record, registers and deletes its
+// exposed ports. The same token cannot attach, open the tunnel, exec or read
+// env; an
 // agent:attach token stays denied on the member's agent; a token without
 // agent:port_access (agent:manage excludes it) cannot open ports; and
 // another member's port_access token is refused.
@@ -277,15 +279,15 @@ func TestProjectUAT_OwnerAdminPortAccessOnMembersAgent(t *testing.T) {
 			rec = doRequestWithUAT(t, srv, portKey, http.MethodGet, base+"/pty", nil)
 			assert.Equal(t, http.StatusForbidden, rec.Code, "%s port_access token must not attach: %s", tc.name, rec.Body.String())
 
-			for _, m := range []struct{ method, path string }{
-				{http.MethodPost, base + "/ports"},
-				{http.MethodDelete, base + "/ports"},
-				{http.MethodDelete, base + "/ports/8080"},
-			} {
-				rec := doRequestWithUAT(t, srv, portKey, m.method, m.path, map[string]any{"port": 8080})
-				assert.Equal(t, http.StatusForbidden, rec.Code,
-					"%s port_access token must not manage a member's ports (%s %s): %s", tc.name, m.method, m.path, rec.Body.String())
-			}
+			// Port registration is authorized on the agent record, so the
+			// same token registers and deletes a port of the member's agent.
+			// Port 8080 stays exposed for the other subtest's proxy check.
+			rec = doRequestWithUAT(t, srv, portKey, http.MethodPost, base+"/ports", map[string]any{"port": 9090})
+			assert.Equal(t, http.StatusCreated, rec.Code,
+				"%s port_access token registers a port on a member's agent: %s", tc.name, rec.Body.String())
+			rec = doRequestWithUAT(t, srv, portKey, http.MethodDelete, base+"/ports/9090", nil)
+			assert.Equal(t, http.StatusNoContent, rec.Code,
+				"%s port_access token deletes a port on a member's agent: %s", tc.name, rec.Body.String())
 
 			req := httptest.NewRequest(http.MethodGet, base+"/ports/tunnel", nil)
 			req.Header.Set("Authorization", "Bearer "+portKey)

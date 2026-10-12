@@ -544,7 +544,8 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 func TestTokenScopeSurfacesDoNotExposeStaleUATScopes(t *testing.T) {
 	cliHelp := permissions.UATScopeHelp()
 	for _, stale := range []string{"agent:start", "agent:stop", "agent:dispatch"} {
-		if strings.Contains(cliHelp, stale) {
+		// Whole scope names only: agent:stop_all is a valid scope.
+		if regexp.MustCompile(`(^|[^a-z_:])` + regexp.QuoteMeta(stale) + `($|[^a-z_])`).MatchString(cliHelp) {
 			t.Fatalf("generated CLI help still exposes stale UAT scope %q", stale)
 		}
 	}

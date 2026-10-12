@@ -220,9 +220,13 @@ func TestStopAllHubForm_RequiresStopAllSelectorAndHubBoundary(t *testing.T) {
 	rec = doRequestWithUAT(t, f.srv, projectKey, http.MethodPost, projectPath, nil)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, string(state.PhaseStopped), phase(f.agent))
-	// and refuses a project token for another project.
+	// and refuses a project token for another project, of a user who is
+	// not a member of the target project.
 	second := f.newAgent(t, "atk-sa-all-second", string(state.PhaseRunning))
-	otherKey := f.mint(t, f.ownerID, projectBoundary(f.other), "agent:stop_all")
+	outsiderID := tid("atk-stopall-outsider")
+	createTestUserWithProjectRole(t, f.store, outsiderID, outsiderID+"@test.com", f.other, store.ProjectRoleOwner)
+	ensureHubMembership(ctx, f.store, outsiderID)
+	otherKey := f.mint(t, outsiderID, projectBoundary(f.other), "agent:stop_all")
 	rec = doRequestWithUAT(t, f.srv, otherKey, http.MethodPost, projectPath, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Equal(t, string(state.PhaseRunning), phase(second))
