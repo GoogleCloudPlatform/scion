@@ -28,7 +28,7 @@ This command performs several actions simultaneously:
 2.  **Starts a Broker**: Binds a local broker interface to execute containers.
 3.  **Links Them**: Automatically registers the local broker with the local hub.
 
-When the server is up, `scion server start` asks the Hub whether onboarding is complete. If it is not, it prints and opens the [onboarding wizard](/scion/getting-started/onboarding/) (`/onboarding`); otherwise it opens the Web Dashboard.
+When the server is up, `scion server start` asks the Hub whether onboarding is complete. If it is not, it prints and opens the [onboarding wizard](/scion/getting-started/onboarding/) (`/onboarding`); otherwise it opens the Web Dashboard. If the Hub's onboarding status cannot be read, Scion opens the wizard only when no global settings file existed before this start.
 
 **No image registry yet.** The Runtime Broker needs `image_registry` to pull agent images. If it is not set, the Hub and Web Dashboard still start, so the wizard (which sets the registry) is reachable, and the Runtime Broker is skipped with a warning. Set the registry in the wizard or with `scion config set --global image_registry <registry>`, then run `scion server restart` to start the Runtime Broker. (A hosted server still refuses to start without it.)
 

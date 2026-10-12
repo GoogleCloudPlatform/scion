@@ -181,7 +181,7 @@ The local listener binds to `127.0.0.1` only. The tunnel stays open until you st
 
 ### SSH into an agent
 
-`sciontool` in the agent runs an embedded SSH server that is reachable only through a Conduit tunnel; it never listens on a network port. It offers a shell, `exec`, `sftp` and forwarding to the agent's loopback addresses and Unix sockets. Remote forwarding, agent forwarding and X11 are refused. Every session runs as the container user, whatever user name you give. The Hub authorizes the tunnel, so the SSH connection itself needs no key.
+`sciontool` in the agent runs an embedded SSH server that is reachable only through a Conduit tunnel; it never listens on a network port. It offers a shell, `exec`, `sftp` and forwarding to the agent's loopback addresses (except [the reserved ports](#2-infrastructure-reserved-ports-denylist)) and Unix sockets. Unlike a TCP tunnel, SSH forwarding does not require the port to be exposed or allow-listed. Remote forwarding, agent forwarding and X11 are refused. Every session runs as the container user, whatever user name you give. The Hub authorizes the tunnel, so the SSH connection itself needs no key.
 
 Use `scion tunnel --ssh --stdio` as an ssh `ProxyCommand`:
 

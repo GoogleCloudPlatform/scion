@@ -29,7 +29,7 @@ Start the Workstation server:
 scion server start
 ```
 
-While onboarding is not complete (Scion asks the Hub for its onboarding status), Scion prints the web URL and **automatically opens your browser** to the wizard. Once onboarding is complete, it opens the Web Dashboard instead:
+While onboarding is not complete (Scion asks the Hub for its onboarding status), Scion prints the web URL and **automatically opens your browser** to the wizard. If the Hub's onboarding status cannot be read, Scion opens the wizard only when no global settings file existed before this start. Once onboarding is complete, it opens the Web Dashboard instead:
 
 ```
 http://127.0.0.1:8080/onboarding
