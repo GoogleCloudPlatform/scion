@@ -456,6 +456,8 @@ var identityOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestFederationToken_UserAccessTokenNeedsMintScope"},
 			{Package: "pkg/hub", Function: "TestFederationToken_AudienceAllowList"},
 			{Package: "pkg/hub", Function: "TestFederationToken_AuditWritten"},
+			{Package: "pkg/hub", Function: "TestFederationToken_AuditFailureIssuesNothing"},
+			{Package: "pkg/hub", Function: "TestFederationToken_RefusedCredentialKinds"},
 		},
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryHub),
 	},
