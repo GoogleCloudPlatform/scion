@@ -52,6 +52,8 @@ const (
 	FieldIssuanceID = "issuance_id"
 	// FieldIssuerCredentialID holds the string denoting the issuer_credential_id field in the database.
 	FieldIssuerCredentialID = "issuer_credential_id"
+	// FieldIssuerDelegationID holds the string denoting the issuer_delegation_id field in the database.
+	FieldIssuerDelegationID = "issuer_delegation_id"
 	// EdgeOwnedGroups holds the string denoting the owned_groups edge name in mutations.
 	EdgeOwnedGroups = "owned_groups"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -131,6 +133,7 @@ var Columns = []string{
 	FieldPurpose,
 	FieldIssuanceID,
 	FieldIssuerCredentialID,
+	FieldIssuerDelegationID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -327,6 +330,11 @@ func ByIssuanceID(opts ...sql.OrderTermOption) OrderOption {
 // ByIssuerCredentialID orders the results by the issuer_credential_id field.
 func ByIssuerCredentialID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldIssuerCredentialID, opts...).ToFunc()
+}
+
+// ByIssuerDelegationID orders the results by the issuer_delegation_id field.
+func ByIssuerDelegationID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuerDelegationID, opts...).ToFunc()
 }
 
 // ByOwnedGroupsCount orders the results by owned_groups count.

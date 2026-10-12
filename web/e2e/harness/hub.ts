@@ -19,9 +19,17 @@
  * ephemeral port with an in-memory/temp-dir SQLite store, dev-auth enabled,
  * and the test-login endpoint available. Waits for the health endpoint before
  * returning.
+ *
+ * With `testIdentities: true` (and `testLogin: false`) it starts a throwaway
+ * member-level test hub instead: hub-issued test identities on, the test
+ * infrastructure marker written to the temp database first (it holds the
+ * hub-local key for test identity web sessions), and a private HOME and
+ * environment under the temp dir. See README.md ("Test identity browser
+ * sessions").
  */
 
-import { execSync, spawn } from 'node:child_process';
+import * as crypto from 'node:crypto';
+import { execFileSync, execSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -49,6 +57,59 @@ export interface HubState {
   dbDir: string;
   /** Dev-auth token for API calls (super-admin). */
   devToken: string;
+  /** Hub id of a member-level test hub (testIdentities), else unset. */
+  hubId?: string;
+  /** Private HOME of a member-level test hub (under dbDir), else unset. */
+  homeDir?: string;
+}
+
+/** Options of startHub. The defaults start the hub the main suite uses. */
+export interface StartHubOptions {
+  /** Pass --enable-test-login (and the fixed --session-secret). Default true. */
+  testLogin?: boolean;
+  /**
+   * Start a member-level test hub: --enable-test-identities, a random hub
+   * id, the test infrastructure marker written by
+   * `scion server test-infra mark` into the temp database before start, and
+   * a private HOME and SCION_*-free environment under the temp dir.
+   * Default false.
+   */
+  testIdentities?: boolean;
+  /** Build the web assets and the binary first. Default true. */
+  build?: boolean;
+  /** State file shared with stopHub. Default: the main suite's. */
+  stateFile?: string;
+}
+
+/** Acknowledgement flag of `scion server test-infra mark`. */
+const TEST_INFRA_MARK_ACK = '--i-understand-this-hub-can-mint-super-admins';
+
+/** The dev token pattern, for capture and for redaction in logs. */
+const DEV_TOKEN_PATTERN = /SCION_DEV_TOKEN=(scion_dev_[0-9a-f]+)/;
+const DEV_TOKEN_ANY = /scion_dev_[0-9a-f]+/g;
+
+/** Hub log lines are echoed with any dev token redacted. */
+function redact(line: string): string {
+  return line.replace(DEV_TOKEN_ANY, 'scion_dev_<redacted>');
+}
+
+/** Path of the hub binary the harness builds and runs. */
+export function hubBinaryPath(): string {
+  return HUB_BINARY;
+}
+
+/**
+ * The environment of a member-level test hub and of CLI calls against it:
+ * the caller's environment without any SCION_* variable (inherited hub,
+ * project or token settings must not reach the throwaway hub),
+ * with a private HOME and human CLI mode.
+ */
+function isolatedEnv(homeDir: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith('SCION_')) env[key] = value;
+  }
+  return { ...env, HOME: homeDir, SCION_CLI_MODE: 'human', ...extra };
 }
 
 /** Find an available port by briefly binding to port 0. */
@@ -74,7 +135,7 @@ function buildWeb(): void {
   execSync('npm run build', {
     cwd: WEB_DIR,
     stdio: 'inherit',
-    timeout: 120_000,
+    timeout: 300_000,
   });
   console.log('[hub] Web assets built.');
 }
@@ -85,7 +146,7 @@ function buildHub(): void {
   execSync('make build', {
     cwd: WORKSPACE_ROOT,
     stdio: 'inherit',
-    timeout: 180_000,
+    timeout: 600_000,
   });
   console.log('[hub] Hub binary built.');
 }
@@ -126,14 +187,55 @@ async function waitForHealth(baseURL: string, timeoutMs = 30_000): Promise<void>
  * Build assets and start the hub. Returns the hub state (port, PID, dev token, etc.).
  * The state is also written to a temp file for the teardown script.
  */
-export async function startHub(): Promise<HubState> {
+export async function startHub(options: StartHubOptions = {}): Promise<HubState> {
+  const testLogin = options.testLogin ?? true;
+  const testIdentities = options.testIdentities ?? false;
+  const stateFile = options.stateFile ?? STATE_FILE;
+
   // Build assets and binary
-  buildWeb();
-  buildHub();
+  if (options.build ?? true) {
+    buildWeb();
+    buildHub();
+  }
 
   // Create a temp directory for the SQLite database
   const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scion-e2e-db-'));
   const dbPath = path.join(dbDir, 'e2e.db');
+
+  // A member-level test hub gets its own HOME and hub id, and its database
+  // is marked as test infrastructure before the hub starts (the hub reads
+  // the marker, and the web session key in it, only at startup).
+  let hubId: string | undefined;
+  let homeDir: string | undefined;
+  let env: NodeJS.ProcessEnv = {
+    ...process.env,
+    // The binary restricts commands by CLI mode; server requires human mode
+    SCION_CLI_MODE: 'human',
+  };
+  if (testIdentities) {
+    hubId = crypto.randomBytes(6).toString('hex');
+    homeDir = path.join(dbDir, 'home');
+    fs.mkdirSync(homeDir, { mode: 0o700 });
+    env = isolatedEnv(homeDir, { SCION_SERVER_HUB_HUBID: hubId });
+    console.info(`[hub] Marking ${dbPath} as test infrastructure for hub ${hubId}...`);
+    const markOut = execFileSync(
+      HUB_BINARY,
+      [
+        'server',
+        'test-infra',
+        'mark',
+        '--hub-id',
+        hubId,
+        '--db',
+        dbPath,
+        TEST_INFRA_MARK_ACK,
+        '--operator',
+        'e2e-harness',
+      ],
+      { cwd: homeDir, env, encoding: 'utf-8', timeout: 60_000 }
+    );
+    for (const line of markOut.trim().split('\n')) console.info(`[hub:mark] ${redact(line)}`);
+  }
 
   // Find a free port
   const port = await findFreePort();
@@ -143,51 +245,40 @@ export async function startHub(): Promise<HubState> {
 
   // Start the hub binary
   const webAssetsDir = path.join(WEB_DIR, 'dist', 'client');
-  const hubProcess = spawn(
-    HUB_BINARY,
-    [
-      'server',
-      'start',
-      '--foreground',
-      '--host',
-      '127.0.0.1',
-      '--web-port',
-      String(port),
-      '--enable-hub',
-      '--enable-web',
-      '--enable-runtime-broker=false',
-      '--hosted',
-      '--dev-auth',
-      '--enable-test-login',
-      '--session-secret',
-      E2E_SESSION_SECRET,
-      '--db',
-      dbPath,
-      '--web-assets-dir',
-      webAssetsDir,
-    ],
-    {
-      cwd: WORKSPACE_ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true,
-      env: {
-        ...process.env,
-        // The binary restricts commands by CLI mode; server requires human mode
-        SCION_CLI_MODE: 'human',
-      },
-    }
-  );
+  const args = [
+    'server',
+    'start',
+    '--foreground',
+    '--host',
+    '127.0.0.1',
+    '--web-port',
+    String(port),
+    '--enable-hub',
+    '--enable-web',
+    '--enable-runtime-broker=false',
+    '--hosted',
+    '--dev-auth',
+  ];
+  if (testLogin) args.push('--enable-test-login', '--session-secret', E2E_SESSION_SECRET);
+  if (testIdentities) args.push('--enable-test-identities');
+  args.push('--db', dbPath, '--web-assets-dir', webAssetsDir);
+  const hubProcess = spawn(HUB_BINARY, args, {
+    cwd: homeDir ?? WORKSPACE_ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+    env,
+  });
 
   // Capture the dev token from hub startup logs
   let devToken = '';
   // Token is scion_dev_ followed by hex; stop before any trailing quote/brace.
-  const devTokenPattern = /SCION_DEV_TOKEN=(scion_dev_[0-9a-f]+)/;
+  const devTokenPattern = DEV_TOKEN_PATTERN;
 
   // Log hub output for debugging and capture dev token
   hubProcess.stdout?.on('data', (data: Buffer) => {
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
-      console.log(`[hub:stdout] ${line}`);
+      console.log(`[hub:stdout] ${redact(line)}`);
       const match = line.match(devTokenPattern);
       if (match) {
         devToken = match[1];
@@ -198,7 +289,7 @@ export async function startHub(): Promise<HubState> {
   hubProcess.stderr?.on('data', (data: Buffer) => {
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
-      console.log(`[hub:stderr] ${line}`);
+      console.log(`[hub:stderr] ${redact(line)}`);
     }
   });
 
@@ -227,10 +318,15 @@ export async function startHub(): Promise<HubState> {
     baseURL,
     dbDir,
     devToken,
+    ...(hubId ? { hubId } : {}),
+    ...(homeDir ? { homeDir } : {}),
   };
 
-  // Write state file for teardown
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  // Write state file for teardown. It holds the dev token: owner-only, and
+  // created fresh (a stale file or a symlink at the path is removed first;
+  // 'wx' never follows one).
+  fs.rmSync(stateFile, { force: true });
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), { mode: 0o600, flag: 'wx' });
 
   // Unref so the parent process can exit cleanly
   hubProcess.unref();
@@ -239,9 +335,9 @@ export async function startHub(): Promise<HubState> {
 }
 
 /** Read the hub state from the temp file (used by teardown and tests). */
-export function readHubState(): HubState | null {
+export function readHubState(stateFile: string = STATE_FILE): HubState | null {
   try {
-    const raw = fs.readFileSync(STATE_FILE, 'utf-8');
+    const raw = fs.readFileSync(stateFile, 'utf-8');
     return JSON.parse(raw) as HubState;
   } catch {
     return null;
@@ -249,8 +345,8 @@ export function readHubState(): HubState | null {
 }
 
 /** Stop the hub process and clean up temp files. */
-export function stopHub(): void {
-  const state = readHubState();
+export function stopHub(stateFile: string = STATE_FILE): void {
+  const state = readHubState(stateFile);
   if (!state) {
     console.log('[hub] No hub state found — nothing to stop.');
     return;
@@ -277,10 +373,43 @@ export function stopHub(): void {
 
   // Clean up state file
   try {
-    fs.unlinkSync(STATE_FILE);
+    fs.unlinkSync(stateFile);
   } catch {
     // Best-effort cleanup
   }
 
   console.log('[hub] Hub stopped and cleaned up.');
+}
+
+/**
+ * Runs the scion CLI against a member-level test hub (started with
+ * `testIdentities: true`) as the dev-auth admin, in the hub's private HOME
+ * and environment, and returns its stdout. --global is added (there is no
+ * local project). A failure throws with the exit
+ * status and stderr (the CLI never prints a token or web-login code).
+ */
+export function runScionCLI(state: HubState, args: string[]): string {
+  if (!state.homeDir) {
+    throw new Error('runScionCLI needs a hub started with testIdentities: true');
+  }
+  const env = isolatedEnv(state.homeDir, {
+    SCION_HUB_ENDPOINT: state.baseURL,
+    SCION_HUB_TOKEN: state.devToken,
+    SCION_DEV_TOKEN: state.devToken,
+  });
+  try {
+    return execFileSync(HUB_BINARY, ['--global', ...args], {
+      cwd: state.homeDir,
+      env,
+      encoding: 'utf-8',
+      timeout: 60_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    const e = err as { status?: number; stderr?: string };
+    // eslint-disable-next-line preserve-caught-error -- the exec error carries raw stderr and argv; only the redacted text is kept
+    throw new Error(
+      `scion ${args.slice(0, 3).join(' ')} failed (exit ${String(e.status)}): ${redact(String(e.stderr ?? '')).trim()}`
+    );
+  }
 }

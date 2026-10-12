@@ -52,7 +52,7 @@ func TestPersistHubFlagEndpoint(t *testing.T) {
 			root := makeDirProject(t, "")
 			globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
 			projectDir := filepath.Join(root, ".scion")
-			resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman)
+			require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman))
 			require.Equal(t, targetSourceContext, hubSource)
 			require.Equal(t, ctxTestHub, hubEndpoint)
 			require.Empty(t, hubFlagEndpoint())
@@ -76,7 +76,7 @@ func TestPersistHubFlagEndpoint(t *testing.T) {
 			globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
 			projectDir := filepath.Join(root, ".scion")
 			hubEndpoint = "https://flag.example.com"
-			resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman)
+			require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman))
 			require.Equal(t, "https://flag.example.com", hubFlagEndpoint())
 
 			target, isGlobal := projectDir, false
@@ -122,7 +122,7 @@ func TestHubEnable_EndpointSource(t *testing.T) {
 			}
 
 			enable := findCommand(t, "hub", "enable")
-			resolveInvocationTarget(enable, ModeHuman)
+			require.NoError(t, resolveInvocationTarget(enable, ModeHuman))
 			require.Equal(t, srv.URL, hubEndpoint)
 			_ = captureStdout(t, func() { require.NoError(t, runHubEnable(enable, nil)) })
 
@@ -159,7 +159,7 @@ func TestHubLink_EndpointSource(t *testing.T) {
 				hubEndpoint = server.URL
 			}
 
-			resolveInvocationTarget(hubLinkCmd, ModeHuman)
+			require.NoError(t, resolveInvocationTarget(hubLinkCmd, ModeHuman))
 			require.Equal(t, server.URL, hubEndpoint)
 			_ = captureStdout(t, func() { require.NoError(t, runHubLink(hubLinkCmd, nil)) })
 			require.True(t, *registered, "the project was linked")
@@ -219,7 +219,7 @@ func TestHubShadow_IgnoresContext(t *testing.T) {
 				hubEndpoint = srv.URL
 			}
 			shadow := findCommand(t, "hub", "shadow")
-			resolveInvocationTarget(shadow, ModeHuman)
+			require.NoError(t, resolveInvocationTarget(shadow, ModeHuman))
 			assert.Empty(t, hubSource, "the hook does not apply the context to hub shadow")
 
 			var runErr error
@@ -280,7 +280,7 @@ func TestCheckHubAvailability_ContextHubDoesNotRelink(t *testing.T) {
 	t.Chdir(root)
 	before := readFileT(t, settingsFile)
 
-	resolveInvocationTarget(findCommand(t, "list"), ModeHuman)
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	require.Equal(t, targetSourceContext, hubSource)
 	require.Empty(t, projectPath, "a directory project is not replaced by the context project")
 

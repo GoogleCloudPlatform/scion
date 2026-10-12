@@ -111,8 +111,9 @@ profiles:
 }
 
 // Acceptance 1: with telemetry configured in settings.yaml, a newly
-// provisioned agent's scion-agent.json contains no settings telemetry, and a
-// template's own telemetry block is still persisted.
+// provisioned agent's scion-agent.json contains no settings telemetry. A
+// template's own telemetry block is an ignored environment key
+// (ptone/scion#4524), so it is not persisted either.
 func TestProvision_SettingsTelemetryNotPersisted(t *testing.T) {
 	t.Run("no template telemetry", func(t *testing.T) {
 		project := hubTelemetryFixture(t, hubTierSettingsTelemetry)
@@ -120,27 +121,29 @@ func TestProvision_SettingsTelemetryNotPersisted(t *testing.T) {
 
 		assertPersistedTelemetry(t, agentDir, "")
 	})
-	t.Run("template telemetry kept", func(t *testing.T) {
+	t.Run("template telemetry ignored", func(t *testing.T) {
 		project := hubTelemetryFixture(t, hubTierSettingsTelemetry)
 		writeTelemetryTemplate(t, "tel-tpl", templateTelemetry)
 		agentDir := provisionSettingsTelemetryAgent(t, project, "fresh-tpl", "tel-tpl")
 
-		assertPersistedTelemetry(t, agentDir, "template:4317")
+		assertPersistedTelemetry(t, agentDir, "")
 	})
 }
 
 // Acceptance 2: on a provisioned agent, Start applies per-field
-// settings < hub default < template. Protocol is the regression detector:
-// settings sets it and the template does not, so it must come from the hub
-// default; a provision-time bake would make the settings value win.
-func TestProvisionThenStart_SettingsBelowHubBelowTemplate(t *testing.T) {
+// settings < hub default < agent config. Protocol is the regression
+// detector: settings sets it, so it must come from the hub default; a
+// provision-time bake would make the settings value win. The template's
+// own telemetry (endpoint template:4317) is an ignored environment key
+// (ptone/scion#4524), so the hub default supplies the endpoint too.
+func TestProvisionThenStart_SettingsBelowHub_TemplateTelemetryIgnored(t *testing.T) {
 	project := hubTelemetryFixture(t, hubTierSettingsTelemetry)
 	writeTelemetryTemplate(t, "tel-tpl", templateTelemetry)
 	provisionSettingsTelemetryAgent(t, project, "order", "tel-tpl")
 
 	env, _ := startWithHubTelemetry(t, project, "order", hubTelemetryDefault("hub:4317"), nil)
 
-	assertEnv(t, env, "SCION_OTEL_ENDPOINT", "template:4317")       // template beats hub and settings
+	assertEnv(t, env, "SCION_OTEL_ENDPOINT", "hub:4317")            // template ignored; hub beats settings
 	assertEnv(t, env, "SCION_OTEL_PROTOCOL", "grpc")                // hub beats settings
 	assertEnv(t, env, "SCION_TELEMETRY_CLOUD_PROVIDER", "gcp")      // hub fills
 	assertEnv(t, env, "SCION_TELEMETRY_HUB_REPORT_INTERVAL", "45s") // hub fills

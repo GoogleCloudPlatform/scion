@@ -512,7 +512,7 @@ func (c *Client) RegisterPort(ctx context.Context, req RegisterPortRequest) (*Ex
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 	var out ExposedPort
 	if err := json.Unmarshal(respBody, &out); err != nil {
@@ -539,7 +539,7 @@ func (c *Client) ListPorts(ctx context.Context) ([]ExposedPort, error) {
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 	var out ListPortsResponse
 	if err := json.Unmarshal(respBody, &out); err != nil {
@@ -568,9 +568,28 @@ func (c *Client) DeletePort(ctx context.Context, port int) error {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+		return &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 	return nil
+}
+
+// StatusError is returned by the port API methods when the hub answers
+// with an unexpected HTTP status. Its message keeps the
+// "hub returned error <code>: <body>" form used by the other methods.
+type StatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("hub returned error %d: %s", e.StatusCode, e.Body)
+}
+
+// IsUnauthorized reports whether err carries an HTTP 401 from the hub,
+// meaning the hub did not accept the agent's current credential.
+func IsUnauthorized(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusUnauthorized
 }
 
 func (c *Client) absoluteURL(path string) string {
