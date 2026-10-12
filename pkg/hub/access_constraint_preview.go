@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -1294,7 +1295,7 @@ func (ps *PreviewService) assessLockout(
 	proposedStore := ps.hubToStoreConstraint(proposed)
 
 	// Resolve admin users.
-	adminUsers, err := ps.resolveAdminUsers(ctx, scopeType, scopeID)
+	adminUsers, err := ps.resolveAdminUsers(ctx, now, scopeType, scopeID)
 	if err != nil {
 		ps.logger.Warn("lockout check: failed to resolve admin users", "error", err)
 		return LockoutAssessment{
@@ -1395,17 +1396,22 @@ func (ps *PreviewService) assessLockout(
 	}
 }
 
-// resolveAdminUsers finds users with constraint-admin permission at a scope.
-func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scopeID string) ([]adminUserInfo, error) {
-	return resolveConstraintAdminUsers(ctx, ps.store, scopeType, scopeID)
+// resolveAdminUsers finds users with constraint-admin permission at a
+// scope at now.
+func (ps *PreviewService) resolveAdminUsers(ctx context.Context, now time.Time, scopeType, scopeID string) ([]adminUserInfo, error) {
+	return resolveConstraintAdminUsers(ctx, ps.store, now, scopeType, scopeID)
 }
 
 // resolveConstraintAdminUsers finds the active users with constraint-admin
 // permission at a scope, through direct and group role bindings. A user
 // counts only when the user row exists with status active: a suspended,
 // invited or missing user holds no effective authority, so counting one
-// would let a lockout check pass with no admin able to act.
-func resolveConstraintAdminUsers(ctx context.Context, st store.Store, scopeType, scopeID string) ([]adminUserInfo, error) {
+// would let a lockout check pass with no admin able to act. Only a
+// binding active at now (isBindingActive) admits a user: a binding that
+// is not yet valid or has expired grants no authority. A role
+// definition read error fails the resolution; a binding whose role
+// definition no longer exists grants nothing and is skipped.
+func resolveConstraintAdminUsers(ctx context.Context, st store.Store, now time.Time, scopeType, scopeID string) ([]adminUserInfo, error) {
 	bindings, err := st.ListRoleBindingsForScope(ctx, scopeType, scopeID)
 	if err != nil {
 		return nil, err
@@ -1436,9 +1442,15 @@ func resolveConstraintAdminUsers(ctx context.Context, st store.Store, scopeType,
 	}
 
 	for _, b := range bindings {
-		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if err != nil {
+		if !isBindingActive(b, now) {
 			continue
+		}
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("get role definition %s: %w", b.RoleDefinitionID, err)
 		}
 		hasAdmin := false
 		for _, p := range rd.Permissions {

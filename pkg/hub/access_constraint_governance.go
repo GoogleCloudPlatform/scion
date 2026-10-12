@@ -862,12 +862,13 @@ type adminRemoval struct {
 // *GovernanceError with ErrCodeConstraintAdminLockout when the change
 // would leave the scope with no active user holding
 // access_constraint.admin, now or once scheduled constraints activate.
-// Only active users count (resolveConstraintAdminUsers).
+// Only active users with a binding active at now count
+// (resolveConstraintAdminUsers).
 //
 // st may be a transaction handle so the check reads the same state the
 // caller then writes.
 func checkConstraintAdminLockout(ctx context.Context, st store.Store, now time.Time, scopeType, scopeID string, rm adminRemoval) error {
-	adminUsers, err := resolveConstraintAdminUsers(ctx, st, scopeType, scopeID)
+	adminUsers, err := resolveConstraintAdminUsers(ctx, st, now, scopeType, scopeID)
 	if err != nil {
 		return &GovernanceError{
 			Code:    ErrCodeConstraintAdminLockout,

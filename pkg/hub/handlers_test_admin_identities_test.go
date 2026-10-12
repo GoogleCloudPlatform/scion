@@ -1561,7 +1561,7 @@ func TestTestAdmin_NotAConstraintAdminForRemovalLockout(t *testing.T) {
 		require.NoError(t, s.UpdateUser(ctx, u))
 	}
 
-	admins, err := resolveConstraintAdminUsers(ctx, s, store.RoleScopeSystem, "")
+	admins, err := resolveConstraintAdminUsers(ctx, s, time.Now(), store.RoleScopeSystem, "")
 	require.NoError(t, err)
 	var ids []string
 	for _, a := range admins {

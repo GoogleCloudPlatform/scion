@@ -1408,7 +1408,7 @@ func TestResolveAdminUsers_GetGroupMembersFailure_FailsClosed(t *testing.T) {
 	}
 	preview := &PreviewService{store: errStore}
 
-	_, err = preview.resolveAdminUsers(ctx, ScopeTypeSystem, "")
+	_, err = preview.resolveAdminUsers(ctx, time.Now(), ScopeTypeSystem, "")
 
 	// Must fail closed: error propagates instead of continuing with empty members.
 	assert.Error(t, err, "resolveAdminUsers must propagate GetGroupMembers error")
@@ -1451,7 +1451,7 @@ func TestResolveAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *testing.T) {
 	}
 	preview := &PreviewService{store: errStore}
 
-	_, err = preview.resolveAdminUsers(ctx, ScopeTypeSystem, "")
+	_, err = preview.resolveAdminUsers(ctx, time.Now(), ScopeTypeSystem, "")
 
 	// Must fail closed: error propagates instead of setting groupIDs = nil.
 	assert.Error(t, err, "resolveAdminUsers must propagate GetEffectiveGroups error")
