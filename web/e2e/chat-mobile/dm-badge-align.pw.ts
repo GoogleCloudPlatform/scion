@@ -87,77 +87,50 @@ interface Measurement {
   dmHeader: Box | null;
   dmBadge: Box | null;
   spaceHeader: Box | null;
-  spaceChevron: Box | null;
-  spaceName: Box | null;
-  spaceActions: Box | null;
   spaceBadge: Box | null;
-  spaceMenuBase: Box | null;
-  dmBadgeText: string | undefined;
-  spaceBadgeText: string | undefined;
-  dmBadgeRight: number | null;
-  spaceBadgeRight: number | null;
 }
 
-/** Layout boxes of the DM heading and the space heading. */
+const SPACE_HEADER = '.space-header:not(.dm-header)';
+
+/** Layout boxes of the DM heading, the space heading and their badges. */
 async function measure(page: Page): Promise<Measurement> {
-  const space = '.space-header:not(.dm-header)';
-  const right = (b: Box | null): number | null => (b ? b.x + b.width : null);
-  const dmBadge = await box(page, '.dm-header .unread-badge');
-  const spaceBadge = await box(page, `${space} .unread-badge`);
   return {
     dmHeader: await box(page, '.dm-header'),
-    dmBadge,
-    spaceHeader: await box(page, space),
-    spaceChevron: await box(page, `${space} .chevron`),
-    spaceName: await box(page, `${space} .space-name`),
-    spaceActions: await box(page, `${space} .space-actions`),
-    spaceBadge,
-    spaceMenuBase: await box(page, `${space} sl-icon-button [part~="base"]`),
-    dmBadgeText: (await visible(page, '.dm-header .unread-badge').textContent())?.trim(),
-    spaceBadgeText: (await visible(page, `${space} .unread-badge`).textContent())?.trim(),
-    dmBadgeRight: right(dmBadge),
-    spaceBadgeRight: right(spaceBadge),
+    dmBadge: await box(page, '.dm-header .unread-badge'),
+    spaceHeader: await box(page, SPACE_HEADER),
+    spaceBadge: await box(page, `${SPACE_HEADER} .unread-badge`),
   };
+}
+
+/** How far apart the two badges' right edges are; Infinity until both render. */
+async function badgeRightGap(page: Page): Promise<number> {
+  const { dmBadge, spaceBadge } = await measure(page);
+  if (!dmBadge || !spaceBadge) return Number.POSITIVE_INFINITY;
+  return Math.abs(dmBadge.x + dmBadge.width - (spaceBadge.x + spaceBadge.width));
 }
 
 test('@static the DM heading badge lines up with the space heading badge', async ({
   page,
 }, testInfo) => {
-  const desktop = testInfo.project.name.startsWith('desktop');
-  if (desktop) await page.setViewportSize({ width: 1280, height: 900 });
+  if (testInfo.project.name.startsWith('desktop')) {
+    await page.setViewportSize({ width: 1280, height: 900 });
+  }
   await openChatRail(page, unreadMocks);
-  const dmBadge = page.locator('.dm-header .unread-badge');
+  const dmBadge = visible(page, '.dm-header .unread-badge');
+  const spaceBadge = visible(page, `${SPACE_HEADER} .unread-badge`);
   await expect(dmBadge).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.space-header:not(.dm-header) .unread-badge')).toBeVisible();
+  await expect(spaceBadge).toBeVisible();
+  await expect(dmBadge).toHaveText('2');
+  await expect(spaceBadge).toHaveText(String(SPACE_UNREAD));
 
   // On desktop the space then opens #general, which re-renders the page:
-  // measure once both headings have settled on screen.
-  await expect
-    .poll(async () => {
-      const probe = await measure(page);
-      return Boolean(probe.dmBadge && probe.spaceBadge && probe.dmHeader && probe.spaceHeader);
-    })
-    .toBe(true);
-  await page.waitForTimeout(300);
-  const m = await measure(page);
-  const label = desktop ? 'desktop-1280' : testInfo.project.name;
-  console.info(`DM-BADGE-MEASURE ${label} ${JSON.stringify(m)}`);
+  // poll until the right edges agree rather than sleeping.
+  await expect.poll(() => badgeRightGap(page)).toBeLessThanOrEqual(1);
 
-  const shotDir = process.env.DM_BADGE_SHOT_DIR;
-  if (shotDir && m.dmHeader && m.spaceHeader) {
-    const top = Math.max(0, Math.floor(m.dmHeader.y) - 8);
-    await page.screenshot({
-      path: `${shotDir}/${process.env.DM_BADGE_SHOT_PREFIX ?? 'rail'}-${label}.png`,
-      clip: {
-        x: 0,
-        y: top,
-        width: Math.ceil(m.spaceHeader.x + m.spaceHeader.width),
-        height: Math.ceil(m.spaceHeader.y + m.spaceHeader.height) - top + 8,
-      },
-    });
-  }
-
-  expect(m.dmBadgeText).toBe('2');
-  expect(m.spaceBadgeText).toBe(String(SPACE_UNREAD));
-  expect(Math.abs(m.dmBadgeRight! - m.spaceBadgeRight!)).toBeLessThanOrEqual(1);
+  // The spacer adds no height: the DM heading is no taller than a space
+  // heading.
+  const { dmHeader, spaceHeader } = await measure(page);
+  expect(dmHeader).not.toBeNull();
+  expect(spaceHeader).not.toBeNull();
+  expect(dmHeader!.height).toBeLessThanOrEqual(spaceHeader!.height + 1);
 });
