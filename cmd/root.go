@@ -134,6 +134,13 @@ return an error instead of blocking.`,
 			globalMode = true
 		}
 
+		// Fill the hub endpoint and project from the current context
+		// ('scion use') where no flag, environment variable or directory
+		// project chose them. It runs after every --global form is known
+		// and before the project requirement check, so a selected project
+		// satisfies it.
+		resolveInvocationTarget(cmd, mode)
+
 		if globalMode && projectPath == "" {
 			projectPath = "global"
 		}
@@ -284,6 +291,11 @@ func Execute() {
 	}
 
 	cmd, err := rootCmd.ExecuteC()
+	if err != nil && topLevelName(cmd) == "ssh" {
+		// scion ssh follows the ssh convention: any failure before the
+		// remote command runs, from the root hook included, exits 255.
+		os.Exit(reportSSHError(os.Stderr, err))
+	}
 	if err != nil && plainErrorCommands[topLevelName(cmd)] {
 		// One plain line, no usage block, and the command's own exit code.
 		os.Exit(reportPlainError(os.Stderr, err))
@@ -306,7 +318,8 @@ func Execute() {
 // the tunnel exit-code table. They run under ssh and editors, where the
 // error lands in a log. One command per line.
 var plainErrorCommands = map[string]bool{
-	"tunnel": true,
+	"tunnel":     true,
+	"ssh-config": true,
 }
 
 // formatCLIError renders a failed command's error for f. The error banner is
@@ -586,7 +599,10 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 		return
 	}
 
-	// Check if Hub is enabled (either via settings or --hub flag override)
+	// Check if Hub is enabled (either via settings or --hub flag override).
+	// A hub selected with 'scion use' is in hubEndpoint too and counts the
+	// same way: a project from the current context is resolved on that hub
+	// without hub.enabled, so dev auth is really in use.
 	hubEnabled := settings.IsHubEnabled() || hubEndpoint != ""
 	if !hubEnabled {
 		return

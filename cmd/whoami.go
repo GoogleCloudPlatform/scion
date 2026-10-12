@@ -54,6 +54,7 @@ type WhoamiResult struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Ancestry    []string          `json:"ancestry,omitempty"`
 	TaskSummary string            `json:"taskSummary,omitempty"`
+	MessageMode string            `json:"messageMode,omitempty"` // effective message mode (none, lineage, branch, project, hub)
 
 	// Scopes are the scopes of the agent's current hub token, read from
 	// the token itself (only with --full). They show whether, for example,
@@ -208,6 +209,7 @@ func enrichFromHub(cmd *cobra.Command, result *WhoamiResult) {
 	result.Annotations = self.Annotations
 	result.Ancestry = self.Ancestry
 	result.TaskSummary = self.TaskSummary
+	result.MessageMode = self.MessageMode
 
 	enabled, err := client.GetExperiments(ctx)
 	if err != nil {
@@ -251,6 +253,9 @@ func printFullPlainText(r WhoamiResult) {
 	if r.Activity != "" {
 		fmt.Printf("Activity: %s\n", r.Activity)
 	}
+	if r.MessageMode != "" {
+		fmt.Printf("Msg Mode: %s\n", r.MessageMode)
+	}
 	if r.HubURL != "" {
 		fmt.Printf("Hub:      %s\n", r.HubURL)
 	}
@@ -280,5 +285,5 @@ func runSystemWhoami() error {
 func init() {
 	rootCmd.AddCommand(whoamiCmd)
 	whoamiCmd.Flags().BoolVar(&whoamiFull, "full", false,
-		"Include the token's scopes and enriched fields from the Hub (phase, activity, labels, ancestry, enabled experiments)")
+		"Include the token's scopes and enriched fields from the Hub (phase, activity, message mode, labels, ancestry, enabled experiments)")
 }

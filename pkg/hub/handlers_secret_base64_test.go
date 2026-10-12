@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 // Package hub – tests for the Encoding field and base64/raw-value handling in
 // all four secret-write handlers:

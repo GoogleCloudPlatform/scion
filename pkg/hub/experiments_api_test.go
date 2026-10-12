@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 // API tests for GET /api/v1/experiments and GET|PUT|DELETE
 // /api/v1/admin/experiments (ptone/scion#2217). The HTTP tests in this file
