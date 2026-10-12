@@ -225,6 +225,76 @@ func TestDialWithConfig_ConnectionOutlivesItsDialContext(t *testing.T) {
 	}
 }
 
+// TestDialWithConfig_DialedConnectionHasNoHandshakeDeadline: a dial that
+// succeeds returns a connection with no handshake deadline left on it, so a
+// read and a write still work well after HandshakeTimeout has passed. (The
+// dial context is never cancelled here; see
+// TestDialWithConfig_ConnectionOutlivesItsDialContext for that.)
+func TestDialWithConfig_DialedConnectionHasNoHandshakeDeadline(t *testing.T) {
+	cfg := DefaultConnectionConfig()
+	cfg.HandshakeTimeout = 200 * time.Millisecond
+
+	release := make(chan struct{})
+	serverGot := make(chan error, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverGot <- err
+			return
+		}
+		defer func() { _ = ws.Close() }()
+		<-release // answer only after the client has waited out its handshake timeout
+		if err := ws.WriteMessage(websocket.TextMessage, []byte("hello")); err != nil {
+			serverGot <- err
+			return
+		}
+		_, data, err := ws.ReadMessage()
+		if err == nil && string(data) != "reply" {
+			err = errUnexpected(string(data))
+		}
+		serverGot <- err
+	}))
+	t.Cleanup(srv.Close)
+
+	conn, _, err := DialWithConfig(context.Background(), "ws"+strings.TrimPrefix(srv.URL, "http")+"/", nil, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	time.Sleep(3 * cfg.HandshakeTimeout) // well past any deadline the handshake set
+	close(release)
+
+	read := make(chan error, 1)
+	go func() {
+		_, data, err := conn.ReadMessage()
+		if err == nil && string(data) != "hello" {
+			err = errUnexpected(string(data))
+		}
+		read <- err
+	}()
+	select {
+	case err := <-read:
+		require.NoError(t, err, "a read after HandshakeTimeout has passed")
+	case <-time.After(dialGuard):
+		t.Fatal("timed out waiting for the server's message")
+	}
+
+	write := make(chan error, 1)
+	go func() { write <- conn.WriteMessage(websocket.TextMessage, []byte("reply")) }()
+	select {
+	case err := <-write:
+		require.NoError(t, err, "a write after HandshakeTimeout has passed")
+	case <-time.After(dialGuard):
+		t.Fatal("timed out writing the reply")
+	}
+	select {
+	case err := <-serverGot:
+		require.NoError(t, err, "the server's read of the reply")
+	case <-time.After(dialGuard):
+		t.Fatal("timed out waiting for the server to read the reply")
+	}
+}
+
 type errUnexpected string
 
 func (e errUnexpected) Error() string { return "unexpected message " + string(e) }
