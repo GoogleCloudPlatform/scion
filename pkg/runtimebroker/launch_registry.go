@@ -170,20 +170,10 @@ func (r *launchRegistry) Handoff(key launchKey, from, to *launchRecord, fromCanc
 	return true
 }
 
-// CancelLocal wakes the record held for key, if any (design §3.8.1: stop and
-// delete on the same replica call this to wake long waits). It is
-// CancelLocalFor with no agent or run to match.
-func (r *launchRegistry) CancelLocal(key launchKey) {
-	r.CancelLocalFor(key, "", "")
-}
-
-// CancelLocalForRun is CancelLocalFor with no agent ID to match.
-func (r *launchRegistry) CancelLocalForRun(key launchKey, runID string) bool {
-	return r.CancelLocalFor(key, "", runID)
-}
-
 // CancelLocalFor wakes the launch or create registered under key for a stop
-// or delete of the agent the hub knows as agentID, naming run runID. It
+// or delete of the agent the hub knows as agentID, naming run runID (design
+// §3.8.1: stop and delete on the same replica call this to wake long
+// waits). It
 // leaves alone a launch of a different agent (ptone/scion#2632: a late stop
 // or delete for an old agent must not cancel the start of a newer agent
 // recreated under the same name) or of a different run (ptone/scion#2550).
@@ -224,8 +214,8 @@ func (r *launchRegistry) CancelLocalFor(key launchKey, agentID, runID string) bo
 // registered under key (ptone/scion#2675). Such a launch is provisioning, or
 // about to provision, the agent's files under this name, so a delete naming
 // runID must leave them alone even before the launch has recorded its run
-// on disk. False without a run ID on either side, matching
-// CancelLocalForRun.
+// on disk. False without a run ID on either side, matching CancelLocalFor's
+// run match.
 func (r *launchRegistry) OtherRunInFlight(key launchKey, runID string) bool {
 	_, ok := r.otherRunInFlightID(key, runID)
 	return ok

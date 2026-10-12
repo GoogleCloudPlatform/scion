@@ -83,8 +83,8 @@ type syncStart struct {
 	projectPath     string
 	sharedWorkspace bool
 	registry        *launchRegistry
-	// ctx is the context beginCreateRegistration returned; it is done once
-	// the registration has been cancelled (stop, delete, newer start).
+	// ctx is done once the registration has been cancelled (stop, delete,
+	// newer start). It is a cancellation signal only; see bind.
 	ctx context.Context
 	// handedOff is set once handOff has replaced rec in the registry with
 	// an async launch's record; finish then leaves the registry alone.
@@ -93,10 +93,11 @@ type syncStart struct {
 
 // beginCreateRegistration registers a create for req under the agent's
 // name, before any name-addressed work (buildStartContext, the GCS
-// workspace download, provisioning) runs. It returns a context derived from
-// ctx that is cancelled when the agent is deleted or stopped on this
-// broker, or when a newer start for the same name begins; the caller must
-// call finish exactly once when the create ends.
+// workspace download, provisioning) runs. The registration is cancelled
+// when the agent is deleted or stopped on this broker, or when a newer
+// start for the same name begins; bind carries that cancellation onto the
+// context the start later runs under. The caller must call finish exactly
+// once when the create ends.
 //
 // If an earlier start of the same name is still running here, it is
 // cancelled and waited for (bounded by ctx and the supersede wait) before
@@ -104,7 +105,7 @@ type syncStart struct {
 // create writes anything addressed by the name. The wait ends with
 // errCreateSupersedeTimeout or errCreateStartCancelled, and the
 // registration is released.
-func (s *Server) beginCreateRegistration(ctx context.Context, req CreateAgentRequest) (context.Context, *syncStart, error) {
+func (s *Server) beginCreateRegistration(ctx context.Context, req CreateAgentRequest) (*syncStart, error) {
 	slug := req.Slug
 	if slug == "" {
 		slug = req.Name
@@ -113,14 +114,18 @@ func (s *Server) beginCreateRegistration(ctx context.Context, req CreateAgentReq
 	// already checks Name and Slug at the request boundary; this check keeps
 	// the helper safe on its own, before any registry or filesystem use.
 	if !isSingleCleanPathElement(slug) {
-		return nil, nil, errInvalidLaunchSlug
+		return nil, errInvalidLaunchSlug
 	}
-	startCtx, cancel := context.WithCancel(ctx)
+	// regCtx is only a cancellation signal (ss.ctx), never the start's own
+	// context: it is derived from ctx before createAgent attaches the
+	// harness-config policy, skill resolver, hub agent defaults and
+	// worktree signal, so the start must not run under it (see bind).
+	regCtx, cancel := context.WithCancel(ctx)
 	ss := &syncStart{
 		key:      launchKey{ProjectID: req.ProjectID, Slug: slug},
 		owner:    "sync-" + uuid.NewString(),
 		registry: s.launchRegistry,
-		ctx:      startCtx,
+		ctx:      regCtx,
 	}
 	ss.rec = newLaunchRecord(ss.owner, req.ID, store.LaunchKindCreate, "", time.Time{}, cancel)
 	ss.rec.RunID = req.RunID
@@ -138,16 +143,37 @@ func (s *Server) beginCreateRegistration(ctx context.Context, req CreateAgentReq
 		select {
 		case <-supersededDone:
 			timer.Stop()
-		case <-startCtx.Done():
+		case <-regCtx.Done():
 			timer.Stop()
 			ss.finish()
-			return nil, nil, errCreateStartCancelled
+			return nil, errCreateStartCancelled
 		case <-timer.C:
 			ss.finish()
-			return nil, nil, errCreateSupersedeTimeout
+			return nil, errCreateSupersedeTimeout
 		}
 	}
-	return startCtx, ss, nil
+	return ss, nil
+}
+
+// bind returns a context derived from ctx -- the dispatch context with
+// everything createAgent attached after the registration (harness-config
+// policy hook, skill resolver, hub agent defaults, provisioned-worktree
+// signal) -- that is also cancelled when this registration is cancelled (a
+// stop, delete or newer start of the name), and a release func the caller
+// must call once the start has returned.
+func (ss *syncStart) bind(ctx context.Context) (context.Context, func()) {
+	startCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(ss.ctx, cancel)
+	return startCtx, func() {
+		stop()
+		cancel()
+	}
+}
+
+// cancelled reports whether this registration has been cancelled: a stop or
+// delete of the agent, or a newer start of the name, reached it.
+func (ss *syncStart) cancelled() bool {
+	return ss.ctx.Err() != nil
 }
 
 // takeName writes this start's launch marker for the slug, under the
@@ -182,7 +208,7 @@ func (ss *syncStart) handOff(rec *launchRecord) bool {
 	if ss.registry == nil {
 		return false
 	}
-	if !ss.registry.Handoff(ss.key, ss.rec, rec, func() bool { return ss.ctx.Err() != nil }) {
+	if !ss.registry.Handoff(ss.key, ss.rec, rec, ss.cancelled) {
 		return false
 	}
 	ss.handedOff = true

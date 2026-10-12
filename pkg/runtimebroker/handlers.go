@@ -1259,12 +1259,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// the name's launch marker further down (takeName); an async create
 	// hands the registration over to its launch (beginAsyncLaunch).
 	var ss *syncStart
-	var startCtxForStart context.Context
-	var finishTracked func()
+	var unbindStart, finishTracked func()
 	if !req.ProvisionOnly {
-		var startCtx context.Context
 		var ssErr error
-		startCtx, ss, ssErr = s.beginCreateRegistration(ctx, req)
+		ss, ssErr = s.beginCreateRegistration(ctx, req)
 		if ssErr != nil {
 			s.writeCreateRegistrationError(w, span, req, ssErr, markAttemptFailed)
 			return
@@ -1274,12 +1272,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// Manager.Start, Run's deferred cleanup and ss.finish have all
 		// returned.
 		defer func() {
+			if unbindStart != nil {
+				unbindStart()
+			}
 			ss.finish()
 			if finishTracked != nil {
 				finishTracked()
 			}
 		}()
-		startCtxForStart = startCtx
 	}
 
 	// Build unified start context (project path, env, template, git-clone, secrets, manager)
@@ -1412,6 +1412,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Synchronous path from here. A stop, delete or newer start of the name
+	// that reached the registration while buildStartContext ran ends the
+	// create here, before the GCS download, with the same 409 the supersede
+	// wait gives, rather than a generic failure at Manager.Start. (The async
+	// path checks the same at handOff.)
+	if ss != nil && ss.cancelled() {
+		s.writeCreateRegistrationError(w, span, req, errCreateStartCancelled, markAttemptFailed)
+		return
+	}
+
 	// If WorkspaceStoragePath is set, download workspace from GCS (non-git
 	// bootstrap). Factored into downloadWorkspaceFromGCS so the async-launch
 	// path (runLaunch) performs exactly the same step, in its own goroutine
@@ -1461,8 +1471,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// Tracked as a start in flight until Manager.Start, Run's deferred
 		// cleanup and ss.finish have all returned (the deferred release
 		// above runs finishTracked last).
-		var trackCtx context.Context
-		trackCtx, finishTracked = s.startsInFlight.begin(startCtxForStart, ss.key)
+		// The start runs under ctx as built up to here (policy hook, skill
+		// resolver, hub agent defaults, worktree signal), cancelled also
+		// when the registration is (bind), never under the registration's
+		// own context, which predates those values.
+		var startCtx, trackCtx context.Context
+		startCtx, unbindStart = ss.bind(ctx)
+		trackCtx, finishTracked = s.startsInFlight.begin(startCtx, ss.key)
 		s.startsInFlight.setRunID(trackCtx, opts.RunID)
 		ctx = trackCtx
 	}
@@ -2799,8 +2814,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			s.agentLifecycleLog.Debug("No task in start request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
 	}
-	// The expected runtime target is checked before any runtime call. A start without it is accepted: it can only use the
-	// server's own target.
+	// The expected runtime target is checked before any runtime call. A
+	// start without it is accepted: it can only use the server's own target.
 	if refusal := s.expectedTargetRefusal(startReq.ExpectedRuntimeTargetID, false); refusal != nil {
 		span.SetStatus(codes.Error, refusal.code)
 		refusal.write(w)

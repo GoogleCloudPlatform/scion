@@ -1167,7 +1167,7 @@ func TestAsyncCreate_ClaimLocallyCancelled_SendsNoTerminal(t *testing.T) {
 	if !waitUntil(t, time.Second, func() bool { return len(rtb.getLaunchReports()) >= 1 }) {
 		t.Fatal("expected at least one claim attempt")
 	}
-	srv.launchRegistry.CancelLocal(launchKey{Slug: "agent-cancel-local"})
+	srv.launchRegistry.CancelLocalFor(launchKey{Slug: "agent-cancel-local"}, "", "")
 
 	time.Sleep(200 * time.Millisecond) // let runLaunch observe the cancellation
 	for _, r := range rtb.getLaunchReports() {

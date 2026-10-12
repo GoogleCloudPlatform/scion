@@ -16,15 +16,19 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -394,6 +398,216 @@ func TestStopAndDelete_AgentIDScopesLaunchCancel(t *testing.T) {
 			send("")
 			if !cancelled.Load() {
 				t.Fatalf("a %s without an agent ID (older hub) did not cancel the start by name", tc.name)
+			}
+		})
+	}
+}
+
+// Item 2 regression (r1 finding 1): moving the registration ahead of
+// buildStartContext must not move the synchronous start off the dispatch
+// context. Manager.Start still sees the harness-config policy hook, the
+// skill resolver and the hub agent defaults createAgent attaches after the
+// registration.
+func TestCreateAgent_FullSyncStartRunsUnderDispatchContext(t *testing.T) {
+	srv, mgr := hookTestServer(t, false, "")
+	code, body := postJSON(t, srv, "/api/v1/agents", `{
+		"name": "dispatch-ctx", "id": "id-dispatch-ctx", "slug": "dispatch-ctx",
+		"config": {"template": "none", "hubAgentDefaults": {"autoExposePorts": true}},
+		"preResolvedSkills": {"resolved": [{"uri": "skill://scion/global/s@1.0.0", "name": "s",
+			"resolvedVersion": "1.0.0", "contentHash": "sha256:abc", "files": []}]}
+	}`)
+	if code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d: %s", code, http.StatusCreated, body)
+	}
+	ctx := mgr.lastStartCtx
+	if ctx == nil {
+		t.Fatal("Start was never called")
+	}
+	if config.HarnessConfigPolicyFromContext(ctx) == nil {
+		t.Error("the sync Start context has no harness-config policy hook")
+	}
+	if agent.SkillResolverFromContext(ctx) == nil {
+		t.Error("the sync Start context has no skill resolver")
+	}
+	if hd := api.HubAgentDefaultsFromContext(ctx); hd == nil || hd.AutoExposePorts == nil || !*hd.AutoExposePorts {
+		t.Errorf("the sync Start context hub defaults = %+v, want autoExposePorts=true", hd)
+	}
+}
+
+// Item 3 (r1 finding 3): a stop, delete or newer start that cancels a sync
+// create's registration while buildStartContext runs ends the create with
+// 409 start_cancelled, before the download or Start.
+func TestCreateAgent_SyncRegistrationCancelledDuringBuild_409(t *testing.T) {
+	srv, mgr, projectPath, _ := newSyncStartTestServer(t)
+	key := launchKey{Slug: "same-name"}
+	buildStartContextProbe(t, "same-name", func() {
+		srv.launchRegistry.CancelLocalFor(key, "agent-new-id", "")
+	})
+	mgr.starts <- func(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+		t.Error("Start ran for a create cancelled during buildStartContext")
+		return nil, ctx.Err()
+	}
+
+	w := createSync(srv, "agent-new-id", projectPath)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	if code := errorCodeOf(t, w); code != api.BrokerErrCodeStartCancelled {
+		t.Errorf("error code = %q, want %q", code, api.BrokerErrCodeStartCancelled)
+	}
+	if rec := registryRecord(srv, key); rec != nil {
+		t.Errorf("registry still holds %+v for the refused create", rec)
+	}
+}
+
+// Item 2 (r1 finding 2): an async create of a name whose earlier async
+// launch is still in its failure cleanup (a real runLaunch blocked in
+// CleanupLaunch) waits for that cleanup before buildStartContext, then is
+// accepted, hands its registration to its launch and reaches Start.
+func TestAsyncCreate_WaitsForPredecessorCleanupThenAccepts(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.setStartErr(errors.New("boom"))
+	cleanupBlock := make(chan struct{})
+	mgr.setCleanupBlock(cleanupBlock)
+	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.createSupersedeWait = syncStartTestTimeout
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if req.LaunchID == "L-old" && req.State == hubclient.AgentLaunchReportStateFailed {
+			// 403 is one of the design's cleanup reasons, so the old
+			// launch's failure drives it into cleanupAbortedLaunch, which
+			// blocks on cleanupBlock.
+			return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusForbidden}, nil
+		}
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+	key := launchKey{Slug: "agent-shared"}
+	body := func(id, launchID string) map[string]any {
+		return map[string]any{
+			"id": id, "name": "agent-shared", "asyncLaunch": true, "launchId": launchID,
+			"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+		}
+	}
+
+	if w := postCreate(t, srv, body("agent-old-id", "L-old")); w.Code != http.StatusCreated {
+		t.Fatalf("old create status = %d: %s", w.Code, w.Body.String())
+	}
+	if !waitUntil(t, syncStartTestTimeout, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		t.Fatal("the old launch never reached CleanupLaunch")
+	}
+	// The old launch is blocked in CleanupLaunch; its registry record (and
+	// done channel) is still held. The new launch's Start succeeds and
+	// stays running so its record can be inspected.
+	mgr.setStartErr(nil)
+	mgr.mu.Lock()
+	mgr.startBlock = make(chan struct{})
+	mgr.mu.Unlock()
+	defer func() {
+		mgr.mu.Lock()
+		close(mgr.startBlock)
+		mgr.mu.Unlock()
+	}()
+	calls := buildStartContextProbe(t, "agent-shared", nil)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- postCreate(t, srv, body("agent-new-id", "L-new")) }()
+	if !waitUntil(t, syncStartTestTimeout, func() bool {
+		rec := registryRecord(srv, key)
+		return rec != nil && strings.HasPrefix(rec.ID, "sync-")
+	}) {
+		t.Fatal("the new create never registered under the name")
+	}
+	time.Sleep(100 * time.Millisecond) // a create that does not wait would reach buildStartContext and Start now
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("buildStartContext ran %d time(s) while the old launch was still cleaning up", n)
+	}
+	if n := mgr.StartCallCount(); n != 1 {
+		t.Fatalf("Start calls = %d while the old launch was still cleaning up, want 1 (the old launch's)", n)
+	}
+
+	close(cleanupBlock)
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-done:
+	case <-time.After(syncStartTestTimeout):
+		t.Fatal("the new create did not return after the old launch's cleanup finished")
+	}
+	if w.Code != http.StatusCreated {
+		t.Fatalf("new create status = %d, want %d: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	if resp := decodeCreateResponse(t, w); !resp.LaunchPending || resp.LaunchID != "L-new" {
+		t.Fatalf("new create response = %+v, want an accepted launch L-new", resp)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("buildStartContext calls = %d, want 1", calls.Load())
+	}
+	if !waitUntil(t, syncStartTestTimeout, func() bool { return mgr.StartCallCount() >= 2 }) {
+		t.Fatal("the new launch never reached Start")
+	}
+	if rec := registryRecord(srv, key); rec == nil || rec.ID != "L-new" {
+		t.Fatalf("registry record for the name = %+v, want the new launch's record L-new", rec)
+	}
+}
+
+// Item 5 (r1 finding 5): the cancel after delete resolution, keyed by the
+// resolved entry's project (the delete names no projectId, so the early
+// cancel cannot match), also honours agentId.
+func TestDeleteAgent_ResolvedCancelHonoursAgentID(t *testing.T) {
+	for _, tc := range []struct {
+		name, agentID string
+		wantCancel    bool
+	}{
+		{"old agent", "agent-old", false},
+		{"the launch's agent", "agent-new", true},
+		{"no agent ID (older hub)", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &filteringMockManager{}
+			srv, home := newScopeTestServer(t, mgr)
+			scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+			mgr.agents = []api.AgentInfo{labelled("dev", "cid-legacy", scopeProjB, scionB)}
+
+			cancels := 0
+			srv.launchRegistry.Begin(launchKey{ProjectID: scopeProjB, Slug: "dev"},
+				newLaunchRecord("sync-1", "agent-new", "create", "", time.Time{}, func() { cancels++ }))
+
+			query := ""
+			if tc.agentID != "" {
+				query = api.AgentIDQueryParam + "=" + tc.agentID
+			}
+			if code := doDelete(t, srv, "dev", query).Code; code != http.StatusNoContent {
+				t.Fatalf("delete: expected 204, got %d", code)
+			}
+			if got := cancels > 0; got != tc.wantCancel {
+				t.Errorf("cancelled = %v, want %v", got, tc.wantCancel)
+			}
+		})
+	}
+}
+
+// Item 5 (r1 finding 5): a run-scoped stop also honours agentId: a stop of
+// the right run for an old agent leaves alone the newer agent's launch.
+func TestStopAgent_RunScopedCancelHonoursAgentID(t *testing.T) {
+	for _, tc := range []struct {
+		name, agentID string
+		wantCancel    bool
+	}{
+		{"old agent", "agent-old", false},
+		{"the launch's agent", "agent-new", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mgr, _, _ := newSyncStartTestServer(t)
+			setAgents(mgr, trackedRunEntry("c-a", "run-a"))
+			cancels := 0
+			rec := newLaunchRecord("async-1", "agent-new", "create", "", time.Time{}, func() { cancels++ })
+			rec.RunID = "run-b"
+			srv.launchRegistry.Begin(launchKey{Slug: "same-name"}, rec)
+
+			actionWithRun(srv, "stop", "runId=run-b&"+api.AgentIDQueryParam+"="+tc.agentID, "")
+			if got := cancels > 0; got != tc.wantCancel {
+				t.Errorf("cancelled = %v, want %v", got, tc.wantCancel)
+			}
+			if mgr.StopCalls() != 0 {
+				t.Errorf("stop calls = %d, want 0: run-a's container must not be stopped", mgr.StopCalls())
 			}
 		})
 	}

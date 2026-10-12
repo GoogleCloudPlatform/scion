@@ -69,7 +69,7 @@ func TestLaunchRegistry_BeginReplacesAndCancelsOld(t *testing.T) {
 	}
 }
 
-func TestLaunchRegistry_CancelLocal_WakesTheHeldRecord(t *testing.T) {
+func TestLaunchRegistry_CancelLocalFor_WakesTheHeldRecord(t *testing.T) {
 	r := newLaunchRegistry()
 	key := launchKey{ProjectID: "p1", Slug: "agent-1"}
 
@@ -79,9 +79,9 @@ func TestLaunchRegistry_CancelLocal_WakesTheHeldRecord(t *testing.T) {
 
 	// A key with no held record is a harmless no-op (design: "optimisation
 	// only").
-	r.CancelLocal(launchKey{ProjectID: "p1", Slug: "no-such-agent"})
+	r.CancelLocalFor(launchKey{ProjectID: "p1", Slug: "no-such-agent"}, "", "")
 
-	r.CancelLocal(key)
+	r.CancelLocalFor(key, "", "")
 	select {
 	case <-cancelled:
 	case <-time.After(time.Second):

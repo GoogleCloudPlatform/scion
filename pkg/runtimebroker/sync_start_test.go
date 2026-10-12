@@ -359,7 +359,7 @@ func TestBeginCreateRegistration_RejectsInvalidSlug(t *testing.T) {
 		t.Run(fmt.Sprintf("%q", slug), func(t *testing.T) {
 			srv, _, projectPath, _ := newSyncStartTestServer(t)
 			req := CreateAgentRequest{ID: "agent-id", Slug: slug}
-			_, ss, err := srv.beginCreateRegistration(context.Background(), req)
+			ss, err := srv.beginCreateRegistration(context.Background(), req)
 			if !errors.Is(err, errInvalidLaunchSlug) {
 				t.Fatalf("beginCreateRegistration error = %v, want errInvalidLaunchSlug", err)
 			}
