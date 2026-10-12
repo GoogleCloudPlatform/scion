@@ -4597,6 +4597,8 @@ type AgentMutation struct {
 	previous_run_ids           *[]string
 	appendprevious_run_ids     []string
 	run_id_updated_at          *time.Time
+	ssh_host_key               *string
+	ssh_host_key_run_id        *string
 	launch_state               *string
 	launch_end_reason          *string
 	launch_kind                *string
@@ -7355,6 +7357,104 @@ func (m *AgentMutation) ResetRunIDUpdatedAt() {
 	delete(m.clearedFields, agent.FieldRunIDUpdatedAt)
 }
 
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (m *AgentMutation) SetSSHHostKey(s string) {
+	m.ssh_host_key = &s
+}
+
+// SSHHostKey returns the value of the "ssh_host_key" field in the mutation.
+func (m *AgentMutation) SSHHostKey() (r string, exists bool) {
+	v := m.ssh_host_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSSHHostKey returns the old "ssh_host_key" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldSSHHostKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSSHHostKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSSHHostKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSSHHostKey: %w", err)
+	}
+	return oldValue.SSHHostKey, nil
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (m *AgentMutation) ClearSSHHostKey() {
+	m.ssh_host_key = nil
+	m.clearedFields[agent.FieldSSHHostKey] = struct{}{}
+}
+
+// SSHHostKeyCleared returns if the "ssh_host_key" field was cleared in this mutation.
+func (m *AgentMutation) SSHHostKeyCleared() bool {
+	_, ok := m.clearedFields[agent.FieldSSHHostKey]
+	return ok
+}
+
+// ResetSSHHostKey resets all changes to the "ssh_host_key" field.
+func (m *AgentMutation) ResetSSHHostKey() {
+	m.ssh_host_key = nil
+	delete(m.clearedFields, agent.FieldSSHHostKey)
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (m *AgentMutation) SetSSHHostKeyRunID(s string) {
+	m.ssh_host_key_run_id = &s
+}
+
+// SSHHostKeyRunID returns the value of the "ssh_host_key_run_id" field in the mutation.
+func (m *AgentMutation) SSHHostKeyRunID() (r string, exists bool) {
+	v := m.ssh_host_key_run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSSHHostKeyRunID returns the old "ssh_host_key_run_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldSSHHostKeyRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSSHHostKeyRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSSHHostKeyRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSSHHostKeyRunID: %w", err)
+	}
+	return oldValue.SSHHostKeyRunID, nil
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (m *AgentMutation) ClearSSHHostKeyRunID() {
+	m.ssh_host_key_run_id = nil
+	m.clearedFields[agent.FieldSSHHostKeyRunID] = struct{}{}
+}
+
+// SSHHostKeyRunIDCleared returns if the "ssh_host_key_run_id" field was cleared in this mutation.
+func (m *AgentMutation) SSHHostKeyRunIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldSSHHostKeyRunID]
+	return ok
+}
+
+// ResetSSHHostKeyRunID resets all changes to the "ssh_host_key_run_id" field.
+func (m *AgentMutation) ResetSSHHostKeyRunID() {
+	m.ssh_host_key_run_id = nil
+	delete(m.clearedFields, agent.FieldSSHHostKeyRunID)
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (m *AgentMutation) SetLaunchState(s string) {
 	m.launch_state = &s
@@ -9214,7 +9314,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 86)
+	fields := make([]string, 0, 88)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -9376,6 +9476,12 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.run_id_updated_at != nil {
 		fields = append(fields, agent.FieldRunIDUpdatedAt)
+	}
+	if m.ssh_host_key != nil {
+		fields = append(fields, agent.FieldSSHHostKey)
+	}
+	if m.ssh_host_key_run_id != nil {
+		fields = append(fields, agent.FieldSSHHostKeyRunID)
 	}
 	if m.launch_state != nil {
 		fields = append(fields, agent.FieldLaunchState)
@@ -9589,6 +9695,10 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.PreviousRunIds()
 	case agent.FieldRunIDUpdatedAt:
 		return m.RunIDUpdatedAt()
+	case agent.FieldSSHHostKey:
+		return m.SSHHostKey()
+	case agent.FieldSSHHostKeyRunID:
+		return m.SSHHostKeyRunID()
 	case agent.FieldLaunchState:
 		return m.LaunchState()
 	case agent.FieldLaunchEndReason:
@@ -9770,6 +9880,10 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldPreviousRunIds(ctx)
 	case agent.FieldRunIDUpdatedAt:
 		return m.OldRunIDUpdatedAt(ctx)
+	case agent.FieldSSHHostKey:
+		return m.OldSSHHostKey(ctx)
+	case agent.FieldSSHHostKeyRunID:
+		return m.OldSSHHostKeyRunID(ctx)
 	case agent.FieldLaunchState:
 		return m.OldLaunchState(ctx)
 	case agent.FieldLaunchEndReason:
@@ -10220,6 +10334,20 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetRunIDUpdatedAt(v)
+		return nil
+	case agent.FieldSSHHostKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSSHHostKey(v)
+		return nil
+	case agent.FieldSSHHostKeyRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSSHHostKeyRunID(v)
 		return nil
 	case agent.FieldLaunchState:
 		v, ok := value.(string)
@@ -10679,6 +10807,12 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldRunIDUpdatedAt) {
 		fields = append(fields, agent.FieldRunIDUpdatedAt)
 	}
+	if m.FieldCleared(agent.FieldSSHHostKey) {
+		fields = append(fields, agent.FieldSSHHostKey)
+	}
+	if m.FieldCleared(agent.FieldSSHHostKeyRunID) {
+		fields = append(fields, agent.FieldSSHHostKeyRunID)
+	}
 	if m.FieldCleared(agent.FieldLaunchState) {
 		fields = append(fields, agent.FieldLaunchState)
 	}
@@ -10899,6 +11033,12 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldRunIDUpdatedAt:
 		m.ClearRunIDUpdatedAt()
+		return nil
+	case agent.FieldSSHHostKey:
+		m.ClearSSHHostKey()
+		return nil
+	case agent.FieldSSHHostKeyRunID:
+		m.ClearSSHHostKeyRunID()
 		return nil
 	case agent.FieldLaunchState:
 		m.ClearLaunchState()
@@ -11159,6 +11299,12 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldRunIDUpdatedAt:
 		m.ResetRunIDUpdatedAt()
+		return nil
+	case agent.FieldSSHHostKey:
+		m.ResetSSHHostKey()
+		return nil
+	case agent.FieldSSHHostKeyRunID:
+		m.ResetSSHHostKeyRunID()
 		return nil
 	case agent.FieldLaunchState:
 		m.ResetLaunchState()
@@ -84407,6 +84553,8 @@ type UserMutation struct {
 	expires_at                 *time.Time
 	issued_by                  *string
 	purpose                    *string
+	issuance_id                *string
+	issuer_credential_id       *string
 	clearedFields              map[string]struct{}
 	owned_groups               map[uuid.UUID]struct{}
 	removedowned_groups        map[uuid.UUID]struct{}
@@ -85244,6 +85392,104 @@ func (m *UserMutation) ResetPurpose() {
 	delete(m.clearedFields, user.FieldPurpose)
 }
 
+// SetIssuanceID sets the "issuance_id" field.
+func (m *UserMutation) SetIssuanceID(s string) {
+	m.issuance_id = &s
+}
+
+// IssuanceID returns the value of the "issuance_id" field in the mutation.
+func (m *UserMutation) IssuanceID() (r string, exists bool) {
+	v := m.issuance_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIssuanceID returns the old "issuance_id" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldIssuanceID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuanceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuanceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuanceID: %w", err)
+	}
+	return oldValue.IssuanceID, nil
+}
+
+// ClearIssuanceID clears the value of the "issuance_id" field.
+func (m *UserMutation) ClearIssuanceID() {
+	m.issuance_id = nil
+	m.clearedFields[user.FieldIssuanceID] = struct{}{}
+}
+
+// IssuanceIDCleared returns if the "issuance_id" field was cleared in this mutation.
+func (m *UserMutation) IssuanceIDCleared() bool {
+	_, ok := m.clearedFields[user.FieldIssuanceID]
+	return ok
+}
+
+// ResetIssuanceID resets all changes to the "issuance_id" field.
+func (m *UserMutation) ResetIssuanceID() {
+	m.issuance_id = nil
+	delete(m.clearedFields, user.FieldIssuanceID)
+}
+
+// SetIssuerCredentialID sets the "issuer_credential_id" field.
+func (m *UserMutation) SetIssuerCredentialID(s string) {
+	m.issuer_credential_id = &s
+}
+
+// IssuerCredentialID returns the value of the "issuer_credential_id" field in the mutation.
+func (m *UserMutation) IssuerCredentialID() (r string, exists bool) {
+	v := m.issuer_credential_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIssuerCredentialID returns the old "issuer_credential_id" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldIssuerCredentialID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuerCredentialID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuerCredentialID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuerCredentialID: %w", err)
+	}
+	return oldValue.IssuerCredentialID, nil
+}
+
+// ClearIssuerCredentialID clears the value of the "issuer_credential_id" field.
+func (m *UserMutation) ClearIssuerCredentialID() {
+	m.issuer_credential_id = nil
+	m.clearedFields[user.FieldIssuerCredentialID] = struct{}{}
+}
+
+// IssuerCredentialIDCleared returns if the "issuer_credential_id" field was cleared in this mutation.
+func (m *UserMutation) IssuerCredentialIDCleared() bool {
+	_, ok := m.clearedFields[user.FieldIssuerCredentialID]
+	return ok
+}
+
+// ResetIssuerCredentialID resets all changes to the "issuer_credential_id" field.
+func (m *UserMutation) ResetIssuerCredentialID() {
+	m.issuer_credential_id = nil
+	delete(m.clearedFields, user.FieldIssuerCredentialID)
+}
+
 // AddOwnedGroupIDs adds the "owned_groups" edge to the Group entity by ids.
 func (m *UserMutation) AddOwnedGroupIDs(ids ...uuid.UUID) {
 	if m.owned_groups == nil {
@@ -85533,7 +85779,7 @@ func (m *UserMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserMutation) Fields() []string {
-	fields := make([]string, 0, 16)
+	fields := make([]string, 0, 18)
 	if m.email != nil {
 		fields = append(fields, user.FieldEmail)
 	}
@@ -85582,6 +85828,12 @@ func (m *UserMutation) Fields() []string {
 	if m.purpose != nil {
 		fields = append(fields, user.FieldPurpose)
 	}
+	if m.issuance_id != nil {
+		fields = append(fields, user.FieldIssuanceID)
+	}
+	if m.issuer_credential_id != nil {
+		fields = append(fields, user.FieldIssuerCredentialID)
+	}
 	return fields
 }
 
@@ -85622,6 +85874,10 @@ func (m *UserMutation) Field(name string) (ent.Value, bool) {
 		return m.IssuedBy()
 	case user.FieldPurpose:
 		return m.Purpose()
+	case user.FieldIssuanceID:
+		return m.IssuanceID()
+	case user.FieldIssuerCredentialID:
+		return m.IssuerCredentialID()
 	}
 	return nil, false
 }
@@ -85663,6 +85919,10 @@ func (m *UserMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldIssuedBy(ctx)
 	case user.FieldPurpose:
 		return m.OldPurpose(ctx)
+	case user.FieldIssuanceID:
+		return m.OldIssuanceID(ctx)
+	case user.FieldIssuerCredentialID:
+		return m.OldIssuerCredentialID(ctx)
 	}
 	return nil, fmt.Errorf("unknown User field %s", name)
 }
@@ -85784,6 +86044,20 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetPurpose(v)
 		return nil
+	case user.FieldIssuanceID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIssuanceID(v)
+		return nil
+	case user.FieldIssuerCredentialID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIssuerCredentialID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)
 }
@@ -85856,6 +86130,12 @@ func (m *UserMutation) ClearedFields() []string {
 	if m.FieldCleared(user.FieldPurpose) {
 		fields = append(fields, user.FieldPurpose)
 	}
+	if m.FieldCleared(user.FieldIssuanceID) {
+		fields = append(fields, user.FieldIssuanceID)
+	}
+	if m.FieldCleared(user.FieldIssuerCredentialID) {
+		fields = append(fields, user.FieldIssuerCredentialID)
+	}
 	return fields
 }
 
@@ -85896,6 +86176,12 @@ func (m *UserMutation) ClearField(name string) error {
 		return nil
 	case user.FieldPurpose:
 		m.ClearPurpose()
+		return nil
+	case user.FieldIssuanceID:
+		m.ClearIssuanceID()
+		return nil
+	case user.FieldIssuerCredentialID:
+		m.ClearIssuerCredentialID()
 		return nil
 	}
 	return fmt.Errorf("unknown User nullable field %s", name)
@@ -85952,6 +86238,12 @@ func (m *UserMutation) ResetField(name string) error {
 		return nil
 	case user.FieldPurpose:
 		m.ResetPurpose()
+		return nil
+	case user.FieldIssuanceID:
+		m.ResetIssuanceID()
+		return nil
+	case user.FieldIssuerCredentialID:
+		m.ResetIssuerCredentialID()
 		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)

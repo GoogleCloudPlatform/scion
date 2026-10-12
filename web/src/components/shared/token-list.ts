@@ -486,6 +486,14 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'test_identity:issue_admin',
+    label: 'test_identity:issue_admin',
+    description:
+      'Issue short-lived test identities holding an expiring hub-admin role (only on hubs started with the test admin gate); held only by super-admin',
+    resource: 'test_identity',
+    isAlias: false,
+  },
+  {
     value: 'hub_integrations:read',
     label: 'hub_integrations:read',
     description: 'Read integrations',

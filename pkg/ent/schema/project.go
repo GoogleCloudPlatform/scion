@@ -114,6 +114,6 @@ func (Project) Edges() []ent.Edge {
 // Annotations of the Project.
 func (Project) Annotations() []schema.Annotation {
 	return []schema.Annotation{
-		entsql.Annotation{Table: "projects"},
+		entsql.Annotation{Table: "projects", Checks: fixtureStampCheck("projects")},
 	}
 }

@@ -94,15 +94,31 @@ else
         -d '*.${DOMAIN}' \
         --email ${EMAIL} \
         --non-interactive \
-        --agree-tos \
-        --deploy-hook 'chown root:caddy /etc/letsencrypt/live /etc/letsencrypt/archive && chmod g+x /etc/letsencrypt/live /etc/letsencrypt/archive && chown -R root:caddy /etc/letsencrypt/live/\${RENEWED_DOMAINS%%,*} /etc/letsencrypt/archive/\${RENEWED_DOMAINS%%,*} && chmod -R g+rX /etc/letsencrypt/live/\${RENEWED_DOMAINS%%,*} /etc/letsencrypt/archive/\${RENEWED_DOMAINS%%,*} && (systemctl reload caddy || caddy reload --config /etc/caddy/Caddyfile)'"
+        --agree-tos"
 fi
 
-# 5. Reload Caddy if it's installed to pick up new/renewed certificates
-if gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="command -v caddy" &>/dev/null; then
-    echo "Reloading Caddy on ${INSTANCE_NAME}..."
-    gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo systemctl reload caddy || sudo caddy reload --config /etc/caddy/Caddyfile"
+# 5. Make renewals reach Caddy, for new and existing certificates alike.
+# Caddy serves the files under /etc/letsencrypt/live/ and only re-reads them
+# on reload. fix-tls-rotation.sh installs a certbot deploy hook that reloads
+# Caddy after each successful renewal, enables the renewal timer, and reloads
+# Caddy now if it serves an older certificate than the one on disk. It runs
+# on both paths above: hubs whose certificate already existed never got the
+# hook from the certonly call (ptone/scion#4207).
+echo "Installing certificate rotation (certbot deploy hook, renewal timer) on ${INSTANCE_NAME}..."
+# A private directory (mktemp -d, mode 0700) rather than a fixed /tmp path.
+REMOTE_DIR="$(gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" \
+    --command="mktemp -d /tmp/fix-tls-rotation.XXXXXX" | tr -d '\r' | tail -n 1)"
+if [[ ! "${REMOTE_DIR}" =~ ^/tmp/fix-tls-rotation\.[A-Za-z0-9]+$ ]]; then
+    echo "Error: could not create a temporary directory on ${INSTANCE_NAME} (got '${REMOTE_DIR}')."
+    exit 1
 fi
+if ! gcloud compute scp "${SCRIPT_DIR}/fix-tls-rotation.sh" "${INSTANCE_NAME}:${REMOTE_DIR}/fix-tls-rotation.sh" --zone="${GCE_ZONE}"; then
+    echo "Error: could not copy fix-tls-rotation.sh to ${INSTANCE_NAME}; removing ${REMOTE_DIR}."
+    gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="rm -rf ${REMOTE_DIR}" || true
+    exit 1
+fi
+# A non-zero exit (a PROBLEM in its final check) stops this script here.
+gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo bash ${REMOTE_DIR}/fix-tls-rotation.sh --domain '${DOMAIN}' --host '${HUB_SUBDOMAIN}'; rc=\$?; rm -rf ${REMOTE_DIR}; exit \$rc"
 
 echo ""
 echo "=== Success ==="

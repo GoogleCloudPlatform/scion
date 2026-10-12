@@ -51,6 +51,119 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
 
 COPILOT_CONFIG_FILE = "~/.copilot/config.json"
 
+# What counts as sign-in in copilot's config.json. This is the same rule the
+# host applies before it ships the file into an agent
+# (copilotConfigHoldsSignIn in pkg/harness/host_credentials_content.go), so
+# the host and the container agree about the same file. Keep the two in sync:
+# provision_test.py checks these key sets against the Go source and runs this
+# predicate over the Go test fixtures in
+# pkg/harness/testdata/copilot_config_signin.json.
+#
+# Top-level keys, lowercased, that hold settings or identity but never a
+# credential (copilotSettingsKeys on the host). Includes trustedFolders,
+# which _ensure_settings writes on every provision.
+_COPILOT_SETTINGS_KEYS = frozenset({
+    "banner",
+    "beep",
+    "copilot_integration_id",
+    "copilot_url",
+    "last_logged_in_user",
+    "logged_in_users",
+    "model",
+    "render_markdown",
+    "screen_reader",
+    "theme",
+    "trusted_folders",
+    "trustedfolders",
+})
+
+# Top-level keys, lowercased, where copilot keeps a credential. They count as
+# sign-in only with a non-empty value (see _config_holds_sign_in).
+_COPILOT_TOKENS_KEY = "copilot_tokens"
+_COPILOT_HMAC_KEYS = frozenset({"copilot_hmac_key", "capi_hmac_key"})
+_COPILOT_CREDENTIAL_KEYS = frozenset({_COPILOT_TOKENS_KEY}) | _COPILOT_HMAC_KEYS
+
+# The characters Go's strings.TrimSpace removes (unicode.IsSpace). Python's
+# str.strip() also removes U+001C..U+001F, so it is not used for this check.
+_GO_SPACE = (
+    "\t\n\v\f\r \x85\xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+def _reject_json_constant(name: str) -> Any:
+    # Go's encoding/json rejects NaN and Infinity; Python's json accepts them.
+    raise ValueError(f"invalid JSON constant {name}")
+
+
+def _config_holds_sign_in(raw: bytes) -> bool:
+    """Report whether config.json content may hold sign-in data.
+
+    Mirrors the host's copilotConfigHoldsSignIn. Lines that start with "//"
+    (after leading whitespace) are dropped and the rest is parsed as JSON.
+    Top-level keys are compared lowercased, as copilot lowercases them.
+    One known difference: Python and Go lowercase U+0130 differently, so a
+    key spelled with it is unknown here (fail open, signed in) while the
+    host may read it as a credential key.
+
+      - copilot_tokens holding a string value that is not blank, or a
+        non-empty string in copilot_hmac_key or capi_hmac_key, is sign-in.
+      - Otherwise, a file whose other keys are all known settings keys is not
+        sign-in; empty credential values do not count either. This is the
+        file scion writes, and the file of a user who signs in through the OS
+        keychain.
+      - Any key in neither list counts as possible sign-in (fail open): a
+        future copilot version may keep a credential under a new key.
+      - Content that is not a JSON object (unparseable, an array, null, or
+        empty) is not sign-in: copilot cannot read sign-in from it, and
+        _ensure_settings replaces unparseable JSON.
+
+    Values are only tested for emptiness; they are never logged or returned.
+    """
+    text = raw.decode("utf-8", errors="replace")
+    kept = [ln for ln in text.split("\n") if not ln.lstrip(_GO_SPACE).startswith("//")]
+    try:
+        top = json.loads("\n".join(kept), parse_constant=_reject_json_constant)
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(top, dict):
+        return False
+    unknown = False
+    for key, value in top.items():
+        k = key.lower()
+        if k == _COPILOT_TOKENS_KEY:
+            if isinstance(value, dict) and any(
+                isinstance(v, str) and v.strip(_GO_SPACE) for v in value.values()
+            ):
+                return True
+        elif k in _COPILOT_HMAC_KEYS:
+            if isinstance(value, str) and value:
+                return True
+        elif k not in _COPILOT_SETTINGS_KEYS:
+            unknown = True
+    return unknown
+
+
+def _config_file_may_hold_credential(path: str) -> bool:
+    """Report whether an existing ~/.copilot/config.json may hold sign-in state.
+
+    config.json is both copilot's settings file and its sign-in file, and
+    _ensure_settings writes trustedFolders into it on every provision, so a
+    file holding only settings must not satisfy the auth-file method, or a
+    restart with no credential would look signed in. The content rule is the
+    host's (_config_holds_sign_in). A file that cannot be read counts as
+    possible sign-in (fail open, as before); the host has no such case,
+    because it only applies its rule to content it has already read.
+    """
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return True
+    return _config_holds_sign_in(raw)
+
+
 AUTH = scion_harness.AuthSpec(
     "copilot",
     [
@@ -68,6 +181,7 @@ AUTH = scion_harness.AuthSpec(
             path=COPILOT_CONFIG_FILE,
             hint=f"provide copilot config at {COPILOT_CONFIG_FILE}",
             secret_key="COPILOT_CONFIG",
+            present_check=_config_file_may_hold_credential,
         ),
     ],
     fallback_to_none_on_error=True,

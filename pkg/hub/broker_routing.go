@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -152,6 +153,7 @@ const (
 // write their own record pass nil.
 func dispatchWithBrokerRetry(ctx context.Context, recordLog *slog.Logger, dispatcher AgentDispatcher, agent *store.Agent, msg string, urgent bool, structuredMsg *messages.StructuredMessage) error {
 	logMessageRecord(recordLog, agent, structuredMsg)
+	urgent = effectiveInterrupt(agent, urgent)
 	backoff := brokerRetryInitialBackoff
 	for {
 		err := dispatcher.DispatchAgentMessage(ctx, agent, msg, urgent, structuredMsg)
@@ -171,6 +173,32 @@ func dispatchWithBrokerRetry(ctx context.Context, recordLog *slog.Logger, dispat
 			}
 		}
 	}
+}
+
+// agentStillInitializing reports whether a stored agent is running but its
+// harness has not shown it reads input yet: the one case where
+// state.AgentState.AcceptsInput is false for a running agent that reported
+// an activity. A running agent with no activity at all is treated as before
+// (images and brokers that predate the initializing activity).
+func agentStillInitializing(agent *store.Agent) bool {
+	return agent != nil && state.Phase(agent.Phase) == state.PhaseRunning &&
+		state.Activity(agent.Activity) == state.ActivityInitializing
+}
+
+// effectiveInterrupt returns whether an interrupt/urgent message may be
+// pasted at once. The broker delivers an interrupt immediately, bypassing
+// its message buffer and that buffer's harness-readiness wait. An agent that
+// is still initializing gets an ordinary buffered delivery instead, so the
+// message waits for the harness rather than racing its startup. The message
+// is still delivered; only the interrupt is dropped. Images that predate the
+// initializing activity report working at once and keep their interrupt.
+func effectiveInterrupt(agent *store.Agent, urgent bool) bool {
+	if !urgent || !agentStillInitializing(agent) {
+		return urgent
+	}
+	slog.Info("Delivering interrupt as a buffered message: agent is still initializing",
+		"agent_id", agent.ID, "phase", agent.Phase, "activity", agent.Activity)
+	return false
 }
 
 // StoreAffinityLookup returns an affinity lookup backed by runtime_brokers: the

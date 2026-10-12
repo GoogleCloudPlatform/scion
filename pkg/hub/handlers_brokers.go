@@ -296,10 +296,28 @@ func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
 // hub boundary), its ceiling must contain broker.create, and its user must
 // currently hold broker.create. authorize() writes 401 for no identity and
 // 403 when any of these checks fails.
+//
+// A hub test identity (kind test_fixture, ptone/scion#4240) never creates or
+// re-mints a broker: brokers carry no provenance stamp, so a fixture-made
+// broker could not be purged. The kind is read from the store
+// (lookupUserKind), never from token claims, and a read error refuses.
 func (s *Server) authorizeBrokerCreate(w http.ResponseWriter, r *http.Request) bool {
 	resource := Resource{Type: "broker"}
 	if !s.requireUserCredentialKind(w, r, resource, ActionCreate, true) {
 		return false
+	}
+	if user := GetUserIdentityFromContext(r.Context()); user != nil {
+		isFixture, _, err := lookupUserKind(r.Context(), s.store, user.ID())
+		if err != nil {
+			InternalError(w)
+			return false
+		}
+		if isFixture {
+			logAuthzDenial(r, user, resource, ActionCreate, "test identity cannot create brokers")
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "a test identity cannot create or register brokers",
+				map[string]interface{}{"reason": testIdentityReasonFixtureBroker})
+			return false
+		}
 	}
 	return s.authorize(w, r, resource, ActionCreate)
 }
@@ -605,6 +623,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 
 	// Log successful join
 	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "")
+	s.conduitBrokerCredentialChanged(req.BrokerID)
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -703,6 +722,7 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 			"failed to rotate secret: "+err.Error(), nil)
 		return
 	}
+	s.conduitBrokerCredentialChanged(brokerID)
 
 	// Log audit event
 	actorID := ""

@@ -104,7 +104,7 @@ var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.delete",
 		Domain:      "testidentity",
-		Description: "Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner",
+		Description: "Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}", Method: "DELETE"},
 		},
@@ -116,7 +116,7 @@ var testIdentityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:        GovernanceIssuerCredential,
-			Description: "Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin",
+			Description: "Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin (with ?purge=true: the same 200 empty report for any ID the caller may not purge)",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
@@ -131,5 +131,69 @@ var testIdentityOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestTestIdentity_Delete"},
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
+	},
+	{
+		ID:          "testidentity.admin.create",
+		Domain:      "testidentity",
+		Description: "Issue a short-lived test identity holding an expiring hub-admin role and one access token for it (no refresh token, no cookie), on a hub started with the test admin gate",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/admin", Method: "POST"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver:      "hub-scoped",
+		BasePermission:        "test_identity.issue_admin",
+		Effects:               []SecurityEffect{EffectCreateResource, EffectGrantAuthority, EffectMintCredential},
+		DelegationKind:        DelegationNonAmplification,
+		DelegationDescription: "The issued hub-admin authority never exceeds the issuer's: the issuer must be a live super-admin through its own current bindings (canIssueTestAdmin), and an access token issuer's frozen ceiling must carry the capability. The binding expires with the identity",
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the test_identity:issue_admin scope, at most 8 h old, loaded and checked on every issuance. One live admin-kind identity per issuer, two per hub; issuance is rate limited per issuer",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "test_admin_issue",
+			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
+			AfterFields:   []string{"user_id", "kind", "role", "issued_by", "issuer_credential_id", "issuance_id", "purpose", "expires_at", "token_ttl_seconds"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestTestAdmin_IssuanceMatrix"},
+		},
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
+	},
+	{
+		ID:          "testidentity.admin.revokeall",
+		Domain:      "testidentity",
+		Description: "Revoke every admin-kind test identity: delete each (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/admin/revoke-all", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "test_identity.issue_admin",
+		Effects:          []SecurityEffect{EffectDeleteResource, EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "Only a human caller holding an active super-admin binding, on an interactive session; only admin-kind rows are touched",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "test_admin_revoke",
+			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
+			BeforeFields:  []string{"user_id", "role", "issued_by", "purpose", "expires_at"},
+			AfterFields:   []string{"outcome"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestTestAdmin_RevokeAll"},
+		},
+		Bearer: SessionOnly(ReasonCredentialManagement),
 	},
 }
