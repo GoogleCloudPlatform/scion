@@ -107,7 +107,7 @@ export interface Hub {
   otherWalks(): number;
   /** Every agent-list request: walks, their later pages, and probes. */
   total(): number;
-  /** `GET /api/v1/users` requests (the chat sidebar's users walk). */
+  /** `GET /api/v1/users` requests (the chat sidebar's bounded recent-users page). */
   usersRequests(): number;
   /** The `cursor` of every store page request after a walk's first, in order. */
   storeCursors(): string[];

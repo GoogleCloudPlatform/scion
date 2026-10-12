@@ -41,6 +41,13 @@ import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { isValidTimeZone } from '../../utils/time.js';
 import { normalizeGcpModeForTarget, type GcpModeFields } from '../../shared/gcp-identity-state.js';
+import { assignStatusTarget, orderByAssignStatus } from '../../shared/gcp-sa-assign-status.js';
+import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
+import {
+  assignStatusStyles,
+  renderAssignStatusHelp,
+  renderServiceAccountOption,
+} from '../shared/gcp-sa-picker-options.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import '../shared/env-editor.js';
@@ -348,6 +355,32 @@ export class ScionPageAgentConfigure extends LitElement {
     return this.gcpServiceAccounts.filter((sa) => sa.verified);
   }
 
+  /** The selected account's mapping state on this agent's profile, when the hub reported one. */
+  private get selectedAssignStatus(): GCPServiceAccount['assignStatus'] {
+    if (!this.gcpServiceAccountId) return undefined;
+    return this.gcpServiceAccounts.find((sa) => sa.id === this.gcpServiceAccountId)?.assignStatus;
+  }
+
+  /**
+   * Loads the project's accounts with their mapping state on this agent's
+   * Kubernetes target (its runtime broker and profile, ptone/scion#4391),
+   * with the same guard and fallback as the Create Agent picker. The target
+   * is known only once the broker has loaded, so the state is asked for then.
+   */
+  private readonly gcpAccounts = new GCPServiceAccountsLoader({
+    projectId: () => this.agent?.projectId ?? '',
+    target: () =>
+      assignStatusTarget(
+        this.targetRuntimeIsKubernetesOnly,
+        this.agent?.runtimeBrokerId ?? '',
+        this.agent?.appliedConfig?.profile ?? ''
+      ),
+    accounts: () => this.gcpServiceAccounts,
+    setAccounts: (accounts) => {
+      this.gcpServiceAccounts = accounts;
+    },
+  });
+
   /**
    * Whether this agent's runtime broker/profile is reliably known to be
    * Kubernetes. A NEW selection of Block is disabled in that case
@@ -402,19 +435,10 @@ export class ScionPageAgentConfigure extends LitElement {
     </div>`;
   }
 
-  private async loadGCPServiceAccounts(projectId: string): Promise<void> {
+  private async loadGCPServiceAccounts(): Promise<void> {
+    // Non-critical: a failed fetch just won't show the assign option.
     this.gcpServiceAccounts = [];
-    try {
-      const res = await apiFetch(
-        `/api/v1/projects/${projectId}/gcp-service-accounts?includeHubScoped=true`
-      );
-      if (res.ok) {
-        const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
-        this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
-      }
-    } catch {
-      // Non-critical — just won't show assign option
-    }
+    await this.gcpAccounts.load();
   }
 
   /** Loads this agent's own runtime broker, to classify its runtime kind for the GCP Identity picker. */
@@ -466,6 +490,7 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   static override styles = css`
+    ${assignStatusStyles}
     :host {
       display: block;
     }
@@ -741,6 +766,11 @@ export class ScionPageAgentConfigure extends LitElement {
     if (changedProperties.has('targetBroker') || changedProperties.has('gcpMetadataMode')) {
       this.normalizeGcpModeForTarget();
     }
+    // The accounts' mapping state is for this agent's broker and profile:
+    // ask for it once they are known (ptone/scion#4391).
+    if (changedProperties.has('targetBroker') || changedProperties.has('agent')) {
+      void this.gcpAccounts.targetChanged();
+    }
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -834,7 +864,7 @@ export class ScionPageAgentConfigure extends LitElement {
         return;
       }
 
-      void this.loadGCPServiceAccounts(this.agent.projectId);
+      void this.loadGCPServiceAccounts();
       if (this.agent.runtimeBrokerId) {
         void this.loadTargetBroker(this.agent.runtimeBrokerId);
       }
@@ -1778,15 +1808,10 @@ export class ScionPageAgentConfigure extends LitElement {
                         this.gcpUserBlockSuspended = false;
                       }}
                     >
-                      ${this.verifiedGCPServiceAccounts.map(
-                        (sa) =>
-                          html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
-                            'hub'
-                              ? ' (Hub)'
-                              : ''}
-                          </sl-option>`
+                      ${orderByAssignStatus(this.verifiedGCPServiceAccounts).map((sa) =>
+                        renderServiceAccountOption(sa)
                       )}
+                      ${renderAssignStatusHelp(this.selectedAssignStatus)}
                     </sl-select>
                   `
                 : html`
