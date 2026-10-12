@@ -189,9 +189,19 @@ func resolveHubNickname(c *config.CLIContext) error {
 	if h == nil {
 		return unknownHubError(hubEndpoint, c)
 	}
+	if h.Endpoint == "" {
+		return hubWithoutEndpointError(hubEndpoint)
+	}
 	hubFlagName = hubEndpoint
 	hubEndpoint = h.Endpoint
 	return nil
+}
+
+// hubWithoutEndpointError is the error for a nickname whose hub entry has
+// no endpoint (a hand-edited context.yaml). Using it would silently drop
+// the --hub choice.
+func hubWithoutEndpointError(name string) error {
+	return fmt.Errorf("hub '%s' has no endpoint; remove it with 'scion hub remove %s' and add it again with 'scion hub add %s <url>'", name, name, name)
 }
 
 // resolveInvocationTarget fills the hub endpoint and the project of this
