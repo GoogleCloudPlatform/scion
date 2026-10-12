@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -423,4 +424,132 @@ func TestNotificationOrphanGCHandler(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = s.GetNotification(ctx, unacked)
 	assert.NoError(t, err)
+}
+
+// notificationDispatched returns the dispatched flag of the notification
+// with the given ID, failing the test if it does not exist.
+func notificationDispatched(t *testing.T, env *notificationTestEnv, id string) bool {
+	t.Helper()
+	allNotifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
+	require.NoError(t, err)
+	for _, n := range allNotifs {
+		if n.ID == id {
+			return n.Dispatched
+		}
+	}
+	require.FailNow(t, "notification not found", "id %s", id)
+	return false
+}
+
+// A failed retry delivery releases its claim so the next sweep retries it
+// (ptone/scion#2743).
+func TestRetryDispatch_DeliveryFailure_RevertsClaim(t *testing.T) {
+	env := setupRetryTest(t)
+	env.dispatcher.returnErr = errors.New("broker refused")
+	ctx := context.Background()
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	env.nd.RetryDispatch(ctx, &notifs[0])
+
+	require.Len(t, env.dispatcher.getCalls(), 1)
+	assert.False(t, notificationDispatched(t, env, notifs[0].ID),
+		"a failed retry delivery must release its claim")
+
+	again, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, again, 1, "the next sweep must see the notification again")
+	assert.Equal(t, notifs[0].ID, again[0].ID)
+}
+
+// A notification older than notificationRetryMaxAge whose delivery fails
+// stays claimed, so retries are bounded.
+func TestRetryDispatch_DeliveryFailure_PastMaxAge_StaysClaimed(t *testing.T) {
+	env := setupNotificationTest(t)
+	env.dispatcher.returnErr = errors.New("broker refused")
+	ctx := context.Background()
+
+	notif := &store.Notification{
+		ID:             api.NewUUID(),
+		SubscriptionID: env.sub.ID,
+		AgentID:        env.watched.ID,
+		ProjectID:      env.project.ID,
+		SubscriberType: store.SubscriberTypeAgent,
+		SubscriberID:   env.subscriber.Slug,
+		Status:         "COMPLETED",
+		Message:        "watched-agent has reached a state of COMPLETED",
+		CreatedAt:      time.Now().Add(-notificationRetryMaxAge - time.Hour),
+	}
+	require.NoError(t, env.store.CreateNotification(ctx, notif))
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	env.nd.RetryDispatch(ctx, &notifs[0])
+
+	require.Len(t, env.dispatcher.getCalls(), 1)
+	assert.True(t, notificationDispatched(t, env, notif.ID),
+		"a failed delivery past the max retry age must stay claimed")
+}
+
+// A delivery that keeps deferring (broker not reachable) is cut off by the
+// per-attempt timeout instead of using the caller's whole budget, and its
+// claim is released.
+func TestRetryDispatch_DeferredDelivery_AttemptTimeoutRevertsClaim(t *testing.T) {
+	orig := retryDispatchAttemptTimeout
+	retryDispatchAttemptTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { retryDispatchAttemptTimeout = orig })
+
+	env := setupRetryTest(t)
+	env.dispatcher.returnErr = ErrMessageDeferred
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	start := time.Now()
+	env.nd.RetryDispatch(ctx, &notifs[0])
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, 2*time.Second,
+		"the attempt must stop at retryDispatchAttemptTimeout, not the caller's deadline")
+	require.NotEmpty(t, env.dispatcher.getCalls())
+	assert.False(t, notificationDispatched(t, env, notifs[0].ID),
+		"a timed-out retry delivery must release its claim")
+}
+
+// End to end through the sweep handler: a sweep whose delivery fails leaves
+// the notification undispatched, and the next sweep delivers it.
+func TestSweepHandler_FailedDeliveryRetriedNextSweep(t *testing.T) {
+	env := setupRetryTest(t)
+	env.dispatcher.returnErr = errors.New("broker refused")
+	ctx := context.Background()
+
+	srv := &Server{
+		store:                  env.store,
+		agentLifecycleLog:      slog.Default(),
+		notificationDispatcher: env.nd,
+	}
+	handler := srv.notificationDispatchSweepHandler()
+
+	handler(ctx)
+	require.Len(t, env.dispatcher.getCalls(), 1)
+	pending, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "a failed delivery must stay undispatched")
+
+	env.dispatcher.mu.Lock()
+	env.dispatcher.returnErr = nil
+	env.dispatcher.mu.Unlock()
+
+	handler(ctx)
+	require.Len(t, env.dispatcher.getCalls(), 2)
+	pending, err = env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	assert.Empty(t, pending, "the next sweep must deliver it")
 }

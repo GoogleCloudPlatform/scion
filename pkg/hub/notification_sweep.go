@@ -28,7 +28,8 @@ import (
 // undispatched agent notifications and re-attempts delivery. Registered as a
 // RecurringSingleton guarded by LockNotificationDispatchSweep. This is the
 // backstop for notifications that could not be dispatched because the
-// subscriber agent had no RuntimeBrokerID or no dispatcher was available.
+// subscriber agent had no RuntimeBrokerID, no dispatcher was available, or the
+// delivery attempt failed.
 func (s *Server) notificationDispatchSweepHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -119,6 +120,18 @@ func (s *Server) drainUndispatchedNotifications(ctx context.Context, brokerID st
 	}
 }
 
+// retryDispatchAttemptTimeout caps one RetryDispatch delivery attempt. It is
+// a variable so tests can shorten it.
+var retryDispatchAttemptTimeout = 10 * time.Second
+
+// notificationRetryMaxAge is how old a notification may be and still have a
+// failed delivery reverted for another retry. Past it, RetryDispatch gives up
+// and leaves the notification claimed. There is no per-notification attempt
+// counter: the 5-minute sweep cadence is the backoff, so this bounds a
+// notification to about notificationRetryMaxAge / 5m sweep attempts, plus one
+// per broker-connect drain.
+const notificationRetryMaxAge = 24 * time.Hour
+
 // RetryDispatch re-attempts delivery of an existing undispatched notification.
 // It is the shared code path for both the periodic sweep backstop and the
 // broker-connect fast-path hook.
@@ -127,7 +140,9 @@ func (s *Server) drainUndispatchedNotifications(ctx context.Context, brokerID st
 // is called before delivery to prevent double-dispatch when the sweep and hook
 // race on the same notification. If the claim fails (another caller already
 // claimed it), this is a no-op. If delivery cannot proceed (no dispatcher, no
-// broker), the claim is reverted so a future sweep can retry.
+// broker) or the delivery attempt fails, the claim is reverted so a future
+// sweep can retry; a failed delivery older than notificationRetryMaxAge stays
+// claimed instead.
 func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *store.Notification) {
 	// 1. Claim: atomically mark dispatched (CAS: WHERE dispatched = false).
 	claimed, err := nd.store.ClaimNotificationForDispatch(ctx, notif.ID)
@@ -251,13 +266,24 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 	structuredMsg.RecipientID = subscriber.ID
 	structuredMsg.Status = notif.Status
 
-	// Use the caller's context directly — the sweep/drain handler already
-	// sets a 30s timeout, and dispatchWithBrokerRetry respects ctx.Done().
-	if err := dispatchWithBrokerRetry(ctx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
-		nd.log.Error("retry: delivery failed, leaving claimed",
+	// Cap this attempt so one unreachable broker (dispatchWithBrokerRetry
+	// keeps retrying ErrMessageDeferred until ctx ends) cannot use up the
+	// whole sweep/drain budget shared by the rest of the batch.
+	attemptCtx, cancel := context.WithTimeout(ctx, retryDispatchAttemptTimeout)
+	defer cancel()
+	if err := dispatchWithBrokerRetry(attemptCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
+		if !notif.CreatedAt.IsZero() && time.Since(notif.CreatedAt) > notificationRetryMaxAge {
+			// Give up: leave claimed so the sweep stops retrying it.
+			nd.log.Error("retry: delivery failed past max retry age, giving up",
+				"notificationID", notif.ID, "subscriberID", sub.SubscriberID,
+				"createdAt", notif.CreatedAt, "error", err)
+			return
+		}
+		nd.log.Warn("retry: delivery failed, reverting claim",
 			"notificationID", notif.ID, "subscriberID", sub.SubscriberID, "error", err)
-		// Leave claimed (dispatched=true). The delivery attempt was made; the
-		// current contract is best-effort (same as the primary dispatch path).
+		if err2 := nd.store.UnmarkNotificationDispatched(ctx, notif.ID); err2 != nil {
+			nd.log.Error("retry: failed to revert claim", "notificationID", notif.ID, "error", err2)
+		}
 	} else {
 		nd.log.Info("retry: notification delivered",
 			"notificationID", notif.ID, "subscriberID", sub.SubscriberID,

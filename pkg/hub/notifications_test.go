@@ -205,11 +205,15 @@ func TestNotificationDispatcher_DispatchFailure(t *testing.T) {
 		return len(env.dispatcher.getCalls()) == 1
 	}, 2*time.Second, 50*time.Millisecond)
 
-	// Even on dispatch failure, notification is stored and marked dispatched (best-effort)
+	// A failed delivery stores the notification but does NOT mark it
+	// dispatched, so the dispatch sweep retries it (ptone/scion#2743).
+	// The dispatch call is recorded before dispatchToAgent finishes, so give
+	// it time to complete before reading the final state.
+	time.Sleep(200 * time.Millisecond)
 	notifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
 	require.NoError(t, err)
-	assert.Len(t, notifs, 1)
-	assert.True(t, notifs[0].Dispatched)
+	require.Len(t, notifs, 1)
+	assert.False(t, notifs[0].Dispatched, "a failed delivery must not be marked dispatched")
 }
 
 func TestNotificationDispatcher_UserSubscriber(t *testing.T) {
