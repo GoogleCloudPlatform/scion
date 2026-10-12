@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -435,4 +436,71 @@ func TestWhoamiNonAgent(t *testing.T) {
 	// Should attempt system whoami — may succeed or fail depending on the environment,
 	// but should not return agent identity.
 	_ = err
+}
+
+// fakeAgentJWT returns an unsigned token whose payload is claims; whoami
+// only decodes it.
+func fakeAgentJWT(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	payload, err := json.Marshal(claims)
+	require.NoError(t, err)
+	return "eyJhbGciOiJIUzI1NiJ9." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
+// withWhoamiToken overrides the token whoami reads for the test.
+func withWhoamiToken(t *testing.T, token string) {
+	t.Helper()
+	orig := whoamiToken
+	whoamiToken = func() string { return token }
+	t.Cleanup(func() { whoamiToken = orig })
+}
+
+// TestWhoamiFullListsTokenScopes: --full lists the scopes of the agent's
+// own token, in JSON and in text, even when the hub is unreachable, so an
+// agent can check whether it holds the artifact scopes (ptone/scion#4569).
+// Without --full the JSON carries no scopes.
+func TestWhoamiFullListsTokenScopes(t *testing.T) {
+	t.Setenv("SCION_AGENT_SLUG", "scoped-agent")
+	t.Setenv("SCION_AGENT_NAME", "Scoped Agent")
+	t.Setenv("SCION_AGENT_ID", "agent-scoped-id")
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	withWhoamiToken(t, fakeAgentJWT(t, map[string]any{
+		"sub":    "agent-scoped-id",
+		"scopes": []string{"project:read", "project:artifact:read"},
+	}))
+	origFactory := newHubClient
+	newHubClient = func() *sciontoolhub.Client { return nil }
+	t.Cleanup(func() { newHubClient = origFactory })
+	oldFull := whoamiFull
+	t.Cleanup(func() { whoamiFull = oldFull })
+
+	run := func(opts cliutil.RootOptions) string {
+		withRootOptions(t, whoamiCmd, opts)
+		return captureStdout(t, func() {
+			_ = captureStderr(t, func() {
+				require.NoError(t, whoamiCmd.RunE(whoamiCmd, nil))
+			})
+		})
+	}
+
+	whoamiFull = true
+	var result WhoamiResult
+	require.NoError(t, json.Unmarshal([]byte(run(cliutil.RootOptions{OutputFormat: "json"})), &result))
+	assert.Equal(t, []string{"project:read", "project:artifact:read"}, result.Scopes)
+	assert.Contains(t, run(cliutil.RootOptions{}), "Scopes:   project:read, project:artifact:read")
+
+	whoamiFull = false
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal([]byte(run(cliutil.RootOptions{OutputFormat: "json"})), &raw))
+	assert.NotContains(t, raw, "scopes")
+}
+
+// TestTokenScopes: only the scopes claim of a well-formed JWT is read.
+func TestTokenScopes(t *testing.T) {
+	assert.Equal(t, []string{"a", "b"}, tokenScopes(fakeAgentJWT(t, map[string]any{"scopes": []string{"a", "b"}})))
+	assert.Nil(t, tokenScopes(fakeAgentJWT(t, map[string]any{"sub": "x"})))
+	assert.Nil(t, tokenScopes(""))
+	assert.Nil(t, tokenScopes("dev-token-without-dots"))
+	assert.Nil(t, tokenScopes("a.!!!.c"))
+	assert.Nil(t, tokenScopes("a."+base64.RawURLEncoding.EncodeToString([]byte("not json"))+".c"))
 }

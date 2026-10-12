@@ -18,8 +18,12 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -216,14 +220,20 @@ func TestPreArtifactAgentParentChildHasNoArtifactAccess(t *testing.T) {
 	uat := NewScopedUserIdentityWithCeiling(authUser(f.creator), f.proj.ID, sortedUniqueIDs(selectors), "uat-artifact-parent",
 		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: ceilingIDs})
 
-	parent, parentEdge := f.createdAgent(t, f.create(t, uat, CreateAgentRequest{Name: "artifact-parent", AgentRole: string(AgentRoleFull)}), "artifact-parent")
+	parentRec := f.create(t, uat, CreateAgentRequest{Name: "artifact-parent", AgentRole: string(AgentRoleFull)})
+	parent, parentEdge := f.createdAgent(t, parentRec, "artifact-parent")
 	require.Equal(t, store.EffectCeilingBounded, parentEdge.Kind)
 	parentScopes, err := f.srv.authzService.ceilingFilteredAgentScopes(context.Background(), parent, f.srv.authzService.mintCandidateScopes(parent))
 	require.NoError(t, err)
 	require.Contains(t, parentScopes, ScopeAgentCreate)
 	require.NotContains(t, parentScopes, ScopeProjectArtifactRead, "the parent's own token lacks the read scope")
 
-	child, childEdge := f.childOf(t, parent, "artifact-child")
+	// Both create responses warn that the artifact scopes were left out
+	// (ptone/scion#4569).
+	assertDroppedScopesWarning(t, parentRec, "artifact-parent", ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
+	childRec := f.createAsParent(t, f.agentToken(t, parent.ID), CreateAgentRequest{Name: "artifact-child"})
+	child, childEdge := f.createdAgent(t, childRec, "artifact-child")
+	assertDroppedScopesWarning(t, childRec, "artifact-child", ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.read")
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.create")
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.update")
@@ -232,4 +242,97 @@ func TestPreArtifactAgentParentChildHasNoArtifactAccess(t *testing.T) {
 	issued, err := authz.ceilingFilteredAgentScopes(context.Background(), child, append(authz.mintCandidateScopes(child), ScopeProjectArtifactWrite))
 	require.NoError(t, err)
 	assertNoArtifactAccess(t, newArtifactHost(f.srv), child.ID, child.ProjectID, issued)
+}
+
+// createResponseWarnings decodes the warnings of a create or lifecycle
+// response.
+func createResponseWarnings(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var body struct {
+		Warnings []string `json:"warnings"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	return body.Warnings
+}
+
+// assertDroppedScopesWarning asserts that rec carries exactly the
+// dropped-scope warning for slug naming scopes.
+func assertDroppedScopesWarning(t *testing.T, rec *httptest.ResponseRecorder, slug string, scopes ...AgentTokenScope) {
+	t.Helper()
+	want := droppedScopesWarning(&store.Agent{Slug: slug}, &AgentTokenGrant{DroppedScopes: scopes})
+	require.NotEmpty(t, want)
+	assert.Contains(t, createResponseWarnings(t, rec), want, rec.Body.String())
+}
+
+// TestDroppedScopesWarningText: the warning names every dropped scope, the
+// creator's scope ceiling as the reason, and the re-issue path; there is
+// none without a dropped scope.
+func TestDroppedScopesWarningText(t *testing.T) {
+	both := droppedScopesWarning(&store.Agent{Slug: "worker-1", Name: "Worker 1"},
+		&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
+	assert.Contains(t, both, "without the project:artifact:read, project:artifact:write scopes")
+	assert.Contains(t, both, "scope ceiling of the agent's creator does not allow them")
+	assert.Contains(t, both, "missing_scope")
+	assert.Contains(t, both, "same parent gives it the same scopes")
+	assert.Contains(t, both, "hub super-admin can run 'scion reset-auth worker-1 --reissue-scopes'")
+
+	one := droppedScopesWarning(&store.Agent{Name: "Worker 2"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead}})
+	assert.Contains(t, one, "without the project:artifact:read scope:")
+	assert.Contains(t, one, "does not allow it,")
+	assert.Contains(t, one, "'scion reset-auth Worker 2 --reissue-scopes'")
+
+	assert.Empty(t, droppedScopesWarning(&store.Agent{Slug: "w"}, &AgentTokenGrant{}))
+	assert.Empty(t, droppedScopesWarning(&store.Agent{Slug: "w"}, nil))
+}
+
+// TestDroppedCeilingOptionalScopes: only ceiling-optional role scopes the
+// issued set lacks are reported, once each and in candidate order; a
+// required scope the ceiling dropped is not (that denies the role instead).
+func TestDroppedCeilingOptionalScopes(t *testing.T) {
+	candidates := []AgentTokenScope{ScopeProjectRead, ScopeProjectArtifactWrite, ScopeAgentCreate, ScopeProjectArtifactRead, ScopeProjectArtifactWrite}
+	assert.Equal(t, []AgentTokenScope{ScopeProjectArtifactWrite, ScopeProjectArtifactRead},
+		droppedCeilingOptionalScopes(candidates, []AgentTokenScope{ScopeProjectRead}))
+	assert.Equal(t, []AgentTokenScope{ScopeProjectArtifactWrite},
+		droppedCeilingOptionalScopes(candidates, []AgentTokenScope{ScopeProjectArtifactRead}))
+	assert.Empty(t, droppedCeilingOptionalScopes(candidates, candidates))
+	assert.Empty(t, droppedCeilingOptionalScopes(ScopesForRole(AgentRoleNone), nil))
+}
+
+// TestMintWarnsWhenCeilingDropsArtifactScopes: create, start and restart of
+// an agent whose chain ceiling does not allow the artifact scopes each
+// raise the dropped-scope warning, and the start response carries it; an
+// agent whose ceiling allows them gets no such warning (ptone/scion#4569).
+func TestMintWarnsWhenCeilingDropsArtifactScopes(t *testing.T) {
+	f := newMintFixture(t, "drop-warn")
+	capped := f.agent(t, "drop-warn-capped", AgentRoleBaseline, state.PhaseStopped)
+	f.edge(t, store.DelegationPrincipalUser, f.userID, capped.ID, preArtifactReadCeiling(), provSession)
+	want := droppedScopesWarning(capped, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
+
+	for name, dispatch := range map[string]func(context.Context) error{
+		"create": func(ctx context.Context) error {
+			_, err := f.disp.DispatchAgentCreate(ctx, capped)
+			return err
+		},
+		"start":   func(ctx context.Context) error { return f.disp.DispatchAgentStart(ctx, capped, "", false) },
+		"restart": func(ctx context.Context) error { return f.disp.DispatchAgentRestart(ctx, capped) },
+	} {
+		ctx, warns := withDispatchWarnings(context.Background())
+		require.NoError(t, dispatch(ctx), name)
+		assert.Contains(t, warns.Warnings(), want, name)
+	}
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+capped.ID+"/start", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, createResponseWarnings(t, rec), want, "the start response carries the warning")
+
+	open := f.agent(t, "drop-warn-open", AgentRoleBaseline, state.PhaseStopped)
+	f.edge(t, store.DelegationPrincipalUser, f.userID, open.ID, ceilPrincip, provSession)
+	ctx, warns := withDispatchWarnings(context.Background())
+	_, err := f.disp.DispatchAgentCreate(ctx, open)
+	require.NoError(t, err)
+	require.NoError(t, f.disp.DispatchAgentStart(ctx, open, "", false))
+	for _, w := range warns.Warnings() {
+		assert.NotContains(t, w, "issued without the", "no warning when the ceiling allows the artifact scopes")
+	}
+	assert.Contains(t, f.tokenClaims(t, f.client.lastResolvedEnv["SCION_AUTH_TOKEN"]).Scopes, ScopeProjectArtifactWrite)
 }

@@ -1327,6 +1327,9 @@ The command populates a structured JSON schema divided into two latency tiers:
 - `ancestry`: A lineage array representing the agent's parent/child spawn relationships.
 - `taskSummary`: A brief summary of active task execution.
 
+##### Token scopes (requires `--full`; read locally, no Hub connectivity needed)
+- `scopes`: The scopes of the agent's current Hub token, decoded from the token itself (shown as `Scopes:` in plain text). For example, an agent without `project:artifact:write` cannot publish artifacts; see [Artifacts](/scion/reference/artifacts/).
+
 ### `scion version`
 
 Prints the Scion version information and optionally checks for available updates.
