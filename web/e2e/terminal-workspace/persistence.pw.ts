@@ -246,6 +246,53 @@ async function clickRailEntry(page: Page, name: string): Promise<void> {
   await page.locator(`[aria-label^="Show terminal for ${name} "]`).click();
 }
 
+/** This file's fixture names for agent IDs, for failure messages. */
+function agentNames(ids: readonly string[]): string {
+  return `[${ids.map((id) => ALL_AGENTS[id]?.name ?? id).join(', ')}]`;
+}
+
+/** The PUT bodies, with fixture names, for failure messages. */
+function describePuts(puts: readonly WorkspacePut[]): string {
+  if (puts.length === 0) return 'none';
+  return puts
+    .map(
+      (put) =>
+        `${agentNames(put.agentIds)} frontmost ${put.frontmostAgentId ? agentNames([put.frontmostAgentId]) : 'none'}`
+    )
+    .join('; ');
+}
+
+/** How long one bounded wait in a test body may take before it fails with
+ *  its own message. Well inside the file's 90s test timeout, so a missing
+ *  attach or PUT fails the test naming what is missing, instead of letting
+ *  the test time out with no message. */
+const EVENT_WAIT_TIMEOUT = 20_000;
+
+/**
+ * Resolves with `promise`, or fails with `message()` if it has not resolved
+ * within `timeoutMs`. A deadline on an event wait (waitForAttach,
+ * waitForState), not a fixed sleep: it resolves the instant the event does.
+ * The message is built at the deadline, so it reports the state then.
+ */
+async function within<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: () => string
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${message()} (after ${timeoutMs}ms)`)),
+      timeoutMs
+    );
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ===========================================================================
 // Case 1: round trip across two browser contexts
 // ===========================================================================
@@ -419,7 +466,11 @@ test('owner only: PUTs come only from the owning page, never the non-owner', asy
   });
 
   await owner.goto(`/terminals/${agentA}`);
-  await ownerSocket.waitForAttach(1);
+  await within(
+    ownerSocket.waitForAttach(1),
+    FIRST_RENDER_TIMEOUT,
+    () => `owner page did not attach alpha; owner attached ${agentNames(ownerSocket.attachedAgentIds)}`
+  );
 
   // The non-owner tab loads an agent path, so the owner selects that agent
   // and the non-owner shows "Terminals open in another window": it cannot
@@ -435,7 +486,25 @@ test('owner only: PUTs come only from the owning page, never the non-owner', asy
       timeout: FIRST_RENDER_TIMEOUT,
     }
   );
-  expect(otherSocket.attaches).toBe(0);
+  expect(otherSocket.attaches, 'non-owner page attached a terminal').toBe(0);
+
+  // Wait for the owner to attach the forwarded beta before it opens gamma.
+  // The non-owner's message above appears once the owner has selected beta,
+  // which can be before beta's pane has been shown and measured; a pane
+  // attaches only then (terminal-pane initTerminal waits for a measurable
+  // pane). Opening gamma replaces beta in the single pane, so a beta that
+  // has not attached by then stays pending, hidden, and never attaches
+  // (ptone/scion#4638).
+  await within(
+    ownerSocket.waitForAttach(2),
+    EVENT_WAIT_TIMEOUT,
+    () =>
+      `owner page did not attach the forwarded beta; owner attached ${agentNames(ownerSocket.attachedAgentIds)}`
+  );
+  expect(ownerSocket.attachedAgentIds, 'owner page attaches before its own change').toEqual([
+    agentA,
+    agentB,
+  ]);
 
   // A change made directly in the owner tab (agentC, not yet open, so this
   // is not satisfied by anything above) produces its own PUT: wait for a
@@ -445,13 +514,25 @@ test('owner only: PUTs come only from the owning page, never the non-owner', asy
   await navigateToTerminal(owner, agentC);
   // Owner attaches: A (direct open), B (forwarded from the non-owner's
   // visit, above), then C (this change).
-  await ownerSocket.waitForAttach(3);
-  await state.waitForState(
-    () => state.puts.length > putsBeforeChange && state.puts.at(-1)?.frontmostAgentId === agentC
+  await within(
+    ownerSocket.waitForAttach(3),
+    EVENT_WAIT_TIMEOUT,
+    () =>
+      `owner page did not attach gamma after opening it; owner attached ${agentNames(ownerSocket.attachedAgentIds)}`
+  );
+  await within(
+    state.waitForState(
+      () => state.puts.length > putsBeforeChange && state.puts.at(-1)?.frontmostAgentId === agentC
+    ),
+    EVENT_WAIT_TIMEOUT,
+    () =>
+      `no PUT with frontmost gamma after the owner opened gamma; PUTs since then: ${describePuts(state.puts.slice(putsBeforeChange))}; all PUTs: ${describePuts(state.puts)}`
   );
 
-  expect(otherPuts.length).toBe(0);
-  expect(ownerPuts.length).toBeGreaterThan(0);
+  expect(otherPuts, `non-owner page sent PUTs; stored PUTs: ${describePuts(state.puts)}`).toEqual(
+    []
+  );
+  expect(ownerPuts.length, 'owner page sent no PUT').toBeGreaterThan(0);
 
   await context.close();
 });
