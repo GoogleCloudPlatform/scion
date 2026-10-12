@@ -585,7 +585,7 @@ func (s *OwnershipStore) ReleaseSlug(projectID, agentID string) error {
 	if err := os.Remove(sp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	syncDir(filepath.Dir(sp))
+	syncDirBestEffort(filepath.Dir(sp))
 	return nil
 }
 
@@ -681,7 +681,7 @@ func (s *OwnershipStore) RepairSlugIndex() ([]string, error) {
 				if err := os.Remove(sp); err != nil && !errors.Is(err, os.ErrNotExist) {
 					return nil, err
 				}
-				syncDir(filepath.Dir(sp))
+				syncDirBestEffort(filepath.Dir(sp))
 			}
 		}
 	}
@@ -787,9 +787,9 @@ func writeOwnershipFile(path string, data []byte) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
-	syncDir(dir)
+	syncDirBestEffort(dir)
 	for _, d := range created {
-		syncDir(filepath.Dir(d))
+		syncDirBestEffort(filepath.Dir(d))
 	}
 	return nil
 }
@@ -814,7 +814,8 @@ func mkdirAllSynced(dir string) ([]string, error) {
 	return created, nil
 }
 
-func syncDir(dir string) {
+// syncDirBestEffort fsyncs the directory dir, ignoring any error.
+func syncDirBestEffort(dir string) {
 	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
