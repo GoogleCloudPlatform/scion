@@ -25,8 +25,8 @@
 # Usage:
 #   shard.sh test K [--nosqlite] [--race]
 #       Compile shard K (go test -c), check that the binary's test list is
-#       exactly what hubshard -list K expects, then run it with go test,
-#       skipping the common files' tests outside shard 1.
+#       exactly what hubshard -list K expects, then run that binary (no
+#       second compile), skipping the common files' tests outside shard 1.
 #   shard.sh build K [--nosqlite]
 #       Compile shard K only (binary discarded).
 #   shard.sh vet K
@@ -117,6 +117,27 @@ compile() {
 		-tags "$(with_tags "$k" "$extra")" -o "$out/" ./pkg/hub
 }
 
+# run_binary runs a compiled shard test binary the way go test runs it:
+# from the package directory, with -test.paniconexit0 (go test always
+# passes it). The tests run with Go's default GOGC. Compiling once and
+# running the binary avoids a second compile and link of the shard (go
+# test would relink it). The exit status is the binary's: non-zero on a
+# failed test, a panic or -test.timeout. Prints an ok/FAIL line like go
+# test's.
+run_binary() {
+	local bin=$1 label=$2 start rc
+	shift 2
+	start=$(date +%s)
+	rc=0
+	(cd pkg/hub && "$bin" -test.paniconexit0 "$@") || rc=$?
+	if [ "$rc" -eq 0 ]; then
+		echo "ok  	$label	$(($(date +%s) - start))s"
+	else
+		echo "FAIL	$label	$(($(date +%s) - start))s (exit $rc)"
+	fi
+	return "$rc"
+}
+
 case "$cmd" in
 build)
 	parse_flags "$@"
@@ -143,9 +164,9 @@ test)
 	echo "shard $shard compiles $(wc -l <"$tmp/got") tests, as expected"
 
 	skip=$(hubshard -tags "$nosqlite" -skip "$shard")
-	echo "== run pkg/hub shard $shard"
-	go test -count=1 -timeout "$timeout" -p "$par" ${race:+"$race"} -overlay "$overlay" \
-		-tags "$(with_tags "$shard" "$nosqlite")" ${skip:+-skip "$skip"} ./pkg/hub
+	echo "== run pkg/hub shard $shard (the binary checked above)"
+	run_binary "$tmp/bin/hub.test" "pkg/hub shard $shard (tags: $(with_tags "$shard" "$nosqlite"))" \
+		-test.count=1 -test.timeout="$timeout" ${skip:+-test.skip="$skip"}
 	;;
 
 vet)
@@ -175,10 +196,9 @@ postgres)
 		regex="^($(echo "$names" | paste -sd '|' -))\$"
 		log="$tmp/postgres-$k.log"
 		echo "== Postgres tests in pkg/hub shard $k (tags: $(with_tags "$k" "$tags")): $(echo "$names" | tr '\n' ' ')"
-		# Built with the compile GOGC, as the targets always did: the
-		# selected tests are short.
-		GOGC=$build_gogc go test -count=1 -timeout 20m -v -p "$par" -overlay "$overlay" \
-			-tags "$(with_tags "$k" "$tags")" -run "$regex" ./pkg/hub 2>&1 | tee "$log"
+		compile "$k" "$tags" "$tmp/bin-$k"
+		run_binary "$tmp/bin-$k/hub.test" "pkg/hub shard $k Postgres tests" \
+			-test.count=1 -test.timeout=20m -test.v -test.run="$regex" 2>&1 | tee "$log"
 		if grep -qE '^[[:space:]]*--- SKIP' "$log"; then
 			die "one or more pkg/hub Postgres tests were skipped -- see '--- SKIP' lines above."
 		fi
