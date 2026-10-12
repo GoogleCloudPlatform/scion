@@ -368,6 +368,40 @@ func TestWaitForPodReady_DeadlineDuringGetIsLaunchTimeout(t *testing.T) {
 	}
 }
 
+// TestWaitForPodReady_CallerCancelDuringGetStaysUntyped checks that a
+// caller cancel (a stop, or the broker's own cancel) that a pod Get
+// observes is not typed launch_timeout: only waitForPodReady's own budget
+// is.
+func TestWaitForPodReady_CallerCancelDuringGetStaysUntyped(t *testing.T) {
+	rt, clientset := fastPodReadyRuntime(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	polls := 0
+	clientset.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		mu.Lock()
+		polls++
+		n := polls
+		mu.Unlock()
+		if n == 1 {
+			return true, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}, Status: *statusUnscheduled.DeepCopy()}, nil
+		}
+		// A real client fails the request once the caller's ctx is
+		// cancelled.
+		cancel()
+		return true, nil, context.Canceled
+	})
+
+	err := rt.waitForPodReady(ctx, "default", "p", launchHooks{})
+	var lf *LaunchFailure
+	if errors.As(err, &lf) {
+		t.Errorf("caller cancel typed as %+v; want the plain error", lf)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error %v does not wrap context.Canceled", err)
+	}
+}
+
 // TestLaunchFailure_TextAndUnwrap checks that a LaunchFailure reads as the
 // error it wraps and unwraps to it.
 func TestLaunchFailure_TextAndUnwrap(t *testing.T) {
