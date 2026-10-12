@@ -121,6 +121,7 @@ type exportPlan struct {
 	kinds      map[string]aliasKind
 	helperCall map[string]string // func key -> receiver of the t.Helper call it makes ("" = none)
 	fieldSites []fieldSite       // staying selectors rewritten for field exports
+	curFile    *ast.File         // file being scanned by findFieldSites
 	notes      []string          // review notes
 	targetSrc  map[string][]byte // target file base name -> content
 	changed    map[string][]byte // source package file -> new content (nil = delete)
@@ -644,6 +645,7 @@ func (ep *exportPlan) findFieldSites() error {
 		}
 	}
 	for _, f := range ep.p.files {
+		ep.curFile = f.ast
 		movedSpans := ep.movedSpans(f)
 		ast.Inspect(f.ast, func(n ast.Node) bool {
 			se, ok := n.(*ast.SelectorExpr)
@@ -657,21 +659,91 @@ func (ep *exportPlan) findFieldSites() error {
 				}
 			}
 			pos := ep.p.fset.Position(se.Sel.Pos())
-			if call, ok := se.X.(*ast.CallExpr); ok {
-				if id, ok := call.Fun.(*ast.Ident); ok {
-					if t, ok := returns[id.Name]; ok {
-						if nn, ok := ep.spec.fields[t][se.Sel.Name]; ok {
-							ep.fieldSites = append(ep.fieldSites, fieldSite{file: f.name, offset: off, old: se.Sel.Name, new: nn, line: pos.Line})
-							return true
-						}
-					}
+			if t := ep.operandType(se.X, returns); t != "" {
+				if nn, ok := ep.spec.fields[t][se.Sel.Name]; ok {
+					ep.fieldSites = append(ep.fieldSites, fieldSite{file: f.name, offset: off, old: se.Sel.Name, new: nn, line: pos.Line})
+					return true
 				}
 			}
-			ep.notes = append(ep.notes, fmt.Sprintf("INFO selector .%s at %s:%d not rewritten (not a call of a moved func returning the type; the compiler checks any real field access)", se.Sel.Name, f.name, pos.Line))
+			ep.notes = append(ep.notes, fmt.Sprintf("INFO selector .%s at %s:%d not rewritten (operand is not known to have a field-exported type; the compiler checks any real field access)", se.Sel.Name, f.name, pos.Line))
 			return true
 		})
 	}
 	return nil
+}
+
+// operandType returns the field-exported moved type that the operand of a
+// selector syntactically has, or "":
+//   - a call F(...) of a moved func whose single result is T or *T;
+//   - a local variable declared from such a call, x := F(...) or
+//     var x = F(...) (one name, one value, no declared type), and never
+//     written again (see reassigned).
+//
+// The analysis follows the parser's object resolution only, so anything
+// else (a field, a parameter, a reassigned or multi-value variable) is
+// left alone and reported; the compiler rejects any missed access.
+func (ep *exportPlan) operandType(x ast.Expr, returns map[string]string) string {
+	switch e := x.(type) {
+	case *ast.ParenExpr:
+		return ep.operandType(e.X, returns)
+	case *ast.CallExpr:
+		if id, ok := e.Fun.(*ast.Ident); ok {
+			return returns[id.Name]
+		}
+	case *ast.Ident:
+		if e.Obj == nil || e.Obj.Kind != ast.Var || ep.curFile == nil || reassigned(ep.curFile, e.Obj) {
+			return ""
+		}
+		switch d := e.Obj.Decl.(type) {
+		case *ast.AssignStmt:
+			if d.Tok == token.DEFINE && len(d.Lhs) == 1 && len(d.Rhs) == 1 {
+				if lid, ok := d.Lhs[0].(*ast.Ident); ok && lid.Name == e.Name {
+					if call, ok := d.Rhs[0].(*ast.CallExpr); ok {
+						return ep.operandType(call, returns)
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			if len(d.Names) == 1 && len(d.Values) == 1 && d.Type == nil {
+				if call, ok := d.Values[0].(*ast.CallExpr); ok {
+					return ep.operandType(call, returns)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// reassigned reports whether the local object obj is written in f after
+// its declaration: assigned (=, op=), incremented, ranged into or taken
+// by address. Such a local is not rewritten.
+func reassigned(f *ast.File, obj *ast.Object) bool { //nolint:staticcheck // SA1019: syntax-only resolution, as elsewhere in this tool.
+	is := func(e ast.Expr) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && id.Obj == obj
+	}
+	hit := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			if x == obj.Decl {
+				return true
+			}
+			for _, l := range x.Lhs {
+				if is(l) {
+					hit = true
+				}
+			}
+		case *ast.IncDecStmt:
+			hit = hit || is(x.X)
+		case *ast.UnaryExpr:
+			hit = hit || x.Op == token.AND && is(x.X)
+		case *ast.RangeStmt:
+			hit = hit || x.Key != nil && is(x.Key) || x.Value != nil && is(x.Value)
+		}
+		return !hit
+	})
+	return hit
 }
 
 func (ep *exportPlan) movedSpans(f *srcFile) [][2]int {

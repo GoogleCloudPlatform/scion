@@ -9,8 +9,9 @@ rename tid=TID
 rename tidSlugSafe=TIDSlugSafe
 rename requireUUID=RequireUUID
 
-# scanLeakedGoroutines().total is read by test_server_cleanup_test.go.
+# test_server_cleanup_test.go reads .total and .ids of leak-guard results.
 field leakGuardResult.total=Total
+field leakGuardResult.ids=IDs
 
 # id_helpers_test.go
 tid
@@ -50,8 +51,11 @@ leakGuardSignatures
 leakGuardStoreSignature
 leakGuardResult
 scanLeakedGoroutines
+scanStacks
+goroutineID
 allGoroutineStacks
 checkPackageLeaks
+checkLeaksExcluding
 runLeakGuard
 
 # git_lsremote_helpers_test.go

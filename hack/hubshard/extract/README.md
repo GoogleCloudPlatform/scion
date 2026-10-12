@@ -206,8 +206,11 @@ What `export` does:
     and any var that the package assigns, increments or takes the address
     of, is refused: an alias copy would diverge.
 - Rewrites a staying selector for a `field` export only where its operand
-  is a call of a moved func that returns the type. Other selectors with the
-  same name are listed as INFO; the compiler rejects any missed access.
+  syntactically has the type: a call of a moved func that returns it, or a
+  local declared as `x := F(...)` / `var x = F(...)` from such a call and
+  never written again (no reassignment, `++`, range assignment or `&x`).
+  Shadowed locals resolve to their own declaration. Other selectors with
+  the same name are listed as INFO; the compiler rejects any missed access.
 - Deletes helper files left without declarations, and drops unused
   imports.
 - Lists review notes: source-scanning test files (moved code leaves their

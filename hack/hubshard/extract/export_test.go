@@ -556,3 +556,74 @@ func TestCommentOnlyDiff(t *testing.T) {
 		}
 	}
 }
+
+func TestExportFieldSitesThroughLocals(t *testing.T) {
+	dir := writePkg(t, map[string]string{
+		"a_helpers_test.go": hdr + `package hub
+
+type res struct {
+	total int
+	ids   map[string]bool
+}
+
+func scan() res { return res{total: 1, ids: map[string]bool{}} }
+`,
+		"b_test.go": hdr + `package hub
+
+type other struct{ total int }
+
+func use() {
+	base := scan()
+	_ = base.total
+	var v = scan()
+	_ = v.ids
+	_ = scan().total
+	re := scan()
+	re = scan()
+	_ = re.total
+	sh := scan()
+	_ = sh
+	{
+		sh := other{}
+		_ = sh.total
+	}
+	var typed res
+	_ = typed.total
+	pp := scan()
+	_ = &pp
+	_ = pp.total
+}
+`,
+	})
+	target := filepath.Join(t.TempDir(), "support")
+	spec := exportSpec{names: []string{"res", "scan"}, fields: map[string]map[string]string{"res": {"total": "Total", "ids": "IDs"}}}
+	ep := runExportOn(t, dir, target, spec)
+	got := readFile(t, filepath.Join(dir, "b_test.go"))
+	for _, want := range []string{"_ = base.Total", "_ = v.IDs", "_ = scan().Total"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("not rewritten: want %q in\n%s", want, got)
+		}
+	}
+	// Reassigned, shadowed, typed-declaration and address-taken locals are
+	// left alone (the compiler checks them).
+	for _, want := range []string{"_ = re.total", "_ = sh.total", "_ = typed.total", "_ = pp.total"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("must not be rewritten: want %q in\n%s", want, got)
+		}
+	}
+	if len(ep.fieldSites) != 3 {
+		t.Errorf("field sites = %d, want 3: %+v", len(ep.fieldSites), ep.fieldSites)
+	}
+	infos := 0
+	for _, n := range ep.notes {
+		if strings.HasPrefix(n, "INFO selector .total") {
+			infos++
+		}
+	}
+	if infos != 4 {
+		t.Errorf("INFO notes for unrewritten .total = %d, want 4: %v", infos, ep.notes)
+	}
+	if tgt := readFile(t, filepath.Join(target, "a.go")); !strings.Contains(tgt, "return Res{Total: 1, IDs: map[string]bool{}}") {
+		t.Errorf("moved code not renamed:\n%s", tgt)
+	}
+}
