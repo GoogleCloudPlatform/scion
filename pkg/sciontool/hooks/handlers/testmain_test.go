@@ -23,8 +23,8 @@ import (
 )
 
 // transportEnvKeys lists the transport credential and platform settings the
-// Hub client reads when it builds its HTTP transport, beyond the keys
-// testutil.HubEnvKeys covers.
+// Hub client reads when it builds its HTTP transport. Some of them are also
+// in testutil.HubEnvKeys; testMainClearedEnvKeys removes the duplicates.
 var transportEnvKeys = []string{
 	transportauth.EnvTransportToken,
 	transportauth.EnvTransportTokenFile,
@@ -35,6 +35,12 @@ var transportEnvKeys = []string{
 	transportauth.EnvMetadataMode,
 }
 
+// runScopeEnvKeys lists the Hub client inputs, beyond testutil.HubEnvKeys,
+// that it sends with every agent-authenticated request.
+var runScopeEnvKeys = []string{
+	hub.EnvLaunchID,
+}
+
 // testMainClearedEnvKeys returns every environment variable TestMain
 // clears for the whole test binary, each listed once so that restoring
 // them in order cannot undo an earlier restore.
@@ -43,13 +49,19 @@ func testMainClearedEnvKeys() []string {
 	keys = append(keys, testutil.HubEnvKeys()...)
 	keys = append(keys, agentIdentityEnvKeys...)
 	keys = append(keys, transportEnvKeys...)
+	keys = append(keys, runScopeEnvKeys...)
 	slices.Sort(keys)
 	return slices.Compact(keys)
 }
 
-// sandboxHomeDir is the per-binary temp directory TestMain points HOME and
-// the Hub client's token home at.
-var sandboxHomeDir string
+// sandboxHomeDir and sandboxTokenHomeDir are the per-binary temp
+// directories TestMain points HOME and the Hub client's token home at. They
+// are distinct, so a test can tell the token home override apart from the
+// client's fallback to HOME.
+var (
+	sandboxHomeDir      string
+	sandboxTokenHomeDir string
+)
 
 // stubIsOnGCE replaces transportauth.IsOnGCEFunc for the whole test binary,
 // so no test probes the platform for a metadata server.
@@ -86,11 +98,11 @@ func restoreEnv(saved []savedEnv) {
 // TestMain makes this package's tests independent of the machine that runs
 // them, for every test in the binary, not only those that call scrubHubEnv:
 //
-//   - the Hub, agent identity and transport credential environment
-//     variables are cleared;
-//   - HOME and the Hub client's token home point at a temp directory, so
-//     the client never reads the host's token file (the token home is
-//     otherwise found through a user lookup, not HOME);
+//   - the Hub, agent identity, run id and transport credential
+//     environment variables are cleared;
+//   - HOME and the Hub client's token home point at two separate temp
+//     directories, so the client never reads the host's token file (the
+//     token home is otherwise found through a user lookup, not HOME);
 //   - platform detection is stubbed to report "not on GCE", so the client
 //     never probes for, or uses, a metadata server.
 //
@@ -99,14 +111,22 @@ func restoreEnv(saved []savedEnv) {
 func TestMain(m *testing.M) {
 	saved := saveAndUnsetEnv(append(testMainClearedEnvKeys(), "HOME"))
 
-	tmpHome, err := os.MkdirTemp("", "handlers-test-home-*")
+	sandbox, err := os.MkdirTemp("", "handlers-test-sandbox-*")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "TestMain: creating sandbox home: %v\n", err)
+		fmt.Fprintf(os.Stderr, "TestMain: creating sandbox: %v\n", err)
 		os.Exit(1)
 	}
-	sandboxHomeDir = tmpHome
-	_ = os.Setenv("HOME", tmpHome)
-	restoreTokenHome := hub.SetTokenHome(tmpHome)
+	sandboxHomeDir = filepath.Join(sandbox, "home")
+	sandboxTokenHomeDir = filepath.Join(sandbox, "token-home")
+	for _, dir := range []string{sandboxHomeDir, sandboxTokenHomeDir} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			fmt.Fprintf(os.Stderr, "TestMain: creating %s: %v\n", dir, err)
+			_ = os.RemoveAll(sandbox)
+			os.Exit(1)
+		}
+	}
+	_ = os.Setenv("HOME", sandboxHomeDir)
+	restoreTokenHome := hub.SetTokenHome(sandboxTokenHomeDir)
 	origIsOnGCE := transportauth.IsOnGCEFunc
 	transportauth.IsOnGCEFunc = stubIsOnGCE
 
@@ -115,21 +135,25 @@ func TestMain(m *testing.M) {
 	transportauth.IsOnGCEFunc = origIsOnGCE
 	restoreTokenHome()
 	restoreEnv(saved)
-	if err := os.RemoveAll(tmpHome); err != nil {
-		fmt.Fprintf(os.Stderr, "TestMain: removing sandbox home: %v\n", err)
+	if err := os.RemoveAll(sandbox); err != nil {
+		fmt.Fprintf(os.Stderr, "TestMain: removing sandbox: %v\n", err)
 	}
 	os.Exit(code)
 }
 
-// The Hub client's token file resolves under the TestMain sandbox, not
-// under the host user's home.
+// The Hub client's token file resolves under the TestMain token home: not
+// under the host user's home, and not under HOME either, so this fails
+// without the token home override on any machine.
 func TestHermetic_TokenHomeIsSandboxed(t *testing.T) {
-	if sandboxHomeDir == "" {
-		t.Fatal("sandboxHomeDir was not set by TestMain")
+	if sandboxHomeDir == "" || sandboxTokenHomeDir == "" {
+		t.Fatal("the sandbox directories were not set by TestMain")
 	}
 	got := hub.TokenFilePath()
-	if !strings.HasPrefix(got, sandboxHomeDir+string(filepath.Separator)) {
-		t.Errorf("hub.TokenFilePath() = %q, want a path under the sandbox home %q", got, sandboxHomeDir)
+	if !strings.HasPrefix(got, sandboxTokenHomeDir+string(filepath.Separator)) {
+		t.Errorf("hub.TokenFilePath() = %q, want a path under the sandbox token home %q", got, sandboxTokenHomeDir)
+	}
+	if strings.HasPrefix(got, sandboxHomeDir+string(filepath.Separator)) {
+		t.Errorf("hub.TokenFilePath() = %q is under HOME %q; the token home override is not in effect", got, sandboxHomeDir)
 	}
 	if home := os.Getenv("HOME"); home != sandboxHomeDir {
 		t.Errorf("HOME = %q, want the sandbox home %q", home, sandboxHomeDir)
@@ -149,9 +173,37 @@ func TestHermetic_PlatformProbeStubbed(t *testing.T) {
 	}
 }
 
-// Every key TestMain clears is unset when a test starts.
+// expectedHubClientEnvKeys lists, from the exported constants, every
+// environment variable the Hub client reads to find, authenticate to and
+// scope requests to a Hub, or to build its transport. It is kept separate
+// from the lists TestMain uses, so a key dropped from those lists is
+// caught.
+var expectedHubClientEnvKeys = []string{
+	hub.EnvHubEndpoint,
+	hub.EnvHubURL,
+	hub.EnvHubToken,
+	hub.EnvAgentID,
+	hub.EnvAgentMode,
+	hub.EnvLaunchID,
+	transportauth.EnvTransportToken,
+	transportauth.EnvTransportTokenFile,
+	transportauth.EnvTransportAudience,
+	transportauth.EnvTransportTokenExpiry,
+	transportauth.EnvHubOIDCAudience,
+	transportauth.EnvTransportMode,
+	transportauth.EnvMetadataMode,
+}
+
+// Every key TestMain clears, and every Hub client input, is unset when a
+// test starts.
 func TestHermetic_AmbientEnvCleared(t *testing.T) {
-	for _, key := range testMainClearedEnvKeys() {
+	cleared := testMainClearedEnvKeys()
+	for _, key := range expectedHubClientEnvKeys {
+		if !slices.Contains(cleared, key) {
+			t.Errorf("%s is a Hub client input but TestMain does not clear it", key)
+		}
+	}
+	for _, key := range slices.Concat(cleared, expectedHubClientEnvKeys) {
 		if _, set := os.LookupEnv(key); set {
 			t.Errorf("%s is set at test start; TestMain must clear it", key)
 		}
@@ -159,7 +211,7 @@ func TestHermetic_AmbientEnvCleared(t *testing.T) {
 }
 
 // A handler built only from synthetic test settings sends exactly the
-// synthetic agent token and no transport-auth header.
+// synthetic agent token, no run id and no transport-auth header.
 func TestHermetic_HubRequestUsesOnlySyntheticCredentials(t *testing.T) {
 	const syntheticToken = "synthetic-agent-token"
 
@@ -200,6 +252,9 @@ func TestHermetic_HubRequestUsesOnlySyntheticCredentials(t *testing.T) {
 	for i, h := range headers {
 		if got := h.Get("X-Scion-Agent-Token"); got != syntheticToken {
 			t.Errorf("request %d: X-Scion-Agent-Token is not the synthetic token (len %d)", i, len(got))
+		}
+		if _, ok := h[http.CanonicalHeaderKey(hub.RunIDHeader)]; ok {
+			t.Errorf("request %d carries %s", i, hub.RunIDHeader)
 		}
 		for _, name := range transportHeaders {
 			if _, ok := h[http.CanonicalHeaderKey(name)]; ok {
