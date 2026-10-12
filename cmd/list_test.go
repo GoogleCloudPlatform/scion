@@ -928,46 +928,6 @@ func TestValidateListFlagsNegativeCount(t *testing.T) {
 	}
 }
 
-// TestRejectHubOnlyFiltersInLocalMode covers: a Hub-only filter set while
-// listing locally must error rather
-// than silently listing everything (a narrowing filter that narrows nothing
-// makes the output wider than asked for, with no indication anything was
-// ignored).
-func TestRejectHubOnlyFiltersInLocalMode(t *testing.T) {
-	reset := func() {
-		filterOwner, filterBroker, filterHarness = "", "", ""
-		filterDescendants, filterAncestors, filterLineage = "", "", ""
-	}
-	defer reset()
-
-	t.Run("no Hub-only filters set: no error", func(t *testing.T) {
-		reset()
-		assert.NoError(t, rejectHubOnlyFiltersInLocalMode())
-	})
-
-	tests := []struct {
-		flagName string
-		set      func()
-	}{
-		{"owner", func() { filterOwner = "alice" }},
-		{"broker", func() { filterBroker = "my-broker" }},
-		{"harness", func() { filterHarness = "claude" }},
-		{"descendants", func() { filterDescendants = "agent-a" }},
-		{"ancestors", func() { filterAncestors = "agent-a" }},
-		{"lineage", func() { filterLineage = "agent-a" }},
-	}
-	for _, tt := range tests {
-		t.Run(tt.flagName, func(t *testing.T) {
-			reset()
-			tt.set()
-			err := rejectHubOnlyFiltersInLocalMode()
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "--"+tt.flagName)
-			assert.Contains(t, err.Error(), "Hub mode")
-		})
-	}
-}
-
 // TestListCmd_Args_RejectsPositionalArguments covers: `scion list
 // --descendants foo` (space, not "=") must not silently drop "foo" as an
 // ignored positional argument. Because

@@ -24,6 +24,10 @@
 #   3. scion hub link              links to the local hub without a prompt
 #   4. scion hub status            reports the project as linked
 #   5. scion list                  returns an empty list through the hub
+#   5b. scion list (auto-link)     in a second project that was never
+#                                  linked, links it to the local hub without
+#                                  a prompt and returns an empty list (only
+#                                  where 'scion init' can run)
 #   6. scion server stop           stops the server
 #   7. no image registry           in a second fresh HOME with no
 #                                  image_registry anywhere, scion server start
@@ -226,11 +230,18 @@ git commit -q --allow-empty -m "initial commit"
 # target the global project with --global (commands run outside a project
 # require it). --format json skips the interactive image-registry question.
 TARGET=()
+REPO2=""
 if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
   log "scion init --machine && scion init"
   "$SCION" init --machine --format json >"$WORK/init-machine.out" 2>&1 || {
     cat "$WORK/init-machine.out" >&2; fail "scion init --machine"; }
   "$SCION" init --format json >"$WORK/init.out" 2>&1 || { cat "$WORK/init.out" >&2; fail "scion init"; }
+  # A second project, initialised while no hub runs (so init does not link
+  # it): step 5b checks that its first command links it automatically.
+  REPO2="$WORK/repo2"
+  mkdir -p "$REPO2"
+  (cd "$REPO2" && git init -q && git commit -q --allow-empty -m "initial commit" &&
+    "$SCION" init --format json) >"$WORK/init2.out" 2>&1 || { cat "$WORK/init2.out" >&2; fail "scion init (second project)"; }
 else
   log "no container runtime found: skipping scion init, using the global project"
   TARGET=(--global)
@@ -303,6 +314,25 @@ grep -q "Using hub: http://127.0.0.1:" "$WORK/list.err" || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list --format json"; }
 tr -d '[:space:]' <"$WORK/list.json" | grep -Eq '^(\[\]|null)$' || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list did not return an empty list"; }
+
+if [ -n "$REPO2" ]; then
+  log "5b. scion list in a never-linked project links it to the local hub"
+  # No terminal and no -y: a link prompt would decline, so this passes only
+  # if the project is linked without one.
+  (cd "$REPO2" && "$SCION" list --format json </dev/null) >"$WORK/autolink.json" 2>"$WORK/autolink.err" || {
+    cat "$WORK/autolink.json" "$WORK/autolink.err" >&2; fail "scion list in a never-linked project"; }
+  grep -q "Linking project '.*' to the local hub at http://127.0.0.1:" "$WORK/autolink.err" || {
+    cat "$WORK/autolink.err" >&2; fail "scion list did not link the project to the local hub"; }
+  if grep -q "Link project with Hub?" "$WORK/autolink.err"; then fail "the auto-link asked for confirmation"; fi
+  tr -d '[:space:]' <"$WORK/autolink.json" | grep -Eq '^(\[\]|null)$' || {
+    cat "$WORK/autolink.json" "$WORK/autolink.err" >&2; fail "scion list did not return an empty list"; }
+  (cd "$REPO2" && "$SCION" hub status --format json) >"$WORK/autolink-status.json" 2>&1 || {
+    cat "$WORK/autolink-status.json" >&2; fail "scion hub status (second project)"; }
+  grep -Eq '"linked"[[:space:]]*:[[:space:]]*true' "$WORK/autolink-status.json" || {
+    cat "$WORK/autolink-status.json" >&2; fail "hub status does not report the auto-linked project as linked"; }
+else
+  log "5b. skipped: no container runtime for 'scion init'"
+fi
 
 log "6. scion server stop"
 stop_server || { cat "$WORK/stop.out" >&2; fail "scion server stop"; }

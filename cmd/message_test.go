@@ -3036,26 +3036,24 @@ func setHermeticHubEnv(t *testing.T, server *httptest.Server) {
 // PersistentPreRunE, project resolution, sender resolution or any Hub
 // request. Every recipient form and flag combination that previously
 // routed --raw somewhere (the keys alias, conversation references,
-// cross-project, local mode) is covered, plus --raw=false and a missing
+// cross-project) is covered, plus --raw=false and a missing
 // body, which must be refused too.
 func TestMessageCmd_RawFlag_ZeroWireCalls(t *testing.T) {
 	cases := []struct {
-		name  string
-		args  []string
-		noHub bool
+		name string
+		args []string
 	}{
-		{"agent", []string{"message", "target-agent", "Escape", "--raw"}, false},
-		{"raw false", []string{"message", "target-agent", "Escape", "--raw=false"}, false},
-		{"no body", []string{"message", "target-agent", "--raw"}, false},
-		{"at agent", []string{"message", "@target-agent", "Escape", "--raw"}, false},
-		{"conversation", []string{"message", "conv:11111111-1111-1111-1111-111111111111", "Escape", "--raw"}, false},
-		{"thread", []string{"message", "#general", "Escape", "--raw"}, false},
-		{"user", []string{"message", "user:alice", "Escape", "--raw"}, false},
-		{"group", []string{"message", "group[agent:a,agent:b]", "Escape", "--raw"}, false},
-		{"cross project", []string{"message", "target-agent", "Escape", "--raw", "--project", "other-project"}, false},
-		{"interrupt", []string{"message", "target-agent", "Escape", "--raw", "--interrupt"}, false},
-		{"msg alias", []string{"msg", "target-agent", "Escape", "--raw"}, false},
-		{"local mode", []string{"message", "target-agent", "Escape", "--raw"}, true},
+		{"agent", []string{"message", "target-agent", "Escape", "--raw"}},
+		{"raw false", []string{"message", "target-agent", "Escape", "--raw=false"}},
+		{"no body", []string{"message", "target-agent", "--raw"}},
+		{"at agent", []string{"message", "@target-agent", "Escape", "--raw"}},
+		{"conversation", []string{"message", "conv:11111111-1111-1111-1111-111111111111", "Escape", "--raw"}},
+		{"thread", []string{"message", "#general", "Escape", "--raw"}},
+		{"user", []string{"message", "user:alice", "Escape", "--raw"}},
+		{"group", []string{"message", "group[agent:a,agent:b]", "Escape", "--raw"}},
+		{"cross project", []string{"message", "target-agent", "Escape", "--raw", "--project", "other-project"}},
+		{"interrupt", []string{"message", "target-agent", "Escape", "--raw", "--interrupt"}},
+		{"msg alias", []string{"msg", "target-agent", "Escape", "--raw"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3076,7 +3074,6 @@ func TestMessageCmd_RawFlag_ZeroWireCalls(t *testing.T) {
 			server, hits := newCountingHubServer(t)
 			defer server.Close()
 			setHermeticHubEnv(t, server)
-			noHub = tc.noHub
 
 			var out bytes.Buffer
 			rootCmd.SetOut(&out)
@@ -3121,7 +3118,6 @@ func TestMessageCmd_WithoutRawFlag_ReachesCountingServer(t *testing.T) {
 			server, hits := newCountingHubServer(t)
 			defer server.Close()
 			setHermeticHubEnv(t, server)
-			noHub = false
 
 			var out bytes.Buffer
 			rootCmd.SetOut(&out)
@@ -3145,8 +3141,9 @@ func TestMessageCmd_WithoutRawFlag_ReachesCountingServer(t *testing.T) {
 // still an attempt to reinterpret the sender's project context, and this
 // check's behavior must match the pre-existing behavior. Table covers all 7 cases.
 //
-// Hermetic: noHub=true short-circuits before any hub call is attempted, and
-// hub env vars are cleared, so only the conv: error string is asserted.
+// Hermetic: hub env vars are cleared and no hub is configured, so a call
+// that passes the check fails on the not-configured error before any hub
+// request; only the conv: error string is asserted.
 func TestMessageCmd_RunE_ConvRefCrossProjectMismatch(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
@@ -3220,12 +3217,13 @@ func TestMessageCmd_RunE_ConvRefCrossProjectMismatch(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// A fresh HOME, so no real hub settings are read.
+			t.Setenv("HOME", t.TempDir())
 			t.Setenv("SCION_HUB_ENDPOINT", "")
 			t.Setenv("SCION_HUB_URL", "")
 			t.Setenv("SCION_AGENT_NAME", tc.agentName)
 			t.Setenv("SCION_PROJECT", tc.ownSlug)
 			t.Setenv("SCION_PROJECT_ID", tc.ownID)
-			noHub = true
 
 			cmd := newProjectFlagCommand(t)
 			if tc.setProject {

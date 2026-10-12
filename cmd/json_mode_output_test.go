@@ -103,7 +103,7 @@ func TestConfirmStopAllRm_JSONModeKeepsStdoutClean(t *testing.T) {
 	})
 }
 
-// localDeleteProject points the delete command at a fresh local project
+// localDeleteProject points the delete helpers at a fresh local project
 // (no Hub) and returns its .scion directory.
 func localDeleteProject(t *testing.T) string {
 	t.Helper()
@@ -111,7 +111,6 @@ func localDeleteProject(t *testing.T) string {
 	t.Cleanup(orig.restore)
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
-	noHub = true
 	preserveBranch = true
 	deleteStopped = false
 	deleteForce = false
@@ -119,51 +118,6 @@ func localDeleteProject(t *testing.T) string {
 	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0o755))
 	projectPath = projectDir
 	return projectDir
-}
-
-// ptone/scion#3494: local-mode scion delete --format json writes only the
-// JSON document on stdout; its progress lines do not go there.
-func TestDeleteLocal_JSONStdoutIsOnlyTheDocument(t *testing.T) {
-	projectDir := localDeleteProject(t)
-	agentDir := createAgentDir(t, projectDir, "real-agent")
-	setJSONOutput(t)
-
-	var err error
-	stdout, _ := captureStdIO(t, func() {
-		err = deleteCmd.RunE(deleteCmd, []string{"real-agent", "missing-agent"})
-	})
-	require.Error(t, err)
-	assert.True(t, isReportedInJSON(err), "partial failure exits 1 without an extra banner")
-	assert.NoDirExists(t, agentDir)
-
-	doc := requireSingleJSONDoc(t, stdout)
-	assert.Equal(t, "partial", doc["status"])
-	assert.Equal(t, "delete", doc["command"])
-	results, _ := doc["results"].([]interface{})
-	require.Len(t, results, 2)
-	assert.Equal(t, "success", results[0].(map[string]interface{})["status"])
-	assert.Equal(t, "error", results[1].(map[string]interface{})["status"])
-}
-
-// Text mode is unchanged: local scion delete still prints its progress
-// lines on stdout.
-func TestDeleteLocal_TextModeProgressOnStdout(t *testing.T) {
-	projectDir := localDeleteProject(t)
-	agentDir := createAgentDir(t, projectDir, "real-agent")
-	orig := outputFormat
-	outputFormat = ""
-	t.Cleanup(func() { outputFormat = orig })
-
-	var err error
-	stdout, stderr := captureStdIO(t, func() {
-		err = deleteCmd.RunE(deleteCmd, []string{"real-agent"})
-	})
-	require.NoError(t, err)
-	assert.NoDirExists(t, agentDir)
-	assert.Contains(t, stdout, "Deleting agent 'real-agent'...")
-	assert.Contains(t, stdout, "No container found, removing agent definition...")
-	assert.Contains(t, stdout, "Agent 'real-agent' deleted.")
-	assert.NotContains(t, stderr, "Deleting agent 'real-agent'...")
 }
 
 // stoppedAgentsRuntime is a mock runtime listing stopped agents; deleting

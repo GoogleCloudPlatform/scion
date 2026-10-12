@@ -141,13 +141,10 @@ func TestExecuteUsageOnError_EndToEnd(t *testing.T) {
 		rootCmd.SetErr(nil)
 	})
 
-	t.Setenv("SCION_HOST_UID", "")
-	// A non-empty Hub endpoint makes config.IsHubContext() true, which is
-	// what PersistentPreRunE uses to skip the image_registry requirement.
-	// This doesn't affect the attach code path itself, which is gated
-	// separately by the package-level noHub flag set below.
-	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.invalid.example")
-	noHub = true
+	// A fake hub: its endpoint in SCION_HUB_ENDPOINT makes
+	// config.IsHubContext() true, which is what PersistentPreRunE uses to
+	// skip the image_registry requirement, and attach reaches the hub.
+	withFakeHub(t)
 	projectPath = t.TempDir()
 
 	run := func(t *testing.T, args []string) (*cobra.Command, error) {
@@ -236,9 +233,7 @@ func TestExecuteUsageOnError_CentralSilence(t *testing.T) {
 		rootCmd.SetErr(nil)
 	})
 
-	hermeticCLIEnv(t)
-	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.invalid.example")
-	noHub = true
+	withFakeHub(t)
 	projectPath = t.TempDir()
 
 	tests := []struct {
@@ -415,9 +410,7 @@ func TestExecuteUsageOnError_ArgsValidatorsKeepUsage(t *testing.T) {
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
 	})
-	hermeticCLIEnv(t)
-	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.invalid.example")
-	noHub = true
+	withFakeHub(t)
 	projectPath = t.TempDir()
 
 	saveCLIModeState(t)
@@ -518,9 +511,7 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
 	})
-	hermeticCLIEnv(t)
-	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.invalid.example")
-	noHub = true
+	withFakeHub(t)
 	tempProject := t.TempDir()
 	projectPath = tempProject
 
@@ -569,7 +560,6 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 			assert.Equal(t, target, cmd)
 			assert.True(t, target.SilenceUsage, "the check must run after root's hook (RunE), not in Args")
-			assert.True(t, noHub, "the per-row flag reset must not undo the noHub setup")
 			assert.Equal(t, tempProject, projectPath, "the per-row flag reset must not undo the temp project")
 			assert.True(t, isUsageError(err), "error: %v", err)
 			assert.True(t, showUsageForError(cmd, err, true))
@@ -826,7 +816,7 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	projectPath = ""
 	profile = ""
 	outputFormat = ""
-	noHub = true
+	noHub = false
 	nonInteractive = true
 	autoConfirm = true
 
@@ -896,7 +886,7 @@ func setupNoProjectPreRun(t *testing.T) {
 
 	globalMode = false
 	projectPath = ""
-	noHub = true
+	noHub = false
 	nonInteractive = true
 	autoConfirm = true
 	outputFormat = ""
@@ -1017,48 +1007,41 @@ hub:
 
 	tests := []struct {
 		name          string
-		noHubFlag     bool
 		hubEndpoint   string
 		devTokenEnv   string
 		devTokenFile  string
 		expectWarning bool
 	}{
 		{
-			name:          "No hub enabled, no warning",
-			noHubFlag:     true,
+			name:          "No dev token, no warning",
 			expectWarning: false,
 		},
 		{
 			name:          "Local hub endpoint with dev token env var",
-			noHubFlag:     false,
 			hubEndpoint:   "http://localhost:9810",
 			devTokenEnv:   "scion_dev_testtoken123",
 			expectWarning: true,
 		},
 		{
 			name:          "Hub endpoint via flag, no dev token",
-			noHubFlag:     false,
 			hubEndpoint:   "http://localhost:9810",
 			devTokenEnv:   "",
 			expectWarning: false,
 		},
 		{
 			name:          "Remote hub with dev token env var warns",
-			noHubFlag:     false,
 			hubEndpoint:   "https://hub.demo.scion-ai.dev/",
 			devTokenEnv:   "scion_dev_testtoken123",
 			expectWarning: true,
 		},
 		{
 			name:          "Remote hub with dev token file does not warn",
-			noHubFlag:     false,
 			hubEndpoint:   "https://hub.demo.scion-ai.dev/",
 			devTokenFile:  "scion_dev_testtoken123",
 			expectWarning: false,
 		},
 		{
 			name:          "Local hub with dev token file warns",
-			noHubFlag:     false,
 			hubEndpoint:   "http://localhost:9810",
 			devTokenFile:  "scion_dev_testtoken123",
 			expectWarning: true,
@@ -1068,7 +1051,6 @@ hub:
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Set flags
-			noHub = tt.noHubFlag
 			hubEndpoint = tt.hubEndpoint
 
 			// Set environment

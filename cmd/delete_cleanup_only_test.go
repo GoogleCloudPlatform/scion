@@ -239,16 +239,16 @@ func TestDeleteCleanupOnly_HubUnreachable(t *testing.T) {
 		assert.Equal(t, before.LastSyncedAt, st.LastSyncedAt, "the sync watermark is not advanced: the hub was not checked")
 	})
 
-	t.Run("no hub in use refuses without --force", func(t *testing.T) {
+	t.Run("no hub configured refuses without --force", func(t *testing.T) {
 		withCleanupOnlyState(t)
 		projectDir := cleanupOnlyProject(t)
 		agentDir := createAgentDir(t, projectDir, "local")
 
-		err := deleteAgentsCleanupOnly(nil, nil, []string{"local"})
+		err := deleteAgentsCleanupOnly(nil, errHubNotConfigured, []string{"local"})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no Hub is in use")
+		assert.Contains(t, err.Error(), "the Hub could not be checked")
+		assert.Contains(t, err.Error(), "No hub configured")
 		assert.Contains(t, err.Error(), "--force")
-		assert.Contains(t, err.Error(), "scion delete <agent>", "local-only mode: point at a plain delete")
 		assert.DirExists(t, agentDir)
 	})
 }

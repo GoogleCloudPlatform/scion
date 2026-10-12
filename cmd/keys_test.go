@@ -1392,7 +1392,7 @@ func TestSendKeysViaHub_AmbiguousGitRemote_FailsClosed_NoDispatch(t *testing.T) 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 	// hubCtx.ProjectID deliberately empty: this is the exact shape
-	// sendKeysViaHub receives from CheckHubAvailabilityForAgent when no
+	// sendKeysViaHub receives from requireHub when no
 	// --project flag was given and settings carry no project_id, forcing
 	// the git-remote resolution path that fails closed on ambiguity.
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL}

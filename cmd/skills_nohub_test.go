@@ -25,41 +25,45 @@ import (
 )
 
 // isolateNoHubForTest gives the test a temp HOME and a project with no hub
-// configured, and points projectPath at that project. With noHubFlag set it
-// also sets the --no-hub flag variable. Ambient SCION_* variables are already
-// cleared for the whole test binary by TestMain (clearAmbientScionEnv).
-// Package state it changes is restored when the test ends.
-func isolateNoHubForTest(t *testing.T, noHubFlag bool) {
+// endpoint configured, and points projectPath at that project. With
+// staleEnabled the project settings still carry hub.enabled=true, which no
+// longer counts: only an endpoint does. Ambient SCION_* variables are
+// already cleared for the whole test binary by TestMain
+// (clearAmbientScionEnv). Package state it changes is restored when the test
+// ends.
+func isolateNoHubForTest(t *testing.T, staleEnabled bool) {
 	t.Helper()
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	projectDir := filepath.Join(home, "project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+	if staleEnabled {
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  enabled: true\n"), 0o644))
+	}
 
 	origProjectPath, origGlobal := projectPath, globalMode
-	origFormat, origYes, origNonInteractive, origNoHub, origEndpoint := outputFormat, autoConfirm, nonInteractive, noHub, hubEndpoint
+	origFormat, origYes, origNonInteractive, origEndpoint := outputFormat, autoConfirm, nonInteractive, hubEndpoint
 	t.Cleanup(func() {
 		projectPath, globalMode = origProjectPath, origGlobal
-		outputFormat, autoConfirm, nonInteractive, noHub, hubEndpoint = origFormat, origYes, origNonInteractive, origNoHub, origEndpoint
+		outputFormat, autoConfirm, nonInteractive, hubEndpoint = origFormat, origYes, origNonInteractive, origEndpoint
 	})
 	projectPath = projectDir
 	globalMode = false
 	outputFormat = ""
 	autoConfirm = true
 	nonInteractive = true
-	noHub = noHubFlag
 	hubEndpoint = ""
 }
 
-// noHubModes are the two ways no hub is in use: no hub in settings, and the
-// --no-hub flag.
+// noHubModes are the ways no hub is configured: no hub settings at all, and
+// a stale hub.enabled=true without an endpoint.
 var noHubModes = []struct {
-	name      string
-	noHubFlag bool
+	name         string
+	staleEnabled bool
 }{
-	{name: "hub-not-enabled", noHubFlag: false},
-	{name: "no-hub-flag", noHubFlag: true},
+	{name: "no-hub-settings", staleEnabled: false},
+	{name: "stale-hub-enabled", staleEnabled: true},
 }
 
 // setCmdFlagForTest sets a flag on cmd for the duration of the test.
@@ -76,9 +80,8 @@ func setCmdFlagForTest(t *testing.T, cmd *cobra.Command, name, value string) {
 }
 
 // TestSkillsCommands_NoHubConfigured runs every hub-backed skills command
-// with no hub configured, both with hub settings absent and with --no-hub.
-// Each must return errHubNotConfigured instead of dereferencing a nil hub
-// context.
+// with no hub endpoint configured. Each must return errHubNotConfigured
+// instead of dereferencing a nil hub context.
 func TestSkillsCommands_NoHubConfigured(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -102,7 +105,7 @@ func TestSkillsCommands_NoHubConfigured(t *testing.T) {
 	for _, tt := range tests {
 		for _, mode := range noHubModes {
 			t.Run(tt.name+"/"+mode.name, func(t *testing.T) {
-				isolateNoHubForTest(t, mode.noHubFlag)
+				isolateNoHubForTest(t, mode.staleEnabled)
 				args := tt.args
 				if tt.setup != nil {
 					args = tt.setup(t)
@@ -112,7 +115,7 @@ func TestSkillsCommands_NoHubConfigured(t *testing.T) {
 				assert.NotPanics(t, func() { err = tt.cmd.RunE(tt.cmd, args) })
 				require.Error(t, err)
 				assert.ErrorIs(t, err, errHubNotConfigured)
-				assert.Contains(t, err.Error(), "this command needs a hub")
+				assert.Contains(t, err.Error(), "No hub configured")
 			})
 		}
 	}

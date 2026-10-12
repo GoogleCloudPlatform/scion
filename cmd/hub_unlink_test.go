@@ -87,13 +87,13 @@ func TestHubUnlink_WritesOnlyLinkedAndProjectID(t *testing.T) {
 	assert.Contains(t, stdout, "has been unlinked from the Hub")
 	assert.Contains(t, stdout, "manage them with '--project <hub-slug>' or re-link")
 	assert.Contains(t, stdout, "scion hub link")
-	assert.Contains(t, stdout, "scion hub disable", "local-only mode still exists in this phase")
+	assert.NotContains(t, stdout, "hub disable", "local-only mode was removed")
 }
 
 // TestHubUnlink_Gate checks which projects 'scion hub unlink' acts on:
-// hub.linked=true, or hub.linked unset with hub mode on (registered before
-// the link was recorded). An explicit false, or unset with hub mode off,
-// is "not linked".
+// hub.linked=true, or hub.linked unset (never linked, or registered before
+// the link was recorded; unlinking opts the project out of the auto-link).
+// hub.enabled no longer matters. An explicit false is "not linked".
 func TestHubUnlink_Gate(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -102,8 +102,9 @@ func TestHubUnlink_Gate(t *testing.T) {
 		wantLine   string
 	}{
 		{name: "explicitly unlinked", settings: "hub:\n  enabled: true\n  linked: false\n", wantLine: "This project is not linked to the Hub."},
-		{name: "hub off, linked unset", settings: "hub:\n  enabled: false\n", wantLine: "This project is not linked to the Hub."},
-		{name: "legacy: hub on, linked unset, nothing on a hub", settings: "hub:\n  enabled: true\n", wantUnlink: true,
+		{name: "stale hub off, linked unset", settings: "hub:\n  enabled: false\n", wantUnlink: true,
+			wantLine: "Project 'repo' marked as unlinked; agent commands here will refuse until 'scion hub link'."},
+		{name: "never linked, nothing on a hub", settings: "hub:\n  enabled: true\n", wantUnlink: true,
 			wantLine: "Project 'repo' marked as unlinked; agent commands here will refuse until 'scion hub link'."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -140,12 +141,9 @@ func TestHubUnlink_Gate(t *testing.T) {
 
 func TestUnlinkGateOpen(t *testing.T) {
 	yes, no := true, false
-	assert.True(t, unlinkGateOpen(&yes, false))
-	assert.True(t, unlinkGateOpen(&yes, true))
-	assert.False(t, unlinkGateOpen(&no, true))
-	assert.False(t, unlinkGateOpen(&no, false))
-	assert.True(t, unlinkGateOpen(nil, true))
-	assert.False(t, unlinkGateOpen(nil, false))
+	assert.True(t, unlinkGateOpen(&yes), "a recorded link can be removed")
+	assert.False(t, unlinkGateOpen(&no), "already unlinked")
+	assert.True(t, unlinkGateOpen(nil), "never linked: unlinking opts out of the auto-link")
 }
 
 // roundTripHub is a local workstation hub for link -> unlink -> link. It

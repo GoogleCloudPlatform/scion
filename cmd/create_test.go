@@ -58,27 +58,6 @@ func TestCreateCmd_HarnessFlagDefaultsToEmpty(t *testing.T) {
 	assert.Equal(t, "", f.DefValue, "--harness default value must be empty string")
 }
 
-func TestCreateAgent_DuplicateReturnsError(t *testing.T) {
-	orig := saveCreateTestState()
-	defer orig.restore()
-
-	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
-	noHub = true
-
-	// Set up project directory with an existing agent
-	projectDir := filepath.Join(tmpHome, "project", ".scion")
-	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
-	projectPath = projectDir
-
-	createAgentDir(t, projectDir, "my-agent")
-
-	// Attempt to create an agent with the same name — should fail
-	err := createCmd.RunE(createCmd, []string{"my-agent"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already exists")
-}
-
 // TestCreateOutput_SaysNotStarted checks that every scion create output says
 // the agent was provisioned but not started and names the command that
 // starts it.
