@@ -620,7 +620,7 @@ func TestHandleAgentDirWithoutConfig_CleanWorktreeWithOnlyIgnoredFileIsRemoved(t
 		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
 	}
 	logs := logBuf.String()
-	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "ignored_count=1") || !strings.Contains(logs, "settings.local") {
+	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "ignored_entries=1") || !strings.Contains(logs, "settings.local") {
 		t.Errorf("logs = %q, want a Warn with the ignored file count and path", logs)
 	}
 }
@@ -1158,7 +1158,10 @@ func TestHandleAgentDirWithoutConfig_PausedAutostashRebaseIsKeptWithoutGit(t *te
 		t.Fatal(err)
 	}
 	cmd := exec.Command("git", "-C", ws, "rebase", "-q", "-i", "--autostash", "HEAD~1")
-	cmd.Env = append(os.Environ(), "GIT_SEQUENCE_EDITOR=sed -i 1s/^pick/edit/")
+	// sed -i.bak works with both GNU and BSD sed (a bare -i is GNU-only);
+	// git appends the todo file path as "$@", so a shell function removes
+	// the backup afterwards.
+	cmd.Env = append(os.Environ(), `GIT_SEQUENCE_EDITOR=edit_first() { sed -i.bak 1s/^pick/edit/ "$1" && rm -f "$1.bak"; }; edit_first`)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("setup: rebase: %v\n%s", err, out)
 	}

@@ -3199,7 +3199,8 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 //     reported by git status and are removed with the worktree. Keeping on
 //     them would make almost every used worktree a permanent conflict
 //     (node_modules, dist and similar). A global excludes file is not
-//     applied, so it cannot hide an untracked file. Their count and a few
+//     applied, so it cannot hide an untracked file. The number of ignored
+//     status entries (a fully ignored directory counts once) and a few
 //     paths are logged at Warn before the removal.
 //   - The idle per-worktree admin state goes with the prune: the HEAD
 //     reflog, ORIG_HEAD, FETCH_HEAD and AUTO_MERGE. Commits reachable only
@@ -3360,9 +3361,11 @@ func worktreeAdminDirIdle(gitDir string) (bool, error) {
 	return idle, nil
 }
 
-// warnIgnoredFiles logs, at Warn, how many ignored files the clean
-// worktree wt has and a few of their paths, because they are removed with
-// it. It changes nothing; a failure is logged too.
+// warnIgnoredFiles logs, at Warn, how many ignored git status entries the
+// clean worktree wt has and a few of their paths, because they are removed
+// with it. The count is of entries, not files: a fully ignored directory is
+// one entry however many files it holds. It changes nothing; a failure is
+// logged too.
 func warnIgnoredFiles(wt projectWorktree) {
 	out, err := runWorktreeGit(wt, "status", "--porcelain", "-z", "--untracked-files=normal", "--ignored=matching")
 	if err != nil {
@@ -3384,7 +3387,7 @@ func warnIgnoredFiles(wt projectWorktree) {
 		sample = sample[:5]
 	}
 	slog.Warn("GetAgent: clean stale agent workspace has ignored files; they are removed with it",
-		"workspace", wt.workTree, "ignored_count", len(ignored), "ignored_sample", sample)
+		"workspace", wt.workTree, "ignored_entries", len(ignored), "ignored_sample", sample)
 }
 
 // hasHiddenIndexEntries reports whether NUL-separated git ls-files -v
