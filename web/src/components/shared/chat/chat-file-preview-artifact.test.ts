@@ -275,7 +275,7 @@ describe('scion-chat-file-preview artifact target', () => {
     expect(buttons(el)).toContain('Open in artifact viewer');
   });
 
-  it('renders an HTML bundle through a minted view in the artifact page\'s sandboxed frame, never its source', async () => {
+  it("renders an HTML bundle through a minted view in the artifact page's sandboxed frame, never its source", async () => {
     const big = 10 * 1024 * 1024; // over the text preview cap: HTML is not capped
     apiFetchMock.mockImplementation((path: string, options?: RequestInit) =>
       Promise.resolve(
@@ -291,9 +291,9 @@ describe('scion-chat-file-preview artifact target', () => {
       `/api/v1/artifacts/${ID}`,
       `/api/v1/artifacts/${ID}/versions/3/view`,
     ]);
-    expect(apiFetchMock.mock.calls.find((c) => (c[0] as string).endsWith('/view'))?.[1]?.method).toBe(
-      'POST'
-    );
+    expect(
+      apiFetchMock.mock.calls.find((c) => (c[0] as string).endsWith('/view'))?.[1]?.method
+    ).toBe('POST');
     expect(q(el, 'scion-code-editor')).toBeNull();
     expect(q(el, 'scion-artifact-markdown-frame')).toBeNull();
     const frames = el.shadowRoot?.querySelectorAll('iframe') ?? [];
@@ -352,7 +352,9 @@ describe('scion-chat-file-preview artifact target', () => {
     );
     const el = await open();
     expect(q(el, 'iframe')).toBeNull();
-    expect(q(el, '.file-preview-placeholder.error')?.textContent).toContain('Could not open the view');
+    expect(q(el, '.file-preview-placeholder.error')?.textContent).toContain(
+      'Could not open the view'
+    );
     const retry = Array.from(el.shadowRoot?.querySelectorAll('sl-button') ?? []).find((b) =>
       (b.textContent ?? '').includes('Retry')
     ) as HTMLElement | undefined;

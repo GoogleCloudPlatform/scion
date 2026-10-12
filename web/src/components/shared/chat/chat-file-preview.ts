@@ -703,7 +703,15 @@ export class ScionChatFilePreview extends LitElement {
       };
       const renderer = rendererFor(entry.mediaType);
       if (renderer === 'html') {
-        await this.loadArtifactView(data, version.seq, version.files, artifact, base, gen, controller);
+        await this.loadArtifactView(
+          data,
+          version.seq,
+          version.files,
+          artifact,
+          base,
+          gen,
+          controller
+        );
         return;
       }
       if (
@@ -791,7 +799,12 @@ export class ScionChatFilePreview extends LitElement {
     const res = await apiFetch(viewUrl, { method: 'POST', signal: controller.signal });
     if (gen !== this.generation) return;
     if (res.status === 403 || res.status === 404) {
-      this.loadState = { ...base, status: 'error', error: ARTIFACT_UNAVAILABLE_MESSAGE, unavailable: true };
+      this.loadState = {
+        ...base,
+        status: 'error',
+        error: ARTIFACT_UNAVAILABLE_MESSAGE,
+        unavailable: true,
+      };
       return;
     }
     if (!res.ok) {
