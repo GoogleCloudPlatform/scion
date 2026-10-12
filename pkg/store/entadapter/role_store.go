@@ -32,11 +32,50 @@ import (
 // RoleStore implements store.RoleStore using Ent ORM.
 type RoleStore struct {
 	client *ent.Client
+	// now is the clock the project membership reads evaluate binding
+	// activation windows against. It is the Go wall clock, the same clock
+	// the authorization kernel is given; tests replace it.
+	now func() time.Time
 }
 
 // NewRoleStore creates a new Ent-backed RoleStore.
 func NewRoleStore(client *ent.Client) *RoleStore {
-	return &RoleStore{client: client}
+	return &RoleStore{client: client, now: time.Now}
+}
+
+// roleBindingActiveAt reports whether rb's activation window contains now.
+// It applies the authorization kernel's rule (evaluateActivation in
+// pkg/hub/authz_kernel.go): an unset bound is unbounded, NotBefore is
+// inclusive (active when now >= NotBefore) and ExpiresAt is exclusive
+// (active when now < ExpiresAt). A zero now with any bound set is
+// inactive, as in the kernel.
+func roleBindingActiveAt(rb *ent.RoleBinding, now time.Time) bool {
+	if rb.NotBefore == nil && rb.ExpiresAt == nil {
+		return true
+	}
+	if now.IsZero() {
+		return false
+	}
+	if rb.NotBefore != nil && now.Before(*rb.NotBefore) {
+		return false
+	}
+	if rb.ExpiresAt != nil && !now.Before(*rb.ExpiresAt) {
+		return false
+	}
+	return true
+}
+
+// activeRoleBindings returns the bindings in rbs whose activation window
+// contains the store clock's current time.
+func (r *RoleStore) activeRoleBindings(rbs []*ent.RoleBinding) []*ent.RoleBinding {
+	now := r.now()
+	active := rbs[:0:0]
+	for _, rb := range rbs {
+		if roleBindingActiveAt(rb, now) {
+			active = append(active, rb)
+		}
+	}
+	return active
 }
 
 // entRoleDefinitionToStore converts an Ent RoleDefinition entity to a store.RoleDefinition model.
@@ -712,7 +751,9 @@ func (r *RoleStore) DeleteRoleBindingsForScope(ctx context.Context, scopeType, s
 
 // GetProjectMembership returns the project membership for a user in a project.
 // It looks up role bindings scoped to the project for the user and resolves
-// the role definition name.
+// the role definition name. Only bindings whose activation window contains
+// the current time count (roleBindingActiveAt); a user with none has no
+// membership and gets ErrNotFound.
 func (r *RoleStore) GetProjectMembership(ctx context.Context, projectID, userID string) (*store.ProjectMembership, error) {
 	rbs, err := r.client.RoleBinding.Query().
 		Where(
@@ -726,6 +767,7 @@ func (r *RoleStore) GetProjectMembership(ctx context.Context, projectID, userID 
 	if err != nil {
 		return nil, mapError(err)
 	}
+	rbs = r.activeRoleBindings(rbs)
 	if len(rbs) == 0 {
 		return nil, store.ErrNotFound
 	}
@@ -755,6 +797,8 @@ func (r *RoleStore) GetProjectMembership(ctx context.Context, projectID, userID 
 }
 
 // ListProjectMembers returns all members of a project via role bindings.
+// Only bindings whose activation window contains the current time count
+// (roleBindingActiveAt).
 func (r *RoleStore) ListProjectMembers(ctx context.Context, projectID string) ([]*store.ProjectMembership, error) {
 	rbs, err := r.client.RoleBinding.Query().
 		Where(
@@ -767,6 +811,7 @@ func (r *RoleStore) ListProjectMembers(ctx context.Context, projectID string) ([
 	if err != nil {
 		return nil, mapError(err)
 	}
+	rbs = r.activeRoleBindings(rbs)
 
 	// Group by principal_id and pick highest-privilege binding per user.
 	byUser := make(map[string]*ent.RoleBinding)
@@ -794,20 +839,21 @@ func (r *RoleStore) ListProjectMembers(ctx context.Context, projectID string) ([
 }
 
 // IsProjectMember returns true if the user has any project-scoped role binding
-// for the given project.
+// for the given project whose activation window contains the current time
+// (roleBindingActiveAt).
 func (r *RoleStore) IsProjectMember(ctx context.Context, projectID, userID string) (bool, error) {
-	count, err := r.client.RoleBinding.Query().
+	rbs, err := r.client.RoleBinding.Query().
 		Where(
 			rolebinding.PrincipalTypeEQ(rolebinding.PrincipalTypeUser),
 			rolebinding.PrincipalIDEQ(userID),
 			rolebinding.ScopeTypeEQ(rolebinding.ScopeTypeProject),
 			rolebinding.ScopeIDEQ(projectID),
 		).
-		Count(ctx)
+		All(ctx)
 	if err != nil {
 		return false, mapError(err)
 	}
-	return count > 0, nil
+	return len(r.activeRoleBindings(rbs)) > 0, nil
 }
 
 // roleRank returns a numeric ranking for role bindings based on the role

@@ -1457,3 +1457,94 @@ func TestResolveAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *testing.T) {
 	assert.Error(t, err, "resolveAdminUsers must propagate GetEffectiveGroups error")
 	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
 }
+
+// isBindingActive uses the kernel's activation rule (evaluateActivation):
+// notBefore is inclusive, expiresAt is exclusive, and a zero evaluation
+// time with any bound set is inactive.
+func TestIsBindingActive_BoundariesMatchKernel(t *testing.T) {
+	ref := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { v := ref.Add(d); return &v }
+	zeroBound := func() *time.Time { return &time.Time{} }
+	cases := []struct {
+		name      string
+		now       time.Time
+		notBefore *time.Time
+		expiresAt *time.Time
+		want      bool
+	}{
+		{"unbounded", ref, nil, nil, true},
+		{"now equals notBefore", ref, at(0), nil, true},
+		{"now before notBefore", ref, at(time.Nanosecond), nil, false},
+		{"now equals expiresAt", ref, nil, at(0), false},
+		{"now before expiresAt", ref, nil, at(time.Nanosecond), true},
+		{"now after expiresAt", ref, nil, at(-time.Nanosecond), false},
+		{"zero now unbounded", time.Time{}, nil, nil, true},
+		{"zero now with only expiresAt", time.Time{}, nil, at(time.Hour), false},
+		{"zero now with only notBefore", time.Time{}, at(-time.Hour), nil, false},
+		{"set but zero expiresAt", ref, nil, zeroBound(), false},
+		{"set but zero notBefore", ref, zeroBound(), nil, true},
+		{"zero now with set but zero notBefore", time.Time{}, zeroBound(), nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &store.RoleBinding{ID: "rb", NotBefore: tc.notBefore, ExpiresAt: tc.expiresAt}
+			assert.Equal(t, tc.want, isBindingActive(b, tc.now))
+			assert.Equal(t, tc.want, bindingActivationOK(b, tc.now),
+				"bindingActivationOK must apply the same rule")
+			cands := toCandidateBindings([]*store.RoleBinding{b})
+			require.Len(t, cands, 1)
+			assert.Equal(t, tc.want, evaluateActivation(&cands[0], tc.now).Active,
+				"the kernel's candidate path must apply the same rule")
+		})
+	}
+}
+
+// The kernel's decision path (toCandidateBindings then Evaluate) applies
+// the same activation rule to stored role bindings as isBindingActive.
+func TestEvaluate_StoredBindingWindowMatchesIsBindingActive(t *testing.T) {
+	ref := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { v := ref.Add(d); return &v }
+	zeroBound := func() *time.Time { return &time.Time{} }
+	roles := map[string]*RolePermissions{
+		"r1": NewRolePermissions("r1", "reader", ScopeTypeSystem, []string{"agent.read"}),
+	}
+	cases := []struct {
+		name      string
+		now       time.Time
+		notBefore *time.Time
+		expiresAt *time.Time
+		want      bool
+	}{
+		{"unbounded", ref, nil, nil, true},
+		{"in window", ref, at(-time.Hour), at(time.Hour), true},
+		{"now equals expiresAt", ref, nil, at(0), false},
+		{"zero now with only expiresAt", time.Time{}, nil, at(time.Hour), false},
+		{"set but zero expiresAt", ref, nil, zeroBound(), false},
+		{"set but zero notBefore", ref, zeroBound(), nil, true},
+		{"zero now with set but zero notBefore", time.Time{}, zeroBound(), nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &store.RoleBinding{
+				ID:               "rb",
+				RoleDefinitionID: "r1",
+				PrincipalType:    "user",
+				PrincipalID:      "user1",
+				ScopeType:        ScopeTypeSystem,
+				NotBefore:        tc.notBefore,
+				ExpiresAt:        tc.expiresAt,
+			}
+			d := Evaluate(KernelRequest{
+				Permission:        "agent.read",
+				PrincipalClosure:  closureOf("user:user1"),
+				Resource:          ResourceContext{ProjectID: "proj-a"},
+				CandidateBindings: toCandidateBindings([]*store.RoleBinding{b}),
+				RoleDefinitions:   roles,
+				Now:               tc.now,
+			})
+			assert.Equal(t, tc.want, d.Allowed, "kernel decision")
+			assert.Equal(t, isBindingActive(b, tc.now), d.Allowed,
+				"kernel decision must agree with isBindingActive")
+		})
+	}
+}

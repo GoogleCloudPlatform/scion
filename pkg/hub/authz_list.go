@@ -364,12 +364,35 @@ func toCandidateBindings(bindings []*store.RoleBinding) []CandidateBinding {
 			ScopeType:        b.ScopeType,
 			ScopeID:          b.ScopeID,
 		}
-		if b.NotBefore != nil {
-			candidates[i].NotBefore = *b.NotBefore
-		}
-		if b.ExpiresAt != nil {
-			candidates[i].ExpiresAt = *b.ExpiresAt
-		}
+		candidates[i].NotBefore, candidates[i].ExpiresAt = candidateActivationBounds(b)
 	}
 	return candidates
+}
+
+// setZeroBound stands in for a stored activation bound that is set but
+// holds the zero time. It is the earliest non-zero instant, so the kernel
+// sees a time condition rather than an unset bound.
+var setZeroBound = time.Time{}.Add(time.Nanosecond)
+
+// candidateActivationBounds converts a store RoleBinding's optional
+// activation bounds to the kernel's value form, where a zero time means
+// unset. A bound that is set but zero maps to setZeroBound, so the kernel
+// agrees with the store's membership reads: a set-but-zero ExpiresAt is
+// already expired, and any set bound fails closed on a zero evaluation
+// time. Every conversion from store.RoleBinding to CandidateBinding uses
+// this, so all activation checks in pkg/hub apply one rule.
+func candidateActivationBounds(b *store.RoleBinding) (notBefore, expiresAt time.Time) {
+	if b.NotBefore != nil {
+		notBefore = *b.NotBefore
+		if notBefore.IsZero() {
+			notBefore = setZeroBound
+		}
+	}
+	if b.ExpiresAt != nil {
+		expiresAt = *b.ExpiresAt
+		if expiresAt.IsZero() {
+			expiresAt = setZeroBound
+		}
+	}
+	return notBefore, expiresAt
 }
