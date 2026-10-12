@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 package hub
 
@@ -311,7 +311,14 @@ func TestArtifactRefsAdmittedAfterAuthzInChatV2(t *testing.T) {
 func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
 	got := hubCallSites(t, "artifactRefResolver", "contextWithCredentialContext")
 
-	wantResolver := map[stripSiteKey]bool{{"message_artifacts.go", "resolveArtifactRefs"}: true}
+	// artifactRecipientWarning builds it too, for the warning-only
+	// recipient check (ptone/scion#4575), which never resolves anything for
+	// the caller of ctx; it is pinned below and by
+	// TestArtifactRecipientCheckIsWarningOnly.
+	wantResolver := map[stripSiteKey]bool{
+		{"message_artifacts.go", "resolveArtifactRefs"}:      true,
+		{"message_artifacts.go", "artifactRecipientWarning"}: true,
+	}
 	if len(got["artifactRefResolver"]) == 0 {
 		t.Fatal("found no artifactRefResolver call sites: scanner broken")
 	}
@@ -331,8 +338,10 @@ func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
 		}
 	}
 
-	if calls, ok := funcCalls(t, stripSiteKey{"message_artifacts.go", "resolveArtifactRefs"}, "requestCredentialBindsIdentity"); !ok || !calls {
-		t.Error("resolveArtifactRefs must check that the request credential binds the current identity before resolving")
+	for key := range wantResolver {
+		if calls, ok := funcCalls(t, key, "requestCredentialBindsIdentity"); !ok || !calls {
+			t.Errorf("%s must check that the request credential binds the current identity before building the artifact service", key.function)
+		}
 	}
 }
 

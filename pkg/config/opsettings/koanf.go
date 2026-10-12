@@ -63,6 +63,11 @@ var layer0Prefixes = []string{
 	// hold it; the server-config API additionally refuses it in every mode,
 	// including workstation hubs where other Layer-0 keys are writable.
 	"server.hub.class",
+	// Test identity workload issuers (ptone/scion#4240, phase X2): the
+	// startup allowlist of workload subjects that may hold an issuer
+	// delegation. Layer-0 so no DB section can hold it; the server-config
+	// API additionally refuses it in every mode.
+	"server.hub.test_identities",
 	// Logging
 	"server.log_level",
 	"server.log_format",

@@ -47,6 +47,14 @@ export interface User {
   avatar?: string | undefined;
   role?: UserRole | undefined;
   preferences?: UserPreferences | undefined;
+  /** Set only for a test identity web session (GET /auth/me). */
+  testIdentity?: TestIdentitySessionInfo | undefined;
+}
+
+/** The testIdentity member of GET /auth/me for a test identity web session. */
+export interface TestIdentitySessionInfo {
+  /** The identity's expiry, ISO 8601. The session ends then. */
+  expiresAt: string;
 }
 
 /**
@@ -63,6 +71,7 @@ export interface AuthMeResponse {
   avatar?: string;
   role?: UserRole;
   preferences?: UserPreferences;
+  testIdentity?: TestIdentitySessionInfo;
 }
 
 /**
@@ -402,6 +411,7 @@ export interface AgentMessageabilityDetail extends AgentMessageability {
  * Agent runtime activity (only meaningful when phase=running)
  */
 export type AgentActivity =
+  | 'initializing'
   | 'working'
   | 'thinking'
   | 'executing'
@@ -1533,9 +1543,10 @@ export interface GCPServiceAccountAssignStatus {
 }
 
 /**
- * Mapping state of one Kubernetes broker profile for an account. 'not_mapped'
- * is shown only on an authoritative report (complete and fresh); otherwise an
- * unmapped account is 'unknown' with `unknownReason`.
+ * Mapping state of one Kubernetes broker profile for an account: the hub's
+ * shared mapping decision, the one the dispatch refusal uses. 'mapped' and
+ * 'not_mapped' need a complete, current report; otherwise the state is
+ * 'unknown' with `unknownReason`. 'not_reported' means no report at all.
  */
 export type GCPSAMappingState = 'mapped' | 'not_mapped' | 'unknown' | 'not_reported';
 
@@ -1559,7 +1570,8 @@ export interface GCPServiceAccountProfileMapping {
   ambiguous?: boolean;
   /**
    * Why the state is 'unknown': 'report_missing', 'report_incomplete',
-   * 'report_old_version' or 'report_stale'.
+   * 'report_old_version', 'report_stale', 'runtime_unrecognized' or
+   * 'ambiguous_mapping' (with `ambiguous` set).
    */
   unknownReason?: string;
 }

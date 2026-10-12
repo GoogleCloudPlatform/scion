@@ -208,20 +208,17 @@ describe('scion-chat-members thread default', () => {
     expect(divider(el)).toBeNull();
   });
 
-  it('renders no sub-heading and no divider when the default agent is filtered out', async () => {
+  it('renders no sub-heading and no divider when the default agent is not a member', async () => {
     const el = await mount([
       agent({ id: 'agent-1', displayName: 'Coder', slug: 'coder' }),
       agent({ id: 'agent-2', displayName: 'Reviewer', slug: 'reviewer' }),
     ]);
-    el.defaultAgentSlug = 'reviewer';
-    el.unreadFromIds = ['agent-1'];
-    // Switch to the unread filter, which hides Reviewer (agent-2).
-    (el.shadowRoot?.querySelectorAll('.filter-toggle button')[1] as HTMLElement)?.click();
+    el.defaultAgentSlug = 'planner';
     await el.updateComplete;
 
     expect(subheading(el)).toBeNull();
     expect(divider(el)).toBeNull();
-    expect(rowNames(el)).toEqual(['Coder']);
+    expect(rowNames(el)).toEqual(['Coder', 'Reviewer']);
   });
 
   it('shows the sub-heading with no divider when the default is the only agent', async () => {
@@ -232,6 +229,51 @@ describe('scion-chat-members thread default', () => {
     expect(subheading(el)?.textContent?.trim()).toBe('Thread default');
     expect(divider(el)).toBeNull();
     expect(rowNames(el)).toEqual(['Coder']);
+  });
+});
+
+describe('scion-chat-members unread', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function memberRow(el: ScionChatMembers, name: string): Element | undefined {
+    return [...(el.shadowRoot?.querySelectorAll('.member-item') ?? [])].find(
+      (row) => row.querySelector('.member-name')?.textContent?.trim() === name
+    );
+  }
+
+  it('shows the unread dot on members in unreadFromIds and lists every member', async () => {
+    const el = await mount([
+      agent({ id: 'agent-1', displayName: 'Coder', slug: 'coder' }),
+      agent({ id: 'agent-2', displayName: 'Reviewer', slug: 'reviewer' }),
+    ]);
+    el.humans = [
+      { id: 'user-1', kind: 'user', displayName: 'Ada' },
+      { id: 'user-2', kind: 'user', displayName: 'Bob' },
+    ];
+    el.unreadFromIds = ['agent-1', 'user-2'];
+    await el.updateComplete;
+
+    expect(memberRow(el, 'Coder')?.querySelector('.unread-dot')).not.toBeNull();
+    expect(memberRow(el, 'Reviewer')?.querySelector('.unread-dot')).toBeNull();
+    expect(memberRow(el, 'Ada')?.querySelector('.unread-dot')).toBeNull();
+    expect(memberRow(el, 'Bob')?.querySelector('.unread-dot')).not.toBeNull();
+  });
+
+  it('renders no All/Unread filter control, only the sort menu', async () => {
+    const el = await mount([agent()]);
+    el.unreadFromIds = ['agent-1'];
+    await el.updateComplete;
+
+    const toolbar = el.shadowRoot?.querySelector('.members-toolbar');
+    expect(toolbar?.querySelector('.sort-btn')).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('.filter-toggle')).toBeNull();
+    const labels = [...(el.shadowRoot?.querySelectorAll('button') ?? [])].map((b) =>
+      b.textContent?.trim()
+    );
+    expect(labels).not.toContain('All');
+    expect(labels).not.toContain('Unread');
   });
 });
 

@@ -265,14 +265,14 @@ runtimes:
 	}
 }
 
-// TestResolveManagerForOpts_SettingsDecodeErrorIsLogged proves
-// resolveManagerForOpts no longer swallows a settings decode error
+// TestResolveManagerForOpts_SettingsLoadErrorIsLogged proves
+// resolveManagerForOpts no longer swallows a settings load error
 // silently: it must log a warning identifying the project directory and the
 // error, then fall back to the broker's default manager. A malformed
 // settings.yaml (not the SCION_AUTO_EXPOSE_PORTS collision, which the
-// mapper fix above avoids entirely) is used to force a real decode error
+// mapper fix above avoids entirely) is used to force a real load error
 // deterministically.
-func TestResolveManagerForOpts_SettingsDecodeErrorIsLogged(t *testing.T) {
+func TestResolveManagerForOpts_SettingsLoadErrorIsLogged(t *testing.T) {
 	clearSCIONEnv(t)
 	t.Setenv("HOME", t.TempDir())
 
@@ -281,10 +281,11 @@ func TestResolveManagerForOpts_SettingsDecodeErrorIsLogged(t *testing.T) {
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// profiles is declared as a scalar here instead of a map, forcing
-	// VersionedSettings' Unmarshal to fail.
+	// The file is not valid YAML, so the load fails. A wrong-typed value
+	// (profiles as a scalar, say) no longer does: the settings loader falls
+	// back to the default for that key and the load succeeds.
 	malformedYAML := `schema_version: "1"
-profiles: "not-a-map"
+profiles: [not valid yaml
 `
 	if err := os.WriteFile(filepath.Join(projectPath, "settings.yaml"), []byte(malformedYAML), 0644); err != nil {
 		t.Fatal(err)
@@ -302,14 +303,14 @@ profiles: "not-a-map"
 	mgr, rtName := srv.resolveManagerForOpts(opts)
 
 	if mgr != srv.manager {
-		t.Error("expected default manager when settings fail to decode")
+		t.Error("expected default manager when settings fail to load")
 	}
 	if rtName != srv.runtime.Name() {
-		t.Errorf("expected the broker's default runtime %q when settings fail to decode, got %q", srv.runtime.Name(), rtName)
+		t.Errorf("expected the broker's default runtime %q when settings fail to load, got %q", srv.runtime.Name(), rtName)
 	}
 	logged := logBuf.String()
 	if !strings.Contains(logged, "level=WARN") {
-		t.Errorf("expected a WARN-level log entry for the settings decode error, got: %s", logged)
+		t.Errorf("expected a WARN-level log entry for the settings load error, got: %s", logged)
 	}
 	if !strings.Contains(logged, projectPath) {
 		t.Errorf("expected the logged warning to include the project dir %q, got: %s", projectPath, logged)

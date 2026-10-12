@@ -740,7 +740,7 @@ func envArgs(env map[string]string) []string {
 //	    while tmux has-session -t scion 2>/dev/null; do sleep 2; done
 func buildEntrypoint(cfg RunConfig) ([]string, error) {
 	// Build the harness command line.
-	cmdLine, ok := harnessCmdLine(cfg)
+	cmdLine, ok := harnessCmdLine(cfg, harnessCmdLineOptions{})
 	if !ok {
 		return nil, fmt.Errorf("cloudrun-sandbox: no harness provided")
 	}
