@@ -109,11 +109,12 @@ func projectAppStatus(t *testing.T, s store.Store, projectID string) *store.GitH
 	return project.GitHubAppStatus
 }
 
-// assertNoCredentialInLog fails if any credential value appears in the log.
+// assertNoCredentialInLog fails if any non-empty credential value appears in
+// the log. Empty values are skipped: every string contains "".
 func assertNoCredentialInLog(t *testing.T, log string, values map[string]string) {
 	t.Helper()
 	for name, val := range values {
-		if strings.Contains(log, val) {
+		if val != "" && strings.Contains(log, val) {
 			t.Errorf("resource log contains the value of %s: %s", name, log)
 		}
 	}
