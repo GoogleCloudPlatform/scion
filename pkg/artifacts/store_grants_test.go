@@ -433,13 +433,13 @@ func TestStorePutReviewGrant(t *testing.T) {
 		if created, err := st.PutReviewGrant(ctx, review("user:r"), 10, "project-1"); err != nil || created {
 			t.Errorf("repeat: %v %v", created, err)
 		}
-		// Read is raised; write and admin are never lowered.
+		// Read, write and admin are never replaced.
 		if _, err := st.PutGrant(ctx, &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal,
 			SubjectRef: "user:read", Permission: GrantRead, CreatedAt: time.Now()}, 10, false); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.PutReviewGrant(ctx, review("user:read"), 10, "project-1"); err != nil || permOf("user:read") != GrantReview {
-			t.Errorf("raise read: %v %q", err, permOf("user:read"))
+		if _, err := st.PutReviewGrant(ctx, review("user:read"), 10, "project-1"); !errors.Is(err, ErrReviewGrantRefused) || permOf("user:read") != GrantRead {
+			t.Errorf("replace read: %v %q", err, permOf("user:read"))
 		}
 		if _, err := st.PutGrant(ctx, &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal,
 			SubjectRef: "user:adm", Permission: GrantAdmin, CreatedAt: time.Now()}, 10, false); err != nil {
@@ -501,8 +501,9 @@ func TestStorePutReviewGrant(t *testing.T) {
 }
 
 // TestStorePutGrantReview: PutGrant stores a review grant to a user
-// principal, raises and lowers to and from it like any level, and refuses
-// review for an agent or a scope, on both dialects (ptone/scion#4538).
+// principal, repeats it, raises it to write, never puts review over a
+// read, write or admin grant (ErrReviewReplacesAccess), and refuses review
+// for an agent or a scope, on both dialects (ptone/scion#4538).
 func TestStorePutGrantReview(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
@@ -525,10 +526,38 @@ func TestStorePutGrantReview(t *testing.T) {
 		if !found {
 			t.Errorf("review grant not stored: %+v", grants)
 		}
+		again := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:rv",
+			Permission: GrantReview, CreatedAt: time.Now()}
+		if created, err := st.PutGrant(ctx, again, 10, false); err != nil || created {
+			t.Errorf("repeat review: %v %v", created, err)
+		}
 		up := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:rv",
 			Permission: GrantWrite, CreatedAt: time.Now()}
 		if created, err := st.PutGrant(ctx, up, 10, false); err != nil || created {
 			t.Errorf("review to write: %v %v", created, err)
+		}
+		// Back to review over write, and over read or admin: refused, the
+		// grant unchanged.
+		for _, perm := range []string{GrantWrite, GrantRead, GrantAdmin} {
+			set := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:rv",
+				Permission: perm, CreatedAt: time.Now()}
+			if _, err := st.PutGrant(ctx, set, 10, false); err != nil {
+				t.Fatal(err)
+			}
+			down := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:rv",
+				Permission: GrantReview, CreatedAt: time.Now()}
+			if _, err := st.PutGrant(ctx, down, 10, false); !errors.Is(err, ErrReviewReplacesAccess) {
+				t.Errorf("review over %s: %v", perm, err)
+			}
+			gs, err := st.ListGrants(ctx, a.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, x := range gs {
+				if x.SubjectRef == "user:rv" && x.Permission != perm {
+					t.Errorf("grant changed from %s to %s", perm, x.Permission)
+				}
+			}
 		}
 		for _, bad := range []*Grant{
 			{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "agent:x", Permission: GrantReview},

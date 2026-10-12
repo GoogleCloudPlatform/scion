@@ -288,6 +288,10 @@ func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend
 // a caller whose read check answered readable. CanReview is true only for
 // a reader whose access allows review versions and nothing more: it adds
 // nothing when CanPublish is true, and it is never true without the read.
+// capabilities runs only after readableArtifact, so it always passes true;
+// the parameter states that precondition where the capability is
+// decided, and the kill check for "canReview without the read check"
+// mutates it.
 func reviewCapability(readable bool, access writeAccess) (canPublish, canReview bool) {
 	if !readable {
 		return false, false

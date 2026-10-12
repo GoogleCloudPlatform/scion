@@ -106,21 +106,9 @@ func TestReviewGrantAllowed(t *testing.T) {
 			if pend := f.createPending(reviewer, "/api/v1/artifacts/"+id+"/versions", req); pend.Version.Seq != 2 {
 				t.Errorf("reviewer appended seq %d", pend.Version.Seq)
 			}
-			// Repeating it is a 200 on the same grant; raising a read
-			// grant to review is allowed too (the read grant is also what
-			// lets that user read before the review grant).
+			// Repeating it is a 200 on the same grant.
 			if rec := f.postGrantBody(granter, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)); rec.Code != http.StatusOK {
 				t.Errorf("repeat: %d", rec.Code)
-			}
-			if _, err := f.store.PutGrant(context.Background(), &Grant{ID: uuid.NewString(), ArtifactID: id,
-				SubjectKind: SubjectPrincipal, SubjectRef: "user:raised", Permission: GrantRead, CreatedAt: time.Now()}, 100, false); err != nil {
-				t.Fatal(err)
-			}
-			if rec := f.postGrantBody(granter, id, reviewBody(SubjectPrincipal, "user:raised", GrantReview)); rec.Code != http.StatusOK {
-				t.Errorf("raise read to review: %d", rec.Code)
-			}
-			if g := f.grantOf(id, "user:raised"); g == nil || g.Permission != GrantReview {
-				t.Errorf("raised grant: %+v", g)
 			}
 		})
 	}
@@ -223,12 +211,13 @@ func TestReviewGrantUserOwnedUnchanged(t *testing.T) {
 	}
 }
 
-// TestReviewGrantNeverLowersAdmin: a user who already holds a write or an
-// admin grant keeps it; the review grant is refused with the same 403 as
-// every other refusal, so the granter learns nothing about the existing
-// grant.
+// TestReviewGrantNeverLowersAdmin: a user who already holds a read, write
+// or admin grant keeps it; the review grant is refused with the same 403
+// as every other refusal, so the granter learns nothing about the
+// existing grant. (reviewer also reads through the home project, so the
+// refusal comes from the existing grant, not the subject check.)
 func TestReviewGrantNeverLowersAdmin(t *testing.T) {
-	for _, perm := range []string{GrantWrite, GrantAdmin} {
+	for _, perm := range []string{GrantRead, GrantWrite, GrantAdmin} {
 		t.Run(perm, func(t *testing.T) {
 			f, id := newReviewGrantFixture(t)
 			if _, err := f.store.PutGrant(context.Background(), &Grant{ID: uuid.NewString(), ArtifactID: id,
@@ -379,5 +368,30 @@ func TestAdminForbiddenCopy(t *testing.T) {
 		if !strings.Contains(e.Error.Message, want) {
 			t.Errorf("message %q lacks %q", e.Error.Message, want)
 		}
+	}
+}
+
+// TestReviewGrantKeepsPrincipalRead: a user whose only read is a principal
+// read grant (no home-project membership) cannot receive a review grant
+// through the review-access path. That grant would take the row of the
+// read grant, and with it the read. The request gets the same 403 as
+// every other refusal, and the user keeps the read grant and can still
+// read the artifact.
+func TestReviewGrantKeepsPrincipalRead(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	outsider := principal{PrincipalKindUser, "user-granted", ""}
+	f.grantPrincipal(id, outsider)
+	ref := PrincipalRef(outsider.kind, outsider.ref)
+	want := response(f.postGrantBody(member, id, "junk"))
+	for _, granter := range []principal{delegator, projAdmin} {
+		if got := response(f.postGrantBody(granter, id, reviewBody(SubjectPrincipal, ref, GrantReview))); got != want {
+			t.Errorf("%s: review over the only read grant:\n%s\nwant\n%s", granter.ref, got, want)
+		}
+	}
+	if g := f.grantOf(id, ref); g == nil || g.Permission != GrantRead {
+		t.Errorf("read grant changed: %+v", g)
+	}
+	if rec := f.do(&outsider, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("GET after the refusal: %d", rec.Code)
 	}
 }

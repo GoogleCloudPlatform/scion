@@ -33,8 +33,10 @@ import (
 
 // Grants (design §5.2, D7, D16). A grant gives a principal (a user or an
 // agent) or a scope (a project's members) read, write or admin on one
-// artifact, or gives a user review (read, and versions of kind review
-// only; ptone/scion#4538). Grants are read at request time by the same read check every
+// artifact, or gives a user review (ptone/scion#4538): versions of kind
+// review only, with no read of its own; it counts only while the user
+// reads the artifact through the home project or a grant to one of their
+// projects. Grants are read at request time by the same read check every
 // route uses (canReadWith), so a grant never reaches past what the
 // caller's credential permits (Host.Permits, for agents including the live
 // delegation chain).
@@ -47,12 +49,17 @@ import (
 // All of them need canAdminister, with one exception (design D24): on an
 // artifact owned by an agent, the agent's delegating user and an admin of
 // the home project may also POST a review grant to a user who can already
-// read the artifact, the access a human reviewer needs (putReviewGrant). The home project's read grant (the
+// read the artifact through the home project or a grant to one of their
+// projects, the access a human reviewer needs (putReviewGrant). The home project's read grant (the
 // scope grant naming the current home scope) is listed with home set; its
 // permission may be read or write, and it cannot be removed. A scope grant
 // to any other project needs the host to allow sharing across projects
 // (CrossScopeSharing) when it is created; existing grants keep working if
 // that is turned off later.
+
+// CodeReviewReplacesAccess is the error code of a review grant refused
+// because the user holds a principal read, write or admin grant.
+const CodeReviewReplacesAccess = "review_replaces_access"
 
 // MaxGrantsPerArtifact caps the principal and scope grants of one
 // artifact, the home project's included.
@@ -303,6 +310,10 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 	case errors.Is(err, ErrHomeGrantAdmin):
 		writeError(w, http.StatusBadRequest, "bad_request", "the home project's grant may be read or write")
 		return
+	case errors.Is(err, ErrReviewReplacesAccess):
+		writeError(w, http.StatusBadRequest, CodeReviewReplacesAccess,
+			"a review grant cannot replace a user's read, write or admin grant")
+		return
 	case errors.Is(err, ErrCrossScopeDisabled):
 		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 			"sharing artifacts with other projects is turned off on this hub")
@@ -331,15 +342,17 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 // artifact owned by an agent, the agent's delegating user and an admin of
 // the home project may give a user a review grant (ptone/scion#4538), the
 // access a reviewer needs, and nothing else: no read, write or admin grant,
-// no grant to an agent or a scope. The user must already be able to read
-// the artifact without the new grant (reviewSubjectCanRead), so review
-// never widens who can read it. The owning agent itself, like every agent,
+// no grant to an agent or a scope. The user must already read the
+// artifact through the home project or a grant to one of their projects
+// (reviewSubjectCanRead), and an existing principal grant other than
+// review is never replaced, so the grant never takes away the read it
+// counts with. The owning agent itself, like every agent,
 // is refused (sharing is user-only). The caller's credential must permit
 // artifact.manage in the home scope, as for an administrator. Every
 // refusal, a malformed body and a subject that cannot read included, is
 // the 403 a non-administrator gets today, so the request says nothing
 // about why. The store re-checks the home and owner under the artifact's
-// lock and never lowers an existing write or admin grant.
+// lock and never replaces an existing read, write or admin grant.
 func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) {
 	ctx := r.Context()
 	subject, ok := s.reviewGrantSubject(r, a)

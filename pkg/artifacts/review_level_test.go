@@ -261,14 +261,24 @@ func TestReviewLevelLostReadIsMissing(t *testing.T) {
 	}
 }
 
-// TestReviewLevelWriteWins: a caller whose grant is raised from review to
-// write is a full writer (canPublish, no canReview).
+// TestReviewLevelWriteWins: a caller holding a principal review grant and,
+// at the same time, write through a scope grant to one of its projects is
+// a full writer: canPublish without canReview, and a publish version can
+// be started.
 func TestReviewLevelWriteWins(t *testing.T) {
 	f := newReviewLevelFixture(t)
-	f.setLevel(rvOnly, GrantWrite)
+	f.host.allow(rvOnly, "project-2", PermissionRead, PermissionCreate)
+	insertGrant(f.fixture, f.id, SubjectScope, "project-2", GrantWrite, nil)
 	resp := decodeInto[ArtifactResponse](t, f.do(&rvOnly, http.MethodGet, "/api/v1/artifacts/"+f.id, nil, nil))
 	if !resp.CanPublish || resp.CanReview {
-		t.Errorf("write grantee: publish=%v review=%v", resp.CanPublish, resp.CanReview)
+		t.Errorf("review grant plus scope write: publish=%v review=%v", resp.CanPublish, resp.CanReview)
+	}
+	if g := f.grantOf(f.id, PrincipalRef(rvOnly.kind, rvOnly.ref)); g == nil || g.Permission != GrantReview {
+		t.Fatalf("principal grant: %+v", g)
+	}
+	rec := f.postJSON(&rvOnly, "/api/v1/artifacts/"+f.id+"/versions", with(f.v1, "plan.md", "# New\n").manifest("plan.md"))
+	if rec.Code != http.StatusCreated {
+		t.Errorf("publish start: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -418,6 +428,24 @@ func TestAdminGrantRouteReview(t *testing.T) {
 			t.Errorf("review to %s %s: %d %s", tc.kind, tc.ref, rec.Code, rec.Body.String())
 		}
 	}
+	// A repeat is a 200; review raised to read, write or admin works.
+	if rec, _ := f.putGrant(userU, id, SubjectPrincipal, "user:friend", GrantReview); rec.Code != http.StatusOK {
+		t.Errorf("repeat review: %d %s", rec.Code, rec.Body.String())
+	}
+	// Review never replaces a user's read, write or admin grant: 400 with
+	// its own code, and the grant is unchanged.
+	for _, perm := range []string{GrantRead, GrantWrite, GrantAdmin} {
+		if rec, _ := f.putGrant(userU, id, SubjectPrincipal, "user:friend", perm); rec.Code != http.StatusOK {
+			t.Fatalf("review to %s: %d %s", perm, rec.Code, rec.Body.String())
+		}
+		rec, _ := f.putGrant(userU, id, SubjectPrincipal, "user:friend", GrantReview)
+		if rec.Code != http.StatusBadRequest || errCode(t, rec) != CodeReviewReplacesAccess {
+			t.Errorf("review over %s: %d %s", perm, rec.Code, rec.Body.String())
+		}
+		if g := f.grantOf(id, "user:friend"); g == nil || g.Permission != perm {
+			t.Errorf("grant after review over %s: %+v", perm, g)
+		}
+	}
 }
 
 // TestReviewGrantSubjectCheckFailureIsLoud: when the subject read check
@@ -463,12 +491,14 @@ func (h noSubjectHost) MayGrantReview(ctx context.Context, ownerAgentID, homeSco
 	return h.Host.(ReviewGrantAuthority).MayGrantReview(ctx, ownerAgentID, homeScope)
 }
 
-// TestReviewSubjectParity: the D24 subject check and a real GET by the
-// same user agree, allow and deny alike: a home member, a read grantee
-// and a member of a project with a scope grant can read and may receive
-// review; an outsider and a user holding only a review grant can do
-// neither.
-func TestReviewSubjectParity(t *testing.T) {
+// TestReviewSubjectIsGetWithoutOwnGrant: the review-access subject check
+// answers what a real GET by the same user answers once that user's own
+// principal grant is left out (the review grant would take its row).
+// A home member and a member of a project with a scope grant: both allow.
+// An outsider and a user holding only a review grant: both refuse.
+// A user whose only read is a principal read grant: GET allows, the
+// subject check refuses.
+func TestReviewSubjectIsGetWithoutOwnGrant(t *testing.T) {
 	f, id := newReviewGrantFixture(t)
 	f.host.crossScope = true
 	homeMember := principal{PrincipalKindUser, "user-home", ""}
@@ -482,10 +512,12 @@ func TestReviewSubjectParity(t *testing.T) {
 	insertGrant(f, id, SubjectScope, "project-2", GrantRead, nil)
 	insertGrant(f, id, SubjectPrincipal, PrincipalRef(reviewOnly.kind, reviewOnly.ref), GrantReview, nil)
 	for _, tc := range []struct {
-		p    principal
-		want bool
+		p                 principal
+		wantGet, wantSubj bool
 	}{
-		{homeMember, true}, {readGrantee, true}, {scopeMember, true}, {stranger, false}, {reviewOnly, false},
+		{homeMember, true, true}, {scopeMember, true, true},
+		{stranger, false, false}, {reviewOnly, false, false},
+		{readGrantee, true, false},
 	} {
 		t.Run(tc.p.ref, func(t *testing.T) {
 			get := f.do(&tc.p, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil)
@@ -502,8 +534,8 @@ func TestReviewSubjectParity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if reads != tc.want || subject != tc.want {
-				t.Errorf("GET reads=%v, subject check=%v, want both %v", reads, subject, tc.want)
+			if reads != tc.wantGet || subject != tc.wantSubj {
+				t.Errorf("GET reads=%v, subject check=%v, want %v %v", reads, subject, tc.wantGet, tc.wantSubj)
 			}
 		})
 	}

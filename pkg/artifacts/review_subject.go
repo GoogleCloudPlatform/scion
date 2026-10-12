@@ -23,10 +23,10 @@ import (
 // The subject read check of a review grant (design D24, ptone/scion#4538).
 //
 // A review grant is given only to a user who can already read the
-// artifact. A review grant is never itself a read path, and the write
-// decision asks again at every use, so the check here only refuses a grant
-// that could never be used; it is not what keeps review from widening
-// read. That is a question
+// artifact through the home project or a grant to one of the user's
+// projects. A review grant is never itself a read path, and the write
+// decision asks again at every use, so the check here refuses a grant
+// that could never be used. That is a question
 // about a user other than the caller. The service answers it with the one
 // read decision, canReadWith, asked through subjectReadHost, a Host whose
 // caller is the subject. Nothing here grants access, serves content or
@@ -47,10 +47,19 @@ type ReviewSubjectAuthority interface {
 }
 
 // reviewSubjectCanRead reports whether the user principal subject
-// ("user:<id>") can read a without a new grant: canReadWith, with
-// subjectReadHost as the host and a's current grants. A host without
-// ReviewSubjectAuthority answers no (fail closed). A failed lookup is an
-// error, never a refusal.
+// ("user:<id>") can read a through a path the review grant leaves in
+// place: canReadWith, with subjectReadHost as the host and a's current
+// grants except the subject's own principal grant. A subject has one
+// principal grant per artifact, and the review grant takes its row, so
+// that grant can never be the read a review grant counts with; the paths
+// left are the home project and grants to the subject's projects. A host
+// without ReviewSubjectAuthority answers no (fail closed). A failed lookup
+// is an error, never a refusal.
+//
+// By design, whether the grant is made follows this answer, so the outcome
+// of a review-access request reflects whether the named user can already
+// read the artifact. That is accepted: only the delegating user and
+// home-project admins reach this check, and every grant made is recorded.
 func (s *Service) reviewSubjectCanRead(ctx context.Context, b backend, a *Artifact, subject string) (bool, error) {
 	auth, ok := s.host.(ReviewSubjectAuthority)
 	if !ok {
@@ -65,12 +74,24 @@ func (s *Service) reviewSubjectCanRead(ctx context.Context, b backend, a *Artifa
 	readable := canReadWith(ctx, h, a, func() ([]Grant, error) {
 		gs, err := b.store.ListGrants(ctx, a.ID)
 		loadErr = err
-		return gs, err
+		return withoutPrincipal(gs, subject), err
 	})
 	if err := errors.Join(loadErr, h.err); err != nil {
 		return false, err
 	}
 	return readable, nil
+}
+
+// withoutPrincipal returns gs without the principal grant naming ref.
+func withoutPrincipal(gs []Grant, ref string) []Grant {
+	out := make([]Grant, 0, len(gs))
+	for _, g := range gs {
+		if g.SubjectKind == SubjectPrincipal && g.SubjectRef == ref {
+			continue
+		}
+		out = append(out, g)
+	}
+	return out
 }
 
 // subjectReadHost is the Host canReadWith asks for reviewSubjectCanRead:

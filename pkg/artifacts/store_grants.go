@@ -74,7 +74,10 @@ func reviewSubjectOK(p, kind, ref string) bool {
 
 // putGrant is PutGrant and, with reviewHome set, PutReviewGrant: then the
 // artifact must still be owned by an agent and homed in reviewHome, and an
-// existing write or admin grant for the subject is never lowered.
+// existing grant for the subject other than review is never replaced. A
+// review grant never replaces a read, write or admin grant on either path:
+// the subject's one principal row would lose the read the review counts
+// with.
 func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, reviewHome string) (bool, error) {
 	if g == nil || (g.SubjectKind != SubjectPrincipal && g.SubjectKind != SubjectScope) || g.SubjectRef == "" ||
 		!validGrantPermission(g.Permission) || !reviewSubjectOK(g.Permission, g.SubjectKind, g.SubjectRef) {
@@ -118,8 +121,11 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &created)
 	switch {
 	case err == nil:
-		if reviewHome != "" && perm != GrantRead && perm != GrantReview {
+		if reviewHome != "" && perm != GrantReview {
 			return false, ErrReviewGrantRefused
+		}
+		if g.Permission == GrantReview && perm != GrantReview {
+			return false, ErrReviewReplacesAccess
 		}
 		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_grant SET permission = ? WHERE id = ?`), g.Permission, id); err != nil {
 			return false, fmt.Errorf("artifacts: update grant: %w", err)

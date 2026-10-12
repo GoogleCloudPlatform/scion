@@ -510,8 +510,8 @@ func refuseKind(w http.ResponseWriter, access writeAccess, kind string) bool {
 // its credential must permit publishing (artifact.create) in the home
 // scope, and it must own the artifact (accessOwner), hold an unexpired
 // write or admin grant (accessWriteGrant), or hold an unexpired review
-// grant while it can read the artifact through another path
-// (accessReviewGrant, review versions only). A grant is a principal
+// grant while it reads the artifact through the home project or a grant
+// to one of its projects (accessReviewGrant, review versions only). A grant is a principal
 // grant for the caller or a scope grant for a scope the host authorizes it
 // to publish in. The home scope's own read grant never confers write.
 // Publishing a version is publishing; ownership and grants decide which
@@ -530,8 +530,8 @@ func (s *Service) canWriteErr(ctx context.Context, b backend, a *Artifact) (writ
 // admin grant wins over a review grant held at the same time.
 //
 // A review grant never makes an artifact readable (it is in no read set),
-// so its holder must read the artifact another way: as a home-project
-// member, or through a read, write or admin grant. That is asked again
+// so its holder must read the artifact another way: through the home
+// project or a grant to one of their projects. That is asked again
 // here, on every use, with canReadWith (the one read decision), so losing
 // the other read path ends review access at once, with nothing to revoke.
 func (s *Service) canWritePermittedErr(ctx context.Context, b backend, a *Artifact, permitted bool) (writeAccess, error) {
