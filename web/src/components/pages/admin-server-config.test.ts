@@ -885,10 +885,33 @@ describe('scion-page-admin-server-config', () => {
       expect(server?.broker?.host).toBeUndefined();
     });
 
-    it('an empty runtime broker host shows 0.0.0.0 on a hosted hub', async () => {
-      element = await createComponent(createFetchHandler(withBrokerHost(undefined, {})));
+    it('a typed runtime broker host is sent on a workstation hub', async () => {
+      const payload = await capturePut(withBrokerHost(undefined, workstation), (el) => {
+        el.brokerHost = '10.0.0.5';
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.broker?.host).toBe('10.0.0.5');
+    });
+
+    it('an env-pinned runtime broker host shows no effective hint', async () => {
+      const config = withBrokerHost(undefined, {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
       const field = brokerHostField(element);
-      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain('environment variable');
+      expect(field.querySelector('.read-only-value')?.textContent).not.toContain('127.0.0.1');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 0.0.0.0 on a hosted hub', async () => {
+      const config = withBrokerHost(undefined, { settings_tier: 'db' });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-value')?.textContent).toContain('0.0.0.0');
       expect(field.querySelector('.broker-host-effective')).toBeNull();
     });
 

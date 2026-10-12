@@ -2105,7 +2105,9 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   /**
    * Runtime broker host. On a workstation hub an unset value (empty or
-   * 0.0.0.0) shows the address the broker binds to instead.
+   * 0.0.0.0) shows the address the broker binds to instead. An env-pinned
+   * value shows as loaded, with no effective hint: the page does not see
+   * the environment value.
    */
   private renderBrokerHostField(): ReturnType<typeof html> {
     const onInput = (e: Event) => {
@@ -2117,6 +2119,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.brokerHost || '0.0.0.0',
         html`<sl-input value=${this.brokerHost || '0.0.0.0'} @sl-input=${onInput}></sl-input>`
       );
+    }
+    if (this.readOnlyReason('server.broker.host') === 'env') {
+      return this.renderFieldValue('server.broker.host', this.brokerHost, html``);
     }
     const unset = isUnsetBrokerHost(this.brokerHost);
     return html`${this.renderFieldValue(
