@@ -184,6 +184,8 @@ Registering a broker never associates it with a project. Brokers registered befo
 
 Register, re-register, rotate, link and unlink events in the audit log record the credential kind and credential ID next to the user, so you can tell whether a sign-in or a specific token was used.
 
+With the `hub.conduit` [experiment](/scion/reference/experiments/) on, each of the Runtime Broker's Conduit sessions is tied to the secret it was admitted with. Deregistering the broker, rotating or replacing its secret, or a secret that is no longer active closes those sessions with `4401 authz_expired`. The broker retries with backoff (1 to 60 seconds); after a rotation it is admitted again with its new secret. A session that cannot be checked (for example during a database error) stays open until the next check.
+
 ## Headless registration with a hub token
 
 To register a broker on a machine where you cannot sign in interactively (a build host or a VM), mint a short-lived hub-boundary token on a machine where you are signed in, then use it on the host.

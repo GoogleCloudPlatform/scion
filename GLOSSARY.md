@@ -213,7 +213,7 @@ _See also_: Harness-config, Profile
 
 **Port Forwarding**:
 The feature that allows users, developers, and external systems to access HTTP services running inside agent containers securely via the Hub's reverse proxy. Requests are routed over a persistent, authenticated outbound WebSocket connection from the container to the Hub.
-_Avoid_: tunnel (that term is reserved for **Tunnel (Conduit user tunnel)**), docker proxy, ingress
+_Avoid_: tunnel (that term is reserved for **Tunnel (Conduit user tunnel)**; the route `/ports/tunnel` and its error text keep their legacy names), docker proxy, ingress
 _See also_: Auto-Expose, Hub, Tunnel (Conduit user tunnel)
 
 **Tunnel (Conduit user tunnel)**:
