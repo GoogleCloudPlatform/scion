@@ -36,6 +36,10 @@ import (
 // transient read errors are retried, and a refused (403) or not-found (404)
 // read is interpreted by caller kind, because the Hub answers an agent
 // caller with 404 both for a missing agent and for one it may not read.
+//
+// The CLI still has its own copy of these rules (waitForAgentLaunch in
+// cmd/launch_wait.go); a change to one must be applied to the other until
+// the CLI is moved onto WaitForLaunch.
 
 // The wait timings are variables so tests can shorten them.
 var (
@@ -58,6 +62,12 @@ var (
 	launchUnreadableBackoffMax = 2 * time.Second
 	// launchFetchTimeout bounds one GET agent while waiting.
 	launchFetchTimeout = 30 * time.Second
+	// launchFailureSettle is how long a failed phase (error or stopped)
+	// seen while the launch is still active is re-read for the
+	// launch-ending write that carries the launch error code. The Hub
+	// allows that state; the code arrives with the write that ends the
+	// launch.
+	launchFailureSettle = 5 * time.Second
 )
 
 // launchNow and launchAfter are the clock of the unreadable-status retry;
@@ -76,6 +86,9 @@ var ErrLaunchWaitTimeout = errors.New("launch wait budget ran out while the agen
 // not-found error) by WaitForLaunch when a caller that is not an agent gets
 // a lasting not-found for the agent being waited for.
 var ErrAgentDeletedDuringLaunch = errors.New("agent was deleted while launching")
+
+// ErrLaunchNotRunning matches *LaunchNotRunningError with errors.Is.
+var ErrLaunchNotRunning = errors.New("agent launch ended without the agent running")
 
 // LaunchOutcome is how a launch wait ended.
 type LaunchOutcome struct {
@@ -108,6 +121,13 @@ type LaunchWaitOptions struct {
 	// or after a successful read. A non-agent caller is refused with 403,
 	// so its lasting not-found is a deletion.
 	AgentCaller bool
+	// Timeout, when positive, replaces the derived wait budget (it may be
+	// longer or shorter) and starts before the first fetch. Running out of
+	// it is reported as ErrLaunchWaitTimeout. 0 derives the budget from the
+	// launch.
+	Timeout time.Duration
+	// PollInterval is the time between reads; 0 means 2 s.
+	PollInterval time.Duration
 }
 
 // LaunchStatusUnreadableError is returned by WaitForLaunch to an agent
@@ -178,7 +198,13 @@ func (e *LaunchNotRunningError) Error() string {
 	return msg
 }
 
+// Is reports whether target is ErrLaunchNotRunning.
+func (e *LaunchNotRunningError) Is(target error) bool { return target == ErrLaunchNotRunning }
+
 // LaunchActive reports whether the Hub reports an in-flight launch for a.
+// Use it on a create, start or restart answer to tell an asynchronous
+// answer (the launch continues; follow it with WaitForLaunch) from a
+// synchronous one.
 func LaunchActive(a *Agent) bool {
 	return a != nil && a.Launch != nil && a.Launch.Active
 }
@@ -213,7 +239,8 @@ func failedLaunchEndReason(reason string) bool {
 // success. Error and stopped end it with a failure, and so does a launch
 // that has ended with an error code or a failed end reason, whatever the
 // phase (the failure phase differs by launch kind). Everything else keeps
-// waiting.
+// waiting. WaitForLaunch holds a failed phase seen while the launch is
+// still active for launchFailureSettle, to report the launch error code.
 func launchDone(a *Agent) (done, running bool) {
 	switch launchPhase(a) {
 	case string(state.PhaseRunning):
@@ -261,8 +288,13 @@ func launchWaitBudget(a *Agent) time.Duration {
 // start is the agent from the create or start answer. It may be nil. When
 // it shows an active launch, the launch counts as accepted: a refused or
 // not-found read before any read has succeeded is then retried briefly.
-// The budget is start's launch.remainingSeconds plus 30 s; without it, the
-// first fetched agent's; else 5 min.
+// The budget is opts.Timeout when set; else start's launch.remainingSeconds
+// plus 30 s; without it, the first fetched agent's; else 5 min.
+//
+// An agent in phase error or stopped whose launch is still active is
+// re-read for up to 5 s (within the budget) so the outcome can carry the
+// launch error code from the write that ends the launch; if that does not
+// arrive, the failure is reported with what was read (Code may be "").
 //
 // A nil error means the wait saw the end of the launch: the outcome reports
 // whether the agent is running, or how it failed. Otherwise the error is
@@ -286,6 +318,9 @@ func WaitForLaunch(ctx context.Context, svc AgentService, agentID string, start 
 	}
 
 	var last *Agent
+	// failedSince is when a failed phase with a still-active launch was
+	// first seen in a row of such reads; zero otherwise.
+	var failedSince time.Time
 	lastStep := ""
 	reportStep := func(a *Agent) {
 		if opts.OnStep == nil || a == nil || a.Launch == nil {
@@ -350,7 +385,16 @@ func WaitForLaunch(ctx context.Context, svc AgentService, agentID string, start 
 		}
 		last = a
 		reportStep(a)
-		done, _ := launchDone(a)
+		done, running := launchDone(a)
+		if done && !running && LaunchActive(a) {
+			// The launch error code comes with the write that ends the
+			// launch; re-read briefly for it.
+			if failedSince.IsZero() {
+				failedSince = time.Now()
+			}
+			return time.Since(failedSince) >= launchFailureSettle, nil
+		}
+		failedSince = time.Time{}
 		return done, nil
 	}
 
@@ -362,12 +406,19 @@ func WaitForLaunch(ctx context.Context, svc AgentService, agentID string, start 
 		return out, err
 	}
 
+	budget := func(a *Agent) time.Duration {
+		if opts.Timeout > 0 {
+			return opts.Timeout
+		}
+		return launchWaitBudget(a)
+	}
+
 	var waitCtx context.Context
 	var cancel context.CancelFunc
-	if start != nil && start.Launch != nil && start.Launch.RemainingSeconds != nil {
-		// The advertised budget starts before the first fetch, so it also
-		// bounds the unreadable-status retry.
-		waitCtx, cancel = context.WithTimeout(ctx, launchWaitBudget(start))
+	if opts.Timeout > 0 || (start != nil && start.Launch != nil && start.Launch.RemainingSeconds != nil) {
+		// An explicit or advertised budget starts before the first fetch,
+		// so it also bounds the unreadable-status retry.
+		waitCtx, cancel = context.WithTimeout(ctx, budget(start))
 		defer cancel()
 		if done, err := check(waitCtx); done {
 			return finish(err)
@@ -379,16 +430,16 @@ func WaitForLaunch(ctx context.Context, svc AgentService, agentID string, start 
 		if budgetAgent == nil {
 			budgetAgent = start
 		}
-		waitCtx, cancel = context.WithTimeout(ctx, launchWaitBudget(budgetAgent))
+		waitCtx, cancel = context.WithTimeout(ctx, budget(budgetAgent))
 		defer cancel()
 		if done {
 			return finish(err)
 		}
 	}
 
-	interval := launchPollInterval
+	interval := opts.PollInterval
 	if interval <= 0 {
-		interval = 2 * time.Second
+		interval = launchPollInterval
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -397,6 +448,11 @@ func WaitForLaunch(ctx context.Context, svc AgentService, agentID string, start 
 		case <-waitCtx.Done():
 			if ctx.Err() != nil {
 				return finish(launchInterruptedError(ctx, agentID))
+			}
+			if !failedSince.IsZero() {
+				// The budget ran out while waiting for the failed launch's
+				// code: report the failure that was seen.
+				return finish(nil)
 			}
 			return finish(fmt.Errorf("agent %q: %w", agentID, ErrLaunchWaitTimeout))
 		case <-ticker.C:
@@ -417,20 +473,56 @@ func launchInterruptedError(ctx context.Context, agentID string) error {
 	return fmt.Errorf("stopped waiting for agent %q launch: %w", agentID, err)
 }
 
+// EnsureRunningBeforeSendByID reads the agent once (GET agent by ID or
+// slug) and, when it shows an active launch, waits for the launch as
+// EnsureRunningBeforeSend does. It returns nil at once when the agent is not
+// launching. A failed read is returned wrapped. Callers use it before
+// sending a message to an agent that may still be launching, which the Hub
+// would refuse; it is the form for callers that hold only an ID or slug, or
+// an agent read earlier.
+func EnsureRunningBeforeSendByID(ctx context.Context, svc AgentService, agentID string, opts LaunchWaitOptions) error {
+	if svc == nil {
+		return errors.New("hubclient: EnsureRunningBeforeSendByID: nil agent service")
+	}
+	getCtx, cancel := context.WithTimeout(ctx, launchFetchTimeout)
+	a, err := svc.Get(getCtx, agentID)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("reading agent %q before sending: %w", agentID, err)
+	}
+	if a == nil {
+		return fmt.Errorf("reading agent %q before sending: empty answer", agentID)
+	}
+	return ensureRunning(ctx, svc, agentID, a, opts)
+}
+
 // EnsureRunningBeforeSend returns nil at once, without reading the agent,
 // when a shows no active launch. Otherwise it waits for the launch with
 // WaitForLaunch and returns nil when the agent is running,
-// *LaunchNotRunningError when the launch ended without running, or the
-// wait's error. Callers use it before sending a message to an agent that
-// may still be launching, which the Hub would refuse.
+// *LaunchNotRunningError (matching ErrLaunchNotRunning) when the launch
+// ended without running, or the wait's error.
+//
+// a must be fresh: the create, start or restart answer, or an agent just
+// read. A stale agent that shows no active launch skips the wait, and the
+// send may then be refused because the agent is still launching. Callers
+// without a fresh agent use EnsureRunningBeforeSendByID.
 func EnsureRunningBeforeSend(ctx context.Context, svc AgentService, a *Agent, opts LaunchWaitOptions) error {
 	if a == nil {
 		return errors.New("hubclient: EnsureRunningBeforeSend: nil agent")
 	}
+	return ensureRunning(ctx, svc, a.ID, a, opts)
+}
+
+// ensureRunning waits for a's launch, reading the agent by id, when a shows
+// one; a.ID is preferred over id when set.
+func ensureRunning(ctx context.Context, svc AgentService, id string, a *Agent, opts LaunchWaitOptions) error {
 	if !LaunchActive(a) {
 		return nil
 	}
-	out, err := WaitForLaunch(ctx, svc, a.ID, a, opts)
+	if a.ID != "" {
+		id = a.ID
+	}
+	out, err := WaitForLaunch(ctx, svc, id, a, opts)
 	if err != nil {
 		return err
 	}

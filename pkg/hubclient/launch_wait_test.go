@@ -36,10 +36,13 @@ func fastLaunchTimings(t *testing.T) {
 	t.Helper()
 	poll, slack, fallback := launchPollInterval, launchWaitSlack, launchWaitFallback
 	grace, backoff, backoffMax := launchUnreadableGrace, launchUnreadableBackoff, launchUnreadableBackoffMax
+	settle := launchFailureSettle
 	t.Cleanup(func() {
 		launchPollInterval, launchWaitSlack, launchWaitFallback = poll, slack, fallback
 		launchUnreadableGrace, launchUnreadableBackoff, launchUnreadableBackoffMax = grace, backoff, backoffMax
+		launchFailureSettle = settle
 	})
+	launchFailureSettle = 30 * time.Millisecond
 	launchPollInterval = 5 * time.Millisecond
 	launchWaitSlack = 50 * time.Millisecond
 	launchWaitFallback = 400 * time.Millisecond
@@ -48,10 +51,12 @@ func fastLaunchTimings(t *testing.T) {
 	launchUnreadableBackoffMax = 10 * time.Millisecond
 }
 
-// getResult is one scripted answer to GET agent.
+// getResult is one scripted answer to GET agent; fn, when set, answers
+// instead of agent and err.
 type getResult struct {
 	agent *Agent
 	err   error
+	fn    func(ctx context.Context) (*Agent, error)
 }
 
 // scriptedGetService answers Get from a script; the last entry repeats.
@@ -60,6 +65,7 @@ type scriptedGetService struct {
 	mu     sync.Mutex
 	script []getResult
 	calls  int
+	ids    []string
 }
 
 func (s *scriptedGetService) Get(ctx context.Context, agentID string) (*Agent, error) {
@@ -67,6 +73,7 @@ func (s *scriptedGetService) Get(ctx context.Context, agentID string) (*Agent, e
 	defer s.mu.Unlock()
 	i := s.calls
 	s.calls++
+	s.ids = append(s.ids, agentID)
 	if len(s.script) == 0 {
 		return nil, errors.New("no script")
 	}
@@ -74,6 +81,11 @@ func (s *scriptedGetService) Get(ctx context.Context, agentID string) (*Agent, e
 		i = len(s.script) - 1
 	}
 	r := s.script[i]
+	if r.fn != nil {
+		s.mu.Unlock()
+		defer s.mu.Lock()
+		return r.fn(ctx)
+	}
 	if r.agent != nil {
 		a := *r.agent
 		return &a, r.err
@@ -428,6 +440,7 @@ func TestEnsureRunningBeforeSend(t *testing.T) {
 		err := EnsureRunningBeforeSend(context.Background(), svc, launchingAgent(""), LaunchWaitOptions{})
 		var nr *LaunchNotRunningError
 		require.True(t, errors.As(err, &nr), "got %v", err)
+		assert.ErrorIs(t, err, ErrLaunchNotRunning)
 		assert.Equal(t, "image_pull_failed", nr.Outcome.Code)
 		assert.Equal(t, `agent "alpha" failed to start (image_pull_failed): pull access denied`, err.Error())
 	})
@@ -492,4 +505,371 @@ func TestStartRestartWithOptions_Body(t *testing.T) {
 	assert.JSONEq(t, `{"acceptAsyncLaunch":true}`, got[1].body)
 	assert.Empty(t, got[2].body, "zero options post no body, like Start")
 	assert.Empty(t, got[3].body, "zero options post no body, like Restart")
+}
+
+// Mutant: drop the whole "ended launch" clause in launchDone. A stop during
+// the launch ends it in phase stopping with launch_stopped/failed; only the
+// ended-launch rule ends the wait there.
+func TestWaitForLaunch_StoppingWithStoppedLaunch(t *testing.T) {
+	fastLaunchTimings(t)
+	stopping := &Agent{ID: "a1", Name: "alpha", Phase: "stopping",
+		Launch: &AgentLaunch{ID: "l1", State: "ended", Kind: "create", Error: "launch_stopped", EndReason: "failed"}}
+	svc := script(ok(launchingAgent("image_pull")), ok(stopping))
+
+	out, err := WaitForLaunch(context.Background(), svc, "a1", launchingAgent(""), LaunchWaitOptions{})
+	require.NoError(t, err)
+	assert.False(t, out.Running)
+	assert.Equal(t, "stopping", out.Phase)
+	assert.Equal(t, "launch_stopped", out.Code)
+	assert.Equal(t, "failed", out.EndReason)
+}
+
+// fakeLaunchClock replaces launchNow and launchAfter (the clock of the
+// unreadable-status retry). A blocked clock never fires; onBlock runs when
+// a delay is requested on it.
+type fakeLaunchClock struct {
+	mu      sync.Mutex
+	now     time.Time
+	delays  []time.Duration
+	blocked bool
+	onBlock func()
+}
+
+func installFakeLaunchClock(t *testing.T) *fakeLaunchClock {
+	t.Helper()
+	c := &fakeLaunchClock{now: time.Unix(1_700_000_000, 0)}
+	origNow, origAfter := launchNow, launchAfter
+	t.Cleanup(func() { launchNow, launchAfter = origNow, origAfter })
+	launchNow = func() time.Time {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.now
+	}
+	launchAfter = func(d time.Duration) <-chan time.Time {
+		c.mu.Lock()
+		c.delays = append(c.delays, d)
+		if c.blocked {
+			onBlock := c.onBlock
+			c.mu.Unlock()
+			if onBlock != nil {
+				onBlock()
+			}
+			return make(chan time.Time) // never fires
+		}
+		c.now = c.now.Add(d)
+		ch := make(chan time.Time, 1)
+		ch <- c.now
+		c.mu.Unlock()
+		return ch
+	}
+	return c
+}
+
+func (c *fakeLaunchClock) recorded() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]time.Duration(nil), c.delays...)
+}
+
+// waitGuarded runs WaitForLaunch and fails the test if it does not return
+// within 5 s.
+func waitGuarded(t *testing.T, ctx context.Context, svc AgentService, start *Agent, opts LaunchWaitOptions) (LaunchOutcome, time.Duration, error) {
+	t.Helper()
+	type result struct {
+		out LaunchOutcome
+		err error
+	}
+	done := make(chan result, 1)
+	began := time.Now()
+	go func() {
+		out, err := WaitForLaunch(ctx, svc, "a1", start, opts)
+		done <- result{out, err}
+	}()
+	select {
+	case r := <-done:
+		return r.out, time.Since(began), r.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait did not return")
+		return LaunchOutcome{}, 0, nil
+	}
+}
+
+// Mutant: the retry delay is not cut at the grace (min(delay, remaining)
+// becomes delay).
+func TestWaitForLaunch_UnreadableRetryBackoff(t *testing.T) {
+	// The production timings: the delays double from 250ms up to 2s, and
+	// the last one is cut short so the retries span exactly the 5s grace.
+	clock := installFakeLaunchClock(t)
+	svc := script(httpErr(http.StatusNotFound))
+
+	_, _, err := waitGuarded(t, context.Background(), svc, launchingAgent(""),
+		LaunchWaitOptions{AgentCaller: true, Timeout: time.Minute, PollInterval: time.Millisecond})
+	var unreadable *LaunchStatusUnreadableError
+	require.ErrorAs(t, err, &unreadable)
+	want := []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 1250 * time.Millisecond}
+	assert.Equal(t, want, clock.recorded())
+	assert.Equal(t, 1+len(want), svc.Calls(), "the first read and one per delay")
+}
+
+// Mutant: drop the retry-cut-short return before any read (an interrupt
+// during the retry is then reported as an unreadable status).
+func TestWaitForLaunch_InterruptDuringUnreadableRetry(t *testing.T) {
+	fastLaunchTimings(t)
+	clock := installFakeLaunchClock(t)
+	launchUnreadableGrace = time.Hour
+	cause := errors.New("received terminated")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	clock.blocked = true
+	clock.onBlock = func() { cancel(cause) }
+	svc := script(httpErr(http.StatusNotFound))
+
+	_, elapsed, err := waitGuarded(t, ctx, svc, launchingAgent(""), LaunchWaitOptions{AgentCaller: true, Timeout: time.Hour})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.ErrorIs(t, err, cause)
+	var unreadable *LaunchStatusUnreadableError
+	assert.False(t, errors.As(err, &unreadable), "got %v", err)
+	assert.Less(t, elapsed, 2*time.Second)
+	assert.Equal(t, 1, svc.Calls(), "no read after the interrupt")
+}
+
+// Mutant: (ctx.Err() != nil || opts.AgentCaller) becomes (ctx.Err() != nil):
+// an agent caller whose budget ends during the retry then gets an
+// unreadable status instead of a timeout.
+func TestWaitForLaunch_TimeoutDuringUnreadableRetry(t *testing.T) {
+	withRemaining := launchingAgent("")
+	withRemaining.Launch.RemainingSeconds = intPtr(0)
+	cases := map[string]struct {
+		start *Agent
+		opts  LaunchWaitOptions
+	}{
+		"explicit timeout":  {launchingAgent(""), LaunchWaitOptions{AgentCaller: true, Timeout: 50 * time.Millisecond}},
+		"advertised budget": {withRemaining, LaunchWaitOptions{AgentCaller: true}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			fastLaunchTimings(t)
+			clock := installFakeLaunchClock(t)
+			launchUnreadableGrace = time.Hour
+			clock.blocked = true
+			svc := script(httpErr(http.StatusNotFound))
+
+			_, elapsed, err := waitGuarded(t, context.Background(), svc, tc.start, tc.opts)
+			assert.ErrorIs(t, err, ErrLaunchWaitTimeout)
+			assert.Less(t, elapsed, 2*time.Second)
+		})
+	}
+}
+
+// Mutant: in the after-read confirmation, ctx.Err() becomes fetchCtx.Err():
+// a not-found lasting to the end of the budget is then reported as a
+// timeout instead of a deletion (user) or an unreadable status (agent).
+func TestWaitForLaunch_BudgetEndsDuringConfirmation(t *testing.T) {
+	for _, agentCaller := range []bool{false, true} {
+		name := "user"
+		if agentCaller {
+			name = "agent"
+		}
+		t.Run(name, func(t *testing.T) {
+			fastLaunchTimings(t)
+			clock := installFakeLaunchClock(t)
+			launchUnreadableGrace = time.Hour
+			clock.blocked = true
+			svc := script(ok(launchingAgent("image_pull")), httpErr(http.StatusNotFound))
+
+			_, elapsed, err := waitGuarded(t, context.Background(), svc, launchingAgent(""),
+				LaunchWaitOptions{AgentCaller: agentCaller, Timeout: 50 * time.Millisecond})
+			assert.NotErrorIs(t, err, ErrLaunchWaitTimeout)
+			if agentCaller {
+				var unreadable *LaunchStatusUnreadableError
+				require.ErrorAs(t, err, &unreadable)
+				assert.True(t, unreadable.AfterRead)
+			} else {
+				assert.ErrorIs(t, err, ErrAgentDeletedDuringLaunch)
+			}
+			assert.Less(t, elapsed, 2*time.Second)
+		})
+	}
+}
+
+// Mutant: drop the after-read confirmation's interrupt return (an interrupt
+// is then reported as a deletion or an unreadable status).
+func TestWaitForLaunch_InterruptDuringDeletionConfirmation(t *testing.T) {
+	for _, agentCaller := range []bool{false, true} {
+		name := "user"
+		if agentCaller {
+			name = "agent"
+		}
+		t.Run(name, func(t *testing.T) {
+			fastLaunchTimings(t)
+			clock := installFakeLaunchClock(t)
+			launchUnreadableGrace = time.Hour
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			clock.blocked = true
+			clock.onBlock = cancel
+			svc := script(ok(launchingAgent("image_pull")), httpErr(http.StatusNotFound))
+
+			_, _, err := waitGuarded(t, ctx, svc, launchingAgent(""), LaunchWaitOptions{AgentCaller: agentCaller, Timeout: time.Hour})
+			assert.ErrorIs(t, err, context.Canceled)
+			assert.NotErrorIs(t, err, ErrAgentDeletedDuringLaunch)
+			var unreadable *LaunchStatusUnreadableError
+			assert.False(t, errors.As(err, &unreadable), "got %v", err)
+		})
+	}
+}
+
+// Mutant: the retry-cut-short condition becomes true for every caller: a
+// user caller's definite 404/403 is then reported as a timeout.
+func TestWaitForLaunch_UserCallerBudgetEndsDuringRetry(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			fastLaunchTimings(t)
+			clock := installFakeLaunchClock(t)
+			launchUnreadableGrace = time.Hour
+			clock.blocked = true
+			svc := script(httpErr(status))
+
+			_, _, err := waitGuarded(t, context.Background(), svc, launchingAgent(""), LaunchWaitOptions{Timeout: 50 * time.Millisecond})
+			assert.NotErrorIs(t, err, ErrLaunchWaitTimeout)
+			if status == http.StatusNotFound {
+				assert.ErrorIs(t, err, ErrAgentDeletedDuringLaunch)
+			} else {
+				var rejected *LaunchStatusRejectedError
+				assert.ErrorAs(t, err, &rejected)
+			}
+		})
+	}
+}
+
+// Mutant: drop the "read cut short by ctx" return in retryUnreadableStatus:
+// the cut-short read's deadline error then replaces the 404, and a user
+// caller's deletion is reported as a timeout.
+func TestWaitForLaunch_RetryReadCutShortKeepsNotFound(t *testing.T) {
+	fastLaunchTimings(t)
+	installFakeLaunchClock(t)
+	launchUnreadableGrace = time.Hour
+	blockUntilDone := getResult{fn: func(ctx context.Context) (*Agent, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	svc := script(httpErr(http.StatusNotFound), blockUntilDone)
+
+	_, _, err := waitGuarded(t, context.Background(), svc, launchingAgent(""), LaunchWaitOptions{Timeout: 50 * time.Millisecond})
+	assert.ErrorIs(t, err, ErrAgentDeletedDuringLaunch)
+	assert.NotErrorIs(t, err, ErrLaunchWaitTimeout)
+}
+
+// Mutant: ignore opts.Timeout (use the derived budget).
+func TestWaitForLaunch_ExplicitTimeout(t *testing.T) {
+	fastLaunchTimings(t)
+	start := launchingAgent("")
+	start.Launch.RemainingSeconds = intPtr(3600)
+	svc := script(ok(launchingAgent("image_pull")))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, elapsed, err := waitGuarded(t, ctx, svc, start, LaunchWaitOptions{Timeout: 30 * time.Millisecond})
+	assert.ErrorIs(t, err, ErrLaunchWaitTimeout)
+	assert.Less(t, elapsed, time.Second)
+}
+
+// Mutant: ignore opts.PollInterval (use launchPollInterval).
+func TestWaitForLaunch_PollInterval(t *testing.T) {
+	fastLaunchTimings(t)
+	launchPollInterval = time.Hour
+	svc := script(ok(launchingAgent("image_pull")), ok(runningAgent()))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	out, _, err := waitGuarded(t, ctx, svc, launchingAgent(""), LaunchWaitOptions{PollInterval: time.Millisecond})
+	require.NoError(t, err)
+	assert.True(t, out.Running)
+}
+
+// Mutant: end the wait at once on a failed phase with an active launch (no
+// settle), so the code from the launch-ending write is not reported.
+func TestWaitForLaunch_ErrorPhaseActiveLaunchWaitsForCode(t *testing.T) {
+	fastLaunchTimings(t)
+	launchFailureSettle = time.Second
+	errActive := &Agent{ID: "a1", Name: "alpha", Phase: "error",
+		Launch: &AgentLaunch{ID: "l1", State: "active", Active: true, Kind: "create", Step: "container_start"}}
+	errEnded := &Agent{ID: "a1", Name: "alpha", Phase: "error", Message: "exited 1",
+		Launch: &AgentLaunch{ID: "l1", State: "ended", Kind: "create", Step: "container_start", Error: "container_exited", EndReason: "failed"}}
+	svc := script(ok(errActive), ok(errActive), ok(errEnded))
+
+	out, err := WaitForLaunch(context.Background(), svc, "a1", launchingAgent(""), LaunchWaitOptions{})
+	require.NoError(t, err)
+	assert.False(t, out.Running)
+	assert.Equal(t, "container_exited", out.Code)
+	assert.Equal(t, "exited 1", out.Message)
+	assert.Equal(t, 3, svc.Calls())
+}
+
+// Mutant: the settle never ends (the comparison is always false), so the
+// wait runs to its budget.
+func TestWaitForLaunch_ErrorPhaseActiveLaunchSettleEnds(t *testing.T) {
+	fastLaunchTimings(t)
+	launchWaitFallback = 10 * time.Second
+	errActive := &Agent{ID: "a1", Name: "alpha", Phase: "error",
+		Launch: &AgentLaunch{ID: "l1", State: "active", Active: true, Kind: "create"}}
+	svc := script(ok(errActive))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	out, _, err := waitGuarded(t, ctx, svc, launchingAgent(""), LaunchWaitOptions{})
+	require.NoError(t, err)
+	assert.False(t, out.Running)
+	assert.Equal(t, "error", out.Phase)
+	assert.Empty(t, out.Code)
+}
+
+// Mutant: drop the settle check on budget expiry, so a failure seen during
+// the settle is reported as a timeout.
+func TestWaitForLaunch_BudgetEndsDuringFailureSettle(t *testing.T) {
+	fastLaunchTimings(t)
+	launchFailureSettle = time.Hour
+	errActive := &Agent{ID: "a1", Name: "alpha", Phase: "error",
+		Launch: &AgentLaunch{ID: "l1", State: "active", Active: true, Kind: "create"}}
+	svc := script(ok(errActive))
+
+	out, _, err := waitGuarded(t, context.Background(), svc, launchingAgent(""), LaunchWaitOptions{Timeout: 50 * time.Millisecond})
+	require.NoError(t, err)
+	assert.False(t, out.Running)
+	assert.Equal(t, "error", out.Phase)
+}
+
+// Mutant: EnsureRunningBeforeSendByID returns after the read without
+// waiting.
+func TestEnsureRunningBeforeSendByID(t *testing.T) {
+	t.Run("not launching: one read", func(t *testing.T) {
+		fastLaunchTimings(t)
+		svc := script(ok(runningAgent()))
+		require.NoError(t, EnsureRunningBeforeSendByID(context.Background(), svc, "alpha", LaunchWaitOptions{}))
+		assert.Equal(t, 1, svc.Calls())
+	})
+	t.Run("launching then running: waits by agent ID", func(t *testing.T) {
+		fastLaunchTimings(t)
+		svc := script(ok(launchingAgent("image_pull")), ok(runningAgent()))
+		require.NoError(t, EnsureRunningBeforeSendByID(context.Background(), svc, "alpha", LaunchWaitOptions{}))
+		assert.Equal(t, []string{"alpha", "a1"}, svc.ids)
+	})
+	t.Run("launch fails", func(t *testing.T) {
+		fastLaunchTimings(t)
+		failed := &Agent{ID: "a1", Name: "alpha", Phase: "error", Message: "pull access denied",
+			Launch: &AgentLaunch{ID: "l1", State: "ended", Error: "image_pull_failed", EndReason: "failed"}}
+		svc := script(ok(launchingAgent("image_pull")), ok(failed))
+		err := EnsureRunningBeforeSendByID(context.Background(), svc, "alpha", LaunchWaitOptions{})
+		assert.ErrorIs(t, err, ErrLaunchNotRunning)
+		var nr *LaunchNotRunningError
+		require.ErrorAs(t, err, &nr)
+		assert.Equal(t, "image_pull_failed", nr.Outcome.Code)
+	})
+	t.Run("read fails", func(t *testing.T) {
+		fastLaunchTimings(t)
+		svc := script(httpErr(http.StatusNotFound))
+		err := EnsureRunningBeforeSendByID(context.Background(), svc, "alpha", LaunchWaitOptions{})
+		assert.True(t, apiclient.IsNotFoundError(err), "got %v", err)
+		assert.Equal(t, 1, svc.Calls())
+	})
 }
