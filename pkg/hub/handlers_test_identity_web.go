@@ -343,6 +343,7 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 		expiresAt = *u.ExpiresAt
 	}
 	auditActor := s.buildAuditActorFromContext(ctx)
+	workload := workloadDelegationCaller(ctx)
 	row := &store.TestIdentityLoginCode{
 		UserID:             u.ID,
 		CodeHash:           hash,
@@ -352,6 +353,13 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 		Created:            now,
 	}
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		// A workload delegation must still be live at the mint itself
+		// (DEC-3 C3), as for token re-issue.
+		if workload != nil {
+			if err := s.recheckWorkloadDelegation(ctx, tx, workload, now); err != nil {
+				return err
+			}
+		}
 		if err := tx.ReplaceTestIdentityLoginCode(ctx, row); err != nil {
 			return fmt.Errorf("store web-login code: %w", err)
 		}
@@ -375,6 +383,8 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, errTestIdentityDelegationNotLive):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "workload delegation does not grant this request", nil)
 		case errors.Is(err, store.ErrAlreadyExists), isTransientIssuanceConflict(err):
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "web-login code issuance is busy; retry shortly",

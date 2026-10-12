@@ -7120,6 +7120,7 @@
 - `pkg/hub:TestTestIdentityWeb_Mint`
 - `pkg/hub:TestWorkloadDelegation_WebLoginCodeForOwnIdentity`
 - `pkg/hub:TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities`
+- `pkg/hub:TestWorkloadDelegation_RevokedAfterAuthMintsNothing`
 
 ---
 

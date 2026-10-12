@@ -1193,6 +1193,27 @@ func TestWorkloadDelegation_RevokedAfterAuthMintsNothing(t *testing.T) {
 		assert.NotContains(t, rec.Body.String(), "accessToken")
 		assert.Equal(t, audits, auditCount(t, e, testIdentityTokenIssueMutation), "no re-issue audit")
 	})
+
+	// X3b (advisor): the web-login code mint rechecks the delegation in
+	// its transaction too, so a delegation revoked after the arm accepted
+	// the request mints no code.
+	t.Run("web-login code", func(t *testing.T) {
+		e := newX2Env(t, true)
+		x2EnableWebSessions(t, e)
+		grantor, _ := e.bindingGrantor(t, "x2-n3-webcode")
+		d := e.delegate(t, grantor, nil)
+		rec := e.mint(t, d.ID)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		id := tiDecode(t, rec).Identity.ID
+		e.srv.workloadIssuer.store = &x2RevokeOnGrantorRead{Store: e.s, grantorID: grantor.ID, delegationID: d.ID}
+		rec = e.workload(t, http.MethodPost, "/api/v1/test-identities/"+id+"/web-login-code", x2Token(t, x2TokenOpts{}), d.ID, nil, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "code\"")
+		assert.Empty(t, x2WebCodeAudits(t, e, id), "no web-login code audit")
+		got, err := e.s.GetTestIdentityDelegation(ctx, d.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.RevokedAt, "the revocation happened after the arm accepted the request")
+	})
 }
 
 // N4: the in-transaction recheck uses the arm's definition of live, so a
