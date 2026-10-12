@@ -66,18 +66,6 @@ func FallbackEnvEntries(fallback map[string]string, suppressed []string, emitted
 	return out
 }
 
-// envKeysOf returns the keys of "KEY=VALUE" (or bare "KEY") entries.
-func envKeysOf(entries []string) map[string]bool {
-	keys := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		k, _, _ := strings.Cut(e, "=")
-		if k != "" {
-			keys[k] = true
-		}
-	}
-	return keys
-}
-
 // envKeysOfArgs returns the keys set by "-e"/"--env" flags in a container
 // CLI argument list (each flag followed by its "KEY=VALUE" value).
 func envKeysOfArgs(args []string) map[string]bool {
