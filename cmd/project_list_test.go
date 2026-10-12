@@ -30,8 +30,9 @@ var projectListLocalArgs = []string{"project", "list"}
 
 // projectListGoldenEnv names the variable that makes
 // TestProjectListLocal_Golden write its golden files instead of comparing
-// against them.
-const projectListGoldenEnv = "SCION_UPDATE_GOLDEN"
+// against them. It is a SCION_TEST_* variable because the cmd tests' TestMain
+// clears every other SCION_* variable.
+const projectListGoldenEnv = "SCION_TEST_UPDATE_GOLDEN"
 
 // writeLocalProjectFixture creates, under HOME, one project directory of
 // each kind the machine-local list shows: the global project, an external
@@ -59,7 +60,7 @@ func writeLocalProjectFixture(t *testing.T) {
 // TestProjectListLocal_Golden pins the machine-local project list, text and
 // JSON, byte for byte. The golden files were written from the listing as it
 // was before 'project list' became the list across hubs; run the test with
-// SCION_UPDATE_GOLDEN=1 to write them again.
+// SCION_TEST_UPDATE_GOLDEN=1 to write them again.
 func TestProjectListLocal_Golden(t *testing.T) {
 	// The setup below changes the working directory; the golden files live
 	// in this package's testdata directory.
