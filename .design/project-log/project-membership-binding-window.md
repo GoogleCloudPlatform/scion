@@ -92,3 +92,5 @@ still returns a new slice rather than filtering its input in place. Tests:
 `TestActiveRoleBindings_NoClockUsesWallClock`,
 `TestBindingActivationOK_NilBindingInactive`,
 `TestCandidateActivationBounds_NilBindingNeverActive`.
+
+After merging upstream main forward, `TestConstraintAdminLockout_InactiveOtherAdminNotCounted` case `expires-now` now expects the removal to be refused: a binding that expires at the check time is not active (ExpiresAt is exclusive, as in the kernel). No other merged lockout test sets a bound at the check time.
