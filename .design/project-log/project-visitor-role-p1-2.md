@@ -70,3 +70,10 @@
   which has no caller yet. While `federation.project_visitors` is off, the
   role definition list and GET leave out the project-visitor role, so the
   admin pickers do not offer it.
+- Merge-forward (2026-10-12): merged the updated item 1 branch (which
+  carries upstream main with the final binding activation rule, including
+  the nil binding and unset clock handling) and then upstream main. Both
+  rules hold together: a nil binding or a set bound with a zero evaluation
+  time is never active, and a binding of a role that does not confer
+  membership is never membership. The shard build tag was dropped from the
+  visitor test file, since test shards are no longer committed.
