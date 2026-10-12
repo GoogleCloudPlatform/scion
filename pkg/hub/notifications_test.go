@@ -207,9 +207,11 @@ func TestNotificationDispatcher_DispatchFailure(t *testing.T) {
 
 	// A failed delivery stores the notification but does NOT mark it
 	// dispatched, so the dispatch sweep retries it (ptone/scion#2743).
-	// The dispatch call is recorded before dispatchToAgent finishes, so give
-	// it time to complete before reading the final state.
-	time.Sleep(200 * time.Millisecond)
+	// The dispatch call is recorded before dispatchToAgent finishes. It runs
+	// synchronously in the dispatcher goroutine, and Stop waits for that
+	// goroutine, so the final state is settled after Stop (the deferred Stop
+	// is a no-op).
+	env.nd.Stop()
 	notifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
 	require.NoError(t, err)
 	require.Len(t, notifs, 1)

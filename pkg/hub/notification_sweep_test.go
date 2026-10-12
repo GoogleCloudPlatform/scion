@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -427,25 +428,117 @@ func TestNotificationOrphanGCHandler(t *testing.T) {
 }
 
 // notificationDispatched returns the dispatched flag of the notification
-// with the given ID, failing the test if it does not exist.
+// with the given ID.
 func notificationDispatched(t *testing.T, env *notificationTestEnv, id string) bool {
 	t.Helper()
-	allNotifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
+	n, err := env.store.GetNotification(context.Background(), id)
 	require.NoError(t, err)
-	for _, n := range allNotifs {
-		if n.ID == id {
-			return n.Dispatched
+	return n.Dispatched
+}
+
+// setReturnErr sets the error DispatchAgentMessage returns, under the lock.
+func (d *recordingDispatcher) setReturnErr(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.returnErr = err
+}
+
+// brokerDeferringDispatcher records calls like recordingDispatcher and
+// returns ErrMessageDeferred for agents on the listed brokers, as the hub
+// does when a broker cannot be routed to.
+type brokerDeferringDispatcher struct {
+	recordingDispatcher
+	deferBrokers map[string]bool
+}
+
+func (d *brokerDeferringDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
+	err := d.recordingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, structuredMsg)
+	if d.deferBrokers[agent.RuntimeBrokerID] {
+		return ErrMessageDeferred
+	}
+	return err
+}
+
+// callsFor counts the recorded dispatch calls to the given agent.
+func (d *brokerDeferringDispatcher) callsFor(agentID string) int {
+	n := 0
+	for _, c := range d.getCalls() {
+		if c.Agent.ID == agentID {
+			n++
 		}
 	}
-	require.FailNow(t, "notification not found", "id %s", id)
-	return false
+	return n
+}
+
+// addSubscriberOnBroker creates an online broker and a subscriber agent on
+// it, subscribed to env.watched, and returns the agent and subscription.
+func addSubscriberOnBroker(t *testing.T, env *notificationTestEnv, name string) (*store.Agent, *store.NotificationSubscription) {
+	t.Helper()
+	ctx := context.Background()
+	broker := &store.RuntimeBroker{
+		ID:     tid(name + "-broker"),
+		Name:   name + " broker",
+		Slug:   name + "-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, env.store.CreateRuntimeBroker(ctx, broker))
+	subscriber := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            name,
+		Name:            name,
+		Template:        "claude",
+		ProjectID:       env.project.ID,
+		Phase:           string(state.PhaseRunning),
+		RuntimeBrokerID: broker.ID,
+	}
+	require.NoError(t, env.store.CreateAgent(ctx, subscriber))
+	sub := &store.NotificationSubscription{
+		ID:                api.NewUUID(),
+		Scope:             store.SubscriptionScopeAgent,
+		AgentID:           env.watched.ID,
+		SubscriberType:    store.SubscriberTypeAgent,
+		SubscriberID:      subscriber.Slug,
+		ProjectID:         env.project.ID,
+		TriggerActivities: []string{"COMPLETED"},
+		CreatedAt:         time.Now().Add(-time.Hour),
+		CreatedBy:         "test",
+	}
+	require.NoError(t, env.store.CreateNotificationSubscription(ctx, sub))
+	return subscriber, sub
+}
+
+// createUndispatchedNotification stores an undispatched notification for
+// sub, created age ago, and returns its ID.
+func createUndispatchedNotification(t *testing.T, env *notificationTestEnv, sub *store.NotificationSubscription, age time.Duration) string {
+	t.Helper()
+	notif := &store.Notification{
+		ID:             api.NewUUID(),
+		SubscriptionID: sub.ID,
+		AgentID:        env.watched.ID,
+		ProjectID:      env.project.ID,
+		SubscriberType: store.SubscriberTypeAgent,
+		SubscriberID:   sub.SubscriberID,
+		Status:         "COMPLETED",
+		Message:        "watched-agent has reached a state of COMPLETED",
+		CreatedAt:      time.Now().Add(-age),
+	}
+	require.NoError(t, env.store.CreateNotification(context.Background(), notif))
+	return notif.ID
+}
+
+// setRetryAttemptTimeout overrides retryDispatchAttemptTimeout for one test.
+func setRetryAttemptTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := retryDispatchAttemptTimeout
+	retryDispatchAttemptTimeout = d
+	t.Cleanup(func() { retryDispatchAttemptTimeout = orig })
 }
 
 // A failed retry delivery releases its claim so the next sweep retries it
 // (ptone/scion#2743).
 func TestRetryDispatch_DeliveryFailure_RevertsClaim(t *testing.T) {
 	env := setupRetryTest(t)
-	env.dispatcher.returnErr = errors.New("broker refused")
+	env.dispatcher.setReturnErr(errors.New("broker refused"))
 	ctx := context.Background()
 
 	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
@@ -468,7 +561,7 @@ func TestRetryDispatch_DeliveryFailure_RevertsClaim(t *testing.T) {
 // stays claimed, so retries are bounded.
 func TestRetryDispatch_DeliveryFailure_PastMaxAge_StaysClaimed(t *testing.T) {
 	env := setupNotificationTest(t)
-	env.dispatcher.returnErr = errors.New("broker refused")
+	env.dispatcher.setReturnErr(errors.New("broker refused"))
 	ctx := context.Background()
 
 	notif := &store.Notification{
@@ -499,12 +592,10 @@ func TestRetryDispatch_DeliveryFailure_PastMaxAge_StaysClaimed(t *testing.T) {
 // per-attempt timeout instead of using the caller's whole budget, and its
 // claim is released.
 func TestRetryDispatch_DeferredDelivery_AttemptTimeoutRevertsClaim(t *testing.T) {
-	orig := retryDispatchAttemptTimeout
-	retryDispatchAttemptTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { retryDispatchAttemptTimeout = orig })
+	setRetryAttemptTimeout(t, 200*time.Millisecond)
 
 	env := setupRetryTest(t)
-	env.dispatcher.returnErr = ErrMessageDeferred
+	env.dispatcher.setReturnErr(ErrMessageDeferred)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -527,7 +618,7 @@ func TestRetryDispatch_DeferredDelivery_AttemptTimeoutRevertsClaim(t *testing.T)
 // the notification undispatched, and the next sweep delivers it.
 func TestSweepHandler_FailedDeliveryRetriedNextSweep(t *testing.T) {
 	env := setupRetryTest(t)
-	env.dispatcher.returnErr = errors.New("broker refused")
+	env.dispatcher.setReturnErr(errors.New("broker refused"))
 	ctx := context.Background()
 
 	srv := &Server{
@@ -543,13 +634,92 @@ func TestSweepHandler_FailedDeliveryRetriedNextSweep(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pending, 1, "a failed delivery must stay undispatched")
 
-	env.dispatcher.mu.Lock()
-	env.dispatcher.returnErr = nil
-	env.dispatcher.mu.Unlock()
+	env.dispatcher.setReturnErr(nil)
 
 	handler(ctx)
 	require.Len(t, env.dispatcher.getCalls(), 2)
 	pending, err = env.store.GetUndispatchedAgentNotifications(ctx, "")
 	require.NoError(t, err)
 	assert.Empty(t, pending, "the next sweep must deliver it")
+}
+
+// A delivery attempt that outlives the caller's deadline still releases its
+// claim: the revert does not run on the expired caller context.
+func TestRetryDispatch_RevertSurvivesExpiredParentContext(t *testing.T) {
+	setRetryAttemptTimeout(t, 5*time.Second)
+
+	env := setupRetryTest(t)
+	env.dispatcher.setReturnErr(ErrMessageDeferred)
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(context.Background(), "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	// The parent deadline ends the attempt (first backoff is 500ms), so the
+	// revert runs after the parent context has expired.
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	env.nd.RetryDispatch(ctx, &notifs[0])
+	require.Error(t, ctx.Err(), "the parent context must have expired during the attempt")
+
+	require.NotEmpty(t, env.dispatcher.getCalls())
+	assert.False(t, notificationDispatched(t, env, notifs[0].ID),
+		"the claim must be released even after the caller's deadline")
+}
+
+// The batch starts no attempt when less than one attempt timeout is left in
+// the caller's budget; the notification stays undispatched (and unclaimed)
+// for the next pass.
+func TestSweepHandler_StopsWhenBudgetBelowAttemptTimeout(t *testing.T) {
+	setRetryAttemptTimeout(t, 200*time.Millisecond)
+
+	env := setupNotificationTest(t)
+	_, subB := addSubscriberOnBroker(t, env, "subscriber-b")
+	d := &brokerDeferringDispatcher{deferBrokers: map[string]bool{
+		env.subscriber.RuntimeBrokerID: true,
+		tid("subscriber-b-broker"):     true,
+	}}
+	nd := NewNotificationDispatcher(env.store, env.pub, func() AgentDispatcher { return d }, slog.Default())
+	srv := &Server{store: env.store, agentLifecycleLog: slog.Default(), notificationDispatcher: nd}
+
+	first := createUndispatchedNotification(t, env, env.sub, 3*time.Minute)
+	second := createUndispatchedNotification(t, env, subB, 2*time.Minute)
+
+	// 300ms budget: the first attempt (200ms) runs, then less than 200ms is
+	// left, so the second (on another broker, not skipped) does not start.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	srv.notificationDispatchSweepHandler()(ctx)
+
+	assert.Len(t, d.getCalls(), 1, "no attempt may start with less than one attempt timeout left")
+	assert.False(t, notificationDispatched(t, env, first), "the attempted notification must be reverted")
+	assert.False(t, notificationDispatched(t, env, second), "the unattempted notification must stay undispatched")
+}
+
+// A broker found unreachable is skipped for the rest of the pass, so older
+// notifications for an offline broker do not block a newer one for an
+// online broker (ptone/scion#2743).
+func TestSweepHandler_SkipsUnreachableBrokerForRestOfPass(t *testing.T) {
+	setRetryAttemptTimeout(t, 200*time.Millisecond)
+
+	env := setupNotificationTest(t)
+	subscriberB, subB := addSubscriberOnBroker(t, env, "subscriber-b")
+	d := &brokerDeferringDispatcher{deferBrokers: map[string]bool{
+		env.subscriber.RuntimeBrokerID: true, // broker A is offline
+	}}
+	nd := NewNotificationDispatcher(env.store, env.pub, func() AgentDispatcher { return d }, slog.Default())
+	srv := &Server{store: env.store, agentLifecycleLog: slog.Default(), notificationDispatcher: nd}
+
+	// Oldest first: two for broker A, then one for broker B.
+	a1 := createUndispatchedNotification(t, env, env.sub, 4*time.Minute)
+	a2 := createUndispatchedNotification(t, env, env.sub, 3*time.Minute)
+	b1 := createUndispatchedNotification(t, env, subB, 2*time.Minute)
+
+	srv.notificationDispatchSweepHandler()(context.Background())
+
+	assert.Equal(t, 1, d.callsFor(env.subscriber.ID), "the offline broker must be attempted once per pass")
+	assert.Equal(t, 1, d.callsFor(subscriberB.ID), "the online broker's notification must be attempted")
+	assert.True(t, notificationDispatched(t, env, b1), "the online broker's notification must be delivered in the same pass")
+	assert.False(t, notificationDispatched(t, env, a1), "the attempted offline notification must be reverted")
+	assert.False(t, notificationDispatched(t, env, a2), "the skipped offline notification must stay undispatched")
 }
