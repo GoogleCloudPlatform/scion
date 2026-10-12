@@ -128,20 +128,6 @@ Recurring schedules are evaluated in UTC, and there is no schedule timezone sett
 
 See [Scheduling](/scion/hosted/user/scheduling/#recurring-schedules).
 
-## Local mode
-
-Without a Hub there is no `TZ` chain, no Hub default timezone and no display preference.
-
-- **Agent `TZ`** comes only from the `env` you give the agent:
-  - a template's `env`;
-  - the harness-config `env` in `settings.yaml`, including a profile's `harness_overrides` entry for that harness config;
-  - an inline config passed with `scion create --config`.
-
-  An empty `TZ: ""` in a template or an inline config passes your machine's `TZ` through. A `TZ` in a `settings.yaml` harness-config entry (or a profile's `harness_overrides`) takes precedence over a template or inline-config `TZ`. If it is empty, `TZ` is omitted with a warning, even when a template or inline config sets one, and the container uses the image default (UTC). With no `TZ` in any of them, the container uses the image default (UTC).
-- **CLI display** uses your local zone, with `--tz` and `--utc` as above.
-
-A Hub-created agent that is later started with a local `scion start` uses the `TZ` saved in its `scion-agent.json` again.
-
 ## Operator steps
 
 Two maintenance migrations relate to times. An admin runs them from **Admin → Maintenance** in the web dashboard, which offers a dry run, or with `POST /api/v1/admin/maintenance/migrations/<key>/run`. Nothing runs them automatically.

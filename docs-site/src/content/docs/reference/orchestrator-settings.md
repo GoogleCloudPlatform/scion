@@ -65,18 +65,16 @@ Settings for connecting the CLI to a Scion Hub.
 
 ```yaml
 hub:
-  enabled: true
   endpoint: "https://hub.example.com"
   project_id: "uuid-or-slug"
-  local_only: false
 ```
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `enabled` | bool | Whether to enable Hub integration for this project. A Runtime Broker ignores `hub.enabled` and still uses the project's Hub endpoint. `scion hub unlink` does not change it. |
-| `endpoint` | string | The Hub API endpoint URL. Can be overridden per-agent in `scion-agent.yaml`. |
+| `endpoint` | string | The Hub API endpoint URL. A configured endpoint is what makes the CLI use a Hub. Can be overridden per-agent in `scion-agent.yaml`. This is the current way to choose the CLI's Hub; a later release replaces it with a list of named hubs. Servers use `server.hub.public_url` and `server.broker.hub_endpoint` instead (see [Server Configuration](/scion/reference/server-config/)). |
 | `project_id` | string | The unique identifier for this project on the Hub. |
-| `local_only` | bool | If `true`, forces local-only operation even if the Hub is configured. |
+| `linked` | bool | Written by the CLI: `true` once the project is linked, `false` after `scion hub unlink` (agent commands then refuse until `scion hub link`). Unset means never linked; the project links on its first command. |
+| `enabled`, `local_only` | bool | **Deprecated and ignored.** Accepted so existing settings files still validate. `scion hub status` notes it when they are set; see the [migration page](/scion/reference/local-mode-removal/). |
 
 :::caution[Moved Fields]
 Legacy fields like `token`, `apiKey`, and broker identity fields (`brokerId`) have been removed. 
@@ -264,7 +262,7 @@ profiles:
     clone_depth: full
 ```
 
-**Agent timezone.** Profiles do not set the `TZ` of a Hub-dispatched agent: a `TZ` in a profile's `harness_overrides` env is not used (profiles have no `env` key). The Hub-level default is `agent_defaults.default_timezone` (in `settings.yaml`, the top-level `default_timezone` key). For the full order, pins and local mode, see [Times and Timezones](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents).
+**Agent timezone.** Profiles do not set the `TZ` of a Hub-dispatched agent: a `TZ` in a profile's `harness_overrides` env is not used (profiles have no `env` key). The Hub-level default is `agent_defaults.default_timezone` (in `settings.yaml`, the top-level `default_timezone` key). For the full order and pins, see [Times and Timezones](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents).
 
 #### Removed: profile `timezone`
 

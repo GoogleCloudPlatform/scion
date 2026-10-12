@@ -844,7 +844,7 @@ A git clone-per-agent workspace on EmptyDir is cloned again from the remote when
   If the check cannot run (for example the container has already exited, or it times out), there is no warning and the stop goes ahead as usual. The Hub's stop-all action (for example **Stop All** in the Web Dashboard) does not run the check, to keep it fast; `scion stop --all` stops each agent on its own and does run it.
 - **When the agent next starts** (`scion start`, `scion resume`, or a restart), the response repeats the result recorded at the stop, for example `Workspace is ephemeral and was re-cloned; 2 unpushed commits and 3 changed files from the previous run were lost.` When there is no record (the Pod went away without a single-agent stop, or the check did not complete), it says `Workspace is ephemeral and is re-cloned on start; local changes from the previous run are not kept.` A clean workspace gives no warning.
 
-To keep the work, push it before stopping the agent, or use [NFS workspace storage](#sharing-modes-on-the-nfs-workspace). Agents on NFS workspace storage and agents on other runtimes, such as Docker, are not checked and get no warning. The check runs only for agents managed through a Hub; local mode with the Kubernetes runtime does not warn.
+To keep the work, push it before stopping the agent, or use [NFS workspace storage](#sharing-modes-on-the-nfs-workspace). Agents on NFS workspace storage and agents on other runtimes, such as Docker, are not checked and get no warning.
 
 ### Persistent Agent Home (NFS)
 

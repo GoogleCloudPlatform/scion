@@ -2,18 +2,18 @@
 title: Workstation Server Mode
 ---
 
-The **Workstation Server Mode** allows you to run a standalone, single-tenant Scion Hub directly on your local machine. This is a "bonus" feature primarily intended for advanced users who want the benefits of the hosted architecture—such as the web dashboard and remote agent dispatch—without deploying a full, multi-user infrastructure.
+The **Workstation Server Mode** runs a standalone, single-tenant Scion Hub directly on your local machine. It is how Scion runs agents on your own machine: every `scion` command there goes through it, and it adds the web dashboard without deploying a full, multi-user infrastructure.
 
 ## What is Workstation Server Mode?
 
-In a standard local workflow, you run agents directly via the CLI (`scion start ...`). In a standard hosted workflow, a central Hub manages state for an entire team.
-
-The Workstation Server mode bridges these two paradigms. It starts a local instance of the Scion Hub API and Web Dashboard, while also automatically registering your local machine as the default Runtime Broker. 
+Scion always runs agents through a Hub. In a hosted workflow, a central Hub manages state for an entire team. On your own machine, the workstation server is that Hub: it starts a local instance of the Scion Hub API and Web Dashboard, and registers your machine as the default Runtime Broker.
 
 This enables you to:
-1.  Manage your local agents through a visual interface (the Web Dashboard).
-2.  Dispatch agents to your local machine from other devices on your network.
+1.  Run agents from the CLI (`scion start ...`) in any repository on this machine. A repository links itself to this Hub on its first command, without a prompt.
+2.  Manage your agents through a visual interface (the Web Dashboard).
 3.  Simulate a hosted environment for testing or custom template development.
+
+With no Hub configured, agent commands fail with a pointer to `scion server start`; when this server is configured but not running, they say `Local scion server is not running. Start it with 'scion server start'.` Nothing starts the server for you.
 
 ## Starting the Server
 
@@ -24,7 +24,7 @@ scion server start
 ```
 
 This command performs several actions simultaneously:
-1.  **Starts the Hub**: Binds a local API and Web server (defaulting to port 8080).
+1.  **Starts the Hub**: Binds a local API and Web server (defaulting to port 8080), and saves its endpoint as `hub.endpoint` in your global settings (`Configured hub endpoint: http://127.0.0.1:8080`) when none is set, so CLI commands find it.
 2.  **Starts a Broker**: Binds a local broker interface to execute containers.
 3.  **Links Them**: Automatically registers the local broker with the local hub.
 
@@ -34,12 +34,29 @@ When the server is up, `scion server start` asks the Hub whether onboarding is c
 
 **No image registry yet.** The Runtime Broker needs `image_registry` to pull agent images. If it is not set, the Hub and Web Dashboard still start, so the wizard (which sets the registry) is reachable, and the Runtime Broker is skipped with a warning. Set the registry in the wizard or with `scion config set --global image_registry <registry>`, then run `scion server restart` to start the Runtime Broker. (A hosted server still refuses to start without it.)
 
-**Harness logins from your home directory.** Agents run by the co-located Runtime Broker can use the harness login files you already have in your home directory (for example a Claude or Codex login). Only files declared by the harness configs built into Scion are copied, and only when they resolve to a regular file inside your home directory. A Hub secret with the same name or target always wins.
+**Harness logins from your home directory.** Agents run by the co-located Runtime Broker can use the harness login files you already have in your home directory (for example a Claude or Codex login). Only files declared by the harness configs built into Scion are copied, and only when they resolve to a regular file inside your home directory. A Hub secret with the same name or target always wins. Turn it off with `use_host_credentials: false`; see [Host credential files on a workstation](/scion/local/agent-credentials/#host-credential-files-on-a-workstation).
 
 Because it runs as a background daemon, you can manage its lifecycle using:
 - `scion server status`: View running status, PID, and log file location. A degraded server (up, but a non-critical check such as the co-located broker is failing) is shown as running with the failing checks named; an unhealthy one (database or workspace storage failing) is shown as unhealthy. A degraded runtime broker is shown on its own line with its failing checks; the Hub API line reflects only the hub's own checks, and the Web Frontend line reflects the combined status. With `--json`, `hubRunning`/`webRunning`/`brokerRunning` are true when the component is up (healthy or degraded), `hubStatus`/`webStatus`/`brokerStatus` hold the status when it is not healthy (`degraded` or `unhealthy`), and `hubHealthReason`/`webHealthReason`/`brokerHealthReason` name the failing checks (for example `colocated_broker: unhealthy: registration failed`). The `*Status` and `*HealthReason` keys are omitted for a component that is healthy or not detected.
 - `scion server restart`: Restart the daemon.
 - `scion server stop`: Stop the background process. It waits up to 30 seconds for the process to exit. If it is still running after that, the command fails and keeps the PID file so the process can still be found; `scion server stop --force` then stops it.
+
+### Starting at login
+
+`scion server install` prints a service file that runs the server in the foreground under your service manager: a systemd user unit on Linux, a launchd agent on macOS.
+
+```bash
+# Linux (systemd user service)
+scion server install > ~/.config/systemd/user/scion-server.service
+systemctl --user daemon-reload
+systemctl --user enable --now scion-server
+
+# macOS (launchd user agent)
+scion server install > ~/Library/LaunchAgents/io.scion.server.plist
+launchctl load ~/Library/LaunchAgents/io.scion.server.plist
+```
+
+### Foreground
 
 If you prefer to run the server interactively, use the `--foreground` flag:
 
@@ -55,7 +72,11 @@ Because the Workstation Server mode involves both a central Hub (running on your
 
 ### Automatic Bridge (Podman, Docker)
 
-If you are using **Podman** as your container runtime, Scion automatically creates and configures the necessary network bridge. The agents can communicate with the Hub (for API access, status updates, and SSE events) seamlessly via this internal network. No manual intervention is required.
+If you are using **Podman** or **Docker** as your container runtime, Scion automatically creates and configures the necessary network bridge. The agents can communicate with the Hub (for API access, status updates, and SSE events) seamlessly via this internal network. No manual intervention is required.
+
+### Apple container (macOS)
+
+On macOS, Scion picks the Apple `container` runtime first when it is installed (then Podman, then Docker). Apple container needs a one-time container DNS entry, created with `sudo`, before agents can reach the Hub; the onboarding wizard offers it. See [Apple Container DNS](/scion/local/apple-container/), or choose Podman or Docker instead.
 
 ### Manual Configuration
 

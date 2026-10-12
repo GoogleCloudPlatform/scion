@@ -192,23 +192,19 @@ next start.
 To give an existing agent the new setup:
 
 1. **Update the harness-config.**
-   - **Local mode:** run `scion harness-config upgrade <name>`. It changes only the local copy
-     in `~/.scion/harness-configs/<name>/`. It adds missing files and settings, but an existing
-     file that changed in the new defaults (for example `home/.claude/settings.json`) keeps your
-     version. To take the new defaults, run `scion harness-config upgrade <name> --force`. This
-     overwrites every file that ships in the embedded defaults, discarding your edits to those
-     files. Files you added yourself are kept.
-   - **Workstation and hosted:** agents use the Hub's copy, which `upgrade` does not change. The
+   - Agents use the Hub's copy. `scion harness-config upgrade <name>` changes only the local copy
+     in `~/.scion/harness-configs/<name>/` (add `--force` to take every new default file, discarding
+     your edits to them), not the Hub's copy. The
      Hub refreshes its copy of a built-in harness-config from the binary's defaults when it
      restarts. In Workstation mode, that restart also resets the bundled configs in
      `~/.scion/harness-configs/` to the defaults. Publish a harness-config you changed yourself
      with `scion harness-config sync <name>`.
 2. **Rebuild the agent's home.**
-   - **With a Hub:** run [`scion reincarnate <agent>`](/scion/reference/cli/#scion-reincarnate).
+   - Run [`scion reincarnate <agent>`](/scion/reference/cli/#scion-reincarnate).
      It keeps the agent's identity and workspace and copies the harness-config's home files, the
      skills from the template chain (including skill references it declares) and the platform
      skills in again. It overlays files: files that the new version no longer has stay in place.
-   - **Without a Hub, or in a worktree-per-agent project** (where reincarnate is not available):
+   - **In a worktree-per-agent project** (where reincarnate is not available):
      save the agent's work, then delete the agent with `scion delete` and start it again.
 
 ### Deleting

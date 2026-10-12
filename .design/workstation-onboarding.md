@@ -1,5 +1,7 @@
 # Workstation Mode as a First-Class Onboarding Experience
 
+> **Note (local-only mode removed):** this document describes the CLI-only mode with no Hub ("solo" or "local" mode) as current. That mode was removed; every agent now runs through a Hub (the workstation server on a single machine). See `docs-site/src/content/docs/reference/local-mode-removal.md`.
+
 **Date:** 2026-05-30 (decisions folded in 2026-05-31)
 **Status:** Proposal — Survey & Planning (decisions confirmed)
 **Author:** Scion Agent (workstation-onboarding)

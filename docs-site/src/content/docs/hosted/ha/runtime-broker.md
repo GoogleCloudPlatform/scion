@@ -156,7 +156,7 @@ Configure it with a runtime entry of `type: substrate` and a `substrate:` block 
 ## Security & Isolation
 
 When you register your machine as a broker:
-*   **Isolation**: Every agent runs in its own isolated container. In local mode each agent gets a dedicated git worktree (`.scion_worktrees/`); in hub-hosted git projects agents share a single workspace checkout, but each agent's per-agent state (task prompt, resolved config) lives outside that shared mount so sibling agents cannot read it.
+*   **Isolation**: Every agent runs in its own isolated container. In worktree-per-agent projects each agent gets a dedicated git worktree; in other hub-hosted git projects agents share a single workspace checkout, but each agent's per-agent state (task prompt, resolved config) lives outside that shared mount so sibling agents cannot read it.
 *   **No Source Code Sharing**: The Hub does not store your source code. The broker simply creates local branches and commits.
 *   **Safe Secrets**: Sensitive API keys and environment variables managed in the Hub are injected directly into the agent container's memory at runtime. They are not saved to your local disk.
 *   **Mutual Authentication**: All communication over the Control Channel uses HMAC-SHA256 signatures, ensuring that only the authorized Hub can send commands to your machine.

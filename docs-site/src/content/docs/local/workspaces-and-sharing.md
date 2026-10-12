@@ -31,7 +31,7 @@ Every agent operates on the same repository history but has an independent worki
 
 - **Isolation:** per-agent working tree; shared history.
 - **Requires git:** yes.
-- **Availability:** supported in **local mode** and on **Hub-managed git projects** created with workspace mode `worktree-per-agent` (requires git 2.48 or later on the broker). On Kubernetes it requires NFS workspace storage.
+- **Availability:** supported on **linked git projects** (a repository on your machine, linked to a hub) and on **Hub-managed git projects** created with workspace mode `worktree-per-agent` (requires git 2.48 or later on the broker). On Kubernetes it requires NFS workspace storage.
 - **Best for:** local git projects where multiple agents work in parallel on the same repository.
 
 ### Clone-per-agent
@@ -111,7 +111,7 @@ The Hub rejects unknown values with `400`. The mode is stored in the server-owne
 
 ## Runtime environment variables
 
-Agents can discover their workspace provisioning at startup through two environment variables. The Runtime Broker sets them when it starts an agent (Hub-dispatched agents, including Workstation mode). Agents started in local mode without a Runtime Broker do not get them.
+Agents can discover their workspace provisioning at startup through two environment variables. The Runtime Broker sets them when it starts an agent, including on the workstation server.
 
 ### `SCION_WORKSPACE_MODE`
 

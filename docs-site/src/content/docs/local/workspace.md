@@ -14,7 +14,7 @@ When you start an agent, Scion determines its workspace based on the following p
     If you provide a path via `--workspace`, Scion mounts that directory directly. This works in both Git and non-Git environments.
 
 2.  **Git Worktree** (Git repositories):
-    If you are in a Git repository and do not provide an explicit workspace, Scion uses [Git Worktrees](https://git-scm.com/docs/git-worktree) to give the agent its own isolated working directory and branch.
+    If you are in a Git repository and do not provide an explicit workspace, Scion uses [Git Worktrees](https://git-scm.com/docs/git-worktree) to give the agent its own isolated working directory and branch. Exception: in a git repository linked to a Hub, new agents get a clone instead; see [Linked git projects](#linked-git-projects).
 
 3.  **Project Root / CWD** (Non-Git environments):
     If you are not in a Git repository, Scion mounts the project root (or current directory for global agents) directly.
@@ -63,7 +63,7 @@ scion start my-agent "fix web bugs" --workspace packages/web
 
 ## 2. Git Worktrees (Automatic Isolation)
 
-When working inside a Git repository without an explicit `--workspace`, Scion automatically manages **Git Worktrees**. This ensures that each agent has its own isolated checkout of the code, allowing them to work on different branches simultaneously without interfering with your main working directory.
+When working inside a Git repository without an explicit `--workspace`, Scion automatically manages **Git Worktrees** (for a repository linked to a Hub, see [Linked git projects](#linked-git-projects) first). This ensures that each agent has its own isolated checkout of the code, allowing them to work on different branches simultaneously without interfering with your main working directory.
 
 ### Prerequisites
 - Git **2.48.0** or newer is required (for relative path support).
@@ -154,11 +154,39 @@ By default, git projects use a shallow clone with `depth=1` for fast startup.
 
 Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets or your local environment through the env-gather flow.
 
-### Linked Projects (clone-based by default, even when the repo is local)
+### Linked git projects
 
-When you link an existing local git project to a Hub (`scion hub link`), the project becomes **Hub-managed**. Once linked, agents started via the Hub use clone-based provisioning by default, even if the broker machine already has the repository checked out locally.
+This section is the reference for how agents in a git repository on your machine get their
+workspace; other pages link here.
 
-This is intentional: the Hub enforces a consistent, unambiguous workspace strategy for all git-based projects, rather than depending on what happens to already be checked out on whichever broker machine an agent lands on. A project can instead be configured for worktree-per-agent mode, in which case Hub-dispatched agents get the same host-side shared-clone-plus-worktree strategy local mode uses, gated on the broker's git version being 2.48 or later (falling back to clone-based provisioning otherwise).
+A repository on your machine becomes a **linked project** when it links to a Hub: on its first
+command against the local workstation Hub (no prompt), or with `scion hub link`. Once linked, new
+agents use clone-based provisioning by default, even though the broker machine (on a workstation,
+your own machine) already has the repository checked out: each new agent clones the repository's
+remote over HTTPS inside its container, on branch `scion/<agent-name>`.
+
+- A **private repository** needs a `GITHUB_TOKEN` (see below).
+- The agent's work is in its own clone, not in a worktree of your checkout. Push the agent's
+  branch and merge it (or open a pull request) to bring the work back.
+- Agents that already existed in the repository before it was linked, and were imported, keep
+  their git worktrees under `../.scion_worktrees/<project>/<agent>`.
+
+:::caution[Known gap: no local worktrees for new agents]
+Releases that ran agents without a Hub gave every new agent a git worktree of your checkout. On a
+linked project, new agents get a clone instead. Until this changes:
+
+- **Private repositories need a token.** The clone uses HTTPS and a `GITHUB_TOKEN`; your SSH keys
+  are not used.
+- **Unpushed work is not visible to you.** The agent works from the remote's state, not from your
+  checkout: changes you have not pushed are not in its clone, and its changes are not in your
+  checkout until it pushes them.
+- **Branches do not land locally.** The agent's `scion/<agent-name>` branch exists in its clone.
+  Push it, then fetch or open a pull request; it does not appear in `git branch` in your checkout.
+
+This difference is known and under review.
+:::
+
+This is intentional: the Hub enforces a consistent, unambiguous workspace strategy for all git-based projects, rather than depending on what happens to already be checked out on whichever broker machine an agent lands on. A project can instead be configured for worktree-per-agent mode, in which case agents get a host-side shared clone plus a git worktree per agent, gated on the broker's git version being 2.48 or later (falling back to clone-based provisioning otherwise).
 
 **What this means in practice:**
 
@@ -174,13 +202,9 @@ This is intentional: the Hub enforces a consistent, unambiguous workspace strate
   ```
 - **Merging agent work** is done via git push and pull request, not by merging worktrees back into your local checkout.
 
-To return to local worktree-based mode, disable hub integration:
-
-```bash
-scion hub disable
-# or run with --no-hub
-scion start my-agent --no-hub "fix the bug"
-```
+To give agents git worktrees over a shared checkout instead of separate clones, use a project with the
+`worktree-per-agent` [workspace sharing mode](/scion/local/workspaces-and-sharing/). The mode is set
+when the project is created on the Hub and cannot be changed later.
 
 ---
 

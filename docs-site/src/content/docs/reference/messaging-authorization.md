@@ -151,7 +151,7 @@ delivery. All gates must pass:
 
 | Gate | Check | Denial code |
 |------|-------|-------------|
-| Hub enabled | `cross_project_messaging_enabled` is `true` | `cross_project_disabled` |
+| Hub switch on | `cross_project_messaging_enabled` is `true` | `cross_project_disabled` |
 | Sender mode | Sender must be `hub` | `cross_project_sender_mode` |
 | Target mode | Target must be `project` or `hub` | `cross_project_target_mode` |
 | Inbound policy | Destination project's `crossProjectInbound` permits sender | `cross_project_inbound_none` |
@@ -349,7 +349,7 @@ This means a `project`-mode recipient can list and read its incoming
 cross-project DM even though it cannot reply. A hub-to-project downgrade
 alone does not close reads if the reverse hub-to-project edge still exists.
 
-**Hub disable** closes all cross-project agent history/list/resolve/stream
+**Turning the Hub switch off** (`cross_project_messaging_enabled: false`) closes all cross-project agent history/list/resolve/stream
 access. Stored messages and authorized human audit views are retained.
 
 **Project policy changes** govern new incoming content. Previously accepted
@@ -665,7 +665,7 @@ ratified by the project sponsor. Key decisions:
 | D11 | Hub mode: project cell + cross-project DMs; recipient may be project or hub mode |
 | D12 | Hub mode grant: agent caller must be full-role and already hub-mode (non-escalation) |
 | D13 | Cross-project DMs only in first release; group expansion must remain possible |
-| D14 | Hub disable blocks cross-project sends and agent history access; retains records |
+| D14 | Turning the Hub switch off blocks cross-project sends and agent history access; retains records |
 
 ---
 
@@ -677,7 +677,7 @@ For full CLI documentation, see the [CLI Reference](/scion/reference/cli/).
 
 Sets the initial message mode when creating an agent. Overrides template
 and parent inheritance. Valid modes: `none`, `lineage`, `branch`, `project`,
-`hub`. Hub-only (ignored in local mode).
+`hub`.
 
 ### `scion create --message-mode <mode>`
 
@@ -751,7 +751,7 @@ These administration commands are human-only and unavailable in agent mode.
    designated sender into `hub` mode. Demonstrate DM delivery and denied
    reply, then grant the recipient `hub` mode and demonstrate the allowed
    reverse edge.
-4. Verify membership removal and Hub disable against a queued message.
+4. Verify membership removal and turning the Hub switch off against a queued message.
 5. Keep default settings unchanged for all other projects/agents.
 
 ### Rollback

@@ -9,12 +9,12 @@ This document is a **draft**, current as of **2026-02-11**. The Scion project is
 
 ## Overview
 
-Scion is a container-based orchestration platform for managing concurrent LLM-based code agents. It operates in two distinct modes:
+Scion is a container-based orchestration platform for managing concurrent LLM-based code agents. It has one CLI architecture: the `scion` CLI talks to a **Hub**, which keeps agent state and dispatches work to one or more **Runtime Brokers**, and a broker is the only component that starts agent containers.
 
-- **Solo Mode** &mdash; A local-only, zero-config experience where the CLI manages agents directly via a local container runtime.
-- **Hosted Mode** &mdash; A distributed architecture where a centralized **Hub** coordinates state and dispatches work to one or more **Runtime Brokers** that execute agents on remote or local compute.
+- **Workstation** &mdash; `scion server start` runs the Hub, a co-located Runtime Broker and the web dashboard as one process on loopback, with SQLite and dev auth. It is the Hub for every `scion` command on that machine.
+- **Hosted** &mdash; a networked Hub dispatches to Runtime Brokers on remote or local compute.
 
-Both modes share the same core abstractions (Projects, Agents, Templates, Harnesses, Runtimes) but differ in where state is persisted and how lifecycle operations are routed.
+Both share the same core abstractions (Projects, Agents, Templates, Harnesses, Runtimes) and the same lifecycle path. (An earlier CLI-only mode, in which the CLI called the agent manager directly, was removed; see [the migration page](/scion/reference/local-mode-removal/).)
 
 ---
 
@@ -22,20 +22,7 @@ Both modes share the same core abstractions (Projects, Agents, Templates, Harnes
 
 ```d2
 direction: right
-solo: Solo Mode {
-  cli: scion CLI
-  manager: Agent Manager
-  runtime: Container Runtime {
-    tooltip: Docker / Apple / K8s
-  }
-  agent: Agent Container
-
-  cli -> manager: direct
-  manager -> runtime
-  runtime -> agent
-}
-
-hosted: Hosted Mode {
+hosted: Hub and Runtime Broker (workstation server, or hosted) {
   cli: scion CLI
   hub: Scion Hub {
     tooltip: API + Store
@@ -61,12 +48,13 @@ hosted: Hosted Mode {
 
 ### Project
 
-A **Project** is the top-level grouping construct for agents. In Solo mode it is represented by a `.scion` directory on the filesystem; in Hosted mode it is a database record identified by its git remote URL.
+A **Project** is the top-level grouping construct for agents. On disk it is a `.scion` directory; on the Hub it is a database record, linked to the directory (and, for git projects, associated with its remote URL).
 
-**Resolution order (Solo):**
-1. Explicit `--project` flag
+**Resolution order (CLI):**
+1. Explicit `--project` / `--global` flag
 2. Project-level `.scion` directory (walking up from cwd)
-3. Global `~/.scion` directory
+3. Outside a project directory: the current project selected with `scion use`
+4. Global `~/.scion` directory
 
 **Key properties:**
 - **Name**: Slugified from the parent directory containing `.scion`.
@@ -82,18 +70,18 @@ An **Agent** is an isolated container running an LLM harness. Each agent has:
 | Component | Description |
 | :--- | :--- |
 | **Home directory** | Mounted at `/home/<user>` inside the container. Contains harness config, credentials, and a per-agent `agent-info.json`. |
-| **Workspace** | Mounted at `/workspace`. Typically a dedicated git worktree to prevent merge conflicts between concurrent agents. |
+| **Workspace** | Mounted at `/workspace`. A per-agent clone, a git worktree, or a shared or empty directory, depending on the project's workspace sharing mode; see [About Workspaces](/scion/local/workspace/). |
 | **Template** | The blueprint that seeded the agent's home directory and configuration. |
 | **Harness** | The LLM-specific adapter (Claude, Gemini, OpenCode, Codex, or Generic). |
 
-Agent identity varies by mode:
+Agent identity:
 
-| Field | Solo Mode | Hosted Mode |
-| :--- | :--- | :--- |
-| `Name` | User-provided or auto-generated | User-provided or auto-generated |
-| `ContainerID` | Assigned by the container runtime | Assigned by the container runtime |
-| `ID` | Not used | UUID primary key in the Hub database |
-| `Slug` | Not used | URL-safe identifier (unique per project) |
+| Field | Meaning |
+| :--- | :--- |
+| `Name` | User-provided or auto-generated |
+| `ContainerID` | Assigned by the container runtime |
+| `ID` | UUID primary key in the Hub database |
+| `Slug` | URL-safe identifier (unique per project) |
 
 ### Template
 
@@ -254,19 +242,34 @@ Hub and Runtime Broker servers have their own entry points but reuse the same `a
 
 ## Agent Lifecycle
 
-### Solo Mode
+### Starting an agent
 
 ```
-scion start <name> --task "..." [--template claude] [--profile docker-local]
+scion start <name> "task" [--template claude] [--profile docker-local]
 ```
 
-1. **Project resolution**: `config.GetResolvedProjectDir()` locates the `.scion` directory.
+1. **Hub resolution**: The CLI resolves the Hub endpoint (flag, environment, settings) and fails with a pointer to `scion server start` when there is none. An unregistered project links itself on the local workstation Hub, or after a prompt on a remote Hub.
+2. **API call**: The CLI sends a `POST /api/v1/projects/{projectId}/agents` request to the Hub.
+3. **Broker selection**: The Hub selects a Runtime Broker (explicit or project default).
+4. **Environment resolution**: The Hub merges environment variables and secrets from all applicable scopes (user → project → broker).
+5. **Template hydration**: The Hub resolves the template, attaches its content hash for broker-side caching.
+6. **Dispatch**: The Hub dispatches the creation request to the selected Runtime Broker via:
+   - **Direct HTTP** if the Runtime Broker has a reachable endpoint.
+   - **Control Channel** (WebSocket connection) if the Runtime Broker is behind a NAT/firewall.
+7. **Broker execution**: The Runtime Broker provisions and starts the agent through `agent.Manager` and `runtime.Runtime` (next section).
+8. **Status reporting**: The broker reports status back to the Hub via heartbeats and agent status updates.
+
+### Broker-side provisioning
+
+Inside the Runtime Broker, `agent.Manager` runs these steps:
+
+1. **Project resolution**: the broker resolves the project's directory on its host (the linked directory, or a Hub-managed project directory).
 2. **Settings loading**: `config.LoadSettings()` reads `settings.yaml` from the project, merging with environment variable overrides.
 3. **Provisioning** (`agent.ProvisionAgent`):
    a. Creates `agents/<name>/home/` and `agents/<name>/workspace/` directories.
    b. Resolves the template chain and copies home directory contents.
    c. Merges configuration: `template base → template → settings (harness/profile) → agent overrides`.
-   d. Creates a git worktree at `agents/<name>/workspace/` on a new branch (slugified agent name).
+   d. Prepares the workspace for the project's sharing mode (a per-agent clone made inside the container, a git worktree, or a shared or empty directory).
    e. Runs harness-specific provisioning (`harness.Provision()`).
    f. Writes `scion-agent.json` and `agent-info.json`.
 4. **Image resolution**: Resolves the container image from settings/template/CLI override. Pulls if not present.
@@ -276,23 +279,6 @@ scion start <name> --task "..." [--template claude] [--profile docker-local]
    c. If tmux is enabled, wraps the harness command in a tmux session named `scion`.
    d. Launches the container in detached mode.
 6. **Status update**: Writes `agent-info.json` with status `running`.
-
-### Hosted Mode
-
-```
-scion start <name> --task "..." --hub
-```
-
-1. **Hub sync**: The CLI registers/syncs the project with the Hub if not already registered.
-2. **API call**: The CLI sends a `POST /api/v1/projects/{projectId}/agents` request to the Hub.
-3. **Broker selection**: The Hub selects a Runtime Broker (explicit or project default).
-4. **Environment resolution**: The Hub merges environment variables and secrets from all applicable scopes (user → project → broker).
-5. **Template hydration**: The Hub resolves the template, attaches its content hash for broker-side caching.
-6. **Dispatch**: The Hub dispatches the creation request to the selected Runtime Broker via:
-   - **Direct HTTP** if the Runtime Broker has a reachable endpoint.
-   - **Control Channel** (WebSocket connection) if the Runtime Broker is behind a NAT/firewall.
-7. **Broker execution**: The Runtime Broker provisions and starts the agent using the same `agent.Manager` and `runtime.Runtime` code path as Solo mode.
-8. **Status reporting**: The broker reports status back to the Hub via heartbeats and agent status updates.
 
 ---
 
@@ -421,7 +407,6 @@ active_profile: docker-local
 default_template: antigravity
 
 hub:
-  enabled: true
   endpoint: https://hub.example.com
   projectId: "uuid__slug"
 
@@ -476,7 +461,7 @@ Scion uses **git worktrees** for workspace isolation:
 
 ## Web Frontend
 
-The web dashboard (`web/`) provides a visual interface for Hosted mode operations.
+The web dashboard (`web/`) provides a visual interface to the Hub.
 
 | Layer | Technology | Location |
 | :--- | :--- | :--- |
@@ -497,29 +482,35 @@ The server layer (enabled via `--enable-web`) provides:
 
 Each agent runs in its own container with:
 - A dedicated home directory (no shared state between agents).
-- An isolated git worktree (no merge conflicts).
+- An isolated workspace (a per-agent clone or git worktree, depending on the project's sharing mode).
 - Environment variables injected at container creation time (credentials are not written to disk in the project).
 
 ### Credential Flow
 
 ```d2
-host: Host
+direction: right
 cli: CLI {
-  tooltip: discovers credentials (env vars, config files)
+  tooltip: env-gather: sends required env vars from the user's shell
 }
-harness: Harness.DiscoverAuth()\nAuthProvider.GetAuthConfig()
-container: Container {
-  tooltip: Available as \$ANTHROPIC_API_KEY, etc.
+hub: Hub {
+  tooltip: resolves secrets (user, project, broker scopes)
 }
-
-host -> cli
-cli -> harness
-harness -> container: Injected as env vars\nat launch time
+broker: Runtime Broker {
+  tooltip: workstation only: host harness login files, opt-in gcloud ADC
+}
+container: Agent Container {
+  tooltip: provision.py selects the auth method
+}
+cli -> hub: create request
+hub -> broker: dispatch with resolved secrets
+broker -> container: env vars and file secrets
+at launch time
 ```
 
-In Hosted mode, credentials can also be:
-- Stored as encrypted **secrets** in the Hub (scoped to user, project, or broker).
-- Resolved and injected by the Hub at dispatch time (`ResolvedEnv` in the create request).
+Credentials reach an agent from three places:
+- Environment variables from the user's shell, sent by the CLI with the create request (env-gather).
+- Encrypted **secrets** stored in the Hub (scoped to user, project, or broker), resolved at dispatch time.
+- On a workstation broker only: the host's harness login files (`use_host_credentials`) and, when opted in, gcloud ADC (`auto_inject_gcloud_adc`). Hub secrets take precedence. See [Agent Credentials](/scion/local/agent-credentials/#host-credential-files-on-a-workstation).
 
 ### Project Security
 
@@ -594,7 +585,7 @@ Both the Hub and Runtime Broker use structured logging via Go's `slog` package, 
 
 ### Shared Code Path
 
-Solo and Hosted modes share the same `agent.Manager`, `runtime.Runtime`, and `harness.Harness` implementations. The Runtime Broker does not contain a separate agent management stack; it wraps the same `AgentManager` that the CLI uses locally.
+The Runtime Broker wraps `agent.Manager`, `runtime.Runtime`, and `harness.Harness`; it does not contain a separate agent management stack. The CLI does not start agents itself: it reaches the manager only through a Hub and a broker.
 
 ### WebSocket Control Channel
 
@@ -608,6 +599,6 @@ Templates use a chain-based merge strategy rather than flat overrides. This allo
 
 Agent records in the Hub use a `StateVersion` field for optimistic concurrency control. Updates that don't match the expected version are rejected with `ErrVersionConflict`, preventing lost updates from concurrent broker status reports.
 
-### Filesystem as Source of Truth (Solo)
+### Hub Database and Broker Files
 
-In Solo mode, the filesystem (`agents/<name>/scion-agent.json`, `agent-info.json`) is the only source of truth. There is no local database. This keeps Solo mode truly zero-config.
+The Hub database is the source of truth for agent state. On the broker host, the per-agent files (`agents/<name>/scion-agent.json`, `agent-info.json`) hold the provisioned configuration and are what the broker reads when it starts, stops or reports an agent.

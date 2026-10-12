@@ -98,7 +98,7 @@ A workspace sharing mode where one workspace directory is mounted into every age
 _Avoid_: shared mount, plain workspace
 
 **Worktree-per-agent**:
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; on Kubernetes it requires NFS workspace storage.
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported on linked git projects (a repository on your machine, linked to a hub) and on Hub-managed git projects; on Kubernetes it requires NFS workspace storage.
 _Avoid_: worktree mode, shared checkout
 
 **Clone-per-agent**:
@@ -388,7 +388,7 @@ _Avoid_: desired state, target phase
 _See also_: Phase, Run ID, Start claim
 
 **Run ID**:
-The identity of one run of an agent, minted by the Hub for each create, start or restart dispatch. It is applied to the runtime entry as the `scion.run_id` label and carried as the `run_id` claim in the agent's Hub token, so a delete that names a run only targets that run, not a later run of an agent with the same name. A start without a Hub (local mode) gets a run ID from the agent manager instead.
+The identity of one run of an agent, minted by the Hub for each create, start or restart dispatch. It is applied to the runtime entry as the `scion.run_id` label and carried as the `run_id` claim in the agent's Hub token, so a delete that names a run only targets that run, not a later run of an agent with the same name.
 _Avoid_: session ID, instance ID; not the `runId` of an admin maintenance operation
 _See also_: Run intent, Reincarnation
 
@@ -399,22 +399,22 @@ _See also_: Run intent, Run ID
 
 ## Modes
 
-The run modes form a spine of increasing infrastructure — **Local → Workstation → Single-node hosted → HA hosted**. Two independent dimensions separate them: the **availability tier** of the control plane (whether the Hub runs as a single instance on an embedded database, or is replicated across an external one), and **Tenancy** (whether it serves one user or many). Tenancy is orthogonal and only opens up once hosted; the availability tier is fixed by the Hub's database driver (`SCION_SERVER_DATABASE_DRIVER`: `sqlite` vs. `postgres`).
+The run modes form a spine of increasing infrastructure — **Workstation → Single-node hosted → HA hosted**. Two independent dimensions separate them: the **availability tier** of the control plane (whether the Hub runs as a single instance on an embedded database, or is replicated across an external one), and **Tenancy** (whether it serves one user or many). Tenancy is orthogonal and only opens up once hosted; the availability tier is fixed by the Hub's database driver (`SCION_SERVER_DATABASE_DRIVER`: `sqlite` vs. `postgres`).
 
 | Mode | Control plane | State & durability | Tenancy | Canonical use |
 |------|---------------|--------------------|---------|----------------|
-| **Local mode** | None (CLI only) | Local machine; git-worktree isolation | Single-user | Agents launched directly via the `scion` CLI, no server |
 | **Workstation mode** | Combo server (Hub + Runtime Broker + Web) on loopback | Embedded SQLite on that machine | Single-user | The hosted experience locally, on your own machine |
 | **Single-node hosted** | One networked Hub instance on a single node | Embedded SQLite, local/single-volume; non-HA | Single- or multi-user | A cheap, simple networked Hub — a single VM, or a single Cloud Run instance + SQLite |
 | **HA hosted** | Hub replicated behind a load balancer | External managed DB (Postgres) + object storage; highly available | Single- or multi-user | A durable, always-on shared deployment — Cloud Run + Cloud SQL |
 
-**Local mode**:
-Running Scion with no server at all — agents launched directly via the `scion` CLI, with state on the local machine and isolation via git worktrees.
-_Avoid_: solo mode, standalone mode, single-user mode, workstation mode
-
 **Workstation mode**:
-Running a single-tenant Scion server (Hub + Runtime Broker + Web combined) on your own machine, giving the hosted experience locally over loopback. A local server, not the no-server CLI workflow.
+Running a single-tenant Scion server (Hub + Runtime Broker + Web combined) on your own machine over loopback, started with `scion server start`. It is the hub that the `scion` CLI and the web dashboard on that machine run agents through; repositories link to it on their first command.
 _Avoid_: local mode, local server, dev mode, single-user mode
+
+**Local mode** (historical):
+Running agents directly from the `scion` CLI with no Hub. Removed; Workstation mode replaces it. Use only when describing that history, for example in migration notes. See `docs-site/src/content/docs/reference/local-mode-removal.md`.
+_Avoid_: as a current mode; solo mode, standalone mode
+_See also_: Workstation mode
 
 **Hosted mode**:
 The umbrella term for running against a networked Hub — reachable beyond a single machine — that coordinates state across users, projects, and runtime brokers. Spans two **availability tiers**, **Single-node hosted** and **HA hosted**, distinguished by control-plane durability and cost; the tier is fixed by the Hub's database driver (embedded `sqlite` vs. external `postgres`). Orthogonal to the tier is **Tenancy** (single- vs. multi-user).
@@ -466,7 +466,7 @@ _Avoid_: harness metrics, user metrics, LLM metrics
 _See also_: Infrastructure metrics (the other family), Telemetry pipeline
 
 **Telemetry pipeline**:
-The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry`) that collects traces, metrics, and logs from the harness and exports them to a cloud backend (GCP Cloud Monitoring, Cloud Trace, Cloud Logging). Requires the `scion-telemetry-gcp-credentials` secret for cloud export; runs in local-only mode without it.
+The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry`) that collects traces, metrics, and logs from the harness and exports them to a cloud backend (GCP Cloud Monitoring, Cloud Trace, Cloud Logging). Requires the `scion-telemetry-gcp-credentials` secret for cloud export; without it, telemetry is collected in the container but not exported.
 _Avoid_: metrics pipeline, collector, OTel collector
 _See also_: Agent metrics
 

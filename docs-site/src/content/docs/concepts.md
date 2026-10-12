@@ -118,11 +118,11 @@ Furthermore, agent identities are **strictly scoped by their project** (e.g., `p
 A **Workspace** is the working directory mounted into a single agent's container at `/workspace`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**, chosen when the project is created. There are four modes:
 
 - **Shared-plain** — One workspace directory is mounted into every agent with no per-agent isolation. This is the model used for plain (non-git) projects.
-- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; requires git 2.48 or later on the broker (on Kubernetes, only with NFS workspace storage).
+- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported on linked git projects (a repository on your machine, linked to a hub) and on Hub-managed git projects; requires git 2.48 or later on the broker (on Kubernetes, only with NFS workspace storage).
 - **Clone-per-agent** — Each agent gets its own full git clone of the repository.
 - **Empty-per-agent** — For Hub-managed projects without git: each agent gets its own private directory that starts empty. Use [shared directories](/scion/local/workspaces-and-sharing/#2-the-shared-directories-invariant) to share or keep files.
 
-**Worktree-per-agent (local git projects):**
+**Worktree-per-agent (linked git projects):**
 - A new worktree is created (e.g. at `../.scion_worktrees/<project>/<agent>`) with a dedicated branch, and mounted into the agent's container as `/workspace`.
 - Agents operate on the same repository history but have independent working directories.
 - Work is merged back to the main branch manually (e.g., `git merge <agent-branch>`).

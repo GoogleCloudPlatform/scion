@@ -19,7 +19,7 @@ Before diving in, it's important to understand the two workspace models Scion of
 | **Hub required** | No | Yes |
 | **Best for** | Solo development, fast iteration | Team workflows, remote brokers, CI-like dispatch |
 
-**Key takeaway**: When a project is managed by the Hub — whether created from a URL or linked from a local directory — agents use **HTTPS clone-based provisioning** by default. The Hub enforces a consistent workspace strategy across all brokers and users, rather than depending on what a given broker machine happens to have checked out. A project can instead select worktree-per-agent mode, which gives Hub-dispatched agents the same host-side shared-clone-plus-worktree strategy local mode uses, gated on the broker's git version being 2.48 or later.
+**Key takeaway**: When a project is managed by the Hub — whether created from a URL or linked from a local directory — agents use **HTTPS clone-based provisioning** by default. The Hub enforces a consistent workspace strategy across all brokers and users, rather than depending on what a given broker machine happens to have checked out. A project can instead select worktree-per-agent mode, which gives agents a git worktree each over a host-side shared clone (not your own checkout), gated on the broker's git version being 2.48 or later. On a workstation this also applies to the repository you work in; see [Linked git projects](/scion/local/workspace/#linked-git-projects).
 
 For the full technical details on workspace strategies, see [About Workspaces](/scion/local/workspace/).
 
@@ -238,15 +238,9 @@ If you already have a local checkout linked to the Hub via `scion hub link`, be 
 
 This means you need a `GITHUB_TOKEN` secret set on the project for clone-based provisioning, just like a project created from a URL.
 
-To temporarily fall back to local worktree mode outside the Hub entirely:
-
-```bash
-# Disable hub for a single command
-scion start my-agent --no-hub "quick local fix"
-
-# Or disable hub integration entirely
-scion hub disable
-```
+This applies to the repository you work on with the local workstation Hub too: new agents get a
+clone, not a worktree of your checkout. See [Linked git projects](/scion/local/workspace/#linked-git-projects)
+for what that means and the known gap.
 
 ---
 

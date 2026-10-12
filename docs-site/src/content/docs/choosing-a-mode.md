@@ -1,19 +1,21 @@
 ---
 title: Choosing a Mode
-description: How to pick the right Scion run mode — Local, Workstation, Single-node hosted, or HA hosted — from the two dimensions that separate them.
+description: How to pick the right Scion run mode — Workstation, Single-node hosted, or HA hosted — from the two dimensions that separate them.
 ---
 
 Scion runs the same agents and the same CLI whether you are working alone on a laptop or operating a durable, always-on platform for a team. What changes between those situations is **how much infrastructure sits behind the agents** — and that is what a *mode* captures.
 
-This page introduces the four run modes and helps you pick the one that fits your use case. The definitions here follow the canonical [`GLOSSARY.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/GLOSSARY.md); when in doubt, the root glossary wins.
+This page introduces the three run modes and helps you pick the one that fits your use case. The definitions here follow the canonical [`GLOSSARY.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/GLOSSARY.md); when in doubt, the root glossary wins.
 
 ## The mode spine
 
 The run modes form a **spine of increasing infrastructure**:
 
-**Local → Workstation → Single-node hosted → HA hosted**
+**Workstation → Single-node hosted → HA hosted**
 
-Each step to the right adds capability — a control plane, a durable data store, multi-user access — at the cost of more moving parts to run and pay for. You are not locked in: the same projects and agents move up the spine as your needs grow.
+Every mode has a control plane: Scion always runs agents through a **Hub**. Each step to the right adds capability — a networked Hub, a durable data store, multi-user access — at the cost of more moving parts to run and pay for. You are not locked in: the same projects and agents move up the spine as your needs grow.
+
+Earlier releases could also run agents from the CLI with no Hub at all. That option was removed; on your own machine the workstation server takes its place. See the [migration page](/scion/reference/local-mode-removal/).
 
 ## The two dimensions
 
@@ -33,32 +35,23 @@ The **availability tier** describes the durability of the **Hub** — Scion's co
 - **Single-user** — one principal, with simple auth (a workstation dev token, or one OAuth identity).
 - **Multi-user** — many principals authenticated through an OAuth identity provider (Google or GitHub), with Hub **Groups** and access policies governing who can see and act on what.
 
-Local and Workstation modes are single-user by construction. Either hosted tier can be single- or multi-user.
+Workstation mode is single-user by construction. Either hosted tier can be single- or multi-user.
 
-## The four modes
+## The three modes
 
 | Mode | Control plane | State & durability | Tenancy | Canonical use |
 |------|---------------|--------------------|---------|----------------|
-| **Local** | None (CLI only) | Local machine; git-worktree isolation | Single-user | Agents launched directly via the `scion` CLI, no server |
 | **Workstation** | Combo server (Hub + Runtime Broker + Web) on loopback | Embedded SQLite on that machine | Single-user | The hosted experience locally, on your own machine |
 | **Single-node hosted** | One networked Hub on a single node | Embedded SQLite, single-volume; non-HA | Single- or multi-user | A cheap, simple networked Hub — a single VM, or one Cloud Run instance + SQLite |
 | **HA hosted** | Hub replicated behind a load balancer | External Postgres + object storage; highly available | Single- or multi-user | A durable, always-on shared deployment — Cloud Run + Cloud SQL |
 
-### Local mode
-
-Run Scion with **no server at all**. Agents are launched directly through the `scion` CLI, state lives on your machine, and isolation between agents comes from git worktrees. There is no Hub, no web dashboard, and no admin role — just you and the CLI.
-
-Choose Local when: *"I just want agents on my machine, no server."*
-
-Start here with the [Installation guide](/scion/getting-started/install/) and the [Tutorial](/scion/getting-started/tutorial/).
-
 ### Workstation mode
 
-Run a single-tenant Scion server — the **combo server**, which bundles the Hub, a Runtime Broker, and the Web dashboard into one process — on your own machine over loopback. This gives you the hosted experience locally: a visual dashboard, remote-style dispatch, and project management, without deploying shared infrastructure. It is a local *server*, not the no-server CLI workflow.
+Run a single-tenant Scion server — the **combo server**, which bundles the Hub, a Runtime Broker, and the Web dashboard into one process — on your own machine over loopback. This gives you the hosted experience locally: a visual dashboard, remote-style dispatch, and project management, without deploying shared infrastructure. It is also where the `scion` CLI runs your agents on this machine: once the server is running, a repository links to it on its first command.
 
-Choose Workstation when: *"Give me the hosted experience locally."*
+Choose Workstation when: *"I want agents on my machine"*, with or without the dashboard.
 
-The fastest way in is the [Onboarding Wizard](/scion/getting-started/onboarding/), which `scion server start` opens automatically on first run. For the mechanics of the combo server, network bridges, and lifecycle, see [Workstation Server Mode](/scion/workstation/workstation-server/).
+The fastest way in is the [Onboarding Wizard](/scion/getting-started/onboarding/), which `scion server start` opens automatically on first run; then follow the [Tutorial](/scion/getting-started/tutorial/). For the mechanics of the combo server, network bridges, and lifecycle, see [Workstation Server Mode](/scion/workstation/workstation-server/).
 
 ### Single-node hosted
 
@@ -78,12 +71,11 @@ This tier requires the fullest **user/admin** split: admins provision Postgres, 
 
 ## How to choose
 
-- **No server, just me** → **Local**. Nothing to run beyond the CLI.
-- **The dashboard and hosted workflow, but only on my machine** → **Workstation**. One command (`scion server start`) and the onboarding wizard.
+- **Agents on my machine, just me** → **Workstation**. One command (`scion server start`) and the onboarding wizard; the CLI and the dashboard both use it.
 - **A shared Hub on the network, kept cheap and simple** → **Single-node hosted**. One VM or Cloud Run instance with SQLite; accepts downtime.
 - **A durable, always-on platform for a team** → **HA hosted**. External Postgres, object storage, and replicated Hub instances.
 
-The two questions that resolve almost every case: *Do I need a networked control plane at all?* (Local vs. everything else), and if so, *Do I need it to stay up through restarts and node loss?* (Single-node vs. HA). Tenancy — single- or multi-user — is a separate switch you set once you are hosted.
+The two questions that resolve almost every case: *Does anyone besides me, on another machine, need to reach the Hub?* (Workstation vs. hosted), and if so, *Do I need it to stay up through restarts and node loss?* (Single-node vs. HA). Tenancy — single- or multi-user — is a separate switch you set once you are hosted.
 
 ## See also
 

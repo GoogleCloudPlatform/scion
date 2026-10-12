@@ -17,12 +17,12 @@ Edit `~/.scion/settings.yaml` (or use `scion config set`):
 
 ```yaml
 hub:
-  enabled: true
   endpoint: "https://scion.yourcompany.com"
-  local_only: false
 ```
 
-**Note:** In workstation mode, this should be `http://localhost:8080`.
+A configured endpoint is all the CLI needs; there is no separate switch to turn the Hub on. Setting `hub.endpoint` is the current way to choose the Hub; a later release replaces it with a list of named hubs.
+
+**Note:** In workstation mode, `scion server start` writes `http://127.0.0.1:8080` here for you.
 
 ### Authentication
 
@@ -36,11 +36,28 @@ scion hub auth login
 scion hub auth login --hub-url https://scion.yourcompany.com
 ```
 
-This will open your browser to complete the OAuth flow. The hub URL comes from `--hub-url`, then the root `--hub` flag, then the `SCION_HUB_ENDPOINT` environment variable (which overrides `hub.endpoint` in settings), then `hub.endpoint` in settings, then the `SCION_HUB_URL` environment variable — the same order as the other Hub commands, with `--hub-url` first. If no `hub.endpoint` is configured yet, a successful login saves the URL to your global settings (or to the project's settings, when that project already has hub settings) so `scion hub status` and other Hub commands use it. If Hub mode is off, an interactive login offers to enable it; otherwise run `scion hub enable`.
+This will open your browser to complete the OAuth flow. The hub URL comes from `--hub-url`, then the root `--hub` flag, then the `SCION_HUB_ENDPOINT` environment variable (which overrides `hub.endpoint` in settings), then `hub.endpoint` in settings, then the `SCION_HUB_URL` environment variable — the same order as the other Hub commands, with `--hub-url` first. If no `hub.endpoint` is configured yet, a successful login saves the URL to your global settings (or to the project's settings, when that project already has hub settings) so `scion hub status` and other Hub commands use it.
+
+Saving `hub.endpoint` in settings is the current way to point the CLI at a remote Hub. A later release replaces it with a list of named hubs that you switch between.
 
 To let a coding agent on your machine (for example Claude Code or Gemini CLI) drive the CLI under a scoped token, see [Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).
 
-Commands that take a Hub project reference, such as `scion start -g <hub-project>`, need Hub mode. When you are logged in, an interactive run offers to enable it; otherwise the error tells you to run `scion hub enable`.
+Commands that take a Hub project reference, such as `scion start -g <hub-project>`, work once a Hub endpoint is configured.
+
+### Working with a Hub project from anywhere
+
+Inside a linked directory, commands target that project. To work with a Hub project from outside
+any project directory (for example a Hub-managed project with no local checkout), select it once:
+
+```bash
+scion use my-project
+scion list
+```
+
+Commands run outside a project directory then target `my-project` on the current Hub until you run
+`scion use --clear`; run `scion use` to see what is selected and why. See
+[`scion use`](/scion/reference/cli/#scion-use). `--global` still targets the global project, for
+example for global settings.
 
 ## Project Linking (Projects)
 
@@ -51,11 +68,11 @@ In a team environment, a **Project** represents a shared project. You link your 
 scion hub link
 ```
 
-If this directory is already linked (its Hub project ID names a Hub project of the same name), Scion reports that it is already linked. Otherwise it looks for Hub projects with the same name (the repository name from the Git remote, or the directory name). If it finds any, it asks whether to link to one of them or register a new project; with `--yes` it links to the first match, and `--non-interactive` refuses when more than one matches. If none match, it registers a new project. On the local workstation Hub the link confirmation is skipped (a prompt to pick among matching projects, and the offer to sync agents, still appear). With no Hub endpoint configured, `scion hub link` fails with one line telling you to start the local Hub with `scion server start` or to set a remote one with `scion config set hub.endpoint <url>`.
+If this directory is already linked (its Hub project ID names a Hub project of the same name), Scion reports that it is already linked. Otherwise it looks for Hub projects with the same name (the repository name from the Git remote, or the directory name). If it finds any, it asks whether to link to one of them or register a new project; with `--yes` it links to the first match, and `--non-interactive` refuses when more than one matches. If none match, it registers a new project. On the local workstation Hub the link confirmation is skipped (a prompt to pick among matching projects still appears), and a repository links itself on its first command, so you rarely need `scion hub link` there. With no Hub endpoint configured, `scion hub link` fails with one line telling you to start the local Hub with `scion server start` or to set a remote one with `scion config set hub.endpoint <url>`.
 
-When a project with existing local agents is linked and you accept the offer to sync them, they are imported to the Hub. An agent whose container is running is adopted as it is. Other agents are imported without being started (as stopped, or as created when they have no container), so the import never restarts dormant agents or re-sends their task.
+When a project still has agents from a release that ran them without a Hub, linking offers to import them (on the local workstation Hub it imports them without asking). An agent whose container is running is adopted as it is. Other agents are imported as created, not started, so the import never restarts dormant agents or re-sends their task. See the [migration page](/scion/reference/local-mode-removal/#what-the-import-does-with-each-agent).
 
-`scion hub unlink` only clears the link for this directory (it sets `hub.linked: false` and removes the Hub project ID). It does not turn Hub mode off and does not remove the project or its agents from the Hub. Agent commands in an unlinked project refuse and point you to `scion hub link`.
+`scion hub unlink` only clears the link for this directory (it sets `hub.linked: false` and removes the Hub project ID). It does not remove the project or its agents from the Hub; existing agents keep running on their broker and stay reachable with `--project <hub-slug>`. Agent commands in the unlinked directory refuse and point you to `scion hub link`.
 
 ### Project Configuration
 
@@ -75,12 +92,12 @@ For clone-based provisioning, this means:
   ```bash
   scion hub secret set --project my-project GITHUB_TOKEN=ghp_xxxxxxxxxxxx
   ```
-- SSH credentials are not used for workspace provisioning when Hub mode is active.
+- SSH credentials are not used for workspace provisioning.
 - The CLI will confirm the clone path when starting agents:
   ```
   Using hub, cloning repo https://github.com/org/repo.git
   ```
-- To use local worktrees instead, run with `--no-hub` or disable hub integration temporarily.
+- To use git worktrees instead, use a project with the `worktree-per-agent` workspace sharing mode, which is set when the project is created on the Hub.
 
 Clone-per-agent is one of Scion's three **workspace sharing modes** (Shared-plain, Worktree-per-agent, Clone-per-agent). For how each mode provisions the workspace and which apply to Hub-managed projects, see [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/) and [About Workspaces](/scion/local/workspace/).
 
@@ -91,8 +108,8 @@ With the Hub connected, you can dispatch agents to **Runtime Brokers** managed b
 ### Selecting a Broker
 The Hub automatically routes tasks to available brokers. You can tag agents to request specific capabilities (e.g., `gpu-capable`).
 
-### Local Fallback
-If you want to temporarily run agents locally even while connected to the Hub, add `--no-hub` to a single command, or set `hub.local_only: true` in your settings to keep the Hub configured but operate locally.
+### Running agents on your own machine
+To run agents on your own machine instead, start the local workstation server (`scion server start`) and point the CLI at it; see [Workstation Server Mode](/scion/workstation/workstation-server/).
 
 ## Shared Secrets & Environment
 

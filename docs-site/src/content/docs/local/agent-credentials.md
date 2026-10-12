@@ -7,12 +7,44 @@ Scion automatically handles discovering and injecting LLM credentials into agent
 
 > **Note**: This documentation covers how harnesses gain access to LLM models, as well as how agents authenticate to Git repositories.
 
-## Local vs. Hub Deployment
+## Workstation vs. Hosted Brokers
 
-Authentication setup depends heavily on how you are running Scion:
+Every agent is started by a Runtime Broker on behalf of a Hub. What the agent can pick up from your machine depends on where that broker runs:
 
-- **Local (Solo) Mode**: Scion running locally will automatically scan your host machine's environment variables and well-known credential file paths (like `~/.config/gcloud/application_default_credentials.json`).
-- **Hub (Hosted) Mode**: For agents dispatched by a Scion Hub to remote brokers, the agent's environment is strictly isolated from the broker's host machine. You must provide credentials explicitly via Hub Secrets or profile settings, which are then securely injected into the agent container at launch.
+- **Workstation** (the broker inside `scion server start`, on your machine, with the Hub on loopback and dev auth): API keys exported in the shell you run `scion` from are sent with the start request. The harness login files in your home directory are given to the agent too; see [Host credential files on a workstation](#host-credential-files-on-a-workstation). Your gcloud ADC file is given to agents only when you opt in with `auto_inject_gcloud_adc: true` (the onboarding wizard offers it). Hub secrets take precedence over all of these.
+- **Hosted brokers**: the agent's environment is strictly isolated from the broker's host machine. You must provide credentials explicitly via Hub Secrets or profile settings, which are then securely injected into the agent container at launch.
+
+## Host credential files on a workstation
+
+On a workstation server, an agent gets the harness login files from your home directory, for
+example `~/.claude/.credentials.json` after you sign in to Claude Code on this machine, or
+`~/.gemini/oauth_creds.json` after a Gemini CLI login. You do not need to upload them as
+secrets. This is controlled by the global setting `use_host_credentials`:
+
+```yaml
+# ~/.scion/settings.yaml
+use_host_credentials: false   # default: true on a workstation
+```
+
+or `scion config set --global use_host_credentials false`.
+
+- **When it applies.** Only when the broker runs inside a workstation server (not hosted mode)
+  with dev auth, the start request comes over that server's own connection, and the Hub endpoint is
+  loopback. Hosted brokers never read host credential files, whatever the setting says.
+- **Which files.** Only the credential files declared by the harness configs that ship with
+  Scion (the paths in the table under [`auth-file`](#harness-specific-credential-file-auth-file)).
+  A template-bundled, project or user-installed harness config cannot add paths. A file must be a
+  regular file inside your home directory, after following symlinks, and at most 1 MiB. Copilot's
+  `~/.copilot/config.json` is used only when it holds sign-in data; a config file with only
+  preferences is skipped.
+- **Precedence.** A Hub secret with the same name or the same target path wins over the host file.
+- **When it is read.** On every start, restart and resume. Turning the setting off takes effect on
+  the next start; the server does not need a restart. If the settings file cannot be read, no host
+  files are given to agents.
+- **What it does not cover.** Environment variables (API keys come from your shell through the
+  start request) and gcloud ADC (opt in with `auto_inject_gcloud_adc: true`).
+
+The broker logs the names of the files it gave to an agent, never their contents.
 
 ---
 
@@ -22,7 +54,7 @@ All harnesses are provisioned by a **container-script** (`provision.py`) that ru
 agent container, backed by the shared `scion_harness` Python library. Credential resolution is a
 two-part collaboration:
 
-1. **Host-side gather (Go)**: Before the container starts, Scion collects candidate credentials from environment variables and well-known file paths. In Hub mode this includes only the secrets and variables explicitly injected into the agent; direct Hub-secret access from inside the agent is blocked.
+1. **Host-side gather (Go)**: Before the container starts, Scion collects candidate credentials from environment variables and well-known file paths. On a hosted broker this includes only the secrets and variables explicitly injected into the agent; direct Hub-secret access from inside the agent is blocked.
 2. **In-container select (`provision.py`)**: The harness's provisioner evaluates the staged candidates against the harness's declared auth methods (the `auth:` block in its `config.yaml`), selects one, and writes the harness-native configuration (e.g. `~/.claude.json`, `~/.gemini/settings.json`, `~/.hermes/.env`).
 
 The selection logic lives in each bundle's `provision.py` via `scion_harness.AuthSpec` /
@@ -176,24 +208,25 @@ This is also the token that Claude's `capture_auth.py` stores automatically afte
 
 ### Vertex Model Garden (`vertex-ai`)
 
-Uses Google Cloud's Vertex AI endpoints with Application Default Credentials (ADC). Scion supports two primary ways to authenticate in Hub mode: via an assigned GCP Identity (Service Account) or an injected ADC file secret. Supported by Claude, Gemini, OpenCode, and Antigravity (Codex, Copilot, and Hermes do not support Vertex AI).
+Uses Google Cloud's Vertex AI endpoints with Application Default Credentials (ADC). On a Hub, Scion supports two primary ways to authenticate: via an assigned GCP Identity (Service Account) or an injected ADC file secret. Supported by Claude, Gemini, OpenCode, and Antigravity (Codex, Copilot, and Hermes do not support Vertex AI).
 
 **Required Sources:**
-- **Assigned GCP Identity** (Hub Mode): If the agent is assigned a Hub-managed GCP Service Account via metadata emulation, Vertex AI will automatically use it. This is the recommended and most secure approach.
-- **ADC JSON file** (Fallback/Local): Automatically discovered at `~/.config/gcloud/application_default_credentials.json` if present locally. In Hub mode, you can upload an ADC file via the `gcloud-adc` file secret or specify the `GOOGLE_APPLICATION_CREDENTIALS` environment variable pointing to a custom credential file.
+- **Assigned GCP Identity**: If the agent is assigned a Hub-managed GCP Service Account via metadata emulation, Vertex AI will automatically use it. This is the recommended and most secure approach.
+- **ADC JSON file**: On a workstation, your host file at `~/.config/gcloud/application_default_credentials.json` is used when `auto_inject_gcloud_adc: true` is set in your global settings. Otherwise, you can upload an ADC file via the `gcloud-adc` file secret or specify the `GOOGLE_APPLICATION_CREDENTIALS` environment variable pointing to a custom credential file.
 - `GOOGLE_CLOUD_PROJECT`: Your Google Cloud project ID.
 - `GOOGLE_CLOUD_REGION`: The region (e.g., `us-east5`). Required for Claude, optional but recommended for Gemini. `CLOUD_ML_REGION` and `GOOGLE_CLOUD_LOCATION` are accepted as alternatives.
 
-**Local Setup:**
+**Workstation Setup:**
 ```bash
-# Assuming ADC is already generated via `gcloud auth application-default login`
+# Assuming ADC is already generated via `gcloud auth application-default login`,
+# and ~/.scion/settings.yaml contains: auto_inject_gcloud_adc: true
 export GOOGLE_CLOUD_PROJECT="my-project"
 export GOOGLE_CLOUD_REGION="us-east5"
 scion start --harness claude my-agent
 ```
 
 **Hub Setup:**
-For Hub mode, the recommended approach is to assign a GCP Service Account to the agent at creation time.
+On a shared Hub, the recommended approach is to assign a GCP Service Account to the agent at creation time.
 
 :::note[IAM-Gated Service Account Assignment]
 Binding a GCP Service Account to an agent on a Hub requires satisfying two authorization gates:
@@ -244,8 +277,8 @@ To prevent auth state corruption across container restarts, Scion implements a s
 
 Some harnesses authenticate with their own credential files, such as OAuth credential files. Scion
 stages the file at the harness's expected path inside the container. The file is provided either by
-uploading it as a **file secret**, or (locally) by having it present at its conventional path on
-your host, where Scion discovers it and mounts it into the agent.
+uploading it as a **file secret**, or (on a workstation) by having it present at its conventional
+path in your home directory; see [Host credential files on a workstation](#host-credential-files-on-a-workstation).
 
 **Well-known paths & file-secret keys:**
 
@@ -262,8 +295,8 @@ your host, where Scion discovers it and mounts it into the agent.
 Harness-config resolution changed in the 2026-10-06 release. Upgrade the Hub before, or together with, its Runtime Brokers. Existing agents that use `auth-file` must re-authenticate (or be re-created) once after the upgrade. Agents that authenticate with environment secrets are not affected.
 :::
 
-**Local Setup:**
-If you have run the harness's native authentication command (e.g. an OAuth login on your host), Scion will automatically detect the resulting credential file and mount it into the agent.
+**Workstation Setup:**
+If you have run the harness's native authentication command (e.g. an OAuth login on your host), the workstation broker gives the resulting credential file to the agent, as long as `use_host_credentials` is not turned off.
 
 **Hub Setup:**
 Upload the credential file as a file secret via the Web Interface or CLI, targeting the harness's expected path:
@@ -352,7 +385,7 @@ By default, all capture paths use **user scope** with **progeny enabled** (`--al
   `~/.codex/auth.json` as the `CODEX_AUTH` file secret; Gemini captures
   `~/.gemini/oauth_creds.json` as `GEMINI_OAUTH_CREDS`. See the table in
   [The Three-Stage Auth Workflow](#the-three-stage-auth-workflow).
-- **Where it goes** — into the **secret store** (the Hub's secret store in Hub mode), scoped either to the project or the originating user. This is why captured credentials survive container restarts: the file lives in the store, not in the ephemeral container, and the host re-stages it on every subsequent start.
+- **Where it goes** — into the **secret store** (the Hub's secret store), scoped either to the project or the originating user. This is why captured credentials survive container restarts: the file lives in the store, not in the ephemeral container, and the host re-stages it on every subsequent start.
 - **Harness-specific extras** — some bundles override the generic flow:
   - **Claude** additionally scans the terminal scrollback for the `sk-ant-oat…` token printed by
     `claude setup-token` and stores it as the `CLAUDE_CODE_OAUTH_TOKEN` environment secret.
@@ -468,7 +501,7 @@ You have configured the **Explicit Path** (e.g., selecting `vertex-ai`) but the 
 The Runtime Broker refused the start before creating a container (see [No-Auth Fallback](#no-auth-fallback)). The message names the harness, the accepted auth types and, for a selected auth type, the credentials it looks for. Provide one of them as a Hub secret (`scion hub secret set`) or a Hub environment setting (`scion hub env set`), or select a different auth type with `--harness-auth`.
 
 ### "agent secrets could not be resolved" or "agent environment settings could not be read"
-In Hub mode, create, start, restart, resume and waking an agent for a direct message fail closed with `503` when the Hub cannot resolve the agent's configured secrets or read its stored environment settings, instead of starting the agent without them. A start leaves the agent as it was, a restart leaves it stopped (its stop leg has already run), and a failed create is rolled back. A provision-only create still succeeds; the agent's later start fails closed. A reincarnation answers `202` and then fails at its start leg: it is recorded as failed with the same message and the previous config is restored. This points to a secret backend or database problem on the Hub, not a missing credential (an agent with no secrets or settings starts normally). Retry once the Hub's backend is healthy; the Hub's server log has the cause.
+Create, start, restart, resume and waking an agent for a direct message fail closed with `503` when the Hub cannot resolve the agent's configured secrets or read its stored environment settings, instead of starting the agent without them. A start leaves the agent as it was, a restart leaves it stopped (its stop leg has already run), and a failed create is rolled back. A provision-only create still succeeds; the agent's later start fails closed. A reincarnation answers `202` and then fails at its start leg: it is recorded as failed with the same message and the previous config is restored. This points to a secret backend or database problem on the Hub, not a missing credential (an agent with no secrets or settings starts normally). Retry once the Hub's backend is healthy; the Hub's server log has the cause.
 
 ### "unknown auth type"
 The value you passed to `--harness-auth` (or `auth_selectedType`) is not one this harness supports. Valid universal types are `api-key`, `oauth-token`, `auth-file`, and `vertex-ai`, but each harness only accepts a subset — see the [auth capability matrix](/scion/supported-harnesses/#feature-capability-matrix).

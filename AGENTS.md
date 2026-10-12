@@ -5,7 +5,7 @@
 
 > **Terminology note**: The concept now called "project" was formerly called "grove". You may still encounter "grove" in historical issues, commit history, or older documentation, and in the compatibility code described under the terminology guardrail below; treat it as a synonym for "project". See `docs-site/src/content/docs/reference/grove-removal.md` for what changed.
 
-`scion` is a container-based orchestration platform designed to manage concurrent LLM-based code agents. It supports both a standalone local CLI mode and a distributed "Hosted" architecture where state is centralized in a Hub and agents execute on disparate Runtime Brokers (local Docker, remote servers, or Kubernetes clusters).
+`scion` is a container-based orchestration platform designed to manage concurrent LLM-based code agents. Every agent runs through a Hub: on a single machine that is the workstation server (`scion server start`: Hub, Runtime Broker and web on loopback), and in the distributed "Hosted" architecture state is centralized in a networked Hub and agents execute on disparate Runtime Brokers (local Docker, remote servers, or Kubernetes clusters). The former local-only CLI mode (no Hub) was removed; see `docs-site/src/content/docs/reference/local-mode-removal.md`.
 
 ## Agent Instruction Files
 
@@ -45,16 +45,16 @@ Subdirectories contain domain-specific agent instructions for their respective a
 
 ## Key Concepts
 
-### Solo/Local Architecture
+### Workstation Architecture
+- **Workstation server**: `scion server start` runs the Hub, a co-located Runtime Broker and the web UI as one daemon on 127.0.0.1 (SQLite at `~/.scion/hub.db`, dev auth). Nothing starts it implicitly; with no hub configured, agent commands fail with a pointer to `scion server start`. On this hub a repository links itself on its first command (no prompt); remote hubs keep the link prompt. The CLI never runs agents itself: the broker does, through `pkg/agent`.
 - **Project (Group)**: A grouping construct for a set of agents, represented by a `.scion` directory.
-  - **Resolution**: Active project is resolved by: 1. `--project` flag, 2. Project-level `.scion`, 3. Global `.scion` in home directory.
+  - **Resolution**: Active project is resolved by: 1. `--project`/`--global` flag, 2. Project-level `.scion`, 3. outside a project, the current project selected with `scion use`, 4. Global `.scion` in home directory.
   - **Naming**: Slugified version of the parent directory containing the `.scion` directory.
 - **Agent**: An isolated container running an LLM harness (Gemini, Claude, etc.).
   - **Filesystem**: Dedicated home directory (`/home/gemini`) containing unique config and history.
   - **Workspace**: Mounted git worktree at `/workspace`.
-- **Workspace Strategy (Git Worktrees)**:
-  - On start, a new worktree is created at `../.scion_worktrees/<project>/<agent>` to avoid recursion.
-  - A new feature branch is created for each agent.
+- **Workspace Strategy**:
+  - In a linked git project with a remote, a new agent clones the remote inside its container (HTTPS, `GITHUB_TOKEN` for private repos) on branch `scion/<agent>`; projects with the `worktree-per-agent` workspace mode get a worktree per agent over a host-side shared clone (not the user's checkout), and agents imported from before the link keep their worktrees at `../.scion_worktrees/<project>/<agent>`. This is a known gap versus the removed hub-less CLI mode; see "Linked git projects" in `docs-site/src/content/docs/local/workspace.md`.
 - **Observability & Interactivity**:
   - **Status**: Agents write state to `/home/gemini/.gemini-status.json` (STARTING, THINKING, EXECUTING, WAITING_FOR_INPUT, COMPLETED, ERROR).
   - **Intervention**: When `WAITING_FOR_INPUT`, users can `scion attach <agent>` to provide input or confirmations.
