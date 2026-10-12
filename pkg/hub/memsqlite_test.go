@@ -188,29 +188,29 @@ const (
 	implicitDSN
 )
 
-func drv() string { return "sqlite3" }
+func drv() string { return "sqlite" }
 
-func openTestMemorySQLite() { _, _ = sql.Open("sqlite3", ":memory:") } // exempt
+func openTestMemorySQLite() { _, _ = sql.Open("sqlite", ":memory:") } // exempt
 
 func bad() {
 	const localDSN = "file:x?mode=memory"
-	_, _ = sql.Open("sqlite3", ":memory:")
-	_, _ = sql.Open("sqlite3", memDSN)
+	_, _ = sql.Open("sqlite", ":memory:")
+	_, _ = sql.Open("sqlite", memDSN)
 	_, _ = sql.Open(
-		"sqlite3",
+		"sqlite",
 		":memory:",
 	)
 	_, _ = sql.Open(drv(), ":memory:")
-	_, _ = sql.Open("sqlite3", localDSN)
-	_, _ = ent.Open("sqlite3", "file::memory:?_fk=1")
-	_, _ = sql.Open("sqlite3", implicitDSN)
+	_, _ = sql.Open("sqlite", localDSN)
+	_, _ = ent.Open("sqlite", "file::memory:?_fk=1")
+	_, _ = sql.Open("sqlite", implicitDSN)
 }
 
 func good() {
-	// _, _ = sql.Open("sqlite3", ":memory:")
-	_, _ = sql.Open("sqlite3", "file::memory:?cache=shared")
-	_, _ = sql.Open("sqlite3", "file:x?mode=memory&cache=shared")
-	_, _ = sql.Open("sqlite3", "/tmp/db.sqlite")
+	// _, _ = sql.Open("sqlite", ":memory:")
+	_, _ = sql.Open("sqlite", "file::memory:?cache=shared")
+	_, _ = sql.Open("sqlite", "file:x?mode=memory&cache=shared")
+	_, _ = sql.Open("sqlite", "/tmp/db.sqlite")
 }
 `
 	got, err := rawMemorySQLiteOpens(map[string][]byte{"probe_test.go": []byte(src)})

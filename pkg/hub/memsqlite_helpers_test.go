@@ -21,8 +21,8 @@ import (
 
 // openTestMemorySQLite opens a private in-memory SQLite database on the given
 // registered driver ("sqlite" for modernc.org/sqlite, the production driver,
-// or a test driver that wraps it) and closes it in t.Cleanup. Callers may still close it
-// themselves; closing twice is harmless.
+// or a test driver that wraps it) and closes it in t.Cleanup. Callers may
+// still close it themselves; closing twice is harmless.
 //
 // Every pkg/hub test that wants a raw *sql.DB on ":memory:" must use this
 // helper instead of sql.Open (TestNoRawMemorySQLiteOpen enforces it).
@@ -39,20 +39,17 @@ import (
 // trades "no such table" for SQLITE_LOCKED table-lock errors that the
 // busy timeout does not retry.
 //
-// On the production driver ("sqlite") the DSN also sets "_timezone=UTC",
-// the option entc.OpenSQLite adds for the hub's own database, so every
-// time.Time bind and scan is canonical UTC as in production.
+// The DSN also sets "_timezone=UTC", the option entc.OpenSQLite adds for the
+// hub's own database, so every time.Time bind and scan is canonical UTC as in
+// production. A wrapping driver must pass the DSN on to modernc.org/sqlite
+// unchanged, so it gets the same option.
 //
 // The cost of one connection: code that holds a *sql.Rows or *sql.Tx and
 // issues a second query on the same *sql.DB blocks forever. Production SQLite
 // has the same constraint, so such a hang is a real bug, not a test artifact.
 func openTestMemorySQLite(t testing.TB, driver string) *sql.DB {
 	t.Helper()
-	dsn := ":memory:"
-	if driver == "sqlite" {
-		dsn += "?_timezone=UTC"
-	}
-	db, err := sql.Open(driver, dsn)
+	db, err := sql.Open(driver, ":memory:?_timezone=UTC")
 	if err != nil {
 		t.Fatalf("open in-memory sqlite (%s): %v", driver, err)
 	}
