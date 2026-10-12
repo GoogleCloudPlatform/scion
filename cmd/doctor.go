@@ -938,7 +938,10 @@ func checkDoctorServerHubEndpointHere() (scionruntime.CheckResult, bool) {
 	if err != nil {
 		return scionruntime.CheckResult{}, false
 	}
-	settings, err := config.LoadSettings("")
+	// The global settings only: the server daemon runs in the global
+	// directory, so the project settings of doctor's current directory are
+	// not the server's.
+	settings, err := config.LoadSettings(globalDir)
 	if err != nil {
 		return scionruntime.CheckResult{}, false
 	}
@@ -992,8 +995,10 @@ func defaultServerWebPort() int {
 // is known to run a standalone broker it evaluates every mode the server
 // could run in (workstation, hosted with and without the web frontend,
 // broker only, with default ports) and warns only when the server would be
-// affected in all of them: it never warns on a guess. The bool is false
-// when there is nothing to report.
+// affected in all of them: it never warns on a guess. For the same reason a
+// loopback legacy value is indeterminate unless the host runs a standalone
+// broker: a workstation on a port doctor cannot see may have written it as
+// its own endpoint. The bool is false when there is nothing to report.
 func checkDoctorServerHubEndpoint(cfg *config.GlobalConfig, settings *config.Settings, host doctorServerHost, defaultWebPort int) (scionruntime.CheckResult, bool) {
 	if !host.configured {
 		return scionruntime.CheckResult{}, false
@@ -1008,6 +1013,9 @@ func checkDoctorServerHubEndpoint(cfg *config.GlobalConfig, settings *config.Set
 		)
 	}
 	legacy := settings.GetHubEndpoint()
+	if !host.brokerOnly && isLoopbackURL(legacy) {
+		return scionruntime.CheckResult{}, false
+	}
 	for _, m := range modes {
 		if !serverHubEndpointDeprecated(cfg, m, legacy) {
 			return scionruntime.CheckResult{}, false

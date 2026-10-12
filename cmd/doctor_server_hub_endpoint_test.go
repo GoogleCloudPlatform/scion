@@ -15,6 +15,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -36,7 +38,8 @@ func TestCheckDoctorServerHubEndpoint(t *testing.T) {
 		{name: "server host, remote legacy value", host: server, legacy: "https://hub.example.com", want: true},
 		{name: "server host, no legacy value", host: server, legacy: "", want: false},
 		{name: "server host, workstation self-written loopback", host: server, legacy: "http://127.0.0.1:8080", want: false},
-		{name: "server host, loopback on another port", host: server, legacy: "http://127.0.0.1:9999", want: true},
+		{name: "server host, loopback on another port is indeterminate (a workstation on that port)", host: server, legacy: "http://127.0.0.1:9999", want: false},
+		{name: "server host, localhost without a port is indeterminate", host: server, legacy: "http://localhost", want: false},
 		{
 			name: "server host, server keys set", host: server, legacy: "https://hub.example.com",
 			setup: func(cfg *config.GlobalConfig) {
@@ -46,6 +49,11 @@ func TestCheckDoctorServerHubEndpoint(t *testing.T) {
 			want: false,
 		},
 		{name: "standalone broker, loopback legacy value", host: broker, legacy: "http://127.0.0.1:8080", want: true},
+		{
+			name: "standalone broker, only server.broker.hub_endpoint set", host: broker, legacy: "https://hub.example.com",
+			setup: func(cfg *config.GlobalConfig) { cfg.RuntimeBroker.HubEndpoint = "https://hub.example.com" },
+			want:  false,
+		},
 		{
 			name: "standalone broker, server keys set", host: broker, legacy: "https://hub.example.com",
 			setup: func(cfg *config.GlobalConfig) {
@@ -108,6 +116,27 @@ func TestCheckDoctorServerHubEndpointHere(t *testing.T) {
 	t.Run("CLI-only host", func(t *testing.T) {
 		isolateServerHubEndpointEnv(t)
 		t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
+		_, ok := checkDoctorServerHubEndpointHere()
+		assert.False(t, ok)
+	})
+	// Doctor run inside a repo whose project settings pin a remote
+	// hub.endpoint: the server does not read project settings, so there is
+	// nothing to report.
+	t.Run("server host, cwd project pins a remote hub.endpoint", func(t *testing.T) {
+		globalDir := isolateServerHubEndpointEnv(t)
+		writeGlobalSettings(t, globalDir, "server:\n  mode: hosted\n")
+		repo := t.TempDir()
+		projectDir := filepath.Join(repo, ".scion")
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
+			[]byte("schema_version: \"1\"\nhub:\n  endpoint: https://remote.example.com\n"), 0644))
+		t.Chdir(repo)
+
+		merged, err := config.LoadSettings("")
+		require.NoError(t, err)
+		require.Equal(t, "https://remote.example.com", merged.GetHubEndpoint(),
+			"precondition: the cwd project layer carries the remote endpoint")
+
 		_, ok := checkDoctorServerHubEndpointHere()
 		assert.False(t, ok)
 	})

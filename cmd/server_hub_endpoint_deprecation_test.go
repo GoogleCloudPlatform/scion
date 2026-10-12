@@ -99,11 +99,17 @@ func TestServerHubEndpointDeprecated(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "broker-only with only server.broker.hub_endpoint: advertised fallback 1 still uses the legacy value",
+			name: "broker-only with only server.broker.hub_endpoint: the advertised fallback is not checked",
 			mode: brokerOnlyMode, legacy: "https://hub.example.com",
 			setup: func(cfg *config.GlobalConfig) { cfg.RuntimeBroker.HubEndpoint = "https://hub.example.com" },
-			want:  true,
+			want:  false,
 		},
+		{
+			name: "broker-only with a different server.broker.hub_endpoint", mode: brokerOnlyMode, legacy: "https://old.example.com",
+			setup: func(cfg *config.GlobalConfig) { cfg.RuntimeBroker.HubEndpoint = "https://hub.example.com" },
+			want:  false,
+		},
+		{name: "hub disabled and broker disabled", mode: serverEndpointMode{}, legacy: "https://hub.example.com", want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -202,6 +208,22 @@ func TestWarnDeprecatedServerHubEndpoint_Sources(t *testing.T) {
 			},
 			mode: brokerOnlyMode, want: false,
 		},
+		{
+			name:     "substrate shape: server.broker.hub_endpoint in settings plus SCION_HUB_ENDPOINT, broker-only",
+			settings: "server:\n  broker:\n    hub_endpoint: https://hub.example.com\n",
+			env:      map[string]string{"SCION_HUB_ENDPOINT": "https://hub.example.com"},
+			mode:     brokerOnlyMode, want: false,
+		},
+		{
+			name: "substrate shape without server.broker.hub_endpoint, broker-only",
+			env:  map[string]string{"SCION_HUB_ENDPOINT": "https://hub.example.com"},
+			mode: brokerOnlyMode, want: true,
+		},
+		{
+			name: "SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT plus SCION_HUB_ENDPOINT, broker-only",
+			env:  map[string]string{"SCION_HUB_ENDPOINT": "https://hub.example.com", "SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT": "https://hub.example.com"},
+			mode: brokerOnlyMode, want: false,
+		},
 		{name: "workstation localhost fallback, no legacy value", mode: workstationMode, want: false},
 		{name: "workstation self-written hub.endpoint", settings: "hub:\n  endpoint: http://127.0.0.1:8080\n", mode: workstationMode, want: false},
 	}
@@ -230,14 +252,11 @@ func TestWarnDeprecatedServerHubEndpoint_Sources(t *testing.T) {
 	}
 }
 
-// TestLogServerHubEndpointDeprecation_StartupHook checks the startup hook
-// reads the 'server start' mode and logs the exact A1.2 text once.
-func TestLogServerHubEndpointDeprecation_StartupHook(t *testing.T) {
-	isolateServerHubEndpointEnv(t)
-	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
-	settings, err := config.LoadSettings("")
-	require.NoError(t, err)
-
+// TestResolveServerHubEndpoint_StartupWarning checks startup's endpoint
+// resolution: it reads the 'server start' mode, returns the resolved
+// endpoint, and logs the exact A1.2 text once; with server.hub.public_url
+// set it logs nothing.
+func TestResolveServerHubEndpoint_StartupWarning(t *testing.T) {
 	savedHub, savedBroker, savedWeb, savedHosted, savedPort, savedBase := enableHub, enableRuntimeBroker, enableWeb, hostedMode, webPort, webBaseURL
 	t.Cleanup(func() {
 		enableHub, enableRuntimeBroker, enableWeb, hostedMode, webPort, webBaseURL = savedHub, savedBroker, savedWeb, savedHosted, savedPort, savedBase
@@ -250,9 +269,32 @@ func TestLogServerHubEndpointDeprecation_StartupHook(t *testing.T) {
 	log.SetFlags(0)
 	t.Cleanup(func() { log.SetOutput(savedOut); log.SetFlags(savedFlags) })
 
-	logServerHubEndpointDeprecation(newDeprecationTestConfig(), settings)
-	assert.Equal(t, serverHubEndpointDeprecationWarning+"\n", buf.String())
-	assert.Equal(t, 1, strings.Count(buf.String(), "deprecated:"))
+	t.Run("legacy env value", func(t *testing.T) {
+		buf.Reset()
+		isolateServerHubEndpointEnv(t)
+		t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
+		settings, err := config.LoadSettings("")
+		require.NoError(t, err)
+
+		endpoint, src := resolveServerHubEndpoint(newDeprecationTestConfig(), settings)
+		assert.Equal(t, "https://hub.example.com", endpoint)
+		assert.Equal(t, hubEndpointSourceSettings, src)
+		assert.Equal(t, serverHubEndpointDeprecationWarning+"\n", buf.String())
+		assert.Equal(t, 1, strings.Count(buf.String(), "deprecated:"))
+	})
+	t.Run("server.hub.public_url set", func(t *testing.T) {
+		buf.Reset()
+		isolateServerHubEndpointEnv(t)
+		t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
+		settings, err := config.LoadSettings("")
+		require.NoError(t, err)
+		cfg := newDeprecationTestConfig()
+		cfg.Hub.Endpoint = "https://public.example.com"
+
+		endpoint, _ := resolveServerHubEndpoint(cfg, settings)
+		assert.Equal(t, "https://public.example.com", endpoint)
+		assert.Empty(t, buf.String())
+	})
 }
 
 // TestResolveHubEndpointFrom_LegacyRemoved checks the counterfactual the

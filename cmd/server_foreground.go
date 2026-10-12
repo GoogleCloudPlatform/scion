@@ -356,8 +356,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 10. Resolve hub endpoint
-	hubEndpoint, hubEndpointSrc := resolveHubEndpointWithSource(cfg, brokerSettings)
-	logServerHubEndpointDeprecation(cfg, brokerSettings)
+	hubEndpoint, hubEndpointSrc := resolveServerHubEndpoint(cfg, brokerSettings)
 
 	// Parse admin emails
 	adminEmailList := parseAdminEmails(cfg)

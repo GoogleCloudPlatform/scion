@@ -32,19 +32,26 @@ const serverHubEndpointDeprecationWarning = "deprecated: the server's hub endpoi
 // serverHubEndpointDeprecated reports whether a server in mode m takes a hub
 // endpoint from legacyEndpoint (the settings hub.endpoint, which koanf also
 // fills from SCION_HUB_ENDPOINT) in a way that removing that fallback would
-// change. It resolves the advertised endpoint, and the broker's reporting
-// endpoint when the broker is enabled, with and without the legacy value and
-// compares the results. A workstation whose hub.endpoint is its own loopback
-// URL therefore does not count: without it the localhost fallback yields the
-// same endpoint.
+// change. It resolves the advertised endpoint when the hub is enabled, and
+// the broker's reporting endpoint when the broker is enabled, with and
+// without the legacy value and compares the results. A workstation whose
+// hub.endpoint is its own loopback URL therefore does not count: without it
+// the localhost fallback yields the same endpoint.
+//
+// A broker-only server's advertised endpoint is not checked: it has no
+// consumer there, and its legacy fallback is removed without a replacement.
+// So a broker-only server counts only while server.broker.hub_endpoint is
+// unset and its reporting hub comes from the legacy value.
 func serverHubEndpointDeprecated(cfg *config.GlobalConfig, m serverEndpointMode, legacyEndpoint string) bool {
 	if legacyEndpoint == "" {
 		return false
 	}
-	used, _ := resolveHubEndpointFrom(cfg, m, legacyEndpoint, nil)
-	without, _ := resolveHubEndpointFrom(cfg, m, "", nil)
-	if !sameServerHubEndpoint(used, without) {
-		return true
+	if m.hubEnabled {
+		used, _ := resolveHubEndpointFrom(cfg, m, legacyEndpoint, nil)
+		without, _ := resolveHubEndpointFrom(cfg, m, "", nil)
+		if !sameServerHubEndpoint(used, without) {
+			return true
+		}
 	}
 	if m.brokerEnabled {
 		used := resolveBrokerHubEndpointFrom(cfg, m, legacyEndpoint, nil)
@@ -99,6 +106,12 @@ func urlPort(u *url.URL) string {
 	return ""
 }
 
+// isLoopbackURL reports whether endpoint is a URL with a loopback host.
+func isLoopbackURL(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	return err == nil && u.Host != "" && isLoopbackHost(u.Hostname())
+}
+
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -107,8 +120,12 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// logServerHubEndpointDeprecation is the startup hook: it checks the running
-// server's mode against its loaded settings.
-func logServerHubEndpointDeprecation(cfg *config.GlobalConfig, settings *config.Settings) {
+// resolveServerHubEndpoint is server startup's hub endpoint resolution:
+// resolveHubEndpointWithSource, then the one-time deprecation check for the
+// running server's mode. Startup takes its endpoint only from here, so the
+// warning cannot be dropped from startup without changing this function.
+func resolveServerHubEndpoint(cfg *config.GlobalConfig, settings *config.Settings) (string, hubEndpointSource) {
+	endpoint, src := resolveHubEndpointWithSource(cfg, settings)
 	warnDeprecatedServerHubEndpoint(cfg, currentServerEndpointMode(), settings, log.Printf)
+	return endpoint, src
 }
