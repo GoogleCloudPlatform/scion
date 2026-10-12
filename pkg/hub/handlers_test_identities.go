@@ -193,14 +193,15 @@ func newTestIdentityState(enabled bool) testIdentityState {
 	}
 }
 
-// isReservedTestIdentityEmail reports whether email is in the reserved
-// test-fixture domain. Every path that resolves or creates a user by email
+// isReservedTestIdentityEmail reports whether email is in a reserved test
+// identity domain: the member fixture domain or either admin kind's domain
+// (store.IsReservedTestIdentityEmail). Every path that resolves or creates a user by email
 // refuses such an email, except the issuance endpoint (which creates it)
 // and the hub-issued JWT path (where the fixture's own token is checked by
 // testFixtureRejection instead). It is deliberately separate from
 // isReservedPlatformIdentity, which also guards the JWT path.
 func isReservedTestIdentityEmail(email string) bool {
-	return store.IsTestFixtureEmail(email)
+	return store.IsReservedTestIdentityEmail(email)
 }
 
 // emailResolvedPrincipalRefused reports whether a path that resolves a user
@@ -216,7 +217,7 @@ func emailResolvedPrincipalRefused(email string, u *store.User) bool {
 	if isReservedTestIdentityEmail(email) {
 		return true
 	}
-	return u != nil && (u.IsTestFixture() || isReservedTestIdentityEmail(u.Email))
+	return u != nil && (!u.IsHumanKind() || isReservedTestIdentityEmail(u.Email))
 }
 
 // testFixtureRejection returns a non-empty reason when u must not
@@ -229,6 +230,11 @@ func testFixtureRejection(u *store.User, enabled bool, now time.Time) string {
 		return ""
 	}
 	if !u.IsTestFixture() {
+		// An admin-kind row is checked by testAdminRowRejection, which
+		// runs next in the same row block.
+		if u.IsTestAdmin() {
+			return ""
+		}
 		if isReservedTestIdentityEmail(u.Email) {
 			return "reserved_test_identity_domain"
 		}
@@ -415,14 +421,15 @@ func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (Use
 		writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
 		return nil, false
 	}
-	// A test fixture never issues test identities, whatever grant it may
-	// have been given.
-	if caller, err := s.store.GetUser(ctx, user.ID()); err == nil && caller.IsTestFixture() {
-		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "test fixture cannot issue test identities")
+	// A test identity of any kind never issues test identities, whatever
+	// grant it may have been given. The kind is read through
+	// kindForPrincipal; a read error or an unrecognized kind fails closed.
+	if k, err := s.kindForPrincipal(ctx, user.ID()); err == nil && k.isTestIdentity() {
+		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "test identity cannot issue test identities")
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "a test identity cannot issue test identities",
 			map[string]interface{}{"reason": testIdentityReasonFixtureCall})
 		return nil, false
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+	} else if err != nil {
 		InternalError(w)
 		return nil, false
 	}
@@ -681,6 +688,13 @@ func (s *Server) handleIssueTestIdentityToken(w http.ResponseWriter, r *http.Req
 
 	id := r.PathValue("id")
 	u, err := s.store.GetUser(ctx, id)
+	// An admin-kind identity gets exactly one token, at issuance: no
+	// re-issue (409), for its issuer or an unscoped platform admin.
+	if err == nil && u.IsTestAdmin() && canManageTestIdentity(caller, u) {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "an admin-kind test identity's token is never re-issued",
+			map[string]interface{}{"reason": testAdminReasonAdminKindTokens})
+		return
+	}
 	// One answer for a missing user, a non-fixture user, and a fixture the
 	// caller did not issue, so the route is no user-existence oracle.
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !canManageTestIdentity(caller, u))) {

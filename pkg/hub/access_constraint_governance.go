@@ -1042,8 +1042,10 @@ func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.
 		return fmt.Errorf("list bindings for constraint-admin lockout check: %w", err)
 	}
 	// Unclamped read: a test identity is never a constraint admin through
-	// a system-scoped grant.
-	bindings, err = clampTestFixtureBindings(ctx, st, principals, bindings)
+	// a system-scoped grant. No authorization service is wired here, so an
+	// admin-kind test identity gets no authority from the clamps either
+	// (it never counts as a constraint admin).
+	bindings, err = clampTestIdentityBindings(ctx, st, nil, principals, bindings)
 	if err != nil {
 		return err
 	}
@@ -1183,12 +1185,17 @@ func (gs *GovernanceService) isConstraintAdmin(ctx context.Context, userID strin
 	}
 	// Unclamped read: apply the test-identity grant clamp, so a test
 	// identity is never a constraint admin through a system-scoped grant.
-	bindings, err = clampTestFixtureBindings(ctx, gs.store, principals, bindings)
+	bindings, err = clampTestIdentityBindings(ctx, gs.store, gs.authz, principals, bindings)
 	if err != nil {
 		return false, err
 	}
 
+	// Only active bindings count (activation window: isBindingActive).
+	now := time.Now()
 	for _, b := range bindings {
+		if !isBindingActive(b, now) {
+			continue
+		}
 		rd, err := gs.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
 			continue

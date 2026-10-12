@@ -260,7 +260,7 @@ type movingReviewStore struct {
 func (m *movingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string) (bool, error) {
 	if _, err := m.UpdateArtifact(ctx, g.ArtifactID, ArtifactUpdate{
 		HomeGrant: &Grant{ID: "moved-" + g.ID, ArtifactID: g.ArtifactID, SubjectKind: SubjectScope, SubjectRef: m.to,
-			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: max}); err != nil {
+			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: max, Actor: testActor}); err != nil {
 		return false, err
 	}
 	return m.Store.PutReviewGrant(ctx, g, max, home)
@@ -295,7 +295,7 @@ func TestReviewGrantFollowsCurrentHome(t *testing.T) {
 	}
 	if _, err := f.store.UpdateArtifact(context.Background(), id, ArtifactUpdate{
 		HomeGrant: &Grant{ID: uuid.NewString(), ArtifactID: id, SubjectKind: SubjectScope, SubjectRef: "project-3",
-			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: MaxGrantsPerArtifact}); err != nil {
+			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: MaxGrantsPerArtifact, Actor: testActor}); err != nil {
 		t.Fatal(err)
 	}
 	want := response(f.postGrantBody(member, id, "junk"))

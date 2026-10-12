@@ -193,6 +193,10 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// run_id_updated_at: written only with run_id by the same writers
 	// (ptone/scion#3661).
 	"RunIDUpdatedAt": true,
+	// ssh_host_key and ssh_host_key_run_id are written only through
+	// SetAgentSSHHostKey; CreateAgent and UpdateAgent never write them.
+	"SSHHostKey":      true,
+	"SSHHostKeyRunID": true,
 	// workspace_placement is written only through SetAgentWorkspacePlacement
 	// (ptone/scion#2727): CreateAgent and UpdateAgent never write it, so it
 	// cannot round-trip here. It is not an authz input.

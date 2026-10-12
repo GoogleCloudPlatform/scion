@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -271,7 +272,7 @@ func TestWaitForAgentReady_Timeout(t *testing.T) {
 	srv, _, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
 
 	ctx := context.Background()
-	err := srv.waitForAgentReady(ctx, agent.ID, 100*time.Millisecond)
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 100*time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timed out waiting for agent to become ready")
 }
@@ -290,7 +291,7 @@ func TestWaitForAgentReady_ActivityReported(t *testing.T) {
 		})
 	}()
 
-	err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
 	require.NoError(t, err)
 }
 
@@ -308,7 +309,7 @@ func TestWaitForAgentReady_UnexpectedPhase(t *testing.T) {
 		})
 	}()
 
-	err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected phase")
 }
@@ -336,7 +337,7 @@ func TestWaitForAgentReady_ResumedPhaseTransitional(t *testing.T) {
 		})
 	}()
 
-	err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
 	require.NoError(t, err)
 }
 
@@ -354,7 +355,106 @@ func TestWaitForAgentReady_ErrorPhaseFails(t *testing.T) {
 		})
 	}()
 
-	err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected phase")
+}
+
+// TestWaitForAgentReady_InitializingWaitsForReady verifies that the
+// initializing activity does not satisfy the wait and a later working does.
+func TestWaitForAgentReady_InitializingWaitsForReady(t *testing.T) {
+	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
+	ctx := context.Background()
+
+	var ready atomic.Bool
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			Phase: string(state.PhaseRunning), Activity: string(state.ActivityInitializing),
+		})
+		time.Sleep(700 * time.Millisecond)
+		ready.Store(true)
+		_ = s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			Activity: string(state.ActivityWorking),
+		})
+	}()
+
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 3*time.Second)
+	require.NoError(t, err)
+	require.True(t, ready.Load(), "returned while the agent was still initializing")
+}
+
+// TestWaitForAgentReady_InitializingAtTimeoutDelivers verifies that an agent
+// still initializing when the wait ends counts as ready (the message goes
+// into the broker buffer), rather than failing the wake.
+func TestWaitForAgentReady_InitializingAtTimeoutDelivers(t *testing.T) {
+	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
+	ctx := context.Background()
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseRunning), Activity: string(state.ActivityInitializing),
+	}))
+
+	start := time.Now()
+	activity, err := srv.waitForAgentReady(ctx, agent.ID, 1200*time.Millisecond)
+	require.NoError(t, err)
+	assert.Equal(t, state.ActivityInitializing, activity, "the caller learns the agent is still initializing")
+	assert.GreaterOrEqual(t, time.Since(start), time.Second, "should wait the full timeout for readiness first")
+}
+
+// TestWaitForAgentReady_OldImageWorkingAtOnce verifies an image that
+// predates the initializing activity (it reports running/working at start)
+// is ready immediately, as before.
+func TestWaitForAgentReady_OldImageWorkingAtOnce(t *testing.T) {
+	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
+	ctx := context.Background()
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseRunning), Activity: string(state.ActivityWorking),
+	}))
+
+	start := time.Now()
+	activity, err := srv.waitForAgentReady(ctx, agent.ID, 3*time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, state.ActivityWorking, activity)
+	assert.Less(t, time.Since(start), 1500*time.Millisecond)
+}
+
+// TestHandleAgentMessage_WakeDMInterruptInitializingIsBuffered: a user DM
+// with wake and interrupt to an agent still initializing when the wake wait
+// ends is delivered as an ordinary (buffered) message; an agent that reports
+// working keeps the interrupt.
+func TestHandleAgentMessage_WakeDMInterruptInitializingIsBuffered(t *testing.T) {
+	orig := wakeReadyTimeout
+	wakeReadyTimeout = 1500 * time.Millisecond
+	t.Cleanup(func() { wakeReadyTimeout = orig })
+
+	for _, tc := range []struct {
+		activity      string
+		wantInterrupt bool
+	}{
+		{"initializing", false},
+		{"working", true},
+	} {
+		t.Run(tc.activity, func(t *testing.T) {
+			srv, s, agent := createWakeTestFixtures(t, string(state.PhaseSuspended))
+			disp := &wakeRecordingDispatcher{}
+			srv.SetDispatcher(disp)
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				_ = s.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{
+					Phase: string(state.PhaseRunning), Activity: tc.activity,
+				})
+			}()
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", map[string]interface{}{
+				"message":   "stop and look",
+				"wake":      true,
+				"interrupt": true,
+			})
+			require.Equal(t, http.StatusOK, rec.Code, "response body: %s", rec.Body.String())
+
+			calls := disp.getCalls()
+			require.Len(t, calls, 1, "the message is delivered")
+			assert.Equal(t, tc.wantInterrupt, calls[0].Interrupt)
+		})
+	}
 }

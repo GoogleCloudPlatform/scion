@@ -140,6 +140,8 @@ var agentAllowed = map[string]bool{
 	"artifact.publish":              true,
 	"artifact.get":                  true,
 	"artifact.versions":             true,
+	// artifact share and artifact delete are human-only and deliberately
+	// absent (ptone/scion#4529): agents may not share or delete artifacts.
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

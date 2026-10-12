@@ -837,15 +837,16 @@ func TestAgentListSecrets_LivenessErrorRecordsAuditItem(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// The request precheck already calls GetUser three times for the
-	// root user (check 5, then the agent standing check's ancestry-root
-	// lookup and admission check, ptone/scion#3433) and must succeed; only
-	// the per-row liveness check's own GetUser call, made after them, is
-	// made to fail.
+	// The request precheck already calls GetUser four times for the
+	// root user (check 5, the test identity clamp's kind read in check 5's
+	// membership check, ptone/scion#4240, then the agent standing check's
+	// ancestry-root lookup and admission check, ptone/scion#3433) and must
+	// succeed; only the per-row liveness check's own GetUser call, made
+	// after them, is made to fail.
 	f.Server.store = &materialFailingStore{
 		Store:                f.Store,
 		getUserErr:           errors.New("injected liveness lookup failure"),
-		getUserErrAfterCalls: 3,
+		getUserErrAfterCalls: 4,
 	}
 
 	auditor := newRecordingMaterialAuditor()
