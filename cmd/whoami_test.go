@@ -254,6 +254,7 @@ func TestWhoamiFull(t *testing.T) {
 		"annotations": map[string]string{"note": "test annotation"},
 		"ancestry":    []string{"user-root", "parent-agent"},
 		"taskSummary": "Implementing feature X",
+		"messageMode": "branch",
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodGet, r.Method)
@@ -307,6 +308,7 @@ func TestWhoamiFull(t *testing.T) {
 	assert.Equal(t, map[string]string{"note": "test annotation"}, result.Annotations)
 	assert.Equal(t, []string{"user-root", "parent-agent"}, result.Ancestry)
 	assert.Equal(t, "Implementing feature X", result.TaskSummary)
+	assert.Equal(t, "branch", result.MessageMode)
 }
 
 func TestWhoamiFullNoHub(t *testing.T) {
@@ -358,6 +360,7 @@ func TestWhoamiFullNoHub(t *testing.T) {
 	assert.NotContains(t, raw, "annotations")
 	assert.NotContains(t, raw, "ancestry")
 	assert.NotContains(t, raw, "taskSummary")
+	assert.NotContains(t, raw, "messageMode")
 }
 
 func TestWhoamiFullPlainText(t *testing.T) {
@@ -406,6 +409,48 @@ func TestWhoamiFullPlainText(t *testing.T) {
 
 	// Verify plain-text does not contain JSON braces.
 	assert.False(t, strings.HasPrefix(strings.TrimSpace(out), "{"))
+}
+
+// TestWhoamiFullPlainTextMessageMode checks that the plain-text --full
+// output shows the message mode the Hub reports for the agent
+// (ptone/scion#4411).
+func TestWhoamiFullPlainTextMessageMode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":          "agent-mm-id",
+			"phase":       "running",
+			"messageMode": "lineage",
+		})
+	}))
+	defer srv.Close()
+
+	t.Setenv("SCION_AGENT_SLUG", "mm-agent")
+	t.Setenv("SCION_AGENT_NAME", "MM Agent")
+	t.Setenv("SCION_AGENT_ID", "agent-mm-id")
+	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+
+	cleanup := sciontoolhub.SetHubTestSandboxed()
+	defer cleanup()
+	origFactory := newHubClient
+	newHubClient = func() *sciontoolhub.Client {
+		return sciontoolhub.NewClientWithConfig(srv.URL, "test-token", "agent-mm-id")
+	}
+	defer func() { newHubClient = origFactory }()
+
+	oldFull := whoamiFull
+	whoamiFull = true
+	defer func() { whoamiFull = oldFull }()
+
+	withRootOptions(t, whoamiCmd, cliutil.RootOptions{})
+
+	cmd := whoamiCmd
+	out := captureStdout(t, func() {
+		require.NoError(t, cmd.RunE(cmd, nil))
+	})
+
+	assert.Contains(t, out, "Phase:    running")
+	assert.Contains(t, out, "Msg Mode: lineage")
 }
 
 func TestWhoamiNameOnly(t *testing.T) {

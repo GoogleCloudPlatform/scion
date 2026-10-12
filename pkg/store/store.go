@@ -186,6 +186,19 @@ type Store interface {
 	// cascade spans several sub-stores.
 	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
 
+	// CreateTestAdminUser creates an admin-kind test identity and its one
+	// system role binding, in one transaction (the caller's, when called
+	// inside WithTx). It is the only store path that writes
+	// UserKindTestHubAdmin or UserKindTestSuperAdmin. It requires an admin
+	// Kind, the kind's role (TestAdminRole), an email in the kind's domain
+	// (TestAdminEmailDomain), a non-nil ExpiresAt, a non-empty IssuedBy and
+	// IssuanceID, and a system-scoped roleDefinitionID; it returns
+	// ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
+	// to the identity's expiry and CreatedBy TestIdentityIssuanceCreatedBy,
+	// so it never outlives the identity. It is a Store method because it
+	// spans the user and role-binding sub-stores.
+	CreateTestAdminUser(ctx context.Context, user *User, roleDefinitionID string) (*RoleBinding, error)
+
 	// ListFixtureRootedResources returns the agents (soft-deleted ones
 	// included), schedules, groups and projects whose creation-time
 	// provenance stamp has fixture_root_id == rootID (ptone/scion#4240,
@@ -293,6 +306,10 @@ type Store interface {
 
 	// Conversation operations (Multi-Party Messaging)
 	ConversationStore
+
+	// Thread group operations (project-scoped chat thread groups,
+	// ptone/scion#4424)
+	ThreadGroupStore
 
 	// Role operations (Permissions Foundation Phase 1E)
 	RoleStore
@@ -1743,7 +1760,8 @@ type UserStore interface {
 	// Kind=UserKindTestFixture, a non-nil ExpiresAt, a non-empty IssuedBy,
 	// an email in TestFixtureEmailDomain and the member or viewer role, and
 	// returns ErrInvalidInput otherwise. CreateUser refuses all of these
-	// rows with ErrTestFixtureKindRefused.
+	// rows, every admin kind and every email in a test identity domain
+	// (IsReservedTestIdentityEmail) with ErrTestFixtureKindRefused.
 	CreateTestFixtureUser(ctx context.Context, user *User) error
 
 	// CountLiveTestFixtureUsers counts test fixture users whose expiry is
@@ -1771,6 +1789,36 @@ type UserStore interface {
 	// lock LockTestIdentityIssuance; on SQLite, which serializes writers,
 	// it is a no-op. Must be called inside WithTx.
 	LockTestFixtureIssuance(ctx context.Context) error
+
+	// ReplaceTestIdentityLoginCode stores code as the user's only
+	// web-login code: it deletes any code row the user already has
+	// (redeemed or not), then inserts code. It requires a non-empty
+	// UserID, CodeHash and IssuedBy and a non-zero ExpiresAt, and returns
+	// ErrInvalidInput otherwise. A concurrent replace for the same user
+	// can fail with ErrAlreadyExists. Call it inside WithTx together with
+	// the mint audit. It sets code.ID and code.Created when empty.
+	ReplaceTestIdentityLoginCode(ctx context.Context, code *TestIdentityLoginCode) error
+
+	// ConsumeTestIdentityLoginCode redeems the code with the given hash:
+	// in one conditional update it sets consumed_at = now where the hash
+	// matches, consumed_at is unset and expires_at is after now. It
+	// returns the redeemed row when exactly one row changed. Otherwise it
+	// returns ErrNotFound for an unknown hash,
+	// ErrTestIdentityLoginCodeConsumed for a code already redeemed and
+	// ErrTestIdentityLoginCodeExpired for an expired one. Of any number of
+	// concurrent calls for one code, at most one succeeds.
+	ConsumeTestIdentityLoginCode(ctx context.Context, codeHash string, now time.Time) (*TestIdentityLoginCode, error)
+
+	// CountLiveTestAdminUsers counts admin-kind test identities (the
+	// kinds UserKindTestHubAdmin and UserKindTestSuperAdmin) whose expiry
+	// is after now. A non-empty kind restricts the count to that admin
+	// kind; a non-empty issuedBy to that issuer. A kind that is not an
+	// admin kind returns ErrInvalidInput.
+	CountLiveTestAdminUsers(ctx context.Context, kind, issuedBy string, now time.Time) (int, error)
+
+	// ListTestAdminUsers returns every admin-kind test identity, live or
+	// not, oldest first.
+	ListTestAdminUsers(ctx context.Context) ([]User, error)
 }
 
 // UserFilter defines criteria for filtering users.
@@ -3026,6 +3074,68 @@ type ConversationStore interface {
 	// UpdateDeliveryState updates the delivery state of an addressee.
 	// Returns ErrNotFound if the addressee doesn't exist.
 	UpdateDeliveryState(ctx context.Context, id string, state string, failureReason *string) error
+}
+
+// ThreadGroupStore manages project-scoped chat thread groups
+// (ptone/scion#4424). A thread group is a named folder of group
+// conversations; a conversation is in at most one thread group.
+//
+// The store does not check that a member conversation exists, is a group
+// conversation or is in the group's project; the hub validates that before
+// it files a thread. Reads skip members whose conversation is missing or
+// soft-deleted. Archived conversations keep their membership and are
+// returned. The limits in MaxThreadGroupsPerProject and
+// MaxThreadsPerThreadGroup are enforced by the hub API, not here.
+type ThreadGroupStore interface {
+	// CreateThreadGroup creates a thread group. ProjectID, Name and
+	// CreatedByKind (user or agent) are required. The name is validated
+	// with ValidateThreadGroupName and stored trimmed; NameKey is computed.
+	// An empty ID is generated. ID, Name, NameKey, CreatedAt and UpdatedAt
+	// are written back to g. Returns ErrAlreadyExists if the project already
+	// has a group with the same ThreadGroupNameKey (or the ID is taken), and
+	// ErrInvalidInput for an invalid field.
+	CreateThreadGroup(ctx context.Context, g *ThreadGroup) error
+
+	// GetThreadGroup returns a thread group with its members.
+	// Returns ErrNotFound if it does not exist.
+	GetThreadGroup(ctx context.Context, id string) (*ThreadGroup, error)
+
+	// ListThreadGroups returns a project's thread groups with their members,
+	// ordered by NameKey in byte order (the same on every dialect), each
+	// group's members ordered by AddedAt. A project
+	// with no groups returns an empty, non-nil slice.
+	ListThreadGroups(ctx context.Context, projectID string) ([]ThreadGroup, error)
+
+	// RenameThreadGroup renames a thread group and bumps UpdatedAt (last
+	// writer wins). Returns ErrNotFound if it does not exist,
+	// ErrAlreadyExists if another group in the project has the same name
+	// key, and ErrInvalidInput for an invalid name.
+	RenameThreadGroup(ctx context.Context, id, name string) error
+
+	// DeleteThreadGroup deletes a thread group and its member rows in one
+	// transaction. The member conversations are not touched.
+	// Returns ErrNotFound if it does not exist.
+	DeleteThreadGroup(ctx context.Context, id string) error
+
+	// SetThreadGroupMember files a conversation into a thread group. It is
+	// an upsert on the conversation: a conversation in another group is
+	// moved, atomically, and one already in this group is left unchanged.
+	// The group's existence is checked in the same transaction; a missing
+	// group returns ErrNotFound and writes nothing.
+	SetThreadGroupMember(ctx context.Context, groupID, conversationID, addedBy string) error
+
+	// RemoveThreadGroupMember takes a conversation out of a thread group. It
+	// is idempotent: a conversation that is not in that group, or a group ID
+	// that matches no group (including a malformed one), is not an error.
+	RemoveThreadGroupMember(ctx context.Context, groupID, conversationID string) error
+
+	// RemoveThreadGroupMembersForConversation removes a conversation from
+	// whatever thread group it is in. It is idempotent.
+	RemoveThreadGroupMembersForConversation(ctx context.Context, conversationID string) error
+
+	// DeleteThreadGroupsForProject deletes every thread group of a project
+	// and their member rows in one transaction. It is idempotent.
+	DeleteThreadGroupsForProject(ctx context.Context, projectID string) error
 }
 
 // =============================================================================
