@@ -152,6 +152,12 @@ server:
 
 Both keys are read only at Hub startup; restart the Hub after changing them. They cannot be set through the admin server-config API (see [Layer 0](#layer-0--bootstrap-file--env-only)).
 
+**Brokers on a Cloud Run service.** An asynchronous launch keeps running in the Runtime Broker after the create response. A broker hosted on a Cloud Run service therefore needs CPU allocated outside requests: deploy the service with `--no-cpu-throttling`, and keep its minimum instances above zero.
+
+- **Symptoms.** If the service allocates CPU only during requests (the Cloud Run default), the launch stalls after the create response. The broker stops reporting, so the Hub ends the launch and sets the agent to `error` with launch error `broker_lost` (or `launch_timeout`). With minimum instances at zero, idle scale-in can also end a broker mid-launch, with the same result.
+- **Startup warning.** The server cannot see the service's CPU setting. When the Runtime Broker is enabled and the process runs on a Cloud Run service (`K_SERVICE` set, `CLOUD_RUN_INSTANCE` unset), it logs this warning once at startup: "If this Cloud Run service allocates CPU only during requests, async agent launches will stall after the create response and be reaped. Deploy with --no-cpu-throttling and set SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true to silence this."
+- **Silencing it.** Set the environment variable `SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true` on a service deployed with `--no-cpu-throttling`. It is an assertion, not a check: remove it if you redeploy with CPU throttling. The Cloud Run deploy script (`scripts/cloudrun/deploy.sh`) sets both.
+
 #### Request performance tracing
 
 `perf_trace: true` (env `SCION_SERVER_HUB_PERFTRACE=true`) records where Hub API requests and SSE connections spend their time, and how many authorization store reads and decision-audit records each request causes. It is for diagnosing slow agent lists, mainly on a test or staging Hub. On a production Hub, turn it on only for a short diagnosis window: the log volume grows by one line per request. It is off by default. For a how-to (reading the log lines, running the `perf/bench` harness, and using the counts as regression budgets), see [Hub Performance Tracing and Benchmarks](/scion/contributing/perf-tracing/).

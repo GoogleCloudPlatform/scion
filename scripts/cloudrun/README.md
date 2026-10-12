@@ -117,9 +117,39 @@ that URL unless `SCION_PUBLIC_URL` was provided.
    Cloud Run runtime configuration.
 6. Stores settings and the shared session secret in Secret Manager.
 7. Deploys Cloud Run with `--iap`, `--no-allow-unauthenticated`,
-   `--no-cpu-throttling`, min instances `>= 2`, and Cloud SQL attachment.
+   `--no-cpu-throttling`, min instances `>= 2`, and Cloud SQL attachment, and
+   sets `SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true` (see
+   [CPU allocation and async agent launch](#cpu-allocation-and-async-agent-launch)).
 8. Grants the IAP service agent `roles/run.invoker`.
 9. Grants the transport SA `roles/iap.httpsResourceAccessor`.
+
+## CPU allocation and async agent launch
+
+With asynchronous agent create (`server.hub.async_agent_launch: true`), the
+Hub answers the create request as soon as the broker accepts it, and the
+broker finishes the launch in the background. On Cloud Run that background
+work needs CPU outside requests:
+
+- **Requirement:** deploy the service with `--no-cpu-throttling` (CPU always
+  allocated). Keep minimum instances above zero: idle scale-in can end a
+  broker in the middle of a launch.
+- **Symptoms when CPU is allocated only during requests:** the launch stalls
+  after the create response. The broker stops reporting, so the Hub ends the
+  launch and sets the agent to `error` (`broker_lost`, or `launch_timeout`).
+  A broker instance scaled in mid-launch shows up the same way.
+- **Startup warning:** a server that runs the Runtime Broker on a Cloud Run
+  service (`K_SERVICE` set, `CLOUD_RUN_INSTANCE` unset) logs this warning once
+  at startup, because it cannot see the service's CPU setting:
+
+  > If this Cloud Run service allocates CPU only during requests, async agent
+  > launches will stall after the create response and be reaped. Deploy with
+  > --no-cpu-throttling and set SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true to
+  > silence this.
+
+  Set `SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true` only on a service deployed
+  with `--no-cpu-throttling`. `deploy.sh` sets both. If you later redeploy
+  with CPU throttling, remove the variable too: it is an assertion, not a
+  check.
 
 ## Hub-minted service accounts
 
