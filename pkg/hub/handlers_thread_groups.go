@@ -72,6 +72,25 @@ type addThreadGroupThreadRequest struct {
 	ThreadID       string `json:"threadId"`
 }
 
+// threadGroupsGate wraps a thread group route in
+// requireExperiment(ChatThreadGroups), so the route answers 404 while the
+// experiment is off. The wrap is built per request, as the scheduled-send
+// routes do (handleConversationScheduledRoutes), and not at route
+// registration: requireExperiment panics when the experiment is not in the
+// server's registry, and a hub built by New with an injected, smaller
+// registry (the experiments API tests do this) must still start. Such a
+// registry fails closed here with the same 404. The experiment is
+// registered in experiments.Default() (phase 1).
+func (s *Server) threadGroupsGate(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := s.experimentRegistry().Lookup(experiments.ChatThreadGroups); !ok {
+			NotFound(w, "route")
+			return
+		}
+		s.requireExperiment(experiments.ChatThreadGroups, next)(w, r)
+	}
+}
+
 // handleThreadGroups serves /api/v1/thread-groups (list and create).
 func (s *Server) handleThreadGroups(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {

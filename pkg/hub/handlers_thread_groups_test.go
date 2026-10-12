@@ -78,8 +78,15 @@ type threadGroupFixture struct {
 
 func setThreadGroupsExperiment(t *testing.T, srv *Server, enabled bool) {
 	t.Helper()
+	setThreadGroupsExperimentsDoc(t, srv, fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.ChatThreadGroups, enabled))
+}
+
+// setThreadGroupsExperimentsDoc installs operational settings whose stored
+// experiments row is raw.
+func setThreadGroupsExperimentsDoc(t *testing.T, srv *Server, raw string) {
+	t.Helper()
 	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("experiments", json.RawMessage(fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.ChatThreadGroups, enabled)))
+	fakeStore.seed("experiments", json.RawMessage(raw))
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
 	_, err := ops.Refresh(context.Background())
 	require.NoError(t, err)
@@ -130,7 +137,8 @@ func (f *threadGroupFixture) mkGroup(t *testing.T, projectID, name string) *stor
 }
 
 // agentCall sends a request as agent (an agent token of projectID with
-// project:read) through the experiment gate to the thread group handlers.
+// project:read) to the thread group handlers through their experiment gate,
+// or to handleCreateConversation.
 func (f *threadGroupFixture) agentCall(t *testing.T, agentID, projectID, method, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	var raw []byte
@@ -149,7 +157,11 @@ func (f *threadGroupFixture) agentCall(t *testing.T, agentID, projectID, method,
 	} else if !strings.HasPrefix(path, "/api/v1/thread-groups/") {
 		handler = f.srv.handleThreadGroups
 	}
-	f.srv.requireExperiment(experiments.ChatThreadGroups, handler)(rec, req)
+	if strings.HasPrefix(path, "/api/v1/conversations") {
+		handler(rec, req) // not experiment-gated; threadGroupId checks the flag itself
+	} else {
+		f.srv.threadGroupsGate(handler)(rec, req)
+	}
 	return rec
 }
 
@@ -211,6 +223,40 @@ func TestThreadGroups_FlagOffEveryRoute404(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "thread groups are not enabled")
 	assertNoConversationNamed(t, f.s, "flag-off-create")
+	assert.Empty(t, f.spy.take())
+}
+
+// A hub built with an injected registry that lacks hub.chat_thread_groups
+// (as the experiments API tests build one) starts, and the thread group
+// routes fail closed with 404 instead of panicking.
+func TestThreadGroups_RegistryWithoutExperimentStartsAnd404s(t *testing.T) {
+	srv, _ := testServerWithOps(t, testRegistry(t))
+	for _, path := range []string{"/api/v1/thread-groups?projectId=" + uuid.NewString(), "/api/v1/thread-groups/" + uuid.NewString()} {
+		rec := doRequest(t, srv, http.MethodGet, path, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "%s: %s", path, rec.Body.String())
+	}
+}
+
+// A malformed stored experiments row fails closed for this server-layer
+// experiment (design section 6): every route is 404 and threadGroupId is 400,
+// even though the row also says the experiment is on.
+func TestThreadGroups_MalformedExperimentsRowFailsClosed(t *testing.T) {
+	f := newThreadGroupFixture(t, true)
+	conv, _ := f.thread(t, f.projA, "malformed-thread")
+	g := f.mkGroup(t, f.projA, "Malformed")
+	setThreadGroupsExperimentsDoc(t, f.srv, fmt.Sprintf(`{"overrides":{%q:true,"web.other":"not-a-bool"}}`, experiments.ChatThreadGroups))
+	require.False(t, f.srv.experimentEnabled(experiments.ChatThreadGroups))
+
+	got := threadGroupOps(t, f.projA, g, conv, func(method, path string, body interface{}) *httptest.ResponseRecorder {
+		return f.session(t, f.member, method, path, body)
+	})
+	for op, code := range got {
+		assert.Equal(t, http.StatusNotFound, code, "%s must be 404 with a malformed experiments row", op)
+	}
+	rec := f.session(t, f.member, http.MethodPost, "/api/v1/conversations",
+		map[string]string{"displayName": "malformed-create", "projectId": f.projA, "threadGroupId": g.ID})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assertNoConversationNamed(t, f.s, "malformed-create")
 	assert.Empty(t, f.spy.take())
 }
 
@@ -615,8 +661,17 @@ func TestCreateConversation_WithThreadGroup(t *testing.T) {
 	rec = f.agentCall(t, f.agentB.ID, f.projB, http.MethodPost, "/api/v1/conversations",
 		map[string]string{"displayName": "foreign-agent-create", "projectId": f.projA, "threadGroupId": g.ID})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "agents can only file threads into thread groups of their own project",
+		"the 403 must come from the thread group rule")
 	assertNoConversationNamed(t, f.s, "foreign-agent-create")
 	assert.Empty(t, f.spy.take())
+	// Control: without threadGroupId the same agent may create in A (the
+	// binding grants project:read), so the 403 above is the thread group
+	// rule and not the project check.
+	rec = f.agentCall(t, f.agentB.ID, f.projB, http.MethodPost, "/api/v1/conversations",
+		map[string]string{"displayName": "foreign-agent-control", "projectId": f.projA})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Empty(t, f.spy.take(), "no thread group event without threadGroupId")
 
 	// An agent defaulting to its own project can file too.
 	rec = f.agentCall(t, f.agentA.ID, f.projA, http.MethodPost, "/api/v1/conversations",
