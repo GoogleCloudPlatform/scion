@@ -3497,7 +3497,9 @@ describe('scion-page-admin-server-config', () => {
             default_user_role: 'member',
             authorized_domains: [],
           },
-          github_app: {},
+          // Empty GitHub App fields are echoed as explicit clears
+          // (ptone/scion#4416).
+          github_app: { app_id: 0, api_base_url: '', installation_url: '' },
         },
         telemetry: {
           enabled: false,
@@ -3570,6 +3572,62 @@ describe('scion-page-admin-server-config', () => {
 
       expect(shadowText(element)).toContain(
         'Failed to save GitHub App configuration: failed to store private key'
+      );
+    });
+  });
+
+  describe('hub default service account and mapping state (ptone/scion#4391)', () => {
+    it('does not ask for or show a mapping state, and says why', async () => {
+      const saUrls: string[] = [];
+      const base = createFetchHandler(
+        makeBaseConfig({
+          default_gcp_identity_mode: 'assign',
+          default_gcp_identity_service_account_id: 'sa-1',
+        })
+      );
+      element = await createComponent((url, init) => {
+        const raw = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (raw.includes('/gcp-service-accounts')) {
+          saUrls.push(raw);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                items: [
+                  {
+                    id: 'sa-1',
+                    scope: 'hub',
+                    email: 'sa-1@example.com',
+                    displayName: '',
+                    verified: true,
+                  },
+                ],
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return base(url, init);
+      });
+
+      expect(saUrls.length).toBeGreaterThan(0);
+      for (const raw of saUrls) {
+        const u = new URL(raw, 'http://hub.example.com');
+        expect(u.searchParams.has('assignStatus')).toBe(false);
+        expect(u.searchParams.has('profile')).toBe(false);
+      }
+
+      const field = queryAll(element, '.form-field').find(
+        (f) =>
+          f.querySelector('label')?.textContent?.trim() === 'Default GCP Identity Service Account'
+      );
+      expect(field).toBeDefined();
+      for (const o of Array.from(field!.querySelectorAll('sl-option'))) {
+        expect(o.hasAttribute('data-assign-state')).toBe(false);
+        expect(o.querySelector('.assign-status')).toBeNull();
+      }
+      const hint = (field!.querySelector('.hint')?.textContent ?? '').replace(/\s+/g, ' ');
+      expect(hint).toContain(
+        'applies to any project and runtime profile that has no default of its own, so no mapping state is shown here'
       );
     });
   });
@@ -3873,7 +3931,8 @@ describe('scion-page-admin-server-config', () => {
      * against that request.
      */
     const GITHUB_APP_CLEAR: Record<string, ClearSpec> = {
-      'server.github_app.app_id': { clear: (el) => (el.githubAppId = 0), expected: null },
+      // PUT /api/v1/github-app reads null as "keep", so app_id clears as 0.
+      'server.github_app.app_id': { clear: (el) => (el.githubAppId = 0), expected: 0 },
       'server.github_app.api_base_url': {
         clear: (el) => (el.githubAppApiBaseUrl = ''),
         expected: '',
@@ -3889,18 +3948,12 @@ describe('scion-page-admin-server-config', () => {
     };
 
     /**
-     * Known payload gaps, reported on ptone/scion#3924 and not fixed by this
-     * test-only change: the GitHub App save sends app_id, api_base_url and
-     * installation_url as `|| undefined`, so a cleared value is left out and
-     * the server (GitHubAppConfigUpdateRequest, nil pointer = keep) keeps the
-     * stored one. The test asserts this exact list, so fixing a gap fails it
-     * until the entry is removed.
+     * Known payload gaps: GitHub App fields left out of the save when
+     * cleared. The three reported on ptone/scion#3924 (app_id, api_base_url,
+     * installation_url) were fixed in ptone/scion#4416. The test asserts this
+     * exact list, so a new gap fails it.
      */
-    const KNOWN_GITHUB_APP_GAPS = [
-      'server.github_app.api_base_url',
-      'server.github_app.app_id',
-      'server.github_app.installation_url',
-    ];
+    const KNOWN_GITHUB_APP_GAPS: string[] = [];
 
     const READ_ONLY_PROBE = 'readOnlyReason';
 
@@ -4055,6 +4108,287 @@ describe('scion-page-admin-server-config', () => {
         .filter((k) => owningSection(k) !== 'github_app');
       expect(unknown).toEqual([]);
     });
+  });
+  describe('GitHub App card sends explicit clears (ptone/scion#4416)', () => {
+    const LOADED = {
+      app_id: 123,
+      api_base_url: 'https://ghe.example.com/api/v3',
+      webhooks_enabled: true,
+      installation_url: 'https://github.com/apps/x/installations/new',
+    };
+
+    /** Ways the mock hub can fail a request. */
+    interface MockFailures {
+      /** GET /api/v1/admin/server-config answers 500. */
+      configGet?: boolean;
+      /** GET /api/v1/github-app answers 500, or throws (network error). */
+      githubAppGet?: 'status' | 'throw';
+      /** PUT /api/v1/github-app answers 500 and stores nothing. */
+      githubAppPut?: boolean;
+      /** A GET /api/v1/github-app after a PUT waits for this to settle. */
+      holdGetAfterPut?: Promise<void>;
+    }
+
+    const jsonResponse = (body: unknown, status = 200): Promise<Response> =>
+      Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+
+    /**
+     * A fetch handler whose GET /api/v1/github-app returns the stored
+     * config and whose PUT applies the sent non-secret keys to it, as the
+     * hub does (a sent "" or 0 replaces the stored value; an omitted key
+     * keeps it). The GET leaves out empty URLs, as the hub's omitempty does.
+     */
+    function statefulGitHubApp(
+      config: Record<string, unknown>,
+      fail: MockFailures = {}
+    ): {
+      handler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+      puts: Array<Record<string, unknown>>;
+      stored: Record<string, unknown>;
+    } {
+      const stored: Record<string, unknown> = { ...LOADED };
+      const puts: Array<Record<string, unknown>> = [];
+      const base = createFetchHandler(config);
+      const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        const isPut = init?.method === 'PUT';
+        if (fail.configGet && !isPut && path.includes('/api/v1/admin/server-config')) {
+          return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+        }
+        if (!path.endsWith('/api/v1/github-app')) return base(url, init);
+        if (isPut) {
+          const body = JSON.parse(init.body as string) as Record<string, unknown>;
+          puts.push(body);
+          if (fail.githubAppPut) return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+          for (const k of ['app_id', 'api_base_url', 'webhooks_enabled', 'installation_url']) {
+            if (k in body) stored[k] = body[k];
+          }
+        } else if (fail.holdGetAfterPut && puts.length > 0) {
+          return fail.holdGetAfterPut.then(storedResponse);
+        } else if (fail.githubAppGet === 'status') {
+          return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+        } else if (fail.githubAppGet === 'throw') {
+          return Promise.reject(new TypeError('Failed to fetch'));
+        }
+        return storedResponse();
+      };
+      function storedResponse(): Promise<Response> {
+        const res: Record<string, unknown> = { ...stored, configured: true };
+        for (const k of ['api_base_url', 'installation_url']) {
+          if (!res[k]) delete res[k];
+        }
+        return jsonResponse(res);
+      }
+      return { handler, puts, stored };
+    }
+
+    /** The page members these tests drive. */
+    interface CardElement {
+      [state: string]: unknown;
+      handleSaveGitHubApp(): Promise<void>;
+      buildLayer1Payload(): { server?: { github_app?: Record<string, unknown> } };
+      buildFilePayload(): { server?: { github_app?: Record<string, unknown> } };
+    }
+
+    function saveButton(el: HTMLElement): HTMLElement {
+      const btn = query(el, 'sl-button[data-action="save-github-app"]');
+      expect(btn, 'card Save button').not.toBeNull();
+      return btn as HTMLElement;
+    }
+
+    const FIELDS = [
+      { state: 'githubAppId', key: 'app_id', cleared: 0 },
+      { state: 'githubAppApiBaseUrl', key: 'api_base_url', cleared: '' },
+      { state: 'githubAppInstallationUrl', key: 'installation_url', cleared: '' },
+    ] as const;
+
+    for (const field of FIELDS) {
+      it(`clearing ${field.key} sends ${JSON.stringify(field.cleared)}, the stored value is removed, and the other fields are unchanged`, async () => {
+        const { handler, puts, stored } = statefulGitHubApp(
+          makeBaseConfig({ settings_tier: 'db' })
+        );
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        expect(el[field.state]).toEqual(LOADED[field.key]);
+
+        el[field.state] = field.cleared;
+        await el.handleSaveGitHubApp();
+
+        expect(puts).toHaveLength(1);
+        expect(puts[0]![field.key]).toBe(field.cleared);
+        expect(stored[field.key]).toBe(field.cleared);
+        // Untouched fields go back as loaded.
+        for (const other of FIELDS.filter((f) => f !== field)) {
+          expect(puts[0]![other.key], other.key).toEqual(LOADED[other.key]);
+        }
+        expect(puts[0]!.webhooks_enabled).toBe(true);
+        // Secrets are sent only when typed in.
+        expect('private_key' in puts[0]!).toBe(false);
+        expect('webhook_secret' in puts[0]!).toBe(false);
+        // The main save's echo carries the clear too.
+        const echo = el.buildLayer1Payload().server!.github_app!;
+        expect(echo[field.key]).toBe(field.cleared);
+      });
+    }
+
+    it('a set value is sent as entered', async () => {
+      const { handler, puts } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      el.githubAppId = 456;
+      el.githubAppApiBaseUrl = 'https://ghe2.example.com/api/v3';
+      el.githubAppInstallationUrl = 'https://github.com/apps/y/installations/new';
+      el.githubAppPrivateKey = '  PEM  ';
+      await el.handleSaveGitHubApp();
+      expect(puts[0]).toEqual({
+        app_id: 456,
+        api_base_url: 'https://ghe2.example.com/api/v3',
+        webhooks_enabled: true,
+        installation_url: 'https://github.com/apps/y/installations/new',
+        private_key: 'PEM',
+      });
+    });
+
+    // A card that did not load holds defaults (app_id 0, empty URLs), not
+    // the stored config. Saving them would clear the stored App, so the
+    // card cannot be saved and the main save leaves github_app out.
+    const LOAD_FAILURES: Array<{ name: string; fail: MockFailures }> = [
+      { name: 'GET server-config answers 500', fail: { configGet: true } },
+      { name: 'GET github-app answers 500', fail: { githubAppGet: 'status' } },
+      { name: 'GET github-app throws', fail: { githubAppGet: 'throw' } },
+    ];
+
+    for (const { name, fail } of LOAD_FAILURES) {
+      it(`${name}: the card cannot be saved and sends no PUT`, async () => {
+        const { handler, puts, stored } = statefulGitHubApp(
+          makeBaseConfig({ settings_tier: 'db' }),
+          fail
+        );
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        expect(el.githubAppLoaded).toBe(false);
+        expect(saveButton(element).hasAttribute('disabled')).toBe(true);
+        expect(query(element, '[data-github-app-not-loaded]')).not.toBeNull();
+
+        // Even a direct call (or a typed secret) sends nothing.
+        el.githubAppPrivateKey = 'PEM';
+        await el.handleSaveGitHubApp();
+        expect(puts).toEqual([]);
+        expect(stored).toEqual(LOADED);
+      });
+    }
+
+    for (const { name, fail } of LOAD_FAILURES.filter((f) => !f.fail.configGet)) {
+      for (const tier of ['db', 'file'] as const) {
+        it(`${name}: the ${tier} main save leaves github_app out`, async () => {
+          // The server-config GET carries a github_app block, so the
+          // payload would echo it if the card's load were not checked.
+          const base = makeBaseConfig({ settings_tier: tier });
+          const config = {
+            ...base,
+            server: { ...(base.server as Record<string, unknown>), github_app: { app_id: 123 } },
+          };
+          const { handler } = statefulGitHubApp(config, fail);
+          element = await createComponent(handler);
+          const el = element as unknown as CardElement;
+          const payload = tier === 'db' ? el.buildLayer1Payload() : el.buildFilePayload();
+          expect(payload.server?.github_app).toBeUndefined();
+        });
+      }
+    }
+
+    it('a loaded card can be saved', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      expect((element as unknown as CardElement).githubAppLoaded).toBe(true);
+      expect(saveButton(element).hasAttribute('disabled')).toBe(false);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+    });
+
+    it('the reload after a card save does not show the "did not load" hint while in flight', async () => {
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      const { handler, puts } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }), {
+        holdGetAfterPut: hold,
+      });
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement & { updateComplete: Promise<boolean> };
+      el.githubAppApiBaseUrl = '';
+      const saving = el.handleSaveGitHubApp();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await el.updateComplete;
+      // The PUT is done and the reload GET is held.
+      expect(puts).toHaveLength(1);
+      expect(el.githubAppLoaded).toBe(true);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+
+      release();
+      await saving;
+      await el.updateComplete;
+      expect(el.githubAppLoaded).toBe(true);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+      expect(saveButton(element).hasAttribute('disabled')).toBe(false);
+    });
+
+    it('a reload that fails after a loaded card disables Save and shows the hint', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement & {
+        updateComplete: Promise<boolean>;
+        loadGitHubAppConfig(): Promise<void>;
+      };
+      expect(el.githubAppLoaded).toBe(true);
+      vi.mocked(fetch).mockImplementation(() => Promise.reject(new TypeError('Failed to fetch')));
+      await el.loadGitHubAppConfig();
+      await el.updateComplete;
+      expect(el.githubAppLoaded).toBe(false);
+      expect(query(element, '[data-github-app-not-loaded]')).not.toBeNull();
+      expect(saveButton(element).hasAttribute('disabled')).toBe(true);
+    });
+
+    it('main save with the card untouched echoes the loaded values', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      expect(el.buildLayer1Payload().server!.github_app).toEqual(LOADED);
+    });
+
+    it('main save after a failed card save still echoes the loaded values', async () => {
+      const { handler, puts, stored } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }), {
+        githubAppPut: true,
+      });
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      el.githubAppId = 0;
+      el.githubAppApiBaseUrl = '';
+      await el.handleSaveGitHubApp();
+      expect(puts).toHaveLength(1);
+      expect(stored).toEqual(LOADED);
+      expect(el.buildLayer1Payload().server!.github_app).toEqual(LOADED);
+    });
+
+    for (const tier of ['db', 'file'] as const) {
+      it(`${tier} mode main save echoes empty GitHub App fields as explicit clears`, async () => {
+        const { handler, stored } = statefulGitHubApp(makeBaseConfig({ settings_tier: tier }));
+        stored.app_id = 0;
+        stored.api_base_url = '';
+        stored.installation_url = '';
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        const payload = tier === 'db' ? el.buildLayer1Payload() : el.buildFilePayload();
+        expect(payload.server!.github_app).toEqual({
+          app_id: 0,
+          api_base_url: '',
+          webhooks_enabled: true,
+          installation_url: '',
+        });
+      });
+    }
   });
 });
 

@@ -1566,6 +1566,9 @@ type Server struct {
 	// portProxyMetrics counts agent port proxy upstream header timeouts
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
 	portProxyMetrics atomic.Pointer[portProxyMetrics]
+	// conduitRefreshMetrics counts agent AuthRefresh outcomes
+	// (conduit_agent_refresh.go); nil until SetConduitAgentRefreshMetrics.
+	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu     sync.Mutex
@@ -1763,6 +1766,10 @@ type Server struct {
 	// (test_admin_gate.go). It has no setter: testAdminTierEnabled reads
 	// only this value.
 	testAdminGate testAdminGate
+
+	// testAdminIssuance is the state of admin-kind test identity issuance
+	// (handlers_test_admin_identities.go).
+	testAdminIssuance testAdminIssuanceState
 	// testAdminAudit is the synchronous, level-independent stdout writer
 	// for test admin tier events (test_admin_audit_sink.go).
 	testAdminAudit *testAdminAuditSink
@@ -2395,6 +2402,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// isReservedPlatformIdentity treats as inert.
 	srv.platformAuthSA = cfg.PlatformAuthSA
 	srv.testIdentities = newTestIdentityState(cfg.EnableTestIdentities)
+	srv.testAdminIssuance = newTestAdminIssuanceState()
 
 	// Store transport token minter if configured
 	if cfg.TransportMinter != nil {
@@ -2503,6 +2511,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// gates whether this server currently admits dev_local authority at
 	// all. See devLocalAuthorityEnabled's doc comment (devauth.go).
 	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
+	// Admin test identities (ptone/scion#4240): the authorization
+	// service's admin-kind clamp reads the immutable gate and the test
+	// identity clock through these closures.
+	setAuthzTestAdminTier(srv.authzService,
+		func(kind string) bool { return srv.testAdminTierEnabled(testAdminKind(kind)) },
+		func() time.Time { return srv.testIdentities.clock() })
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
 	srv.wireAgentDelegation()
@@ -2762,6 +2776,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// row block's test-fixture checks use.
 		TestIdentitiesEnabled: srv.testIdentities.enabled,
 		Now:                   func() time.Time { return srv.testIdentities.clock() },
+		// Admin test identities: the row block's admin-kind checks read
+		// the kind through kindForPrincipal and the immutable gate.
+		KindForPrincipal:     srv.kindForPrincipal,
+		TestAdminTierEnabled: func(kind string) bool { return srv.testAdminTierEnabled(testAdminKind(kind)) },
 
 		// Agent delegated credentials (scion_adt_ bearers); refused while
 		// hub.agent_delegation is off.
@@ -4507,6 +4525,16 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 		return false
 	}
 
+	// Skip agents that stalled while initializing: the harness never
+	// showed it was reading input, so a long start (or a lost readiness
+	// report) is not idleness and must not suspend the agent. The stall
+	// marker itself still applies, for visibility.
+	if agent.StalledFromActivity == string(state.ActivityInitializing) {
+		slog.Info("Scheduler: skipping auto-suspend; agent stalled while initializing",
+			"agent_id", agent.ID, "agent_name", agent.Name)
+		return false
+	}
+
 	// Skip agents whose harness does not support resume — suspending
 	// them would imply resumability that doesn't exist.
 	if agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig != "" {
@@ -5732,6 +5760,10 @@ func (s *Server) registerSchedulerHandlers() {
 	// retry, expiry scan and full sweep. Not gated by any setting.
 	s.registerMembershipStandingReconciler()
 
+	// Test identity expiry reaper (ptone/scion#4240): only with
+	// --enable-test-identities.
+	s.registerTestIdentityReaper()
+
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
 	// Registered whatever the startup retention: soft_delete_retention is
@@ -6600,6 +6632,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/test-identities", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities", s.handleCreateTestIdentity)))
 	s.mux.HandleFunc("GET /api/v1/test-identities", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identities", s.handleListTestIdentities)))
 	s.mux.HandleFunc("POST /api/v1/test-identities/{id}/token", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities/{id}/token", s.handleIssueTestIdentityToken)))
+	// Admin-kind test identities (admin tier A1). 404 for every caller
+	// unless the test admin gate is on; the gate runs before the guard.
+	s.mux.HandleFunc("POST /api/v1/test-identities/admin", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin", s.handleIssueTestAdminIdentity)))
+	s.mux.HandleFunc("POST /api/v1/test-identities/admin/revoke-all", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin/revoke-all", s.handleRevokeAllTestAdminIdentities)))
 	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
 
 	// Telegram account linking endpoints
