@@ -133,7 +133,8 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //     TestListProjectAgentsSorted_Race_MissingRow.
 //   - The Launch* bookkeeping fields (LaunchAsyncOptIn, LaunchID,
 //     LaunchState, LaunchEndReason, LaunchKind, LaunchDeadline,
-//     LaunchLastReportAt, LaunchOwner, LaunchSeq, LaunchStep, LaunchError):
+//     LaunchLastReportAt, LaunchOwner, LaunchSeq, LaunchStep, LaunchError,
+//     LaunchCause):
 //     per agent_store.go's own doc comment, "UpdateAgent never sets any of
 //     these from the caller's struct: they are absent from its Ent builder
 //     chain entirely" -- only BeginLaunch/MarkLaunchAccepted/EndLaunch/
@@ -173,7 +174,7 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"LaunchAsyncOptIn": true, "LaunchID": true, "LaunchState": true,
 	"LaunchEndReason": true, "LaunchKind": true, "LaunchDeadline": true,
 	"LaunchLastReportAt": true, "LaunchOwner": true, "LaunchSeq": true,
-	"LaunchStep": true, "LaunchError": true,
+	"LaunchStep": true, "LaunchError": true, "LaunchCause": true,
 	"Launch": true,
 	// Deletion marker columns are written only through UpdateAgentDeletion
 	// (never by CreateAgent/UpdateAgent), and Deletion is computed.
