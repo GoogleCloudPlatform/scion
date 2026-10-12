@@ -34,7 +34,7 @@ Used inside agent containers. Agents can orchestrate sibling agents within their
 | `templates` (all subcommands) | Template management — managed by the operator |
 | `harness-config` (all subcommands) | Harness configuration — managed by the operator |
 | `config` (all subcommands) | Configuration inspection/mutation — managed by the operator |
-| `doctor` | Diagnostic tool — not relevant inside a running container |
+| `doctor` | Host and platform diagnostics for people checking health or troubleshooting agents; an agent checks itself with `sciontool doctor`. An authorized assistant agent runs `scion doctor` from a person-owned environment with a hub-boundary token (`hub_health:read`), since the Hub serves the health summary to user credentials only (ptone/scion#4727) |
 | `messages` (all subcommands) | Agents receive messages directly; inbox polling is unnecessary |
 | `completion` | Shell completion generation — not useful inside a container |
 | `shared-dir create/remove` | Shared directory lifecycle — managed by the operator |
