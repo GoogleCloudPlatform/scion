@@ -566,9 +566,10 @@ func (s *agentService) lifecycle(ctx context.Context, agentID, action string) (*
 	return s.lifecycleWithBody(ctx, agentID, action, nil)
 }
 
-// lifecycleWithBody is lifecycle with a request body; a nil body posts none.
-func (s *agentService) lifecycleWithBody(ctx context.Context, agentID, action string, body interface{}) (*LifecycleResponse, error) {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/"+action, body, nil)
+// lifecycleWithBody is lifecycle with a request body; a nil reqBody posts
+// none.
+func (s *agentService) lifecycleWithBody(ctx context.Context, agentID, action string, reqBody interface{}) (*LifecycleResponse, error) {
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/"+action, reqBody, nil)
 	if err != nil {
 		return nil, err
 	}
