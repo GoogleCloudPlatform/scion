@@ -40,6 +40,9 @@ band (`scion hub test-identity issue` / `web-code --out`), plus
 single-use). The runner deletes that identity afterwards; the spec cannot
 verify that, and its evidence is written before it. The no-runtime failure
 panel check runs on a remote target only with `E2E_LAUNCH_CAPABLE=0`.
+A remote hub must start the member's agents without harness credentials
+(the no-auth fallback): A2 and A4 assert `appliedConfig.noAuth`, and fail
+otherwise. The credential guard runs only for the local hub.
 
 ## Evidence
 

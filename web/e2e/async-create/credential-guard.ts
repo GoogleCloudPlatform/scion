@@ -79,11 +79,12 @@ export function assertNoHarnessCredentialEnv(env: NodeJS.ProcessEnv = process.en
   const set = names.filter((n) => (env[n] ?? '') !== '');
   if (set.length > 0) {
     throw new Error(
-      `credential guard: unset these harness credential variables before running ` +
-        `(the journey must run without credentials): ${set.join(', ')}`
+      `credential guard: unset these harness credential or auth-selecting variables ` +
+        `before running (the journey must run without credentials): ${set.join(', ')}`
     );
   }
   console.info(
-    `[setup] Credential guard: none of ${names.length} harness credential variables is set.`
+    `[setup] Credential guard: none of ${names.length} harness credential or ` +
+      'auth-selecting variables is set.'
   );
 }

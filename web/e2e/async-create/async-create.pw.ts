@@ -148,6 +148,8 @@ const journey: {
   agents: CreatedAgent[];
   a1Page?: TrackedPage;
   a1Submit?: SubmitResult;
+  /** A2's running agent (same harness as A4, the image differs). */
+  a2Running?: { image: string };
   evidence: Record<string, unknown>;
 } = { projectCreated: false, agents: [], evidence: {} };
 
@@ -245,7 +247,7 @@ async function chooseOption(page: Page, selectSelector: string, text: string): P
 async function chooseOptionValue(page: Page, selectSelector: string, value: string): Promise<void> {
   const select = page.locator(SELECTORS.createPage).locator(selectSelector);
   await select.click();
-  await select.locator(`${SELECTORS.selectOption}[value="${value}"]`).click();
+  await select.locator(`${SELECTORS.selectOption}[value="${value}"]`).first().click();
   await expect(select).toHaveJSProperty('value', value);
 }
 
@@ -385,6 +387,29 @@ async function finalPageState(page: Page): Promise<'failed' | 'running' | ''> {
   return '';
 }
 
+interface AppliedConfigView {
+  noAuth?: boolean;
+  harnessAuth?: string;
+  image?: string;
+}
+
+/** The agent's appliedConfig from a direct GET as the member (flat or wrapped body). */
+async function appliedConfigOf(agentId: string): Promise<AppliedConfigView | undefined> {
+  const res = await member().get(`/api/v1/agents/${agentId}`);
+  expect(res.status(), `GET agent ${agentId}`).toBe(200);
+  const body = (await res.json()) as {
+    agent?: { appliedConfig?: AppliedConfigView };
+    appliedConfig?: AppliedConfigView;
+  };
+  return body.appliedConfig ?? body.agent?.appliedConfig;
+}
+
+/** The agent started on the credential-free no-auth fallback. */
+function expectNoAuth(applied: AppliedConfigView | undefined): void {
+  expect(applied?.noAuth, 'appliedConfig.noAuth: started without credentials').toBe(true);
+  expect(applied?.harnessAuth, 'appliedConfig.harnessAuth').toBe('none');
+}
+
 /** Deletes the agent from the failed-create panel and checks it is gone. */
 async function deleteFromPanel(page: Page, agentId: string): Promise<void> {
   await incompleteDeleteButton(page).click();
@@ -451,6 +476,47 @@ function expectForwardOnly(sequence: string[], what: string): void {
   }
 }
 
+/** Deletes the agents and the project this run created and checks they are gone. */
+async function cleanUpAgentsAndProject(
+  cleanup: Record<string, unknown>,
+  residue: string[]
+): Promise<void> {
+  for (const agent of journey.context ? journey.agents : []) {
+    if (!(await agentGone(member(), agent.id))) {
+      const res = await member().delete(`/api/v1/agents/${agent.id}`);
+      cleanup[`agent ${agent.check}`] = `DELETE ${res.status()}`;
+    }
+    const gone = await expect
+      .poll(() => agentGone(member(), agent.id), { timeout: 120_000 })
+      .toBe(true)
+      .then(
+        () => true,
+        () => false
+      );
+    cleanup[`agent ${agent.check} state`] = await agentReadState(member(), agent.id);
+    if (!gone) residue.push(`agent ${agent.id} (${agent.check})`);
+  }
+
+  // The project, when this run created it.
+  if (journey.projectCreated && journey.projectId) {
+    const res = await member().delete(`/api/v1/projects/${journey.projectId}`);
+    cleanup.project = `DELETE ${res.status()}`;
+    const projectState = async (): Promise<ReadState> => {
+      const get = await member().get(`/api/v1/projects/${journey.projectId}`);
+      return classifyRead(get.status(), await get.json().catch(() => null), 'project');
+    };
+    const gone = await expect
+      .poll(async () => isGone(await projectState()), { timeout: 60_000 })
+      .toBe(true)
+      .then(
+        () => true,
+        () => false
+      );
+    cleanup.projectState = await projectState();
+    if (!gone) residue.push(`project ${journey.projectId}`);
+  }
+}
+
 test.describe.serial('async agent create from the web form', () => {
   test.beforeAll(async ({ browser }) => {
     const t = resolveTarget();
@@ -461,9 +527,13 @@ test.describe.serial('async agent create from the web form', () => {
       launchCapableReason: t.launchCapableReason,
     };
     journey.evidence.fixture = {
-      runningPath: 'FIXTURE: no-auth drop-to-shell (no harness credentials)',
+      runningPath:
+        'FIXTURE: no-auth drop-to-shell ' +
+        (t.mode === 'local'
+          ? '(no harness credentials; credential guard passed)'
+          : '(asserted in A2; credential guard not run: remote target)'),
       harnessConfig: t.harnessConfig ?? 'form default',
-      agentImage: t.agentImage,
+      expectedAgentImage: t.agentImage ?? null,
       badImage: t.badImage ?? `template ${t.badImageTemplate ?? '(none)'}`,
     };
     console.info(
@@ -613,16 +683,14 @@ test.describe.serial('async agent create from the web form', () => {
 
     // The running path is the credential-free no-auth fallback: the agent
     // must have started without credentials.
-    const agentRes = await member().get(`/api/v1/agents/${submit.agentId}`);
-    expect(agentRes.status()).toBe(200);
-    const agentBody = (await agentRes.json()) as {
-      agent?: { appliedConfig?: { noAuth?: boolean; harnessAuth?: string } };
-      appliedConfig?: { noAuth?: boolean; harnessAuth?: string };
+    const applied = await appliedConfigOf(submit.agentId);
+    journey.evidence.a2AppliedConfig = {
+      noAuth: applied?.noAuth,
+      harnessAuth: applied?.harnessAuth,
+      observedImage: applied?.image,
     };
-    const applied = agentBody.appliedConfig ?? agentBody.agent?.appliedConfig;
-    journey.evidence.a2NoAuth = { noAuth: applied?.noAuth, harnessAuth: applied?.harnessAuth };
-    expect(applied?.noAuth, 'appliedConfig.noAuth: started without credentials').toBe(true);
-    expect(applied?.harnessAuth, 'appliedConfig.harnessAuth').toBe('none');
+    journey.a2Running = { image: applied?.image ?? '' };
+    expectNoAuth(applied);
 
     // A1b over the whole launch, and no reload.
     await expectNoStartNoReload(tracked, submit);
@@ -688,10 +756,28 @@ test.describe.serial('async agent create from the web form', () => {
       IMAGE_FAILURE_CODES as readonly string[],
       `code ${panel.code} is an image failure code`
     ).toContain(panel.code);
+    // On Docker a pull failure maps to the catch-all runtime_error, and the
+    // panel message is the broker's fixed text (it never carries the pull
+    // error). Pin the cause instead: same credential-free auth path as A2
+    // (which reached running with the same harness), and the agent really
+    // used the bad image from the template.
+    const applied = await appliedConfigOf(submit.agentId);
+    const a4Applied = {
+      noAuth: applied?.noAuth,
+      harnessAuth: applied?.harnessAuth,
+      image: applied?.image,
+      expectedImage: t.badImage ?? null,
+      a2RunningImage: journey.a2Running?.image ?? null,
+    };
+    expectNoAuth(applied);
+    if (t.badImage) {
+      expect(applied?.image, 'appliedConfig.image is the bad image').toBe(t.badImage);
+    }
     await expectNoStartNoReload(tracked, submit);
     journey.evidence.a4 = {
       status: submit.status,
       launch: submit.launch,
+      appliedConfig: a4Applied,
       code: panel.code,
       messageLength: panel.message.length,
       timeline: await timelineRows(tracked.page, submit.agentId),
@@ -722,40 +808,12 @@ test.describe.serial('async agent create from the web form', () => {
 
     for (const page of journey.context?.pages() ?? []) await page.close();
 
-    // Agents, as the member.
-    for (const agent of journey.context ? journey.agents : []) {
-      if (!(await agentGone(member(), agent.id))) {
-        const res = await member().delete(`/api/v1/agents/${agent.id}`);
-        cleanup[`agent ${agent.check}`] = `DELETE ${res.status()}`;
-      }
-      const gone = await expect
-        .poll(() => agentGone(member(), agent.id), { timeout: 120_000 })
-        .toBe(true)
-        .then(
-          () => true,
-          () => false
-        );
-      cleanup[`agent ${agent.check} state`] = await agentReadState(member(), agent.id);
-      if (!gone) residue.push(`agent ${agent.id} (${agent.check})`);
-    }
-
-    // The project, when this run created it.
-    if (journey.projectCreated && journey.projectId) {
-      const res = await member().delete(`/api/v1/projects/${journey.projectId}`);
-      cleanup.project = `DELETE ${res.status()}`;
-      const projectState = async (): Promise<ReadState> => {
-        const get = await member().get(`/api/v1/projects/${journey.projectId}`);
-        return classifyRead(get.status(), await get.json().catch(() => null), 'project');
-      };
-      const gone = await expect
-        .poll(async () => isGone(await projectState()), { timeout: 60_000 })
-        .toBe(true)
-        .then(
-          () => true,
-          () => false
-        );
-      cleanup.projectState = await projectState();
-      if (!gone) residue.push(`project ${journey.projectId}`);
+    // Agents and the project, as the member. A transport error is recorded
+    // as residue and does not stop the identity deletion below.
+    try {
+      await cleanUpAgentsAndProject(cleanup, residue);
+    } catch (err) {
+      residue.push(`cleanup error: ${String((err as Error).message).split('\n')[0]}`);
     }
 
     // The fixture template (local hub).
