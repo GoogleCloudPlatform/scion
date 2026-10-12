@@ -281,10 +281,7 @@ async function within<T>(
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`${message()} (after ${timeoutMs}ms)`)),
-      timeoutMs
-    );
+    timer = setTimeout(() => reject(new Error(`${message()} (after ${timeoutMs}ms)`)), timeoutMs);
   });
   try {
     return await Promise.race([promise, deadline]);
@@ -469,7 +466,8 @@ test('owner only: PUTs come only from the owning page, never the non-owner', asy
   await within(
     ownerSocket.waitForAttach(1),
     FIRST_RENDER_TIMEOUT,
-    () => `owner page did not attach alpha; owner attached ${agentNames(ownerSocket.attachedAgentIds)}`
+    () =>
+      `owner page did not attach alpha; owner attached ${agentNames(ownerSocket.attachedAgentIds)}`
   );
 
   // The non-owner tab loads an agent path, so the owner selects that agent
