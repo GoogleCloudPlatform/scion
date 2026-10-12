@@ -118,6 +118,7 @@ type exportPlan struct {
 	selected   map[*declInfo]bool
 	order      []*declInfo       // selected, in package order
 	exported   map[string]string // staying-visible key -> exported name
+	aliased    map[string]bool   // exported keys that get an alias in the staying package
 	kinds      map[string]aliasKind
 	helperCall map[string]string // func key -> receiver of the t.Helper call it makes ("" = none)
 	fieldSites []fieldSite       // staying selectors rewritten for field exports
@@ -164,6 +165,7 @@ func planExport(p *pkgInfo, spec exportSpec, targetDir, importPath, aliasFile st
 		targetPkg:  filepath.Base(targetDir),
 		selected:   map[*declInfo]bool{},
 		exported:   map[string]string{},
+		aliased:    map[string]bool{},
 		kinds:      map[string]aliasKind{},
 		helperCall: map[string]string{},
 		targetSrc:  map[string][]byte{},
@@ -247,6 +249,32 @@ func planExport(p *pkgInfo, spec exportSpec, targetDir, importPath, aliasFile st
 			if !ep.selected[u] {
 				ep.exported[d.key] = ""
 				break
+			}
+		}
+	}
+	// Aliases: only names the staying package spells. That is the names a
+	// staying declaration uses, plus the types in the signatures of aliased
+	// funcs (the wrappers copy those signatures). A type reached only
+	// through an exported field or method of another type is exported but
+	// gets no alias: nothing in the staying package names it, and an unused
+	// alias fails the unused lint.
+	for k := range ep.exported {
+		ep.aliased[k] = true
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, d := range ep.order {
+			if !ep.aliased[d.key] || d.recv != "" {
+				continue
+			}
+			if _, ok := d.node.(*ast.FuncDecl); !ok {
+				continue
+			}
+			for _, n := range signatureRefs(p, d) {
+				if !ep.aliased[n] {
+					ep.aliased[n] = true
+					changed = true
+				}
 			}
 		}
 	}
@@ -1002,12 +1030,16 @@ func writeImports(b *bytes.Buffer, imports map[importKey]bool) {
 }
 
 // renderAlias writes the staying package's alias file: one declaration per
-// exported name, sorted by name, so staying code needs no edits.
+// aliased name (see ep.aliased), sorted by name, so staying code needs no
+// edits.
 func (ep *exportPlan) renderAlias() ([]byte, error) {
 	q := ep.targetPkg
 	imports := map[importKey]bool{{path: strconv.Quote(ep.importPath)}: true}
 	var decls []string
 	for _, k := range sortedKeys(ep.exported) {
+		if !ep.aliased[k] {
+			continue
+		}
 		d := ep.p.byKey[k][0]
 		n := ep.exported[k]
 		switch ep.kinds[k] {
@@ -1233,6 +1265,9 @@ func (ep *exportPlan) report(w *bytes.Buffer) {
 		extra := ""
 		if h := ep.helperCall[k]; h != "" {
 			extra = " (calls " + h + ".Helper())"
+		}
+		if !ep.aliased[k] {
+			extra += " (no alias: the staying package does not name it)"
 		}
 		fmt.Fprintf(w, "  %-36s -> %-36s %s%s\n", k, ep.exported[k], ep.kinds[k], extra)
 	}

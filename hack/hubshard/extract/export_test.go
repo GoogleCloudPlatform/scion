@@ -532,8 +532,31 @@ func newHolder() holder { return holder{} }
 			t.Errorf("target lacks %q:\n%s", want, got)
 		}
 	}
-	if alias := readFile(t, filepath.Join(dir, defaultAliasFile)); !strings.Contains(alias, "type call = support.Call") {
-		t.Errorf("alias file lacks the call alias:\n%s", alias)
+	// Aliases only for names the staying package spells: newStub and
+	// newHolder (used by b_test.go), and stub/holder (in their wrappers'
+	// signatures). call and inner are reachable only through an exported
+	// method or field, so they are exported but get no alias; an unused
+	// alias would fail the unused lint.
+	alias := readFile(t, filepath.Join(dir, defaultAliasFile))
+	for _, want := range []string{"type stub = support.Stub", "type holder = support.Holder", "func newStub() *stub {", "func newHolder() holder {"} {
+		if !strings.Contains(alias, want) {
+			t.Errorf("alias file lacks %q:\n%s", want, alias)
+		}
+	}
+	for _, unwanted := range []string{"type call = ", "type inner = "} {
+		if strings.Contains(alias, unwanted) {
+			t.Errorf("alias file must not alias a type the staying package never names (%q):\n%s", unwanted, alias)
+		}
+	}
+	for _, k := range []string{"call", "inner"} {
+		if ep.aliased[k] {
+			t.Errorf("aliased[%s] = true, want false", k)
+		}
+	}
+	var rep bytes.Buffer
+	ep.report(&rep)
+	if !strings.Contains(rep.String(), "(no alias: the staying package does not name it)") {
+		t.Errorf("report does not list the unaliased exports:\n%s", rep.String())
 	}
 }
 
