@@ -318,10 +318,10 @@ func TestGroupMessageMode_OutboundThreadPost(t *testing.T) {
 	}
 }
 
-// TestGroupMessageMode_InboundSelfPost covers an agent addressing itself
-// with a group conversation_id, and with a thread_id naming an existing
-// thread conversation, for every mode.
-func TestGroupMessageMode_InboundSelfPost(t *testing.T) {
+// TestGroupMessageMode_InboundPost covers an agent's message through the
+// agent message handler naming a group conversation, by conversation_id
+// and by thread_id, for every mode.
+func TestGroupMessageMode_InboundPost(t *testing.T) {
 	srv, s, projectID, target, _ := def49Setup(t)
 	brokerID := target.RuntimeBrokerID
 
@@ -345,7 +345,7 @@ func TestGroupMessageMode_InboundSelfPost(t *testing.T) {
 					var rr *httptest.ResponseRecorder
 					threadID := ""
 					if byThread {
-						threadID = "gmm-self-" + uuid.NewString()[:8]
+						threadID = "gmm-inbound-" + uuid.NewString()[:8]
 						extRef, err := messaging.ThreadConversationExternalRef(projectID, threadID)
 						require.NoError(t, err)
 						conv = groupModeConversation(t, s, projectID, extRef)
