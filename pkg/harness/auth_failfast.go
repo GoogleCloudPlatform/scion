@@ -70,7 +70,9 @@ type AuthCheckInputs struct {
 //     no declared type is satisfied. All shipped harnesses declare no_auth,
 //     so this branch applies only to custom harness-configs.
 //
-// Whether a type is satisfied is decided by stagedSatisfiesType.
+// Whether a type is satisfied is decided by stagedSatisfiesType. A missing,
+// unreadable or malformed auth-candidates.json fails open (the start is
+// allowed).
 //
 // The check trusts the harness-config auth.types as the provisioner's
 // contract. The broker rejects a start when an env-only auth type declared
@@ -135,11 +137,12 @@ func (c *ContainerScriptHarness) CheckStagedAuth(in AuthCheckInputs) error {
 //     auth-candidates.json, or set in the start env. The provisioner selects
 //     env methods from the staged candidates and secret files, plus, for
 //     env_fallback methods, its own environment. That environment is
-//     minimal (HOME, PATH, LANG, TZ and every SCION_* variable of the
-//     container), so the only container env it can see is SCION_*, which
-//     the broker cannot fully see either; a type with any SCION_* key is
-//     therefore always satisfied. "Any key" and the start env only make the
-//     check more permissive than the provisioner.
+//     minimal (HOME, PATH, LANG, TZ, PYTHONDONTWRITEBYTECODE and every
+//     SCION_* variable of the container), so the only credential-bearing
+//     container env it can see is SCION_*, which the broker cannot fully
+//     see either; a type with any SCION_* key is therefore always
+//     satisfied. "Any key" and the start env only make the check more
+//     permissive than the provisioner.
 func stagedSatisfiesType(t api.HarnessAuthTypeMetadata, staged stagedAuthCandidates, env map[string]string) bool {
 	if len(t.RequiredFiles) > 0 || len(t.RequiredEnv) == 0 {
 		return true
