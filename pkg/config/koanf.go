@@ -310,18 +310,31 @@ func dropInheritedHubProjectID(k *koanf.Koanf, projectPath, effectiveProjectPath
 }
 
 // loadsProjectLayer reports whether a settings load for projectPath merges a
-// project layer above the global one. It uses the same conditions as the
-// in-repo and external project steps of LoadSettingsKoanf and
-// LoadVersionedSettings. The "global" and "home" aliases name the global
+// project layer above the global one. It follows the in-repo and external
+// project steps of LoadSettingsKoanf and LoadVersionedSettings, but compares
+// against the global directory by resolved path: FindProjectRoot returns a
+// symlink-resolved path, so a working directory under a symlinked $HOME still
+// names the global project. The "global" and "home" aliases name the global
 // project.
 func loadsProjectLayer(projectPath, effectiveProjectPath, globalDir string) bool {
 	if projectPath == "global" || projectPath == "home" {
 		return false
 	}
-	if projectPath != "" && projectPath != globalDir {
+	isProject := func(p string) bool { return p != "" && !sameDirForComparison(p, globalDir) }
+	return isProject(projectPath) || (effectiveProjectPath != projectPath && isProject(effectiveProjectPath))
+}
+
+// sameDirForComparison reports whether a and b name the same directory,
+// literally or after resolving symlinks (see resolvePathForComparison). An
+// empty b never matches a non-empty a.
+func sameDirForComparison(a, b string) bool {
+	if a == b {
 		return true
 	}
-	return effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath
+	if a == "" || b == "" {
+		return false
+	}
+	return resolvePathForComparison(a) == resolvePathForComparison(b)
 }
 
 // LoadSettingsFromDir loads settings from a single directory's settings file

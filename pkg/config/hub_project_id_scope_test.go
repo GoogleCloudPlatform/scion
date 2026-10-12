@@ -38,7 +38,9 @@ func setupHubIDScopeHome(t *testing.T, globalHub string) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	unsetTestEnv(t, "SCION_HUB_ENDPOINT", "SCION_AUTO_EXPOSE_PORTS", "SCION_PROJECT",
+	// SCION_HUB_ENDPOINT and SCION_HUB_URL mark a hub-connected container,
+	// where FindProjectRoot returns a synthetic project for any directory.
+	unsetTestEnv(t, "SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_AUTO_EXPOSE_PORTS", "SCION_PROJECT",
 		projectkeys.EnvProjectID, projectkeys.EnvHubProjectID)
 	globalDir := filepath.Join(home, ".scion")
 	require.NoError(t, os.MkdirAll(globalDir, 0o755))
@@ -216,4 +218,22 @@ func TestLoadsProjectLayer(t *testing.T) {
 	assert.True(t, loadsProjectLayer("/r/.scion", "/r/.scion", g))
 	assert.True(t, loadsProjectLayer("/r/.scion", "/home/u/.scion/project-configs/r", g))
 	assert.True(t, loadsProjectLayer("", "/r/.scion", g), "a project found from the working directory")
+}
+
+// TestLoadsProjectLayer_SymlinkedGlobalDir checks that a global directory
+// reached through a symlinked home, as FindProjectRoot reports it (resolved),
+// is still the global project.
+func TestLoadsProjectLayer_SymlinkedGlobalDir(t *testing.T) {
+	realHome := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(realHome, ".scion"), 0o755))
+	link := filepath.Join(t.TempDir(), "home")
+	require.NoError(t, os.Symlink(realHome, link))
+	globalDir := filepath.Join(link, ".scion")
+	resolved, err := filepath.EvalSymlinks(globalDir)
+	require.NoError(t, err)
+	require.NotEqual(t, globalDir, resolved)
+
+	assert.False(t, loadsProjectLayer("", resolved, globalDir), "a working directory under the symlinked home")
+	assert.False(t, loadsProjectLayer(resolved, resolved, globalDir), "an explicit resolved global path")
+	assert.True(t, loadsProjectLayer("", filepath.Join(realHome, "repo", ".scion"), globalDir), "a real project still counts")
 }
