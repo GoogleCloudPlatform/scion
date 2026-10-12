@@ -2531,7 +2531,7 @@ func TestConstraintAdminLockout_ReplaceMoveReadFailureRefuses(t *testing.T) {
 	}
 }
 
-// A replace that keeps the admin role for the same principal at the same
+// A replace that keeps an admin role for the same principal at the same
 // scope but narrows the validity window removes admin authority for the
 // time the new window leaves out, so the sole admin's replace is refused.
 // Control: another active admin at the scope. A widened or equal window
@@ -2582,7 +2582,12 @@ func TestConstraintAdminLockout_ReplaceNarrowedWindow(t *testing.T) {
 				CreatedBy:     "test",
 			})
 			require.NoError(t, err)
+			// A second admin role: the store keeps one binding per role,
+			// principal and scope, and the replace creates before it
+			// deletes.
 			newBinding := replaceMoved(old, "user", user, projectID)
+			newBinding.RoleDefinitionID = createTestRoleDefinition(t, s, name+"-new-role",
+				store.RoleScopeProject, []string{PermissionConstraintAdmin}).ID
 			newBinding.NotBefore, newBinding.ExpiresAt = at(tc.newNB), at(tc.newExp)
 
 			created, err := gs.ReplaceRoleBinding(ctx, old.ID, newBinding, "")
