@@ -257,8 +257,11 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save daemon args: %v\n", err)
 	}
 
-	// Verify it started
-	time.Sleep(500 * time.Millisecond)
+	// Wait until the started components answer /healthz, so a command run
+	// right after start (e.g. 'scion hub link') can reach the server.
+	if err := waitForDaemonServerReady(globalDir, daemonArgs); err != nil {
+		return err
+	}
 	running, pid, _ = daemon.StatusComponent(serverDaemonComponent, globalDir)
 	if !running {
 		return fmt.Errorf("daemon failed to start. Check log at: %s", daemon.GetLogPathComponent(serverDaemonComponent, globalDir))
@@ -552,8 +555,10 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	// Verify it started
-	time.Sleep(500 * time.Millisecond)
+	// Wait until the restarted components answer /healthz.
+	if err := waitForDaemonServerReady(globalDir, daemonArgs); err != nil {
+		return err
+	}
 	running, pid, _ = daemon.StatusComponent(serverDaemonComponent, globalDir)
 	if !running {
 		return fmt.Errorf("daemon failed to start. Check log at: %s", daemon.GetLogPathComponent(serverDaemonComponent, globalDir))

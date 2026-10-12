@@ -295,6 +295,9 @@ var routeAuthzManifest = map[string]string{
 	"DELETE /api/v1/test-identities/{id}":              "authenticated", // Delete a test identity
 	"POST /api/v1/test-identities/admin":               "authenticated", // Issue an admin-kind test identity
 	"POST /api/v1/test-identities/admin/revoke-all":    "authenticated", // Revoke every admin-kind test identity
+	"POST /api/v1/test-identity-delegations":           "authenticated", // Create a workload issuer delegation (session only)
+	"GET /api/v1/test-identity-delegations":            "authenticated", // List workload issuer delegations (session only)
+	"DELETE /api/v1/test-identity-delegations/{id}":    "authenticated", // Revoke a workload issuer delegation (session only)
 
 	// ── Platform account linking ───────────────────────────────────────
 	"/api/v1/telegram/link":        "authenticated", // Telegram account linking

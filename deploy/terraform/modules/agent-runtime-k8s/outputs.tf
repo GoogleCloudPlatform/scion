@@ -27,3 +27,11 @@ output "hub_rbac_created" {
   description = "Whether this module created the hub's Role/RoleBinding (var.create_hub_rbac). Exposed so a root can assert which side owns the hub's namespace RBAC: this module for Cloud Run hubs, the Helm chart for hub-gke."
   value       = length(kubernetes_role.hub) > 0
 }
+
+output "nfs_owner" {
+  description = "uid and gid the init Job chowns this hub's NFS subdirectory to ({ uid, gid }, from nfs_uid/nfs_gid). Exposed so a root can assert the hub process runs as the same ids."
+  value = {
+    uid = var.nfs_uid
+    gid = var.nfs_gid
+  }
+}

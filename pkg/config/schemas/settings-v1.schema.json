@@ -1242,6 +1242,18 @@
           "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the --test-mode gate: every level other than off requires \"test\". Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
           "x-env-var": "SCION_SERVER_HUB_CLASS"
         },
+        "test_identities": {
+          "type": "object",
+          "description": "Startup-only settings of hub-issued test identities. Settable only in the settings file: the server-config API refuses this key, and every key under it, in every mode.",
+          "properties": {
+            "workload_issuers": {
+              "type": "array",
+              "description": "Workload subjects a human issuer may pin a test identity issuer delegation to. Each entry is a Google subject (a service account's unique id) and the highest tier a delegation to it may cover; only \"member\" is accepted in this release. Read once at startup.",
+              "items": { "$ref": "#/$defs/serverTestIdentityWorkloadIssuer" }
+            }
+          },
+          "additionalProperties": false
+        },
         "monitoring_dashboard_url": {
           "type": "string",
           "format": "uri",
@@ -2341,6 +2353,15 @@
           ],
           "description": "Go duration, e.g. \"30s\". Empty means the default. An unquoted 0 is accepted (it loads as \"0\")."
         }
+      },
+      "additionalProperties": false
+    },
+    "serverTestIdentityWorkloadIssuer": {
+      "type": "object",
+      "required": ["sub", "max_tier"],
+      "properties": {
+        "sub": { "type": "string", "pattern": "^[0-9]{1,64}$" },
+        "max_tier": { "type": "string", "enum": ["member", "admin"] }
       },
       "additionalProperties": false
     },
