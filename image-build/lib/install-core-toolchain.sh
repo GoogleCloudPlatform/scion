@@ -158,10 +158,10 @@ step_apt_common() {
 
 # chromium. On Debian it is a real apt package. On Ubuntu it is snap-only, so we
 # install Google Chrome from Google's own apt repository and put it on PATH
-# under the expected name. The name matters as much as the browser: the web-dev
-# template runs a service literally called `chromium`, pkg/api/types_test.go
-# expects CHROME_PATH=/usr/bin/chromium, and
-# pkg/hub/suspended_page_browser_test.go calls exec.LookPath("chromium").
+# under the expected name. The name matters as much as the browser:
+# pkg/api/types_test.go expects CHROME_PATH=/usr/bin/chromium, and the hub test
+# TestSuspendedPage_HeadlessBrowser_ZeroFanOut
+# (pkg/hub/suspended_page_browser_test.go) calls exec.LookPath("chromium").
 #
 # The apt route is both predicted and verified, and both halves earn their keep:
 #   * predicted, so that Ubuntu's `chromium` virtual name — a shim that depends
