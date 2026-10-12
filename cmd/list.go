@@ -51,13 +51,13 @@ var (
 	filterLabels   []string
 	listCount      int
 
-	// Attribute filters (Hub mode only — combine with each other and with
+	// Attribute filters (combine with each other and with
 	// --phase/--activity/--template/--label using AND). ptone/scion#2146.
 	filterOwner   string
 	filterBroker  string
 	filterHarness string
 
-	// Relationship filters (Hub mode only, mutually exclusive with each
+	// Relationship filters (mutually exclusive with each
 	// other). Empty means unset; scopeInferSentinel (via cobra's
 	// NoOptDefVal) means "infer the reference" — see
 	// resolveRelationshipReference. ptone/scion#2146.
@@ -1098,20 +1098,20 @@ func init() {
 	listCmd.Flags().StringArrayVar(&filterLabels, "label", nil, "Filter by label in key=value format (repeatable)")
 	listCmd.Flags().IntVar(&listCount, "count", 0, "Maximum number of agents to return (default: server limit)")
 
-	// Attribute filters (Hub mode only).
-	listCmd.Flags().StringVar(&filterOwner, "owner", "", "Filter by owner: a user ID, name, email, or the reserved value \"me\" (Hub mode only)")
-	listCmd.Flags().StringVar(&filterBroker, "broker", "", "Filter by runtime broker name or ID (Hub mode only)")
-	listCmd.Flags().StringVar(&filterHarness, "harness", "", "Filter by harness-config name (Hub mode only)")
+	// Attribute filters.
+	listCmd.Flags().StringVar(&filterOwner, "owner", "", "Filter by owner: a user ID, name, email, or the reserved value \"me\"")
+	listCmd.Flags().StringVar(&filterBroker, "broker", "", "Filter by runtime broker name or ID")
+	listCmd.Flags().StringVar(&filterHarness, "harness", "", "Filter by harness-config name")
 
-	// Relationship filters (Hub mode only). NoOptDefVal lets both
+	// Relationship filters. NoOptDefVal lets both
 	// `--descendants` and `--descendants=<agent>` parse: the bare form
 	// infers the reference (calling agent in agent mode, calling user
 	// otherwise) — see resolveRelationshipReference.
-	listCmd.Flags().StringVar(&filterDescendants, "descendants", "", "List every agent descended from the reference (default: self) (Hub mode only)")
+	listCmd.Flags().StringVar(&filterDescendants, "descendants", "", "List every agent descended from the reference (default: self)")
 	listCmd.Flags().Lookup("descendants").NoOptDefVal = scopeInferSentinel
-	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference's ancestry chain (default: self) (Hub mode only)")
+	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference's ancestry chain (default: self)")
 	listCmd.Flags().Lookup("ancestors").NoOptDefVal = scopeInferSentinel
-	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's creation-tree neighborhood: its direct parent agent plus all of that parent's descendants, bounded to the reference's project. A reference whose parent is a user, or whose only recorded parent is an agent you cannot see, is its own root (default: self) (Hub mode only)")
+	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's creation-tree neighborhood: its direct parent agent plus all of that parent's descendants, bounded to the reference's project. A reference whose parent is a user, or whose only recorded parent is an agent you cannot see, is its own root (default: self)")
 	listCmd.Flags().Lookup("lineage").NoOptDefVal = scopeInferSentinel
 	listCmd.MarkFlagsMutuallyExclusive("descendants", "ancestors", "lineage")
 }

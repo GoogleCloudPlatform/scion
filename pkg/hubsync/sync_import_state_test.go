@@ -164,18 +164,18 @@ func TestExecuteSync_ImportKeepsNonRunningAgentsStopped(t *testing.T) {
 	}{
 		{name: "running container is adopted", containers: []api.AgentInfo{localContainer("c-a1", "a1", "running", resolved)}, wantProvision: false, wantLine: "+ a1 (running, adopted)\n"},
 		{name: "running container matched by project name label", containers: []api.AgentInfo{{ContainerID: "c-a1", Name: "a1", Phase: "running", Project: projectName, Labels: map[string]string{"scion.name": "a1"}}}, wantProvision: false, wantLine: "+ a1 (running, adopted)\n"},
-		{name: "exited container is removed and the agent imported as stopped", containers: []api.AgentInfo{localContainer("c-a1", "a1", "stopped", resolved)}, wantProvision: true, wantLine: "+ a1 (imported as created (not started); its exited container was removed)\n"},
-		{name: "no container is imported as created", wantProvision: true, wantLine: "+ a1 (imported as created (not started))\n"},
+		{name: "exited container is removed and the agent imported as stopped", containers: []api.AgentInfo{localContainer("c-a1", "a1", "stopped", resolved)}, wantProvision: true, wantLine: "+ a1 (imported as created, not started; its exited container was removed)\n"},
+		{name: "no container is imported as created", wantProvision: true, wantLine: "+ a1 (imported as created, not started)\n"},
 		{name: "running same-name agent in another project does not count", containers: []api.AgentInfo{
 			{ContainerID: "c-x", Name: "a1", Phase: "running", ProjectPath: "/elsewhere/other/.scion", Project: projectName, Labels: map[string]string{"scion.name": "a1", "scion.project_path": "/elsewhere/other/.scion"}},
-		}, wantProvision: true, wantLine: "+ a1 (imported as created (not started))\n"},
+		}, wantProvision: true, wantLine: "+ a1 (imported as created, not started)\n"},
 		{name: "running same-name agent with another project name does not count", containers: []api.AgentInfo{
 			{ContainerID: "c-x", Name: "a1", Phase: "running", Project: "some-other-project", Labels: map[string]string{"scion.name": "a1"}},
-		}, wantProvision: true, wantLine: "+ a1 (imported as created (not started))\n"},
+		}, wantProvision: true, wantLine: "+ a1 (imported as created, not started)\n"},
 		{name: "running container without project labels does not count", containers: []api.AgentInfo{
 			{ContainerID: "c-x", Name: "a1", Phase: "running", Labels: map[string]string{"scion.name": "a1"}},
-		}, wantProvision: true, wantLine: "+ a1 (imported as created (not started))\n"},
-		{name: "runtime error does not start the agent", listErr: errors.New("daemon not reachable"), wantProvision: true, wantLine: "+ a1 (imported as created (not started))\n", wantWarning: "could not check which agents are running"},
+		}, wantProvision: true, wantLine: "+ a1 (imported as created, not started)\n"},
+		{name: "runtime error does not start the agent", listErr: errors.New("daemon not reachable"), wantProvision: true, wantLine: "+ a1 (imported as created, not started)\n", wantWarning: "could not check which agents are running"},
 	}
 
 	for _, tc := range cases {
@@ -215,7 +215,7 @@ func TestExecuteSync_ImportRemovesExitedLeftoverFirst(t *testing.T) {
 	assert.Equal(t, runtime.RunRef{ID: "c-s1", RunID: "run-c-s1"}, r.deleted[0])
 	require.Len(t, r.reqs, 1)
 	assert.True(t, r.reqs[0].ProvisionOnly)
-	assert.Contains(t, r.out, "+ s1 (imported as created (not started); its exited container was removed)\n")
+	assert.Contains(t, r.out, "+ s1 (imported as created, not started; its exited container was removed)\n")
 	assert.Empty(t, r.warn)
 }
 
@@ -234,14 +234,14 @@ func TestExecuteSync_ImportNeverRemovesOtherContainers(t *testing.T) {
 		wantHint   bool
 	}{
 		{name: "running container", containers: []api.AgentInfo{localContainer("c-a1", "a1", "running", resolved)}, wantLine: "+ a1 (running, adopted)\n"},
-		{name: "exited container of another project", containers: []api.AgentInfo{localContainer("c-x", "a1", "stopped", "/elsewhere/other/.scion")}, wantLine: "+ a1 (imported as created (not started))\n"},
+		{name: "exited container of another project", containers: []api.AgentInfo{localContainer("c-x", "a1", "stopped", "/elsewhere/other/.scion")}, wantLine: "+ a1 (imported as created, not started)\n"},
 		{name: "created (not exited) container, as a concurrent start leaves it", containers: []api.AgentInfo{localContainer("c-new", "a1", "created", resolved)},
-			wantLine: "+ a1 (imported as created (not started))\n", wantHint: true},
+			wantLine: "+ a1 (imported as created, not started)\n", wantHint: true},
 		{name: "dead or restarting container (phase not stopped)", containers: []api.AgentInfo{localContainer("c-dead", "a1", "error", resolved)},
-			wantLine: "+ a1 (imported as created (not started))\n", wantHint: true},
+			wantLine: "+ a1 (imported as created, not started)\n", wantHint: true},
 		{name: "exited container known only by project name", containers: []api.AgentInfo{
 			{ContainerID: "c-n", Name: "a1", Phase: "stopped", Project: projectName, Labels: map[string]string{"scion.name": "a1"}},
-		}, wantLine: "+ a1 (imported as created (not started))\n", wantHint: true},
+		}, wantLine: "+ a1 (imported as created, not started)\n", wantHint: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := runImport(t, projectDir, func() ([]api.AgentInfo, error) { return tc.containers, nil }, nil, "a1")
@@ -270,7 +270,7 @@ func TestExecuteSync_ImportRemovalFailureWarns(t *testing.T) {
 	assert.Contains(t, r.warn, "could not remove the exited container of agent 's1'")
 	assert.Contains(t, r.warn, "permission denied")
 	assert.Contains(t, r.warn, "run 'scion stop s1' before 'scion start s1'")
-	assert.Contains(t, r.out, "+ s1 (imported as created (not started))\n")
+	assert.Contains(t, r.out, "+ s1 (imported as created, not started)\n")
 }
 
 // TestExecuteSync_ImportMixedAgents imports several agents in one sync and
@@ -292,7 +292,7 @@ func TestExecuteSync_ImportMixedAgents(t *testing.T) {
 	assert.False(t, r.reqs[1].ProvisionOnly, "running agent keeps create and start")
 	assert.True(t, r.reqs[2].ProvisionOnly, "stopped agent is provisioned only")
 	assert.Equal(t, []string{"create idle", "create run", "delete c-off", "create off"}, r.events)
-	assert.Equal(t, "+ idle (imported as created (not started))\n+ run (running, adopted)\n+ off (imported as created (not started); its exited container was removed)\nAgent synchronization complete.\n", r.out)
+	assert.Equal(t, "+ idle (imported as created, not started)\n+ run (running, adopted)\n+ off (imported as created, not started; its exited container was removed)\nAgent synchronization complete.\n", r.out)
 }
 
 // TestExecuteSync_NoRegistrationsSkipsRuntime checks that a sync with

@@ -464,7 +464,7 @@ func init() {
 
 	createCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
 
-	// Template resolution flags for Hub mode (Section 9.4)
+	// Template resolution flags (Section 9.4)
 	createCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	createCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
 	createCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
@@ -485,7 +485,7 @@ func init() {
 		"Agent message mode: none, lineage, branch, project")
 
 	// GCP service account assignment flag
-	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name (requires Hub mode)")
+	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name")
 }
 
 // skillResolverHubOptions returns the EnsureHubReady options for the hub

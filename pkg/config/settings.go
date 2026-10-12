@@ -814,23 +814,11 @@ func (s *Settings) IsHubConfigured() bool {
 	return s.Hub != nil && s.Hub.Endpoint != ""
 }
 
-// HubEndpoint returns the configured Hub endpoint (settings, with the
-// SCION_HUB_ENDPOINT overlay applied by the loader), or "" when none is set.
-func (s *Settings) HubEndpoint() string {
-	return s.GetHubEndpoint()
-}
-
-// HasHubEndpoint reports whether a Hub endpoint is configured. A configured
-// endpoint is what makes the CLI use a hub; the deprecated hub.enabled
-// setting is not read for that.
-func (s *Settings) HasHubEndpoint() bool {
-	return s.HubEndpoint() != ""
-}
-
 // IsHubEnabled reports the legacy hub.enabled switch: credentials plus an
-// endpoint, or hub.enabled=true. Deprecated: the CLI no longer reads it
-// (use HasHubEndpoint); it remains only for the agent manager's non-broker
-// start path, which is removed with the local-mode engine cleanup.
+// endpoint, or hub.enabled=true. Deprecated: the CLI no longer reads it (a
+// configured endpoint is what counts); it remains only for the agent
+// manager's non-broker start path, which is removed with the local-mode
+// engine cleanup.
 func (s *Settings) IsHubEnabled() bool {
 	if s.Hub == nil {
 		return false

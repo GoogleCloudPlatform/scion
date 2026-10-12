@@ -2421,6 +2421,10 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	if err := config.UpdateSetting(resolvedPath, "hub.linked", "true", isGlobal); err != nil {
 		return fmt.Errorf("failed to save linked state: %w", err)
 	}
+	// A project the removed 'scion hub disable' (or hub.local_only) turned
+	// off gets the one-time notice, and the stale switch is cleared, as on
+	// the first command after upgrading.
+	hubsync.ClearStaleModeSettings(os.Stderr, resolvedPath, isGlobal)
 
 	// Save endpoint if provided via flag
 	if hubEndpoint != "" {

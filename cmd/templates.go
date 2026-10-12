@@ -77,14 +77,17 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 		// Get project ID for filtering project-scoped templates
 		projectID, _ := GetProjectID(hubCtx)
 
-		// Fetch global templates from Hub
+		// Fetch global templates from Hub. A failure here is returned: the
+		// hub answered requireHub, so an empty hub section would hide a
+		// real error (no silent fallback, D5).
 		globalResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
 			Scope:  "global",
 			Status: "active",
 		})
-		if err == nil {
-			hubGlobal = globalResp.Templates
+		if err != nil {
+			return wrapHubError(fmt.Errorf("failed to list hub templates: %w", err))
 		}
+		hubGlobal = globalResp.Templates
 
 		// Fetch project templates from Hub (if we have a project ID)
 		if projectID != "" {
@@ -93,7 +96,10 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 				ProjectID: projectID,
 				Status:    "active",
 			})
-			if err == nil {
+			if err != nil {
+				// The global list worked, so show it and say what is missing.
+				warnTemplateScopeListFailed("project", err)
+			} else {
 				hubProject = projectResp.Templates
 			}
 		}
@@ -103,7 +109,9 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 			Scope:  "user",
 			Status: "active",
 		})
-		if err == nil {
+		if err != nil {
+			warnTemplateScopeListFailed("user", err)
+		} else {
 			hubUser = userResp.Templates
 		}
 
@@ -190,6 +198,13 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 
 	_ = w.Flush()
 	return nil
+}
+
+// warnTemplateScopeListFailed reports on stderr that the hub templates of
+// one scope could not be listed, so 'templates list' does not show that
+// section as empty without saying so.
+func warnTemplateScopeListFailed(scope string, err error) {
+	fmt.Fprintf(os.Stderr, "Warning: could not list %s templates on the hub: %v\n", scope, err)
 }
 
 // printLocalTemplateList prints the filesystem templates for

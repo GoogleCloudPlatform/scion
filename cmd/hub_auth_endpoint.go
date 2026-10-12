@@ -94,7 +94,7 @@ type loginEndpointOptions struct {
 	// IsGlobal reports whether the invocation runs in the global context
 	// (no project), so only global settings apply.
 	IsGlobal bool
-	// TargetGlobal selects the settings a new hub.endpoint (and hub.enabled)
+	// TargetGlobal selects the settings a new hub.endpoint
 	// is written to: global settings, else the project's own settings.
 	TargetGlobal bool
 }

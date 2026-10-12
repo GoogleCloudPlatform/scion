@@ -56,7 +56,7 @@ var logsCmd = &cobra.Command{
 		}
 		if hubCtx != nil {
 			if logsFollow {
-				return fmt.Errorf("--follow is not supported in hub mode")
+				return fmt.Errorf("--follow is not supported for agents on a hub")
 			}
 			return getHubLogs(cmd.Context(), hubCtx, agentName)
 		}

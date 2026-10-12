@@ -607,3 +607,70 @@ func TestRunTemplateList_LocalMakesNoHubRequest(t *testing.T) {
 	assert.Contains(t, stdout, "local-tpl")
 	assert.Empty(t, hub.Requests(), "--local must not call the hub")
 }
+
+// templateListHub is a hub-connected test hub whose template list answers
+// per scope: a scope in failScopes gets a 500, any other scope one template
+// named "<scope>-tpl".
+func templateListHub(t *testing.T, failScopes ...string) {
+	t.Helper()
+	hermeticCLIEnv(t)
+	fail := map[string]bool{}
+	for _, s := range failScopes {
+		fail[s] = true
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
+			scope := r.URL.Query().Get("scope")
+			if fail[scope] {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]string{"code": "internal", "message": scope + " list failed"},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"templates": []map[string]string{{"id": scope + "-id", "name": scope + "-tpl"}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_tpl")
+	t.Setenv("SCION_PROJECT_ID", "tpl-project")
+}
+
+// TestRunTemplateList_HubListErrors: a failed global-scope list is returned
+// (no empty hub section next to the local templates); a failed project or
+// user list alone is a warning and the rest is still listed.
+func TestRunTemplateList_HubListErrors(t *testing.T) {
+	t.Run("global scope failure fails the command", func(t *testing.T) {
+		orig := saveTemplateTestState()
+		defer orig.restore()
+		templateListHub(t, "global")
+		globalMode = true
+
+		var err error
+		captureStdIO(t, func() { err = runTemplateList(nil, nil) })
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to list hub templates")
+	})
+	t.Run("project and user failures are warnings", func(t *testing.T) {
+		orig := saveTemplateTestState()
+		defer orig.restore()
+		templateListHub(t, "project", "user")
+		globalMode = true
+
+		var err error
+		stdout, stderr := captureStdIO(t, func() { err = runTemplateList(nil, nil) })
+		require.NoError(t, err)
+		assert.Contains(t, stdout, "global-tpl")
+		assert.Contains(t, stderr, "Warning: could not list project templates on the hub")
+		assert.Contains(t, stderr, "Warning: could not list user templates on the hub")
+	})
+}

@@ -1106,15 +1106,15 @@ func hubCloneTransportNote(cloneURL string) string {
 	lower := strings.ToLower(cloneURL)
 	switch {
 	case strings.HasPrefix(lower, "https://"):
-		return "Hub mode uses HTTPS clone with GITHUB_TOKEN"
+		return "the broker uses HTTPS clone with GITHUB_TOKEN"
 	case strings.HasPrefix(lower, "http://"):
-		return "Hub mode uses plain HTTP clone with GITHUB_TOKEN"
+		return "the broker uses plain HTTP clone with GITHUB_TOKEN"
 	case strings.HasPrefix(lower, "ssh://"), strings.HasPrefix(cloneURL, "git@"):
-		return "Hub mode uses SSH clone; GITHUB_TOKEN is not used"
+		return "the broker uses SSH clone; GITHUB_TOKEN is not used"
 	case strings.HasPrefix(lower, "git://"):
-		return "Hub mode uses unauthenticated git:// clone; GITHUB_TOKEN is not used"
+		return "the broker uses unauthenticated git:// clone; GITHUB_TOKEN is not used"
 	default:
-		return "Hub mode clones this path on the runtime broker"
+		return "the runtime broker clones this path"
 	}
 }
 

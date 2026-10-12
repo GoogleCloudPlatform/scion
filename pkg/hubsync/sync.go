@@ -296,14 +296,8 @@ func notConfiguredError(projectPath string, isGlobal bool) error {
 // load reports such errors. The global settings are not merged in, so the
 // global project's value does not leak into other projects.
 func ProjectLinkedSetting(projectPath string, isGlobal bool) *bool {
-	dirs := []string{projectPath}
-	if !isGlobal {
-		if ext := config.GetProjectConfigDir(projectPath); ext != "" && ext != projectPath {
-			dirs = append(dirs, ext)
-		}
-	}
 	var linked *bool
-	for _, dir := range dirs {
+	for _, dir := range projectSettingsDirs(projectPath, isGlobal) {
 		own, err := config.LoadSettingsFromDir(dir)
 		if err != nil || own == nil || own.Hub == nil || own.Hub.Linked == nil {
 			continue
@@ -631,8 +625,11 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// A project whose link was never recorded (hub.linked unset) gets it
 	// recorded now, after the one-release import of agents left from
 	// local-only mode. A project that was registered before links were
-	// recorded takes the same path; it normally has nothing to import.
-	if linkedHere || ProjectLinkedSetting(resolvedPath, isGlobal) == nil {
+	// recorded takes the same path; it normally has nothing to import. So
+	// does a linked project whose own settings still turn the hub off (the
+	// removed 'scion hub disable' wrote hub.enabled=false and kept
+	// hub.linked=true): it may hold agents created while it was disabled.
+	if linkedHere || ProjectLinkedSetting(resolvedPath, isGlobal) == nil || len(StaleModeKeys(resolvedPath, isGlobal)) > 0 {
 		finishAutoLink(hubCtx, opts.AutoConfirm)
 	}
 
@@ -650,27 +647,96 @@ func hubUnreachableError(endpoint string, err error) error {
 	return wrapHubError(endpoint, fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
 }
 
-// legacyModeIgnoredNotice is printed once, on the first link, to a user
-// whose settings still turn the hub off (hub.enabled=false or
-// hub.local_only=true): local-only mode was removed and both are ignored.
-const legacyModeIgnoredNotice = "Local-only mode has been removed; hub.enabled=false / hub.local_only are ignored."
+// LegacyModeIgnoredNotice is printed once, when the link is recorded, to a
+// user whose own project settings still turn the hub off
+// (hub.enabled=false or hub.local_only=true): local-only mode was removed
+// and both are ignored.
+const LegacyModeIgnoredNotice = "Local-only mode has been removed; hub.enabled=false / hub.local_only are ignored."
+
+// projectSettingsDirs lists the directories holding the project's own
+// settings, in the order 'scion hub link' and 'scion hub unlink' resolve
+// them: the in-repo .scion directory, then the external project-configs
+// directory of a git project with split storage, whose values win. For the
+// global project it is the global directory only.
+func projectSettingsDirs(projectPath string, isGlobal bool) []string {
+	dirs := []string{projectPath}
+	if !isGlobal {
+		if ext := config.GetProjectConfigDir(projectPath); ext != "" && ext != projectPath {
+			dirs = append(dirs, ext)
+		}
+	}
+	return dirs
+}
+
+// StaleModeKeys returns the removed mode switches that the project's own
+// settings still set to "off": "hub.enabled" when hub.enabled is false and
+// "hub.local_only" when hub.local_only is true. Only the project's own
+// settings are read (see projectSettingsDirs), so a value in the global
+// settings does not mark other projects. Unreadable files are skipped.
+func StaleModeKeys(projectPath string, isGlobal bool) []string {
+	var enabled, localOnly *bool
+	for _, dir := range projectSettingsDirs(projectPath, isGlobal) {
+		own, err := config.LoadSettingsFromDir(dir)
+		if err != nil || own == nil || own.Hub == nil {
+			continue
+		}
+		if own.Hub.Enabled != nil {
+			enabled = own.Hub.Enabled
+		}
+		if own.Hub.LocalOnly != nil {
+			localOnly = own.Hub.LocalOnly
+		}
+	}
+	var keys []string
+	if enabled != nil && !*enabled {
+		keys = append(keys, "hub.enabled")
+	}
+	if localOnly != nil && *localOnly {
+		keys = append(keys, "hub.local_only")
+	}
+	return keys
+}
+
+// ClearStaleModeSettings prints LegacyModeIgnoredNotice to out and clears the
+// stale mode switches in the project's own settings when StaleModeKeys finds
+// any; it reports whether it did. A cleared key is written as the "on"
+// value (hub.enabled=true, hub.local_only=false) rather than deleted, so an
+// older binary reading the same settings uses the hub too. Write failures
+// are warnings.
+func ClearStaleModeSettings(out io.Writer, projectPath string, isGlobal bool) bool {
+	keys := StaleModeKeys(projectPath, isGlobal)
+	if len(keys) == 0 {
+		return false
+	}
+	_, _ = fmt.Fprintln(out, LegacyModeIgnoredNotice)
+	for _, key := range keys {
+		value := "true"
+		if key == "hub.local_only" {
+			value = "false"
+		}
+		if err := config.UpdateSetting(projectPath, key, value, isGlobal); err != nil {
+			warnf("failed to clear %s: %v", key, err)
+		}
+	}
+	return true
+}
 
 // finishAutoLink records hub.linked=true for a project whose link was not
-// recorded yet, after importing the agents left in its .scion/agents from
-// local-only mode. This is the one-release migration import: on the local
-// workstation hub it runs without a prompt; on a remote hub the import plan
-// is shown for confirmation. Only registrations are imported; hub agents
-// missing locally are never removed here. When no broker is online, or the
-// import fails, the link is not recorded, so the next command tries again.
-// Failures are warnings: the command itself goes on.
+// recorded yet (or whose own settings still turn the hub off), after
+// importing the agents left in its .scion/agents from local-only mode. This
+// is the one-release migration import: on the local workstation hub it runs
+// without a prompt; on a remote hub the import plan is shown for
+// confirmation. Only registrations are imported; hub agents missing locally
+// are never removed here.
+//
+// Whenever the link is recorded, including after a declined import, the
+// stale mode switches are cleared with a one-time notice
+// (ClearStaleModeSettings) and hub.linked=true is written. When no broker
+// is online, or the import fails, nothing is recorded, so the next command
+// tries again. Failures are warnings: the command itself goes on.
 func finishAutoLink(hubCtx *HubContext, autoConfirm bool) {
-	settings := hubCtx.Settings
-	if settings != nil && settings.Hub != nil &&
-		(settings.IsHubExplicitlyDisabled() || (settings.Hub.LocalOnly != nil && *settings.Hub.LocalOnly)) {
-		_, _ = fmt.Fprintln(promptOut, legacyModeIgnoredNotice)
-	}
-
 	record := func() {
+		ClearStaleModeSettings(promptOut, hubCtx.ProjectPath, hubCtx.IsGlobal)
 		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.linked", "true", hubCtx.IsGlobal); err != nil {
 			warnf("failed to record the hub link: %v", err)
 		}
@@ -714,7 +780,7 @@ func finishAutoLink(hubCtx *HubContext, autoConfirm bool) {
 		warnf("failed to import agents: %v", err)
 		return
 	}
-	_, _ = fmt.Fprintln(promptOut, "Running agents were adopted in place by the broker. Other agents were imported as created (not started); "+
+	_, _ = fmt.Fprintln(promptOut, "Running agents were adopted in place by the broker. Other agents were imported as created, not started; "+
 		"start them with 'scion start <name>' (a suspended agent's harness session is not resumed).")
 	_, _ = fmt.Fprintf(promptOut, "See %s for details.\n", LocalModeRemovalDocsURL)
 	record()
@@ -1050,7 +1116,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 			if err := containers.removeExited(ctxTimeout, name); err != nil {
 				warnf("could not remove the exited container of agent '%s' (%v); run 'scion stop %s' before 'scion start %s'", name, err, name, name)
 			} else {
-				outcome = "imported as created (not started); its exited container was removed"
+				outcome = "imported as created, not started; its exited container was removed"
 			}
 		}
 		debugf("Creating agent: name=%s, projectID=%s, container=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID, cstate)
@@ -1225,7 +1291,7 @@ func (c containerState) importOutcome() string {
 		// Exited, absent or unknown: provisioned without starting. The hub
 		// shows such an agent as created (not started); the import line
 		// uses the same words.
-		return "imported as created (not started)"
+		return "imported as created, not started"
 	}
 }
 

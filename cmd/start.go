@@ -58,14 +58,14 @@ func init() {
 
 	startCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
 
-	// Notification flag — on by default for Hub mode; use --no-notify to opt out
+	// Notification flag — on by default; use --no-notify to opt out
 	startCmd.Flags().BoolVar(&startNoNotify, "no-notify", false, "Do not subscribe to notifications for the spawned agent")
 
 	// Back-compat: accept --notify without error (it's now the default)
 	startCmd.Flags().BoolVar(&startNotifyDeprecated, "notify", false, "")
 	_ = startCmd.Flags().MarkDeprecated("notify", "notifications are now enabled by default; remove --notify from your instructions")
 
-	// Template resolution flags for Hub mode (Section 9.4)
+	// Template resolution flags (Section 9.4)
 	startCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	startCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
 	startCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
@@ -103,10 +103,10 @@ func init() {
 			"Default: inherited from template, parent, or 'project'.")
 
 	// Hub launch wait flags
-	startCmd.Flags().BoolVar(&startNoWait, "no-wait", false, "Hub mode: return once the Hub accepts the agent, without waiting for it to be running")
-	startCmd.Flags().DurationVar(&startWaitTimeout, "wait-timeout", 0, "Hub mode: how long to wait for the agent to be running (default: the Hub's remaining launch time plus 30s, or 5m when the Hub does not report it)")
+	startCmd.Flags().BoolVar(&startNoWait, "no-wait", false, "Return once the Hub accepts the agent, without waiting for it to be running")
+	startCmd.Flags().DurationVar(&startWaitTimeout, "wait-timeout", 0, "How long to wait for the agent to be running (default: the Hub's remaining launch time plus 30s, or 5m when the Hub does not report it)")
 
 	// GCP service account assignment flag
-	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name (requires Hub mode)")
+	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name")
 
 }

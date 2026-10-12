@@ -235,7 +235,7 @@ func TestEnsureHubReady_StaleDisableIgnored(t *testing.T) {
 			if hubCtx == nil || hubCtx.Endpoint != srv.URL {
 				t.Fatalf("hubCtx = %+v, want the configured hub", hubCtx)
 			}
-			if !strings.Contains(out.String(), legacyModeIgnoredNotice) {
+			if !strings.Contains(out.String(), LegacyModeIgnoredNotice) {
 				t.Errorf("output missing the one-time notice; got:\n%s", out.String())
 			}
 			if linked := ProjectLinkedSetting(globalDir, true); linked == nil || !*linked {
@@ -247,7 +247,7 @@ func TestEnsureHubReady_StaleDisableIgnored(t *testing.T) {
 			if _, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: srv.URL}); err != nil {
 				t.Fatalf("second EnsureHubReady: %v", err)
 			}
-			if strings.Contains(out.String(), legacyModeIgnoredNotice) {
+			if strings.Contains(out.String(), LegacyModeIgnoredNotice) {
 				t.Errorf("notice repeated on the second command:\n%s", out.String())
 			}
 		})
@@ -329,7 +329,7 @@ func TestEnsureHubReady_AutoLinkImportsLocalAgents(t *testing.T) {
 		"Linking project 'global' to the local hub",
 		"Local-only mode has been removed: scion now runs agents through a hub.",
 		"Importing 1 existing agent(s)",
-		"+ a1 (imported as created (not started))",
+		"+ a1 (imported as created, not started)",
 		LocalModeRemovalDocsURL,
 	} {
 		if !strings.Contains(out.String(), want) {
@@ -373,5 +373,104 @@ func TestEnsureHubReady_AutoLinkNoBrokerDefersImport(t *testing.T) {
 	}
 	if linked := ProjectLinkedSetting(globalDir, true); linked != nil {
 		t.Errorf("hub.linked = %v, want unset so the import is retried", *linked)
+	}
+}
+
+// TestEnsureHubReady_StaleDisableOnLinkedProject covers a project that the
+// removed 'scion hub disable' left with hub.linked=true and
+// hub.enabled=false, holding an agent created while it was disabled. The
+// first command prints the notice once, imports the agent once and clears
+// the stale key; the next command does neither.
+func TestEnsureHubReady_StaleDisableOnLinkedProject(t *testing.T) {
+	home := clearHubCredentialEnv(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	hub := &flipHub{projectID: "stale-linked", online: true}
+	srv := hub.serve(t)
+	hub.registered["stale-linked"] = true // linked and registered before the disable
+	globalDir := writeGlobalSettings(t, home, "project_id: stale-linked\nhub:\n  linked: true\n  enabled: false\n")
+	addLocalAgent(t, globalDir, "a1")
+	withImportRuntime(t, &runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+	})
+	out := withPromptIO(t, strings.NewReader(""), false)
+
+	if _, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: srv.URL}); err != nil {
+		t.Fatalf("EnsureHubReady: %v", err)
+	}
+	if n := strings.Count(out.String(), LegacyModeIgnoredNotice); n != 1 {
+		t.Errorf("notice printed %d times, want 1; output:\n%s", n, out.String())
+	}
+	if len(hub.creates) != 1 || hub.creates[0].Name != "a1" || !hub.creates[0].ProvisionOnly {
+		t.Fatalf("creates = %+v, want a1 imported once, provisioned without starting", hub.creates)
+	}
+	if keys := StaleModeKeys(globalDir, true); len(keys) != 0 {
+		t.Errorf("stale keys after the first command = %v, want none", keys)
+	}
+	if linked := ProjectLinkedSetting(globalDir, true); linked == nil || !*linked {
+		t.Errorf("hub.linked = %v, want true", linked)
+	}
+
+	out.Reset()
+	if _, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: srv.URL}); err != nil {
+		t.Fatalf("second EnsureHubReady: %v", err)
+	}
+	if strings.Contains(out.String(), LegacyModeIgnoredNotice) || len(hub.creates) != 1 {
+		t.Errorf("second command repeated the notice or the import: creates=%d output:\n%s", len(hub.creates), out.String())
+	}
+}
+
+// TestEnsureHubReady_RemoteImportDeclined covers the remote-hub import plan
+// declined (no terminal, no --yes): nothing is imported, but the link is
+// recorded with the one-time notice and the stale key cleared, so the
+// question and the notice do not repeat on every command.
+func TestEnsureHubReady_RemoteImportDeclined(t *testing.T) {
+	home := clearHubCredentialEnv(t)
+	t.Setenv("SCION_HUB_TOKEN", "bearer-test-token") // a remote-style hub: not the local workstation hub
+	hub := &flipHub{projectID: "remote-declined", online: true}
+	srv := hub.serve(t)
+	hub.registered["remote-declined"] = true
+	globalDir := writeGlobalSettings(t, home, "project_id: remote-declined\nhub:\n  enabled: false\n")
+	addLocalAgent(t, globalDir, "a1")
+	out := withPromptIO(t, strings.NewReader(""), false)
+
+	if _, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: srv.URL}); err != nil {
+		t.Fatalf("EnsureHubReady: %v", err)
+	}
+	if len(hub.creates) != 0 {
+		t.Errorf("creates = %+v, want none after a declined import", hub.creates)
+	}
+	for _, want := range []string{"Agents not imported. Import them later with 'scion hub link'.", LegacyModeIgnoredNotice} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output missing %q; got:\n%s", want, out.String())
+		}
+	}
+	if keys := StaleModeKeys(globalDir, true); len(keys) != 0 {
+		t.Errorf("stale keys = %v, want none", keys)
+	}
+	if linked := ProjectLinkedSetting(globalDir, true); linked == nil || !*linked {
+		t.Fatalf("hub.linked = %v, want true after a declined import", linked)
+	}
+
+	out.Reset()
+	if _, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: srv.URL}); err != nil {
+		t.Fatalf("second EnsureHubReady: %v", err)
+	}
+	if strings.Contains(out.String(), LegacyModeIgnoredNotice) || strings.Contains(out.String(), "Hub Agent Sync Required") {
+		t.Errorf("second command asked again or repeated the notice:\n%s", out.String())
+	}
+}
+
+func TestStaleModeKeys_OwnSettingsOnly(t *testing.T) {
+	home := clearHubCredentialEnv(t)
+	writeGlobalSettings(t, home, "hub:\n  enabled: false\n  local_only: true\n")
+	projectDir := filepath.Join(t.TempDir(), "repo", ".scion")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := StaleModeKeys(projectDir, false); len(got) != 0 {
+		t.Errorf("a global stale value leaked into a project: %v", got)
+	}
+	if got := StaleModeKeys(filepath.Join(home, ".scion"), true); len(got) != 2 {
+		t.Errorf("global project stale keys = %v, want hub.enabled and hub.local_only", got)
 	}
 }

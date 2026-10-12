@@ -160,19 +160,6 @@ func ShowLinkPrompt(projectName string, autoConfirm bool) bool {
 	return ConfirmAction("Link project with Hub?", true, autoConfirm)
 }
 
-// ShowInitLinkPrompt displays the post-init link prompt.
-// Returns true if the user confirms, false otherwise.
-func ShowInitLinkPrompt(autoConfirm bool) bool {
-	return ConfirmAction("Project initialized. Link to Hub?", true, autoConfirm)
-}
-
-// ShowInitProvidePrompt displays a confirmation to add this broker as a provider.
-// Returns true if the user confirms, false otherwise.
-func ShowInitProvidePrompt(brokerName, projectName string, autoConfirm bool) bool {
-	_, _ = fmt.Fprintf(promptOut, "This host (%s) is registered as a broker.\n", brokerName)
-	return ConfirmAction(fmt.Sprintf("Add as provider for '%s'?", projectName), true, autoConfirm)
-}
-
 // ProjectChoice represents the user's choice when matching projects exist.
 type ProjectChoice int
 

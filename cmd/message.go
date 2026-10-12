@@ -98,8 +98,8 @@ var messageCmd = &cobra.Command{
 Recipients:
   <agent-name>       Send to an agent (default, same as agent:<name>)
   agent:<name>       Send to an agent explicitly
-  user:<name>        Send to a user's inbox (Hub mode only)
-  group[a,b,...]     Send to multiple recipients (Hub mode only)
+  user:<name>        Send to a user's inbox
+  group[a,b,...]     Send to multiple recipients
   @<agent-name>      Send to an agent's conversation (preferred)
   @<email>           Send to a user by email (global DM)
   conv:<uuid>        Send to a conversation by ID
@@ -382,7 +382,7 @@ Examples:
 			return scheduleMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgPlain)
 		}
 
-		// Stage attachments to shared volume (after Hub mode confirmed)
+		// Stage attachments to shared volume
 		if len(msgAttach) > 0 && hubCtx != nil {
 			staged, err := stageAttachments(msgAttach)
 			if err != nil {
