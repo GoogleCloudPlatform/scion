@@ -59,6 +59,7 @@ var migrations = []migration{
 	{name: migrationFinalizeClaims, sqlite: sqliteFinalizeClaims, postgres: postgresFinalizeClaims},
 	{name: migrationLinkTokens, sqlite: sqliteLinkTokens, postgres: postgresLinkTokens},
 	{name: migrationBlobGC, sqlite: sqliteBlobGC, postgres: postgresBlobGC},
+	{name: migrationOrphans, sqlite: sqliteOrphans, postgres: postgresOrphans},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -671,12 +672,14 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 		seq                  sql.NullInt64
 		expires, created     dbTime
 		updated, deletedTime dbTime
+		orphaned             dbTime
 	)
 	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT
-		id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at
+		id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at,
+		orphaned_at
 		FROM artifact WHERE `+where+` AND deleted_at IS NULL`), args...).Scan(
 		&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
-		&expires, &created, &updated, &deletedTime)
+		&expires, &created, &updated, &deletedTime, &orphaned)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -689,6 +692,7 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 	a.CreatedAt = created.Time
 	a.UpdatedAt = updated.Time
 	a.DeletedAt = deletedTime.ptr()
+	a.OrphanedAt = orphaned.ptr()
 	return &a, nil
 }
 
@@ -868,9 +872,10 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 			key, kind                 sql.NullString
 			seq                       sql.NullInt64
 			expires, created, updated dbTime
+			orphaned                  dbTime
 		)
 		if err := rows.Scan(&c.ID, &c.ScopeKind, &c.ScopeRef, &c.OwnerKind, &c.OwnerRef, &key, &c.Title,
-			&seq, &expires, &created, &updated, &kind); err != nil {
+			&seq, &expires, &created, &updated, &orphaned, &kind); err != nil {
 			return nil, fmt.Errorf("artifacts: scan candidate: %w", err)
 		}
 		c.Key = key.String
@@ -878,6 +883,7 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 		c.ExpiresAt = expires.ptr()
 		c.CreatedAt = created.Time
 		c.UpdatedAt = updated.Time
+		c.OrphanedAt = orphaned.ptr()
 		c.CurrentKind = kind.String
 		out = append(out, c)
 	}
@@ -942,7 +948,7 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 // candidateColumns is the column list every arm of the candidate query
 // selects; the union and its outer ORDER BY rely on the names.
 const candidateColumns = `a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner_ref, a."key", a.title,
-		a.current_seq, a.expires_at, a.created_at, a.updated_at, v.kind AS current_kind`
+		a.current_seq, a.expires_at, a.created_at, a.updated_at, a.orphaned_at, v.kind AS current_kind`
 
 // writeCandidateFilters appends the conditions every candidate arm shares:
 // live, not expired, the search, the review filter, the home scope and the

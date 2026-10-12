@@ -76,6 +76,22 @@ func writeInitRunFile(harness string) (string, error) {
 	return nonce, nil
 }
 
+// harnessReadyMarkerMatches reports whether the ready marker carries nonce.
+// Used by init's readiness watcher; same file checks as the runtime probe
+// (no symlinks, bounded read).
+func harnessReadyMarkerMatches(nonce string) bool {
+	data, err := dirfd.ReadFileNoFollow(harnessReadyFilePath, readinessFileMaxBytes)
+	if err != nil {
+		return false
+	}
+	got, ok := state.ParseReadyMarker(string(data))
+	return ok && got == nonce
+}
+
+// markHarnessReadyFn is markHarnessReady; a variable so tests can observe
+// when the marker is written relative to the local status write.
+var markHarnessReadyFn = markHarnessReady
+
 // markHarnessReady writes the ready marker for the current init run when ev
 // is a qualifying readiness event. It never fails the hook and never waits:
 // there is no network, retry or sleep, and every error is logged at debug

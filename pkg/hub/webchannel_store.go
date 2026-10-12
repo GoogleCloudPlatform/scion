@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -1652,8 +1653,11 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 	}
 
 	// Check if the messages table exists.
-	var tableExists int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'").Scan(&tableExists); err != nil || tableExists == 0 {
+	tableExists, err := s.tableExists(ctx, "messages")
+	if err != nil {
+		return nil, "", err
+	}
+	if !tableExists {
 		return nil, "", nil
 	}
 
@@ -2076,12 +2080,16 @@ func (s *sqliteWebChatStore) migrateThreadIDs(batchSize int) error {
 		return nil
 	}
 
-	// Check if the messages table exists (it's Ent-managed and may not exist in tests).
-	var tableExists int
-	err = s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'").Scan(&tableExists)
-	if err != nil || tableExists == 0 {
-		// No messages table — nothing to backfill; mark as complete.
-		return s.markMigrationCompleted("thread_id_backfill")
+	// messages is Ent-managed and may not exist yet. With no table there is
+	// nothing to backfill, so leave the migration unrecorded: the next Init
+	// runs it once the table exists.
+	tableExists, err := s.tableExists(context.Background(), "messages")
+	if err != nil {
+		return err
+	}
+	if !tableExists {
+		slog.Debug("Webchat thread_id backfill deferred: messages table does not exist yet")
+		return nil
 	}
 
 	for {
@@ -2791,6 +2799,19 @@ func (s *sqliteWebChatStore) CountMessages(ctx context.Context, threadID string)
 	return count, nil
 }
 
+// tableExists reports whether the named table exists. A failed check is
+// returned as an error, not reported as "absent", so callers that record
+// work as done when the table is absent do not do so on a query failure.
+func (s *sqliteWebChatStore) tableExists(ctx context.Context, table string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?", table).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("webchat store: check table %s exists: %w", table, err)
+	}
+	return count > 0, nil
+}
+
 // addThreadIDIndex creates an index on messages.thread_id for query performance.
 func (s *sqliteWebChatStore) addThreadIDIndex() error {
 	done, err := s.migrationCompleted("thread_id_index")
@@ -2801,11 +2822,15 @@ func (s *sqliteWebChatStore) addThreadIDIndex() error {
 		return nil
 	}
 
-	// Check if the messages table exists (it's Ent-managed and may not exist in tests).
-	var tableExists int
-	err = s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'").Scan(&tableExists)
-	if err != nil || tableExists == 0 {
-		return s.markMigrationCompleted("thread_id_index")
+	// As in migrateThreadIDs: with no messages table there is nothing to
+	// index, so leave the migration unrecorded for the next Init.
+	tableExists, err := s.tableExists(context.Background(), "messages")
+	if err != nil {
+		return err
+	}
+	if !tableExists {
+		slog.Debug("Webchat thread_id index deferred: messages table does not exist yet")
+		return nil
 	}
 
 	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages (thread_id)`)

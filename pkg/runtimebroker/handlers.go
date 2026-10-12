@@ -49,6 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -298,6 +299,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
+			// Hub telemetry defaults and policy are separate tiers
+			// (ptone/scion#4218).
+			TemplateTiers: true,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),
@@ -1601,10 +1605,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
 
-		s.agentLifecycleLog.Error("Agent create failed",
+		s.agentLifecycleLog.Error("Agent create failed", append([]any{
 			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
 			"name", req.Name, "slug", req.Slug,
-			"error", err)
+			"error", err}, runtimeFailureLogAttrs(err)...)...)
 
 		// Clean up provisioned agent files so they don't become orphans --
 		// but only while this start still owns the agent name. The files
@@ -1658,7 +1662,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
 		default:
-			RuntimeError(w, runtimeOpError(opCreateAgent, err).Error())
+			writeCreateRuntimeError(w, err)
 		}
 		return
 	}
@@ -2741,6 +2745,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// HubAgentDefaults carries the hub defaults a start applies at its
 		// lowest tier (today the auto-expose default, for buildAgentEnv).
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+		// TelemetryPolicy is the project's enforced telemetry on/off; see
+		// CreateAgentConfig.TelemetryPolicy (ptone/scion#4218).
+		TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
 		// ExpectedRuntimeTargetID is the agent's pinned runtime target
 		// (flat Runtime Brokers; see CreateAgentRequest).
 		ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
@@ -2883,6 +2890,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		WorkspaceMode:            startReq.WorkspaceMode,
 		RunID:                    startReq.RunID,
 		TemplateName:             startReq.TemplateName,
+		TelemetryPolicy:          startReq.TelemetryPolicy,
 		TemplateID:               startReq.TemplateID,
 		TemplateHash:             startReq.TemplateHash,
 		HTTPRequest:              r,
@@ -3758,6 +3766,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		TemplateName string `json:"templateName,omitempty"`
 		// HubAgentDefaults mirrors the same field on the start path.
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+		// TelemetryPolicy mirrors the same field on the start path.
+		TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
 		// ExpectedRuntimeTargetID mirrors the same field on the start path.
 		ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
 		// Image mirrors the same field on the start path: the user's
@@ -3926,6 +3936,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		RunID:                    restartReq.RunID,
 		SharedWorkspace:          restartReq.SharedWorkspace,
 		TemplateName:             restartReq.TemplateName,
+		TelemetryPolicy:          restartReq.TelemetryPolicy,
 		TemplateID:               restartReq.TemplateID,
 		TemplateHash:             restartReq.TemplateHash,
 		// The Hub-supplied project ID (the request's projectId) locates a
@@ -4210,7 +4221,10 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	if req.Interrupt {
 		logMsg = "message delivered (interrupt, unbuffered)"
 	}
-	logAttrs := []any{"agent_id", id}
+	// The hub writes the message record; this delivery acknowledgement
+	// is a lifecycle entry, so a broker sharing the hub's message log
+	// does not list the message twice.
+	logAttrs := []any{"agent_id", id, logging.AttrLogKind, logging.LogKindEvent}
 	if req.ProjectID != "" {
 		logAttrs = append(logAttrs, "project_id", req.ProjectID)
 	}
@@ -5192,12 +5206,13 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 			}
 		}
 
-		// Template-level auth_selectedType takes high precedence
-		if req.Config != nil && req.Config.Template != "" && req.ProjectPath != "" {
-			if tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath); err == nil {
-				if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil && cfg.AuthSelectedType != "" {
-					authType = cfg.AuthSelectedType
-				}
+		// Template-level auth_selectedType takes high precedence. Read from
+		// the same template launch uses: the hydrated copy for a hub
+		// template, never a local template of the same slug
+		// (ptone/scion#4218, P6).
+		if tmpl := envGatherTemplate(req, hydratedTemplatePath); tmpl != nil {
+			if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil && cfg.AuthSelectedType != "" {
+				authType = cfg.AuthSelectedType
 			}
 		}
 
@@ -5495,18 +5510,18 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 			Type:        sec.Type,
 		}
 	}
-	// Also try loading local template config
-	if req.Config != nil && req.Config.Template != "" && req.ProjectPath != "" {
-		if tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath); err == nil {
-			if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil {
-				for _, sec := range cfg.Secrets {
-					required[sec.Key] = struct{}{}
-					if _, exists := secretInfo[sec.Key]; !exists {
-						secretInfo[sec.Key] = api.SecretKeyInfo{
-							Description: sec.Description,
-							Source:      "template",
-							Type:        sec.Type,
-						}
+	// Also load the template's own config. For a hub template this is the
+	// hydrated copy launch uses: the broker's local project may have no
+	// template of that slug, or a different one (ptone/scion#4218, P6).
+	if tmpl := envGatherTemplate(req, hydratedTemplatePath); tmpl != nil {
+		if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil {
+			for _, sec := range cfg.Secrets {
+				required[sec.Key] = struct{}{}
+				if _, exists := secretInfo[sec.Key]; !exists {
+					secretInfo[sec.Key] = api.SecretKeyInfo{
+						Description: sec.Description,
+						Source:      "template",
+						Type:        sec.Type,
 					}
 				}
 			}
@@ -7858,4 +7873,29 @@ func preResolvedHubEndpoint(conn *HubConnection, advertised string) string {
 		}
 	}
 	return advertised
+}
+
+// envGatherTemplate returns the template env-gather reads (its declared
+// secrets and its auth_selectedType), or nil when there is none.
+//
+// Rule: env-gather reads the same template start will use. A hydrated hub
+// template (hydratedTemplatePath, from hydrateTemplate) is used whenever one
+// was supplied, so a hub template is never looked up by slug in the broker's
+// local project path. The slug fallback applies only when nothing was
+// hydrated: no hub connection, no TemplateID/hash, or hydration returned no
+// path. In each of those cases buildStartContext also leaves opts.Template
+// as the slug and provisioning resolves it locally. A hydration error fails
+// the create before this point.
+func envGatherTemplate(req CreateAgentRequest, hydratedTemplatePath string) *config.Template {
+	if hydratedTemplatePath != "" {
+		return &config.Template{Name: filepath.Base(hydratedTemplatePath), Path: hydratedTemplatePath}
+	}
+	if req.Config == nil || req.Config.Template == "" || req.ProjectPath == "" {
+		return nil
+	}
+	tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath)
+	if err != nil {
+		return nil
+	}
+	return tmpl
 }

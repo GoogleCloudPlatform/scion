@@ -7,6 +7,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -83,6 +85,16 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 	// only: outcome and elapsed_ms, never the request body.
 	callStart := time.Now()
 
+	// A codex or claude sub-agent's new-work or tool-start event must not
+	// clear a status the parent agent holds. The StatusHandler runs first in
+	// the same hook process and keeps a held status locally; the Hub follows
+	// it. The guard runs before the switch, so a held sub-agent session-start
+	// skips its ReportState call too.
+	if isHeldSubagentEvent(event) && h.isLocalActivitySticky() {
+		log.Debug("Hub: Skipping %s from sub-agent (local activity is sticky)", event.Name)
+		return nil
+	}
+
 	var err error
 	switch event.Name {
 	case hooks.EventSessionStart:
@@ -124,7 +136,7 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 
 	case hooks.EventToolStart:
 		// Claude-specific: ExitPlanMode and AskUserQuestion mean waiting for user
-		if event.Dialect == "claude" && (event.Data.ToolName == "ExitPlanMode" || event.Data.ToolName == "AskUserQuestion") {
+		if isClaudeUserWaitTool(event) {
 			message := "Waiting on parent"
 			if event.Data.ToolName == "ExitPlanMode" {
 				message = "Waiting for plan approval"
@@ -252,6 +264,14 @@ func (h *HubHandler) isLocalActivitySticky() bool {
 }
 
 // readLocalActivity reads the current activity from the local agent-info.json file.
+//
+// The read goes through dirfd.ReadFileNoFollow with agentInfoMaxBytes, the
+// same bounded, no-follow read StatusHandler.readAgentInfoMap uses on this
+// file: a symlink at any path component, a FIFO, a hardlinked file, or a
+// file over the size cap is refused rather than followed or read in full.
+// A missing file returns "" silently, as before. A refusal also returns ""
+// (not sticky), the same fail-open result an unreadable file always gave,
+// and logs only the reason at debug level, never the file's contents.
 func readLocalActivity() string {
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -259,8 +279,11 @@ func readLocalActivity() string {
 	}
 	statusPath := filepath.Join(home, "agent-info.json")
 
-	data, err := os.ReadFile(statusPath)
+	data, err := dirfd.ReadFileNoFollow(statusPath, agentInfoMaxBytes)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Debug("Hub: not reading local activity: %v", err)
+		}
 		return ""
 	}
 

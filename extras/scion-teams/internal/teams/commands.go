@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 )
 
 // pendingTeamsLink tracks an in-progress identity linking registration that is
@@ -388,7 +390,10 @@ func (h *CommandHandler) handleAgents(ctx context.Context, activity *Activity) e
 
 	for _, agent := range agents {
 		emoji := agentPhaseEmoji(agent.Phase)
-		activityText := agent.Activity
+		if agent.Activity == string(state.ActivityInitializing) {
+			emoji = agentPhaseEmoji("starting")
+		}
+		activityText := state.Activity(agent.Activity).DisplayLabel()
 		if activityText == "" {
 			activityText = agent.Phase
 		}
@@ -500,7 +505,7 @@ func (h *CommandHandler) showAgentStatus(ctx context.Context, activity *Activity
 
 	for _, agent := range agents {
 		if strings.EqualFold(agent.Slug, agentSlug) {
-			activityText := agent.Activity
+			activityText := state.Activity(agent.Activity).DisplayLabel()
 			if activityText == "" {
 				activityText = "idle"
 			}
