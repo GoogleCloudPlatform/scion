@@ -77,3 +77,10 @@
   regenerated (`make ent-check` clean). `CreateFederatedUser` now also
   refuses the new `IssuerDelegationID` field, like every other test identity
   field. No test file this branch adds or changes carries a shard tag.
+- Fork CI follow-up: the attestation guard test lists every `UserIdentity`
+  implementation, so `VisitorIdentity` is now recorded there as
+  `federated`, and the equivalence table pins that `AncestryIsHubAttested`
+  returns false for it (plain, typed nil, and scoped). The visitor lookup
+  failure test now installs its store wrapper with `installStoreFault`
+  instead of assigning `srv.store`, which `check-hub-store-reassign.sh`
+  refuses. Test-only change.
