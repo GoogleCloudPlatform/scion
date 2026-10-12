@@ -1019,3 +1019,125 @@ func fpAddProvider(t *testing.T, s store.Store, projectID string) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: projectID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline}))
 }
+
+// fpFinalizingSoftAgent creates a stamped agent and leaves it finalizing
+// with a stored soft request: soft-delete retention on with files retained,
+// and the soft finish of its DELETE fails once (agentDeletionFinalizeSeam).
+func fpFinalizingSoftAgent(t *testing.T, e fpEnv, name string) string {
+	t.Helper()
+	e.srv.SetDispatcher(&purgeRecDispatcher{})
+	e.srv.config.SoftDeleteRetention = time.Hour
+	e.srv.config.SoftDeleteRetainFiles = true
+	agent := fpCreateAgent(t, e.srv, e.fx.AccessToken, e.project, name)
+
+	old := agentDeletionFinalizeSeam
+	t.Cleanup(func() { agentDeletionFinalizeSeam = old })
+	var once sync.Once
+	agentDeletionFinalizeSeam = func(context.Context, store.Store, *store.Agent, store.DeletionFinalizeMode) error {
+		var err error
+		once.Do(func() { err = fmt.Errorf("injected finalize error") })
+		return err
+	}
+	rec := doRequestWithToken(t, e.srv, e.fx.AccessToken, http.MethodDelete, "/api/v1/agents/"+agent, nil)
+	require.NotEqual(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	got := fpAgent(t, e.store, agent)
+	require.Equal(t, store.DeletionStateFinalizing, got.DeletionState)
+	require.Equal(t, store.DeletionCodeFinalizeFailed, got.DeletionCode)
+	require.True(t, got.DeletedAt.IsZero())
+	req := got.ParseDeletionRequest()
+	require.True(t, req.Soft, "the stored request is soft")
+	require.False(t, req.DeleteFiles, "the stored soft request keeps the files")
+	return agent
+}
+
+// A purge reaching an agent whose earlier delete is finalizing with a stored
+// soft request: the engine's re-claim keeps that request (ptone/scion#4183)
+// and leaves a soft tombstone, which the purge removes in the same run. The
+// agent counts as removed only with its row gone, and the files the earlier
+// request kept are reported.
+func TestFixturePurge_FinalizingSoftRequestLeavesNoTombstone(t *testing.T) {
+	e := newFPEnv(t, "fpp-finsoft")
+	fxID := e.fx.Identity.ID
+	agent := fpFinalizingSoftAgent(t, e, "fpp-finsoft-agent")
+
+	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r := fpPurgeReport(t, rec)
+	assert.True(t, r.Complete)
+	assert.Empty(t, r.NotDone)
+	assert.Equal(t, 1, r.Deleted.Agents)
+	assert.Equal(t, []TestIdentityPurgeItem{{
+		Type: "agent", ID: agent, ProjectID: e.project, Status: "removed", Reason: "files_and_branch_retained",
+	}}, r.FilesRetained)
+	assert.False(t, fpAgentExists(t, e.store, agent), "no soft tombstone outlives the purge")
+	assert.False(t, fpUserExists(t, e.store, fxID))
+	fpRequireBasis(t, e.store, mutationTypeAgentHardDelete, agent, fxID, e.issuerID)
+}
+
+// fpRestoreOnDeletedPublisher restores one agent right after the delete
+// engine publishes its (soft) deletion, before the purge re-reads the row.
+type fpRestoreOnDeletedPublisher struct {
+	EventPublisher
+	srv     *Server
+	agentID string
+	once    sync.Once
+	mu      sync.Mutex
+	err     error
+	ran     bool
+}
+
+func (p *fpRestoreOnDeletedPublisher) PublishAgentDeleted(ctx context.Context, agentID, projectID string) {
+	p.EventPublisher.PublishAgentDeleted(ctx, agentID, projectID)
+	if agentID != p.agentID {
+		return
+	}
+	p.once.Do(func() {
+		var err error
+		a, gerr := p.srv.store.GetAgent(context.Background(), agentID)
+		if gerr != nil {
+			err = gerr
+		} else {
+			err = p.srv.restoreAgentTx(context.Background(), a, AuditActor{})
+		}
+		p.mu.Lock()
+		p.err, p.ran = err, true
+		p.mu.Unlock()
+	})
+}
+
+// The same purge with a restore between the engine's soft finish and the
+// purge's hard finalize: the restore wins, the agent is kept, and the purge
+// reports it not done (never removed) and keeps the identity.
+func TestFixturePurge_FinalizingSoftRequestRestoreWins(t *testing.T) {
+	e := newFPEnv(t, "fpp-finsoft-restore")
+	fxID := e.fx.Identity.ID
+	agent := fpFinalizingSoftAgent(t, e, "fpp-finsoft-restore-agent")
+
+	base := e.srv.events
+	if base == nil {
+		base = noopEventPublisher{}
+	}
+	pub := &fpRestoreOnDeletedPublisher{EventPublisher: base, srv: e.srv, agentID: agent}
+	e.srv.SetEventPublisher(pub)
+	t.Cleanup(func() { e.srv.SetEventPublisher(base) })
+
+	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	pub.mu.Lock()
+	ran, rerr := pub.ran, pub.err
+	pub.mu.Unlock()
+	require.True(t, ran, "the soft finish published the deletion")
+	require.NoError(t, rerr, "the restore succeeded")
+
+	r := fpPurgeReport(t, rec)
+	assert.False(t, r.Complete)
+	assert.Zero(t, r.Deleted.Agents, "a restored agent is not counted as removed")
+	assert.Empty(t, r.FilesRetained)
+	require.NotEmpty(t, r.NotDone)
+	assert.Equal(t, TestIdentityPurgeItem{Type: "agent", ID: agent, ProjectID: e.project, Status: "pending", Reason: "changed_concurrently"}, r.NotDone[0])
+	assert.False(t, r.IdentityDeleted)
+	assert.True(t, fpUserExists(t, e.store, fxID))
+	got := fpAgent(t, e.store, agent)
+	assert.True(t, got.DeletedAt.IsZero(), "the restored agent stays live")
+}
