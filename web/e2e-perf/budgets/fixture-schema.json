@@ -35,6 +35,7 @@
       "status": 200,
       "fields": [
         "experiments.hub.artifacts:boolean",
+        "experiments.hub.chat_thread_groups:boolean",
         "experiments.web.agent_edit:boolean",
         "experiments.web.chat_scheduled_send:boolean",
         "experiments.web.gcs_links:boolean",
