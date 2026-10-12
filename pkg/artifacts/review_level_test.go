@@ -211,7 +211,7 @@ func TestReviewLevelGrantAloneIsNotRead(t *testing.T) {
 	if response(got) != response(missing) {
 		t.Errorf("GET with a review grant only:\n%s\nwant\n%s", response(got), response(missing))
 	}
-	list := f.do(&rvOnly, http.MethodGet, "/api/v1/artifacts", nil, nil)
+	list := f.do(&rvOnly, http.MethodGet, "/api/v1/artifacts?mine=1", nil, nil)
 	if list.Code != http.StatusOK || strings.Contains(list.Body.String(), f.id) {
 		t.Errorf("list with a review grant only: %d %s", list.Code, list.Body.String())
 	}
