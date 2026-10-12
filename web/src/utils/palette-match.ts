@@ -128,6 +128,7 @@ function indexOfQuery(field: string, query: string): number {
  * in any order. Walks the query's word boundaries in place rather than
  * splitting it, so it allocates nothing.
  */
+// Each word is checked on its own, so a repeated query word can match one occurrence.
 function containsEveryWord(query: string, field: string): boolean {
   let start = 0;
   while (start < query.length) {

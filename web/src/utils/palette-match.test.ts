@@ -564,6 +564,26 @@ describe('multi-word queries: a space matches a word separator', () => {
     expect(classifyMatch(normalizeQuery('chat'), 'native-chat')).toBe(2);
   });
 
+  it('matches a hyphen typed inside a multi-word query only against a hyphen', () => {
+    expect(classifyMatch(normalizeQuery('native-chat ui'), 'native-chat-ui')).toBe(0);
+    expect(classifyMatch(normalizeQuery('native-chat ui'), 'native_chat ui')).toBeNull();
+  });
+
+  it('merges the highlights of out-of-order words whose first occurrences overlap', () => {
+    expect(classifyMatch(normalizeQuery('at nat'), 'nat')).toBe(3);
+    expect(highlightRangesFor('at nat', 'nat')).toEqual([{ start: 0, end: 3 }]);
+  });
+
+  it('treats a query with a trailing space as the single word', () => {
+    expect(normalizeQuery('native ')).toBe(normalizeQuery('native'));
+    for (const field of ['native', 'native-chat', 'my-native-chat', 'n-a-t-i-v-e', 'chat']) {
+      expect(classifyMatch(normalizeQuery('native '), field)).toBe(
+        classifyMatch(normalizeQuery('native'), field)
+      );
+      expect(highlightRangesFor('native ', field)).toEqual(highlightRangesFor('native', field));
+    }
+  });
+
   it('highlights the hyphen a query space matched inside a contiguous match', () => {
     expect(highlightRangesFor('native chat', 'Native-Chat')).toEqual([{ start: 0, end: 11 }]);
     expect(highlightRangesFor('tive cha', 'my-native-chat')).toEqual([{ start: 5, end: 13 }]);
