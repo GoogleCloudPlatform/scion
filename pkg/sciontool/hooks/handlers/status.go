@@ -177,6 +177,8 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 			// parent's session, not a status the parent set. Record it as
 			// notification-set and owned by the sub-agent, so the
 			// sub-agent's own tool-end (the user answered) clears it.
+			// blocked, completed, limits_exceeded and crashed are kept,
+			// with no owner recorded (see setWaitingFromNotificationFor).
 			if isSubagentEvent(event) {
 				return h.setWaitingFromNotificationFor(subagentID(event))
 			}
@@ -649,7 +651,8 @@ func isClaudeUserWaitTool(event *hooks.Event) bool {
 // tool-start event that must not clear a status the parent agent holds. A
 // sub-agent's ExitPlanMode or AskUserQuestion tool-start is excluded: the
 // user is being asked, so it still sets waiting_for_input (recorded as
-// notification-set, see Handle).
+// notification-set, see Handle), unless the agent holds blocked, completed,
+// limits_exceeded or crashed (see setWaitingFromNotificationFor).
 func isHeldSubagentEvent(event *hooks.Event) bool {
 	if !isSubagentEvent(event) || isClaudeUserWaitTool(event) {
 		return false
