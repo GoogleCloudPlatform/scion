@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -1561,7 +1561,7 @@ func TestTestAdmin_NotAConstraintAdminForRemovalLockout(t *testing.T) {
 		require.NoError(t, s.UpdateUser(ctx, u))
 	}
 
-	admins, err := resolveConstraintAdminUsers(ctx, s, store.RoleScopeSystem, "")
+	admins, err := resolveConstraintAdminUsers(ctx, s, time.Now(), store.RoleScopeSystem, "")
 	require.NoError(t, err)
 	var ids []string
 	for _, a := range admins {
