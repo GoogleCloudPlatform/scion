@@ -156,10 +156,10 @@ never see each other's prompts through a shared mount.
 
 When the first agent for a project lands on a node in worktree-per-agent mode:
 
-1. **Acquire the per-project advisory lock** (`store.AdvisoryLocker` /
-   `LockWorkspaceProvision`, keyed by a stable project hash — same guard the NFS
-   backend uses, `workspace_backend_nfs.go:227-268`). On Postgres this is
-   `pg_try_advisory_lock`; on SQLite/single-node it serializes naturally.
+1. **Acquire the per-project provisioning lock** — the `.scion-provision.lock`
+   file lock that `pkg/provision` takes on the project's state directory (a lock
+   directory with heartbeats, stale reclaim and a bounded wait), the same guard
+   that NFS workspace provisioning uses.
 2. **Check the `.scion-provisioned` sentinel.** If present, skip to §4.2.
 3. **Clone the remote once** into `base/` using the dispatched `GitCloneConfig`
    (URL/branch/depth). This is the *only* network clone for the project on this node.

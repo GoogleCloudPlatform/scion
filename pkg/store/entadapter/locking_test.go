@@ -29,6 +29,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testLockClassID is a per-object advisory lock class ID used only by these
+// tests. It is not a production key.
+const testLockClassID store.AdvisoryLockKey = 0x5C10F001
+
 // On SQLite the advisory lock is a no-op that always succeeds, because the
 // single-writer model already makes the guarded work effectively singleton.
 func TestTryAdvisoryLock_SQLiteAlwaysAcquires(t *testing.T) {
@@ -133,14 +137,14 @@ func TestTryAdvisoryLockObject_SQLiteAlwaysAcquires(t *testing.T) {
 	c := newTestCompositeStore(t)
 	ctx := context.Background()
 
-	acquired, release, err := c.TryAdvisoryLockObject(ctx, store.LockWorkspaceProvision, 42)
+	acquired, release, err := c.TryAdvisoryLockObject(ctx, testLockClassID, 42)
 	require.NoError(t, err)
 	assert.True(t, acquired, "SQLite two-int advisory lock must always acquire")
 	require.NotNil(t, release)
 	require.NoError(t, release())
 
 	// A second concurrent acquisition on the same (classID, objID) also succeeds.
-	acquired2, release2, err := c.TryAdvisoryLockObject(ctx, store.LockWorkspaceProvision, 42)
+	acquired2, release2, err := c.TryAdvisoryLockObject(ctx, testLockClassID, 42)
 	require.NoError(t, err)
 	assert.True(t, acquired2)
 	require.NoError(t, release2())
@@ -151,11 +155,11 @@ func TestTryAdvisoryLockObject_SQLiteDifferentObjIDsIndependent(t *testing.T) {
 	c := newTestCompositeStore(t)
 	ctx := context.Background()
 
-	acq1, rel1, err := c.TryAdvisoryLockObject(ctx, store.LockWorkspaceProvision, 1)
+	acq1, rel1, err := c.TryAdvisoryLockObject(ctx, testLockClassID, 1)
 	require.NoError(t, err)
 	assert.True(t, acq1)
 
-	acq2, rel2, err := c.TryAdvisoryLockObject(ctx, store.LockWorkspaceProvision, 2)
+	acq2, rel2, err := c.TryAdvisoryLockObject(ctx, testLockClassID, 2)
 	require.NoError(t, err)
 	assert.True(t, acq2)
 
