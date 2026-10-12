@@ -27,6 +27,11 @@
 #       Compile shard K (go test -c), check that the binary's test list is
 #       exactly what hubshard -list K expects, then run that binary (no
 #       second compile), skipping the common files' tests outside shard 1.
+#       Running the binary skips the vet checks go test runs before a test
+#       (go test's built-in vet pass). CI vets every shard fully (make
+#       vet-hub-shard; make hubshard-parity checks those vets cover every
+#       pkg/hub test file); local make test-hub-shard(s) runs and the
+#       nightly Full Test Suite and Race Detection loops do not vet.
 #   shard.sh build K [--nosqlite]
 #       Compile shard K only (binary discarded).
 #   shard.sh vet K
@@ -34,13 +39,13 @@
 #       volume_test tzcontract': together, the shards' vets cover every
 #       file the module-wide vets (make lint, make vet-integration) cover.
 #   shard.sh postgres K|all TAGS TEST...
-#       Run the named tests (go test -v -run) in the shard that holds each
-#       (in every shard holding one for "all"), with build tags TAGS ("" or
-#       for example integration). Fails if a name is in no test file, if
+#       Run the named tests (the shard binary with -test.v and -test.run)
+#       in the shard that holds each (in every shard holding one for
+#       "all"), with build tags TAGS ("" or for example integration). Fails if a name is in no test file, if
 #       any selected test skips, or if a named test prints no PASS line.
 #
 # Environment:
-#   HUB_SHARD_TIMEOUT  go test -timeout for "test" (default 30m)
+#   HUB_SHARD_TIMEOUT  the test binary's -test.timeout for "test" (default 30m)
 #   HUB_SHARD_P        go build -p for the compiles (default 1: one package
 #                      at a time keeps the peak at the pkg/hub compile)
 #   GOGC               for the compiles (default 25, as HUB_TEST_GOGC in the
@@ -74,6 +79,8 @@ esac
 timeout=${HUB_SHARD_TIMEOUT:-30m}
 par=${HUB_SHARD_P:-1}
 build_gogc=${GOGC:-25}
+
+goroot_bin="$(go env GOROOT)/bin"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -118,10 +125,11 @@ compile() {
 }
 
 # run_binary runs a compiled shard test binary the way go test runs it:
-# from the package directory, with -test.paniconexit0 (go test always
-# passes it). The tests run with Go's default GOGC. Compiling once and
-# running the binary avoids a second compile and link of the shard (go
-# test would relink it). The exit status is the binary's: non-zero on a
+# from the package directory, with $(go env GOROOT)/bin first on PATH (so
+# a test that execs go gets the same toolchain) and -test.paniconexit0
+# (go test always passes both). The tests run with the caller's GOGC (Go's
+# default unless set). Compiling once and running the binary avoids a
+# second compile and link of the shard (go test would relink it). The exit status is the binary's: non-zero on a
 # failed test, a panic or -test.timeout. Prints an ok/FAIL line like go
 # test's.
 run_binary() {
@@ -129,7 +137,7 @@ run_binary() {
 	shift 2
 	start=$(date +%s)
 	rc=0
-	(cd pkg/hub && "$bin" -test.paniconexit0 "$@") || rc=$?
+	(cd pkg/hub && PATH="$goroot_bin:$PATH" "$bin" -test.paniconexit0 "$@") || rc=$?
 	if [ "$rc" -eq 0 ]; then
 		echo "ok  	$label	$(($(date +%s) - start))s"
 	else
@@ -197,7 +205,9 @@ postgres)
 		log="$tmp/postgres-$k.log"
 		echo "== Postgres tests in pkg/hub shard $k (tags: $(with_tags "$k" "$tags")): $(echo "$names" | tr '\n' ' ')"
 		compile "$k" "$tags" "$tmp/bin-$k"
-		run_binary "$tmp/bin-$k/hub.test" "pkg/hub shard $k Postgres tests" \
+		# The selected tests are short; they run with the compile GOGC,
+		# as they did when go test built and ran them in one command.
+		GOGC=$build_gogc run_binary "$tmp/bin-$k/hub.test" "pkg/hub shard $k Postgres tests" \
 			-test.count=1 -test.timeout=20m -test.v -test.run="$regex" 2>&1 | tee "$log"
 		if grep -qE '^[[:space:]]*--- SKIP' "$log"; then
 			die "one or more pkg/hub Postgres tests were skipped -- see '--- SKIP' lines above."
