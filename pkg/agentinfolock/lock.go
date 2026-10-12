@@ -67,7 +67,8 @@ type Options struct {
 	// in test binaries only, TestWaitEnv when it is set. A non-zero Wait
 	// always takes precedence over TestWaitEnv.
 	Wait time.Duration
-	// Logf receives repeats of a warning for the same lock path. Nil means
+	// Logf receives repeats of a warning for the same lock path and, on
+	// platforms without flock, the unlocked-update notice. Nil means
 	// slog.Debug.
 	Logf func(format string, args ...any)
 	// Warnf receives the first message for a lock file that is not a

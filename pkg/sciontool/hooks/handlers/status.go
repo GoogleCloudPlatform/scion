@@ -47,8 +47,9 @@ type StatusHandler struct {
 
 // update runs one locked read-modify-write: it reads the map, lets mutate
 // change it, and writes it back unless mutate returns false. mutate runs
-// with h.mu held, which is not re-entrant, so it must not call any method
-// of h (or start another update): that would deadlock.
+// with h.mu held, which is not re-entrant, so it must not call any locking
+// method of h (that deadlocks) or start another update of the same file
+// (that waits out the lock wait and then writes unlocked).
 func (h *StatusHandler) update(mutate func(info map[string]interface{}) bool) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

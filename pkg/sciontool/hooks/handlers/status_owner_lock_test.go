@@ -39,22 +39,21 @@ func TestStatusHandlerOwnerListAndStatusWritersLoseNothing(t *testing.T) {
 
 	var added, released, msgs atomic.Int64
 	msgs.Store(-1)
-	var lost atomic.Bool
+	// releasing is set before the first release write.
+	var releasing, lost atomic.Bool
 	check := func(who string) {
 		wantAdded, wantReleased, wantMsg := added.Load(), released.Load(), msgs.Load()
 		info := readInfo(t, path)
+		// Loaded after the read: false proves no release write had
+		// started before the read, so the add-phase lower bound holds.
+		addPhase := !releasing.Load()
 		n := int64(len(notificationWaitOwners(info)))
 		detail, _ := info["detail"].(map[string]any)
 		gotMsg := readCounter(detail["message"], "m")
 		// Each bound only uses counters loaded before the read, and a
-		// later write only moves the count further the same way. Once all
-		// owners are added, a release may already be on disk before its
-		// counter moves, so only the upper bound applies from then on.
-		var ownersOK bool
-		switch {
-		case wantReleased > 0 || wantAdded == nOwners:
-			ownersOK = n <= nOwners-wantReleased
-		default:
+		// later write only moves the count further the same way.
+		ownersOK := n <= nOwners-wantReleased
+		if addPhase {
 			ownersOK = n >= wantAdded
 		}
 		if (!ownersOK || gotMsg < wantMsg || info["template"] != "tpl") && lost.CompareAndSwap(false, true) {
@@ -75,6 +74,7 @@ func TestStatusHandlerOwnerListAndStatusWritersLoseNothing(t *testing.T) {
 			added.Add(1)
 			check("add")
 		}
+		releasing.Store(true)
 		for i := 0; i < nOwners && !lost.Load(); i++ {
 			if err := owners.releaseNotificationWaitOwner(fmt.Sprintf("sa-%d", i)); err != nil {
 				t.Errorf("release: %v", err)

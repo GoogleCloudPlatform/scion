@@ -158,6 +158,23 @@ func TestUpdateTimeoutLogsAndRunsUnlocked(t *testing.T) {
 	if warn.joined() != want || debug.joined() != want {
 		t.Fatalf("second timeout: warn=%q debug=%q", warn.joined(), debug.joined())
 	}
+
+	// Taking the lock re-arms the warning: the next timeout warns again.
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	if err := Update(info, opts, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	if err := Update(info, opts, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if warn.joined() != want+"\n"+want || debug.joined() != want {
+		t.Fatalf("after re-arm: warn=%q debug=%q", warn.joined(), debug.joined())
+	}
 }
 
 func TestUpdateSkipsNonRegularLockAndLogs(t *testing.T) {

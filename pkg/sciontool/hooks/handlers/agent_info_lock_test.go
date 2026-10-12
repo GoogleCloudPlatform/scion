@@ -264,7 +264,12 @@ func TestStatusHandlerReadsInsideLock(t *testing.T) {
 	go func() { done <- h.SetMessage("x") }()
 
 	// Give the update time to reach the lock (or, without one, to finish).
-	time.Sleep(20 * time.Millisecond)
+	// With the read inside the lock the test passes whatever the timing,
+	// since the update waits up to the 10s test wait. Code that read
+	// before the lock fails unless the goroutine is scheduled more than
+	// 500ms late; a fully deterministic sync would need a test hook in
+	// production code.
+	time.Sleep(500 * time.Millisecond)
 	require.NoError(t, os.WriteFile(path, []byte(`{"template":"t2"}`), 0o644))
 	require.NoError(t, unix.Flock(int(f.Fd()), unix.LOCK_UN))
 	require.NoError(t, <-done)
