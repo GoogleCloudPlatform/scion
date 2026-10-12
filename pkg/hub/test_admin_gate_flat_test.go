@@ -17,15 +17,18 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -41,11 +44,11 @@ const (
 // and a remote broker is still refused. An instance that stops being
 // embedded is refused again.
 func TestTestAdminBroker_ColocatedFlatInstancesAdmitted(t *testing.T) {
-	buf := tiaCaptureAudit(t)
+	buf := flatTiaCaptureAudit(t)
 	srv, s := testServer(t)
 	ctx := context.Background()
-	tiaBroker(t, s, tiaFlatBrokerA, store.BrokerStatusOnline, nil)
-	tiaBroker(t, s, tiaFlatBrokerB, store.BrokerStatusOnline, nil)
+	flatTiaBroker(t, s, tiaFlatBrokerA, store.BrokerStatusOnline, nil)
+	flatTiaBroker(t, s, tiaFlatBrokerB, store.BrokerStatusOnline, nil)
 
 	srv.ExpectEmbeddedBroker()
 	srv.ExpectEmbeddedFlatInstances([]string{"k8s-a", "docker-b"})
@@ -55,21 +58,21 @@ func TestTestAdminBroker_ColocatedFlatInstancesAdmitted(t *testing.T) {
 	srv.mu.Unlock()
 	require.Empty(t, srv.embeddedBrokerSnapshot().id, "precondition: two instances, so no single embedded broker ID")
 
-	enableTestAdminGateForTest(srv)
+	flatEnableTestAdminGateForTest(srv)
 	for _, id := range []string{tiaFlatBrokerA, tiaFlatBrokerB} {
 		assert.NoError(t, srv.testAdminBrokerAdmission(ctx, id), "co-located flat instance %s", id)
 	}
-	assert.ErrorIs(t, srv.testAdminBrokerAdmission(ctx, tiaRemoteBrokerID), ErrTestAdminRemoteBrokerRefused)
+	assert.ErrorIs(t, srv.testAdminBrokerAdmission(ctx, flatTiaRemoteBrokerID), ErrTestAdminRemoteBrokerRefused)
 	assert.NoError(t, srv.VerifyTestAdminBrokerSet(ctx), "both flat instance rows online")
 	line := tiaBrokerSetAuditLine(t, buf.String())
 	assert.Equal(t, []interface{}{tiaFlatBrokerA, tiaFlatBrokerB}, line["flat_broker_ids"], "the audit line names the admitted flat instances")
 	assert.Equal(t, "", line["embedded_broker_id"])
 
-	tiaBroker(t, s, tiaRemoteOnlineID, store.BrokerStatusOnline, nil)
+	flatTiaBroker(t, s, flatTiaRemoteOnlineID, store.BrokerStatusOnline, nil)
 	err := srv.VerifyTestAdminBrokerSet(ctx)
 	require.ErrorIs(t, err, ErrTestAdminRemoteBrokerActive)
-	assert.Contains(t, err.Error(), tiaRemoteOnlineID)
-	require.NoError(t, s.DeleteRuntimeBroker(ctx, tiaRemoteOnlineID))
+	assert.Contains(t, err.Error(), flatTiaRemoteOnlineID)
+	require.NoError(t, s.DeleteRuntimeBroker(ctx, flatTiaRemoteOnlineID))
 
 	srv.EmbeddedFlatInstanceFailed("docker-b", errors.New("stopped serving"))
 	assert.ErrorIs(t, srv.testAdminBrokerAdmission(ctx, tiaFlatBrokerB), ErrTestAdminRemoteBrokerRefused,
@@ -93,4 +96,45 @@ func tiaBrokerSetAuditLine(t *testing.T, out string) map[string]interface{} {
 	}
 	require.NotNil(t, last, "no %s audit line in: %s", testAdminAuditEventBrokerSet, out)
 	return last
+}
+
+// The helpers below are this file's own copies, so the file uses only
+// pkg/hub code and untagged test helpers and compiles in every pkg/hub
+// test shard (see hack/hubshard).
+
+// Copied from test_admin_gate_test.go: the tiaHubID, tiaRemoteBrokerID and tiaRemoteOnlineID
+// constants (same values); de-duplicate after ptone/scion#4562.
+const (
+	flatTiaHubID          = "ti-a0-hub"
+	flatTiaRemoteBrokerID = "0a0a0a0a-0000-4000-8000-000000000003"
+	flatTiaRemoteOnlineID = "0a0a0a0a-0000-4000-8000-000000000004"
+)
+
+// flatTiaCaptureAudit redirects the test admin audit sink to a buffer for
+// the test. Copied from test_admin_gate_test.go: tiaCaptureAudit (identical body);
+// de-duplicate after ptone/scion#4562.
+func flatTiaCaptureAudit(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := testAdminAuditOutput
+	testAdminAuditOutput = &buf
+	t.Cleanup(func() { testAdminAuditOutput = prev })
+	return &buf
+}
+
+// flatEnableTestAdminGateForTest turns the gate on for a server built
+// without it. Copied from test_admin_gate_test.go: enableTestAdminGateForTest (identical body,
+// using flatTiaHubID); de-duplicate after ptone/scion#4562.
+func flatEnableTestAdminGateForTest(srv *Server) {
+	srv.testAdminGate = testAdminGate{hubAdmin: true, hubID: flatTiaHubID, hubClass: config.HubClassTest}
+}
+
+// flatTiaBroker creates a Runtime Broker row. Copied from test_admin_gate_test.go: tiaBroker
+// (identical body); de-duplicate after ptone/scion#4562.
+func flatTiaBroker(t *testing.T, s store.Store, id, status string, labels map[string]string) {
+	t.Helper()
+	require.NoError(t, s.CreateRuntimeBroker(context.Background(), &store.RuntimeBroker{
+		ID: id, Name: "broker-" + id[len(id)-4:], Slug: "broker-" + id[len(id)-4:], Status: status, Labels: labels,
+		Created: time.Now(), Updated: time.Now(),
+	}))
 }
