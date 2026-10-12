@@ -213,6 +213,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"agent.list": {BoundaryKindProject, BoundaryKindHub}, "agent.delete": {BoundaryKindProject, BoundaryKindHub},
 	"agent.attach": {BoundaryKindProject, BoundaryKindHub}, "agent.lifecycle": {BoundaryKindProject, BoundaryKindHub},
 	"agent.port_access": {BoundaryKindProject, BoundaryKindHub}, "agent.message": {BoundaryKindProject, BoundaryKindHub},
+	"agent.update": {BoundaryKindProject, BoundaryKindHub}, "agent.stop_all": {BoundaryKindProject, BoundaryKindHub}, "agent.set_message_mode": {BoundaryKindProject, BoundaryKindHub},
 	"project.read": {BoundaryKindProject, BoundaryKindHub}, "project.update": {BoundaryKindProject, BoundaryKindHub},
 	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub}, "project.set_messaging_policy": {BoundaryKindProject, BoundaryKindHub},
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
@@ -349,6 +350,10 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"agent.list": {TargetClassKindProjectScoped}, "agent.delete": {TargetClassKindProjectScoped},
 	"agent.attach": {TargetClassKindProjectScoped}, "agent.lifecycle": {TargetClassKindProjectScoped},
 	"agent.port_access": {TargetClassKindProjectScoped}, "agent.message": {TargetClassKindProjectScoped},
+	"agent.update": {TargetClassKindProjectScoped}, "agent.set_message_mode": {TargetClassKindProjectScoped},
+	// agent.stop_all targets a project's agents (project form) or every
+	// agent on the hub (hub form, hubScopedResource("agent", "hub")).
+	"agent.stop_all": {TargetClassKindProjectScoped, TargetClassKindHubResource},
 
 	// project.* — read/update/manage/set_messaging_policy target an existing
 	// project; clone is a hub-level collection action (false in

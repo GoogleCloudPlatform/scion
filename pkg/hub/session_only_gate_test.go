@@ -61,8 +61,6 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
 		}, authzop.ReasonGovernancePending},
 		{"project member remove", http.MethodDelete, "/api/v1/projects/" + f.project + "/members/" + f.projectMembership, nil, authzop.ReasonGovernancePending},
-		{"port registration", http.MethodPost, "/api/v1/agents/" + f.agent + "/ports", map[string]interface{}{"port": 18081}, authzop.ReasonGovernancePending},
-		{"message mode", http.MethodPost, "/api/v1/agents/" + f.agent + "/set_message_mode", map[string]interface{}{"mode": "project"}, authzop.ReasonGovernancePending},
 		{"scheduled event create", http.MethodPost, "/api/v1/projects/" + f.project + "/scheduled-events", map[string]interface{}{"eventType": "dispatch_agent", "fireIn": "1h", "agentName": "x"}, authzop.ReasonGovernancePending},
 		{"schedule create", http.MethodPost, "/api/v1/projects/" + f.project + "/schedules", map[string]interface{}{"name": "x", "cronExpr": "0 * * * *", "eventType": "message", "agentName": "x", "message": "x"}, authzop.ReasonGovernancePending},
 		{"schedule update", http.MethodPatch, "/api/v1/projects/" + f.project + "/schedules/" + f.schedule, map[string]interface{}{"name": "x"}, authzop.ReasonGovernancePending},
@@ -155,10 +153,10 @@ func TestSessionOnlyGate_AllowsInteractiveAndDevOnly(t *testing.T) {
 }
 
 // TestSessionOnlyPredicateSites_NonTokenUserIdentitiesKeepTheirResult pins
-// that the sites which refuse a user access token by identity type (message
-// mode, port registration, scheduled authoring) refuse only that identity:
-// a federated user identity and a user identity presented by a broker on a
-// user's behalf are not refused with the session-only details there.
+// that a federated user identity and a user identity presented by a broker
+// on a user's behalf are not refused with the session-only details at
+// scheduled authoring (which refuses a user access token by credential), at
+// port registration or at message mode.
 func TestSessionOnlyPredicateSites_NonTokenUserIdentitiesKeepTheirResult(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

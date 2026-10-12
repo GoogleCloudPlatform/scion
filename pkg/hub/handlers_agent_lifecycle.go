@@ -1398,6 +1398,10 @@ func startInFlightPhase(phase string) bool {
 // allows any project member: holders of agent.stop_all on the project
 // (project owners/admins, hub admins) stop all agents; other members, by
 // active direct or group-derived role binding, stop only their own.
+//
+// A user access token is admitted with the agent:stop_all selector: the
+// global form on a hub boundary only, the project form on a hub boundary
+// or a boundary for that project.
 func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -1428,7 +1432,9 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	// against the project-scoped agent collection for a project, so
 	// project-owner and project-admin role bindings count. This is the
 	// same resource the project's stop_all scope capability is computed on.
-	resource := Resource{Type: "agent", ID: "hub"}
+	// The hub target carries an explicit system parent, so it resolves to
+	// the hub for a token's boundary check.
+	resource := hubScopedResource("agent", "hub")
 	if projectID != "" {
 		resource = Resource{Type: "agent", ParentType: "project", ParentID: projectID}
 	}

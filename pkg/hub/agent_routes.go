@@ -186,6 +186,16 @@ const (
 	opAgentTokenRefresh     authzop.OperationID = "agent.token.refresh"
 	opAgentOutboundMessage  authzop.OperationID = "agent.outbound.message"
 	opAgentMetricsReport    authzop.OperationID = "agent.metrics.report"
+	opAgentStatusUpdate     authzop.OperationID = "agent.status.update"
+	opAgentLogsRead         authzop.OperationID = "agent.logs.read"
+	opAgentMessagesRead     authzop.OperationID = "agent.messages.read"
+	opAgentMetricsRead      authzop.OperationID = "agent.metrics.read"
+	opAgentKeys             authzop.OperationID = "agent.lifecycle.keys"
+	opAgentActionMessage    authzop.OperationID = "agent.action.message"
+	opAgentPortList         authzop.OperationID = "agent.port.list"
+	opAgentPortRegister     authzop.OperationID = "agent.port.register"
+	opAgentPortTunnel       authzop.OperationID = "agent.port.tunnel"
+	opAgentStopAllProject   authzop.OperationID = "agent.stopall.project"
 
 	opAgentDelegationCreate   authzop.OperationID = "agent.delegation.create"
 	opAgentDelegationExchange authzop.OperationID = "agent.delegation.exchange"
@@ -193,6 +203,10 @@ const (
 
 func postOp(op authzop.OperationID) map[string]authzop.OperationID {
 	return map[string]authzop.OperationID{http.MethodPost: op}
+}
+
+func getOp(op authzop.OperationID) map[string]authzop.OperationID {
+	return map[string]authzop.OperationID{http.MethodGet: op}
 }
 
 // agentSubRouteTable lists every agent sub-route. Rows are matched in order;
@@ -212,25 +226,29 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRoutePTY, form: agentFormByID, segs: []string{"pty"}, ops: map[string]authzop.OperationID{http.MethodGet: opAgentAttach}, kind: authzop.EntryPointWebSocket},
 	{id: AgentRouteWorkspace, form: agentFormByID, segs: []string{"workspace"}, opaque: true},
 	{id: AgentRouteGroups, form: agentFormByID, segs: []string{"groups"}},
-	{id: AgentRoutePorts, form: agentFormByID, segs: []string{"ports"}, trailingSlash: true, ops: map[string]authzop.OperationID{http.MethodGet: opAgentPortAccess}},
-	{id: AgentRoutePortsTunnel, form: agentFormByID, segs: []string{"ports", "tunnel"}},
+	{id: AgentRoutePorts, form: agentFormByID, segs: []string{"ports"}, trailingSlash: true, ops: map[string]authzop.OperationID{
+		http.MethodGet:    opAgentPortList,
+		http.MethodPost:   opAgentPortRegister,
+		http.MethodDelete: opAgentPortRegister,
+	}},
+	{id: AgentRoutePortsTunnel, form: agentFormByID, segs: []string{"ports", "tunnel"}, ops: map[string]authzop.OperationID{http.MethodGet: opAgentPortTunnel}, kind: authzop.EntryPointWebSocket},
 	{id: AgentRoutePortProxy, form: agentFormByID, segs: []string{"ports", agentRouteParam, "proxy"}, opaque: true, allMethodsOp: opAgentPortAccess},
-	{id: AgentRoutePortItem, form: agentFormByID, segs: []string{"ports", agentRouteParam}},
-	{id: AgentRouteLogs, form: agentFormByID, segs: []string{"logs"}},
-	{id: AgentRouteCloudLogs, form: agentFormByID, segs: []string{"cloud-logs"}},
+	{id: AgentRoutePortItem, form: agentFormByID, segs: []string{"ports", agentRouteParam}, ops: map[string]authzop.OperationID{http.MethodDelete: opAgentPortRegister}},
+	{id: AgentRouteLogs, form: agentFormByID, segs: []string{"logs"}, ops: getOp(opAgentLogsRead)},
+	{id: AgentRouteCloudLogs, form: agentFormByID, segs: []string{"cloud-logs"}, ops: getOp(opAgentLogsRead)},
 	{id: AgentRouteCloudLogsStream, form: agentFormByID, segs: []string{"cloud-logs", "stream"}},
-	{id: AgentRouteMessageLogs, form: agentFormByID, segs: []string{"message-logs"}},
+	{id: AgentRouteMessageLogs, form: agentFormByID, segs: []string{"message-logs"}, ops: getOp(opAgentMessagesRead)},
 	{id: AgentRouteMessageLogsStream, form: agentFormByID, segs: []string{"message-logs", "stream"}},
-	{id: AgentRouteMessages, form: agentFormByID, segs: []string{"messages"}},
+	{id: AgentRouteMessages, form: agentFormByID, segs: []string{"messages"}, ops: getOp(opAgentMessagesRead)},
 	{id: AgentRouteMessagesStream, form: agentFormByID, segs: []string{"messages", "stream"}},
 	{id: AgentRouteSecrets, form: agentFormByID, segs: []string{"secrets"}, opaque: true},
-	{id: AgentRouteMetricsSummary, form: agentFormByID, segs: []string{"metrics", "summary"}},
-	{id: AgentRouteActionStatus, form: agentFormByID, segs: []string{"status"}},
+	{id: AgentRouteMetricsSummary, form: agentFormByID, segs: []string{"metrics", "summary"}, ops: getOp(opAgentMetricsRead)},
+	{id: AgentRouteActionStatus, form: agentFormByID, segs: []string{"status"}, ops: postOp(opAgentStatusUpdate)},
 	{id: AgentRouteActionStart, form: agentFormByID, segs: []string{"start"}, ops: postOp(opAgentLifecycleControl)},
 	{id: AgentRouteActionStop, form: agentFormByID, segs: []string{"stop"}, ops: postOp(opAgentLifecycleControl)},
 	{id: AgentRouteActionSuspend, form: agentFormByID, segs: []string{"suspend"}, ops: postOp(opAgentLifecycleControl)},
 	{id: AgentRouteActionRestart, form: agentFormByID, segs: []string{"restart"}, ops: postOp(opAgentLifecycleControl)},
-	{id: AgentRouteActionMessage, form: agentFormByID, segs: []string{"message"}},
+	{id: AgentRouteActionMessage, form: agentFormByID, segs: []string{"message"}, ops: postOp(opAgentActionMessage)},
 	{id: AgentRouteActionExec, form: agentFormByID, segs: []string{"exec"}, ops: postOp(opAgentExec)},
 	{id: AgentRouteActionRestore, form: agentFormByID, segs: []string{"restore"}, ops: postOp(opAgentLifecycleRestore)},
 	{id: AgentRouteActionEnv, form: agentFormByID, segs: []string{"env"}, ops: postOp(opAgentEnv)},
@@ -241,11 +259,9 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteActionMessageMode, form: agentFormByID, segs: []string{"set_message_mode"}, ops: postOp(opAgentSetMessageMode)},
 	{id: AgentRouteActionReincarnate, form: agentFormByID, segs: []string{"reincarnate"}, ops: postOp(opAgentReincarnate)},
 	{id: AgentRouteActionResetAuth, form: agentFormByID, segs: []string{"reset-auth"}, ops: postOp(opAgentResetAuth)},
-	// AgentRouteActionKeys has no ops entry, like message above: the keys
-	// action is routed and authorized by its own dedicated branch
-	// (authorizeAgentKeys in handleAgentAction). The keys action has no
-	// catalog operation.
-	{id: AgentRouteActionKeys, form: agentFormByID, segs: []string{"keys"}},
+	// The keys action is routed and authorized by its own dedicated branch
+	// (authorizeAgentKeys in handleAgentAction).
+	{id: AgentRouteActionKeys, form: agentFormByID, segs: []string{"keys"}, ops: postOp(opAgentKeys)},
 	// Hub-admin lift of an agent's holds (ptone/scion#3433).
 	{id: AgentRouteHoldLift, form: agentFormByID, segs: []string{"hold", "lift"}, ops: postOp(opAgentHoldLift)},
 	// Agent delegation grant issuance and credential exchange, behind
@@ -254,20 +270,28 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteDelegationExchange, form: agentFormByID, segs: []string{"delegations", agentRouteParam, "exchange"}, ops: postOp(opAgentDelegationExchange), paramName: "{grantId}"},
 
 	// --- /api/v1/projects/{projectId}/agents ---
+	// The collection row names no operation: its POST shares the
+	// agent.lifecycle.create operation with POST /api/v1/agents, which is
+	// not an agent sub-route, and its GET is listed in
+	// authzop.PendingBearerDispositions.
 	{id: ProjectAgentRouteCollection, form: agentFormProject, noAgent: true, trailingSlash: true},
-	{id: ProjectAgentRouteStopAll, form: agentFormProject, noAgent: true, segs: []string{"stop-all"}},
-	{id: ProjectAgentRouteRoot, form: agentFormProject, trailingSlash: true},
-	{id: ProjectAgentRouteLogs, form: agentFormProject, segs: []string{"logs"}},
-	{id: ProjectAgentRouteCloudLogs, form: agentFormProject, segs: []string{"cloud-logs"}},
+	{id: ProjectAgentRouteStopAll, form: agentFormProject, noAgent: true, segs: []string{"stop-all"}, ops: postOp(opAgentStopAllProject)},
+	{id: ProjectAgentRouteRoot, form: agentFormProject, trailingSlash: true, ops: map[string]authzop.OperationID{
+		http.MethodGet:    opAgentRead,
+		http.MethodDelete: opAgentDelete,
+		http.MethodPatch:  opAgentUpdate,
+	}},
+	{id: ProjectAgentRouteLogs, form: agentFormProject, segs: []string{"logs"}, ops: getOp(opAgentLogsRead)},
+	{id: ProjectAgentRouteCloudLogs, form: agentFormProject, segs: []string{"cloud-logs"}, ops: getOp(opAgentLogsRead)},
 	{id: ProjectAgentRouteCloudLogsStream, form: agentFormProject, segs: []string{"cloud-logs", "stream"}},
-	{id: ProjectAgentRouteMessageLogs, form: agentFormProject, segs: []string{"message-logs"}},
+	{id: ProjectAgentRouteMessageLogs, form: agentFormProject, segs: []string{"message-logs"}, ops: getOp(opAgentMessagesRead)},
 	{id: ProjectAgentRouteMessageLogsStream, form: agentFormProject, segs: []string{"message-logs", "stream"}},
-	{id: ProjectAgentRouteActionStatus, form: agentFormProject, segs: []string{"status"}},
+	{id: ProjectAgentRouteActionStatus, form: agentFormProject, segs: []string{"status"}, ops: postOp(opAgentStatusUpdate)},
 	{id: ProjectAgentRouteActionStart, form: agentFormProject, segs: []string{"start"}, ops: postOp(opAgentLifecycleControl)},
 	{id: ProjectAgentRouteActionStop, form: agentFormProject, segs: []string{"stop"}, ops: postOp(opAgentLifecycleControl)},
 	{id: ProjectAgentRouteActionSuspend, form: agentFormProject, segs: []string{"suspend"}, ops: postOp(opAgentLifecycleControl)},
 	{id: ProjectAgentRouteActionRestart, form: agentFormProject, segs: []string{"restart"}, ops: postOp(opAgentLifecycleControl)},
-	{id: ProjectAgentRouteActionMessage, form: agentFormProject, segs: []string{"message"}},
+	{id: ProjectAgentRouteActionMessage, form: agentFormProject, segs: []string{"message"}, ops: postOp(opAgentActionMessage)},
 	{id: ProjectAgentRouteActionExec, form: agentFormProject, segs: []string{"exec"}, ops: postOp(opAgentExec)},
 	{id: ProjectAgentRouteActionRestore, form: agentFormProject, segs: []string{"restore"}, ops: postOp(opAgentLifecycleRestore)},
 	{id: ProjectAgentRouteActionEnv, form: agentFormProject, segs: []string{"env"}, ops: postOp(opAgentEnv)},
@@ -276,8 +300,8 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: ProjectAgentRouteActionReincarnate, form: agentFormProject, segs: []string{"reincarnate"}, ops: postOp(opAgentReincarnate)},
 	{id: ProjectAgentRouteActionResetAuth, form: agentFormProject, segs: []string{"reset-auth"}, ops: postOp(opAgentResetAuth)},
 	// See AgentRouteActionKeys above: same early-branch choke point
-	// (handleProjectAgentAction's authorizeAgentKeys call), no ops entry.
-	{id: ProjectAgentRouteActionKeys, form: agentFormProject, segs: []string{"keys"}},
+	// (handleProjectAgentAction's authorizeAgentKeys call).
+	{id: ProjectAgentRouteActionKeys, form: agentFormProject, segs: []string{"keys"}, ops: postOp(opAgentKeys)},
 }
 
 // agentRoutePatternPrefix returns the catalog-style pattern prefix of a form.

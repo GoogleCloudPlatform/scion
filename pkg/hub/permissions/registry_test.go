@@ -130,6 +130,11 @@ var expectedSelectorRegistry = map[string][]string{
 	"scheduled_event:list":   {"scheduled_event.list"},
 	"scheduled_event:read":   {"scheduled_event.read"},
 	"scheduled_event:update": {"scheduled_event.update"},
+
+	// agent selectors outside the agent:manage alias.
+	"agent:set_message_mode": {"agent.set_message_mode"},
+	"agent:stop_all":         {"agent.stop_all"},
+	"agent:update":           {"agent.update"},
 }
 
 func TestValidateSelectorRegistry_PinnedSnapshot(t *testing.T) {

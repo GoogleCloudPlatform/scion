@@ -118,7 +118,7 @@ func seedDecisionLogAdmin(t *testing.T, s store.Store) *store.User {
 }
 
 // stopAllPath is POST /api/v1/agents/stop-all (global). Its handler decides
-// agent.stop_all on Resource{Type: "agent", ID: "hub"} with an explicit
+// agent.stop_all on hubScopedResource("agent", "hub") with an explicit
 // Permission, which is a system-scoped, in-domain decision.
 const stopAllPath = "/api/v1/agents/stop-all"
 

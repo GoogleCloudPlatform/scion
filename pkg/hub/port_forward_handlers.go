@@ -30,7 +30,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -517,7 +516,7 @@ func (s *Server) handleAgentPortTunnel(w http.ResponseWriter, r *http.Request, a
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
 		return
 	}
-	agent, ok := s.authorizePortRegistration(w, r, agentID)
+	agent, ok := s.authorizePortTunnel(w, r, agentID)
 	if !ok {
 		return
 	}
@@ -555,18 +554,14 @@ func (s *Server) authorizePortAccess(w http.ResponseWriter, r *http.Request, age
 	return nil, false
 }
 
+// authorizePortRegistration authorizes registering, deleting and clearing an
+// agent's exposed ports. The agent itself needs the port-forward scope on its
+// own record. A user needs agent.port_access on the agent record (the same
+// check as authorizePortAccess); a user access token needs the
+// agent:port_access selector, a boundary that contains the agent's project
+// and current access to that project. Loopback, reserved-port and per-agent
+// limits are checked by the callers.
 func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Request, agentID string) (*store.Agent, bool) {
-	// A user access token never manages exposed ports, whatever its scopes
-	// or holder. Check that first so the caller gets this specific reason
-	// rather than a generic deny from the general access check below (which
-	// for a UAT also requires live project access).
-	if userIdent := GetUserIdentityFromContext(r.Context()); userIdent != nil {
-		if _, scoped := userIdent.(*ScopedUserIdentity); scoped {
-			// Session-only with the GOV_PENDING reason (session_only_gate.go).
-			writeSessionOnlyDenial(w, ErrCodeForbidden, "Scoped access tokens cannot manage exposed ports", authzop.ReasonGovernancePending)
-			return nil, false
-		}
-	}
 	agent, ok := s.authorizePortAccess(w, r, agentID, ActionPortAccess)
 	if !ok {
 		return nil, false
@@ -576,21 +571,21 @@ func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: agent:port:forward", nil)
 			return nil, false
 		}
-		return agent, true
 	}
-	if userIdent := GetUserIdentityFromContext(r.Context()); userIdent != nil {
-		if s.authzService.Decide(r.Context(), AuthzRequest{
-			Principal:  principalContextForIdentity(userIdent),
-			Credential: credentialContextForIdentity(userIdent),
-			Resource:   Resource{Type: "agent", ID: "hub"},
-			Action:     Action("port_access"),
-			Permission: "agent.port_access",
-		}).Allowed {
-			return agent, true
-		}
+	return agent, true
+}
+
+// authorizePortTunnel authorizes opening an agent's port tunnel. Only the
+// agent itself opens its tunnel: an agent identity for the agent's own ID
+// and project, holding the port-forward scope. Every other identity,
+// including every user, is refused.
+func (s *Server) authorizePortTunnel(w http.ResponseWriter, r *http.Request, agentID string) (*store.Agent, bool) {
+	agentIdent := GetAgentIdentityFromContext(r.Context())
+	if agentIdent == nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Only the agent can open its port tunnel", nil)
+		return nil, false
 	}
-	writeError(w, http.StatusForbidden, ErrCodeForbidden, "Only the agent can manage its exposed ports", nil)
-	return nil, false
+	return s.authorizePortRegistration(w, r, agentID)
 }
 
 func exposedPortResponses(agentID string, ports []store.ExposedPort) []exposedPortResponse {

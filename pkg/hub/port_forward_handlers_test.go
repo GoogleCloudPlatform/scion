@@ -71,40 +71,12 @@ func TestAgentPortRegistrationLifecycle(t *testing.T) {
 	assert.Empty(t, got.ExposedPorts)
 }
 
-func TestAuthorizePortRegistrationRejectsScopedHubAdmin(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-	admin := NewAuthenticatedUser(tid("scoped-port-admin"), "admin@example.com", "Scoped Port Admin", store.UserRoleAdmin, "api")
-	project := &store.Project{
-		ID:      tid("scoped-port-project"),
-		Name:    "Scoped Port Project",
-		Slug:    "scoped-port-project",
-		OwnerID: admin.ID(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	agent := &store.Agent{
-		ID:        tid("scoped-port-agent"),
-		Slug:      "scoped-port-agent",
-		Name:      "Scoped Port Agent",
-		ProjectID: project.ID,
-		OwnerID:   admin.ID(),
-		Phase:     string(state.PhaseRunning),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	scoped := NewScopedUserIdentity(admin, project.ID, []string{store.UATScopeAgentPortAccess})
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
-	r = r.WithContext(contextWithIdentity(r.Context(), scoped))
-	w := httptest.NewRecorder()
-
-	_, ok := srv.authorizePortRegistration(w, r, agent.ID)
-
-	assert.False(t, ok, "scoped hub-admin UAT must not use the raw admin port-management shortcut")
-	assert.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), "Scoped access tokens cannot manage exposed ports")
-}
-
-func TestAuthorizePortRegistrationRejectsFederatedAdmin(t *testing.T) {
+// TestAuthorizePortRegistration_FederatedUserNeedsPortAccessOnTheAgent pins
+// the agent-record rule for a federated user: without agent.port_access on
+// the agent (no role in its project, not its owner) the caller is refused,
+// and with the project-owner role, which carries agent.port_access, it may
+// manage the agent's ports.
+func TestAuthorizePortRegistration_FederatedUserNeedsPortAccessOnTheAgent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	caller := newBindableFederatedAdmin(tid("federated-port-admin"))
@@ -117,23 +89,25 @@ func TestAuthorizePortRegistrationRejectsFederatedAdmin(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 	agent := &store.Agent{
 		ID: tid("federated-port-agent"), Slug: "federated-port-agent", Name: "Federated Port Agent",
-		ProjectID: project.ID, OwnerID: caller.ID(), Phase: string(state.PhaseRunning),
+		ProjectID: project.ID, OwnerID: tid("federated-port-other-owner"), Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	// The caller owns the agent, so it passes authorizePortAccess (via the
-	// resource-owner grant and project-owner's agent.port_access) but still
-	// lacks the hub-level permission checked by authorizePortRegistration.
-	createTestUserWithProjectRole(t, s, caller.ID(), caller.Email(), project.ID, store.ProjectRoleOwner)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
-	r = r.WithContext(contextWithIdentity(r.Context(), caller))
-	w := httptest.NewRecorder()
+	register := func() (*httptest.ResponseRecorder, bool) {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
+		r = r.WithContext(contextWithIdentity(r.Context(), caller))
+		w := httptest.NewRecorder()
+		_, ok := srv.authorizePortRegistration(w, r, agent.ID)
+		return w, ok
+	}
 
-	_, ok := srv.authorizePortRegistration(w, r, agent.ID)
-
-	assert.False(t, ok, "federated admins must not use the local-admin port-management shortcut")
+	w, ok := register()
+	assert.False(t, ok, "a federated admin with no grant on the agent is refused")
 	assert.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), "Only the agent can manage its exposed ports")
+
+	createTestUserWithProjectRole(t, s, caller.ID(), caller.Email(), project.ID, store.ProjectRoleOwner)
+	w, ok = register()
+	assert.True(t, ok, "agent.port_access on the agent admits the caller: %s", w.Body.String())
 }
 
 func TestAuthorizePortRegistrationAllowsUnscopedLocalAdmin(t *testing.T) {

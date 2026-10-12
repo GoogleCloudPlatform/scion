@@ -25,6 +25,9 @@ var agentOperations = []OperationSpec{
 		Description: "Create an agent in a project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "POST"},
+			// The project form takes the project from the path; both forms
+			// authorize agent.create on that project (authorizeAgentCreate).
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -60,6 +63,7 @@ var agentOperations = []OperationSpec{
 		Description: "Delete an agent",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -233,6 +237,7 @@ var agentOperations = []OperationSpec{
 		Description: "Read a single agent's metadata by ID",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}", Method: "GET"},
 		},
 		// An agent delegated credential is admitted here behind
 		// hub.agent_delegation (agentDelegationAdmittedRoutes in pkg/hub).
@@ -299,16 +304,204 @@ var agentOperations = []OperationSpec{
 			// handleAgentByID (handlers_agents_core.go) dispatches the
 			// no-action, no-sub-resource case on r.Method: PATCH, not PUT.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "PATCH"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}", Method: "PATCH"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Principals:  []PrincipalKind{PrincipalUser},
+		Credentials: []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		// applyAgentUpdate also applies, for every caller: the passthrough
+		// gate (authorizePassthroughIdentity) on a passthrough GCP identity,
+		// gcp_service_account.assign on an assigned service account
+		// (authorizeSAAssignment), and the stateVersion check.
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestAgentUpdateToken_PassthroughGateStillApplies"},
+			{Package: "pkg/hub", Function: "TestAgentUpdateToken_ServiceAccountAssignRequiresAssignSelector"},
+		},
+		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.status.update",
+		Domain:      "agent",
+		Description: "Report an agent's status: the agent itself, or a user who may update the agent",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/status", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/status", Method: "POST"},
+		},
+		// updateAgentStatus admits the agent itself for its own record with
+		// the agent:status:update scope; every other caller needs
+		// agent.update on the agent.
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.update",
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.workspace.read",
+		Domain:      "agent",
+		Description: "Read an agent's workspace sync status",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.workspace.sync",
+		Domain:      "agent",
+		Description: "Sync an agent's workspace from or to the agent",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-from", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-to", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-to/finalize", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.logs.read",
+		Domain:      "agent",
+		Description: "Read an agent's runtime logs and Cloud Logging entries",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/logs", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/logs", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/cloud-logs", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/cloud-logs", Method: "GET"},
+		},
+		// An agent caller reads only agents of its own project
+		// (checkAgentReadScope and the handlers' project check).
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.messages.read",
+		Domain:      "agent",
+		Description: "Read an agent's message history and message logs",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/messages", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/message-logs", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/message-logs", Method: "GET"},
+		},
+		// agent.attach on the agent gives the full history; agent.read alone
+		// gives only the messages the caller took part in.
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.metrics.read",
+		Domain:      "agent",
+		Description: "Read an agent's aggregate session metrics",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/metrics/summary", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.lifecycle.keys",
+		Domain:      "agent",
+		Description: "Send keystrokes to an agent's session",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/keys", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/keys", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.attach",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.action.message",
+		Domain:      "agent",
+		Description: "Send a message to an agent through its message action",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/message", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/message", Method: "POST"},
+		},
+		// authorizeAgentMessage applies the recipient's message mode and,
+		// for a user access token, the agent:message selector and the token
+		// boundary before any piercing rule.
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.message",
+		Effects:          []SecurityEffect{EffectEmitExternal},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		ExternalPolicy: &ExternalEffectPolicy{
+			DeliveryMode:   DeliveryFireAndForget,
+			FailureMode:    FailureLogAndContinue,
+			IdempotencyKey: "message ID",
+			RetryPolicy:    "no retry for user-sent messages",
+			AuthBeforeEmit: true,
+		},
+		AuditObligation: &AuditObligation{
+			EventType:              "agent.message.send",
+			ContextFields:          []string{"actor_id", "project_id"},
+			AfterFields:            []string{"message_id", "target_agent_id"},
+			Atomic:                 false,
+			NonAtomicJustification: "Message dispatch is fire-and-forget; audit recorded before dispatch",
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:      AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.attach",
@@ -338,7 +531,6 @@ var agentOperations = []OperationSpec{
 		Domain:      "agent",
 		Description: "Access forwarded ports on an agent",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports", Method: "GET"},
 			// port_forward_handlers.go's proxyAgentPort (invoked from
 			// handleAgentPorts for the "{port}/proxy" and "{port}/proxy/*"
 			// suffixes) authorizes via authorizePortAccess for EVERY HTTP
@@ -368,23 +560,74 @@ var agentOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
-		ID:          "agent.stopall",
+		ID:          "agent.port.list",
 		Domain:      "agent",
-		Description: "Stop all running agents in a project",
+		Description: "List an agent's exposed ports",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/stop-all", Method: "POST"},
+			// listAgentPorts authorizes agent.read on the agent through
+			// authorizePortAccess, which also admits the agent itself.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
-		ResourceResolver: "project-from-url",
-		BasePermission:   "agent.stop_all",
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.port.register",
+		Domain:      "agent",
+		Description: "Register, delete or clear an agent's exposed ports",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports", Method: "DELETE"},
+		},
+		// authorizePortRegistration: the agent itself with the port-forward
+		// scope, or a user with agent.port_access on the agent record. The
+		// loopback-host rule, the reserved-port list and the per-agent port
+		// limit apply to every caller.
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.port_access",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialConflict},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestPortRegistration_UsesAgentRecordTarget"}},
+		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.port.tunnel",
+		Domain:      "agent",
+		Description: "Open the calling agent's own port tunnel",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointWebSocket, Pattern: "/api/v1/agents/{id}/ports/tunnel", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialAgentJWT},
+		ResourceResolver: "agent-self",
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestPortTunnel_OnlyTheAgentItself"}},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionInternalOnly,
+			Reason: "Only the agent itself opens its port tunnel, with its own agent JWT and the port-forward scope; every user is refused",
+			Scope:  "agent self access",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerNonUser, Pin: "TestPortTunnel_OnlyTheAgentItself"},
 	},
 	{
 		ID:          "agent.setmessagemode",
@@ -399,15 +642,23 @@ var agentOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/set_message_mode", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/set_message_mode", Method: "POST"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		// handleSetMessageMode also admits a full-role agent of the same
+		// project. A user, with a session or a token, is refused when a
+		// project admin who is not a lineage owner; granting hub mode with a
+		// token needs a hub boundary (AuthorizeMessageModeGrant).
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.set_message_mode",
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestSetMessageModeToken_ProjectAdminDenialStillApplies"},
+		},
+		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.token.refresh",
@@ -510,5 +761,54 @@ var agentOperations = []OperationSpec{
 			Waives: []WaivedObligation{WaiveBasePermission},
 		}},
 		Bearer: NonUser(),
+	},
+
+	// Stop-all stops the running agents of the fixture server's projects,
+	// so its entries come last among the agent operations
+	// (TestBearerDispositionMatrix_CatalogEntryPoints runs entries in
+	// catalog order).
+	{
+		ID:          "agent.stopall",
+		Domain:      "agent",
+		Description: "Stop all running agents on the hub",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/stop-all", Method: "POST"},
+		},
+		// agent.stop_all is decided on hubScopedResource("agent", "hub"),
+		// which resolves to the hub, so a token needs a hub boundary.
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "agent.stop_all",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestStopAllHubForm_RequiresStopAllSelectorAndHubBoundary"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.stopall.project",
+		Domain:      "agent",
+		Description: "Stop all running agents in a project",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/stop-all", Method: "POST"},
+		},
+		// A holder of agent.stop_all on the project stops all its agents.
+		// Another project member stops only the agents the per-agent
+		// lifecycle rule allows.
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "agent.stop_all",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestStopAllHubForm_RequiresStopAllSelectorAndHubBoundary"}},
+		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 }

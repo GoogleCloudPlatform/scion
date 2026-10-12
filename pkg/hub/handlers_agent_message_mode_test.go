@@ -399,10 +399,10 @@ func TestSetMessageMode_AgentCallersDenied(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: UATs always denied (no scope exists) (D7)
+// Test 5: a token without agent:set_message_mode is refused (D7)
 // ---------------------------------------------------------------------------
 
-func TestSetMessageMode_UATsDenied(t *testing.T) {
+func TestSetMessageModeToken_RequiresSetMessageModeSelector(t *testing.T) {
 	srv, s, owner, _, _, projectID := smmSetup(t)
 
 	agent := smmAgent(t, s, "smm-uat-target", projectID, store.MessageModeProject,
