@@ -166,14 +166,14 @@ type Runtime interface {
 
 | Runtime | Platform | Selection |
 | :--- | :--- | :--- |
-| `AppleContainerRuntime` | macOS | Auto-detected when Apple `container` CLI is present |
+| `AppleContainerRuntime` | macOS | Auto-detected when Apple `container` CLI is present and neither Podman nor Docker is available |
 | `DockerRuntime` | Linux / macOS / Windows | Default fallback; supports remote Docker hosts via `Host` config |
 | `PodmanRuntime` | Linux / macOS | Daemonless/Rootless alternative; supports remote/machine execution |
 | `KubernetesRuntime` | Any (via kubeconfig) | Runs agents as Kubernetes Pods; supports namespace isolation, resource specs, and workspace sync via `tar` snapshots |
 
 **Runtime selection** is handled by the `GetRuntime` factory function, which resolves the runtime based on:
 1. The active profile's `runtime` field in `settings.yaml`.
-2. OS-level auto-detection (macOS with `container` CLI &rarr; Apple; Linux &rarr; Podman if available, else Docker).
+2. OS-level auto-detection (macOS &rarr; Podman, else Docker, else Apple `container`; Linux &rarr; Podman if available, else Docker).
 3. Explicit override via CLI flags.
 
 ---
@@ -289,8 +289,8 @@ scion start <name> --task "..." --hub
 4. **Environment resolution**: The Hub merges environment variables and secrets from all applicable scopes (user → project → broker).
 5. **Template hydration**: The Hub resolves the template, attaches its content hash for broker-side caching.
 6. **Dispatch**: The Hub dispatches the creation request to the selected Runtime Broker via:
-   - **Direct HTTP** if the broker has a reachable endpoint.
-   - **Control Channel** (WebSocket tunnel) if the broker is behind a NAT/firewall.
+   - **Direct HTTP** if the Runtime Broker has a reachable endpoint.
+   - **Control Channel** (WebSocket connection) if the Runtime Broker is behind a NAT/firewall.
 7. **Broker execution**: The Runtime Broker provisions and starts the agent using the same `agent.Manager` and `runtime.Runtime` code path as Solo mode.
 8. **Status reporting**: The broker reports status back to the Hub via heartbeats and agent status updates.
 

@@ -107,13 +107,15 @@ variable "enable_http_redirect" {
 }
 
 variable "nfs_uid" {
-  type    = number
-  default = 1000
+  description = "uid that owns this hub's NFS export (agent-runtime-k8s chowns it) and that the hub process runs as (hub-gke's hub_run_as_uid). One variable for both, because the hub writes workspaces that agents later read."
+  type        = number
+  default     = 1000
 }
 
 variable "nfs_gid" {
-  type    = number
-  default = 1000
+  description = "gid that owns this hub's NFS export (agent-runtime-k8s chowns it) and that the hub process runs as (hub-gke's hub_run_as_gid). One variable for both, because the hub writes workspaces that agents later read."
+  type        = number
+  default     = 1000
 }
 
 variable "nfs_subpath_root" {
@@ -125,4 +127,32 @@ variable "nfs_capacity" {
   description = "Advertised PV/PVC capacity (bookkeeping only; Filestore Basic doesn't enforce per-subdirectory quotas)."
   type        = string
   default     = "1Ti"
+}
+
+variable "test_identities_enabled" {
+  description = "Sets the chart's hub.testIdentities.enabled, which lets the hub issue test identities. For test hubs only. Default false leaves the chart value unset (the chart's default is false). Unrelated to test login, which the chart does not offer."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "test_runner" {
+  description = <<-EOT
+    Optional test-runner identities (modules/hub-test-runner) so an agent on
+    another hub can run tests against this one. Off by default.
+      enabled                     create <hub>-uat and <hub>-issuer and their grants
+      impersonators               serviceAccount:<email> members (lowercase email) allowed to mint ID tokens for both
+                                  accounts; validated only by modules/hub-test-runner (non-empty, serviceAccount:
+                                  only), so with enabled = false they are not checked and have no effect
+      alert_notification_channels non-empty adds a log-based metric and alert for token minting by anyone else
+    Needs iamcredentials DATA_READ audit logs on the project (configurations/shared-infra's
+    iamcredentials_data_access_logs); the plan fails without them.
+  EOT
+  type = object({
+    enabled                     = optional(bool, false)
+    impersonators               = optional(list(string), [])
+    alert_notification_channels = optional(list(string), [])
+  })
+  default  = {}
+  nullable = false
 }

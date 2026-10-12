@@ -3626,7 +3626,7 @@ func isDirectChildOfAny(target string, roots []string) bool {
 // this removes the local directory as well. Only a single direct child of the
 // projects root is removed. An absent directory is not an error.
 func (s *Server) removeEmbeddedBrokerProjectDir(slug, removedPath string) {
-	if s.GetEmbeddedBrokerID() == "" {
+	if !s.hasEmbeddedBroker() {
 		return
 	}
 	if err := validateProjectSlug(slug); err != nil {

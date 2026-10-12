@@ -156,12 +156,21 @@ func TestCreateTestAdminUser_Validation(t *testing.T) {
 		"ordinary domain":   func(u *store.User) { u.Email = "x-" + uuid.NewString()[:8] + "@example.com" },
 		"admin role":        func(u *store.User) { u.Role = store.UserRoleAdmin },
 		"viewer role":       func(u *store.User) { u.Role = store.UserRoleViewer },
+		"delegation stamp": func(u *store.User) {
+			d := uuid.NewString()
+			u.IssuerDelegationID = &d
+		},
 	}
 	for name, mutate := range cases {
 		u := newTestAdminUser(store.UserKindTestHubAdmin, uuid.NewString(), exp)
 		mutate(u)
 		_, err := cs.CreateTestAdminUser(ctx, u, rd.ID)
 		assert.ErrorIs(t, err, store.ErrInvalidInput, name)
+		// Nothing is written for any refused shape, including an
+		// admin-kind row carrying a workload delegation stamp (workload
+		// delegations issue the member tier only).
+		_, err = cs.GetUser(ctx, u.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound, name)
 	}
 	// A project-scoped role is refused, and nothing is written.
 	prd, err := cs.CreateRoleDefinition(ctx, &store.RoleDefinition{

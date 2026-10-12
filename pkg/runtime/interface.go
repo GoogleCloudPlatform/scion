@@ -20,7 +20,6 @@ import (
 	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 type RunConfig struct {
@@ -187,18 +186,6 @@ type RunConfig struct {
 	// that clones/provisions the workspace before the main container starts.
 	GitCloneForInit *api.GitCloneConfig
 
-	// Locker provides the per-agent start lock of an NFS-home agent
-	// (acquireHomeStartLock): it keeps two starts of the same agent from
-	// running at once across brokers. On Postgres-backed deployments it
-	// would come from the store's AdvisoryLocker capability.
-	//
-	// May be nil — no production caller sets it today, and without it the
-	// NFS-home start is guarded by the termination wait only. The
-	// Kubernetes runtime's NFS workspace provisioning does not use it:
-	// sciontool provision serializes provisioners with a file lock on the
-	// export.
-	Locker store.AdvisoryLocker
-
 	// Checkpoint and OnResourceCreated are an async launch's runtime hooks
 	// (design t1-async-create-v11.md §3.8.3, §3.8.4), copied from
 	// api.StartOptions. Runtimes call them through launchHooks, whose
@@ -214,6 +201,19 @@ type RunConfig struct {
 	Checkpoint        func(ctx context.Context, step string) error
 	OnResourceCreated func(api.ResourceHandle)
 
+	// ObserveResourceCreated, when set, is called after each true create of
+	// a launch resource, after OnResourceCreated, on both the synchronous
+	// and the async path. It only observes: setting it never changes who
+	// cleans up a failed start (see launchHooks.active). It runs
+	// synchronously on the launch path, so it must be fast and
+	// non-blocking and must not call back into the runtime; it has no
+	// error return, so an observer's own failure must never fail or slow
+	// the start (a flat instance latches it for its Checkpoint). It also
+	// fires for resources created before a later failure. Honoured by the
+	// runtimes that create resources through launchHooks: Docker, Podman,
+	// Apple container and Kubernetes; other runtimes (Cloud Run,
+	// substrate) do not report created resources.
+	ObserveResourceCreated func(api.ResourceHandle)
 	// KubernetesBlockIdentity marks a pod whose GCP identity mode is
 	// "block" (ptone/scion#4034). The Kubernetes runtime then sets
 	// automountServiceAccountToken false and adds the Workload Identity node
@@ -222,6 +222,20 @@ type RunConfig struct {
 	// manager has already set to the block ServiceAccount or cleared.
 	// Ignored by other runtimes.
 	KubernetesBlockIdentity bool
+
+	// FallbackEnv is the template env layer (ptone/scion#4524): every
+	// runtime applies it with FallbackEnvEntries as the LAST step of its
+	// container env assembly, so a key is set only when no other source
+	// emitted it. Values are literal. Consumers: buildCommonRunArgs
+	// (docker/podman/apple), the kubernetes buildPod, buildCloudRunInstance,
+	// the Cloud Run sandbox runtime and the substrate bootstrap env. A new
+	// runtime must call it too (forgetting drops template env, never lets
+	// it win).
+	FallbackEnv map[string]string
+	// SuppressedFallbackKeys are keys FallbackEnv may never set (the
+	// harness-config's auth-candidate keys), even when nothing else set
+	// them.
+	SuppressedFallbackKeys []string
 }
 
 // Checkpoint step names a runtime passes to RunConfig.Checkpoint (design
@@ -241,6 +255,7 @@ const (
 type launchHooks struct {
 	checkpointFn func(ctx context.Context, step string) error
 	createdFn    func(api.ResourceHandle)
+	observedFn   func(api.ResourceHandle)
 	// recordFn, when set, also receives every created handle. Unlike
 	// createdFn it does not make the hooks active: the Kubernetes runtime
 	// uses it to remember the objects a start created (verifyStartObjects).
@@ -249,7 +264,7 @@ type launchHooks struct {
 
 // launchHooks returns config's async-launch hooks.
 func (config *RunConfig) launchHooks() launchHooks {
-	return launchHooks{checkpointFn: config.Checkpoint, createdFn: config.OnResourceCreated}
+	return launchHooks{checkpointFn: config.Checkpoint, createdFn: config.OnResourceCreated, observedFn: config.ObserveResourceCreated}
 }
 
 // checkpoint is called immediately before a resource-creating call. A
@@ -268,6 +283,9 @@ func (h launchHooks) checkpoint(ctx context.Context, step string) error {
 // RunConfig.OnResourceCreated), and only a caller that records handles can
 // clean up what the runtime leaves.
 func (h launchHooks) active() bool {
+	// Keyed on createdFn only, never observedFn: an observer records
+	// handles but does not take over cleanup, so a synchronous start with
+	// only an observer keeps the runtime's own cleanup.
 	return h.createdFn != nil
 }
 
@@ -276,10 +294,12 @@ func (h launchHooks) created(handle api.ResourceHandle) {
 	if h.recordFn != nil {
 		h.recordFn(handle)
 	}
-	if h.createdFn == nil {
-		return
+	if h.createdFn != nil {
+		h.createdFn(handle)
 	}
-	h.createdFn(handle)
+	if h.observedFn != nil {
+		h.observedFn(handle)
+	}
 }
 
 // HomeStorageRealization describes the NFS agent home of one start: the
