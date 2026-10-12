@@ -292,6 +292,8 @@ var routeAuthzManifest = map[string]string{
 	"GET /api/v1/test-identities":                   "authenticated", // List test identities
 	"POST /api/v1/test-identities/{id}/token":       "authenticated", // Re-issue a test identity token
 	"DELETE /api/v1/test-identities/{id}":           "authenticated", // Delete a test identity
+	"POST /api/v1/test-identities/admin":            "authenticated", // Issue an admin-kind test identity
+	"POST /api/v1/test-identities/admin/revoke-all": "authenticated", // Revoke every admin-kind test identity
 	"POST /api/v1/test-identity-delegations":        "authenticated", // Create a workload issuer delegation (session only)
 	"GET /api/v1/test-identity-delegations":         "authenticated", // List workload issuer delegations (session only)
 	"DELETE /api/v1/test-identity-delegations/{id}": "authenticated", // Revoke a workload issuer delegation (session only)

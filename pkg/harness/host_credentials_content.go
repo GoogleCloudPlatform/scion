@@ -55,6 +55,11 @@ func hostCredentialHoldsSignIn(f HostCredentialFile, data []byte) bool {
 // trusted_folders, copilot_integration_id, copilot_url); and scion's own
 // copilot provisioner (harnesses/copilot/provision.py), which writes
 // trustedFolders.
+// The copilot provisioner applies the same rule inside the agent container
+// (_COPILOT_SETTINGS_KEYS and _config_holds_sign_in in
+// harnesses/copilot/provision.py). Keep the two in sync: its tests compare
+// these key lists with its own and run its check over the fixtures in
+// testdata/copilot_config_signin.json.
 // last_logged_in_user and logged_in_users name the signed-in user (host and
 // login) while the token itself is in the OS keychain.
 var copilotSettingsKeys = map[string]struct{}{

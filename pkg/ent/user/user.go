@@ -48,6 +48,10 @@ const (
 	FieldIssuedBy = "issued_by"
 	// FieldPurpose holds the string denoting the purpose field in the database.
 	FieldPurpose = "purpose"
+	// FieldIssuanceID holds the string denoting the issuance_id field in the database.
+	FieldIssuanceID = "issuance_id"
+	// FieldIssuerCredentialID holds the string denoting the issuer_credential_id field in the database.
+	FieldIssuerCredentialID = "issuer_credential_id"
 	// FieldIssuerDelegationID holds the string denoting the issuer_delegation_id field in the database.
 	FieldIssuerDelegationID = "issuer_delegation_id"
 	// EdgeOwnedGroups holds the string denoting the owned_groups edge name in mutations.
@@ -118,6 +122,8 @@ var Columns = []string{
 	FieldExpiresAt,
 	FieldIssuedBy,
 	FieldPurpose,
+	FieldIssuanceID,
+	FieldIssuerCredentialID,
 	FieldIssuerDelegationID,
 }
 
@@ -204,8 +210,10 @@ const DefaultKind = KindHuman
 
 // Kind values.
 const (
-	KindHuman       Kind = "human"
-	KindTestFixture Kind = "test_fixture"
+	KindHuman          Kind = "human"
+	KindTestFixture    Kind = "test_fixture"
+	KindTestHubAdmin   Kind = "test_hub_admin"
+	KindTestSuperAdmin Kind = "test_super_admin"
 )
 
 func (k Kind) String() string {
@@ -215,7 +223,7 @@ func (k Kind) String() string {
 // KindValidator is a validator for the "kind" field enum values. It is called by the builders before save.
 func KindValidator(k Kind) error {
 	switch k {
-	case KindHuman, KindTestFixture:
+	case KindHuman, KindTestFixture, KindTestHubAdmin, KindTestSuperAdmin:
 		return nil
 	default:
 		return fmt.Errorf("user: invalid enum value for kind field: %q", k)
@@ -303,6 +311,16 @@ func ByIssuedBy(opts ...sql.OrderTermOption) OrderOption {
 // ByPurpose orders the results by the purpose field.
 func ByPurpose(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldPurpose, opts...).ToFunc()
+}
+
+// ByIssuanceID orders the results by the issuance_id field.
+func ByIssuanceID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuanceID, opts...).ToFunc()
+}
+
+// ByIssuerCredentialID orders the results by the issuer_credential_id field.
+func ByIssuerCredentialID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuerCredentialID, opts...).ToFunc()
 }
 
 // ByIssuerDelegationID orders the results by the issuer_delegation_id field.

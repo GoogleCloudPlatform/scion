@@ -53,6 +53,10 @@ type User struct {
 	IssuedBy *string `json:"issued_by,omitempty"`
 	// Issuer-supplied purpose of this test_fixture user
 	Purpose *string `json:"purpose,omitempty"`
+	// Issuance ID of an admin-kind test identity (audit correlation)
+	IssuanceID *string `json:"issuance_id,omitempty"`
+	// ID of the issuer's user access token for an admin-kind test identity; null for a session issuer
+	IssuerCredentialID *string `json:"issuer_credential_id,omitempty"`
 	// ID of the issuer delegation a test_fixture user was issued through; empty for session and PAT issuance
 	IssuerDelegationID *string `json:"issuer_delegation_id,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
@@ -134,7 +138,7 @@ func (*User) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case user.FieldSessionGeneration:
 			values[i] = new(sql.NullInt64)
-		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus, user.FieldInvitedBy, user.FieldInviteNote, user.FieldKind, user.FieldIssuedBy, user.FieldPurpose, user.FieldIssuerDelegationID:
+		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus, user.FieldInvitedBy, user.FieldInviteNote, user.FieldKind, user.FieldIssuedBy, user.FieldPurpose, user.FieldIssuanceID, user.FieldIssuerCredentialID, user.FieldIssuerDelegationID:
 			values[i] = new(sql.NullString)
 		case user.FieldCreated, user.FieldLastLogin, user.FieldLastSeen, user.FieldExpiresAt:
 			values[i] = new(sql.NullTime)
@@ -266,6 +270,20 @@ func (_m *User) assignValues(columns []string, values []any) error {
 				_m.Purpose = new(string)
 				*_m.Purpose = value.String
 			}
+		case user.FieldIssuanceID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issuance_id", values[i])
+			} else if value.Valid {
+				_m.IssuanceID = new(string)
+				*_m.IssuanceID = value.String
+			}
+		case user.FieldIssuerCredentialID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issuer_credential_id", values[i])
+			} else if value.Valid {
+				_m.IssuerCredentialID = new(string)
+				*_m.IssuerCredentialID = value.String
+			}
 		case user.FieldIssuerDelegationID:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field issuer_delegation_id", values[i])
@@ -393,6 +411,16 @@ func (_m *User) String() string {
 	builder.WriteString(", ")
 	if v := _m.Purpose; v != nil {
 		builder.WriteString("purpose=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.IssuanceID; v != nil {
+		builder.WriteString("issuance_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.IssuerCredentialID; v != nil {
+		builder.WriteString("issuer_credential_id=")
 		builder.WriteString(*v)
 	}
 	builder.WriteString(", ")
