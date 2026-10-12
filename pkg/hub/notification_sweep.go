@@ -32,7 +32,7 @@ import (
 // delivery attempt failed.
 func (s *Server) notificationDispatchSweepHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
-		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, notificationRetryPassTimeout)
 		defer cancel()
 
 		if s.notificationDispatcher == nil {
@@ -89,7 +89,7 @@ func (s *Server) notificationOrphanGCHandler() func(ctx context.Context) {
 // on the given broker. Called as a goroutine from markBrokerOnline for sub-second
 // delivery when a broker first connects.
 func (s *Server) drainUndispatchedNotifications(ctx context.Context, brokerID string) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, notificationRetryPassTimeout)
 	defer cancel()
 
 	if s.notificationDispatcher == nil {
@@ -112,9 +112,21 @@ func (s *Server) drainUndispatchedNotifications(ctx context.Context, brokerID st
 	s.notificationDispatcher.retryBatch(ctx, notifs)
 }
 
+// notificationRetryPassTimeout is the budget of one sweep or broker-connect
+// drain pass.
+const notificationRetryPassTimeout = 30 * time.Second
+
 // retryDispatchAttemptTimeout caps one RetryDispatch delivery attempt. It is
 // a variable so tests can shorten it.
-var retryDispatchAttemptTimeout = 10 * time.Second
+//
+// Why 2s: the hub decides an unroutable broker at once (ErrMessageDeferred),
+// and dispatchWithBrokerRetry then retries with a 500ms backoff that doubles,
+// so 2s covers three tries (at 0, 0.5s and 1.5s). Waiting longer only helps a
+// broker that comes back within the window, and the broker-connect drain
+// already covers that. Each unreachable broker costs one attempt per pass
+// (retryBatch skips it afterwards), so a 30s pass can still deliver behind
+// about a dozen unreachable brokers.
+var retryDispatchAttemptTimeout = 2 * time.Second
 
 // revertClaimTimeout bounds the store write that releases a retry claim.
 const revertClaimTimeout = 5 * time.Second
@@ -337,7 +349,11 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 	brokerID = subscriber.RuntimeBrokerID
 	if err := dispatchWithBrokerRetry(attemptCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
 		outcome = retryFailed
-		if errors.Is(err, ErrBrokerTimeout) || errors.Is(err, ErrMessageDeferred) || errors.Is(err, context.DeadlineExceeded) {
+		// ErrBrokerTimeout: deferred (unroutable) until the attempt timed out.
+		// DeadlineExceeded: the broker call itself ran out the attempt.
+		// (dispatchWithBrokerRetry never returns ErrMessageDeferred; it
+		// retries it.)
+		if errors.Is(err, ErrBrokerTimeout) || errors.Is(err, context.DeadlineExceeded) {
 			outcome = retryBrokerUnreachable
 		}
 		// The store always sets CreatedAt; a zero value never gives up.

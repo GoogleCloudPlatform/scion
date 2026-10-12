@@ -449,10 +449,17 @@ func (d *recordingDispatcher) setReturnErr(err error) {
 type brokerDeferringDispatcher struct {
 	recordingDispatcher
 	deferBrokers map[string]bool
+	// blockBrokers hang until ctx ends and return ctx.Err(), like a broker
+	// call that runs out its deadline.
+	blockBrokers map[string]bool
 }
 
 func (d *brokerDeferringDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	err := d.recordingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, structuredMsg)
+	if d.blockBrokers[agent.RuntimeBrokerID] {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if d.deferBrokers[agent.RuntimeBrokerID] {
 		return ErrMessageDeferred
 	}
@@ -655,9 +662,9 @@ func TestRetryDispatch_RevertSurvivesExpiredParentContext(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, notifs, 1)
 
-	// The parent deadline ends the attempt (first backoff is 500ms), so the
-	// revert runs after the parent context has expired.
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	// The parent deadline (well before the 5s attempt timeout) ends the
+	// attempt, so the revert runs after the parent context has expired.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	env.nd.RetryDispatch(ctx, &notifs[0])
 	require.Error(t, ctx.Err(), "the parent context must have expired during the attempt")
@@ -671,7 +678,7 @@ func TestRetryDispatch_RevertSurvivesExpiredParentContext(t *testing.T) {
 // the caller's budget; the notification stays undispatched (and unclaimed)
 // for the next pass.
 func TestSweepHandler_StopsWhenBudgetBelowAttemptTimeout(t *testing.T) {
-	setRetryAttemptTimeout(t, 200*time.Millisecond)
+	setRetryAttemptTimeout(t, 600*time.Millisecond)
 
 	env := setupNotificationTest(t)
 	_, subB := addSubscriberOnBroker(t, env, "subscriber-b")
@@ -685,9 +692,9 @@ func TestSweepHandler_StopsWhenBudgetBelowAttemptTimeout(t *testing.T) {
 	first := createUndispatchedNotification(t, env, env.sub, 3*time.Minute)
 	second := createUndispatchedNotification(t, env, subB, 2*time.Minute)
 
-	// 300ms budget: the first attempt (200ms) runs, then less than 200ms is
+	// 1s budget: the first attempt (600ms) runs, then less than 600ms is
 	// left, so the second (on another broker, not skipped) does not start.
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	srv.notificationDispatchSweepHandler()(ctx)
 
@@ -722,4 +729,89 @@ func TestSweepHandler_SkipsUnreachableBrokerForRestOfPass(t *testing.T) {
 	assert.True(t, notificationDispatched(t, env, b1), "the online broker's notification must be delivered in the same pass")
 	assert.False(t, notificationDispatched(t, env, a1), "the attempted offline notification must be reverted")
 	assert.False(t, notificationDispatched(t, env, a2), "the skipped offline notification must stay undispatched")
+}
+
+// The default attempt timeout leaves room in one pass for several
+// unreachable brokers (each costs one attempt) before deliverable
+// notifications behind them.
+func TestRetryDispatchAttemptTimeout_FitsSeveralBrokersPerPass(t *testing.T) {
+	assert.GreaterOrEqual(t, int(notificationRetryPassTimeout/retryDispatchAttemptTimeout), 10,
+		"a pass must fit at least 10 attempts")
+}
+
+// Two unreachable brokers with older notifications do not use up the pass:
+// a healthy broker's newer notification is delivered in the same pass.
+func TestSweepHandler_TwoUnreachableBrokersStillDeliverHealthy(t *testing.T) {
+	setRetryAttemptTimeout(t, 200*time.Millisecond)
+
+	env := setupNotificationTest(t)
+	subscriberB, subB := addSubscriberOnBroker(t, env, "subscriber-b")
+	_, subC := addSubscriberOnBroker(t, env, "subscriber-c")
+	d := &brokerDeferringDispatcher{deferBrokers: map[string]bool{
+		env.subscriber.RuntimeBrokerID: true,
+		subscriberB.RuntimeBrokerID:    true,
+	}}
+	nd := NewNotificationDispatcher(env.store, env.pub, func() AgentDispatcher { return d }, slog.Default())
+	srv := &Server{store: env.store, agentLifecycleLog: slog.Default(), notificationDispatcher: nd}
+
+	a1 := createUndispatchedNotification(t, env, env.sub, 5*time.Minute)
+	b1 := createUndispatchedNotification(t, env, subB, 4*time.Minute)
+	a2 := createUndispatchedNotification(t, env, env.sub, 3*time.Minute)
+	c1 := createUndispatchedNotification(t, env, subC, 2*time.Minute)
+
+	// Budget for about 10 attempts: A and B cost one each, then C.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	srv.notificationDispatchSweepHandler()(ctx)
+
+	assert.Equal(t, 1, d.callsFor(env.subscriber.ID), "broker A must be attempted once")
+	assert.Equal(t, 1, d.callsFor(subscriberB.ID), "broker B must be attempted once")
+	assert.True(t, notificationDispatched(t, env, c1), "the healthy broker's notification must be delivered in the same pass")
+	for _, id := range []string{a1, b1, a2} {
+		assert.False(t, notificationDispatched(t, env, id), "unreachable brokers' notifications must stay undispatched")
+	}
+}
+
+// A broker call that runs out the attempt deadline (DeadlineExceeded rather
+// than deferral) also marks the broker unreachable for the rest of the pass.
+func TestSweepHandler_SkipsBrokerAfterAttemptDeadlineExceeded(t *testing.T) {
+	setRetryAttemptTimeout(t, 200*time.Millisecond)
+
+	env := setupNotificationTest(t)
+	d := &brokerDeferringDispatcher{blockBrokers: map[string]bool{
+		env.subscriber.RuntimeBrokerID: true,
+	}}
+	nd := NewNotificationDispatcher(env.store, env.pub, func() AgentDispatcher { return d }, slog.Default())
+	srv := &Server{store: env.store, agentLifecycleLog: slog.Default(), notificationDispatcher: nd}
+
+	a1 := createUndispatchedNotification(t, env, env.sub, 3*time.Minute)
+	a2 := createUndispatchedNotification(t, env, env.sub, 2*time.Minute)
+
+	srv.notificationDispatchSweepHandler()(context.Background())
+
+	assert.Equal(t, 1, d.callsFor(env.subscriber.ID), "a broker that timed out must be skipped for the rest of the pass")
+	assert.False(t, notificationDispatched(t, env, a1), "the timed-out notification must be reverted")
+	assert.False(t, notificationDispatched(t, env, a2), "the skipped notification must stay undispatched")
+}
+
+// The broker-connect drain goes through retryBatch too: once its broker is
+// found unreachable, the rest of the drain is skipped.
+func TestDrainUndispatchedNotifications_StopsAfterBrokerUnreachable(t *testing.T) {
+	setRetryAttemptTimeout(t, 200*time.Millisecond)
+
+	env := setupNotificationTest(t)
+	d := &brokerDeferringDispatcher{deferBrokers: map[string]bool{
+		env.subscriber.RuntimeBrokerID: true,
+	}}
+	nd := NewNotificationDispatcher(env.store, env.pub, func() AgentDispatcher { return d }, slog.Default())
+	srv := &Server{store: env.store, agentLifecycleLog: slog.Default(), notificationDispatcher: nd}
+
+	a1 := createUndispatchedNotification(t, env, env.sub, 3*time.Minute)
+	a2 := createUndispatchedNotification(t, env, env.sub, 2*time.Minute)
+
+	srv.drainUndispatchedNotifications(context.Background(), env.subscriber.RuntimeBrokerID)
+
+	assert.Equal(t, 1, d.callsFor(env.subscriber.ID), "the drain must stop attempting an unreachable broker")
+	assert.False(t, notificationDispatched(t, env, a1))
+	assert.False(t, notificationDispatched(t, env, a2))
 }
