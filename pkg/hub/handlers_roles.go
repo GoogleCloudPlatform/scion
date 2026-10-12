@@ -1323,7 +1323,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if err == nil && target.IsTestFixture() {
+		if err == nil && !target.IsHumanKind() {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
 				"a test identity cannot hold hub-level role bindings",
 				map[string]interface{}{"reason": "test_identity_hub_binding_forbidden"})
@@ -1446,6 +1446,8 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			RoleDefinitionID: req.RoleDefinitionID,
 			ScopeType:        req.ScopeType,
 			ScopeID:          req.ScopeID,
+			GranteeType:      req.PrincipalType,
+			GranteeID:        req.PrincipalID,
 		})
 		if !decision.Allowed {
 			writeForbiddenStructured(w, "cannot create binding: "+decision.Reason, "role_binding", Action("create"))

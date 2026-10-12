@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -1010,8 +1011,21 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// run's files and record a fresh nonce and mode. The agent runtime waits
 	// on these before pasting a buffered message. Failure only means the
 	// runtime falls back to its session-age check, so it is not fatal.
-	if _, err := writeInitRunFile(os.Getenv("SCION_HARNESS")); err != nil {
+	readyNonce, err := writeInitRunFile(os.Getenv("SCION_HARNESS"))
+	if err != nil {
 		log.Warn("Harness readiness: writing init-run file: %v", err)
+		readyNonce = ""
+	}
+	readyMode := hooks.HarnessReadyMode(os.Getenv("SCION_HARNESS"))
+	harnessLaunchedAt := time.Now()
+
+	// The conduit SSH server and its host key are prepared, and the first
+	// host key report attempted (bounded), before the harness starts.
+	var conduitSSH *sshd.Config
+	if hubClient != nil && hubClient.IsConfigured() && !opts.DisablePortForwarding {
+		conduitSSH = prepareConduitSSH(hubClient, !opts.DisableConduit,
+			conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
+			sshSessionEnv(config), os.Getenv)
 	}
 
 	// since_init_ms (not elapsed_ms, unlike the other sciontool init: lines
@@ -1035,6 +1049,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 	var tokenRefreshDone <-chan struct{}
 	var ghTokenRefreshCancel context.CancelFunc
 	var ghTokenRefreshDone <-chan struct{}
+	var readyWatchCancel context.CancelFunc
+	var readyWatchDone chan struct{}
 
 	// Wait a moment for process to start, then run post-start hooks
 	// Use a short timeout to detect immediate startup failures
@@ -1065,7 +1081,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 			hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			startedAtStr := time.Now().UTC().Format(time.RFC3339)
 			zeroCount := 0
-			s := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}
+			// The harness process is up but not yet known to read input:
+			// report initializing; the readiness watcher started below
+			// reports working once the harness is ready. Older hubs store
+			// the activity as given, and the legacy Status stays "running".
+			s := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityInitializing}
 			// startup_ms (elapsed since sciontool init started) rides in
 			// Metadata rather than a new StatusUpdate field: it is
 			// observability only, read by the hub purely for a log line,
@@ -1073,7 +1093,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			startupMs := strconv.FormatInt(time.Since(initStart).Milliseconds(), 10)
 			if err := hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
 				Phase:             state.PhaseRunning,
-				Activity:          state.ActivityWorking,
+				Activity:          state.ActivityInitializing,
 				Status:            s.DisplayStatus(),
 				Message:           "Agent started",
 				StartedAt:         startedAtStr,
@@ -1086,7 +1106,40 @@ func RunInit(args []string, opts InitRunOptions) int {
 				log.Info("Reported running status to Hub (startedAt=%s)", startedAtStr)
 			}
 			hubCancel()
+		}
 
+		// Start the readiness watcher after the initializing report has
+		// returned, so a ready marker that already exists tells the
+		// watcher the hook may have reported before it (see
+		// watchHarnessReady). It never blocks init.
+		readyCfg := readyWatchConfig{
+			Nonce:         readyNonce,
+			Mode:          readyMode,
+			Start:         harnessLaunchedAt,
+			MarkerReady:   harnessReadyMarkerMatches,
+			LocalActivity: statusHandler.CurrentActivity,
+			ReplaceLocal:  statusHandler.ReplaceActivityIf,
+		}
+		if hubClient != nil && hubClient.IsConfigured() {
+			readyCfg.Report = func(ctx context.Context, activity state.Activity, message string) error {
+				as := state.AgentState{Phase: state.PhaseRunning, Activity: activity}
+				return hubClient.UpdateStatus(ctx, hub.StatusUpdate{
+					Phase:    state.PhaseRunning,
+					Activity: activity,
+					Status:   as.DisplayStatus(),
+					Message:  message,
+				})
+			}
+		}
+		var readyWatchCtx context.Context
+		readyWatchCtx, readyWatchCancel = context.WithCancel(context.Background())
+		readyWatchDone = make(chan struct{})
+		go func() {
+			defer close(readyWatchDone)
+			watchHarnessReady(readyWatchCtx, readyCfg)
+		}()
+
+		if hubClient != nil && hubClient.IsConfigured() {
 			// Start heartbeat loop in background
 			var heartbeatCtx context.Context
 			heartbeatCtx, heartbeatCancel = context.WithCancel(context.Background())
@@ -1111,7 +1164,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			} else {
 				go newPortForwarding(hubClient, opts.DisableConduit,
 					conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
-					sshSessionEnv(config), os.Getenv).run(ctx)
+					conduitSSH, os.Getenv).run(ctx)
 
 				// Auto-expose: detect and register listening ports
 				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
@@ -1356,6 +1409,14 @@ waitLoop:
 			result = <-exitChan
 			break waitLoop
 		}
+	}
+
+	// Stop the readiness watcher first so it cannot report working after
+	// the harness has exited.
+	if readyWatchCancel != nil {
+		readyWatchCancel()
+		<-readyWatchDone
+		log.Debug("Harness readiness watcher stopped")
 	}
 
 	// Stop token refresh loops and heartbeat before reporting shutdown status to prevent races
