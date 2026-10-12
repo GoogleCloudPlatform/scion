@@ -54,9 +54,11 @@ type ConnectionConfig struct {
 // ConnectionConfig.HandshakeTimeout is zero.
 const DefaultHandshakeTimeout = 30 * time.Second
 
-// pastDeadline is a deadline that has already passed: setting it on a
-// connection fails its pending and future reads and writes at once.
-var pastDeadline = time.Unix(1, 0)
+// afterRawDial, when set, runs with each connection DialWithConfig dials,
+// after the connection's cancellation is armed and before the websocket
+// dialer continues with it. It is nil in production; tests set it to hold
+// the window between the dial and the dialer's own handshake deadline.
+var afterRawDial func(net.Conn)
 
 // DefaultConnectionConfig returns the default connection configuration.
 func DefaultConnectionConfig() ConnectionConfig {
@@ -348,11 +350,11 @@ func DialWithConfig(ctx context.Context, url string, headers http.Header, config
 	// The websocket dialer honours ctx for the TCP dial but not for the
 	// handshake that follows on the connection. So the connection is
 	// dialled here, and a cancellation of ctx (the caller's context, which
-	// outlives the dial) sets a past deadline on it, failing a pending
-	// handshake read or write at once.
+	// outlives the dial) closes it, failing a pending handshake read or
+	// write, and the dialer's own later deadline set, at once. A close
+	// cannot be undone by the dialer, unlike a deadline.
 	var (
 		mu   sync.Mutex
-		raw  net.Conn
 		stop func() bool
 	)
 	dialer := websocket.Dialer{
@@ -365,38 +367,36 @@ func DialWithConfig(ctx context.Context, url string, headers http.Header, config
 				return nil, err
 			}
 			mu.Lock()
-			raw = c
-			stop = context.AfterFunc(ctx, func() { _ = c.SetDeadline(pastDeadline) })
+			stop = context.AfterFunc(ctx, func() { _ = c.Close() })
 			mu.Unlock()
+			if afterRawDial != nil {
+				afterRawDial(c)
+			}
 			return c, nil
 		},
 	}
 
 	conn, resp, err := dialer.DialContext(ctx, url, headers)
 	mu.Lock()
-	rawConn, stopCancel := raw, stop
+	stopCancel := stop
 	mu.Unlock()
 	if err != nil {
 		if stopCancel != nil {
 			stopCancel()
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			// A cancelled dial reports the cancellation, not the deadline
-			// error the past deadline caused; both stay reachable through
+			// A cancelled dial reports the cancellation, not the error the
+			// closed connection caused; both stay reachable through
 			// errors.Is and errors.As.
 			return nil, resp, fmt.Errorf("%w: %w", ctxErr, err)
 		}
 		return nil, resp, err
 	}
 	if stopCancel != nil && !stopCancel() {
-		// ctx was cancelled as the handshake completed: the connection may
-		// carry the past deadline, so it is closed rather than returned.
+		// ctx was cancelled as the handshake completed: the cancellation
+		// may have closed the connection, so it is closed and not returned.
 		_ = conn.Close()
-		return nil, nil, ctx.Err()
-	}
-	if rawConn != nil {
-		// No deadline set while dialling stays on the returned connection.
-		_ = rawConn.SetDeadline(time.Time{})
+		return nil, nil, fmt.Errorf("websocket dial: %w", ctx.Err())
 	}
 
 	return NewConnection(conn, config), resp, nil

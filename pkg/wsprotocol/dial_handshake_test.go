@@ -19,7 +19,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -108,7 +107,7 @@ func TestDialWithConfig_CancelEndsUnansweredHandshake(t *testing.T) {
 	cancel()
 	r := waitDial(t, done, "the dial to end after its context was cancelled")
 	require.ErrorIs(t, r.err, context.Canceled, "a cancelled dial reports the cancellation")
-	require.ErrorIs(t, r.err, os.ErrDeadlineExceeded, "the transport error stays reachable")
+	require.ErrorIs(t, r.err, net.ErrClosed, "the transport error stays reachable")
 	require.Nil(t, r.conn)
 }
 
@@ -219,3 +218,34 @@ func TestDialWithConfig_ConnectionOutlivesItsDialContext(t *testing.T) {
 type errUnexpected string
 
 func (e errUnexpected) Error() string { return "unexpected message " + string(e) }
+
+// TestDialWithConfig_CancelBeforeDialerDeadlineEndsDial: a cancellation that
+// lands after the connection is dialled but before the websocket dialer sets
+// its own handshake deadline on it still ends the dial at once; the dialer
+// cannot undo it. The seam holds that window: it cancels, then waits until
+// the cancellation has acted on the connection, before the dialer goes on.
+func TestDialWithConfig_CancelBeforeDialerDeadlineEndsDial(t *testing.T) {
+	addr, _ := silentListener(t)
+	cfg := DefaultConnectionConfig()
+	cfg.HandshakeTimeout = time.Hour // only the cancellation can end it
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	afterRawDial = func(c net.Conn) {
+		cancel()
+		// Returns once the cancellation has acted on c (the silent server
+		// sends nothing, so nothing else ends this read).
+		_, _ = c.Read(make([]byte, 1))
+	}
+	t.Cleanup(func() { afterRawDial = nil })
+
+	done := make(chan dialResult, 1)
+	go func() {
+		c, _, err := DialWithConfig(ctx, "ws://"+addr+"/", nil, cfg)
+		done <- dialResult{c, err}
+	}()
+	r := waitDial(t, done, "the dial to end after a cancel before the dialer's deadline")
+	require.ErrorIs(t, r.err, context.Canceled)
+	require.ErrorIs(t, r.err, net.ErrClosed)
+	require.Nil(t, r.conn)
+}
