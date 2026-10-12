@@ -133,7 +133,7 @@ func waitForAgentAcceptsInput(ctx context.Context, opts waitReadyOptions) (ready
 				if status == "" {
 					status = p.Phase
 				}
-				fmt.Fprintf(opts.Progress, "Waiting for agent '%s' to accept input (%s)...\n", opts.AgentName, status)
+				_, _ = fmt.Fprintf(opts.Progress, "Waiting for agent '%s' to accept input (%s)...\n", opts.AgentName, status)
 				announced = true
 			}
 		}
