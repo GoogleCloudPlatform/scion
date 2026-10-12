@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"net"
 	"os"
@@ -316,9 +317,15 @@ func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
 // structured slog.Warn with path and kind, then a slog.Debug repeat.
 func TestUpdateDefaultSlogBranch(t *testing.T) {
 	rec := &recordingHandler{}
-	prev := slog.Default()
+	// slog.SetDefault with a non-default handler also redirects the log
+	// package, so its output and flags are restored too.
+	prev, prevOut, prevFlags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(rec))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
 
 	info := filepath.Join(t.TempDir(), "agent-info.json")
 	lock := LockPath(info)

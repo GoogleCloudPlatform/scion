@@ -106,7 +106,8 @@ func (o Options) logf(format string, args ...any) {
 
 // What is wrong with an unusable lock file. Each is the start of a fixed
 // message (see unusableMsg), so a structured backend can match it; the kind,
-// path and error go in attributes.
+// path and error go in attributes. Every problem must also be listed in
+// problems, or clearWarned will not re-arm its warning.
 const (
 	problemNotRegular = "agent-info lock file is not a single-link regular file"
 	problemCannotOpen = "agent-info lock file cannot be opened"
@@ -123,7 +124,8 @@ func unusableMsg(problem string) string {
 // warned records which (lock path, problem) pairs were already reported at
 // Warn in this process. clearWarned drops a path's entries once its lock is
 // taken, so the Warn re-arms if the lock file breaks again later. It holds
-// at most one entry per problem per lock path that is unusable right now.
+// at most one entry per problem for each lock path that has been unusable
+// since its last successful lock.
 var warned sync.Map
 
 func warnedKey(lockPath, problem string) string {
