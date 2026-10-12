@@ -814,25 +814,30 @@ func (s *Settings) IsHubConfigured() bool {
 	return s.Hub != nil && s.Hub.Endpoint != ""
 }
 
-// IsHubEnabled returns true if Hub integration is enabled.
-// Hub is considered enabled when:
-//  1. Hub credentials (token or apiKey) AND an endpoint are present.
-//     Credentials imply intent to use the hub and override any
-//     hub.enabled setting from config files. OR
-//  2. hub.enabled is explicitly set to true (without credentials).
-//
-// This allows users with SCION_HUB_TOKEN and SCION_HUB_ENDPOINT env vars
-// to interact with the hub without requiring an explicit hub.enabled=true,
-// even if a stale hub.enabled=false exists in a settings file.
+// HubEndpoint returns the configured Hub endpoint (settings, with the
+// SCION_HUB_ENDPOINT overlay applied by the loader), or "" when none is set.
+func (s *Settings) HubEndpoint() string {
+	return s.GetHubEndpoint()
+}
+
+// HasHubEndpoint reports whether a Hub endpoint is configured. A configured
+// endpoint is what makes the CLI use a hub; the deprecated hub.enabled
+// setting is not read for that.
+func (s *Settings) HasHubEndpoint() bool {
+	return s.HubEndpoint() != ""
+}
+
+// IsHubEnabled reports the legacy hub.enabled switch: credentials plus an
+// endpoint, or hub.enabled=true. Deprecated: the CLI no longer reads it
+// (use HasHubEndpoint); it remains only for the agent manager's non-broker
+// start path, which is removed with the local-mode engine cleanup.
 func (s *Settings) IsHubEnabled() bool {
 	if s.Hub == nil {
 		return false
 	}
-	// Credentials + endpoint present: always enabled (env vars override config)
 	if s.Hub.Endpoint != "" && (s.Hub.Token != "" || s.Hub.APIKey != "") {
 		return true
 	}
-	// Fall back to explicit hub.enabled setting
 	return s.Hub.Enabled != nil && *s.Hub.Enabled
 }
 
@@ -846,12 +851,6 @@ func (s *Settings) IsHubLinked() bool {
 // Returns false if not configured (nil) or enabled.
 func (s *Settings) IsHubExplicitlyDisabled() bool {
 	return s.Hub != nil && s.Hub.Enabled != nil && !*s.Hub.Enabled
-}
-
-// IsHubLocalOnly returns true if the project is configured for local-only mode.
-// When true, Hub sync checks will error with guidance to use --no-hub.
-func (s *Settings) IsHubLocalOnly() bool {
-	return s.Hub != nil && s.Hub.LocalOnly != nil && *s.Hub.LocalOnly
 }
 
 // DeleteHubConnection removes a hub connection entry from settings at the specified scope.

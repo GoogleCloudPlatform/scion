@@ -117,7 +117,7 @@ func unregisteredHub(t *testing.T, projectID string) (*httptest.Server, *atomic.
 	return server, &registers
 }
 
-// setupUnregisteredGlobalProject writes hub-enabled global settings for
+// setupUnregisteredGlobalProject writes global settings for
 // projectID and moves into HOME so the global project is resolved.
 func setupUnregisteredGlobalProject(t *testing.T, home, projectID string) {
 	t.Helper()
@@ -125,7 +125,7 @@ func setupUnregisteredGlobalProject(t *testing.T, home, projectID string) {
 	if err := os.MkdirAll(globalDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	settings := fmt.Sprintf("project_id: %s\nhub:\n  enabled: true\n", projectID)
+	settings := fmt.Sprintf("project_id: %s\n", projectID)
 	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -136,14 +136,14 @@ func TestEnsureHubReady_AutoLinkLocal(t *testing.T) {
 	const projectID = "autolink-project-id"
 	tests := []struct {
 		name          string
-		autoLinkLocal bool
 		hubToken      string
 		wantRegisters int32
 		wantPrompt    bool
 	}{
-		{name: "local workstation hub links without prompting", autoLinkLocal: true, wantRegisters: 1},
-		{name: "option off keeps the prompt", autoLinkLocal: false, wantPrompt: true},
-		{name: "non-dev credential on loopback keeps the prompt", autoLinkLocal: true, hubToken: "bearer-xyz", wantPrompt: true},
+		// Auto-link on the local hub is unconditional: no option and no
+		// hub.enabled setting is needed.
+		{name: "local workstation hub links without prompting", wantRegisters: 1},
+		{name: "non-dev credential on loopback keeps the prompt", hubToken: "bearer-xyz", wantPrompt: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,8 +157,6 @@ func TestEnsureHubReady_AutoLinkLocal(t *testing.T) {
 
 			hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 				EndpointOverride: server.URL,
-				SkipSync:         true,
-				AutoLinkLocal:    tc.autoLinkLocal,
 			})
 
 			prompted := strings.Contains(out.String(), "Link project with Hub?")

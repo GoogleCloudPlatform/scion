@@ -1121,14 +1121,3 @@ func TestVersionedSettings_IsHubExplicitlyDisabled(t *testing.T) {
 	vs.Hub.Enabled = boolPtr(false)
 	assert.True(t, vs.IsHubExplicitlyDisabled())
 }
-
-func TestVersionedSettings_IsHubLocalOnly(t *testing.T) {
-	vs := &VersionedSettings{}
-	assert.False(t, vs.IsHubLocalOnly())
-
-	vs.Hub = &V1HubClientConfig{}
-	assert.False(t, vs.IsHubLocalOnly())
-
-	vs.Hub.LocalOnly = boolPtr(true)
-	assert.True(t, vs.IsHubLocalOnly())
-}

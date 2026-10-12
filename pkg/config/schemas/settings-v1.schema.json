@@ -129,7 +129,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "description": "Enable Hub integration.",
+          "description": "Deprecated and ignored: accepted so existing settings files still load. Local-only mode was removed; a configured hub.endpoint is what makes scion use a hub.",
           "x-env-var": "SCION_HUB_ENABLED",
           "x-since": "1"
         },
@@ -153,7 +153,7 @@
         },
         "local_only": {
           "type": "boolean",
-          "description": "Operate in local-only mode even when Hub is configured.",
+          "description": "Deprecated and ignored: accepted so existing settings files still load. Local-only mode was removed.",
           "x-env-var": "SCION_HUB_LOCAL_ONLY",
           "x-since": "1"
         },

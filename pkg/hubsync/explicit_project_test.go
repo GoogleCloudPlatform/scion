@@ -264,7 +264,7 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 				flag = resolved
 			}
 
-			hubCtx, err := EnsureHubReady(flag, EnsureHubReadyOptions{AutoConfirm: true, SkipSync: true, ExplicitProject: explicit})
+			hubCtx, err := EnsureHubReady(flag, EnsureHubReadyOptions{AutoConfirm: true, ExplicitProject: explicit})
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("EnsureHubReady(%q) error = %v, want containing %q", flag, err, tc.wantErr)

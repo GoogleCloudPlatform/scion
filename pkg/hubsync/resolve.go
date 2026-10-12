@@ -87,31 +87,20 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 		return nil, fmt.Errorf("failed to load settings from fallback project: %w", err)
 	}
 
-	debugf("resolveHubProjectRef: hub=%v, hubConfigured=%v, hubEnabled=%v, hubExplicitlyDisabled=%v",
-		settings.Hub != nil, settings.IsHubConfigured(), settings.IsHubEnabled(), settings.IsHubExplicitlyDisabled())
-	if settings.Hub != nil {
-		hasToken := settings.Hub.Token != ""
-		hasAPIKey := settings.Hub.APIKey != ""
-		hasEndpoint := settings.Hub.Endpoint != ""
-		enabledPtr := "<nil>"
-		if settings.Hub.Enabled != nil {
-			enabledPtr = fmt.Sprintf("%v", *settings.Hub.Enabled)
-		}
-		debugf("resolveHubProjectRef: hub.enabled=%s, hub.endpoint=%v, hub.hasToken=%v, hub.hasAPIKey=%v",
-			enabledPtr, hasEndpoint, hasToken, hasAPIKey)
-	}
-
-	if !settings.IsHubEnabled() {
-		return nil, fmt.Errorf("hub project references (slugs, names, git URLs) require hub mode to be enabled\n\n" +
-			"Enable with: scion hub enable")
-	}
+	debugf("resolveHubProjectRef: hub=%v, hubConfigured=%v", settings.Hub != nil, settings.IsHubConfigured())
 
 	endpoint := opts.EndpointOverride
 	if endpoint == "" {
 		endpoint = getEndpoint(settings)
 	}
 	if endpoint == "" {
-		return nil, fmt.Errorf("hub is enabled but no endpoint configured\n\nConfigure via: scion config set hub.endpoint <url>")
+		endpoint = os.Getenv("SCION_HUB_ENDPOINT")
+		if endpoint == "" {
+			endpoint = os.Getenv("SCION_HUB_URL")
+		}
+	}
+	if endpoint == "" {
+		return nil, ErrHubNotConfigured
 	}
 
 	client, credentialKind, err := createHubClient(settings, endpoint)
@@ -124,7 +113,7 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 	defer cancel()
 
 	if _, err := client.Health(ctx); err != nil {
-		return nil, wrapHubError(endpoint, fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
+		return nil, hubUnreachableError(endpoint, err)
 	}
 
 	// Resolve the project on the hub

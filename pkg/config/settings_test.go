@@ -920,3 +920,28 @@ func TestUpdateSetting_SplitStorageWritesToExternalDir(t *testing.T) {
 		t.Errorf("expected hub.enabled=true from effective settings, got false")
 	}
 }
+
+func TestSettingsHasHubEndpoint(t *testing.T) {
+	disabled := false
+	tests := []struct {
+		name string
+		s    *Settings
+		want bool
+	}{
+		{"no hub section", &Settings{}, false},
+		{"empty endpoint", &Settings{Hub: &HubClientConfig{}}, false},
+		{"endpoint set", &Settings{Hub: &HubClientConfig{Endpoint: "http://127.0.0.1:8080"}}, true},
+		// hub.enabled is deprecated and ignored: an endpoint is enough.
+		{"endpoint with stale enabled=false", &Settings{Hub: &HubClientConfig{Endpoint: "https://hub.example.com", Enabled: &disabled}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.s.HasHubEndpoint(); got != tt.want {
+				t.Errorf("HasHubEndpoint() = %v, want %v", got, tt.want)
+			}
+			if got := tt.s.HubEndpoint() != ""; got != tt.want {
+				t.Errorf("HubEndpoint() non-empty = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

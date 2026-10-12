@@ -97,8 +97,6 @@ func TestEnsureHubReady_UnlinkedProjectRefuses(t *testing.T) {
 
 			hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 				EndpointOverride: server.URL,
-				SkipSync:         true,
-				AutoLinkLocal:    true,
 				AutoConfirm:      true,
 			})
 			if !errors.Is(err, ErrProjectUnlinked) {
@@ -132,7 +130,7 @@ func TestEnsureHubReady_UnlinkRelinkRoundTrip(t *testing.T) {
 	setupUnregisteredGlobalProject(t, home, projectID)
 	globalDir := filepath.Join(home, ".scion")
 	withPromptIO(t, strings.NewReader(""), false)
-	opts := EnsureHubReadyOptions{EndpointOverride: server.URL, SkipSync: true, AutoLinkLocal: true}
+	opts := EnsureHubReadyOptions{EndpointOverride: server.URL}
 
 	// Linked: works.
 	if err := config.UpdateSetting(globalDir, "hub.linked", "true", true); err != nil {
@@ -171,7 +169,7 @@ func TestEnsureHubReady_UnlinkedSkippedInHubContainer(t *testing.T) {
 	unlinkGlobalProject(t, filepath.Join(home, ".scion"))
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	if _, err := EnsureHubReady("", EnsureHubReadyOptions{SkipSync: true}); errors.Is(err, ErrProjectUnlinked) {
+	if _, err := EnsureHubReady("", EnsureHubReadyOptions{}); errors.Is(err, ErrProjectUnlinked) {
 		t.Fatalf("hub-connected container got ErrProjectUnlinked")
 	}
 }
@@ -292,8 +290,6 @@ func TestEnsureHubReady_UnlinkedSplitStorageProject(t *testing.T) {
 
 	_, err := EnsureHubReady("", EnsureHubReadyOptions{
 		EndpointOverride: server.URL,
-		SkipSync:         true,
-		AutoLinkLocal:    true,
 		AutoConfirm:      true,
 	})
 	if !errors.Is(err, ErrProjectUnlinked) {
@@ -310,7 +306,7 @@ func TestEnsureHubReady_UnlinkedSplitStorageProject(t *testing.T) {
 	if err := config.UpdateSetting(scionDir, "hub.linked", "true", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: server.URL, SkipSync: true, AutoLinkLocal: true}); err != nil {
+	if _, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: server.URL}); err != nil {
 		t.Fatalf("after re-link: %v", err)
 	}
 }

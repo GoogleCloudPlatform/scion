@@ -1077,11 +1077,6 @@ func (vs *VersionedSettings) IsHubExplicitlyDisabled() bool {
 	return vs.Hub != nil && vs.Hub.Enabled != nil && !*vs.Hub.Enabled
 }
 
-// IsHubLocalOnly returns true if the project is configured for local-only mode.
-func (vs *VersionedSettings) IsHubLocalOnly() bool {
-	return vs.Hub != nil && vs.Hub.LocalOnly != nil && *vs.Hub.LocalOnly
-}
-
 // IsImageRegistryConfigured returns true if image_registry is set at any level
 // (top-level or in any profile).
 func (vs *VersionedSettings) IsImageRegistryConfigured(profileName string) bool {
