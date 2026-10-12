@@ -76,9 +76,16 @@ func setupUseTest(t *testing.T) (*httptest.Server, *atomic.Int32) {
 }
 
 // runScion runs the root command with args and returns stdout, stderr and
-// the error.
+// the error. Each run starts like a fresh process: the hub and project the
+// hook filled in an earlier run are cleared (see resetContextTargets).
 func runScion(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
+	resetContextTargets()
+	for _, name := range []string{"hub", "project"} {
+		if f := rootCmd.PersistentFlags().Lookup(name); f != nil {
+			f.Changed = false
+		}
+	}
 	outputFormat = ""
 	for _, c := range []*cobra.Command{useCmd, projectUseCmd} {
 		for _, name := range []string{"clear", "force"} {
@@ -409,4 +416,25 @@ func TestUseSelectProject_EnvHubNote(t *testing.T) {
 	assert.Contains(t, stderr, "Note: selected on the hub from SCION_HUB_ENDPOINT; it is now the current hub.")
 	assert.NotContains(t, stderr, "overrides the current hub")
 	assert.Equal(t, "local", readTestContext(t).CurrentHub)
+}
+
+// TestUseShow_RepeatedRunsKeepContextSource: bare 'scion use' run several
+// times in one process (each run starting like a fresh process) reports the
+// hub and project from the current context every time.
+func TestUseShow_RepeatedRunsKeepContextSource(t *testing.T) {
+	srv, _ := setupUseTest(t)
+	_, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		stdout, _, err := runScion(t, "use", "--format", "json")
+		require.NoError(t, err)
+		var got useShowJSON
+		require.NoError(t, json.Unmarshal([]byte(stdout), &got), stdout)
+		assert.Equal(t, "context", got.Effective.Hub.Source, "run %d", i+1)
+		assert.Equal(t, srv.URL, got.Effective.Hub.Endpoint, "run %d", i+1)
+		assert.Equal(t, "context", got.Effective.Project.Source, "run %d", i+1)
+		stdout, _, err = runScion(t, "use")
+		require.NoError(t, err)
+		assert.Contains(t, stdout, "(current context)", "run %d", i+1)
+	}
 }

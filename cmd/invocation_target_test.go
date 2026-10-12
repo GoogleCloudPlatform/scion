@@ -31,6 +31,17 @@ const (
 	ctxTestProjectID = "1dfdd6c7-0000-4000-8000-000000000001"
 )
 
+// resetContextTargets clears what resolveInvocationTarget fills or records
+// (and the --project value it fills), as a fresh process would have them.
+// Cobra does not reset package flag variables between in-process
+// executions, so a value the hook filled in one execution would otherwise
+// look like a --hub or --project flag in the next.
+func resetContextTargets() {
+	hubEndpoint, projectPath = "", ""
+	hubSource, projectSource, contextProjectID = "", "", ""
+	contextWarned = false
+}
+
 // setupContextTest isolates a test of the current context: a fresh HOME, a
 // working directory outside any project, human mode, no hub or agent
 // variables from the environment, and the root flag variables (including
@@ -42,8 +53,8 @@ func setupContextTest(t *testing.T) string {
 	origHubEndpoint := hubEndpoint
 	origUseClear, origUseForce := useClear, useForce
 	t.Cleanup(func() {
+		resetContextTargets()
 		hubEndpoint = origHubEndpoint
-		hubSource, projectSource, contextProjectID = "", "", ""
 		useClear, useForce = origUseClear, origUseForce
 	})
 	for _, name := range []string{
@@ -54,8 +65,7 @@ func setupContextTest(t *testing.T) string {
 	}
 	t.Setenv("SCION_CLI_MODE", string(ModeHuman))
 	noHub = false
-	hubEndpoint = ""
-	hubSource, projectSource, contextProjectID = "", "", ""
+	resetContextTargets()
 	useClear, useForce = false, false
 	return os.Getenv("HOME")
 }
