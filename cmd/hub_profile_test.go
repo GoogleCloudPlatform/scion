@@ -456,6 +456,15 @@ func TestHubProfile_ReadsNoLocalProjectSettings(t *testing.T) {
 	r, err := runProfileRoot(t, "--hub-profile", "t1", "hub", "test-identity", "list")
 	require.NoError(t, err, "with a profile the unreadable local settings are never read: %s", r.stderr)
 	assert.Contains(t, r.stdout, "No test identities.")
+
+	// hub projects reaches the target through loadHubClient (the shared
+	// helper of the general hub commands): it must not read the settings
+	// either.
+	r, err = runProfileRoot(t, "--hub-profile", "t1", "hub", "test-identity", "issue", "--as", "owner", "--run", "r1")
+	require.NoError(t, err, r.stderr)
+	r, err = runProfileRoot(t, "--hub-profile", "t1", "hub", "projects", "--as", "owner", "--run", "r1")
+	require.NoError(t, err, "hub projects with a profile must not read the unreadable local settings: %s", r.stderr)
+	assert.Contains(t, r.stdout, "No projects found")
 }
 
 // artifact commands under a profile build the client from the profile and
