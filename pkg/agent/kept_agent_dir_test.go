@@ -405,3 +405,32 @@ func TestResolveKeptAgentDirRetention(t *testing.T) {
 		t.Fatalf("invalid: got %v, want the default %v", got, keptAgentDirDefaultRetention)
 	}
 }
+
+// When a dir with a populated home and an agent record is adopted (a config
+// file is written from the record), a marker from an earlier keep is
+// removed, so a later loss of the config cannot reuse its keptAt.
+func TestHandleAgentDirWithoutConfig_AdoptionRemovesMarker(t *testing.T) {
+	keptTestRetention(t, time.Hour)
+	now := keptTestClock(t)
+	base := t.TempDir()
+	agentDir := filepath.Join(base, "agents", "a")
+	agentHome := filepath.Join(base, "external", "a", "home")
+	for _, d := range []string{agentDir, agentHome} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMarkerT(t, agentDir, now.Add(-2*time.Hour))
+	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
+		[]byte(`{"name":"a","template":"default","harnessConfig":"generic"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, filepath.Join(agentDir, "workspace")); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, "scion-agent.json")); err != nil {
+		t.Fatalf("expected the adopted dir to have a config file: %v", err)
+	}
+	requireRemoved(t, filepath.Join(agentDir, keptAgentDirMarker))
+}

@@ -140,6 +140,16 @@ func recordKeptAgentDir(agentName, agentDir, reason string) {
 	}
 }
 
+// clearKeptAgentDirMarker removes the marker from agentDir, for a dir that
+// has become a live agent again. A missing marker is not an error; other
+// failures are logged.
+func clearKeptAgentDirMarker(agentName, agentDir string) {
+	if err := os.Remove(filepath.Join(agentDir, keptAgentDirMarker)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		slog.Warn("GetAgent: could not remove the kept agent directory marker",
+			"agent", agentName, "agent_dir", agentDir, "error", err)
+	}
+}
+
 // readKeptAgentDirRecord reads the marker in agentDir. It reports false
 // when there is none, it is not a regular file, or it cannot be parsed.
 func readKeptAgentDirRecord(agentDir string) (keptAgentDirRecord, bool) {
