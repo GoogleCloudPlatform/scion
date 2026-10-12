@@ -906,9 +906,9 @@ Provision(ctx context.Context, req *ProvisionUserRequest) (*ProvisionUserRespons
 Mode availability (`AGENTS.md:92`, `.design/cli-modes.md`, `cmd/cli_mode.go`):
 
 - **Agent mode:** unavailable automatically, because `hub` is not in `agentAllowed`.
-- **Assistant mode:** since removed from the CLI, which now has only human mode and agent mode, so
-  the command is available in human mode (and still absent in agent mode). While assistant mode
-  existed, the command was proposed available there, because `hub.users` was not in
+- **Assistant mode:** has since been removed from the CLI, which now has only human mode and agent
+  mode, so the command is available in human mode (and still absent in agent mode). While assistant
+  mode existed, the command was proposed available there, because `hub.users` was not in
   `assistantDenied`. The command is not interactive and not credential lifecycle. Its closest
   equivalent is `hub allow-list add EMAIL` (`cmd/hub_allow_list.go:55`), which creates the same
   `invited` record and which assistants could already run. `scion hub invite` (`cmd/hub_invite.go:36`) is a different flow:
