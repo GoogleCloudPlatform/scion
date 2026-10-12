@@ -15,7 +15,13 @@
 package telegram
 
 import (
+	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,12 +89,53 @@ func TestV2_Reconfigure_WebhookToPollDeletesWebhookAndPolls(t *testing.T) {
 	waitPolling(t, tgSrv)
 }
 
-// Switching from poll mode to webhook mode stops the poll loop; it has
-// exited by the time Configure returns.
+// Switching from poll mode to webhook mode stops the poll loop and waits for
+// it: while a polled update's handler is still running, Configure does not
+// return; once the handler finishes, the loop has exited when Configure
+// returns.
 func TestV2_Reconfigure_PollToWebhookStopsPollLoop(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
+	g := newGatedTelegram(t, tgSrv)
 	b := NewV2(slog.Default())
 	defer b.Close()
+	defer g.unblock()
+
+	pollCfg := validPollConfig(t, tgSrv)
+	pollCfg["api_base_url"] = g.srv.URL
+	require.NoError(t, b.Configure(pollCfg))
+
+	u := dmUpdate()
+	g.pending.Store(&u)
+	g.armed.Store(true)
+	require.NoError(t, b.Subscribe("scion.project.proj-1.>"))
+	g.waitHeld(t) // the polled update's handler is now held
+	_, done := pollState(b)
+
+	webhookCfg := validWebhookConfig(t, tgSrv)
+	webhookCfg["api_base_url"] = g.srv.URL
+	configured := make(chan error, 1)
+	go func() { configured <- b.Configure(webhookCfg) }()
+
+	assert.Never(t, func() bool { return len(configured) > 0 }, 300*time.Millisecond, 10*time.Millisecond,
+		"the switch to webhook mode must wait for the poll loop's running handler")
+
+	g.unblock()
+	select {
+	case err := <-configured:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "Configure did not return after the handler finished")
+	}
+	assertClosed(t, done, "the poll loop must have exited when the switch to webhook mode returns")
+	running, _ := pollState(b)
+	assert.False(t, running, "webhook mode must not keep a poll loop")
+}
+
+// Close after a switch from poll mode to webhook mode leaves no poll loop
+// (the issue's webhook-mode Close case).
+func TestV2_Close_AfterPollToWebhookLeavesNoPollLoop(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := NewV2(slog.Default())
 
 	require.NoError(t, b.Configure(validPollConfig(t, tgSrv)))
 	require.NoError(t, b.Subscribe("scion.project.proj-1.>"))
@@ -96,13 +143,17 @@ func TestV2_Reconfigure_PollToWebhookStopsPollLoop(t *testing.T) {
 	_, done := pollState(b)
 
 	require.NoError(t, b.Configure(validWebhookConfig(t, tgSrv)))
+	require.NoError(t, b.Close())
 
-	assertClosed(t, done, "the poll loop must have exited when the switch to webhook mode returns")
+	assertClosed(t, done, "no poll loop may be left after Close in webhook mode")
 	running, _ := pollState(b)
-	assert.False(t, running, "webhook mode must not keep a poll loop")
+	assert.False(t, running, "no poll loop may be left after Close")
 }
 
-// Close stops the poll loop; it has exited by the time Close returns.
+// Close stops the poll loop; it has exited by the time Close returns. Close
+// in poll mode already stopped polling before the inbound-mode fix, so this
+// test passes without it; it guards the stopPolling call in Close, which now
+// runs in either mode.
 func TestV2_Close_StopsPollLoop(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	b := NewV2(slog.Default())
@@ -117,4 +168,83 @@ func TestV2_Close_StopsPollLoop(t *testing.T) {
 	assertClosed(t, done, "the poll loop must have exited when Close returns")
 	running, _ := pollState(b)
 	assert.False(t, running, "no poll loop may be left after Close")
+}
+
+// multiBotTelegram is a fake Telegram API that answers for any bot
+// credential and counts deleteWebhook calls per credential.
+type multiBotTelegram struct {
+	srv *httptest.Server
+
+	mu            sync.Mutex
+	deleteWebhook map[string]int
+}
+
+func newMultiBotTelegram(t *testing.T) *multiBotTelegram {
+	t.Helper()
+	f := &multiBotTelegram{deleteWebhook: make(map[string]int)}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, method, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, "/bot"), "/")
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var result any = true
+		switch method {
+		case "getMe":
+			result = BotUser{ID: 100, IsBot: true, FirstName: "TestBot", Username: "test_bot"}
+		case "getUpdates":
+			select {
+			case <-time.After(20 * time.Millisecond):
+			case <-r.Context().Done():
+				return
+			}
+			result = []Update{}
+		case "deleteWebhook":
+			f.mu.Lock()
+			f.deleteWebhook[token]++
+			f.mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, result)})
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+// deleteWebhookCalls returns the deleteWebhook calls made with token.
+func (f *multiBotTelegram) deleteWebhookCalls(token string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deleteWebhook[token]
+}
+
+// When one reconfigure changes both the bot credential and the mode from
+// webhook to poll, the webhook is removed through the bot that registered
+// it, not the new one.
+func TestV2_Reconfigure_WebhookToPollWithNewBotDeletesOldWebhook(t *testing.T) {
+	f := newMultiBotTelegram(t)
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	require.NoError(t, b.Configure(map[string]string{
+		"bot_token":      "old-token",
+		"api_base_url":   f.srv.URL,
+		"hub_url":        "http://hub.test",
+		"db_path":        filepath.Join(t.TempDir(), "test.db"),
+		"inbound_mode":   "webhook",
+		"webhook_url":    "https://example.com/telegram/webhook",
+		"webhook_listen": "127.0.0.1:0",
+		"webhook_secret": "test-secret",
+	}))
+	require.NoError(t, b.Configure(map[string]string{
+		"bot_token":    "new-token",
+		"api_base_url": f.srv.URL,
+		"hub_url":      "http://hub.test",
+		"db_path":      filepath.Join(t.TempDir(), "test.db"),
+	}))
+
+	assert.Equal(t, 1, f.deleteWebhookCalls("old-token"),
+		"the webhook must be removed through the bot that registered it")
+	assert.Equal(t, 0, f.deleteWebhookCalls("new-token"),
+		"the new bot has no webhook registration to remove")
 }
