@@ -55,6 +55,7 @@ func TestLaunchVocabularyValues(t *testing.T) {
 		{LaunchCodeInitContainerFailed, "init_container_failed"},
 		{LaunchCodeUnschedulable, "unschedulable"},
 		{LaunchCodeBrokerRestarted, "broker_restarted"},
+		{LaunchCodePodDisrupted, "pod_disrupted"},
 	} {
 		if c.got != c.want {
 			t.Errorf("constant value %q, want %q", c.got, c.want)

@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -391,7 +392,98 @@ func TestK8sRun_ProgressAfterPodReady(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
-			assertEvents(t, rec.snapshot(), tc.want)
+			// startFakeK8sPod turns the pod ready only after Run created it,
+			// so the readiness polls before that may report scheduling.
+			got := rec.snapshot()
+			for len(got) > 0 && got[0] == "scheduling: waiting to be scheduled" {
+				got = got[1:]
+			}
+			assertEvents(t, got, tc.want)
 		})
 	}
+}
+
+// TestWaitForPodReady_DisruptedPodIsTyped checks that a pod the cluster
+// preempts, evicts or deletes during the readiness wait ends the wait with
+// a pod_disrupted *LaunchFailure carrying the Kubernetes reason only. A pod
+// still being removed fails at once with new text; a pod already in a
+// terminal phase, or already gone, keeps its old error text.
+func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
+	const secret = "admit critical pod registry.example/secret-team"
+	pending := func(conds ...corev1.PodCondition) corev1.PodStatus {
+		return corev1.PodStatus{Phase: corev1.PodPending, Conditions: conds}
+	}
+	disruption := func(reason string) corev1.PodCondition {
+		return corev1.PodCondition{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: reason, Message: secret}
+	}
+	for _, tc := range []struct {
+		name         string
+		status       corev1.PodStatus
+		deleting     bool
+		gone         bool
+		reason, text string
+	}{
+		{name: "preempted while pending", status: pending(disruption(corev1.PodReasonPreemptionByScheduler)),
+			reason: "PreemptionByScheduler",
+			text:   `pod "p" was disrupted while starting (PreemptionByScheduler) — the cluster preempted or evicted it; start the agent again`},
+		{name: "terminating", status: pending(), deleting: true,
+			text: `pod "p" was deleted while starting — start the agent again`},
+		{name: "evicted and failed", status: corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted", Message: secret},
+			reason: "Evicted", text: "pod terminated with status: Failed"},
+		{name: "terminated by kubelet", status: corev1.PodStatus{Phase: corev1.PodFailed,
+			Conditions: []corev1.PodCondition{disruption("TerminationByKubelet")},
+			ContainerStatuses: []corev1.ContainerStatus{{Name: agentContainerName, State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "Error", Message: "killed"}}}}},
+			reason: "TerminationByKubelet", text: "pod failed to start: Error - killed"},
+		{name: "gone", status: pending(), gone: true, text: `pods "p" not found`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, clientset := fastPodReadyRuntime(false)
+			rt.podReadyTimeout = time.Second
+			var mu sync.Mutex
+			polls := 0
+			clientset.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				polls++
+				if tc.gone && polls > 1 {
+					return true, nil, k8serrors.NewNotFound(corev1.Resource("pods"), "p")
+				}
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}, Status: *tc.status.DeepCopy()}
+				if tc.deleting {
+					now := metav1.Now()
+					pod.DeletionTimestamp = &now
+				}
+				return true, pod, nil
+			})
+
+			err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{})
+			if err == nil {
+				t.Fatal("waitForPodReady succeeded, want a failure")
+			}
+			if err.Error() != tc.text {
+				t.Errorf("error text:\n got  %s\n want %s", err.Error(), tc.text)
+			}
+			var lf *LaunchFailure
+			if !errors.As(err, &lf) {
+				t.Fatalf("error %T is not a *LaunchFailure: %v", err, err)
+			}
+			if lf.Code != api.LaunchCodePodDisrupted || lf.Reason != tc.reason || lf.Step != api.LaunchStepScheduling {
+				t.Errorf("LaunchFailure{Code %q, Step %q, Reason %q}, want {pod_disrupted, scheduling, %q}", lf.Code, lf.Step, lf.Reason, tc.reason)
+			}
+			if strings.Contains(err.Error(), "secret-team") || strings.Contains(lf.Reason, "secret-team") {
+				t.Errorf("error or Reason carries the Kubernetes message: %v / %q", err, lf.Reason)
+			}
+		})
+	}
+
+	t.Run("failed without disruption stays untyped", func(t *testing.T) {
+		rt, clientset := fastPodReadyRuntime(false)
+		scriptPodGets(clientset, corev1.PodStatus{Phase: corev1.PodFailed})
+		err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{})
+		var lf *LaunchFailure
+		if err == nil || errors.As(err, &lf) {
+			t.Errorf("err = %v (LaunchFailure %+v), want the plain terminal error", err, lf)
+		}
+	})
 }

@@ -3163,6 +3163,42 @@ func podLaunchStep(pod *corev1.Pod, gke bool) string {
 	return api.LaunchStepContainerCreate
 }
 
+// podDisruptionReason returns the Kubernetes reason a pod is being removed
+// by the cluster: the pod status reason "Evicted" (kubelet node-pressure
+// eviction) or the reason of a true DisruptionTarget condition (e.g.
+// PreemptionByScheduler, TerminationByKubelet, EvictionByEvictionAPI). It
+// returns "" when neither is present. Unlike k8sDisruptionExitReason it
+// keeps the Kubernetes enum, for LaunchFailure.Reason.
+func podDisruptionReason(pod *corev1.Pod) string {
+	if pod.Status.Reason == "Evicted" {
+		return pod.Status.Reason
+	}
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.DisruptionTarget && cond.Status == corev1.ConditionTrue {
+			return cond.Reason
+		}
+	}
+	return ""
+}
+
+// podDisruptedError returns a pod_disrupted *LaunchFailure in step when the
+// pod is being removed (a disruption reason, or a deletion timestamp), or
+// nil. The text names the Kubernetes reason only, never the condition's
+// message.
+func podDisruptedError(pod *corev1.Pod, podName, step string) error {
+	reason := podDisruptionReason(pod)
+	switch {
+	case reason != "":
+		return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason,
+			fmt.Errorf("pod %q was disrupted while starting (%s) — the cluster preempted or evicted it; start the agent again", podName, reason))
+	case pod.DeletionTimestamp != nil:
+		return newLaunchFailure(api.LaunchCodePodDisrupted, step, "",
+			fmt.Errorf("pod %q was deleted while starting — start the agent again", podName))
+	default:
+		return nil
+	}
+}
+
 // podTimingUnavailable marks a podLifecycleTimings field as not computable,
 // e.g. because the pod lacks the corresponding condition or container state
 // yet. Callers omit the log attribute rather than reporting a misleading 0.
@@ -3305,12 +3341,27 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 		case <-ticker.C:
 			pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 			if err != nil {
+				if k8serrors.IsNotFound(err) && parentCtx.Err() == nil {
+					// The pod was removed (preempted, evicted or deleted)
+					// before it became ready.
+					return newLaunchFailure(api.LaunchCodePodDisrupted, lastStep, "", err)
+				}
 				return err
 			}
 
 			if step := podLaunchStep(pod, r.isGKEScheduling()); step != lastStep {
 				lastStep = step
 				hooks.progress(step)
+			}
+
+			// A pod the cluster is removing never becomes usable: fail now
+			// rather than wait for it to disappear. A pod already in a
+			// terminal phase keeps its error text below.
+			if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
+				if err := podDisruptedError(pod, podName, lastStep); err != nil {
+					runtimeLog.Error("Pod disrupted while starting", "pod", podName, "reason", podDisruptionReason(pod), "phase", "wait-schedule")
+					return err
+				}
 			}
 
 			// F-111 review (tf-lead): init container failures (most notably
@@ -3414,10 +3465,14 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				}
 			}
 			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+				err := fmt.Errorf("pod terminated with status: %s", pod.Status.Phase)
 				if containerStatus != nil && containerStatus.State.Terminated != nil {
-					return fmt.Errorf("pod failed to start: %s - %s", containerStatus.State.Terminated.Reason, containerStatus.State.Terminated.Message)
+					err = fmt.Errorf("pod failed to start: %s - %s", containerStatus.State.Terminated.Reason, containerStatus.State.Terminated.Message)
 				}
-				return fmt.Errorf("pod terminated with status: %s", pod.Status.Phase)
+				if reason := podDisruptionReason(pod); reason != "" {
+					return newLaunchFailure(api.LaunchCodePodDisrupted, lastStep, reason, err)
+				}
+				return err
 			}
 		}
 	}

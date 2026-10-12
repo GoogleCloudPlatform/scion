@@ -96,6 +96,9 @@ const (
 	// LaunchCodeUnschedulable: the pod cannot be scheduled and the cluster
 	// will not add capacity for it (not GKE).
 	LaunchCodeUnschedulable = "unschedulable"
+	// LaunchCodePodDisrupted: the pod was preempted, evicted or deleted
+	// while the launch waited for it to become ready.
+	LaunchCodePodDisrupted = "pod_disrupted"
 	// LaunchCodeBrokerRestarted: the broker restarted while the launch was
 	// in flight.
 	LaunchCodeBrokerRestarted = "broker_restarted"
