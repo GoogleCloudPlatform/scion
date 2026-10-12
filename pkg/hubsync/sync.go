@@ -1637,6 +1637,7 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 		Name:      projectName,
 		GitRemote: util.NormalizeGitRemote(gitRemote),
 		Path:      hubCtx.ProjectPath,
+		Labels:    LinkedProjectLabels(hubCtx.Endpoint, gitRemote),
 		Broker: &hubclient.BrokerInfo{
 			ID:   hubCtx.BrokerID,
 			Name: brokerName,
@@ -1787,6 +1788,23 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 
 	// 4. Fallback to auto dev auth
 	return hubclient.WithAutoDevAuth(), CredentialKindDevAuto
+}
+
+// LinkedProjectLabels returns the labels a CLI registration of a local
+// project directory sends to the hub. A git project registered on the local
+// workstation hub is labelled worktree-per-agent, so the co-located broker
+// gives each new agent a git worktree of the user's own checkout instead of
+// a clone. Any other registration (no git remote, or any other hub) sends
+// no labels and keeps the hub's default.
+//
+// The hub stores the label only when the registration creates the project;
+// it is ignored for a project that already exists, and it cannot be added
+// later.
+func LinkedProjectLabels(endpoint, gitRemote string) map[string]string {
+	if gitRemote == "" || !IsLocalWorkstationEndpoint(endpoint) {
+		return nil
+	}
+	return map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent}
 }
 
 // IsLocalWorkstationEndpoint reports whether endpoint is the local

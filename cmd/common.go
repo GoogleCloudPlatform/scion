@@ -1190,6 +1190,11 @@ func printHubWorkspaceSource(project *hubclient.Project) {
 		fmt.Fprintf(os.Stderr, "  (agents mount the project's shared workspace on the runtime broker; no per-agent clone)\n")
 		return
 	}
+	if project.Labels[store.LabelWorkspaceMode] == store.WorkspaceModeWorktreePerAgent {
+		fmt.Fprintf(os.Stderr, "Using hub, git worktree per agent for repo %s\n", project.GitRemote)
+		fmt.Fprintf(os.Stderr, "  (on the local broker, each agent gets a worktree of this checkout under .scion/agents/<name>/workspace)\n")
+		return
+	}
 	cloneURL := util.ResolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 	fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
 	fmt.Fprintf(os.Stderr, "  (%s; local worktrees are not used)\n", hubCloneTransportNote(cloneURL))

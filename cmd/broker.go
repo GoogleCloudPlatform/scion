@@ -639,12 +639,14 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	// (ptone/scion#3534).
 	if shouldOfferProjectProvider(projectID, settings.IsHubEnabled(), isGlobal) {
 		if hubsync.ShowProjectProviderPrompt(projectName, autoConfirm) {
+			gitRemote := util.GetGitRemote()
 			req := &hubclient.RegisterProjectRequest{
 				ID:        projectID,
 				Name:      projectName,
 				Path:      resolvedPath,
 				BrokerID:  brokerID,
-				GitRemote: util.NormalizeGitRemote(util.GetGitRemote()),
+				GitRemote: util.NormalizeGitRemote(gitRemote),
+				Labels:    hubsync.LinkedProjectLabels(endpoint, gitRemote),
 			}
 
 			resp, err := client.Projects().Register(ctx, req)
