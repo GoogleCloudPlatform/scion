@@ -203,6 +203,22 @@ func planDropsConstraintAdmin(plan rolePlan, currentDefs map[string]*store.RoleD
 	return true
 }
 
+// requestTouchesConstraintAdmin reports whether any current or requested
+// role carries access_constraint.admin.
+func requestTouchesConstraintAdmin(current map[string]*store.RoleDefinition, desired []*store.RoleDefinition) bool {
+	for _, rd := range current {
+		if rd != nil && roleHasConstraintAdmin(rd) {
+			return true
+		}
+	}
+	for _, rd := range desired {
+		if rd != nil && roleHasConstraintAdmin(rd) {
+			return true
+		}
+	}
+	return false
+}
+
 // planRoleSet computes the diff between a principal's current project-scope
 // bindings and the desired role definitions. current and desired are both
 // already de-duplicated by role definition ID by the caller. currentDefs
@@ -977,10 +993,10 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 	lossEnqueued := false
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		lossEnqueued = false
-		// A plan that drops the member's constraint-admin role takes the
-		// admin-guard lock before the project lock, the order user delete
-		// uses.
-		if planDropsConstraintAdmin(plan0, currentDefs0, plan0.Create) {
+		// A request that touches a role carrying access_constraint.admin
+		// takes the admin-guard lock before the project lock, the order
+		// user delete uses.
+		if requestTouchesConstraintAdmin(currentDefs0, desiredDefs) {
 			if err := lockConstraintAdminGuard(ctx, tx); err != nil {
 				return err
 			}
@@ -1103,14 +1119,10 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		}
 
 		// Constraint-admin lockout guard, shared with user suspend and
-		// delete: after the plan the user holds no role on this project
-		// with access_constraint.admin.
-		if req.PrincipalType == store.RoleBindingPrincipalUser && planDropsConstraintAdmin(plan1, currentDefs1, refetchedCreates) {
-			if err := lockConstraintAdminGuard(ctx, tx); err != nil {
-				return err
-			}
-			if err := checkConstraintAdminLockout(ctx, tx, now, store.RoleScopeProject, req.ProjectID,
-				adminRemoval{userID: req.PrincipalID, userAction: userRemovalProjectMember}); err != nil {
+		// delete: after the plan the principal holds no role on this
+		// project with access_constraint.admin.
+		if planDropsConstraintAdmin(plan1, currentDefs1, refetchedCreates) {
+			if err := checkRoleBindingRemovalAdminLockout(ctx, tx, now, plan1.Remove...); err != nil {
 				return err
 			}
 		}

@@ -1162,6 +1162,14 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	// R2-1: hub authority is re-evaluated inside the tx to close the TOCTOU window.
 	var created *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// A change that drops access_constraint.admin takes the
+		// admin-guard lock before the project lock, the order user
+		// delete uses.
+		if roleHasConstraintAdmin(oldRoleDef) && !roleHasConstraintAdmin(newRoleDef) {
+			if err := lockConstraintAdminGuard(ctx, tx); err != nil {
+				return err
+			}
+		}
 		// Acquire project-scoped membership lock.
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
@@ -1238,6 +1246,14 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 			}
 		}
 
+		// Constraint-admin lockout guard, shared with user suspend and
+		// delete.
+		if !roleHasConstraintAdmin(newRoleDef) {
+			if err := checkRoleBindingRemovalAdminLockout(ctx, tx, now, existing); err != nil {
+				return err
+			}
+		}
+
 		// Delete old binding before creating replacement to satisfy the D4
 		// partial unique index (one binding per principal per project).
 		if err := tx.DeleteRoleBinding(ctx, req.BindingID); err != nil {
@@ -1288,6 +1304,9 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		var gdErr *governanceDenialError
 		if errors.As(txErr, &gdErr) {
 			return nil, &gdErr.decision
+		}
+		if d := constraintAdminLockoutDecision(txErr); d != nil {
+			return nil, d
 		}
 		if d := storeMembersGroupPrincipalDecision(txErr); d != nil {
 			return nil, d

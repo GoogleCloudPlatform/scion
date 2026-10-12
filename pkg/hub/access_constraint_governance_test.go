@@ -1600,7 +1600,7 @@ func TestConstraintAdminLockout_ProjectMemberPrincipalDelete(t *testing.T) {
 
 	rec = doRequest(t, srv, http.MethodDelete, path+users[1], nil)
 	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
-	assert.Contains(t, rec.Body.String(), "constraint-admin role")
+	assert.Contains(t, rec.Body.String(), "removing this role binding")
 	requireBindingExists(t, s, bindings[1].ID, true)
 }
 
@@ -1685,4 +1685,67 @@ func TestConstraintAdminLockout_OtherScopeAdminNotCounted(t *testing.T) {
 	other := pvSeedUser(t, s, "lockout-scope-other")
 	pvSeedRoleBinding(t, s, rd.ID, "user", other, store.RoleScopeProject, projectID)
 	assert.NoError(t, checkRoleBindingRemovalAdminLockout(ctx, s, now, binding))
+}
+
+// DELETE /projects/{id}/members/principals/group/{groupID}.
+func TestConstraintAdminLockout_ProjectMemberGroupPrincipalDelete(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := pvSeedProject(t, s, "lockout-grp-principal-project")
+	rd := createTestRoleDefinition(t, s, "lockout-grp-principal-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin, "agent.read"})
+	groupID := pvSeedGroup(t, s, "lockout-grp-principal")
+	pvSeedGroupMember(t, s, groupID, store.GroupMemberTypeUser, pvSeedUser(t, s, "lockout-grp-principal-member"))
+	groupBinding := lockoutProjectBinding(t, s, rd.ID, "group", groupID, projectID)
+	path := "/api/v1/projects/" + projectID + "/members/principals/group/" + groupID
+
+	rec := doRequest(t, srv, http.MethodDelete, path, nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	requireBindingExists(t, s, groupBinding.ID, true)
+
+	lockoutProjectBinding(t, s, rd.ID, "user", pvSeedUser(t, s, "lockout-grp-principal-other"), projectID)
+	rec = doRequest(t, srv, http.MethodDelete, path, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, groupBinding.ID, false)
+}
+
+// PATCH /projects/{id}/members/{bindingID} from a custom role carrying
+// access_constraint.admin to project-member.
+func TestConstraintAdminLockout_ProjectMemberRoleChange(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID, _, bindings := lockoutProjectAdmins(t, s, "lockout-role-change", 2)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	path := "/api/v1/projects/" + projectID + "/members/"
+	body := updateProjectMemberRequest{RoleDefinitionID: memberRD.ID}
+
+	rec := doRequest(t, srv, http.MethodPatch, path+bindings[0].ID, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, bindings[0].ID, false)
+
+	rec = doRequest(t, srv, http.MethodPatch, path+bindings[1].ID, body)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	requireBindingExists(t, s, bindings[1].ID, true)
+}
+
+// A user who stays a constraint admin through a group binding at the
+// project can drop their own constraint-admin role.
+func TestConstraintAdminLockout_ProjectMemberPrincipalPutGroupKeepsAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := pvSeedProject(t, s, "lockout-put-grp-project")
+	rd := createTestRoleDefinition(t, s, "lockout-put-grp-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin, "agent.read"})
+	user := pvSeedUser(t, s, "lockout-put-grp-user")
+	userBinding := lockoutProjectBinding(t, s, rd.ID, "user", user, projectID)
+	groupID := pvSeedGroup(t, s, "lockout-put-grp")
+	pvSeedGroupMember(t, s, groupID, store.GroupMemberTypeUser, user)
+	lockoutProjectBinding(t, s, rd.ID, "group", groupID, projectID)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+projectID+"/members/principals/user/"+user,
+		setMemberRolesRequestBody{RoleDefinitionIDs: []string{memberRD.ID}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, userBinding.ID, false)
 }

@@ -841,7 +841,7 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 // would violate the lockout invariant.
 func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, binding *store.RoleBinding) error {
 	return checkConstraintAdminLockout(ctx, gs.store, gs.nowFunc(),
-		binding.ScopeType, binding.ScopeID, adminRemoval{binding: binding})
+		binding.ScopeType, binding.ScopeID, adminRemoval{bindings: []*store.RoleBinding{binding}})
 }
 
 // adminRemoval describes the constraint-admin authority a mutation takes
@@ -851,8 +851,9 @@ type adminRemoval struct {
 	userID string
 	// userAction names the user change for the refusal message.
 	userAction userRemovalAction
-	// binding is a role binding being removed or downgraded.
-	binding *store.RoleBinding
+	// bindings are role bindings at one scope, each carrying
+	// access_constraint.admin, being removed or downgraded together.
+	bindings []*store.RoleBinding
 }
 
 // checkConstraintAdminLockout is the single lockout check for the
@@ -900,7 +901,7 @@ func checkConstraintAdminLockout(ctx context.Context, st store.Store, now time.T
 	// authority, so the check fails closed.
 	var scopeBindings []*store.RoleBinding
 	scopeReadOK := true
-	if rm.binding != nil {
+	if len(rm.bindings) > 0 {
 		if scopeBindings, err = st.ListRoleBindingsForScope(ctx, scopeType, scopeID); err != nil {
 			scopeReadOK = false
 		}
@@ -981,22 +982,15 @@ type userRemovalAction int
 const (
 	userRemovalSuspend userRemovalAction = iota
 	userRemovalDelete
-	// userRemovalProjectMember removes the user's constraint-admin roles
-	// on one project (project member principal PUT or DELETE).
-	userRemovalProjectMember
 )
 
 // lockoutMessage returns the refusal message, naming the action.
 func (rm adminRemoval) lockoutMessage(suffix string) string {
 	action := "removing this role binding"
 	if rm.userID != "" {
-		switch rm.userAction {
-		case userRemovalDelete:
+		action = "suspending this user"
+		if rm.userAction == userRemovalDelete {
 			action = "deleting this user"
-		case userRemovalProjectMember:
-			action = "removing this member's constraint-admin role"
-		default:
-			action = "suspending this user"
 		}
 	}
 	return action + " would leave zero constraint admins" + suffix
@@ -1004,25 +998,30 @@ func (rm adminRemoval) lockoutMessage(suffix string) string {
 
 // adminLosesAuthority reports whether the admin au loses
 // access_constraint.admin through the removal rm. For a binding removal,
-// au loses it when the binding covers au (a user binding for au, or a
-// group binding for one of au's effective groups) and no other binding
-// in scopeBindings, the bindings at the removed binding's scope, both
-// covers au and carries access_constraint.admin. When scopeReadOK is
-// false the scope bindings could not be read and every covered admin
-// counts as a loss, so the check fails closed.
+// au loses it when a removed binding covers au (a user binding for au, or
+// a group binding for one of au's effective groups) and no binding in
+// scopeBindings, the bindings at the removed bindings' scope, that is not
+// itself removed both covers au and carries access_constraint.admin.
+// When scopeReadOK is false the scope bindings could not be read and
+// every covered admin counts as a loss, so the check fails closed.
 func adminLosesAuthority(ctx context.Context, st store.Store, au adminUserInfo, rm adminRemoval, scopeBindings []*store.RoleBinding, scopeReadOK bool) bool {
 	if rm.userID != "" {
 		return au.userID == rm.userID
 	}
-	b := rm.binding
-	if !bindingCoversAdmin(b, au) {
+	removed := make(map[string]bool, len(rm.bindings))
+	covered := false
+	for _, b := range rm.bindings {
+		removed[b.ID] = true
+		covered = covered || bindingCoversAdmin(b, au)
+	}
+	if !covered {
 		return false
 	}
 	if !scopeReadOK {
 		return true
 	}
 	for _, ob := range scopeBindings {
-		if ob.ID == b.ID || !bindingCoversAdmin(ob, au) {
+		if removed[ob.ID] || !bindingCoversAdmin(ob, au) {
 			continue
 		}
 		rd, err := st.GetRoleDefinition(ctx, ob.RoleDefinitionID)
@@ -1106,23 +1105,32 @@ func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.
 }
 
 // checkRoleBindingRemovalAdminLockout runs checkConstraintAdminLockout
-// for a role binding about to be deleted. It is a no-op when the binding's
-// role does not carry access_constraint.admin. Otherwise it first takes
-// the admin-guard lock (lockConstraintAdminGuard) so the check serializes
-// with user suspend and delete. The role-binding delete paths call it
-// inside their transaction, before the delete; st must be that handle.
-func checkRoleBindingRemovalAdminLockout(ctx context.Context, st store.Store, now time.Time, b *store.RoleBinding) error {
-	rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
-	if err != nil {
-		return fmt.Errorf("resolve role for constraint-admin lockout check: %w", err)
+// for role bindings at one scope about to be deleted together. Only the
+// bindings whose role carries access_constraint.admin are counted; with
+// none it is a no-op. Otherwise it first takes the admin-guard lock
+// (lockConstraintAdminGuard) so the check serializes with user suspend
+// and delete; a caller that took it already re-takes it at no cost. The
+// role-binding delete paths call it inside their transaction, before the
+// delete; st must be that handle.
+func checkRoleBindingRemovalAdminLockout(ctx context.Context, st store.Store, now time.Time, bs ...*store.RoleBinding) error {
+	var adminBindings []*store.RoleBinding
+	for _, b := range bs {
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			return fmt.Errorf("resolve role for constraint-admin lockout check: %w", err)
+		}
+		if roleHasConstraintAdmin(rd) {
+			adminBindings = append(adminBindings, b)
+		}
 	}
-	if !roleHasConstraintAdmin(rd) {
+	if len(adminBindings) == 0 {
 		return nil
 	}
 	if err := lockConstraintAdminGuard(ctx, st); err != nil {
 		return err
 	}
-	return checkConstraintAdminLockout(ctx, st, now, b.ScopeType, b.ScopeID, adminRemoval{binding: b})
+	b := adminBindings[0]
+	return checkConstraintAdminLockout(ctx, st, now, b.ScopeType, b.ScopeID, adminRemoval{bindings: adminBindings})
 }
 
 // ---------------------------------------------------------------------------
