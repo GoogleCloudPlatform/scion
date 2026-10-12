@@ -346,10 +346,11 @@ func registerTestHubCtx(t *testing.T, projectDir, projectID string) *HubContext 
 	return &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID, ProjectPath: projectDir}
 }
 
-// TestRegisterProject_RecordsLink checks that registration records
-// hub.linked=true, as 'scion hub link' does, so 'scion hub unlink' works
-// for projects linked by the preflight.
-func TestRegisterProject_RecordsLink(t *testing.T) {
+// TestFinishAutoLink_RecordsLink checks that a link made by the preflight
+// records hub.linked=true, as 'scion hub link' does, so 'scion hub unlink'
+// works for it. registerProject itself leaves it to finishAutoLink, so a
+// deferred import is retried.
+func TestFinishAutoLink_RecordsLink(t *testing.T) {
 	clearHubCredentialEnv(t)
 	projectDir := filepath.Join(t.TempDir(), "proj", ".scion")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -361,15 +362,19 @@ func TestRegisterProject_RecordsLink(t *testing.T) {
 	if err := registerProject(context.Background(), hubCtx, "proj", false); err != nil {
 		t.Fatalf("registerProject: %v", err)
 	}
+	if linked := ProjectLinkedSetting(projectDir, false); linked != nil {
+		t.Fatalf("registerProject wrote hub.linked = %v; finishAutoLink records it", *linked)
+	}
+	finishAutoLink(hubCtx, true)
 	linked := ProjectLinkedSetting(projectDir, false)
 	if linked == nil || !*linked {
 		t.Fatalf("hub.linked = %v, want true", linked)
 	}
 }
 
-// TestRegisterProject_LinkWriteFailureWarns checks that a failure to record
-// hub.linked is a warning: registration still succeeds.
-func TestRegisterProject_LinkWriteFailureWarns(t *testing.T) {
+// TestFinishAutoLink_LinkWriteFailureWarns checks that a failure to record
+// hub.linked is a warning, not an error.
+func TestFinishAutoLink_LinkWriteFailureWarns(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
@@ -378,7 +383,7 @@ func TestRegisterProject_LinkWriteFailureWarns(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	out := withPromptIO(t, strings.NewReader(""), false)
+	_, warn := captureImportOutput(t)
 	hubCtx := registerTestHubCtx(t, projectDir, "register-fail-id")
 	// A read-only project directory makes the settings write fail.
 	if err := os.Chmod(projectDir, 0o555); err != nil {
@@ -386,13 +391,8 @@ func TestRegisterProject_LinkWriteFailureWarns(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(projectDir, 0o755) })
 
-	if err := registerProject(context.Background(), hubCtx, "proj", false); err != nil {
-		t.Fatalf("registerProject must succeed when only the linked write fails: %v", err)
-	}
-	if !strings.Contains(out.String(), "Warning: failed to save linked state") {
-		t.Errorf("missing warning; output:\n%s", out.String())
-	}
-	if !strings.Contains(out.String(), "Linked to existing project") {
-		t.Errorf("registration output missing; output:\n%s", out.String())
+	finishAutoLink(hubCtx, true)
+	if !strings.Contains(warn.String(), "failed to record the hub link") {
+		t.Errorf("missing warning; output:\n%s", warn.String())
 	}
 }

@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -267,10 +266,11 @@ func TestEnsureHubReady_LocalHubNameMatchKeepsPrompt(t *testing.T) {
 		{"id": "existing-2", "name": "global", "slug": "global-2"},
 	}}
 	srv := hub.serve(t)
-	globalDir := writeGlobalSettings(t, home, "project_id: local-project\n")
+	writeGlobalSettings(t, home, "project_id: local-project\n")
 	out := withPromptIO(t, strings.NewReader(""), false)
 
-	if _, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: srv.URL, AutoConfirm: true}); err != nil {
+	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: srv.URL, AutoConfirm: true})
+	if err != nil {
 		t.Fatalf("EnsureHubReady: %v", err)
 	}
 	if !strings.Contains(out.String(), "Found 2 existing project(s) with the name 'global'") {
@@ -282,12 +282,13 @@ func TestEnsureHubReady_LocalHubNameMatchKeepsPrompt(t *testing.T) {
 	if strings.Contains(out.String(), "Linking project 'global' to the local hub") {
 		t.Errorf("auto-link linked silently despite name matches; output:\n%s", out.String())
 	}
-	s, err := config.LoadSettingsFromDir(globalDir)
-	if err != nil {
-		t.Fatal(err)
+	if hubCtx == nil {
+		t.Fatal("hubCtx is nil")
 	}
-	if got := s.GetHubProjectID(); got != "existing-1" {
-		t.Errorf("hub.projectId = %q, want existing-1", got)
+	// The link registers this directory under the selected hub project's
+	// ID; it is not registered as a new project under its own ID.
+	if !hub.registered["existing-1"] || hub.registered["local-project"] {
+		t.Errorf("registered = %v, want only existing-1 (linked, not registered as new)", hub.registered)
 	}
 
 	// Without a terminal and without --yes, nothing is picked.
