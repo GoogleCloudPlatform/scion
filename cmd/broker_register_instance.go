@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokerownership"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerregistration"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -125,7 +126,7 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 		Version:           version.Version,
 		Capabilities:      runtimebroker.StaticCapabilityNames(rt),
 		AutoProvide:       brokerAutoProvide,
-		Labels:            map[string]string{"scion.io/broker-role": "remote"},
+		Labels:            map[string]string{brokerownership.LabelBrokerRole: "remote"},
 		WorkspaceStorage:  loadBrokerRegistrationWorkspaceStorage(),
 		TransportMode:     transportMode,
 		TransportAudience: transportAudience,

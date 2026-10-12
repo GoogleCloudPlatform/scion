@@ -51,3 +51,24 @@ func TestBrokerRegisterInstance_PassesTheEndpointItRegistersThrough(t *testing.T
 	require.NotNil(t, got, "registration was not called")
 	assert.Equal(t, endpoint, got.HubEndpoint)
 }
+
+// TestBrokerRegisterInstance_LabelsTheRowAsARemoteBroker: 'scion broker
+// register --instance' labels the registration with the established
+// broker-role key and the value "remote", as legacy remote registration
+// does, so Hub filters on that label treat it the same way.
+func TestBrokerRegisterInstance_LabelsTheRowAsARemoteBroker(t *testing.T) {
+	setupRegisterInstanceTest(t, "http://hub.example:8080")
+	brokerRegisterInstance = "remote-docker"
+	orig := registerFlatInstance
+	t.Cleanup(func() { registerFlatInstance = orig })
+	var got *brokerregistration.Options
+	registerFlatInstance = func(_ context.Context, _ hubclient.Client, _ config.V1RuntimeBrokerInstanceConfig, id *brokeridentity.Identity,
+		_, _ string, o brokerregistration.Options) (*brokercredentials.BrokerCredentials, error) {
+		got = &o
+		return &brokercredentials.BrokerCredentials{BrokerID: id.RuntimeBrokerID, HubEndpoint: o.HubEndpoint}, nil
+	}
+
+	require.NoError(t, runBrokerRegister(brokerRegisterCmd, nil))
+	require.NotNil(t, got, "registration was not called")
+	assert.Equal(t, map[string]string{"scion.io/broker-role": "remote"}, got.Labels)
+}
