@@ -690,6 +690,9 @@ jobs:
       shards: ${{ steps.plan.outputs.shards }}
       count: ${{ steps.plan.outputs.count }}
       integration_shards: ${{ steps.integration.outputs.integration_shards }}
+      # The single place to change the runner label for every pkg/hub shard
+      # job (hub-shard and hub-shard-postgres-integration).
+      runner: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -716,21 +719,28 @@ jobs:
       - name: List the pkg/hub shards with integration Postgres tests
         id: integration
         run: |
+          set -o pipefail
           shards=$(make -s hub-postgres-integration-shards)
-          echo "integration_shards=$(echo "$shards" | jq -cR 'select(length > 0) | tonumber' | jq -cs .)" >> "$GITHUB_OUTPUT"
-          echo "pkg/hub shards with integration Postgres tests: $(echo "$shards" | tr '\n' ' ')"
+          json=$(printf '%s\n' "$shards" | jq -cR 'select(length > 0) | tonumber' | jq -cs .)
+          # hubshard -locate fails on a name in no test file, so at least
+          # one shard must come back; [] means the listing itself broke.
+          if [ -z "$json" ] || [ "$json" = '[]' ]; then
+            echo "::error title=pkg/hub shard plan::no pkg/hub shard holds a HUB_INTEGRATION_POSTGRES_TESTS test (got '$json' from '$shards')"
+            exit 1
+          fi
+          echo "integration_shards=$json" >> "$GITHUB_OUTPUT"
+          echo "pkg/hub shards with integration Postgres tests: $json"
 
   hub-shard:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }}
     needs: hub-shard-plan
-    # runner is the single place to change the runner label for every
-    # shard job.
-    runs-on: ${{ matrix.runner }}
+    # The runner label comes from hub-shard-plan (outputs.runner), the
+    # single place to change it for every pkg/hub shard job.
+    runs-on: ${{ needs.hub-shard-plan.outputs.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest]
         shard: ${{ fromJSON(needs.hub-shard-plan.outputs.shards) }}
     services:
       postgres:
@@ -804,12 +814,12 @@ jobs:
   # files, so the shard job's binary cannot run them), about 1.5-2.5 min;
   # in its own job, in parallel with the shard jobs, it is off their
   # critical path. Every listed test must pass and none may skip
-  # (hack/hubshard/shard.sh postgres). Skipped only if no shard holds one.
+  # (hack/hubshard/shard.sh postgres). The plan fails if no shard holds
+  # one, so this job always has at least one shard.
   hub-shard-postgres-integration:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }} Postgres (integration)
     needs: hub-shard-plan
-    if: ${{ needs.hub-shard-plan.outputs.integration_shards != '[]' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.hub-shard-plan.outputs.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -853,8 +863,7 @@ jobs:
   # single pkg/hub job had, so a required check keeps working). A matrix
   # job's names include the matrix values, so they are not usable as
   # required checks. It fails unless every shard job and every shard
-  # integration Postgres job succeeded. The integration jobs may be
-  # skipped only when the plan found no shard holding such a test.
+  # integration Postgres job succeeded.
   hub-sqlite-tests:
     name: pkg/hub SQLite Tests
     needs: [hub-shard-plan, hub-shard, hub-shard-postgres-integration]
@@ -867,31 +876,31 @@ jobs:
           PLAN: ${{ needs.hub-shard-plan.result }}
           RESULT: ${{ needs.hub-shard.result }}
           INTEGRATION: ${{ needs.hub-shard-postgres-integration.result }}
-          INTEGRATION_SHARDS: ${{ needs.hub-shard-plan.outputs.integration_shards }}
         run: |
           if [ "$PLAN" != success ] || [ "$RESULT" != success ]; then
             echo "::error title=pkg/hub shards::the pkg/hub shard plan (result: $PLAN) or one or more pkg/hub shard jobs (result: $RESULT) did not succeed; see the pkg/hub shard jobs."
             exit 1
           fi
-          if [ "$INTEGRATION" != success ] && ! { [ "$INTEGRATION" = skipped ] && [ "$INTEGRATION_SHARDS" = '[]' ]; }; then
-            echo "::error title=pkg/hub shards::one or more pkg/hub shard integration Postgres jobs did not succeed (result: $INTEGRATION; shards: $INTEGRATION_SHARDS); see the pkg/hub shard Postgres (integration) jobs."
+          if [ "$INTEGRATION" != success ]; then
+            echo "::error title=pkg/hub shards::one or more pkg/hub shard integration Postgres jobs did not succeed (result: $INTEGRATION); see the pkg/hub shard Postgres (integration) jobs."
             exit 1
           fi
 
   # T1 Launch Store PostgreSQL Tests runs as several parallel jobs; the
   # job below with the old name only rolls them up. About 70% of the old
   # single job was pkg/store/entadapter on Postgres (~13 of ~20 min), so
-  # that package's tests are split by name into matrix.parts parts
+  # that package's tests are split by name into strategy.job-total parts
   # (hack/testpart.sh: round-robin over the sorted top-level test names),
   # one job each, and the other Postgres packages run in one more job.
   # Every entadapter job checks that the parts together hold every test of
   # the package exactly once (testpart.sh parity) and that every test of
   # its part printed a PASS or SKIP line.
   #
-  # The entadapter jobs. To change the number of parts, change both parts
-  # and the part list (1..parts) below.
+  # The entadapter jobs. The number of parts is the number of matrix jobs
+  # (strategy.job-total); to change it, change the part list, which must
+  # be 1..N in order (the run step checks part == job-index + 1).
   launch-store-postgres-entadapter:
-    name: T1 Launch Store PostgreSQL Tests (entadapter ${{ matrix.part }}/${{ matrix.parts }})
+    name: T1 Launch Store PostgreSQL Tests (entadapter ${{ matrix.part }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
     # 90m: the whole entadapter suite took ~29-39m of the old single job on
     # main, but ~57m on a runner 2-3x slower than usual
@@ -904,7 +913,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        parts: [2]
         part: [1, 2]
     services:
       postgres:
@@ -941,14 +949,22 @@ jobs:
       # Makefile's test-store-postgres comment), which runs unchanged
       # against SQLite (the default `go test` build) and Postgres (here, via
       # -tags integration) to prove dialect parity. This job runs part
-      # matrix.part of matrix.parts of its top-level tests, with the same
-      # skip checks as the unsplit run.
-      - name: Run entadapter tests (Postgres-enabled, part ${{ matrix.part }}/${{ matrix.parts }})
+      # matrix.part of strategy.job-total of its top-level tests, with the
+      # same skip checks as the unsplit run. The part must be the job's
+      # own position in the matrix, so a part list that is not 1..N (a
+      # gap would leave a part unrun) fails here.
+      - name: Run entadapter tests (Postgres-enabled, part ${{ matrix.part }}/${{ strategy.job-total }})
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
           PART: ${{ matrix.part }}
-          PARTS: ${{ matrix.parts }}
-        run: make test-store-postgres-entadapter ENTADAPTER_PART="$PART" ENTADAPTER_PARTS="$PARTS"
+          PARTS: ${{ strategy.job-total }}
+          JOB_INDEX: ${{ strategy.job-index }}
+        run: |
+          if [ "$PART" != "$((JOB_INDEX + 1))" ]; then
+            echo "::error title=T1 entadapter matrix::matrix.part is $PART but this is matrix job $((JOB_INDEX + 1)) of $PARTS; the part list must be 1..N in order"
+            exit 1
+          fi
+          make test-store-postgres-entadapter ENTADAPTER_PART="$PART" ENTADAPTER_PARTS="$PARTS"
 
   # The T1 Postgres packages other than pkg/store/entadapter.
   launch-store-postgres-others:

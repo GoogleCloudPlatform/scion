@@ -20,6 +20,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 tp=./hack/testpart.sh
 
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
 fails=0
 fail() {
 	echo "FAIL: $*" >&2
@@ -59,15 +62,14 @@ for n in 1 2 3 5; do
 done
 
 # The union of the parts is the input, each name once, for a larger list.
-seq -f 'TestN%04g' 1 1271 >/tmp/testpart-selftest.$$
+seq -f 'TestN%04g' 1 1271 >"$tmp/names"
 for n in 2 3 4; do
-	union=$(for k in $(seq 1 "$n"); do $tp list "$k" "$n" </tmp/testpart-selftest.$$; done | LC_ALL=C sort)
-	[ "$union" = "$(LC_ALL=C sort /tmp/testpart-selftest.$$)" ] || fail "union of $n parts differs from the input"
-	$tp parity "$n" </tmp/testpart-selftest.$$ >/dev/null || fail "parity $n on 1271 names failed"
+	union=$(for k in $(seq 1 "$n"); do $tp list "$k" "$n" <"$tmp/names"; done | LC_ALL=C sort)
+	[ "$union" = "$(LC_ALL=C sort "$tmp/names")" ] || fail "union of $n parts differs from the input"
+	$tp parity "$n" <"$tmp/names" >/dev/null || fail "parity $n on 1271 names failed"
 done
-sizes=$(for k in 1 2 3; do $tp list "$k" 3 </tmp/testpart-selftest.$$ | wc -l | tr -d ' '; done | paste -sd ' ' -)
+sizes=$(for k in 1 2 3; do $tp list "$k" 3 <"$tmp/names" | wc -l | tr -d ' '; done | paste -sd ' ' -)
 [ "$sizes" = "424 424 423" ] || fail "part sizes of 1271 names in 3 parts: got '$sizes'"
-rm -f /tmp/testpart-selftest.$$
 
 # Errors: more parts than names, bad K or N, empty input.
 echo "$input" | $tp parity 6 >/dev/null 2>&1 && fail "parity 6 on 5 names passed"

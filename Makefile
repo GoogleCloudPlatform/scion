@@ -362,11 +362,19 @@ MEMBERSHIP_LOSS_POSTGRES_TESTS := TestMembershipLossProcessor_vs_ProjectDelete_P
 # .github/workflows/ci.yml): test-store-postgres-entadapter with
 # ENTADAPTER_PART=K ENTADAPTER_PARTS=N runs part K of the entadapter tests,
 # and test-store-postgres-others runs the rest. Locally,
-# make test-store-postgres runs it all, in the order below.
-test-store-postgres: test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail
+# make test-store-postgres runs it all, in the order below. The umbrella
+# targets run their parts one after another through sub-makes (not as
+# prerequisites), so make -j never runs them at once: they share one
+# Postgres server, and the cmd run is a large compile.
+test-store-postgres:
+	@$(MAKE) --no-print-directory test-store-postgres-integrationtest
+	@$(MAKE) --no-print-directory test-store-postgres-entadapter
+	@$(MAKE) --no-print-directory test-store-postgres-tail
 
 ## test-store-postgres-others: test-store-postgres without pkg/store/entadapter (CI runs entadapter in its own jobs)
-test-store-postgres-others: test-store-postgres-integrationtest test-store-postgres-tail
+test-store-postgres-others:
+	@$(MAKE) --no-print-directory test-store-postgres-integrationtest
+	@$(MAKE) --no-print-directory test-store-postgres-tail
 
 # test-store-postgres-env-check fails if SCION_TEST_POSTGRES_URL is unset.
 test-store-postgres-env-check:
@@ -408,6 +416,10 @@ ENTADAPTER_PARTS ?= 1
 test-store-postgres-entadapter: test-store-postgres-env-check
 	@part='$(ENTADAPTER_PART)'; parts='$(ENTADAPTER_PARTS)'; \
 	set --; \
+	if [ "$$parts" = 1 ] && [ "$$part" != 1 ]; then \
+		echo "ERROR: ENTADAPTER_PART must be 1 when ENTADAPTER_PARTS is 1 (got $$part)." >&2; \
+		exit 1; \
+	fi; \
 	if [ "$$parts" != 1 ]; then \
 		if ! go test -tags integration -count=1 -list '.*' \
 			./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.list 2>&1; then \
@@ -531,7 +543,11 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 # needs its own pkg/hub compile (-tags integration: a different TestMain
 # and extra test files), so it runs in its own job, in parallel with the
 # shard jobs, for each shard hub-postgres-integration-shards prints.
-test-hub-postgres: test-hub-postgres-default test-hub-postgres-integration
+# The two halves run one after another through sub-makes (not as
+# prerequisites), so make -j never runs two pkg/hub compiles at once.
+test-hub-postgres:
+	@$(MAKE) --no-print-directory test-hub-postgres-default
+	@$(MAKE) --no-print-directory test-hub-postgres-integration
 
 # test-hub-postgres-env-check fails unless both Postgres variables are set.
 test-hub-postgres-env-check:
