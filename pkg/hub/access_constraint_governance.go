@@ -778,9 +778,10 @@ func (gs *GovernanceService) CheckRoleBindingChange(ctx context.Context, binding
 // ReplaceRoleBinding replaces a role binding in one transaction, so a
 // grant downgrade never leaves both the old and the new binding active.
 // When the old role carries access_constraint.admin and the new one does
-// not, the lockout check runs in that transaction under the admin-guard
-// lock (checkRoleBindingRemovalAdminLockout), the same lock the user and
-// role-binding removal paths take, so it reads the state it then writes.
+// not, the replacement takes the admin-guard lock before the lockout
+// check (checkRoleBindingRemovalAdminLockout), the same lock the user
+// and role-binding removal paths take, so the check reads the state the
+// transaction then writes.
 func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingID string, newBinding *store.RoleBinding, previewToken string) (*store.RoleBinding, error) {
 	var created *store.RoleBinding
 	err := gs.store.WithTx(ctx, func(tx store.Store) error {
