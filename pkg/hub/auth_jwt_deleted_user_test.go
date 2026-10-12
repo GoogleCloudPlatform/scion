@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -89,13 +88,6 @@ func (f *deletedUserTokenFixture) get(t *testing.T, path string) *httptest.Respo
 	rec := httptest.NewRecorder()
 	f.srv.Handler().ServeHTTP(rec, req)
 	return rec
-}
-
-func errorCodeOf(t *testing.T, rec *httptest.ResponseRecorder) string {
-	t.Helper()
-	var errResp ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp), "body: %s", rec.Body.String())
-	return errResp.Error.Code
 }
 
 // TestJWTAuth_TokenStopsWorkingAfterUserDelete covers the full flow: a CLI

@@ -67,7 +67,10 @@ type WakeResult struct {
 // wakeReadyTimeout bounds a wake's wait for the resumed agent's first
 // activity (its readiness signal); a caller deadline that ends sooner
 // shortens it.
-const wakeReadyTimeout = 30 * time.Second
+//
+// It is a variable only as a test seam. Tests that change it must not use
+// t.Parallel and must restore the original value (t.Cleanup).
+var wakeReadyTimeout = 30 * time.Second
 
 // wakeDeleteWonError is the 409 delete_in_progress answer to a DM wake that
 // lost to a delete after its resume landed: the same code, message and
@@ -160,6 +163,11 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// releases the claim like a success: the start itself was accepted.
 		var statusErr *AgentDMError
 		var readyErr error
+		// readyActivity is the activity the readiness wait last saw. It is
+		// copied to the caller's agent, so a following dispatch decides
+		// interrupt vs buffered delivery (effectiveInterrupt) on the woken
+		// run's activity, not on the stale pre-suspend one.
+		var readyActivity state.Activity
 		// From here the resume no longer follows the sender's request
 		// (ptone/scion#3471, as ptone/scion#1961 did for the other
 		// synchronous launches): a sender that disconnects or gives up must
@@ -260,7 +268,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					wait = left
 				}
 			}
-			readyErr = s.waitForAgentReady(ctx, agent.ID, wait)
+			readyActivity, readyErr = s.waitForAgentReady(ctx, agent.ID, wait)
 			if readyErr != nil {
 				// A delete that wins during the wait usually ends it with
 				// an unexpected phase (its claim writes stopping) or a
@@ -293,6 +301,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 				return nil
 			}
 			agent.Phase = string(state.PhaseRunning)
+			agent.Activity = string(readyActivity)
 			return nil
 		}})
 		if err != nil {
@@ -352,6 +361,17 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 				// failure: record it on the agent.
 				s.settleRuntimeTargetRefusal(ctx, agent, err)
 				return nil, dmErr
+			}
+			var secretErr *secretResolutionError
+			if errors.As(err, &secretErr) {
+				// The agent's secrets could not be resolved, or its stored
+				// env settings could not be read; nothing was sent to the
+				// broker. Only the fixed message is returned.
+				return nil, &AgentDMError{
+					Code:       ErrCodeUnavailable,
+					Message:    secretErr.Error(),
+					HTTPStatus: http.StatusServiceUnavailable,
+				}
 			}
 			if errors.Is(err, errBrokerLacksEmptyPerAgent) {
 				// Fail closed like the other dispatch sites (design #2703 D3).

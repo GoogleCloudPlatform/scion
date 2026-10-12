@@ -123,6 +123,10 @@ type webSessionUser struct {
 	// never cached on the session. It is nil wherever webSessionUser is
 	// built or read for purposes other than that response.
 	Preferences *store.UserPreferences `json:"preferences,omitempty"`
+
+	// TestIdentity is set only by handleAuthMe, for a valid test identity
+	// web session (ptone/scion#4240, WS1).
+	TestIdentity *webTestIdentityInfo `json:"testIdentity,omitempty"`
 }
 
 // getWebSessionUser retrieves the web session user from the request context.
@@ -245,6 +249,18 @@ type WebServer struct {
 
 	// testLoginLimiter rate-limits POST /api/v1/auth/test-login per source IP.
 	testLoginLimiter *testLoginLimiter
+
+	// testIdentityHub is the hub whose test identity state backs test
+	// identity web sessions (SetTestIdentityWebSessions), or nil.
+	testIdentityHub *Server
+	// testIdentityRedeemLimiter rate-limits POST /auth/test-identity/redeem
+	// per source IP.
+	testIdentityRedeemLimiter *testLoginLimiter
+	// testIdentityKinds caches, per user ID, whether the user's row is a
+	// test identity row (kind test_fixture or a reserved-domain email),
+	// for classifyTestIdentitySession's fast path; see the soundness note
+	// there.
+	testIdentityKinds testFixtureClampCache
 
 	// fingerprintedAssets holds the request paths (/assets/x-<hash>.js) of
 	// the files Vite fingerprinted, read from its build manifest when assets
@@ -590,7 +606,8 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		startTime: time.Now(),
 		log:       logging.Subsystem(webLogSubsystem),
 
-		testLoginLimiter: newTestLoginLimiter(),
+		testLoginLimiter:          newTestLoginLimiter(),
+		testIdentityRedeemLimiter: newTestLoginLimiter(),
 	}
 
 	// Initialize session store
@@ -879,6 +896,48 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// A test identity holds a web session only through a redeemed
+		// web-login code (fixtureSessionValid). Such a session stores no
+		// hub token: each request gets a freshly minted short-lived token,
+		// and the refresh branches below are never entered. Any other
+		// session for a test identity, and any session that no longer
+		// passes the checks, is cleared and the request continues with no
+		// Authorization header.
+		//
+		// classifyTestIdentitySession decides from the user row before
+		// any token is minted or a stored token is forwarded, whatever
+		// the session's email or cookies claim.
+		res := ws.classifyTestIdentitySession(r, session, nil)
+		switch res.state {
+		case tiSessionStoreError:
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "internal error", nil)
+			return
+		case tiSessionUnverifiable:
+			// No store to read the row from while test identities are
+			// on: neither mint nor forward a token (fail closed).
+			next.ServeHTTP(w, r)
+			return
+		case tiSessionInvalid:
+			ws.logger().Info("Clearing test identity web session", "reason", res.reason)
+			ws.clearTestIdentitySession(w, r, session)
+			next.ServeHTTP(w, r)
+			return
+		case tiSessionValid:
+			tok, err := ws.testIdentityAccessToken(res)
+			if err != nil {
+				ws.logger().Info("Clearing test identity web session", "reason", "token_unavailable")
+				ws.clearTestIdentitySession(w, r, session)
+				next.ServeHTTP(w, r)
+				return
+			}
+			r2 := r.Clone(r.Context())
+			r2.Header.Set("Authorization", "Bearer "+tok)
+			next.ServeHTTP(w, r2)
+			return
+		}
+		// tiSessionNotFixture / tiSessionUserMissing: an ordinary account
+		// (a missing one is refused by the hub's row block); continue.
+
 		accessToken, _ := session.Values[sessKeyHubAccessToken].(string)
 		if accessToken == "" {
 			// Session has no Hub token — this happens when the OAuth callback's
@@ -1012,6 +1071,9 @@ func (ws *WebServer) registerRoutes() {
 	ws.mux.HandleFunc("/auth/me", ws.handleAuthMe)
 	ws.mux.HandleFunc("/auth/providers", ws.handleAuthProviders)
 	ws.mux.HandleFunc("/auth/debug", ws.handleAuthDebug)
+	// Test identity web sessions (ptone/scion#4240, WS1): redeem a
+	// single-use web-login code. 404 unless available on this hub.
+	ws.mux.HandleFunc("/auth/test-identity/redeem", ws.handleTestIdentityRedeem)
 	// Test-login endpoint for integration testing (gated by EnableTestLogin)
 	ws.mux.HandleFunc("/api/v1/auth/test-login", ws.handleTestLogin)
 	// SSE event stream (protected by session auth middleware)
@@ -1290,6 +1352,9 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 		Name      string `json:"name"`
 		AvatarURL string `json:"avatarUrl,omitempty"`
 		Role      string `json:"role,omitempty"`
+		// TestIdentity is set for a test identity web session (WS1), as
+		// in GET /auth/me; the web shell shows the identity chip from it.
+		TestIdentity *webTestIdentityInfo `json:"testIdentity,omitempty"`
 	}
 
 	type pageDataEnvelope struct {
@@ -1316,6 +1381,13 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 			Name:      u.Name,
 			AvatarURL: u.AvatarURL,
 			Role:      u.Role,
+		}
+		// The session middleware admitted this request; a test identity
+		// row here means a valid test identity web session.
+		if row, ok := r.Context().Value(dbUserContextKey{}).(*store.User); ok && row != nil && row.IsTestFixture() && row.ID == u.UserID {
+			if m, _ := ws.readTestIdentityMarker(r); m != nil && m.UserID == row.ID {
+				envelope.User.TestIdentity = &webTestIdentityInfo{ExpiresAt: time.UnixMilli(m.Expiry).UTC()}
+			}
 		}
 		if ws.profiling != nil {
 			envelope.ReadinessMarks = ws.profiling.ReadinessMarksEnabled()
@@ -1512,6 +1584,38 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A test identity web session (already checked at connect by the
+	// session middleware) is re-checked on every heartbeat, and the stream
+	// ends at the identity's expiry at the latest.
+	var tiDeadline <-chan time.Time
+	tiSession := false
+	if ws.sessionStore == nil {
+		// Fail closed by construction: with no session store no session
+		// can be decoded, so no test identity session can exist on this
+		// stream and there is nothing to re-check (a bare test server).
+	} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil {
+		// Decided at accept time, from the user row, before wildcard
+		// expansion, subject authorization and subscribe: a long-lived
+		// stream must never start, nor read anything as the context user,
+		// for a test identity session that fails the checks, whichever
+		// middleware admitted the request (dev auth included).
+		res := ws.classifyTestIdentitySession(r, session, nil)
+		switch res.state {
+		case tiSessionValid:
+			tiSession = true
+			d := time.UnixMilli(res.marker.Expiry).Sub(ws.testIdentityNow())
+			if d < 0 {
+				d = 0
+			}
+			t := time.NewTimer(d)
+			defer t.Stop()
+			tiDeadline = t.C
+		case tiSessionInvalid, tiSessionStoreError, tiSessionUnverifiable:
+			http.Error(w, "test identity session ended", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	// Performance tracing (server.hub.perf_trace), observe only. With the
 	// setting off, trace stays nil and nothing below records anything.
 	var trace *PerfTrace
@@ -1589,6 +1693,7 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	viewer := ws.newSSEMessageViewer(r)
 
 	eventID := 0
+	// Each tick also re-checks a test identity web session.
 	heartbeatInterval := ws.config.SSEHeartbeatInterval
 	if heartbeatInterval <= 0 {
 		heartbeatInterval = defaultSSEHeartbeatInterval
@@ -1632,11 +1737,16 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 				trace.addSSEEvent(time.Since(writeStart))
 			}
 		case <-heartbeat.C:
+			if tiSession && !ws.sseTestIdentitySessionStillValid(r) {
+				return
+			}
 			// A named event rather than an SSE comment: browsers never pass
 			// comments to page code, so the client could not observe them.
 			// No id line, so Last-Event-ID and update ids are unaffected.
 			_, _ = fmt.Fprintf(w, "event: heartbeat\ndata: %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
+		case <-tiDeadline:
+			return
 		case <-reconnectTimer.C:
 			// Send a reconnect hint so clients can distinguish a
 			// server-initiated close from an error, then return to
@@ -2293,6 +2403,26 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 
 		// If user already in session, load into context and continue
 		if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
+			// A test identity session is admitted only after its checks.
+			// When it fails them it ends here: it is never replaced by the
+			// dev identity on this request.
+			res := ws.classifyTestIdentitySession(r, session, nil)
+			switch res.state {
+			case tiSessionStoreError, tiSessionUnverifiable:
+				ws.serveInternalError(w, r)
+				return
+			case tiSessionInvalid:
+				ws.logger().Info("Clearing test identity web session", "reason", res.reason)
+				ws.clearTestIdentitySession(w, r, session)
+				ws.serveTestIdentitySessionEnded(w, r)
+				return
+			case tiSessionValid:
+				ctx := context.WithValue(r.Context(), webUserContextKey{}, testIdentityWebSessionUser(res.row))
+				ctx = context.WithValue(ctx, dbUserContextKey{}, res.row)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
 			user := &webSessionUser{
 				UserID:    uid,
 				Email:     sessionString(session, sessKeyUserEmail),
@@ -2388,6 +2518,15 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
 		if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
+			// Test identity web sessions need the driver binding of a later
+			// phase on proxy hubs. Until then every marked session is
+			// refused here, before any lookup.
+			if _, present := ws.readTestIdentityMarker(r); present || sessionString(session, sessKeyTIMarker) != "" {
+				ws.logger().Warn("Proxy auth: clearing a test identity web session (not available behind proxy auth)", "user_id", uid)
+				ws.expireTestIdentityMarker(w)
+				ws.clearStaleSession(w, r)
+				return
+			}
 			// Session exists — re-verify user status and role from the
 			// authoritative store using the immutable session user ID.
 			email, _ := session.Values[sessKeyUserEmail].(string)
@@ -2424,8 +2563,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					// See isReservedPlatformIdentity: every path that provisions a
 					// user or mints/re-mints a hub token checks this, including an
 					// existing session for the configured service account.
-					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
-						ws.logger().Warn("Proxy auth: clearing stale session for the configured service account", "user_id", u.ID)
+					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(email) || !u.IsHumanKind() {
+						ws.logger().Warn("Proxy auth: clearing stale session for a reserved identity", "user_id", u.ID)
 						ws.clearStaleSession(w, r)
 						return
 					}
@@ -2521,8 +2660,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		// find-or-create (it does not go through Server.provisionUser), so it
 		// carries the same check independently. Checked before authorization,
 		// before find-or-create, and before any session/token is issued.
-		if isReservedPlatformIdentity(proxyUser.Email, ws.config.PlatformAuthSA) {
-			ws.logger().Warn("Proxy auth: rejecting configured service account identity", "email", proxyUser.Email)
+		if isReservedPlatformIdentity(proxyUser.Email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(proxyUser.Email) {
+			ws.logger().Warn("Proxy auth: rejecting reserved identity", "email", proxyUser.Email)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
@@ -2675,6 +2814,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Populate session
+		ws.dropTestIdentityValues(w, session)
 		session.Values[sessKeyUserID] = user.ID
 		session.Values[sessKeyUserEmail] = user.Email
 		session.Values[sessKeyUserName] = user.DisplayName
@@ -2737,6 +2877,13 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 			if ws.store != nil {
 				dbUser, err := ws.store.GetUser(ctx, uid)
 				if err != nil {
+					if errors.Is(err, store.ErrNotFound) && ws.classifyTestIdentitySession(r, session, nil).state == tiSessionInvalid {
+						// A test identity that no longer exists: the
+						// session ended. No login redirect.
+						ws.clearTestIdentitySession(w, r, session)
+						ws.serveTestIdentitySessionEnded(w, r)
+						return
+					}
 					if errors.Is(err, store.ErrNotFound) {
 						// User deleted — clear session and force re-login.
 						// Redirect to /login (the SPA login page) rather than
@@ -2753,6 +2900,24 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 					return
 				}
+				// A test identity session must pass every check
+				// (fixtureSessionValid, which includes the generation),
+				// or it ends here with a static page and no login
+				// redirect.
+				res := ws.classifyTestIdentitySession(r, session, dbUser)
+				switch res.state {
+				case tiSessionInvalid, tiSessionStoreError:
+					ws.logger().Info("Clearing test identity web session", "reason", res.reason)
+					ws.clearTestIdentitySession(w, r, session)
+					ws.serveTestIdentitySessionEnded(w, r)
+					return
+				case tiSessionValid:
+					ctx = context.WithValue(ctx, dbUserContextKey{}, dbUser)
+					ctx = context.WithValue(ctx, webUserContextKey{}, testIdentityWebSessionUser(dbUser))
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+
 				cookieGen, _ := session.Values[sessKeySessionGeneration].(int64)
 				if dbUser.SessionGeneration > cookieGen {
 					// Generation mismatch — force re-login
@@ -2933,16 +3098,16 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// mints/re-mints a hub token checks this. A service account cannot
 	// complete interactive OAuth, so this is not reachable in practice; kept
 	// for consistency with the other find-or-create paths.
-	if isReservedPlatformIdentity(userInfo.Email, ws.config.PlatformAuthSA) {
-		ws.logger().Warn("OAuth callback: rejecting configured service account identity", "email", userInfo.Email)
+	if isReservedPlatformIdentity(userInfo.Email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(userInfo.Email) {
+		ws.logger().Warn("OAuth callback: rejecting reserved identity", "email", userInfo.Email)
 		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
 		return
 	}
 
 	// Check if user is authorized (admin bypass, domain check, access mode)
-	if !checkUserAuthorized(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store) {
-		ws.logger().Warn("Unauthorized user", "email", userInfo.Email)
-		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
+	if denial := checkSignInDenial(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store); denial != "" {
+		ws.logger().Warn("Unauthorized user", "email", userInfo.Email, "reason", denial)
+		http.Redirect(w, r, "/login?error="+denial, http.StatusFound)
 		return
 	}
 
@@ -3086,6 +3251,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Store user info in session
+	ws.dropTestIdentityValues(w, session)
 	session.Values[sessKeyUserID] = user.ID
 	session.Values[sessKeyUserEmail] = user.Email
 	session.Values[sessKeyUserName] = user.DisplayName
@@ -3124,6 +3290,14 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 	// In proxy mode, the hub does not own the session.
 	if ws.config.AuthMode == "proxy" {
+		// A test identity web session is still cleared here.
+		if ws.sessionStore == nil {
+			// No session store: nothing to clear.
+		} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.classifyTestIdentitySession(r, session, nil).isTestIdentitySession() {
+			ws.clearTestIdentitySession(w, r, session)
+		} else if _, present := ws.readTestIdentityMarker(r); present {
+			ws.expireTestIdentityMarker(w)
+		}
 		if isBrowserRequest(r) {
 			// Redirect to IAP's clear login cookie endpoint
 			http.Redirect(w, r, "/_gcp_iap/clear_login_cookie", http.StatusFound)
@@ -3151,6 +3325,9 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if err := session.Save(r, w); err != nil {
 		ws.logger().Error("Failed to clear session on logout", "error", err)
 	}
+	if _, present := ws.readTestIdentityMarker(r); present {
+		ws.expireTestIdentityMarker(w)
+	}
 
 	if isBrowserRequest(r) {
 		http.Redirect(w, r, "/login", http.StatusFound)
@@ -3165,6 +3342,49 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 // handleAuthMe returns the current user from the session as JSON.
 // Route: GET /auth/me
 func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	// A test identity web session answers only after every check, from
+	// the authoritative row, with its expiry (the web shell's identity
+	// chip). One that fails them is cleared and answered 401.
+	if ws.sessionStore == nil {
+		// No session store: nothing to check here.
+	} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil {
+		if uid, _ := session.Values[sessKeyUserID].(string); uid != "" {
+			res := ws.classifyTestIdentitySession(r, session, nil)
+			switch res.state {
+			case tiSessionStoreError:
+				// /auth/me grants no authority, so a store error on an
+				// unhinted session keeps the existing degraded answer
+				// (session fields only, below). A hinted session (any
+				// test identity hint) is refused. Every authority
+				// surface (sessionToBearer, page routes, dev auth, the
+				// event stream) fails closed on a store error.
+				if ws.isTestIdentitySessionCandidate(r, session) {
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "internal error", nil)
+					return
+				}
+			case tiSessionUnverifiable:
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
+				return
+			case tiSessionInvalid:
+				ws.clearTestIdentitySession(w, r, session)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
+				return
+			case tiSessionValid:
+				resp := *testIdentityWebSessionUser(res.row)
+				resp.Preferences = res.row.Preferences
+				resp.TestIdentity = &webTestIdentityInfo{ExpiresAt: time.UnixMilli(res.marker.Expiry).UTC()}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Cache-Control", "no-store")
+				_ = json.NewEncoder(w).Encode(resp)
+				return
+			}
+		}
+	}
+
 	// Check context first (set by devAuthMiddleware or sessionAuthMiddleware)
 	if sessUser := getWebSessionUser(r.Context()); sessUser != nil {
 		resp := *sessUser

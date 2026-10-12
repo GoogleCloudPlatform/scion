@@ -350,6 +350,17 @@ auth:
 Conventional type names — `api-key`, `oauth-token`, `auth-file`, `vertex-ai` —
 line up with the `capabilities.auth` matrix; use them.
 
+Declare every method your provisioner accepts, with the same name and the
+same credentials. On a broker start, Scion rejects the start before any
+container is created when the selected auth type is env-only (it declares
+`required_env` but no `required_files`) and none of its keys are staged. It
+does the same when no type is selected, the harness has no `no_auth`, and no
+declared type is satisfied. Types that declare `required_files`, and keys
+named `SCION_*`, are never rejected. A method your `provision.py` accepts but
+this block does not declare, or declares as env-only while the provisioner
+also accepts a file, can therefore be rejected on the broker even though the
+provisioner would accept it.
+
 ### no_auth
 
 ```yaml
@@ -508,12 +519,9 @@ assert scion_harness.INTERFACE_VERSION >= 2
 ```
 
 (Bundles inside the scion repo itself are kept in sync mechanically via
-`go run ./harnesses/gen`, which stamps a `GENERATED FILE` header; external
-bundles just track the canonical file. Run it from the repo root — the
-`//go:generate` directive on this file resolves `gen`'s paths against the
-package directory, not the repo root, so `go generate ./harnesses/...`
-itself fails with "no such file or directory"; `go run ./harnesses/gen` is
-the command that actually works.)
+`go generate ./harnesses/` or, from the repo root, `go run ./harnesses/gen`;
+both stamp a `GENERATED FILE` header and produce identical output. External
+bundles just track the canonical file.)
 
 Key API surface:
 
@@ -543,7 +551,11 @@ Key API surface:
   env var to the `write_outputs(env=...)` overlay (`CLAUDE_CODE_EFFORT_LEVEL`).
 - **Auth engine** — `AuthSpec(harness, [methods])` with
   `env_method(name, any_of=/all_of=, hint=, env_fallback=)` and
-  `file_method(name, path=, secret_key=, hint=)`. `select_auth` honors an
+  `file_method(name, path=, secret_key=, hint=, present_check=)`. A file
+  already in the container at `path` satisfies a file method unless
+  `present_check(path)` returns False; set it when that path can also hold
+  a non-credential file (copilot's `config.json` holds settings too). Staged
+  file secrets and candidate file mappings always satisfy it. `select_auth` honors an
   explicit user selection, otherwise tries methods **in declaration order**
   (your precedence), checking staged candidates/secrets before any env
   fallback; raises `ProvisionError` with the accumulated hints if nothing

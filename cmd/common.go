@@ -372,6 +372,9 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		TargetAgent:      targetAgent,
 		ExcludedAgents:   excludedAgents,
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
+		// On the local workstation hub, link an unregistered project
+		// without prompting; a remote hub keeps the prompt.
+		AutoLinkLocal: true,
 	}
 
 	// A hub project reference needs hub mode: offer to enable it (when
@@ -402,6 +405,25 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		IsGlobal:       hubCtx.IsGlobal,
 		CredentialKind: hubCtx.CredentialKind,
 	}, nil
+}
+
+// errHubNotConfigured is returned by requireHub when the command needs a hub
+// but none is in use (hub not enabled, or --no-hub was given).
+var errHubNotConfigured = errors.New("this command needs a hub; run 'scion server start' or 'scion hub enable'")
+
+// requireHub is CheckHubAvailability for commands that only work against a
+// hub. It never returns a nil HubContext without an error: when no hub is in
+// use it returns errHubNotConfigured, so callers can use hubCtx.Client
+// directly.
+func requireHub(projectPath string) (*HubContext, error) {
+	hubCtx, err := CheckHubAvailability(projectPath)
+	if err != nil {
+		return nil, err
+	}
+	if hubCtx == nil {
+		return nil, errHubNotConfigured
+	}
+	return hubCtx, nil
 }
 
 // detectCrossProjectTarget reports the target project when the caller is an
@@ -471,13 +493,33 @@ func PrintUsingHub(endpoint string) {
 	fmt.Fprintf(os.Stderr, "Using hub: %s\n", endpoint)
 }
 
-// localOnlyHint is appended to hub errors where switching to local-only mode
-// is a plausible remedy (the hub is unreachable or failing).
-const localOnlyHint = "\n\nTo use local-only mode, run: scion hub disable"
+// hubCheckHint is appended to hub errors where the hub may be down or
+// failing. For the local workstation endpoint it says how to check and start
+// the local server; for any other endpoint it points at 'scion hub status'.
+// The wording is shared with pkg/hubsync.
+func hubCheckHint(endpoint string) string {
+	return "\n\n" + hubsync.HubCheckHint(endpoint)
+}
 
-// emptyResponseNote replaces localOnlyHint when the hub answered a call that
-// needs a body with an empty response (apiclient.ErrNoContent). The hub was
-// reachable, so suggesting local-only mode would be misleading.
+// hintHubEndpoint returns the hub endpoint hubCheckHint describes: the
+// endpoint of the current invocation (the --hub flag, the active project's
+// settings, or the environment). It is only called on an error path, and
+// returns what it can without failing. Tests replace it.
+var hintHubEndpoint = func() string {
+	resolved, _, err := config.ResolveProjectPath(projectPath)
+	if err != nil {
+		return GetHubEndpoint(nil)
+	}
+	settings, err := config.LoadSettings(resolved)
+	if err != nil {
+		return GetHubEndpoint(nil)
+	}
+	return GetHubEndpoint(settings)
+}
+
+// emptyResponseNote replaces the hub-check hint when the hub answered a call
+// that needs a body with an empty response (apiclient.ErrNoContent). The hub
+// was reachable, so telling the user to check it would be misleading.
 const emptyResponseNote = "\n\nThe hub returned an empty response where a result was expected."
 
 // hubError marks an error that has been through wrapHubError. Error() is the
@@ -521,21 +563,21 @@ func isHubFailure(err error) bool {
 //     hub-managed agent, a credentials-rejected message that keeps the cause).
 //   - Connectivity failures (anything that is not an *apiclient.APIError,
 //     other than the empty-response case below, e.g. a transport error or
-//     timeout) and 5xx responses: the "scion hub disable" local-only hint is
-//     appended, since the hub being down is the case where falling back to
-//     local mode can help.
+//     timeout) and 5xx responses: the hubCheckHint for the current endpoint
+//     is appended (check and start the local server, or 'scion hub status'),
+//     since the hub may be down.
 //   - A runtime broker failure relayed by the Hub ("runtime broker returned
 //     error ..."): rendered as a short failure category with the broker's
-//     code and the request ID, without the local-only hint.
+//     code and the request ID, without the hub-check hint.
 //   - Other API errors (4xx such as 400/403/404/409/422): returned as-is. The
-//     hub answered and the message is about the request, so suggesting that
-//     the user disable the hub would be misleading noise.
+//     hub answered and the message is about the request, so telling the user
+//     to check the hub would be misleading noise.
 //   - An empty response from a call that needs a body (an error wrapping
 //     apiclient.ErrNoContent): the hub answered, so it gets a note saying so
-//     instead of the local-only hint.
+//     instead of the hub-check hint.
 //
-// Inside a hub-managed agent the local-only hint is never added, because
-// disabling the Hub would break orchestration connectivity.
+// Inside a hub-managed agent the hub-check hint is never added: the agent
+// cannot run those commands.
 func wrapHubError(err error) error {
 	if err == nil {
 		return nil
@@ -559,15 +601,15 @@ func wrapHubError(err error) error {
 		return &hubError{msg: "authentication failed, login to hub with 'scion hub auth login'", err: err}
 	}
 	// A failure the Hub relays from the runtime broker: the Hub is up, so
-	// local-only mode is no remedy; show a short category instead of the
+	// checking it is no remedy; show a short category instead of the
 	// broker's raw response (ptone/scion#3323).
 	if msg, ok := renderBrokerFailure(err); ok {
 		return &hubError{msg: msg, err: err}
 	}
-	if config.IsHubManagedAgent() || !shouldSuggestLocalOnly(err) {
+	if config.IsHubManagedAgent() || !shouldSuggestHubCheck(err) {
 		return &hubError{msg: err.Error(), err: err}
 	}
-	return &hubError{msg: err.Error() + localOnlyHint, err: err}
+	return &hubError{msg: err.Error() + hubCheckHint(hintHubEndpoint()), err: err}
 }
 
 // printDeleteInProgressWarnings writes each string in details.warnings of a
@@ -595,9 +637,9 @@ func printDeleteInProgressWarnings(w io.Writer, err error) {
 	}
 }
 
-// shouldSuggestLocalOnly reports whether the local-only hint is relevant for
+// shouldSuggestHubCheck reports whether the hub-check hint is relevant for
 // err: true for connectivity failures (no structured API response) and 5xx.
-func shouldSuggestLocalOnly(err error) bool {
+func shouldSuggestHubCheck(err error) bool {
 	var apiErr *apiclient.APIError
 	if !errors.As(err, &apiErr) {
 		return true
@@ -749,6 +791,9 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	if err := validateLaunchWaitFlags(); err != nil {
+		return asUsageError(err)
+	}
+	if err := validateWaitReadyFlags(); err != nil {
 		return asUsageError(err)
 	}
 
@@ -993,23 +1038,47 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		displayStatus = "resumed"
 	}
 
+	var readyErr error
+	if startWaitReady {
+		var progress io.Writer
+		if !isJSONOutput() {
+			progress = os.Stderr
+		}
+		_, readyErr = waitForAgentAcceptsInput(context.Background(), waitReadyOptions{
+			AgentName: agentName,
+			Get:       localReadyProbe(mgr, agentName),
+			Timeout:   remainingWaitReadyTimeout(time.Now()),
+			Progress:  progress,
+		})
+	}
+
 	if isJSONOutput() {
-		return outputJSON(ActionResult{
+		details := map[string]interface{}{
+			"id":       info.ID,
+			"detached": info.Detached,
+		}
+		if startWaitReady {
+			details["ready"] = readyErr == nil
+		}
+		if err := outputJSON(ActionResult{
 			Status:   "success",
 			Command:  cmd.Name(),
 			Agent:    agentName,
 			Message:  fmt.Sprintf("Agent '%s' %s successfully.", agentName, displayStatus),
 			Warnings: info.Warnings,
-			Details: map[string]interface{}{
-				"id":       info.ID,
-				"detached": info.Detached,
-			},
-		})
+			Details:  details,
+		}); err != nil {
+			return err
+		}
+		return markWaitReadyReported(readyErr)
 	}
 
 	statusf("Agent '%s' %s successfully (ID: %s)\n", agentName, displayStatus, info.ID)
+	if startWaitReady && readyErr == nil {
+		statusf("Agent '%s' is ready.\n", agentName)
+	}
 
-	return nil
+	return readyErr
 }
 
 // waitForTmuxSession polls the container until the tmux session "scion" is
@@ -1605,6 +1674,11 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	if startNoWait && !attach {
 		needWait = false
 	}
+	// --wait-ready needs the agent running first.
+	if startWaitReady {
+		needWait = true
+	}
+	waitStart := time.Now()
 
 	finalAgent := resp.Agent
 	// notFollowed is set when the Hub accepted the launch but the wait could
@@ -1673,6 +1747,42 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		}
 	}
 
+	// --wait-ready: once running, wait until the harness accepts input. A
+	// launch the wait could not follow to running is not ready either.
+	var readyErr error
+	if startWaitReady {
+		if notFollowed != "" {
+			p := readyProbe{}
+			if finalAgent != nil {
+				p = hubReadyProbe(finalAgent)
+			}
+			readyErr = &waitReadyTimeoutError{Agent: agentName, Timeout: remainingWaitReadyTimeout(waitStart), Phase: p.Phase, Activity: p.Activity}
+		} else {
+			var progress io.Writer
+			if !isJSONOutput() {
+				progress = os.Stderr
+			}
+			var last *hubclient.Agent
+			_, readyErr = waitForAgentAcceptsInput(context.Background(), waitReadyOptions{
+				AgentName: agentName,
+				Get: func(ctx context.Context) (readyProbe, error) {
+					a, err := hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
+					if err != nil || a == nil {
+						return readyProbe{}, fmt.Errorf("fetching agent: %w", err)
+					}
+					last = a
+					return hubReadyProbe(a), nil
+				},
+				Timeout:  remainingWaitReadyTimeout(waitStart),
+				Progress: progress,
+			})
+			if last != nil {
+				finalAgent = last
+				statusRead = true
+			}
+		}
+	}
+
 	// A status that was never read leaves only the create answer, whose
 	// phase predates the launch.
 	phaseKnown := statusRead
@@ -1734,6 +1844,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			if notFollowed != "" {
 				result.Details["launchNote"] = notFollowed
 			}
+			if startWaitReady {
+				result.Details["ready"] = readyErr == nil
+			}
 			if launching && launchReportable && finalAgent.Launch != nil {
 				result.Details["launchId"] = finalAgent.Launch.ID
 				if finalAgent.Launch.Deadline != nil {
@@ -1741,7 +1854,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 				}
 			}
 		}
-		return outputJSON(result)
+		if err := outputJSON(result); err != nil {
+			return err
+		}
+		return markWaitReadyReported(readyErr)
 	}
 
 	statusf("%s\n", message)
@@ -1761,6 +1877,12 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	}
 	for _, w := range textWarnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+	}
+	if startWaitReady {
+		if readyErr != nil {
+			return readyErr
+		}
+		statusf("Agent '%s' is ready.\n", agentName)
 	}
 
 	if !attach {

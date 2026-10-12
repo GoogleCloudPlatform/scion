@@ -17,6 +17,7 @@
 package enttest
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -50,4 +51,12 @@ func NewEmptySchemaURL(t *testing.T) string {
 	t.Helper()
 	t.Skip("enttest: Postgres backend not built; rebuild with -tags integration and set SCION_TEST_POSTGRES_URL")
 	return ""
+}
+
+// WithConnParam has no meaning without the Postgres backend, whose NewSchemaURL
+// and NewEmptySchemaURL skip the calling test before a DSN exists. It returns
+// an error. The signature matches the integration build's implementation so
+// Postgres-only tests compile under both build tags.
+func WithConnParam(_, _, _ string) (string, error) {
+	return "", errors.New("enttest: Postgres backend not built; rebuild with -tags integration and set SCION_TEST_POSTGRES_URL")
 }

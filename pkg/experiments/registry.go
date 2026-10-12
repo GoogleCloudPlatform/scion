@@ -150,10 +150,35 @@ const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 // accepts edits of agents with no container whether or not it is on.
 const AgentEdit = "web.agent_edit"
 
+// AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
+// the grant issuance and credential exchange routes, the delegated
+// credential middleware arm, and the delegated decision procedure. While it
+// is off, issuance and exchange answer 404 and every delegated credential is
+// refused. Turning it off suspends stored grants; it does not revoke them.
+const AgentDelegation = "hub.agent_delegation"
+
+// ChatThreadGroups gates project-scoped chat thread groups
+// (ptone/scion#4424): the hub's /api/v1/thread-groups routes (404 while
+// off), the threadGroupId field on conversation create, the migration of
+// personal groups into project groups, and the web rail's project groups.
+// Turning it off hides the feature but keeps every stored group.
+const ChatThreadGroups = "hub.chat_thread_groups"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        AgentDelegation,
+		Title:       "Agent delegation",
+		Description: "Lets a user issue an agent delegation grant and lets the bound agent exchange it for a short-lived delegated credential. While off, issuance and exchange answer 404 and delegated credentials are refused; stored grants are kept.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2131",
+		Owner:       "authz",
+		ReviewBy:    "2027-01-31",
+	},
 	{
 		Name:        AuthorizationDecisionAuditV2,
 		Title:       "Authorization decision audit v2",
@@ -252,6 +277,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#3952",
 		Owner:       "web",
 		ReviewBy:    "2027-01-07",
+	},
+	{
+		Name:        ChatThreadGroups,
+		Title:       "Project thread groups in chat",
+		Description: "Makes chat thread groups belong to the project, so every project member (user or agent) sees the same groups and can file threads into them; each user keeps their own sidebar order. Gates the web rail (LayerWeb) and the hub's /api/v1/thread-groups routes, which answer 404 while it is off, plus the copy of personal groups into project groups (LayerServer). Turning it off hides project groups and restores personal groups; no data is deleted.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4424",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-01-11",
 	},
 }
 

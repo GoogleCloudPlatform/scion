@@ -11,6 +11,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
@@ -45,6 +46,18 @@ type User struct {
 	LastSeen *time.Time `json:"last_seen,omitempty"`
 	// Incremented to revoke all sessions for this user
 	SessionGeneration int64 `json:"session_generation,omitempty"`
+	// Kind holds the value of the "kind" field.
+	Kind user.Kind `json:"kind,omitempty"`
+	// Hard expiry of a test_fixture user; required for that kind
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// User ID of the principal that issued this test_fixture user
+	IssuedBy *string `json:"issued_by,omitempty"`
+	// Issuer-supplied purpose of this test_fixture user
+	Purpose *string `json:"purpose,omitempty"`
+	// Issuance ID of an admin-kind test identity (audit correlation)
+	IssuanceID *string `json:"issuance_id,omitempty"`
+	// ID of the issuer's user access token for an admin-kind test identity; null for a session issuer
+	IssuerCredentialID *string `json:"issuer_credential_id,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the UserQuery when eager-loading is set.
 	Edges        UserEdges `json:"edges"`
@@ -63,9 +76,11 @@ type UserEdges struct {
 	ExternalIdentities []*ExternalIdentity `json:"external_identities,omitempty"`
 	// TerminalWorkspace holds the value of the terminal_workspace edge.
 	TerminalWorkspace *UserTerminalWorkspace `json:"terminal_workspace,omitempty"`
+	// TestIdentityLoginCode holds the value of the test_identity_login_code edge.
+	TestIdentityLoginCode *TestIdentityLoginCode `json:"test_identity_login_code,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [5]bool
+	loadedTypes [6]bool
 }
 
 // OwnedGroupsOrErr returns the OwnedGroups value or an error if the edge
@@ -115,6 +130,17 @@ func (e UserEdges) TerminalWorkspaceOrErr() (*UserTerminalWorkspace, error) {
 	return nil, &NotLoadedError{edge: "terminal_workspace"}
 }
 
+// TestIdentityLoginCodeOrErr returns the TestIdentityLoginCode value or an error if the edge
+// was not loaded in eager-loading, or loaded but was not found.
+func (e UserEdges) TestIdentityLoginCodeOrErr() (*TestIdentityLoginCode, error) {
+	if e.TestIdentityLoginCode != nil {
+		return e.TestIdentityLoginCode, nil
+	} else if e.loadedTypes[5] {
+		return nil, &NotFoundError{label: testidentitylogincode.Label}
+	}
+	return nil, &NotLoadedError{edge: "test_identity_login_code"}
+}
+
 // scanValues returns the types for scanning values from sql.Rows.
 func (*User) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
@@ -124,9 +150,9 @@ func (*User) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case user.FieldSessionGeneration:
 			values[i] = new(sql.NullInt64)
-		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus, user.FieldInvitedBy, user.FieldInviteNote:
+		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus, user.FieldInvitedBy, user.FieldInviteNote, user.FieldKind, user.FieldIssuedBy, user.FieldPurpose, user.FieldIssuanceID, user.FieldIssuerCredentialID:
 			values[i] = new(sql.NullString)
-		case user.FieldCreated, user.FieldLastLogin, user.FieldLastSeen:
+		case user.FieldCreated, user.FieldLastLogin, user.FieldLastSeen, user.FieldExpiresAt:
 			values[i] = new(sql.NullTime)
 		case user.FieldID:
 			values[i] = new(uuid.UUID)
@@ -229,6 +255,47 @@ func (_m *User) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.SessionGeneration = value.Int64
 			}
+		case user.FieldKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field kind", values[i])
+			} else if value.Valid {
+				_m.Kind = user.Kind(value.String)
+			}
+		case user.FieldExpiresAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field expires_at", values[i])
+			} else if value.Valid {
+				_m.ExpiresAt = new(time.Time)
+				*_m.ExpiresAt = value.Time
+			}
+		case user.FieldIssuedBy:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issued_by", values[i])
+			} else if value.Valid {
+				_m.IssuedBy = new(string)
+				*_m.IssuedBy = value.String
+			}
+		case user.FieldPurpose:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field purpose", values[i])
+			} else if value.Valid {
+				_m.Purpose = new(string)
+				*_m.Purpose = value.String
+			}
+		case user.FieldIssuanceID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issuance_id", values[i])
+			} else if value.Valid {
+				_m.IssuanceID = new(string)
+				*_m.IssuanceID = value.String
+			}
+		case user.FieldIssuerCredentialID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issuer_credential_id", values[i])
+			} else if value.Valid {
+				_m.IssuerCredentialID = new(string)
+				*_m.IssuerCredentialID = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -265,6 +332,11 @@ func (_m *User) QueryExternalIdentities() *ExternalIdentityQuery {
 // QueryTerminalWorkspace queries the "terminal_workspace" edge of the User entity.
 func (_m *User) QueryTerminalWorkspace() *UserTerminalWorkspaceQuery {
 	return NewUserClient(_m.config).QueryTerminalWorkspace(_m)
+}
+
+// QueryTestIdentityLoginCode queries the "test_identity_login_code" edge of the User entity.
+func (_m *User) QueryTestIdentityLoginCode() *TestIdentityLoginCodeQuery {
+	return NewUserClient(_m.config).QueryTestIdentityLoginCode(_m)
 }
 
 // Update returns a builder for updating this User.
@@ -333,6 +405,34 @@ func (_m *User) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("session_generation=")
 	builder.WriteString(fmt.Sprintf("%v", _m.SessionGeneration))
+	builder.WriteString(", ")
+	builder.WriteString("kind=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Kind))
+	builder.WriteString(", ")
+	if v := _m.ExpiresAt; v != nil {
+		builder.WriteString("expires_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.IssuedBy; v != nil {
+		builder.WriteString("issued_by=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.Purpose; v != nil {
+		builder.WriteString("purpose=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.IssuanceID; v != nil {
+		builder.WriteString("issuance_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.IssuerCredentialID; v != nil {
+		builder.WriteString("issuer_credential_id=")
+		builder.WriteString(*v)
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

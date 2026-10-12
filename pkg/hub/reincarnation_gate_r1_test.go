@@ -1,4 +1,4 @@
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 // Copyright 2026 Google LLC
 //
@@ -46,17 +46,6 @@ import (
 // ---------------------------------------------------------------------------
 // R1: human-sender deferred path must still run notify + @mention fan-out
 // ---------------------------------------------------------------------------
-
-// setReincarnationState sets an agent's ReincarnationState via UpdateAgent.
-// CreateAgent's ent mapping does not persist this field (see
-// entadapter/agent_store.go: SetReincarnationState is wired only into
-// UpdateAgent's mutation builder), so every test that needs a migrating
-// agent must create it first and set this separately.
-func setReincarnationState(t *testing.T, s store.Store, a *store.Agent, rs string) {
-	t.Helper()
-	a.ReincarnationState = rs
-	require.NoError(t, s.UpdateAgent(context.Background(), a))
-}
 
 // setupR1TestAgents creates a project, a runtime broker, a migrating primary
 // agent, and a running peer agent that can be @mentioned.

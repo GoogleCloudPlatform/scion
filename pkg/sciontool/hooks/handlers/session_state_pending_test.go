@@ -157,9 +157,14 @@ func TestPendingReport_HookKilledBeforeReportSentAtShutdownOnce(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].SessionID != "s1" || got[0].TurnCount != 1 {
 		t.Fatalf("shutdown check = %+v, %v; want the s1 summary once", got, err)
 	}
+	// A check by another process while the first is sending leaves the
+	// report to it. (A shutdown check reclaims its own process's claims by
+	// design, see claimAbandoned; RunInit runs it once per process.)
+	procs.self = 2
 	if again, err := store.CloseOpenSessionAndClaimPending(""); err != nil || len(again) != 0 {
 		t.Fatalf("second check while the first is sending = %+v, %v; want nothing", again, err)
 	}
+	procs.self = 1
 	if err := store.CompleteReportsNoFollow(got...); err != nil {
 		t.Fatal(err)
 	}

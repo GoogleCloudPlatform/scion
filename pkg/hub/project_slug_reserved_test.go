@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -28,12 +28,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func assertNoProjectWithSlug(t *testing.T, s store.Store, slug string) {
-	t.Helper()
-	_, err := s.GetProjectBySlug(context.Background(), slug)
-	assert.ErrorIs(t, err, store.ErrNotFound, "no project may hold slug %q", slug)
-}
 
 func TestCreateProject_ExplicitReservedSlugRefused(t *testing.T) {
 	for _, slug := range []string{"global", "GLOBAL", "Global"} {

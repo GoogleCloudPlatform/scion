@@ -29,7 +29,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Project, RuntimeBroker, Template, GCPServiceAccount } from '../../shared/types.js';
+import type { Project, RuntimeBroker, Template } from '../../shared/types.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -51,6 +51,8 @@ import {
   type ProjectCreateDefaults,
 } from '../../shared/agent-config-inherited.js';
 import { GcpIdentityState } from '../../shared/gcp-identity-state.js';
+import { assignStatusTarget } from '../../shared/gcp-sa-assign-status.js';
+import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
@@ -398,6 +400,9 @@ export class ScionPageAgentCreate extends LitElement {
       changedProperties.has('brokers')
     ) {
       this.gcp.setTarget(this.targetRuntimeIsKubernetesOnly, this.profile);
+      // The accounts' mapping state is for one target: ask again when it
+      // changes (ptone/scion#4391). Not before the first load has started.
+      void this.gcpAccounts.targetChanged();
     }
   }
 
@@ -703,45 +708,31 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   /**
-   * Incremented at the start of every loadGCPServiceAccounts call. Each call
-   * captures its own value and, after every await, drops its results if a
-   * newer call has started since (ptone/scion#2548): project switches fire
-   * the load unawaited, so a slow response for the previous project must not
-   * overwrite the current project's accounts or default.
+   * Loads the project's accounts with their mapping state on the chosen
+   * Kubernetes target, and asks again when the target changes. Its guard
+   * also drops a slow load for a previous project (ptone/scion#2548): project
+   * switches fire the load unawaited.
    */
-  private gcpLoadSeq = 0;
+  private readonly gcpAccounts = new GCPServiceAccountsLoader({
+    projectId: () => this.projectId,
+    target: () =>
+      assignStatusTarget(this.targetRuntimeIsKubernetesOnly, this.brokerId, this.profile),
+    accounts: () => this.gcp.gcpServiceAccounts,
+    setAccounts: (accounts) => this.gcp.setAccounts(accounts),
+  });
 
   private async loadGCPServiceAccounts(): Promise<void> {
-    const seq = ++this.gcpLoadSeq;
-    const projectId = this.projectId;
-    // True when a newer load has started or the project changed under this
-    // one; a stale load must not touch any state after that point.
-    const isStale = (): boolean => seq !== this.gcpLoadSeq || this.projectId !== projectId;
-
     // Recomputing defaults from scratch (initial load, or a project change).
     // This runs synchronously, before any await, so it is always performed
     // by the newest load.
     this.gcp.reset();
 
-    if (!projectId) return;
-    let accounts: GCPServiceAccount[] = [];
-    try {
-      const res = await apiFetch(
-        `/api/v1/projects/${projectId}/gcp-service-accounts?includeHubScoped=true`
-      );
-      if (res.ok) {
-        const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
-        accounts = Array.isArray(data) ? data : data.items || [];
-      }
-    } catch {
-      // Non-critical
-    }
-    if (isStale()) return;
-    this.gcp.setAccounts(accounts);
+    const isStale = await this.gcpAccounts.load();
+    if (!isStale) return;
 
     // The project's default identity: applied to the displayed value only
     // when the user has not already picked while the fetches were in flight.
-    const settings = await this.fetchProjectSettings(projectId);
+    const settings = await this.fetchProjectSettings(this.projectId);
     if (isStale()) return;
     this.gcp.applyProjectDefaults(settings);
   }

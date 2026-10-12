@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -61,12 +61,6 @@ func seedSelfScopeMember(t *testing.T, s store.Store, userID, projectID string) 
 		require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Name: projectID, Slug: projectID}))
 	}
 	createTestUserWithProjectRole(t, s, userID, userID+"@test.com", projectID, store.ProjectRoleMember)
-}
-
-// selfToken builds a token identity with the given boundary and selectors.
-func selfToken(t *testing.T, userID string, boundary TokenBoundary, selectors ...string) *ScopedUserIdentity {
-	t.Helper()
-	return NewScopedUserIdentityWithBoundaryAndDecoration(bearerUser(userID), boundary, selectors, tid("self-cred-"+userID), bearerCeiling(t, selectors...), nil)
 }
 
 // callAuthorizeSelfScoped runs Server.authorizeSelfScoped for identity and

@@ -186,6 +186,11 @@ func (svc *ProjectMembershipService) projectEffectiveRole(ctx context.Context, u
 	if err != nil {
 		return ""
 	}
+	// Unclamped reads: apply the test identity clamps (fail closed: no
+	// role on a kind-read error).
+	if directBindings, err = clampBindingsForUser(ctx, svc.store, svc.authz, userID, directBindings); err != nil {
+		return ""
+	}
 
 	rdCache := make(map[string]*store.RoleDefinition)
 	getRoleDef := func(rdID string) *store.RoleDefinition {
@@ -223,6 +228,9 @@ func (svc *ProjectMembershipService) projectEffectiveRole(ctx context.Context, u
 			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
 		}
 		groupBindings, err := svc.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		if err == nil {
+			groupBindings, err = clampBindingsForUser(ctx, svc.store, svc.authz, userID, groupBindings)
+		}
 		if err == nil {
 			for _, rb := range groupBindings {
 				if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
@@ -274,6 +282,10 @@ func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.C
 	if err != nil {
 		return "", fmt.Errorf("list direct bindings for actor %s: %w", userID, err)
 	}
+	// Unclamped reads (the tx store): apply the test identity clamps.
+	if directBindings, err = clampBindingsForUser(ctx, s, svc.authz, userID, directBindings); err != nil {
+		return "", fmt.Errorf("test identity clamp for actor %s: %w", userID, err)
+	}
 
 	rdCache := make(map[string]*store.RoleDefinition)
 	getRoleDef := func(rdID string) (*store.RoleDefinition, error) {
@@ -317,6 +329,9 @@ func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.C
 		if err != nil {
 			return "", fmt.Errorf("list group bindings: %w", err)
 		}
+		if groupBindings, err = clampBindingsForUser(ctx, s, svc.authz, userID, groupBindings); err != nil {
+			return "", fmt.Errorf("test identity clamp for actor %s: %w", userID, err)
+		}
 		for _, rb := range groupBindings {
 			if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
 				continue
@@ -358,6 +373,9 @@ func (svc *ProjectMembershipService) isActorDirectOwnerFromStore(ctx context.Con
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return false, fmt.Errorf("list bindings for owner check %s: %w", userID, err)
+	}
+	if bindings, err = clampBindingsForUser(ctx, s, svc.authz, userID, bindings); err != nil {
+		return false, fmt.Errorf("test identity clamp for owner check %s: %w", userID, err)
 	}
 	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	if err != nil {
@@ -472,6 +490,14 @@ func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthorityTx(ctx conte
 	if err != nil {
 		return false, fmt.Errorf("list bindings for hub authority: %w", err)
 	}
+	// This read is unclamped (the tx store, not the authorization
+	// service's), so apply the test-identity grant clamp: a test identity
+	// never holds hub-level role-binding authority beyond member. A
+	// kind-read error fails closed.
+	bindings, err = clampTestIdentityBindings(ctx, tx, svc.authz, principals, bindings)
+	if err != nil {
+		return false, fmt.Errorf("test identity clamp for hub authority: %w", err)
+	}
 
 	// 3. Filter to system-scoped, active bindings and check permissions.
 	for _, b := range bindings {
@@ -479,10 +505,7 @@ func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthorityTx(ctx conte
 			continue
 		}
 		// Activation window check.
-		if b.NotBefore != nil && now.Before(*b.NotBefore) {
-			continue
-		}
-		if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+		if !isBindingActive(b, now) {
 			continue
 		}
 		rd, rdErr := tx.GetRoleDefinition(ctx, b.RoleDefinitionID)
@@ -823,6 +846,8 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			RoleDefinitionID: req.RoleDefID,
 			ScopeType:        store.RoleScopeProject,
 			ScopeID:          req.ProjectID,
+			GranteeType:      req.PrincipalType,
+			GranteeID:        req.PrincipalID,
 		})
 		if !delDecision.Allowed {
 			return nil, canDelegateRefusal(roleDef, delDecision.Reason)
@@ -1139,6 +1164,8 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 				RoleDefinitionID: req.NewRoleDefID,
 				ScopeType:        store.RoleScopeProject,
 				ScopeID:          req.ProjectID,
+				GranteeType:      req.PrincipalType,
+				GranteeID:        req.PrincipalID,
 			})
 			if !delDecision.Allowed {
 				return nil, canDelegateRefusalFor(newRoleDef, "the new role", delDecision.Reason)
@@ -1507,6 +1534,12 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 	}
 	if newOwner.Status != "active" {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: ErrCodePrincipalIneligible, Reason: "target user is not active", HTTPStatus: 400}
+	}
+	// An admin-kind test identity holds only its issuance binding: it is
+	// never made a project owner. The kind is read through
+	// kindForPrincipal; a read error or unrecognized kind refuses.
+	if denied := svc.refuseTestAdminNewOwner(ctx, newOwner); denied != nil {
+		return nil, denied
 	}
 
 	// Resolve role definitions.
@@ -2133,4 +2166,22 @@ func (svc *ProjectMembershipService) MigrateMultiRoleBindings(ctx context.Contex
 	}
 
 	return results, nil
+}
+
+// refuseTestAdminNewOwner refuses an ownership transfer to an admin-kind
+// test identity (403), reading the kind through kindForPrincipal (the row's
+// own classification when no authorization service is wired). A read
+// error or an unrecognized kind refuses too.
+func (svc *ProjectMembershipService) refuseTestAdminNewOwner(ctx context.Context, newOwner *store.User) *MembershipDecision {
+	var k principalKind
+	var err error
+	if svc.authz != nil {
+		k, err = svc.authz.kindForPrincipal(ctx, newOwner.ID)
+	} else {
+		k, err = classifyUserKind(newOwner)
+	}
+	if err != nil || k.isTestAdmin() {
+		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: testAdminGranteeReasonRefused, HTTPStatus: 403}
+	}
+	return nil
 }

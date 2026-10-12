@@ -14,6 +14,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerreportedrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
@@ -27,6 +28,34 @@ type AgentCreate struct {
 	mutation *AgentMutation
 	hooks    []Hook
 	conflict []sql.ConflictOption
+}
+
+// SetFixtureRootID sets the "fixture_root_id" field.
+func (_c *AgentCreate) SetFixtureRootID(v uuid.UUID) *AgentCreate {
+	_c.mutation.SetFixtureRootID(v)
+	return _c
+}
+
+// SetNillableFixtureRootID sets the "fixture_root_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableFixtureRootID(v *uuid.UUID) *AgentCreate {
+	if v != nil {
+		_c.SetFixtureRootID(*v)
+	}
+	return _c
+}
+
+// SetFixtureIssuerID sets the "fixture_issuer_id" field.
+func (_c *AgentCreate) SetFixtureIssuerID(v uuid.UUID) *AgentCreate {
+	_c.mutation.SetFixtureIssuerID(v)
+	return _c
+}
+
+// SetNillableFixtureIssuerID sets the "fixture_issuer_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableFixtureIssuerID(v *uuid.UUID) *AgentCreate {
+	if v != nil {
+		_c.SetFixtureIssuerID(*v)
+	}
+	return _c
 }
 
 // SetSlug sets the "slug" field.
@@ -679,6 +708,48 @@ func (_c *AgentCreate) SetPreviousRunIds(v []string) *AgentCreate {
 	return _c
 }
 
+// SetRunIDUpdatedAt sets the "run_id_updated_at" field.
+func (_c *AgentCreate) SetRunIDUpdatedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetRunIDUpdatedAt(v)
+	return _c
+}
+
+// SetNillableRunIDUpdatedAt sets the "run_id_updated_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunIDUpdatedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetRunIDUpdatedAt(*v)
+	}
+	return _c
+}
+
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (_c *AgentCreate) SetSSHHostKey(v string) *AgentCreate {
+	_c.mutation.SetSSHHostKey(v)
+	return _c
+}
+
+// SetNillableSSHHostKey sets the "ssh_host_key" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSSHHostKey(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetSSHHostKey(*v)
+	}
+	return _c
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (_c *AgentCreate) SetSSHHostKeyRunID(v string) *AgentCreate {
+	_c.mutation.SetSSHHostKeyRunID(v)
+	return _c
+}
+
+// SetNillableSSHHostKeyRunID sets the "ssh_host_key_run_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSSHHostKeyRunID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetSSHHostKeyRunID(*v)
+	}
+	return _c
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_c *AgentCreate) SetLaunchState(v string) *AgentCreate {
 	_c.mutation.SetLaunchState(v)
@@ -1191,6 +1262,21 @@ func (_c *AgentCreate) AddHolds(v ...*AgentHold) *AgentCreate {
 	return _c.AddHoldIDs(ids...)
 }
 
+// AddReportedRunIDs adds the "reported_runs" edge to the BrokerReportedRun entity by IDs.
+func (_c *AgentCreate) AddReportedRunIDs(ids ...uuid.UUID) *AgentCreate {
+	_c.mutation.AddReportedRunIDs(ids...)
+	return _c
+}
+
+// AddReportedRuns adds the "reported_runs" edges to the BrokerReportedRun entity.
+func (_c *AgentCreate) AddReportedRuns(v ...*BrokerReportedRun) *AgentCreate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _c.AddReportedRunIDs(ids...)
+}
+
 // Mutation returns the AgentMutation object of the builder.
 func (_c *AgentCreate) Mutation() *AgentMutation {
 	return _c.mutation
@@ -1484,6 +1570,14 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_node.ID = id
 		_spec.ID.Value = &id
 	}
+	if value, ok := _c.mutation.FixtureRootID(); ok {
+		_spec.SetField(agent.FieldFixtureRootID, field.TypeUUID, value)
+		_node.FixtureRootID = &value
+	}
+	if value, ok := _c.mutation.FixtureIssuerID(); ok {
+		_spec.SetField(agent.FieldFixtureIssuerID, field.TypeUUID, value)
+		_node.FixtureIssuerID = &value
+	}
 	if value, ok := _c.mutation.Slug(); ok {
 		_spec.SetField(agent.FieldSlug, field.TypeString, value)
 		_node.Slug = value
@@ -1684,6 +1778,18 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
 		_node.PreviousRunIds = value
 	}
+	if value, ok := _c.mutation.RunIDUpdatedAt(); ok {
+		_spec.SetField(agent.FieldRunIDUpdatedAt, field.TypeTime, value)
+		_node.RunIDUpdatedAt = &value
+	}
+	if value, ok := _c.mutation.SSHHostKey(); ok {
+		_spec.SetField(agent.FieldSSHHostKey, field.TypeString, value)
+		_node.SSHHostKey = value
+	}
+	if value, ok := _c.mutation.SSHHostKeyRunID(); ok {
+		_spec.SetField(agent.FieldSSHHostKeyRunID, field.TypeString, value)
+		_node.SSHHostKeyRunID = value
+	}
 	if value, ok := _c.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 		_node.LaunchState = value
@@ -1877,6 +1983,22 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		}
 		_spec.Edges = append(_spec.Edges, edge)
 	}
+	if nodes := _c.mutation.ReportedRunsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.ReportedRunsTable,
+			Columns: []string{agent.ReportedRunsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(brokerreportedrun.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
 	return _node, _spec
 }
 
@@ -1884,7 +2006,7 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 // of the `INSERT` statement. For example:
 //
 //	client.Agent.Create().
-//		SetSlug(v).
+//		SetFixtureRootID(v).
 //		OnConflict(
 //			// Update the row with the new values
 //			// the was proposed for insertion.
@@ -1893,7 +2015,7 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.AgentUpsert) {
-//			SetSlug(v+v).
+//			SetFixtureRootID(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *AgentCreate) OnConflict(opts ...sql.ConflictOption) *AgentUpsertOne {
@@ -1992,24 +2114,6 @@ func (u *AgentUpsert) SetStatus(v agent.Status) *AgentUpsert {
 // UpdateStatus sets the "status" field to the value that was provided on create.
 func (u *AgentUpsert) UpdateStatus() *AgentUpsert {
 	u.SetExcluded(agent.FieldStatus)
-	return u
-}
-
-// SetCreatedBy sets the "created_by" field.
-func (u *AgentUpsert) SetCreatedBy(v uuid.UUID) *AgentUpsert {
-	u.Set(agent.FieldCreatedBy, v)
-	return u
-}
-
-// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
-func (u *AgentUpsert) UpdateCreatedBy() *AgentUpsert {
-	u.SetExcluded(agent.FieldCreatedBy)
-	return u
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (u *AgentUpsert) ClearCreatedBy() *AgentUpsert {
-	u.SetNull(agent.FieldCreatedBy)
 	return u
 }
 
@@ -2535,24 +2639,6 @@ func (u *AgentUpsert) ClearHarnessConfig() *AgentUpsert {
 	return u
 }
 
-// SetAncestry sets the "ancestry" field.
-func (u *AgentUpsert) SetAncestry(v []string) *AgentUpsert {
-	u.Set(agent.FieldAncestry, v)
-	return u
-}
-
-// UpdateAncestry sets the "ancestry" field to the value that was provided on create.
-func (u *AgentUpsert) UpdateAncestry() *AgentUpsert {
-	u.SetExcluded(agent.FieldAncestry)
-	return u
-}
-
-// ClearAncestry clears the value of the "ancestry" field.
-func (u *AgentUpsert) ClearAncestry() *AgentUpsert {
-	u.SetNull(agent.FieldAncestry)
-	return u
-}
-
 // SetUpdated sets the "updated" field.
 func (u *AgentUpsert) SetUpdated(v time.Time) *AgentUpsert {
 	u.Set(agent.FieldUpdated, v)
@@ -2772,6 +2858,60 @@ func (u *AgentUpsert) UpdatePreviousRunIds() *AgentUpsert {
 // ClearPreviousRunIds clears the value of the "previous_run_ids" field.
 func (u *AgentUpsert) ClearPreviousRunIds() *AgentUpsert {
 	u.SetNull(agent.FieldPreviousRunIds)
+	return u
+}
+
+// SetRunIDUpdatedAt sets the "run_id_updated_at" field.
+func (u *AgentUpsert) SetRunIDUpdatedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldRunIDUpdatedAt, v)
+	return u
+}
+
+// UpdateRunIDUpdatedAt sets the "run_id_updated_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunIDUpdatedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunIDUpdatedAt)
+	return u
+}
+
+// ClearRunIDUpdatedAt clears the value of the "run_id_updated_at" field.
+func (u *AgentUpsert) ClearRunIDUpdatedAt() *AgentUpsert {
+	u.SetNull(agent.FieldRunIDUpdatedAt)
+	return u
+}
+
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (u *AgentUpsert) SetSSHHostKey(v string) *AgentUpsert {
+	u.Set(agent.FieldSSHHostKey, v)
+	return u
+}
+
+// UpdateSSHHostKey sets the "ssh_host_key" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSSHHostKey() *AgentUpsert {
+	u.SetExcluded(agent.FieldSSHHostKey)
+	return u
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (u *AgentUpsert) ClearSSHHostKey() *AgentUpsert {
+	u.SetNull(agent.FieldSSHHostKey)
+	return u
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (u *AgentUpsert) SetSSHHostKeyRunID(v string) *AgentUpsert {
+	u.Set(agent.FieldSSHHostKeyRunID, v)
+	return u
+}
+
+// UpdateSSHHostKeyRunID sets the "ssh_host_key_run_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSSHHostKeyRunID() *AgentUpsert {
+	u.SetExcluded(agent.FieldSSHHostKeyRunID)
+	return u
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (u *AgentUpsert) ClearSSHHostKeyRunID() *AgentUpsert {
+	u.SetNull(agent.FieldSSHHostKeyRunID)
 	return u
 }
 
@@ -3368,6 +3508,18 @@ func (u *AgentUpsertOne) UpdateNewValues() *AgentUpsertOne {
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(agent.FieldID)
 		}
+		if _, exists := u.create.mutation.FixtureRootID(); exists {
+			s.SetIgnore(agent.FieldFixtureRootID)
+		}
+		if _, exists := u.create.mutation.FixtureIssuerID(); exists {
+			s.SetIgnore(agent.FieldFixtureIssuerID)
+		}
+		if _, exists := u.create.mutation.CreatedBy(); exists {
+			s.SetIgnore(agent.FieldCreatedBy)
+		}
+		if _, exists := u.create.mutation.Ancestry(); exists {
+			s.SetIgnore(agent.FieldAncestry)
+		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(agent.FieldCreated)
 		}
@@ -3476,27 +3628,6 @@ func (u *AgentUpsertOne) SetStatus(v agent.Status) *AgentUpsertOne {
 func (u *AgentUpsertOne) UpdateStatus() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateStatus()
-	})
-}
-
-// SetCreatedBy sets the "created_by" field.
-func (u *AgentUpsertOne) SetCreatedBy(v uuid.UUID) *AgentUpsertOne {
-	return u.Update(func(s *AgentUpsert) {
-		s.SetCreatedBy(v)
-	})
-}
-
-// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
-func (u *AgentUpsertOne) UpdateCreatedBy() *AgentUpsertOne {
-	return u.Update(func(s *AgentUpsert) {
-		s.UpdateCreatedBy()
-	})
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (u *AgentUpsertOne) ClearCreatedBy() *AgentUpsertOne {
-	return u.Update(func(s *AgentUpsert) {
-		s.ClearCreatedBy()
 	})
 }
 
@@ -4109,27 +4240,6 @@ func (u *AgentUpsertOne) ClearHarnessConfig() *AgentUpsertOne {
 	})
 }
 
-// SetAncestry sets the "ancestry" field.
-func (u *AgentUpsertOne) SetAncestry(v []string) *AgentUpsertOne {
-	return u.Update(func(s *AgentUpsert) {
-		s.SetAncestry(v)
-	})
-}
-
-// UpdateAncestry sets the "ancestry" field to the value that was provided on create.
-func (u *AgentUpsertOne) UpdateAncestry() *AgentUpsertOne {
-	return u.Update(func(s *AgentUpsert) {
-		s.UpdateAncestry()
-	})
-}
-
-// ClearAncestry clears the value of the "ancestry" field.
-func (u *AgentUpsertOne) ClearAncestry() *AgentUpsertOne {
-	return u.Update(func(s *AgentUpsert) {
-		s.ClearAncestry()
-	})
-}
-
 // SetUpdated sets the "updated" field.
 func (u *AgentUpsertOne) SetUpdated(v time.Time) *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
@@ -4386,6 +4496,69 @@ func (u *AgentUpsertOne) UpdatePreviousRunIds() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearPreviousRunIds() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearPreviousRunIds()
+	})
+}
+
+// SetRunIDUpdatedAt sets the "run_id_updated_at" field.
+func (u *AgentUpsertOne) SetRunIDUpdatedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIDUpdatedAt(v)
+	})
+}
+
+// UpdateRunIDUpdatedAt sets the "run_id_updated_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunIDUpdatedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIDUpdatedAt()
+	})
+}
+
+// ClearRunIDUpdatedAt clears the value of the "run_id_updated_at" field.
+func (u *AgentUpsertOne) ClearRunIDUpdatedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIDUpdatedAt()
+	})
+}
+
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (u *AgentUpsertOne) SetSSHHostKey(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKey(v)
+	})
+}
+
+// UpdateSSHHostKey sets the "ssh_host_key" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSSHHostKey() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKey()
+	})
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (u *AgentUpsertOne) ClearSSHHostKey() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKey()
+	})
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (u *AgentUpsertOne) SetSSHHostKeyRunID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKeyRunID(v)
+	})
+}
+
+// UpdateSSHHostKeyRunID sets the "ssh_host_key_run_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSSHHostKeyRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKeyRunID()
+	})
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (u *AgentUpsertOne) ClearSSHHostKeyRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKeyRunID()
 	})
 }
 
@@ -5197,7 +5370,7 @@ func (_c *AgentCreateBulk) ExecX(ctx context.Context) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.AgentUpsert) {
-//			SetSlug(v+v).
+//			SetFixtureRootID(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *AgentCreateBulk) OnConflict(opts ...sql.ConflictOption) *AgentUpsertBulk {
@@ -5243,6 +5416,18 @@ func (u *AgentUpsertBulk) UpdateNewValues() *AgentUpsertBulk {
 		for _, b := range u.create.builders {
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(agent.FieldID)
+			}
+			if _, exists := b.mutation.FixtureRootID(); exists {
+				s.SetIgnore(agent.FieldFixtureRootID)
+			}
+			if _, exists := b.mutation.FixtureIssuerID(); exists {
+				s.SetIgnore(agent.FieldFixtureIssuerID)
+			}
+			if _, exists := b.mutation.CreatedBy(); exists {
+				s.SetIgnore(agent.FieldCreatedBy)
+			}
+			if _, exists := b.mutation.Ancestry(); exists {
+				s.SetIgnore(agent.FieldAncestry)
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(agent.FieldCreated)
@@ -5353,27 +5538,6 @@ func (u *AgentUpsertBulk) SetStatus(v agent.Status) *AgentUpsertBulk {
 func (u *AgentUpsertBulk) UpdateStatus() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateStatus()
-	})
-}
-
-// SetCreatedBy sets the "created_by" field.
-func (u *AgentUpsertBulk) SetCreatedBy(v uuid.UUID) *AgentUpsertBulk {
-	return u.Update(func(s *AgentUpsert) {
-		s.SetCreatedBy(v)
-	})
-}
-
-// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
-func (u *AgentUpsertBulk) UpdateCreatedBy() *AgentUpsertBulk {
-	return u.Update(func(s *AgentUpsert) {
-		s.UpdateCreatedBy()
-	})
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (u *AgentUpsertBulk) ClearCreatedBy() *AgentUpsertBulk {
-	return u.Update(func(s *AgentUpsert) {
-		s.ClearCreatedBy()
 	})
 }
 
@@ -5986,27 +6150,6 @@ func (u *AgentUpsertBulk) ClearHarnessConfig() *AgentUpsertBulk {
 	})
 }
 
-// SetAncestry sets the "ancestry" field.
-func (u *AgentUpsertBulk) SetAncestry(v []string) *AgentUpsertBulk {
-	return u.Update(func(s *AgentUpsert) {
-		s.SetAncestry(v)
-	})
-}
-
-// UpdateAncestry sets the "ancestry" field to the value that was provided on create.
-func (u *AgentUpsertBulk) UpdateAncestry() *AgentUpsertBulk {
-	return u.Update(func(s *AgentUpsert) {
-		s.UpdateAncestry()
-	})
-}
-
-// ClearAncestry clears the value of the "ancestry" field.
-func (u *AgentUpsertBulk) ClearAncestry() *AgentUpsertBulk {
-	return u.Update(func(s *AgentUpsert) {
-		s.ClearAncestry()
-	})
-}
-
 // SetUpdated sets the "updated" field.
 func (u *AgentUpsertBulk) SetUpdated(v time.Time) *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
@@ -6263,6 +6406,69 @@ func (u *AgentUpsertBulk) UpdatePreviousRunIds() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearPreviousRunIds() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearPreviousRunIds()
+	})
+}
+
+// SetRunIDUpdatedAt sets the "run_id_updated_at" field.
+func (u *AgentUpsertBulk) SetRunIDUpdatedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIDUpdatedAt(v)
+	})
+}
+
+// UpdateRunIDUpdatedAt sets the "run_id_updated_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunIDUpdatedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIDUpdatedAt()
+	})
+}
+
+// ClearRunIDUpdatedAt clears the value of the "run_id_updated_at" field.
+func (u *AgentUpsertBulk) ClearRunIDUpdatedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIDUpdatedAt()
+	})
+}
+
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (u *AgentUpsertBulk) SetSSHHostKey(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKey(v)
+	})
+}
+
+// UpdateSSHHostKey sets the "ssh_host_key" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSSHHostKey() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKey()
+	})
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (u *AgentUpsertBulk) ClearSSHHostKey() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKey()
+	})
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (u *AgentUpsertBulk) SetSSHHostKeyRunID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKeyRunID(v)
+	})
+}
+
+// UpdateSSHHostKeyRunID sets the "ssh_host_key_run_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSSHHostKeyRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKeyRunID()
+	})
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (u *AgentUpsertBulk) ClearSSHHostKeyRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKeyRunID()
 	})
 }
 

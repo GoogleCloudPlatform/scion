@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_2
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -263,15 +265,6 @@ func testControlChannelBrokerClient_ExecuteKeys_ServerError(t *testing.T, tr hub
 			}
 		})
 	}
-}
-
-// failingControlChannelSigner always fails, for testing that a signing
-// failure — proven to occur before the tunnel is ever used — classifies as
-// agentkeys.ErrNotDispatched rather than an uncertain outcome.
-type failingControlChannelSigner struct{}
-
-func (failingControlChannelSigner) Sign(context.Context, *http.Request, string) error {
-	return errors.New("boom: no broker secret")
 }
 
 // TestControlChannelBrokerClient_ExecuteKeys_SignerFailureIsNotDispatched

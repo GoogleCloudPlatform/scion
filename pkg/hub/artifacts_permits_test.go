@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -83,14 +83,6 @@ func TestArtifactHostPermits(t *testing.T) {
 		})
 	}
 	assert.False(t, host.Permits(context.Background(), "p1", artifacts.PermissionRead), "no identity")
-}
-
-// artifactTestUAT builds a current-version (V1) user access token bounded
-// to project, whose ceiling is exactly the registry permissions of scopes.
-func artifactTestUAT(t *testing.T, user UserIdentity, project string, scopes ...string) *ScopedUserIdentity {
-	t.Helper()
-	return NewScopedUserIdentityWithCeiling(user, project, scopes, "uat-"+project,
-		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: uatCeilingFromSelectors(t, scopes...).PermissionIDs})
 }
 
 // TestArtifactHostIgnoresInProcessAgentIdentities: identities the hub
@@ -170,6 +162,7 @@ func TestLegacyChainsWithholdOnlyArtifactScopes(t *testing.T) {
 		"artifact.create": true, "artifact.read": true, "artifact.update": true, "artifact.delete": true,
 		"hub.federation.read": true, "hub.federation.update": true, "hub.teams_manifest.update": true,
 		"user.list": true, "agent.log_append": true,
+		"test_identity.issue_super_admin": true,
 	}, legacyChainExcludedPermissions)
 
 	unrecorded := store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}

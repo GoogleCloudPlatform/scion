@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 const agent = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -43,6 +44,7 @@ async function setup(
     close: (options?: { code?: number; reason?: string }) => void;
     send: (data: string | Buffer) => void;
   }> = [];
+  await installEventSourceStub(page);
   await page.addInitScript(
     ({ enabled, locks }) => {
       window.__SCION_FEATURES__ = { 'web.terminal_workspace': enabled };
@@ -58,14 +60,6 @@ async function setup(
           return initialize.apply(this, args);
         };
       });
-      window.EventSource = class extends EventTarget {
-        onopen: (() => void) | null = null;
-        constructor() {
-          super();
-          queueMicrotask(() => this.onopen?.());
-        }
-        close(): void {}
-      } as unknown as typeof EventSource;
     },
     { enabled, locks }
   );
@@ -513,7 +507,9 @@ test('a second tab selects through the owner without attaching locally', async (
   await owner.goto(`/terminals/${agent}`);
   await expect.poll(() => ownerSocket.attaches).toBe(1);
   await other.goto(`/terminals/${agent}`);
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
   expect(otherSocket.attaches).toBe(0);
   expect(await other.locator('#terminal-workspace scion-terminal-pane').count()).toBe(0);
   await expect
@@ -1856,7 +1852,9 @@ test('keyboard "Place in pane" action places session without drag gesture', asyn
   expect(socket.closes).toBe(0);
 });
 
-test('ordinary rail click preserves active preset, does not place (#1701)', async ({ page }) => {
+test('rail click keeps the active preset and fills the next free slot (#1701, ptone/scion#4324)', async ({
+  page,
+}) => {
   const socket = await setup(page);
 
   await page.goto(`/terminals/${agent}`);
@@ -1873,18 +1871,24 @@ test('ordinary rail click preserves active preset, does not place (#1701)', asyn
   // open() no longer clobbers the preset — stays in two-columns (#1701)
   await expect.poll(() => activePreset(page)).toBe('two-columns');
 
-  // Two-columns should still have empty slots (not affected by rail click)
-  const twoColSlots = await page.evaluate(() => {
+  // The rail click puts the terminal in the first free slot (ptone/scion#4324)
+  const slots = await page.evaluate((agentId) => {
     type WorkspaceEl = HTMLElement & {
       workspaceRoot?: {
         layoutManager: { getState: () => { twoColumns: (string | null)[] } };
+        findSessionKeyByAgentId: (id: string) => string | null;
       };
     };
     const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
-    return host.workspaceRoot!.layoutManager.getState().twoColumns;
-  });
-  expect(twoColSlots).toEqual([null, null]);
+    return {
+      twoColumns: host.workspaceRoot!.layoutManager.getState().twoColumns,
+      key: host.workspaceRoot!.findSessionKeyByAgentId(agentId),
+    };
+  }, agent);
+  expect(slots.key).not.toBeNull();
+  expect(slots.twoColumns).toEqual([slots.key, null]);
 
+  // The same session: no new connection
   expect(socket.attaches).toBe(1);
 });
 
@@ -2190,7 +2194,9 @@ test('non-owner logout broadcasts teardown, owner disposes', async ({ context })
 
   // Other tab navigates to terminals (becomes non-owner)
   await other.goto(`/terminals/${agent}`);
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
 
   // Non-owner fires teardown
   await other.evaluate(() => {
@@ -2358,29 +2364,10 @@ test('SSE auth-expiry check triggers teardown before login redirect', async ({ p
   //   checkAuthAndReconnect → fetch('/auth/me') → 401 →
   //   dispatchTeardown('auth-expired')
   await page.evaluate(async () => {
-    // Replace EventSource with one that fires onerror without opening,
-    // simulating a rejected SSE handshake after session invalidation.
-    window.EventSource = class extends EventTarget {
-      static CONNECTING = 0;
-      static OPEN = 1;
-      static CLOSED = 2;
-      readyState = 0;
-      onerror: (() => void) | null = null;
-      onopen: (() => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      constructor() {
-        super();
-        // Fire error on next microtask without opening first — the SSE
-        // client sees wasOpen=false and calls checkAuthAndReconnect().
-        queueMicrotask(() => {
-          this.readyState = 2;
-          this.onerror?.();
-        });
-      }
-      close(): void {
-        this.readyState = 2;
-      }
-    } as unknown as typeof EventSource;
+    // New streams from the shared stub now fire error without opening,
+    // simulating a rejected SSE handshake after session invalidation: the
+    // SSE client sees wasOpen=false and calls checkAuthAndReconnect().
+    window.__eventSourceStub.handshake = 'error';
 
     // Import the actual SSE client module and trigger the auth-check path.
     // This goes through the real SSEClient code: openConnection creates the

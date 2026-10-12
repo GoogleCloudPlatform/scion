@@ -108,7 +108,7 @@ func runSecretMigrate(cmd *cobra.Command, args []string) error {
 	}
 	db := entadapter.NewCompositeStore(entClient)
 	defer func() { _ = db.Close() }()
-	if err := db.Migrate(ctx); err != nil {
+	if err := migrateHubStore(ctx, db, cfg.Database.AllowShadowedSchema); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 

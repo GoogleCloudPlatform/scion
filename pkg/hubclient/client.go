@@ -130,6 +130,9 @@ type Client interface {
 	// Artifacts returns the artifact operations interface.
 	Artifacts() ArtifactService
 
+	// TestIdentities returns the hub test identity operations interface.
+	TestIdentities() TestIdentityService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }
@@ -161,6 +164,7 @@ type client struct {
 	invites               *inviteService
 	messaging             *messagingService
 	artifacts             *artifactService
+	testIdentities        *testIdentityService
 }
 
 // New creates a new Hub API client.
@@ -216,6 +220,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.invites = &inviteService{c: c}
 	c.messaging = &messagingService{c: c}
 	c.artifacts = &artifactService{c: c}
+	c.testIdentities = &testIdentityService{c: c}
 
 	return c, nil
 }
@@ -353,6 +358,11 @@ func (c *client) Messaging() MessagingService {
 // Artifacts returns the artifact operations interface.
 func (c *client) Artifacts() ArtifactService {
 	return c.artifacts
+}
+
+// TestIdentities returns the hub test identity operations interface.
+func (c *client) TestIdentities() TestIdentityService {
+	return c.testIdentities
 }
 
 // get performs an HTTP GET request.

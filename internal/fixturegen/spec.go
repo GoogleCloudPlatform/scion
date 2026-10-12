@@ -46,6 +46,10 @@ const (
 	roleDefID      = "aa000000-0000-0000-0000-000000000001"
 	limitDefID     = "bb000000-0000-0000-0000-000000000001"
 	constraintID   = "ac100000-0000-0000-0000-000000000001"
+	// groupConversationID is a group conversation (chat thread) filed into
+	// threadGroupID.
+	groupConversationID = "99999999-9999-9999-9999-999999999998"
+	threadGroupID       = "7a000000-0000-0000-0000-000000000001"
 )
 
 // baseTime is a fixed timestamp so the generated fixture is byte-reproducible
@@ -249,6 +253,12 @@ func Spec() []TableFixture {
 			{ // BLOB column
 				"broker_id": brokerID, "secret_key": []byte{0x01, 0x02, 0x03, 0x04, 0xfe, 0xff},
 				"algorithm": "hmac-sha256", "created_at": baseTime, "status": "active",
+			},
+		}},
+		{Table: "broker_reported_runs", Rows: []row{
+			{ // an entry of the fixture agent reported off its assigned broker
+				"id": "b7000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"run_id": "fixture-run-1", "broker_id": brokerID, "seen_at": baseTime,
 			},
 		}},
 		{Table: "broker_join_tokens", Rows: []row{
@@ -477,6 +487,41 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Agent delegation grants and delegated credentials ----
+		{Table: "agent_delegation_grants", Rows: []row{
+			{ // active hub-bounded grant; optional fields left NULL
+				"id": "ae000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"agent_project_id": projectID, "agent_generation": 0, "agent_state_version": 1,
+				"issuer_user_id": userID, "boundary_kind": "hub",
+				"ceiling_version": 1, "ceiling_permission_ids": `["agent.read"]`,
+				"name": "fixture-hub-grant", "allow_subdelegation": false, "depth": 0,
+				"max_credential_ttl_seconds": 900, "expires_at": baseTime.Add(7 * 24 * time.Hour),
+				"created": baseTime, "issuance_audit_id": "ae100000-0000-0000-0000-000000000001",
+			},
+			{ // revoked project-bounded grant with every optional field set
+				"id": "ae000000-0000-0000-0000-000000000002", "agent_id": agentID,
+				"agent_project_id": projectID, "agent_generation": 2, "agent_state_version": 7,
+				"issuer_user_id": userID, "boundary_kind": "project", "boundary_project_id": projectID,
+				"ceiling_version": 1, "ceiling_permission_ids": `["agent.read"]`,
+				"name": "fixture-project-grant", "purpose": "nightly report 📊",
+				"labels": unicodeJSON, "allow_subdelegation": false, "depth": 0,
+				"max_credential_ttl_seconds": 3600, "expires_at": baseTime.Add(30 * 24 * time.Hour),
+				"created": baseTime, "last_exchanged_at": baseTime.Add(time.Hour),
+				"revoked_at": baseTime.Add(2 * time.Hour), "revoked_by": userID, "revoke_reason": "test",
+				"issuance_audit_id":   "ae100000-0000-0000-0000-000000000002",
+				"revocation_audit_id": "ae100000-0000-0000-0000-000000000003",
+			},
+		}},
+		{Table: "agent_delegated_credentials", Rows: []row{
+			{
+				"id": "af000000-0000-0000-0000-000000000001", "grant_id": "ae000000-0000-0000-0000-000000000001",
+				"agent_id": agentID, "key_hash": "sha256:fixture-delegated-key-hash", "prefix": "scion_adt_",
+				"audience": "scion-hub", "ceiling_permission_ids": `["agent.read"]`,
+				"exchange_agent_credential_id": "ac000000-0000-0000-0000-000000000001",
+				"issued_at":                    baseTime, "expires_at": baseTime.Add(15 * time.Minute),
+			},
+		}},
+
 		// ---- Agent holds ----
 		{Table: "agent_holds", Rows: []row{
 			{ // active hold
@@ -568,12 +613,36 @@ func Spec() []TableFixture {
 				"kind": "direct", "surface": "native",
 				"drift_state": "active", "last_activity_at": baseTime, "created_at": baseTime,
 			},
+			{ // a group conversation (thread), the only kind a thread group holds
+				"id": groupConversationID, "project_id": projectID,
+				"kind": "group", "surface": "native", "external_ref": "thread:fixture-release",
+				"display_name": "release-notes",
+				"drift_state":  "active", "last_activity_at": baseTime, "created_at": baseTime,
+			},
 		}},
 		{Table: "conversation_participants", Rows: []row{
 			{
 				"id":              "cp000000-0000-0000-0000-000000000001",
 				"conversation_id": conversationID, "principal_kind": "user",
 				"principal_id": userID, "role": "member", "joined_at": baseTime,
+			},
+		}},
+
+		// ---- Thread groups (ptone/scion#4424) ----
+		{Table: "thread_groups", Rows: []row{
+			{ // non-ASCII name: name_key is store.ThreadGroupNameKey(name)
+				"id": threadGroupID, "project_id": projectID,
+				"name": "Équipe Release", "name_key": "équipe release",
+				"created_by": userID, "created_by_kind": "user",
+				"created_at": baseTime, "updated_at": baseTime,
+			},
+		}},
+		{Table: "thread_group_members", Rows: []row{
+			{
+				"id":       "7b000000-0000-0000-0000-000000000001",
+				"group_id": threadGroupID, "project_id": projectID,
+				"conversation_id": groupConversationID,
+				"added_by":        userID, "added_at": baseTime,
 			},
 		}},
 
@@ -585,6 +654,16 @@ func Spec() []TableFixture {
 				"delegate_type": "agent", "delegate_id": agentID,
 				"scope_type": "project", "scope_id": projectID,
 				"role": "creator", "active": true, "grandfathered": false,
+			},
+		}},
+
+		// ---- Agent service-account assignments ----
+		{Table: "agent_service_account_assignments", Rows: []row{
+			{
+				"id":       "da000000-0000-0000-0000-000000000001",
+				"agent_id": agentID, "project_id": projectID,
+				"service_account_id": "sa-fixture", "origin": "create_explicit",
+				"active": true,
 			},
 		}},
 
@@ -782,6 +861,33 @@ func Spec() []TableFixture {
 				"started_at": baseTime, "last_seen": baseTime, "stopped_at": baseTime,
 				"status": "healthy", "checks": `{"database":"healthy"}`,
 				"stats": `{}`,
+			},
+		}},
+
+		// ---- Test infrastructure marker (admin tier A0, ptone/scion#4240;
+		// single row, written only by `scion server test-infra mark`) ----
+		{Table: "test_infra_marker", Rows: []row{
+			{
+				"id": "test-infra-marker", "hub_id": "fixture-test-hub",
+				"class": "test", "created_at": baseTime,
+				"created_by_host": "fixture-host",
+				"attested":        `{"bucket":"fixture-bucket","broker_ids":["fixture-broker"]}`,
+				// A fixed placeholder, not a real key: 64 bytes, as the
+				// mark command writes.
+				"web_session_key": []byte(strings.Repeat("k", 64)),
+			},
+		}},
+
+		// ---- Test identity web-login codes (WS1, ptone/scion#4240) ----
+		{Table: "test_identity_login_codes", Rows: []row{
+			{
+				"id": "c0de0000-0000-0000-0000-000000000001", "user_id": userID,
+				"code_hash":            strings.Repeat("ab", 32),
+				"issued_by":            userID,
+				"issuer_credential_id": "",
+				"expires_at":           baseTime.Add(5 * time.Minute),
+				"consumed_at":          nil,
+				"created_at":           baseTime,
 			},
 		}},
 	}
