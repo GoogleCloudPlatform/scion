@@ -469,9 +469,9 @@ func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, i
 		participants = canonical
 	}
 
-	writeJSON(w, http.StatusOK, conversationResponse{
+	writeJSON(w, http.StatusOK, conversationGetResponse{
 		Conversation: *conv,
-		Participants: participants,
+		Participants: s.conversationParticipantViews(ctx, conv, participants),
 	})
 }
 
