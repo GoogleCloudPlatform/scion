@@ -41,15 +41,18 @@
 #   shard.sh postgres K|all TAGS TEST...
 #       Run the named tests (the shard binary with -test.v and -test.run)
 #       in the shard that holds each (in every shard holding one for
-#       "all"), with build tags TAGS ("" or for example integration). Fails if a name is in no test file, if
-#       any selected test skips, or if a named test prints no PASS line.
+#       "all"), with build tags TAGS ("" or for example integration).
+#       Fails if a name is in no test file, if any selected test skips,
+#       or if a named test prints no PASS line.
 #
 # Environment:
 #   HUB_SHARD_TIMEOUT  the test binary's -test.timeout for "test" (default 30m)
 #   HUB_SHARD_P        go build -p for the compiles (default 1: one package
 #                      at a time keeps the peak at the pkg/hub compile)
 #   GOGC               for the compiles (default 25, as HUB_TEST_GOGC in the
-#                      Makefile; the tests themselves run with Go's default)
+#                      Makefile). The "test" runs inherit GOGC (Go's
+#                      default unless set); the short "postgres" runs use
+#                      the compile GOGC.
 
 set -euo pipefail
 
@@ -129,9 +132,9 @@ compile() {
 # a test that execs go gets the same toolchain) and -test.paniconexit0
 # (go test always passes both). The tests run with the caller's GOGC (Go's
 # default unless set). Compiling once and running the binary avoids a
-# second compile and link of the shard (go test would relink it). The exit status is the binary's: non-zero on a
-# failed test, a panic or -test.timeout. Prints an ok/FAIL line like go
-# test's.
+# second compile and link of the shard (go test would relink it). The
+# exit status is the binary's: non-zero on a failed test, a panic or
+# -test.timeout. Prints an ok/FAIL line like go test's.
 run_binary() {
 	local bin=$1 label=$2 start rc
 	shift 2
