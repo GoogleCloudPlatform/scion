@@ -1403,7 +1403,8 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, now time.Time, 
 }
 
 // resolveConstraintAdminUsers finds the active users with constraint-admin
-// permission at a scope, through direct and group role bindings. A user
+// permission at a scope, through direct and group role bindings; a group
+// binding covers the group's effective (transitive) user members. A user
 // counts only when the user row exists with status active: a suspended,
 // invited or missing user holds no effective authority, so counting one
 // would let a lockout check pass with no admin able to act. Only a
@@ -1451,6 +1452,43 @@ func resolveConstraintAdmins(ctx context.Context, st store.Store, now time.Time,
 		return !u.IsHumanKind(), nil
 	}
 
+	// groupUsers returns the user members of a bound group through
+	// effective (transitive) membership: the users of the group and of
+	// every group nested in it at any depth, each once. It walks the same
+	// group nesting GetEffectiveGroups closes over for a user, so a user
+	// is found from a group exactly when isConstraintAdmin counts that
+	// group among the user's groups. Each group is read once, so a cycle
+	// ends the walk. A read error fails the resolution.
+	groupUsers := func(groupID string) ([]string, error) {
+		var users []string
+		seenUser := make(map[string]bool)
+		visited := map[string]bool{groupID: true}
+		queue := []string{groupID}
+		for len(queue) > 0 {
+			gid := queue[0]
+			queue = queue[1:]
+			members, err := st.GetGroupMembers(ctx, gid)
+			if err != nil {
+				return nil, fmt.Errorf("get members for group %s: %w", gid, err)
+			}
+			for _, m := range members {
+				switch m.MemberType {
+				case store.GroupMemberTypeUser:
+					if !seenUser[m.MemberID] {
+						seenUser[m.MemberID] = true
+						users = append(users, m.MemberID)
+					}
+				case store.GroupMemberTypeGroup:
+					if !visited[m.MemberID] {
+						visited[m.MemberID] = true
+						queue = append(queue, m.MemberID)
+					}
+				}
+			}
+		}
+		return users, nil
+	}
+
 	for _, b := range bindings {
 		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if errors.Is(err, store.ErrNotFound) {
@@ -1476,15 +1514,11 @@ func resolveConstraintAdmins(ctx context.Context, st store.Store, now time.Time,
 			case "user":
 				ids = append(ids, b.PrincipalID)
 			case "group":
-				members, err := st.GetGroupMembers(ctx, b.PrincipalID)
+				members, err := groupUsers(b.PrincipalID)
 				if err != nil {
-					return nil, nil, fmt.Errorf("get members for group %s: %w", b.PrincipalID, err)
+					return nil, nil, err
 				}
-				for _, m := range members {
-					if m.MemberType == "user" {
-						ids = append(ids, m.MemberID)
-					}
-				}
+				ids = append(ids, members...)
 			}
 			for _, id := range ids {
 				if inactiveOnly[id] {
@@ -1528,29 +1562,30 @@ func resolveConstraintAdmins(ctx context.Context, st store.Store, now time.Time,
 				})
 			}
 		case "group":
-			// Expand group members.
-			members, err := st.GetGroupMembers(ctx, b.PrincipalID)
+			// Expand the group's effective user members.
+			members, err := groupUsers(b.PrincipalID)
 			if err != nil {
-				return nil, nil, fmt.Errorf("get members for group %s: %w", b.PrincipalID, err)
+				return nil, nil, err
 			}
-			for _, m := range members {
-				if m.MemberType == "user" && !seen[m.MemberID] {
-					if skip, err := skipUser(m.MemberID); err != nil {
-						return nil, nil, fmt.Errorf("check admin user %s: %w", m.MemberID, err)
-					} else if skip {
-						seen[m.MemberID] = true
-						continue
-					}
-					groups, err := st.GetEffectiveGroups(ctx, m.MemberID)
-					if err != nil {
-						return nil, nil, fmt.Errorf("get effective groups for user %s: %w", m.MemberID, err)
-					}
-					seen[m.MemberID] = true
-					admins = append(admins, adminUserInfo{
-						userID:   m.MemberID,
-						groupIDs: groups,
-					})
+			for _, id := range members {
+				if seen[id] {
+					continue
 				}
+				if skip, err := skipUser(id); err != nil {
+					return nil, nil, fmt.Errorf("check admin user %s: %w", id, err)
+				} else if skip {
+					seen[id] = true
+					continue
+				}
+				groups, err := st.GetEffectiveGroups(ctx, id)
+				if err != nil {
+					return nil, nil, fmt.Errorf("get effective groups for user %s: %w", id, err)
+				}
+				seen[id] = true
+				admins = append(admins, adminUserInfo{
+					userID:   id,
+					groupIDs: groups,
+				})
 			}
 		}
 	}
