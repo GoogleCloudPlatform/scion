@@ -306,10 +306,26 @@ func TestTokenDiff(t *testing.T) {
 
 func TestExportRefusals(t *testing.T) {
 	cases := map[string]struct {
-		files map[string]string
-		names []string
-		want  string
+		files  map[string]string
+		names  []string
+		fields map[string]map[string]string
+		want   string
 	}{
+		"field site in the moved func's own file": {
+			// operandType's file-scope branch: scan is declared in this file,
+			// so scan().total resolves to it and is a field site. A site in a
+			// file that also loses moved declarations is not supported, so
+			// finding it makes the export refuse. If the branch failed to
+			// resolve scan, the selector would only be an INFO note and the
+			// export would succeed.
+			files: map[string]string{
+				"a_helpers_test.go": hdr + "package hub\n\ntype res struct{ total int }\n\nfunc scan() res { return res{} }\n\nfunc stayUse() int { return scan().total }\n",
+				"b_test.go":         hdr + "package hub\n\nvar _ = stayUse()\n",
+			},
+			names:  []string{"res", "scan"},
+			fields: map[string]map[string]string{"res": {"total": "Total"}},
+			want:   "field-export call site in a file that also loses moved declarations",
+		},
 		"uses staying decl": {
 			files: map[string]string{"a_helpers_test.go": exportStay, "server.go": exportProd},
 			names: []string{"stays"},
@@ -421,7 +437,7 @@ func TestExportRefusals(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = planExport(p, exportSpec{names: c.names}, filepath.Join(t.TempDir(), "support"), "example.com/m/support", defaultAliasFile)
+			_, err = planExport(p, exportSpec{names: c.names, fields: c.fields}, filepath.Join(t.TempDir(), "support"), "example.com/m/support", defaultAliasFile)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("err = %v, want it to contain %q", err, c.want)
 			}
