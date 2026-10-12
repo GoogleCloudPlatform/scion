@@ -519,7 +519,6 @@ func newCCTestRig(t *testing.T) *ccTestRig {
 	return r
 }
 
-// info tunnels a Hub-signed GET /api/v1/info to id over its control channel.
 // infoVia sends a signed GET /api/v1/info for instance id through the Hub
 // connection c (whatever session it is), with a short timeout, and returns
 // the status. Only a live broker answers.
@@ -542,6 +541,7 @@ func (r *ccTestRig) infoVia(t *testing.T, c *hub.BrokerConnection, id string) (i
 	return resp.StatusCode, nil
 }
 
+// info tunnels a Hub-signed GET /api/v1/info to id over its control channel.
 func (r *ccTestRig) info(t *testing.T, id string) (int, string, error) {
 	t.Helper()
 	secret, err := r.s.GetBrokerSecret(r.ctx, id)
