@@ -522,7 +522,7 @@ func TestSQLiteOnlyTestsUseProductionDriver(t *testing.T) {
 // TestMattnDriverUsesDetector checks the driver guard against the spellings
 // it must catch and the ones it must allow.
 func TestMattnDriverUsesDetector(t *testing.T) {
-	const sqliteOnly = "//go:build !no_sqlite && (!hubshard || hubshard_1)\n\n"
+	const sqliteOnly = "//go:build !no_sqlite\n\n"
 	const body = `package hub
 
 import (
@@ -603,7 +603,7 @@ func other(t *testing.T) {
 		"named_import_test.go": []byte(namedImport),
 		"plain_import_test.go": []byte(plainImport),
 		"untagged_test.go":     []byte(body),
-		"shard_only_test.go":   []byte("//go:build !hubshard || hubshard_1\n\n" + body),
+		"other_tag_test.go":    []byte("//go:build linux\n\n" + body),
 		"allowed_test.go":      []byte(allowedFile),
 	}, allowed)
 	if err != nil {
