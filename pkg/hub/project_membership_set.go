@@ -179,6 +179,46 @@ func (p rolePlan) changes(defs map[string]*store.RoleDefinition) []planChange {
 	return out
 }
 
+// planDropsConstraintAdmin reports whether plan removes a binding whose
+// role carries access_constraint.admin while no kept binding and no role
+// in creates carries it, so the principal loses that authority on the
+// project.
+func planDropsConstraintAdmin(plan rolePlan, currentDefs map[string]*store.RoleDefinition, creates []*store.RoleDefinition) bool {
+	hasAdmin := func(bs []*store.RoleBinding) bool {
+		for _, b := range bs {
+			if rd := currentDefs[b.RoleDefinitionID]; rd != nil && roleHasConstraintAdmin(rd) {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasAdmin(plan.Remove) || hasAdmin(plan.Keep) {
+		return false
+	}
+	for _, rd := range creates {
+		if rd != nil && roleHasConstraintAdmin(rd) {
+			return false
+		}
+	}
+	return true
+}
+
+// requestTouchesConstraintAdmin reports whether any current or requested
+// role carries access_constraint.admin.
+func requestTouchesConstraintAdmin(current map[string]*store.RoleDefinition, desired []*store.RoleDefinition) bool {
+	for _, rd := range current {
+		if rd != nil && roleHasConstraintAdmin(rd) {
+			return true
+		}
+	}
+	for _, rd := range desired {
+		if rd != nil && roleHasConstraintAdmin(rd) {
+			return true
+		}
+	}
+	return false
+}
+
 // planRoleSet computes the diff between a principal's current project-scope
 // bindings and the desired role definitions. current and desired are both
 // already de-duplicated by role definition ID by the caller. currentDefs
@@ -962,6 +1002,14 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 	lossEnqueued := false
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		lossEnqueued = false
+		// A request that touches a role carrying access_constraint.admin
+		// takes the admin-guard lock before the project lock, the order
+		// user delete uses.
+		if requestTouchesConstraintAdmin(currentDefs0, desiredDefs) {
+			if err := lockConstraintAdminGuard(ctx, tx); err != nil {
+				return err
+			}
+		}
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
 		}
@@ -1077,6 +1125,15 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		removedUsable, err := anyUsableOwnerBinding(ctx, tx, removedOwners, now)
 		if err != nil {
 			return fmt.Errorf("cannot verify usable owner: %w", err)
+		}
+
+		// Constraint-admin lockout guard, shared with user suspend and
+		// delete: after the plan the principal holds no role on this
+		// project with access_constraint.admin.
+		if planDropsConstraintAdmin(plan1, currentDefs1, refetchedCreates) {
+			if err := checkRoleBindingRemovalAdminLockout(ctx, tx, now, plan1.Remove...); err != nil {
+				return err
+			}
 		}
 
 		// Apply the plan: every direct role-binding mutation for this request
@@ -1226,6 +1283,9 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		}
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
+		}
+		if d := constraintAdminLockoutDecision(txErr); d != nil {
+			return nil, d
 		}
 		if errors.Is(txErr, store.ErrAlreadyExists) || errors.Is(txErr, store.ErrBuiltInMembershipConflict) {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "conflict", Reason: txErr.Error(), HTTPStatus: 409}

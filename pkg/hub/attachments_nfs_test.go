@@ -46,9 +46,9 @@ func nfsAttachmentServer(t *testing.T) (srv *Server, project *store.Project, hos
 	hostBase = setNFSSharedDirStorageGlobalSettings(t)
 	srv, s := testServer(t)
 
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	wcs := NewWebChatStore(db, "sqlite3")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 

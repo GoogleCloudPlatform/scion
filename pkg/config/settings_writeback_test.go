@@ -494,7 +494,7 @@ var structParityBases = []structParityBase{
 // UpdateVersionedSetting takes the package-wide settings-file lock
 // (LockSettingsFile), so that part of each case still runs one at a time.
 // Callers must not use t.Setenv or change package variables
-// (createTempFile, syncFile, ...) while the subtests run.
+// (such as createTempFile) while the subtests run.
 func runStructParity(t *testing.T, bases []structParityBase) {
 	t.Helper()
 	values := []string{"new-value", "", "true", "false", "yes", "123"}

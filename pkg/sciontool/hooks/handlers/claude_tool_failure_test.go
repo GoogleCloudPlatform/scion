@@ -50,6 +50,7 @@ func claudeToolCallStatuses(t *testing.T, reader *sdkmetric.ManualReader) map[st
 // A Claude Code PostToolUseFailure, parsed through the real claude dialect,
 // must end the PreToolUse call and be counted as an error.
 func TestClaudeToolFailure_ToolCallCountedAsError(t *testing.T) {
+	scrubTelemetryEnv(t)
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
@@ -77,6 +78,7 @@ func TestClaudeToolFailure_ToolCallCountedAsError(t *testing.T) {
 // the PostToolUseFailure handler has no PreToolUse span to pair with. The
 // unpaired tool-end must still count exactly one tool call, as an error.
 func TestClaudeToolFailure_UnpairedToolCallCountedAsError(t *testing.T) {
+	scrubTelemetryEnv(t)
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()

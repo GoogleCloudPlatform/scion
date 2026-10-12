@@ -39,12 +39,20 @@ import (
 // trades "no such table" for SQLITE_LOCKED table-lock errors that the
 // busy timeout does not retry.
 //
+// On the production driver ("sqlite") the DSN also sets "_timezone=UTC",
+// the option entc.OpenSQLite adds for the hub's own database, so every
+// time.Time bind and scan is canonical UTC as in production.
+//
 // The cost of one connection: code that holds a *sql.Rows or *sql.Tx and
 // issues a second query on the same *sql.DB blocks forever. Production SQLite
 // has the same constraint, so such a hang is a real bug, not a test artifact.
 func OpenTestMemorySQLite(t testing.TB, driver string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open(driver, ":memory:")
+	dsn := ":memory:"
+	if driver == "sqlite" {
+		dsn += "?_timezone=UTC"
+	}
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		t.Fatalf("open in-memory sqlite (%s): %v", driver, err)
 	}
