@@ -46,8 +46,6 @@ func clearAmbientGCPProjectEnv() {
 
 type gitLsRemoteStub = hubtestutil.GitLsRemoteStub
 
-type gitSparseCheckoutCall = hubtestutil.GitSparseCheckoutCall
-
 type gitSparseCheckoutStub = hubtestutil.GitSparseCheckoutStub
 
 func installHermeticGitLsRemote() (restore func()) {
