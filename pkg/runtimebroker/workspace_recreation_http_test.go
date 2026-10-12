@@ -106,7 +106,7 @@ func TestStartAgent_MissingStateProvisionsFromHubTemplate(t *testing.T) {
 // template path and no SCION_TEMPLATE (the agent starts from its own state
 // as before).
 func TestStartAgent_SurvivingStateKeepsTemplateUnset(t *testing.T) {
-	srv, mgr, _, lookups := startWithTemplateHub(t)
+	srv, mgr, _, _ := startWithTemplateHub(t)
 	projectDir := filepath.Join(t.TempDir(), ".scion")
 	agentDir := config.GetAgentDir(projectDir, "kept-agent", false)
 	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home"), 0o755))
@@ -117,7 +117,10 @@ func TestStartAgent_SurvivingStateKeepsTemplateUnset(t *testing.T) {
 	assert.Empty(t, mgr.lastStartOpts.Template)
 	_, set := mgr.lastStartOpts.Env["SCION_TEMPLATE"]
 	assert.False(t, set)
-	assert.Zero(t, lookups.Load(), "the template must not be hydrated")
+	// The template is resolved for its env fallback only (ptone/scion#4524):
+	// it reaches the agent manager as TemplateEnvSource, never as Template,
+	// so the existing agent's image and harness-config resolve as before.
+	assert.NotEmpty(t, mgr.lastStartOpts.TemplateEnvSource, "the template env source must be resolved on a start")
 }
 
 // writeProvisionedAgent writes a provisioned agent state directory (one with
@@ -161,9 +164,10 @@ func postRecreationRestart(t *testing.T, srv *Server, agentName, body string) {
 // restart: the agent's container is running and its broker-side state
 // exists, and a new Hub names the same project with the recreation inputs.
 // The project comes from the request, nothing is cleared (FreshProvision
-// stays false), no template path is set and nothing is hydrated.
+// stays false) and no template path is set; the template is resolved for
+// its env fallback only (TemplateEnvSource, ptone/scion#4524).
 func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged(t *testing.T) {
-	srv, mgr, _, lookups := startWithTemplateHub(t)
+	srv, mgr, _, _ := startWithTemplateHub(t)
 	projectDir := filepath.Join(t.TempDir(), ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0o755))
 	writeProvisionedAgent(t, projectDir, "live-agent")
@@ -187,13 +191,14 @@ func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged(t *testing.T) {
 	assert.Equal(t, projectDir, opts.ProjectPath, "the request's project wins over the container's recorded path")
 	assert.False(t, opts.FreshProvision)
 	assert.Empty(t, opts.Template)
-	assert.Zero(t, lookups.Load(), "the template must not be hydrated")
+	// The template is resolved for its env fallback only (ptone/scion#4524).
+	assert.NotEmpty(t, opts.TemplateEnvSource, "the template env source must be resolved on a restart")
 }
 
 // TestRestartAgent_LiveContainerAndSurvivingStateUnchanged_HubNative is the
 // hub-native variant: the request names the project by slug only.
 func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged_HubNative(t *testing.T) {
-	srv, mgr, _, lookups := startWithTemplateHub(t)
+	srv, mgr, _, _ := startWithTemplateHub(t)
 	globalDir, err := config.GetGlobalDir()
 	require.NoError(t, err)
 	projectPath := filepath.Join(globalDir, "projects", "native-proj")
@@ -216,7 +221,8 @@ func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged_HubNative(t *testi
 	assert.Equal(t, projectPath, opts.ProjectPath, "the project is resolved from the slug")
 	assert.False(t, opts.FreshProvision)
 	assert.Empty(t, opts.Template)
-	assert.Zero(t, lookups.Load(), "the template must not be hydrated")
+	// The template is resolved for its env fallback only (ptone/scion#4524).
+	assert.NotEmpty(t, opts.TemplateEnvSource, "the template env source must be resolved on a restart")
 }
 
 // TestRestartAgent_UsesRequestInputsWithoutContainer proves a restart of an

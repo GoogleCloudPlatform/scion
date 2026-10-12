@@ -1079,14 +1079,7 @@ func (r *KubernetesRuntime) createAgentSecretWithHooks(ctx context.Context, name
 	}
 
 	// Build labels for cleanup
-	secretLabels := map[string]string{
-		"scion.agent": agentName,
-	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			secretLabels[k] = v
-		}
-	}
+	secretLabels := launchChildLabels(agentName, labels)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1329,14 +1322,7 @@ func (r *KubernetesRuntime) createSecretProviderClassWithHooks(ctx context.Conte
 	}
 
 	// Build labels
-	spcLabels := map[string]string{
-		"scion.agent": agentName,
-	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			spcLabels[k] = v
-		}
-	}
+	spcLabels := launchChildLabels(agentName, labels)
 
 	// GKE's managed Secret Manager add-on registers its provider as "gke",
 	// whereas the upstream open-source CSI driver uses "gcp".
@@ -1608,10 +1594,45 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 			return err
 		}
 	}
-	selector, err := labels.ValidatedSelectorFromSet(map[string]string{
+	return r.cleanupAgentResourcesSelected(ctx, agentName, runID, map[string]string{
 		"scion.name":               agentName,
 		projectkeys.LabelProjectID: projectID,
 	})
+}
+
+// CleanupOwnedAgentResources is CleanupAgentResources limited to the
+// objects carrying the owning flat Runtime Broker instance's reserved label
+// (api.LabelRuntimeBrokerID = runtimeBrokerID); same kinds, same pod-gone
+// rule and the same runID scoping (OwnedAgentResourceCleaner). An empty or
+// invalid runtimeBrokerID is an error and nothing is deleted: there is no
+// unscoped fallback. An invalid runID is an error as on the unscoped path.
+func (r *KubernetesRuntime) CleanupOwnedAgentResources(ctx context.Context, agentName, projectID, runtimeBrokerID, runID string) error {
+	if runtimeBrokerID == "" {
+		return errors.New("owned agent cleanup: a Runtime Broker ID is required")
+	}
+	if errs := k8svalidation.IsValidLabelValue(runtimeBrokerID); len(errs) > 0 {
+		return fmt.Errorf("owned agent cleanup: invalid Runtime Broker ID %q: %s", runtimeBrokerID, strings.Join(errs, "; "))
+	}
+	if agentName == "" || projectID == "" {
+		return nil
+	}
+	if runID != "" {
+		if err := validateRunIDLabel(runID); err != nil {
+			return err
+		}
+	}
+	return r.cleanupAgentResourcesSelected(ctx, agentName, runID, map[string]string{
+		"scion.name":               agentName,
+		projectkeys.LabelProjectID: projectID,
+		api.LabelRuntimeBrokerID:   runtimeBrokerID,
+	})
+}
+
+// cleanupAgentResourcesSelected removes the per-agent objects matching set
+// that the rules of CleanupAgentResources allow for runID (already
+// validated by the caller; empty selects by the set alone).
+func (r *KubernetesRuntime) cleanupAgentResourcesSelected(ctx context.Context, agentName, runID string, set map[string]string) error {
+	selector, err := labels.ValidatedSelectorFromSet(set)
 	if err != nil {
 		return fmt.Errorf("invalid agent selector: %w", err)
 	}
@@ -1783,14 +1804,7 @@ func (r *KubernetesRuntime) createAuthFileSecretWithHooks(ctx context.Context, n
 		data[keyName] = content
 	}
 
-	secretLabels := map[string]string{
-		"scion.agent": agentName,
-	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			secretLabels[k] = v
-		}
-	}
+	secretLabels := launchChildLabels(agentName, labels)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2441,6 +2455,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// as the agent user via runAsUser, so sciontool does no privilege drop
 	// here; the variable only drives the umask.
 	envVars = withSupplementalGIDsEnv(envVars, sharedDirGroups(config))
+
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only names no source above set (plain or secret-backed), never a
+	// suppressed key.
+	envVars = appendK8sFallbackEnv(envVars, config.FallbackEnv, config.SuppressedFallbackKeys)
 
 	// Determine image pull policy
 	pullPolicy := corev1.PullIfNotPresent

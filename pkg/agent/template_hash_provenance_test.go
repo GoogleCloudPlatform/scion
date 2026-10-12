@@ -33,8 +33,10 @@ const (
 
 // hydratedTemplateStartEnv is a project with a global "web-dev" template and
 // a content-hash template cache dir, each bundling its own "claude-web"
-// harness-config (told apart by user) and its own image. An agent is created
-// from the hash dir with the "web-dev" slug.
+// harness-config, told apart by user and by the harness-config's own image
+// (a template's own image is an ignored environment key,
+// ptone/scion#4524). An agent is created from the hash dir with the
+// "web-dev" slug.
 type hydratedTemplateStartEnv struct {
 	projectScionDir string
 	agentName       string
@@ -50,13 +52,13 @@ func newHydratedTemplateStartEnv(t *testing.T) hydratedTemplateStartEnv {
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 	t.Setenv("HOME", tmpDir)
 
-	writeHC := func(dir, user string) {
+	writeHC := func(dir, user, image string) {
 		_ = os.MkdirAll(filepath.Join(dir, "home"), 0o755)
 		_ = os.WriteFile(filepath.Join(dir, "config.yaml"),
-			[]byte("harness: claude\nuser: "+user+"\nimage: scion-claude:latest\n"), 0o644)
+			[]byte("harness: claude\nuser: "+user+"\nimage: "+image+"\n"), 0o644)
 	}
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	writeHC(filepath.Join(globalScionDir, "harness-configs", "claude-web"), "globaluser")
+	writeHC(filepath.Join(globalScionDir, "harness-configs", "claude-web"), "globaluser", "scion-claude:latest")
 	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
@@ -64,14 +66,14 @@ profiles:
     runtime: docker
 `), 0o644)
 	localTpl := filepath.Join(globalScionDir, "templates", "web-dev")
-	writeHC(filepath.Join(localTpl, "harness-configs", "claude-web"), "localuser")
+	writeHC(filepath.Join(localTpl, "harness-configs", "claude-web"), "localuser", localTplImage)
 	_ = os.WriteFile(filepath.Join(localTpl, "scion-agent.json"),
-		[]byte(`{"default_harness_config":"claude-web","image":"`+localTplImage+`"}`), 0o644)
+		[]byte(`{"default_harness_config":"claude-web"}`), 0o644)
 
 	hashDir := filepath.Join(tmpDir, "template-cache", testContentHash)
-	writeHC(filepath.Join(hashDir, "harness-configs", "claude-web"), "scion")
+	writeHC(filepath.Join(hashDir, "harness-configs", "claude-web"), "scion", hashTplImage)
 	_ = os.WriteFile(filepath.Join(hashDir, "scion-agent.json"),
-		[]byte(`{"default_harness_config":"claude-web","image":"`+hashTplImage+`"}`), 0o644)
+		[]byte(`{"default_harness_config":"claude-web"}`), 0o644)
 
 	projectScionDir := filepath.Join(tmpDir, "project", ".scion")
 	_ = os.MkdirAll(projectScionDir, 0o755)
@@ -143,8 +145,8 @@ func (e hydratedTemplateStartEnv) restart(t *testing.T, template string) runtime
 // content-addressed cache is read from the provenance record only: with
 // agent-info.json's templateHash removed, a restart still treats the
 // template as unresolvable — the same-named local template supplies
-// neither the image nor the harness-config, and the recorded template
-// image applies.
+// neither the image nor the harness-config. No template image is recorded:
+// a template's own image is an ignored environment key (ptone/scion#4524).
 func TestStart_HydratedTemplateFromProvenanceIgnoresAgentInfoHash(t *testing.T) {
 	e := newHydratedTemplateStartEnv(t)
 
@@ -155,15 +157,15 @@ func TestStart_HydratedTemplateFromProvenanceIgnoresAgentInfoHash(t *testing.T) 
 	if prov.TemplateHash != testContentHash || prov.Template != "web-dev" {
 		t.Fatalf("provenance template = %q, templateHash = %q; want %q, %q", prov.Template, prov.TemplateHash, "web-dev", testContentHash)
 	}
-	if prov.TemplateImage != hashTplImage {
-		t.Fatalf("provenance templateImage = %q, want %q", prov.TemplateImage, hashTplImage)
+	if prov.TemplateImage != "" {
+		t.Fatalf("provenance templateImage = %q, want none (a template's image is ignored)", prov.TemplateImage)
 	}
 
 	e.setInfoTemplateHash(t, "")
 	for _, template := range []string{"", "web-dev"} {
 		got := e.restart(t, template)
-		if got.Image != hashTplImage {
-			t.Errorf("restart (template %q): image = %q, want the recorded template image %q", template, got.Image, hashTplImage)
+		if got.Image == localTplImage {
+			t.Errorf("restart (template %q): image = %q, from the local web-dev template's harness-config", template, got.Image)
 		}
 		if got.UnixUsername == "localuser" {
 			t.Errorf("restart (template %q): used the local web-dev template's harness-config", template)

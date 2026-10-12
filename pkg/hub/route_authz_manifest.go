@@ -142,6 +142,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/templates":        "authenticated", // User-scoped templates
 	"/api/v1/users/me/templates/":       "authenticated", // User-scoped template by ID
 
+	// ── Agent delegation grants the caller issued ──────────────────────
+	"/api/v1/users/me/delegations": "authenticated", // GET: caller's issued grants; session/dev credential only (requireSessionCredentialFor)
+
 	// ── User-scoped terminal workspace ─────────────────────────────────
 	"/api/v1/users/me/terminal-workspace": "authenticated", // GET/PUT: caller's own list; session/dev credential only (requireSessionCredentialFor)
 

@@ -388,6 +388,14 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 	if migratedFrom != "" {
 		s.removeLegacyTemplateTree(ctx, stor, tmpl, migratedFrom)
 	}
+
+	// A template that sets environment keys is committed as is (the
+	// AgentConfig snapshot stays a faithful parse), but agents ignore those
+	// keys (ptone/scion#4524), so say so.
+	if keys := config.TemplateEnvironmentKeys(tmpl.AgentConfig); len(keys) > 0 {
+		slog.Warn("template commit: template sets environment keys; agents ignore them (environment comes from settings)",
+			"template", tmpl.Name, "template_id", tmpl.ID, "scope", tmpl.Scope, "keys", keys)
+	}
 	return nil
 }
 

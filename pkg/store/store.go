@@ -3644,6 +3644,56 @@ type AgentDelegationStore interface {
 	// UpdateAgentDelegatedCredentialLastSeen sets the credential's
 	// last_seen_at. Callers treat a failure as best effort.
 	UpdateAgentDelegatedCredentialLastSeen(ctx context.Context, id string, at time.Time) error
+
+	// ListAgentDelegationGrants returns the grants that match filter,
+	// newest first. At least one of filter.AgentID and filter.IssuerUserID
+	// must be set; an empty filter returns ErrInvalidInput.
+	ListAgentDelegationGrants(ctx context.Context, filter AgentDelegationGrantFilter) ([]*AgentDelegationGrant, error)
+
+	// CountActiveAgentDelegationGrants counts the grants that match filter
+	// and are active at now: not revoked and expiring after now. The same
+	// filter rule as ListAgentDelegationGrants applies.
+	CountActiveAgentDelegationGrants(ctx context.Context, filter AgentDelegationGrantFilter, now time.Time) (int, error)
+
+	// LockAgentDelegationIssuer serializes grant issuance for one issuer.
+	// On PostgreSQL it runs SELECT ... FOR UPDATE on the user row; on
+	// SQLite, which serializes writes, it is a plain existence check. It
+	// must run inside WithTx, before the per-issuer grant count. Returns
+	// ErrNotFound if the user does not exist.
+	LockAgentDelegationIssuer(ctx context.Context, userID string) error
+
+	// LockAgentDelegationGrant serializes credential issuance and
+	// revocation for one grant, the same way, on the grant row, and
+	// returns the grant as read under the lock. Returns ErrNotFound if
+	// the grant does not exist.
+	LockAgentDelegationGrant(ctx context.Context, id string) (*AgentDelegationGrant, error)
+
+	// GetAgentDelegatedCredential returns the delegated credential with
+	// id, or ErrNotFound.
+	GetAgentDelegatedCredential(ctx context.Context, id string) (*AgentDelegatedCredential, error)
+
+	// ListActiveAgentDelegatedCredentials returns the credentials of the
+	// given grants that are active at now (not revoked and expiring after
+	// now), oldest first.
+	ListActiveAgentDelegatedCredentials(ctx context.Context, grantIDs []string, now time.Time) ([]*AgentDelegatedCredential, error)
+
+	// RevokeAgentDelegatedCredential revokes the credential with id, with
+	// reason. The update is conditional on revoked_at being NULL: a
+	// credential that is already revoked is left unchanged and reports
+	// revoked=false. Returns ErrNotFound if the credential does not exist.
+	RevokeAgentDelegatedCredential(ctx context.Context, id, reason string, at time.Time) (revoked bool, err error)
+
+	// PurgeAgentDelegatedCredentials deletes every delegated credential
+	// whose expiry is before expiredBefore, revoked or not, and returns
+	// the number deleted. Grants are never purged.
+	PurgeAgentDelegatedCredentials(ctx context.Context, expiredBefore time.Time) (int, error)
+}
+
+// AgentDelegationGrantFilter selects agent delegation grants by bound
+// agent, by issuer, or both.
+type AgentDelegationGrantFilter struct {
+	AgentID      string
+	IssuerUserID string
 }
 
 // =============================================================================
