@@ -216,6 +216,7 @@ export function buildFixture() {
         testIdentities: false,
         testHubAdmin: false,
         testSuperAdmin: false,
+        testIdentityWebSessions: false,
         testIssuerAudience: '',
       },
     },

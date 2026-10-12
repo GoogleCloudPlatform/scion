@@ -2765,6 +2765,35 @@ var (
 			},
 		},
 	}
+	// TestIdentityLoginCodesColumns holds the columns for the "test_identity_login_codes" table.
+	TestIdentityLoginCodesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "code_hash", Type: field.TypeString, Unique: true},
+		{Name: "issued_by", Type: field.TypeString},
+		{Name: "issuer_credential_id", Type: field.TypeString, Default: ""},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "consumed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "user_id", Type: field.TypeUUID, Unique: true},
+	}
+	// TestIdentityLoginCodesTable holds the schema information for the "test_identity_login_codes" table.
+	TestIdentityLoginCodesTable = &schema.Table{
+		Name:       "test_identity_login_codes",
+		Columns:    TestIdentityLoginCodesColumns,
+		PrimaryKey: []*schema.Column{TestIdentityLoginCodesColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "test_identity_login_codes_users_test_identity_login_code",
+				Columns:    []*schema.Column{TestIdentityLoginCodesColumns[7]},
+				RefColumns: []*schema.Column{UsersColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "testidentitylogincode_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{TestIdentityLoginCodesColumns[4]},
 	// TestIdentityDelegationsColumns holds the columns for the "test_identity_delegations" table.
 	TestIdentityDelegationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2799,6 +2828,7 @@ var (
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "created_by_host", Type: field.TypeString, Default: ""},
 		{Name: "attested", Type: field.TypeJSON, Nullable: true},
+		{Name: "web_session_key", Type: field.TypeBytes, Nullable: true},
 	}
 	// TestInfraMarkerTable holds the schema information for the "test_infra_marker" table.
 	TestInfraMarkerTable = &schema.Table{
@@ -3118,6 +3148,7 @@ var (
 		SkillVersionsTable,
 		SubscriptionTemplatesTable,
 		TemplatesTable,
+		TestIdentityLoginCodesTable,
 		TestIdentityDelegationsTable,
 		TestInfraMarkerTable,
 		ThreadGroupsTable,
@@ -3315,6 +3346,9 @@ func init() {
 	TemplatesTable.Annotation = &entsql.Annotation{
 		Table: "templates",
 	}
+	TestIdentityLoginCodesTable.ForeignKeys[0].RefTable = UsersTable
+	TestIdentityLoginCodesTable.Annotation = &entsql.Annotation{
+		Table: "test_identity_login_codes",
 	TestIdentityDelegationsTable.Annotation = &entsql.Annotation{
 		Table: "test_identity_delegations",
 	}

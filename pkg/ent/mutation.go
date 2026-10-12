@@ -87,6 +87,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
@@ -181,6 +182,7 @@ const (
 	TypeSkillVersion                  = "SkillVersion"
 	TypeSubscriptionTemplate          = "SubscriptionTemplate"
 	TypeTemplate                      = "Template"
+	TypeTestIdentityLoginCode         = "TestIdentityLoginCode"
 	TypeTestIdentityDelegation        = "TestIdentityDelegation"
 	TypeTestInfraMarker               = "TestInfraMarker"
 	TypeThreadGroup                   = "ThreadGroup"
@@ -83127,6 +83129,37 @@ func (m *TemplateMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown Template edge %s", name)
 }
 
+// TestIdentityLoginCodeMutation represents an operation that mutates the TestIdentityLoginCode nodes in the graph.
+type TestIdentityLoginCodeMutation struct {
+	config
+	op                   Op
+	typ                  string
+	id                   *uuid.UUID
+	code_hash            *string
+	issued_by            *string
+	issuer_credential_id *string
+	expires_at           *time.Time
+	consumed_at          *time.Time
+	created_at           *time.Time
+	clearedFields        map[string]struct{}
+	user                 *uuid.UUID
+	cleareduser          bool
+	done                 bool
+	oldValue             func(context.Context) (*TestIdentityLoginCode, error)
+	predicates           []predicate.TestIdentityLoginCode
+}
+
+var _ ent.Mutation = (*TestIdentityLoginCodeMutation)(nil)
+
+// testidentitylogincodeOption allows management of the mutation configuration using functional options.
+type testidentitylogincodeOption func(*TestIdentityLoginCodeMutation)
+
+// newTestIdentityLoginCodeMutation creates new mutation for the TestIdentityLoginCode entity.
+func newTestIdentityLoginCodeMutation(c config, op Op, opts ...testidentitylogincodeOption) *TestIdentityLoginCodeMutation {
+	m := &TestIdentityLoginCodeMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeTestIdentityLoginCode,
 // TestIdentityDelegationMutation represents an operation that mutates the TestIdentityDelegation nodes in the graph.
 type TestIdentityDelegationMutation struct {
 	config
@@ -83168,6 +83201,15 @@ func newTestIdentityDelegationMutation(c config, op Op, opts ...testidentitydele
 	return m
 }
 
+// withTestIdentityLoginCodeID sets the ID field of the mutation.
+func withTestIdentityLoginCodeID(id uuid.UUID) testidentitylogincodeOption {
+	return func(m *TestIdentityLoginCodeMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *TestIdentityLoginCode
+		)
+		m.oldValue = func(ctx context.Context) (*TestIdentityLoginCode, error) {
 // withTestIdentityDelegationID sets the ID field of the mutation.
 func withTestIdentityDelegationID(id uuid.UUID) testidentitydelegationOption {
 	return func(m *TestIdentityDelegationMutation) {
@@ -83181,6 +83223,7 @@ func withTestIdentityDelegationID(id uuid.UUID) testidentitydelegationOption {
 				if m.done {
 					err = errors.New("querying old values post mutation is not allowed")
 				} else {
+					value, err = m.Client().TestIdentityLoginCode.Get(ctx, id)
 					value, err = m.Client().TestIdentityDelegation.Get(ctx, id)
 				}
 			})
@@ -83190,6 +83233,10 @@ func withTestIdentityDelegationID(id uuid.UUID) testidentitydelegationOption {
 	}
 }
 
+// withTestIdentityLoginCode sets the old TestIdentityLoginCode of the mutation.
+func withTestIdentityLoginCode(node *TestIdentityLoginCode) testidentitylogincodeOption {
+	return func(m *TestIdentityLoginCodeMutation) {
+		m.oldValue = func(context.Context) (*TestIdentityLoginCode, error) {
 // withTestIdentityDelegation sets the old TestIdentityDelegation of the mutation.
 func withTestIdentityDelegation(node *TestIdentityDelegation) testidentitydelegationOption {
 	return func(m *TestIdentityDelegationMutation) {
@@ -83202,6 +83249,7 @@ func withTestIdentityDelegation(node *TestIdentityDelegation) testidentitydelega
 
 // Client returns a new `ent.Client` from the mutation. If the mutation was
 // executed in a transaction (ent.Tx), a transactional client is returned.
+func (m TestIdentityLoginCodeMutation) Client() *Client {
 func (m TestIdentityDelegationMutation) Client() *Client {
 	client := &Client{config: m.config}
 	client.init()
@@ -83210,6 +83258,7 @@ func (m TestIdentityDelegationMutation) Client() *Client {
 
 // Tx returns an `ent.Tx` for mutations that were executed in transactions;
 // it returns an error otherwise.
+func (m TestIdentityLoginCodeMutation) Tx() (*Tx, error) {
 func (m TestIdentityDelegationMutation) Tx() (*Tx, error) {
 	if _, ok := m.driver.(*txDriver); !ok {
 		return nil, errors.New("ent: mutation is not running in a transaction")
@@ -83220,6 +83269,8 @@ func (m TestIdentityDelegationMutation) Tx() (*Tx, error) {
 }
 
 // SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of TestIdentityLoginCode entities.
+func (m *TestIdentityLoginCodeMutation) SetID(id uuid.UUID) {
 // operation is only accepted on creation of TestIdentityDelegation entities.
 func (m *TestIdentityDelegationMutation) SetID(id uuid.UUID) {
 	m.id = &id
@@ -83227,6 +83278,7 @@ func (m *TestIdentityDelegationMutation) SetID(id uuid.UUID) {
 
 // ID returns the ID value in the mutation. Note that the ID is only available
 // if it was provided to the builder or after it was returned from the database.
+func (m *TestIdentityLoginCodeMutation) ID() (id uuid.UUID, exists bool) {
 func (m *TestIdentityDelegationMutation) ID() (id uuid.UUID, exists bool) {
 	if m.id == nil {
 		return
@@ -83238,6 +83290,7 @@ func (m *TestIdentityDelegationMutation) ID() (id uuid.UUID, exists bool) {
 // That means, if the mutation is applied within a transaction with an isolation level such
 // as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
 // or updated by the mutation.
+func (m *TestIdentityLoginCodeMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
 func (m *TestIdentityDelegationMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
 	switch {
 	case m.op.Is(OpUpdateOne | OpDeleteOne):
@@ -83247,12 +83300,21 @@ func (m *TestIdentityDelegationMutation) IDs(ctx context.Context) ([]uuid.UUID, 
 		}
 		fallthrough
 	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().TestIdentityLoginCode.Query().Where(m.predicates...).IDs(ctx)
 		return m.Client().TestIdentityDelegation.Query().Where(m.predicates...).IDs(ctx)
 	default:
 		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
 	}
 }
 
+// SetUserID sets the "user_id" field.
+func (m *TestIdentityLoginCodeMutation) SetUserID(u uuid.UUID) {
+	m.user = &u
+}
+
+// UserID returns the value of the "user_id" field in the mutation.
+func (m *TestIdentityLoginCodeMutation) UserID() (r uuid.UUID, exists bool) {
+	v := m.user
 // SetGrantorID sets the "grantor_id" field.
 func (m *TestIdentityDelegationMutation) SetGrantorID(s string) {
 	m.grantor_id = &s
@@ -83267,6 +83329,36 @@ func (m *TestIdentityDelegationMutation) GrantorID() (r string, exists bool) {
 	return *v, true
 }
 
+// OldUserID returns the old "user_id" field's value of the TestIdentityLoginCode entity.
+// If the TestIdentityLoginCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityLoginCodeMutation) OldUserID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUserID: %w", err)
+	}
+	return oldValue.UserID, nil
+}
+
+// ResetUserID resets all changes to the "user_id" field.
+func (m *TestIdentityLoginCodeMutation) ResetUserID() {
+	m.user = nil
+}
+
+// SetCodeHash sets the "code_hash" field.
+func (m *TestIdentityLoginCodeMutation) SetCodeHash(s string) {
+	m.code_hash = &s
+}
+
+// CodeHash returns the value of the "code_hash" field in the mutation.
+func (m *TestIdentityLoginCodeMutation) CodeHash() (r string, exists bool) {
+	v := m.code_hash
 // OldGrantorID returns the old "grantor_id" field's value of the TestIdentityDelegation entity.
 // If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
@@ -83303,6 +83395,36 @@ func (m *TestIdentityDelegationMutation) WorkloadSub() (r string, exists bool) {
 	return *v, true
 }
 
+// OldCodeHash returns the old "code_hash" field's value of the TestIdentityLoginCode entity.
+// If the TestIdentityLoginCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityLoginCodeMutation) OldCodeHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCodeHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCodeHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCodeHash: %w", err)
+	}
+	return oldValue.CodeHash, nil
+}
+
+// ResetCodeHash resets all changes to the "code_hash" field.
+func (m *TestIdentityLoginCodeMutation) ResetCodeHash() {
+	m.code_hash = nil
+}
+
+// SetIssuedBy sets the "issued_by" field.
+func (m *TestIdentityLoginCodeMutation) SetIssuedBy(s string) {
+	m.issued_by = &s
+}
+
+// IssuedBy returns the value of the "issued_by" field in the mutation.
+func (m *TestIdentityLoginCodeMutation) IssuedBy() (r string, exists bool) {
+	v := m.issued_by
 // OldWorkloadSub returns the old "workload_sub" field's value of the TestIdentityDelegation entity.
 // If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
@@ -83339,6 +83461,36 @@ func (m *TestIdentityDelegationMutation) Scope() (r string, exists bool) {
 	return *v, true
 }
 
+// OldIssuedBy returns the old "issued_by" field's value of the TestIdentityLoginCode entity.
+// If the TestIdentityLoginCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityLoginCodeMutation) OldIssuedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuedBy: %w", err)
+	}
+	return oldValue.IssuedBy, nil
+}
+
+// ResetIssuedBy resets all changes to the "issued_by" field.
+func (m *TestIdentityLoginCodeMutation) ResetIssuedBy() {
+	m.issued_by = nil
+}
+
+// SetIssuerCredentialID sets the "issuer_credential_id" field.
+func (m *TestIdentityLoginCodeMutation) SetIssuerCredentialID(s string) {
+	m.issuer_credential_id = &s
+}
+
+// IssuerCredentialID returns the value of the "issuer_credential_id" field in the mutation.
+func (m *TestIdentityLoginCodeMutation) IssuerCredentialID() (r string, exists bool) {
+	v := m.issuer_credential_id
 // OldScope returns the old "scope" field's value of the TestIdentityDelegation entity.
 // If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
@@ -83376,6 +83528,30 @@ func (m *TestIdentityDelegationMutation) MemberCap() (r int, exists bool) {
 	return *v, true
 }
 
+// OldIssuerCredentialID returns the old "issuer_credential_id" field's value of the TestIdentityLoginCode entity.
+// If the TestIdentityLoginCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityLoginCodeMutation) OldIssuerCredentialID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuerCredentialID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuerCredentialID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuerCredentialID: %w", err)
+	}
+	return oldValue.IssuerCredentialID, nil
+}
+
+// ResetIssuerCredentialID resets all changes to the "issuer_credential_id" field.
+func (m *TestIdentityLoginCodeMutation) ResetIssuerCredentialID() {
+	m.issuer_credential_id = nil
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *TestIdentityLoginCodeMutation) SetExpiresAt(t time.Time) {
 // OldMemberCap returns the old "member_cap" field's value of the TestIdentityDelegation entity.
 // If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
@@ -83495,6 +83671,7 @@ func (m *TestIdentityDelegationMutation) SetExpiresAt(t time.Time) {
 }
 
 // ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *TestIdentityLoginCodeMutation) ExpiresAt() (r time.Time, exists bool) {
 func (m *TestIdentityDelegationMutation) ExpiresAt() (r time.Time, exists bool) {
 	v := m.expires_at
 	if v == nil {
@@ -83503,6 +83680,10 @@ func (m *TestIdentityDelegationMutation) ExpiresAt() (r time.Time, exists bool) 
 	return *v, true
 }
 
+// OldExpiresAt returns the old "expires_at" field's value of the TestIdentityLoginCode entity.
+// If the TestIdentityLoginCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityLoginCodeMutation) OldExpiresAt(ctx context.Context) (v time.Time, err error) {
 // OldExpiresAt returns the old "expires_at" field's value of the TestIdentityDelegation entity.
 // If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
@@ -83521,6 +83702,18 @@ func (m *TestIdentityDelegationMutation) OldExpiresAt(ctx context.Context) (v ti
 }
 
 // ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *TestIdentityLoginCodeMutation) ResetExpiresAt() {
+	m.expires_at = nil
+}
+
+// SetConsumedAt sets the "consumed_at" field.
+func (m *TestIdentityLoginCodeMutation) SetConsumedAt(t time.Time) {
+	m.consumed_at = &t
+}
+
+// ConsumedAt returns the value of the "consumed_at" field in the mutation.
+func (m *TestIdentityLoginCodeMutation) ConsumedAt() (r time.Time, exists bool) {
+	v := m.consumed_at
 func (m *TestIdentityDelegationMutation) ResetExpiresAt() {
 	m.expires_at = nil
 }
@@ -83539,6 +83732,49 @@ func (m *TestIdentityDelegationMutation) RevokedAt() (r time.Time, exists bool) 
 	return *v, true
 }
 
+// OldConsumedAt returns the old "consumed_at" field's value of the TestIdentityLoginCode entity.
+// If the TestIdentityLoginCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityLoginCodeMutation) OldConsumedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConsumedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConsumedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConsumedAt: %w", err)
+	}
+	return oldValue.ConsumedAt, nil
+}
+
+// ClearConsumedAt clears the value of the "consumed_at" field.
+func (m *TestIdentityLoginCodeMutation) ClearConsumedAt() {
+	m.consumed_at = nil
+	m.clearedFields[testidentitylogincode.FieldConsumedAt] = struct{}{}
+}
+
+// ConsumedAtCleared returns if the "consumed_at" field was cleared in this mutation.
+func (m *TestIdentityLoginCodeMutation) ConsumedAtCleared() bool {
+	_, ok := m.clearedFields[testidentitylogincode.FieldConsumedAt]
+	return ok
+}
+
+// ResetConsumedAt resets all changes to the "consumed_at" field.
+func (m *TestIdentityLoginCodeMutation) ResetConsumedAt() {
+	m.consumed_at = nil
+	delete(m.clearedFields, testidentitylogincode.FieldConsumedAt)
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *TestIdentityLoginCodeMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *TestIdentityLoginCodeMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
 // OldRevokedAt returns the old "revoked_at" field's value of the TestIdentityDelegation entity.
 // If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
@@ -83588,6 +83824,64 @@ func (m *TestIdentityDelegationMutation) RevokedBy() (r string, exists bool) {
 	return *v, true
 }
 
+// OldCreatedAt returns the old "created_at" field's value of the TestIdentityLoginCode entity.
+// If the TestIdentityLoginCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestIdentityLoginCodeMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *TestIdentityLoginCodeMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// ClearUser clears the "user" edge to the User entity.
+func (m *TestIdentityLoginCodeMutation) ClearUser() {
+	m.cleareduser = true
+	m.clearedFields[testidentitylogincode.FieldUserID] = struct{}{}
+}
+
+// UserCleared reports if the "user" edge to the User entity was cleared.
+func (m *TestIdentityLoginCodeMutation) UserCleared() bool {
+	return m.cleareduser
+}
+
+// UserIDs returns the "user" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// UserID instead. It exists only for internal usage by the builders.
+func (m *TestIdentityLoginCodeMutation) UserIDs() (ids []uuid.UUID) {
+	if id := m.user; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetUser resets all changes to the "user" edge.
+func (m *TestIdentityLoginCodeMutation) ResetUser() {
+	m.user = nil
+	m.cleareduser = false
+}
+
+// Where appends a list predicates to the TestIdentityLoginCodeMutation builder.
+func (m *TestIdentityLoginCodeMutation) Where(ps ...predicate.TestIdentityLoginCode) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the TestIdentityLoginCodeMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *TestIdentityLoginCodeMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.TestIdentityLoginCode, len(ps))
 // OldRevokedBy returns the old "revoked_by" field's value of the TestIdentityDelegation entity.
 // If the TestIdentityDelegation object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
@@ -83639,11 +83933,18 @@ func (m *TestIdentityDelegationMutation) WhereP(ps ...func(*sql.Selector)) {
 }
 
 // Op returns the operation name.
+func (m *TestIdentityLoginCodeMutation) Op() Op {
 func (m *TestIdentityDelegationMutation) Op() Op {
 	return m.op
 }
 
 // SetOp allows setting the mutation operation.
+func (m *TestIdentityLoginCodeMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (TestIdentityLoginCode).
+func (m *TestIdentityLoginCodeMutation) Type() string {
 func (m *TestIdentityDelegationMutation) SetOp(op Op) {
 	m.op = op
 }
@@ -83656,6 +83957,28 @@ func (m *TestIdentityDelegationMutation) Type() string {
 // Fields returns all fields that were changed during this mutation. Note that in
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
+func (m *TestIdentityLoginCodeMutation) Fields() []string {
+	fields := make([]string, 0, 7)
+	if m.user != nil {
+		fields = append(fields, testidentitylogincode.FieldUserID)
+	}
+	if m.code_hash != nil {
+		fields = append(fields, testidentitylogincode.FieldCodeHash)
+	}
+	if m.issued_by != nil {
+		fields = append(fields, testidentitylogincode.FieldIssuedBy)
+	}
+	if m.issuer_credential_id != nil {
+		fields = append(fields, testidentitylogincode.FieldIssuerCredentialID)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, testidentitylogincode.FieldExpiresAt)
+	}
+	if m.consumed_at != nil {
+		fields = append(fields, testidentitylogincode.FieldConsumedAt)
+	}
+	if m.created_at != nil {
+		fields = append(fields, testidentitylogincode.FieldCreatedAt)
 func (m *TestIdentityDelegationMutation) Fields() []string {
 	fields := make([]string, 0, 9)
 	if m.grantor_id != nil {
@@ -83691,6 +84014,22 @@ func (m *TestIdentityDelegationMutation) Fields() []string {
 // Field returns the value of a field with the given name. The second boolean
 // return value indicates that this field was not set, or was not defined in the
 // schema.
+func (m *TestIdentityLoginCodeMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case testidentitylogincode.FieldUserID:
+		return m.UserID()
+	case testidentitylogincode.FieldCodeHash:
+		return m.CodeHash()
+	case testidentitylogincode.FieldIssuedBy:
+		return m.IssuedBy()
+	case testidentitylogincode.FieldIssuerCredentialID:
+		return m.IssuerCredentialID()
+	case testidentitylogincode.FieldExpiresAt:
+		return m.ExpiresAt()
+	case testidentitylogincode.FieldConsumedAt:
+		return m.ConsumedAt()
+	case testidentitylogincode.FieldCreatedAt:
+		return m.CreatedAt()
 func (m *TestIdentityDelegationMutation) Field(name string) (ent.Value, bool) {
 	switch name {
 	case testidentitydelegation.FieldGrantorID:
@@ -83718,6 +84057,24 @@ func (m *TestIdentityDelegationMutation) Field(name string) (ent.Value, bool) {
 // OldField returns the old value of the field from the database. An error is
 // returned if the mutation operation is not UpdateOne, or the query to the
 // database failed.
+func (m *TestIdentityLoginCodeMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case testidentitylogincode.FieldUserID:
+		return m.OldUserID(ctx)
+	case testidentitylogincode.FieldCodeHash:
+		return m.OldCodeHash(ctx)
+	case testidentitylogincode.FieldIssuedBy:
+		return m.OldIssuedBy(ctx)
+	case testidentitylogincode.FieldIssuerCredentialID:
+		return m.OldIssuerCredentialID(ctx)
+	case testidentitylogincode.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	case testidentitylogincode.FieldConsumedAt:
+		return m.OldConsumedAt(ctx)
+	case testidentitylogincode.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown TestIdentityLoginCode field %s", name)
 func (m *TestIdentityDelegationMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
 	switch name {
 	case testidentitydelegation.FieldGrantorID:
@@ -83745,6 +84102,16 @@ func (m *TestIdentityDelegationMutation) OldField(ctx context.Context, name stri
 // SetField sets the value of a field with the given name. It returns an error if
 // the field is not defined in the schema, or if the type mismatched the field
 // type.
+func (m *TestIdentityLoginCodeMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case testidentitylogincode.FieldUserID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUserID(v)
+		return nil
+	case testidentitylogincode.FieldCodeHash:
 func (m *TestIdentityDelegationMutation) SetField(name string, value ent.Value) error {
 	switch name {
 	case testidentitydelegation.FieldGrantorID:
@@ -83752,6 +84119,9 @@ func (m *TestIdentityDelegationMutation) SetField(name string, value ent.Value) 
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
+		m.SetCodeHash(v)
+		return nil
+	case testidentitylogincode.FieldIssuedBy:
 		m.SetGrantorID(v)
 		return nil
 	case testidentitydelegation.FieldWorkloadSub:
@@ -83759,6 +84129,9 @@ func (m *TestIdentityDelegationMutation) SetField(name string, value ent.Value) 
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
+		m.SetIssuedBy(v)
+		return nil
+	case testidentitylogincode.FieldIssuerCredentialID:
 		m.SetWorkloadSub(v)
 		return nil
 	case testidentitydelegation.FieldScope:
@@ -83766,6 +84139,9 @@ func (m *TestIdentityDelegationMutation) SetField(name string, value ent.Value) 
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
+		m.SetIssuerCredentialID(v)
+		return nil
+	case testidentitylogincode.FieldExpiresAt:
 		m.SetScope(v)
 		return nil
 	case testidentitydelegation.FieldMemberCap:
@@ -83796,11 +84172,23 @@ func (m *TestIdentityDelegationMutation) SetField(name string, value ent.Value) 
 		}
 		m.SetExpiresAt(v)
 		return nil
+	case testidentitylogincode.FieldConsumedAt:
 	case testidentitydelegation.FieldRevokedAt:
 		v, ok := value.(time.Time)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
+		m.SetConsumedAt(v)
+		return nil
+	case testidentitylogincode.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown TestIdentityLoginCode field %s", name)
 		m.SetRevokedAt(v)
 		return nil
 	case testidentitydelegation.FieldRevokedBy:
@@ -83816,6 +84204,8 @@ func (m *TestIdentityDelegationMutation) SetField(name string, value ent.Value) 
 
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
+func (m *TestIdentityLoginCodeMutation) AddedFields() []string {
+	return nil
 func (m *TestIdentityDelegationMutation) AddedFields() []string {
 	var fields []string
 	if m.addmember_cap != nil {
@@ -83827,6 +84217,7 @@ func (m *TestIdentityDelegationMutation) AddedFields() []string {
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
+func (m *TestIdentityLoginCodeMutation) AddedField(name string) (ent.Value, bool) {
 func (m *TestIdentityDelegationMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
 	case testidentitydelegation.FieldMemberCap:
@@ -83838,6 +84229,10 @@ func (m *TestIdentityDelegationMutation) AddedField(name string) (ent.Value, boo
 // AddField adds the value to the field with the given name. It returns an error if
 // the field is not defined in the schema, or if the type mismatched the field
 // type.
+func (m *TestIdentityLoginCodeMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown TestIdentityLoginCode numeric field %s", name)
 func (m *TestIdentityDelegationMutation) AddField(name string, value ent.Value) error {
 	switch name {
 	case testidentitydelegation.FieldMemberCap:
@@ -83853,6 +84248,10 @@ func (m *TestIdentityDelegationMutation) AddField(name string, value ent.Value) 
 
 // ClearedFields returns all nullable fields that were cleared during this
 // mutation.
+func (m *TestIdentityLoginCodeMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(testidentitylogincode.FieldConsumedAt) {
+		fields = append(fields, testidentitylogincode.FieldConsumedAt)
 func (m *TestIdentityDelegationMutation) ClearedFields() []string {
 	var fields []string
 	if m.FieldCleared(testidentitydelegation.FieldRevokedAt) {
@@ -83866,6 +84265,7 @@ func (m *TestIdentityDelegationMutation) ClearedFields() []string {
 
 // FieldCleared returns a boolean indicating if a field with the given name was
 // cleared in this mutation.
+func (m *TestIdentityLoginCodeMutation) FieldCleared(name string) bool {
 func (m *TestIdentityDelegationMutation) FieldCleared(name string) bool {
 	_, ok := m.clearedFields[name]
 	return ok
@@ -83873,6 +84273,13 @@ func (m *TestIdentityDelegationMutation) FieldCleared(name string) bool {
 
 // ClearField clears the value of the field with the given name. It returns an
 // error if the field is not defined in the schema.
+func (m *TestIdentityLoginCodeMutation) ClearField(name string) error {
+	switch name {
+	case testidentitylogincode.FieldConsumedAt:
+		m.ClearConsumedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown TestIdentityLoginCode nullable field %s", name)
 func (m *TestIdentityDelegationMutation) ClearField(name string) error {
 	switch name {
 	case testidentitydelegation.FieldRevokedAt:
@@ -83887,6 +84294,39 @@ func (m *TestIdentityDelegationMutation) ClearField(name string) error {
 
 // ResetField resets all changes in the mutation for the field with the given name.
 // It returns an error if the field is not defined in the schema.
+func (m *TestIdentityLoginCodeMutation) ResetField(name string) error {
+	switch name {
+	case testidentitylogincode.FieldUserID:
+		m.ResetUserID()
+		return nil
+	case testidentitylogincode.FieldCodeHash:
+		m.ResetCodeHash()
+		return nil
+	case testidentitylogincode.FieldIssuedBy:
+		m.ResetIssuedBy()
+		return nil
+	case testidentitylogincode.FieldIssuerCredentialID:
+		m.ResetIssuerCredentialID()
+		return nil
+	case testidentitylogincode.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	case testidentitylogincode.FieldConsumedAt:
+		m.ResetConsumedAt()
+		return nil
+	case testidentitylogincode.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown TestIdentityLoginCode field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *TestIdentityLoginCodeMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.user != nil {
+		edges = append(edges, testidentitylogincode.EdgeUser)
+	}
 func (m *TestIdentityDelegationMutation) ResetField(name string) error {
 	switch name {
 	case testidentitydelegation.FieldGrantorID:
@@ -83928,11 +84368,20 @@ func (m *TestIdentityDelegationMutation) AddedEdges() []string {
 
 // AddedIDs returns all IDs (to other nodes) that were added for the given edge
 // name in this mutation.
+func (m *TestIdentityLoginCodeMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case testidentitylogincode.EdgeUser:
+		if id := m.user; id != nil {
+			return []ent.Value{*id}
+		}
+	}
 func (m *TestIdentityDelegationMutation) AddedIDs(name string) []ent.Value {
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
+func (m *TestIdentityLoginCodeMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
 func (m *TestIdentityDelegationMutation) RemovedEdges() []string {
 	edges := make([]string, 0, 0)
 	return edges
@@ -83940,11 +84389,17 @@ func (m *TestIdentityDelegationMutation) RemovedEdges() []string {
 
 // RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
 // the given name in this mutation.
+func (m *TestIdentityLoginCodeMutation) RemovedIDs(name string) []ent.Value {
 func (m *TestIdentityDelegationMutation) RemovedIDs(name string) []ent.Value {
 	return nil
 }
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *TestIdentityLoginCodeMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.cleareduser {
+		edges = append(edges, testidentitylogincode.EdgeUser)
+	}
 func (m *TestIdentityDelegationMutation) ClearedEdges() []string {
 	edges := make([]string, 0, 0)
 	return edges
@@ -83952,18 +84407,37 @@ func (m *TestIdentityDelegationMutation) ClearedEdges() []string {
 
 // EdgeCleared returns a boolean which indicates if the edge with the given name
 // was cleared in this mutation.
+func (m *TestIdentityLoginCodeMutation) EdgeCleared(name string) bool {
+	switch name {
+	case testidentitylogincode.EdgeUser:
+		return m.cleareduser
+	}
 func (m *TestIdentityDelegationMutation) EdgeCleared(name string) bool {
 	return false
 }
 
 // ClearEdge clears the value of the edge with the given name. It returns an error
 // if that edge is not defined in the schema.
+func (m *TestIdentityLoginCodeMutation) ClearEdge(name string) error {
+	switch name {
+	case testidentitylogincode.EdgeUser:
+		m.ClearUser()
+		return nil
+	}
+	return fmt.Errorf("unknown TestIdentityLoginCode unique edge %s", name)
 func (m *TestIdentityDelegationMutation) ClearEdge(name string) error {
 	return fmt.Errorf("unknown TestIdentityDelegation unique edge %s", name)
 }
 
 // ResetEdge resets all changes to the edge with the given name in this mutation.
 // It returns an error if the edge is not defined in the schema.
+func (m *TestIdentityLoginCodeMutation) ResetEdge(name string) error {
+	switch name {
+	case testidentitylogincode.EdgeUser:
+		m.ResetUser()
+		return nil
+	}
+	return fmt.Errorf("unknown TestIdentityLoginCode edge %s", name)
 func (m *TestIdentityDelegationMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown TestIdentityDelegation edge %s", name)
 }
@@ -83980,6 +84454,7 @@ type TestInfraMarkerMutation struct {
 	created_by_host *string
 	attested        *json.RawMessage
 	appendattested  json.RawMessage
+	web_session_key *[]byte
 	clearedFields   map[string]struct{}
 	done            bool
 	oldValue        func(context.Context) (*TestInfraMarker, error)
@@ -84299,6 +84774,55 @@ func (m *TestInfraMarkerMutation) ResetAttested() {
 	delete(m.clearedFields, testinframarker.FieldAttested)
 }
 
+// SetWebSessionKey sets the "web_session_key" field.
+func (m *TestInfraMarkerMutation) SetWebSessionKey(b []byte) {
+	m.web_session_key = &b
+}
+
+// WebSessionKey returns the value of the "web_session_key" field in the mutation.
+func (m *TestInfraMarkerMutation) WebSessionKey() (r []byte, exists bool) {
+	v := m.web_session_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWebSessionKey returns the old "web_session_key" field's value of the TestInfraMarker entity.
+// If the TestInfraMarker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TestInfraMarkerMutation) OldWebSessionKey(ctx context.Context) (v []byte, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWebSessionKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWebSessionKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWebSessionKey: %w", err)
+	}
+	return oldValue.WebSessionKey, nil
+}
+
+// ClearWebSessionKey clears the value of the "web_session_key" field.
+func (m *TestInfraMarkerMutation) ClearWebSessionKey() {
+	m.web_session_key = nil
+	m.clearedFields[testinframarker.FieldWebSessionKey] = struct{}{}
+}
+
+// WebSessionKeyCleared returns if the "web_session_key" field was cleared in this mutation.
+func (m *TestInfraMarkerMutation) WebSessionKeyCleared() bool {
+	_, ok := m.clearedFields[testinframarker.FieldWebSessionKey]
+	return ok
+}
+
+// ResetWebSessionKey resets all changes to the "web_session_key" field.
+func (m *TestInfraMarkerMutation) ResetWebSessionKey() {
+	m.web_session_key = nil
+	delete(m.clearedFields, testinframarker.FieldWebSessionKey)
+}
+
 // Where appends a list predicates to the TestInfraMarkerMutation builder.
 func (m *TestInfraMarkerMutation) Where(ps ...predicate.TestInfraMarker) {
 	m.predicates = append(m.predicates, ps...)
@@ -84333,7 +84857,7 @@ func (m *TestInfraMarkerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TestInfraMarkerMutation) Fields() []string {
-	fields := make([]string, 0, 5)
+	fields := make([]string, 0, 6)
 	if m.hub_id != nil {
 		fields = append(fields, testinframarker.FieldHubID)
 	}
@@ -84348,6 +84872,9 @@ func (m *TestInfraMarkerMutation) Fields() []string {
 	}
 	if m.attested != nil {
 		fields = append(fields, testinframarker.FieldAttested)
+	}
+	if m.web_session_key != nil {
+		fields = append(fields, testinframarker.FieldWebSessionKey)
 	}
 	return fields
 }
@@ -84367,6 +84894,8 @@ func (m *TestInfraMarkerMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedByHost()
 	case testinframarker.FieldAttested:
 		return m.Attested()
+	case testinframarker.FieldWebSessionKey:
+		return m.WebSessionKey()
 	}
 	return nil, false
 }
@@ -84386,6 +84915,8 @@ func (m *TestInfraMarkerMutation) OldField(ctx context.Context, name string) (en
 		return m.OldCreatedByHost(ctx)
 	case testinframarker.FieldAttested:
 		return m.OldAttested(ctx)
+	case testinframarker.FieldWebSessionKey:
+		return m.OldWebSessionKey(ctx)
 	}
 	return nil, fmt.Errorf("unknown TestInfraMarker field %s", name)
 }
@@ -84430,6 +84961,13 @@ func (m *TestInfraMarkerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetAttested(v)
 		return nil
+	case testinframarker.FieldWebSessionKey:
+		v, ok := value.([]byte)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWebSessionKey(v)
+		return nil
 	}
 	return fmt.Errorf("unknown TestInfraMarker field %s", name)
 }
@@ -84463,6 +85001,9 @@ func (m *TestInfraMarkerMutation) ClearedFields() []string {
 	if m.FieldCleared(testinframarker.FieldAttested) {
 		fields = append(fields, testinframarker.FieldAttested)
 	}
+	if m.FieldCleared(testinframarker.FieldWebSessionKey) {
+		fields = append(fields, testinframarker.FieldWebSessionKey)
+	}
 	return fields
 }
 
@@ -84479,6 +85020,9 @@ func (m *TestInfraMarkerMutation) ClearField(name string) error {
 	switch name {
 	case testinframarker.FieldAttested:
 		m.ClearAttested()
+		return nil
+	case testinframarker.FieldWebSessionKey:
+		m.ClearWebSessionKey()
 		return nil
 	}
 	return fmt.Errorf("unknown TestInfraMarker nullable field %s", name)
@@ -84502,6 +85046,9 @@ func (m *TestInfraMarkerMutation) ResetField(name string) error {
 		return nil
 	case testinframarker.FieldAttested:
 		m.ResetAttested()
+		return nil
+	case testinframarker.FieldWebSessionKey:
+		m.ResetWebSessionKey()
 		return nil
 	}
 	return fmt.Errorf("unknown TestInfraMarker field %s", name)
@@ -86584,6 +87131,48 @@ func (m *UsageReservationMutation) ResetEdge(name string) error {
 // UserMutation represents an operation that mutates the User nodes in the graph.
 type UserMutation struct {
 	config
+	op                              Op
+	typ                             string
+	id                              *uuid.UUID
+	email                           *string
+	display_name                    *string
+	avatar_url                      *string
+	role                            *user.Role
+	status                          *user.Status
+	preferences                     **schema.UserPreferences
+	created                         *time.Time
+	invited_by                      *string
+	invite_note                     *string
+	last_login                      *time.Time
+	last_seen                       *time.Time
+	session_generation              *int64
+	addsession_generation           *int64
+	kind                            *user.Kind
+	expires_at                      *time.Time
+	issued_by                       *string
+	purpose                         *string
+	issuance_id                     *string
+	issuer_credential_id            *string
+	clearedFields                   map[string]struct{}
+	owned_groups                    map[uuid.UUID]struct{}
+	removedowned_groups             map[uuid.UUID]struct{}
+	clearedowned_groups             bool
+	memberships                     map[uuid.UUID]struct{}
+	removedmemberships              map[uuid.UUID]struct{}
+	clearedmemberships              bool
+	policy_bindings                 map[uuid.UUID]struct{}
+	removedpolicy_bindings          map[uuid.UUID]struct{}
+	clearedpolicy_bindings          bool
+	external_identities             map[uuid.UUID]struct{}
+	removedexternal_identities      map[uuid.UUID]struct{}
+	clearedexternal_identities      bool
+	terminal_workspace              *uuid.UUID
+	clearedterminal_workspace       bool
+	test_identity_login_code        *uuid.UUID
+	clearedtest_identity_login_code bool
+	done                            bool
+	oldValue                        func(context.Context) (*User, error)
+	predicates                      []predicate.User
 	op                         Op
 	typ                        string
 	id                         *uuid.UUID
@@ -87846,6 +88435,45 @@ func (m *UserMutation) ResetTerminalWorkspace() {
 	m.clearedterminal_workspace = false
 }
 
+// SetTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by id.
+func (m *UserMutation) SetTestIdentityLoginCodeID(id uuid.UUID) {
+	m.test_identity_login_code = &id
+}
+
+// ClearTestIdentityLoginCode clears the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (m *UserMutation) ClearTestIdentityLoginCode() {
+	m.clearedtest_identity_login_code = true
+}
+
+// TestIdentityLoginCodeCleared reports if the "test_identity_login_code" edge to the TestIdentityLoginCode entity was cleared.
+func (m *UserMutation) TestIdentityLoginCodeCleared() bool {
+	return m.clearedtest_identity_login_code
+}
+
+// TestIdentityLoginCodeID returns the "test_identity_login_code" edge ID in the mutation.
+func (m *UserMutation) TestIdentityLoginCodeID() (id uuid.UUID, exists bool) {
+	if m.test_identity_login_code != nil {
+		return *m.test_identity_login_code, true
+	}
+	return
+}
+
+// TestIdentityLoginCodeIDs returns the "test_identity_login_code" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// TestIdentityLoginCodeID instead. It exists only for internal usage by the builders.
+func (m *UserMutation) TestIdentityLoginCodeIDs() (ids []uuid.UUID) {
+	if id := m.test_identity_login_code; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetTestIdentityLoginCode resets all changes to the "test_identity_login_code" edge.
+func (m *UserMutation) ResetTestIdentityLoginCode() {
+	m.test_identity_login_code = nil
+	m.clearedtest_identity_login_code = false
+}
+
 // Where appends a list predicates to the UserMutation builder.
 func (m *UserMutation) Where(ps ...predicate.User) {
 	m.predicates = append(m.predicates, ps...)
@@ -88375,7 +89003,7 @@ func (m *UserMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *UserMutation) AddedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.owned_groups != nil {
 		edges = append(edges, user.EdgeOwnedGroups)
 	}
@@ -88390,6 +89018,9 @@ func (m *UserMutation) AddedEdges() []string {
 	}
 	if m.terminal_workspace != nil {
 		edges = append(edges, user.EdgeTerminalWorkspace)
+	}
+	if m.test_identity_login_code != nil {
+		edges = append(edges, user.EdgeTestIdentityLoginCode)
 	}
 	return edges
 }
@@ -88426,13 +89057,17 @@ func (m *UserMutation) AddedIDs(name string) []ent.Value {
 		if id := m.terminal_workspace; id != nil {
 			return []ent.Value{*id}
 		}
+	case user.EdgeTestIdentityLoginCode:
+		if id := m.test_identity_login_code; id != nil {
+			return []ent.Value{*id}
+		}
 	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *UserMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.removedowned_groups != nil {
 		edges = append(edges, user.EdgeOwnedGroups)
 	}
@@ -88482,7 +89117,7 @@ func (m *UserMutation) RemovedIDs(name string) []ent.Value {
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *UserMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.clearedowned_groups {
 		edges = append(edges, user.EdgeOwnedGroups)
 	}
@@ -88497,6 +89132,9 @@ func (m *UserMutation) ClearedEdges() []string {
 	}
 	if m.clearedterminal_workspace {
 		edges = append(edges, user.EdgeTerminalWorkspace)
+	}
+	if m.clearedtest_identity_login_code {
+		edges = append(edges, user.EdgeTestIdentityLoginCode)
 	}
 	return edges
 }
@@ -88515,6 +89153,8 @@ func (m *UserMutation) EdgeCleared(name string) bool {
 		return m.clearedexternal_identities
 	case user.EdgeTerminalWorkspace:
 		return m.clearedterminal_workspace
+	case user.EdgeTestIdentityLoginCode:
+		return m.clearedtest_identity_login_code
 	}
 	return false
 }
@@ -88525,6 +89165,9 @@ func (m *UserMutation) ClearEdge(name string) error {
 	switch name {
 	case user.EdgeTerminalWorkspace:
 		m.ClearTerminalWorkspace()
+		return nil
+	case user.EdgeTestIdentityLoginCode:
+		m.ClearTestIdentityLoginCode()
 		return nil
 	}
 	return fmt.Errorf("unknown User unique edge %s", name)
@@ -88548,6 +89191,9 @@ func (m *UserMutation) ResetEdge(name string) error {
 		return nil
 	case user.EdgeTerminalWorkspace:
 		m.ResetTerminalWorkspace()
+		return nil
+	case user.EdgeTestIdentityLoginCode:
+		m.ResetTestIdentityLoginCode()
 		return nil
 	}
 	return fmt.Errorf("unknown User edge %s", name)

@@ -1276,6 +1276,29 @@ func HasTerminalWorkspaceWith(preds ...predicate.UserTerminalWorkspace) predicat
 	})
 }
 
+// HasTestIdentityLoginCode applies the HasEdge predicate on the "test_identity_login_code" edge.
+func HasTestIdentityLoginCode() predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, TestIdentityLoginCodeTable, TestIdentityLoginCodeColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasTestIdentityLoginCodeWith applies the HasEdge predicate on the "test_identity_login_code" edge with a given conditions (other predicates).
+func HasTestIdentityLoginCodeWith(preds ...predicate.TestIdentityLoginCode) predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := newTestIdentityLoginCodeStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
 // And groups predicates with the AND operator between them.
 func And(predicates ...predicate.User) predicate.User {
 	return predicate.User(sql.AndPredicates(predicates...))

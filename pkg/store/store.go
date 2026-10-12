@@ -1795,6 +1795,25 @@ type UserStore interface {
 	// it is a no-op. Must be called inside WithTx.
 	LockTestFixtureIssuance(ctx context.Context) error
 
+	// ReplaceTestIdentityLoginCode stores code as the user's only
+	// web-login code: it deletes any code row the user already has
+	// (redeemed or not), then inserts code. It requires a non-empty
+	// UserID, CodeHash and IssuedBy and a non-zero ExpiresAt, and returns
+	// ErrInvalidInput otherwise. A concurrent replace for the same user
+	// can fail with ErrAlreadyExists. Call it inside WithTx together with
+	// the mint audit. It sets code.ID and code.Created when empty.
+	ReplaceTestIdentityLoginCode(ctx context.Context, code *TestIdentityLoginCode) error
+
+	// ConsumeTestIdentityLoginCode redeems the code with the given hash:
+	// in one conditional update it sets consumed_at = now where the hash
+	// matches, consumed_at is unset and expires_at is after now. It
+	// returns the redeemed row when exactly one row changed. Otherwise it
+	// returns ErrNotFound for an unknown hash,
+	// ErrTestIdentityLoginCodeConsumed for a code already redeemed and
+	// ErrTestIdentityLoginCodeExpired for an expired one. Of any number of
+	// concurrent calls for one code, at most one succeeds.
+	ConsumeTestIdentityLoginCode(ctx context.Context, codeHash string, now time.Time) (*TestIdentityLoginCode, error)
+
 	// CountLiveTestAdminUsers counts admin-kind test identities (the
 	// kinds UserKindTestHubAdmin and UserKindTestSuperAdmin) whose expiry
 	// is after now. A non-empty kind restricts the count to that admin

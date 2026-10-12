@@ -29,6 +29,11 @@ type testInfraGates struct {
 	// TestSuperAdmin is always false for now.
 	TestHubAdmin   bool
 	TestSuperAdmin bool
+	// TestIdentityWebSessions is true when test identity web sessions are
+	// available (ptone/scion#4240, WS1): the member tier is on, the hub
+	// has its hub-local web session key, and it is not in proxy auth mode
+	// (testIdentityWebSessionGate).
+	TestIdentityWebSessions bool
 	// TestIssuerAudience is the audience a workload ID token must carry to
 	// prove a test identity issuer delegation on this hub
 	// ("scion-test-issuer:<hub id>"), or "" when the hub accepts no
@@ -41,11 +46,13 @@ type testInfraGates struct {
 // testInfraGates returns the hub's test-identity gates. It is the single
 // place GET /api/v1/test-infra/status reads them from.
 func (s *Server) testInfraGates() testInfraGates {
+	webSessions, _ := s.testIdentityWebSessionGate()
 	return testInfraGates{
-		TestIdentities:     s.testIdentities.enabled,
-		TestHubAdmin:       s.testAdminTierEnabled(testAdminKindHubAdmin),
-		TestSuperAdmin:     s.testAdminTierEnabled(testAdminKindSuperAdmin),
-		TestIssuerAudience: s.testIssuerAudienceIfAccepted(),
+		TestIdentities:          s.testIdentities.enabled,
+		TestHubAdmin:            s.testAdminTierEnabled(testAdminKindHubAdmin),
+		TestSuperAdmin:          s.testAdminTierEnabled(testAdminKindSuperAdmin),
+		TestIdentityWebSessions: webSessions,
+		TestIssuerAudience:      s.testIssuerAudienceIfAccepted(),
 	}
 }
 
@@ -60,13 +67,14 @@ func (s *Server) testIssuerAudienceIfAccepted() string {
 }
 
 // TestInfraStatusResponse is the body of GET /api/v1/test-infra/status:
-// exactly three booleans and the issuer audience string, and no other hub
+// exactly four booleans and the issuer audience string, and no other hub
 // data.
 type TestInfraStatusResponse struct {
-	TestIdentities     bool   `json:"testIdentities"`
-	TestHubAdmin       bool   `json:"testHubAdmin"`
-	TestSuperAdmin     bool   `json:"testSuperAdmin"`
-	TestIssuerAudience string `json:"testIssuerAudience"`
+	TestIdentities          bool   `json:"testIdentities"`
+	TestHubAdmin            bool   `json:"testHubAdmin"`
+	TestSuperAdmin          bool   `json:"testSuperAdmin"`
+	TestIdentityWebSessions bool   `json:"testIdentityWebSessions"`
+	TestIssuerAudience      string `json:"testIssuerAudience"`
 }
 
 // handleTestInfraStatus handles GET /api/v1/test-infra/status.

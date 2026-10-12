@@ -872,6 +872,22 @@ func Spec() []TableFixture {
 				"class": "test", "created_at": baseTime,
 				"created_by_host": "fixture-host",
 				"attested":        `{"bucket":"fixture-bucket","broker_ids":["fixture-broker"]}`,
+				// A fixed placeholder, not a real key: 64 bytes, as the
+				// mark command writes.
+				"web_session_key": []byte(strings.Repeat("k", 64)),
+			},
+		}},
+
+		// ---- Test identity web-login codes (WS1, ptone/scion#4240) ----
+		{Table: "test_identity_login_codes", Rows: []row{
+			{
+				"id": "c0de0000-0000-0000-0000-000000000001", "user_id": userID,
+				"code_hash":            strings.Repeat("ab", 32),
+				"issued_by":            userID,
+				"issuer_credential_id": "",
+				"expires_at":           baseTime.Add(5 * time.Minute),
+				"consumed_at":          nil,
+				"created_at":           baseTime,
 			},
 		}},
 
