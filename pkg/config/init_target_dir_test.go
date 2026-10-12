@@ -252,7 +252,8 @@ func TestInitProject_ExplicitTargetRelativeAndSubdirectory(t *testing.T) {
 
 			target := tc.target
 			if tc.abs {
-				target = filepath.Join(cwd, target)
+				// Not filepath.Join: it would drop a trailing separator.
+				target = cwd + string(filepath.Separator) + target
 			}
 			id := api.NewUUID()
 			if err := InitProject(target, nil, InitProjectOpts{SkipRuntimeCheck: true, ProjectID: id}); err != nil {
