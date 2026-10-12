@@ -164,14 +164,14 @@ func TestResolveInvocationTarget(t *testing.T) {
 		{
 			name: "global settings endpoint inside a directory project counts as the directory's",
 			setup: func(t *testing.T) {
-				writeGlobalSettings(t, "hub:\n  endpoint: http://global.example.com\n")
+				writeHomeGlobalSettings(t, "hub:\n  endpoint: http://global.example.com\n")
 				makeDirProject(t, "")
 			},
 			cmd: []string{"list"},
 		},
 		{
 			name:  "outside a project the context hub beats the global settings endpoint",
-			setup: func(t *testing.T) { writeGlobalSettings(t, "hub:\n  endpoint: http://global.example.com\n") },
+			setup: func(t *testing.T) { writeHomeGlobalSettings(t, "hub:\n  endpoint: http://global.example.com\n") },
 			cmd:   []string{"list"},
 			want:  filled,
 		},
@@ -282,7 +282,7 @@ func TestResolveInvocationTarget(t *testing.T) {
 	}
 }
 
-func writeGlobalSettings(t *testing.T, content string) {
+func writeHomeGlobalSettings(t *testing.T, content string) {
 	t.Helper()
 	dir := filepath.Join(os.Getenv("HOME"), ".scion")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -377,7 +377,7 @@ func TestPersistentPreRun_ConfigSubcommandGlobalSeesGlobalEndpoint(t *testing.T)
 	setupContextTest(t)
 	restoreAllSilenceUsage(t)
 	resetConfigSetFlags(t)
-	writeGlobalSettings(t, "hub:\n  endpoint: http://global.example.com\n")
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: http://global.example.com\n")
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
 
 	rootCmd.SetArgs([]string{"config", "set", "--global", "image_registry", "registry.example.test/team"})

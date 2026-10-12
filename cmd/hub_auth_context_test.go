@@ -33,7 +33,7 @@ func setupLoginContextTest(t *testing.T) (globalFile, projectFile string) {
 	origHubURL := hubAuthHubURL
 	t.Cleanup(func() { hubAuthHubURL = origHubURL })
 	hubAuthHubURL = ""
-	writeGlobalSettings(t, "image_registry: registry.example.test/team\n")
+	writeHomeGlobalSettings(t, "image_registry: registry.example.test/team\n")
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
 	root := makeDirProject(t, "")
 	globalFile = filepath.Join(os.Getenv("HOME"), ".scion", "settings.yaml")

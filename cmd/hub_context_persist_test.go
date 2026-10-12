@@ -47,7 +47,7 @@ func TestPersistHubFlagEndpoint(t *testing.T) {
 	for _, scope := range []string{"project", "global"} {
 		t.Run(scope+": a context hub is not written", func(t *testing.T) {
 			setupContextTest(t)
-			writeGlobalSettings(t, "image_registry: registry.example.test/team\n")
+			writeHomeGlobalSettings(t, "image_registry: registry.example.test/team\n")
 			saveTestContext(t, ctxTestHub, ctxTestProjectID)
 			root := makeDirProject(t, "")
 			globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
@@ -70,7 +70,7 @@ func TestPersistHubFlagEndpoint(t *testing.T) {
 
 		t.Run(scope+": the --hub flag is written", func(t *testing.T) {
 			setupContextTest(t)
-			writeGlobalSettings(t, "image_registry: registry.example.test/team\n")
+			writeHomeGlobalSettings(t, "image_registry: registry.example.test/team\n")
 			saveTestContext(t, ctxTestHub, ctxTestProjectID)
 			root := makeDirProject(t, "")
 			globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
@@ -115,7 +115,7 @@ func TestHubEnable_EndpointSource(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			setupContextTest(t)
 			srv := healthOnlyHub(t)
-			writeGlobalSettings(t, "image_registry: registry.example.test/team\n")
+			writeHomeGlobalSettings(t, "image_registry: registry.example.test/team\n")
 			saveTestContext(t, srv.URL, ctxTestProjectID)
 			if tc.flag {
 				hubEndpoint = srv.URL
@@ -149,7 +149,7 @@ func TestHubLink_EndpointSource(t *testing.T) {
 			origYes, origOffer := autoConfirm, offerTemplateSyncOnLinkFn
 			t.Cleanup(func() { autoConfirm, offerTemplateSyncOnLinkFn = origYes, origOffer })
 			offerTemplateSyncOnLinkFn = func(_, _, _ string, _ bool) {}
-			writeGlobalSettings(t, "schema_version: \"1\"\n")
+			writeHomeGlobalSettings(t, "schema_version: \"1\"\n")
 			t.Chdir(os.Getenv("HOME"))
 			globalMode, autoConfirm = true, true
 			t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
@@ -213,7 +213,7 @@ func TestHubShadow_IgnoresContext(t *testing.T) {
 			t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 			saveTestContext(t, ctxHub.URL, ctxTestProjectID)
 			if tc.globalEndpoint {
-				writeGlobalSettings(t, "hub:\n  endpoint: "+srv.URL+"\n")
+				writeHomeGlobalSettings(t, "hub:\n  endpoint: "+srv.URL+"\n")
 			}
 			if tc.flag {
 				hubEndpoint = srv.URL

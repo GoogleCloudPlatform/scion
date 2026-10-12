@@ -70,7 +70,7 @@ func setupUseTest(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	restoreAllSilenceUsage(t)
 	t.Cleanup(func() { rootCmd.SetArgs(nil) })
 	srv, calls := useFakeHub(t)
-	writeGlobalSettings(t, "hub:\n  endpoint: "+srv.URL+"\n")
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+srv.URL+"\n")
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 	return srv, calls
 }
@@ -193,7 +193,7 @@ func TestUseSelectProject_NotLoggedIn(t *testing.T) {
 
 func TestUseSelectProject_NoHub(t *testing.T) {
 	setupUseTest(t)
-	writeGlobalSettings(t, "")
+	writeHomeGlobalSettings(t, "")
 	_, _, err := runScion(t, "use", "foo")
 	require.Error(t, err)
 	assert.Equal(t, noHubSelectedMessage, err.Error())
@@ -230,7 +230,7 @@ func TestUseSelectProject_CorruptContextNeedsForce(t *testing.T) {
 
 func TestUseShow_NothingConfigured(t *testing.T) {
 	setupUseTest(t)
-	writeGlobalSettings(t, "")
+	writeHomeGlobalSettings(t, "")
 	stdout, _, err := runScion(t, "use")
 	require.NoError(t, err)
 	assert.Equal(t, noHubSelectedMessage+"\n", stdout)
@@ -401,7 +401,7 @@ func TestUseShow_CorruptContextWarnsOnce(t *testing.T) {
 // says so.
 func TestUseSelectProject_EnvHubNote(t *testing.T) {
 	srv, _ := setupUseTest(t)
-	writeGlobalSettings(t, "")
+	writeHomeGlobalSettings(t, "")
 	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
 	stdout, stderr, err := runScion(t, "use", "foo")
 	require.NoError(t, err)
