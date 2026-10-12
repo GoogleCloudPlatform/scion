@@ -725,23 +725,69 @@ esac`, deleting, ack))
 // Mutant G2-strict: no re-read/retry (a benign change fails the start).
 // Mutant G2-blind: the retry skips the held check.
 // Mutant G2-delete: on a conflict the start deletes the sandbox by name.
-// Mutant G2-nocleanup: on a state read or write failure (not a nonce
+// Mutant G2-mismatch-delete: on a second mismatch the start deletes the
+// sandbox by name.
+// Mutant G2-nocleanup: on a first-put read or write failure (not a nonce
 // mismatch) the start does not delete its own sandbox.
+// Mutant G2-reread-nocleanup: the same, on a failed re-read.
+// Mutant G2-retry-nocleanup: the same, on a failed retried put.
 // -----------------------------------------------------------------------
+
+// newArgsLogSandboxRuntime is newFenceSandboxRuntime (exec answers 0, wait
+// blocks) with a mock that logs each call's full argv, one per line.
+func newArgsLogSandboxRuntime(t *testing.T) (*CloudRunSandboxRuntime, string) {
+	t.Helper()
+	log := filepath.Join(t.TempDir(), "calls.log")
+	bin := writeMockBin(t, fmt.Sprintf(`[ "$1" = wait ] && exec sleep 60
+echo "$*" >> %q
+exit 0`, log))
+	rt := newWorkaroundTestRuntime(t, bin)
+	cancelWatchersOnCleanup(t, rt)
+	return rt, log
+}
+
+// deleteCalls returns the logged delete invocations.
+func deleteCalls(t *testing.T, log string) []string {
+	t.Helper()
+	var out []string
+	for _, line := range strings.Split(sandboxCalls(t, log), "\n") {
+		if strings.HasPrefix(line, "delete") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func setRecordRunHook(t *testing.T, hook func(name, stage string)) {
+	t.Helper()
+	prev := sandboxRecordRunHook
+	sandboxRecordRunHook = hook
+	t.Cleanup(func() { sandboxRecordRunHook = prev })
+}
+
+// seedStoppedOld records a stopped entry of an older run under "dev".
+func seedStoppedOld(rt *CloudRunSandboxRuntime) {
+	old := runEntry("dev", "run-old")
+	old.Stopped = true
+	rt.state.add(old)
+}
+
+// removeKeyHook returns an after-launch hook in which another instance
+// removes the key (a benign change: the first put then mismatches).
+func removeKeyHook(t *testing.T, path string) func(string) {
+	return func(string) {
+		w := newSandboxStateStore(path)
+		if err := w.casRemove("dev", nonceOf(w.get("dev"))); err != nil {
+			t.Errorf("remove old entry: %v", err)
+		}
+	}
+}
 
 func TestCloudRunSandboxRun_RecordAfterConcurrentChange(t *testing.T) {
 	t.Run("benign change: retried", func(t *testing.T) {
-		rt, _ := newFenceSandboxRuntime(t, 0)
-		old := runEntry("dev", "run-old")
-		old.Stopped = true
-		rt.state.add(old)
-		setAfterLaunchHook(t, func(string) {
-			// Another instance's reconcile removes the stopped entry.
-			w := newSandboxStateStore(rt.state.path)
-			if err := w.casRemove("dev", nonceOf(w.get("dev"))); err != nil {
-				t.Errorf("remove old entry: %v", err)
-			}
-		})
+		rt, log := newArgsLogSandboxRuntime(t)
+		seedStoppedOld(rt)
+		setAfterLaunchHook(t, removeKeyHook(t, rt.state.path))
 		if _, err := rt.Run(context.Background(), fenceRunConfig(t, "run-a")); err != nil {
 			t.Fatalf("Run A = %v, want success", err)
 		}
@@ -749,27 +795,85 @@ func TestCloudRunSandboxRun_RecordAfterConcurrentChange(t *testing.T) {
 		if e == nil || e.Labels[api.LabelRunID] != "run-a" || e.Stopped {
 			t.Errorf("file entry = %+v, want run A's live entry", e)
 		}
+		if d := deleteCalls(t, log); len(d) != 0 {
+			t.Errorf("deletes = %q, want none", d)
+		}
 	})
 
-	t.Run("state write fails: own sandbox deleted", func(t *testing.T) {
-		rt, log := newFenceSandboxRuntime(t, 0)
-		corrupt := []byte(`{"dev": `)
-		setAfterLaunchHook(t, func(string) {
-			// The state file becomes unreadable between the held check and
-			// the record, so the put fails with a read error.
-			if err := os.WriteFile(rt.state.path, corrupt, 0600); err != nil {
-				t.Errorf("corrupt state file: %v", err)
+	// The own-sandbox cleanup cases: the state cannot be read at one of the
+	// three record steps. The sandbox is deleted by name with --force, and
+	// the unreadable file is left as it is.
+	corrupt := []byte(`{"dev": `)
+	for _, tc := range []struct {
+		name  string
+		stage string // "" = first put (after-launch hook), else the record hook stage
+	}{
+		{"state unreadable at first put: own sandbox deleted", ""},
+		{"state unreadable at re-read: own sandbox deleted", "reread"},
+		{"state unreadable at retried put: own sandbox deleted", "retry"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, log := newArgsLogSandboxRuntime(t)
+			seedStoppedOld(rt)
+			corruptFile := func() {
+				if err := os.WriteFile(rt.state.path, corrupt, 0600); err != nil {
+					t.Errorf("corrupt state file: %v", err)
+				}
+			}
+			if tc.stage == "" {
+				setAfterLaunchHook(t, func(string) { corruptFile() })
+			} else {
+				setAfterLaunchHook(t, removeKeyHook(t, rt.state.path))
+				setRecordRunHook(t, func(_, stage string) {
+					if stage == tc.stage {
+						corruptFile()
+					}
+				})
+			}
+			_, err := rt.Run(context.Background(), fenceRunConfig(t, "run-a"))
+			if err == nil || errors.Is(err, ErrRunConflict) || errors.Is(err, errStateChanged) {
+				t.Fatalf("Run A = %v, want a state read error", err)
+			}
+			if d := deleteCalls(t, log); len(d) != 1 || d[0] != "delete --force dev" {
+				t.Errorf("deletes = %q, want exactly [\"delete --force dev\"]", d)
+			}
+			if got, _ := os.ReadFile(rt.state.path); !bytes.Equal(got, corrupt) {
+				t.Errorf("corrupt state file overwritten: %q", got)
+			}
+		})
+	}
+
+	t.Run("second mismatch: no delete", func(t *testing.T) {
+		var logs bytes.Buffer
+		setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
+
+		rt, log := newArgsLogSandboxRuntime(t)
+		seedStoppedOld(rt)
+		setAfterLaunchHook(t, removeKeyHook(t, rt.state.path))
+		setRecordRunHook(t, func(_, stage string) {
+			if stage != "retry" {
+				return
+			}
+			// Another writer (not fenced: another process) records run B
+			// between the re-read and the retried put.
+			w := newSandboxStateStore(rt.state.path)
+			if _, err := w.casPut("dev", nonceOf(w.get("dev")), runEntry("dev", "run-b")); err != nil {
+				t.Errorf("write B: %v", err)
 			}
 		})
 		_, err := rt.Run(context.Background(), fenceRunConfig(t, "run-a"))
-		if err == nil || errors.Is(err, ErrRunConflict) || errors.Is(err, errStateChanged) {
-			t.Fatalf("Run A = %v, want a state read error", err)
+		if !errors.Is(err, errStateChanged) {
+			t.Fatalf("Run A = %v, want errStateChanged", err)
 		}
-		if calls := sandboxCalls(t, log); !strings.Contains(calls, "delete") {
-			t.Errorf("Run A left its unrecorded sandbox running (no delete); calls:\n%s", calls)
+		if d := deleteCalls(t, log); len(d) != 0 {
+			t.Errorf("deletes = %q, want none: the key holds an entry this Run did not write", d)
 		}
-		if got, _ := os.ReadFile(rt.state.path); !bytes.Equal(got, corrupt) {
-			t.Errorf("corrupt state file overwritten: %q", got)
+		e := readStateForTest(t, rt.state.path)["dev"]
+		if e == nil || e.Labels[api.LabelRunID] != "run-b" || e.Stopped {
+			t.Errorf("file entry = %+v, want run B's live entry", e)
+		}
+		if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "sandbox=dev") || !strings.Contains(got, "untracked") {
+			t.Errorf("no WARN naming the sandbox as untracked:\n%s", got)
 		}
 	})
 
@@ -777,10 +881,8 @@ func TestCloudRunSandboxRun_RecordAfterConcurrentChange(t *testing.T) {
 		var logs bytes.Buffer
 		setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
 
-		rt, log := newFenceSandboxRuntime(t, 0)
-		old := runEntry("dev", "run-old")
-		old.Stopped = true
-		rt.state.add(old)
+		rt, log := newArgsLogSandboxRuntime(t)
+		seedStoppedOld(rt)
 		setAfterLaunchHook(t, func(string) {
 			// Another writer (not fenced: another process) records run B live.
 			w := newSandboxStateStore(rt.state.path)
@@ -796,8 +898,8 @@ func TestCloudRunSandboxRun_RecordAfterConcurrentChange(t *testing.T) {
 		if e == nil || e.Labels[api.LabelRunID] != "run-b" || e.Stopped {
 			t.Errorf("file entry = %+v, want run B's live entry", e)
 		}
-		if calls := sandboxCalls(t, log); strings.Contains(calls, "delete") {
-			t.Errorf("Run A deleted by name after the conflict; calls:\n%s", calls)
+		if d := deleteCalls(t, log); len(d) != 0 {
+			t.Errorf("deletes = %q, want none after the conflict", d)
 		}
 		got := logs.String()
 		if !strings.Contains(got, "level=WARN") || !strings.Contains(got, "sandbox=dev") || !strings.Contains(got, "untracked") {

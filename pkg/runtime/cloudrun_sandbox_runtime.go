@@ -1298,6 +1298,9 @@ func (r *CloudRunSandboxRuntime) recordRun(slug, runID string, observed sandboxN
 	if !errors.Is(err, errStateChanged) {
 		return nonceAbsent, r.cleanupUnrecordedRun(slug, runID, err)
 	}
+	if sandboxRecordRunHook != nil {
+		sandboxRecordRunHook(slug, "reread")
+	}
 	cur, curNonce, readErr := r.state.diskEntry(slug)
 	if readErr != nil {
 		return nonceAbsent, r.cleanupUnrecordedRun(slug, runID, readErr)
@@ -1307,6 +1310,9 @@ func (r *CloudRunSandboxRuntime) recordRun(slug, runID string, observed sandboxN
 			"this start's sandbox is live but untracked (no state entry): remove it with a by-name delete (sandbox delete --force <name>)",
 			"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
 		return nonceAbsent, fmt.Errorf("cloudrun-sandbox: sandbox %s belongs to run %q, not %q: %w", slug, other, runID, ErrRunConflict)
+	}
+	if sandboxRecordRunHook != nil {
+		sandboxRecordRunHook(slug, "retry")
 	}
 	nonce, err = r.state.casPut(slug, curNonce, entry)
 	switch {
@@ -1326,7 +1332,13 @@ func (r *CloudRunSandboxRuntime) recordRun(slug, runID string, observed sandboxN
 // not be read or written (cause): it deletes the sandbox by name, best
 // effort, with a fresh 10 s context, and returns the record error. The
 // caller holds the name lock and has passed the held check, so the
-// sandbox named slug is the one its Run launched.
+// sandbox named slug is the one its Run launched. On the re-read-failure
+// path (after a nonce mismatch, so another writer touched the key) this
+// is safe only because the name lock is process-global and recordRun is
+// the only writer of a live entry, under that lock: no other writer in
+// this process can have put another run's sandbox under the name. Another
+// process on the same host is unfenced, so there it is ambiguous
+// (ptone/scion#3951).
 func (r *CloudRunSandboxRuntime) cleanupUnrecordedRun(slug, runID string, cause error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	out, err := runSimpleCommand(cleanupCtx, r.bin, "delete", "--force", slug)
@@ -1342,6 +1354,12 @@ func (r *CloudRunSandboxRuntime) cleanupUnrecordedRun(slug, runID string, cause 
 	}
 	return fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, cause)
 }
+
+// sandboxRecordRunHook, if set, runs in recordRun after a nonce mismatch:
+// with stage "reread" before the file is re-read, and with stage "retry"
+// before the retried put. Nil in production; tests use it to change the
+// state file in those windows.
+var sandboxRecordRunHook func(name, stage string)
 
 // sandboxAfterLaunchHook, if set, runs after `sandbox run` returns and
 // before the liveness probe. Nil in production; tests use it to model a
