@@ -936,17 +936,33 @@ func TestUseMultiHub_LoneCandidateNotEffectiveIsNotContacted(t *testing.T) {
 }
 
 // In a search across hubs the rule is decided per hub: the effective hub
-// gets the full credential chain (here SCION_HUB_TOKEN), every other hub
-// only its own login.
+// gets the full credential chain (here SCION_HUB_TOKEN and the
+// environment's transport), every other hub only what is bound to it.
 func TestUseMultiHub_SearchDecidesFullChainPerHub(t *testing.T) {
-	prod, staging := setupTwoHubsNoLogins(t)
-	storeTestLogin(t, staging.URL())
-	staging.setProjects()
-	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+	t.Run("other hub without a login", func(t *testing.T) {
+		prod, staging := setupTwoHubsNoLogins(t) // both have "foo"
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
 
-	stdout, _, err := runScion(t, "use", "foo", "--refresh")
-	require.NoError(t, err)
-	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
-	assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders(), "the effective hub: full chain")
-	assert.Equal(t, []string{"Bearer tok"}, staging.authHeaders(), "another hub: only its own login")
+		stdout, stderr, err := runScion(t, "use", "foo", "--refresh")
+		require.NoError(t, err)
+		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+		assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders(), "the effective hub: full chain")
+		assert.Zero(t, staging.calls(), "another hub: not sent the effective hub's token")
+		assert.Contains(t, stderr, "Warning: skipped hubs: staging: not logged in")
+	})
+	t.Run("other hub with its own login", func(t *testing.T) {
+		prod, staging := setupTwoHubsNoLogins(t)
+		withEnvTransport(t)
+		storeTestLogin(t, staging.URL())
+		staging.setProjects()
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+
+		stdout, _, err := runScion(t, "use", "foo", "--refresh")
+		require.NoError(t, err)
+		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+		assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders(), "the effective hub: full chain")
+		assert.Equal(t, []string{envTransportHeader}, prod.takeProxyHeaders(), "the effective hub: the environment's transport")
+		assert.Equal(t, []string{"Bearer tok"}, staging.authHeaders(), "another hub: only its own login, never SCION_HUB_TOKEN")
+		assert.Equal(t, []string{""}, staging.takeProxyHeaders(), "another hub: not the environment's transport")
+	})
 }
