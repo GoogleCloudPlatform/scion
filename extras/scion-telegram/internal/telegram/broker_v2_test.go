@@ -2235,6 +2235,146 @@ func TestV2_Configure_InvalidInboundMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid inbound_mode")
 }
 
+// newRejectingTGServer returns a Telegram API stand-in that rejects every
+// call and counts the calls it receives.
+func newRejectingTGServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":401,"description":"Unauthorized"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+// An invalid config fails before any Telegram API call (bot identity lookup,
+// command registration, setWebhook).
+func TestV2_Configure_InvalidConfigMakesNoAPICalls(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		config  map[string]string
+		wantErr string
+	}{
+		{"invalid inbound_mode", map[string]string{"inbound_mode": "push"}, "invalid inbound_mode"},
+		{"webhook without url", map[string]string{
+			"inbound_mode":   "webhook",
+			"webhook_secret": "test-secret",
+		}, "webhook_url is required"},
+		{"webhook without secret", map[string]string{
+			"inbound_mode": "webhook",
+			"webhook_url":  "https://example.com/telegram/webhook",
+		}, "webhook_secret is required"},
+		{"invalid agent_cache_ttl", map[string]string{"agent_cache_ttl": "soon"}, "invalid agent_cache_ttl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, calls := newRejectingTGServer(t)
+
+			b := NewV2(slog.Default())
+			defer b.Close()
+
+			cfg := map[string]string{
+				"bot_token":      "test-token",
+				"api_base_url":   srv.URL,
+				"db_path":        filepath.Join(t.TempDir(), "test.db"),
+				"webhook_listen": ":0",
+			}
+			for k, v := range tc.config {
+				cfg[k] = v
+			}
+
+			err := b.Configure(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Zero(t, calls.Load(), "Configure must not call the Telegram API with an invalid config")
+		})
+	}
+}
+
+// A reconfigure that fails, after a valid webhook-mode configure, leaves the
+// running configuration in place: the earlier webhook server keeps serving
+// against the store, which stays open.
+func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func(cfg map[string]string, rejectingURL string)
+		wantErr string
+	}{
+		{"missing webhook secret", func(cfg map[string]string, _ string) {
+			delete(cfg, "webhook_secret")
+		}, "webhook_secret is required"},
+		{"missing webhook url", func(cfg map[string]string, _ string) {
+			cfg["webhook_url"] = ""
+		}, "webhook_url is required"},
+		{"invalid inbound mode", func(cfg map[string]string, _ string) {
+			cfg["inbound_mode"] = "push"
+		}, "invalid inbound_mode"},
+		{"bot token rejected", func(cfg map[string]string, rejectingURL string) {
+			cfg["api_base_url"] = rejectingURL
+		}, "failed to validate bot token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tgSrv := newFakeTGServerV2(t)
+			rejecting, _ := newRejectingTGServer(t)
+
+			b := NewV2(slog.Default())
+			defer b.Close()
+
+			cfg := map[string]string{
+				"bot_token":      "test-token",
+				"api_base_url":   tgSrv.srv.URL,
+				"hub_url":        "http://hub.test",
+				"db_path":        filepath.Join(t.TempDir(), "test.db"),
+				"inbound_mode":   "webhook",
+				"webhook_url":    "https://example.com/telegram/webhook",
+				"webhook_listen": ":0",
+				"webhook_secret": "test-secret",
+			}
+			require.NoError(t, b.Configure(cfg))
+			server, store, api := b.webhookServer, b.store, b.api
+			require.NotNil(t, server)
+
+			bad := make(map[string]string, len(cfg))
+			for k, v := range cfg {
+				bad[k] = v
+			}
+			bad["hub_url"] = "http://other-hub.test"
+			tc.mutate(bad, rejecting.URL)
+
+			err := b.Configure(bad)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+
+			assert.Same(t, server, b.webhookServer, "the earlier webhook server must stay in place")
+			assert.Same(t, store, b.store, "the store must not be replaced")
+			assert.Same(t, api, b.api, "the API client must not be replaced")
+			assert.Equal(t, "http://hub.test", b.hubURL)
+			assert.Equal(t, "webhook", b.inboundMode)
+
+			// The store the webhook handlers use is still open.
+			require.NoError(t, b.store.SaveGroupLink(context.Background(), &GroupLink{
+				ChatID:    -300,
+				ProjectID: "proj-1",
+				LinkedAt:  time.Now().UTC(),
+				Active:    true,
+			}))
+
+			// The earlier webhook server still accepts updates.
+			req, err := http.NewRequest(http.MethodPost, "http://"+server.actualAddr+webhookPath,
+				strings.NewReader(`{"update_id":1}`))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(secretTokenHeader, "test-secret")
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+		})
+	}
+}
+
 func TestV2_Configure_DefaultPollMode(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	dbPath := filepath.Join(t.TempDir(), "test.db")

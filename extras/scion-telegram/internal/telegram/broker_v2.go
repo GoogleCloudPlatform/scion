@@ -161,9 +161,107 @@ func (b *TelegramBrokerV2) SetHostCallbacks(hc plugin.HostCallbacks) {
 }
 
 // Configure sets up the v2 Telegram broker from the provided config map.
+//
+// The whole config is validated before any Telegram API call or change to
+// the broker, so a misconfigured plugin fails fast and a failed reconfigure
+// leaves the running store, API client and webhook server in place.
 func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	botToken := config["bot_token"]
+	if botToken == "" {
+		return fmt.Errorf("bot_token is required")
+	}
+
+	// Parse optional agent cache TTL.
+	agentCacheTTL := b.agentCacheTTL
+	if v, ok := config["agent_cache_ttl"]; ok && v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid agent_cache_ttl: %w", err)
+		}
+		if d < 0 {
+			b.log.Warn("agent_cache_ttl is negative; using the default",
+				"agent_cache_ttl", d, "default", defaultAgentCacheTTL)
+			d = defaultAgentCacheTTL
+		}
+		if d > maxAgentCacheTTL {
+			b.log.Warn("agent_cache_ttl is longer than the agent-cache retention allows; clamping",
+				"agent_cache_ttl", d, "max", maxAgentCacheTTL)
+			d = maxAgentCacheTTL
+		}
+		agentCacheTTL = d
+	}
+
+	// Parse inbound mode: "poll" (default) or "webhook".
+	inboundMode := "poll"
+	if v, ok := config["inbound_mode"]; ok && v != "" {
+		switch v {
+		case "poll", "webhook":
+			inboundMode = v
+		default:
+			return fmt.Errorf("invalid inbound_mode %q: must be \"poll\" or \"webhook\"", v)
+		}
+	}
+
+	webhookURL := config["webhook_url"]
+	webhookSecret := config["webhook_secret"]
+	if inboundMode == "webhook" {
+		if webhookURL == "" {
+			return fmt.Errorf("webhook_url is required when inbound_mode is \"webhook\"")
+		}
+		// The webhook listener verifies every inbound request against this
+		// secret, so it is required in webhook mode, including standalone HA
+		// mode (skip_set_webhook=true).
+		if webhookSecret == "" {
+			return fmt.Errorf("webhook_secret is required when inbound_mode is \"webhook\"")
+		}
+	}
+
+	// Open the store and check the bot token with a new API client. Neither
+	// replaces the running ones until the Telegram calls below succeed.
+	api := NewAPIClient(botToken, config["api_base_url"])
+
+	// Initialize store: Postgres if database_url is set, otherwise SQLite.
+	var store Store
+	if databaseURL, ok := config["database_url"]; ok && databaseURL != "" {
+		s, err := NewPostgresStore(databaseURL)
+		if err != nil {
+			return fmt.Errorf("init postgres store: %w", err)
+		}
+		store = s
+	} else {
+		dbPath := config["db_path"]
+		if dbPath == "" {
+			dbPath = defaultDBPath
+		}
+		s, err := NewSQLiteStore(dbPath)
+		if err != nil {
+			return fmt.Errorf("init store: %w", err)
+		}
+		store = s
+	}
+
+	// Validate bot token.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	bot, err := api.GetMe(ctx)
+	if err != nil {
+		store.Close()
+		return fmt.Errorf("failed to validate bot token: %w", err)
+	}
+
+	// In standalone HA mode, skip_set_webhook=true means this instance
+	// should start the HTTP listener but NOT call setWebhook. Only the
+	// lock holder calls RegisterWebhook() separately.
+	if inboundMode == "webhook" && config["skip_set_webhook"] != "true" {
+		if err := api.SetWebhook(ctx, webhookURL, webhookSecret); err != nil {
+			store.Close()
+			return fmt.Errorf("failed to set webhook: %w", err)
+		}
+	}
 
 	if v, ok := config["hub_url"]; ok {
 		b.hubURL = v
@@ -178,13 +276,11 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		b.pluginName = v
 	}
 
-	botToken, ok := config["bot_token"]
-	if !ok || botToken == "" {
-		return fmt.Errorf("bot_token is required")
-	}
-
-	baseURL := config["api_base_url"]
-	b.api = NewAPIClient(botToken, baseURL)
+	b.api = api
+	b.store = store
+	b.botInfo = bot
+	b.agentCacheTTL = agentCacheTTL
+	b.inboundMode = inboundMode
 
 	// Initialize send queue with rate limiting.
 	sqSize := 0
@@ -201,59 +297,10 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	}
 	b.sendQueue = NewSendQueue(b.api, b.log, sqSize, sqDelay)
 
-	// Parse optional agent cache TTL.
-	if v, ok := config["agent_cache_ttl"]; ok && v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("invalid agent_cache_ttl: %w", err)
-		}
-		if d < 0 {
-			b.log.Warn("agent_cache_ttl is negative; using the default",
-				"agent_cache_ttl", d, "default", defaultAgentCacheTTL)
-			d = defaultAgentCacheTTL
-		}
-		if d > maxAgentCacheTTL {
-			b.log.Warn("agent_cache_ttl is longer than the agent-cache retention allows; clamping",
-				"agent_cache_ttl", d, "max", maxAgentCacheTTL)
-			d = maxAgentCacheTTL
-		}
-		b.agentCacheTTL = d
-	}
-
 	// Parse optional downloads directory override.
 	if v, ok := config["downloads_path"]; ok && v != "" {
 		b.downloadsPath = v
 	}
-
-	// Initialize store: Postgres if database_url is set, otherwise SQLite.
-	if databaseURL, ok := config["database_url"]; ok && databaseURL != "" {
-		store, err := NewPostgresStore(databaseURL)
-		if err != nil {
-			return fmt.Errorf("init postgres store: %w", err)
-		}
-		b.store = store
-	} else {
-		dbPath := config["db_path"]
-		if dbPath == "" {
-			dbPath = defaultDBPath
-		}
-		store, err := NewSQLiteStore(dbPath)
-		if err != nil {
-			return fmt.Errorf("init store: %w", err)
-		}
-		b.store = store
-	}
-
-	// Validate bot token.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	bot, err := b.api.GetMe(ctx)
-	if err != nil {
-		b.store.Close()
-		return fmt.Errorf("failed to validate bot token: %w", err)
-	}
-	b.botInfo = bot
 
 	if !bot.CanReadAllGroupMessages {
 		b.log.Warn("Bot has privacy mode enabled (can_read_all_group_messages=false). " +
@@ -264,49 +311,11 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 
 	b.registerBotCommands(ctx)
 
-	// Parse inbound mode: "poll" (default) or "webhook".
-	b.inboundMode = "poll"
-	if v, ok := config["inbound_mode"]; ok && v != "" {
-		switch v {
-		case "poll", "webhook":
-			b.inboundMode = v
-		default:
-			b.store.Close()
-			return fmt.Errorf("invalid inbound_mode %q: must be \"poll\" or \"webhook\"", v)
-		}
-	}
-
 	// Set up webhook if configured.
 	if b.inboundMode == "webhook" {
-		webhookURL, ok := config["webhook_url"]
-		if !ok || webhookURL == "" {
-			b.store.Close()
-			return fmt.Errorf("webhook_url is required when inbound_mode is \"webhook\"")
-		}
-
-		// The webhook listener verifies every inbound request against this
-		// secret, so it is required in webhook mode, including standalone HA
-		// mode (skip_set_webhook=true). Validate before calling SetWebhook.
-		webhookSecret := config["webhook_secret"]
-		if webhookSecret == "" {
-			b.store.Close()
-			return fmt.Errorf("webhook_secret is required when inbound_mode is \"webhook\"")
-		}
-
 		webhookListen := config["webhook_listen"]
 		if webhookListen == "" {
 			webhookListen = ":9094"
-		}
-
-		// In standalone HA mode, skip_set_webhook=true means this instance
-		// should start the HTTP listener but NOT call setWebhook. Only the
-		// lock holder calls RegisterWebhook() separately.
-		skipSetWebhook := config["skip_set_webhook"] == "true"
-		if !skipSetWebhook {
-			if err := b.api.SetWebhook(ctx, webhookURL, webhookSecret); err != nil {
-				b.store.Close()
-				return fmt.Errorf("failed to set webhook: %w", err)
-			}
 		}
 
 		// Stop any existing webhook server before starting a new one.
