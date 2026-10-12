@@ -24,11 +24,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Tests for ptone/scion#4769: the broker's file deletions resolve an
@@ -39,11 +41,9 @@ const (
 	hubRootHubID   = "44444444-dddd-4ddd-8ddd-444444444444"
 )
 
-// A failed synchronous create removes the agent's state directory that
-// lookup resolves from the Hub project ID, also when the project's
-// project-id marker keeps a different (local) ID: the create is not
-// flagged shared, but the agent's directory under the Hub-ID root already
-// holds scion-agent.json, so lookup uses that directory.
+// A failed synchronous create removes the agent's state directory as
+// lookup resolves it from the Hub project ID, when that differs from the
+// directory resolved from the project-id marker.
 func TestSyncCreateFailure_RemovesStateDirOfHubProjectID(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv("HOME", t.TempDir())
@@ -52,8 +52,7 @@ func TestSyncCreateFailure_RemovesStateDirOfHubProjectID(t *testing.T) {
 
 	const agentName = "same-name"
 	root, dotScion := identityProjectDir(t, hubRootLocalID)
-	// The local ID's project config dir exists, so the start keeps the
-	// local ID in the marker rather than writing the Hub's.
+	// Keep the project-id marker on the local ID, so the two roots differ.
 	localCfg, err := config.GetGitProjectExternalConfigDir(dotScion)
 	if err != nil || localCfg == "" {
 		t.Fatalf("GetGitProjectExternalConfigDir: dir=%q err=%v", localCfg, err)
@@ -96,10 +95,50 @@ func TestSyncCreateFailure_RemovesStateDirOfHubProjectID(t *testing.T) {
 		t.Fatalf("Start got HubProjectID %q, want %q", gotHubID, hubRootHubID)
 	}
 	if id, err := config.ReadProjectID(dotScion); err != nil || id != hubRootLocalID {
-		t.Fatalf("project-id marker = %q, %v; want the local ID %q kept", id, err, hubRootLocalID)
+		t.Fatalf("project-id marker = %q, %v; want %q", id, err, hubRootLocalID)
 	}
 	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
 		t.Errorf("failed create left the state dir of the Hub project ID (stat err %v)", err)
+	}
+}
+
+// The async launch's failure cleanup (cleanupAbortedLaunch) also removes
+// the agent's state directory as lookup resolves it from the launch's Hub
+// project ID, when that differs from the directory resolved from the
+// project-id marker.
+func TestCleanupAbortedLaunch_RemovesStateDirOfHubProjectID(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	const agentName = "agent-x"
+	_, dotScion := identityProjectDir(t, hubRootLocalID)
+	stateDir, err := config.AgentDirForProject(dotScion, agentName, true, hubRootHubID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "scion-agent.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLaunchMarker(dotScion, false, agentName, "L1"); err != nil {
+		t.Fatal(err)
+	}
+	mgr := newAsyncManager()
+	srv, _ := newAsyncTestServer(t, mgr)
+	rec := newLaunchRecord("L1", "agent-id", store.LaunchKindCreate, "", time.Now().Add(time.Minute), func() {})
+	lc := launchCtx{
+		opts: api.StartOptions{Name: agentName, ProjectPath: dotScion, RunID: "run-a", HubProjectID: hubRootHubID},
+		mgr:  mgr,
+		key:  launchKey{ProjectID: hubRootHubID, Slug: agentName},
+	}
+
+	srv.cleanupAbortedLaunch(mgr, rec, lc)
+
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Errorf("aborted launch cleanup left the state dir of the Hub project ID (stat err %v)", err)
 	}
 }
 

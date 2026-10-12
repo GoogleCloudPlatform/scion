@@ -43,8 +43,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// ErrAgentProjectUnresolved is returned by DeleteAgentFiles when the
-// project path resolves to no existing project directory.
+// ErrAgentProjectUnresolved is returned by DeleteAgentFiles and
+// DeleteAgentFilesForHubProject when the project path resolves to no
+// existing project directory.
 var ErrAgentProjectUnresolved = errors.New("the agent's project directory does not exist")
 
 // DeleteAgentFiles removes agentName's files in the project projectPath
@@ -164,17 +165,7 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 			externalAgentDir = filepath.Join(extDir, agentName)
 		}
 
-		// The agent's state directory as lookup resolves it from the Hub
-		// project ID (agentStateDir), which need not be the external dir
-		// above: that one comes from the project-id marker. Skipped when it
-		// is a directory removed anyway.
-		if hubProjectID != "" {
-			if dir, err := config.AgentDirForProject(projectDir, agentName, true, hubProjectID); err == nil &&
-				(externalAgentDir == "" || !sameDir(dir, externalAgentDir)) &&
-				!sameDir(dir, filepath.Join(projectDir, "agents", agentName)) {
-				hubAgentDir = dir
-			}
-		}
+		hubAgentDir = hubStateDirToRemove(projectDir, agentName, hubProjectID, externalAgentDir)
 	}
 	// Empty-per-agent (design #2703): the agent's workspace is a private,
 	// non-git directory that owns no worktree or branch. Even when the
@@ -182,8 +173,7 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 	// repository with a same-named branch, delete must only remove the
 	// agent's directories -- never a worktree, a sharer registration, a
 	// prune of the enclosing repo, or a branch.
-	emptyPerAgent := persistedEmptyPerAgent(agentsDirs, externalAgentDir, agentName) ||
-		(hubAgentDir != "" && persistedEmptyPerAgent(nil, hubAgentDir, agentName))
+	emptyPerAgent := persistedEmptyPerAgent(agentsDirs, externalAgentDir, agentName)
 	if emptyPerAgent {
 		util.Debugf("delete: %s is empty-per-agent; skipping worktree and branch cleanup", agentName)
 		repoRoot = ""
@@ -447,6 +437,30 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 	}
 
 	return branchDeleted, nil
+}
+
+// hubStateDirToRemove returns the agent's state directory as lookup
+// resolves it from hubProjectID (agentStateDir: config.AgentDirForProject
+// with the shared-workspace root), for deleteAgentFiles to remove besides
+// the directories it removes anyway. The external dir from the project-id
+// marker (externalAgentDir) and <projectDir>/agents/<agentName> are
+// removed anyway, so when the directory is one of them it returns "", as
+// it does for an empty hubProjectID or a directory that cannot be resolved.
+func hubStateDirToRemove(projectDir, agentName, hubProjectID, externalAgentDir string) string {
+	if hubProjectID == "" {
+		return ""
+	}
+	dir, err := config.AgentDirForProject(projectDir, agentName, true, hubProjectID)
+	if err != nil {
+		return ""
+	}
+	if externalAgentDir != "" && sameDir(dir, externalAgentDir) {
+		return ""
+	}
+	if sameDir(dir, filepath.Join(projectDir, "agents", agentName)) {
+		return ""
+	}
+	return dir
 }
 
 // persistedEmptyPerAgent reports whether the agent's persisted

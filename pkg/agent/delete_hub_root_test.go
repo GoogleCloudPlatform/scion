@@ -149,19 +149,51 @@ func TestDeleteAgentFiles_NoHubProjectIDKeepsMarkerRootsOnly(t *testing.T) {
 	assertPresent(t, "Hub-root state dir", l.stateDir)
 }
 
-// When the Hub project ID equals the marker, both resolve to one dir,
-// which is removed once without error.
+// When the Hub project ID equals the marker, both resolve to one dir: it
+// is removed, and hubStateDirToRemove reports no extra dir for it.
 func TestDeleteAgentFilesForHubProject_SameProjectID(t *testing.T) {
 	const agentName = "worker"
 	l := setupHubRootProject(t, hubRootMarkerID, hubRootMarkerID, agentName)
 	if l.stateDir != l.markerDir {
 		t.Fatalf("test setup: want one dir, got %s and %s", l.stateDir, l.markerDir)
 	}
+	if got := hubStateDirToRemove(l.projectPath, agentName, hubRootMarkerID, l.markerDir); got != "" {
+		t.Errorf("hubStateDirToRemove for the marker's own ID = %q, want \"\"", got)
+	}
 
 	if _, err := DeleteAgentFilesForHubProject(agentName, l.projectPath, hubRootMarkerID, false); err != nil {
 		t.Fatalf("DeleteAgentFilesForHubProject: %v", err)
 	}
 	assertGone(t, "state dir", l.stateDir)
+}
+
+// hubStateDirToRemove returns lookup's state dir only when it is not a
+// directory delete removes anyway.
+func TestHubStateDirToRemove(t *testing.T) {
+	const agentName = "worker"
+	l := setupHubRootProject(t, hubRootMarkerID, hubRootHubID, agentName)
+
+	if got := hubStateDirToRemove(l.projectPath, agentName, "", l.markerDir); got != "" {
+		t.Errorf("empty Hub project ID: got %q, want \"\"", got)
+	}
+	if got := hubStateDirToRemove(l.projectPath, agentName, hubRootHubID, l.markerDir); got != l.stateDir {
+		t.Errorf("different roots: got %q, want %q", got, l.stateDir)
+	}
+	if got := hubStateDirToRemove(l.projectPath, agentName, hubRootHubID, l.stateDir); got != "" {
+		t.Errorf("same as the marker's external dir: got %q, want \"\"", got)
+	}
+
+	// A project whose resolved dir is the Hub ID's own project config dir
+	// (hub-native): lookup's dir is <projectDir>/agents/<name>.
+	marker := &config.ProjectMarker{ProjectID: hubRootHubID, ProjectName: "native", ProjectSlug: "native"}
+	nativeDir, err := marker.ExternalProjectPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustMkdirAll(t, filepath.Join(nativeDir, "agents", agentName))
+	if got := hubStateDirToRemove(nativeDir, agentName, hubRootHubID, ""); got != "" {
+		t.Errorf("hub-native project: got %q, want \"\"", got)
+	}
 }
 
 // The checks that run before any root is built still refuse: an agent name
@@ -174,7 +206,11 @@ func TestDeleteAgentFilesForHubProject_EarlyChecksTouchNothing(t *testing.T) {
 	if _, err := DeleteAgentFilesForHubProject("../"+agentName, l.projectPath, hubRootHubID, false); err == nil {
 		t.Error("multi-element agent name: want an error, got nil")
 	}
-	missing := filepath.Join(t.TempDir(), "gone", ".scion")
+	// Same project name, so the Hub root it would resolve to is l.stateDir's.
+	missing := filepath.Join(t.TempDir(), "project", ".scion")
+	if dir, err := config.AgentDirForProject(missing, agentName, true, hubRootHubID); err != nil || dir != l.stateDir {
+		t.Fatalf("test setup: Hub-root dir for the missing project = %q, %v; want %q", dir, err, l.stateDir)
+	}
 	if _, err := DeleteAgentFilesForHubProject(agentName, missing, hubRootHubID, false); !errors.Is(err, ErrAgentProjectUnresolved) {
 		t.Errorf("unresolved project: err = %v, want ErrAgentProjectUnresolved", err)
 	}
