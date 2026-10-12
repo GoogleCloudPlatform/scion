@@ -966,6 +966,14 @@ func TestTIWebIAP_BearerRuleTruthTable(t *testing.T) {
 	// The session survives the unchanged requests and still works.
 	rec, _ = b.call(tiDriverEmail, b.valid, b.jar, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// A session that no longer passes its checks (generation bumped) never
+	// takes the place of the bearer, even with the right driver, assertion
+	// and token.
+	require.NoError(t, b.st.IncrementSessionGeneration(context.Background(), b.fx.Identity.ID))
+	rec, seen = b.call(tiDriverEmail, b.valid, b.jar, nil)
+	assert.Equal(t, "Bearer "+b.valid, seen, "revoked session: unchanged")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 // With no driver token audience configured the rule never applies, and on
