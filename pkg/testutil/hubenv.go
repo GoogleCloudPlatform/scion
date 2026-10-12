@@ -14,13 +14,16 @@
 
 package testutil
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
-// HubEnvKeys lists the environment variables the in-container Hub client
-// reads to find and authenticate to a Hub. An agent container sets them
-// ambiently. The values are spelled out here rather than imported so this
+// hubEnvKeys lists the environment variables that point the in-container
+// Hub client at a Hub, authenticate it, or identify the agent to it. An agent
+// container sets them ambiently. The values are spelled out here rather than imported so this
 // package stays free of dependencies on the packages that use it.
-var HubEnvKeys = []string{
+var hubEnvKeys = []string{
 	"SCION_HUB_ENDPOINT",
 	"SCION_HUB_URL",
 	"SCION_AUTH_TOKEN",
@@ -30,12 +33,18 @@ var HubEnvKeys = []string{
 	"SCION_TRANSPORT_TOKEN_FILE",
 }
 
-// ScrubHubEnv clears every variable in HubEnvKeys for the duration of the
+// HubEnvKeys returns a fresh copy of the Hub client environment variable
+// names that ScrubHubEnv clears, so callers can't change the shared list.
+func HubEnvKeys() []string {
+	return slices.Clone(hubEnvKeys)
+}
+
+// ScrubHubEnv clears every variable HubEnvKeys returns for the duration of the
 // test, so a test running inside an agent container never talks to a real
 // Hub and gives the same result as it would anywhere else.
 func ScrubHubEnv(t testing.TB) {
 	t.Helper()
-	for _, key := range HubEnvKeys {
+	for _, key := range hubEnvKeys {
 		t.Setenv(key, "")
 	}
 }

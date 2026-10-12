@@ -62,18 +62,19 @@ func TestScrubHubEnv_ClearsAmbientAgentAndProject(t *testing.T) {
 	}
 }
 
-// scrubTelemetryEnv additionally clears the telemetry configuration values.
-func TestScrubTelemetryEnv_ClearsTelemetryConfig(t *testing.T) {
-	for _, k := range telemetryConfigEnvKeys {
+// scrubTelemetryEnv clears every key it covers: the shared Hub keys, the
+// agent identity keys and the telemetry configuration keys.
+func TestScrubTelemetryEnv_ClearsAllScrubbedKeys(t *testing.T) {
+	var keys []string
+	keys = append(keys, testutil.HubEnvKeys()...)
+	keys = append(keys, agentIdentityEnvKeys...)
+	keys = append(keys, telemetryConfigEnvKeys...)
+	for _, k := range keys {
 		t.Setenv(k, "ambient-value")
 	}
 
 	scrubTelemetryEnv(t)
 
-	var keys []string
-	keys = append(keys, testutil.HubEnvKeys...)
-	keys = append(keys, agentIdentityEnvKeys...)
-	keys = append(keys, telemetryConfigEnvKeys...)
 	for _, k := range keys {
 		if got := os.Getenv(k); got != "" {
 			t.Errorf("after scrubTelemetryEnv, %s = %q, want empty", k, got)

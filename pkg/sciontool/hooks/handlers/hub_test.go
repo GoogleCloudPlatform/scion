@@ -20,10 +20,10 @@ import (
 )
 
 // agentIdentityEnvKeys lists the agent identity variables scrubHubEnv clears
-// in addition to testutil.HubEnvKeys. SCION_AGENT_ID (also in the shared
-// list), SCION_HARNESS, SCION_PROJECT and SCION_PROJECT_ID are values the
-// container sets ambiently; handlers stamp some of them onto telemetry, so
-// leaving them set would make results depend on where the tests run.
+// in addition to testutil.HubEnvKeys(). SCION_HARNESS, SCION_PROJECT and
+// SCION_PROJECT_ID are values the container sets ambiently; handlers stamp
+// some of them onto telemetry, so leaving them set would make results depend
+// on where the tests run.
 var agentIdentityEnvKeys = []string{
 	"SCION_HARNESS",
 	"SCION_PROJECT",

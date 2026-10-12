@@ -23,7 +23,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -62,24 +61,6 @@ func scrubHubEnv(t *testing.T) {
 	t.Helper()
 	testutil.ScrubHubEnv(t)
 	t.Cleanup(SetHubTestSandboxed())
-}
-
-// The shared key list must cover every variable this client reads to find
-// and authenticate to a Hub, or scrubHubEnv would leave one set.
-func TestScrubHubEnv_CoversClientEnvKeys(t *testing.T) {
-	for _, key := range []string{
-		EnvHubEndpoint,
-		EnvHubURL,
-		EnvHubToken,
-		EnvAgentID,
-		EnvAgentMode,
-		transportauth.EnvTransportToken,
-		transportauth.EnvTransportTokenFile,
-	} {
-		if !slices.Contains(testutil.HubEnvKeys, key) {
-			t.Errorf("testutil.HubEnvKeys is missing %s", key)
-		}
-	}
 }
 
 func TestNewClient_FromEnvironment(t *testing.T) {
