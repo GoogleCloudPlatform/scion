@@ -183,6 +183,9 @@ func TestTestMode_MemberStartupLineAndStatus(t *testing.T) {
 	assert.Equal(t, "member", recs[0]["test_mode"])
 	assert.Equal(t, anyStrings(TestModeMemberPreconditions()), recs[0]["preconditions"])
 	assert.Equal(t, tiaHubID, recs[0]["hub_id"])
+	// DEC-10: the member level warns that hub and broker material reaches
+	// every member agent.
+	assert.Equal(t, testModeSecretsWarning, recs[0]["warning"])
 
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -232,7 +235,7 @@ func TestTestMode_OffStatus(t *testing.T) {
 	srv, _, err := tiaNewServer(t, testServerConfig())
 	require.NoError(t, err)
 	assert.Equal(t, TestModeOff, srv.TestModeLevel())
-	assert.Empty(t, buf.String())
+	assert.Empty(t, buf.String(), "off writes no startup line, so no DEC-10 warning")
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

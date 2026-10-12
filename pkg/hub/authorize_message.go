@@ -103,15 +103,22 @@ type EffectiveMembershipResult struct {
 // highest built-in tier held and is "" when membership comes only from
 // custom roles.
 func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID string) EffectiveMembershipResult {
+	return checkEffectiveMembership(ctx, s.store, s.authzService, userID, projectID)
+}
+
+// checkEffectiveMembership is CheckEffectiveMembership over an explicit store
+// and authorization service, so the dispatcher's test-admin secret clamp
+// uses the same membership rule as the runtime material precheck.
+func checkEffectiveMembership(ctx context.Context, st store.Store, authz *AuthzService, userID, projectID string) EffectiveMembershipResult {
 	now := time.Now()
 
 	// 1. Direct user bindings.
-	directBindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	directBindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return EffectiveMembershipResult{Err: fmt.Errorf("list direct bindings for user %s: %w", userID, err)}
 	}
 	// Unclamped read: apply the test identity clamps (fail closed).
-	if directBindings, err = clampBindingsForUser(ctx, s.store, s.authzService, userID, directBindings); err != nil {
+	if directBindings, err = clampBindingsForUser(ctx, st, authz, userID, directBindings); err != nil {
 		return EffectiveMembershipResult{Err: fmt.Errorf("test identity clamp for user %s: %w", userID, err)}
 	}
 
@@ -120,7 +127,7 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 		if rd, ok := rdCache[rdID]; ok {
 			return rd, nil
 		}
-		rd, err := s.store.GetRoleDefinition(ctx, rdID)
+		rd, err := st.GetRoleDefinition(ctx, rdID)
 		if err != nil {
 			return nil, fmt.Errorf("get role definition %s: %w", rdID, err)
 		}
@@ -153,7 +160,7 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 	}
 
 	// 2. Group-derived bindings.
-	groupIDs, err := s.store.GetEffectiveGroups(ctx, userID)
+	groupIDs, err := st.GetEffectiveGroups(ctx, userID)
 	if err != nil {
 		return EffectiveMembershipResult{Err: fmt.Errorf("get effective groups for user %s: %w", userID, err)}
 	}
@@ -162,11 +169,11 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 		for _, gid := range groupIDs {
 			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
 		}
-		groupBindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		groupBindings, err := st.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
 		if err != nil {
 			return EffectiveMembershipResult{Err: fmt.Errorf("list group bindings: %w", err)}
 		}
-		if groupBindings, err = clampBindingsForUser(ctx, s.store, s.authzService, userID, groupBindings); err != nil {
+		if groupBindings, err = clampBindingsForUser(ctx, st, authz, userID, groupBindings); err != nil {
 			return EffectiveMembershipResult{Err: fmt.Errorf("test identity clamp for user %s: %w", userID, err)}
 		}
 		for _, rb := range groupBindings {

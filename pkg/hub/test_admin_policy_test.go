@@ -1166,7 +1166,48 @@ func TestTestAdminPolicy_DispatchSecretsClamp(t *testing.T) {
 		assert.True(t, got[n], "human root keeps %s", n)
 	}
 	assert.Len(t, second(agentFor(issuer.ID, otherProject)), 4)
-	// A kind read error (an unrecognized kind) withholds every non-user scope.
+	// A kind read error (an unrecognized kind) withholds every scope.
 	unknown := taRawUnknownKindUser(t, s, store.UserRoleMember)
-	assert.Equal(t, map[string]bool{"U_S": true}, first(agentFor(unknown, otherProject)))
+	assert.Empty(t, first(agentFor(unknown, otherProject)))
+	// User scope is the root's own only: an agent whose owner is not its
+	// provenance root gets no user-scope material.
+	a := agentFor(root, ownProject)
+	a.OwnerID = issuer.ID
+	assert.Equal(t, map[string]bool{"P_S": true}, first(a))
+
+	// Env vars follow the same clamp (first pass, as_needed pass and the
+	// source labels all read envScopesForDispatch).
+	scopes := func(a *store.Agent) []string {
+		var out []string
+		for _, f := range d.envScopesForDispatch(ctx, a) {
+			out = append(out, f.Scope)
+		}
+		sort.Strings(out)
+		return out
+	}
+	assert.Equal(t, []string{store.ScopeUser}, scopes(agentFor(root, otherProject)))
+	assert.Equal(t, []string{store.ScopeProject, store.ScopeUser}, scopes(agentFor(root, ownProject)))
+	assert.Empty(t, scopes(agentFor(unknown, otherProject)))
+	human := scopes(agentFor(issuer.ID, otherProject))
+	assert.Contains(t, human, store.ScopeHub)
+	assert.Contains(t, human, store.ScopeProject)
+	for name, scope := range map[string]string{"TSA_HUB_ENV": store.ScopeHub, "TSA_PROJECT_ENV": store.ScopeProject, "TSA_USER_ENV": store.ScopeUser} {
+		scopeID := "test-hub"
+		switch scope {
+		case store.ScopeProject:
+			scopeID = otherProject
+		case store.ScopeUser:
+			scopeID = root
+		}
+		require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{ID: generateID(), Key: name, Value: "v-" + name, Scope: scope, ScopeID: scopeID}))
+	}
+	env, _, err := d.resolveEnvFromStorage(ctx, agentFor(root, otherProject))
+	require.NoError(t, err)
+	assert.Equal(t, "v-TSA_USER_ENV", env["TSA_USER_ENV"])
+	assert.NotContains(t, env, "TSA_HUB_ENV")
+	assert.NotContains(t, env, "TSA_PROJECT_ENV")
+	env, _, err = d.resolveEnvFromStorage(ctx, agentFor(issuer.ID, otherProject))
+	require.NoError(t, err)
+	assert.Equal(t, "v-TSA_HUB_ENV", env["TSA_HUB_ENV"], "a human root keeps hub env vars")
+	assert.Equal(t, "v-TSA_PROJECT_ENV", env["TSA_PROJECT_ENV"])
 }

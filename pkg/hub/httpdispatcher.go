@@ -2717,7 +2717,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 		return result, plain, nil
 	}
 
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			return nil, nil, fmt.Errorf("list %s env vars: %w", filter.Scope, err)
@@ -2814,7 +2814,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	delete(keySet, agentTZEnvKey)
 
 	// 1. Check env_vars table (all scopes, in precedence order so last-wins).
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			if d.debug {
@@ -2975,7 +2975,7 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 		return sources
 	}
 
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			if d.debug {

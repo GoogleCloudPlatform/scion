@@ -396,6 +396,7 @@ func (s *Server) emitTestAdminGateStart() error {
 	if err := s.testAdminAudit.emit(testAdminAuditEventGateStart, map[string]any{
 		"level":               "WARN",
 		"msg":                 testAdminGateStartMessage(g.superAdmin),
+		"warning":             testModeSecretsWarning,
 		"kinds":               kinds,
 		"hub_id":              g.hubID,
 		"hub_class":           g.hubClass,

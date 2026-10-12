@@ -244,6 +244,11 @@ func (s *Server) testModePreconditions() []string {
 	return append([]string{}, s.testMode.preconditions...)
 }
 
+// testModeSecretsWarning is written in the startup line of every level
+// other than off (DEC-10): member-tier test identities are not clamped, so
+// their agents receive hub- and broker-scope material like any member's.
+const testModeSecretsWarning = "test-mode: hub and broker env secrets are injected into every member agent; keep only test-grade secrets on this hub"
+
 // testAdminAuditEventTestModeStart is the startup line of the member level.
 // The admin levels write the test_admin_gate_start line instead, which
 // carries the same test_mode and preconditions fields.
@@ -256,6 +261,7 @@ func (s *Server) emitTestModeStart() error {
 	if err := s.testAdminAudit.emit(testAdminAuditEventTestModeStart, map[string]any{
 		"level":         "WARN",
 		"msg":           "TEST MODE ENABLED: this hub can issue test identities. Test hubs only.",
+		"warning":       testModeSecretsWarning,
 		"test_mode":     string(s.TestModeLevel()),
 		"preconditions": s.testModePreconditions(),
 		"hub_id":        s.config.HubID,
