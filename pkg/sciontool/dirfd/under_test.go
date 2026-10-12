@@ -86,7 +86,7 @@ func TestOpenParentNoFollowUnder_RefusesLinkBelowBase(t *testing.T) {
 
 func TestOpenParentNoFollowUnder_RejectsBadRel(t *testing.T) {
 	base := t.TempDir()
-	for _, rel := range []string{"", ".", "/abs/file", "..", "../file", "a/../../file"} {
+	for _, rel := range []string{"", ".", "/abs/file", "..", "../file", "a/../../file", "a/../b"} {
 		if fd, _, err := OpenParentNoFollowUnder(base, rel); err == nil {
 			_ = syscall.Close(fd)
 			t.Errorf("rel %q was accepted", rel)

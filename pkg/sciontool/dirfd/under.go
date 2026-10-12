@@ -31,11 +31,16 @@ func OpenParentNoFollowUnder(base, rel string) (dirFd int, leaf string, err erro
 	if rel == "" || filepath.IsAbs(rel) {
 		return -1, "", fmt.Errorf("dirfd: %q is not a relative path", rel)
 	}
-	parts := strings.Split(filepath.ToSlash(filepath.Clean(rel)), "/")
-	for _, p := range parts {
-		if p == ".." || p == "." || p == "" {
+	// Check the raw components, before any cleaning, so a ".." anywhere in
+	// rel is refused as documented (even "a/../b", which cleans to "b").
+	for _, p := range strings.Split(filepath.ToSlash(rel), "/") {
+		if p == ".." {
 			return -1, "", fmt.Errorf("dirfd: %q does not stay below its base", rel)
 		}
+	}
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(rel)), "/")
+	if len(parts) == 1 && parts[0] == "." {
+		return -1, "", fmt.Errorf("dirfd: %q does not name an entry below its base", rel)
 	}
 	leaf = parts[len(parts)-1]
 
