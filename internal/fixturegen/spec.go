@@ -46,6 +46,10 @@ const (
 	roleDefID      = "aa000000-0000-0000-0000-000000000001"
 	limitDefID     = "bb000000-0000-0000-0000-000000000001"
 	constraintID   = "ac100000-0000-0000-0000-000000000001"
+	// groupConversationID is a group conversation (chat thread) filed into
+	// threadGroupID.
+	groupConversationID = "99999999-9999-9999-9999-999999999998"
+	threadGroupID       = "7a000000-0000-0000-0000-000000000001"
 )
 
 // baseTime is a fixed timestamp so the generated fixture is byte-reproducible
@@ -609,12 +613,36 @@ func Spec() []TableFixture {
 				"kind": "direct", "surface": "native",
 				"drift_state": "active", "last_activity_at": baseTime, "created_at": baseTime,
 			},
+			{ // a group conversation (thread), the only kind a thread group holds
+				"id": groupConversationID, "project_id": projectID,
+				"kind": "group", "surface": "native", "external_ref": "thread:fixture-release",
+				"display_name": "release-notes",
+				"drift_state":  "active", "last_activity_at": baseTime, "created_at": baseTime,
+			},
 		}},
 		{Table: "conversation_participants", Rows: []row{
 			{
 				"id":              "cp000000-0000-0000-0000-000000000001",
 				"conversation_id": conversationID, "principal_kind": "user",
 				"principal_id": userID, "role": "member", "joined_at": baseTime,
+			},
+		}},
+
+		// ---- Thread groups (ptone/scion#4424) ----
+		{Table: "thread_groups", Rows: []row{
+			{ // non-ASCII name: name_key is store.ThreadGroupNameKey(name)
+				"id": threadGroupID, "project_id": projectID,
+				"name": "Équipe Release", "name_key": "équipe release",
+				"created_by": userID, "created_by_kind": "user",
+				"created_at": baseTime, "updated_at": baseTime,
+			},
+		}},
+		{Table: "thread_group_members", Rows: []row{
+			{
+				"id":       "7b000000-0000-0000-0000-000000000001",
+				"group_id": threadGroupID, "project_id": projectID,
+				"conversation_id": groupConversationID,
+				"added_by":        userID, "added_at": baseTime,
 			},
 		}},
 

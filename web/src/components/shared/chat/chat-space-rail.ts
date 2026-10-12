@@ -636,6 +636,19 @@ export class ScionChatSpaceRail extends LitElement {
       padding: 0.125rem;
     }
 
+    /* The Direct messages heading has no menu. In its place it holds an
+       invisible copy of a space heading's menu button, styled by the same
+       rules, so its badge ends where a space heading's badge does at every
+       size. No height and no visibility: the heading keeps its own height,
+       and the copy is never seen, focused or announced. */
+    .space-actions .menu-spacer {
+      display: flex;
+      flex: 0 0 auto;
+      height: 0;
+      overflow: hidden;
+      visibility: hidden;
+    }
+
     .space-actions sl-menu {
       min-width: 120px;
       padding: 0.125rem 0;
@@ -3605,6 +3618,9 @@ export class ScionChatSpaceRail extends LitElement {
           <span class="space-name">Direct messages</span>
           <div class="space-actions">
             ${unread > 0 ? html`<span class="unread-badge">${unread}</span>` : nothing}
+            <span class="menu-spacer" aria-hidden="true" inert>
+              <sl-icon-button name="three-dots-vertical" tabindex="-1"></sl-icon-button>
+            </span>
           </div>
         </div>
         <div class="thread-list">

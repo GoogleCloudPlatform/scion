@@ -108,6 +108,8 @@ var pendingNonRouteRows = map[string]string{
 func parseNonTestGoFiles(dir string) ([]*ast.File, error) {
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards permission ID references, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards permission ID references (no permission call site resolves through the moved AuthType string constants), which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", dir, err)
@@ -163,7 +165,7 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 	},
 	"agent.port_forward": {
 		{"port_forward_handlers.go", "Server.authorizePortRegistration"},
-		{"conduit_relay.go", "Server.handleConduit"},
+		{"conduit_agent_check.go", "conduitAgentScopeCheck"},
 	},
 	"agent.identity_token": {{"handlers_oidc.go", "Server.handleAgentIdentityToken"}},
 }

@@ -19,7 +19,9 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
@@ -704,26 +706,175 @@ func TestGovernance_RoleBindingChange_NoReviewForNonAdminRole(t *testing.T) {
 	assert.False(t, check.ReviewRequired, "non-admin role binding should not require review")
 }
 
-func TestGovernance_UserSuspension_SecurityReviewRequired(t *testing.T) {
-	gs, _, _, s := govTestSetup(t)
+// ---------------------------------------------------------------------------
+// 11b. Constraint-admin lockout on user suspension and deletion
+// ---------------------------------------------------------------------------
+
+// lockoutProjectAdmins seeds a project and n users, each holding a
+// project-scoped role with access_constraint.admin. Project scope keeps
+// the dev user's system-scoped super-admin binding out of the count.
+func lockoutProjectAdmins(t *testing.T, s store.Store, name string, n int) (string, []string, []*store.RoleBinding) {
+	t.Helper()
 	ctx := context.Background()
-
-	adminID := govSeedAdminUser(t, s, "gov-admin-suspend")
-
-	check, err := gs.CheckUserSuspension(ctx, adminID)
-	require.NoError(t, err)
-	assert.True(t, check.ReviewRequired, "suspending admin user should require review")
+	projectID := pvSeedProject(t, s, name+"-project")
+	rd := createTestRoleDefinition(t, s, name+"-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin, "agent.read"})
+	var users []string
+	var bindings []*store.RoleBinding
+	for i := 0; i < n; i++ {
+		userID := pvSeedUser(t, s, fmt.Sprintf("%s-admin-%d", name, i))
+		b, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID,
+			PrincipalType:    "user",
+			PrincipalID:      userID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          projectID,
+			CreatedBy:        "test",
+		})
+		require.NoError(t, err)
+		users = append(users, userID)
+		bindings = append(bindings, b)
+	}
+	return projectID, users, bindings
 }
 
-func TestGovernance_UserSuspension_NoReviewForNonAdmin(t *testing.T) {
-	gs, _, _, s := govTestSetup(t)
-	ctx := context.Background()
-
-	userID := govSeedNonAdminUser(t, s, "gov-user-suspend")
-
-	check, err := gs.CheckUserSuspension(ctx, userID)
+func requireUserStatus(t *testing.T, s store.Store, userID, want string) {
+	t.Helper()
+	u, err := s.GetUser(context.Background(), userID)
 	require.NoError(t, err)
-	assert.False(t, check.ReviewRequired, "suspending non-admin user should not require review")
+	assert.Equal(t, want, u.Status)
+}
+
+func TestConstraintAdminLockout_SuspendLastAdminRefused(t *testing.T) {
+	srv, s := testServer(t)
+	_, users, _ := lockoutProjectAdmins(t, s, "lockout-suspend-last", 1)
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+users[0],
+		map[string]string{"status": "suspended"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeConstraintAdminLockout, decodeErrorCode(t, rec.Body.Bytes()))
+	assert.Contains(t, rec.Body.String(), "suspending this user")
+	requireUserStatus(t, s, users[0], store.UserStatusActive)
+}
+
+func TestConstraintAdminLockout_SuspendWithOtherAdminAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	_, users, _ := lockoutProjectAdmins(t, s, "lockout-suspend-ok", 2)
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+users[0],
+		map[string]string{"status": "suspended"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	requireUserStatus(t, s, users[0], store.UserStatusSuspended)
+
+	// The remaining admin is now the last active one.
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+users[1],
+		map[string]string{"status": "suspended"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeConstraintAdminLockout, decodeErrorCode(t, rec.Body.Bytes()))
+	requireUserStatus(t, s, users[1], store.UserStatusActive)
+}
+
+func TestConstraintAdminLockout_SuspendNonAdminAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	lockoutProjectAdmins(t, s, "lockout-suspend-nonadmin", 1)
+	userID := govSeedNonAdminUser(t, s, "lockout-suspend-nonadmin-user")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+userID,
+		map[string]string{"status": "suspended"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	requireUserStatus(t, s, userID, store.UserStatusSuspended)
+}
+
+func TestConstraintAdminLockout_DeleteLastAdminRefused(t *testing.T) {
+	srv, s := testServer(t)
+	_, users, _ := lockoutProjectAdmins(t, s, "lockout-delete-last", 1)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+users[0], nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeConstraintAdminLockout, decodeErrorCode(t, rec.Body.Bytes()))
+	assert.Contains(t, rec.Body.String(), "deleting this user")
+	requireUserStatus(t, s, users[0], store.UserStatusActive)
+}
+
+func TestConstraintAdminLockout_DeleteWithOtherAdminAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	_, users, _ := lockoutProjectAdmins(t, s, "lockout-delete-ok", 2)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+users[0], nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	_, err := s.GetUser(context.Background(), users[0])
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestConstraintAdminLockout_DeleteWhenOtherAdminSuspendedRefused(t *testing.T) {
+	srv, s := testServer(t)
+	_, users, _ := lockoutProjectAdmins(t, s, "lockout-delete-susp", 2)
+	u, err := s.GetUser(context.Background(), users[1])
+	require.NoError(t, err)
+	u.Status = store.UserStatusSuspended
+	require.NoError(t, s.UpdateUser(context.Background(), u))
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+users[0], nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeConstraintAdminLockout, decodeErrorCode(t, rec.Body.Bytes()))
+	requireUserStatus(t, s, users[0], store.UserStatusActive)
+}
+
+// Suspending one admin and then downgrading the other is refused at the
+// second step: a suspended admin does not count as remaining.
+func TestConstraintAdminLockout_SuspendThenDowngradeRefused(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID, users, bindings := lockoutProjectAdmins(t, s, "lockout-two-step", 2)
+	ps := NewPreviewServiceWithKey(s, srv.authzService, slog.Default(), []byte("test-governance-hmac-key-32byte!"))
+	gs := NewGovernanceService(s, ps, srv.authzService, slog.Default())
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+users[0],
+		map[string]string{"status": "suspended"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	basicRD := createTestRoleDefinition(t, s, "lockout-two-step-basic", store.RoleScopeProject,
+		[]string{"agent.read"})
+	_, err := gs.ReplaceRoleBinding(ctx, bindings[1].ID, &store.RoleBinding{
+		RoleDefinitionID: basicRD.ID,
+		PrincipalType:    "user",
+		PrincipalID:      users[1],
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	}, "")
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge)
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+	_, err = s.GetRoleBinding(ctx, bindings[1].ID)
+	assert.NoError(t, err, "the admin binding is kept")
+}
+
+// The shared check counts admins holding access_constraint.admin through
+// a group, and ignores users who are not admins.
+func TestConstraintAdminLockout_UserRemovalCheck(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	now := time.Now()
+	projectID := pvSeedProject(t, s, "lockout-group-project")
+	rd := createTestRoleDefinition(t, s, "lockout-group-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin})
+	groupID := pvSeedGroup(t, s, "lockout-group")
+	pvSeedRoleBinding(t, s, rd.ID, "group", groupID, store.RoleScopeProject, projectID)
+	member := pvSeedUser(t, s, "lockout-group-member")
+	pvSeedGroupMember(t, s, groupID, store.GroupMemberTypeUser, member)
+
+	err := checkUserRemovalAdminLockout(ctx, s, now, member, userRemovalSuspend)
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, "the only group-derived admin cannot be removed")
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+
+	other := pvSeedUser(t, s, "lockout-group-member-2")
+	pvSeedGroupMember(t, s, groupID, store.GroupMemberTypeUser, other)
+	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, now, member, userRemovalSuspend))
+
+	nonAdmin := govSeedNonAdminUser(t, s, "lockout-group-nonadmin")
+	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, now, nonAdmin, userRemovalSuspend))
 }
 
 // ---------------------------------------------------------------------------

@@ -358,11 +358,51 @@ func TestHubTestIdentityDelete(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to delete test identity fx-1")
 }
 
-// The delete command has no --purge flag (Phase 3 adds it).
-func TestHubTestIdentityDelete_NoPurgeFlag(t *testing.T) {
+// The delete command has a --purge flag (Phase 3b), off by default.
+func TestHubTestIdentityDelete_PurgeFlag(t *testing.T) {
 	cmd := resolveCommandPath(rootCmd, "hub.test-identity.delete")
 	require.NotNil(t, cmd)
-	assert.Nil(t, cmd.Flags().Lookup("purge"))
+	f := cmd.Flags().Lookup("purge")
+	require.NotNil(t, f)
+	assert.Equal(t, "false", f.DefValue)
+}
+
+// delete --purge sends ?purge=true and no body, prints the hub's report,
+// and fails (asking for a re-run) when the hub reports purge_incomplete.
+func TestHubTestIdentityPurge(t *testing.T) {
+	ctx := context.Background()
+
+	done := &tiCLIHub{deleteStatus: http.StatusOK, deleteBody: `{"identityId":"fx-1","complete":true,"identityDeleted":true,` +
+		`"deleted":{"agents":3,"schedules":1,"groups":1,"projects":1},"keptProjects":[{"id":"p-2","reason":"non_fixture_owner","bindingsRemoved":1}]}`}
+	var stdout, stderr bytes.Buffer
+	require.NoError(t, purgeTestIdentity(ctx, &stdout, &stderr, done.client(t).TestIdentities(), "fx-1"))
+	require.Len(t, done.queries, 1)
+	assert.Equal(t, "purge=true", done.queries[0])
+	assert.Nil(t, done.bodies[0], "purge sends no body")
+	assert.Equal(t, "Purge of test identity fx-1: removed 3 agents, 1 schedules, 1 groups, 1 projects.\n"+
+		"Deleted test identity fx-1.\n"+
+		"  kept project p-2 (non_fixture_owner); the identity's access was removed\n", stdout.String())
+
+	incomplete := &tiCLIHub{deleteStatus: http.StatusConflict, deleteBody: `{"error":{"code":"conflict","message":"test identity purge did not complete; run it again",` +
+		`"details":{"reason":"purge_incomplete","report":{"identityId":"fx-1","complete":false,"identityDeleted":false,"deleted":{"agents":1,"schedules":0,"groups":0,"projects":0},` +
+		`"notDone":[{"type":"agent","id":"a-2","status":"in_doubt","reason":"in_doubt"}],"unproven":[{"type":"agent","id":"a-9","projectId":"p-1","status":"unproven","reason":"no_fixture_stamp"}],` +
+		`"identityKeptReason":"resources_not_done"}}}}`}
+	stdout.Reset()
+	err := purgeTestIdentity(ctx, &stdout, &stderr, incomplete.client(t).TestIdentities(), "fx-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not complete; run the command again")
+	out := stdout.String()
+	assert.Contains(t, out, "removed 1 agents")
+	assert.Contains(t, out, "Test identity fx-1 was kept: resources_not_done.")
+	assert.Contains(t, out, "  not done: agent a-2: in_doubt in_doubt")
+	assert.Contains(t, out, "  unproven: agent a-9 in project p-1")
+
+	forbidden := &tiCLIHub{deleteStatus: http.StatusForbidden, deleteBody: `{"error":{"code":"forbidden","message":"requires test_identity.issue permission"}}`}
+	stdout.Reset()
+	err = purgeTestIdentity(ctx, &stdout, &stderr, forbidden.client(t).TestIdentities(), "fx-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to purge test identity fx-1")
+	assert.Empty(t, stdout.String())
 }
 
 // CLI mode: scion hub test-identity and its subcommands are available in

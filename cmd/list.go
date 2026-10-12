@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -100,9 +101,11 @@ var listCmd = &cobra.Command{
 		// Check if Hub should be used
 		hubCtx, err := CheckHubAvailability(projectPath)
 		if err != nil {
-			// Check if this is because Hub is enabled but project not linked
-			if handleUnlinkedProjectPrompt(cmd, args) {
-				// User chose to link or disable - retry
+			// Check if this is because Hub is enabled but project not
+			// linked. A project the user unlinked is not offered the link
+			// prompt: it refuses with the pointer to 'scion hub link'.
+			if !errors.Is(err, hubsync.ErrProjectUnlinked) && handleUnlinkedProjectPrompt(cmd, args) {
+				// User chose to link - retry
 				hubCtx, err = CheckHubAvailability(projectPath)
 				if err != nil {
 					return err
@@ -1050,6 +1053,8 @@ func formatLastActivity(status string, t time.Time) string {
 	if status == "" || status == "WORKING" || status == "working" {
 		return timePart
 	}
+	// The initializing activity is shown as "starting".
+	status = state.Activity(status).DisplayLabel()
 	if timePart == "-" {
 		return status
 	}
@@ -1057,7 +1062,8 @@ func formatLastActivity(status string, t time.Time) string {
 }
 
 // handleUnlinkedProjectPrompt checks if the error is due to an unlinked project and prompts the user.
-// Returns true if the user made a choice that might resolve the issue (link or disable).
+// Returns true if the user chose to link and the link succeeded. On cancel it
+// returns false, so the caller returns the original error.
 func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 	// Resolve project path to check settings
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
@@ -1126,14 +1132,6 @@ func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 			fmt.Fprintf(os.Stderr, "Failed to link project: %v\n", err)
 			return false
 		}
-		return true
-	case hubsync.LinkOrDisableDisable:
-		// Disable Hub for this project
-		if err := config.UpdateSetting(resolvedPath, "hub.enabled", "false", isGlobal); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to disable Hub: %v\n", err)
-			return false
-		}
-		statusln("Hub integration disabled for this project.")
 		return true
 	default:
 		return false

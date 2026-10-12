@@ -965,7 +965,7 @@ func (ps *PreviewService) getBasePermissions(
 	if err != nil {
 		return nil, err
 	}
-	bindings, err = clampTestFixtureBindings(ctx, ps.store, principals, bindings)
+	bindings, err = clampTestIdentityBindings(ctx, ps.store, ps.authz, principals, bindings)
 	if err != nil {
 		return nil, err
 	}
@@ -1397,7 +1397,16 @@ func (ps *PreviewService) assessLockout(
 
 // resolveAdminUsers finds users with constraint-admin permission at a scope.
 func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scopeID string) ([]adminUserInfo, error) {
-	bindings, err := ps.store.ListRoleBindingsForScope(ctx, scopeType, scopeID)
+	return resolveConstraintAdminUsers(ctx, ps.store, scopeType, scopeID)
+}
+
+// resolveConstraintAdminUsers finds the active users with constraint-admin
+// permission at a scope, through direct and group role bindings. A user
+// counts only when the user row exists with status active: a suspended,
+// invited or missing user holds no effective authority, so counting one
+// would let a lockout check pass with no admin able to act.
+func resolveConstraintAdminUsers(ctx context.Context, st store.Store, scopeType, scopeID string) ([]adminUserInfo, error) {
+	bindings, err := st.ListRoleBindingsForScope(ctx, scopeType, scopeID)
 	if err != nil {
 		return nil, err
 	}
@@ -1406,18 +1415,28 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scop
 	var admins []adminUserInfo
 
 	// This read is unclamped (not through the authorization service), so a
-	// hub test identity, which never holds system-scoped authority beyond
-	// member, is excluded explicitly at system scope. A kind-read error
-	// fails the resolution, which callers treat as undetermined (refused).
+	// member-tier test identity, which never holds system-scoped authority
+	// beyond member, is excluded explicitly at system scope; an admin-kind
+	// test identity (temporary) and a row of unrecognized kind never count,
+	// at any scope (only positively human rows do: IsHumanKind). A
+	// user-read error fails the resolution, which callers treat as
+	// undetermined (refused).
 	skipUser := func(userID string) (bool, error) {
-		if scopeType != store.RoleScopeSystem {
-			return false, nil
+		u, found, err := lookupUserForKind(ctx, st, userID)
+		if err != nil {
+			return false, err
 		}
-		return isTestFixtureUser(ctx, ps.store, userID)
+		if !found || u.Status != store.UserStatusActive {
+			return true, nil
+		}
+		if u.IsTestFixture() {
+			return scopeType == store.RoleScopeSystem, nil
+		}
+		return !u.IsHumanKind(), nil
 	}
 
 	for _, b := range bindings {
-		rd, err := ps.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
 			continue
 		}
@@ -1437,12 +1456,12 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scop
 		case "user":
 			if !seen[b.PrincipalID] {
 				if skip, err := skipUser(b.PrincipalID); err != nil {
-					return nil, fmt.Errorf("check test identity %s: %w", b.PrincipalID, err)
+					return nil, fmt.Errorf("check admin user %s: %w", b.PrincipalID, err)
 				} else if skip {
 					seen[b.PrincipalID] = true
 					continue
 				}
-				groups, err := ps.store.GetEffectiveGroups(ctx, b.PrincipalID)
+				groups, err := st.GetEffectiveGroups(ctx, b.PrincipalID)
 				if err != nil {
 					return nil, fmt.Errorf("get effective groups for user %s: %w", b.PrincipalID, err)
 				}
@@ -1454,19 +1473,19 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scop
 			}
 		case "group":
 			// Expand group members.
-			members, err := ps.store.GetGroupMembers(ctx, b.PrincipalID)
+			members, err := st.GetGroupMembers(ctx, b.PrincipalID)
 			if err != nil {
 				return nil, fmt.Errorf("get members for group %s: %w", b.PrincipalID, err)
 			}
 			for _, m := range members {
 				if m.MemberType == "user" && !seen[m.MemberID] {
 					if skip, err := skipUser(m.MemberID); err != nil {
-						return nil, fmt.Errorf("check test identity %s: %w", m.MemberID, err)
+						return nil, fmt.Errorf("check admin user %s: %w", m.MemberID, err)
 					} else if skip {
 						seen[m.MemberID] = true
 						continue
 					}
-					groups, err := ps.store.GetEffectiveGroups(ctx, m.MemberID)
+					groups, err := st.GetEffectiveGroups(ctx, m.MemberID)
 					if err != nil {
 						return nil, fmt.Errorf("get effective groups for user %s: %w", m.MemberID, err)
 					}

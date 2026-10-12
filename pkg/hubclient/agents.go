@@ -965,6 +965,9 @@ type BroadcastResponse struct {
 	Targeted         int            `json:"targeted"`
 	Skipped          int            `json:"skipped"`
 	SkippedBreakdown map[string]int `json:"skipped_breakdown,omitempty"`
+	// Starting counts targeted agents that are still initializing; the
+	// message is held until their harness is ready. Included in Targeted.
+	Starting int `json:"starting,omitempty"`
 }
 
 // BroadcastMessage broadcasts a structured message to all running agents in the project.
