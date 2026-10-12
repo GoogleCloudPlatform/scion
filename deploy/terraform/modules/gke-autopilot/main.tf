@@ -38,7 +38,10 @@ resource "google_container_cluster" "this" {
 
   deletion_protection = var.deletion_protection
 
-  # Ordering only; the caller decides what goes in create_after.
+  # Terraform accepts an input-variable reference here; the cluster waits for
+  # whatever the caller passes in create_after. Used instead of a module-level
+  # depends_on, which would defer any data source later added here until apply
+  # and would state the reason at the caller rather than on this resource.
   depends_on = [var.create_after]
 
   # Literal, not variable-driven. GKE has no API-level deletion protection at
