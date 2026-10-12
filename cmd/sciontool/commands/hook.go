@@ -294,6 +294,16 @@ func processHookData(data []byte) error {
 	limitsHandler := handlers.NewLimitsHandler(hubHandler)
 
 	processor.AddHandler(statusHandler.Handle)
+	// The ready marker is written right after the local status write, so
+	// a reader that sees the marker (sciontool init's readiness watcher)
+	// knows this event's activity is already in agent-info.json. It still
+	// comes before the Hub post, so it is not delayed by the Hub budget,
+	// and Dispatch runs every handler, so a failed status write does not
+	// stop it. Local file write only; never fails or delays the hook.
+	processor.AddHandler(func(ev *hooks.Event) error {
+		markHarnessReadyFn(ev)
+		return nil
+	})
 	processor.AddHandler(loggingHandler.Handle)
 	processor.AddHandler(promptHandler.Handle)
 
@@ -311,8 +321,6 @@ func processHookData(data []byte) error {
 	if err != nil {
 		return err
 	}
-	// Local file write only; never fails or delays the hook.
-	markHarnessReady(event)
 	if err := processor.Dispatch(event); err != nil {
 		return err
 	}
