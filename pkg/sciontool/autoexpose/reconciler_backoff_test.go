@@ -28,7 +28,8 @@ import (
 
 // scriptedHubClient answers ListPorts from a per-call error script (once it
 // runs out, ListPorts returns the ports registered so far) and RegisterPort
-// and DeletePort from fixed errors.
+// and DeletePort from fixed errors. DeletePort never removes a port from
+// registered: the tests that use it check only the reconciler's tracking.
 type scriptedHubClient struct {
 	mu          sync.Mutex
 	listErrs    []error
@@ -87,9 +88,6 @@ func (c *scriptedHubClient) DeletePort(context.Context, int) error {
 	return c.deleteErr
 }
 
-// The scripted client never deletes from registered: the tests that use
-// DeletePort only check the reconciler's own tracking.
-
 func repeatErr(err error, n int) []error {
 	out := make([]error, n)
 	for i := range out {
@@ -104,6 +102,7 @@ var (
 	errHub422 = &scionhub.StatusError{StatusCode: http.StatusUnprocessableEntity, Body: "maximum exposed ports per agent exceeded"}
 	errHub404 = &scionhub.StatusError{StatusCode: http.StatusNotFound, Body: "not found"}
 	errHub429 = &scionhub.StatusError{StatusCode: http.StatusTooManyRequests, Body: "slow down"}
+	errHub403 = &scionhub.StatusError{StatusCode: http.StatusForbidden, Body: "forbidden"}
 )
 
 // countLogs replaces the package log hooks with counters for the test.
@@ -379,5 +378,95 @@ func TestRun_LogsOnlyOnStateChange(t *testing.T) {
 	}
 	if *errs != 2 || *infos != 1 {
 		t.Fatalf("log lines: errors = %d, infos = %d; want 2 and 1", *errs, *infos)
+	}
+}
+
+// A port the hub refuses to deregister (403) is held back like a refused
+// register: the loop keeps its cadence, the delete is not retried every
+// pass, and the hold is dropped once the port listens again, so a later
+// stop is deregistered straight away.
+func TestRun_RejectedDeregisterHeldBack(t *testing.T) {
+	errs, _ := countLogs(t)
+	client := &scriptedHubClient{deleteErr: errHub403}
+	r := newLoopReconciler(client)
+	r.autoExposed[3000] = true
+
+	got := runLoop(t, r, 4)
+	if want := secs(3, 3, 3, 3); !reflect.DeepEqual(got, want) {
+		t.Fatalf("delays = %v, want %v", got, want)
+	}
+	if client.deleteCalls != 1 {
+		t.Fatalf("DeletePort calls = %d, want 1 (held back after the refusal)", client.deleteCalls)
+	}
+	if !r.autoExposed[3000] {
+		t.Fatal("port 3000 should still be tracked after a refused delete")
+	}
+	if _, held := r.rejectUnexpose[3000]; !held {
+		t.Fatal("port 3000 should be held in rejectUnexpose")
+	}
+	if len(r.rejectExpose) != 0 {
+		t.Fatalf("rejectExpose = %v, want empty (a refused delete is an unexpose hold)", r.rejectExpose)
+	}
+	if *errs != 1 {
+		t.Fatalf("error log lines = %d, want 1", *errs)
+	}
+
+	ctx := context.Background()
+	r.scan = listening(3000)
+	_ = r.reconcileOnce(ctx)
+	if _, held := r.rejectUnexpose[3000]; held {
+		t.Fatal("hold should be dropped once port 3000 listens again")
+	}
+	r.scan = listening()
+	_ = r.reconcileOnce(ctx)
+	if client.deleteCalls != 2 {
+		t.Fatalf("DeletePort calls = %d, want 2 (retried at once after the listener came back and went)", client.deleteCalls)
+	}
+}
+
+// A transport error (no hub status) is a loop failure, not a per-port
+// refusal.
+func TestRun_TransportErrorBacksOff(t *testing.T) {
+	client := &scriptedHubClient{registerErr: errors.New("dial tcp: connection refused")}
+	r := newLoopReconciler(client)
+	r.scan = listening(3000)
+
+	got := runLoop(t, r, 3)
+	if want := secs(3, 6, 12); !reflect.DeepEqual(got, want) {
+		t.Fatalf("delays = %v, want %v", got, want)
+	}
+	if len(r.rejectExpose) != 0 {
+		t.Fatalf("rejectExpose = %v, want empty", r.rejectExpose)
+	}
+}
+
+// After a failed pass the next pass lists the registered ports from the
+// hub even while the cache is warm.
+func TestReconcileOnce_FailureForcesRelist(t *testing.T) {
+	client := &scriptedHubClient{portErrs: map[int]error{4000: errHub500}}
+	r := newLoopReconciler(client)
+	ctx := context.Background()
+
+	r.scan = listening(3000)
+	if err := r.reconcileOnce(ctx); err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	r.nextDelay(nil)
+	warm := client.listCalls
+	_ = r.reconcileOnce(ctx) // cache warm: no ListPorts
+	if client.listCalls != warm {
+		t.Fatalf("ListPorts calls = %d, want %d (warm cache)", client.listCalls, warm)
+	}
+
+	r.scan = listening(3000, 4000)
+	err := r.reconcileOnce(ctx)
+	if err == nil {
+		t.Fatal("pass with a 500 on port 4000 should fail")
+	}
+	r.nextDelay(err)
+	before := client.listCalls
+	_ = r.reconcileOnce(ctx)
+	if client.listCalls != before+1 {
+		t.Fatalf("ListPorts calls after a failure = %d, want %d (forced re-list)", client.listCalls, before+1)
 	}
 }

@@ -174,8 +174,10 @@ func TestRun_LogsOnlyOnStateChange(t *testing.T) {
 
 	err401 := &scionhub.StatusError{StatusCode: http.StatusUnauthorized}
 	script := []connectResult{
-		{false, errDial}, {false, errDial}, {false, errDial}, // one line: entering backoff
-		{false, err401}, {false, err401}, {false, err401}, // one line: entering 401 mode
+		// One line on entering backoff.
+		{false, errDial}, {false, errDial}, {false, errDial},
+		// One line on entering 401 mode.
+		{false, err401}, {false, err401}, {false, err401},
 	}
 	runScripted(t, NewManager(nil), script, 6)
 	if errs != 2 {

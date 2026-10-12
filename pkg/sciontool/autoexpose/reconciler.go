@@ -74,11 +74,11 @@ type Reconciler struct {
 	backoff backoff.Backoff
 	state   loopState
 
-	// pass counts reconcile passes. rejectExpose and rejectUnexpose hold,
-	// per port the hub refused to register or deregister with a 4xx that
-	// retrying cannot fix soon (for example a 422 at the hub's port limit),
-	// the pass from which that port is tried again. Such a refusal does
-	// not back off the loop, so other ports keep the normal cadence.
+	// pass counts reconcile passes. rejectExpose and rejectUnexpose map
+	// each port the hub refused to register or deregister with a 4xx that
+	// retrying cannot fix soon (for example a 422 at the hub's port limit)
+	// to the pass at which it is tried again. Such a refusal does not back
+	// off the loop, so other ports keep the normal cadence.
 	pass           int
 	rejectExpose   map[int]int
 	rejectUnexpose map[int]int
@@ -101,8 +101,12 @@ const (
 // including while the hub does not accept the agent's credential.
 const DefaultMaxBackoff = 5 * time.Minute
 
-// rejectedPortRetry is roughly how long a port the hub refused (see
-// Reconciler.rejectExpose) waits before it is tried again.
+// rejectedPortRetry is how long a port the hub refused (see
+// Reconciler.rejectExpose) waits before it is tried again, at the normal
+// interval. The wait is counted in passes (rejectedRetryPasses), so it is a
+// lower bound: each pass also takes its own duration, and passes are
+// further apart while the loop backs off. Counting passes keeps the hold
+// free of a clock, and the hold only needs to stop per-pass retries.
 const rejectedPortRetry = 5 * time.Minute
 
 // Package-level log hooks so tests can count state-change log lines.
