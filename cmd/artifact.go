@@ -73,7 +73,8 @@ Commands:
   scion artifact publish <file|dir> --review <ref> [--note]
   scion artifact get <ref> [--out <path>] [--clean|--accept] [--kind publish]
   scion artifact versions <ref>                List an artifact's versions
-  scion artifact share <ref> [--ttl 7d]        Create a share link (users only)`,
+  scion artifact share <ref> [--ttl 7d]        Create a share link (users only)
+  scion artifact delete <ref> [--yes]          Delete an artifact (users only)`,
 	// Args/Run make this command Runnable so cobra validates subcommand
 	// names, as for "scion hub": an unrecognized subcommand, including one
 	// the CLI mode removed (such as share in agent mode), returns an

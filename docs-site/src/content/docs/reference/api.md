@@ -291,7 +291,7 @@ A test identity is an ordinary member or viewer for every other route. Its hub-l
 While test identities are enabled, the web UI shows a warning banner that cannot be dismissed ("TEST HUB: test identities are enabled") above the header on every page, the login page included. The banner reads `GET /api/v1/test-infra/status`, which needs no authentication and returns exactly three booleans, `{"testIdentities", "testHubAdmin", "testSuperAdmin"}`, all `false` on a hub without test identities.
 
 ##### Test admin identity gate (operators)
-A later phase adds test identities with hub-admin authority. This release ships only the startup gate for them; no route issues them yet. The gate is a startup flag, `--enable-test-admin-identities=<hub id>`. There is no settings key, experiment or API to change it at runtime, and the Helm chart refuses the flag. The hub refuses to start, with a named error, unless all of these hold:
+Hubs started with this gate can issue test identities with hub-admin authority (see "Test admin identities" below). The gate is a startup flag, `--enable-test-admin-identities=<hub id>`. There is no settings key, experiment or API to change it at runtime, and the Helm chart refuses the flag. The hub refuses to start, with a named error, unless all of these hold:
 
 - `--enable-test-identities` is on, and the value equals the hub's resolved hub id (`server.hub.hub_id`, or the persisted id).
 - `server.hub.class: test` is set in the settings file or environment. The server-config API refuses this key in every mode, and does not return it.
@@ -311,6 +311,17 @@ While the gate is on:
 On every hub, whether or not the gate is on, the `scion.io/plugin` broker label is reserved: a client-supplied value is dropped on broker registration and update, and a value the hub set is kept.
 
 `GET /api/v1/test-infra/status` reports `testHubAdmin: true` while the gate is on (`testSuperAdmin` stays `false` in this release), and the web banner switches to its admin variant. `GET /api/v1/admin/health/summary` reports `hub.test_admin_identities_enabled`, `hub.test_super_admin_identities_enabled` and `hub.live_test_admin_identities`.
+
+##### Test admin identities
+On a hub started with the test admin gate, a super-admin can issue a short-lived test identity that holds the real `hub-admin` role:
+
+- `POST /api/v1/test-identities/admin` with `{"adminRole": "hub-admin", "purpose": "<8 to 200 characters>"}` and optional `lifetimeSeconds` (at most 3600, default 3600) and `tokenTtlSeconds` (at most 1800, default 900). It returns `201` with the identity (`kind: "test_hub_admin"`, an email in `scion-test-hub-admin.invalid`, `issuanceId`, `expiresAt`) and exactly one access token: no refresh token, no cookie, and no re-issue (`POST /api/v1/test-identities/{id}/token` answers `409`). `adminRole: "super-admin"` answers `404` in this release.
+- The caller must be a human user (not a test identity) who is, at that moment, an active super-admin through their own role bindings and holds `test_identity.issue_admin` (super-admin only). An access token is accepted only with a hub boundary, exactly the scope `test_identity:issue_admin`, and an age of at most 8 hours; it is loaded and checked again on every issuance, so revoking the token or the user's super-admin role stops the next issuance.
+- Limits: one live admin identity per issuer, two per hub; six issuances per issuer per hour.
+- The identity's `hub-admin` binding expires with the identity. While the identity lives it has exactly a human hub-admin's authority. It cannot issue test identities, create access tokens, change role, or receive other role bindings, group or project memberships.
+- Its token stops working when the identity expires, is suspended (`403`) or deleted (`401`), and when the hub restarts without the gate. Authorization grants it nothing in those cases, even on a path that does not read the user record.
+- Each issuance writes a `test_admin_issue` audit record (issuer, the issuer's access token ID, kind, purpose, expiry, issuance ID; never the token) and a `[scion-test-admin-audit]` line. Every mutation the identity makes carries credential labels `test_tier`, `kind`, `issuer_id`, `issuer_credential_id`, `issuance_id` and `purpose_hash`, and the correlation ID `<issuance id>:<request id>`.
+- `POST /api/v1/test-identities/admin/revoke-all` (a human super-admin on an interactive session only) deletes every admin test identity. An identity that owns agents or is a project's last owner is suspended and loses its role bindings instead. The response lists each identity and its outcome. Then restart the hub without the gate.
 
 #### Admin (`/api/v1/admin`)
 - `GET /roles`: List Role Definitions.

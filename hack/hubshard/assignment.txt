@@ -156,6 +156,7 @@
 6 artifacts_integration_test.go
 3 artifacts_links_test.go
 4 artifacts_list_test.go
+4 artifacts_orphans_test.go
 6 artifacts_permits_test.go
 6 artifacts_review_grant_test.go
 4 artifacts_review_test.go
@@ -785,6 +786,7 @@
 5 handlers_stopall_test.go
 6 handlers_teams_manifest_test.go
 1 handlers_test.go
+1 handlers_test_admin_identities_test.go
 6 handlers_test_identities_clamp_test.go
 6 handlers_test_identities_delete_test.go
 5 handlers_test_identities_governance_test.go
@@ -1333,6 +1335,7 @@
 6 template_scope_authz_test.go
 3 template_scope_validation_test.go
 0 template_sqlite_helpers_test.go
+1 test_admin_census_test.go
 2 test_admin_gate_test.go
 3 test_server_cleanup_test.go
 0 testmigrate_helpers_test.go
