@@ -399,3 +399,25 @@ func TestAgentDelegation_RegisteredDefaultOff(t *testing.T) {
 		t.Errorf("agent delegation experiment metadata mismatch: %+v", entry)
 	}
 }
+
+// TestChatThreadGroups_RegisteredDefaultOff pins hub.chat_thread_groups
+// (ptone/scion#4424): it gates the web rail and the hub routes, so it needs
+// both layers, and it ships off.
+func TestChatThreadGroups_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(ChatThreadGroups)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", ChatThreadGroups)
+	}
+	if entry.Name != "hub.chat_thread_groups" {
+		t.Errorf("Name = %q, want hub.chat_thread_groups", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
+		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#4424" || entry.Owner != "native-chat" || entry.ReviewBy != "2027-01-11" {
+		t.Errorf("chat thread groups experiment metadata mismatch: %+v", entry)
+	}
+}

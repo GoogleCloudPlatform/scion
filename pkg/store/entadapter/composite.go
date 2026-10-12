@@ -109,6 +109,7 @@ type CompositeStore struct {
 	*ProjectPreStartHookStore
 	*AgentSessionMetricsStore
 	*ConversationStore
+	*ThreadGroupStore
 	*RoleStore
 	*DelegationEdgeStore
 	*SAAssignmentStore
@@ -249,6 +250,8 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.AccessConstraintStore.inTx = true
 	txStore.MembershipLossCheckStore.inTx = true
 	txStore.AgentHoldStore.inTx = true
+	txStore.ConversationStore.inTx = true
+	txStore.ThreadGroupStore.inTx = true
 	return txStore
 }
 
@@ -281,6 +284,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ProjectPreStartHookStore:   NewProjectPreStartHookStore(client),
 		AgentSessionMetricsStore:   NewAgentSessionMetricsStore(client),
 		ConversationStore:          NewConversationStore(client),
+		ThreadGroupStore:           NewThreadGroupStore(client),
 		RoleStore:                  NewRoleStore(client),
 		DelegationEdgeStore:        NewDelegationEdgeStore(client),
 		SAAssignmentStore:          NewSAAssignmentStore(client),
@@ -458,6 +462,12 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	// explicit or a deleted project's keys stay reserved forever.
 	if _, err := c.client.AgentIdentityKey.Delete().
 		Where(agentidentitykey.ProjectIDEQ(uid)).Exec(ctx); err != nil {
+		return err
+	}
+	// thread_groups and thread_group_members carry project_id as a plain
+	// column with no DB-level FK either, so a project's thread groups are
+	// removed explicitly in the same transaction (ptone/scion#4424).
+	if err := c.DeleteThreadGroupsForProject(ctx, id); err != nil {
 		return err
 	}
 	return c.ProjectStore.DeleteProject(ctx, id)
