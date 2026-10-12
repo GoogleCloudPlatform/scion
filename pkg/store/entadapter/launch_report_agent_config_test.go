@@ -228,3 +228,92 @@ func TestApplyLaunchReport_SucceededWithoutAppliedConfigLeavesItEmpty(t *testing
 	assert.Equal(t, "resolved-tmpl", got.Template)
 	assert.Equal(t, "kubernetes", got.Runtime)
 }
+
+// A repeated succeeded report finds the launch already ended as succeeded
+// and writes nothing: the first report's config stays.
+func TestApplyLaunchReport_DuplicateSucceededDoesNotRewriteConfig(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a, launchID := beginConfiguredTestLaunch(t, ctx, s, projectID, "cfg-dup")
+
+	first := resolvedAgentConfig()
+	answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded, AgentConfig: first,
+	})
+	require.NoError(t, err)
+	require.Equal(t, store.LaunchReportResultApplied, answer.Result)
+	before, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	second := store.BrokerAgentConfig{
+		Template: "other-tmpl", HarnessConfig: "gemini", HarnessAuth: "other-auth",
+		HarnessConfigSource: "hub-hydrated", Image: "img:other", Profile: "other-prof", Runtime: "docker",
+	}
+	answer, _, err = s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded, AgentConfig: second,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.LaunchReportResultCompleted, answer.Result)
+	assert.False(t, answer.Changed)
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, *before.AppliedConfig, *got.AppliedConfig, "the duplicate must not rewrite the config")
+	assert.Equal(t, "img:harness-default", got.AppliedConfig.Image)
+	assert.Equal(t, "resolved-tmpl", got.Template)
+	assert.Equal(t, "kubernetes", got.Runtime)
+	assert.Equal(t, "claude", harnessConfigColumn(t, ctx, s, a.ID))
+}
+
+// A non-succeeded report against a launch the hub ended as running_observed
+// carries no config and must leave the recorded config untouched.
+func TestApplyLaunchReport_RunningObservedProgressLeavesConfig(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a, launchID := beginConfiguredTestLaunch(t, ctx, s, projectID, "cfg-ro-progress")
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	before, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateProgress, Seq: 1,
+		AgentConfig: resolvedAgentConfig(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.LaunchReportResultCompleted, answer.Result)
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, *before.AppliedConfig, *got.AppliedConfig)
+	assert.Equal(t, before.Template, got.Template)
+	assert.Equal(t, before.Runtime, got.Runtime)
+	assert.Equal(t, "pre-dispatch", harnessConfigColumn(t, ctx, s, a.ID))
+}
+
+// An applied_config that is not valid JSON is kept byte for byte: the hub
+// cannot read it, so it must not replace it with a near-empty config. The
+// template and runtime, which live in their own columns, are still applied.
+func TestApplyLaunchReport_SucceededKeepsUnreadableAppliedConfig(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a, launchID := beginConfiguredTestLaunch(t, ctx, s, projectID, "cfg-corrupt")
+	uid, err := parseUUID(a.ID)
+	require.NoError(t, err)
+	const corrupt = "{not json"
+	_, err = s.client.Agent.UpdateOneID(uid).SetAppliedConfig(corrupt).Save(ctx)
+	require.NoError(t, err)
+
+	answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded,
+		AgentConfig: resolvedAgentConfig(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, store.LaunchReportResultApplied, answer.Result)
+
+	row, err := s.client.Agent.Get(ctx, uid)
+	require.NoError(t, err)
+	assert.Equal(t, corrupt, row.AppliedConfig, "the unreadable applied_config must be kept as stored")
+	assert.Equal(t, "pre-dispatch", row.HarnessConfig, "the harness_config column must not change")
+	assert.Equal(t, "resolved-tmpl", row.Template)
+	assert.Equal(t, "kubernetes", row.Runtime)
+}
