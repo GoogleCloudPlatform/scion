@@ -59,6 +59,16 @@ every isBindingActive caller passes `time.Now()` or a service clock).
 The test identity expiry check (`now.Before(ExpiresAt)`) already used the
 exclusive rule, so the clamp and the binding check now agree at the instant.
 
+Follow-up: `isBindingActive` now delegates to `bindingActivationOK`, so the
+zero-now case fails closed like the kernel. Every store-to-kernel bound
+conversion (`toCandidateBindings`, `bindingActivationOK`,
+`getEffectivePermissions`, the access-constraint preview) goes through
+`candidateActivationBounds`, which maps a set-but-zero bound to the earliest
+non-zero instant. A set-but-zero ExpiresAt is therefore expired in the
+kernel, the hub helpers and the store alike. Some handlers still have their
+own inline window checks (`artifacts_host.go`, `handlers_users_core.go`,
+`handlers_admin_effective_access.go`); they are left for a later change.
+
 ## Tests
 
 `pkg/store/entadapter/role_store_membership_window_test.go`: expired and

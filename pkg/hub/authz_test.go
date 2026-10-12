@@ -1458,30 +1458,43 @@ func TestResolveAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *testing.T) {
 	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
 }
 
-// isBindingActive uses the kernel's activation boundaries
-// (evaluateActivation): notBefore is inclusive, expiresAt is exclusive.
+// isBindingActive uses the kernel's activation rule (evaluateActivation):
+// notBefore is inclusive, expiresAt is exclusive, and a zero evaluation
+// time with any bound set is inactive.
 func TestIsBindingActive_BoundariesMatchKernel(t *testing.T) {
-	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	at := func(d time.Duration) *time.Time { v := now.Add(d); return &v }
+	ref := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { v := ref.Add(d); return &v }
+	zeroBound := func() *time.Time { return &time.Time{} }
 	cases := []struct {
 		name      string
+		now       time.Time
 		notBefore *time.Time
 		expiresAt *time.Time
 		want      bool
 	}{
-		{"unbounded", nil, nil, true},
-		{"now equals notBefore", at(0), nil, true},
-		{"now before notBefore", at(time.Nanosecond), nil, false},
-		{"now equals expiresAt", nil, at(0), false},
-		{"now before expiresAt", nil, at(time.Nanosecond), true},
-		{"now after expiresAt", nil, at(-time.Nanosecond), false},
+		{"unbounded", ref, nil, nil, true},
+		{"now equals notBefore", ref, at(0), nil, true},
+		{"now before notBefore", ref, at(time.Nanosecond), nil, false},
+		{"now equals expiresAt", ref, nil, at(0), false},
+		{"now before expiresAt", ref, nil, at(time.Nanosecond), true},
+		{"now after expiresAt", ref, nil, at(-time.Nanosecond), false},
+		{"zero now unbounded", time.Time{}, nil, nil, true},
+		{"zero now with only expiresAt", time.Time{}, nil, at(time.Hour), false},
+		{"zero now with only notBefore", time.Time{}, at(-time.Hour), nil, false},
+		{"set but zero expiresAt", ref, nil, zeroBound(), false},
+		{"set but zero notBefore", ref, zeroBound(), nil, true},
+		{"zero now with set but zero notBefore", time.Time{}, zeroBound(), nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := &store.RoleBinding{ID: "rb", NotBefore: tc.notBefore, ExpiresAt: tc.expiresAt}
-			assert.Equal(t, tc.want, isBindingActive(b, now))
-			assert.Equal(t, bindingActivationOK(b, now), isBindingActive(b, now),
-				"isBindingActive must agree with the kernel's evaluateActivation")
+			assert.Equal(t, tc.want, isBindingActive(b, tc.now))
+			assert.Equal(t, tc.want, bindingActivationOK(b, tc.now),
+				"bindingActivationOK must apply the same rule")
+			cands := toCandidateBindings([]*store.RoleBinding{b})
+			require.Len(t, cands, 1)
+			assert.Equal(t, tc.want, evaluateActivation(&cands[0], tc.now).Active,
+				"the kernel's candidate path must apply the same rule")
 		})
 	}
 }
