@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -31,6 +32,7 @@ import (
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,6 +60,13 @@ func makeJWTWithExpiry(t *testing.T, exp time.Time) string {
 // real Hub when tests run inside an agent container. See issue #123.
 func scrubHubEnv(t *testing.T) {
 	t.Helper()
+	testutil.ScrubHubEnv(t)
+	t.Cleanup(SetHubTestSandboxed())
+}
+
+// The shared key list must cover every variable this client reads to find
+// and authenticate to a Hub, or scrubHubEnv would leave one set.
+func TestScrubHubEnv_CoversClientEnvKeys(t *testing.T) {
 	for _, key := range []string{
 		EnvHubEndpoint,
 		EnvHubURL,
@@ -67,9 +76,10 @@ func scrubHubEnv(t *testing.T) {
 		transportauth.EnvTransportToken,
 		transportauth.EnvTransportTokenFile,
 	} {
-		t.Setenv(key, "")
+		if !slices.Contains(testutil.HubEnvKeys, key) {
+			t.Errorf("testutil.HubEnvKeys is missing %s", key)
+		}
 	}
-	t.Cleanup(SetHubTestSandboxed())
 }
 
 func TestNewClient_FromEnvironment(t *testing.T) {

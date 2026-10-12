@@ -9,10 +9,11 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 )
 
 // telemetryConfigEnvKeys lists the telemetry configuration variables, beyond
-// the agent identity keys in scrubHubEnvKeys, that the telemetry handler
+// the keys scrubHubEnv clears, that the telemetry handler
 // reads from the environment. An agent container may set them ambiently.
 var telemetryConfigEnvKeys = []string{
 	"SCION_USAGE_SOURCE",
@@ -69,7 +70,11 @@ func TestScrubTelemetryEnv_ClearsTelemetryConfig(t *testing.T) {
 
 	scrubTelemetryEnv(t)
 
-	for _, k := range append(append([]string{}, scrubHubEnvKeys...), telemetryConfigEnvKeys...) {
+	var keys []string
+	keys = append(keys, testutil.HubEnvKeys...)
+	keys = append(keys, agentIdentityEnvKeys...)
+	keys = append(keys, telemetryConfigEnvKeys...)
+	for _, k := range keys {
 		if got := os.Getenv(k); got != "" {
 			t.Errorf("after scrubTelemetryEnv, %s = %q, want empty", k, got)
 		}
