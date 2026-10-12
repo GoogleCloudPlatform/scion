@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");

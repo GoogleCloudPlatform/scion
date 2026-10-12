@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 // Package hub — tests for the whole-request precheck (checks 1-5) of the
 // runtime material selection check sequence: identity locality, the store
