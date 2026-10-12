@@ -1068,6 +1068,15 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",
 	},
+	// The handler further limits the code to the identity's issuer or an
+	// unscoped platform admin session (canManageTestIdentity) and to hubs
+	// where test identity web sessions are available.
+	"POST /api/v1/test-identities/{id}/web-login-code": {
+		Pattern: "POST /api/v1/test-identities/{id}/web-login-code", RouteID: "testIdentities.webLoginCode",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
 	// The handler further limits a delete to the identity's issuer, an
 	// unscoped platform admin session, or a holder of test_identity.issue
 	// and user.delete (canDeleteTestIdentity).
@@ -1076,6 +1085,24 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",
+	},
+	// Admin-kind test identities (admin tier A1): test_identity.issue_admin
+	// at hub scope, held only by super-admin. The handlers return 404 unless
+	// the hub started with the test admin gate, and re-check the issuer
+	// (human, live super-admin, exact-scope hub token at most 8 h old).
+	"POST /api/v1/test-identities/admin": {
+		Pattern: "POST /api/v1/test-identities/admin", RouteID: "testIdentities.admin.create",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
+		BearerTarget: "hub_collection",
+	},
+	// Revoke-all is session only, for a human super-admin (checked again in
+	// the handler).
+	"POST /api/v1/test-identities/admin/revoke-all": {
+		Pattern: "POST /api/v1/test-identities/admin/revoke-all", RouteID: "testIdentities.admin.revokeAll",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
+		SessionOnly: authzop.ReasonCredentialManagement,
 	},
 
 	// -------------------------------------------------------------------------

@@ -34,7 +34,9 @@ var hubUserLevelCommands = map[string]bool{
 // register or sync a local project, even when --project names one. One
 // command per line.
 var hubOnlyCommands = map[string]bool{
-	"tunnel": true,
+	"tunnel":     true,
+	"ssh":        true,
+	"ssh-config": true,
 }
 
 // brokerMachineLevelCommands are "scion runtime-broker" subcommands that act

@@ -337,6 +337,7 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 //	GET  /api/v1/artifacts/{id}/versions/{seq}/files/{path} a file of version seq
 //	PUT  /api/v1/artifacts/{id}/versions/{seq}/files/{path} upload a file of a pending version
 //	PATCH /api/v1/artifacts/{id}                            set the expiry, move to another project
+//	DELETE /api/v1/artifacts/{id}                           delete (soft delete) the artifact
 //	GET  /api/v1/artifacts/{id}/grants                      the principal and scope grants
 //	POST /api/v1/artifacts/{id}/grants                      add or change a grant
 //	DELETE /api/v1/artifacts/{id}/grants/{grantId}          remove a grant
@@ -399,8 +400,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.handleGetArtifact(w, r, id)
 		case r.Method == http.MethodPatch:
 			s.handlePatchArtifact(w, r, id)
+		case r.Method == http.MethodDelete:
+			s.handleDeleteArtifact(w, r, id)
 		default:
-			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPatch)
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPatch, http.MethodDelete)
 		}
 	case len(segs) == 2 && segs[1] == "grants":
 		switch {

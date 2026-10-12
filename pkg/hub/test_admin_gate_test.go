@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -114,7 +114,7 @@ func TestTestAdminGate_NewCapturesImmutableGate(t *testing.T) {
 	// The phase-W status route reads the same gate (unauthenticated).
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false}`, strings.TrimSpace(rec.Body.String()))
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false,"testIdentityWebSessions":false}`, strings.TrimSpace(rec.Body.String()))
 }
 
 func TestTestAdminGate_OffByDefault(t *testing.T) {
@@ -847,6 +847,7 @@ var tiaKeyMaterialSites = map[string]string{
 	"conduit_grants.go:bootstrap:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey": "conduit_grant",
 	"conduit_grants.go:rotate:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey":    "conduit_grant",
 	"web.go:NewWebServer:github.com/gorilla/sessions.NewCookieStore":                                "web_session",
+	"handlers_test_identity_web.go:newTestIdentityWebState:github.com/gorilla/securecookie.New":     "exempt: test identity web session marker key, hub-local by construction (generated at test-infra mark, stored with the DB marker, never derived from any shared secret; DEC-8)",
 	"brokerauth.go:computeHMAC:crypto/hmac.New":                                                     "exempt: per-broker HMAC secret, generated per broker; authenticates a broker to this hub, never a user",
 	"access_constraint_preview.go:issueToken:crypto/hmac.New":                                       "exempt: preview token key, random per process and memory-only",
 	"access_constraint_preview.go:ValidateToken:crypto/hmac.New":                                    "exempt: preview token key, random per process and memory-only",

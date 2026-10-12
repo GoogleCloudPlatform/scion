@@ -41,6 +41,22 @@ Valid modes:
   lineage  - Ancestry users and project owners only
   branch   - Parent/child agents and ancestry users
   project  - All agents and users in the project (default)
+  hub      - Project messaging plus permitted agents in other projects
+             on this Hub (granting it requires permission)
+
+Branch rule: two agents can message each other in branch mode only when
+both are in branch mode and one is the other's direct parent. Siblings,
+grandparents and grandchildren are denied, as is any pair that mixes
+branch with another mode.
+
+Default for a new agent (applied once, at creation):
+  1. the --message-mode flag of scion create or scion start
+  2. the template's message_mode
+  3. the parent agent's mode, when an agent creates the agent
+  4. project
+A default that resolves to hub is still a new grant and needs permission.
+This command changes the mode of an existing agent; it does not re-run
+the defaults.
 
 Use --cascade to apply the mode to all descendants.
 Use --dry-run to preview cascade effects without applying.`,
