@@ -583,11 +583,18 @@ func (s *Server) ensureTemplateAgentConfig(ctx context.Context, tmpl *store.Temp
 	if err != nil {
 		slog.WarnContext(ctx, "template agent config: cannot read the agent config to derive the snapshot",
 			"template", tmpl.Name, "template_id", tmpl.ID, "error", err)
-		s.templateAgentConfigMisses.Store(missKey, struct{}{})
+		// Only a deterministic miss is remembered: the object is gone. A
+		// cancelled request, a timeout or a storage error is retried on
+		// the next call.
+		if errors.Is(err, storage.ErrNotFound) && ctx.Err() == nil {
+			s.templateAgentConfigMisses.Store(missKey, struct{}{})
+		}
 		return nil
 	}
 	idx := deriveTemplateIndex(data, name, tmpl.Name)
 	if idx.AgentConfig == nil {
+		// The file was read and does not parse (or is too large): the
+		// same content always derives the same nothing.
 		s.templateAgentConfigMisses.Store(missKey, struct{}{})
 		return nil
 	}

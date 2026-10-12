@@ -19,6 +19,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -595,6 +597,45 @@ func TestTemplateAgentConfig_UnreadableFileReadOnce(t *testing.T) {
 	row, err := s.GetTemplate(ctx, broken.ID)
 	require.NoError(t, err)
 	assert.Nil(t, row.AgentConfig)
+}
+
+// flakyDownloadStorage fails the first n Downloads with a transient error.
+type flakyDownloadStorage struct {
+	storage.Storage
+	failures int
+}
+
+func (f *flakyDownloadStorage) Download(ctx context.Context, objectPath string) (io.ReadCloser, *storage.Object, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if f.failures > 0 {
+		f.failures--
+		return nil, nil, errors.New("storage: 503 backend unavailable")
+	}
+	return f.Storage.Download(ctx, objectPath)
+}
+
+// TestTemplateAgentConfig_TransientReadRetried: a transient storage error
+// (and a cancelled request) is not remembered; the next call reads again and
+// derives the snapshot.
+func TestTemplateAgentConfig_TransientReadRetried(t *testing.T) {
+	ctx := context.Background()
+	stor := newCommitTestStorage(t)
+	srv, s := newCommitTestServer(t, stor)
+	tmpl := tiersCommittedTemplate(t, srv, s, "flaky-tmpl", map[string]string{"scion-agent.yaml": "model: flaky-model\n"})
+
+	srv.SetStorage(&flakyDownloadStorage{Storage: stor, failures: 1})
+	assert.Nil(t, srv.templateJobConfigByID(ctx, tmpl.ID), "the first read fails")
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	rowCopy := *tmpl
+	assert.Nil(t, srv.templateJobConfig(cancelled, &rowCopy), "a cancelled request derives nothing")
+
+	jc := srv.templateJobConfigByID(ctx, tmpl.ID)
+	require.NotNil(t, jc, "a transient failure is retried on the next call")
+	assert.Equal(t, "flaky-model", jc.Model)
 }
 
 // TestBrokerCapabilities_TemplateTiersIngested: the hub reads templateTiers

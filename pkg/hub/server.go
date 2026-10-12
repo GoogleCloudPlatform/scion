@@ -1950,10 +1950,11 @@ type Server struct {
 	resourceLog       *slog.Logger
 	templateLog       *slog.Logger
 	// templateAgentConfigMisses records template rows, keyed by ID and
-	// content hash, whose agent config file could not be read or parsed
-	// when deriving a missing snapshot (ensureTemplateAgentConfig), so a
-	// broken file is read once per content, not on every create and
-	// dispatch. A new commit changes the content hash and retries.
+	// content hash, whose agent config file does not parse or is missing
+	// from storage when deriving a missing snapshot
+	// (ensureTemplateAgentConfig), so a broken file is read once per
+	// content, not on every create and dispatch. Transient read failures
+	// are not recorded. A new commit changes the content hash and retries.
 	templateAgentConfigMisses sync.Map
 	workspaceLog              *slog.Logger
 	agentMetricsLog           *slog.Logger
