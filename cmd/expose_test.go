@@ -136,6 +136,36 @@ func TestExpose_AlreadyExposedIsSuccess(t *testing.T) {
 	assert.Contains(t, out, "URL: "+srv.URL+"/p/8080/")
 }
 
+// On a 409 the command succeeds even when the port is missing from the
+// list or the list call fails.
+func TestExpose_AlreadyExposedFallback(t *testing.T) {
+	hub := &exposeTestHub{
+		registerStatus: http.StatusConflict,
+		ports:          []map[string]any{{"port": 9000, "url": "/p/9000/"}},
+	}
+	useExposeHub(t, hub.start(t))
+
+	out, err := runExposeTest(t, runExpose, "8080")
+	require.NoError(t, err)
+	assert.Equal(t, "Port 8080 is already exposed.\n", out)
+}
+
+func TestExpose_AlreadyExposedListFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	useExposeHub(t, srv)
+
+	out, err := runExposeTest(t, runExpose, "8080")
+	require.NoError(t, err)
+	assert.Equal(t, "Port 8080 is already exposed.\n", out)
+}
+
 func TestExpose_HubErrorReturned(t *testing.T) {
 	hub := &exposeTestHub{registerStatus: http.StatusForbidden}
 	useExposeHub(t, hub.start(t))
@@ -162,6 +192,18 @@ func TestExpose_List(t *testing.T) {
 		"9000\t-\t"+srv.URL+"/p/9000/\n", out)
 }
 
+func TestExpose_ListAutoExposeEnabled(t *testing.T) {
+	t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+	t.Setenv("SCION_AUTO_EXPOSE_MODE", "denylist")
+	t.Setenv("SCION_AUTO_EXPOSE_INTERVAL", "10s")
+	useExposeHub(t, (&exposeTestHub{}).start(t))
+	exposeList = true
+
+	out, err := runExposeTest(t, runExpose)
+	require.NoError(t, err)
+	assert.Equal(t, "Auto-expose: enabled (mode: denylist, interval: 10s)\nNo ports exposed.\n", out)
+}
+
 func TestExpose_ListEmpty(t *testing.T) {
 	t.Setenv("SCION_AUTO_EXPOSE_PORTS", "false")
 	useExposeHub(t, (&exposeTestHub{}).start(t))
@@ -172,17 +214,20 @@ func TestExpose_ListEmpty(t *testing.T) {
 	assert.Equal(t, "Auto-expose: disabled\nNo ports exposed.\n", out)
 }
 
-func TestExpose_ArgumentErrors(t *testing.T) {
-	useExposeHub(t, (&exposeTestHub{}).start(t))
+// Both commands check their arguments before the client, so a bad port is
+// reported even without an agent hub identity.
+func TestExpose_ArgumentsCheckedBeforeClient(t *testing.T) {
+	resetExposeFlags(t)
+	orig := newExposeHubClient
+	newExposeHubClient = func() *sciontoolhub.Client { return nil }
+	t.Cleanup(func() { newExposeHubClient = orig })
 
 	_, err := runExposeTest(t, runExpose)
 	require.EqualError(t, err, "port is required")
-
-	_, err = runExposeTest(t, runExpose, "http")
-	require.EqualError(t, err, `invalid port "http"`)
-
-	_, err = runExposeTest(t, runUnexpose, "http")
-	require.EqualError(t, err, `invalid port "http"`)
+	_, err = runExposeTest(t, runExpose, "abc")
+	require.EqualError(t, err, `invalid port "abc"`)
+	_, err = runExposeTest(t, runUnexpose, "abc")
+	require.EqualError(t, err, `invalid port "abc"`)
 }
 
 func TestUnexpose_DeletesPort(t *testing.T) {
@@ -228,6 +273,17 @@ func TestExpose_RequiresAgentHubIdentity(t *testing.T) {
 // expose and unexpose act only as the calling agent, so they are available
 // in agent mode, and they need no local project.
 func TestExposeCommands_AgentModeAndNoProject(t *testing.T) {
+	// The registered flags and defaults (resetExposeFlags sets the
+	// variables directly, so this pins the real registration).
+	host := exposeCmd.Flags().Lookup("host")
+	require.NotNil(t, host)
+	assert.Equal(t, "127.0.0.1", host.DefValue)
+	for _, name := range []string{"label", "list"} {
+		require.NotNil(t, exposeCmd.Flags().Lookup(name), "expose --%s must be registered", name)
+	}
+	assert.Equal(t, "", exposeCmd.Flags().Lookup("label").DefValue)
+	assert.Equal(t, "false", exposeCmd.Flags().Lookup("list").DefValue)
+
 	for _, name := range []string{"expose", "unexpose"} {
 		assert.True(t, agentAllowed[name], "agentAllowed should contain %s", name)
 		real := resolveCommandPath(rootCmd, name)

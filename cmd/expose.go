@@ -93,10 +93,17 @@ func exposeClient() (*sciontoolhub.Client, error) {
 
 func runExpose(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
+	// Arguments are checked before the client, as in unexpose.
+	var port int
 	if !exposeList {
 		if len(args) != 1 {
 			return fmt.Errorf("port is required")
 		}
+		p, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("invalid port %q", args[0])
+		}
+		port = p
 	}
 	client, err := exposeClient()
 	if err != nil {
@@ -130,10 +137,6 @@ func runExpose(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	port, err := strconv.Atoi(args[0])
-	if err != nil {
-		return fmt.Errorf("invalid port %q", args[0])
-	}
 	resp, err := client.RegisterPort(ctx, sciontoolhub.RegisterPortRequest{
 		Port:  port,
 		Label: exposeLabel,
