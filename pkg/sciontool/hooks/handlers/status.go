@@ -54,6 +54,9 @@ func (h *StatusHandler) update(mutate func(info map[string]interface{}) bool) er
 	if opts.Logf == nil {
 		opts.Logf = log.Debug
 	}
+	if opts.Warnf == nil {
+		opts.Warnf = log.Warn
+	}
 	return agentinfolock.Update(h.StatusPath, opts, func() error {
 		info := h.readAgentInfoMap()
 		if !mutate(info) {

@@ -20,7 +20,12 @@ import (
 func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
 	f, err := openLockFile(lockPath)
 	if err != nil {
-		opts.logf("skipping lock %s, updating unlocked: %v", lockPath, err)
+		var nr *notRegularError
+		if errors.As(err, &nr) {
+			opts.warnf("agent-info lock file is not a regular file (%s), writing without lock: %s", nr.kind, lockPath)
+		} else {
+			opts.warnf("agent-info lock file cannot be opened, writing without lock: %s: %v", lockPath, err)
+		}
 		return nil, false
 	}
 	wait := opts.wait()
@@ -33,7 +38,7 @@ func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
 			_ = f.Close()
-			opts.logf("cannot lock %s, updating unlocked: %v", lockPath, err)
+			opts.warnf("agent-info lock file cannot be locked, writing without lock: %s: %v", lockPath, err)
 			return nil, false
 		}
 		if !time.Now().Before(deadline) {
@@ -52,8 +57,29 @@ func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
 	}, true
 }
 
-// errNotRegular reports a lock path that is not a single-link regular file.
-var errNotRegular = errors.New("lock file is not a single-link regular file")
+// notRegularError reports a lock path that is not a single-link regular
+// file. kind is a plain word for the log: fifo, directory, symlink or other
+// (a socket, a device, or a regular file with more than one link).
+type notRegularError struct {
+	kind string
+}
+
+func (e *notRegularError) Error() string {
+	return "lock file is not a single-link regular file (" + e.kind + ")"
+}
+
+// fileKind names the file type in mode (an S_IFMT value) for the log.
+func fileKind(mode uint32) string {
+	switch mode & unix.S_IFMT {
+	case unix.S_IFIFO:
+		return "fifo"
+	case unix.S_IFDIR:
+		return "directory"
+	case unix.S_IFLNK:
+		return "symlink"
+	}
+	return "other"
+}
 
 // openLockFile opens (creating if needed) the lock file relative to its
 // parent directory. The leaf is opened O_NOFOLLOW so a symlink is refused,
@@ -86,8 +112,12 @@ func openLockFile(lockPath string) (*os.File, error) {
 		}
 	}
 	if err != nil {
-		if errors.Is(err, unix.ELOOP) {
-			return nil, errNotRegular
+		// Name the type when the open failed because of what is there
+		// (ELOOP for a symlink under O_NOFOLLOW, EISDIR, ENXIO for a
+		// socket, ...). The lstat is only for the log.
+		var st unix.Stat_t
+		if serr := unix.Fstatat(dirFd, leaf, &st, unix.AT_SYMLINK_NOFOLLOW); serr == nil && st.Mode&unix.S_IFMT != unix.S_IFREG {
+			return nil, &notRegularError{kind: fileKind(uint32(st.Mode))}
 		}
 		return nil, err
 	}
@@ -99,7 +129,7 @@ func openLockFile(lockPath string) (*os.File, error) {
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 {
 		_ = f.Close()
-		return nil, errNotRegular
+		return nil, &notRegularError{kind: fileKind(uint32(st.Mode))}
 	}
 	if created {
 		// The umask narrowed the create mode; widen it on the fd.

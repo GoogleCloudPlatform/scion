@@ -20,9 +20,9 @@ Copyright 2026 The Scion Authors.
 // The lock is best effort and never blocks or fails an update: hooks and the
 // broker's agent list must stay non-blocking. When the lock file is not a
 // regular file (the workload owns the agent home and can put anything there)
-// or cannot be opened, the update runs without the lock and a message is
-// logged. When another holder keeps the lock longer than the wait, the update
-// also runs without it. The unlocked path calls the same rmw func, so the
+// or cannot be opened, the update runs without the lock and a warning naming
+// the file type and path is logged. When another holder keeps the lock longer
+// than the wait, the update also runs without it (logged at debug). The unlocked path calls the same rmw func, so the
 // read and write are the same either way.
 //
 // flock is advisory and per open file description, which covers processes on
@@ -58,10 +58,15 @@ const (
 
 // Options tunes Update. The zero value uses DefaultWait and slog.Debug.
 type Options struct {
-	// Wait bounds how long to wait for the lock. Zero means DefaultWait.
+	// Wait bounds how long to wait for the lock. Zero means DefaultWait, or
+	// in test binaries only, TestWaitEnv when it is set. A non-zero Wait
+	// always takes precedence over TestWaitEnv.
 	Wait time.Duration
-	// Logf receives the skip and timeout messages. Nil means slog.Debug.
+	// Logf receives the timeout message. Nil means slog.Debug.
 	Logf func(format string, args ...any)
+	// Warnf receives the message for a lock file that is not a regular
+	// file or cannot be opened or locked. Nil means slog.Warn.
+	Warnf func(format string, args ...any)
 }
 
 // TestWaitEnv sets the lock wait in test binaries only (it is ignored
@@ -90,6 +95,14 @@ func (o Options) logf(format string, args ...any) {
 		return
 	}
 	slog.Debug("agent-info lock", "detail", fmt.Sprintf(format, args...))
+}
+
+func (o Options) warnf(format string, args ...any) {
+	if o.Warnf != nil {
+		o.Warnf(format, args...)
+		return
+	}
+	slog.Warn(fmt.Sprintf(format, args...))
 }
 
 // LockPath returns the lock file path for an agent-info.json path.

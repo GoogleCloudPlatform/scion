@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -142,11 +143,13 @@ func TestStatusHandlerSkipsNonRegularLockFile(t *testing.T) {
 
 	cases := []struct {
 		name  string
+		kind  string // file type word expected in the warning
 		plant func(t *testing.T, lockPath string)
 		check func(fi os.FileInfo) bool
 	}{
 		{
 			name: "symlink to a held lock",
+			kind: "symlink",
 			plant: func(t *testing.T, lockPath string) {
 				target := filepath.Join(t.TempDir(), "held")
 				f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, 0o644)
@@ -159,6 +162,7 @@ func TestStatusHandlerSkipsNonRegularLockFile(t *testing.T) {
 		},
 		{
 			name: "fifo",
+			kind: "fifo",
 			plant: func(t *testing.T, lockPath string) {
 				require.NoError(t, syscall.Mkfifo(lockPath, 0o644))
 			},
@@ -166,6 +170,7 @@ func TestStatusHandlerSkipsNonRegularLockFile(t *testing.T) {
 		},
 		{
 			name: "directory",
+			kind: "directory",
 			plant: func(t *testing.T, lockPath string) {
 				require.NoError(t, os.Mkdir(lockPath, 0o755))
 			},
@@ -176,6 +181,8 @@ func TestStatusHandlerSkipsNonRegularLockFile(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, path := newHome(t)
 			tc.plant(t, path+".lock")
+			logPath := filepath.Join(t.TempDir(), "agent.log")
+			log.SetLogPath(logPath)
 
 			start := time.Now()
 			require.NoError(t, h.SetMessage("skipped"))
@@ -190,6 +197,10 @@ func TestStatusHandlerSkipsNonRegularLockFile(t *testing.T) {
 			fi, err := os.Lstat(path + ".lock")
 			require.NoError(t, err)
 			assert.True(t, tc.check(fi), "lock path changed: mode %v", fi.Mode())
+
+			logData, err := os.ReadFile(logPath)
+			require.NoError(t, err)
+			assert.Contains(t, string(logData), "[WARN] agent-info lock file is not a regular file ("+tc.kind+"), writing without lock: "+path+".lock")
 		})
 	}
 }
