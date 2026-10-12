@@ -83,7 +83,7 @@ func NewGovernanceService(s store.Store, preview *PreviewService, authz *AuthzSe
 
 // commitEventTypes maps operation names to their corresponding event type
 // constants. Used by the commit path instead of string concatenation to
-// ensure we use the canonical constants (R3).
+// ensure we use the canonical constants.
 var commitEventTypes = map[string]string{
 	"create": EventBoundaryCreated,
 	"update": EventBoundaryUpdated,
@@ -110,7 +110,7 @@ type CommitRequest struct {
 	PreviewToken string
 
 	// PreviewID is the semantic preview identifier from the PreviewResult.
-	// Populated from the preview validation step (B3) rather than being
+	// Populated from the preview token validation rather than being
 	// extracted by slicing the opaque token.
 	PreviewID string
 
@@ -165,7 +165,7 @@ func (e *GovernanceError) Error() string {
 //
 // Transaction steps:
 //
-//	a. Validate the preview token (B3's ValidateToken)
+//	a. Validate the preview token (PreviewService.ValidateToken)
 //	b. Re-read the boundary (if update/delete) and verify revision matches
 //	c. Re-read relevant state: role bindings, group memberships, principal
 //	   status, permission registry — scoped to the subject/scope under change
@@ -380,7 +380,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 }
 
 // ---------------------------------------------------------------------------
-// Compensating actions for audit failure (R1)
+// Compensating actions for audit failure
 // ---------------------------------------------------------------------------
 
 // compensateAuditFailure undoes the store mutation when the subsequent audit
