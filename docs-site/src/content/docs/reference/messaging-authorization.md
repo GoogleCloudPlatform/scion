@@ -165,12 +165,12 @@ in an existing cross-project DM.
 
 A group conversation has no single recipient, so the sender's mode alone
 decides agent posts to it. `project` and `hub` agents may post to any group
-conversation in their project, and posting adds them as participants.
-`lineage` and `branch` agents may post only to a group conversation they
-already belong to, and only a human allowed to message them (an ancestry
-user, a project owner, or a super-admin) can add them. `none` agents never
-post to group conversations or join them. A refused post or add returns
-403 `message_denied`.
+conversation in their project, and posting to a conversation by ID adds them
+as participants. `lineage` and `branch` agents may post only to a group
+conversation they already belong to, and only a human allowed to message
+them (an ancestry user, a project owner, or a super-admin) can add them.
+`none` agents never post to group conversations, and agents or other users
+cannot add them. A refused post or add returns 403 `message_denied`.
 
 ### System to Agent
 

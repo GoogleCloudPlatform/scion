@@ -16,8 +16,10 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -52,7 +54,7 @@ type groupPostDecision struct {
 	// Allowed reports whether the agent may post to the conversation.
 	Allowed bool
 	// MayJoin reports whether posting may register the agent as a
-	// participant of the conversation. It is false whenever Allowed is.
+	// participant of the conversation. It is false whenever Allowed is false.
 	MayJoin bool
 	// Reason is a stable, short reason for logs and the denial body.
 	Reason string
@@ -67,6 +69,7 @@ const (
 	groupModeReasonParticipant       = "sender_is_group_participant"
 	groupModeReasonTargetNone        = "target_message_mode_none"
 	groupModeReasonTargetNarrowAdder = "target_message_mode_requires_authorized_human"
+	groupModeReasonLookupFailed      = "lookup_failed"
 )
 
 // agentGroupPostDecision decides whether sender may post into the group
@@ -83,6 +86,8 @@ func (s *Server) agentGroupPostDecision(ctx context.Context, sender *store.Agent
 	case store.MessageModeProject, store.MessageModeHub:
 		return groupPostDecision{Allowed: true, MayJoin: true, Reason: groupModeReasonProjectCell}, nil
 	case store.MessageModeLineage, store.MessageModeBranch:
+		// isConversationParticipant uses ListParticipants, which returns
+		// only active rows (left_at IS NULL); a left row must not count.
 		member, err := isConversationParticipant(ctx, s.store, conversationID, "agent", sender.ID)
 		if err != nil {
 			return groupPostDecision{}, err
@@ -111,12 +116,15 @@ func (s *Server) groupAgentJoinAllowed(ctx context.Context, adder Identity, targ
 	case store.MessageModeNone:
 		return false, groupModeReasonTargetNone
 	case store.MessageModeLineage, store.MessageModeBranch:
+		// Only a human adder qualifies, decided by the identity's type,
+		// not its Type() string.
 		if isNilIdentity(adder) {
 			return false, groupModeReasonTargetNarrowAdder
 		}
-		switch adder.Type() {
-		case "user", "dev", "federated_user":
-		default:
+		if _, isAgent := adder.(AgentIdentity); isAgent {
+			return false, groupModeReasonTargetNarrowAdder
+		}
+		if _, isUser := adder.(UserIdentity); !isUser {
 			return false, groupModeReasonTargetNarrowAdder
 		}
 		if allowed, _, _ := s.authorizeAgentMessage(ctx, adder, target, false); !allowed {
@@ -138,7 +146,7 @@ func (s *Server) checkAgentGroupPost(ctx context.Context, w http.ResponseWriter,
 			"conversation_id", conversationID, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"conversation participant lookup failed", nil)
-		return groupPostDecision{Reason: "lookup_failed"}, false
+		return groupPostDecision{Reason: groupModeReasonLookupFailed}, false
 	}
 	if !decision.Allowed {
 		mode := ""
@@ -168,15 +176,78 @@ func writeGroupModeDenied(w http.ResponseWriter, reason, mode string) {
 	})
 }
 
-// groupModeMayPostAsParticipant reports whether mode can ever post to a
-// group conversation: the project cell always, lineage and branch as an
-// existing participant. none and unknown modes never can.
-func groupModeMayPostAsParticipant(mode string) bool {
-	switch effectiveGroupMessageMode(mode) {
-	case store.MessageModeLineage, store.MessageModeBranch, store.MessageModeProject, store.MessageModeHub:
+// precheckThreadGroupPost decides, before a thread conversation is
+// resolved (which may create it), whether sender's message mode can allow
+// the post at all. project and hub senders go on. A lineage or branch
+// sender goes on only when the thread conversation already exists, since
+// it can post only as an existing participant; the full decision runs
+// after resolution. none and unknown modes are refused. A refusal or a
+// lookup fault is written to w; ok reports whether the caller may go on.
+// surface is the conversation surface for an external channel, or "" for
+// native.
+func (s *Server) precheckThreadGroupPost(ctx context.Context, w http.ResponseWriter, sender *store.Agent, projectID, extRef, threadID, surface string) bool {
+	mode := effectiveGroupMessageMode(sender.MessageMode)
+	switch mode {
+	case store.MessageModeProject, store.MessageModeHub:
 		return true
+	case store.MessageModeLineage, store.MessageModeBranch:
+		exists, err := s.threadConversationExists(ctx, projectID, extRef, threadID, surface)
+		if err != nil {
+			s.messageLog.Error("group post: thread conversation lookup failed",
+				"thread_id", threadID, "sender_id", sender.ID, "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"thread conversation lookup failed", nil)
+			return false
+		}
+		if exists {
+			return true
+		}
+		s.refuseGroupPost(w, sender, groupModeReasonNotParticipant)
+		return false
+	case store.MessageModeNone:
+		s.refuseGroupPost(w, sender, groupModeReasonSenderNone)
+		return false
+	default:
+		s.refuseGroupPost(w, sender, groupModeReasonUnknownMode)
+		return false
 	}
-	return false
+}
+
+// threadConversationExists reports whether the thread conversation keyed
+// by extRef already exists, without creating it: for a native thread, the
+// same lookup the outbound thread check uses (a visible topic, then the
+// conversation row); for an external channel, the row under its surface.
+func (s *Server) threadConversationExists(ctx context.Context, projectID, extRef, threadID, surface string) (bool, error) {
+	if surface == "" {
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		var tl messaging.TopicConversationLookup
+		if wcs != nil {
+			tl = wcs
+		}
+		state, err := outboundThreadConversationState(ctx, s.store, tl, projectID, extRef, threadID)
+		if err != nil {
+			return false, err
+		}
+		return state == outboundThreadExists, nil
+	}
+	if _, err := s.store.GetConversationByExternalRef(ctx, surface, extRef); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// refuseGroupPost logs and writes the refusal of sender's group post.
+func (s *Server) refuseGroupPost(w http.ResponseWriter, sender *store.Agent, reason string) {
+	s.messageLog.Info("group post refused by message mode",
+		"sender_id", sender.ID,
+		"mode", sender.MessageMode,
+		"reason", reason)
+	writeGroupModeDenied(w, reason, sender.MessageMode)
 }
 
 // loadGroupPostSender reads the sending agent's current record for a group
@@ -184,9 +255,15 @@ func groupModeMayPostAsParticipant(mode string) bool {
 // failed read writes the refusal; ok reports whether the caller may go on.
 func (s *Server) loadGroupPostSender(ctx context.Context, w http.ResponseWriter, senderID string) (*store.Agent, bool) {
 	sender, err := s.store.GetAgent(ctx, senderID)
-	if err != nil || sender == nil {
-		s.messageLog.Warn("group post: sender agent lookup failed",
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.messageLog.Error("group post: sender agent lookup failed",
 			"sender_id", senderID, "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"sender agent lookup failed", nil)
+		return nil, false
+	}
+	if err != nil || sender == nil {
+		s.messageLog.Warn("group post: sender agent not found", "sender_id", senderID)
 		writeGroupModeDenied(w, groupModeReasonUnknownMode, "")
 		return nil, false
 	}

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -120,10 +121,22 @@ func requireGroupModeDenied(t *testing.T, rr *httptest.ResponseRecorder, msgAndA
 // group conversation named by conversationID or threadID.
 func postOutboundGroup(t *testing.T, srv *Server, a *store.Agent, recipientEmail, conversationID, threadID string) *httptest.ResponseRecorder {
 	t.Helper()
+	return postOutboundGroupWith(t, srv, a, recipientEmail, conversationID, threadID, "group post from "+a.Slug)
+}
+
+// postOutboundGroupMsg is postOutboundGroup by conversation_id with the
+// given message body.
+func postOutboundGroupMsg(t *testing.T, srv *Server, a *store.Agent, recipientEmail, conversationID, msg string) *httptest.ResponseRecorder {
+	t.Helper()
+	return postOutboundGroupWith(t, srv, a, recipientEmail, conversationID, "", msg)
+}
+
+func postOutboundGroupWith(t *testing.T, srv *Server, a *store.Agent, recipientEmail, conversationID, threadID, msg string) *httptest.ResponseRecorder {
+	t.Helper()
 	srv.chatSendLimiter = newChatSendLimiter()
 	r := OutboundMessageRequest{
 		Recipient:      "user:" + recipientEmail,
-		Msg:            "group post from " + a.Slug,
+		Msg:            msg,
 		ConversationID: conversationID,
 		ThreadID:       threadID,
 	}
@@ -363,7 +376,7 @@ func TestGroupMessageMode_InboundPost(t *testing.T) {
 
 					allowed := groupModeIsProjectCell(mode) || (groupModeIsNarrow(mode) && added)
 					if allowed {
-						assert.NotEqual(t, http.StatusForbidden, rr.Code, "body: %s", rr.Body.String())
+						assert.Contains(t, []int{http.StatusOK, http.StatusAccepted}, rr.Code, "body: %s", rr.Body.String())
 					} else {
 						requireGroupModeDenied(t, rr, "body: %s", rr.Body.String())
 					}
@@ -395,7 +408,7 @@ func TestGroupMessageMode_InboundRecipientJoin(t *testing.T) {
 		addConvParticipant(t, s, conv.ID, "agent", parent.ID)
 
 		rr := postInboundGroup(t, srv, parent, child, conv.ID, "")
-		assert.NotEqual(t, http.StatusForbidden, rr.Code, "body: %s", rr.Body.String())
+		assert.Contains(t, []int{http.StatusOK, http.StatusAccepted}, rr.Code, "body: %s", rr.Body.String())
 		assert.False(t, groupModeIsParticipant(t, s, conv.ID, "agent", child.ID),
 			"an agent sender does not add a branch agent to a group conversation")
 	})
@@ -406,7 +419,7 @@ func TestGroupMessageMode_InboundRecipientJoin(t *testing.T) {
 		conv := groupModeConversation(t, s, projectID, "")
 
 		rr := postInboundGroup(t, srv, sender, target, conv.ID, "")
-		assert.NotEqual(t, http.StatusForbidden, rr.Code, "body: %s", rr.Body.String())
+		assert.Contains(t, []int{http.StatusOK, http.StatusAccepted}, rr.Code, "body: %s", rr.Body.String())
 		assert.True(t, groupModeIsParticipant(t, s, conv.ID, "agent", target.ID))
 		assert.True(t, groupModeIsParticipant(t, s, conv.ID, "agent", sender.ID))
 	})
@@ -477,8 +490,9 @@ func TestGroupMessageMode_CreateConversation(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			a := groupModeAgent(t, s, project.ID, "", mode)
 			grantAgentProjectAccess(t, s, a.ID, project.ID)
+			name := "gmm-create-" + uuid.NewString()[:8]
 			body, err := json.Marshal(createConversationRequest{
-				DisplayName: "gmm-create-" + uuid.NewString()[:8],
+				DisplayName: name,
 				ProjectID:   project.ID,
 				Kind:        "group",
 			})
@@ -493,6 +507,104 @@ func TestGroupMessageMode_CreateConversation(t *testing.T) {
 			} else {
 				requireGroupModeDenied(t, rr, "body: %s", rr.Body.String())
 			}
+			assert.Equal(t, groupModeIsProjectCell(mode), groupModeConversationNamed(t, s, project.ID, name),
+				"a refused create writes no conversation")
 		})
 	}
+}
+
+// groupModeConversationNamed reports whether projectID has a conversation
+// with the given display name.
+func groupModeConversationNamed(t *testing.T, s store.Store, projectID, name string) bool {
+	t.Helper()
+	res, err := s.ListConversations(context.Background(), store.ConversationFilter{ProjectID: projectID}, store.ListOptions{Limit: 200})
+	require.NoError(t, err)
+	for _, c := range res.Items {
+		if c.DisplayName == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestGroupMessageMode_NewThreadPost covers an agent message naming a
+// thread that does not exist yet: it is refused for none, lineage and
+// branch agents with no conversation created, and accepted for project
+// and hub agents.
+func TestGroupMessageMode_NewThreadPost(t *testing.T) {
+	srv, s, projectID, target, _ := def49Setup(t)
+	brokerID := target.RuntimeBrokerID
+	ctx := context.Background()
+
+	for _, mode := range groupModeTestModes {
+		t.Run(mode, func(t *testing.T) {
+			a := groupModeAgent(t, s, projectID, brokerID, mode)
+			threadID := "gmm-new-" + uuid.NewString()[:8]
+			extRef, err := messaging.ThreadConversationExternalRef(projectID, threadID)
+			require.NoError(t, err)
+
+			rr := postInboundGroup(t, srv, a, a, "", threadID)
+			_, lookupErr := s.GetConversationByExternalRef(ctx, "native", extRef)
+			if groupModeIsProjectCell(mode) {
+				assert.Contains(t, []int{http.StatusOK, http.StatusAccepted}, rr.Code, "body: %s", rr.Body.String())
+				assert.NoError(t, lookupErr)
+			} else {
+				requireGroupModeDenied(t, rr, "body: %s", rr.Body.String())
+				assert.True(t, errors.Is(lookupErr, store.ErrNotFound),
+					"a refused post creates no conversation (err=%v)", lookupErr)
+			}
+		})
+	}
+}
+
+// TestGroupMessageMode_MentionJoin covers agents mentioned in an agent's
+// group post: a branch child mentioned by its branch parent is delivered
+// the mention but not registered as a participant; a project agent
+// mentioned by a project agent is delivered and registered.
+func TestGroupMessageMode_MentionJoin(t *testing.T) {
+	srv, s, project, sender, target, _, _, dispatcher := mentionFanoutSetup(t)
+	wireWebBrokerForMentionTests(t, srv, s, project.ID, dispatcher)
+	ctx := context.Background()
+
+	recipient := &store.User{ID: uuid.NewString(), Email: "gmm-mj-" + uuid.NewString()[:8] + "@example.com", DisplayName: "GMM Recipient"}
+	require.NoError(t, s.CreateUser(ctx, recipient))
+
+	newAgent := func(slug, mode string, ancestry []string) *store.Agent {
+		a := &store.Agent{
+			ID:              uuid.NewString(),
+			Name:            slug,
+			Slug:            slug,
+			ProjectID:       project.ID,
+			Phase:           "running",
+			RuntimeBrokerID: target.RuntimeBrokerID,
+			MessageMode:     mode,
+			Ancestry:        ancestry,
+		}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		return a
+	}
+	parent := newAgent("gmm-mj-parent", store.MessageModeBranch, append([]string{}, sender.Ancestry...))
+	child := newAgent("gmm-mj-child", store.MessageModeBranch, append(append([]string{}, parent.Ancestry...), parent.ID))
+	peer := newAgent("gmm-mj-peer", store.MessageModeProject, append([]string{}, sender.Ancestry...))
+
+	t.Run("branch-child", func(t *testing.T) {
+		conv := groupModeConversation(t, s, project.ID, "")
+		addConvParticipant(t, s, conv.ID, "agent", parent.ID)
+
+		rr := postOutboundGroupMsg(t, srv, parent, recipient.Email, conv.ID, "@gmm-mj-child please take a look")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		require.Len(t, dispatchesTo(dispatcher, child.ID), 1, "the mention is delivered to the child")
+		assert.False(t, groupModeIsParticipant(t, s, conv.ID, "agent", child.ID),
+			"an agent's mention does not add a branch agent to the group conversation")
+	})
+
+	t.Run("project-peer", func(t *testing.T) {
+		conv := groupModeConversation(t, s, project.ID, "")
+
+		rr := postOutboundGroupMsg(t, srv, sender, recipient.Email, conv.ID, "@gmm-mj-peer please take a look")
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		require.Len(t, dispatchesTo(dispatcher, peer.ID), 1, "the mention is delivered to the peer")
+		assert.True(t, groupModeIsParticipant(t, s, conv.ID, "agent", peer.ID),
+			"a mentioned project agent is added to the group conversation")
+	})
 }

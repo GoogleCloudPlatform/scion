@@ -639,12 +639,11 @@ func (s *Server) resolveOutboundRouting(
 			s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
 				"thread_id", req.ThreadID, "agent_id", agent.ID, "error", deriveErr)
 		} else {
-			// A sender whose message mode never posts to group
-			// conversations is refused before any row is written.
-			if kind == "group" && !groupModeMayPostAsParticipant(agent.MessageMode) {
-				if decision, ok := s.checkAgentGroupPost(ctx, w, agent, ""); !ok {
-					return nil, fmt.Errorf("group post refused: %s", decision.Reason)
-				}
+			// The sender's message mode is checked before the thread
+			// conversation is resolved, so a refused post writes no row
+			// (group_message_mode.go).
+			if kind == "group" && !s.precheckThreadGroupPost(ctx, w, agent, agent.ProjectID, extRef, req.ThreadID, outboundThreadSurface(kind, req.Channel)) {
+				return nil, fmt.Errorf("group post refused by message mode")
 			}
 			var keyOpts []messaging.ConversationByKeyOption
 			s.mu.RLock()
@@ -2358,6 +2357,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// a conversation the mentioned agent already belongs to. Only the
 		// looked-up case is used to key a mention row's thread identity.
 		groupConvIsExistingReference := false
+		// threadPostSender is the agent sender's record, read once when it
+		// posts by thread key, for the message mode checks below.
+		var threadPostSender *store.Agent
 		if structuredMsg.ConversationID != "" {
 			// DEF-49 SECURITY: authorize the caller-supplied conversation_id
 			// against the authenticated sender before honouring it.
@@ -2531,17 +2533,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
 					"thread_id", structuredMsg.ThreadID, "error", deriveErr)
 			} else {
-				// An agent sender whose message mode never posts to group
-				// conversations is refused before any row is written.
+				// An agent sender's message mode is checked before the
+				// thread conversation is resolved, so a refused post writes
+				// no row (group_message_mode.go).
 				if kind == "group" && authKind == "agent" {
 					sender, ok := s.loadGroupPostSender(ctx, w, authID)
 					if !ok {
 						return
 					}
-					if !groupModeMayPostAsParticipant(sender.MessageMode) {
-						if _, ok := s.checkAgentGroupPost(ctx, w, sender, ""); !ok {
-							return
-						}
+					threadPostSender = sender
+					if !s.precheckThreadGroupPost(ctx, w, sender, agent.ProjectID, extRef, structuredMsg.ThreadID, "") {
+						return
 					}
 				}
 				var keyOpts []messaging.ConversationByKeyOption
@@ -2596,7 +2598,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// by thread key never registers the sender. The caller-supplied
 		// conversation_id branch above already decided this.
 		if convResult != nil && convResult.Kind == "group" && !groupConvIsExistingReference {
-			if authKind, authID := authenticatedSender(ctx); authKind == "agent" {
+			if threadPostSender != nil {
+				if _, ok := s.checkAgentGroupPost(ctx, w, threadPostSender, convResult.ConversationID); !ok {
+					return
+				}
+			} else if authKind, authID := authenticatedSender(ctx); authKind == "agent" {
 				if _, ok := s.checkInboundAgentGroupPost(ctx, w, authID, convResult.ConversationID); !ok {
 					return
 				}
