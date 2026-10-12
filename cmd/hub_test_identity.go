@@ -64,6 +64,13 @@ The access token of a test identity is written only to the file named by
 --out, which must not exist yet; it is created with mode 0600. The token is
 never printed.
 
+With a target-hub profile (see 'scion hub profile'), the commands act as the
+profile's issuer delegation on another test hub, issued identities go to the
+run cache (issue --as <alias> --run <label>), 'teardown --run <label>'
+removes a whole run, and the commands also run in agent mode, but only
+against a profile for another hub. 'delegate' is the human consent step on
+the target hub.
+
 Examples:
   # Issue a member identity; its token goes to ./fixture.token
   scion hub test-identity issue --role member --ttl 30m --purpose "e2e run" --out ./fixture.token
@@ -75,7 +82,11 @@ Examples:
   scion hub test-identity list
 
   # Delete a test identity when the run is done
-  scion hub test-identity delete <id>`,
+  scion hub test-identity delete <id>
+
+  # With a target-hub profile: issue into the run cache, then tear the run down
+  scion --hub-profile t1 hub test-identity issue --as owner --run r1
+  scion --hub-profile t1 hub test-identity teardown --run r1`,
 }
 
 var hubTestIdentityIssueCmd = &cobra.Command{

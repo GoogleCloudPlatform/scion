@@ -3057,10 +3057,17 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 // key "hub" as a string and collides with the struct-typed hub settings.
 // Hub settings come from the SCION_HUB_* variables (e.g.
 // SCION_HUB_ENDPOINT), which are unaffected.
+//
+// SCION_HUB_PROFILE and SCION_HUB_RUN select a CLI target-hub profile and
+// its run label (pkg/hubprofile, ptone/scion#4240). The CLI reads them
+// directly; left mapped they would land on hub.profile and hub.run, which
+// are not settings.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
 	"SCION_HUB",
+	"SCION_HUB_PROFILE",
+	"SCION_HUB_RUN",
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
