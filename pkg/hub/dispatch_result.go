@@ -53,7 +53,9 @@ type dispatchBrokerError struct {
 //     it is rebuilt alongside HubErrors;
 //   - SecretResolution reports a start, restart, create or finalize_env
 //     the executing node stopped because the agent's secrets could not be
-//     resolved (*secretResolutionError); the verb is rebuilt from the op.
+//     resolved, or its stored environment settings could not be read
+//     (*secretResolutionError); the verb is rebuilt from the op and the
+//     source from SecretResolutionSource.
 //
 // They are rebuilt in that order of precedence, after SecretResolution.
 type dispatchFailureEnvelope struct {
@@ -77,6 +79,10 @@ type dispatchFailureEnvelope struct {
 	// error stays in the executing node's log, and the requesting node
 	// rebuilds the fixed message from the row's op.
 	SecretResolution bool `json:"secretResolution,omitempty"`
+	// SecretResolutionSource is the error's Source when it is not the
+	// secret backend ("env_settings"); empty means secrets. A node that
+	// does not know the field rebuilds the secrets message.
+	SecretResolutionSource string `json:"secretResolutionSource,omitempty"`
 }
 
 // dispatchIdentityNotMapped is the wire form of an
@@ -161,6 +167,7 @@ func dispatchFailureResult(execErr error) string {
 	}
 	if isSecretResolutionError(execErr) {
 		env.SecretResolution = true
+		env.SecretResolutionSource = string(secretResolutionSourceOf(execErr))
 	}
 	if env.BrokerError == nil && env.EnvStillMissing == nil && len(env.HubErrors) == 0 && env.RuntimeTargetRefusal == nil &&
 		!env.AgentDeleted && env.IdentityNotMapped == nil && !env.SecretResolution {
@@ -181,7 +188,10 @@ func dispatchFailureResult(execErr error) string {
 func dispatchFailureError(d *store.BrokerDispatch) error {
 	env := decodeDispatchFailure(d.Result)
 	if env != nil && env.SecretResolution {
-		return fmt.Errorf("dispatch %s failed: %w", d.Op, &secretResolutionError{Verb: secretResolutionVerb(d.Op)})
+		return fmt.Errorf("dispatch %s failed: %w", d.Op, &secretResolutionError{
+			Verb:   secretResolutionVerb(d.Op),
+			Source: resolutionSource(env.SecretResolutionSource),
+		})
 	}
 	if env != nil && env.RuntimeTargetRefusal != nil && env.RuntimeTargetRefusal.Code != "" {
 		r := env.RuntimeTargetRefusal

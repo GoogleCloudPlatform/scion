@@ -215,6 +215,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `sync` | Y | - |
 | `templates` (all) | Y | - |
 | `tunnel` | Y | - |
+| `tunnel status` | Y | - |
 | `version` | Y | Y |
 | `help` | Y | Y |
 | `completion` | Y | - |

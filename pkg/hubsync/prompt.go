@@ -382,6 +382,8 @@ func ShowProjectUnlinkPrompt(projectName string, autoConfirm bool) bool {
 }
 
 // LinkOrDisableChoice represents the user's choice when project is not linked.
+// The disable choice was removed together with the route into local-only mode
+// from this prompt; the name stays until the prompt itself is removed.
 type LinkOrDisableChoice int
 
 const (
@@ -389,20 +391,19 @@ const (
 	LinkOrDisableCancel LinkOrDisableChoice = iota
 	// LinkOrDisableLink means the user chose to link the project.
 	LinkOrDisableLink
-	// LinkOrDisableDisable means the user chose to disable Hub.
-	LinkOrDisableDisable
 )
 
-// ShowProjectLinkOrDisablePrompt displays a prompt when Hub is enabled but project is not linked.
-// Returns the user's choice. Without a terminal (and without autoConfirm) it
-// does not read stdin and returns LinkOrDisableCancel.
+// ShowProjectLinkOrDisablePrompt displays a prompt when Hub is enabled but
+// project is not linked. It offers two choices, link or cancel, and returns
+// the user's choice. Without a terminal (and without autoConfirm) it does not
+// read stdin and returns LinkOrDisableCancel.
 func ShowProjectLinkOrDisablePrompt(projectName string, autoConfirm bool) LinkOrDisableChoice {
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintln(promptOut, "Hub is enabled but this project is not linked.")
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintln(promptOut, "Choose an option:")
 	_, _ = fmt.Fprintln(promptOut, "  [1] Link and sync project now")
-	_, _ = fmt.Fprintln(promptOut, "  [2] Disable Hub for this project")
+	_, _ = fmt.Fprintln(promptOut, "  [2] Cancel")
 	_, _ = fmt.Fprintln(promptOut)
 
 	if autoConfirm {
@@ -418,7 +419,7 @@ func ShowProjectLinkOrDisablePrompt(projectName string, autoConfirm bool) LinkOr
 
 	reader := bufio.NewReader(promptIn)
 	for {
-		_, _ = fmt.Fprint(promptOut, "Enter choice (or 'c' to cancel): ")
+		_, _ = fmt.Fprint(promptOut, "Enter choice: ")
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			return LinkOrDisableCancel
@@ -439,7 +440,7 @@ func ShowProjectLinkOrDisablePrompt(projectName string, autoConfirm bool) LinkOr
 		case 1:
 			return LinkOrDisableLink
 		case 2:
-			return LinkOrDisableDisable
+			return LinkOrDisableCancel
 		default:
 			_, _ = fmt.Fprintln(promptOut, "Invalid choice. Please enter 1 or 2.")
 		}

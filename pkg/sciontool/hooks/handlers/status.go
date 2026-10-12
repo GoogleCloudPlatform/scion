@@ -85,6 +85,14 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 		return h.UpdatePhase(result.phase, result.activity, "")
 	}
 
+	// A codex sub-agent's new-work or tool-start event is activity inside the
+	// parent's session, not the parent resuming. It follows the tool-end and
+	// agent-end rule: a status the parent agent set and still holds (for
+	// example an ask_user waiting_for_input, or completed) stays in place.
+	if isCodexSubagentEvent(event) && (isNewWorkEvent(event.Name) || event.Name == hooks.EventToolStart) {
+		return h.updateActivityIfNotSticky(result.activity, event.Data.ToolName, clearNotificationWaiting)
+	}
+
 	// New work events (prompt-submit, agent-start, session-start): always
 	// update activity unconditionally — clears any sticky state.
 	if isNewWorkEvent(event.Name) {
@@ -371,6 +379,20 @@ func isNewWorkEvent(name string) bool {
 		return true
 	}
 	return false
+}
+
+// isCodexSubagentEvent reports whether a codex hook event came from a
+// sub-agent rather than the parent agent. Codex sends the root session's
+// session_id on a sub-agent's hook events; only agent_id names the child.
+// An event whose agent_id is set and differs from session_id is therefore a
+// sub-agent's. Other dialects are not checked, so their handling is
+// unchanged.
+func isCodexSubagentEvent(event *hooks.Event) bool {
+	if event.Dialect != "codex" {
+		return false
+	}
+	agentID, _ := event.Data.Raw["agent_id"].(string)
+	return agentID != "" && agentID != event.Data.SessionID
 }
 
 // eventToPhaseActivity maps normalized events to phase/activity pairs.
