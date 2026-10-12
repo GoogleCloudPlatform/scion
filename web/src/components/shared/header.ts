@@ -41,7 +41,7 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { User } from '../../shared/types.js';
+import type { Project, User } from '../../shared/types.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../utils/feature-flags.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { apiFetch } from '../../client/api.js';
@@ -1469,12 +1469,8 @@ export class ScionHeader extends LitElement {
     try {
       const res = await apiFetch(`/api/v1/projects?slug=${encodeURIComponent(slug)}&limit=1`);
       if (res.ok) {
-        const data = (await res.json()) as {
-          items?: Array<{ id: string; slug: string }>;
-        };
-        if (data.items && data.items.length > 0) {
-          return data.items[0].id;
-        }
+        const data = (await res.json()) as { projects?: Project[] };
+        return data.projects?.[0]?.id ?? '';
       }
     } catch {
       // Slug resolution is best-effort; fall back to the top-level view.
