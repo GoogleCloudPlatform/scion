@@ -876,9 +876,9 @@ type legacyKeyAction struct {
 // using per-path state (keyed by the exact path given) — keyed additionally
 // by which legacy key the event is about, since one call can legitimately
 // migrate several distinct keys (a marker file's grove-id, grove-name and
-// grove-slug) and each of those must still be reported the first time. Every call still
-// re-examines the filesystem, so a file edited or migrated by another
-// process between calls is always picked up correctly.
+// grove-slug) and each of those must still be reported the first time.
+// Every call still re-examines the filesystem, so a file edited or
+// migrated by another process between calls is always picked up correctly.
 func migrateLegacyYAMLKeys(file string, renames []legacyYAMLKeyRename, report Reporter) map[string]string {
 	path := file
 	if resolved, err := filepath.EvalSymlinks(file); err == nil {
