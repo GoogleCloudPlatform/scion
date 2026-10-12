@@ -263,10 +263,10 @@ func purgeExpiredKeptAgentDir(agentName, agentDir, agentHome string, retention t
 
 // sweepExpiredKeptAgentDirs removes the expired kept directories in
 // agentsRoot other than skipName's (GetAgent handles that one itself).
-// Entries named like a directory being removed are skipped: they may belong
-// to another process's removal in progress.
 // homeOf returns an agent's home path. Only plain directories holding a
 // marker are considered; the retention is resolved only when one is found.
+// Entries named like a directory being removed are skipped: they may belong
+// to another process's removal in progress.
 func sweepExpiredKeptAgentDirs(agentsRoot, skipName string, homeOf func(name string) string) {
 	entries, err := os.ReadDir(agentsRoot)
 	if err != nil {
