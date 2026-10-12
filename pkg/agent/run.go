@@ -2525,7 +2525,9 @@ authDone:
 		// agent-info.json was set to "running" above, before the runtime
 		// launch. If the launch itself fails, keep the provisioned
 		// workspace but flip the local state to "error" so list/status do not
-		// report a phantom agent forever.
+		// report a phantom agent forever. This write comes after Run, so on a
+		// runtime whose Run fails after creating the container it may run
+		// while the container exists; tracked in ptone/scion#4815.
 		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
 			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
 		}

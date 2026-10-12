@@ -2640,8 +2640,8 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		// After the runtime delete the mark is advisory: the hub's agent
 		// row records the soft delete, and the mark only feeds local
 		// display. A failed mark (unparseable agent-info.json, a read-only
-		// home, a full disk) would not clear on a retry, so it is logged
-		// and the delete goes on.
+		// home, a full disk) may not clear on a retry, so it is logged and
+		// the delete still answers 204.
 		if markErr := markAgentSoftDeleted(target.name, projectPath, deletedAt); markErr != nil {
 			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", markErr)
 		}
@@ -2690,10 +2690,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	}
 	if err != nil {
 		// The delete failed. Unless only the file cleanup failed after a
-		// successful runtime delete (agent.ErrAgentFilesDelete, which has
-		// the soft-delete mark, since the pod is gone), the entry may still
-		// be there and no mark was written; the hub retries or reports the
-		// failure.
+		// successful runtime delete (agent.ErrAgentFilesDelete, for which
+		// the soft-delete mark was attempted, since the pod is gone), the
+		// entry may still be there and no mark was written; the hub
+		// retries or reports the failure.
 		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}

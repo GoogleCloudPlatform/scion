@@ -110,7 +110,9 @@ func TestDeleteAgent_SoftDeleteMarkAfterContainerStopped(t *testing.T) {
 // After a successful runtime delete the mark is advisory (the hub's agent
 // row records the soft delete), so a mark that cannot be written, here
 // because agent-info.json is not valid JSON, is logged as a warning and the
-// delete still answers 204.
+// delete still answers 204. This guards existing behaviour (main also
+// answers 204 with a warning here); it fails if a failed post-delete mark
+// fails the delete.
 func TestDeleteAgent_SoftDeleteMarkFailure_Warns204(t *testing.T) {
 	rt := newNameHeldRuntime("run-old")
 	mgr := &k8sStyleManager{real: agent.NewManager(rt)}
