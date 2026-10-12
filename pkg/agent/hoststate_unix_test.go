@@ -160,7 +160,7 @@ func TestHostStateUnlockedParallelWritesStayWhole(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") {
+		if strings.HasPrefix(e.Name(), "."+HostStateFile+".tmp-") {
 			t.Fatalf("temp file left: %s", e.Name())
 		}
 	}

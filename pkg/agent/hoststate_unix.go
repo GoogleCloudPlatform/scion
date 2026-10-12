@@ -36,7 +36,7 @@ import (
 const hostStateNoFollowParent = true
 
 // hostStateDir is agentDir opened once: the resolved trusted root, then
-// each component below it with openat(O_DIRECTORY|O_NOFOLLOW). Every later
+// each component below it with openat(O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK). Every later
 // operation on HostStateFile (open, temp create, rename) goes through the
 // fd, so a symlink swapped into the path afterwards is not followed either.
 type hostStateDir struct {
@@ -49,7 +49,9 @@ type hostStateDir struct {
 // below the root makes it fail. A missing component gives an error that
 // matches fs.ErrNotExist.
 func openHostStateDir(l hostStateLayout) (*hostStateDir, error) {
-	const dirFlags = unix.O_DIRECTORY | unix.O_RDONLY | unix.O_CLOEXEC
+	// O_NONBLOCK keeps a FIFO component from blocking the open on a
+	// platform where O_DIRECTORY does not refuse it first.
+	const dirFlags = unix.O_DIRECTORY | unix.O_RDONLY | unix.O_NONBLOCK | unix.O_CLOEXEC
 	fd, err := unix.Open(l.root, dirFlags, 0)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: l.root, Err: err}
@@ -116,9 +118,10 @@ func (d *hostStateDir) openFile() (*os.File, error) {
 //
 // The helper names the temp file by pid and nanosecond time and does not
 // retry. Two goroutines in one process can only race for a name when the
-// lock is unusable; the loser's O_EXCL create then fails with EEXIST and
-// it writes nothing, so a collision fails the update and never corrupts
-// the file.
+// update runs unlocked: the lock file is unusable, or another holder keeps
+// the lock past the wait. The loser's O_EXCL create then fails with EEXIST
+// and it writes nothing, so a collision fails that update (the error wraps
+// EEXIST) and never corrupts the file.
 func (d *hostStateDir) writeFile(data []byte) error {
 	return dirfd.WriteAtNoFollowWithChown(d.fd, HostStateFile, filepath.Join(d.path, HostStateFile),
 		data, 0o600, -1, -1, dirfd.ReplaceLeaf, syscall.Fchown)

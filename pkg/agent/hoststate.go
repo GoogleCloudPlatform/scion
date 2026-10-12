@@ -40,30 +40,41 @@ import (
 // Callers name the file by a trusted root and an agent name, never by a
 // path: agentDir is <root>/.scion/agents/<name>, built here with the
 // config agent-dir layout helpers. The root is the broker-side directory
-// that holds the project's .scion DIRECTORY (not a .scion marker file):
+// that holds the .scion DIRECTORY the agent's state is under. It follows
+// how pkg/config picks agentDir, which depends on whether the project's
+// .scion is a directory or a marker file and on shared-workspace mode, not
+// on whether the project is hub-native or linked:
 //
-//   - a linked git project (agent state in the project): the project's
-//     checkout directory;
-//   - a hub-native project, a non-git linked project, or a shared-workspace
-//     git project: the external project-configs directory
-//     ~/.scion/project-configs/<slug>__<project-id>. In these layouts the
-//     .scion inside the project directory is only a marker file, and
-//     passing the project directory as the root fails with
-//     errHostStateMarkerFile;
+//   - worktree mode with a .scion directory in the project (a linked git
+//     checkout, or a hub-native clone with an in-repo .scion): the project
+//     directory;
+//   - a .scion marker file in the project (a non-git linked project, or a
+//     hub-native project without an in-repo .scion), or shared-workspace
+//     mode: the external project-configs directory. Derive it with the
+//     config helpers, never by hand: the parent of
+//     config.ProjectMarker{ProjectID: <broker-held ID>, ...}.ExternalProjectPath(),
+//     or two levels above config.AgentsRootForProject(projectDir, true,
+//     <broker-held ID>) with a non-empty ID. Passing the project directory
+//     itself here fails with errHostStateMarkerFile;
 //   - the global project: $HOME.
+//
+// A wrong root that still exists usually has no agentDir below it, and
+// then ReadHostState returns the zero HostState with a nil error, so
+// callers must pick the root as above rather than probe for it.
 //
 // The caller derives the root from broker configuration and from the
 // project ID the broker itself holds (its hub record or broker settings),
 // never from the project-id in a marker file, from anything stored under
-// agentDir, or from anything else in the project tree. When no
-// broker-held project ID is available for a layout that needs one, the
-// caller must refuse, not fall back to another root. The agent name comes
-// from the broker request or dispatch context, not from the project tree.
-// This package takes only the root and the name; mapping a project ID to a
-// root is the caller's job. Symlinks in the root's own path are resolved
-// once (EvalSymlinks) and trusted; below the root, every component
-// (.scion, agents, the agent name) is opened without following a symlink
-// on unix.
+// agentDir, or from anything else in the project tree. In particular it
+// must not use config.AgentsRootForProject with an empty ID, whose
+// fallback reads the marker. When no broker-held project ID is available
+// for a layout that needs one, the caller must refuse, not fall back to
+// another root. The agent name comes from the broker request or dispatch
+// context, not from the project tree. This package takes only the root
+// and the name; mapping a project ID to a root is the caller's job.
+// Symlinks in the root's own path are resolved once (EvalSymlinks) and
+// trusted; below the root, every component (.scion, agents, the agent
+// name) is opened without following a symlink on unix.
 //
 // The file is host-owned in the sense that the agent home and workspace,
 // which are mounted into the container, never contain it. That is not an
@@ -71,7 +82,9 @@ import (
 // some local setups (see the caveat on provisionedWorktreeStateFile in
 // provision.go, e.g. an explicit --workspace pointed at the project root).
 // Readers must therefore treat the content as data to validate, not as a
-// trusted input. ReadHostState and UpdateHostState refuse a symlinked file
+// trusted input: in layouts where agentDir sits inside repository content
+// (worktree mode with an in-repo .scion), a host-state.json committed to
+// the repository can be present before the host ever writes one. ReadHostState and UpdateHostState refuse a symlinked file
 // and cap reads at 64 KiB. A host-state.json with more than one hard link is
 // accepted: the write replaces the name, so another link to the old file is
 // left as it was. Serialization of concurrent updates is best effort (see
@@ -301,7 +314,9 @@ func readHostStateBytes(d *hostStateDir) ([]byte, error) {
 // which needs read permission on every ancestor directory; where that is
 // missing (say a 0711 ancestor owned by another user), the lock is
 // unusable and the update runs unlocked. Two concurrent unlocked updates
-// can lose one of their writes. Each write is still atomic (temp file,
+// can lose one of their writes, and one of them can also fail with an
+// error wrapping EEXIST when their temp file names collide (nothing is
+// written then). Each write is still atomic (temp file,
 // fsync and rename), so the file is never torn.
 func UpdateHostState(trustedRoot, agentName string, mutate func(*HostState) error) error {
 	l, err := resolveHostStateLayout(trustedRoot, agentName)
