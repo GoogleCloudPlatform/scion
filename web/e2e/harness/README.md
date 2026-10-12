@@ -156,8 +156,10 @@ Two more `startHub()` options, both off by default:
 
 `E2E_KEEP_HUB_STATE=1` makes `stopHub()` keep the hub's temp dir (the
 SQLite database, the private HOME and the hub's files) and print its
-path, for inspecting a run afterwards. It is off by default; remove the
-dir by hand when done.
+path, for inspecting a run afterwards. It is off by default. The dir
+contains hub credentials (dev token, session keys, test identity rows):
+do not copy it into evidence or artifacts, and remove it by hand when
+done.
 
 The `harness-selftest` suite (`e2e/harness-selftest/`) checks these
 options against a stand-in binary, without Go or a browser:

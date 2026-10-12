@@ -70,13 +70,7 @@ import {
   type SseLaunchRecord,
   type TimelineRow,
 } from './page-recorder.js';
-import {
-  classifyRead,
-  isGone,
-  parseTimeoutMs,
-  redactPath,
-  type ReadState,
-} from './journey-lib.js';
+import { classifyRead, isGone, parseTimeoutMs, redactPath, type ReadState } from './journey-lib.js';
 import {
   FORBIDDEN_HEADER_ACTIONS,
   IMAGE_FAILURE_CODES,
@@ -117,7 +111,11 @@ interface RequestRecord {
   method: string;
   path: string;
   status?: number;
+  /** No response: the request failed (failure holds the browser's reason). */
   failed?: boolean;
+  /** Answered, then aborted (e.g. the SSE stream when its page closes). */
+  abortedAfterResponse?: boolean;
+  failure?: string;
 }
 
 /** A main-frame navigation (document load or same-document URL change). */
@@ -169,7 +167,7 @@ const journey: {
   /** A2's running agent; A4 asserts the same harness config and a different image. */
   a2Running?: { image: string; harnessConfig: string };
   /** Every DELETE status per agent id (panel and cleanup), and whether a force was used. */
-  agentDeletes: Record<string, { statuses: number[]; forced: boolean }>;
+  agentDeletes: Record<string, { statuses: Array<number | null>; forced: boolean }>;
   evidence: Record<string, unknown>;
 } = { projectCreated: false, agents: [], agentDeletes: {}, evidence: {} };
 
@@ -253,7 +251,11 @@ async function trackedPage(): Promise<TrackedPage> {
   });
   page.on('requestfailed', (req) => {
     const rec = records.get(req);
-    if (rec) rec.failed = true;
+    if (!rec) return;
+    if (rec.status !== undefined) rec.abortedAfterResponse = true;
+    else rec.failed = true;
+    const reason = req.failure()?.errorText;
+    if (reason) rec.failure = reason;
   });
   page.on('framenavigated', (frame) => {
     if (frame === page.mainFrame()) {
@@ -502,39 +504,64 @@ function expectNoAuth(applied: AppliedConfigView | undefined): void {
 /** Deletes the agent from the failed-create panel and checks it is gone. */
 async function deleteFromPanel(
   tracked: TrackedPage,
-  agentId: string
-): Promise<{ forced: boolean }> {
+  agentId: string,
+  where: string,
+  evidence: Record<string, unknown>
+): Promise<void> {
   const { page } = tracked;
-  await incompleteDeleteButton(page).click();
-  await confirmDialogButton(page).click();
   // When the broker cannot remove the agent (e.g. no container runtime),
   // the hub answers 502/503 and the page offers its own Force Delete
   // confirm (agent-delete.ts). Take it, as a user would, and record it.
+  // Whatever happens (a failed force, a timeout), the finally records the
+  // DELETE answers and any force, so a later delete cannot hide them.
   let forced = false;
-  await expect
-    .poll(
-      async () => {
-        if (await agentGone(member(), agentId)) return true;
-        const force = confirmDialogButton(page, 'Force Delete');
-        if (!forced && (await force.count()) > 0 && (await force.first().isVisible())) {
-          await force.first().click();
-          forced = true;
-        }
-        return false;
-      },
-      { message: 'the agent is gone after Delete', timeout: 120_000 }
-    )
-    .toBe(true);
-  // The page's own DELETE answers for this agent (a 5xx = broker delete failed).
-  const statuses = tracked.requests
-    .filter((r) => r.method === 'DELETE' && r.path.endsWith(`/api/v1/agents/${agentId}`))
-    .map((r) => r.status ?? 0);
-  noteAgentDelete(agentId, statuses, forced);
-  return { forced };
+  try {
+    await incompleteDeleteButton(page).click();
+    await confirmDialogButton(page).click();
+    await expect
+      .poll(
+        async () => {
+          if (await agentGone(member(), agentId)) return true;
+          const force = confirmDialogButton(page, 'Force Delete');
+          if (!forced && (await force.count()) > 0 && (await force.first().isVisible())) {
+            forced = true;
+            await force.first().click();
+          }
+          return false;
+        },
+        { message: 'the agent is gone after Delete', timeout: 120_000 }
+      )
+      .toBe(true);
+    // The row can go before the DELETE answer arrives: wait (bounded) until
+    // every DELETE of the page is answered or failed.
+    await expect
+      .poll(() => panelDeletes(tracked, agentId).some((r) => r.status === undefined && !r.failed), {
+        timeout: 10_000,
+      })
+      .toBe(false)
+      .catch(() => undefined);
+  } finally {
+    // null = no answer (failed or still pending), never a made-up status.
+    const statuses = panelDeletes(tracked, agentId).map((r) => r.status ?? null);
+    noteAgentDelete(agentId, statuses, forced);
+    recordForcedDelete(where, forced);
+    Object.assign(evidence, {
+      panelDeleteStatuses: statuses,
+      deleteForced: forced,
+      launchCapable: target().launchCapable,
+    });
+  }
+}
+
+/** The page's own DELETE requests for the agent. */
+function panelDeletes(tracked: TrackedPage, agentId: string): RequestRecord[] {
+  return tracked.requests.filter(
+    (r) => r.method === 'DELETE' && r.path.endsWith(`/api/v1/agents/${agentId}`)
+  );
 }
 
 /** Records DELETE answers for an agent (see journey.agentDeletes). */
-function noteAgentDelete(agentId: string, statuses: number[], forced: boolean): void {
+function noteAgentDelete(agentId: string, statuses: Array<number | null>, forced: boolean): void {
   const entry = (journey.agentDeletes[agentId] ??= { statuses: [], forced: false });
   entry.statuses.push(...statuses);
   entry.forced ||= forced;
@@ -614,9 +641,11 @@ async function cleanUpAgentsAndProject(
         if (res.status() === 502 || res.status() === 503) {
           // The broker cannot remove it (e.g. no container runtime): the
           // same force delete the web UI falls back to.
+          // Recorded before the request, so a failing force is never lost.
+          noteAgentDelete(agent.id, [], true);
+          recordForcedDelete(`A5 cleanup (agent ${agent.check})`, true);
           const forced = await member().delete(`/api/v1/agents/${agent.id}?force=true`);
           noteAgentDelete(agent.id, [forced.status()], true);
-          recordForcedDelete(`A5 cleanup (agent ${agent.check})`, true);
         }
       }
       // Gone here means gone by its own delete, before the project delete
@@ -629,10 +658,12 @@ async function cleanUpAgentsAndProject(
           () => false
         );
       const deletes = journey.agentDeletes[agent.id] ?? { statuses: [], forced: false };
-      const brokerDeleteFailed = deletes.statuses.some((st) => st >= 500);
+      const brokerDeleteFailed = deletes.statuses.some((st) => st !== null && st >= 500);
       agentResults[agent.check] = {
         id: agent.id,
         deleteStatuses: deletes.statuses,
+        // DELETEs without an answer (failed or pending); null in deleteStatuses.
+        unansweredDeletes: deletes.statuses.filter((st) => st === null).length,
         forced: deletes.forced,
         // Reported apart from "gone": a 5xx means the broker did not remove
         // the agent, even when its row is gone later.
@@ -767,20 +798,26 @@ const TITLE_A5 = 'A5: cleanup is verified by absence';
  * here. The oracle's A3 (failed create) is this spec's A4; its A4/A5
  * (cleanup, evidence handling) are this spec's A5 afterAll.
  */
-const ORACLE_ROW_MAP: Record<string, string> = {
-  A1a: TITLE_A1,
-  A1b: `${TITLE_A1} (re-checked over the whole window in ${TITLE_A2} and in ${TITLE_A5})`,
-  A2a: TITLE_A2,
-  A2b: TITLE_A2,
-  A2c: `${TITLE_A2} (evidence: a2.timeline and a2.sse for comparison)`,
-  A3a: TITLE_A4,
-  A3b: TITLE_A4,
-  A3c: TITLE_A4,
-  A3d: TITLE_A4,
-  A4: `${TITLE_A5} (afterAll)`,
-  A5:
-    `${TITLE_A5} (afterAll: evidence written after the identity deletion; ` +
-    'no traces, HAR or video)',
+const ORACLE_ROW_MAP: Record<string, { test: string; note?: string }> = {
+  A1a: { test: TITLE_A1 },
+  A1b: {
+    test: TITLE_A1,
+    note: `re-checked over the whole window in ${TITLE_A2} and in ${TITLE_A5}`,
+  },
+  A2a: { test: TITLE_A2 },
+  A2b: { test: TITLE_A2 },
+  A2c: { test: TITLE_A2, note: 'evidence: a2.timeline and a2.sse for comparison' },
+  A3a: { test: TITLE_A4 },
+  A3b: { test: TITLE_A4 },
+  A3c: { test: TITLE_A4 },
+  A3d: { test: TITLE_A4 },
+  A4: { test: TITLE_A5, note: 'the afterAll hook' },
+  A5: {
+    test: TITLE_A5,
+    note:
+      'the afterAll hook: evidence written after the identity deletion; ' +
+      'no traces, HAR or video',
+  },
 };
 
 test.describe.serial('async agent create from the web form', () => {
@@ -1011,7 +1048,7 @@ test.describe.serial('async agent create from the web form', () => {
     expect(submit.template, 'the agent uses the fixture template').toBe(template);
     const panel = await expectFailedCreatePanel(tracked.page);
     await expectNoStartNoReload(tracked, submit);
-    journey.evidence.failurePanelNoRuntime = {
+    const noRuntimeEvidence: Record<string, unknown> = {
       status: submit.status,
       launch: submit.launch,
       code: panel.code,
@@ -1022,12 +1059,13 @@ test.describe.serial('async agent create from the web form', () => {
       sse: await sseRecords(tracked.page, submit.agentId),
       requests: requestsSinceSubmit(tracked, submit),
     };
-    const deletion = await deleteFromPanel(tracked, submit.agentId);
-    recordForcedDelete('failure-panel-no-runtime (panel Delete)', deletion.forced);
-    Object.assign(journey.evidence.failurePanelNoRuntime as Record<string, unknown>, {
-      deleteForced: deletion.forced,
-      launchCapable: t.launchCapable,
-    });
+    journey.evidence.failurePanelNoRuntime = noRuntimeEvidence;
+    await deleteFromPanel(
+      tracked,
+      submit.agentId,
+      'failure-panel-no-runtime (panel Delete)',
+      noRuntimeEvidence
+    );
     await tracked.page.close();
   });
 
@@ -1082,7 +1120,7 @@ test.describe.serial('async agent create from the web form', () => {
       expect(applied?.image, 'appliedConfig.image is the bad image').toBe(t.badImage);
     }
     await expectNoStartNoReload(tracked, submit);
-    journey.evidence.a4 = {
+    const a4Evidence: Record<string, unknown> = {
       status: submit.status,
       launch: submit.launch,
       appliedConfig: a4Applied,
@@ -1094,12 +1132,8 @@ test.describe.serial('async agent create from the web form', () => {
       sse: await sseRecords(tracked.page, submit.agentId),
       requests: requestsSinceSubmit(tracked, submit),
     };
-    const deletion = await deleteFromPanel(tracked, submit.agentId);
-    recordForcedDelete('A4 (panel Delete)', deletion.forced);
-    Object.assign(journey.evidence.a4 as Record<string, unknown>, {
-      deleteForced: deletion.forced,
-      launchCapable: t.launchCapable,
-    });
+    journey.evidence.a4 = a4Evidence;
+    await deleteFromPanel(tracked, submit.agentId, 'A4 (panel Delete)', a4Evidence);
     await tracked.page.close();
   });
 
@@ -1122,8 +1156,6 @@ test.describe.serial('async agent create from the web form', () => {
       // A1's whole window, from the submit until its page closes here.
       const a1 = (journey.evidence.a1 ?? {}) as Record<string, unknown>;
       a1.landedAt = journey.a1Submit.landedAt ?? null;
-      a1.windowEnd = Date.now();
-      a1.requests = requestsSinceSubmit(journey.a1Page, journey.a1Submit);
       if (!journey.a1Page.page.isClosed()) {
         a1.reload = await reloadCheck(journey.a1Page, journey.a1Submit);
         a1.stateSequence = stateSequence(
@@ -1134,6 +1166,14 @@ test.describe.serial('async agent create from the web form', () => {
     }
 
     for (const page of journey.context?.pages() ?? []) await page.close();
+    // A1's request window ends when its page closes (records are kept after
+    // the close; the SSE stream then shows abortedAfterResponse).
+    if (journey.a1Page && journey.a1Submit) {
+      const a1 = (journey.evidence.a1 ?? {}) as Record<string, unknown>;
+      a1.windowEnd = Date.now();
+      a1.requests = requestsSinceSubmit(journey.a1Page, journey.a1Submit);
+      journey.evidence.a1 = a1;
+    }
 
     // Agents and the project, as the member. A transport error on one
     // resource is recorded as residue; the others, the identity deletion
@@ -1211,6 +1251,18 @@ test.describe.serial('async agent create from the web form', () => {
 
     // Evidence only now, after the identity is deleted.
     journey.evidence.cleanup = { ...cleanup, residue, violations };
+    // Every declared test has a results entry: one that never ran (serial
+    // mode stops after a failure) is "not run". The afterAll's own outcome
+    // is in the Playwright report (the evidence is written inside it).
+    const results = (journey.evidence.results ??= {}) as Record<string, unknown>;
+    for (const title of [TITLE_A1, TITLE_A2, TITLE_NO_RUNTIME, TITLE_A4]) {
+      results[title] ??= { status: 'not run' };
+    }
+    results[TITLE_A5] = {
+      status: 'this afterAll; see the Playwright report',
+      residue: residue.length,
+      violations: violations.length,
+    };
     // Prominent flag for the grader (see recordForcedDelete).
     journey.evidence.forcedDeleteOnLaunchCapableRun = (
       (journey.evidence.forcedDeletes ?? []) as Array<{ launchCapable?: boolean }>

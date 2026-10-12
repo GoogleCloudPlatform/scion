@@ -479,8 +479,9 @@ export function readHubState(stateFile: string = STATE_FILE): HubState | null {
 
 /**
  * Whether stopHub keeps the hub's temp dir (E2E_KEEP_HUB_STATE=1). Off by
- * default. The kept dir holds the database and the private HOME; remove
- * it by hand when done.
+ * default. The kept dir holds the database and the private HOME, which
+ * contain hub credentials (dev token, session keys, test identities): do
+ * not copy it into evidence or artifacts, and remove it by hand when done.
  */
 export function keepHubState(): boolean {
   return process.env.E2E_KEEP_HUB_STATE === '1';
@@ -509,7 +510,10 @@ export function stopHub(stateFile: string = STATE_FILE): void {
   // Clean up temp database, unless E2E_KEEP_HUB_STATE=1 asks to keep it
   // (database, private HOME and hub files) for inspection after a run.
   if (keepHubState()) {
-    console.info(`[hub] E2E_KEEP_HUB_STATE=1: kept the hub state at ${state.dbDir}`);
+    console.info(
+      `[hub] E2E_KEEP_HUB_STATE=1: kept the hub state at ${state.dbDir} ` +
+        '(contains hub credentials; do not copy it into evidence or artifacts)'
+    );
   } else {
     try {
       fs.rmSync(state.dbDir, { recursive: true, force: true });

@@ -62,6 +62,13 @@ agent delete. `forcedDeletes` lists every force fallback next to
 `launchCapable`.
 
 `E2E_KEEP_HUB_STATE=1` keeps the local hub's temp dir (database, private
-HOME) at teardown and prints its path.
+HOME) at teardown and prints its path. It contains hub credentials: do not
+copy it into evidence or artifacts.
+
+Request records: `failed` means no response (`failure` gives the browser's
+reason); `abortedAfterResponse` means answered and then aborted, which is
+normal for the SSE stream when its page closes. `cleanup.agents[*]` and
+`oracleRowMap` (row -> `{test, note}`) replace the earlier flat
+`cleanup["agent X"]` keys and string map values.
 
 Selectors and state names live in `selectors.ts` only.

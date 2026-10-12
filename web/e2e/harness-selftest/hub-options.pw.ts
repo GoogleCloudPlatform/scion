@@ -223,9 +223,12 @@ test('E2E_KEEP_HUB_STATE=1 keeps the hub temp dir at stop; unset removes it', as
       binary,
       stateFile,
     });
-    stopHub(stateFile);
-    expect(fs.existsSync(kept.dbDir), 'kept with E2E_KEEP_HUB_STATE=1').toBe(true);
-    fs.rmSync(kept.dbDir, { recursive: true, force: true });
+    try {
+      stopHub(stateFile);
+      expect(fs.existsSync(kept.dbDir), 'kept with E2E_KEEP_HUB_STATE=1').toBe(true);
+    } finally {
+      fs.rmSync(kept.dbDir, { recursive: true, force: true });
+    }
 
     delete process.env.E2E_KEEP_HUB_STATE;
     expect(keepHubState()).toBe(false);

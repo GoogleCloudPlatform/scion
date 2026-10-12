@@ -25,12 +25,7 @@ import {
   assertNoHarnessCredentialEnv,
   harnessCredentialEnvNames,
 } from '../async-create/credential-guard.js';
-import {
-  classifyRead,
-  isGone,
-  parseTimeoutMs,
-  redactPath,
-} from '../async-create/journey-lib.js';
+import { classifyRead, isGone, parseTimeoutMs, redactPath } from '../async-create/journey-lib.js';
 import { launchErrorCodeOf } from '../async-create/selectors.js';
 
 test('parseTimeoutMs takes a positive number and refuses anything else', () => {
@@ -109,4 +104,8 @@ test('redactPath keeps ordinary paths and redacts secret-like segments', () => {
   expect(redactPath('/x/scion_dev_0123abcd/y')).toBe('/x/<redacted>/y');
   expect(redactPath(`/x/${'a1B2'.repeat(10)}`)).toBe('/x/<redacted>');
   expect(redactPath('/x/eyJhbGciOiJIUzI1NiJ9')).toBe('/x/<redacted>');
+  // Percent-encoded: the decoded segment is checked.
+  expect(redactPath('/x/tiwc%5Fabc')).toBe('/x/<redacted>');
+  // Known limit: a short segment with an unknown prefix is kept.
+  expect(redactPath('/x/abc123')).toBe('/x/abc123');
 });
