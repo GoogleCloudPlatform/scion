@@ -457,11 +457,19 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 	}
 
 	// Leaving webhook mode: remove the webhook registration, or getUpdates
-	// fails with a conflict and polling cannot start. The registration
-	// belongs to the bot of the running configuration, so it is removed
-	// through that bot's client (b.api), also when bot_token changes.
+	// fails with a conflict and polling cannot start.
+	//
+	// For the same bot (also when its credential was rotated, which revokes
+	// the old one), delete through the new client; a failure fails the
+	// reconfigure. When the new configuration uses a different bot, the
+	// old bot's webhook does not block this bot's polling, so remove it
+	// through the old client on a best-effort basis.
 	if inboundMode != "webhook" && b.inboundMode == "webhook" {
-		if err := b.api.DeleteWebhook(ctx); err != nil {
+		if b.botInfo != nil && b.botInfo.ID != bot.ID {
+			if err := b.api.DeleteWebhook(ctx); err != nil {
+				b.log.Warn("Failed to delete the previous bot's webhook", "error", err)
+			}
+		} else if err := api.DeleteWebhook(ctx); err != nil {
 			store.Close()
 			return nil, fmt.Errorf("failed to delete webhook: %w", err)
 		}

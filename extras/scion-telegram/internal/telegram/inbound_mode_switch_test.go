@@ -136,6 +136,7 @@ func TestV2_Reconfigure_PollToWebhookStopsPollLoop(t *testing.T) {
 func TestV2_Close_AfterPollToWebhookLeavesNoPollLoop(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	b := NewV2(slog.Default())
+	defer b.Close() // idempotent; releases the broker if a require fails
 
 	require.NoError(t, b.Configure(validPollConfig(t, tgSrv)))
 	require.NoError(t, b.Subscribe("scion.project.proj-1.>"))
@@ -170,28 +171,41 @@ func TestV2_Close_StopsPollLoop(t *testing.T) {
 	assert.False(t, running, "no poll loop may be left after Close")
 }
 
-// multiBotTelegram is a fake Telegram API that answers for any bot
-// credential and counts deleteWebhook calls per credential.
+// multiBotTelegram is a fake Telegram API that answers for several bot
+// credentials. Each credential maps to a bot ID (several credentials may
+// belong to one bot); a rejected credential gets 401 for every method. It
+// counts deleteWebhook calls per credential, including rejected ones.
 type multiBotTelegram struct {
 	srv *httptest.Server
 
 	mu            sync.Mutex
+	botIDs        map[string]int64
+	rejected      map[string]bool
 	deleteWebhook map[string]int
 }
 
-func newMultiBotTelegram(t *testing.T) *multiBotTelegram {
+func newMultiBotTelegram(t *testing.T, botIDs map[string]int64) *multiBotTelegram {
 	t.Helper()
-	f := &multiBotTelegram{deleteWebhook: make(map[string]int)}
+	f := &multiBotTelegram{botIDs: botIDs, rejected: make(map[string]bool), deleteWebhook: make(map[string]int)}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, method, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, "/bot"), "/")
-		if !ok {
-			w.WriteHeader(http.StatusNotFound)
+		f.mu.Lock()
+		botID, known := f.botIDs[token]
+		rejected := f.rejected[token]
+		if ok && method == "deleteWebhook" {
+			f.deleteWebhook[token]++
+		}
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if !ok || !known || rejected {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 401, Description: "Unauthorized"})
 			return
 		}
 		var result any = true
 		switch method {
 		case "getMe":
-			result = BotUser{ID: 100, IsBot: true, FirstName: "TestBot", Username: "test_bot"}
+			result = BotUser{ID: botID, IsBot: true, FirstName: "TestBot", Username: "test_bot"}
 		case "getUpdates":
 			select {
 			case <-time.After(20 * time.Millisecond):
@@ -199,16 +213,18 @@ func newMultiBotTelegram(t *testing.T) *multiBotTelegram {
 				return
 			}
 			result = []Update{}
-		case "deleteWebhook":
-			f.mu.Lock()
-			f.deleteWebhook[token]++
-			f.mu.Unlock()
 		}
-		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, result)})
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// reject makes every later call with token fail with 401.
+func (f *multiBotTelegram) reject(token string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rejected[token] = true
 }
 
 // deleteWebhookCalls returns the deleteWebhook calls made with token.
@@ -218,16 +234,12 @@ func (f *multiBotTelegram) deleteWebhookCalls(token string) int {
 	return f.deleteWebhook[token]
 }
 
-// When one reconfigure changes both the bot credential and the mode from
-// webhook to poll, the webhook is removed through the bot that registered
-// it, not the new one.
-func TestV2_Reconfigure_WebhookToPollWithNewBotDeletesOldWebhook(t *testing.T) {
-	f := newMultiBotTelegram(t)
-	b := NewV2(slog.Default())
-	defer b.Close()
-
+// switchBotAndMode configures webhook mode with oldToken, calls between,
+// then reconfigures to poll mode with newToken and returns that error.
+func switchBotAndMode(t *testing.T, b *TelegramBrokerV2, f *multiBotTelegram, oldToken, newToken string, between func()) error {
+	t.Helper()
 	require.NoError(t, b.Configure(map[string]string{
-		"bot_token":      "old-token",
+		"bot_token":      oldToken,
 		"api_base_url":   f.srv.URL,
 		"hub_url":        "http://hub.test",
 		"db_path":        filepath.Join(t.TempDir(), "test.db"),
@@ -236,15 +248,69 @@ func TestV2_Reconfigure_WebhookToPollWithNewBotDeletesOldWebhook(t *testing.T) {
 		"webhook_listen": "127.0.0.1:0",
 		"webhook_secret": "test-secret",
 	}))
-	require.NoError(t, b.Configure(map[string]string{
-		"bot_token":    "new-token",
+	require.NoError(t, b.Subscribe("scion.project.proj-1.>"))
+	between()
+	return b.Configure(map[string]string{
+		"bot_token":    newToken,
 		"api_base_url": f.srv.URL,
 		"hub_url":      "http://hub.test",
 		"db_path":      filepath.Join(t.TempDir(), "test.db"),
-	}))
+	})
+}
 
-	assert.Equal(t, 1, f.deleteWebhookCalls("old-token"),
-		"the webhook must be removed through the bot that registered it")
-	assert.Equal(t, 0, f.deleteWebhookCalls("new-token"),
+// A reconfigure that switches to a different bot and from webhook to poll
+// mode removes the old bot's webhook through the old bot's client.
+func TestV2_Reconfigure_WebhookToPollWithOtherBotDeletesOldWebhook(t *testing.T) {
+	f := newMultiBotTelegram(t, map[string]int64{"bot-a-token": 100, "bot-b-token": 200})
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	require.NoError(t, switchBotAndMode(t, b, f, "bot-a-token", "bot-b-token", func() {}))
+
+	assert.Equal(t, 1, f.deleteWebhookCalls("bot-a-token"),
+		"the old bot's webhook must be removed through the old bot's client")
+	assert.Equal(t, 0, f.deleteWebhookCalls("bot-b-token"),
 		"the new bot has no webhook registration to remove")
+	running, _ := pollState(b)
+	assert.True(t, running, "poll mode must poll for the existing subscriptions")
+}
+
+// A reconfigure that rotates the credential of the same bot (the old one is
+// revoked) and switches from webhook to poll mode removes the webhook
+// through the new credential and succeeds.
+func TestV2_Reconfigure_WebhookToPollWithRotatedCredentialDeletesViaNewClient(t *testing.T) {
+	f := newMultiBotTelegram(t, map[string]int64{"old-token": 100, "new-token": 100})
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	err := switchBotAndMode(t, b, f, "old-token", "new-token", func() { f.reject("old-token") })
+	require.NoError(t, err, "a revoked old credential must not fail the reconfigure")
+
+	assert.Equal(t, 1, f.deleteWebhookCalls("new-token"),
+		"the same bot's webhook must be removed through the new credential")
+	assert.Equal(t, 0, f.deleteWebhookCalls("old-token"),
+		"the revoked credential must not be used")
+	assert.Equal(t, "poll", b.inboundMode)
+	running, _ := pollState(b)
+	assert.True(t, running, "poll mode must poll for the existing subscriptions")
+}
+
+// When the old bot's deleteWebhook fails on a switch to a different bot, the
+// reconfigure still succeeds and logs a warning: the old bot's webhook does
+// not block the new bot's polling.
+func TestV2_Reconfigure_WebhookToPollWithOtherBotDeleteFailureWarns(t *testing.T) {
+	f := newMultiBotTelegram(t, map[string]int64{"bot-a-token": 100, "bot-b-token": 200})
+	logs := &syncBuffer{}
+	b := NewV2(slog.New(slog.NewTextHandler(logs, nil)))
+	defer b.Close()
+
+	err := switchBotAndMode(t, b, f, "bot-a-token", "bot-b-token", func() { f.reject("bot-a-token") })
+	require.NoError(t, err, "the old bot's deleteWebhook failure must not fail the reconfigure")
+
+	assert.Equal(t, 1, f.deleteWebhookCalls("bot-a-token"), "the old bot's webhook removal must be attempted")
+	assert.Equal(t, 0, f.deleteWebhookCalls("bot-b-token"))
+	assert.Equal(t, "poll", b.inboundMode)
+	assert.Contains(t, logs.String(), "Failed to delete the previous bot's webhook")
+	running, _ := pollState(b)
+	assert.True(t, running, "poll mode must poll for the existing subscriptions")
 }
