@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -378,6 +379,11 @@ func DialWithConfig(ctx context.Context, url string, headers http.Header, config
 	if err != nil {
 		if stopCancel != nil {
 			stopCancel()
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// A cancelled dial reports the cancellation, not the deadline
+			// error the past deadline caused.
+			return nil, resp, fmt.Errorf("%w: %v", ctxErr, err)
 		}
 		return nil, resp, err
 	}

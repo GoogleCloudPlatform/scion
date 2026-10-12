@@ -106,7 +106,7 @@ func TestDialWithConfig_CancelEndsUnansweredHandshake(t *testing.T) {
 	}
 	cancel()
 	r := waitDial(t, done, "the dial to end after its context was cancelled")
-	require.Error(t, r.err)
+	require.ErrorIs(t, r.err, context.Canceled, "a cancelled dial reports the cancellation")
 	require.Nil(t, r.conn)
 }
 
