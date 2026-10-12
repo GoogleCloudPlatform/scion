@@ -91,6 +91,13 @@ variable "iap_oauth_client_id" {
   }
 }
 
+variable "test_identities_enabled" {
+  description = "Sets the chart's hub.testIdentities.enabled, which lets the hub issue test identities. Default false leaves the value out of the chart values entirely (the chart's default is false). Unrelated to test login, which the chart does not offer."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
 variable "admin_emails" {
   description = "Emails seeded as hub admins (the chart's hub.adminEmails)."
   type        = list(string)

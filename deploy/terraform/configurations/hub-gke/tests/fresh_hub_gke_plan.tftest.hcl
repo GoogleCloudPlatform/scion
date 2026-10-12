@@ -280,6 +280,28 @@ run "fresh_gke_hub_plans_clean" {
     condition     = output.hub_rbac_created_by_terraform == false
     error_message = "create_hub_rbac must be false for hub-gke: the chart owns the hub's RBAC."
   }
+
+  # Defaults add nothing: no test-runner module, null outputs, and no
+  # test-identities chart value.
+  assert {
+    condition     = length(module.hub_test_runner) == 0
+    error_message = "test_runner defaults to disabled and must create nothing."
+  }
+
+  assert {
+    condition = (
+      output.test_runner_uat_email == null &&
+      output.test_runner_uat_unique_id == null &&
+      output.test_runner_issuer_email == null &&
+      output.test_runner_issuer_unique_id == null
+    )
+    error_message = "test-runner outputs must be null while test_runner is disabled."
+  }
+
+  assert {
+    condition     = !contains(keys(output.chart_values.hub), "testIdentities")
+    error_message = "test_identities_enabled defaults to false and must leave hub.testIdentities out of the chart values."
+  }
 }
 
 # iap_audience depends on the backend service's generated_id, unknown in
@@ -528,4 +550,167 @@ run "pv_name_not_claim_fails_plan" {
   }
 
   expect_failures = [output.nfs_workspace]
+}
+
+# --- Test-runner identities (modules/hub-test-runner) ---
+#
+# All emails are fake. Override targets carry the [0] instance key: overrides
+# match the module instance's address, and an unkeyed target does not match
+# a counted module. Each enabled run overrides the module's IAM-policy read
+# with an iamcredentials DATA_READ audit config; the precondition itself is
+# covered by the module's own tests (a child module's precondition cannot be
+# named in a root test's expect_failures). For the same reason the
+# impersonator validations, which live only in the module, are tested there.
+
+run "test_runner_enabled_adds_the_module" {
+  command = plan
+
+  variables {
+    test_runner = {
+      enabled       = true
+      impersonators = ["serviceAccount:orchestrator@example-project.iam.gserviceaccount.com"]
+    }
+  }
+
+  override_data {
+    target = module.hub_test_runner[0].data.google_project_iam_policy.this
+    values = {
+      policy_data = "{\"auditConfigs\":[{\"service\":\"iamcredentials.googleapis.com\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\"}]}]}"
+    }
+  }
+
+  assert {
+    condition     = length(module.hub_test_runner) == 1
+    error_message = "test_runner.enabled must create the module once."
+  }
+
+  # Role and scope only: each grant's account is derived from the accounts'
+  # computed name and email, resolved in test_runner_outputs_pass_through.
+  assert {
+    condition = [for g in module.hub_test_runner[0].iam_grants : "${g.role}|${g.resource}"] == [
+      "roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "roles/iap.httpsResourceAccessor|backend_service:tfha-gke-h3-hub-backend",
+    ]
+    error_message = "the module must grant token creation twice and IAP on this hub's backend service."
+  }
+
+  assert {
+    condition     = !module.hub_test_runner[0].alerts_enabled
+    error_message = "no alert objects without notification channels."
+  }
+
+  # Enabling test-runner identities does not by itself turn on test identities.
+  assert {
+    condition     = !contains(keys(output.chart_values.hub), "testIdentities")
+    error_message = "test_runner must not change the chart values."
+  }
+}
+
+run "test_runner_alerts_with_channels" {
+  command = plan
+
+  variables {
+    test_runner = {
+      enabled                     = true
+      impersonators               = ["serviceAccount:orchestrator@example-project.iam.gserviceaccount.com"]
+      alert_notification_channels = ["projects/example-project/notificationChannels/1234567890"]
+    }
+  }
+
+  override_data {
+    target = module.hub_test_runner[0].data.google_project_iam_policy.this
+    values = {
+      policy_data = "{\"auditConfigs\":[{\"service\":\"allServices\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\"}]}]}"
+    }
+  }
+
+  assert {
+    condition     = module.hub_test_runner[0].alerts_enabled
+    error_message = "notification channels must create the alert objects."
+  }
+}
+
+# Against the MOCK providers only, targeted at the module: resolves the
+# accounts' computed email and unique_id so the pass-through outputs can be
+# checked. The target leaves out the global address (prevent_destroy).
+run "test_runner_outputs_pass_through" {
+  command = apply
+
+  plan_options {
+    target = [module.hub_test_runner]
+  }
+
+  variables {
+    test_runner = {
+      enabled       = true
+      impersonators = ["serviceAccount:orchestrator@example-project.iam.gserviceaccount.com"]
+    }
+  }
+
+  override_data {
+    target = module.hub_test_runner[0].data.google_project_iam_policy.this
+    values = {
+      policy_data = "{\"auditConfigs\":[{\"service\":\"iamcredentials.googleapis.com\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\"}]}]}"
+    }
+  }
+
+  override_resource {
+    target = module.hub_test_runner[0].google_service_account.uat
+    values = {
+      name      = "projects/tfha-test-project/serviceAccounts/tfha-gke-h3-uat@tfha-test-project.iam.gserviceaccount.com"
+      email     = "tfha-gke-h3-uat@tfha-test-project.iam.gserviceaccount.com"
+      unique_id = "100000000000000000001"
+    }
+  }
+
+  override_resource {
+    target = module.hub_test_runner[0].google_service_account.issuer
+    values = {
+      name      = "projects/tfha-test-project/serviceAccounts/tfha-gke-h3-issuer@tfha-test-project.iam.gserviceaccount.com"
+      email     = "tfha-gke-h3-issuer@tfha-test-project.iam.gserviceaccount.com"
+      unique_id = "100000000000000000002"
+    }
+  }
+
+  assert {
+    condition = (
+      output.test_runner_uat_email == "tfha-gke-h3-uat@tfha-test-project.iam.gserviceaccount.com" &&
+      output.test_runner_uat_unique_id == "100000000000000000001" &&
+      output.test_runner_issuer_email == "tfha-gke-h3-issuer@tfha-test-project.iam.gserviceaccount.com" &&
+      output.test_runner_issuer_unique_id == "100000000000000000002"
+    )
+    error_message = "the root must pass through both accounts' email and unique_id."
+  }
+
+  # account comes from each grant resource (token-creator: service_account_id;
+  # IAP: member), so this proves the IAP grant is for -uat only.
+  assert {
+    condition = [for g in module.hub_test_runner[0].iam_grants : "${g.account}|${g.role}|${g.resource}"] == [
+      "uat|roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "issuer|roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "uat|roles/iap.httpsResourceAccessor|backend_service:tfha-gke-h3-hub-backend",
+    ]
+    error_message = "the module must grant token creation on both accounts and IAP on this hub's backend service for -uat only."
+  }
+}
+
+# --- Test identities chart value ---
+
+run "test_identities_enabled_reaches_the_chart" {
+  command = plan
+
+  variables {
+    test_identities_enabled = true
+  }
+
+  assert {
+    condition     = output.chart_values.hub.testIdentities.enabled == true
+    error_message = "test_identities_enabled = true must set the chart's hub.testIdentities.enabled."
+  }
+
+  assert {
+    condition     = length(module.hub_test_runner) == 0
+    error_message = "test identities alone must not create test-runner identities."
+  }
 }

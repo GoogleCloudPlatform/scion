@@ -149,6 +149,13 @@ run "client_id_set_installs_the_hub" {
     error_message = "no rotation marker means no rotation annotation."
   }
 
+  # Default: the value is left out, so the chart's own default (false)
+  # applies and existing hubs' values do not change.
+  assert {
+    condition     = !contains(keys(output.chart_values.hub), "testIdentities")
+    error_message = "test_identities_enabled defaults to false and must leave hub.testIdentities out of the chart values."
+  }
+
   assert {
     condition     = output.chart_values.runtime.gke == true
     error_message = "agent_runtime_gke_mode defaults to true, so chart_values.runtime.gke must be true (the chart's previous hardcoded runtimes.kubernetes.gke)."
@@ -246,6 +253,37 @@ run "agent_runtime_gke_mode_passes_through" {
   assert {
     condition     = output.chart_values.runtime.gke == false
     error_message = "agent_runtime_gke_mode = false must reach the chart as runtime.gke = false."
+  }
+}
+
+run "test_identities_enabled_reaches_the_chart" {
+  command = plan
+
+  variables {
+    test_identities_enabled = true
+  }
+
+  assert {
+    condition     = output.chart_values.hub.testIdentities.enabled == true
+    error_message = "test_identities_enabled = true must set the chart's hub.testIdentities.enabled to true."
+  }
+
+  assert {
+    condition     = helm_release.hub[0].values == tolist([yamlencode(output.chart_values)])
+    error_message = "the release's values must still be exactly the chart_values output."
+  }
+}
+
+run "test_identities_explicit_false_adds_nothing" {
+  command = plan
+
+  variables {
+    test_identities_enabled = false
+  }
+
+  assert {
+    condition     = !contains(keys(output.chart_values.hub), "testIdentities")
+    error_message = "test_identities_enabled = false must leave hub.testIdentities out (the chart default is false)."
   }
 }
 

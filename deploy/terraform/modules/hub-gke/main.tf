@@ -77,6 +77,14 @@ locals {
           "scion.dev/db-password-rotation" = var.db_password_rotation
         }
       },
+      # Only when enabled, so existing hubs' values stay byte-identical by
+      # default (the chart's own default is false). Unrelated to test login,
+      # which the chart does not offer.
+      var.test_identities_enabled ? {
+        testIdentities = {
+          enabled = true
+        }
+      } : {},
     )
 
     serviceAccount = {

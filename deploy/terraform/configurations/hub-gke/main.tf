@@ -195,6 +195,8 @@ module "hub_gke" {
   iap_oauth_client_id = var.iap_oauth_client_id
   admin_emails        = var.admin_emails
 
+  test_identities_enabled = var.test_identities_enabled
+
   image_registry    = local.image_registry
   runtime_namespace = module.agent_runtime_k8s.namespace
   port              = local.hub_port
@@ -229,6 +231,23 @@ module "hub_gke" {
     hub_workload_identity = module.hub_identity.hub_workload_identity_member
     hub_iam_grants        = join(",", module.hub_identity.hub_iam_grants)
   }
+}
+
+# Optional test-runner identities, off by default. The backend service name
+# is read here at the root: modules/hub-gke must not consume hub-lb
+# attributes beyond the front-door contract, but this module may.
+#
+# Gated on enabled only. test_runner.impersonators is validated in one
+# place, the module's own variable, which fails the plan on invalid input.
+module "hub_test_runner" {
+  source = "../../modules/hub-test-runner"
+  count  = var.test_runner.enabled ? 1 : 0
+
+  project_id                  = var.project_id
+  hub_name                    = var.hub_name
+  impersonators               = var.test_runner.impersonators
+  backend_service_name        = module.hub_lb.backend_service.name
+  alert_notification_channels = var.test_runner.alert_notification_channels
 }
 
 # Same pattern as hub-cloudrun's check of the same name. Here an unset client

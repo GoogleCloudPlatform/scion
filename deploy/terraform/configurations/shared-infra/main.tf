@@ -88,6 +88,28 @@ module "artifact_registry" {
   depends_on = [module.project_services]
 }
 
+# --- iamcredentials data-access audit logs (opt-in) ---
+#
+# Logs every token minted through iamcredentials.googleapis.com
+# (GenerateIdToken, GenerateAccessToken, SignJwt, ...). modules/hub-test-runner
+# refuses to grant token creation without it. Audit configs are project-level,
+# so this root owns it once rather than each hub.
+#
+# google_project_iam_audit_config is authoritative for this one service: it
+# replaces any audit config for iamcredentials.googleapis.com set outside
+# Terraform (including exempted members). Other services' audit configs and
+# all IAM bindings are untouched.
+resource "google_project_iam_audit_config" "iamcredentials" {
+  count = var.iamcredentials_data_access_logs ? 1 : 0
+
+  project = var.project_id
+  service = "iamcredentials.googleapis.com"
+
+  audit_log_config {
+    log_type = "DATA_READ"
+  }
+}
+
 # --- Destroy guardrail ---
 #
 # GCP does not refuse to delete a Cloud SQL instance that still has hub

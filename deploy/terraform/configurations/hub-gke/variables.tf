@@ -128,3 +128,31 @@ variable "nfs_capacity" {
   type        = string
   default     = "1Ti"
 }
+
+variable "test_identities_enabled" {
+  description = "Sets the chart's hub.testIdentities.enabled, which lets the hub issue test identities. For test hubs only. Default false leaves the chart value unset (the chart's default is false). Unrelated to test login, which the chart does not offer."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "test_runner" {
+  description = <<-EOT
+    Optional test-runner identities (modules/hub-test-runner) so an agent on
+    another hub can run tests against this one. Off by default.
+      enabled                     create <hub>-uat and <hub>-issuer and their grants
+      impersonators               serviceAccount:<email> members (lowercase email) allowed to mint ID tokens for both
+                                  accounts; validated only by modules/hub-test-runner (non-empty, serviceAccount:
+                                  only), so with enabled = false they are not checked and have no effect
+      alert_notification_channels non-empty adds a log-based metric and alert for token minting by anyone else
+    Needs iamcredentials DATA_READ audit logs on the project (configurations/shared-infra's
+    iamcredentials_data_access_logs); the plan fails without them.
+  EOT
+  type = object({
+    enabled                     = optional(bool, false)
+    impersonators               = optional(list(string), [])
+    alert_notification_channels = optional(list(string), [])
+  })
+  default  = {}
+  nullable = false
+}

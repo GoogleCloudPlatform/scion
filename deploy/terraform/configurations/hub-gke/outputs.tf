@@ -90,3 +90,23 @@ output "nfs_workspace" {
     error_message = "the hub's NFS shareId \"${module.hub_gke.chart_values.workspaceStorage.nfs.shareId}\" must equal the agent namespace (\"${module.agent_runtime_k8s.namespace}\") and the last segment of the export (\"${module.hub_gke.chart_values.workspaceStorage.nfs.export}\"), and pvName (\"${module.hub_gke.chart_values.workspaceStorage.nfs.pvName}\") must be the agent claim \"<shareId>-nfs\" (\"${module.agent_runtime_k8s.pvc_name}\"). Otherwise the hub and agents do not see the same workspace tree."
   }
 }
+
+output "test_runner_uat_email" {
+  description = "Email of <hub>-uat (modules/hub-test-runner). null unless test_runner.enabled."
+  value       = one(module.hub_test_runner[*].uat_email)
+}
+
+output "test_runner_uat_unique_id" {
+  description = "Unique ID of <hub>-uat. null unless test_runner.enabled."
+  value       = one(module.hub_test_runner[*].uat_unique_id)
+}
+
+output "test_runner_issuer_email" {
+  description = "Email of <hub>-issuer (modules/hub-test-runner). null unless test_runner.enabled."
+  value       = one(module.hub_test_runner[*].issuer_email)
+}
+
+output "test_runner_issuer_unique_id" {
+  description = "Unique ID of <hub>-issuer. null unless test_runner.enabled."
+  value       = one(module.hub_test_runner[*].issuer_unique_id)
+}
