@@ -154,3 +154,109 @@ Over **every** top-level declaration of the package (not only the moved ones):
 - the multiset of free-floating comments is unchanged.
 
 It exits non-zero on any difference.
+
+## Exporting helpers to a support package (`export`)
+
+`export` moves helper declarations out of `pkg/hub` **verbatim** into a
+non-test support package that never imports `pkg/hub` (by default
+`pkg/hub/internal/hubtestutil`), so packages whose tests cannot import
+`pkg/hub` (future `pkg/hub/<area>` packages) can use them. `pkg/hub` keeps
+every old name through one generated, untagged alias file
+(`zz_alias_hubtestutil_test.go`), so its tests need no edits.
+
+```sh
+go build -buildvcs=false -o /tmp/extract ./hack/hubshard/extract
+mkdir /tmp/hub-before && git archive HEAD pkg/hub | tar -x -C /tmp/hub-before
+/tmp/extract export -family hack/hubshard/extract/families/hubtestutil-wave1.txt   # -n: plan only
+/tmp/extract verify-export -before /tmp/hub-before/pkg/hub -after pkg/hub \
+    -family hack/hubshard/extract/families/hubtestutil-wave1.txt
+```
+
+`verify-export` finds the target as `-after`'s `internal/hubtestutil` by
+default, so it works unchanged on a `git archive` of a commit
+(`-after /tmp/gen/pkg/hub`); pass `-to`/`-import` for another target.
+
+The family file lists the names to move, plus optional `rename old=New`
+(export name; the default upper-cases the first letter) and
+`field T.f=F` (export a field of a moved struct) lines.
+
+What `export` does:
+
+- Takes the requested declarations (only from `*_helpers_test.go` files)
+  and the methods of requested types. It refuses a test entry point, part
+  of a grouped declaration, and any moved declaration that uses a
+  declaration that stays (request that one too, or leave both in place).
+- Exports only the names that staying code uses, plus the moved types that
+  staying code can reach through them: types in an exported func's or typed
+  var's signature, in an exported type's exported fields, and in its exported
+  methods' signatures (`GitSparseCheckoutStub.Calls` returns
+  `[]GitSparseCheckoutCall`). Inside the moved code it renames exactly those
+  identifiers; everything else, doc comments included, is byte-for-byte
+  the original. Doc comments keep the old names.
+- Writes one target file per origin (`x_helpers_test.go` -> `x.go`). Target
+  files are unconstrained, so a declaration from a constrained origin must
+  need nothing constrained (the `move` widening rule).
+- Writes the alias file, one declaration per exported name:
+  - type: `type x = pkg.X`; const: `const x = pkg.X`;
+  - func: a wrapper with the original signature that forwards its
+    arguments. If the original calls `t.Helper()` (as a top-level statement),
+    the wrapper does too, so failures are still reported at the test's line.
+    A `Helper()` call anywhere else in the body (a nested block, a closure,
+    a non-parameter receiver) is refused, since a wrapper could not mirror it;
+  - var: a value alias (`var x = pkg.X`) only for a slice or map literal,
+    which shares its backing store; a pointer alias (`var x = &pkg.X`) for a
+    var declared with a type and no value (a state holder such as
+    `atomic.Bool`), so method calls reach the one instance. Any other var,
+    and any var that the package assigns, increments or takes the address
+    of, is refused: an alias copy would diverge.
+- Rewrites a staying selector for a `field` export only where its operand
+  syntactically has the type: a call of a moved func that returns it, or a
+  local declared as `x := F(...)` / `var x = F(...)` from such a call and
+  never written again (no reassignment, `++`, range assignment or `&x`).
+  Shadowed locals resolve to their own declaration, and a call only counts
+  if it names the package-level func (not a local shadowing it). Other
+  selectors with the same name are listed as INFO; the compiler rejects any
+  missed access. Only selectors are handled: composite-literal keys of the
+  type in staying code (`T{f: ...}`) are not rewritten.
+- Deletes helper files left without declarations, and drops unused
+  imports.
+- Lists review notes: source-scanning test files (moved code leaves their
+  view; check that none of them matched it) and moved code that captures
+  stacks or names.
+
+What `verify-export` checks, independently of the rendering:
+
+- every moved declaration, with its doc comment, has the same Go token
+  stream (comments included) in the target, except identifiers that the
+  rename map changes (old -> new, nothing else), and the target's non-test
+  files declare nothing else;
+- every other declaration of the source package is byte-identical, except
+  field-export call sites, whose tokens differ only by the field renames;
+  the test entry points (so `go test -list` under every tag set) and the
+  free-floating comments are unchanged;
+- the alias file, the edited source files and the target files are exactly
+  what a fresh `export` on the before tree writes (no hand edits).
+
+No shard bookkeeping follows an export: shard tags are no longer
+committed (GCP#3364). CI generates them in an overlay on every run, so
+deleted helper files and the new alias file are picked up automatically;
+`make hubshard-parity` checks the result.
+
+A hand-written comment fix on top of a generated export (for example doc
+comments that still use the old names) goes in its own commit, and
+`comment-only` checks it touches nothing but comments:
+
+```sh
+mkdir -p /tmp/gen /tmp/cmt
+git archive <generated commit> pkg/hub | tar -x -C /tmp/gen
+git archive <comment-only commit> pkg/hub | tar -x -C /tmp/cmt
+/tmp/extract comment-only -before /tmp/gen/pkg/hub -after /tmp/cmt/pkg/hub
+/tmp/extract comment-only -before /tmp/gen/pkg/hub/internal/hubtestutil -after /tmp/cmt/pkg/hub/internal/hubtestutil
+```
+
+Compare two archives of commits, not the working tree: later commits (or
+uncommitted edits) would otherwise show up as differences, or hide them.
+Comments the toolchain reads count as code: `//go:` directives (build
+constraints, `//go:embed`, `//go:linkname`, ...), `// +build`, line
+directives and cgo's `//export`, and every comment of a file that imports
+`"C"` (the cgo preamble).
