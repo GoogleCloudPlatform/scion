@@ -199,3 +199,28 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
 		}
 	}
 }
+
+// hubFlagEndpoint returns the --hub flag value: hubEndpoint, unless
+// resolveInvocationTarget filled it from the current context. Code that
+// persists "the endpoint given with --hub" must use this, so a hub selected
+// with 'scion use' is never written into settings.
+func hubFlagEndpoint() string {
+	if hubSource == targetSourceContext {
+		return ""
+	}
+	return hubEndpoint
+}
+
+// persistHubFlagEndpoint saves the --hub flag value as hub.endpoint in the
+// settings of resolvedPath (global settings when isGlobal). It does nothing
+// without the flag, including when the hub came from the current context.
+func persistHubFlagEndpoint(resolvedPath string, isGlobal bool) error {
+	ep := hubFlagEndpoint()
+	if ep == "" {
+		return nil
+	}
+	if err := config.UpdateSetting(resolvedPath, "hub.endpoint", ep, isGlobal); err != nil {
+		return fmt.Errorf("failed to save endpoint: %w", err)
+	}
+	return nil
+}
