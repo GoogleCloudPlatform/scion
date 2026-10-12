@@ -248,9 +248,8 @@ const (
 // signInDenialAuditReason returns the audit reason for a denied sign-in,
 // derived from the checkSignInDenial code so the record says why the
 // sign-in was denied. A code without a mapped reason is recorded as
-// itself. accessMode is used only when the code is empty (the caller
-// was denied but the policy now allows the email, e.g. it changed
-// between the check and the audit).
+// itself. accessMode is used only when the code is empty (the decision
+// came from a bool-only authorize check that returns no code).
 func signInDenialAuditReason(denial, accessMode string) string {
 	switch denial {
 	case signInDeniedDomain:
@@ -670,6 +669,21 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 			return
 		case testFixtureRejection(u, s.testIdentities.enabled, s.testIdentities.clock()) != "":
 			// Same test-identity rule as the middleware's row block.
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
+		}
+		// Same admin-kind rule as the middleware's row block.
+		_, reason, kErr := testAdminRowRejection(r.Context(), s.kindForPrincipal,
+			func(kind string) bool { return s.testAdminTierEnabled(testAdminKind(kind)) },
+			u, claims.Role, s.testIdentities.clock())
+		if kErr != nil {
+			slog.Error("Auth validate: user kind lookup failed",
+				"user_id", claims.UserID, "error", kErr)
+			writeError(w, http.StatusServiceUnavailable, "store_error",
+				"unable to verify user status", nil)
+			return
+		}
+		if reason != "" {
 			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 			return
 		}
@@ -1634,7 +1648,8 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 // inline logic field for field.
 func (s *Server) signInPolicyDeps() signInPolicyDeps {
 	return signInPolicyDeps{
-		authorize: s.isUserAuthorized,
+		authorize:    s.isUserAuthorized,
+		signInDenial: s.signInDenial,
 		activationRole: func(ctx context.Context, email, currentRole, userID string) string {
 			// The stored role on an invited row is a placeholder (invites
 			// carry no role), so evaluate as a brand-new user: admin if in
@@ -1666,7 +1681,8 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		auditActivated: func(ctx context.Context, email, userID string) {
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, email, "", userID, email, nil)
 		},
-		// auditDenied records the same denial reason provisionUser does.
+		// auditDenied records the denial code the decision returned (see
+		// signInDenial above), mapped the same way provisionUser maps it.
 		// provisionUser calls the helper with preAuthorized=true, so this
 		// only fires from a caller (the resolver) that passes
 		// preAuthorized=false and fails the authorize check — provisionUser
@@ -1681,9 +1697,9 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		// capture, an unauthorized caller retrying is expected to stop or be
 		// blocked at a layer above this one, and de-duplicating here would
 		// mean dropping legitimate repeat-denial records.
-		auditDenied: func(ctx context.Context, email string) {
+		auditDenied: func(ctx context.Context, email, denial string) {
 			LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, email,
-				signInDenialAuditReason(s.signInDenial(ctx, email), s.UserAccessMode()))
+				signInDenialAuditReason(denial, s.UserAccessMode()))
 		},
 	}
 }

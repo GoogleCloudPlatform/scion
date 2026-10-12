@@ -193,6 +193,14 @@ type Agent struct {
 	// writes it.
 	RunIDUpdatedAt *time.Time `json:"-"`
 
+	// SSHHostKey is the authorized_keys line of the agent's SSH host key
+	// for the run SSHHostKeyRunID. The reported host key is bound to the
+	// reporting agent's current run: the only writer is SetAgentSSHHostKey,
+	// and readers use it only while SSHHostKeyRunID equals RunID. Like
+	// RunID, UpdateAgent never writes them.
+	SSHHostKey      string `json:"-"`
+	SSHHostKeyRunID string `json:"-"`
+
 	// RunIntent is whether the agent should be running ("running" or
 	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
 	// time of the last intent write. Internal bookkeeping, untagged like the
@@ -1433,17 +1441,26 @@ type User struct {
 	// Session revocation
 	SessionGeneration int64 `json:"sessionGeneration,omitempty"`
 
-	// Kind is UserKindHuman (the default; empty reads as human) or
-	// UserKindTestFixture. It is written only at create and never changes.
-	// Only UserStore.CreateTestFixtureUser can write UserKindTestFixture.
-	// It is never bound from a request body (json:"-").
+	// Kind is UserKindHuman (the default; empty reads as human),
+	// UserKindTestFixture, UserKindTestHubAdmin or UserKindTestSuperAdmin.
+	// It is written only at create and never changes. Only
+	// UserStore.CreateTestFixtureUser can write UserKindTestFixture, and
+	// only Store.CreateTestAdminUser the two admin kinds. It is never bound
+	// from a request body (json:"-").
 	Kind string `json:"-"`
-	// ExpiresAt, IssuedBy and Purpose are set only on test-fixture rows,
-	// at create, and never change. They are never bound from a request
-	// body (json:"-").
+	// ExpiresAt, IssuedBy and Purpose are set only on test identity rows
+	// (every kind other than human), at create, and never change. They are
+	// never bound from a request body (json:"-").
 	ExpiresAt *time.Time `json:"-"`
 	IssuedBy  *string    `json:"-"`
 	Purpose   *string    `json:"-"`
+	// IssuanceID and IssuerCredentialID are set only on admin-kind test
+	// identity rows, at create, and never change. IssuanceID identifies
+	// the issuance (audit correlation); IssuerCredentialID is the ID of the
+	// issuer's user access token when the issuer used one, and empty for a
+	// session. Never bound from a request body (json:"-").
+	IssuanceID         *string `json:"-"`
+	IssuerCredentialID *string `json:"-"`
 
 	// Timestamps
 	Created   time.Time `json:"created"`
@@ -1451,9 +1468,33 @@ type User struct {
 	LastSeen  time.Time `json:"lastSeen,omitempty"`
 }
 
-// IsTestFixture reports whether u is a hub-issued test fixture.
+// IsTestFixture reports whether u is a hub-issued member-tier test fixture
+// (kind test_fixture). It is false for the admin kinds.
 func (u *User) IsTestFixture() bool {
 	return u != nil && u.Kind == UserKindTestFixture
+}
+
+// IsTestAdmin reports whether u is a hub-issued admin-kind test identity
+// (test_hub_admin or test_super_admin).
+func (u *User) IsTestAdmin() bool {
+	return u != nil && IsTestAdminKind(u.Kind)
+}
+
+// IsHumanKind reports whether u is positively an ordinary (human) user:
+// kind "" (the column default) or "human". It is false for every test
+// identity kind and for any unrecognized kind, so code that admits only
+// humans fails closed on kind skew. Use it, not !IsTestIdentity(), wherever
+// a check must refuse anything that is not a known human row.
+func (u *User) IsHumanKind() bool {
+	return u != nil && (u.Kind == "" || u.Kind == UserKindHuman)
+}
+
+// IsTestIdentity reports whether u is any hub-issued test identity: every
+// kind other than human. A row with an empty or unrecognized kind is not
+// reported as a test identity here; authorization reads the kind through
+// the hub's kindForPrincipal, which refuses an unrecognized kind.
+func (u *User) IsTestIdentity() bool {
+	return u != nil && (u.Kind == UserKindTestFixture || IsTestAdminKind(u.Kind))
 }
 
 // ExpiredTestFixtureQuery selects test fixture users by expiry for
@@ -1539,7 +1580,95 @@ const (
 const (
 	UserKindHuman       = "human"
 	UserKindTestFixture = "test_fixture"
+	// UserKindTestHubAdmin is a hub-issued test identity holding a real,
+	// expiring system hub-admin binding (admin tier, ptone/scion#4240).
+	UserKindTestHubAdmin = "test_hub_admin"
+	// UserKindTestSuperAdmin is a hub-issued test identity holding a real,
+	// expiring system super-admin binding. Its issuance stays refused until
+	// the admin tier's policy phase ships.
+	UserKindTestSuperAdmin = "test_super_admin"
 )
+
+// IsTestAdminKind reports whether kind is one of the admin test identity
+// kinds.
+func IsTestAdminKind(kind string) bool {
+	return kind == UserKindTestHubAdmin || kind == UserKindTestSuperAdmin
+}
+
+// TestIdentityIssuanceCreatedBy is the CreatedBy of the role bindings the
+// test identity issuance paths create: the member tier's hub grants and the
+// admin kinds' system binding. It is deliberately distinct from
+// AdminAPICreatedBy, so super-admin reconciliation never counts such a
+// binding as an intended administrator.
+const TestIdentityIssuanceCreatedBy = "test-identity-issuance"
+
+// Reserved email domains of the admin test identity kinds, one per kind,
+// so a domain identifies the kind without a join. Like
+// TestFixtureEmailDomain, only the issuance path creates a user in them.
+const (
+	TestHubAdminEmailDomain   = "scion-test-hub-admin.invalid"
+	TestSuperAdminEmailDomain = "scion-test-super-admin.invalid"
+)
+
+// TestAdminEmailDomain returns the reserved email domain of an admin test
+// identity kind, and "" for any other kind.
+func TestAdminEmailDomain(kind string) string {
+	switch kind {
+	case UserKindTestHubAdmin:
+		return TestHubAdminEmailDomain
+	case UserKindTestSuperAdmin:
+		return TestSuperAdminEmailDomain
+	}
+	return ""
+}
+
+// TestAdminRole returns the stored role of an admin test identity kind:
+// member for test_hub_admin (as a real hub-admin), admin for
+// test_super_admin (the legacy admin fast path reads the role). It
+// returns "" for any other kind.
+func TestAdminRole(kind string) string {
+	switch kind {
+	case UserKindTestHubAdmin:
+		return UserRoleMember
+	case UserKindTestSuperAdmin:
+		return UserRoleAdmin
+	}
+	return ""
+}
+
+// emailInDomain reports whether email is in domain or one of its
+// subdomains, trimming surrounding white space and ignoring case.
+func emailInDomain(email, domain string) bool {
+	e := strings.ToLower(strings.TrimSpace(email))
+	at := strings.LastIndex(e, "@")
+	if at < 0 {
+		return false
+	}
+	d := strings.TrimSuffix(e[at+1:], ".")
+	return d == domain || strings.HasSuffix(d, "."+domain)
+}
+
+// TestIdentityEmailKind returns the test identity kind whose reserved
+// domain email is in, and "" when email is in none of them.
+func TestIdentityEmailKind(email string) string {
+	switch {
+	case emailInDomain(email, TestFixtureEmailDomain):
+		return UserKindTestFixture
+	case emailInDomain(email, TestHubAdminEmailDomain):
+		return UserKindTestHubAdmin
+	case emailInDomain(email, TestSuperAdminEmailDomain):
+		return UserKindTestSuperAdmin
+	}
+	return ""
+}
+
+// IsReservedTestIdentityEmail reports whether email is in any test identity
+// domain: the member fixture domain or either admin kind domain. Every
+// path that resolves or creates a user by email, other than issuance and
+// the hub-issued JWT, refuses such an email.
+func IsReservedTestIdentityEmail(email string) bool {
+	return TestIdentityEmailKind(email) != ""
+}
 
 // TestFixtureEmailDomain is the reserved email domain of hub-issued test
 // fixture users. Only the issuance path creates a user in it; every other
@@ -1551,19 +1680,34 @@ const TestFixtureEmailDomain = "scion-fixture.invalid"
 // The comparison trims surrounding white space and ignores case. A
 // subdomain of the reserved domain counts as reserved too.
 func IsTestFixtureEmail(email string) bool {
-	e := strings.ToLower(strings.TrimSpace(email))
-	at := strings.LastIndex(e, "@")
-	if at < 0 {
-		return false
-	}
-	domain := strings.TrimSuffix(e[at+1:], ".")
-	return domain == TestFixtureEmailDomain || strings.HasSuffix(domain, "."+TestFixtureEmailDomain)
+	return emailInDomain(email, TestFixtureEmailDomain)
 }
 
 // ErrTestFixtureKindRefused is returned when a path other than
 // UserStore.CreateTestFixtureUser tries to create a test-fixture user, or a
 // user in TestFixtureEmailDomain.
 var ErrTestFixtureKindRefused = errors.New("test fixture users can only be created by the test identity issuance path")
+
+// TestIdentityLoginCode is a single-use web-login code for a test identity
+// (ptone/scion#4240, phase WS1). Only the hash of the code is stored. A
+// user holds at most one; see UserStore.ReplaceTestIdentityLoginCode.
+type TestIdentityLoginCode struct {
+	ID                 string
+	UserID             string
+	CodeHash           string
+	IssuedBy           string
+	IssuerCredentialID string
+	ExpiresAt          time.Time
+	ConsumedAt         *time.Time
+	Created            time.Time
+}
+
+// Errors of UserStore.ConsumeTestIdentityLoginCode for a code hash that
+// exists but cannot be redeemed. An unknown hash returns ErrNotFound.
+var (
+	ErrTestIdentityLoginCodeConsumed = errors.New("test identity login code already used")
+	ErrTestIdentityLoginCodeExpired  = errors.New("test identity login code expired")
+)
 
 // Visibility constants - re-exported from api package for convenience.
 // The api package is the canonical source for these values.

@@ -361,6 +361,22 @@ var serverForceStopGrace = 5 * time.Second
 // A killed process still answers liveness checks until it has been reaped.
 var serverForceExitWait = 2 * time.Second
 
+// serverProcessIdentity reports whether pid is a scion server daemon: its
+// command line must be this scion binary (by base name) running
+// "server start --foreground". It errors when the command line cannot be
+// read. A variable so tests can substitute the check.
+var serverProcessIdentity = func(pid int) (bool, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return false, err
+	}
+	return daemon.IsProcessCommand(pid, executable, serverDaemonArgsPrefix...)
+}
+
+// serverDaemonArgsPrefix is the leading argv of the server daemon started by
+// 'server start' (see buildDaemonStartArgs), used to recognise it.
+var serverDaemonArgsPrefix = []string{"server", "start", "--foreground"}
+
 // serverStopError turns a daemon stop failure into a user-facing error,
 // pointing at the forced stop when the server did not exit in time.
 func serverStopError(err error) error {
@@ -380,8 +396,21 @@ func forcedStopStillRunningError(pid int, err error) error {
 	return fmt.Errorf("server process (PID %d) is still running after the forced stop: %w\n\nKill it manually, for example: kill -9 %d", pid, err, pid)
 }
 
+// forcedStopUnconfirmedError reports a recorded process that survived
+// 'server stop --force' but was not confirmed as the server. It gives no kill
+// hint, since the PID may have been reused by another process.
+func forcedStopUnconfirmedError(pid int, err error) error {
+	if pid <= 0 {
+		return forcedStopStillRunningError(pid, err)
+	}
+	return fmt.Errorf("process (PID %d) from the server PID file is still running after the forced stop, but it could not be confirmed as the scion server: %w\n\nCheck what PID %d is before stopping it manually", pid, err, pid)
+}
+
 func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts []int) error {
 	killed := false
+	// confirmed records that the identity check passed for pid. Only then is
+	// the manual kill hint given for a process that is still running.
+	confirmed := false
 
 	// If PID file exists and process is running, stop it normally first.
 	if pidRunning {
@@ -414,6 +443,27 @@ func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts 
 		}
 	}
 
+	// A hung server that holds no port survives the port kill. Kill the
+	// recorded process directly, but only once it is confirmed to still be
+	// the server, so a reused PID is never killed.
+	if pidRunning && pid > 0 {
+		if running, curPID, _ := daemon.StatusComponent(serverDaemonComponent, globalDir); running && curPID == pid {
+			ok, err := serverProcessIdentity(pid)
+			switch {
+			case err != nil:
+				fmt.Fprintf(os.Stderr, "Warning: PID %d could not be confirmed as the scion server (%v); not killing it\n", pid, err)
+			case !ok:
+				fmt.Fprintf(os.Stderr, "Warning: PID %d could not be confirmed as the scion server (its command line does not match); not killing it\n", pid)
+			default:
+				confirmed = true
+				if process, err := os.FindProcess(pid); err == nil && process.Kill() == nil {
+					fmt.Printf("Killed server process %d\n", pid)
+					killed = true
+				}
+			}
+		}
+	}
+
 	// Clean up the PID file, but only once its process has exited. A process
 	// killed above can still answer liveness checks until it is reaped, so
 	// wait briefly; WaitForExitComponent removes the PID file once the
@@ -423,7 +473,10 @@ func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts 
 		if readErr != nil || stillPID <= 0 {
 			stillPID = pid
 		}
-		return forcedStopStillRunningError(stillPID, err)
+		if confirmed && stillPID == pid {
+			return forcedStopStillRunningError(stillPID, err)
+		}
+		return forcedStopUnconfirmedError(stillPID, err)
 	}
 
 	if killed {

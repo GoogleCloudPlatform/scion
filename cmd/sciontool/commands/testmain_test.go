@@ -214,6 +214,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	sandboxHomeDir = tmpHome
+	conduitHostKeyDir = filepath.Join(tmpHome, "conduit-hostkey")
 	_ = os.Setenv("HOME", tmpHome)
 	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpHome, ".config"))
 	if err := disableGoTelemetry(filepath.Join(tmpHome, ".config")); err != nil {

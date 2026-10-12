@@ -1053,6 +1053,8 @@ func formatLastActivity(status string, t time.Time) string {
 	if status == "" || status == "WORKING" || status == "working" {
 		return timePart
 	}
+	// The initializing activity is shown as "starting".
+	status = state.Activity(status).DisplayLabel()
 	if timePart == "-" {
 		return status
 	}

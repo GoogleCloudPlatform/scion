@@ -138,8 +138,10 @@ type agentDeleteParams struct {
 	force        bool
 	requestedBy  string
 	// hard always removes the row, whatever the soft-delete retention,
-	// without force's skipping of broker failures. Only the test identity
-	// purge (fixture_purge.go) sets it; no request parameter maps to it.
+	// without force's skipping of broker failures. Exception: a finalizing
+	// re-claim with a stored request keeps that request
+	// (ptone/scion#4183). Only the test identity purge (fixture_purge.go)
+	// sets it; no request parameter maps to it.
 	hard bool
 }
 
@@ -182,6 +184,9 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 		claim    int64
 		oldState string
 		req      store.DeletionRequestInfo
+		// fallback: req was derived because a finalizing row had no
+		// usable stored request (logged once the claim is confirmed).
+		fallback bool
 	)
 	set := store.DeletionFields{
 		State:         &deleting,
@@ -194,6 +199,7 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 		Derive: func(cur *store.Agent, f *store.DeletionFields) {
 			claim = cur.DeletionClaim + 1
 			oldState = cur.DeletionState
+			fallback = false
 			// Capture prior once per delete attempt: a re-claim of an
 			// abandoned row keeps the original prior.
 			if cur.DeletionState == store.DeletionStateNone || cur.DeletionState == store.DeletionStateFailed {
@@ -225,22 +231,49 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 					post.Phase = stopping
 				}
 			}
-			// Soft unless force, no retention, or an incomplete async create
-			// (T1 §0c, evaluated on the post-claim row): those are always
-			// hard-deleted so the name can be reused.
-			req = store.DeletionRequestInfo{
-				DeleteFiles:  p.deleteFiles,
-				RemoveBranch: p.removeBranch,
-				Force:        p.force,
-				RequestedBy:  p.requestedBy,
-				Soft:         retention > 0 && !p.force && !p.hard && !post.IsIncompleteCreate(),
+			// writeRequest stores a newly derived request.
+			writeRequest := func() {
+				if b, err := json.Marshal(req); err == nil {
+					rs := string(b)
+					f.Request = &rs
+				}
 			}
-			if req.Soft && retainFiles {
-				req.DeleteFiles = false
-			}
-			if b, err := json.Marshal(req); err == nil {
-				rs := string(b)
-				f.Request = &rs
+			if cur.DeletionState == store.DeletionStateFinalizing {
+				if stored, ok := storedDeletionRequest(cur); ok {
+					// Teardown ran under the stored request, so the
+					// finish keeps its soft/hard decision (and the whole
+					// request), whatever this retry asked for and
+					// whatever retention says now (ptone/scion#4183), as
+					// the in_doubt re-claim does; even a hard (purge)
+					// claim keeps it. The column is left untouched.
+					req = stored
+				} else {
+					// No usable stored request: decide from the current
+					// configuration and p.hard only, never from this
+					// retry's force, deleteFiles or removeBranch (the
+					// dispatch is skipped).
+					fallback = true
+					req = store.DeletionRequestInfo{
+						RequestedBy: p.requestedBy,
+						Soft:        retention > 0 && !p.hard && !post.IsIncompleteCreate(),
+					}
+					writeRequest()
+				}
+			} else {
+				// Soft unless force, hard, no retention, or an incomplete
+				// async create (T1 §0c, evaluated on the post-claim row):
+				// those are always hard-deleted so the name can be reused.
+				req = store.DeletionRequestInfo{
+					DeleteFiles:  p.deleteFiles,
+					RemoveBranch: p.removeBranch,
+					Force:        p.force,
+					RequestedBy:  p.requestedBy,
+					Soft:         retention > 0 && !p.force && !p.hard && !post.IsIncompleteCreate(),
+				}
+				if req.Soft && retainFiles {
+					req.DeleteFiles = false
+				}
+				writeRequest()
 			}
 		},
 	}
@@ -266,6 +299,10 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 			// lease expired); treat as not claimed.
 			return nil, nil
 		}
+		if fallback {
+			s.agentLifecycleLog.Warn("delete claim: finalizing row has no stored request; using the current retention setting",
+				"agent_id", agentID, "claim", claim)
+		}
 		return &agentDeletionPlan{
 			claim:        claim,
 			snapshot:     row,
@@ -275,6 +312,17 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 		}, nil
 	}
 	return nil, nil
+}
+
+// storedDeletionRequest decodes a's stored delete request. ok is false when
+// it is missing or unreadable; unlike Agent.ParseDeletionRequest, that is
+// never read as the zero (hard) request.
+func storedDeletionRequest(a *store.Agent) (store.DeletionRequestInfo, bool) {
+	var req store.DeletionRequestInfo
+	if a.DeletionRequest == "" || json.Unmarshal([]byte(a.DeletionRequest), &req) != nil {
+		return store.DeletionRequestInfo{}, false
+	}
+	return req, true
 }
 
 // runAgentDeletion starts the engine for plan on a context detached from
