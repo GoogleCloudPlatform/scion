@@ -161,9 +161,9 @@ Run `scion server restart` after setting the registry; the broker does not start
 ## macOS with Apple container
 
 Agents reach the hub from inside their containers. Docker and Podman are handled automatically.
-On macOS, runtime auto-detection picks Apple `container` first when it is installed (then Podman,
-then Docker). With Apple container, container-to-host DNS needs a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon); the onboarding
-wizard's runtime step shows the command. You can choose Podman or Docker instead. See
+On macOS, runtime auto-detection prefers Podman, then Docker, then Apple `container`. When Apple
+container is used (it is the only runtime installed, or you selected it), container-to-host DNS
+needs a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon); the onboarding wizard's runtime step shows the command. See
 [Apple Container DNS](/scion/local/apple-container/).
 
 ## Rolling back

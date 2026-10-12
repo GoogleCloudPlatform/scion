@@ -718,7 +718,7 @@ Options:
 
 Recommendation: (A), as a new phase before the phase-3 release. Phase 3 can merge if the maintainer accepts shipping (C) temporarily; otherwise phase 3's release waits for (A). Phase 5 documents actual behaviour (C) and marks the gap, until the decision.
 
-**Finding 2: D4's premise was wrong.** D4 assumed macOS auto-detect prefers podman/docker. The code tries Apple `container` first (pkg/config/runtime_detect.go:34-38: container, podman, docker). Any Mac with Apple `container` installed therefore gets it by default, and with it the root DNS/pf step for container-to-hub reachability, plus the untested Apple broker PTY path (R5). D4's "accept and document" may still stand, but it was approved on an incorrect premise, so it goes back to the maintainer. Options:
+**Finding 2: D4's premise was wrong.** *(Resolved: the macOS order is now podman, docker, then Apple container (#3440), so D4's premise holds again.)* D4 assumed macOS auto-detect prefers podman/docker. The code tries Apple `container` first (pkg/config/runtime_detect.go:34-38: container, podman, docker). Any Mac with Apple `container` installed therefore gets it by default, and with it the root DNS/pf step for container-to-hub reachability, plus the untested Apple broker PTY path (R5). D4's "accept and document" may still stand, but it was approved on an incorrect premise, so it goes back to the maintainer. Options:
 - keep D4 and document the root step prominently;
 - change the auto-detect order on macOS to podman, docker, container, a one-line change in pkg/config;
 - have the onboarding wizard run the apple-dns helper by default.

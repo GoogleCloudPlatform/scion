@@ -95,9 +95,9 @@ Scion requires a container runtime to manage agents. You can use Docker, Podman,
 - Agents reach the hub from inside their containers. With Docker and Podman this works
   automatically. With Apple container it needs a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon); the onboarding wizard's runtime
   step shows the command. See [Apple Container DNS](/scion/local/apple-container/).
-  Auto-detection picks Apple container first on macOS; if you also have Podman or Docker, you can
-  select one of them in the wizard (or in settings, see [Select Runtime](#5-select-runtime)) to skip
-  the DNS step.
+  On macOS, auto-detection prefers Podman, then Docker, and picks Apple container only when neither
+  is installed, so the DNS step applies when Apple container is the only runtime or you select it
+  (see [Select Runtime](#5-select-runtime)).
 
 ### 3. Git
 Scion uses `git worktree` to manage agent workspaces.

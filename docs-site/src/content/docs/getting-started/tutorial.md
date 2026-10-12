@@ -31,11 +31,10 @@ links your repository from the command line.
 If the browser does not open (over SSH, or with `SCION_NO_BROWSER` set), open the URL yourself.
 
 :::caution[macOS with Apple container]
-On macOS, Scion picks the Apple `container` runtime first when it is installed (then Podman, then
-Docker). With Apple container, agents can reach the hub only through a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon). The wizard's
-runtime step shows the command; run it yourself. See
-[Apple Container DNS](/scion/local/apple-container/), including how to automate it after reboots. Choosing Podman or Docker in the wizard
-avoids this step.
+On macOS, Scion prefers Podman, then Docker, and uses the Apple `container` runtime only when
+neither is installed or when you select it. With Apple container, agents can reach the hub only
+through a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon). The wizard's runtime step shows the command; run it yourself. See
+[Apple Container DNS](/scion/local/apple-container/), including how to automate it after reboots.
 :::
 
 :::note[No image registry yet?]

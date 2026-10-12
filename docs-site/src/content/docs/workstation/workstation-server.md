@@ -78,7 +78,7 @@ If you are using **Podman** or **Docker** as your container runtime, Scion autom
 
 ### Apple container (macOS)
 
-On macOS, Scion picks the Apple `container` runtime first when it is installed (then Podman, then Docker). Apple container needs a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon) before agents can reach the Hub; the onboarding wizard's runtime step shows the command. See [Apple Container DNS](/scion/local/apple-container/), or choose Podman or Docker instead.
+On macOS, Scion prefers Podman, then Docker, and uses the Apple `container` runtime only when neither is installed or when you select it. Apple container needs a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon) before agents can reach the Hub; the onboarding wizard's runtime step shows the command. See [Apple Container DNS](/scion/local/apple-container/).
 
 ### Manual Configuration
 
