@@ -457,14 +457,14 @@ func (c *CLIContext) SelectProject(hubName string, p KnownProject, now time.Time
 		if e.Hub != hubName || e.ID != p.ID {
 			continue
 		}
+		// Update only what a selection owns (slug, name, last use) and
+		// keep everything else, such as the local path a link recorded.
 		// A linked project stays linked; anything else becomes a
 		// selection, which a later refresh does not remove.
-		if e.Source == KnownProjectSourceLink {
-			p.Source = KnownProjectSourceLink
-		} else {
-			p.Source = KnownProjectSourceUse
+		e.Slug, e.Name, e.LastUsed = p.Slug, p.Name, p.LastUsed
+		if e.Source != KnownProjectSourceLink {
+			e.Source = KnownProjectSourceUse
 		}
-		*e = p
 		return nil
 	}
 	p.Source = KnownProjectSourceUse

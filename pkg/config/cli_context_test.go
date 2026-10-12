@@ -550,3 +550,40 @@ func TestCLIContextOptionalV1FieldsOmittedWhenEmpty(t *testing.T) {
 		}
 	}
 }
+
+// TestCLIContextSelectKeepsUnownedFields: selecting a project that is
+// already in the known list updates only what a selection owns (slug, name,
+// last use, and source unless linked) and keeps the rest, such as the local
+// path a link recorded.
+func TestCLIContextSelectKeepsUnownedFields(t *testing.T) {
+	c := &CLIContext{Version: 1}
+	name, _ := c.EnsureHub("https://hub.example.com", "prod")
+	t0 := time.Date(2026, 10, 12, 3, 0, 0, 0, time.UTC)
+	c.Projects = []KnownProject{
+		{Hub: name, ID: "p1", Slug: "old", Name: "Old", Source: KnownProjectSourceLink, LocalPath: "/src/foo"},
+		{Hub: name, ID: "p2", Slug: "bar", Source: KnownProjectSourceRefresh, LocalPath: "/src/bar"},
+	}
+	if err := c.SelectProject(name, KnownProject{ID: "p1", Slug: "foo", Name: "Foo"}, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SelectProject(name, KnownProject{ID: "p2", Slug: "bar", Name: "Bar"}, t0); err != nil {
+		t.Fatal(err)
+	}
+	want := []KnownProject{
+		{Hub: name, ID: "p1", Slug: "foo", Name: "Foo", Source: KnownProjectSourceLink, LocalPath: "/src/foo", LastUsed: t0},
+		{Hub: name, ID: "p2", Slug: "bar", Name: "Bar", Source: KnownProjectSourceUse, LocalPath: "/src/bar", LastUsed: t0},
+	}
+	if len(c.Projects) != len(want) {
+		t.Fatalf("projects = %+v", c.Projects)
+	}
+	for i := range want {
+		got := c.Projects[i]
+		if !got.LastUsed.Equal(want[i].LastUsed) {
+			t.Errorf("project %d last_used = %v", i, got.LastUsed)
+		}
+		got.LastUsed = want[i].LastUsed
+		if got != want[i] {
+			t.Errorf("project %d = %+v, want %+v", i, got, want[i])
+		}
+	}
+}
