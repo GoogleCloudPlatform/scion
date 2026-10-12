@@ -284,6 +284,11 @@ func Execute() {
 	}
 
 	cmd, err := rootCmd.ExecuteC()
+	if err != nil && topLevelName(cmd) == "ssh" {
+		// scion ssh follows the ssh convention: any failure before the
+		// remote command runs, from the root hook included, exits 255.
+		os.Exit(reportSSHError(os.Stderr, err))
+	}
 	if err != nil && plainErrorCommands[topLevelName(cmd)] {
 		// One plain line, no usage block, and the command's own exit code.
 		os.Exit(reportPlainError(os.Stderr, err))
@@ -306,7 +311,8 @@ func Execute() {
 // the tunnel exit-code table. They run under ssh and editors, where the
 // error lands in a log. One command per line.
 var plainErrorCommands = map[string]bool{
-	"tunnel": true,
+	"tunnel":     true,
+	"ssh-config": true,
 }
 
 // formatCLIError renders a failed command's error for f. The error banner is
