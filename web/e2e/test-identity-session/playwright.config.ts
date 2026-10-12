@@ -49,7 +49,8 @@ export default defineConfig({
   globalTeardown: './global-teardown.ts',
   use: {
     // A trace of the retried attempt in CI. The redeem pauses trace
-    // recording, so no trace holds the code or the session Set-Cookie.
+    // recording, so no trace holds the redeem request or its Set-Cookie.
+    // Later requests send the session cookie, which the trace records.
     trace: CI ? 'on-first-retry' : 'off',
     viewport: { width: 1280, height: 800 },
     launchOptions: {

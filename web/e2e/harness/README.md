@@ -145,7 +145,8 @@ import { assertTestIdentity, redeemTestIdentity } from './harness/auth.js';
 const issued = JSON.parse(
   runScionCLI(state, ['hub', 'test-identity', 'issue', '--out', tokenFile, '--json'])
 );
-// 2. Mint a code into a new 0600 file in a task-owned temp dir.
+// 2. Mint a code into a new 0600 file in a task-owned temp dir, resolved with
+//    fs.realpathSync (no symlinked directory in the path).
 runScionCLI(state, ['hub', 'test-identity', 'web-code', issued.identity.id, '--out', codeFile]);
 
 // 3. Redeem in a fresh context, before any navigation.
@@ -176,8 +177,15 @@ await assertTestIdentity(page, { email: issued.identity.email });
   code replaces an unredeemed earlier one.
 - **Traces:** the redeem pauses trace recording (it ends the current trace
   chunk without saving it and starts a new one), so no trace holds the
-  redeem body or its `Set-Cookie`. Actions in the same context before the
-  redeem are dropped from the trace; redeem first.
+  redeem request or its `Set-Cookie`. Actions in the same context before
+  the redeem are dropped from the trace; redeem first.
+- A trace or HAR recorded **after** the redeem holds the session cookie
+  (every later request sends it). Treat such artifacts as sensitive until
+  the identity is deleted or expires, and do not enable `recordHar` on a
+  context that redeems (HAR recording is not paused).
+- `--out` of `web-code` must not have a symlinked directory anywhere in its
+  path, including system temp dirs on macOS (`/var` is a symlink there).
+  Resolve a temp dir first: `fs.realpathSync(fs.mkdtempSync(...))`.
 - Keep the code out of URLs, logs, screenshots and argv: pass `codeFile`,
   not the code. The CLI never prints the code.
 - Write no `storageState` of a test identity session to a shared path.

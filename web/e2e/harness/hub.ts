@@ -100,8 +100,8 @@ export function hubBinaryPath(): string {
 
 /**
  * The environment of a member-level test hub and of CLI calls against it:
- * the caller's environment without any SCION_* variable (a container's
- * leaked hub, project or token settings must not reach the throwaway hub),
+ * the caller's environment without any SCION_* variable (inherited hub,
+ * project or token settings must not reach the throwaway hub),
  * with a private HOME and human CLI mode.
  */
 function isolatedEnv(homeDir: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
@@ -217,7 +217,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     homeDir = path.join(dbDir, 'home');
     fs.mkdirSync(homeDir, { mode: 0o700 });
     env = isolatedEnv(homeDir, { SCION_SERVER_HUB_HUBID: hubId });
-    console.log(`[hub] Marking ${dbPath} as test infrastructure for hub ${hubId}...`);
+    console.info(`[hub] Marking ${dbPath} as test infrastructure for hub ${hubId}...`);
     const markOut = execFileSync(
       HUB_BINARY,
       [
@@ -234,7 +234,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
       ],
       { cwd: homeDir, env, encoding: 'utf-8', timeout: 60_000 }
     );
-    for (const line of markOut.trim().split('\n')) console.log(`[hub:mark] ${redact(line)}`);
+    for (const line of markOut.trim().split('\n')) console.info(`[hub:mark] ${redact(line)}`);
   }
 
   // Find a free port
@@ -322,8 +322,11 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     ...(homeDir ? { homeDir } : {}),
   };
 
-  // Write state file for teardown (it holds the dev token: owner-only)
-  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), { mode: 0o600 });
+  // Write state file for teardown. It holds the dev token: owner-only, and
+  // created fresh (a stale file or a symlink at the path is removed first;
+  // 'wx' never follows one).
+  fs.rmSync(stateFile, { force: true });
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), { mode: 0o600, flag: 'wx' });
 
   // Unref so the parent process can exit cleanly
   hubProcess.unref();
@@ -405,7 +408,8 @@ export function runScionCLI(state: HubState, args: string[]): string {
   } catch (err) {
     const e = err as { status?: number; stderr?: string };
     throw new Error(
-      `scion ${args.slice(0, 3).join(' ')} failed (exit ${String(e.status)}): ${redact(String(e.stderr ?? '')).trim()}`
+      `scion ${args.slice(0, 3).join(' ')} failed (exit ${String(e.status)}): ${redact(String(e.stderr ?? '')).trim()}`,
+      { cause: err }
     );
   }
 }

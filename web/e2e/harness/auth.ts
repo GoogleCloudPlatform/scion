@@ -327,11 +327,12 @@ export function hubErrorCode(body: string): string {
 
 /**
  * Runs fn with the context's trace recording paused, so the trace never
- * holds the redeem request body or its Set-Cookie answer. Recording is
- * paused by ending the current trace chunk without saving it and resumed
- * with a new chunk, so actions in this context before the call are dropped
- * from the trace: redeem before any navigation. A context without active
- * tracing runs fn unchanged.
+ * holds the redeem request or its Set-Cookie answer. Requests made after
+ * it still send the session cookie, and a trace recorded then holds it.
+ * Recording is paused by ending the current trace chunk without saving it
+ * and resumed with a new chunk, so actions in this context before the call
+ * are dropped from the trace: redeem before any navigation. A context
+ * without active tracing runs fn unchanged.
  */
 export async function withTracingPaused<T>(
   context: BrowserContext,
@@ -342,17 +343,51 @@ export async function withTracingPaused<T>(
     await context.tracing.stopChunk();
     paused = true;
   } catch (err) {
-    // Playwright refuses stopChunk when tracing was never started; any
+    // Playwright may refuse stopChunk when tracing was never started; any
     // other failure is not safe to ignore.
-    if (!/must start tracing/i.test(String((err as Error)?.message ?? err))) {
+    if (!isTracingNotStarted(err)) {
       throw err;
     }
   }
+  let result: T;
   try {
-    return await fn();
-  } finally {
+    result = await fn();
+  } catch (err) {
+    // Resume recording, but never let a tracing error hide fn's error.
     if (paused) {
-      await context.tracing.startChunk({ title: 'after test identity redeem' });
+      await resumeTracing(context).catch((traceErr: unknown) => {
+        console.warn(`withTracingPaused: could not resume tracing: ${errorText(traceErr)}`);
+      });
+    }
+    throw err;
+  }
+  if (paused) {
+    await resumeTracing(context);
+  }
+  return result;
+}
+
+function errorText(err: unknown): string {
+  return String((err as Error)?.message ?? err);
+}
+
+/** Playwright's answer to a chunk call on a context that is not tracing. */
+function isTracingNotStarted(err: unknown): boolean {
+  return /must start tracing/i.test(errorText(err));
+}
+
+/**
+ * Starts a new trace chunk. stopChunk() succeeds as a no-op on a context
+ * that is not tracing (the test runner with trace off), and startChunk()
+ * then refuses with "Must start tracing": nothing was paused, so that
+ * answer is not an error here.
+ */
+async function resumeTracing(context: BrowserContext): Promise<void> {
+  try {
+    await context.tracing.startChunk({ title: 'after test identity redeem' });
+  } catch (err) {
+    if (!isTracingNotStarted(err)) {
+      throw err;
     }
   }
 }
@@ -387,7 +422,9 @@ export async function redeemTestIdentity(
     try {
       res = await context.request.post(url, { data: { code }, headers, maxRedirects: 0 });
     } catch (err) {
-      // The request error names the URL only; keep it short.
+      // Keep only the first line: the caught Playwright error carries a call
+      // log with request details, so it is deliberately not attached.
+      // eslint-disable-next-line preserve-caught-error -- see above
       throw new Error(
         `redeemTestIdentity: request to ${REDEEM_PATH} failed (set baseURL on the context or in opts): ${String((err as Error)?.message ?? err).split('\n')[0]}`
       );

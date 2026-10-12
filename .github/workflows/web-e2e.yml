@@ -17,8 +17,9 @@
 # the nightly run covers everything else, such as browser drift.
 #
 # One matrix job per suite config under web/e2e/*/playwright.config.ts,
-# all in full Chromium. Every suite serves the web sources
-# itself (Vite dev server or an esbuild bundle). Only terminal-workspace also
+# all in full Chromium. Every suite except test-identity-session (below)
+# serves the web sources itself (Vite dev server or an esbuild bundle) with
+# a mocked hub. Only terminal-workspace also
 # needs a production build: some of its tests check the Shoelace icon files
 # in web/dist, so that job runs npm run build first.
 #
@@ -41,9 +42,12 @@
 # Runtime and cost: about 23 minutes of test time per full run (most of it
 # terminal-workspace, chat-palette, terminal-entrypoints and
 # terminal-hidden), plus roughly 2-3 minutes of setup per job, so about
-# 50-60 runner-minutes across 13 jobs; retries of failing tests add to that.
-# The terminal-workspace job also runs a Vite production build first, which
-# adds about 1 minute (that job takes about 4 minutes in total).
+# 50-60 runner-minutes across the 13 mocked-hub jobs; retries of failing
+# tests add to that. The terminal-workspace job also runs a Vite production
+# build first, which adds about 1 minute (that job takes about 4 minutes in
+# total). The 14th job, test-identity-session, adds setup-go, a Go build
+# (make build; a few minutes on a cold Go cache, less with the setup-go
+# cache) and a Vite production build before its short suite.
 # Wall clock is bounded by the slowest job, about 8-10 minutes.
 
 name: Web E2E (advisory)

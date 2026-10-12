@@ -218,7 +218,7 @@ func TestHubTestIdentityWebCode_OutRequiredAndFailureLeavesNoFile(t *testing.T) 
 		body   string
 		want   string
 	}{
-		{"unavailable", http.StatusNotFound, `{"error":{"code":"not_found","message":"test identity web sessions are not available on this hub","details":{"reason":"test_identity_web_unavailable","cause":"marker_absent"}}}`, "web sessions are not available on this hub"},
+		{"unavailable", http.StatusNotFound, `{"error":{"code":"not_found","message":"test identity web sessions are not available on this hub","details":{"reason":"test_identity_web_sessions_unavailable","cause":"web_session_key_unavailable"}}}`, "web sessions are not available on this hub"},
 		{"expired", http.StatusConflict, `{"error":{"code":"conflict","message":"test identity has expired"}}`, "test identity has expired"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -15,11 +15,12 @@
 /** Global teardown of the test identity session suite: stops the hub. */
 
 import { stopHub } from '../harness/hub.js';
-import { STATE_FILE } from './state.js';
+import { removeStateDir, stateFile } from './state.js';
 
 // eslint-disable-next-line @typescript-eslint/require-await -- Playwright calls this as an async teardown hook; it stays async so it keeps returning a Promise
 async function globalTeardown(): Promise<void> {
-  stopHub(STATE_FILE);
+  stopHub(stateFile());
+  removeStateDir();
 }
 
 export default globalTeardown;

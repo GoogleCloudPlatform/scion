@@ -12,8 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-/** Hub state of this suite, separate from the main suite's. */
-export const STATE_FILE = path.join(os.tmpdir(), 'scion-e2e-test-identity-hub-state.json');
+/**
+ * Environment variable naming this suite's hub state file. Global setup
+ * creates the file in a private temp dir and sets it; Playwright passes the
+ * environment of global setup on to the workers and the teardown.
+ */
+const STATE_ENV = 'E2E_TI_HUB_STATE_FILE';
+
+/** Creates the private state dir and publishes the state file path. */
+export function createStateFile(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scion-e2e-ti-state-'));
+  fs.chmodSync(dir, 0o700);
+  const file = path.join(dir, 'hub-state.json');
+  process.env[STATE_ENV] = file;
+  return file;
+}
+
+/** The state file path published by global setup. */
+export function stateFile(): string {
+  const file = process.env[STATE_ENV];
+  if (!file) {
+    throw new Error(`${STATE_ENV} is not set; did global-setup run?`);
+  }
+  return file;
+}
+
+/** Removes the private state dir. */
+export function removeStateDir(): void {
+  const file = process.env[STATE_ENV];
+  if (file) fs.rmSync(path.dirname(file), { recursive: true, force: true });
+}

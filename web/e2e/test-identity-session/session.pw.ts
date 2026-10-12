@@ -36,24 +36,26 @@ import { expect, test } from '@playwright/test';
 
 import { assertTestIdentity, redeemTestIdentity } from '../harness/auth.js';
 import { readHubState, runScionCLI, type HubState } from '../harness/hub.js';
-import { STATE_FILE } from './state.js';
+import { stateFile } from './state.js';
 
 interface IssuedIdentity {
   identity: { id: string; email: string; role: string };
 }
 
 function hubState(): HubState {
-  const state = readHubState(STATE_FILE);
+  const file = stateFile();
+  const state = readHubState(file);
   if (!state?.homeDir) {
-    throw new Error(`No member-level test hub state at ${STATE_FILE}; did global-setup run?`);
+    throw new Error(`No member-level test hub state at ${file}; did global-setup run?`);
   }
   return state;
 }
 
 test('a test identity holds a browser session for a UI journey', async ({ browser }) => {
   const state = hubState();
-  // Task-owned private directory for the token and code files.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scion-e2e-ti-'));
+  // Task-owned private directory for the token and code files. Resolved,
+  // since web-code refuses a path under a symlinked directory (macOS /var).
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'scion-e2e-ti-')));
   fs.chmodSync(dir, 0o700);
   let identityId = '';
   let deleted = false;
@@ -115,7 +117,9 @@ test('a test identity holds a browser session for a UI journey', async ({ browse
     await page.locator('scion-nav a[href="/projects"]').filter({ visible: true }).first().click();
     await expect(page).toHaveURL(/\/projects$/);
     expect((await projectsLoaded).status()).toBe(200);
-    await expect(page.getByRole('heading', { level: 1, name: 'Projects' })).toBeVisible();
+    await expect(
+      page.locator('scion-page-projects').getByRole('heading', { level: 1, name: 'Projects' })
+    ).toBeVisible();
     await expect(page.getByTestId('test-identity-chip')).toContainText(email);
     // A member session: no admin navigation.
     await expect(page.locator('scion-nav a[href="/admin/server-config"]')).toHaveCount(0);
@@ -148,7 +152,7 @@ test('redeem and assert failures report the status and hub error code only', asy
   browser,
 }) => {
   const state = hubState();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scion-e2e-ti-'));
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'scion-e2e-ti-')));
   fs.chmodSync(dir, 0o700);
   let identityId = '';
 

@@ -412,17 +412,25 @@ func (t *tokenFile) abandon() {
 	_ = os.Remove(t.path)
 }
 
-// write writes the token and closes the file.
+// write writes the token and a newline, and closes the file.
 func (t *tokenFile) write(token string) error {
-	if _, err := io.WriteString(t.f, token+"\n"); err != nil {
-		_ = t.f.Close()
-		return err
+	return t.writeExact(token + "\n")
+}
+
+// writeExact writes content as is, syncs and closes the file. On any
+// failure it closes and removes the file, so no partial secret is left.
+func (t *tokenFile) writeExact(content string) error {
+	_, err := io.WriteString(t.f, content)
+	if err == nil {
+		err = t.f.Sync()
 	}
-	if err := t.f.Sync(); err != nil {
-		_ = t.f.Close()
-		return err
+	if cerr := t.f.Close(); err == nil {
+		err = cerr
 	}
-	return t.f.Close()
+	if err != nil {
+		_ = os.Remove(t.path)
+	}
+	return err
 }
 
 // testIdentityOutput is the --json output of issue and token. It has no
@@ -583,18 +591,7 @@ func mintTestIdentityWebCode(ctx context.Context, out io.Writer, svc hubclient.T
 		}
 		return fmt.Errorf("failed to mint a web-login code for test identity %s: %w", opts.ID, err)
 	}
-	if _, err := io.WriteString(file.f, resp.Code); err != nil {
-		_ = file.f.Close()
-		_ = os.Remove(file.path)
-		return fmt.Errorf("failed to write --out %s; mint a new code with a new --out: %w", file.path, err)
-	}
-	if err := file.f.Sync(); err != nil {
-		_ = file.f.Close()
-		_ = os.Remove(file.path)
-		return fmt.Errorf("failed to write --out %s; mint a new code with a new --out: %w", file.path, err)
-	}
-	if err := file.f.Close(); err != nil {
-		_ = os.Remove(file.path)
+	if err := file.writeExact(resp.Code); err != nil {
 		return fmt.Errorf("failed to write --out %s; mint a new code with a new --out: %w", file.path, err)
 	}
 	absPath := file.path

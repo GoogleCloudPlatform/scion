@@ -14,21 +14,21 @@
 
 /**
  * Global setup of the test identity session suite: starts a throwaway
- * member-level test hub (no test-login) and records its state in
- * STATE_FILE for the spec and the teardown.
+ * member-level test hub (no test-login) and records its state in a private
+ * state file for the spec and the teardown (see state.ts).
  */
 
 import { startHub } from '../harness/hub.js';
-import { STATE_FILE } from './state.js';
+import { createStateFile } from './state.js';
 
 async function globalSetup(): Promise<void> {
   const state = await startHub({
     testLogin: false,
     testIdentities: true,
     build: process.env.E2E_PREBUILT !== '1',
-    stateFile: STATE_FILE,
+    stateFile: createStateFile(),
   });
-  console.log(`[setup] Member-level test hub ${String(state.hubId)} at ${state.baseURL}`);
+  console.info(`[setup] Member-level test hub ${String(state.hubId)} at ${state.baseURL}`);
 }
 
 export default globalSetup;

@@ -27,13 +27,13 @@ There is no separate switch for web sessions. When either requirement is missing
 You need the `test_identity.issue` permission, as for issuing: an admin sign-in, or a hub-bound access token carrying the `test_identity:issue` scope in `SCION_HUB_TOKEN`.
 
 ```bash
-dir=$(mktemp -d)   # a private, task-owned directory
+dir=$(cd -P "$(mktemp -d)" && pwd)   # a private, task-owned directory, symlinks resolved
 scion hub test-identity issue --role member --purpose "browser run" --out "$dir/identity.token" --json > "$dir/identity.json"
 ID=$(jq -r .identity.id "$dir/identity.json")
 scion hub test-identity web-code "$ID" --out "$dir/code.txt"
 ```
 
-`web-code` writes **only** the code to `--out`. The path must not exist yet: an existing file, a symlink, or a path under a symlinked directory is refused before any request is sent. The file is created with mode `0600`. The code is never printed; the command prints the identity ID, the code ID, the code expiry and the file path (`--json` prints the same as JSON).
+`web-code` writes **only** the code to `--out`. The path must not exist yet: an existing file, a symlink, or a path under a symlinked directory is refused before any request is sent. That includes system temp directories that sit under a symlink, such as `/var/folders/...` on macOS, which is why the example resolves the directory first. The file is created with mode `0600`. The code is never printed; the command prints the identity ID, the code ID, the code expiry and the file path (`--json` prints the same as JSON).
 
 The code is valid for **5 minutes** and can be redeemed **once**. Minting a new code replaces any earlier code that was not redeemed.
 
@@ -62,7 +62,8 @@ While the session lasts, every page shows a "Test identity &lt;email&gt; · expi
 ### Rules for test code
 
 - **Redeem first**, in a fresh context, before any navigation.
-- **Traces:** the helper pauses trace recording around the redeem, so a trace never holds the redeem body or its `Set-Cookie`. Actions taken in the same context before the redeem are dropped from the trace.
+- **Traces:** the helper pauses trace recording around the redeem, so a trace never holds the redeem request or its `Set-Cookie`. Actions taken in the same context before the redeem are dropped from the trace.
+- A trace or HAR recorded after the redeem holds the session cookie, because every later request sends it. Treat such artifacts as sensitive until the identity is deleted or expires, and do not enable HAR recording (`recordHar`) on a context that redeems.
 - Keep the code out of URLs, logs, screenshots and command lines: pass the code file, not the code.
 - Do not write the context's `storageState` to a shared path.
 - Use `waitUntil: 'domcontentloaded'`, not `networkidle`: the web app keeps server-sent event connections open.
