@@ -151,16 +151,13 @@ func (f *threadGroupFixture) agentCall(t *testing.T, agentID, projectID, method,
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(agentContextWithScopes(agentID, projectID, []AgentTokenScope{ScopeProjectRead}))
 	rec := httptest.NewRecorder()
-	handler := f.srv.handleThreadGroupRoutes
-	if strings.HasPrefix(path, "/api/v1/conversations") {
-		handler = f.srv.handleCreateConversation
-	} else if !strings.HasPrefix(path, "/api/v1/thread-groups/") {
-		handler = f.srv.handleThreadGroups
-	}
-	if strings.HasPrefix(path, "/api/v1/conversations") {
-		handler(rec, req) // not experiment-gated; threadGroupId checks the flag itself
-	} else {
-		f.srv.threadGroupsGate(handler)(rec, req)
+	switch {
+	case strings.HasPrefix(path, "/api/v1/conversations"):
+		f.srv.handleCreateConversation(rec, req) // not gated; threadGroupId checks the flag itself
+	case strings.HasPrefix(path, "/api/v1/thread-groups/"):
+		f.srv.threadGroupsGate(f.srv.handleThreadGroupRoutes)(rec, req)
+	default:
+		f.srv.threadGroupsGate(f.srv.handleThreadGroups)(rec, req)
 	}
 	return rec
 }
@@ -234,6 +231,7 @@ func TestThreadGroups_RegistryWithoutExperimentStartsAnd404s(t *testing.T) {
 	for _, path := range []string{"/api/v1/thread-groups?projectId=" + uuid.NewString(), "/api/v1/thread-groups/" + uuid.NewString()} {
 		rec := doRequest(t, srv, http.MethodGet, path, nil)
 		assert.Equal(t, http.StatusNotFound, rec.Code, "%s: %s", path, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "route not found", "%s must be stopped by the gate, not the handler", path)
 	}
 }
 
