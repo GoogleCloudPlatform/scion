@@ -325,11 +325,12 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"authz_delegation_ceiling.go:evaluateUserDelegatorAuthority":     {Policy: testAdminPolicyAllow, Reason: "delegation ceiling of a system-admin delegator; grant shaping for test admins is phase A3"},
 	"project_deletion_service.go:Delete":                             {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance"},
 	"project_deletion_service.go:checkDeletionGovernance":            {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance"},
-	// Test identity issuance and management: each refuses every test
-	// identity kind before (or instead of) its admin check.
-	"handlers_test_admin_identities.go:canIssueTestAdmin":                  {Policy: testAdminPolicyAllow, Reason: "issuer check; testAdminIssuer refuses non-human callers first, and the issuance capabilities are deny"},
-	"handlers_test_admin_identities.go:handleRevokeAllTestAdminIdentities": {Policy: testAdminPolicyAllow, Reason: "revoke-all refuses non-human callers (kindForPrincipal) before the super-admin check"},
-	"handlers_test_identities.go:testIdentityCallerSeesAll":                {Policy: testAdminPolicyAllow, Reason: "result scope of the test_identity.issue routes, which are deny for test identities"},
+	// Test identity issuance and management: deny states the intent; each
+	// also refuses every test identity kind by kind or by the route
+	// permission.
+	"handlers_test_admin_identities.go:canIssueTestAdmin":                  {Policy: testAdminPolicyDeny, Reason: "test identities never issue (design 3.6.1: test_identity.issue* are deny); also refused by kind in testAdminIssuer"},
+	"handlers_test_admin_identities.go:handleRevokeAllTestAdminIdentities": {Policy: testAdminPolicyDeny, Reason: "revoke-all is for human super-admins only (design 3.3); also refused by kind first"},
+	"handlers_test_identities.go:testIdentityCallerSeesAll":                {Policy: testAdminPolicyDeny, Reason: "issuance and list visibility of every test identity (test_identity.issue routes are deny)"},
 }
 
 // testAdminSettingsSectionPolicy classifies every operational settings

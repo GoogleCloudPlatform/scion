@@ -660,14 +660,19 @@ func (s *Server) handleCreateTestIdentity(w http.ResponseWriter, r *http.Request
 // test_identity.issue route guard, sees and re-issues every test identity
 // rather than only its own: an unscoped platform admin session. It widens
 // the result scope only; it grants no access on its own.
-func testIdentityCallerSeesAll(caller UserIdentity) bool {
+func (s *Server) testIdentityCallerSeesAll(ctx context.Context, caller UserIdentity) bool {
+	// Test identities with admin roles never see every test identity
+	// (test-admin policy; the routes are deny for them as well).
+	if s.testAdminPolicyRefusesUser(ctx, caller.ID(), "handlers_test_identities.go:testIdentityCallerSeesAll") {
+		return false
+	}
 	return IsUnscopedLocalPlatformAdmin(caller)
 }
 
 // canManageTestIdentity reports whether caller may see or re-issue for u:
 // its issuer, or an unscoped platform admin session.
-func canManageTestIdentity(caller UserIdentity, u *store.User) bool {
-	if testIdentityCallerSeesAll(caller) {
+func (s *Server) canManageTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
+	if s.testIdentityCallerSeesAll(ctx, caller) {
 		return true
 	}
 	return u.IssuedBy != nil && *u.IssuedBy == caller.ID()
@@ -690,14 +695,14 @@ func (s *Server) handleIssueTestIdentityToken(w http.ResponseWriter, r *http.Req
 	u, err := s.store.GetUser(ctx, id)
 	// An admin-kind identity gets exactly one token, at issuance: no
 	// re-issue (409), for its issuer or an unscoped platform admin.
-	if err == nil && u.IsTestAdmin() && canManageTestIdentity(caller, u) {
+	if err == nil && u.IsTestAdmin() && s.canManageTestIdentity(r.Context(), caller, u) {
 		writeError(w, http.StatusConflict, ErrCodeConflict, "an admin-kind test identity's token is never re-issued",
 			map[string]interface{}{"reason": testAdminReasonAdminKindTokens})
 		return
 	}
 	// One answer for a missing user, a non-fixture user, and a fixture the
 	// caller did not issue, so the route is no user-existence oracle.
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !canManageTestIdentity(caller, u))) {
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !s.canManageTestIdentity(r.Context(), caller, u))) {
 		NotFound(w, "test identity")
 		return
 	}
@@ -775,7 +780,7 @@ func (s *Server) handleListTestIdentities(w http.ResponseWriter, r *http.Request
 		return
 	}
 	issuedBy := caller.ID()
-	if testIdentityCallerSeesAll(caller) {
+	if s.testIdentityCallerSeesAll(r.Context(), caller) {
 		issuedBy = ""
 	}
 	// Live identities only, unless includeExpired=true; newest first, at
@@ -828,7 +833,7 @@ func (s *Server) handleListTestIdentities(w http.ResponseWriter, r *http.Request
 // besides test_identity.issue (checked by testIdentityCaller), holds
 // user.delete on u.
 func (s *Server) canDeleteTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
-	if canManageTestIdentity(caller, u) {
+	if s.canManageTestIdentity(r.Context(), caller, u) {
 		return true
 	}
 	return s.authzService.Decide(ctx, AuthzRequest{
@@ -1011,7 +1016,7 @@ func (s *Server) handlePurgeTestIdentity(w http.ResponseWriter, r *http.Request,
 			InternalError(w)
 			return
 		}
-		if !ok || (!testIdentityCallerSeesAll(caller) && issuer != caller.ID()) {
+		if !ok || (!s.testIdentityCallerSeesAll(r.Context(), caller) && issuer != caller.ID()) {
 			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
 			return
 		}

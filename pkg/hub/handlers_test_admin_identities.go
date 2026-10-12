@@ -510,6 +510,10 @@ func permissionAction(permissionID string) string {
 // ceiling, so revoking the user's super-admin binding stops the next
 // issuance even while the token is valid.
 func (s *Server) canIssueTestAdmin(ctx context.Context, userID, permission string) error {
+	// Test identities never issue (test-admin policy, deny).
+	if s.testAdminPolicyRefusesUser(ctx, userID, "handlers_test_admin_identities.go:canIssueTestAdmin") {
+		return fmt.Errorf("%w: test identities do not issue", errTestAdminIssuerNotLive)
+	}
 	u, err := s.store.GetUser(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errTestAdminIssuerNotLive, err)
@@ -834,6 +838,12 @@ func (s *Server) handleRevokeAllTestAdminIdentities(w http.ResponseWriter, r *ht
 	k, err := s.kindForPrincipal(ctx, actor.ID())
 	if err != nil || !k.isHuman() {
 		logAuthzDenial(r, actor, Resource{Type: permissions.ResourceTestIdentity}, Action("revoke"), "caller is not a human user")
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "revoke-all requires a human super-admin session",
+			map[string]interface{}{"reason": testAdminReasonCallerNotHuman})
+		return
+	}
+	// Revoke-all is for human super-admins only (test-admin policy, deny).
+	if s.testAdminPolicyRefusesUser(ctx, actor.ID(), "handlers_test_admin_identities.go:handleRevokeAllTestAdminIdentities") {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "revoke-all requires a human super-admin session",
 			map[string]interface{}{"reason": testAdminReasonCallerNotHuman})
 		return

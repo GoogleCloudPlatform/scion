@@ -289,7 +289,7 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 	// One answer for a missing user, a user of a kind that cannot hold a
 	// web session, and an identity the caller did not issue, as for
 	// re-issue: the route is no user-existence oracle.
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!testIdentityWebKindAdmitted(u) || !canManageTestIdentity(caller, u))) {
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!testIdentityWebKindAdmitted(u) || !s.canManageTestIdentity(r.Context(), caller, u))) {
 		NotFound(w, "test identity")
 		return
 	}
