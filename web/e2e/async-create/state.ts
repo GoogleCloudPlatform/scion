@@ -69,7 +69,7 @@ export interface JourneyTarget {
    * remote: only with E2E_LAUNCH_CAPABLE=0).
    */
   noRuntimeConfirmed: boolean;
-  /** Local only: image of the bad image fixture template. */
+  /** Image of the bad image fixture template (local: seeded; remote: E2E_BAD_IMAGE). */
   badImage?: string;
   /** Local only: the image the harness resolves to (for the evidence). */
   agentImage?: string;
@@ -128,6 +128,7 @@ export function isRemoteTarget(): boolean {
  * - E2E_TEST_IDENTITY_EMAIL: that identity's email.
  * - E2E_LAUNCH_CAPABLE=1: the hub's broker can start containers.
  * - E2E_BAD_IMAGE_TEMPLATE: template whose image tag does not exist.
+ * - E2E_BAD_IMAGE: optional, that template's image ref (A4 asserts it).
  * - E2E_TARGET_PROJECT_ID: optional project with a provider broker; a
  *   hub-managed project is created (and deleted) when unset.
  * - E2E_HARNESS_CONFIG: optional harness config to pick in the form.
@@ -165,5 +166,8 @@ export function remoteTargetFromEnv(): JourneyTarget {
     ...(env.E2E_BAD_IMAGE_TEMPLATE ? { badImageTemplate: env.E2E_BAD_IMAGE_TEMPLATE } : {}),
     ...(env.E2E_TARGET_PROJECT_ID ? { projectId: env.E2E_TARGET_PROJECT_ID } : {}),
     ...(env.E2E_HARNESS_CONFIG ? { harnessConfig: env.E2E_HARNESS_CONFIG } : {}),
+    // The image of E2E_BAD_IMAGE_TEMPLATE, when the runner knows it: A4 then
+    // asserts the exact ref, as on a local hub.
+    ...(env.E2E_BAD_IMAGE ? { badImage: env.E2E_BAD_IMAGE } : {}),
   };
 }

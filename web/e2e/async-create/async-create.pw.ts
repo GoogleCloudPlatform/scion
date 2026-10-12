@@ -148,8 +148,8 @@ const journey: {
   agents: CreatedAgent[];
   a1Page?: TrackedPage;
   a1Submit?: SubmitResult;
-  /** A2's running agent (same harness as A4, the image differs). */
-  a2Running?: { image: string };
+  /** A2's running agent; A4 asserts the same harness config and a different image. */
+  a2Running?: { image: string; harnessConfig: string };
   evidence: Record<string, unknown>;
 } = { projectCreated: false, agents: [], evidence: {} };
 
@@ -390,6 +390,7 @@ async function finalPageState(page: Page): Promise<'failed' | 'running' | ''> {
 interface AppliedConfigView {
   noAuth?: boolean;
   harnessAuth?: string;
+  harnessConfig?: string;
   image?: string;
 }
 
@@ -476,45 +477,71 @@ function expectForwardOnly(sequence: string[], what: string): void {
   }
 }
 
-/** Deletes the agents and the project this run created and checks they are gone. */
+/**
+ * Deletes the agents and the project this run created and checks they are
+ * gone, each in its own try: a transport error is recorded and the rest go on.
+ */
 async function cleanUpAgentsAndProject(
   cleanup: Record<string, unknown>,
   residue: string[]
 ): Promise<void> {
   for (const agent of journey.context ? journey.agents : []) {
-    if (!(await agentGone(member(), agent.id))) {
-      const res = await member().delete(`/api/v1/agents/${agent.id}`);
-      cleanup[`agent ${agent.check}`] = `DELETE ${res.status()}`;
+    try {
+      if (!(await agentGone(member(), agent.id))) {
+        const res = await member().delete(`/api/v1/agents/${agent.id}`);
+        cleanup[`agent ${agent.check}`] = `DELETE ${res.status()}`;
+      }
+      const gone = await expect
+        .poll(() => agentGone(member(), agent.id), { timeout: 120_000 })
+        .toBe(true)
+        .then(
+          () => true,
+          () => false
+        );
+      cleanup[`agent ${agent.check} state`] = await agentReadState(member(), agent.id);
+      if (!gone) residue.push(`agent ${agent.id} (${agent.check})`);
+    } catch (err) {
+      residue.push(`cleanup error (agent ${agent.id}): ${firstLine(err)}`);
     }
-    const gone = await expect
-      .poll(() => agentGone(member(), agent.id), { timeout: 120_000 })
-      .toBe(true)
-      .then(
-        () => true,
-        () => false
-      );
-    cleanup[`agent ${agent.check} state`] = await agentReadState(member(), agent.id);
-    if (!gone) residue.push(`agent ${agent.id} (${agent.check})`);
   }
 
   // The project, when this run created it.
   if (journey.projectCreated && journey.projectId) {
-    const res = await member().delete(`/api/v1/projects/${journey.projectId}`);
-    cleanup.project = `DELETE ${res.status()}`;
-    const projectState = async (): Promise<ReadState> => {
-      const get = await member().get(`/api/v1/projects/${journey.projectId}`);
-      return classifyRead(get.status(), await get.json().catch(() => null), 'project');
-    };
-    const gone = await expect
-      .poll(async () => isGone(await projectState()), { timeout: 60_000 })
-      .toBe(true)
-      .then(
-        () => true,
-        () => false
-      );
-    cleanup.projectState = await projectState();
-    if (!gone) residue.push(`project ${journey.projectId}`);
+    try {
+      await cleanUpProject(journey.projectId, cleanup, residue);
+    } catch (err) {
+      residue.push(`cleanup error (project ${journey.projectId}): ${firstLine(err)}`);
+    }
   }
+}
+
+/** First line of a thrown value's message. */
+function firstLine(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.split('\n')[0];
+}
+
+/** Deletes the project this run created and checks it is gone. */
+async function cleanUpProject(
+  projectId: string,
+  cleanup: Record<string, unknown>,
+  residue: string[]
+): Promise<void> {
+  const res = await member().delete(`/api/v1/projects/${projectId}`);
+  cleanup.project = `DELETE ${res.status()}`;
+  const projectState = async (): Promise<ReadState> => {
+    const get = await member().get(`/api/v1/projects/${projectId}`);
+    return classifyRead(get.status(), await get.json().catch(() => null), 'project');
+  };
+  const gone = await expect
+    .poll(async () => isGone(await projectState()), { timeout: 60_000 })
+    .toBe(true)
+    .then(
+      () => true,
+      () => false
+    );
+  cleanup.projectState = await projectState();
+  if (!gone) residue.push(`project ${projectId}`);
 }
 
 test.describe.serial('async agent create from the web form', () => {
@@ -687,9 +714,13 @@ test.describe.serial('async agent create from the web form', () => {
     journey.evidence.a2AppliedConfig = {
       noAuth: applied?.noAuth,
       harnessAuth: applied?.harnessAuth,
+      harnessConfig: applied?.harnessConfig,
       observedImage: applied?.image,
     };
-    journey.a2Running = { image: applied?.image ?? '' };
+    journey.a2Running = {
+      image: applied?.image ?? '',
+      harnessConfig: applied?.harnessConfig ?? '',
+    };
     expectNoAuth(applied);
 
     // A1b over the whole launch, and no reload.
@@ -762,14 +793,24 @@ test.describe.serial('async agent create from the web form', () => {
     // (which reached running with the same harness), and the agent really
     // used the bad image from the template.
     const applied = await appliedConfigOf(submit.agentId);
+    const a2 = journey.a2Running;
     const a4Applied = {
       noAuth: applied?.noAuth,
       harnessAuth: applied?.harnessAuth,
+      harnessConfig: applied?.harnessConfig,
       image: applied?.image,
       expectedImage: t.badImage ?? null,
-      a2RunningImage: journey.a2Running?.image ?? null,
+      a2RunningImage: a2?.image ?? null,
+      a2HarnessConfig: a2?.harnessConfig ?? null,
     };
     expectNoAuth(applied);
+    // Serial mode: A2 reached running before A4 runs. Same harness config,
+    // different image: the image is what differs between the two launches.
+    expect(a2, 'A2 ran first (serial)').toBeDefined();
+    expect(applied?.harnessConfig, 'A4 uses the same harness config as A2').toBe(a2?.harnessConfig);
+    expect(applied?.image ?? '', 'appliedConfig.image is set').not.toBe('');
+    expect(applied?.image, 'A4 image differs from A2 running image').not.toBe(a2?.image);
+    // The exact ref, where the suite knows it (local hub, or E2E_BAD_IMAGE).
     if (t.badImage) {
       expect(applied?.image, 'appliedConfig.image is the bad image').toBe(t.badImage);
     }
@@ -808,22 +849,24 @@ test.describe.serial('async agent create from the web form', () => {
 
     for (const page of journey.context?.pages() ?? []) await page.close();
 
-    // Agents and the project, as the member. A transport error is recorded
-    // as residue and does not stop the identity deletion below.
-    try {
-      await cleanUpAgentsAndProject(cleanup, residue);
-    } catch (err) {
-      residue.push(`cleanup error: ${String((err as Error).message).split('\n')[0]}`);
-    }
+    // Agents and the project, as the member. A transport error on one
+    // resource is recorded as residue; the others, the identity deletion
+    // and the evidence still run.
+    await cleanUpAgentsAndProject(cleanup, residue);
 
     // The fixture template (local hub).
     if (hub && journey.template) {
-      const del = await adminRequest(hub, 'DELETE', `/api/v1/templates/${journey.template.id}`);
-      cleanup.template = `DELETE ${del.status}`;
-      const get = await adminRequest(hub, 'GET', `/api/v1/templates/${journey.template.id}`);
-      const templateState = classifyRead(get.status, get.body, 'template');
-      cleanup.templateState = templateState;
-      if (!isGone(templateState)) residue.push(`template ${journey.template.name}`);
+      const tpl = journey.template;
+      try {
+        const del = await adminRequest(hub, 'DELETE', `/api/v1/templates/${tpl.id}`);
+        cleanup.template = `DELETE ${del.status}`;
+        const get = await adminRequest(hub, 'GET', `/api/v1/templates/${tpl.id}`);
+        const templateState = classifyRead(get.status, get.body, 'template');
+        cleanup.templateState = templateState;
+        if (!isGone(templateState)) residue.push(`template ${tpl.name}`);
+      } catch (err) {
+        residue.push(`cleanup error (template ${tpl.name}): ${firstLine(err)}`);
+      }
     }
 
     // The test identity (local hub). Without --purge the delete is refused
@@ -833,22 +876,27 @@ test.describe.serial('async agent create from the web form', () => {
         runScionCLI(hub, ['hub', 'test-identity', 'delete', journey.identityId]);
         cleanup.identity = 'deleted';
       } catch (err) {
-        cleanup.identity = `delete failed: ${String((err as Error).message)}`;
+        cleanup.identity = `delete failed: ${firstLine(err)}`;
       }
-      if (journey.context) {
-        const me = await journey.context.request.get('/auth/me', { maxRedirects: 0 });
-        cleanup.authMeAfterDelete = me.status();
-        if (me.status() !== 401) residue.push('test identity session still answers /auth/me');
-        await me.dispose();
+      const identityId = journey.identityId;
+      try {
+        if (journey.context) {
+          const me = await journey.context.request.get('/auth/me', { maxRedirects: 0 });
+          cleanup.authMeAfterDelete = me.status();
+          if (me.status() !== 401) residue.push('test identity session still answers /auth/me');
+          await me.dispose();
+        }
+        const listed = runScionCLI(hub, [
+          'hub',
+          'test-identity',
+          'list',
+          '--include-expired',
+          '--json',
+        ]);
+        if (listed.includes(identityId)) residue.push(`test identity ${identityId}`);
+      } catch (err) {
+        residue.push(`cleanup error (identity ${identityId}): ${firstLine(err)}`);
       }
-      const listed = runScionCLI(hub, [
-        'hub',
-        'test-identity',
-        'list',
-        '--include-expired',
-        '--json',
-      ]);
-      if (listed.includes(journey.identityId)) residue.push(`test identity ${journey.identityId}`);
     } else if (t?.mode === 'remote') {
       cleanup.identity =
         'remote target: NOT verified here; the runner deletes the identity out of band, ' +
