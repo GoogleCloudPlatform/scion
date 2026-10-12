@@ -316,10 +316,19 @@ var sqliteOpenPackages = map[string]string{
 // argument is "sqlite3", spelled as a literal or as a string const or var
 // declared in the package or in the enclosing function. Files built under
 // no_sqlite are skipped: there modernc.org/sqlite is not linked and mattn is
-// the only driver. Uses that allowed lists are skipped, and an allowed entry
+// the only driver. Uses listed in allowed are skipped, and an allowed entry
 // that matches no use is reported as stale.
 //
-// Known blind spot: a driver name computed at run time is not evaluated.
+// Known limits (none occur in the tree today):
+//   - a driver name computed at run time is not evaluated;
+//   - names are resolved through one flat map per top-level declaration,
+//     filled only from string-literal const, var and := declarations. A
+//     function parameter, a non-literal := (driver := pick()) or a later
+//     plain = does not shadow a package-level name, so the package value is
+//     used. That reports a false use (fails closed; fix it or allowlist it);
+//   - a name declared in an inner block or closure stays visible to later
+//     calls in the enclosing scope, which can hide a use;
+//   - a dot-imported Open (a bare identifier call) is not matched.
 func mattnDriverUses(files map[string][]byte, allowed map[string]map[string]bool) ([]string, error) {
 	fset := token.NewFileSet()
 	type parsedFile struct {
@@ -528,6 +537,8 @@ const mattnDriver = "sqlite3"
 
 var mattnVar = "sqlite3"
 
+const shadowed = "sqlite3"
+
 func bad(t *testing.T) {
 	_ = openTestMemorySQLite(t, "sqlite3")
 	_, _ = sql.Open("sqlite3", "file:x.db")
@@ -551,6 +562,14 @@ func good(t *testing.T) {
 	_, _ = entsql.Open("sqlite", "file:x.db")
 	_ = NewWebChatStore(nil, "sqlite3")
 	_, _ = other.Open("sqlite3", "file:x.db")
+	// A local name shadows the package-level one of the same name.
+	shadowed := "sqlite"
+	_, _ = sql.Open(shadowed, "file:x.db")
+}
+
+func goodLocalConst(t *testing.T) {
+	const shadowed = "sqlite"
+	_ = openTestMemorySQLite(t, shadowed)
 }
 `
 	// A named and a plain import are caught like a blank one.
