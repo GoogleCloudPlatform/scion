@@ -159,6 +159,12 @@ type StatusUpdate struct {
 
 	// Exit tracking
 	ExitCode *int `json:"exitCode,omitempty"`
+
+	// SSHHostKey is the public key (authorized_keys line) of the agent's
+	// conduit SSH server host key. The hub records it with the conduit
+	// experiment on; the reported host key is bound to the reporting
+	// agent's current run.
+	SSHHostKey string `json:"sshHostKey,omitempty"`
 }
 
 // Client is a Hub API client for sciontool.
@@ -339,6 +345,12 @@ func (c *Client) UpdateStatus(ctx context.Context, status StatusUpdate) error {
 	return c.postJSONWithRetry(ctx, endpoint, body)
 }
 
+// ReportSSHHostKey sends the conduit SSH server's public host key
+// (authorized_keys line) in a status update carrying nothing else.
+func (c *Client) ReportSSHHostKey(ctx context.Context, publicKey string) error {
+	return c.UpdateStatus(ctx, StatusUpdate{SSHHostKey: publicKey})
+}
+
 func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []byte) error {
 	if err := c.writes.allow(); err != nil {
 		return err
@@ -499,7 +511,7 @@ func (c *Client) RegisterPort(ctx context.Context, req RegisterPortRequest) (*Ex
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 	var out ExposedPort
 	if err := json.Unmarshal(respBody, &out); err != nil {
@@ -526,7 +538,7 @@ func (c *Client) ListPorts(ctx context.Context) ([]ExposedPort, error) {
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 	var out ListPortsResponse
 	if err := json.Unmarshal(respBody, &out); err != nil {
@@ -555,9 +567,28 @@ func (c *Client) DeletePort(ctx context.Context, port int) error {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+		return &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 	return nil
+}
+
+// StatusError is returned by the port API methods when the hub answers
+// with an unexpected HTTP status. Its message keeps the
+// "hub returned error <code>: <body>" form used by the other methods.
+type StatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("hub returned error %d: %s", e.StatusCode, e.Body)
+}
+
+// IsUnauthorized reports whether err carries an HTTP 401 from the hub,
+// meaning the hub did not accept the agent's current credential.
+func IsUnauthorized(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusUnauthorized
 }
 
 func (c *Client) absoluteURL(path string) string {
@@ -2438,6 +2469,9 @@ type AgentSelf struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Ancestry    []string          `json:"ancestry,omitempty"`
 	TaskSummary string            `json:"taskSummary,omitempty"`
+	// MessageMode is the agent's effective message mode (none, lineage,
+	// branch, project, hub) as stored on the Hub.
+	MessageMode string `json:"messageMode,omitempty"`
 	// CreatedBy is the ID of the principal (user or agent) that created
 	// this agent.
 	CreatedBy string `json:"createdBy,omitempty"`

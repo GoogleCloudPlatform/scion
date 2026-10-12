@@ -3932,6 +3932,10 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		s.handleAgentDelegations(w, r, id)
 	case AgentRouteDelegationExchange:
 		s.handleAgentDelegationExchange(w, r, id, route.Suffix.Param)
+	case AgentRouteDelegationItem:
+		s.handleAgentDelegationItem(w, r, id, route.Suffix.Param)
+	case AgentRouteDelegationCredential:
+		s.handleAgentDelegationCredential(w, r, id, route.Suffix.Param, route.Suffix.SecondParam)
 
 	case AgentRouteActionStatus:
 		s.handleAgentAction(w, r, id, api.AgentActionStatus)
@@ -4089,6 +4093,7 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 		ResolvedHarness:     resolvedHarness,
 		HarnessCapabilities: &harnessCaps,
 		CloudLogging:        s.logQueryService != nil,
+		SSHHostKey:          s.agentSSHHostKey(agent),
 	}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, agentResource(agent))
@@ -5714,6 +5719,10 @@ const harnessConfigUnusableErrorCode = api.BrokerErrCodeHarnessConfigUnusable
 // A required-skill resolution failure is relayed verbatim: the broker's
 // status, message, details and Retry-After, with no hub prefix (#2546 R2).
 //
+// Any other failure gets the generic 502. When the broker answered
+// runtime_error with a well-formed details.cause code, details.cause
+// carries that code and nothing else (brokerRuntimeCauseDetails).
+//
 // A delete that claimed agentID while the create was in flight refuses the
 // dispatch's run-ID write (store.ErrDeleteInProgress); that answers 409
 // delete_in_progress, as start does (ptone/scion#2550).
@@ -5751,7 +5760,9 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 		}
 		writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to dispatch to runtime broker: "+message, nil)
 	default:
-		RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
+		// A broker runtime_error may carry a fixed details.cause code (for
+		// example runtime_forbidden, ptone/scion#4555); relay only that.
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Failed to dispatch to runtime broker: "+err.Error(), brokerRuntimeCauseDetails(err))
 	}
 }
 

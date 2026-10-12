@@ -22,19 +22,30 @@ import (
 
 // hubUserLevelCommands are direct "scion hub" subcommands that act on the
 // user's hub connection or login rather than on a local project. Outside a
-// project they read and write the global settings, as with --global.
+// project they read and write the global settings, as with --global. The
+// hub list commands (add, list, rename, remove) act on the user's hub list
+// in ~/.scion/context.yaml.
 var hubUserLevelCommands = map[string]bool{
 	"status":  true,
 	"enable":  true,
 	"disable": true,
+	"add":     true,
+	"list":    true,
+	"rename":  true,
+	"remove":  true,
 }
 
 // hubOnlyCommands are top-level commands that need only the hub endpoint,
 // the credential and an agent reference: they never resolve, create,
 // register or sync a local project, even when --project names one. One
-// command per line.
+// command per line. (expose and unexpose act as the calling agent, with
+// its own hub identity and no agent reference.)
 var hubOnlyCommands = map[string]bool{
-	"tunnel": true,
+	"tunnel":     true,
+	"ssh":        true,
+	"ssh-config": true,
+	"expose":     true,
+	"unexpose":   true,
 }
 
 // brokerMachineLevelCommands are "scion runtime-broker" subcommands that act
@@ -86,6 +97,11 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	case "scion":
 		// Root command itself doesn't require project
 		return false
+	case "use":
+		// Top-level 'use' (alias of 'project use') acts on user state.
+		if isTopLevel(cmd) {
+			return false
+		}
 	}
 	// Hub login and connection commands (ptone/scion#3317).
 	if parentName == "auth" && commandInSubtree(cmd, "hub") {

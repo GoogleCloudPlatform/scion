@@ -644,22 +644,18 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	if err := hooks.checkpoint(ctx, CheckpointStepPreClean); err != nil {
 		return "", err
 	}
-	// NFS-home agents: one start at a time per agent, across brokers that
-	// share the store, from before the previous pod is removed until the new
-	// pod exists, so two pods never write to the same home.
+	// NFS-home agents: two pods must never write to the same home. The hub
+	// start claim admits one start of an agent at a time, across hub
+	// replicas and brokers. Here, the pre-clean waits until the previous
+	// pod's termination is confirmed before the new pod is created (and
+	// refuses with previous_pod_unconfirmed otherwise), and every object
+	// carries this start's ID, so the cleanup of a failed start never
+	// removes a newer start's pod and mark-seeded refuses once a newer start
+	// owns the home.
 	nfsHomeStart, err := nfsHomePod(config)
 	if err != nil {
 		return "", err
 	}
-	releaseHomeLock := func() {}
-	if nfsHomeStart {
-		release, err := acquireHomeStartLock(ctx, config)
-		if err != nil {
-			return "", err
-		}
-		releaseHomeLock = release
-	}
-	defer func() { releaseHomeLock() }()
 
 	if runID := config.Labels[api.LabelRunID]; runID != "" {
 		// Run-scoped pre-clean (ptone/scion#2550), with the same NFS-home
@@ -829,8 +825,6 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	podCreated = true
 	r.trackCreatedPod(createdPod)
 	hooks.created(api.ResourceHandle{Kind: api.ResourceKindPod, Namespace: namespace, Name: createdPod.Name, UID: string(createdPod.UID)})
-	releaseHomeLock()
-	releaseHomeLock = func() {}
 	runtimeLog.Info("Pod created", "agent", config.Name, "namespace", namespace,
 		"phase", "pod-create", "elapsed_ms", time.Since(podCreateStart).Milliseconds())
 
@@ -1085,14 +1079,7 @@ func (r *KubernetesRuntime) createAgentSecretWithHooks(ctx context.Context, name
 	}
 
 	// Build labels for cleanup
-	secretLabels := map[string]string{
-		"scion.agent": agentName,
-	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			secretLabels[k] = v
-		}
-	}
+	secretLabels := launchChildLabels(agentName, labels)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1335,14 +1322,7 @@ func (r *KubernetesRuntime) createSecretProviderClassWithHooks(ctx context.Conte
 	}
 
 	// Build labels
-	spcLabels := map[string]string{
-		"scion.agent": agentName,
-	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			spcLabels[k] = v
-		}
-	}
+	spcLabels := launchChildLabels(agentName, labels)
 
 	// GKE's managed Secret Manager add-on registers its provider as "gke",
 	// whereas the upstream open-source CSI driver uses "gcp".
@@ -1614,10 +1594,45 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 			return err
 		}
 	}
-	selector, err := labels.ValidatedSelectorFromSet(map[string]string{
+	return r.cleanupAgentResourcesSelected(ctx, agentName, runID, map[string]string{
 		"scion.name":               agentName,
 		projectkeys.LabelProjectID: projectID,
 	})
+}
+
+// CleanupOwnedAgentResources is CleanupAgentResources limited to the
+// objects carrying the owning flat Runtime Broker instance's reserved label
+// (api.LabelRuntimeBrokerID = runtimeBrokerID); same kinds, same pod-gone
+// rule and the same runID scoping (OwnedAgentResourceCleaner). An empty or
+// invalid runtimeBrokerID is an error and nothing is deleted: there is no
+// unscoped fallback. An invalid runID is an error as on the unscoped path.
+func (r *KubernetesRuntime) CleanupOwnedAgentResources(ctx context.Context, agentName, projectID, runtimeBrokerID, runID string) error {
+	if runtimeBrokerID == "" {
+		return errors.New("owned agent cleanup: a Runtime Broker ID is required")
+	}
+	if errs := k8svalidation.IsValidLabelValue(runtimeBrokerID); len(errs) > 0 {
+		return fmt.Errorf("owned agent cleanup: invalid Runtime Broker ID %q: %s", runtimeBrokerID, strings.Join(errs, "; "))
+	}
+	if agentName == "" || projectID == "" {
+		return nil
+	}
+	if runID != "" {
+		if err := validateRunIDLabel(runID); err != nil {
+			return err
+		}
+	}
+	return r.cleanupAgentResourcesSelected(ctx, agentName, runID, map[string]string{
+		"scion.name":               agentName,
+		projectkeys.LabelProjectID: projectID,
+		api.LabelRuntimeBrokerID:   runtimeBrokerID,
+	})
+}
+
+// cleanupAgentResourcesSelected removes the per-agent objects matching set
+// that the rules of CleanupAgentResources allow for runID (already
+// validated by the caller; empty selects by the set alone).
+func (r *KubernetesRuntime) cleanupAgentResourcesSelected(ctx context.Context, agentName, runID string, set map[string]string) error {
+	selector, err := labels.ValidatedSelectorFromSet(set)
 	if err != nil {
 		return fmt.Errorf("invalid agent selector: %w", err)
 	}
@@ -1789,14 +1804,7 @@ func (r *KubernetesRuntime) createAuthFileSecretWithHooks(ctx context.Context, n
 		data[keyName] = content
 	}
 
-	secretLabels := map[string]string{
-		"scion.agent": agentName,
-	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			secretLabels[k] = v
-		}
-	}
+	secretLabels := launchChildLabels(agentName, labels)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2091,8 +2099,17 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// equivalent. No-auth mode builds a raw shell command string to avoid
 	// the double-sh-c wrapping that previously caused the no-auth command
 	// to be injected as terminal input instead of running standalone.
+	//
+	// nfsHome is the value that decides the NFS agent-home mount below. A
+	// pod-local home (no NFS home) is lost when the pod is deleted, so a
+	// resume has no harness session to continue: let it fall back to a
+	// fresh start instead of exiting (ptone/scion#2665).
+	nfsHome, err := nfsHomePod(config)
+	if err != nil {
+		return nil, err
+	}
 	var cmd []string
-	cmdLine, ok := harnessCmdLine(config)
+	cmdLine, ok := harnessCmdLine(config, harnessCmdLineOptions{FreshStartOnFailedResume: !nfsHome})
 	if !ok {
 		cmdLine = "sleep infinity"
 	}
@@ -2176,10 +2193,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	var extraVolumes []corev1.Volume
 	var extraVolumeMounts []corev1.VolumeMount
 
-	nfsHome, err := nfsHomePod(config)
-	if err != nil {
-		return nil, err
-	}
 	containerHome := util.GetHomeDir(config.UnixUsername)
 	fileProjections := r.k8sFileProjections(config)
 	if err := checkK8sHomeFileTargets(r.k8sHomeFilePlacements(config)); err != nil {
@@ -2442,6 +2455,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// as the agent user via runAsUser, so sciontool does no privilege drop
 	// here; the variable only drives the umask.
 	envVars = withSupplementalGIDsEnv(envVars, sharedDirGroups(config))
+
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only names no source above set (plain or secret-backed), never a
+	// suppressed key.
+	envVars = appendK8sFallbackEnv(envVars, config.FallbackEnv, config.SuppressedFallbackKeys)
 
 	// Determine image pull policy
 	pullPolicy := corev1.PullIfNotPresent
@@ -3665,11 +3683,11 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 	if err != nil && (nfsHome || hs != nil) {
 		// An NFS-home start never force-deletes a pod it could not read:
 		// it may be a previous pod of this agent still writing to the home.
-		return fmt.Errorf("%w: cannot read the previous pod %s: %v", errPreviousPodUnconfirmed, podName, err)
+		return fmt.Errorf("%w: cannot read the previous pod %s: %w", errPreviousPodUnconfirmed, podName, err)
 	}
 	if err == nil && isNFSHomePod(pod) {
 		if derr := pods.Delete(ctx, podName, podDeleteOptions(pod)); derr != nil && !k8serrors.IsNotFound(derr) {
-			return fmt.Errorf("%w: failed to delete the previous pod %s: %v", errPreviousPodUnconfirmed, podName, derr)
+			return fmt.Errorf("%w: failed to delete the previous pod %s: %w", errPreviousPodUnconfirmed, podName, derr)
 		}
 		bound := nfsHomeTerminationBound(pod, hs)
 		runtimeLog.Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace, "bound", bound.String(), "phase", "home-wait")

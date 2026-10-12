@@ -36,7 +36,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
   - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the toggle falls back to the top-level dashboard `/`.
 - **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports robust 1-on-1 Direct Messages (DMs). This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
   - **DM Promotion to Shared Threads**: When a 1-on-1 Direct Message with an agent develops context useful for the broader team, you can promote the DM conversation into a Shared Space Thread. This atomic operation safely re-keys the messages and streams the transition live to all clients via SSE without a page reload. Use the promotion button located in the DM header.
-- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message. The thread's default agent is listed first in the AGENTS section of the sidebar, under a **Thread default** sub-heading. When a thread has a default agent, the thread header shows **terminal** and **graph** buttons for that agent, the same as a DM with an agent. Members can be filtered (All/Unread toggle) and sorted (Alphabetical or Recent Activity).
+- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message. The thread's default agent is listed first in the AGENTS section of the sidebar, under a **Thread default** sub-heading. When a thread has a default agent, the thread header shows **terminal** and **graph** buttons for that agent, the same as a DM with an agent. Members can be sorted (Alphabetical or Recent Activity). A blue dot marks members with unread messages; to find unread DMs, use the rail's **Unread** filter.
 - **The Thread Rail & Mobile Swipe Navigation**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. On mobile viewports, the rail supports native **swipe gestures** for fluid, app-like drawer navigation.
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
 - **Zero-Reload Navigation**: Move between threads, project spaces, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
@@ -199,7 +199,11 @@ scion message @tech-lead --body-file - < ./review-notes.md
 
 For `--body-file` and stdin, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
 
-A successful send to an agent prints `Message accepted for agent '<name>'`. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it. It does not mean the agent has read it. A send to an agent that is reincarnating prints a separate notice that the message was saved for catch-up. See [`scion message`](/scion/reference/cli/#scion-message-or-msg) for what each status means.
+A successful send to an agent prints `Message accepted for agent '<name>'`. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it. It does not mean the agent has read it. A send to an agent that is reincarnating prints a separate notice that the message was saved for catch-up.
+
+**Messages to an agent that is still starting.** Until its harness accepts input, an agent's activity is `initializing` (shown as "starting"). Messages sent in that window, from the CLI, web chat or a DM, are accepted and held by the agent's runtime. They are pasted once the harness reports it is ready, or after at most 90 seconds, so early messages are not lost. An `--interrupt` sent in that window is delivered as an ordinary message. To wait for readiness before you send, start the agent with [`scion start --wait-ready`](/scion/reference/cli/#scion-start-or-run).
+
+See [`scion message`](/scion/reference/cli/#scion-message-or-msg) for what each status means.
 
 ### Message Formatting
 
@@ -344,9 +348,17 @@ The available modes are:
 
 - **Project Mode (Default)**: Any user with the `agent:message` permission in the project can message the agent. Any peer agent in the project (that is not restricted by lineage mode) can also message it. The most permissive mode. Note that the default project-member role does **not** include `agent:message` — messaging requires an owner, admin, or ancestry relationship with the agent (i.e., the agent's creator or their ancestors). This aligns messaging authorization with the terminal attach permission gate.
 - **Hub Mode**: Behaves like Project mode within the agent's own project, and additionally allows the agent to send direct messages across project boundaries when [cross-project messaging](#cross-project-messaging) is enabled. A project-mode agent can *receive* a cross-project DM but cannot *reply* across the boundary until granted Hub mode.
-- **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it.
+- **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it. Agent-to-agent messages need both agents in branch mode and one to be the other's direct parent; siblings, grandparents, and pairs that mix branch with another mode are denied.
 - **Lineage Mode**: Strictly restricts messaging to users in the agent's ancestry chain (its creator and their ancestors). No agent-to-agent messaging is permitted.
 - **None Mode**: Seals the agent from all messaging except system-plane notices. No users and no agents can message a none-mode agent through normal paths.
+
+A new agent's mode is set once, at creation: the `--message-mode` flag of `scion create` or `scion start` if given, else the template's `message_mode`, else the parent agent's mode when an agent creates it, else `project`. A default that resolves to `hub` still needs a hub-mode grant.
+
+To see modes:
+
+- `scion whoami --full` shows the calling agent's own mode (`messageMode` in `--format json`).
+- `scion conversation get` and `scion conversation participants` show a **MSG MODE** column for agent participants in the conversation's project; for a conversation without a project (a DM or legacy group), in the calling agent's project (`messageMode` in JSON). It shows `-` for users, for agents outside that project, and for every agent when a user reads a conversation without a project.
+- When a send is denied, the CLI error names the reason and both modes, for example `message_denied: Message delivery denied [reason: ..., sender mode: branch, recipient mode: project] (status: 403)`.
 
 ### Piercing
 Highly privileged users can bypass an agent's message mode restrictions. This is called **piercing**.

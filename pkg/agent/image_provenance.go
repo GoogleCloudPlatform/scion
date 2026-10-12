@@ -262,3 +262,26 @@ func logImageProvenanceError(agentName string, err error) {
 		slog.Error("agent state directory unavailable", "agent", agentName, "path", de.Path, "error", de.Err)
 	}
 }
+
+// ProvisionedTemplateHash returns the content hash of the template agentName
+// was provisioned from when it was loaded from a content-addressed cache
+// (broker-side image provenance), or "" when none is recorded or the agent
+// state cannot be read. The broker uses it to find the agent's template in
+// its cache, read-only, for the template env fallback when an older Hub
+// sends no template identity on a start (ptone/scion#4524). The agent dir is
+// resolved as for ProvisionedProfile.
+func ProvisionedTemplateHash(projectPath, agentName string, sharedWorkspace bool, hubProjectID string) string {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return ""
+	}
+	agentDir, _, err := AgentStateDir(projectDir, agentName, sharedWorkspace, hubProjectID, true)
+	if err != nil {
+		return ""
+	}
+	p, err := readImageProvenance(agentDir)
+	if err != nil || p == nil {
+		return ""
+	}
+	return p.TemplateHash
+}

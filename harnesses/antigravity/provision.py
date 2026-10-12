@@ -138,9 +138,17 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         try:
             resolved = ctx.select_auth(ANTIGRAVITY_AUTH)
         except scion_harness.ProvisionError:
-            if ctx.explicit_type:
+            # config.yaml declares oauth-token as a file (AGY_TOKEN projected
+            # to the antigravity-oauth-token path). select_auth checks only
+            # the AGY_TOKEN env route, so an explicit oauth-token with only
+            # the file present is accepted here rather than rejected.
+            if ctx.explicit_type == "oauth-token" and has_disk_token:
+                ctx.info("detected bind-mounted antigravity-oauth-token; using oauth-token auth")
+                resolved = scion_harness.ResolvedAuth(method="oauth-token")
+            elif ctx.explicit_type:
                 raise
-            resolved = scion_harness.ResolvedAuth(method="none")
+            else:
+                resolved = scion_harness.ResolvedAuth(method="none")
 
         if resolved.method == "none" and has_disk_token:
             ctx.info("detected bind-mounted antigravity-oauth-token; using oauth-token auth")

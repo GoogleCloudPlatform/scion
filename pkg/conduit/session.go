@@ -125,9 +125,16 @@ func newSession(cfg Config, conn transport.Conn, isDialer bool) *session {
 
 // ---------------------------------------------------------------- handshake
 
+// afterDialHook, if set, runs in Dial after the transport connect returns
+// and before ctx is checked and the Hello is sent. Tests only; nil in
+// production.
+var afterDialHook func(ctx context.Context)
+
 // Dial opens a session to the relay: it dials the transport, sends hello
 // and waits for Welcome. A GoAway in place of Welcome (admission refused)
-// is returned as a *CloseError carrying 4401/4403.
+// is returned as a *CloseError carrying 4401/4403. If ctx is cancelled by
+// the time the connect returns, Dial closes the connection and returns
+// ctx's error without sending hello.
 func Dial(ctx context.Context, d transport.Dialer, cfg Config, hello *conduitv1.Hello) (Session, *conduitv1.Welcome, error) {
 	cfg = cfg.withDefaults()
 	if _, err := PrincipalKindFromProto(hello.GetPrincipalKind()); err != nil {
@@ -135,6 +142,18 @@ func Dial(ctx context.Context, d transport.Dialer, cfg Config, hello *conduitv1.
 	}
 	conn, err := d.Dial(ctx)
 	if err != nil {
+		return nil, nil, err
+	}
+	if afterDialHook != nil {
+		afterDialHook(ctx)
+	}
+	// A connect that completes after ctx is cancelled (the client is
+	// stopping) is closed without sending Hello, so the relay does not
+	// admit a session for it. A cancel that lands after this check but
+	// before the Hello write still lets the Hello out; the handshake read
+	// below then returns ctx's error and closes the connection.
+	if err := ctx.Err(); err != nil {
+		_ = conn.Close()
 		return nil, nil, err
 	}
 	s := newSession(cfg, conn, true)

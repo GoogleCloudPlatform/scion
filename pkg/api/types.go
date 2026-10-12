@@ -1359,6 +1359,12 @@ type StartOptions struct {
 	// leaves the reported resources to the caller. Set both hooks together.
 	OnResourceCreated func(ResourceHandle)
 
+	// ObserveResourceCreated, when set, is also called after each true
+	// create of a launch resource (on the synchronous path as well). It
+	// only observes: unlike OnResourceCreated it never changes who cleans
+	// up a failed start. See runtime.RunConfig.ObserveResourceCreated.
+	ObserveResourceCreated func(ResourceHandle)
+
 	// RunID is the per-run identity minted by the hub for this create/start
 	// dispatch (ptone/scion#2550). It is applied to the runtime entry as the
 	// LabelRunID label. When empty (local/CLI mode, or an older hub) the
@@ -1392,6 +1398,12 @@ type StartOptions struct {
 	// or target already exists. Like KubernetesBlockIdentity it is never
 	// persisted, so it is recomputed on every dispatch.
 	HostCredentialFiles bool
+
+	// TemplateEnvSource is a local template path (hydrated by the broker on a
+	// start or restart of an agent with a Hub template) used only to compute
+	// the template env fallback (ptone/scion#4524). Unlike Template, it never
+	// affects image, harness-config or agent config resolution.
+	TemplateEnvSource string
 }
 
 // KubernetesBlockIdentity describes how a GCP identity "block" pod runs on
@@ -1419,6 +1431,17 @@ type ResourceHandle struct {
 // (StartOptions.RunID, AgentInfo.RunID). A delete carrying a run ID only
 // targets the entry with that label (ptone/scion#2550).
 const LabelRunID = "scion.run_id"
+
+// LabelRuntimeBrokerID is the reserved runtime label naming the flat
+// Runtime Broker instance that owns a runtime object (ptone/scion#3274).
+// Only the owning instance sets it, before the object becomes visible;
+// caller, template or agent labels never set or replace it.
+const LabelRuntimeBrokerID = "scion.runtime_broker_id"
+
+// LabelAgentID is the runtime label carrying an agent's immutable Hub agent
+// ID. A start sets it on the main object, and the Kubernetes runtime copies
+// it from the run labels onto every per-launch child object.
+const LabelAgentID = "agent_id"
 
 // Error-detail keys a runtime broker sets on a start or restart failure
 // that happened inside Manager.Start (ptone/scion#2550). By then the broker

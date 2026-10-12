@@ -93,6 +93,7 @@ func sortedEnvVarKeys(envVars map[string]string) []string {
 }
 
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	ctx = m.withWorkspaceLock(ctx)
 	startEntry := time.Now()
 	// callerHubEndpoint is opts.Env's SCION_HUB_ENDPOINT exactly as the
 	// caller passed it in — captured before anything below ever writes to
@@ -172,7 +173,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
-	agents, listErr := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	// Owner-filtered on a flat instance (listRuntime): a pre-clean never sees, or removes, another instance's object.
+	agents, listErr := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if listErr == nil {
 		for _, a := range agents {
 			// Skip agents from a different project
@@ -429,8 +431,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		templateName = opts.Template
 	}
 	var templatePaths []string
+	var templateChain []*config.Template
 	if templateName != "" {
 		if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
+			templateChain = chain
 			for _, tpl := range chain {
 				templatePaths = append(templatePaths, tpl.Path)
 			}
@@ -561,23 +565,25 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		applyEnvironmentResources(ctx, finalScionCfg, settings, envProfile, harnessConfigName)
 	}
 
-	// Hub default telemetry tier (ptone/scion#4218). It sits in base
-	// position: broker settings telemetry < hub default < the agent's own
-	// config telemetry (requester inline telemetry from older hubs, and the
-	// stored config). Templates contribute no telemetry once environment
-	// keys are ignored in templates (ptone/scion#4524). It is merged here
-	// first so the settings merge below lands underneath it.
-	// The context value is deep-copied so it is never aliased into the
-	// agent config, and agentCfgBeforeHubTelemetry lets the
-	// scion-agent.json rewrites below persist the config without it: a
-	// baked-in hub default would rank as agent config on the next start,
-	// and later hub changes would never reach the agent.
-	agentCfgBeforeHubTelemetry := finalScionCfg
-	hubTelemetryApplied := false
+	// Telemetry tiers applied per start: broker settings telemetry < hub
+	// default (ptone/scion#4218) < the agent's own config telemetry
+	// (requester inline telemetry from older hubs, and the stored config).
+	// Templates contribute no telemetry (ptone/scion#4524). Both lower
+	// tiers are merged here in base position, the hub default first so the
+	// settings merge below lands underneath it. The hub context value is
+	// deep-copied so it is never aliased into the agent config.
+	// agentOwnTelemetry is the agent's
+	// telemetry before either merge; the scion-agent.json rewrites below
+	// persist it instead of the merged result (ptone/scion#4241): a baked-in
+	// settings or hub value would rank as agent config on the next start,
+	// and later settings or hub changes would never reach the agent.
+	var agentOwnTelemetry *api.TelemetryConfig
+	if finalScionCfg != nil {
+		agentOwnTelemetry = cloneTelemetryConfig(finalScionCfg.Telemetry)
+	}
 	if hubTelemetry := cloneTelemetryConfig(api.HubAgentDefaultsFromContext(ctx).TelemetryDefault()); hubTelemetry != nil {
 		util.Debugf("Start: merging hub default telemetry config in base position")
 		finalScionCfg = config.MergeScionConfig(&api.ScionConfig{Telemetry: hubTelemetry}, finalScionCfg)
-		hubTelemetryApplied = true
 	}
 
 	if settings != nil {
@@ -586,8 +592,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 		// Merge settings-level telemetry config into finalScionCfg so that
 		// cloud export configuration (endpoint, protocol, batch, etc.) and
-		// the TelemetryEnabled flag are available at start time. This mirrors
-		// the merge in ProvisionAgent.
+		// the TelemetryEnabled flag are available at start time. This is the
+		// only place settings telemetry is applied: ProvisionAgent does not
+		// bake it into scion-agent.json (ptone/scion#4241).
 		if settings.Telemetry != nil {
 			util.Debugf("Start: merging settings telemetry config (cloud=%v, endpoint=%q)",
 				settings.Telemetry.Cloud != nil, func() string {
@@ -600,9 +607,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				Telemetry: config.ConvertV1TelemetryToAPI(settings.Telemetry),
 			}
 			finalScionCfg = config.MergeScionConfig(settingsCfg, finalScionCfg)
-			if hubTelemetryApplied {
-				agentCfgBeforeHubTelemetry = config.MergeScionConfig(settingsCfg, agentCfgBeforeHubTelemetry)
-			}
 		} else {
 			util.Debugf("Start: settings.Telemetry is nil, skipping telemetry merge")
 		}
@@ -642,6 +646,30 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	warnings := templateEnvWarns.Warnings()
+
+	// The template env layer (ptone/scion#4524): recomputed from the live
+	// template chain on every start, never read from scion-agent.json, and
+	// handed to the runtime as RunConfig.FallbackEnv below. An unresolvable
+	// template has no template env.
+	//
+	// For an agent with a Hub template, a start or restart leaves
+	// opts.Template unset (so image and harness-config resolution are
+	// unchanged); the broker hydrates the template and passes its path in
+	// opts.TemplateEnvSource for the template env only.
+	envChain := templateChain
+	if envChain == nil && opts.TemplateEnvSource != "" {
+		if chain, err := config.GetTemplateChainInProject(opts.TemplateEnvSource, opts.ProjectPath); err == nil {
+			envChain = chain
+		} else {
+			util.Debugf("template env: source %q could not be resolved: %v", opts.TemplateEnvSource, err)
+		}
+	}
+	templateEnv := templateChainEnv(envChain)
+	if envChain == nil && (templateUnresolvable || opts.TemplateEnvSource != "") {
+		if label := templateDisplayName(templateName, provenance, finalScionCfg); label != "" {
+			warnings = append(warnings, fmt.Sprintf("Warning: template %s not found; its env fallback is not applied", label))
+		}
+	}
 
 	// There is no live template tier: image and kubernetes are environment
 	// keys, which a template may not set (ptone/scion#4524).
@@ -1166,6 +1194,17 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				if err := recordSecrets(agentDir, agentHome, cs.StagedSecretNames(), hcIdentity); err != nil {
 					return nil, fmt.Errorf("record harness secrets: %w", err)
 				}
+				// On the broker, fail the start here, before any container
+				// is created, when no auth method can be satisfied; otherwise
+				// the in-container provisioner exits 1 in the pre-start hook
+				// with a far less useful error. Only env-only auth types can
+				// be rejected; see harness.CheckStagedAuth.
+				if opts.BrokerMode {
+					in := harness.AuthCheckInputs{AgentHome: agentHome, Env: opts.Env}
+					if err := cs.CheckStagedAuth(in); err != nil {
+						return nil, err
+					}
+				}
 			}
 			util.Debugf("auth: applied harness-specific settings for %q", harnessName)
 		}
@@ -1469,7 +1508,7 @@ authDone:
 			finalScionCfg = &api.ScionConfig{}
 		}
 		finalScionCfg.AuthSelectedType = opts.HarnessAuth
-		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentCfgBeforeHubTelemetry, hubTelemetryApplied), ownEnv), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
 		}
@@ -1480,7 +1519,7 @@ authDone:
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
 		// Active corruption repair: clear the corrupted value and rewrite.
 		finalScionCfg.AuthSelectedType = ""
-		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentCfgBeforeHubTelemetry, hubTelemetryApplied), ownEnv), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal repaired agent config: %w", marshalErr)
 		}
@@ -1543,7 +1582,19 @@ authDone:
 		}
 	}
 
-	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(finalScionCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
+	// A stored Env key whose value equals the live template env value was
+	// merged in from the template by an older version: it applies only
+	// through the template fill (demoted on a per-start copy; scion-agent.json
+	// is not rewritten).
+	//
+	// The harness-config's auth-candidate keys are suppressed for the
+	// template env fallback (RunConfig.SuppressedFallbackKeys), so a
+	// template never takes part in auth; a demoted key among them is
+	// reported, never dropped silently.
+	suppressedFallbackKeys := sortedKeys(configAuthEnvKeySet(authMeta))
+	envCfg, demotedTemplateKeys := demoteLegacyTemplateEnv(finalScionCfg, templateEnv)
+	warnings = append(warnings, suppressedDemotedKeyWarnings(demotedTemplateKeys, suppressedFallbackKeys)...)
+	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(envCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
 	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
 	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
 	warnings = append(warnings, hubOnlyEnvWarnings...)
@@ -2216,6 +2267,14 @@ authDone:
 	// request or template env is replaced.
 	agentEnv = withLaunchIDEnv(agentEnv, runID)
 
+	// The template env layer is never part of agentEnv: it travels as
+	// RunConfig.FallbackEnv, which every runtime applies as the LAST step
+	// of its own env assembly, after auth env, harness env, telemetry env
+	// and env-type secrets too; suppressedFallbackKeys (above) keeps it
+	// out of auth.
+	templateFallbackEnv, templateEnvFallbackWarnings := templateEnvFallback(templateEnv, opts.BrokerMode, opts.Name)
+	warnings = append(warnings, templateEnvFallbackWarnings...)
+
 	// Write the full task to the agent home, and pass a short pointer to
 	// it instead when the task is too large to pass inline.
 	task, err = deliverTaskFile(agentHome, task)
@@ -2298,6 +2357,9 @@ authDone:
 		}(),
 		Env:             agentEnv,
 		ResolvedSecrets: opts.ResolvedSecrets,
+
+		FallbackEnv:            templateFallbackEnv,
+		SuppressedFallbackKeys: suppressedFallbackKeys,
 		Volumes: func() []api.VolumeMount {
 			var volumes []api.VolumeMount
 			if finalScionCfg != nil {
@@ -2442,6 +2504,11 @@ authDone:
 					l[k] = v
 				}
 			}
+			// The reserved owner label is set last, by the manager only,
+			// so nothing above can set or replace it.
+			for k, v := range m.ownerLabels() {
+				l[k] = v
+			}
 			return l
 		}(),
 		Annotations: projectkeys.ProjectPathLabels(projectDir),
@@ -2449,6 +2516,9 @@ authDone:
 		// §3.8.4); nil on the synchronous path.
 		Checkpoint:        opts.Checkpoint,
 		OnResourceCreated: opts.OnResourceCreated,
+		// Observes every created resource (flat instance ownership
+		// records) without changing cleanup ownership.
+		ObserveResourceCreated: opts.ObserveResourceCreated,
 	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())
@@ -2495,10 +2565,16 @@ authDone:
 	}
 
 	// Fetch fresh info and verify the container is actually running
-	allAgents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	allAgents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if err == nil {
 		for _, a := range allAgents {
-			if a.ContainerID == id || strings.EqualFold(a.Name, opts.Name) {
+			matched := a.ContainerID == id || strings.EqualFold(a.Name, opts.Name)
+			// An owned (flat instance) manager matches by name only within
+			// the agent's project, never another project's same-named agent.
+			if matched && m.owner != nil && a.ContainerID != id && !matchAgentProject(a, projectName, projectID) {
+				matched = false
+			}
+			if matched {
 				// Check if the container has already exited
 				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
 					// Try to get logs for diagnosis
@@ -3449,18 +3525,16 @@ func cloneTelemetryConfig(t *api.TelemetryConfig) *api.TelemetryConfig {
 }
 
 // persistableAgentConfig returns the config Start writes back to
-// scion-agent.json. The hub default telemetry tier is applied per start and
-// must not be persisted (ptone/scion#4218), so when it was applied the
-// written config carries the telemetry it had before that merge.
-func persistableAgentConfig(cfg, beforeHubTelemetry *api.ScionConfig, hubTelemetryApplied bool) *api.ScionConfig {
-	if !hubTelemetryApplied || cfg == nil {
-		return cfg
+// scion-agent.json. The settings telemetry and hub default telemetry tiers
+// are applied per start and must not be persisted (ptone/scion#4218,
+// ptone/scion#4241), so the written config carries agentTelemetry, the
+// agent's own telemetry from before those merges.
+func persistableAgentConfig(cfg *api.ScionConfig, agentTelemetry *api.TelemetryConfig) *api.ScionConfig {
+	if cfg == nil {
+		return nil
 	}
 	out := *cfg
-	out.Telemetry = nil
-	if beforeHubTelemetry != nil {
-		out.Telemetry = beforeHubTelemetry.Telemetry
-	}
+	out.Telemetry = cloneTelemetryConfig(agentTelemetry)
 	return &out
 }
 

@@ -31,9 +31,9 @@ import (
 // Default harness-readiness wait timings. See waitHarnessReady.
 const (
 	defaultReadyPollInterval  = 500 * time.Millisecond
-	defaultReadyDeadline      = 90 * time.Second
+	defaultReadyDeadline      = state.ReadyDeadline
 	defaultReadySettle        = 1500 * time.Millisecond
-	defaultReadySettleSession = 8 * time.Second
+	defaultReadySettleSession = state.ReadySettleSession
 	readyProbeExecTimeout     = 5 * time.Second
 )
 
@@ -213,8 +213,15 @@ func (m *AgentManager) waitHarnessReady(ctx context.Context, agentID, projectID 
 	start := time.Now()
 	deadline := start.Add(timings.Deadline)
 
-	target, err := m.findMessageTarget(ctx, agentID, projectID)
+	target, matches, err := m.findMessageTargetCounted(ctx, agentID, projectID)
 	if err != nil {
+		return
+	}
+	// An owned manager never probes among several same-named agents of
+	// different projects: return before any probe, and delivery then
+	// refuses the name (deliverImmediate).
+	if err := m.refuseAmbiguousOwnedTarget(agentID, projectID, matches); err != nil {
+		slog.Debug("harness readiness not waited for: ambiguous target", "agent", agentID, "error", err)
 		return
 	}
 

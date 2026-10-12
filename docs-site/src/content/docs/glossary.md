@@ -60,7 +60,7 @@ The helper utility injected into every agent container for status reporting, met
 ## Runtime & Workspace
 
 ### Agent Port Forwarding
-A feature that allows exposing local HTTP ports running inside an agent container through the Hub as authenticated, reverse-proxied URLs. Built on an outbound WebSocket reverse tunnel.
+A feature that allows exposing local HTTP ports running inside an agent container through the Hub as authenticated, reverse-proxied URLs. Built on an outbound WebSocket connection from the container. Do not call it a tunnel: for raw TCP or SSH access through `scion tunnel`, see [Tunnel (Conduit user tunnel)](#tunnel-conduit-user-tunnel).
 
 ### Runtime
 The container technology that executes an agent's container: Docker, Podman, Apple Container, Kubernetes, Cloud Run Instances, or Substrate (Agent Substrate actors on GKE).
@@ -146,7 +146,10 @@ A server process running both the Hub and Runtime Broker components together (th
 A credential made available to an agent at runtime (e.g. API keys, tokens). A harness-config's `secrets` field *declares* which secrets an agent needs; the **Secret Backend** — a pluggable store (local SQLite for development, GCP Secret Manager in production, selected via `SCION_SERVER_SECRETS_BACKEND`) — *stores and resolves* them, scoped by user, project, runtime broker, or hub, and injects them into the container.
 
 ### Port Forwarding
-The feature that allows users, developers, and external systems to access HTTP services running inside agent containers securely via the Hub's reverse proxy. Requests are routed over a persistent, authenticated WebSocket-based reverse tunnel established from within the container to the Hub.
+The feature that allows users, developers, and external systems to access HTTP services running inside agent containers securely via the Hub's reverse proxy. Requests are routed over a persistent, authenticated outbound WebSocket connection from the container to the Hub. Do not call it a tunnel; that term is reserved for [Tunnel (Conduit user tunnel)](#tunnel-conduit-user-tunnel). The route `/ports/tunnel` and its error text keep their legacy names.
+
+### Tunnel (Conduit user tunnel)
+A raw TCP or SSH connection from a user's machine to a port or the SSH service inside an agent, opened with [`scion tunnel`](/scion/hosted/user/port-forwarding/#tunnels-from-your-machine-scion-tunnel) over a Conduit session with the Hub (behind the `hub.conduit` experiment). The local end is a `127.0.0.1` listener or stdin/stdout. Distinct from Port Forwarding, which serves HTTP through the Hub's proxy URLs.
 
 ### Auto-Expose
 A sub-feature of port forwarding where `sciontool` periodically scans for listening TCP sockets inside the agent container (by reading `/proc/net/tcp` and `/proc/net/tcp6`), filters them by policy, and registers them with the Hub using the `auto-scan` label. Stale registrations are automatically cleaned up when the service stops listening.
@@ -259,7 +262,7 @@ The tracked `root → parent → child` relationship between agents that governs
 The infrastructure lifecycle stage of an agent container: `created`, `provisioning`, `cloning`, `starting`, `running`, `stopping`, `stopped`, `suspended`, or `error`. In Hub mode, an agent provisioned with `scion create` and not yet started is shown as `created (not started)`.
 
 ### Activity
-What a running agent is currently doing within the `running` phase, such as `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, or `offline`. Distinct from phase.
+What a running agent is currently doing within the `running` phase, such as `initializing` (shown as "starting": the harness is not yet reading input), `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, or `offline`. Distinct from phase.
 
 ### Blocked
 The activity an agent assigns to itself when intentionally waiting for an expected event (such as a child agent completing), so it is not mistaken for stalled.
@@ -271,7 +274,7 @@ The activity an agent assigns to itself when intentionally waiting for an expect
 The phase an agent enters when its process or container exits non-zero (a crash, OOM, or `SIGKILL`), carrying a message like `Agent crashed with exit code N`. The `error` phase is restartable: `scion start` clears it and runs a fresh session. A clean exit goes to `stopped` instead. The `error` phase also covers setup failures (e.g. a failed git clone) that happen before an agent reaches `running`.
 
 ### Stalled
-A platform-set activity for a `running` agent whose heartbeat is still arriving (the process is alive) but that has produced no activity events within the stall threshold (`server.hub.stalled_threshold`, default 5 minutes; a value under 2 minutes falls back to the default). Indicates a hung agent. Agents whose activity is `blocked`, `waiting_for_input`, `completed`, `limits_exceeded` or `offline` are excluded. Distinct from `offline`, which means no heartbeat for over 2 minutes.
+A platform-set activity for a `running` agent whose heartbeat is still arriving (the process is alive) but that has produced no activity events within the stall threshold (`server.hub.stalled_threshold`, default 5 minutes; a value under 2 minutes falls back to the default). Indicates a hung agent. Agents whose activity is `blocked`, `waiting_for_input`, `completed`, `limits_exceeded` or `offline` are excluded. An agent can be marked stalled while `initializing`, but auto-suspend never suspends it for that stall. Distinct from `offline`, which means no heartbeat for over 2 minutes.
 
 ### Auto-Suspend
 A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspends an agent when it is marked `stalled`, reclaiming its container. Agents whose harness does not support session resume are skipped. A message sent with wake (`scion message --wake`, or accepting the web UI's wake prompt) resumes the agent and then delivers it; a message without wake is not delivered (`scion message` gets `409 agent_not_running`).

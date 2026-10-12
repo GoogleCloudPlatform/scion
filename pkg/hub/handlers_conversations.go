@@ -465,9 +465,9 @@ func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, i
 		participants = canonical
 	}
 
-	writeJSON(w, http.StatusOK, conversationResponse{
+	writeJSON(w, http.StatusOK, conversationGetResponse{
 		Conversation: *conv,
-		Participants: participants,
+		Participants: s.conversationParticipantViews(ctx, conv, participants),
 	})
 }
 
@@ -743,6 +743,20 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	// A token also needs inbox:write for the conversation's project.
 	if cls == inboxCredentialToken && !s.authorizeSelfScoped(w, r, permInboxWrite, req.ProjectID) {
 		return
+	}
+
+	// An agent creator becomes a participant below, so its message mode
+	// must allow joining the group (group_message_mode.go).
+	if ai, ok := identity.(AgentIdentity); ok {
+		creator, err := s.store.GetAgent(ctx, ai.ID())
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if joinOK, joinReason := s.groupAgentJoinAllowed(ctx, identity, creator); !joinOK {
+			writeGroupModeDenied(w, joinReason, creator.MessageMode)
+			return
+		}
 	}
 
 	// kind == "group" from here (direct was rejected above). Route creation
@@ -1046,6 +1060,13 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		if conv.ProjectID != nil && agent.ProjectID != *conv.ProjectID {
 			logReferenceRefused(ctx, logging.RequestPath(r), "agent belongs to another project than the conversation", identity)
 			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+			return
+		}
+
+		// The caller must be allowed to add the agent under the agent's
+		// message mode (group_message_mode.go).
+		if joinOK, joinReason := s.groupAgentJoinAllowed(ctx, identity, agent); !joinOK {
+			writeGroupModeDenied(w, joinReason, agent.MessageMode)
 			return
 		}
 	}

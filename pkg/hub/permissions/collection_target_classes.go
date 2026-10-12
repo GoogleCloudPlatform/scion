@@ -81,6 +81,10 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"agent.token_refresh": {}, "agent.port_forward": {}, "agent.identity_token": {},
 	// agent.delegation.* always target an existing, specific agent.
 	"agent.delegation.create": {}, "agent.delegation.exchange": {},
+	// Grant management is checked on the hub or project instance that holds
+	// it, never as a collection-level request.
+	"agent.delegation.revoke": {}, "agent.delegation.credential.revoke": {},
+	"agent.delegation.list": {}, "agent.delegation.read": {},
 
 	// project.* — create/list are CapabilityScope; register/clone are
 	// CapabilityResource (register/clone target an EXISTING project — the
@@ -194,6 +198,9 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// test_identity.issue — issuance and listing target the hub-level
 	// test identity collection.
 	"test_identity.issue": {TargetClassKindHubResource},
+	// test_identity.issue_admin and issue_super_admin — admin-kind
+	// issuance and revoke-all target the same hub-level collection.
+	"test_identity.issue_admin": {TargetClassKindHubResource}, "test_identity.issue_super_admin": {TargetClassKindHubResource},
 	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
 	"hub.metrics.read": {TargetClassKindHubResource}, "hub.audit.read": {},
 	"hub.env_vars.read": {TargetClassKindHubResource},

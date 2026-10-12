@@ -350,6 +350,17 @@ auth:
 Conventional type names — `api-key`, `oauth-token`, `auth-file`, `vertex-ai` —
 line up with the `capabilities.auth` matrix; use them.
 
+Declare every method your provisioner accepts, with the same name and the
+same credentials. On a broker start, Scion rejects the start before any
+container is created when the selected auth type is env-only (it declares
+`required_env` but no `required_files`) and none of its keys are staged. It
+does the same when no type is selected, the harness has no `no_auth`, and no
+declared type is satisfied. Types that declare `required_files`, and keys
+named `SCION_*`, are never rejected. A method your `provision.py` accepts but
+this block does not declare, or declares as env-only while the provisioner
+also accepts a file, can therefore be rejected on the broker even though the
+provisioner would accept it.
+
 ### no_auth
 
 ```yaml
@@ -564,7 +575,8 @@ Key API surface:
   (warn-and-skip per server, demotes project scope to global).
 - **File helpers** — `atomic_write_json`, `atomic_write_text` (tmp +
   `os.replace`), `expand_path`, `load_json`,
-  `read_json_skipping_comment_lines`; TOML emit/reconcile helpers:
+  `read_json_skipping_comment_lines` and `drop_json_comment_lines` (the
+  host's `//` comment-line rule); TOML emit/reconcile helpers:
   `toml_escape`, `toml_inline_table`, `toml_string_array` (tomllib is
   read-only, so TOML editing is manual, line-oriented text surgery).
   `strip_toml_sections(content, header_predicate)` removes whole

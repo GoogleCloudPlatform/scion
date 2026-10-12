@@ -45,6 +45,8 @@ interface ImportEvent {
   type: 'discovered' | 'started' | 'completed' | 'failed' | 'skipped' | 'done' | 'error';
   name?: string;
   reason?: string;
+  /** Machine-readable error code on an `error` event, e.g. harness_config_unusable. */
+  code?: string;
   completed?: number;
   total?: number;
   names?: string[];

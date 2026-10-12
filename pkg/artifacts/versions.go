@@ -173,7 +173,7 @@ func (s *Service) handleCreateVersion(w http.ResponseWriter, r *http.Request, id
 		writeError(w, http.StatusBadRequest, "bad_request", "title, key and scope apply only when creating an artifact")
 		return
 	}
-	b, a, ok := s.writableArtifact(w, r, id)
+	b, a, _, ok := s.writableArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -192,19 +192,23 @@ func (s *Service) handleCreateVersion(w http.ResponseWriter, r *http.Request, id
 func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, req *CreateVersionRequest, permitted *bool) {
 	ctx := r.Context()
 	kind, ref, _, _ := s.host.Principal(ctx)
-	var writable bool
+	var access writeAccess
 	var err error
 	if permitted != nil {
-		writable, err = s.canWritePermittedErr(ctx, b, a, *permitted)
+		access, err = s.canWritePermittedErr(ctx, b, a, *permitted)
 	} else {
-		writable, err = s.canWriteErr(ctx, b, a)
+		access, err = s.canWriteErr(ctx, b, a)
 	}
 	if err != nil {
 		writeGrantsReadFailed(w, r, err)
 		return
 	}
-	if !writable {
+	if access == accessNone {
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
+		return
+	}
+	// Refusal 1 of 3 for a review grantee: starting a publish version.
+	if refuseKind(w, access, versionKind(req.Kind)) {
 		return
 	}
 	if req.Kind == VersionKindReview && a.CurrentSeq == 0 {
@@ -458,64 +462,127 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// canWriteErr reports whether the caller may append versions to artifact
-// a: its credential must permit publishing (artifact.create) in the home
-// scope, and it must own the artifact or hold an unexpired write or admin
-// grant (a principal grant for it, or a scope grant for a scope the host
-// authorizes it to publish in). The home scope's own read grant never
-// confers write. Publishing a version is publishing; ownership and grants
-// decide which artifacts.
+// writeAccess is how the caller may append versions to an artifact: the
+// answer of the one write decision, canWritePermittedErr.
+type writeAccess int
+
+const (
+	// accessNone: the caller may not append versions.
+	accessNone writeAccess = iota
+	// accessReviewGrant: only a review grant matches, and the caller can
+	// read the artifact without it, so it may append versions of kind
+	// review and nothing else (ptone/scion#4538).
+	accessReviewGrant
+	// accessWriteGrant: an unexpired write or admin grant matches.
+	accessWriteGrant
+	// accessOwner: the caller owns the artifact.
+	accessOwner
+)
+
+// canPublish reports whether the access lets the caller publish any kind
+// of version, not only reviews.
+func (w writeAccess) canPublish() bool { return w == accessOwner || w == accessWriteGrant }
+
+// allowsKind reports whether the access lets the caller append (start,
+// upload to or finalize) a version of the stored kind: every kind for a
+// full writer, review only for a review grantee.
+func (w writeAccess) allowsKind(kind string) bool {
+	return w.canPublish() || (w == accessReviewGrant && kind == VersionKindReview)
+}
+
+// CodeReviewOnly is the error code of a request refused because the
+// caller's access allows review versions only.
+const CodeReviewOnly = "review_only"
+
+// refuseKind writes the 403 for a caller whose access does not allow a
+// version of kind and reports whether it did. A review grantee is refused
+// a publish version when it starts one, uploads to one and finalizes one,
+// so a publish never follows a review that was allowed to start.
+func refuseKind(w http.ResponseWriter, access writeAccess, kind string) bool {
+	if access.allowsKind(kind) {
+		return false
+	}
+	writeError(w, http.StatusForbidden, CodeReviewOnly, "your access to this artifact allows review versions only")
+	return true
+}
+
+// canWriteErr reports how the caller may append versions to artifact a:
+// its credential must permit publishing (artifact.create) in the home
+// scope, and it must own the artifact (accessOwner), hold an unexpired
+// write or admin grant (accessWriteGrant), or hold an unexpired review
+// grant while it reads the artifact through the home project or a grant
+// to one of its projects (accessReviewGrant, review versions only). A grant is a principal
+// grant for the caller or a scope grant for a scope the host authorizes it
+// to publish in. The home scope's own read grant never confers write.
+// Publishing a version is publishing; ownership and grants decide which
+// artifacts, and a review grant which kinds.
 //
 // A failed grant read is an error, never a refusal, so a write route
 // answers 500 rather than a 403 a working read would not give, and
-// ArtifactResponse.CanPublish states the same decision.
-func (s *Service) canWriteErr(ctx context.Context, b backend, a *Artifact) (bool, error) {
+// ArtifactResponse.CanPublish and CanReview state the same decision.
+func (s *Service) canWriteErr(ctx context.Context, b backend, a *Artifact) (writeAccess, error) {
 	return s.canWritePermittedErr(ctx, b, a, s.host.Permits(ctx, a.ScopeRef, PermissionCreate))
 }
 
 // canWritePermittedErr is canWriteErr with the answer of Host.Permits for
 // artifact.create in a's home scope already known, for a caller that has
-// just asked it for that scope. It is the one write decision.
-func (s *Service) canWritePermittedErr(ctx context.Context, b backend, a *Artifact, permitted bool) (bool, error) {
+// just asked it for that scope. It is the one write decision. A write or
+// admin grant wins over a review grant held at the same time.
+//
+// A review grant never makes an artifact readable (it is in no read set),
+// so its holder must read the artifact another way: through the home
+// project or a grant to one of their projects. That is asked again
+// here, on every use, with canReadWith (the one read decision), so losing
+// the other read path ends review access at once, with nothing to revoke.
+func (s *Service) canWritePermittedErr(ctx context.Context, b backend, a *Artifact, permitted bool) (writeAccess, error) {
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok {
-		return false, nil
+		return accessNone, nil
 	}
 	now := time.Now()
 	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
-		return false, nil
+		return accessNone, nil
 	}
 	if !permitted {
-		return false, nil
+		return accessNone, nil
 	}
 	if kind == a.OwnerKind && ref == a.OwnerRef {
-		return true, nil
+		return accessOwner, nil
 	}
 	grants, err := b.store.ListGrants(ctx, a.ID)
 	if err != nil {
-		return false, err
+		return accessNone, err
 	}
-	return grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForWrite, PermissionCreate, false), nil
+	if grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForWrite, PermissionCreate, false) {
+		return accessWriteGrant, nil
+	}
+	if grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForReview, PermissionCreate, false) &&
+		canReadWith(ctx, s.host, a, func() ([]Grant, error) { return grants, nil }) {
+		return accessReviewGrant, nil
+	}
+	return accessNone, nil
 }
 
-// writableArtifact loads an artifact the caller may write. An artifact the
-// caller cannot read answers 404, like a missing one; one it can read but
-// not write answers 403; a failed grant read answers 500.
-func (s *Service) writableArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, bool) {
+// writableArtifact loads an artifact the caller may write, with how it may
+// (canWriteErr). An artifact the caller cannot read answers 404, like a
+// missing one; one it can read but not write answers 403; a failed grant
+// read answers 500. A review grantee passes: each route then refuses the
+// version kinds its access does not allow (refuseKind).
+func (s *Service) writableArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, writeAccess, bool) {
 	b, a, ok := s.readableArtifact(w, r, id)
 	if !ok {
-		return b, nil, false
+		return b, nil, accessNone, false
 	}
-	writable, err := s.canWriteErr(r.Context(), b, a)
+	access, err := s.canWriteErr(r.Context(), b, a)
 	if err != nil {
 		writeGrantsReadFailed(w, r, err)
-		return b, nil, false
+		return b, nil, accessNone, false
 	}
-	if !writable {
+	if access == accessNone {
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
-		return b, nil, false
+		return b, nil, accessNone, false
 	}
-	return b, a, true
+	return b, a, access, true
 }
 
 // pendingVersionOf loads pending version seq of a for its creator. Another
@@ -556,12 +623,17 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 		writeNotFound(w)
 		return
 	}
-	b, a, ok := s.writableArtifact(w, r, id)
+	b, a, access, ok := s.writableArtifact(w, r, id)
 	if !ok {
 		return
 	}
 	v, ok := s.pendingVersionOf(w, r, b, a, seq, false)
 	if !ok {
+		return
+	}
+	// Refusal 2 of 3 for a review grantee: uploading to a publish version
+	// (one it started while it still held write access).
+	if refuseKind(w, access, v.Kind) {
 		return
 	}
 	f, err := b.store.GetFile(ctx, v.ID, filePath)
@@ -648,12 +720,17 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	if !ok {
 		return
 	}
-	b, a, ok := s.writableArtifact(w, r, id)
+	b, a, access, ok := s.writableArtifact(w, r, id)
 	if !ok {
 		return
 	}
 	v, ok := s.pendingVersionOf(w, r, b, a, seq, true)
 	if !ok {
+		return
+	}
+	// Refusal 3 of 3 for a review grantee: finalizing a publish version.
+	// It comes before the claim, so a refused request changes nothing.
+	if refuseKind(w, access, v.Kind) {
 		return
 	}
 	if v.Kind == VersionKindReview && freq.Base <= 0 {

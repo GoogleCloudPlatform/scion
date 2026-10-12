@@ -352,6 +352,18 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		Values: &runpb.EnvVar_Value{Value: fmt.Sprintf("%d", gid)},
 	})
 
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only names no source above set (env-type secrets are already folded
+	// into cfg.Env), never a suppressed key.
+	emitted := make(map[string]bool, len(envVars))
+	for _, ev := range envVars {
+		emitted[ev.GetName()] = true
+	}
+	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
+		k, v, _ := strings.Cut(e, "=")
+		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
+	}
+
 	var volumes []*runpb.Volume
 	var volumeMounts []*runpb.VolumeMount
 
@@ -434,7 +446,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	if cfg.NoAuth || cfg.Harness != nil {
 		// harnessCmdLine covers both branches (NoAuth checked first,
 		// matching the priority order above); ok is always true here.
-		cmdLine, _ := harnessCmdLine(cfg)
+		cmdLine, _ := harnessCmdLine(cfg, harnessCmdLineOptions{})
 		agentWindowCmd := tmuxAgentWindowCmd("/bin/sh", cmdLine)
 		// Use poll loop instead of attach-session: CRI has no TTY for PID 1,
 		// so tmux attach-session would fail with "not a terminal". The poll
