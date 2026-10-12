@@ -105,7 +105,7 @@ Environment variables override any settings file value and are the most convenie
 
 #### Client certificates (mTLS)
 
-For a generic OTLP gRPC endpoint that requires client certificate authentication, set `telemetry.cloud.tls.cert_file` and `telemetry.cloud.tls.key_file` (or `SCION_OTEL_CERT_FILE` and `SCION_OTEL_KEY_FILE`). The paths are read inside the agent container, so the files must be mounted there, for example through a file secret or a template. Set both or neither. `sciontool` fails at startup, naming the path, if only one is set or a file cannot be read. Client certificates cannot be combined with plaintext transport (`tls.enabled: false`) or with GCP-native export. When neither is set, behavior is unchanged.
+For a generic OTLP gRPC endpoint that requires client certificate authentication, set `telemetry.cloud.tls.cert_file` and `telemetry.cloud.tls.key_file` (or `SCION_OTEL_CERT_FILE` and `SCION_OTEL_KEY_FILE`). The paths are read inside the agent container, so the files must be mounted there, for example through a file secret or a template. Set both or neither. If only one is set, or a file cannot be read, `sciontool` logs an error naming the path and starts without cloud telemetry export; the agent itself still runs. Client certificates cannot be combined with plaintext transport (`tls.enabled: false`) or with GCP-native export. When neither is set, behavior is unchanged.
 
 ### Local Receiver Settings (For Agents)
 
