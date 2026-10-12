@@ -996,6 +996,16 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Duration-valued keys (opsettings Section.Durations) must parse as a
+	// Go duration; "" or null clears. Checked on the documents built from
+	// the body, before any merge, so only the values sent are checked.
+	if fieldErr := validateDurationSettings(sectionDocs); fieldErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, fieldErr.Error(), map[string]interface{}{
+			"field": fieldErr.field,
+		})
+		return
+	}
+
 	// Sections merged on the current row by mergeSectionOnCurrent: only the
 	// keys the body sends change, and the row revision read is the CAS base
 	// (ptone/scion#3718, ptone/scion#3720).

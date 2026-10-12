@@ -143,6 +143,7 @@ Codex supports two authentication methods (auto-detected in this order):
 - **Default Flags**: Runs with `--full-auto` approval mode enabled by default with unified flag formatting.
 - **Resume Support**: Automatically uses the `resume` positional argument to continue existing sessions.
 - **Notify Bridge**: Scion configures `notify = "sh ~/.codex/scion_notify.sh"` so Codex notify payloads can drive Scion state updates.
+- **Hooks**: `~/.codex/config.toml` registers the `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SubagentStop` hooks, each routed through `scion_notify.sh` to `sciontool hook --dialect=codex`. `SubagentStart`, `PermissionRequest`, `PreCompact`, `PostCompact` and `Interrupt` are not registered because Scion has no mapping for them.
 - **OpenTelemetry**: When telemetry is enabled, Scion performs telemetry reconciliation at start to ensure consistent OTLP export (default `localhost:4317`).
 
 ### Reasoning Effort (Thinking Level)
@@ -386,8 +387,8 @@ The following table summarizes the capabilities supported by each agent harness 
 | **Interject** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Interrupt Key | C-c | C-c | Esc / C-c | C-c | C-c | C-c | C-c | C-c | Esc |
 | **Enqueue** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Hooks** | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| Support | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| **Hooks** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Support | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ✅ | ❌ | ❌ | ✅ | ❌ |
 | **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ✅ | ◐ |
 | **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ | ✅ |
