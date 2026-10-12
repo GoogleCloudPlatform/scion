@@ -211,6 +211,9 @@ class VertexEnvOverlayTest(unittest.TestCase):
             "europe-west4",
         )
 
+    def test_no_region_gives_empty_location(self) -> None:
+        self.assertEqual(self._location({"GOOGLE_CLOUD_PROJECT": "p"}), "")
+
     def test_location_and_region_keep_precedence_over_cloud_ml_region(self) -> None:
         self.assertEqual(
             self._location({
