@@ -76,4 +76,11 @@ normal for the SSE stream when its page closes. `cleanup.agents[*]` and
 `oracleRowMap` (row -> `{test, note}`) replace the earlier flat
 `cleanup["agent X"]` keys and string map values.
 
+A2 records the agent's `appliedConfig.image` but does not require it: on
+an async create the hub does not yet record the image the broker
+resolved (a known product gap), so `a2AppliedConfig.a2ImageReported` is
+false and the test carries an annotation. A4 then pins the failure cause
+with the exact bad image ref, which the local hub always knows (remote:
+`E2E_BAD_IMAGE`); without either, A4 fails.
+
 Selectors and state names live in `selectors.ts` only.
