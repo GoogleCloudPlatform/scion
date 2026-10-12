@@ -1335,6 +1335,7 @@
 3 teststore_template_test.go
 2 thinking_level_precedence_test.go
 0 thinking_sqlite_helpers_test.go
+1 thread_group_migration_test.go
 1 thread_membership_test.go
 0 thread_sqlite_helpers_test.go
 6 transport_token_test.go
@@ -1382,6 +1383,7 @@
 2 webchannel_store_reference_test.go
 2 webchannel_store_schema_test.go
 3 webchannel_store_schema_unit_test.go
+1 webchannel_store_thread_groups_marker_test.go
 1 webchannel_store_time_test.go
 6 webchannel_store_topics_batch_test.go
 4 webchannel_store_wave2_test.go
