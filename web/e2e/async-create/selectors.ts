@@ -55,7 +55,6 @@ export const SELECTORS = {
   createPage: 'scion-page-agent-create',
   createName: 'sl-input#name',
   createNameInput: 'sl-input#name input',
-  createTemplate: 'sl-select#template',
   createHarness: 'sl-select#harness',
   createBroker: 'sl-select#broker',
   createTask: 'sl-textarea#task',
@@ -64,7 +63,6 @@ export const SELECTORS = {
   createSubmit: '.form-actions sl-button[variant="primary"]',
   // Additional Options disclosure and its Container image field
   // (agent-config-form.ts, key config.image, General tab).
-  createAdvanced: 'sl-details[summary="Additional Options"]',
   createAdvancedHeader: 'sl-details[summary="Additional Options"] [part="header"]',
   createImageInput: 'scion-agent-config-form .field[data-key="config.image"] sl-input input',
   createError: '.form-card .error-banner',

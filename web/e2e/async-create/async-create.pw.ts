@@ -506,6 +506,31 @@ async function appliedConfigOf(agentId: string): Promise<AppliedConfigView | und
   return body.appliedConfig ?? body.agent?.appliedConfig;
 }
 
+/** What readAppliedConfig read: the status, the config, or the error. */
+interface AppliedConfigRead {
+  status: number | null;
+  applied: AppliedConfigView | undefined;
+  error: string | null;
+}
+
+/** appliedConfigOf without assertions, so a failing read can be recorded. */
+async function readAppliedConfig(agentId: string): Promise<AppliedConfigRead> {
+  try {
+    const res = await member().get(`/api/v1/agents/${agentId}`);
+    const body = (await res.json().catch(() => null)) as {
+      agent?: { appliedConfig?: AppliedConfigView };
+      appliedConfig?: AppliedConfigView;
+    } | null;
+    return {
+      status: res.status(),
+      applied: body?.appliedConfig ?? body?.agent?.appliedConfig,
+      error: body ? null : 'response is not JSON',
+    };
+  } catch (err) {
+    return { status: null, applied: undefined, error: firstLine(err) };
+  }
+}
+
 /** The agent started on the credential-free no-auth fallback. */
 function expectNoAuth(applied: AppliedConfigView | undefined): void {
   expect(applied?.noAuth, 'appliedConfig.noAuth: started without credentials').toBe(true);
@@ -599,7 +624,7 @@ function noteAgentDelete(agentId: string, statuses: Array<number | null>, forced
 
 /**
  * Whether the page or the launch view names an image cause for the failure:
- * the bad tag or an image-not-found class in the panel message, or an
+ * the bad tag or an image/pull/manifest phrase in the panel message, or an
  * image-specific code in the panel or the final launch error.
  */
 function imageFailureReason(
@@ -610,7 +635,7 @@ function imageFailureReason(
 ): { exposed: boolean; source: string | null } {
   const tag = badImage?.split(':').at(-1) ?? '';
   if (tag && message.includes(tag)) return { exposed: true, source: 'panel message names the tag' };
-  if (/image|pull|manifest|not found/i.test(message)) {
+  if (/image|pull|manifest/i.test(message)) {
     return { exposed: true, source: 'panel message names an image cause' };
   }
   for (const c of [code, launch?.error ?? '']) {
@@ -1145,28 +1170,28 @@ test.describe.serial('async agent create from the web form', () => {
       task: 'e2e async create journey, bad image',
       check: 'A4',
     });
+    // A3a facts, recorded before anything can fail.
+    const a4Evidence: Record<string, unknown> = {
+      status: submit.status,
+      launch: submit.launch,
+      requestImage: submit.requestImage,
+    };
+    journey.evidence.a4 = a4Evidence;
     // The async path first: 201 with the launch active, not a 4xx at submit
     // (A3a), and the browser sent the typed image.
     await expectAsyncSubmit(tracked, submit);
     expect(submit.requestImage, 'the form sent the typed image as config.image').toBe(image);
 
-    // 1. Graded UX rows, asserted and recorded first (A3b, A3c): the
-    //    failed-create panel with code and message, Delete and Create
-    //    again, no Start/Resume in the header; then no /start, no reload.
+    // 1. Graded UX rows (A3b, A3c): the failed-create panel with code and
+    //    message, Delete and Create again, no Start/Resume in the header;
+    //    then no /start and no reload. Their evidence is merged in at once.
     const panel = await expectFailedCreatePanel(tracked.page);
     await expectNoStartNoReload(tracked, submit);
-    // 2. Evidence, written before anything else can fail. The facts the
-    //    cause pin needs are read now, while the agent still exists.
-    const applied = await appliedConfigOf(submit.agentId);
     const sse = await sseRecords(tracked.page, submit.agentId);
     const lastLaunch = sse.filter((r) => r.launch).at(-1)?.launch ?? null;
-    const a2 = journey.a2Running;
-    const appliedImage = applied?.image ?? '';
     const imageReason = imageFailureReason(panel.message, panel.code, lastLaunch, image);
-    const a4Evidence: Record<string, unknown> = {
-      status: submit.status,
-      launch: submit.launch,
-      requestImage: submit.requestImage,
+    const timeline = await timelineRows(tracked.page, submit.agentId);
+    Object.assign(a4Evidence, {
       code: panel.code,
       messageLength: panel.message.length,
       panel: {
@@ -1178,33 +1203,44 @@ test.describe.serial('async agent create from the web form', () => {
       finalLaunch: lastLaunch,
       a4ImageReasonExposed: imageReason.exposed,
       imageReasonSource: imageReason.source,
-      appliedConfig: {
-        noAuth: applied?.noAuth,
-        harnessAuth: applied?.harnessAuth,
-        harnessConfig: applied?.harnessConfig,
-        image: appliedImage || null,
-        expectedImage: image,
-        a2RunningImage: a2?.image || null,
-        a2HarnessConfig: a2?.harnessConfig ?? null,
-        causePinnedBy: 'appliedConfig.image === typed ref (exact)',
-      },
-      stateSequence: stateSequence(await timelineRows(tracked.page, submit.agentId)),
+      stateSequence: stateSequence(timeline),
       reload: await reloadCheck(tracked, submit),
-      timeline: await timelineRows(tracked.page, submit.agentId),
+      timeline,
       sse,
       requests: requestsSinceSubmit(tracked, submit),
-    };
-    journey.evidence.a4 = a4Evidence;
+    });
     // Recorded finding, never silent and never a failure on its own: the
     // failure cause text is not exposed to clients yet (upstream #4666).
     if (!imageReason.exposed) {
       test.info().annotations.push({
         type: 'FINDING',
         description:
-          'no image-specific launch failure reason exposed (panel message, launch error ' +
-          `${panel.code} and endReason ${String(lastLaunch?.endReason)} name no image cause)`,
+          `no image-specific launch failure reason exposed (panel code ${panel.code}, ` +
+          `launch error ${String(lastLaunch?.error)}, ` +
+          `endReason ${String(lastLaunch?.endReason)}; the panel message names no image cause)`,
       });
     }
+
+    // 2. The A3e facts, read while the agent still exists (Delete removes
+    //    it). The read itself does not assert, so a failing read is
+    //    recorded; the checks are in step 4.
+    const appliedRead = await readAppliedConfig(submit.agentId);
+    const applied = appliedRead.applied;
+    const a2 = journey.a2Running;
+    const appliedImage = applied?.image ?? '';
+    a4Evidence.appliedConfig = {
+      readStatus: appliedRead.status,
+      readError: appliedRead.error,
+      noAuth: applied?.noAuth,
+      harnessAuth: applied?.harnessAuth,
+      harnessConfig: applied?.harnessConfig,
+      image: appliedImage || null,
+      expectedImage: image,
+      imageMatchesTyped: appliedImage === image,
+      a2RunningImage: a2?.image || null,
+      a2HarnessConfig: a2?.harnessConfig ?? null,
+      causePinMethod: 'appliedConfig.image === typed ref (exact)',
+    };
 
     // 3. Delete from the failed page (A3d).
     await deleteFromPanel(tracked, submit.agentId, 'A4 (panel Delete)', a4Evidence);
@@ -1217,6 +1253,9 @@ test.describe.serial('async agent create from the web form', () => {
       IMAGE_FAILURE_CODES as readonly string[],
       `code ${panel.code} is an image failure code`
     ).toContain(panel.code);
+    expect(appliedRead.status, `GET agent ${submit.agentId} (${appliedRead.error ?? 'ok'})`).toBe(
+      200
+    );
     expectNoAuth(applied);
     expect(a2, 'A2 ran first (serial)').toBeDefined();
     expect(applied?.harnessConfig, 'A4 uses the same harness config as A2').toBe(a2?.harnessConfig);
