@@ -121,12 +121,16 @@ func requireGroupModeDenied(t *testing.T, rr *httptest.ResponseRecorder, msgAndA
 func postOutboundGroup(t *testing.T, srv *Server, a *store.Agent, recipientEmail, conversationID, threadID string) *httptest.ResponseRecorder {
 	t.Helper()
 	srv.chatSendLimiter = newChatSendLimiter()
-	body, err := json.Marshal(OutboundMessageRequest{
+	r := OutboundMessageRequest{
 		Recipient:      "user:" + recipientEmail,
 		Msg:            "group post from " + a.Slug,
 		ConversationID: conversationID,
 		ThreadID:       threadID,
-	})
+	}
+	if threadID != "" {
+		r.Channel = "web"
+	}
+	body, err := json.Marshal(r)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+a.ID+"/outbound-message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -283,8 +287,8 @@ func TestGroupMessageMode_OutboundPost(t *testing.T) {
 // TestGroupMessageMode_OutboundThreadPost posts an agent message into an
 // existing thread conversation by thread_id for every mode.
 func TestGroupMessageMode_OutboundThreadPost(t *testing.T) {
-	f := newInboxFixture(t)
-	recipient := f.member + "@test.com"
+	srv, s, project, _, user := def138Setup(t)
+	setupThreadTestChannels(t, srv, s, project, "web")
 
 	for _, mode := range groupModeTestModes {
 		for _, added := range []bool{true, false} {
@@ -293,23 +297,21 @@ func TestGroupMessageMode_OutboundThreadPost(t *testing.T) {
 				name = mode + "/added"
 			}
 			t.Run(name, func(t *testing.T) {
-				a := groupModeAgent(t, f.s, f.projA, "", mode)
+				a := groupModeAgent(t, s, project.ID, "", mode)
 				threadID := "gmm-thread-" + uuid.NewString()[:8]
-				extRef, err := messaging.ThreadConversationExternalRef(f.projA, threadID)
-				require.NoError(t, err)
-				conv := groupModeConversation(t, f.s, f.projA, extRef)
+				conv := seedThreadConversation(t, s, project.ID, threadID)
 				if added {
-					addConvParticipant(t, f.s, conv.ID, "agent", a.ID)
+					addConvParticipant(t, s, conv.ID, "agent", a.ID)
 				}
 
-				rr := postOutboundGroup(t, f.srv, a, recipient, "", threadID)
+				rr := postOutboundGroup(t, srv, a, user.Email, "", threadID)
 				allowed := groupModeIsProjectCell(mode) || (groupModeIsNarrow(mode) && added)
 				if allowed {
 					require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 				} else {
 					requireGroupModeDenied(t, rr, "body: %s", rr.Body.String())
 				}
-				assert.Equal(t, added, groupModeIsParticipant(t, f.s, conv.ID, "agent", a.ID),
+				assert.Equal(t, added, groupModeIsParticipant(t, s, conv.ID, "agent", a.ID),
 					"posting by thread key never adds the sender")
 			})
 		}
@@ -388,7 +390,7 @@ func TestGroupMessageMode_InboundRecipientJoin(t *testing.T) {
 
 	t.Run("branch-parent-agent-sender", func(t *testing.T) {
 		parent := groupModeAgent(t, s, projectID, brokerID, store.MessageModeBranch)
-		child := groupModeAgent(t, s, projectID, brokerID, store.MessageModeBranch)
+		child := groupModeAgent(t, s, projectID, brokerID, store.MessageModeBranch, parent.ID)
 		conv := groupModeConversation(t, s, projectID, "")
 		addConvParticipant(t, s, conv.ID, "agent", parent.ID)
 
@@ -469,22 +471,23 @@ func TestGroupMessageMode_AddParticipant(t *testing.T) {
 // TestGroupMessageMode_CreateConversation covers an agent creating a group
 // conversation, which makes it a participant, for every mode.
 func TestGroupMessageMode_CreateConversation(t *testing.T) {
-	f := newInboxFixture(t)
+	srv, s, _, _ := setupGroupConvTopicTest(t)
+	project, _, _ := setupConvTestData(t, s)
 	for _, mode := range groupModeTestModes {
 		t.Run(mode, func(t *testing.T) {
-			a := groupModeAgent(t, f.s, f.projA, "", mode)
-			grantAgentProjectAccess(t, f.s, a.ID, f.projA)
+			a := groupModeAgent(t, s, project.ID, "", mode)
+			grantAgentProjectAccess(t, s, a.ID, project.ID)
 			body, err := json.Marshal(createConversationRequest{
 				DisplayName: "gmm-create-" + uuid.NewString()[:8],
-				ProjectID:   f.projA,
+				ProjectID:   project.ID,
 				Kind:        "group",
 			})
 			require.NoError(t, err)
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
-			req = req.WithContext(agentContextWithScopes(a.ID, f.projA, []AgentTokenScope{ScopeProjectRead}))
+			req = req.WithContext(agentContextWithScopes(a.ID, project.ID, []AgentTokenScope{ScopeProjectRead}))
 			rr := httptest.NewRecorder()
-			f.srv.handleCreateConversation(rr, req)
+			srv.handleCreateConversation(rr, req)
 			if groupModeIsProjectCell(mode) {
 				assert.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
 			} else {
