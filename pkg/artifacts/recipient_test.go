@@ -333,6 +333,10 @@ func TestRecipientMayNotReadParity(t *testing.T) {
 			f.execSQL(`UPDATE artifact SET current_seq = NULL WHERE id = ?`, id)
 		}, true},
 		{"credential deny", agentB, func(f *fixture, id string) { f.host.deny(agentB, "project-1", PermissionRead) }, false},
+		{"scope grant, credential denied in that scope", agentX, func(f *fixture, id string) {
+			f.grantScope(id, "project-2")
+			f.host.deny(agentX, "project-2", PermissionRead)
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

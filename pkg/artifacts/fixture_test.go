@@ -174,6 +174,11 @@ func (h *fakeHost) Authorize(ctx context.Context, scope, perm string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.calls = append(h.calls, scope+" "+perm)
+	// Like the hub's Authorize, it starts with Permits (the credential),
+	// read from the same table without logging a second call.
+	if scope == "" || h.denied[PrincipalRef(kind, ref)+" "+scope+" "+perm] {
+		return false
+	}
 	return h.perms[PrincipalRef(kind, ref)][scope][perm]
 }
 

@@ -54,10 +54,20 @@ func (h *artifactHost) ResolveRecipient(ctx context.Context, kind, ref string) (
 }
 
 // recipientSubject is a resolved recipient: artifacts.RecipientSubject
-// answered from its subject identity.
+// answered from its subject identity. It lives for one recipient check.
 type recipientSubject struct {
 	host     *artifactHost
 	identity Identity
+	// chain memoizes an agent's delegation chain walk (result and error)
+	// per permission for the life of the check: the walk is in the agent's
+	// own project, whatever scope is asked, so it is the same every time.
+	chain map[string]chainWalk
+}
+
+// chainWalk is one memoized chain walk.
+type chainWalk struct {
+	ok  bool
+	err error
 }
 
 // Permits implements artifacts.RecipientSubject: whether a credential the
@@ -80,7 +90,15 @@ func (r *recipientSubject) Permits(ctx context.Context, scopeRef, permission str
 	if !agentHasAnyScope(agent, perm.AgentScopes) {
 		return false, nil
 	}
-	return r.host.recipientChainAllows(ctx, agent, perm)
+	if w, done := r.chain[perm.ID]; done {
+		return w.ok, w.err
+	}
+	ok, err := r.host.agentChainAllowsErr(ctx, agent, perm)
+	if r.chain == nil {
+		r.chain = map[string]chainWalk{}
+	}
+	r.chain[perm.ID] = chainWalk{ok: ok, err: err}
+	return ok, err
 }
 
 // Authorize implements artifacts.RecipientSubject: whether policy lets the
@@ -102,26 +120,6 @@ func (r *recipientSubject) Authorize(ctx context.Context, scopeRef, permission s
 		ParentID:   scopeRef,
 	}, Action(perm.Action))
 	return decision.Allowed, nil
-}
-
-// recipientChainAllows is agentChainAllows for a recipient agent, with the
-// chain walk's lookup error returned instead of taken for a refusal, so the
-// recipient check stays silent on a failure.
-func (h *artifactHost) recipientChainAllows(ctx context.Context, agent *agentIdentityWrapper, perm permissions.Permission) (bool, error) {
-	if h.server == nil || h.server.authzService == nil {
-		return false, nil
-	}
-	project := agent.ProjectID()
-	if project == "" || agent.ID() == "" {
-		return false, nil
-	}
-	resource := Resource{Type: permissions.ResourceArtifact, ParentType: permissions.ResourceProject, ParentID: project}
-	allowed, _, err := h.server.authzService.walkDelegationChainWithCause(ctx, resource, Action(perm.Action), perm.ID,
-		agent.ID(), AncestryIsHubAttested(agent), store.RoleScopeProject, project, nil, nil)
-	if err != nil {
-		return false, err
-	}
-	return allowed, nil
 }
 
 // recipientIdentity builds the subject identity for a recipient check, from

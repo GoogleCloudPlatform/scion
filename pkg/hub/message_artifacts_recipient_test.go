@@ -242,10 +242,13 @@ type moduleFuncKey struct{ path, function string }
 // recipientCheckSymbols are the warning-only recipient check entry points,
 // each with the only functions in the module that may call it.
 var recipientCheckSymbols = map[string]map[moduleFuncKey]bool{
-	"RecipientMayNotRead":      {{"pkg/hub/message_artifacts.go", "artifactRecipientWarning"}: true},
-	"ResolveRecipient":         {{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}: true},
-	"recipientIdentity":        {{"pkg/hub/artifacts_recipient.go", "ResolveRecipient"}: true},
-	"recipientChainAllows":     {{"pkg/hub/artifacts_recipient.go", "Permits"}: true},
+	"RecipientMayNotRead": {{"pkg/hub/message_artifacts.go", "artifactRecipientWarning"}: true},
+	"ResolveRecipient":    {{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}: true},
+	"recipientIdentity":   {{"pkg/hub/artifacts_recipient.go", "ResolveRecipient"}: true},
+	"agentChainAllowsErr": {
+		{"pkg/hub/artifacts_host.go", "agentChainAllows"}: true,
+		{"pkg/hub/artifacts_recipient.go", "Permits"}:     true,
+	},
 	"artifactRecipientWarning": {{"pkg/hub/message_artifacts.go", "admitMessageArtifacts"}: true},
 }
 
@@ -484,7 +487,7 @@ func TestArtifactRecipientWarning_ChainWalkFailureIsSilent(t *testing.T) {
 	// recipient's chain walk.
 	first := 0
 	fst.getDelegationEdgesForDelegateHook = func(call int) {
-		if first == 0 && onStack("recipientChainAllows") {
+		if first == 0 && onStack("(*recipientSubject).Permits") {
 			first = call
 		}
 	}
@@ -502,14 +505,29 @@ func TestArtifactRecipientWarning_ChainWalkFailureIsSilent(t *testing.T) {
 	assert.Len(t, admitted, 1, "admission is unchanged")
 	assert.Empty(t, warning, "a failed chain walk gives no warning")
 
-	// The resolved subject's Permits returns the chain walk's error.
+	// A resolved subject walks the chain once per check, whatever scope is
+	// asked (the walk is in the agent's own project).
 	fst.getDelegationEdgesForDelegateErr = nil
-	subject, err := newArtifactHost(srv).ResolveRecipient(context.Background(), artifacts.PrincipalKindAgent, target.ID)
+	host := newArtifactHost(srv)
+	healthy, err := host.ResolveRecipient(context.Background(), artifacts.PrincipalKindAgent, target.ID)
+	require.NoError(t, err)
+	require.NotNil(t, healthy)
+	ok, err := healthy.Permits(context.Background(), project.ID, artifacts.PermissionRead)
+	require.NoError(t, err)
+	require.True(t, ok)
+	reads := fst.getDelegationEdgesForDelegateCalls
+	ok, err = healthy.Permits(context.Background(), tid("recipient-other-project"), artifacts.PermissionRead)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, reads, fst.getDelegationEdgesForDelegateCalls, "the chain walk is memoized for the check")
+
+	// The resolved subject's Permits returns the chain walk's error.
+	subject, err := host.ResolveRecipient(context.Background(), artifacts.PrincipalKindAgent, target.ID)
 	require.NoError(t, err)
 	fst.getDelegationEdgesForDelegateErr = errors.New("edge store unavailable")
 	fst.getDelegationEdgesForDelegateErrAfterCalls = 0 // every read fails from here on
 	require.NotNil(t, subject)
-	ok, err := subject.Permits(context.Background(), project.ID, artifacts.PermissionRead)
+	ok, err = subject.Permits(context.Background(), project.ID, artifacts.PermissionRead)
 	assert.False(t, ok)
 	assert.Error(t, err, "a failed chain walk is an error, not a refusal")
 }
