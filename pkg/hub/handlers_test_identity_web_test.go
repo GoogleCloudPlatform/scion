@@ -871,14 +871,20 @@ func TestTestIdentityWeb_ProxyModeRefused(t *testing.T) {
 	rec = e.page(jar)
 	assert.True(t, tiWebCleared(rec, webSessionName))
 
-	// The hub side reports proxy mode as unavailable too.
+	// The hub side reports a proxy hub without driver principals as
+	// unavailable too (WS2: no proxy authenticator, then no drivers).
 	e.srv.config.AuthMode = "proxy"
 	ok, cause := e.srv.testIdentityWebSessionGate()
 	assert.False(t, ok)
-	assert.Equal(t, testIdentityWebCauseProxyMode, cause)
+	assert.Equal(t, testIdentityWebCauseNoProxyAuthenticator, cause)
+	e.srv.config.ProxyAuth = &fakeProxyAuthenticator{}
+	ok, cause = e.srv.testIdentityWebSessionGate()
+	assert.False(t, ok)
+	assert.Equal(t, testIdentityWebCauseNoDriverPrincipals, cause)
 	assert.Equal(t, http.StatusNotFound, e.mintRec(e.issuerTok, fx.Identity.ID).Code)
 	status := doRequestNoAuth(t, e.srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	assert.Contains(t, status.Body.String(), `"testIdentityWebSessions":false`)
+	assert.Contains(t, status.Body.String(), `"testIdentityWebSessionsUnavailableReason":"`+testIdentityWebCauseNoDriverPrincipals+`"`)
 }
 
 // --- AC6: fixation ------------------------------------------------------------
@@ -1566,7 +1572,7 @@ func TestTestIdentityWeb_LogoutClears(t *testing.T) {
 func TestTestIdentityWeb_Indicator(t *testing.T) {
 	e := newTIWebEnv(t)
 	status := doRequestNoAuth(t, e.srv, http.MethodGet, "/api/v1/test-infra/status", nil)
-	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":true,"testIssuerAudience":""}`, status.Body.String())
+	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":true,"testIdentityWebSessionsUnavailableReason":"","testIssuerAudience":""}`, status.Body.String())
 
 	rec := doRequest(t, e.srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

@@ -29,6 +29,10 @@
 # setup-go module cache as ci.yml) and builds the binary (make build) and
 # the web assets (npm run build) before the suite runs.
 #
+# iap-driver (ptone/scion#4240, WS2) needs no hub and no web build: it
+# checks the e2e harness IAP driver hook against two local HTTP servers it
+# starts itself, in well under a minute.
+#
 # Not covered here:
 # - web/e2e/chat-mobile: the chat-mobile-e2e job in ci.yml owns it (sharded,
 #   with a stable required-check name), so it is not run twice.
@@ -99,6 +103,7 @@ jobs:
           - terminal-workspace
           - test-hub-banner
           - test-identity-session
+          - iap-driver
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

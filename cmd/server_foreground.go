@@ -2441,6 +2441,18 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		}
 	}
 
+	// Proxy driver principals (auth.proxy.driverPrincipals, test identities
+	// phase WS2): exact emails, proxy auth mode only. A non-empty list on a
+	// hub that is not in proxy mode refuses startup; hub.New re-checks it.
+	proxyDrivers, driversErr := config.ValidateProxyDriverConfig(cfg.Auth.Mode, cfg.Auth.Proxy.ProxyDriverPrincipals())
+	if driversErr != nil {
+		return nil, driversErr
+	}
+	hubCfg.ProxyDriverPrincipals = proxyDrivers
+	if len(proxyDrivers) > 0 {
+		log.Printf("Proxy driver principals configured: %d (test identity web session drivers; they never get a hub account)", len(proxyDrivers))
+	}
+
 	// Construct transport token minter when auth.transport is configured
 	if cfg.Auth.Transport != nil && cfg.Auth.Transport.Mode != "" && cfg.Auth.Transport.Mode != "none" {
 		if cfg.Auth.Transport.PlatformAuthSA == "" {
@@ -3109,6 +3121,13 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webPlatformAuthSA = cfg.Auth.Transport.PlatformAuthSA
 	}
 
+	// The same proxy driver principals the hub gets (WS2), checked the same
+	// way, so the web server never runs with a list the hub would refuse.
+	webProxyDrivers, webDriversErr := config.ValidateProxyDriverConfig(cfg.Auth.Mode, cfg.Auth.Proxy.ProxyDriverPrincipals())
+	if webDriversErr != nil {
+		return nil, webDriversErr
+	}
+
 	webCfg := hub.WebServerConfig{
 		Port:                 webPort,
 		Host:                 webHost,
@@ -3125,6 +3144,9 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
 		PerfTrace:            cfg.Hub.PerfTrace,
+
+		ProxyDriverPrincipals:    webProxyDrivers,
+		ProxyDriverTokenAudience: cfg.Auth.Proxy.ProxyDriverTokenAudience(),
 	}
 	if enableDebugEndpoints {
 		slog.Warn("Diagnostic endpoints are enabled (--enable-debug-endpoints). Use for local development only.")

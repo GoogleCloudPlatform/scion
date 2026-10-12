@@ -713,6 +713,14 @@ type ProxyAuthConfig struct {
 	JWT *JWTAuthConfig `json:"jwt,omitempty" yaml:"jwt,omitempty" koanf:"jwt"`
 	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
 	RequireTrustedProxyIP bool `json:"requireTrustedProxyIP,omitempty" yaml:"requireTrustedProxyIP,omitempty" koanf:"requireTrustedProxyIP"`
+	// DriverPrincipals lists the exact emails of the browser drivers that
+	// may carry test identity web sessions through the proxy
+	// (ProxyDriverPrincipalsKey). Startup config only; never API-writable.
+	DriverPrincipals []string `json:"driverPrincipals,omitempty" yaml:"driverPrincipals,omitempty" koanf:"driverPrincipals"`
+	// DriverTokenAudience is the audience (the IAP OAuth client ID) of a
+	// driver's Google ID token (ProxyDriverTokenAudienceKey). Startup config
+	// only; never API-writable.
+	DriverTokenAudience string `json:"driverTokenAudience,omitempty" yaml:"driverTokenAudience,omitempty" koanf:"driverTokenAudience"`
 }
 
 // IAPAuthConfig holds Google IAP-specific settings.
@@ -1692,6 +1700,8 @@ var camelCaseFields = map[string]string{
 	"privatekeypath":                "privateKeyPath",
 	"readtimeout":                   "readTimeout",
 	"requiretrustedproxyip":         "requireTrustedProxyIP",
+	"driverprincipals":              "driverPrincipals",
+	"drivertokenaudience":           "driverTokenAudience",
 	"runtimebroker":                 "runtimeBroker",
 	"slowrequestthreshold":          "slowRequestThreshold",
 	"softdeleteretainfiles":         "softDeleteRetainFiles",

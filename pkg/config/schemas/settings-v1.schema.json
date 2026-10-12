@@ -1738,7 +1738,13 @@
                 }
               }
             },
-            "require_trusted_proxy_ip": { "type": "boolean", "description": "Also require requests to come from a trusted proxy IP." }
+            "require_trusted_proxy_ip": { "type": "boolean", "description": "Also require requests to come from a trusted proxy IP." },
+            "driver_principals": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Exact emails of the browser drivers (for example a test-UI service account) that may carry test identity web sessions through the proxy. No wildcards. A driver principal never gets a hub account. Startup config only; never writable through the API. A hub whose auth mode is not 'proxy' refuses to start with a non-empty list."
+            },
+            "driver_token_audience": { "type": "string", "description": "Audience (the IAP OAuth client ID) a driver's Google ID token must carry before a test identity web session may take its place on an API request. Startup config only; never writable through the API." }
           }
         },
         "transport": {

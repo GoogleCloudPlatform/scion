@@ -440,6 +440,8 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 		resp.Server.Hub.HubClass = ""
 		resp.Server.Hub.TestIdentities = nil
 	}
+	// Likewise the proxy driver settings (WS2).
+	hideNeverAPIWritableProxyKeys(resp.Server)
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
 	// show env-pinned fields in file mode too (H1).

@@ -160,6 +160,15 @@ type ServerConfig struct {
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
 	ProxyAuth ProxyAuthenticator
+	// ProxyDriverPrincipals is auth.proxy.driverPrincipals (ptone/scion#4240,
+	// phase WS2): the exact emails of the browser drivers that may carry
+	// test identity web sessions through the proxy. A verified proxy
+	// assertion for one of them never provisions or authenticates a user
+	// (403). New validates the list (config.ValidateProxyDriverConfig): a
+	// non-empty list when AuthMode is not "proxy" refuses startup. An empty
+	// list in proxy mode leaves test identity web sessions unavailable.
+	// Startup config only; never API-writable.
+	ProxyDriverPrincipals []string
 	// TrustedProxies is a list of trusted proxy IPs/CIDRs for forwarded headers.
 	TrustedProxies []string
 	// Debug enables verbose debug logging.
@@ -1781,6 +1790,9 @@ type Server struct {
 	// testIdentityWeb is the test identity web session state (WS1): the
 	// marker cookie codec built from the hub-local key, fixed in New.
 	testIdentityWeb testIdentityWebState
+	// proxyDrivers is the normalized auth.proxy.driverPrincipals set (WS2),
+	// fixed in New. Empty unless the hub is in proxy auth mode.
+	proxyDrivers driverPrincipalSet
 	// workloadIssuer is the workload-bound issuer delegation state
 	// (test_identity_workload_issuer.go), fixed at startup. Nil when no
 	// workload issuer is configured.
@@ -2150,6 +2162,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateTestIdentityWorkloadIssuers(cfg); err != nil {
 		return nil, err
 	}
+	// Proxy driver principals (WS2): exact emails only, and only in proxy
+	// auth mode. The normalized list is what the server keeps.
+	drivers, err := config.ValidateProxyDriverConfig(cfg.AuthMode, cfg.ProxyDriverPrincipals)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ProxyDriverPrincipals = drivers
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -2433,6 +2452,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.platformAuthSA = cfg.PlatformAuthSA
 	srv.testIdentities = newTestIdentityState(cfg.EnableTestIdentities)
 	srv.testIdentityWeb = newTestIdentityWebState(cfg.TestIdentityWebSessionKey)
+	srv.proxyDrivers = newDriverPrincipalSet(cfg.ProxyDriverPrincipals)
 	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
 	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() })
@@ -2823,6 +2843,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 		// Workload-bound issuer delegations (test identities phase X2).
 		WorkloadIssuer: srv.workloadIssuer,
+
+		// Proxy driver principals (test identities phase WS2): a
+		// verified assertion for one of them is refused at Step 3a.
+		DriverPrincipals: srv.proxyDrivers,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {

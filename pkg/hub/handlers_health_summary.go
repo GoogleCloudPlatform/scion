@@ -135,6 +135,12 @@ type HealthSummaryHub struct {
 	// same value as testIdentityWebSessions in GET
 	// /api/v1/test-infra/status). Read-only.
 	TestIdentityWebSessionsEnabled bool `json:"test_identity_web_sessions_enabled"`
+	// TestIdentityWebSessionsUnavailableReason names why test identity web
+	// sessions are unavailable while the member tier is on (WS2; the same
+	// value as testIdentityWebSessionsUnavailableReason in GET
+	// /api/v1/test-infra/status), or "" when they are available or the
+	// member tier is off. Read-only.
+	TestIdentityWebSessionsUnavailableReason string `json:"test_identity_web_sessions_unavailable_reason"`
 }
 
 // HealthSummaryBrokers is the runtime broker section of the health
@@ -352,6 +358,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	hubSummary.TestAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindHubAdmin)
 	hubSummary.TestSuperAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindSuperAdmin)
 	hubSummary.TestIdentityWebSessionsEnabled, _ = s.testIdentityWebSessionGate()
+	hubSummary.TestIdentityWebSessionsUnavailableReason = s.testIdentityWebSessionsUnavailableReason()
 	if n, err := s.liveTestAdminIdentityCount(ctx); err != nil {
 		slog.Error("health summary: failed to count live test admin identities", "error", err)
 	} else {

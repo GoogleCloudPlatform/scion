@@ -1800,6 +1800,14 @@ type V1ProxyConfig struct {
 	JWT *V1JWTAuthConfig `json:"jwt,omitempty" yaml:"jwt,omitempty" koanf:"jwt"`
 	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
 	RequireTrustedProxyIP bool `json:"require_trusted_proxy_ip,omitempty" yaml:"require_trusted_proxy_ip,omitempty" koanf:"require_trusted_proxy_ip"`
+	// DriverPrincipals lists the exact emails of the browser drivers that
+	// may carry test identity web sessions through the proxy
+	// (ProxyDriverPrincipalsKey). Startup config only; never API-writable.
+	DriverPrincipals []string `json:"driver_principals,omitempty" yaml:"driver_principals,omitempty" koanf:"driver_principals"`
+	// DriverTokenAudience is the audience (the IAP OAuth client ID) of a
+	// driver's Google ID token (ProxyDriverTokenAudienceKey). Startup config
+	// only; never API-writable.
+	DriverTokenAudience string `json:"driver_token_audience,omitempty" yaml:"driver_token_audience,omitempty" koanf:"driver_token_audience"`
 }
 
 // V1IAPConfig holds Google IAP-specific settings.
@@ -3638,6 +3646,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Auth.Proxy = &ProxyAuthConfig{
 				Provider:              v1.Auth.Proxy.Provider,
 				RequireTrustedProxyIP: v1.Auth.Proxy.RequireTrustedProxyIP,
+				DriverPrincipals:      v1.Auth.Proxy.DriverPrincipals,
+				DriverTokenAudience:   v1.Auth.Proxy.DriverTokenAudience,
 			}
 			if v1.Auth.Proxy.IAP != nil {
 				gc.Auth.Proxy.IAP = &IAPAuthConfig{
@@ -3984,6 +3994,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		v1.Auth.Proxy = &V1ProxyConfig{
 			Provider:              gc.Auth.Proxy.Provider,
 			RequireTrustedProxyIP: gc.Auth.Proxy.RequireTrustedProxyIP,
+			DriverPrincipals:      gc.Auth.Proxy.DriverPrincipals,
+			DriverTokenAudience:   gc.Auth.Proxy.DriverTokenAudience,
 		}
 		if gc.Auth.Proxy.IAP != nil {
 			v1.Auth.Proxy.IAP = &V1IAPConfig{
