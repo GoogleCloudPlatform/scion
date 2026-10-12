@@ -144,7 +144,7 @@ async function settle(e: Page): Promise<void> {
 async function mount(opts: Options): Promise<Page> {
   fetchMock = vi.fn(handler(opts));
   vi.stubGlobal('fetch', fetchMock);
-  const e = document.createElement('scion-page-admin-maintenance') as Page;
+  const e = document.createElement('scion-page-admin-maintenance') as unknown as Page;
   document.body.appendChild(e);
   await e.updateComplete;
   await new Promise((resolve) => setTimeout(resolve, 200));
@@ -158,11 +158,23 @@ function findButton(root: ParentNode, text: string): HTMLElement | undefined {
   );
 }
 
+/** The Migrations section; other sections also render .card-list elements. */
+function migrationsSection(e: Page): HTMLElement | null {
+  const sections = Array.from(e.shadowRoot?.querySelectorAll<HTMLElement>('.section') ?? []);
+  return (
+    sections.find((s) => s.querySelector('.section-title')?.textContent?.trim() === 'Migrations') ??
+    null
+  );
+}
+
 function expectPageRendered(e: Page): void {
   const root = e.shadowRoot!;
   expect(root.querySelector('.error-state')).toBeNull();
   expect(root.textContent).not.toContain('Failed to Load');
-  expect(root.querySelector('.card-list')?.textContent).toContain('Migration A');
+  const titles = Array.from(migrationsSection(e)?.querySelectorAll('.card-title') ?? []).map(
+    (t) => t.textContent?.trim()
+  );
+  expect(titles).toContain('Migration A');
 }
 
 function listFetchCount(): number {
@@ -237,7 +249,7 @@ describe('admin maintenance run request errors', () => {
     const root = el.shadowRoot!;
     expect(root.querySelector('.error-state')?.textContent).toContain('Failed to Load');
     expect(root.querySelector('.error-details')?.textContent).toContain('list unavailable');
-    expect(root.querySelector('.card-list')).toBeNull();
+    expect(migrationsSection(el)).toBeNull();
   });
 });
 
