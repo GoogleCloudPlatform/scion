@@ -3520,7 +3520,7 @@ func readPathFile(path, base string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, 4096))
 	if err != nil {
 		return "", false
@@ -3593,7 +3593,7 @@ func readGitdirPointer(path string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, 4096))
 	if err != nil {
 		return "", false
