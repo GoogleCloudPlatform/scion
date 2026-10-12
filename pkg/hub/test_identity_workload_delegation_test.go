@@ -1471,7 +1471,7 @@ func TestTestIdentityDelegation_LabelIsAlwaysValidUTF8(t *testing.T) {
 // management checks the route shares with the issuance routes are
 // delegation-scoped as well: D2 cannot manage D1's identity, and the rate
 // key is per delegation.
-func TestWorkloadDelegation_WebLoginCodeScopedToDelegation(t *testing.T) {
+func TestWorkloadDelegation_WebLoginCodeRefusedForEveryDelegation(t *testing.T) {
 	e := newX2Env(t, true)
 	key := make([]byte, testIdentityWebKeyLen)
 	_, err := rand.Read(key)
