@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_6
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -251,6 +249,9 @@ var routePermissionClassifications = map[string]string{
 	// Role import/export
 	"/api/v1/admin/roles/export": "hub-admin:role",
 	"/api/v1/admin/roles/import": "hub-admin:role",
+
+	// Test identity web-login codes (ptone/scion#4240, WS1)
+	"POST /api/v1/test-identities/{id}/web-login-code": "hub-admin:test-identity",
 }
 
 func TestConstraintAuditRoutePermissionClassification(t *testing.T) {

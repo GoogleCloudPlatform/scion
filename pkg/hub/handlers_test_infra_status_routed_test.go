@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_3)
+//go:build !no_sqlite
 
 package hub
 
@@ -33,19 +33,19 @@ func TestTestInfraStatusRouted_UnauthenticatedFlagOff(t *testing.T) {
 	srv, _ := newTestIdentityServer(t, false)
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false}`, rec.Body.String())
+	assert.JSONEq(t, `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false}`, rec.Body.String())
 }
 
 func TestTestInfraStatusRouted_UnauthenticatedMemberOn(t *testing.T) {
 	srv, _ := newTestIdentityServer(t, true)
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false}`, rec.Body.String())
+	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false}`, rec.Body.String())
 }
 
 func TestTestInfraStatusRouted_SameForSignedInAndInvalidToken(t *testing.T) {
 	srv, _ := newTestIdentityServer(t, true)
-	want := `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false}`
+	want := `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false}`
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
