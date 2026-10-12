@@ -109,7 +109,7 @@ func TestFlatAsyncCreate_PreflightRuntimeErrorReleasesOwnershipMirror(t *testing
 
 // TestFlatAsyncCreate_HarnessPolicyRefusalReleasesOwnershipMirror: a
 // Preflight refused by the harness-config policy refuses the async create
-// with 403.
+// with 403 and releases the ownership mirror.
 func TestFlatAsyncCreate_HarnessPolicyRefusalReleasesOwnershipMirror(t *testing.T) {
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
 	f.mgr.preflightErr = fmt.Errorf("resolve harness-config: %w", agent.ErrHarnessConfigPolicy)
@@ -316,10 +316,10 @@ func TestFlatOwnedStart_ReleaseAfterCompleteIsNoOp(t *testing.T) {
 	}
 }
 
-// TestFlatOwnedStart_ReleaseKeepsALaterMirrorOfTheSameRun: when a later
+// TestFlatOwnedStart_ReleaseKeepsALaterMirrorOfTheSameRunID: when a later
 // start installed its own mirror under the same run ID, releasing the
 // earlier start's mirror leaves the later one in place.
-func TestFlatOwnedStart_ReleaseKeepsALaterMirrorOfTheSameRun(t *testing.T) {
+func TestFlatOwnedStart_ReleaseKeepsALaterMirrorOfTheSameRunID(t *testing.T) {
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
 	first := api.StartOptions{RunID: "run-same"}
 	second := api.StartOptions{RunID: "run-same"}
