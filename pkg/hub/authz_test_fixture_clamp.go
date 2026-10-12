@@ -490,22 +490,6 @@ func clampTestIdentityBindings(ctx context.Context, st store.Store, authz *Authz
 	return c.clampAll(ctx, principals, bindings)
 }
 
-// isTestFixtureUser reports whether userID is a hub test identity, reading
-// through st. It is for code outside the authorization service that counts
-// or targets privileged holders (lockout and last-admin guards, admin
-// recipients): such code must not count a test identity, which can never
-// hold system-scoped authority beyond member. It reports true for every
-// test identity kind (member and admin). A missing user is not a test
-// identity; a read error or unrecognized kind is returned so the caller
-// fails closed.
-func isTestFixtureUser(ctx context.Context, st store.UserStore, userID string) (bool, error) {
-	k, err := kindForPrincipalVia(ctx, st, nil, userID)
-	if err != nil {
-		return false, err
-	}
-	return k.isTestIdentity(), nil
-}
-
 // clampBindingsForUser applies the test identity clamps (member and admin
 // kind) to bindings read for userID outside the authorization service:
 // the user's direct bindings, or the bindings of the user's groups read in

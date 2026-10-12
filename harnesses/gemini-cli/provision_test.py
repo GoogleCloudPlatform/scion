@@ -172,5 +172,31 @@ class GeminiModelTest(unittest.TestCase):
         self.assertIs(settings["model"]["skipNextSpeakerCheck"], True)
 
 
+def _select_vertex(env_vars: list[str]):
+    with tempfile.TemporaryDirectory() as tmp:
+        bundle = os.path.join(tmp, ".scion", "harness")
+        os.makedirs(os.path.join(bundle, "inputs"))
+        with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w", encoding="utf-8") as f:
+            json.dump({"explicit_type": "vertex-ai", "env_vars": env_vars}, f)
+        manifest = {"harness_bundle_dir": bundle, "harness_config": {}}
+        ctx = scion_harness.ProvisionContext("gemini-cli", manifest)
+        ctx.info = lambda *a, **k: None
+        return ctx.select_auth(provision.AUTH)
+
+
+class VertexAuthSelectionTest(unittest.TestCase):
+    # config.yaml's vertex-ai requires a project and a region group; the
+    # provisioner must agree (ptone/scion#4623).
+    def test_project_and_each_region_key_select_vertex_ai(self) -> None:
+        for region in ("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION"):
+            with self.subTest(region=region):
+                resolved = _select_vertex(["GOOGLE_CLOUD_PROJECT", region])
+                self.assertEqual(resolved.method, "vertex-ai")
+
+    def test_project_without_region_is_rejected(self) -> None:
+        with self.assertRaises(scion_harness.ProvisionError):
+            _select_vertex(["GOOGLE_CLOUD_PROJECT"])
+
+
 if __name__ == "__main__":
     unittest.main()

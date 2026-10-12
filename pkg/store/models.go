@@ -193,6 +193,14 @@ type Agent struct {
 	// writes it.
 	RunIDUpdatedAt *time.Time `json:"-"`
 
+	// SSHHostKey is the authorized_keys line of the agent's SSH host key
+	// for the run SSHHostKeyRunID. The reported host key is bound to the
+	// reporting agent's current run: the only writer is SetAgentSSHHostKey,
+	// and readers use it only while SSHHostKeyRunID equals RunID. Like
+	// RunID, UpdateAgent never writes them.
+	SSHHostKey      string `json:"-"`
+	SSHHostKeyRunID string `json:"-"`
+
 	// RunIntent is whether the agent should be running ("running" or
 	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
 	// time of the last intent write. Internal bookkeeping, untagged like the
@@ -1489,6 +1497,37 @@ func (u *User) IsTestIdentity() bool {
 	return u != nil && (u.Kind == UserKindTestFixture || IsTestAdminKind(u.Kind))
 }
 
+// ExpiredTestFixtureQuery selects test fixture users by expiry for
+// Store.ListExpiredTestFixtureUsers. A fixture row always has an expiry
+// (the users_test_fixture_expiry_check CHECK), so every selected row has
+// one.
+type ExpiredTestFixtureQuery struct {
+	// ExpiredAtOrBefore keeps rows with expires_at <= ExpiredAtOrBefore.
+	// Required.
+	ExpiredAtOrBefore time.Time
+	// ExpiredAfter, when non-zero, keeps rows with expires_at >
+	// ExpiredAfter.
+	ExpiredAfter time.Time
+	// AfterID, when non-empty, is a keyset cursor: only rows strictly after
+	// (AfterExpiresAt, AfterID) in (expires_at, id) order are returned.
+	AfterExpiresAt time.Time
+	AfterID        string
+	// Limit caps the rows returned when positive.
+	Limit int
+}
+
+// FixtureRootedResources is what Store.ListFixtureRootedResources found for
+// one fixture root: every resource whose stamp names it.
+type FixtureRootedResources struct {
+	// Agents includes soft-deleted agents.
+	Agents    []Agent
+	Schedules []Schedule
+	Groups    []Group
+	Projects  []Project
+	// Truncated is true when a kind had more rows than the limit.
+	Truncated bool
+}
+
 // FixtureProvenance is the creation-time test-identity provenance stamp of
 // an agent, project, schedule or group: the hub test identity at the root
 // of the principal chain that created the row (RootID) and that identity's
@@ -1648,6 +1687,27 @@ func IsTestFixtureEmail(email string) bool {
 // UserStore.CreateTestFixtureUser tries to create a test-fixture user, or a
 // user in TestFixtureEmailDomain.
 var ErrTestFixtureKindRefused = errors.New("test fixture users can only be created by the test identity issuance path")
+
+// TestIdentityLoginCode is a single-use web-login code for a test identity
+// (ptone/scion#4240, phase WS1). Only the hash of the code is stored. A
+// user holds at most one; see UserStore.ReplaceTestIdentityLoginCode.
+type TestIdentityLoginCode struct {
+	ID                 string
+	UserID             string
+	CodeHash           string
+	IssuedBy           string
+	IssuerCredentialID string
+	ExpiresAt          time.Time
+	ConsumedAt         *time.Time
+	Created            time.Time
+}
+
+// Errors of UserStore.ConsumeTestIdentityLoginCode for a code hash that
+// exists but cannot be redeemed. An unknown hash returns ErrNotFound.
+var (
+	ErrTestIdentityLoginCodeConsumed = errors.New("test identity login code already used")
+	ErrTestIdentityLoginCodeExpired  = errors.New("test identity login code expired")
+)
 
 // Visibility constants - re-exported from api package for convenience.
 // The api package is the canonical source for these values.
@@ -3964,6 +4024,10 @@ const (
 	MembershipLossTriggerSystemScopeChange     MembershipLossTrigger = "system_scope_change"
 	MembershipLossTriggerRestoreCheck          MembershipLossTrigger = "restore_check"
 	MembershipLossTriggerReconcile             MembershipLossTrigger = "reconcile"
+	// MembershipLossTriggerTestIdentityExpiry: a hub test identity
+	// (ptone/scion#4240) passed its expiry, so it is no longer admitted
+	// anywhere and its agents are held until the expiry reaper purges them.
+	MembershipLossTriggerTestIdentityExpiry MembershipLossTrigger = "test_identity_expiry"
 )
 
 // ValidMembershipLossTrigger reports whether t is a recognised trigger.
@@ -3978,7 +4042,8 @@ func ValidMembershipLossTrigger(t MembershipLossTrigger) bool {
 		MembershipLossTriggerBindingExpiry,
 		MembershipLossTriggerSystemScopeChange,
 		MembershipLossTriggerRestoreCheck,
-		MembershipLossTriggerReconcile:
+		MembershipLossTriggerReconcile,
+		MembershipLossTriggerTestIdentityExpiry:
 		return true
 	}
 	return false

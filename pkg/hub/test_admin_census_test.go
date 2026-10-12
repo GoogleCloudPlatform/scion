@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !hubshard || hubshard_1
-
 package hub
 
 import (
@@ -51,7 +49,7 @@ const (
 	// Verified.
 	censusClamped = "decision: clamped"
 	// censusExcludesTestIdentities: a holder-counting guard that counts
-	// only positively human rows (IsHumanKind, isTestFixtureUser or
+	// only positively human rows (IsHumanKind or
 	// reconcileSkipsUser). Verified.
 	censusExcludesTestIdentities = "guard: excludes test identities"
 )
@@ -60,7 +58,7 @@ const (
 // function must reference.
 var censusVerifiers = map[string][]string{
 	censusClamped:                {"clampBindingsForUser", "clampTestIdentityBindings"},
-	censusExcludesTestIdentities: {"IsHumanKind", "isTestFixtureUser", "reconcileSkipsUser"},
+	censusExcludesTestIdentities: {"IsHumanKind", "reconcileSkipsUser"},
 }
 
 // censusClampedStoreMethods are the store methods the authorization
@@ -182,12 +180,14 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"authz.go:isCurrentHubMember:GetGroupMembership":                    "decision: hub-members membership (relationship grant); admin kinds count only while live and enabled (testAdminPrincipalLive)",
 
 	// Holder-counting guards: test identities never count.
-	"access_constraint_preview.go:resolveAdminUsers:GetEffectiveGroups":                       censusExcludesTestIdentities,
-	"access_constraint_preview.go:resolveAdminUsers:GetGroupMembers":                          censusExcludesTestIdentities,
-	"access_constraint_preview.go:resolveAdminUsers:ListRoleBindingsForScope":                 censusExcludesTestIdentities,
-	"handlers_users_core.go:checkLastSuperAdminTx:ListRoleBindingsForScope":                   censusExcludesTestIdentities,
-	"seed.go:ReconcileSuperAdminBindings:ListRoleBindingsForPrincipal":                        censusExcludesTestIdentities,
-	"access_constraint_governance.go:enforceRoleBindingLockout:ListRoleBindingsForPrincipals": "guard: counts survivors among resolveAdminUsers' admin set, which excludes test identities (isTestFixtureUser)",
+	"access_constraint_preview.go:resolveConstraintAdmins:GetEffectiveGroups":                    censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdmins:GetGroupMembers":                       censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdmins:ListRoleBindingsForScope":              censusExcludesTestIdentities,
+	"handlers_users_core.go:checkLastSuperAdminTx:ListRoleBindingsForScope":                      censusExcludesTestIdentities,
+	"seed.go:ReconcileSuperAdminBindings:ListRoleBindingsForPrincipal":                           censusExcludesTestIdentities,
+	"access_constraint_governance.go:checkConstraintAdminLockout:ListRoleBindingsForScope":       "guard: counts survivors among resolveConstraintAdmins' admin set, which counts only positively human rows (IsHumanKind); a scope binding keeps an admin only when active (isBindingActive) and it names that admin or one of its groups",
+	"access_constraint_governance.go:checkUserRemovalAdminLockout:GetEffectiveGroups":            "guard: scopes to lockout-check for a user removal; an extra scope only adds a check, never admits",
+	"access_constraint_governance.go:checkUserRemovalAdminLockout:ListRoleBindingsForPrincipals": "guard: scopes to lockout-check for a user removal (clamped, unwired: admin kinds never constraint admins); an extra, even expired, binding only adds a check, never admits",
 
 	// Narrowing only: access-constraint restriction and preview resolution
 	// can only remove authority, never grant it.
@@ -255,6 +255,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"project_membership_service.go:UpdateMemberRole:GetRoleBinding":                                  "mutation: the binding being changed",
 	"project_membership_service.go:findExistingDirectBindingsFromStore:ListRoleBindingsForPrincipal": "mutation: the target's existing bindings to replace",
 	"project_membership_set.go:loadProjectPrincipalBindings:ListRoleBindingsForPrincipal":            "mutation: the target's existing bindings to plan against",
+	"project_fixture_purge.go:purgeFixtureProject:ListRoleBindingsForScope":                          "mutation: test identity purge, the stamped project's bindings to delete; any other owner keeps the project (project scope)",
 	"project_owner_predicates.go:projectOwnerBindingCount:ListRoleBindingsForScope":                  "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
 	"project_owner_predicates.go:usableOwnerPrincipals:ListRoleBindingsForScope":                     "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
 	"handlers_groups.go:groupClosureHasRoleBinding:ListRoleBindingsForPrincipals":                    "group: whether a group carries bindings (session requirement), not a user's authority",

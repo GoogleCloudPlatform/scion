@@ -29,24 +29,32 @@ type testInfraGates struct {
 	// TestSuperAdmin is always false for now.
 	TestHubAdmin   bool
 	TestSuperAdmin bool
+	// TestIdentityWebSessions is true when test identity web sessions are
+	// available (ptone/scion#4240, WS1): the member tier is on, the hub
+	// has its hub-local web session key, and it is not in proxy auth mode
+	// (testIdentityWebSessionGate).
+	TestIdentityWebSessions bool
 }
 
 // testInfraGates returns the hub's test-identity gates. It is the single
 // place GET /api/v1/test-infra/status reads them from.
 func (s *Server) testInfraGates() testInfraGates {
+	webSessions, _ := s.testIdentityWebSessionGate()
 	return testInfraGates{
-		TestIdentities: s.testIdentities.enabled,
-		TestHubAdmin:   s.testAdminTierEnabled(testAdminKindHubAdmin),
-		TestSuperAdmin: s.testAdminTierEnabled(testAdminKindSuperAdmin),
+		TestIdentities:          s.testIdentities.enabled,
+		TestHubAdmin:            s.testAdminTierEnabled(testAdminKindHubAdmin),
+		TestSuperAdmin:          s.testAdminTierEnabled(testAdminKindSuperAdmin),
+		TestIdentityWebSessions: webSessions,
 	}
 }
 
 // TestInfraStatusResponse is the body of GET /api/v1/test-infra/status:
-// exactly three booleans, and no other hub data.
+// exactly four booleans, and no other hub data.
 type TestInfraStatusResponse struct {
-	TestIdentities bool `json:"testIdentities"`
-	TestHubAdmin   bool `json:"testHubAdmin"`
-	TestSuperAdmin bool `json:"testSuperAdmin"`
+	TestIdentities          bool `json:"testIdentities"`
+	TestHubAdmin            bool `json:"testHubAdmin"`
+	TestSuperAdmin          bool `json:"testSuperAdmin"`
+	TestIdentityWebSessions bool `json:"testIdentityWebSessions"`
 }
 
 // handleTestInfraStatus handles GET /api/v1/test-infra/status.

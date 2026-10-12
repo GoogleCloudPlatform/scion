@@ -124,6 +124,7 @@ ptone/scion#1855.
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
     - `--no-wait`: *(Hub mode)* Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
     - `--wait-timeout <duration>`: *(Hub mode)* How long to wait for the agent to start (for example `10m`); must not be negative. The default is the Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does not advertise one. Raise it if the Hub's launch timeout has been raised.
+    - `--wait-ready`: After the agent is running, also wait until its harness accepts input (its activity is no longer `initializing`, shown as "starting"). Works in Hub and local mode. `--wait-timeout`, if set, bounds the whole wait; otherwise the readiness wait is limited to 2 minutes. Prints `Agent '<name>' is ready.` when it is; JSON output adds `"ready": true|false` to `details`. If the agent is not ready in time the command exits with status 3 and the agent is left running. Cannot be combined with `--no-wait`.
 
 In Hub mode, `start` waits for the agent to reach `running` when the Hub
 launches it asynchronously, after a workspace upload, or with `--attach`.
@@ -337,7 +338,7 @@ Sends a message to a running agent or user.
     - `<message>`: The text to send. Pass `-` to read the body from stdin.
 - **Flags:**
     - `-i, --interrupt`: Interrupt the harness before sending the message.
-    - `-w, --wake`: Resume a suspended agent before delivering the message. Requires the permission to start the agent (`agent.lifecycle`); without it the send fails with `403` and the agent stays suspended.
+    - `-w, --wake`: Resume a suspended agent before delivering the message. Requires the permission to start the agent (`agent.lifecycle`); without it the send fails with `403` and the agent stays suspended. If the agent is still starting (activity `initializing`) when the wake wait ends, the message is delivered and held until its harness is ready, and `--interrupt` is delivered as an ordinary message instead of interrupting.
     - `--body-file <path>`: Read the message body from a file instead of passing it inline. Useful for long messages and scripted workflows. `--body-file -` reads the body from stdin, like a `-` message argument. Mutually exclusive with the inline `<message>` argument.
     - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
         - **Constraints:** Cannot be combined with `--in` or `--at`.
@@ -738,7 +739,11 @@ a user reincarnates an agent without changing its role, and the agent's own dele
 missing or has no recorded provenance, or an edge further up its chain has no recorded provenance
 and every edge between it and the agent is accepted on this hub, the user becomes the agent's
 recorded delegator. This clears the
-`ceiling_unrecorded` denial, which blocks service-account assignment among other actions. The
+`ceiling_unrecorded` denial, which blocks service-account assignment among other actions. If the
+agent has an assigned GCP service account, the same reincarnation also records the user as the source
+of that assignment, provided the user passes the same access checks as `scion create --service-account`
+for the account. If the user does not, the reincarnation repairs the delegation all the same, the agent
+keeps its existing assignment, and the plan carries a warning. The
 **Reincarnate** button in the web UI does the same. A reincarnation by the agent itself or by another
 agent keeps the edge, and so does a user's reincarnation of an agent whose chain is fully recorded,
 or whose first problem walking up from the agent is an edge this hub does not accept (for example
@@ -1002,7 +1007,7 @@ full lifecycle.
 - `sync <name>` (alias `push`): Upload a local config to the Hub (changed files only), creating it or updating the same-named config in the target scope. Scope is the current project by default, or global with `--global`; the output shows the scope used. Flags: `--name` (publish under a different Hub name).
 - `pull <name>`: Download a config from the Hub. Flags: `--to <path>` (destination; defaults to the global dir).
 - `reset <name>`: Restore a config to the binary's embedded defaults.
-- `upgrade [name]`: Add missing support files and metadata without clobbering user values. Flags: `--dry-run`, `--activate-script`, `--force`. With no name, upgrades all configs in the global directory.
+- `upgrade [name]`: Add missing support files and metadata to the local copy without clobbering user values. Flags: `--dry-run`, `--activate-script`, `--force` (overwrite every file that ships in the embedded defaults, discarding local edits to them; files you added are kept). With no name, upgrades all configs in the global directory. It does not change the Hub's copy or existing agents; see [Changing a harness config affects new agents only](/scion/reference/harness-settings/#changing-a-harness-config-affects-new-agents-only).
 - `delete <name>`: Delete a config from the Hub (does not remove local files). The web UI additionally offers an "Also delete stored files" option.
 
 ## Hub Integration
@@ -1067,13 +1072,14 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `token <id> --out <file>`: Issue a new token for a live test identity you issued (an admin sign-in may do it for any), for runs longer than one token. Flags: `--out <file>` (required), `--ttl <duration>`, `--json`.
     - `list`: List the test identities you issued (every identity for an admin sign-in). Only live identities are listed unless `--include-expired` is set. Flags: `--limit <n>` (default: the Hub's, 100; at most 500), `--include-expired`, `--json`.
     - `delete <id>`: Delete a test identity. Its role bindings and group memberships go with it, and its tokens stop working at once. The delete is refused while the identity still owns agents, or is the last owner of a project; the command lists them, and you delete them first. Deleting an identity that does not exist (for example, deleted already) succeeds with a notice on standard error, so a teardown step can run twice.
+        - `--purge`: Also remove what the identity created: its agents (with their files on the broker), schedules, groups and projects. Only resources the Hub recorded as created under the identity are removed. A project that has another owner, or resources someone else created, is kept, and the identity's access to it is removed. Agents the identity owns without that record are listed as unproven and never removed. The command prints what it removed and kept. If the purge cannot finish (for example a broker is offline) it lists what is left and exits non-zero; run it again to finish.
 
 ```bash
 # CI: issue a member identity, run tests with its token, then tear it down
 scion hub test-identity issue --role member --ttl 30m --purpose "e2e" --out ./fixture.token --json > fixture.json
 FIXTURE_ID=$(jq -r .identity.id fixture.json)
 ./run-e2e.sh --token-file ./fixture.token   # your test runner reads the token from the file
-scion hub test-identity delete "$FIXTURE_ID"
+scion hub test-identity delete "$FIXTURE_ID" --purge
 ```
 - `scion hub env`: Manage environment variables on the Hub.
     - `set <key>=<value>`: Set a variable.
@@ -1108,7 +1114,7 @@ Manage GCP service accounts registered with the Hub (aliases `service-account`, 
 
 ### `scion artifact`
 
-Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode, except `share`. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
+Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode, except `share` and `delete`. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
 
 - `scion artifact publish <file|folder>`: Publish a file or folder in the current project; prints its reference, version and web page URL.
     - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
@@ -1117,6 +1123,7 @@ Publishes files as artifacts and fetches them by reference (`scion://artifact/<i
 - `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`.
 - `scion artifact share <ref>`: Create a share link and print it, with its expiry and the command that revokes it. The link is shown only once. Only the artifact's owner or a user with an admin grant can share it; not available in agent mode, and the Hub refuses agents. See [Share links](/scion/reference/artifacts/#share-links).
     - Flags: `--ttl <n>h|<n>d` (link lifetime; default: the Hub's, 7 days unless changed; a lifetime above the Hub's maximum, 30 days unless changed, is rejected, not shortened), `--list` (list the active links instead), `--revoke <link-id>` (revoke one instead).
+- `scion artifact delete <ref>`: Delete an artifact after confirming (`--yes` skips the prompt; required when stdin is not a terminal). Its grants and share links end with it and its files are removed after the hub's grace period; there is no undelete. The artifact's owner, a user with an admin grant on it, or an admin of its home project can delete it; not available in agent mode, and the Hub refuses agents. See [Deletion](/scion/reference/artifacts/#deletion).
 
 ## Notification Management
 

@@ -239,6 +239,34 @@ const (
 	signInDeniedInviteOnly = "invite_only"
 )
 
+// Audit reasons recorded for a denied sign-in (InviteAuditLoginDenied).
+const (
+	signInAuditReasonDomain     = "domain_not_authorized"
+	signInAuditReasonInviteOnly = "not_on_allow_list"
+)
+
+// signInDenialAuditReason returns the audit reason for a denied sign-in,
+// derived from the checkSignInDenial code so the record says why the
+// sign-in was denied. A code without a mapped reason is recorded as
+// itself. accessMode is used only when the code is empty (the decision
+// came from a bool-only authorize check that returns no code).
+func signInDenialAuditReason(denial, accessMode string) string {
+	switch denial {
+	case signInDeniedDomain:
+		return signInAuditReasonDomain
+	case signInDeniedInviteOnly:
+		return signInAuditReasonInviteOnly
+	case "":
+		// No code: fall back to the access mode below.
+	default:
+		return denial
+	}
+	if accessMode == "invite_only" {
+		return signInAuditReasonInviteOnly
+	}
+	return signInAuditReasonDomain
+}
+
 // writeSignInDenied writes the 403 response for a provisionUser access
 // denial, using the invite-only code when that is the reason.
 func writeSignInDenied(w http.ResponseWriter, err error) {
@@ -1559,11 +1587,8 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 
 	// Authorization check
 	if denial := s.signInDenial(ctx, info.Email); denial != "" {
-		reason := "not_on_allow_list"
-		if s.UserAccessMode() != "invite_only" {
-			reason = "domain_not_authorized"
-		}
-		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, info.Email, reason)
+		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, info.Email,
+			signInDenialAuditReason(denial, s.UserAccessMode()))
 		if denial == signInDeniedInviteOnly {
 			return nil, ErrInviteRequired
 		}
@@ -1623,7 +1648,8 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 // inline logic field for field.
 func (s *Server) signInPolicyDeps() signInPolicyDeps {
 	return signInPolicyDeps{
-		authorize: s.isUserAuthorized,
+		authorize:    s.isUserAuthorized,
+		signInDenial: s.signInDenial,
 		activationRole: func(ctx context.Context, email, currentRole, userID string) string {
 			// The stored role on an invited row is a placeholder (invites
 			// carry no role), so evaluate as a brand-new user: admin if in
@@ -1655,7 +1681,8 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		auditActivated: func(ctx context.Context, email, userID string) {
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, email, "", userID, email, nil)
 		},
-		// auditDenied mirrors provisionUser's own denial-reason logic above.
+		// auditDenied records the denial code the decision returned (see
+		// signInDenial above), mapped the same way provisionUser maps it.
 		// provisionUser calls the helper with preAuthorized=true, so this
 		// only fires from a caller (the resolver) that passes
 		// preAuthorized=false and fails the authorize check — provisionUser
@@ -1670,12 +1697,9 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		// capture, an unauthorized caller retrying is expected to stop or be
 		// blocked at a layer above this one, and de-duplicating here would
 		// mean dropping legitimate repeat-denial records.
-		auditDenied: func(ctx context.Context, email string) {
-			reason := "not_on_allow_list"
-			if s.UserAccessMode() != "invite_only" {
-				reason = "domain_not_authorized"
-			}
-			LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, email, reason)
+		auditDenied: func(ctx context.Context, email, denial string) {
+			LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, email,
+				signInDenialAuditReason(denial, s.UserAccessMode()))
 		},
 	}
 }

@@ -2694,9 +2694,12 @@ func (a *AuthzService) isProjectOwner(ctx context.Context, userID, projectID str
 // identity clamps with authz's wiring (clampBindingsForUser), for a store
 // handle outside the authorization service; without it st must be the
 // authorization service's own clamped store. It replaces the unclamped,
-// unfiltered GetProjectMembership on decision paths. A read or kind error
-// is returned; callers deny.
+// unfiltered GetProjectMembership on decision paths. A read or kind error,
+// or a nil store, is returned; callers deny.
 func activeDirectProjectRoles(ctx context.Context, st store.Store, authz *AuthzService, clamp bool, userID, projectID string) (map[string]bool, error) {
+	if st == nil {
+		return nil, errors.New("active direct project roles: no store")
+	}
 	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return nil, err

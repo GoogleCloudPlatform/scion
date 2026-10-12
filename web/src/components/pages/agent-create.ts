@@ -29,7 +29,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Project, RuntimeBroker, Template, GCPServiceAccount } from '../../shared/types.js';
+import type { Project, RuntimeBroker, Template } from '../../shared/types.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -51,13 +51,8 @@ import {
   type ProjectCreateDefaults,
 } from '../../shared/agent-config-inherited.js';
 import { GcpIdentityState } from '../../shared/gcp-identity-state.js';
-import {
-  assignStatusTarget,
-  assignStatusTargetKey,
-  projectServiceAccountListUrl,
-  withoutAssignStatus,
-  type AssignStatusTarget,
-} from '../../shared/gcp-sa-assign-status.js';
+import { assignStatusTarget } from '../../shared/gcp-sa-assign-status.js';
+import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
@@ -407,12 +402,7 @@ export class ScionPageAgentCreate extends LitElement {
       this.gcp.setTarget(this.targetRuntimeIsKubernetesOnly, this.profile);
       // The accounts' mapping state is for one target: ask again when it
       // changes (ptone/scion#4391). Not before the first load has started.
-      if (
-        this.gcpLoadSeq > 0 &&
-        assignStatusTargetKey(this.gcpAssignTarget) !== this.gcpAssignTargetKey
-      ) {
-        void this.refreshGCPAssignStatus();
-      }
+      void this.gcpAccounts.targetChanged();
     }
   }
 
@@ -718,121 +708,31 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   /**
-   * Incremented at the start of every loadGCPServiceAccounts call. Each call
-   * captures its own value and, after every await, drops its results if a
-   * newer call has started since (ptone/scion#2548): project switches fire
-   * the load unawaited, so a slow response for the previous project must not
-   * overwrite the current project's accounts or default.
+   * Loads the project's accounts with their mapping state on the chosen
+   * Kubernetes target, and asks again when the target changes. Its guard
+   * also drops a slow load for a previous project (ptone/scion#2548): project
+   * switches fire the load unawaited.
    */
-  private gcpLoadSeq = 0;
-
-  /**
-   * Incremented by every fetch of the accounts (the project's load and each
-   * mapping-state refresh), so only the newest fetch's mapping state is kept.
-   */
-  private gcpAssignSeq = 0;
-
-  /**
-   * The gcpAssignSeq of the last refresh whose fetched accounts were applied.
-   * Equal to gcpAssignSeq when the newest refresh has already landed.
-   */
-  private gcpAssignAppliedSeq = 0;
-
-  /** The key of the target the current accounts' mapping state was asked for. */
-  private gcpAssignTargetKey = '';
-
-  /** The Kubernetes broker and profile to ask the accounts' mapping state for, or null. */
-  private get gcpAssignTarget(): AssignStatusTarget | null {
-    return assignStatusTarget(this.targetRuntimeIsKubernetesOnly, this.brokerId, this.profile);
-  }
-
-  /** Fetches the project's accounts, with their mapping state on target when given. */
-  private async fetchGCPServiceAccounts(
-    projectId: string,
-    target: AssignStatusTarget | null
-  ): Promise<GCPServiceAccount[] | null> {
-    try {
-      const res = await apiFetch(projectServiceAccountListUrl(projectId, target));
-      if (!res.ok) return null;
-      const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
-      return Array.isArray(data) ? data : data.items || [];
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Re-asks the accounts' mapping state after the target changed, keeping
-   * the mode, the chosen account and the defaults. With no target known any
-   * more, or when the fetch fails, the previous target's labels are dropped
-   * rather than shown against the new one.
-   */
-  private async refreshGCPAssignStatus(): Promise<void> {
-    const projectId = this.projectId;
-    if (!projectId) return;
-    const loadSeq = this.gcpLoadSeq;
-    const seq = ++this.gcpAssignSeq;
-    const target = this.gcpAssignTarget;
-    const key = assignStatusTargetKey(target);
-    this.gcpAssignTargetKey = key;
-    const isStale = (): boolean =>
-      seq !== this.gcpAssignSeq || loadSeq !== this.gcpLoadSeq || this.projectId !== projectId;
-    if (!target) {
-      this.gcp.setAccounts(withoutAssignStatus(this.gcp.gcpServiceAccounts));
-      return;
-    }
-    const accounts = await this.fetchGCPServiceAccounts(projectId, target);
-    if (isStale()) return;
-    if (accounts) {
-      this.gcpAssignAppliedSeq = seq;
-      this.gcp.setAccounts(accounts);
-    } else {
-      this.gcp.setAccounts(withoutAssignStatus(this.gcp.gcpServiceAccounts));
-    }
-  }
+  private readonly gcpAccounts = new GCPServiceAccountsLoader({
+    projectId: () => this.projectId,
+    target: () =>
+      assignStatusTarget(this.targetRuntimeIsKubernetesOnly, this.brokerId, this.profile),
+    accounts: () => this.gcp.gcpServiceAccounts,
+    setAccounts: (accounts) => this.gcp.setAccounts(accounts),
+  });
 
   private async loadGCPServiceAccounts(): Promise<void> {
-    const seq = ++this.gcpLoadSeq;
-    const assignSeq = ++this.gcpAssignSeq;
-    const projectId = this.projectId;
-    // True when a newer load has started or the project changed under this
-    // one; a stale load must not touch any state after that point.
-    const isStale = (): boolean => seq !== this.gcpLoadSeq || this.projectId !== projectId;
-
     // Recomputing defaults from scratch (initial load, or a project change).
     // This runs synchronously, before any await, so it is always performed
     // by the newest load.
     this.gcp.reset();
 
-    if (!projectId) return;
-    const target = this.gcpAssignTarget;
-    this.gcpAssignTargetKey = assignStatusTargetKey(target);
-    let fetched = await this.fetchGCPServiceAccounts(projectId, target);
-    if (isStale()) return;
-    // Asking for the mapping state adds a project-read check on the hub; if
-    // that request fails, list the accounts without it as before.
-    if (fetched === null && target) {
-      fetched = await this.fetchGCPServiceAccounts(projectId, null);
-      if (isStale()) return;
-    }
-    // Non-critical: a failed fetch leaves the picker without accounts.
-    const accounts = fetched ?? [];
-    // The target changed while this load was in flight, and willUpdate has
-    // started a refresh for the new one. If that refresh has already landed,
-    // its accounts are the current ones: keep them. Otherwise show this
-    // load's accounts without its old-target labels; the refresh fills them
-    // in when it lands. Either way no further request is needed.
-    if (assignSeq !== this.gcpAssignSeq) {
-      if (this.gcpAssignAppliedSeq !== this.gcpAssignSeq) {
-        this.gcp.setAccounts(withoutAssignStatus(accounts));
-      }
-    } else {
-      this.gcp.setAccounts(accounts);
-    }
+    const isStale = await this.gcpAccounts.load();
+    if (!isStale) return;
 
     // The project's default identity: applied to the displayed value only
     // when the user has not already picked while the fetches were in flight.
-    const settings = await this.fetchProjectSettings(projectId);
+    const settings = await this.fetchProjectSettings(this.projectId);
     if (isStale()) return;
     this.gcp.applyProjectDefaults(settings);
   }
