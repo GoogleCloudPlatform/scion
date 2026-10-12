@@ -133,8 +133,19 @@ func (s *sqlStore) LinkActive(ctx context.Context, artifactID, linkID string, no
 }
 
 // RevokeLink implements Store.
-func (s *sqlStore) RevokeLink(ctx context.Context, artifactID, linkID string) error {
-	res, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM artifact_grant
+func (s *sqlStore) RevokeLink(ctx context.Context, artifactID, linkID string, actor *Actor) error {
+	if !actor.valid() {
+		return errNoActor
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("artifacts: begin revoke link: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.lockLiveArtifact(ctx, tx, artifactID); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_grant
 		WHERE id = ? AND artifact_id = ? AND subject_kind = ?`), linkID, artifactID, SubjectLink)
 	if err != nil {
 		return fmt.Errorf("artifacts: revoke link: %w", err)
@@ -146,5 +157,8 @@ func (s *sqlStore) RevokeLink(ctx context.Context, artifactID, linkID string) er
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	if err := s.insertEvent(ctx, tx, artifactID, EventLinkRevoked, actor, time.Now(), map[string]any{"linkId": linkID}); err != nil {
+		return err
+	}
+	return commit(tx)
 }

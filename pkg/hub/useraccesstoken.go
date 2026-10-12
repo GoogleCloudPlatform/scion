@@ -298,21 +298,35 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 		return "", nil, err
 	}
 
-	// Containment: a test identity never mints further credentials. The
-	// reserved-domain check needs no store read; the row check covers a
-	// test-fixture row directly. A store failure fails closed.
+	// Containment: a test identity of any kind (member or admin) never
+	// mints further credentials. The reserved-domain check needs no store
+	// read; the kind check reads the token owner's and the acting user's
+	// stored kind through kindForPrincipal. A read error or unrecognized
+	// kind fails closed.
+	actingUserID := ""
 	if identity := GetIdentityFromContext(ctx); !isNilIdentity(identity) {
-		if u, ok := identity.(UserIdentity); ok && isReservedTestIdentityEmail(u.Email()) {
-			return "", nil, ErrUATTestIdentityDenied
+		if u, ok := identity.(UserIdentity); ok {
+			if isReservedTestIdentityEmail(u.Email()) {
+				return "", nil, ErrUATTestIdentityDenied
+			}
+			actingUserID = u.ID()
 		}
 	}
 	if s.users != nil {
-		u, err := s.users.GetUser(ctx, params.UserID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return "", nil, fmt.Errorf("load token owner: %w", err)
-		}
-		if err == nil && u.IsTestFixture() {
-			return "", nil, ErrUATTestIdentityDenied
+		for _, uid := range []string{params.UserID, actingUserID} {
+			if uid == "" {
+				continue
+			}
+			k, err := kindForPrincipalVia(ctx, s.users, nil, uid)
+			if err != nil {
+				return "", nil, fmt.Errorf("load token owner: %w", err)
+			}
+			if k.isTestIdentity() {
+				return "", nil, ErrUATTestIdentityDenied
+			}
+			if actingUserID == params.UserID {
+				break
+			}
 		}
 	}
 

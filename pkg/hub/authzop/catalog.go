@@ -104,8 +104,11 @@ var SecurityMutationSymbols = map[string]string{
 	// CreateTestFixtureUser is the only path that writes a test-fixture
 	// user (ptone/scion#4240).
 	"CreateTestFixtureUser": "create-resource",
-	"UpdateUser":            "change-principal-status",
-	"DeleteUser":            "delete-resource",
+	// CreateTestAdminUser is the only path that writes an admin-kind test
+	// identity and its expiring system binding (ptone/scion#4240).
+	"CreateTestAdminUser": "grant-authority",
+	"UpdateUser":          "change-principal-status",
+	"DeleteUser":          "delete-resource",
 
 	// Credential/token mutations — user access tokens
 	"CreateUserAccessToken": "mint-credential",
@@ -461,6 +464,9 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBinding", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
 	{File: "pkg/hub/handlers_test_identities.go", Function: "handleCreateTestIdentity", Symbol: "CreateTestFixtureUser", OperationID: "testidentity.create"},
+	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "handleIssueTestAdminIdentity", Symbol: "CreateTestAdminUser", OperationID: "testidentity.admin.create"},
+	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "revokeTestAdminIdentity", Symbol: "DeleteRoleBindingsForPrincipal", OperationID: "testidentity.admin.revokeall"},
+	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "revokeTestAdminIdentity", Symbol: "UpdateUser", OperationID: "testidentity.admin.revokeall"},
 	// Test identity purge (ptone/scion#4240, Phase 3b): resources selected
 	// by their fixture_root_id stamp, removed under testidentity.delete.
 	{File: "pkg/hub/fixture_purge.go", Function: "purgeFixtureGroup", Symbol: "DeleteGroup", OperationID: "testidentity.delete"},
@@ -729,6 +735,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/store/entadapter/ — store layer implementation
 	// -----------------------------------------------------------------------
+	{File: "pkg/store/entadapter/composite_testadmin.go", Function: "CreateTestAdminUser", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: CreateTestAdminUser writes the admin-kind test identity's one system binding (expiring with the identity, CreatedBy test-identity-issuance) in the same transaction as the user row; reached only from testidentity.admin.create (ptone/scion#4240)", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/composite.go", Function: "DeleteAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteAgent implementation", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/composite.go", Function: "DeleteAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteAgent re-enters itself on the transactional store so the cascade and the row delete commit together (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/composite.go", Function: "DeleteAgent", Symbol: "DeleteGroupMembershipsForAgents", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: DeleteAgent removes the agent's group memberships before the agent row (ON DELETE SET NULL would orphan them; ptone/scion#2769)", Scope: "pkg/store/entadapter"}},

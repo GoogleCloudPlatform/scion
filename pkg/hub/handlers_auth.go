@@ -673,6 +673,21 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 			return
 		}
+		// Same admin-kind rule as the middleware's row block.
+		_, reason, kErr := testAdminRowRejection(r.Context(), s.kindForPrincipal,
+			func(kind string) bool { return s.testAdminTierEnabled(testAdminKind(kind)) },
+			u, claims.Role, s.testIdentities.clock())
+		if kErr != nil {
+			slog.Error("Auth validate: user kind lookup failed",
+				"user_id", claims.UserID, "error", kErr)
+			writeError(w, http.StatusServiceUnavailable, "store_error",
+				"unable to verify user status", nil)
+			return
+		}
+		if reason != "" {
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
+		}
 	} else if isReservedTestIdentityEmail(claims.Email) {
 		// No row to check: a reserved-domain token is not reported valid.
 		writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})

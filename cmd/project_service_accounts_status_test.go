@@ -117,7 +117,8 @@ func TestPrintSAStatus_MappingDetails(t *testing.T) {
     {"brokerId":"b1","brokerName":"b","profile":"gke-7","state":"unknown","unknownReason":"report_old_version"},
     {"brokerId":"b1","brokerName":"b","profile":"gke-8","state":"unknown","unknownReason":"report_missing"},
     {"brokerId":"b1","brokerName":"b","profile":"gke-9","state":"unknown","unknownReason":"report_incomplete"},
-    {"brokerId":"b1","brokerName":"b","profile":"gke-4","state":"not_mapped","ambiguous":true},
+    {"brokerId":"b1","brokerName":"b","profile":"gke-4","state":"unknown","unknownReason":"ambiguous_mapping","ambiguous":true},
+    {"brokerId":"b1","brokerName":"b","profile":"gke-10","state":"unknown","unknownReason":"runtime_unrecognized"},
     {"brokerId":"b1","brokerName":"b","profile":"gke-5","state":"mapped"}
   ],
   "workloadIdentityBinding":{"state":"unknown"},
@@ -140,7 +141,10 @@ func TestPrintSAStatus_MappingDetails(t *testing.T) {
 		"b/gke-8                         unknown; no stored report from the broker\n",
 		// Incomplete without a named reason still says so.
 		"b/gke-9                         unknown; report incomplete: unknown reason\n",
-		"b/gke-4                         not mapped; ambiguous: more than one Kubernetes service account is annotated with it\n",
+		// An ambiguous mapping is said once, not again as its unknown reason.
+		"b/gke-4                         unknown; ambiguous: more than one Kubernetes service account is annotated with it\n",
+		// A reason code without its own text is shown as-is.
+		"b/gke-10                        unknown; runtime unrecognized\n",
 		// An older broker's entry names only the state.
 		"b/gke-5                         mapped\n",
 	} {
