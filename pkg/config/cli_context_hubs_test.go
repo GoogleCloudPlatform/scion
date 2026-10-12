@@ -416,3 +416,20 @@ func TestLoadCLIContextImported_SaveFailureKeepsView(t *testing.T) {
 		t.Errorf("context = %+v, want the imported view", c)
 	}
 }
+
+// A global endpoint that is not a valid hub URL, such as one carrying user
+// info, is not imported: nothing is written and the import stays pending.
+func TestLoadCLIContextImported_InvalidEndpointNotImported(t *testing.T) {
+	ctxPath := cliContextTestHome(t)
+	writeGlobalSettingsFile(t, "hub:\n  endpoint: https://user:pw@hub.example.com\n")
+	c, err := LoadCLIContextImported(importNamer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Hubs) != 0 || c.GlobalImported() {
+		t.Errorf("context = %+v, want nothing imported", c)
+	}
+	if _, err := os.Stat(ctxPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("context.yaml was created: %v", err)
+	}
+}

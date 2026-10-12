@@ -211,6 +211,10 @@ func registerLoginHub(out, stderr io.Writer, hubURL string) {
 	if contextDisabled(resolveMode()) {
 		return
 	}
+	if err := config.ValidateHubURL(hubURL); err != nil {
+		_, _ = fmt.Fprintf(stderr, "Warning: could not add %s to the hub list: %v\n", hubURL, err)
+		return
+	}
 	var name string
 	var created bool
 	err := config.UpdateCLIContext(func(c *config.CLIContext) error {

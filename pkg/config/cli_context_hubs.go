@@ -204,7 +204,8 @@ var globalHubSettings = func() (string, *HubTransportConfig) {
 // LoadCLIContextImported is LoadCLIContext plus the one-time import of the
 // global settings' hub.endpoint (and hub.transport) into the hub list. The
 // import runs when it has not run before and the global settings file has
-// an endpoint; it is written under the lock, once. baseName names the new
+// an endpoint that is a valid hub URL (ValidateHubURL); it is written under
+// the lock, once. baseName names the new
 // entry (callers name the local workstation hub "local"). The import does
 // not set the current hub (see ImportGlobalHub). No settings file is
 // changed.
@@ -219,7 +220,9 @@ func LoadCLIContextImported(baseName func(endpoint string) string) (*CLIContext,
 		return c, err
 	}
 	endpoint, transport := globalHubSettings()
-	if endpoint == "" {
+	// An endpoint that is not a valid hub URL (for example one carrying
+	// user info) is not imported, and the import stays pending.
+	if endpoint == "" || ValidateHubURL(endpoint) != nil {
 		return c, nil
 	}
 	var imported *CLIContext

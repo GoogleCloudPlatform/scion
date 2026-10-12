@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -832,4 +833,49 @@ func TestHubAuthLabel(t *testing.T) {
 	for _, tt := range tests {
 		assert.Equal(t, tt.want, hubAuthLabel(tt.info), "%+v", tt.info)
 	}
+}
+
+// A hub URL with user info never reaches context.yaml through
+// 'scion use <project> --hub' or the login registration.
+func TestHubURLWithUserInfoNotRegistered(t *testing.T) {
+	t.Run("use <project> --hub", func(t *testing.T) {
+		srv, calls := setupUseTest(t)
+		writeHomeGlobalSettings(t, "")
+		withCreds := strings.Replace(srv.URL, "http://", "http://user:pw@", 1)
+		_, _, err := runScion(t, "use", "foo", "--hub", withCreds)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid hub URL")
+		assert.Zero(t, calls.Load(), "refused before any hub call")
+		_, statErr := os.Stat(contextFilePath())
+		assert.True(t, os.IsNotExist(statErr), "nothing is written")
+	})
+	t.Run("global import", func(t *testing.T) {
+		setupContextTest(t)
+		enableGlobalHubImport(t)
+		const withCreds = "https://user:pw@hub.example.com"
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+withCreds+"\n")
+		for i := 0; i < 2; i++ {
+			resetContextTargets()
+			stderr := captureStderr(t, func() {
+				require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
+			})
+			assert.Empty(t, stderr, "the skipped import prints nothing (run %d)", i+1)
+			assert.Empty(t, hubEndpoint)
+		}
+		_, statErr := os.Stat(contextFilePath())
+		assert.True(t, os.IsNotExist(statErr), "nothing is written")
+		// Outside a project the CLI still follows the global endpoint.
+		s, err := config.LoadSettings(filepath.Join(os.Getenv("HOME"), ".scion"))
+		require.NoError(t, err)
+		assert.Equal(t, withCreds, GetHubEndpoint(s))
+	})
+	t.Run("login registration", func(t *testing.T) {
+		setupContextTest(t)
+		var out, errOut bytes.Buffer
+		registerLoginHub(&out, &errOut, "https://user:pw@new.example.com")
+		assert.Empty(t, out.String())
+		assert.Contains(t, errOut.String(), "Warning: could not add https://user:pw@new.example.com to the hub list: invalid hub URL")
+		_, statErr := os.Stat(contextFilePath())
+		assert.True(t, os.IsNotExist(statErr), "nothing is written")
+	})
 }

@@ -478,8 +478,15 @@ func runUseSelect(ctx context.Context, out, stderr io.Writer, ref string) error 
 	if endpoint == "" {
 		return errHubNotConfigured
 	}
+	c, _ := config.LoadCLIContext()
+	// The selection adds a hub entry for an endpoint that has none, so it
+	// must be a valid hub URL (no user info, query or fragment).
+	if _, h := c.HubByEndpoint(endpoint); h == nil {
+		if err := config.ValidateHubURL(endpoint); err != nil {
+			return err
+		}
+	}
 	if getAuthInfo(settings, endpoint).MethodType == "none" {
-		c, _ := config.LoadCLIContext()
 		return fmt.Errorf("not logged in to the hub at %s\n\nLog in with: %s", endpoint, hubLoginCommand(c, endpoint))
 	}
 	client, err := getHubClient(settings)
