@@ -305,7 +305,7 @@ func TestAuthSpecMatchesHarnessConfig(t *testing.T) {
 func TestCheckAuthSpecConsistencyRules(t *testing.T) {
 	adc := api.HarnessAuthFileRequirement{Name: "gcloud-adc", SkippedWhenGCPServiceAccountAssigned: true}
 	auth := &config.HarnessAuthMetadata{Types: map[string]api.HarnessAuthTypeMetadata{
-		"api-key": {RequiredEnv: []api.HarnessAuthEnvRequirement{{AnyOf: []string{"K1", "K2"}}}},
+		"api-key":   {RequiredEnv: []api.HarnessAuthEnvRequirement{{AnyOf: []string{"K1", "K2"}}}},
 		"auth-file": {RequiredFiles: []api.HarnessAuthFileRequirement{{Name: "AUTH", TargetSuffix: "/.x/auth.json"}}},
 		"vertex-ai": {
 			RequiredEnv:   []api.HarnessAuthEnvRequirement{{AnyOf: []string{"P"}}, {AnyOf: []string{"R1", "R2"}}},
