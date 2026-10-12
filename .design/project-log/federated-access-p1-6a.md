@@ -25,7 +25,9 @@
   `selfScopedDecision`.
 - **Settings.** `server.oidc.user_token_audiences` (list, default empty,
   meaning nothing is issued) and `server.oidc.user_token_lifetime` (default
-  15m, at most 1h). Layer-0 next to the issuer settings: **read at startup,
+  15m, whole seconds, at most 1h; JWT times are whole seconds, so a
+  fractional lifetime would make the response `expires_at` differ from
+  `exp`). Layer-0 next to the issuer settings: **read at startup,
   a change needs a restart.** Invalid values fail startup.
 - **Claims.** `iss`, `sub` (local user ID), `aud` (normalized, no trailing
   slash), `email`, `email_verified: true`, `name` (omitted when empty),
