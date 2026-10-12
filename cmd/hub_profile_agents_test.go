@@ -402,21 +402,30 @@ func TestHubProfileAgents_EndToEnd(t *testing.T) {
 func TestHubProfileAgents_OwnHubRefusedNoProfileUnchanged(t *testing.T) {
 	e := newX3bEnv(t)
 	cmds := []string{"create", "start", "list", "stop", "delete", "look", "logs"}
+
+	// Without a profile first, before any run sets profile flags: the gate
+	// does not ask for a profile, and the commands stay agent-allowed.
+	for _, p := range cmds {
+		assert.True(t, agentAllowed[p], "%s stays agent-allowed", p)
+		assert.NoError(t, checkHubProfileGate(realCommand(t, p), ModeAgent), "%s without a profile is unchanged", p)
+	}
+	// Through rootCmd: without a profile the profile-only flag is refused
+	// before any request (the command itself is not).
+	_, err := e.run(t, "list", "--as", "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--as needs a hub profile")
+
+	// A profile for the agent's own hub is refused before any request.
 	t.Setenv(hubprofile.EnvHubProfile, "own")
 	for _, p := range cmds {
 		err := checkHubProfileGate(realCommand(t, p), ModeAgent)
 		require.ErrorIs(t, err, hubprofile.ErrOwnHub, p)
 	}
-	_, err := e.run(t, "--hub-profile", "own", "list", "--project", x3bProjectName, "--as", "owner", "--run", "r1")
+	_, err = e.run(t, "--hub-profile", "own", "list", "--project", x3bProjectName, "--as", "owner", "--run", "r1")
 	require.ErrorIs(t, err, hubprofile.ErrOwnHub)
 	_, err = e.run(t, "--hub-profile", "own", "start", "a1", "--project", x3bProjectName, "--as", "owner", "--run", "r1")
 	require.ErrorIs(t, err, hubprofile.ErrOwnHub)
 
-	t.Setenv(hubprofile.EnvHubProfile, "")
-	for _, p := range cmds {
-		assert.True(t, agentAllowed[p], "%s stays agent-allowed", p)
-		assert.NoError(t, checkHubProfileGate(realCommand(t, p), ModeAgent), "%s without a profile is unchanged", p)
-	}
 	assert.Empty(t, e.target.Recorded(), "no request to the target")
 	assert.EqualValues(t, 0, e.ownHits.Load())
 }
@@ -473,7 +482,7 @@ func TestHubProfileAgents_FailClosed(t *testing.T) {
 	e.agents.mu.Unlock()
 	_, err = e.run(t, withProject("start", "a3", "--no-wait")...)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no local environment is sent")
+	assert.Contains(t, err.Error(), "nothing is gathered from the local environment")
 	e.agents.mu.Lock()
 	assert.Zero(t, e.agents.envSubmit)
 	require.Len(t, e.agents.creates, 1)
@@ -562,4 +571,37 @@ func TestHubTestIdentityWebCode_Profile(t *testing.T) {
 	projAfter, homeAfter := e.snapshot(t)
 	assert.Equal(t, projBefore, projAfter)
 	assert.Equal(t, homeBefore, homeAfter)
+}
+
+// Review F4: with a target-hub profile, a delete the hub accepted but whose
+// completion could not be observed says nothing about a local worktree,
+// in text and in JSON; without a profile the worktree wording stays.
+func TestFinishHubDelete_ProfileNoWorktreeWording(t *testing.T) {
+	pending := hubDeleteOutcome{Accepted: true, Wait: hubclient.DeletionWaitResult{Outcome: hubclient.DeletionTimedOut}}
+	origFormat := outputFormat
+	t.Cleanup(func() { outputFormat = origFormat })
+
+	for _, tc := range []struct {
+		name     string
+		ctx      *HubContext
+		worktree bool
+	}{
+		{"profile", &HubContext{TargetProfile: "t1"}, false},
+		{"no profile", &HubContext{}, true},
+	} {
+		outputFormat = ""
+		job := &hubDeleteJob{name: "a1", outcome: pending}
+		finishHubDelete(tc.ctx, job)
+		require.Len(t, job.lines, 1, tc.name)
+		assert.Equal(t, tc.worktree, strings.Contains(job.lines[0], "worktree"), "%s: %s", tc.name, job.lines[0])
+		assert.Contains(t, job.lines[0], "delete accepted; cannot observe completion", tc.name)
+
+		outputFormat = "json"
+		job = &hubDeleteJob{name: "a1", outcome: pending}
+		finishHubDelete(tc.ctx, job)
+		require.NotNil(t, job.result, tc.name)
+		_, has := job.result["worktreeKept"]
+		assert.Equal(t, tc.worktree, has, tc.name)
+		assert.Equal(t, tc.worktree, strings.Contains(job.result["message"].(string), "worktree"), tc.name)
+	}
 }

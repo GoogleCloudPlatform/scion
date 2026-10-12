@@ -515,7 +515,12 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 	if err != nil {
 		err = wrapHubError(err)
 	} else {
-		err = hubDeleteFailure(agentName, outcome, "local worktree kept")
+		kept := "local worktree kept"
+		if hubCtx.profileLocalOnly() {
+			// A target-hub profile has no local worktree.
+			kept = "agent kept"
+		}
+		err = hubDeleteFailure(agentName, outcome, kept)
 	}
 	if err != nil {
 		job.errMsg = fmt.Sprintf("%s: %v", agentName, err)
@@ -536,12 +541,18 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 		// state is left alone so that a later sync sees the agent as
 		// stale once the hub finishes.
 		msg := hubDeletePendingMessage(outcome)
+		if hubCtx.profileLocalOnly() {
+			// A target-hub profile has no local worktree to keep.
+			msg = fmt.Sprintf("delete accepted; cannot observe completion (%s)", hubDeletePendingReason(outcome))
+		}
 		if isJSONOutput() {
 			job.result = map[string]interface{}{
-				"agent":        agentName,
-				"status":       "accepted",
-				"message":      msg,
-				"worktreeKept": true,
+				"agent":   agentName,
+				"status":  "accepted",
+				"message": msg,
+			}
+			if !hubCtx.profileLocalOnly() {
+				job.result["worktreeKept"] = true
 			}
 		} else {
 			job.lines = append(job.lines, fmt.Sprintf("Agent '%s': %s.", agentName, msg))

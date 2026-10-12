@@ -38,9 +38,10 @@ import (
 //   - no local project is resolved and no local settings are read;
 //   - no hub sync runs, and no sync state, agent name cache, agent
 //     directory or worktree is written or removed;
-//   - no local template is uploaded (--template must name a template on
-//     the target hub), and no local environment value is sent to the
-//     target (env-gather is off);
+//   - no local template is uploaded (--type must name a template on the
+//     target hub), and no environment value is gathered from the local
+//     environment (env-gather is off). --config and --task-file are
+//     explicit input and are sent as given;
 //   - flags whose behaviour needs local state or another credential
 //     (--attach, --workspace, --upload-template, delete --cleanup-only,
 //     the relationship filters of list) are refused.
@@ -122,26 +123,27 @@ func checkProfileAgentFlags(cmd *cobra.Command) error {
 	if !hubProfileSelected() {
 		return nil
 	}
-	refused := map[string]string{
-		"attach":          "attaching uses a terminal session credential that is not the profile's",
-		"workspace":       "it names a host path or a subdirectory of a local project",
-		"upload-template": "local templates are not uploaded to the target hub",
-		"cleanup-only":    "it removes local agent files, and a profile uses none",
-		"descendants":     "the reference is inferred from this agent, which is not an agent on the target hub",
-		"ancestors":       "the reference is inferred from this agent, which is not an agent on the target hub",
-		"lineage":         "the reference is inferred from this agent, which is not an agent on the target hub",
-		"all":             "name the project with --project",
+	const inferred = "the reference is inferred from this agent, which is not an agent on the target hub"
+	refused := []struct{ name, why string }{
+		{"attach", "attaching uses a terminal session credential that is not the profile's"},
+		{"workspace", "it names a host path or a subdirectory of a local project"},
+		{"upload-template", "local templates are not uploaded to the target hub"},
+		{"cleanup-only", "it removes local agent files, and a profile uses none"},
+		{"descendants", inferred},
+		{"ancestors", inferred},
+		{"lineage", inferred},
 	}
-	for name, why := range refused {
-		f := cmd.Flags().Lookup(name)
+	// list --all lists across projects; stop --all and delete --stopped
+	// act on the named project and are allowed.
+	if cmd == listCmd {
+		refused = append(refused, struct{ name, why string }{"all", "name the project with --project"})
+	}
+	for _, r := range refused {
+		f := cmd.Flags().Lookup(r.name)
 		if f == nil || !f.Changed {
 			continue
 		}
-		// stop --all and delete --stopped act on one project: allowed.
-		if name == "all" && cmd != listCmd {
-			continue
-		}
-		return fmt.Errorf("--%s is not available with a hub profile (%q): %s", name, hubProfileName(), why)
+		return fmt.Errorf("--%s is not available with a hub profile (%q): %s", r.name, hubProfileName(), r.why)
 	}
 	return nil
 }

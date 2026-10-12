@@ -1405,8 +1405,9 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		AcceptAsyncLaunch: true,
 	}
 
-	// With a target-hub profile, no local environment value is sent to
-	// another hub: the env-gather flow is off (ptone/scion#4240).
+	// With a target-hub profile, nothing is gathered from the local
+	// environment for another hub: the env-gather flow is off
+	// (ptone/scion#4240).
 	if hubCtx.profileLocalOnly() {
 		req.GatherEnv = false
 	}
@@ -2131,9 +2132,10 @@ const (
 // for missing keys and submits gathered values back to the Hub.
 func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, projectID string, resp *hubclient.CreateAgentResponse) (*hubclient.CreateAgentResponse, error) {
 	// With a target-hub profile the request asked for no env-gather; if
-	// the target asks anyway, no local environment value is sent.
+	// the target asks anyway, nothing is gathered from the local
+	// environment.
 	if hubCtx.profileLocalOnly() {
-		return nil, fmt.Errorf("the target hub of profile %q asked for environment values (%s); with a hub profile no local environment is sent: set them as secrets or env on the target hub", hubCtx.TargetProfile, strings.Join(resp.EnvGather.Needs, ", "))
+		return nil, fmt.Errorf("the target hub of profile %q asked for environment values (%s); with a hub profile nothing is gathered from the local environment: set them as secrets or env on the target hub", hubCtx.TargetProfile, strings.Join(resp.EnvGather.Needs, ", "))
 	}
 	gather := resp.EnvGather
 	agentID := gather.AgentID
