@@ -51,9 +51,6 @@
 - Permission decisions (`decide`, list scopes, effective grants, constraint
   admin checks, the agent-create button): a visitor binding grants exactly
   its role's permissions, which is intended.
-- `artifactHost.MemberScopes`: its identity switch admits only session,
-  scoped user access credential and dev users, which a federated account
-  cannot be.
 - System-scope and cleanup paths (super-admin and hub-member reconcile,
   cascades, admin binding listings): not project membership.
 
@@ -61,8 +58,15 @@
 
 - Role definitions for the membership skip are read with one
   `GetRoleDefinitionsByIDs` call, only when a candidate project binding
-  exists. A binding whose role definition is missing is not membership
-  (fail closed); the Members API list keeps showing it as before.
-- Experiment: nothing here needs the `federation.project_visitors` check;
-  visitor bindings can only be created through the seam, which has no
-  caller yet.
+  exists. Membership evidence and project admission read the flag from
+  `RolePermissions.ConfersMembership`; under the request-local authz input
+  memo, membership evidence takes the definitions from the memo, so a
+  memoized batch still loads them once. Without the memo, each project
+  access check loads them once more, like the closure and bindings.
+  `artifactHost.MemberScopes` filters the same way. A binding whose role
+  definition is missing is not membership (fail closed); the Members API
+  list keeps showing it as before.
+- Experiment: visitor bindings can only be created through the seam,
+  which has no caller yet. While `federation.project_visitors` is off, the
+  role definition list and GET leave out the project-visitor role, so the
+  admin pickers do not offer it.
