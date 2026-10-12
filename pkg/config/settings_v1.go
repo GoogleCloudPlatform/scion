@@ -3128,7 +3128,7 @@ func undecodableSettingsKeys(k *koanf.Koanf) []string {
 	for _, key := range k.Keys() {
 		parts, ok := keyMap[key]
 		if !ok || len(parts) == 0 {
-			parts = strings.Split(key, ".")
+			continue // Every key from k.Keys() is in KeyMap; never re-split on ".".
 		}
 		nested := map[string]interface{}{parts[len(parts)-1]: k.Get(key)}
 		for i := len(parts) - 2; i >= 0; i-- {
