@@ -3705,8 +3705,13 @@ func worktreeGitEnv() []string {
 // which is unrelated to the agent (ptone/scion#4511).
 func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool) {
 	// chmod to ensure we can remove root-owned files left by containers.
+	// Links are skipped, so their targets are left unchanged; RemoveAll
+	// removes the link itself.
 	_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 		_ = os.Chmod(path, 0755)
