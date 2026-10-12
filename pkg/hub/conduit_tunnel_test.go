@@ -597,6 +597,7 @@ func TestConduitTunnel_TrackedStreamMarked(t *testing.T) {
 	roundTrip(t, st, "tracked")
 
 	a := tf.srv.conduitAuthz.Load()
+	require.NotNil(t, a)
 	a.mu.Lock()
 	var tracked []*conduitUserStream
 	for s := range a.streams {

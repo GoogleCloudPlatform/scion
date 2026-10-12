@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,7 +147,7 @@ func TestConduitTunnelRecheck_ActionRemovedClosesOnSweep(t *testing.T) {
 			w.assertOpen(t)
 			f.clk.Advance(time.Second)
 			assert.Equal(t, "4401 authz_expired", w.waitClosed(t))
-			assert.Contains(t, f.metrics.list(), "sweep/closed/"+tc.kind)
+			f.metrics.wait(t, "sweep/closed/"+tc.kind, 1)
 		})
 	}
 }
@@ -300,4 +301,95 @@ func TestConduitTunnelRecheck_StoreFaultDefers(t *testing.T) {
 			assert.Equal(t, "4401 authz_expired", w.waitClosed(t))
 		})
 	}
+}
+
+// bindingsFaultStore counts ListRoleBindingsForPrincipals calls and, while
+// armed, fails every call after the first okCalls.
+type bindingsFaultStore struct {
+	store.Store
+	armed   atomic.Bool
+	okCalls atomic.Int32
+	calls   atomic.Int32
+}
+
+func (s *bindingsFaultStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
+	if n := s.calls.Add(1); s.armed.Load() && n > s.okCalls.Load() {
+		return nil, errInjectedStoreFault
+	}
+	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
+// TestConduitTunnelRecheck_TunnelActionFaultDefers: a fault met while the
+// re-check of a tunnel stream evaluates ActionTunnel, the action after the
+// kind's, is deferred_unavailable and never closes the stream: neither a
+// deny whose store probe fails nor an authorization lookup that fails.
+// Once the store recovers the next check closes it. u1 keeps attach (the
+// kind's action of ssh) and loses port access (ActionTunnel), so the
+// kind's action passes and ActionTunnel is the action evaluated when the
+// fault is met.
+func TestConduitTunnelRecheck_TunnelActionFaultDefers(t *testing.T) {
+	ctx := context.Background()
+	// requireTunnelActionDenies pins the premise: the kind's action is
+	// allowed and ActionTunnel is denied by policy.
+	requireTunnelActionDenies := func(t *testing.T, f *recheckFixture) {
+		t.Helper()
+		require.NoError(t, f.srv.authorizeConduitAction(ctx, f.u1, f.agent, ActionAttach))
+		err := f.srv.authorizeConduitAction(ctx, f.u1, f.agent, ActionTunnel)
+		require.ErrorIs(t, err, errConduitForbidden)
+		require.NotErrorIs(t, err, errConduitAuthzUnavailable)
+	}
+
+	t.Run("deny probe fails", func(t *testing.T) {
+		var fs *conduitFaultStore
+		f := newRecheckFixture(t, nil, -1, func(f *recheckFixture) {
+			fs, _ = installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *conduitFaultStore {
+				return &conduitFaultStore{Store: inner}
+			})
+		})
+		w := f.openTunnel(t, f.u1, grant.StreamKindSSH, 2)
+		require.NoError(t, f.store.DeleteRoleBinding(ctx, f.portBind[f.u1.ID()]))
+		requireTunnelActionDenies(t, f)
+		// The check's agent read succeeds; the probe after the ActionTunnel
+		// deny is the next agent read, and fails. The actions are decided
+		// on the authorization service's store, which is not wrapped.
+		fs.getAgentOKCalls.Store(1)
+		fs.failGetAgent.Store(true)
+
+		f.a.Recheck(ctx, conduitAuthzTriggerNotify, conduitAuthzMatch{})
+		assert.Equal(t, []string{"notify/deferred_unavailable/ssh"}, f.metrics.list())
+		assert.Equal(t, int32(-1), fs.getAgentOKCalls.Load(), "exactly the check's read and the probe")
+		w.assertOpen(t)
+
+		fs.failGetAgent.Store(false) // recovered
+		f.a.Recheck(ctx, conduitAuthzTriggerNotify, conduitAuthzMatch{})
+		assert.Equal(t, "4401 authz_expired", w.waitClosed(t))
+	})
+
+	t.Run("authz lookup fails", func(t *testing.T) {
+		var bs *bindingsFaultStore
+		f := newRecheckFixture(t, nil, -1, func(f *recheckFixture) {
+			bs = &bindingsFaultStore{Store: f.srv.authzService.store}
+			f.srv.authzService.store = bs
+		})
+		w := f.openTunnel(t, f.u1, grant.StreamKindSSH, 2)
+		require.NoError(t, f.store.DeleteRoleBinding(ctx, f.portBind[f.u1.ID()]))
+		requireTunnelActionDenies(t, f)
+		// Count the binding lookups of the kind's action alone; the
+		// lookups after them belong to ActionTunnel and fail.
+		bs.calls.Store(0)
+		require.NoError(t, f.srv.authorizeConduitAction(ctx, f.u1, f.agent, ActionAttach))
+		kindCalls := bs.calls.Load()
+		bs.okCalls.Store(kindCalls)
+		bs.calls.Store(0)
+		bs.armed.Store(true)
+
+		f.a.Recheck(ctx, conduitAuthzTriggerNotify, conduitAuthzMatch{})
+		assert.Equal(t, []string{"notify/deferred_unavailable/ssh"}, f.metrics.list())
+		assert.Greater(t, bs.calls.Load(), kindCalls, "ActionTunnel looked up bindings after the kind's action")
+		w.assertOpen(t)
+
+		bs.armed.Store(false) // recovered
+		f.a.Recheck(ctx, conduitAuthzTriggerNotify, conduitAuthzMatch{})
+		assert.Equal(t, "4401 authz_expired", w.waitClosed(t))
+	})
 }

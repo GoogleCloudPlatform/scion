@@ -467,10 +467,17 @@ func (ts *conduitTunnelSession) userActive(ctx context.Context) error {
 	case conduitAuthzAllowed:
 		return nil
 	case conduitAuthzDenied:
-		return &conduitTunnelError{failure: tunnelPrincipalInactive, message: "not permitted", cause: reason}
+		return principalInactiveRefusal(reason)
 	default:
 		return fmt.Errorf("user status: %s", reason)
 	}
+}
+
+// principalInactiveRefusal is the refusal of a user that is no longer
+// active: the same generic answer whatever the agent, with the cause
+// (reason) logged on the hub only.
+func principalInactiveRefusal(reason string) *conduitTunnelError {
+	return &conduitTunnelError{failure: tunnelPrincipalInactive, message: "not permitted", cause: reason}
 }
 
 // parseConduitTunnelRequest validates the request shape and returns the
@@ -554,7 +561,7 @@ func (s *Server) authorizeConduitTunnel(ctx context.Context, identity UserIdenti
 	case verdict == conduitAuthzAllowed:
 		return port, nil
 	case errors.Is(err, errConduitPrincipalInactive):
-		return 0, &conduitTunnelError{failure: tunnelPrincipalInactive, message: "not permitted", cause: reason}
+		return 0, principalInactiveRefusal(reason)
 	default:
 		return 0, err
 	}
