@@ -131,8 +131,8 @@ broker finishes the launch in the background. On Cloud Run that background
 work needs CPU outside requests:
 
 - **Requirement:** deploy the service with `--no-cpu-throttling` (CPU always
-  allocated). Keep minimum instances above zero: idle scale-in can end a
-  broker in the middle of a launch.
+  allocated). With minimum instances at zero, idle scale-in can end a broker
+  in the middle of a launch, so keep minimum instances above zero.
 - **Symptoms when CPU is allocated only during requests:** the launch stalls
   after the create response. The broker stops reporting, so the Hub ends the
   launch and sets the agent to `error` (`broker_lost`, or `launch_timeout`).

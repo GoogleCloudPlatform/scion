@@ -16,8 +16,8 @@ package cloudrun
 
 import (
 	"log/slog"
-	"strconv"
-	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // CPUAlwaysAllocatedEnv is the environment variable an operator sets to true
@@ -61,22 +61,8 @@ func cpuAllocationWarningWanted(getenv func(string) string, brokerEnabled bool) 
 	if getenv("CLOUD_RUN_INSTANCE") != "" {
 		return false
 	}
-	return !envTruthy(getenv(CPUAlwaysAllocatedEnv))
-}
-
-// envTruthy reports whether s is a true boolean, accepting the same true
-// spellings as pkg/util.ParseBool (the server's boolean env parser): every
-// strconv.ParseBool true value plus yes, y and on, case-insensitive and
-// whitespace-trimmed. It is inlined to keep this package free of scion
-// imports.
-func envTruthy(s string) bool {
-	v := strings.ToLower(strings.TrimSpace(s))
-	if b, err := strconv.ParseBool(v); err == nil {
-		return b
-	}
-	switch v {
-	case "yes", "y", "on":
-		return true
-	}
-	return false
+	// Same spellings as the server's other boolean env vars (util.ParseBool).
+	// An unrecognized value asserts nothing, so the warning stays.
+	v, ok := util.ParseBool(getenv(CPUAlwaysAllocatedEnv))
+	return !(ok && v)
 }
