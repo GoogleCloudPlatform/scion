@@ -1017,10 +1017,12 @@ hub:
 			expectWarning: false,
 		},
 		{
-			name:          "Local hub endpoint with dev token env var",
+			// The local workstation server on loopback is reached with its
+			// dev token by design: no banner.
+			name:          "Local workstation hub with dev token env var: no banner",
 			hubEndpoint:   "http://localhost:9810",
 			devTokenEnv:   "scion_dev_testtoken123",
-			expectWarning: true,
+			expectWarning: false,
 		},
 		{
 			name:          "Hub endpoint via flag, no dev token",
@@ -1041,9 +1043,16 @@ hub:
 			expectWarning: false,
 		},
 		{
-			name:          "Local hub with dev token file warns",
+			name:          "Local workstation hub with dev token file: no banner",
 			hubEndpoint:   "http://localhost:9810",
 			devTokenFile:  "scion_dev_testtoken123",
+			expectWarning: false,
+		},
+		{
+			// Any other hub keeps the banner when dev auth is in use.
+			name:          "Another remote hub with dev token env var still warns",
+			hubEndpoint:   "https://dev-hub.example.com:9810",
+			devTokenEnv:   "scion_dev_testtoken123",
 			expectWarning: true,
 		},
 	}

@@ -613,6 +613,14 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 		return
 	}
 
+	// The local workstation server on loopback is reached with its dev token
+	// by design (it is the default hub of every workstation), so the banner
+	// would show on every command without telling the user anything. It
+	// stays for every other hub.
+	if isLocalWorkstationEndpoint(endpoint) {
+		return
+	}
+
 	// Check if a dev token would be used
 	devToken, devTokenSource := apiclient.ResolveDevTokenWithSource()
 	if devToken == "" {
