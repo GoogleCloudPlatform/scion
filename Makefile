@@ -817,7 +817,9 @@ proto:
 # ptone/scion#4799). Run on a clean pkg/ent tree:
 # uncommitted pkg/ent edits read as drift (ptone/scion#2746).
 # Exit codes: 1 = drift; 3 = go generate itself failed (not drift), shown by
-# make as "Error 3".
+# make as "Error 3". Besides a schema compile or module download error, exit 3
+# also covers a go.sum entry the generator needs but is missing: go tool runs
+# read-only, so it fails instead of adding it (run make tidy-check).
 # Keep in sync with the ent-generate-check step in .github/workflows/ci.yml:
 # it greps for the "go generate ./pkg/ent failed (not drift)" line below.
 ent-check:
