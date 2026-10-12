@@ -6,7 +6,7 @@ Scion release notes are published weekly.
 
 ## Latest: Week of October 5 -- 11, 2026
 
-Conduit, still behind its experiment flag, now carries agent terminals, Runtime Broker traffic and user tunnels, including SSH through `scion tunnel`. Agent create, start, stop and delete hold up under races: a delete that wins always wins, operations are scoped to the run they target, and starts fail closed when credentials or settings cannot be resolved. Access follows membership: removed members' agents are suspended, sharing a Runtime Broker needs its owner's consent, and schedules run under recorded authority. `scion reincarnate` can move agents between Runtime Brokers and change their settings, and the health dashboard was rebuilt around a single attention policy.
+Conduit, still behind its experiment flag, now carries agent terminals, Runtime Broker traffic and user tunnels, including SSH through `scion tunnel`. Agent create, start, stop and delete hold up under races: a create or start that loses to a delete no longer revives the agent, operations are scoped to the run they target, and starts fail closed when credentials or settings cannot be resolved. Access follows membership: removed members' agents are suspended, sharing a Runtime Broker needs its owner's consent, and schedules run under recorded authority. `scion reincarnate` can move agents between Runtime Brokers and change their settings, and the health dashboard was rebuilt around a single attention policy.
 
 [Read the full release notes for this week ->](/scion/release-notes/2026-10-05/)
 
