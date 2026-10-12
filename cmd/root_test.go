@@ -1010,6 +1010,7 @@ hub:
 		hubEndpoint   string
 		devTokenEnv   string
 		devTokenFile  string
+		hubTokenEnv   string
 		expectWarning bool
 	}{
 		{
@@ -1049,6 +1050,16 @@ hub:
 			expectWarning: false,
 		},
 		{
+			// Loopback, but reached with an explicit token (SCION_HUB_TOKEN,
+			// which settings read as hub.token): not the local workstation
+			// hub and not dev auth, so no banner either way.
+			name:          "Loopback hub with dev token and SCION_HUB_TOKEN: explicit auth, no banner",
+			hubEndpoint:   "http://localhost:9810",
+			devTokenEnv:   "scion_dev_testtoken123",
+			hubTokenEnv:   "bearer-test-token",
+			expectWarning: false,
+		},
+		{
 			// Any other hub keeps the banner when dev auth is in use.
 			name:          "Another remote hub with dev token env var still warns",
 			hubEndpoint:   "https://dev-hub.example.com:9810",
@@ -1070,10 +1081,13 @@ hub:
 				_ = os.Unsetenv("SCION_DEV_TOKEN")
 			}
 			_ = os.Unsetenv("SCION_DEV_TOKEN_FILE")
-			// Clear v1 settings env var to prevent it from leaking dev auth
-			origServerAuthToken := os.Getenv("SCION_AUTH_TOKEN")
-			_ = os.Unsetenv("SCION_AUTH_TOKEN")
-			defer func() { _ = os.Setenv("SCION_AUTH_TOKEN", origServerAuthToken) }()
+			// Hermetic credentials: the local-workstation check reads the
+			// selected hub credential (SCION_HUB_TOKEN, SCION_AUTH_TOKEN), and
+			// the endpoint must come only from the flag or settings here.
+			t.Setenv("SCION_HUB_TOKEN", tt.hubTokenEnv)
+			t.Setenv("SCION_AUTH_TOKEN", "")
+			t.Setenv("SCION_HUB_ENDPOINT", "")
+			t.Setenv("SCION_HUB_URL", "")
 
 			// Write dev token file if specified
 			devTokenPath := filepath.Join(scionDir, "dev-token")
