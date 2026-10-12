@@ -149,21 +149,22 @@ func harnessCmdLine(cfg RunConfig, opts harnessCmdLineOptions) (cmdLine string, 
 		if cfg.Resume && opts.FreshStartOnFailedResume {
 			freshArgs := cfg.Harness.GetCommand(cfg.Task, false, cfg.CommandArgs)
 			if !slices.Equal(harnessArgs, freshArgs) {
-				return resumeFallbackCmdLine(cfg.Task, harnessArgs, freshArgs), true
+				return resumeFallbackCmdLine(harnessArgs, freshArgs), true
 			}
 		}
-		return quotedArgsLine(harnessArgs, "", ""), true
+		return quotedArgsLine(harnessArgs, nil), true
 	}
 	return "", false
 }
 
 // quotedArgsLine shell-quotes each argument and joins them with spaces. An
-// argument equal to a non-empty task is replaced by taskRef instead.
-func quotedArgsLine(args []string, task, taskRef string) string {
+// argument that is a key of refs is replaced by its value, a quoted shell
+// variable reference that expands to the argument as one word.
+func quotedArgsLine(args []string, refs map[string]string) string {
 	quotedArgs := make([]string, 0, len(args))
 	for _, a := range args {
-		if task != "" && a == task {
-			quotedArgs = append(quotedArgs, taskRef)
+		if ref, ok := refs[a]; ok {
+			quotedArgs = append(quotedArgs, ref)
 			continue
 		}
 		quotedArgs = append(quotedArgs, shellQuote(a))
@@ -171,29 +172,60 @@ func quotedArgsLine(args []string, task, taskRef string) string {
 	return strings.Join(quotedArgs, " ")
 }
 
+// resumeFallbackSharedArgMinBytes is the shortest argument common to the
+// resume and fresh commands that resumeFallbackCmdLine stores in a shell
+// variable. A shorter one is written in both commands, since a variable
+// costs about as many bytes as it saves.
+const resumeFallbackSharedArgMinBytes = 24
+
 // resumeFallbackCmdLine runs resumeArgs and, when they exit with a status
 // from 1 to 127 within resumeFallbackWindowSeconds, prints
-// resumeFallbackNotice and runs freshArgs. A status of 128 or more means
-// the harness was killed by a signal (a stop, suspend or pod delete), which
-// never starts the fresh run; if the shell itself is signalled it dies and
-// runs nothing further. freshArgs is the harness's own non-resume command,
-// so the fallback drops exactly the resume flag that harness adds, plus any
-// prompt GetCommand adds only on resume, and carries the same task: on a
-// wake that is no task, never the original prompt. The line's exit status is that of the last harness run, so
-// tmuxAgentWindowCmd records the real code. The task is stored once in a
-// shell variable that both commands reference, so it adds to the line
-// about what it adds to the plain line (see QuotedTaskBytes).
-func resumeFallbackCmdLine(task string, resumeArgs, freshArgs []string) string {
-	const taskRef = `"$scion_task"`
+// resumeFallbackNotice and runs freshArgs.
+//
+// A status of 128 or more means the harness was killed by a signal (a
+// stop, suspend or pod delete), which never starts the fresh run; if the
+// shell itself is signalled it dies and runs nothing further. The line's
+// exit status is that of the last harness run, so tmuxAgentWindowCmd
+// records the real code.
+//
+// freshArgs is the harness's own non-resume command, so the fallback drops
+// exactly the resume flag that harness adds, plus any prompt GetCommand
+// adds only on resume, and carries the same task: on a wake that is no
+// task, never the original prompt.
+//
+// Each argument of at least resumeFallbackSharedArgMinBytes that both
+// commands contain (the task, an inline system prompt) is assigned once to
+// a shell variable, scion_a0, scion_a1 and so on, that both commands
+// reference as "$scion_aN": one word, never re-split. The line is
+// therefore longer than the plain command line by a fixed few hundred
+// bytes plus a few dozen per shared or short argument, not by a second
+// copy of the long ones, which keeps it under tmux's command length limit
+// whenever the plain line is (see QuotedTaskBytes and InlineTaskMaxBytes).
+func resumeFallbackCmdLine(resumeArgs, freshArgs []string) string {
+	inResume := make(map[string]bool, len(resumeArgs))
+	for _, a := range resumeArgs {
+		inResume[a] = true
+	}
+	refs := map[string]string{}
+	var assigns strings.Builder
+	for _, a := range freshArgs {
+		if _, done := refs[a]; done || len(a) < resumeFallbackSharedArgMinBytes || !inResume[a] {
+			continue
+		}
+		name := fmt.Sprintf("scion_a%d", len(refs))
+		refs[a] = `"$` + name + `"`
+		fmt.Fprintf(&assigns, "%s=%s; ", name, shellQuote(a))
+	}
 	return fmt.Sprintf(
-		`scion_task=%s; scion_start=$(date +%%s); %s; scion_rc=$?; `+
-			`if [ "$scion_rc" -gt 0 ] && [ "$scion_rc" -lt 128 ] && [ $(( $(date +%%s) - scion_start )) -lt %d ]; `+
+		`%sscion_start=$(date +%%s); %s; scion_rc=$?; `+
+			`if [ "$scion_rc" -gt 0 ] && [ "$scion_rc" -lt 128 ] && `+
+			`[ $(( $(date +%%s) - scion_start )) -lt %d ]; `+
 			`then printf '%%s\n' %s >&2; %s; else (exit "$scion_rc"); fi`,
-		shellQuote(task),
-		quotedArgsLine(resumeArgs, task, taskRef),
+		assigns.String(),
+		quotedArgsLine(resumeArgs, refs),
 		resumeFallbackWindowSeconds,
 		shellQuote(resumeFallbackNotice),
-		quotedArgsLine(freshArgs, task, taskRef),
+		quotedArgsLine(freshArgs, refs),
 	)
 }
 

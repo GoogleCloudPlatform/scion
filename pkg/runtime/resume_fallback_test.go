@@ -311,14 +311,74 @@ func TestResumeFallback_RuntimeSelection(t *testing.T) {
 	if got := podCmd(false); !strings.Contains(got, "scion_rc") {
 		t.Errorf("pod-local home pod command has no resume fallback: %q", got)
 	}
-	if got := podCmd(true); strings.Contains(got, "scion_rc") || !strings.Contains(got, "--continue") {
-		t.Errorf("NFS-home pod command = %q, want the plain resume line", got)
+	plainWindow := tmuxAgentWindowCmd("sh", `'claude' '--continue'`)
+	if got, want := podCmd(true), buildTmuxStartCmd(plainWindow, tmuxAttachSession); got != want {
+		t.Errorf("NFS-home pod command = %q, want the plain resume line %q", got, want)
 	}
 	args, err := buildCommonRunArgs(RunConfig{Name: "a", Image: "i", Harness: h, Resume: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(args, " "); strings.Contains(got, "scion_rc") || !strings.Contains(got, "--continue") {
-		t.Errorf("docker run args = %q, want the plain resume line", got)
+	if got := strings.Join(args, " "); strings.Contains(got, "scion_rc") || !strings.Contains(got, plainWindow) {
+		t.Errorf("docker run args = %q, want the plain resume line %q", got, plainWindow)
+	}
+}
+
+// longSharedArgs are a system-prompt-style argument of about 8 KB and a
+// task of about 3 KB, both with characters the shell must not interpret.
+func longSharedArgs() (prompt, task string) {
+	prompt = strings.Repeat(`You are an agent; don't stop. "$HOME" * $(id) `, 180)
+	task = strings.Repeat(`it's a task & a 'quote' `, 125)
+	return prompt, task
+}
+
+// TestResumeFallback_LineSizeBounded: arguments common to the resume and
+// fresh commands are written once, so a long inline system prompt and task
+// add well under 1 KB to the tmux start command, which must stay under
+// tmux's command length limit whenever the plain line does.
+func TestResumeFallback_LineSizeBounded(t *testing.T) {
+	prompt, task := longSharedArgs()
+	h := &resumeStubHarness{
+		base:         []string{"claude", "--no-chrome", "--dangerously-skip-permissions"},
+		resumeTokens: []string{"--continue"},
+	}
+	cfg := RunConfig{Harness: h, Resume: true, Task: task, CommandArgs: []string{"--system-prompt", prompt}}
+	startCmd := func(opts harnessCmdLineOptions) string {
+		line, ok := harnessCmdLine(cfg, opts)
+		if !ok {
+			t.Fatal("harnessCmdLine: no command line")
+		}
+		return buildTmuxStartCmd(tmuxAgentWindowCmd("sh", line), tmuxAttachSession)
+	}
+	plain := startCmd(harnessCmdLineOptions{})
+	fallback := startCmd(harnessCmdLineOptions{FreshStartOnFailedResume: true})
+	if len(plain) < 8*1024 {
+		t.Fatalf("plain start command is %d bytes; the test needs a long one", len(plain))
+	}
+	if added := len(fallback) - len(plain); added >= 1024 {
+		t.Errorf("the fallback adds %d bytes to a %d-byte start command; want under 1024", added, len(plain))
+	}
+}
+
+// TestResumeFallback_LongSharedArgsIntact: long arguments stored in shell
+// variables reach both runs as single, unaltered words.
+func TestResumeFallback_LongSharedArgsIntact(t *testing.T) {
+	prompt, task := longSharedArgs()
+	h, env, dir := fallbackEnv(t, "fail", 0)
+	line, ok := harnessCmdLine(RunConfig{Harness: h, Task: task, Resume: true, CommandArgs: []string{"--system-prompt", prompt}},
+		harnessCmdLineOptions{FreshStartOnFailedResume: true})
+	if !ok {
+		t.Fatal("harnessCmdLine: no command line")
+	}
+	if n := strings.Count(line, "You are an agent"); n != 180 {
+		t.Errorf("the prompt text appears %d times in the line, want once", n/180)
+	}
+	run := runLine(t, line, env, dir)
+	want := []string{
+		"resume|resume|--last|--system-prompt|" + prompt + "|" + task,
+		"fresh|--system-prompt|" + prompt + "|" + task,
+	}
+	if strings.Join(run.log, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("runs = %q, want %q", run.log, want)
 	}
 }
