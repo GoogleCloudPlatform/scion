@@ -117,7 +117,7 @@ func TestControlChannelClient_CloseDuringDialLogsNoError(t *testing.T) {
 		waitChan(t, closeDone, "Close to return")
 		waitChan(t, connectDone, "the connect loop to end after Close")
 		if msgs := rec.errorMessages(); len(msgs) != 0 {
-			t.Errorf("a connect ended by Close logged Error records: %q", msgs)
+			t.Errorf("a connect ended by Close (client closed) logged Error records: %q", msgs)
 		}
 	})
 
