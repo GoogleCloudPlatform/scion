@@ -27,6 +27,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
+// Tests in this file replace the package variable markAgentSoftDeleted, so
+// none of them may call t.Parallel.
+
 // Some runtimes do not let the host write files in the container, so a soft
 // delete writes the deleted mark to agent-info.json only after the runtime
 // entry is gone (ptone/scion#4766). The fake runtime records the phase on
@@ -134,5 +137,66 @@ func TestDeleteAgent_SoftDeleteMarkFailure_RetryWritesMark(t *testing.T) {
 	phase, deletedAt := readDeleteMark(t, scionB, "dev")
 	if phase != "deleted" || !deletedAt.Equal(time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)) {
 		t.Errorf("after the retry: phase %q deletedAt %v, want deleted and 2026-10-03", phase, deletedAt)
+	}
+}
+
+// plainErrorManager fails DeleteTarget with an error that is not
+// agent.ErrAgentFilesDelete and deletes nothing, as any lookup or runtime
+// failure that is not wrapped by a sentinel would.
+type plainErrorManager struct{ k8sStyleManager }
+
+func (m *plainErrorManager) DeleteTarget(context.Context, string, runtime.RunRef, bool, string, bool) (bool, error) {
+	return false, errors.New("runtime lookup failed")
+}
+
+// A delete error that is not the file-cleanup sentinel gives no positive
+// signal that the container is gone, so no soft-delete mark is written.
+func TestDeleteAgent_NonSentinelDeleteError_NoSoftDeleteMark(t *testing.T) {
+	rt := newNameHeldRuntime("run-old")
+	mgr := &plainErrorManager{k8sStyleManager{real: agent.NewManager(rt)}}
+	srv, home := newCleanupTestServer(t, mgr)
+	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
+	if rec.Code < 500 {
+		t.Fatalf("expected a 5xx, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if phase, deletedAt := readDeleteMark(t, scionB, "dev"); phase != "running" || !deletedAt.IsZero() {
+		t.Errorf("soft-delete mark written after a non-sentinel delete error: phase %q deletedAt %v", phase, deletedAt)
+	}
+}
+
+// When the files are another run's, a soft delete of the requested run's
+// container deletes the container and writes no mark on the post-delete
+// path either.
+func TestDeleteAgent_FilesOfOtherRun_SoftDeleteWritesNoMark(t *testing.T) {
+	rt := newNameHeldRuntime("run-old")
+	mgr := &k8sStyleManager{real: agent.NewManager(rt)}
+	srv, home := newCleanupTestServer(t, mgr)
+	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	recordRun(t, scionB, "dev", "run-new")
+	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
+
+	orig := markAgentSoftDeleted
+	t.Cleanup(func() { markAgentSoftDeleted = orig })
+	marks := 0
+	markAgentSoftDeleted = func(name, projectPath string, deletedAt time.Time) error {
+		marks++
+		return orig(name, projectPath, deletedAt)
+	}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rt.stillPresent() {
+		t.Fatal("the requested run's container was not deleted; the test premise does not hold")
+	}
+	if marks != 0 {
+		t.Errorf("soft-delete mark written %d times on files owned by another run", marks)
+	}
+	if phase, deletedAt := readDeleteMark(t, scionB, "dev"); phase != "running" || !deletedAt.IsZero() {
+		t.Errorf("another run's agent-info.json was marked: phase %q deletedAt %v", phase, deletedAt)
 	}
 }

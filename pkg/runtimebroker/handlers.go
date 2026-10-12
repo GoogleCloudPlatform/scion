@@ -2619,14 +2619,16 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// A soft delete marks agent-info.json deleted only once the runtime
 	// entry is gone (ptone/scion#4766): some runtimes do not let the host
 	// write files in the container, so the host never writes the file while
-	// the container may run. No mark is written when the runtime delete
-	// failed or found another run (nothing was deleted), nor when the files
-	// are another run's. A file-cleanup failure after a successful runtime
-	// delete still gets the mark: the container is gone. The agent-files lock
+	// the container may run. The mark is written only on a positive signal
+	// that the runtime entry is gone: no error, or a file-cleanup failure
+	// (agent.ErrAgentFilesDelete, returned only after a successful runtime
+	// delete). Any other error (the runtime delete failed, found another
+	// run, or anything else) writes no mark, and neither do files that are
+	// another run's. The agent-files lock
 	// taken above (lockAgentFiles, also taken by start) is held from before
 	// DeleteTarget through this write, so no start of the agent can come in
 	// between and have its files marked.
-	runtimeDeleted := err == nil || (!errors.Is(err, scionrt.ErrRunMismatch) && !errors.Is(err, agent.ErrRuntimeDelete))
+	runtimeDeleted := err == nil || errors.Is(err, agent.ErrAgentFilesDelete)
 	if runtimeDeleted && softDelete && projectPath != "" && !filesOfOtherRun {
 		// Phase and deletedAt are written in one locked update (#4681).
 		var deletedAt time.Time
@@ -2689,10 +2691,11 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		return
 	}
 	if err != nil {
-		// The runtime delete call itself failed, so the entry may still be
-		// there and no soft-delete mark was written (the hub retries or
-		// reports the failure). A file-cleanup failure after a successful
-		// runtime delete has the mark, since the pod is gone.
+		// The delete failed. Unless only the file cleanup failed after a
+		// successful runtime delete (agent.ErrAgentFilesDelete, which has
+		// the soft-delete mark, since the pod is gone), the entry may still
+		// be there and no mark was written; the hub retries or reports the
+		// failure.
 		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
@@ -7156,7 +7159,8 @@ func otherRunContainerID(cands []agentCandidate, runID string) string {
 }
 
 // markAgentSoftDeleted writes the soft-delete mark to agent-info.json; a
-// variable so tests can make the write fail.
+// variable so tests can observe the write or make it fail. Tests that
+// replace it must not call t.Parallel, since every Server shares it.
 var markAgentSoftDeleted = agent.MarkAgentSoftDeleted
 
 // deleteRunRef is the RunRef a resolved delete passes to the runtime: the

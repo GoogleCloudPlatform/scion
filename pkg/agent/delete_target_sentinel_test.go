@@ -23,7 +23,8 @@ import (
 )
 
 // ErrRuntimeDelete marks only a failure of the runtime Delete call, never a
-// file-cleanup failure after it succeeded (P2 review round 4).
+// file-cleanup failure after it succeeded (P2 review round 4), and
+// ErrAgentFilesDelete marks only the file-cleanup failure.
 func TestDeleteTarget_ErrRuntimeDeleteScope(t *testing.T) {
 	projectDir := t.TempDir()
 
@@ -41,11 +42,19 @@ func TestDeleteTarget_ErrRuntimeDeleteScope(t *testing.T) {
 	if errors.Is(err, ErrRuntimeDelete) {
 		t.Errorf("file-cleanup failure wrapped as ErrRuntimeDelete: %v", err)
 	}
+	// The file-cleanup failure is the positive signal that the runtime
+	// entry is gone (ptone/scion#4766).
+	if !errors.Is(err, ErrAgentFilesDelete) {
+		t.Errorf("file-cleanup failure not wrapped as ErrAgentFilesDelete: %v", err)
+	}
 
 	cause := errors.New("apiserver unavailable")
 	bad := &runtime.MockRuntime{DeleteFunc: func(context.Context, runtime.RunRef) error { return cause }}
 	_, err = NewManager(bad).DeleteTarget(context.Background(), "dev", runtime.RunRef{ID: "cid", RunID: "r1"}, true, projectDir, false)
 	if !errors.Is(err, ErrRuntimeDelete) || !errors.Is(err, cause) {
 		t.Errorf("runtime failure: errors.Is(ErrRuntimeDelete)=%v errors.Is(cause)=%v: %v", errors.Is(err, ErrRuntimeDelete), errors.Is(err, cause), err)
+	}
+	if errors.Is(err, ErrAgentFilesDelete) {
+		t.Errorf("runtime failure wrapped as ErrAgentFilesDelete: %v", err)
 	}
 }

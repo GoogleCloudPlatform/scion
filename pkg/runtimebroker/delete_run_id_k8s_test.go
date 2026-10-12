@@ -373,14 +373,15 @@ func TestRestart_NameInUse_409(t *testing.T) {
 
 // filesFailManager deletes the runtime entry successfully and then fails
 // file cleanup before removing anything, as DeleteAgentFiles does on a
-// registry error.
+// registry error (wrapped in agent.ErrAgentFilesDelete, as deleteResolved
+// does).
 type filesFailManager struct{ k8sStyleManager }
 
 func (m *filesFailManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	if _, err := m.k8sStyleManager.DeleteTarget(ctx, agentName, ref, false, projectPath, removeBranch); err != nil {
 		return false, err
 	}
-	return false, errors.New("delete: FindBranchForAgent for dev: registry I/O error")
+	return false, fmt.Errorf("%w: %w", agent.ErrAgentFilesDelete, errors.New("delete: FindBranchForAgent for dev: registry I/O error"))
 }
 
 // Regression (P2 review round 3, B1): when the runtime delete succeeded and
