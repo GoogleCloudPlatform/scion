@@ -105,16 +105,16 @@ const activitySourceNotification = "notification"
 // another sub-agent) leave it in place. A wait with no list behaves as before:
 // any tool-end or agent-end clears it.
 //
-// Updates to the list are best-effort across processes. h.mu only serializes
-// writers inside one process, and each hook event runs in its own sciontool
-// process, so two sub-agents' hooks that fire at the same moment can each
-// read the file, change the list and write it back, and one change is lost.
-// The effect is bounded. A lost entry lets that question be cleared early,
-// as any tool-end did before. A lost removal can hold the wait longer than
-// before: until the stale owner's SubagentStop plus the parent's Agent
-// tool-end, or at the latest the parent's next Stop, prompt or tool-start (an
-// interrupted turn with no Stop waits for the next prompt).
-// ReplaceActivityIf documents the same single-file window.
+// Every add, remove and clear of the list is part of one locked update of
+// agent-info.json (see update), so hook processes that fire at the same
+// moment do not lose each other's changes. Only when the lock cannot be
+// used (its wait timed out, or the lock file is unusable) does an update run
+// unlocked, and then a change can be lost. The effect is bounded. A lost
+// entry lets that question be cleared early, as any tool-end did before. A
+// lost removal can hold the wait longer than before: until the stale owner's
+// SubagentStop plus the parent's Agent tool-end, or at the latest the
+// parent's next Stop, prompt or tool-start (an interrupted turn with no Stop
+// waits for the next prompt).
 const notificationWaitAgentsKey = "notificationWaitAgents"
 
 // maxNotificationWaitAgents caps notificationWaitAgentsKey. Past the cap, a
@@ -219,58 +219,47 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 // Notification event and, when owner (a sub-agent's agent_id) is not empty,
 // adds owner to the wait's owner list. A waiting_for_input the agent set
 // itself is left unchanged: a harness prompt must not turn it into a
-// notification-set wait that the prompt's answer would then clear.
-//
-// The owner list update is a read-modify-write of agent-info.json and is
-// best-effort across hook processes; see notificationWaitAgentsKey for the
-// lost-update window and why it is bounded.
+// notification-set wait that the prompt's answer would then clear. The
+// owner list change is part of the same locked update.
 func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	return h.update(func(info map[string]interface{}) bool {
+		if isAgentSetWaiting(info) {
+			return false
+		}
 
-	info := h.readAgentInfoMap()
-	if isAgentSetWaiting(info) {
-		return nil
-	}
+		var owners []string
+		if isNotificationWaiting(info) {
+			owners = notificationWaitOwners(info)
+		}
+		if owner != "" && !containsString(owners, owner) && len(owners) < maxNotificationWaitAgents {
+			owners = append(owners, owner)
+		}
 
-	var owners []string
-	if isNotificationWaiting(info) {
-		owners = notificationWaitOwners(info)
-	}
-	if owner != "" && !containsString(owners, owner) && len(owners) < maxNotificationWaitAgents {
-		owners = append(owners, owner)
-	}
-
-	info["activity"] = string(state.ActivityWaitingForInput)
-	info[activitySourceKey] = activitySourceNotification
-	setNotificationWaitOwners(info, owners)
-	delete(info, "toolName")
-	delete(info, "status")
-	delete(info, "sessionStatus")
-
-	return h.writeAgentInfoLocked(info)
+		info["activity"] = string(state.ActivityWaitingForInput)
+		info[activitySourceKey] = activitySourceNotification
+		setNotificationWaitOwners(info, owners)
+		delete(info, "toolName")
+		delete(info, "status")
+		delete(info, "sessionStatus")
+		return true
+	})
 }
 
 // releaseNotificationWaitOwner removes owner from the owner list of a
 // notification-set waiting_for_input. The activity is not changed. Nothing is
-// written when owner is not listed. Like setWaitingFromNotificationFor, this
-// read-modify-write is best-effort across hook processes (see
-// notificationWaitAgentsKey).
+// written when owner is not listed. It is one locked update.
 func (h *StatusHandler) releaseNotificationWaitOwner(owner string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	info := h.readAgentInfoMap()
-	if !isNotificationWaiting(info) {
-		return nil
-	}
-	owners := notificationWaitOwners(info)
-	remaining, removed := removeString(owners, owner)
-	if !removed {
-		return nil
-	}
-	setNotificationWaitOwners(info, remaining)
-	return h.writeAgentInfoLocked(info)
+	return h.update(func(info map[string]interface{}) bool {
+		if !isNotificationWaiting(info) {
+			return false
+		}
+		remaining, removed := removeString(notificationWaitOwners(info), owner)
+		if !removed {
+			return false
+		}
+		setNotificationWaitOwners(info, remaining)
+		return true
+	})
 }
 
 // isNotificationWaiting reports whether info holds a waiting_for_input that a
@@ -417,7 +406,9 @@ func (h *StatusHandler) UpdatePhaseAndMessage(phase state.Phase, activity state.
 // is `from`, and reports whether it did. The phase is left unchanged. It
 // lets `sciontool init` end the initializing activity without overwriting an
 // activity a hook has already written. The check and the write are one
-// locked update (see update).
+// locked update (see update). It leaves activitySource and the
+// notification wait owners alone; that is safe because the only caller
+// replaces initializing, which no notification write sets.
 func (h *StatusHandler) ReplaceActivityIf(from, to state.Activity) (bool, error) {
 	replaced := false
 	err := h.update(func(info map[string]interface{}) bool {
