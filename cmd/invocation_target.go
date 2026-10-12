@@ -34,19 +34,10 @@ var (
 	// projectSource is targetSourceContext when resolveInvocationTarget set
 	// projectPath from the current context, and "" otherwise.
 	projectSource string
-	// contextProjectID is the hub project UUID resolveInvocationTarget
-	// injected as projectPath, or "".
-	contextProjectID string
 	// contextWarned records that resolveInvocationTarget already warned
 	// about an unreadable context.yaml in this invocation.
 	contextWarned bool
 )
-
-// isContextProject reports whether path is the project that
-// resolveInvocationTarget took from the current context.
-func isContextProject(path string) bool {
-	return projectSource == targetSourceContext && path != "" && path == contextProjectID
-}
 
 // contextDisabled reports whether the current context must be ignored:
 // in agent mode, inside an agent container (SCION_HOST_UID), and in a
@@ -153,14 +144,8 @@ var contextIgnoredCommands = map[string]bool{
 func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
 	hubSource = ""
 	projectSource = ""
-	contextProjectID = ""
 	contextWarned = false
 	if contextDisabled(mode) || contextSkippedSubtrees[topLevelName(cmd)] || contextIgnoredCommands[cmd.CommandPath()] {
-		return
-	}
-	// --no-hub turns the hub off, and a context project is a hub project.
-	// Remove this check together with the --no-hub flag.
-	if noHub {
 		return
 	}
 	ctx, err := config.LoadCLIContext()
@@ -206,7 +191,6 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
 		if p := ctx.ProjectFor(effectiveHub); p != nil && !inFilesystemProject() {
 			projectPath = p.ID
 			projectSource = targetSourceContext
-			contextProjectID = p.ID
 		}
 	}
 }

@@ -689,6 +689,10 @@ func endpointSourceNote(s hubEndpointScope) string {
 		return fmt.Sprintf("            (inherited from %s)", s.Source)
 	case s.Source == "flag":
 		return "            (from --hub flag)"
+	case s.Source == "env":
+		return "            (from the environment)"
+	case s.Source != "none" && s.Source != "":
+		return fmt.Sprintf("            (from %s settings)", s.Source)
 	}
 	return ""
 }

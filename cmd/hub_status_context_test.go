@@ -49,7 +49,12 @@ func TestEndpointSourceNote(t *testing.T) {
 	assert.Equal(t, "            (current context)", endpointSourceNote(hubEndpointScope{Source: "context"}))
 	assert.Equal(t, "            (from --hub flag)", endpointSourceNote(hubEndpointScope{Source: "flag"}))
 	assert.Equal(t, "            (inherited from global)", endpointSourceNote(hubEndpointScope{Source: "global", Inherited: true}))
-	assert.Empty(t, endpointSourceNote(hubEndpointScope{Source: "project"}))
+	assert.Equal(t, "            (inherited from env)", endpointSourceNote(hubEndpointScope{Source: "env", Inherited: true}))
+	// Local-only mode was removed, so hub status always says where the
+	// endpoint came from (the design's endpoint-source rule).
+	assert.Equal(t, "            (from project settings)", endpointSourceNote(hubEndpointScope{Source: "project"}))
+	assert.Equal(t, "            (from global settings)", endpointSourceNote(hubEndpointScope{Source: "global"}))
+	assert.Equal(t, "            (from the environment)", endpointSourceNote(hubEndpointScope{Source: "env"}))
 	assert.Empty(t, endpointSourceNote(hubEndpointScope{Source: "none"}))
 }
 

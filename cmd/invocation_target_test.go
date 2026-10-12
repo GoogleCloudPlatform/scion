@@ -39,7 +39,7 @@ const (
 // look like a --hub or --project flag in the next.
 func resetContextTargets() {
 	hubEndpoint, projectPath = "", ""
-	hubSource, projectSource, contextProjectID = "", "", ""
+	hubSource, projectSource = "", ""
 	contextWarned = false
 }
 
@@ -218,11 +218,6 @@ func TestResolveInvocationTarget(t *testing.T) {
 			cmd:   []string{"list"},
 		},
 		{
-			name:  "--no-hub ignores the context",
-			setup: func(t *testing.T) { noHub = true },
-			cmd:   []string{"list"},
-		},
-		{
 			name: "server subtree ignores the context",
 			cmd:  []string{"server", "start"},
 		},
@@ -351,8 +346,7 @@ func TestPersistentPreRun_ContextProjectSatisfiesProjectRequirement(t *testing.T
 	require.NoError(t, rootCmd.PersistentPreRunE(list, nil))
 	assert.Equal(t, ctxTestProjectID, projectPath)
 	assert.Equal(t, ctxTestHub, hubEndpoint)
-	assert.True(t, isContextProject(projectPath))
-	assert.False(t, isContextProject("some-other-ref"))
+	assert.Equal(t, targetSourceContext, projectSource)
 }
 
 // TestPersistentPreRun_AgentContainerIgnoresContext covers the acceptance
