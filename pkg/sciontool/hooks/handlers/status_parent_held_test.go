@@ -462,7 +462,7 @@ func loadClaudeSubagentFixture(t *testing.T) []*hooks.Event {
 	path := filepath.Join(filepath.Dir(file), "..", "dialects", "testdata", "claude", "hook-payloads-2.1.296.jsonl")
 	f, err := os.Open(path)
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var events []*hooks.Event
 	scanner := bufio.NewScanner(f)

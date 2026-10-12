@@ -263,7 +263,7 @@ func TestClaudeDialect_ParseTokens(t *testing.T) {
 func TestClaudeDialect_CapturedSubagentPayloads(t *testing.T) {
 	f, err := os.Open(filepath.Join("testdata", "claude", "hook-payloads-2.1.296.jsonl"))
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	want := []struct {
 		name    string
