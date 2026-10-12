@@ -165,6 +165,32 @@ func nonTestImporters(dir, path string) ([]string, error) {
 	return out, err
 }
 
+// TestFindImportThroughRootPackage checks that an import of the module's
+// root package is followed into the module root directory.
+func TestFindImportThroughRootPackage(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, src string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("pkg/hub/internal/hubtestutil/a.go", "package hubtestutil\n\nimport _ \""+modulePath+"\"\n")
+	write("root.go", "package scion\n\nimport _ \""+hubPath+"\"\n")
+	write("pkg/hub/h.go", "package hub\n")
+	chain, err := findImport(root, selfPath, hubPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{selfPath, modulePath, hubPath}
+	if strings.Join(chain, " ") != strings.Join(want, " ") {
+		t.Fatalf("chain = %v, want %v", chain, want)
+	}
+}
+
 func moduleRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
@@ -216,7 +242,10 @@ func findImport(root, from, target string) ([]string, error) {
 // packageImports returns the in-module imports of the non-test .go files of
 // the package with import path pkg.
 func packageImports(root, pkg string) ([]string, error) {
-	dir := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(pkg, modulePath+"/")))
+	dir := root // the module's root package
+	if pkg != modulePath {
+		dir = filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(pkg, modulePath+"/")))
+	}
 	names, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
 		return nil, err
