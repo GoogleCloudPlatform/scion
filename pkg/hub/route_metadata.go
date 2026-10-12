@@ -265,6 +265,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/conversations/resolve", RouteID: "conversations.resolve",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/thread-groups": {
+		Pattern: "/api/v1/thread-groups", RouteID: "threadGroups.list",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/thread-groups/": {
+		Pattern: "/api/v1/thread-groups/", RouteID: "threadGroups.byId",
+		Classification: RouteAuthenticated,
+	},
 
 	// Cross-project messaging (Phase 3)
 	"/api/v1/messaging/capabilities": {

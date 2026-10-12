@@ -793,6 +793,7 @@
 4 handlers_test_login_hardening_test.go
 6 handlers_test_login_limit_test.go
 2 handlers_test_login_test.go
+3 handlers_thread_groups_test.go
 1 handlers_user_templates_test.go
 1 handlers_user_terminal_workspace_test.go
 2 handlers_users_core_test.go
@@ -1335,6 +1336,7 @@
 3 teststore_template_test.go
 2 thinking_level_precedence_test.go
 0 thinking_sqlite_helpers_test.go
+3 thread_group_event_test.go
 1 thread_membership_test.go
 0 thread_sqlite_helpers_test.go
 6 transport_token_test.go

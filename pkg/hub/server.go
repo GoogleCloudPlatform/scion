@@ -6534,6 +6534,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/conversations", s.guarded("/api/v1/conversations", s.handleListConversations))
 	s.mux.HandleFunc("/api/v1/conversations/", s.guarded("/api/v1/conversations/", s.handleConversationRoutes))
 	s.mux.HandleFunc("/api/v1/conversations/resolve", s.guarded("/api/v1/conversations/resolve", s.handleConversationResolve))
+	// Project-scoped chat thread groups (ptone/scion#4424): 404 while the
+	// hub.chat_thread_groups experiment is off.
+	s.mux.HandleFunc("/api/v1/thread-groups", s.guarded("/api/v1/thread-groups", s.requireExperiment(experiments.ChatThreadGroups, s.handleThreadGroups)))
+	s.mux.HandleFunc("/api/v1/thread-groups/", s.guarded("/api/v1/thread-groups/", s.requireExperiment(experiments.ChatThreadGroups, s.handleThreadGroupRoutes)))
 
 	// Cross-project messaging endpoints (Phase 3)
 	s.mux.HandleFunc("/api/v1/messaging/capabilities", s.guarded("/api/v1/messaging/capabilities", s.handleMessagingCapabilities))

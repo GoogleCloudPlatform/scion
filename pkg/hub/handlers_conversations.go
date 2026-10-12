@@ -63,6 +63,10 @@ type createConversationRequest struct {
 	DisplayName string `json:"displayName"`
 	ProjectID   string `json:"projectId"`
 	Kind        string `json:"kind"`
+	// ThreadGroupID optionally files the new conversation into a thread
+	// group of its project (ptone/scion#4424). It is validated before the
+	// conversation is minted.
+	ThreadGroupID string `json:"threadGroupId,omitempty"`
 }
 
 // setDefaultAgentRequest is the request body for setting the default agent.
@@ -745,6 +749,18 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Validate the thread group before anything is minted, so a bad
+	// threadGroupId creates nothing (design ptone/scion#4424 section 2).
+	var threadGroup *store.ThreadGroup
+	if req.ThreadGroupID != "" {
+		g, apiErr := s.threadGroupForNewConversation(ctx, req.ThreadGroupID, req.ProjectID)
+		if apiErr != nil {
+			apiErr.write(w)
+			return
+		}
+		threadGroup = g
+	}
+
 	// kind == "group" from here (direct was rejected above). Route creation
 	// through the same atomic topic-creation path every other native group
 	// mint site uses (design doc: chat-thread-bridge §3), instead of a bare
@@ -798,6 +814,10 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		} else {
 			participants = append(participants, *participant)
 		}
+	}
+
+	if threadGroup != nil {
+		s.fileNewConversation(ctx, threadGroup, conv.ID, identity.ID())
 	}
 
 	writeJSON(w, http.StatusCreated, conversationResponse{

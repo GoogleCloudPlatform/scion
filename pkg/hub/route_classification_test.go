@@ -58,6 +58,8 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/conversations":                          "authenticated:conversation",
 	"/api/v1/conversations/":                         "authenticated:conversation",
 	"/api/v1/conversations/resolve":                  "authenticated:conversation",
+	"/api/v1/thread-groups":                          "authenticated:thread-group",
+	"/api/v1/thread-groups/":                         "authenticated:thread-group",
 	"/api/v1/agents":                                 "policy:agent",
 	"/api/v1/agents/":                                "policy:agent",
 	"/api/v1/projects":                               "policy:project",
