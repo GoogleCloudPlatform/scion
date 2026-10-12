@@ -30,9 +30,9 @@ A **harness-config** is a named, versioned bundle that defines a harness: its `c
 `.scion/harness-configs/<name>/` (project-level); project-level configs override global ones with
 the same name. A template can also bundle harness-configs in its own `harness-configs/<name>/`
 directory, and these take precedence over both project and global configs of the same name (a
-directory that fails to load is skipped and the next one is tried). When a Hub dispatch names a Hub harness-config,
-the Hub's copy is used instead of any of these directories; if the Runtime Broker cannot fetch it,
-the start fails rather than falling back to them.
+directory that fails to load is skipped and the next one is tried). When a Hub dispatch names a
+Hub harness-config, the Hub's copy is used instead of any of these directories; if the Runtime
+Broker cannot fetch it, the start fails rather than falling back to them.
 
 Since all harnesses are now provisioned via container-script (see
 [Supported Agent Harnesses](/scion/supported-harnesses/)), harness-configs are the unit you
