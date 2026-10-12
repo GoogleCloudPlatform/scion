@@ -704,6 +704,26 @@ func (f *threadGroupFixture) deleteTopic(t *testing.T, topicID string) *httptest
 	return rec
 }
 
+// An agent whose message mode forbids joining a group, filing into a bad
+// thread group, gets the message-mode denial (the join check runs before the
+// threadGroupId validation), and nothing is minted.
+func TestCreateConversation_ModeDenialBeforeThreadGroupValidation(t *testing.T) {
+	f := newThreadGroupFixture(t, true)
+	ctx := context.Background()
+	quiet := &store.Agent{ID: uuid.NewString(), Slug: "tg-quiet-agent", Name: "TG Quiet Agent", ProjectID: f.projA,
+		Phase: "running", MessageMode: store.MessageModeNone}
+	require.NoError(t, f.s.CreateAgent(ctx, quiet))
+	grantAgentProjectAccess(t, f.s, quiet.ID, f.projA)
+
+	rec := f.agentCall(t, quiet.ID, f.projA, http.MethodPost, "/api/v1/conversations",
+		map[string]string{"displayName": "mode-denied-create", "threadGroupId": uuid.NewString()})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeMessageDenied, "the message-mode denial wins over the thread group 404")
+	assert.NotContains(t, rec.Body.String(), "Thread group not found")
+	assertNoConversationNamed(t, f.s, "mode-denied-create")
+	assert.Empty(t, f.spy.take())
+}
+
 // handleTopicDelete takes the deleted thread out of its group and
 // publishes the group.
 func TestTopicDelete_RemovesThreadGroupMember(t *testing.T) {
