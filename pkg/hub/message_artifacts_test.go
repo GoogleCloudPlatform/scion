@@ -198,7 +198,10 @@ func TestMessageArtifacts_AgentDMDeliveryAndRecord(t *testing.T) {
 
 	var resp MessageDeliveryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, artifactRefsWarning(1, 0), resp.ArtifactWarning)
+	// The target (paritySetup: no agent role) would get a token without
+	// project:artifact:read, so both admitted refs are counted for it
+	// (ptone/scion#4575).
+	assert.Equal(t, artifactRefsWarning(1, 0)+"; "+fmt.Sprintf(artifactRefsRecipientWarning, 2, target.Slug), resp.ArtifactWarning)
 	assert.NotContains(t, rr.Body.String(), "Secret title")
 
 	calls := dispatchesTo(dispatcher, target.ID)

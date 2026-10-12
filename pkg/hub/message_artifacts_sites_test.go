@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -62,7 +63,8 @@ func TestMessageArtifactsSite_HandleAgentMessageUserSender(t *testing.T) {
 
 	var resp MessageDeliveryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, artifactRefsWarning(1, 0), resp.ArtifactWarning)
+	// The target agent (no agent role) may not read the admitted ref (ptone/scion#4575).
+	assert.Equal(t, artifactRefsWarning(1, 0)+"; "+fmt.Sprintf(artifactRefsRecipientWarning, 1, f.target.Slug), resp.ArtifactWarning)
 	require.NotEmpty(t, resp.MessageID)
 
 	calls := dispatchesTo(f.dispatcher, f.target.ID)
@@ -199,7 +201,8 @@ func TestMessageArtifactsSite_ChatV2SendAndHistory(t *testing.T) {
 
 	var resp chatMessageResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, artifactRefsWarning(1, 0), resp.ArtifactWarning)
+	// The target agent (no agent role) may not read the admitted ref (ptone/scion#4575).
+	assert.Equal(t, artifactRefsWarning(1, 0)+"; "+fmt.Sprintf(artifactRefsRecipientWarning, 1, f.target.Slug), resp.ArtifactWarning)
 	require.Len(t, resp.Artifacts, 1)
 	assert.True(t, resp.Artifacts[0].Available)
 	assert.Equal(t, "Owner notes", resp.Artifacts[0].Title)

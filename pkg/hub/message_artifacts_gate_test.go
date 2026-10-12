@@ -168,6 +168,9 @@ func TestResolveArtifactRefs_ThroughHubMiddleware(t *testing.T) {
 	a, tok := artifactAgent(t, srv, s, p.ID, "msgart-mw-agent", AgentRoleBaseline)
 	user := &store.User{ID: tid("msgart-mw-user"), Email: "mw-user@test.example", DisplayName: "MW", Role: store.UserRoleMember, Status: "active", Created: time.Now()}
 	require.NoError(t, s.CreateUser(context.Background(), user))
+	// A project member, so the recipient warning (ptone/scion#4575) has
+	// nothing to report either.
+	createTestUserWithProjectRole(t, s, user.ID, user.Email, p.ID, store.ProjectRoleMember)
 	own := seedMessageArtifact(t, st, p.ID, artifacts.PrincipalKindAgent, a.ID, "Agent doc")
 
 	body, err := json.Marshal(OutboundMessageRequest{

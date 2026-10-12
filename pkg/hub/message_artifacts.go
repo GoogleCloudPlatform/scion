@@ -127,9 +127,11 @@ func directUserRecipient(r *routingResult, senderAgentID string) artifactRecipie
 // Only references admitted under the sender's own credential are checked,
 // so the warning tells the sender nothing about an artifact it cannot read.
 // A failed check is logged and gives no warning: a failure is not evidence
-// either way.
+// either way. Like resolveArtifactRefs, it runs only for a
+// request-authenticated sender (requestCredentialBindsIdentity), the
+// context the admitted references were resolved under.
 func (s *Server) artifactRecipientWarning(ctx context.Context, admitted []artifacts.MessageRef, to artifactRecipient) string {
-	if len(admitted) == 0 || to.kind == "" || to.id == "" {
+	if len(admitted) == 0 || to.kind == "" || to.id == "" || !requestCredentialBindsIdentity(ctx) {
 		return ""
 	}
 	n, err := s.artifactRefResolver().RecipientMayNotRead(ctx, admitted, to.kind, to.id)
