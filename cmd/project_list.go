@@ -173,9 +173,10 @@ type projectListRowJSON struct {
 // directories on this machine. The key is the normalised hub endpoint and
 // the hub project ID: a directory linked to a known project adds its local
 // path to that row. A directory whose endpoint matches no row joins the row
-// of a project ID known on exactly one hub. A linked directory whose hub project is not known gets
-// a row of its own, and so does a directory not linked to a hub (with no
-// hub). Known entries on a hub that has no hub entry are left out.
+// of a project ID known on exactly one hub. A linked directory whose hub
+// project is not known gets a row of its own, and so does a directory not
+// linked to a hub (with no hub). Known entries on a hub that has no hub
+// entry are left out.
 func buildProjectListRows(c *config.CLIContext, dirs []config.ProjectInfo) []projectListRow {
 	var rows []projectListRow
 	index := map[[2]string]int{}
@@ -457,8 +458,9 @@ func refreshKnownProjects(ctx context.Context, stderr io.Writer, c *config.CLICo
 		skipped  bool
 	}
 	results := make([]result, len(names))
-	// Several hubs get only a credential bound to each (see hubUsable).
-	fanOut := len(names) > 1
+	// Hubs get only a credential bound to each, unless the one hub refreshed
+	// is the one given with --hub or the effective hub (hubGetsFullChain).
+	fanOut := len(names) != 1 || !hubGetsFullChain(settings, c.Hubs[names[0]].Endpoint, onlyHub != "")
 	var wg sync.WaitGroup
 	for i, name := range names {
 		endpoint := c.Hubs[name].Endpoint

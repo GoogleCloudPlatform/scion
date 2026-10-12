@@ -114,6 +114,9 @@ type useLookup struct {
 	ctx      context.Context
 	settings *config.Settings
 	ref      string
+	// explicit is true when the user chose the hub to search (--hub,
+	// SCION_HUB_ENDPOINT or SCION_HUB_URL).
+	explicit bool
 
 	// found are the projects seen on named hubs, merged into the known
 	// list when the context is saved.
@@ -129,41 +132,47 @@ type useLookup struct {
 }
 
 // useCandidateHubs returns the hubs to search: only the hub given with
-// --hub, or else SCION_HUB_ENDPOINT/SCION_HUB_URL, when one is set; else
-// every registered hub, plus the effective hub from the settings when it
-// has no hub entry.
-func useCandidateHubs(c *config.CLIContext, settings *config.Settings) ([]useHub, error) {
-	explicit := hubFlagEndpoint()
-	if explicit == "" {
-		explicit, _ = envHubEndpoint()
+// --hub, or else SCION_HUB_ENDPOINT/SCION_HUB_URL, when one is set
+// (explicit is then true); else every registered hub, plus the effective
+// hub from the settings when it has no hub entry.
+func useCandidateHubs(c *config.CLIContext, settings *config.Settings) (hubs []useHub, explicit bool, err error) {
+	chosen := hubFlagEndpoint()
+	if chosen == "" {
+		chosen, _ = envHubEndpoint()
 	}
-	if explicit != "" {
-		if name, h := c.HubByEndpoint(explicit); h != nil {
-			return []useHub{{Name: name, Endpoint: h.Endpoint}}, nil
+	if chosen != "" {
+		if name, h := c.HubByEndpoint(chosen); h != nil {
+			return []useHub{{Name: name, Endpoint: h.Endpoint}}, true, nil
 		}
 		// Selecting adds a hub entry for it, so it must be a valid hub
 		// URL (no user info, query or fragment).
-		if err := config.ValidateHubURL(explicit); err != nil {
-			return nil, err
+		if err := config.ValidateHubURL(chosen); err != nil {
+			return nil, false, err
 		}
-		return []useHub{{Endpoint: explicit}}, nil
+		return []useHub{{Endpoint: chosen}}, true, nil
 	}
-	var hubs []useHub
 	for _, name := range c.HubNames() {
 		hubs = append(hubs, useHub{Name: name, Endpoint: c.Hubs[name].Endpoint})
 	}
 	if ep := GetHubEndpoint(settings); ep != "" {
 		if _, h := c.HubByEndpoint(ep); h == nil {
 			if err := config.ValidateHubURL(ep); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			hubs = append(hubs, useHub{Endpoint: ep})
 		}
 	}
 	if len(hubs) == 0 {
-		return nil, errHubNotConfigured
+		return nil, false, errHubNotConfigured
 	}
-	return hubs, nil
+	return hubs, false, nil
+}
+
+// fanOut reports whether hubs must get only credentials bound to each:
+// always for several hubs, and for one hub unless the user chose it or it
+// is the effective hub (see hubGetsFullChain).
+func (l *useLookup) fanOut(hubs []useHub) bool {
+	return len(hubs) != 1 || !hubGetsFullChain(l.settings, hubs[0].Endpoint, l.explicit)
 }
 
 // remember records projects seen on hub for the known-project list.
@@ -196,11 +205,13 @@ const (
 // fills in the hub's current slug and name.
 func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
 	notLoggedIn := fmt.Sprintf("Not logged in to hub '%s'. Run: scion hub auth login --hub %s", m.Hub.label(), m.Hub.label())
-	// One named hub: the full credential chain, as for --hub.
-	if !hubUsable(l.settings, m.Hub.Endpoint, false) {
+	// The hub comes from the known list, not from the user: the full
+	// credential chain only for the chosen or effective hub.
+	fanOut := l.fanOut([]useHub{m.Hub})
+	if !hubUsable(l.settings, m.Hub.Endpoint, fanOut) {
 		return useUnchecked, notLoggedIn
 	}
-	client, err := hubClientFor(l.settings, m.Hub.Endpoint, false)
+	client, err := hubClientFor(l.settings, m.Hub.Endpoint, fanOut)
 	if err != nil {
 		return useUnchecked, fmt.Sprintf("Warning: could not check project '%s' on hub '%s': %v", m.shown(), m.Hub.label(), err)
 	}
@@ -255,10 +266,10 @@ func (l *useLookup) lookupOn(hub useHub, fanOut bool) ([]hubclient.Project, erro
 
 // search looks the reference up on hubs in parallel, each within
 // useHubTimeout. Hubs without a usable credential are skipped and not
-// contacted; with several hubs, that is every hub without a credential
-// bound to it (see hubUsable). It returns the matches in the order of hubs.
+// contacted; in a fan-out (see useLookup.fanOut), that is every hub without
+// a credential bound to it. It returns the matches in the order of hubs.
 func (l *useLookup) search(hubs []useHub) []useMatch {
-	fanOut := len(hubs) > 1
+	fanOut := l.fanOut(hubs)
 	type result struct {
 		projects []hubclient.Project
 		err      error
@@ -387,11 +398,11 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 		settings = &config.Settings{}
 	}
 	c, _ := config.LoadCLIContext()
-	hubs, err := useCandidateHubs(c, settings)
+	hubs, explicit, err := useCandidateHubs(c, settings)
 	if err != nil {
 		return err
 	}
-	l := &useLookup{ctx: ctx, settings: settings, ref: ref}
+	l := &useLookup{ctx: ctx, settings: settings, ref: ref, explicit: explicit}
 
 	var chosen *useMatch
 	var candidates []useMatch

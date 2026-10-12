@@ -129,9 +129,20 @@ func updateHubRegistry(fn func(*config.CLIContext) error) error {
 }
 
 // hubResponds checks the health of the hub at endpoint within
-// hubHealthTimeout.
-var hubResponds = func(endpoint string) error {
-	client, err := hubclient.New(endpoint, hubclient.WithTimeout(hubHealthTimeout))
+// hubHealthTimeout. It sends no user credential. With fanOut (a check of
+// hubs the user did not name, such as 'hub list --check'), only the
+// transport of the hub's own entry applies, never the environment's (see
+// fanOutTransport).
+var hubResponds = func(endpoint string, fanOut bool) error {
+	opts := []hubclient.Option{hubclient.WithTimeout(hubHealthTimeout)}
+	if fanOut {
+		src, mode, err := fanOutTransport(endpoint)
+		if err != nil {
+			return err
+		}
+		opts = append(opts, hubclient.WithTransportAuth(src, mode))
+	}
+	client, err := hubclient.New(endpoint, opts...)
 	if err != nil {
 		return err
 	}
@@ -201,7 +212,9 @@ func hubAdd(out, stderr io.Writer, name, url string, use bool) error {
 		return err
 	}
 
-	healthErr := hubResponds(endpoint)
+	// The hub the user named: as before, transport auth from the
+	// environment applies.
+	healthErr := hubResponds(endpoint, false)
 	info := hubAuthFor(endpoint)
 	if isJSONOutput() {
 		return outputJSON(hubAddJSON{
@@ -244,14 +257,22 @@ func hubList(out, stderr io.Writer, check bool) error {
 
 	var reachable []bool
 	if check {
+		settings, err := config.LoadSettings(useSettingsPath())
+		if err != nil {
+			settings = &config.Settings{}
+		}
 		reachable = make([]bool, len(names))
 		var wg sync.WaitGroup
 		for i, name := range names {
+			endpoint := c.Hubs[name].Endpoint
+			// Every hub but the effective one is checked with only its
+			// own entry's transport.
+			fanOut := !hubGetsFullChain(settings, endpoint, false)
 			wg.Add(1)
-			go func(i int, endpoint string) {
+			go func(i int, endpoint string, fanOut bool) {
 				defer wg.Done()
-				reachable[i] = hubResponds(endpoint) == nil
-			}(i, c.Hubs[name].Endpoint)
+				reachable[i] = hubResponds(endpoint, fanOut) == nil
+			}(i, endpoint, fanOut)
 		}
 		wg.Wait()
 	}

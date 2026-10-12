@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -652,4 +653,135 @@ func TestUseMultiHub_HangingHubTimesOut(t *testing.T) {
 	assert.Less(t, time.Since(start), 5*time.Second)
 	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
 	assert.Contains(t, stderr, "Warning: skipped hubs: staging: unreachable: ")
+}
+
+// setupOneHubNoLogin registers one fake hub, prod, with a project "foo"
+// and no login, with SCION_HUB_TOKEN and SCION_DEV_TOKEN set and the fake
+// hubs treated as remote hubs.
+func setupOneHubNoLogin(t *testing.T) *fakeProjectHub {
+	t.Helper()
+	setupRegistryTest(t)
+	writeHomeGlobalSettings(t, "")
+	prod := newFakeProjectHub(t, prodFoo)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("prod", prod.URL())
+	}))
+	t.Setenv("SCION_HUB_TOKEN", "scoped-token")
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	withFanOutLocalHub(t, false)
+	return prod
+}
+
+// The only registered hub is not the hub this invocation targets
+// (SCION_HUB_ENDPOINT names another): it gets nothing that is not bound to
+// it, from --refresh or from 'use'.
+func TestUseMultiHub_LoneHubThatIsNotEffectiveGetsNoUnboundToken(t *testing.T) {
+	prod := setupOneHubNoLogin(t)
+	envHub := newFakeProjectHub(t)
+	t.Setenv("SCION_HUB_ENDPOINT", envHub.URL())
+
+	_, stderr, err := runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Warning: not refreshed: prod: not logged in")
+	assert.Zero(t, prod.calls())
+
+	_, _, err = runScion(t, "use", "foo")
+	require.Error(t, err)
+	assert.Zero(t, prod.calls(), "'use' searches only the environment's hub")
+	assert.Equal(t, []string{"Bearer scoped-token"}, envHub.authHeaders(), "the hub the user chose gets the full chain")
+}
+
+// --hub naming the lone hub, or the lone hub being the effective hub, gives
+// it the full credential chain.
+func TestUseMultiHub_LoneHubChosenOrEffectiveGetsFullChain(t *testing.T) {
+	t.Run("--hub", func(t *testing.T) {
+		prod := setupOneHubNoLogin(t)
+		t.Setenv("SCION_HUB_ENDPOINT", newFakeProjectHub(t).URL())
+		_, _, err := runScion(t, "project", "list", "--refresh", "--hub", "prod")
+		require.NoError(t, err)
+		_, _, err = runScion(t, "use", "foo", "--hub", "prod")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders())
+	})
+	t.Run("effective hub", func(t *testing.T) {
+		prod := setupOneHubNoLogin(t)
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"/\n")
+		_, _, err := runScion(t, "project", "list", "--refresh")
+		require.NoError(t, err)
+		assert.Positive(t, prod.lists.Load())
+		_, _, err = runScion(t, "use", "foo")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders())
+	})
+}
+
+// The check of a known project follows the same rule: on a hub that is
+// neither chosen nor effective, only that hub's own login counts, so with
+// unbound tokens only the project is selected unchecked, with the login
+// hint; on the effective hub the full chain is used.
+func TestUseMultiHub_KnownProjectCheckFollowsCredentialRule(t *testing.T) {
+	seed := func(t *testing.T) {
+		t.Helper()
+		require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+			c.RememberProjects("prod", []config.KnownProject{{ID: "p-foo", Slug: "foo", Name: "Foo"}})
+			return nil
+		}))
+	}
+	t.Run("not effective", func(t *testing.T) {
+		prod, staging := setupTwoHubsNoLogins(t)
+		seed(t)
+		stdout, _, err := runScion(t, "use", "foo")
+		require.NoError(t, err)
+		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n"+
+			"Not logged in to hub 'prod'. Run: scion hub auth login --hub prod\n", stdout)
+		assert.Zero(t, prod.calls())
+		assert.Zero(t, staging.calls())
+	})
+	t.Run("effective", func(t *testing.T) {
+		prod, staging := setupTwoHubsNoLogins(t)
+		seed(t)
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+		stdout, _, err := runScion(t, "use", "foo")
+		require.NoError(t, err)
+		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+		assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders())
+		assert.Equal(t, int32(1), prod.gets.Load())
+		assert.Zero(t, staging.calls())
+	})
+}
+
+// In a fan-out only the hub entry's own transport applies: never the
+// transport token from the environment, never hub.transport in settings.
+func TestFanOutTransport_OnlyTheHubEntrysOwn(t *testing.T) {
+	setupRegistryTest(t)
+	writeHomeGlobalSettings(t, "hub:\n  transport:\n    mode: iap\n    audience: settings-audience\n")
+	t.Setenv("SCION_TRANSPORT_TOKEN", "env-transport-token")
+	origGCE, origADC := transportauth.IsOnGCEFunc, fanOutADCSource
+	t.Cleanup(func() { transportauth.IsOnGCEFunc, fanOutADCSource = origGCE, origADC })
+	transportauth.IsOnGCEFunc = func() bool { return false }
+	var audiences []string
+	fanOutADCSource = func(audience string) (transportauth.TokenSource, error) {
+		audiences = append(audiences, audience)
+		return nil, nil
+	}
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		if err := c.AddHub("plain", "https://plain.example.com"); err != nil {
+			return err
+		}
+		if err := c.AddHub("iap", "https://iap.example.com"); err != nil {
+			return err
+		}
+		c.Hubs["iap"].Transport = &config.HubTransportConfig{Mode: "iap", Audience: "entry-audience"}
+		return nil
+	}))
+
+	src, _, err := fanOutTransport("https://plain.example.com")
+	require.NoError(t, err)
+	assert.Nil(t, src, "no entry transport: nothing, not the environment's or the settings' transport")
+	assert.Empty(t, audiences)
+
+	_, mode, err := fanOutTransport("https://iap.example.com")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"entry-audience"}, audiences)
+	assert.Equal(t, transportauth.ModeFromString("iap"), mode)
 }
