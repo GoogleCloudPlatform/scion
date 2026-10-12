@@ -1031,7 +1031,7 @@ func adminLosesAuthority(ctx context.Context, st store.Store, now time.Time, au 
 		}
 		rd, err := st.GetRoleDefinition(ctx, ob.RoleDefinitionID)
 		if err != nil {
-			continue
+			continue // fail closed: an unreadable role keeps no admin
 		}
 		if roleHasConstraintAdmin(rd) {
 			return false
