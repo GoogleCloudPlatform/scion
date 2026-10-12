@@ -465,7 +465,7 @@ test('owner only: PUTs come only from the owning page, never the non-owner', asy
   await owner.goto(`/terminals/${agentA}`);
   await within(
     ownerSocket.waitForAttach(1),
-    FIRST_RENDER_TIMEOUT,
+    EVENT_WAIT_TIMEOUT,
     () =>
       `owner page did not attach alpha; owner attached ${agentNames(ownerSocket.attachedAgentIds)}`
   );
@@ -490,9 +490,8 @@ test('owner only: PUTs come only from the owning page, never the non-owner', asy
   // The non-owner's message above appears once the owner has selected beta,
   // which can be before beta's pane has been shown and measured; a pane
   // attaches only then (terminal-pane initTerminal waits for a measurable
-  // pane). Opening gamma replaces beta in the single pane, so a beta that
-  // has not attached by then stays pending, hidden, and never attaches
-  // (ptone/scion#4638).
+  // pane). Opening gamma hides beta's pane, so a beta that has not attached
+  // by then stays pending and never attaches (ptone/scion#4638).
   await within(
     ownerSocket.waitForAttach(2),
     EVENT_WAIT_TIMEOUT,
