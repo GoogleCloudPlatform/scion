@@ -120,9 +120,10 @@ func TestLoadSettings_ProjectOwnHubProjectIDWins(t *testing.T) {
 		globalDir := setupHubIDScopeHome(t, "")
 		scionDir, extDir := setupHubIDScopeSplitProject(t, filepath.Dir(globalDir))
 		require.NoError(t, UpdateSetting(scionDir, "hub.projectId", "own-hub-id", false))
-		own, err := LoadSettingsFromDir(extDir)
+		own, err := LoadSingleFileVersioned(extDir)
 		require.NoError(t, err)
-		require.Equal(t, "own-hub-id", own.GetHubProjectID(), "the link writes to the external directory")
+		require.NotNil(t, own.Hub)
+		require.Equal(t, "own-hub-id", own.Hub.ProjectID, "the link writes to the external directory")
 
 		s, err := LoadSettings(scionDir)
 		require.NoError(t, err)

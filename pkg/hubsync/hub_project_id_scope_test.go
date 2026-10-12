@@ -77,11 +77,15 @@ func TestRegisterProject_AlwaysWritesHubProjectID(t *testing.T) {
 	if err := registerProject(context.Background(), hubCtx, "proj", false); err != nil {
 		t.Fatalf("registerProject: %v", err)
 	}
-	own, err := config.LoadSettingsFromDir(projectDir)
+	own, err := config.LoadSingleFileVersioned(projectDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := own.GetHubProjectID(); got != "same-as-local-id" {
+	if own.Hub == nil || own.Hub.ProjectID != "same-as-local-id" {
+		got := ""
+		if own.Hub != nil {
+			got = own.Hub.ProjectID
+		}
 		t.Fatalf("own hub.projectId = %q, want same-as-local-id", got)
 	}
 }
@@ -98,11 +102,15 @@ func TestRegisterProject_WritesHubProjectIDSplitStorage(t *testing.T) {
 	if err := registerProject(context.Background(), hubCtx, "splitrepo", false); err != nil {
 		t.Fatalf("registerProject: %v", err)
 	}
-	ext, err := config.LoadSettingsFromDir(extDir)
+	ext, err := config.LoadSingleFileVersioned(extDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := ext.GetHubProjectID(); got != "split-hub-id" {
+	if ext.Hub == nil || ext.Hub.ProjectID != "split-hub-id" {
+		got := ""
+		if ext.Hub != nil {
+			got = ext.Hub.ProjectID
+		}
 		t.Fatalf("external hub.projectId = %q, want split-hub-id", got)
 	}
 }

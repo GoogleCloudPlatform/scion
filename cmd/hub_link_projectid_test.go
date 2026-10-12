@@ -88,9 +88,10 @@ func TestRunHubLink_RelinkWithLinkedGlobalKeepsProjectHubID(t *testing.T) {
 
 	assertOwnHubID := func(step string) {
 		t.Helper()
-		ext, err := config.LoadSettingsFromDir(extDir)
+		ext, err := config.LoadSingleFileVersioned(extDir)
 		require.NoError(t, err)
-		assert.Equal(t, localID, ext.GetHubProjectID(), "%s: hub.projectId in the project's own settings", step)
+		require.NotNil(t, ext.Hub, "%s: the project's own settings have a hub block", step)
+		assert.Equal(t, localID, ext.Hub.ProjectID, "%s: hub.project_id in the project's own settings", step)
 		merged, err := config.LoadSettings(scionDir)
 		require.NoError(t, err)
 		assert.Equal(t, localID, merged.GetHubProjectID(), "%s: merged settings resolve to the project", step)
