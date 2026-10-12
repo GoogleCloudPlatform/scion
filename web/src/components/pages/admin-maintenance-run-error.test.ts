@@ -57,6 +57,8 @@ interface Options {
   listStatus?: number;
   /** Status for PUT /api/v1/admin/maintenance. */
   toggleStatus?: number;
+  /** Saved maintenance state that GET returns after a failed PUT. */
+  enabledAfterFailedToggle?: boolean;
 }
 
 function json(body: unknown, status = 200): Promise<Response> {
@@ -74,6 +76,7 @@ function pathOf(input: string | URL | Request): string {
 }
 
 function handler(opts: Options) {
+  let savedEnabled = false;
   return (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = pathOf(input);
     const method = (init?.method ?? 'GET').toUpperCase();
@@ -95,13 +98,15 @@ function handler(opts: Options) {
     if (path === '/api/v1/admin/maintenance' && method === 'PUT') {
       const status = opts.toggleStatus ?? 200;
       if (status >= 400) {
+        savedEnabled = opts.enabledAfterFailedToggle ?? savedEnabled;
         return json({ error: { code: 'internal', message: TOGGLE_ERROR } }, status);
       }
       const { enabled } = JSON.parse(String(init?.body)) as { enabled: boolean };
+      savedEnabled = enabled;
       return json({ enabled, message: '' });
     }
     if (path === '/api/v1/admin/maintenance') {
-      return json({ enabled: false, message: '' });
+      return json({ enabled: savedEnabled, message: '' });
     }
     return json({});
   };
@@ -263,7 +268,9 @@ describe('admin maintenance mode toggle errors', () => {
   }
 
   it('keeps the page, toasts the server error and shows the saved state when the toggle fails', async () => {
-    el = await mount({ toggleStatus: 500 });
+    // The request fails but the server saved the change, so the re-read
+    // returns enabled and the toggle shows it.
+    el = await mount({ toggleStatus: 500, enabledAfterFailedToggle: true });
     expect(toggleState(el)).toEqual({ active: false, label: 'Disabled' });
 
     el.shadowRoot!.querySelector<HTMLElement>('.toggle-track')!.click();
@@ -272,7 +279,7 @@ describe('admin maintenance mode toggle errors', () => {
     expectPageRendered(el);
     expect(showToast).toHaveBeenCalledTimes(1);
     expect(vi.mocked(showToast).mock.calls[0][0]).toContain(TOGGLE_ERROR);
-    expect(toggleState(el)).toEqual({ active: false, label: 'Disabled' });
+    expect(toggleState(el)).toEqual({ active: true, label: 'Enabled' });
   });
 
   it('shows the new state when the toggle succeeds', async () => {
