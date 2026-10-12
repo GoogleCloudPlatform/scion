@@ -467,7 +467,8 @@ func TestServerStatus_ProbesStartedWebAndBrokerPorts(t *testing.T) {
 	webPort := healthBodyServer(t, `{"status":"healthy","hub":{"status":"healthy"}}`)
 	brokerPort := newFakeBrokerHealthServer(t, "healthy")
 	args := []string{"server", "start", "--foreground",
-		"--web-port=" + strconv.Itoa(webPort), "--runtime-broker-port=" + strconv.Itoa(brokerPort)}
+		"--web-port=" + strconv.Itoa(webPort), "--runtime-broker-port=" + strconv.Itoa(brokerPort),
+		"--port=" + strconv.Itoa(unusedPort(t))}
 	if err := daemon.SaveArgs(serverDaemonComponent, globalDir, args); err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +490,8 @@ func TestServerStatus_ProbesStartedHubPort(t *testing.T) {
 	markServerDaemonRunning(t, globalDir)
 	hubPort := healthBodyServer(t, `{"status":"healthy"}`)
 	args := []string{"server", "start", "--foreground", "--enable-web=false",
-		"--port=" + strconv.Itoa(hubPort), "--web-port=" + strconv.Itoa(unusedPort(t))}
+		"--port=" + strconv.Itoa(hubPort), "--web-port=" + strconv.Itoa(unusedPort(t)),
+		"--runtime-broker-port=" + strconv.Itoa(unusedPort(t))}
 	if err := daemon.SaveArgs(serverDaemonComponent, globalDir, args); err != nil {
 		t.Fatal(err)
 	}
@@ -510,6 +512,9 @@ func TestServerStatus_IgnoresSavedArgsWithoutDaemon(t *testing.T) {
 	_, globalDir := brokerTestHome(t)
 	t.Setenv("SCION_SERVER_MODE", "")
 	brokerPort := newFakeBrokerHealthServer(t, "healthy")
+	// Point the no-daemon path at an unused broker port, so a broker on the
+	// default port of the test machine does not answer.
+	writeGlobalSettings(t, globalDir, "schema_version: \"1\"\nserver:\n  broker:\n    port: "+strconv.Itoa(unusedPort(t))+"\n")
 	args := []string{"server", "start", "--foreground", "--runtime-broker-port=" + strconv.Itoa(brokerPort)}
 	if err := daemon.SaveArgs(serverDaemonComponent, globalDir, args); err != nil {
 		t.Fatal(err)
