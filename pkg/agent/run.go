@@ -2501,12 +2501,29 @@ authDone:
 		// dropCheckedSharedDirs saves the record; nothing reads it after this.
 		_ = dropCheckedSharedDirs(agentDir, sharedDirRecord, passed, opts.Name)
 	}
+	// Record the running phase, runtime and profile before the container
+	// starts: the host must not write agent-info.json while the container
+	// runs, since some runtimes do not let the host write files in the
+	// container. Once up, the container reports its own phase (sciontool
+	// init writes "running"); a failed launch below overwrites this with
+	// "error".
+	//
+	// Phase is always "running" here, for both a fresh start and a resume:
+	// state.Phase has no "resumed" value, and a non-standard phase string
+	// confuses readers that only understand the canonical lifecycle phases
+	// (e.g. the hub's post-wake readiness wait). Resume-specific display
+	// text is derived independently at the CLI layer (see displayStatus in
+	// cmd/common.go), so it does not need to be encoded in Phase.
+	status := string(state.PhaseRunning)
+	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
+		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
+	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
-		// Provisioning writes agent-info.json in "created" state before the
-		// runtime launch. If the launch itself fails, keep the provisioned
+		// agent-info.json was set to "running" above, before the runtime
+		// launch. If the launch itself fails, keep the provisioned
 		// workspace but flip the local state to "error" so list/status do not
-		// report a phantom created agent forever.
+		// report a phantom agent forever.
 		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
 			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
 		}
@@ -2519,17 +2536,6 @@ authDone:
 			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
 				"agent", opts.Name, "run_id", runID, "error", err)
 		}
-	}
-
-	// Phase is always "running" here, for both a fresh start and a resume:
-	// state.Phase has no "resumed" value, and a non-standard phase string
-	// confuses readers that only understand the canonical lifecycle phases
-	// (e.g. the hub's post-wake readiness wait). Resume-specific display
-	// text is derived independently at the CLI layer (see displayStatus in
-	// cmd/common.go), so it does not need to be encoded in Phase.
-	status := string(state.PhaseRunning)
-	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
-		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
 	}
 
 	// Fetch fresh info and verify the container is actually running
