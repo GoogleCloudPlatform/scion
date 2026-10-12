@@ -1048,6 +1048,7 @@ func fpFinalizingSoftAgent(t *testing.T, e fpEnv, name string) string {
 	req := got.ParseDeletionRequest()
 	require.True(t, req.Soft, "the stored request is soft")
 	require.False(t, req.DeleteFiles, "the stored soft request keeps the files")
+	require.True(t, req.RemoveBranch, "the stored request removes the branch")
 	return agent
 }
 
@@ -1068,7 +1069,7 @@ func TestFixturePurge_FinalizingSoftRequestLeavesNoTombstone(t *testing.T) {
 	assert.Empty(t, r.NotDone)
 	assert.Equal(t, 1, r.Deleted.Agents)
 	assert.Equal(t, []TestIdentityPurgeItem{{
-		Type: "agent", ID: agent, ProjectID: e.project, Status: "removed", Reason: "files_and_branch_retained",
+		Type: "agent", ID: agent, ProjectID: e.project, Status: "removed", Reason: "files_retained",
 	}}, r.FilesRetained)
 	assert.False(t, fpAgentExists(t, e.store, agent), "no soft tombstone outlives the purge")
 	assert.False(t, fpUserExists(t, e.store, fxID))
