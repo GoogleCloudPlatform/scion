@@ -177,21 +177,52 @@ func TestCreateTestAdminUser_Validation(t *testing.T) {
 
 // The super-admin kind's binding is refused by the super-admin binding
 // guard until the admin tier's policy phase; the row rolls back with it.
-func TestCreateTestAdminUser_SuperAdminBindingRefused(t *testing.T) {
+// Admin tier A2: a test_super_admin row gets its expiring super-admin
+// issuance binding. The issuance CreatedBy admits a super-admin binding for
+// no other principal (a human or a test_hub_admin), and an issuance binding
+// must hold its kind's role.
+func TestCreateTestAdminUser_SuperAdminBinding(t *testing.T) {
 	cs := newFixtureTestStore(t)
 	ctx := context.Background()
-	rd, err := cs.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	if err != nil {
-		rd, err = cs.CreateRoleDefinition(ctx, &store.RoleDefinition{
-			ID: uuid.NewString(), Name: store.SystemRoleSuperAdmin, ScopeType: store.RoleScopeSystem, Permissions: []string{"user.read"},
-		})
-		require.NoError(t, err)
+	roleID := func(name string) string {
+		rd, err := cs.GetRoleDefinitionByName(ctx, name, store.RoleScopeSystem)
+		if err != nil {
+			rd, err = cs.CreateRoleDefinition(ctx, &store.RoleDefinition{
+				ID: uuid.NewString(), Name: name, ScopeType: store.RoleScopeSystem, Permissions: []string{"user.read"},
+			})
+			require.NoError(t, err)
+		}
+		return rd.ID
 	}
+	superRole, hubAdminRole := roleID(store.SystemRoleSuperAdmin), roleID(store.SystemRoleHubAdmin)
+
 	u := newTestAdminUser(store.UserKindTestSuperAdmin, uuid.NewString(), time.Now().Add(30*time.Minute))
-	_, err = cs.CreateTestAdminUser(ctx, u, rd.ID)
-	require.ErrorIs(t, err, store.ErrSuperAdminBindingRestricted)
-	_, err = cs.GetUser(ctx, u.ID)
+	rb, err := cs.CreateTestAdminUser(ctx, u, superRole)
+	require.NoError(t, err)
+	assert.Equal(t, store.TestIdentityIssuanceCreatedBy, rb.CreatedBy)
+	require.NotNil(t, rb.ExpiresAt)
+	assert.False(t, rb.ExpiresAt.After(*u.ExpiresAt), "the binding never outlives the identity")
+
+	// The wrong role for the kind is refused, and the row rolls back.
+	wrong := newTestAdminUser(store.UserKindTestSuperAdmin, uuid.NewString(), time.Now().Add(30*time.Minute))
+	_, err = cs.CreateTestAdminUser(ctx, wrong, hubAdminRole)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+	_, err = cs.GetUser(ctx, wrong.ID)
 	require.ErrorIs(t, err, store.ErrNotFound, "the row rolls back with the refused binding")
+	hubKind := newTestAdminUser(store.UserKindTestHubAdmin, uuid.NewString(), time.Now().Add(30*time.Minute))
+	_, err = cs.CreateTestAdminUser(ctx, hubKind, superRole)
+	require.ErrorIs(t, err, store.ErrSuperAdminBindingRestricted)
+	_, err = cs.GetUser(ctx, hubKind.ID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	// A human never gets a super-admin binding through the issuance
+	// CreatedBy.
+	human := &store.User{ID: uuid.NewString(), Email: "h-" + uuid.NewString()[:8] + "@example.com", DisplayName: "h"}
+	require.NoError(t, cs.CreateUser(ctx, human))
+	exp := time.Now().Add(10 * time.Minute)
+	_, err = cs.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: superRole, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: human.ID, ScopeType: store.RoleScopeSystem, ExpiresAt: &exp, CreatedBy: store.TestIdentityIssuanceCreatedBy})
+	require.ErrorIs(t, err, store.ErrSuperAdminBindingRestricted)
 }
 
 // The DB CHECK rejects an admin-kind row without an expiry.
@@ -401,14 +432,14 @@ func TestCheckTestAdminSystemBinding_ComparesAtStoredPrecision(t *testing.T) {
 	u := &ent.User{Kind: user.Kind(store.UserKindTestHubAdmin), ExpiresAt: &stored}
 	same := stored.Add(999 * time.Nanosecond)
 	rb := &store.RoleBinding{ScopeType: store.RoleScopeSystem, CreatedBy: store.TestIdentityIssuanceCreatedBy, ExpiresAt: &same}
-	exp, err := checkTestAdminSystemBinding(u, rb)
+	exp, err := checkTestAdminSystemBinding(u, rb, store.SystemRoleHubAdmin)
 	require.NoError(t, err)
 	require.NotNil(t, exp)
 	assert.True(t, exp.Equal(stored), "the expiry is stored at the identity's precision")
 
 	later := stored.Add(time.Microsecond)
 	rb.ExpiresAt = &later
-	_, err = checkTestAdminSystemBinding(u, rb)
+	_, err = checkTestAdminSystemBinding(u, rb, store.SystemRoleHubAdmin)
 	require.ErrorIs(t, err, store.ErrInvalidInput)
 }
 

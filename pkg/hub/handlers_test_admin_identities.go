@@ -34,19 +34,25 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
-// Admin-kind test identities (ptone/scion#4240, admin tier phase A1).
+// Admin-kind test identities (ptone/scion#4240, admin tier phases A1 and
+// A2).
 //
 // POST /api/v1/test-identities/admin issues a short-lived test identity
-// holding a real, expiring system hub-admin binding (kind test_hub_admin,
-// email in store.TestHubAdminEmailDomain) and returns one access token for
-// it. The test_super_admin kind is defined but its issuance answers 404
-// until the admin tier's policy phase (A2) ships and its own gate is on.
+// holding a real, expiring system hub-admin binding (adminRole hub-admin:
+// kind test_hub_admin, email in store.TestHubAdminEmailDomain) or
+// super-admin binding plus the admin role (adminRole super-admin: kind
+// test_super_admin, store.TestSuperAdminEmailDomain), and returns one
+// access token for it. Each kind answers 404 unless the hub started with
+// its level: --test-mode=admin (or above) for hub-admin,
+// --test-mode=super-admin for super-admin. What either kind may do is
+// limited by the test-admin policy (test_admin_policy.go).
 // POST /api/v1/test-identities/admin/revoke-all deletes every admin-kind
 // identity, for a human super-admin session.
 //
-// Both routes answer 404 unless the hub started with the test admin gate
-// on (test_admin_gate.go). The issuer must be a human (kindForPrincipal),
-// hold the kind's capability (test_identity.issue_admin), and be a live
+// Both routes answer 404 unless the hub started with --test-mode=admin or
+// above (test_admin_gate.go). The issuer must be a human (kindForPrincipal),
+// hold the kind's capability (test_identity.issue_admin or
+// test_identity.issue_super_admin), and be a live
 // super-admin through its own current bindings (canIssueTestAdmin). An
 // access-token issuer must present a hub-boundary token carrying exactly
 // the capability's scope, at most testAdminIssuerPATMaxAge old, which is
@@ -308,16 +314,18 @@ func (a testAdminActor) labels() string {
 // /api/v1/test-identities/admin. Unknown fields are rejected, so no user
 // field (kind, email, expiry, issuer, role) can be bound from a request.
 type CreateTestAdminIdentityRequest struct {
-	// AdminRole is "hub-admin" (or "super-admin", refused with 404 until
-	// the admin tier's policy phase).
+	// AdminRole is "hub-admin" or "super-admin" (404 unless the hub
+	// started with --test-mode=super-admin).
 	AdminRole string `json:"adminRole"`
 	// Purpose is required, 8 to 200 characters.
 	Purpose string `json:"purpose"`
 	// LifetimeSeconds is the identity lifetime. 0 means the kind's
-	// default; at most the kind's cap (60 min for hub-admin).
+	// default; at most the kind's cap (60 min for hub-admin, 30 min for
+	// super-admin).
 	LifetimeSeconds int64 `json:"lifetimeSeconds,omitempty"`
 	// TokenTTLSeconds is the access token lifetime. 0 means the kind's
-	// default (15 min for hub-admin); at most the kind's cap (30 min).
+	// default (15 min for hub-admin, 10 min for super-admin); at most the
+	// kind's cap (30 min for hub-admin, 15 min for super-admin).
 	TokenTTLSeconds int64 `json:"tokenTtlSeconds,omitempty"`
 }
 
@@ -606,7 +614,8 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 		return
 	}
 	// A kind that is off answers 404, as the whole route does while the
-	// tier is off: the test super-admin kind until its own gate exists.
+	// tier is off: the test super-admin kind on a hub started with
+	// --test-mode=admin.
 	if !s.testAdminTierEnabled(spec.kind) {
 		NotFound(w, "endpoint")
 		return

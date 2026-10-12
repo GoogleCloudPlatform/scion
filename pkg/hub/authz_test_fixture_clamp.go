@@ -83,6 +83,33 @@ type testFixtureClampCache struct {
 	// now is the clock of the admin-kind expiry checks. Nil means
 	// time.Now.
 	now func() time.Time
+	// policyDenied, when set, is told about every test-admin policy
+	// refusal decide makes (Server.recordTestAdminPolicyDenial).
+	policyDenied func(ctx context.Context, userID, permissionID string)
+}
+
+// adminTierOn reports whether any admin test identity kind is enabled.
+func (c *testFixtureClampCache) adminTierOn() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	tier := c.adminTier
+	c.mu.Unlock()
+	return tier != nil && (tier(store.UserKindTestHubAdmin) || tier(store.UserKindTestSuperAdmin))
+}
+
+// setAuthzTestAdminPolicyDenied wires the hook decide calls on a test-admin
+// policy refusal. Server.New calls it once; transaction-bound services
+// share the cache.
+func setAuthzTestAdminPolicyDenied(svc *AuthzService, fn func(ctx context.Context, userID, permissionID string)) {
+	c := svc.kindCache()
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.policyDenied = fn
+	c.mu.Unlock()
 }
 
 // testFixtureClampCacheMax bounds the kind cache; it is reset when full.

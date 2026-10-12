@@ -166,7 +166,7 @@ var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.admin.create",
 		Domain:      "testidentity",
-		Description: "Issue a short-lived test identity holding an expiring hub-admin role and one access token for it (no refresh token, no cookie), on a hub started with the test admin gate",
+		Description: "Issue a short-lived test identity holding an expiring hub-admin role (on a hub started with --test-mode=admin or above) or super-admin role (--test-mode=super-admin), and one access token for it (no refresh token, no cookie)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/admin", Method: "POST"},
 		},
@@ -176,10 +176,10 @@ var testIdentityOperations = []OperationSpec{
 		BasePermission:        "test_identity.issue_admin",
 		Effects:               []SecurityEffect{EffectCreateResource, EffectGrantAuthority, EffectMintCredential},
 		DelegationKind:        DelegationNonAmplification,
-		DelegationDescription: "The issued hub-admin authority never exceeds the issuer's: the issuer must be a live super-admin through its own current bindings (canIssueTestAdmin), and an access token issuer's frozen ceiling must carry the capability. The binding expires with the identity",
+		DelegationDescription: "The issued hub-admin or super-admin authority never exceeds the issuer's: the issuer must be a live super-admin through its own current bindings (canIssueTestAdmin), and an access token issuer's frozen ceiling must carry the requested kind's capability. The binding expires with the identity",
 		Governance: &GovernancePolicy{
 			Kind:        GovernanceIssuerCredential,
-			Description: "The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the test_identity:issue_admin scope, at most 8 h old, loaded and checked on every issuance. One live admin-kind identity per issuer, two per hub; issuance is rate limited per issuer",
+			Description: "The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. One live admin-kind identity per issuer, two per hub of which at most one test super-admin; issuance is rate limited per issuer (6/h hub-admin, 2/h super-admin)",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{

@@ -21,7 +21,8 @@ package hub
 //	off          no test identities (the default)
 //	member       member and viewer test identities (POST /api/v1/test-identities)
 //	admin        member, plus the test hub-admin kind
-//	super-admin  admin, plus the test super-admin kind (refused until phase A2)
+//	super-admin  admin, plus the test super-admin kind (only with a complete
+//	             test-admin policy classification, test_admin_policy.go)
 //
 // Every level other than off requires, all together: a hub with a user
 // store, the hub id binding (the value after the colon equals the resolved
@@ -119,6 +120,10 @@ const (
 	TestModePreconditionNoSharedSecret      = "no_shared_signing_secret"
 	TestModePreconditionNoPreconfiguredKey  = "no_preconfigured_signing_key"
 	TestModePreconditionSigningKeysHubLocal = "signing_keys_hub_local"
+	// TestModePreconditionPolicyComplete is the super-admin level's G3:
+	// the test-admin policy classification of this binary is complete
+	// (TestAdminPolicyComplete).
+	TestModePreconditionPolicyComplete = "test_admin_policy_complete"
 )
 
 // TestModeMemberPreconditions returns the preconditions every level other

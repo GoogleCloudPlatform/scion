@@ -118,6 +118,36 @@ func TestTestAdminGate_NewCapturesImmutableGate(t *testing.T) {
 	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false,"testIdentityWebSessions":false}`, strings.TrimSpace(rec.Body.String()))
 }
 
+// Admin tier A2: with a complete test-admin policy classification, New
+// admits --test-mode=super-admin (G3) and captures both kinds; the status
+// route and the startup banner show the super-admin kind. With an
+// incomplete classification New refuses with the G3 error.
+func TestTestAdminGate_NewAdmitsSuperAdminWithCompletePolicy(t *testing.T) {
+	buf := tiaCaptureAudit(t)
+	cfg := tiaGateServerConfig()
+	cfg.TestAdminGate.SuperAdmin = true
+	cfg.TestMode = TestModeConfig{Level: TestModeSuperAdmin}
+	srv, _, err := tiaNewServer(t, cfg)
+	require.NoError(t, err)
+	assert.True(t, srv.testAdminTierEnabled(testAdminKindHubAdmin))
+	assert.True(t, srv.testAdminTierEnabled(testAdminKindSuperAdmin))
+	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":true,"testIdentityWebSessions":false}`, strings.TrimSpace(rec.Body.String()))
+	require.NoError(t, srv.emitTestAdminGateStart())
+	assert.Contains(t, buf.String(), "hub-admin and super-admin authority")
+	assert.Contains(t, buf.String(), `"test_super_admin"`)
+
+	// An incomplete classification refuses the super-admin kind.
+	prev := testAdminPermissionPolicy["hub.config.update"]
+	delete(testAdminPermissionPolicy, "hub.config.update")
+	t.Cleanup(func() { testAdminPermissionPolicy["hub.config.update"] = prev })
+	srv, _, err = tiaNewServer(t, cfg)
+	require.Error(t, err)
+	assert.Nil(t, srv)
+	assert.True(t, errors.Is(err, ErrTestSuperAdminRequiresPolicyRegistry), "got %v", err)
+}
+
 func TestTestAdminGate_OffByDefault(t *testing.T) {
 	srv, _ := testServer(t)
 	assert.False(t, srv.TestAdminTierOn())
@@ -131,7 +161,10 @@ func TestTestAdminGate_NewRefusesEachConditionWithNamedError(t *testing.T) {
 		mutate func(*ServerConfig)
 		want   error
 	}{
-		{"G3 super-admin flag", func(c *ServerConfig) { c.TestAdminGate.SuperAdmin = true }, ErrTestSuperAdminRequiresPolicyRegistry},
+		{"G3 super-admin without the hub-admin kind", func(c *ServerConfig) {
+			c.TestAdminGate.SuperAdmin = true
+			c.TestAdminGate.HubAdmin = false
+		}, ErrTestAdminInconsistent},
 		{"G1 test identities off", func(c *ServerConfig) { c.EnableTestIdentities = false }, ErrTestAdminRequiresTestIdentities},
 		{"G2 hub id mismatch", func(c *ServerConfig) { c.TestAdminGate.HubID = "other-hub" }, ErrTestAdminHubIDMismatch},
 		{"G2 empty hub id", func(c *ServerConfig) { c.TestAdminGate.HubID = "" }, ErrTestAdminHubIDMismatch},

@@ -2555,6 +2555,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	setAuthzTestAdminTier(srv.authzService,
 		func(kind string) bool { return srv.testAdminTierEnabled(testAdminKind(kind)) },
 		func() time.Time { return srv.testIdentities.clock() })
+	// The test-admin policy refusals decide makes are written to the test
+	// admin audit sink.
+	setAuthzTestAdminPolicyDenied(srv.authzService, func(ctx context.Context, userID, permissionID string) {
+		srv.recordTestAdminPolicyDenial(ctx, userID, "permission", permissionID)
+	})
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
 	srv.wireAgentDelegation()
@@ -3717,6 +3722,10 @@ func (s *Server) IsPostgres() bool {
 // server. This is called during hub startup (any DB driver) after seeding and
 // initial refresh (settings-db §3.5/§3.9). Safe for concurrent use.
 func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
+	if ops != nil {
+		// Every section write and delete asks the test-admin policy first.
+		ops.setWriteGuard(s.testAdminSettingsWriteGuard)
+	}
 	s.operationalSettings.Store(ops)
 }
 
@@ -6773,6 +6782,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply admin mode middleware (after auth, so identity is available).
 	// Always applied — checks runtime MaintenanceState on each request.
 	h = adminModeMiddleware(s.maintenance)(h)
+
+	// Test admin audit (ptone/scion#4240): runs right after authentication,
+	// so every request an admin-kind test identity makes is written to the
+	// test admin audit sink before anything else handles it.
+	h = s.testAdminRequestAuditMiddleware(h)
 
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens

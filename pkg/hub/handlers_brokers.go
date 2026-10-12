@@ -348,7 +348,10 @@ func (s *Server) brokerRemintTargetAuthorized(ctx context.Context, user UserIden
 	if !brokerUserCredentialKindAdmitted(ctx, user, false) {
 		return false
 	}
-	return s.authzService.IsSystemAdmin(ctx, user.ID())
+	// Test identities with admin roles do not remint broker credentials
+	// (test-admin policy: key material).
+	return s.authzService.IsSystemAdmin(ctx, user.ID()) &&
+		!s.testAdminPolicyRefusesUser(ctx, user.ID(), "handlers_brokers.go:brokerRemintTargetAuthorized")
 }
 
 // authorizeBrokerAutoProvide reports whether the caller may turn on a
@@ -496,7 +499,10 @@ func (s *Server) authorizedForBrokerRotate(ctx context.Context, user UserIdentit
 		user = nil
 	}
 
-	if user != nil && s.authzService.IsSystemAdmin(ctx, user.ID()) {
+	// Test identities with admin roles do not rotate broker secrets
+	// (test-admin policy: key material).
+	if user != nil && s.authzService.IsSystemAdmin(ctx, user.ID()) &&
+		!s.testAdminPolicyRefusesUser(ctx, user.ID(), "handlers_brokers.go:authorizedForBrokerRotate") {
 		return true, nil
 	}
 

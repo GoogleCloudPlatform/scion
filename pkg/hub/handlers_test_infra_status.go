@@ -25,8 +25,8 @@ type testInfraGates struct {
 	TestIdentities bool
 	// TestHubAdmin and TestSuperAdmin are the admin tier, read from its
 	// immutable startup gate (testAdminTierEnabled, test_admin_gate.go).
-	// The super-admin kind is refused at startup in this release (G3), so
-	// TestSuperAdmin is always false for now.
+	// TestSuperAdmin is true only on a hub started with
+	// --test-mode=super-admin (G3).
 	TestHubAdmin   bool
 	TestSuperAdmin bool
 	// TestIdentityWebSessions is true when test identity web sessions are

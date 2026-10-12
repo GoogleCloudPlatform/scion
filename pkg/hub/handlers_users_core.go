@@ -161,7 +161,7 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 // revokeUserSessions increments the user's session generation, invalidating
 // all existing cookie-based sessions for that user.
 func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id string) {
-	admin, ok := s.requireAdminFor(w, r, authzop.ReasonSessionRecovery)
+	admin, ok := s.requireAdminAt(w, r, authzop.ReasonSessionRecovery, "users.sessions.revoke")
 	if !ok {
 		return
 	}

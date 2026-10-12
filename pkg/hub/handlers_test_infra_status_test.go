@@ -93,7 +93,7 @@ func TestTestInfraStatus_BodyGolden(t *testing.T) {
 // admin-tier values now come from the admin tier's immutable startup gate.
 // With the gate off they are false whatever the member flag; with the
 // hub-admin kind on, testHubAdmin is true; testSuperAdmin follows the
-// super-admin kind, which this release refuses at startup (G3).
+// super-admin kind (--test-mode=super-admin, G3).
 func TestTestInfraStatus_AdminGatesFollowAdminTier(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		g := (&Server{testIdentities: newTestIdentityState(enabled)}).testInfraGates()
@@ -111,8 +111,9 @@ func TestTestInfraStatus_AdminGatesFollowAdminTier(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false,"testIdentityWebSessions":false}`, strings.TrimSpace(rec.Body.String()))
 
-	// The super-admin value reads its own kind (never set by a startup gate
-	// in this release; set directly here to pin the mapping).
+	// The super-admin value reads its own kind (set directly here to pin
+	// the mapping; TestTestAdminGate_NewAdmitsSuperAdminWithCompletePolicy
+	// covers the startup gate).
 	g = (&Server{testAdminGate: testAdminGate{hubAdmin: true, superAdmin: true}}).testInfraGates()
 	assert.True(t, g.TestHubAdmin)
 	assert.True(t, g.TestSuperAdmin)

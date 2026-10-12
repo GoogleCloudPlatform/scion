@@ -249,6 +249,33 @@ type OperationalSettings struct {
 	// stopPropagation cancels the propagation goroutines (subscriber + poll ticker).
 	stopPropagation context.CancelFunc
 	propagationWg   sync.WaitGroup
+
+	// writeGuard, when set, is asked before every section write or delete
+	// (Update, DeleteSection); a non-nil error refuses the write. The
+	// server installs the test-admin policy guard here
+	// (Server.testAdminSettingsWriteGuard), so every settings write path
+	// refuses test identities with admin roles.
+	writeGuard atomic.Pointer[settingsWriteGuard]
+}
+
+// settingsWriteGuard decides whether the caller in ctx may write section.
+type settingsWriteGuard func(ctx context.Context, section string) error
+
+// setWriteGuard installs the write guard (nil removes it).
+func (o *OperationalSettings) setWriteGuard(g settingsWriteGuard) {
+	if g == nil {
+		o.writeGuard.Store(nil)
+		return
+	}
+	o.writeGuard.Store(&g)
+}
+
+// checkWriteGuard runs the write guard for section, if one is installed.
+func (o *OperationalSettings) checkWriteGuard(ctx context.Context, section string) error {
+	if g := o.writeGuard.Load(); g != nil && *g != nil {
+		return (*g)(ctx, section)
+	}
+	return nil
 }
 
 // NewOperationalSettings creates a new OperationalSettings service.
@@ -607,6 +634,9 @@ func (o *OperationalSettings) Update(
 	expectedRevision int64,
 	origin string,
 ) (int64, error) {
+	if err := o.checkWriteGuard(ctx, section); err != nil {
+		return 0, err
+	}
 	// Validate via opsettings registry.
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
 		return 0, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, section, errs)
@@ -676,6 +706,9 @@ func (o *OperationalSettings) Update(
 // cache, publishes an event so peers refresh, and self-applies. The section
 // falls back to bootstrap material immediately (design §3.2.4).
 func (o *OperationalSettings) DeleteSection(ctx context.Context, section string) error {
+	if err := o.checkWriteGuard(ctx, section); err != nil {
+		return err
+	}
 	if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}

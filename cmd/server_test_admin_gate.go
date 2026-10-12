@@ -112,7 +112,10 @@ func validateTestModeFlagsEarly(cmd *cobra.Command) error {
 		return nil
 	}
 	if testModeLevel == hub.TestModeSuperAdmin {
-		return hub.ErrTestSuperAdminRequiresPolicyRegistry
+		// G3: the super-admin kind needs a complete test-admin policy.
+		if err := testAdminPolicyComplete(); err != nil {
+			return fmt.Errorf("%w: %v", hub.ErrTestSuperAdminRequiresPolicyRegistry, err)
+		}
 	}
 	if productionFlagIsExplicit {
 		return fmt.Errorf("--test-mode=%s: %w", testModeLevel, hub.ErrTestAdminProductionFlag)
@@ -148,7 +151,16 @@ type testModeInputs struct {
 
 	// ReadMarker reads the test_infra_marker row (G6).
 	ReadMarker func() (*testinfra.Marker, error)
+
+	// PolicyComplete reports whether the test-admin policy classification
+	// is complete (G3, super-admin only). Nil means
+	// hub.TestAdminPolicyComplete.
+	PolicyComplete func() error
 }
+
+// testAdminPolicyComplete is the G3 check. A variable only so tests can
+// substitute an incomplete classification.
+var testAdminPolicyComplete = hub.TestAdminPolicyComplete
 
 // testModeResolution is what a resolved level sets on hub.ServerConfig.
 type testModeResolution struct {
@@ -179,8 +191,15 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 	switch level {
 	case hub.TestModeMember, hub.TestModeAdmin:
 	case hub.TestModeSuperAdmin:
-		// G3: the super-admin kind needs the A2 policy registry.
-		return refuse(hub.ErrTestSuperAdminRequiresPolicyRegistry)
+		// G3: the super-admin kind is admitted only by a binary whose
+		// test-admin policy classification is complete.
+		complete := in.PolicyComplete
+		if complete == nil {
+			complete = testAdminPolicyComplete
+		}
+		if err := complete(); err != nil {
+			return refuse(fmt.Errorf("%w: %v", hub.ErrTestSuperAdminRequiresPolicyRegistry, err))
+		}
 	default:
 		return refuse(hub.ErrTestModeInconsistent)
 	}
@@ -221,6 +240,9 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 			return refuse(hub.ErrTestAdminPreconfiguredSigningKey)
 		}
 		preconditions = append(preconditions, hub.TestModeAdminPreconditions()...)
+		if level == hub.TestModeSuperAdmin {
+			preconditions = append(preconditions, hub.TestModePreconditionPolicyComplete)
+		}
 	}
 	// G6: the datastore's own test marker for this hub. Read last: it is
 	// the only check that touches the database.
@@ -244,9 +266,10 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 		EnableTestIdentities: true,
 		TestMode:             hub.TestModeConfig{Level: level, Preconditions: preconditions},
 	}
-	if level == hub.TestModeAdmin {
+	if level.IsAdminLevel() {
 		res.TestAdminGate = hub.TestAdminGateConfig{
 			HubAdmin:        true,
+			SuperAdmin:      level == hub.TestModeSuperAdmin,
 			HubID:           in.ResolvedHubID,
 			HubClass:        in.HubClass,
 			MarkerHubID:     marker.HubID,

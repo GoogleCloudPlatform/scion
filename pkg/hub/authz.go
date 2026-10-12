@@ -387,6 +387,16 @@ const (
 	// delegated credential. The fine-grained code is in
 	// Decision.AgentDelegation.
 	DeniedByAgentDelegation DeniedBy = "agent_delegation"
+
+	// DeniedByTestAdminPolicy: the test-admin policy refuses the
+	// permission to an admin-kind test identity (decide step 0c).
+	DeniedByTestAdminPolicy DeniedBy = "test_admin_policy"
+)
+
+// Deny reasons of decide step 0c.
+const (
+	testAdminPolicyDenyReason      = "test-admin policy: not available to test identities with admin roles"
+	testAdminPolicyKindErrorReason = "test-admin policy: principal kind could not be read (fail-closed)"
 )
 
 // DenyCause is a structural tag for a subset of deny reasons that callers
@@ -832,6 +842,46 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				}
 			}
 			return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+		}
+	}
+
+	// ── Step 0c: Test-admin policy (ptone/scion#4240, admin tier A2) ───
+	// An admin-kind test identity (test_hub_admin, test_super_admin) holds
+	// real hub-admin or super-admin bindings. A permission the test-admin
+	// policy classifies deny (or does not classify) is refused to it here,
+	// before any binding is evaluated, so no role, group or relationship
+	// grant can admit it. The kind is read through kindForPrincipal; a read
+	// error denies. Only user principals are checked, and only while an
+	// admin kind is enabled on this hub (otherwise no admin-kind identity
+	// holds authority: the clamp drops its bindings and the row block
+	// refuses its tokens).
+	if principal.Kind == PrincipalKindUser && testAdminPermissionDenied(permissionID) {
+		if cache := a.kindCache(); cache.adminTierOn() {
+			k, kerr := a.kindForPrincipal(ctx, principal.ID)
+			if kerr != nil || k.isTestAdmin() {
+				reason := testAdminPolicyDenyReason
+				if kerr != nil {
+					reason = testAdminPolicyKindErrorReason
+				}
+				cache.mu.Lock()
+				hook := cache.policyDenied
+				cache.mu.Unlock()
+				if hook != nil {
+					hook(ctx, principal.ID, permissionID)
+				}
+				d := Decision{Allowed: false, Reason: reason, DeniedBy: DeniedByTestAdminPolicy, AlwaysAudit: true}
+				if request.Explain {
+					d.Provenance = &DecisionProvenance{
+						Permission:      permissionID,
+						DenyReasons:     []string{reason},
+						Grants:          []GrantDetail{},
+						InactiveGrants:  []GrantDetail{},
+						Restrictions:    []RestrictionProvenance{},
+						MembershipPaths: []MembershipPathDetail{},
+					}
+				}
+				return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+			}
 		}
 	}
 

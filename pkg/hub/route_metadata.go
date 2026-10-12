@@ -72,6 +72,14 @@ type RouteMetadata struct {
 	// interactive session or dev credential with a session-only refusal
 	// (session_only_gate.go), before the permission decision.
 	SessionOnly authzop.SessionOnlyReason
+	// AlsoPermits lists further permissions the RouteHubAdmin guard
+	// accepts in place of Permission, on the same target (the first
+	// allowed decision admits the request). It is set only on a route whose
+	// handler then checks the permission the request actually needs: POST
+	// /api/v1/test-identities/admin admits test_identity.issue_super_admin
+	// as well, so an issuer token scoped to exactly that capability reaches
+	// the handler, which decides the requested kind's capability.
+	AlsoPermits []string
 }
 
 // routeMetadataTable maps every registered mux pattern to its authorization metadata.
@@ -1086,15 +1094,18 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",
 	},
-	// Admin-kind test identities (admin tier A1): test_identity.issue_admin
-	// at hub scope, held only by super-admin. The handlers return 404 unless
-	// the hub started with the test admin gate, and re-check the issuer
-	// (human, live super-admin, exact-scope hub token at most 8 h old).
+	// Admin-kind test identities (admin tier A1, A2): test_identity.issue_admin
+	// (or, for issuance, test_identity.issue_super_admin) at hub scope, held
+	// only by super-admin. The handlers return 404 unless the hub started
+	// with --test-mode=admin or above, and re-check the issuer (human, live
+	// super-admin, the requested kind's capability, exact-scope hub token at
+	// most 8 h old).
 	"POST /api/v1/test-identities/admin": {
 		Pattern: "POST /api/v1/test-identities/admin", RouteID: "testIdentities.admin.create",
 		Classification: RouteHubAdmin,
 		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
 		BearerTarget: "hub_collection",
+		AlsoPermits:  []string{"test_identity.issue_super_admin"},
 	},
 	// Revoke-all is session only, for a human super-admin (checked again in
 	// the handler).
@@ -1312,6 +1323,25 @@ func (s *Server) routePermissionDecision(r *http.Request, meta RouteMetadata) ro
 		Permission:     meta.Permission,
 		TargetEvidence: evidence,
 	})
+	for _, alt := range meta.AlsoPermits {
+		if decision.Allowed {
+			break
+		}
+		altTarget, altEvidence, ok := routeGuardTarget(RouteMetadata{Resource: meta.Resource, Permission: alt, BearerTarget: meta.BearerTarget})
+		if !ok {
+			break
+		}
+		if d := s.authzService.Decide(r.Context(), AuthzRequest{
+			Principal:      principalContextForIdentity(user),
+			Credential:     credentialContextForIdentity(user),
+			Resource:       altTarget,
+			Action:         Action(permissionAction(alt)),
+			Permission:     alt,
+			TargetEvidence: altEvidence,
+		}); d.Allowed {
+			decision = d
+		}
+	}
 	if !decision.Allowed {
 		return routePermissionDecisionResult{outcome: routePermissionForbidden, identity: identity,
 			target: target, reason: decision.Reason}

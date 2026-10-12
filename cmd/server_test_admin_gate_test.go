@@ -96,7 +96,10 @@ func TestValidateTestAdminIdentities_EachConditionRefused(t *testing.T) {
 		{"G2 value differs from PersistentHubID", func(in *testModeInputs) { in.BindingHubID = "another-hub" }, hub.ErrTestAdminHubIDMismatch},
 		{"G2 empty value", func(in *testModeInputs) { in.BindingHubID = "" }, hub.ErrTestAdminHubIDMismatch},
 		{"G2 whitespace value", func(in *testModeInputs) { in.BindingHubID = " " + tiaCmdHubID }, hub.ErrTestAdminHubIDMismatch},
-		{"G3 super-admin level", func(in *testModeInputs) { in.Level = hub.TestModeSuperAdmin }, hub.ErrTestSuperAdminRequiresPolicyRegistry},
+		{"G3 super-admin level with an incomplete policy", func(in *testModeInputs) {
+			in.Level = hub.TestModeSuperAdmin
+			in.PolicyComplete = func() error { return hub.ErrTestAdminPolicyIncomplete }
+		}, hub.ErrTestSuperAdminRequiresPolicyRegistry},
 		{"G4 class absent", func(in *testModeInputs) { in.HubClass = "" }, hub.ErrTestAdminHubClassNotTest},
 		{"G4 class other", func(in *testModeInputs) { in.HubClass = "production" }, hub.ErrTestAdminHubClassNotTest},
 		{"G4 class case", func(in *testModeInputs) { in.HubClass = "TEST" }, hub.ErrTestAdminHubClassNotTest},
@@ -174,8 +177,10 @@ func TestValidateTestAdminFlagsEarly(t *testing.T) {
 	assert.Equal(t, tiaCmdHubID, testModeHubID)
 
 	err = validateTestModeFlagsEarly(tiaStartCmd(t, "--hosted", "--test-mode=super-admin:"+tiaCmdHubID))
-	assert.ErrorIs(t, err, hub.ErrTestSuperAdminRequiresPolicyRegistry)
-	assert.Contains(t, err.Error(), "policy registry")
+	assert.NoError(t, err, "super-admin is admitted with a complete test-admin policy (G3)")
+	assert.Equal(t, hub.TestModeSuperAdmin, testModeLevel)
+	err = validateTestModeFlagsEarly(tiaStartCmd(t, "--production", "--test-mode=super-admin:"+tiaCmdHubID))
+	assert.ErrorIs(t, err, hub.ErrTestAdminProductionFlag, "explicit --production is refused for super-admin too")
 
 	err = validateTestModeFlagsEarly(tiaStartCmd(t, "--production"))
 	assert.NoError(t, err, "--production alone is not this gate's concern")

@@ -298,7 +298,7 @@ A single startup setting, `--test-mode=<level>:<hub id>`, selects which test ide
 | `off` (default) | No test identities. |
 | `member` | Member and viewer test identities (`/api/v1/test-identities`). |
 | `admin` | `member`, plus test identities with hub-admin authority (see "Test admin identities" below). |
-| `super-admin` | `admin`, plus the test super-admin kind. Refused by this release: the hub does not start. |
+| `super-admin` | `admin`, plus test identities with super-admin authority. The hub starts only when its test-admin policy classification is complete (see "Test-admin policy" below). |
 
 The level is matched exactly against these four lower-case strings. An empty value means `off`. Any other value, including a different case or a misspelling, refuses to start with an error that lists the four levels. The hub id after the colon is required for every level except `off`, and must equal the hub's resolved hub id (`server.hub.hub_id`, or the persisted id).
 
@@ -311,7 +311,7 @@ Every level except `off`, `member` included, requires all of the following. If a
 
 These are stricter than the former `--enable-test-identities` flag, which needed none of the class, marker or hub id binding. The capabilities of each level are unchanged from the flags it replaced: `member` grants what `--enable-test-identities` granted, and `admin` adds what `--enable-test-admin-identities` added.
 
-`admin` (and `super-admin`, once available) also requires:
+`admin` and `super-admin` also require:
 
 - Every signing key is local to this hub: no `--session-secret` / `SCION_SERVER_SESSION_SECRET` and no pre-configured key. This covers user and agent tokens, OIDC, signed download and artifact URLs, list cursors, conduit stream grants and the web session cookie. On a hub that predates hub-id key scoping, delete or rotate its hub signing keys before the first start with `--test-mode=admin`: a key copied forward from a legacy record keeps its original bytes.
 - No federation is configured, in the settings file or in stored settings.
@@ -324,7 +324,7 @@ At startup, for any level except `off`, the hub writes one line tagged `[scion-t
 
 The Helm chart renders only the `member` level: `hub.testIdentities.enabled: true` renders `--test-mode=member:<hub.hubId>` and requires `hub.hubClass: test`. No chart value renders `admin` or `super-admin`, and `hub.args` refuses `--test-mode`.
 
-While the test admin tier is on (`--test-mode=admin`):
+While the test admin tier is on (`--test-mode=admin` or `super-admin`):
 - Federation settings writes are refused (`422`) for every caller.
 - Only the hub's co-located Runtime Broker and the hub-managed message-broker plugin records this process provisions may register or connect. Other brokers get `403` (`test_admin_tier_remote_broker_refused`), including HA and self-managed plugins. Startup fails if any other broker record is registered and not offline, including a stale plugin record left online; remove it first.
 - The startup line tagged `[scion-test-admin-audit]` also carries the gate inputs (kinds, hub id, class, marker time, signing-key source labels), and once brokers are up a second line lists the admitted broker ids.
@@ -332,18 +332,31 @@ While the test admin tier is on (`--test-mode=admin`):
 
 On every hub, whether or not the test admin tier is on, the `scion.io/plugin` broker label is reserved: a client-supplied value is dropped on broker registration and update, and a value the hub set is kept.
 
-`GET /api/v1/test-infra/status` reports `testHubAdmin: true` while the test admin tier is on (`testSuperAdmin` stays `false` in this release), and the web banner switches to its admin variant. `GET /api/v1/admin/health/summary` reports `hub.test_admin_identities_enabled`, `hub.test_super_admin_identities_enabled` and `hub.live_test_admin_identities`.
+`GET /api/v1/test-infra/status` reports `testHubAdmin: true` while the test admin tier is on and `testSuperAdmin: true` with `--test-mode=super-admin`, and the web banner switches to its admin or super-admin variant. `GET /api/v1/admin/health/summary` reports `hub.test_admin_identities_enabled`, `hub.test_super_admin_identities_enabled` and `hub.live_test_admin_identities`.
 
 ##### Test admin identities
-On a hub started with `--test-mode=admin`, a super-admin can issue a short-lived test identity that holds the real `hub-admin` role:
+On a hub started with `--test-mode=admin`, a super-admin can issue a short-lived test identity that holds the real `hub-admin` role; with `--test-mode=super-admin`, also one that holds the real `super-admin` role:
 
-- `POST /api/v1/test-identities/admin` with `{"adminRole": "hub-admin", "purpose": "<8 to 200 characters>"}` and optional `lifetimeSeconds` (at most 3600, default 3600) and `tokenTtlSeconds` (at most 1800, default 900). It returns `201` with the identity (`kind: "test_hub_admin"`, an email in `scion-test-hub-admin.invalid`, `issuanceId`, `expiresAt`) and exactly one access token: no refresh token, no cookie, and no re-issue (`POST /api/v1/test-identities/{id}/token` answers `409`). `adminRole: "super-admin"` answers `404` in this release.
-- The caller must be a human user (not a test identity) who is, at that moment, an active super-admin through their own role bindings and holds `test_identity.issue_admin` (super-admin only). An access token is accepted only with a hub boundary, exactly the scope `test_identity:issue_admin`, and an age of at most 8 hours; it is loaded and checked again on every issuance, so revoking the token or the user's super-admin role stops the next issuance.
-- Limits: one live admin identity per issuer, two per hub; six issuances per issuer per hour.
-- The identity's `hub-admin` binding expires with the identity. While the identity lives it has exactly a human hub-admin's authority. It cannot issue test identities, create access tokens, change role, or receive other role bindings, group or project memberships.
-- Its token stops working when the identity expires, is suspended (`403`) or deleted (`401`), and when the hub restarts without `--test-mode=admin`. Authorization grants it nothing in those cases, even on a path that does not read the user record.
+- `POST /api/v1/test-identities/admin` with `{"adminRole": "hub-admin", "purpose": "<8 to 200 characters>"}` and optional `lifetimeSeconds` (at most 3600, default 3600) and `tokenTtlSeconds` (at most 1800, default 900). It returns `201` with the identity (`kind: "test_hub_admin"`, an email in `scion-test-hub-admin.invalid`, `issuanceId`, `expiresAt`) and exactly one access token: no refresh token, no cookie, and no re-issue (`POST /api/v1/test-identities/{id}/token` answers `409`).
+- `{"adminRole": "super-admin", ...}` issues `kind: "test_super_admin"` (an email in `scion-test-super-admin.invalid`, stored role `admin`) with `lifetimeSeconds` at most 1800 (default 1800) and `tokenTtlSeconds` at most 900 (default 600). It answers `404` unless the hub started with `--test-mode=super-admin`.
+- The caller must be a human user (not a test identity) who is, at that moment, an active super-admin through their own role bindings and holds the kind's capability, `test_identity.issue_admin` or `test_identity.issue_super_admin` (both super-admin only). An access token is accepted only with a hub boundary, exactly the requested kind's scope (`test_identity:issue_admin` or `test_identity:issue_super_admin`), and an age of at most 8 hours; it is loaded and checked again on every issuance, so revoking the token or the user's super-admin role stops the next issuance.
+- Limits: one live admin identity per issuer, two per hub of which at most one test super-admin; per issuer, six hub-admin and two super-admin issuances per hour.
+- The identity's `hub-admin` or `super-admin` binding expires with the identity. While the identity lives it has a human hub-admin's or super-admin's authority, minus what the test-admin policy denies (below). It cannot issue test identities, create access tokens, change role, or receive other role bindings, group or project memberships.
+- Its token stops working when the identity expires, is suspended (`403`) or deleted (`401`), and when the hub restarts without its level (`--test-mode=admin` for a test hub-admin, `--test-mode=super-admin` for a test super-admin). Authorization grants it nothing in those cases, even on a path that does not read the user record.
 - Each issuance writes a `test_admin_issue` audit record (issuer, the issuer's access token ID, kind, purpose, expiry, issuance ID; never the token) and a `[scion-test-admin-audit]` line. Every mutation the identity makes carries credential labels `test_tier`, `kind`, `issuer_id`, `issuer_credential_id`, `issuance_id` and `purpose_hash`, and the correlation ID `<issuance id>:<request id>`.
-- `POST /api/v1/test-identities/admin/revoke-all` (a human super-admin on an interactive session only) deletes every admin test identity. An identity that owns agents or is a project's last owner is suspended and loses its role bindings instead. The response lists each identity and its outcome. Then restart the hub without `--test-mode=admin`.
+- `POST /api/v1/test-identities/admin/revoke-all` (a human super-admin on an interactive session only) deletes every admin test identity. An identity that owns agents or is a project's last owner is suspended and loses its role bindings instead. The response lists each identity and its outcome. Then restart the hub without `--test-mode=admin` or `super-admin`.
+
+##### Test-admin policy
+Every permission, legacy admin route, admin role check, operational settings section and key, file-live settings key and experiment is classified `allow` or `deny` for test identities with admin roles (`pkg/hub/test_admin_policy.go`). A `deny` entry answers `403` to a test hub-admin or test super-admin even though its role holds it, and even when a group or custom role it belongs to holds the permission too; human admins are not affected. A build with an unclassified entry fails its tests, and `--test-mode=super-admin` refuses to start on a binary whose classification is incomplete.
+
+Denied to both kinds: reading or writing the server configuration (`GET`/`PUT /api/v1/admin/server-config`, section resets, the schema), every settings and experiment write (`PUT /api/v1/admin/experiments` included), federation, the GitHub App, hub environment variables and hub-scope secrets, integrations, maintenance operations, admin mode, auth reset, signing key rotation, lifecycle hook, allow list, project default, messaging and scheduler updates, hub-wide injected skills, access constraint administration, user promotion and role change, test identity issuance, delegation adoption, the GCP permission check settings, GCP identity passthrough on the co-located broker, and runtime broker credential remint and rotation. Everything else the role holds is allowed.
+
+The refusal is `403`; settings writes carry `details.reason: "test_admin_policy"`. Each refusal writes a `test_admin_policy_denial` line tagged `[scion-test-admin-audit]`.
+
+##### Test admin audit lines
+Every line tagged `[scion-test-admin-audit]` is one JSON object with `event`, `ts`, `seq` and `prev`. `seq` counts the lines of one process from 0; `prev` is the SHA-256 (hex) of the previous line as written (the whole line without its newline), and all zeros on a process's first line. A removed, inserted or edited line breaks the chain. The lines do not depend on `server.log_level` or on the decision audit experiment, and never carry a token.
+
+Besides the startup lines, issuance and revoke-all, every request a test hub-admin or test super-admin makes writes a `test_admin_request` line (method, route template, user, kind, issuance ID) before it is handled, and a `test_admin_response` line with the status and the decision (`allowed`, `denied`, `policy_denied` or `failed`). If a line cannot be written, issuance and requests by those identities answer `503` (`test_admin_audit_unavailable`); requests by every other user are unaffected.
 
 #### Admin (`/api/v1/admin`)
 - `GET /roles`: List Role Definitions.

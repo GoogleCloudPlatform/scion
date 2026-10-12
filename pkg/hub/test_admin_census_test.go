@@ -300,8 +300,9 @@ var testAdminAdminEmailsCensus = map[string]string{
 // user's role (stored or claim) with admin, keyed "file:function". A
 // test_hub_admin's stored role is member and the JWT row block refuses a
 // token whose role claim is not its kind's role, so no role gate admits
-// it; the test_super_admin kind is refused until admin tier A2 classifies
-// these gates.
+// it. A test_super_admin holds the admin role: every "role gate" entry here
+// is classified allow or deny for it in testAdminRoleGatePolicy (admin tier
+// A2, TestTestAdminPolicy_RoleGateCensus).
 var testAdminRoleAdminCensus = map[string]string{
 	"admin_delegation_adoption.go:recheckDelegationAdoptionAdmin": "role gate: admin only",
 	"admin_mode.go:adminModeWebMiddleware":                        "role gate: admin only",

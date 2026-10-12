@@ -131,8 +131,11 @@ func (s *Server) authorizePassthroughIdentity(
 	// The embedded (co-located) broker counts as owned by an unscoped local
 	// platform administrator. On single-node deployments the embedded broker
 	// is registered without a CreatedBy value, so it has no recorded owner.
+	// The test-admin policy keeps this to human admins: it would expose
+	// the co-located host's GCP identity to agents.
 	if !isAdmin && broker.Labels["scion.io/broker-role"] == "embedded" &&
-		IsUnscopedLocalPlatformAdmin(userIdent) {
+		IsUnscopedLocalPlatformAdmin(userIdent) &&
+		!s.testAdminPolicyRefuses(ctx, "passthrough_gate.go:authorizePassthroughIdentity") {
 		isAdmin = true
 	}
 

@@ -654,6 +654,15 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 // plus the session-only reason details (session_only_gate.go). An empty
 // reason writes the plain 403.
 func (s *Server) requireAdminFor(w http.ResponseWriter, r *http.Request, reason authzop.SessionOnlyReason) (UserIdentity, bool) {
+	return s.requireAdminAt(w, r, reason, routeFromContext(r.Context()))
+}
+
+// requireAdminAt is requireAdminFor for the legacy admin route site named
+// site: the RouteID of a guarded route whose guard falls back to
+// requireAdmin, or the site name a handler passes. An admin-kind test
+// identity passes only a site the test-admin policy classifies allow
+// (testAdminLegacyRoutePolicy); an unknown or empty site refuses it.
+func (s *Server) requireAdminAt(w http.ResponseWriter, r *http.Request, reason authzop.SessionOnlyReason, site string) (UserIdentity, bool) {
 	// Synthetic resource: requireAdmin is a role check on the hub itself
 	// rather than a policy check on an addressable resource.
 	// The path is only a label (it reaches the denial log), so it is the
@@ -690,6 +699,13 @@ func (s *Server) requireAdminFor(w http.ResponseWriter, r *http.Request, reason 
 		} else {
 			Forbidden(w)
 		}
+		return nil, false
+	}
+	// The role claim admits an admin-kind test identity holding the
+	// super-admin role; the test-admin policy decides the site.
+	if s.testAdminRouteRefused(r.Context(), site) {
+		logAuthzDenial(r, identity, resource, ActionManage, testAdminPolicyDenyReason)
+		Forbidden(w)
 		return nil, false
 	}
 	return user, true

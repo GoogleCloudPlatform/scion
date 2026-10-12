@@ -1,0 +1,843 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// Admin tier A2 (ptone/scion#4240): the test super-admin kind, the
+// test-admin policy enforced on live requests, and the hash-chained test
+// admin audit sink. Every identity, user and project here is synthetic, in
+// an in-memory store.
+
+// tsaServer builds a test server with the member tier and both admin
+// kinds on (--test-mode=super-admin), DB-backed operational settings, and a
+// captured test admin audit sink.
+func tsaServer(t *testing.T) (*Server, store.Store, *taSinkBuffer) {
+	t.Helper()
+	srv, s, buf := taServer(t)
+	srv.testAdminGate = testAdminGate{hubAdmin: true, superAdmin: true, hubID: taHubID, hubClass: config.HubClassTest}
+	srv.SetOperationalSettings(NewOperationalSettings(s, emptyKoanf(), emptyKoanf()))
+	return srv, s, buf
+}
+
+// tsaIssue issues an admin-kind identity of role as the super-admin
+// session u, requiring 201.
+func tsaIssue(t *testing.T, srv *Server, u *store.User, role string) TestAdminIdentityTokenResponse {
+	t.Helper()
+	rec := doRequestAsUser(t, srv, u, http.MethodPost, taPath, taBody(role))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	return taDecode(t, rec)
+}
+
+// tsaSinkLines returns the sink lines of event (all lines for "").
+func tsaSinkLines(buf *taSinkBuffer, event string) []map[string]any {
+	var out []map[string]any
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if !strings.HasPrefix(l, testAdminAuditTag+" ") {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal([]byte(strings.TrimPrefix(l, testAdminAuditTag+" ")), &m) != nil {
+			continue
+		}
+		if event == "" || m["event"] == event {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// tsaIdentity is the authenticated identity of an admin-kind row, for
+// direct Decide calls.
+func tsaIdentity(t *testing.T, s store.Store, id string) UserIdentity {
+	t.Helper()
+	u, err := s.GetUser(context.Background(), id)
+	require.NoError(t, err)
+	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeAPI))
+}
+
+// --- Issuance of the test super-admin kind (G3, TTLs, caps) -----------------
+
+func TestTestSuperAdmin_Issuance(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-iss", store.SystemRoleSuperAdmin)
+
+	// Lifetime and token TTL caps (30 min, 15 min) are enforced.
+	for _, body := range []map[string]any{
+		{"adminRole": testAdminRoleSuperAdmin, "purpose": taPurpose, "lifetimeSeconds": 1801},
+		{"adminRole": testAdminRoleSuperAdmin, "purpose": taPurpose, "tokenTtlSeconds": 901},
+	} {
+		rec := doRequestAsUser(t, srv, issuer, http.MethodPost, taPath, body)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "%v: %s", body, rec.Body.String())
+	}
+
+	before := time.Now()
+	resp := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	assert.Equal(t, store.UserKindTestSuperAdmin, resp.Identity.Kind)
+	assert.Equal(t, testAdminRoleSuperAdmin, resp.Identity.AdminRole)
+	assert.True(t, strings.HasSuffix(resp.Identity.Email, "@"+store.TestSuperAdminEmailDomain), resp.Identity.Email)
+	assert.Equal(t, store.UserRoleAdmin, resp.Identity.Role, "stored role admin")
+	assert.NotEmpty(t, resp.Identity.IssuanceID)
+	// Defaults: identity 30 min, token 10 min.
+	assert.WithinDuration(t, before.Add(30*time.Minute), resp.Identity.ExpiresAt, time.Minute)
+	assert.Equal(t, int64(600), resp.ExpiresIn)
+	assert.Equal(t, 10*time.Minute, taJWTLifetime(t, resp.AccessToken))
+	// The real, expiring super-admin binding.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, resp.Identity.ID)
+	require.NoError(t, err)
+	superRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	found := false
+	for _, b := range bindings {
+		if b.RoleDefinitionID == superRD.ID && b.ScopeType == store.RoleScopeSystem {
+			found = true
+			assert.Equal(t, store.TestIdentityIssuanceCreatedBy, b.CreatedBy)
+			require.NotNil(t, b.ExpiresAt)
+			assert.WithinDuration(t, resp.Identity.ExpiresAt, *b.ExpiresAt, time.Second, "the binding expires with the identity")
+		}
+	}
+	assert.True(t, found, "the test super-admin holds a system super-admin binding")
+	assert.True(t, srv.authzService.IsSystemAdmin(ctx, resp.Identity.ID))
+	// The token authenticates (role claim admin matches the kind).
+	assert.Equal(t, http.StatusOK, doRequestWithToken(t, srv, resp.AccessToken, http.MethodGet, "/api/v1/users/"+issuer.ID, nil).Code)
+
+	// At most one test super-admin per hub: a second issuer gets 429.
+	issuer2 := taUser(t, s, "tsa-iss2", store.SystemRoleSuperAdmin)
+	rec := doRequestAsUser(t, srv, issuer2, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	assert.Equal(t, testAdminReasonSuperAdminCap, taReason(t, rec))
+
+	// Two super-admin issuances per issuer per hour: expire the identities
+	// (freeing the caps) and the third issuance in the hour is refused.
+	srv.testIdentities.now = func() time.Time { return time.Now().Add(31 * time.Minute) }
+	tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	srv.testIdentities.now = func() time.Time { return time.Now().Add(62 * time.Minute) }
+	rec = doRequestAsUser(t, srv, issuer, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	assert.Equal(t, testIdentityReasonRateLimited, taReason(t, rec))
+}
+
+// The super-admin kind answers 404 on a hub started with
+// --test-mode=admin, as in A1.
+func TestTestSuperAdmin_OffWithAdminLevel404(t *testing.T) {
+	srv, s, _ := taServer(t)
+	issuer := taUser(t, s, "tsa-off", store.SystemRoleSuperAdmin)
+	rec := doRequestAsUser(t, srv, issuer, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+}
+
+// Issuer tokens: a hub token scoped to exactly test_identity:issue_super_admin
+// issues the super-admin kind (the route guard also admits that
+// capability); it does not issue the hub-admin kind, and an issue_admin
+// token does not issue the super-admin kind. A hub-admin is refused.
+func TestTestSuperAdmin_IssuerTokens(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	issuer := taUser(t, s, "tsa-pat", store.SystemRoleSuperAdmin)
+	superKey, superTokID := taPAT(t, srv, issuer.ID, uatScopeTestIdentityIssueSuperAdmin)
+	adminKey, _ := taPAT(t, srv, issuer.ID, "test_identity:issue_admin")
+
+	rec := doRequestWithToken(t, srv, superKey, http.MethodPost, taPath, taBody(testAdminRoleHubAdmin))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "issue_super_admin token, hub-admin kind: %s", rec.Body.String())
+	rec = doRequestWithToken(t, srv, adminKey, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "issue_admin token, super-admin kind: %s", rec.Body.String())
+	rec = doRequestWithToken(t, srv, superKey, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	resp := taDecode(t, rec)
+	row, err := s.GetUser(context.Background(), resp.Identity.ID)
+	require.NoError(t, err)
+	require.NotNil(t, row.IssuerCredentialID)
+	assert.Equal(t, superTokID, *row.IssuerCredentialID)
+
+	hubAdmin := taUser(t, s, "tsa-pat-hubadmin", store.SystemRoleHubAdmin)
+	rec = doRequestAsUser(t, srv, hubAdmin, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	// A test identity never issues, not even a test super-admin.
+	rec = doRequestWithToken(t, srv, resp.AccessToken, http.MethodPost, taPath, taBody(testAdminRoleHubAdmin))
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
+// --- The test-admin policy on live requests --------------------------------
+
+// tsaDenyRoutes are the deny-set and default-deny routes the matrix
+// exercises: every server configuration and settings surface, the GitHub
+// app, hub environment variables, maintenance, auth reset, key rotation,
+// integrations, access constraint administration, issuance and delegation
+// adoption (a legacy role-claim admin route).
+var tsaDenyRoutes = []struct {
+	method, path string
+	body         any
+	// humanOK is true when a human super-admin gets 200 on the test server.
+	humanOK bool
+}{
+	{http.MethodGet, "/api/v1/admin/server-config", nil, true},
+	{http.MethodGet, "/api/v1/admin/server-config/schema", nil, false},
+	{http.MethodPut, "/api/v1/admin/server-config", map[string]any{"telemetry": map[string]any{"enabled": true}}, false},
+	{http.MethodGet, "/api/v1/admin/experiments", nil, true},
+	{http.MethodPut, "/api/v1/admin/experiments", map[string]any{"overrides": map[string]any{experiments.AgentEdit: true}, "expected_revision": 0}, false},
+	{http.MethodPut, "/api/v1/admin/messaging", map[string]any{}, false},
+	{http.MethodPut, "/api/v1/admin/project-defaults", map[string]any{}, false},
+	{http.MethodPut, "/api/v1/admin/profiling", map[string]any{}, false},
+	{http.MethodGet, "/api/v1/github-app", nil, false},
+	{http.MethodGet, "/api/v1/env?scope=hub", nil, true},
+	{http.MethodGet, "/api/v1/admin/maintenance/operations", nil, false},
+	{http.MethodPost, "/api/v1/admin/agents/reset-auth-all", nil, false},
+	{http.MethodPost, "/api/v1/admin/conduit/grant-keys/rotate", nil, false},
+	{http.MethodGet, "/api/v1/admin/integrations", nil, false},
+	{http.MethodPost, "/api/v1/admin/access-constraint-previews", map[string]any{}, false},
+	{http.MethodPost, "/api/v1/test-identities", map[string]any{"role": "member"}, false},
+	{http.MethodGet, "/api/v1/admin/delegation-adoption", nil, false},
+}
+
+// Every deny-set route answers 403 to both admin kinds, including the
+// role-claim admin routes, while a human super-admin passes the policy
+// (200 where the test server can serve the route). Every settings section
+// reset is refused too.
+func TestTestAdminPolicy_DenySetRoutes(t *testing.T) {
+	srv, s, buf := tsaServer(t)
+	issuer := taUser(t, s, "tsa-deny-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "tsa-deny-iss2", store.SystemRoleSuperAdmin)
+	superKind := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	hubKind := tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin)
+	human := taTokenFor(t, srv, taUser(t, s, "tsa-deny-human", store.SystemRoleSuperAdmin))
+
+	for _, rt := range tsaDenyRoutes {
+		for who, token := range map[string]string{"test_super_admin": superKind.AccessToken, "test_hub_admin": hubKind.AccessToken} {
+			rec := doRequestWithToken(t, srv, token, rt.method, rt.path, rt.body)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s %s: %s", who, rt.method, rt.path, rec.Body.String())
+		}
+		rec := doRequestWithToken(t, srv, human, rt.method, rt.path, rt.body)
+		assert.NotContains(t, []int{http.StatusUnauthorized, http.StatusForbidden}, rec.Code,
+			"human super-admin %s %s passes the policy: %s", rt.method, rt.path, rec.Body.String())
+		if rt.humanOK {
+			assert.Equal(t, http.StatusOK, rec.Code, "human super-admin %s %s: %s", rt.method, rt.path, rec.Body.String())
+		}
+	}
+	for _, sec := range []string{"access", "telemetry", "federation", "experiments", "maintenance", "runtimes"} {
+		rec := doRequestWithToken(t, srv, superKind.AccessToken, http.MethodDelete, "/api/v1/admin/server-config/sections/"+sec, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "section reset %s: %s", sec, rec.Body.String())
+	}
+
+	// Each refusal of the test super-admin is in the sink, with its
+	// issuance ID.
+	denials := tsaSinkLines(buf, testAdminAuditEventPolicyDenial)
+	require.NotEmpty(t, denials)
+	subjects := map[string]bool{}
+	for _, d := range denials {
+		if d["issuance_id"] == superKind.Identity.IssuanceID {
+			subjects[d["class"].(string)+":"+d["subject"].(string)] = true
+		}
+	}
+	for _, want := range []string{"permission:hub.config.read", "permission:hub.experiments.update", "role_gate:handlers_env_secrets.go:authorizeHubEnvVarList",
+		"permission:hub.github_app.read", "legacy_route:admin.delegationAdoption"} {
+		assert.True(t, subjects[want], "sink policy denial %s; got %v", want, subjects)
+	}
+}
+
+// Decide: every deny-classified permission is refused to both admin kinds
+// at step 0c (before any binding), and every allow-classified permission
+// decides for a test super-admin exactly as for a human super-admin.
+func TestTestAdminPolicy_DecideMatrix(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-dm-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "tsa-dm-iss2", store.SystemRoleSuperAdmin)
+	superKind := tsaIdentity(t, s, tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin).Identity.ID)
+	hubKind := tsaIdentity(t, s, tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin).Identity.ID)
+	human := tsaIdentity(t, s, taUser(t, s, "tsa-dm-human", store.SystemRoleSuperAdmin).ID)
+	decide := func(u UserIdentity, p permissions.Permission) Decision {
+		return srv.authzService.Decide(ctx, AuthzRequest{
+			Principal: principalContextForIdentity(u), Credential: credentialContextForIdentity(u),
+			Resource: Resource{Type: p.Resource, ID: "hub"}, Permission: p.ID,
+		})
+	}
+	denied, allowed := 0, 0
+	for _, p := range permissions.Registry {
+		h := decide(human, p)
+		if testAdminPermissionDenied(p.ID) {
+			denied++
+			for who, u := range map[string]UserIdentity{"test_super_admin": superKind, "test_hub_admin": hubKind} {
+				d := decide(u, p)
+				assert.False(t, d.Allowed, "%s %s", who, p.ID)
+				if h.Reason == deliveryGateReason {
+					continue // the delivery credential gate (step 0) refuses every user first
+				}
+				assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, "%s %s: %s", who, p.ID, d.Reason)
+			}
+			continue
+		}
+		allowed++
+		d := decide(superKind, p)
+		assert.Equal(t, h.Allowed, d.Allowed, "allow-classified %s: test super-admin decides as a human super-admin (%s / %s)", p.ID, h.Reason, d.Reason)
+	}
+	assert.Greater(t, denied, 20)
+	assert.Greater(t, allowed, 80)
+	// A human super-admin holds the caged permissions.
+	for _, id := range []string{"hub.config.update", "hub.config.read", "hub.experiments.update", "hub.env_vars.read"} {
+		assert.True(t, decide(human, permissions.Permission{ID: id, Resource: permissions.ResourceHub}).Allowed, id)
+	}
+}
+
+// A test super-admin in a group that holds super-admin, and in a group
+// whose custom role holds the caged permissions, is still refused the
+// caged routes and permissions.
+func TestTestAdminPolicy_GroupPathStillCaged(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-grp-iss", store.SystemRoleSuperAdmin)
+	resp := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+
+	superGroup := tiGroupWithSystemRole(t, s, "tsa-super-group", store.SystemRoleHubMember, issuer.ID)
+	taRawGroupBinding(t, s, superGroup.ID, store.SystemRoleSuperAdmin)
+	tiAddToGroup(t, s, superGroup.ID, resp.Identity.ID, store.GroupMemberRoleMember)
+
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{ID: generateID(), Name: "tsa-caged-" + generateID()[:6],
+		ScopeType: store.RoleScopeSystem, Permissions: []string{"hub.config.read", "hub.config.update", "hub.experiments.update"}})
+	require.NoError(t, err)
+	customGroup := tiGroupWithSystemRole(t, s, "tsa-custom-group", store.SystemRoleHubMember, issuer.ID)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalGroup,
+		PrincipalID: customGroup.ID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
+	require.NoError(t, err)
+	tiAddToGroup(t, s, customGroup.ID, resp.Identity.ID, store.GroupMemberRoleMember)
+
+	for _, rt := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/admin/server-config"},
+		{http.MethodPut, "/api/v1/admin/experiments"},
+		{http.MethodGet, "/api/v1/admin/delegation-adoption"},
+	} {
+		rec := doRequestWithToken(t, srv, resp.AccessToken, rt.method, rt.path, map[string]any{})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", rt.method, rt.path, rec.Body.String())
+	}
+	u := tsaIdentity(t, s, resp.Identity.ID)
+	for _, id := range []string{"hub.config.read", "hub.config.update", "hub.experiments.update"} {
+		d := srv.authzService.Decide(ctx, AuthzRequest{Principal: principalContextForIdentity(u), Credential: credentialContextForIdentity(u),
+			Resource: Resource{Type: permissions.ResourceHub, ID: "hub"}, Permission: id})
+		assert.False(t, d.Allowed, id)
+		assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, id)
+	}
+}
+
+// Legacy admin routes and role-claim gates: an allow-classified legacy
+// site reaches its handler for a test super-admin; a deny-classified or
+// unknown site refuses it; humans are never refused; a deny role gate
+// (hub environment variables) refuses it.
+func TestTestAdminPolicy_LegacyRoutesAndRoleGates(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	issuer := taUser(t, s, "tsa-lr-iss", store.SystemRoleSuperAdmin)
+	resp := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	superID := tsaIdentity(t, s, resp.Identity.ID)
+	humanID := tsaIdentity(t, s, taUser(t, s, "tsa-lr-human", store.SystemRoleSuperAdmin).ID)
+
+	run := func(u UserIdentity, site string) int {
+		req := httptest.NewRequest(http.MethodPost, "/x", nil)
+		ctx := contextWithIdentity(req.Context(), u)
+		ctx = context.WithValue(ctx, userContextKey{}, u)
+		rec := httptest.NewRecorder()
+		if _, ok := srv.requireAdminAt(rec, req.WithContext(ctx), "", site); ok {
+			return http.StatusOK
+		}
+		return rec.Code
+	}
+	for _, site := range []string{"agents.hold.lift", "users.sessions.revoke"} {
+		assert.Equal(t, http.StatusOK, run(superID, site), site)
+	}
+	for _, site := range []string{"admin.delegationAdoption", "admin.delegationAdoption.commits", "", "unknown.site"} {
+		assert.Equal(t, http.StatusForbidden, run(superID, site), "site %q", site)
+		assert.Equal(t, http.StatusOK, run(humanID, site), "human, site %q", site)
+	}
+
+	// users.sessions.revoke (allow) reaches the handler over HTTP.
+	target := taUser(t, s, "tsa-lr-target", store.SystemRoleHubMember)
+	rec := doRequestWithToken(t, srv, resp.AccessToken, http.MethodPost, "/api/v1/users/"+target.ID+"/revoke-sessions", nil)
+	assert.NotEqual(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	// Role gates: the hub environment variable list and hub-scope
+	// variables are refused; a human super-admin lists them.
+	assert.Equal(t, http.StatusForbidden, doRequestWithToken(t, srv, resp.AccessToken, http.MethodGet, "/api/v1/env?scope=hub", nil).Code)
+	assert.True(t, srv.testAdminPolicyRefuses(contextWithIdentityAndUser(superID), "handlers_env_secrets.go:resolveEnvSecretAccess"))
+	assert.False(t, srv.testAdminPolicyRefuses(contextWithIdentityAndUser(humanID), "handlers_env_secrets.go:resolveEnvSecretAccess"))
+	assert.False(t, srv.testAdminPolicyRefuses(contextWithIdentityAndUser(superID), "web.go:authorizeSSESubjects"), "allow gate")
+	assert.True(t, srv.testAdminPolicyRefuses(contextWithIdentityAndUser(superID), "unclassified.go:gate"), "an unclassified gate refuses")
+	assert.True(t, srv.testAdminPolicyRefusesUser(context.Background(), resp.Identity.ID, "admin_delegation_adoption.go:recheckDelegationAdoptionAdmin"))
+	assert.False(t, srv.testAdminPolicyRefusesUser(context.Background(), humanID.ID(), "admin_delegation_adoption.go:recheckDelegationAdoptionAdmin"))
+	ctxSuper := contextWithIdentityAndUser(superID)
+	assert.False(t, gcpIAMHubAdmin(ctxSuper) && !srv.testAdminPolicyRefuses(ctxSuper, "gcp_iam_settings.go:gcpIAMHubAdmin"))
+
+	// Broker credential remint and rotation (key material): the
+	// super-admin arm admits a human, not a test super-admin.
+	broker := &store.RuntimeBroker{ID: generateID(), Name: "tsa-broker"}
+	assert.False(t, srv.brokerRemintTargetAuthorized(ctxSuper, superID, broker))
+	assert.True(t, srv.brokerRemintTargetAuthorized(contextWithIdentityAndUser(humanID), humanID, broker))
+	ok, err := srv.authorizedForBrokerRotate(ctxSuper, superID, nil, broker.ID, func() (*store.RuntimeBroker, error) { return broker, nil })
+	require.NoError(t, err)
+	assert.False(t, ok)
+	ok, err = srv.authorizedForBrokerRotate(contextWithIdentityAndUser(humanID), humanID, nil, broker.ID, func() (*store.RuntimeBroker, error) { return broker, nil })
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func contextWithIdentityAndUser(u UserIdentity) context.Context {
+	ctx := contextWithIdentity(context.Background(), u)
+	ctx = context.WithValue(ctx, userContextKey{}, u)
+	return contextWithCredentialContext(ctx, credentialContextForIdentity(u))
+}
+
+// The operational settings write guard refuses every section write and
+// delete by an admin-kind identity; human and background writes pass. The
+// settings.yaml and experiment handlers refuse before writing.
+func TestTestAdminPolicy_SettingsWriteGuard(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	issuer := taUser(t, s, "tsa-sw-iss", store.SystemRoleSuperAdmin)
+	resp := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	superCtx := contextWithIdentityAndUser(tsaIdentity(t, s, resp.Identity.ID))
+	humanCtx := contextWithIdentityAndUser(tsaIdentity(t, s, issuer.ID))
+	ops := srv.GetOperationalSettings()
+	require.NotNil(t, ops)
+	for _, sec := range tsaSectionNames() {
+		_, err := ops.Update(superCtx, sec, json.RawMessage(`{}`), "x", -1, "managed")
+		assert.ErrorIs(t, err, errTestAdminSettingsRefused, sec)
+		assert.ErrorIs(t, ops.DeleteSection(superCtx, sec), errTestAdminSettingsRefused, sec)
+		assert.NoError(t, srv.testAdminSettingsWriteGuard(humanCtx, sec), sec)
+		assert.NoError(t, srv.testAdminSettingsWriteGuard(context.Background(), sec), sec)
+	}
+
+	// Handler-level refusals (defense in depth behind the route guard).
+	r := httptest.NewRequest(http.MethodPut, "/x", nil).WithContext(superCtx)
+	rec := httptest.NewRecorder()
+	assert.True(t, srv.rejectTestAdminSettingsWrite(rec, r, []string{"telemetry.enabled"}, nil))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, testAdminReasonPolicyDenied, taReason(t, rec))
+	rec = httptest.NewRecorder()
+	assert.True(t, srv.rejectTestAdminSettingsWrite(rec, r, nil, []string{experiments.AuthorizationDecisionAuditV2}))
+	rec = httptest.NewRecorder()
+	assert.True(t, srv.rejectTestAdminSettingsWrite(rec, r, nil, nil), "an empty write is refused")
+	rec = httptest.NewRecorder()
+	assert.False(t, srv.rejectTestAdminSettingsWrite(rec, r.WithContext(humanCtx), []string{"telemetry.enabled"}, []string{experiments.AgentEdit}))
+}
+
+// tsaSectionNames lists every classified operational settings section.
+func tsaSectionNames() []string {
+	var out []string
+	for k := range testAdminSettingsSectionPolicy {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// --- The test admin audit sink on live requests ----------------------------
+
+// Every request by an admin-kind identity yields one chained request line
+// (before the handler) and one response line (status, decision,
+// issuance_id); human requests yield none; the chain verifies, and a
+// deleted line is detected.
+func TestTestAdminSink_EveryAdminRequestChained(t *testing.T) {
+	srv, s, buf := tsaServer(t)
+	issuer := taUser(t, s, "tsa-sink-iss", store.SystemRoleSuperAdmin)
+	resp := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	human := taTokenFor(t, srv, issuer)
+	startReq := len(tsaSinkLines(buf, testAdminAuditEventRequest))
+
+	requests := []struct {
+		method, path string
+		decision     string
+		route        string
+	}{
+		{http.MethodGet, "/api/v1/users/" + issuer.ID, "allowed", "/api/v1/users/"},
+		{http.MethodGet, "/api/v1/admin/server-config", "policy_denied", "/api/v1/admin/server-config"},
+		{http.MethodGet, "/api/v1/projects", "allowed", ""},
+		{http.MethodGet, "/api/v1/no-such-route-" + generateID()[:6], "failed", ""},
+	}
+	for _, rq := range requests {
+		doRequestWithToken(t, srv, resp.AccessToken, rq.method, rq.path, nil)
+	}
+	for i := 0; i < 3; i++ {
+		doRequestWithToken(t, srv, human, http.MethodGet, "/api/v1/admin/server-config", nil)
+	}
+	reqLines := tsaSinkLines(buf, testAdminAuditEventRequest)[startReq:]
+	respLines := tsaSinkLines(buf, testAdminAuditEventResponse)
+	require.Len(t, reqLines, len(requests), "one request line per admin-kind request, none for human requests")
+	require.Len(t, respLines, len(requests))
+	for i, rq := range requests {
+		for _, l := range []map[string]any{reqLines[i], respLines[i]} {
+			assert.Equal(t, resp.Identity.IssuanceID, l["issuance_id"])
+			assert.Equal(t, resp.Identity.ID, l["user_id"])
+			assert.Equal(t, store.UserKindTestSuperAdmin, l["kind"])
+			assert.Equal(t, rq.method, l["method"])
+			if rq.route != "" {
+				assert.Equal(t, rq.route, l["route"], rq.path)
+			}
+		}
+		assert.Equal(t, rq.decision, respLines[i]["decision"], rq.path)
+		assert.NotNil(t, respLines[i]["status"])
+	}
+	assert.EqualValues(t, http.StatusForbidden, respLines[1]["status"])
+
+	n, err := verifyTestAdminAuditChain(strings.NewReader(buf.String()))
+	require.NoError(t, err)
+	assert.Equal(t, len(tsaSinkLines(buf, "")), n)
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	require.Greater(t, len(lines), 3)
+	_, err = verifyTestAdminAuditChain(strings.NewReader(strings.Join(append(append([]string(nil), lines[:2]...), lines[3:]...), "\n")))
+	assert.ErrorIs(t, err, errTestAdminAuditChainBroken, "deleting a line breaks the chain")
+}
+
+// A sink write failure refuses issuance and admin-kind requests with 503
+// before the handler runs; human requests are unaffected.
+func TestTestAdminSink_FailClosed(t *testing.T) {
+	srv, s, buf := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-fc-iss", store.SystemRoleSuperAdmin)
+	resp := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+
+	buf.mu.Lock()
+	buf.err = errors.New("journal unavailable")
+	buf.mu.Unlock()
+
+	groupsBefore, err := s.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+	rec := doRequestWithToken(t, srv, resp.AccessToken, http.MethodPost, "/api/v1/groups", map[string]any{"name": "tsa-fc-group", "slug": "tsa-fc-group"})
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeTestAdminAuditUnavailable)
+	groupsAfter, err := s.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+	assert.Equal(t, len(groupsBefore.Items), len(groupsAfter.Items), "the handler did not run")
+	assert.Equal(t, http.StatusServiceUnavailable, doRequestWithToken(t, srv, resp.AccessToken, http.MethodGet, "/api/v1/users/"+issuer.ID, nil).Code)
+
+	// Human requests are unaffected.
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, srv, issuer, http.MethodGet, "/api/v1/users/"+issuer.ID, nil).Code)
+	// Issuance fails closed.
+	issuer2 := taUser(t, s, "tsa-fc-iss2", store.SystemRoleSuperAdmin)
+	rec = doRequestAsUser(t, srv, issuer2, http.MethodPost, taPath, taBody(testAdminRoleHubAdmin))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+}
+
+// Turning the decision audit experiment off (by a human) does not reduce
+// the sink lines an admin-kind request writes.
+func TestTestAdminSink_DecisionAuditExperimentIndependent(t *testing.T) {
+	srv, s, buf := tsaServer(t)
+	issuer := taUser(t, s, "tsa-exp-iss", store.SystemRoleSuperAdmin)
+	resp := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	setExperiment := func(on bool) {
+		rec := doRequestAsUser(t, srv, issuer, http.MethodGet, "/api/v1/admin/experiments", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var cur adminExperimentsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &cur))
+		rec = doRequestAsUser(t, srv, issuer, http.MethodPut, "/api/v1/admin/experiments", map[string]any{
+			"overrides": map[string]any{experiments.AuthorizationDecisionAuditV2: on}, "expected_revision": cur.Revision})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Equal(t, on, srv.experimentEnabled(experiments.AuthorizationDecisionAuditV2))
+	}
+	batch := func() int {
+		before := len(tsaSinkLines(buf, ""))
+		doRequestWithToken(t, srv, resp.AccessToken, http.MethodGet, "/api/v1/users/"+issuer.ID, nil)
+		doRequestWithToken(t, srv, resp.AccessToken, http.MethodGet, "/api/v1/admin/server-config", nil)
+		return len(tsaSinkLines(buf, "")) - before
+	}
+	setExperiment(true)
+	on := batch()
+	setExperiment(false)
+	off := batch()
+	assert.Equal(t, on, off, "the sink does not depend on the decision audit experiment")
+	assert.GreaterOrEqual(t, off, 5, "two request lines, two response lines and a policy denial")
+	_, err := verifyTestAdminAuditChain(strings.NewReader(buf.String()))
+	require.NoError(t, err)
+}
+
+// No token appears in any sink line or log line written while identities
+// are issued and used (golden: the issued tokens, the issuer's session
+// token, and any bearer or JWT-shaped string).
+func TestTestAdminSink_NoTokenInSinkOrLogs(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	srv, s, buf := tsaServer(t)
+	issuer := taUser(t, s, "tsa-tok-iss", store.SystemRoleSuperAdmin)
+	issuerToken := taTokenFor(t, srv, issuer)
+	patKey, _ := taPAT(t, srv, issuer.ID, uatScopeTestIdentityIssueSuperAdmin)
+	rec := doRequestWithToken(t, srv, patKey, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	superKind := taDecode(t, rec)
+	issuer2 := taUser(t, s, "tsa-tok-iss2", store.SystemRoleSuperAdmin)
+	hubKind := tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin)
+	for _, tok := range []string{superKind.AccessToken, hubKind.AccessToken} {
+		doRequestWithToken(t, srv, tok, http.MethodGet, "/api/v1/users/"+issuer.ID, nil)
+		doRequestWithToken(t, srv, tok, http.MethodGet, "/api/v1/admin/server-config", nil)
+		doRequestWithToken(t, srv, tok, http.MethodPut, "/api/v1/admin/experiments", map[string]any{})
+	}
+	doRequestWithToken(t, srv, issuerToken, http.MethodPost, taRevokeAllPath, nil)
+
+	sink := buf.String()
+	require.NotEmpty(t, tsaSinkLines(buf, testAdminAuditEventRequest))
+	for name, out := range map[string]string{"sink": sink, "logs": logs.String()} {
+		for _, secret := range []string{superKind.AccessToken, hubKind.AccessToken, issuerToken, patKey} {
+			require.NotEmpty(t, secret)
+			assert.NotContains(t, out, secret, "%s carries a token", name)
+		}
+		assert.NotContains(t, out, "Bearer ", name)
+	}
+	assert.NotContains(t, sink, "eyJ", "no JWT-shaped value in the sink")
+	for _, l := range tsaSinkLines(buf, "") {
+		for k := range l {
+			assert.NotContains(t, []string{"token", "access_token", "accessToken", "authorization"}, k)
+		}
+	}
+}
+
+// --- Last human super-admin ----------------------------------------------------
+
+// What a test super-admin can do to the last human super-admin: it cannot
+// delete, suspend or demote it, nor remove its super-admin binding (the
+// last-admin and constraint-admin guards do not count test identities); it
+// can revoke its web sessions (the human signs in again). With a second
+// human admin it can remove the first human's super-admin binding, and the
+// admin_emails reconcile at restart restores it.
+func TestTestSuperAdmin_LastHumanAdmin(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	lastHuman := taUser(t, s, "tsa-last-human", store.SystemRoleSuperAdmin)
+	resp := tsaIssue(t, srv, lastHuman, testAdminRoleSuperAdmin)
+	tok := resp.AccessToken
+	superRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	// Make lastHuman the only human super-admin: remove every other human's
+	// super-admin binding (the seeded development user's, for one).
+	system, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	for _, b := range system {
+		if b.RoleDefinitionID != superRD.ID || b.PrincipalType != store.RoleBindingPrincipalUser || b.PrincipalID == lastHuman.ID {
+			continue
+		}
+		if u, err := s.GetUser(ctx, b.PrincipalID); err == nil && !u.IsHumanKind() {
+			continue
+		}
+		require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+	}
+	bindingOf := func(userID string) *store.RoleBinding {
+		bs, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+		require.NoError(t, err)
+		for _, b := range bs {
+			if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == superRD.ID {
+				return b
+			}
+		}
+		return nil
+	}
+	stillAdmin := func(what string) {
+		u, err := s.GetUser(ctx, lastHuman.ID)
+		require.NoError(t, err, what)
+		assert.Equal(t, store.UserStatusActive, u.Status, what)
+		assert.Equal(t, store.UserRoleAdmin, u.Role, what)
+		assert.NotNil(t, bindingOf(lastHuman.ID), what)
+	}
+
+	rec := doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/users/"+lastHuman.ID, nil)
+	t.Logf("delete last human super-admin: %d %s", rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	stillAdmin("delete")
+	rec = doRequestWithToken(t, srv, tok, http.MethodPatch, "/api/v1/users/"+lastHuman.ID, map[string]any{"status": store.UserStatusSuspended})
+	t.Logf("suspend last human super-admin: %d %s", rec.Code, rec.Body.String())
+	assert.GreaterOrEqual(t, rec.Code, 400)
+	stillAdmin("suspend")
+	rec = doRequestWithToken(t, srv, tok, http.MethodPatch, "/api/v1/users/"+lastHuman.ID, map[string]any{"role": store.UserRoleMember})
+	t.Logf("demote last human super-admin: %d %s", rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code, "user.promote is denied to test identities")
+	stillAdmin("demote")
+	b := bindingOf(lastHuman.ID)
+	require.NotNil(t, b)
+	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/admin/role-bindings/"+b.ID, nil)
+	t.Logf("remove last human super-admin binding: %d %s", rec.Code, rec.Body.String())
+	assert.GreaterOrEqual(t, rec.Code, 400)
+	stillAdmin("binding removal")
+	rec = doRequestWithToken(t, srv, tok, http.MethodPost, "/api/v1/users/"+lastHuman.ID+"/revoke-sessions", nil)
+	t.Logf("revoke last human super-admin sessions: %d %s", rec.Code, rec.Body.String())
+	assert.Less(t, rec.Code, 300, "web session revocation is allowed (users.sessions.revoke)")
+
+	// With a second human admin, the first human's binding can go; the
+	// admin_emails reconcile at restart restores it.
+	second := taUser(t, s, "tsa-second-human", store.SystemRoleSuperAdmin)
+	require.NotNil(t, bindingOf(second.ID))
+	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/admin/role-bindings/"+b.ID, nil)
+	t.Logf("remove a non-last human super-admin binding: %d %s", rec.Code, rec.Body.String())
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	assert.Nil(t, bindingOf(lastHuman.ID))
+	_, err = ReconcileSuperAdminBindings(ctx, s, []string{lastHuman.Email, second.Email}, "member")
+	require.NoError(t, err)
+	stillAdmin("after reconcile")
+	assert.NotNil(t, bindingOf(resp.Identity.ID), "reconcile leaves the test super-admin alone")
+}
+
+// --- AE-1 scenario (consumer ae-lead) -------------------------------------------
+
+// A test super-admin verifies agent absence by reads (with a visibility
+// control: a project with known live agents returns exactly that count),
+// then removes a test-login-style human user's leftovers on the general
+// routes, resource by resource: agents, then the project, then the user.
+// The user delete is refused while the user still owns live agents and
+// while it is a project's last owner. Every request is in the sink with
+// the issuance ID.
+func TestTestSuperAdmin_AE1Scenario(t *testing.T) {
+	srv, s, buf := tsaServer(t)
+	ctx := context.Background()
+
+	hex := generateID()[:8]
+	human := &store.User{ID: generateID(), Email: "test-fixture-" + hex + "@scion-test.invalid", DisplayName: "test-fixture-" + hex,
+		Role: store.UserRoleMember, Status: store.UserStatusActive}
+	require.NoError(t, s.CreateUser(ctx, human))
+	ensureHubMembership(ctx, s, human.ID)
+	projectID := tid("tsa-ae1-project")
+	taProject(t, s, projectID, human.ID)
+	var live, deleted []string
+	for i := 0; i < 6; i++ {
+		a := &store.Agent{ID: generateID(), Slug: "tsa-ae1-" + string(rune('a'+i)), Name: "ae1 " + string(rune('a'+i)),
+			ProjectID: projectID, Phase: "stopped", CreatedBy: human.ID, OwnerID: human.ID}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		if i >= 4 {
+			a.DeletedAt = time.Now()
+			require.NoError(t, s.UpdateAgent(ctx, a))
+			deleted = append(deleted, a.ID)
+			continue
+		}
+		live = append(live, a.ID)
+	}
+	controlOwner := &store.User{ID: generateID(), Email: "tsa-ae1-control-" + hex + "@example.com", DisplayName: "control",
+		Role: store.UserRoleMember, Status: store.UserStatusActive}
+	require.NoError(t, s.CreateUser(ctx, controlOwner))
+	ensureHubMembership(ctx, s, controlOwner.ID)
+	controlProject := tid("tsa-ae1-control")
+	taProject(t, s, controlProject, controlOwner.ID)
+	const controlLive = 3
+	for i := 0; i < controlLive; i++ {
+		require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: generateID(), Slug: "tsa-ae1-ctl-" + string(rune('a'+i)), Name: "ctl " + string(rune('a'+i)),
+			ProjectID: controlProject, Phase: "stopped", CreatedBy: controlOwner.ID, OwnerID: controlOwner.ID}))
+	}
+
+	issuer := taUser(t, s, "tsa-ae1-issuer", store.SystemRoleSuperAdmin)
+	resp := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	tok := resp.AccessToken
+	get := func(path string) *httptest.ResponseRecorder {
+		return doRequestWithToken(t, srv, tok, http.MethodGet, path, nil)
+	}
+	count := func(body, prefix string) int { return strings.Count(body, `"slug":"`+prefix) }
+	byProject := "/api/v1/agents?projectId=" + projectID + "&includeDeleted=true"
+	byOwner := "/api/v1/agents?ownerId=" + human.ID + "&includeDeleted=true"
+	liveByProject := "/api/v1/agents?projectId=" + projectID
+
+	// Reads: the user, the project, every agent, and the lists with known
+	// counts; the control project returns exactly its live agents.
+	for _, path := range []string{"/api/v1/users?search=scion-test.invalid", "/api/v1/users/" + human.ID, "/api/v1/projects/" + projectID} {
+		assert.Equal(t, http.StatusOK, get(path).Code, path)
+	}
+	for _, id := range append(append([]string(nil), live...), deleted...) {
+		rec := get("/api/v1/agents/" + id)
+		assert.Contains(t, []int{http.StatusOK, http.StatusNotFound}, rec.Code, "GET agent %s: %s", id, rec.Body.String())
+	}
+	for _, id := range live {
+		assert.Equal(t, http.StatusOK, get("/api/v1/agents/"+id).Code, "a live agent is readable")
+	}
+	for path, want := range map[string]int{byProject: 6, byOwner: 6, liveByProject: 4} {
+		rec := get(path)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, want, count(rec.Body.String(), "tsa-ae1-")-count(rec.Body.String(), "tsa-ae1-ctl-"), path)
+	}
+	for _, path := range []string{"/api/v1/agents?projectId=" + controlProject + "&includeDeleted=true", "/api/v1/agents?ownerId=" + controlOwner.ID + "&includeDeleted=true"} {
+		rec := get(path)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, controlLive, count(rec.Body.String(), "tsa-ae1-ctl-"), "visibility control: %s", path)
+	}
+
+	// The user delete is refused while the user owns live agents.
+	rec := doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/users/"+human.ID, nil)
+	t.Logf("user delete with live agents: %d %s", rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	// Agents, one by one.
+	for _, id := range live {
+		rec := doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/agents/"+id, nil)
+		require.Less(t, rec.Code, 300, "DELETE agent %s: %s", id, rec.Body.String())
+	}
+	rec = get(liveByProject)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Zero(t, count(rec.Body.String(), "tsa-ae1-"), "no live agent is left")
+	// Still the project's last owner: refused.
+	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/users/"+human.ID, nil)
+	t.Logf("user delete while last project owner: %d %s", rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	// The project, then the user.
+	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/projects/"+projectID, nil)
+	require.Less(t, rec.Code, 300, "DELETE project: %s", rec.Body.String())
+	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/users/"+human.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	_, err := s.GetUser(ctx, human.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	// The control project is untouched.
+	rec = get("/api/v1/agents?projectId=" + controlProject)
+	assert.Equal(t, controlLive, count(rec.Body.String(), "tsa-ae1-ctl-"))
+
+	// Every delete is in the sink with the issuance ID, and in
+	// mutation audit with the correlation ID.
+	deletes := 0
+	for _, l := range tsaSinkLines(buf, testAdminAuditEventResponse) {
+		if l["method"] == http.MethodDelete {
+			deletes++
+			assert.Equal(t, resp.Identity.IssuanceID, l["issuance_id"])
+		}
+	}
+	assert.Equal(t, len(live)+4, deletes, "agents, three user deletes and the project delete")
+	_, err = verifyTestAdminAuditChain(strings.NewReader(buf.String()))
+	require.NoError(t, err)
+}
+
+// The test super-admin kind is allowed by G3 only with a complete
+// classification (the hub re-checks the gate configuration at New).
+func TestTestSuperAdmin_GateRequiresCompletePolicy(t *testing.T) {
+	cfg := ServerConfig{HubID: taHubID, EnableTestIdentities: true, TestAdminGate: TestAdminGateConfig{
+		HubAdmin: true, SuperAdmin: true, HubID: taHubID, HubClass: config.HubClassTest,
+		MarkerHubID: taHubID, MarkerClass: config.HubClassTest,
+	}}
+	require.NoError(t, validateTestAdminGateConfig(cfg, true))
+	cfg.TestAdminGate.HubAdmin = false
+	require.ErrorIs(t, validateTestAdminGateConfig(cfg, true), ErrTestAdminInconsistent, "super-admin requires the hub-admin kind (G2)")
+	cfg.TestAdminGate.HubAdmin = true
+
+	prev := testAdminExperimentPolicy[experiments.AgentEdit]
+	delete(testAdminExperimentPolicy, experiments.AgentEdit)
+	t.Cleanup(func() { testAdminExperimentPolicy[experiments.AgentEdit] = prev })
+	require.ErrorIs(t, validateTestAdminGateConfig(cfg, true), ErrTestSuperAdminRequiresPolicyRegistry)
+	cfg.TestAdminGate.SuperAdmin = false
+	require.NoError(t, validateTestAdminGateConfig(cfg, true), "the hub-admin kind does not need the policy")
+}

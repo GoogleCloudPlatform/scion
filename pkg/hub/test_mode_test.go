@@ -186,7 +186,7 @@ func TestTestMode_MemberStartupLineAndStatus(t *testing.T) {
 
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false}`, strings.TrimSpace(rec.Body.String()))
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false}`, strings.TrimSpace(rec.Body.String()))
 
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

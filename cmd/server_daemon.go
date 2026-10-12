@@ -87,8 +87,9 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	// --test-mode (string value): forwarded verbatim when given, so the
 	// child resolves the same level and runs the same gate.
 	// validateTestModeFlagsEarly already refused the removed flags,
-	// super-admin and --production with a level (which the re-exec would
-	// otherwise turn into --hosted) in this parent.
+	// super-admin without a complete test-admin policy, and --production
+	// with a level (which the re-exec would otherwise turn into --hosted)
+	// in this parent.
 	if cmd.Flags().Changed(testModeFlag) {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testModeFlag, testModeValue))
 	}

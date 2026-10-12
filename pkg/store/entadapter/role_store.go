@@ -408,9 +408,20 @@ var directUserOnlyRoles = map[string]struct{}{
 // and for an allowed issuance binding the expiry to store is returned at
 // that precision, so the stored binding never outlives the stored
 // identity on either backend. It is nil for any other binding.
-func checkTestAdminSystemBinding(u *ent.User, rb *store.RoleBinding) (*time.Time, error) {
+//
+// The issuance binding's role must be the kind's role (test_hub_admin:
+// hub-admin, test_super_admin: super-admin), and a super-admin binding with
+// the issuance CreatedBy is admitted for no other principal.
+func checkTestAdminSystemBinding(u *ent.User, rb *store.RoleBinding, roleName string) (*time.Time, error) {
+	if roleName == store.SystemRoleSuperAdmin && rb.CreatedBy == store.TestIdentityIssuanceCreatedBy &&
+		string(u.Kind) != store.UserKindTestSuperAdmin {
+		return nil, store.ErrSuperAdminBindingRestricted
+	}
 	if rb.ScopeType != store.RoleScopeSystem || !store.IsTestAdminKind(string(u.Kind)) {
 		return nil, nil
+	}
+	if rb.CreatedBy == store.TestIdentityIssuanceCreatedBy && roleName != testAdminKindSystemRole(string(u.Kind)) {
+		return nil, fmt.Errorf("%w: a %s test identity's issuance binding must hold the %s role", store.ErrInvalidInput, u.Kind, testAdminKindSystemRole(string(u.Kind)))
 	}
 	if rb.CreatedBy != store.TestIdentityIssuanceCreatedBy {
 		return nil, fmt.Errorf("%w: an admin-kind test identity holds only its issuance binding at system scope", store.ErrInvalidInput)
@@ -423,6 +434,15 @@ func checkTestAdminSystemBinding(u *ent.User, rb *store.RoleBinding) (*time.Time
 		return nil, fmt.Errorf("%w: an admin-kind test identity's system binding must expire no later than the identity", store.ErrInvalidInput)
 	}
 	return &exp, nil
+}
+
+// testAdminKindSystemRole is the system role an admin-kind test identity's
+// issuance binding holds.
+func testAdminKindSystemRole(kind string) string {
+	if kind == store.UserKindTestSuperAdmin {
+		return store.SystemRoleSuperAdmin
+	}
+	return store.SystemRoleHubAdmin
 }
 
 // testAdminExpiry is t at the precision timestamps are stored at (the
@@ -468,7 +488,11 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 	}
 
 	// D10 guard: refuse super-admin bindings from non-reconciler callers.
-	if rd.Name == store.SystemRoleSuperAdmin && !store.IsSuperAdminBindingAllowed(rb.CreatedBy) {
+	// The one other writer is test identity issuance: its binding is
+	// admitted only for a test_super_admin row, checked with the principal
+	// below (checkTestAdminSystemBinding).
+	if rd.Name == store.SystemRoleSuperAdmin && !store.IsSuperAdminBindingAllowed(rb.CreatedBy) &&
+		rb.CreatedBy != store.TestIdentityIssuanceCreatedBy {
 		return nil, store.ErrSuperAdminBindingRestricted
 	}
 
@@ -497,7 +521,7 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 		if err != nil {
 			return nil, fmt.Errorf("%w: user %s", store.ErrNotFound, rb.PrincipalID)
 		}
-		exp, err := checkTestAdminSystemBinding(u, rb)
+		exp, err := checkTestAdminSystemBinding(u, rb, rd.Name)
 		if err != nil {
 			return nil, err
 		}

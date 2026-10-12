@@ -206,7 +206,7 @@ func TestTestAdmin_IssuanceMatrix(t *testing.T) {
 	assert.NotEmpty(t, resp.AccessToken)
 	assert.Equal(t, store.UserKindTestHubAdmin, resp.Identity.Kind)
 
-	// super-admin: 404 until A2 and its own gate.
+	// super-admin: 404 without its own level (--test-mode=super-admin).
 	rec := doRequestAsUser(t, srv, super, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 
@@ -512,22 +512,32 @@ func TestTestAdmin_FidelityMatchesHumanHubAdmin(t *testing.T) {
 	human := taUser(t, s, "ta-fid-human", store.SystemRoleHubAdmin)
 	target := taUser(t, s, "ta-fid-target", store.SystemRoleHubMember)
 	humanTok := taTokenFor(t, srv, human)
-	routes := []struct{ method, path string }{
-		{http.MethodGet, "/api/v1/users"},
-		{http.MethodGet, "/api/v1/users/" + target.ID},
-		{http.MethodGet, "/api/v1/admin/roles"},
-		{http.MethodGet, "/api/v1/admin/role-bindings"},
-		{http.MethodGet, "/api/v1/groups"},
-		{http.MethodGet, "/api/v1/projects"},
-		{http.MethodGet, "/api/v1/admin/health/summary"},
-		{http.MethodGet, "/api/v1/admin/server-config"},
-		{http.MethodGet, "/api/v1/admin/maintenance/operations"},
-		{http.MethodGet, "/api/v1/test-identities"},
-		{http.MethodDelete, "/api/v1/users/" + target.ID},
+	// caged marks the routes whose permission the test-admin policy denies
+	// (admin tier A2): the test hub-admin gets 403 there whatever a human
+	// hub-admin gets; every other route answers both alike.
+	routes := []struct {
+		method, path string
+		caged        bool
+	}{
+		{http.MethodGet, "/api/v1/users", false},
+		{http.MethodGet, "/api/v1/users/" + target.ID, false},
+		{http.MethodGet, "/api/v1/admin/roles", false},
+		{http.MethodGet, "/api/v1/admin/role-bindings", false},
+		{http.MethodGet, "/api/v1/groups", false},
+		{http.MethodGet, "/api/v1/projects", false},
+		{http.MethodGet, "/api/v1/admin/health/summary", false},
+		{http.MethodGet, "/api/v1/admin/server-config", true},
+		{http.MethodGet, "/api/v1/admin/maintenance/operations", true},
+		{http.MethodGet, "/api/v1/test-identities", true},
+		{http.MethodDelete, "/api/v1/users/" + target.ID, false},
 	}
 	for _, r := range routes {
 		want := doRequestWithToken(t, srv, humanTok, r.method, r.path, nil).Code
 		got := doRequestWithToken(t, srv, resp.AccessToken, r.method, r.path, nil).Code
+		if r.caged {
+			assert.Equal(t, http.StatusForbidden, got, "%s %s: test_hub_admin %d (test-admin policy), human hub-admin %d", r.method, r.path, got, want)
+			continue
+		}
 		assert.Equal(t, want, got, "%s %s: test_hub_admin %d, human hub-admin %d", r.method, r.path, got, want)
 	}
 	// Last-admin finding: neither can suspend or delete a human super-admin.
@@ -835,8 +845,9 @@ func taHasSystemRole(t *testing.T, s store.Store, userID, roleName string) bool 
 }
 
 // taRawTestSuperAdmin writes a live test_super_admin row and its expiring
-// super-admin binding directly in the database: A1 refuses to issue that
-// kind, but the tests of kind-driven code (reconcile, the clamps) need one.
+// super-admin binding directly in the database, for the tests of
+// kind-driven code (reconcile, the clamps) that run on a hub without the
+// super-admin level.
 func taRawTestSuperAdmin(t *testing.T, s store.Store) string {
 	t.Helper()
 	ctx := context.Background()
@@ -1093,38 +1104,16 @@ func TestTestAdmin_CapsAtomic(t *testing.T) {
 }
 
 // A second test super-admin hub-wide is refused with 429
-// super_admin_hub_cap_reached. A1 refuses to issue the kind with the real
-// gate (the issuance matrix covers that 404), so this test turns both kinds
-// on in the gate value and places the first test super-admin as a raw row;
-// the caps are counted before the store create, so the HTTP path reaches
-// the super-admin cap.
+// super_admin_hub_cap_reached. Since admin tier A2 a super-admin holds
+// test_identity.issue_super_admin, so issuance reaches the handler and the
+// hub-wide super-admin cap (the first test super-admin is a raw row here;
+// TestTestSuperAdmin_Issuance covers the cap after a real issuance).
 func TestTestAdmin_SuperAdminHubCapHTTP(t *testing.T) {
 	srv, s, _ := taServer(t)
 	srv.testAdminGate = testAdminGate{hubAdmin: true, superAdmin: true, hubID: taHubID, hubClass: config.HubClassTest}
 	taRawTestSuperAdmin(t, s)
 	super := taUser(t, s, "ta-supercap-issuer", store.SystemRoleSuperAdmin)
-	// test_identity.issue_super_admin is Reserved until A2, so no role,
-	// not even super-admin, holds it: refused at the capability check.
 	rec := doRequestAsUser(t, srv, super, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	// Pinned to the layer: testAdminIssuer's Decide on the capability
-	// refuses (no role holds a reserved permission, and decide grants only
-	// through role bindings), which writes no details.reason; a refusal from
-	// a later layer would carry one (issuer_not_live_super_admin,
-	// issuer_token_not_admitted, test_identity_cannot_issue).
-	assert.Contains(t, rec.Body.String(), "requires "+permissionTestIdentityIssueSuperAdmin+" permission")
-	assert.Equal(t, "", taReason(t, rec), "refused at the capability decision, not a later issuer check")
-	// To reach the cap, the test gives the issuer the capability through a
-	// role written directly in the store (the API refuses reserved
-	// permissions in role definitions).
-	ctx := context.Background()
-	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{ID: generateID(), Name: "ta-supercap-role-" + generateID()[:6],
-		ScopeType: store.RoleScopeSystem, Permissions: []string{permissionTestIdentityIssueSuperAdmin}})
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser,
-		PrincipalID: super.ID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
-	require.NoError(t, err)
-	rec = doRequestAsUser(t, srv, super, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
 	assert.Equal(t, testAdminReasonSuperAdminCap, taReason(t, rec))
 }

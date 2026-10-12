@@ -128,6 +128,11 @@ func (s *Server) authorizeDelegationAdoption(w http.ResponseWriter, r *http.Requ
 // No registered permission covers this check (adoption adds none), so it is
 // a direct system-admin test rather than a Decide call.
 func (s *Server) isDelegationAdoptionAdmin(ctx context.Context, user UserIdentity) bool {
+	// Test identities with admin roles do not run delegation adoption
+	// (test-admin policy).
+	if s.testAdminPolicyRefusesUser(ctx, user.ID(), "admin_delegation_adoption.go:isDelegationAdoptionAdmin") {
+		return false
+	}
 	if IsUnscopedLocalPlatformAdmin(user) {
 		return true
 	}
@@ -145,6 +150,9 @@ func (s *Server) recheckDelegationAdoptionAdmin(ctx context.Context, tx store.St
 		return err
 	}
 	if u.Status != store.UserStatusActive {
+		return errAdoptionPermissionLost
+	}
+	if s.testAdminPolicyRefusesUser(ctx, u.ID, "admin_delegation_adoption.go:recheckDelegationAdoptionAdmin") {
 		return errAdoptionPermissionLost
 	}
 	if u.Role == store.UserRoleAdmin {

@@ -257,6 +257,9 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 			"Section name is required", nil)
 		return
 	}
+	if s.rejectTestAdminSettingsWrite(w, r, []string{sectionName}, nil) {
+		return
+	}
 
 	// A user access token resets only a section with no refused key.
 	if !serverConfigSectionTokenResettable(sectionName) &&
@@ -296,7 +299,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	var gcpIAMCur, gcpIAMNext gcpIAMSettings
 	gcpIAMChange := false
 	if sectionName == gcpIAMSection {
-		if !requireGCPIAMHubAdmin(w, r.Context()) {
+		if !s.requireGCPIAMHubAdmin(w, r.Context()) {
 			return
 		}
 		gcpIAMCur = s.currentGCPIAMSettings()
@@ -484,6 +487,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// Gate-protected keys (server.hub.class always; federation while the
 	// test admin tier is on) are refused before anything is decoded.
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
+		return
+	}
+	// Test identities with admin roles write no settings (test-admin
+	// policy; settings.yaml has no write guard of its own).
+	if s.rejectTestAdminSettingsWrite(w, r, settingsBodyKeys(rawBody), nil) {
 		return
 	}
 	var req ServerConfigUpdateRequest

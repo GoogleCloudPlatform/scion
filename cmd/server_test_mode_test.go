@@ -153,16 +153,38 @@ func TestTestMode_ProductionRefusedAtEveryNonOffLevel(t *testing.T) {
 	require.NoError(t, validateTestModeFlagsEarly(tiaStartCmd(t, "--production", "--test-mode=off")))
 }
 
-// super-admin still refuses to start with the same named error as the old
-// --enable-test-super-admin-identities, until phase A2.
-func TestTestMode_SuperAdminStillRefused(t *testing.T) {
+// Admin tier A2 (G3): super-admin starts on a binary whose test-admin
+// policy classification is complete, with both admin kinds and the
+// policy-complete precondition; with an incomplete classification it
+// refuses with the same named error as before, at the early flag check and
+// in resolveTestMode.
+func TestTestMode_SuperAdminNeedsCompletePolicy(t *testing.T) {
 	t.Cleanup(resetTestModeFlags)
 	in := tiaValidInputs()
 	in.Level = hub.TestModeSuperAdmin
-	_, err := resolveTestMode(in)
+	res, err := resolveTestMode(in)
+	require.NoError(t, err)
+	assert.True(t, res.EnableTestIdentities)
+	assert.True(t, res.TestAdminGate.HubAdmin)
+	assert.True(t, res.TestAdminGate.SuperAdmin)
+	assert.Contains(t, res.TestMode.Preconditions, hub.TestModePreconditionPolicyComplete)
+	require.NoError(t, validateTestModeFlagsEarly(tiaStartCmd(t, "--hosted", "--test-mode=super-admin:"+tiaCmdHubID)))
+	resetTestModeFlags()
+
+	incomplete := func() error { return hub.ErrTestAdminPolicyIncomplete }
+	in.PolicyComplete = incomplete
+	_, err = resolveTestMode(in)
 	assert.ErrorIs(t, err, hub.ErrTestSuperAdminRequiresPolicyRegistry)
+	prev := testAdminPolicyComplete
+	testAdminPolicyComplete = incomplete
+	t.Cleanup(func() { testAdminPolicyComplete = prev })
 	err = validateTestModeFlagsEarly(tiaStartCmd(t, "--hosted", "--test-mode=super-admin:"+tiaCmdHubID))
 	assert.ErrorIs(t, err, hub.ErrTestSuperAdminRequiresPolicyRegistry)
+	// The admin level does not need the policy.
+	resetTestModeFlags()
+	in.Level = hub.TestModeAdmin
+	_, err = resolveTestMode(in)
+	require.NoError(t, err)
 }
 
 // C5: the replaced flags refuse startup with a named error that points at
@@ -190,9 +212,10 @@ func TestTestMode_RemovedFlagsRefused(t *testing.T) {
 // C6: the capabilities each level grants equal the old flag combination.
 // off = no flag; member = --enable-test-identities; admin = member plus
 // --enable-test-admin-identities; super-admin = admin plus
-// --enable-test-super-admin-identities, which is refused with the same
-// named error as before. Only the preconditions differ: every level now
-// requires the member preconditions (stricter than the old member flag).
+// --enable-test-super-admin-identities (admitted since admin tier A2 with
+// a complete test-admin policy). Only the preconditions differ: every
+// level now requires the member preconditions (stricter than the old
+// member flag).
 func TestTestMode_CapabilityEquivalenceWithOldFlags(t *testing.T) {
 	type oldFlags struct {
 		testIdentities, admin, superAdmin bool
@@ -205,7 +228,7 @@ func TestTestMode_CapabilityEquivalenceWithOldFlags(t *testing.T) {
 		{hub.TestModeOff, oldFlags{}, nil},
 		{hub.TestModeMember, oldFlags{testIdentities: true}, nil},
 		{hub.TestModeAdmin, oldFlags{testIdentities: true, admin: true}, nil},
-		{hub.TestModeSuperAdmin, oldFlags{testIdentities: true, admin: true, superAdmin: true}, hub.ErrTestSuperAdminRequiresPolicyRegistry},
+		{hub.TestModeSuperAdmin, oldFlags{testIdentities: true, admin: true, superAdmin: true}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.level), func(t *testing.T) {
