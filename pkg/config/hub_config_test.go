@@ -37,8 +37,12 @@ func TestDefaultGlobalConfig(t *testing.T) {
 		t.Errorf("expected Hub host '0.0.0.0', got %q", cfg.Hub.Host)
 	}
 
-	if cfg.RuntimeBroker.Host != DefaultBrokerHost || DefaultBrokerHost != "0.0.0.0" {
-		t.Errorf("expected RuntimeBroker host %q (DefaultBrokerHost), got %q", "0.0.0.0", cfg.RuntimeBroker.Host)
+	if DefaultBrokerHost != "0.0.0.0" {
+		t.Errorf("expected DefaultBrokerHost '0.0.0.0', got %q", DefaultBrokerHost)
+	}
+
+	if cfg.RuntimeBroker.Host != DefaultBrokerHost {
+		t.Errorf("expected RuntimeBroker host to equal DefaultBrokerHost %q, got %q", DefaultBrokerHost, cfg.RuntimeBroker.Host)
 	}
 
 	if cfg.Hub.ReadTimeout != 30*time.Second {
