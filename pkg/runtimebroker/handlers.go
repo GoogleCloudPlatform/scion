@@ -2612,39 +2612,47 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		return
 	}
 
-	// If this is a soft-delete, mark agent-info.json with deleted status
-	// before cleanup -- unless that file is another run's. The state before
-	// the mark is kept so a runtime run mismatch or runtime delete failure
-	// below can undo it.
-	var preMark agent.AgentDeleteState
-	var preMarkOK bool
-	if softDelete && projectPath != "" && !filesOfOtherRun {
-		preMark, preMarkOK = agent.GetAgentDeleteState(target.name, projectPath)
-		// Phase and deletedAt are written in one locked update (#4681).
-		var deletedAt time.Time
-		if deletedAtStr := query.Get("deletedAt"); deletedAtStr != "" {
-			if t, err := time.Parse(time.RFC3339, deletedAtStr); err == nil {
-				deletedAt = t
-			}
-		}
-		if err := agent.MarkAgentSoftDeleted(target.name, projectPath, deletedAt); err != nil {
-			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", err)
-		}
-	}
-
 	s.agentLifecycleLog.Debug("Agent delete: resolved target",
 		"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 		"container_id", target.containerID, "target_run_id", target.runID)
 	_, err = target.mgr.DeleteTarget(ctx, target.name, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
+	// A soft delete marks agent-info.json deleted only once the runtime
+	// entry is gone (ptone/scion#4766): some runtimes do not let the host
+	// write files in the container, so the host never writes the file while
+	// the container may run. No mark is written when the runtime delete
+	// failed or found another run (nothing was deleted), nor when the files
+	// are another run's. A file-cleanup failure after a successful runtime
+	// delete still gets the mark: the container is gone. The agent-files lock
+	// taken above (lockAgentFiles, also taken by start) is held from before
+	// DeleteTarget through this write, so no start of the agent can come in
+	// between and have its files marked.
+	runtimeDeleted := err == nil || (!errors.Is(err, scionrt.ErrRunMismatch) && !errors.Is(err, agent.ErrRuntimeDelete))
+	if runtimeDeleted && softDelete && projectPath != "" && !filesOfOtherRun {
+		// Phase and deletedAt are written in one locked update (#4681).
+		var deletedAt time.Time
+		if deletedAtStr := query.Get("deletedAt"); deletedAtStr != "" {
+			if t, perr := time.Parse(time.RFC3339, deletedAtStr); perr == nil {
+				deletedAt = t
+			}
+		}
+		if markErr := markAgentSoftDeleted(target.name, projectPath, deletedAt); markErr != nil {
+			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", markErr)
+			if err == nil {
+				// Answer with an error so the hub retries the delete; the
+				// retry finds the files only (the container is gone) and
+				// writes the mark then.
+				s.writeRuntimeOpError(w, ctx, "delete agent", fmt.Errorf("mark agent soft-deleted: %w", markErr), "agent_id", id, "project_id", projectID)
+				return
+			}
+		}
+	}
 	if errors.Is(err, scionrt.ErrRunMismatch) {
 		// The runtime found the name held by another run when it came to
 		// delete (the entry was replaced after resolveDeleteTarget listed
 		// it) and deleted nothing. Answer as for errDeleteTargetRunMismatch:
 		// 404, with no file or leftover-object cleanup, since those now
-		// belong to the newer run. A soft-delete mark written above is
-		// undone, since agent-info.json now describes the newer run.
+		// belong to the newer run. No soft-delete mark was written.
 		span.SetStatus(codes.Error, err.Error())
-		s.undoSoftDeleteMark(target.name, projectPath, preMark, preMarkOK, "agent_id", id, "project_id", projectID, "run_id", runID)
 		// A delete naming no run answers the plain 404, as before.
 		if runID == "" {
 			s.agentLifecycleLog.Info("Agent delete: runtime entry belongs to another run; leaving it untouched",
@@ -2682,12 +2690,9 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	}
 	if err != nil {
 		// The runtime delete call itself failed, so the entry may still be
-		// there: undo a soft-delete mark (the hub retries or reports the
-		// failure). A file-cleanup failure after a successful runtime
-		// delete keeps the mark, since the pod is gone.
-		if errors.Is(err, agent.ErrRuntimeDelete) {
-			s.undoSoftDeleteMark(target.name, projectPath, preMark, preMarkOK, "agent_id", id, "project_id", projectID, "run_id", runID)
-		}
+		// there and no soft-delete mark was written (the hub retries or
+		// reports the failure). A file-cleanup failure after a successful
+		// runtime delete has the mark, since the pod is gone.
 		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
@@ -7150,18 +7155,9 @@ func otherRunContainerID(cands []agentCandidate, runID string) string {
 	return current
 }
 
-// undoSoftDeleteMark restores agent-info.json's Phase and DeletedAt to
-// their values before a soft-delete mark (preMark), after a delete that
-// removed nothing. It is a no-op when there was no snapshot (ok false) or
-// the file no longer shows our mark (see agent.RestoreAgentDeleteState).
-func (s *Server) undoSoftDeleteMark(agentName, projectPath string, preMark agent.AgentDeleteState, ok bool, logArgs ...any) {
-	if !ok {
-		return
-	}
-	if err := agent.RestoreAgentDeleteState(agentName, projectPath, preMark); err != nil {
-		s.agentLifecycleLog.Warn("Agent delete: could not undo the soft-delete mark", append(logArgs, "error", err)...)
-	}
-}
+// markAgentSoftDeleted writes the soft-delete mark to agent-info.json; a
+// variable so tests can make the write fail.
+var markAgentSoftDeleted = agent.MarkAgentSoftDeleted
 
 // deleteRunRef is the RunRef a resolved delete passes to the runtime: the
 // entry's own run label, or, for a legacy entry with no run label, the run
