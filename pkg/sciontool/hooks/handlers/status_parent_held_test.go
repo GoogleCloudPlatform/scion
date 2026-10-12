@@ -293,9 +293,9 @@ func TestParentHeld_NonOwnerSubagentKeepsOwnerList(t *testing.T) {
 	}
 }
 
-// SubagentStop removes only that sub-agent's entry, never changes the
-// activity and sends no Hub update. Once no owner is left, the parent's
-// Agent tool-end clears the wait as before.
+// SubagentStop removes only that sub-agent's entry and, while other owners
+// remain, changes no activity and sends no Hub update. The last owner's
+// SubagentStop clears the wait to working and reports it.
 func TestParentHeld_SubagentEndReleasesOnlyItsOwn(t *testing.T) {
 	sh, hh, sent := claudeHubSetup(t)
 	parentHeldHold(t, sh, "working")
@@ -322,9 +322,9 @@ func TestParentHeld_SubagentEndReleasesOnlyItsOwn(t *testing.T) {
 	assert.Empty(t, got)
 
 	got, info = parentHeldStep(t, sh, hh, sent, stop(parentHeldSubB))
-	assert.Equal(t, "waiting_for_input", info["activity"], "SubagentStop never changes the activity")
+	assert.Equal(t, "working", info["activity"], "the last owner's SubagentStop clears the wait")
 	assert.NotContains(t, info, notificationWaitAgentsKey)
-	assert.Empty(t, got)
+	assert.Equal(t, []string{parentHeldWorking}, got)
 
 	got, info = parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "PostToolUse", "Agent"))
 	assert.Equal(t, "working", info["activity"])
@@ -362,16 +362,15 @@ func TestParentHeld_OwnerListCap(t *testing.T) {
 }
 
 // Sub-agents that never send an end event are cleaned up by the parent's
-// turn end or next prompt, and by any other non-notification write.
+// next prompt, and by any other non-notification write. The parent's Stop
+// and tool-start keep them (status_background_subagent_test.go).
 func TestParentHeld_OwnerListCleanup(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		event     func(*testing.T) *hooks.Event
 		wantLocal string
 	}{
-		{"parent Stop", func(t *testing.T) *hooks.Event { return parentHeldParent(t, "Stop", "") }, "working"},
 		{"parent prompt", func(t *testing.T) *hooks.Event { return parentHeldParent(t, "UserPromptSubmit", "") }, "thinking"},
-		{"parent tool-start", func(t *testing.T) *hooks.Event { return parentHeldParent(t, "PreToolUse", "Bash") }, "executing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sh, hh, sent := claudeHubSetup(t)
