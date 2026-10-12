@@ -201,13 +201,16 @@ func TestBackgroundSubagentWait_OwnAnswerReleases(t *testing.T) {
 
 // A stale owner (it never sends an end event) holds the wait through the
 // parent's Stop and tool activity, and is released by the parent's next
-// prompt, a session start or a status write.
+// prompt, a session start or a status write. The prompt row runs both
+// handlers and checks the Hub report too. The session start and status
+// write rows call only the StatusHandler, so they check local state only
+// (wantHub is nil and no Hub assertion is made).
 func TestBackgroundSubagentWait_SafetyNetReleasesStaleOwner(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		release   func(*testing.T, *StatusHandler, *HubHandler, func() []string) []string
 		wantLocal string
-		wantHub   []string
+		wantHub   []string // nil: local state only
 	}{
 		{"parent prompt", func(t *testing.T, sh *StatusHandler, hh *HubHandler, sent func() []string) []string {
 			got, _ := parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "UserPromptSubmit", ""))
@@ -235,9 +238,7 @@ func TestBackgroundSubagentWait_SafetyNetReleasesStaleOwner(t *testing.T) {
 			assert.Equal(t, tc.wantLocal, info["activity"])
 			assert.NotContains(t, info, activitySourceKey)
 			assert.NotContains(t, info, notificationWaitAgentsKey)
-			if tc.wantHub == nil {
-				assert.Empty(t, got)
-			} else {
+			if tc.wantHub != nil {
 				assert.Equal(t, tc.wantHub, got)
 			}
 		})
@@ -332,6 +333,31 @@ func TestBackgroundSubagentWait_ForegroundSequence(t *testing.T) {
 		assert.Equal(t, "working", info["activity"])
 		assert.Equal(t, []string{parentHeldWorking}, got)
 	})
+}
+
+// Known limitation, pinned so it stays visible: the parent's own
+// Notification (for example a permission prompt) during a wait that a
+// sub-agent holds is folded into that wait and keeps the owner list, with
+// nothing recording that the parent is waiting too. When the last owner then
+// ends without answering, its SubagentStop releases the wait to working and
+// reports working to the Hub, although the parent's prompt may still be
+// open. Fixing it needs a change on the question path
+// (setWaitingFromNotificationFor), which is out of scope here.
+func TestBackgroundSubagentWait_ParentNotificationFoldedIntoOwnerHeldWait(t *testing.T) {
+	sh, hh, sent := claudeHubSetup(t)
+	parentHeldHold(t, sh, "working")
+	parentHeldStep(t, sh, hh, sent, parentHeldSub(t, "Notification", "", parentHeldSubA))
+
+	got, info := parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "Notification", ""))
+	require.Equal(t, "waiting_for_input", info["activity"])
+	require.Equal(t, []string{parentHeldSubA}, waitOwnersOf(info), "the parent's prompt is folded into A's wait")
+	require.Equal(t, []string{parentHeldWaiting}, got)
+
+	got, info = parentHeldStep(t, sh, hh, sent, bgSubagentStop(t, parentHeldSubA))
+	assert.Equal(t, "working", info["activity"], "limitation: the parent's open prompt is not kept")
+	assert.Equal(t, activitySourceSubagentEnd, info[activitySourceKey])
+	assert.NotContains(t, info, notificationWaitAgentsKey)
+	assert.Equal(t, []string{parentHeldWorking}, got)
 }
 
 func countString(list []string, s string) int {
