@@ -508,3 +508,23 @@ func TestReviewSubjectParity(t *testing.T) {
 		})
 	}
 }
+
+// TestWriteDecisionReviewNeedsRead: the write decision itself, not only
+// the routes' read check before it, gives a review grantee review access
+// only while it can read the artifact another way.
+func TestWriteDecisionReviewNeedsRead(t *testing.T) {
+	f := newReviewLevelFixture(t)
+	b, _ := f.svc.backend()
+	a, err := f.store.GetArtifact(context.Background(), f.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := withPrincipal(httptest.NewRequest(http.MethodGet, "/", nil), rvOnly).Context()
+	if access, err := f.svc.canWriteErr(ctx, b, a); err != nil || access != accessReviewGrant {
+		t.Fatalf("reader with a review grant: %v %v", access, err)
+	}
+	f.dropRead(rvOnly)
+	if access, err := f.svc.canWriteErr(ctx, b, a); err != nil || access != accessNone {
+		t.Errorf("review grant without read: %v %v, want accessNone", access, err)
+	}
+}
