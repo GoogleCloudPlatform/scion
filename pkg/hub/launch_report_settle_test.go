@@ -135,13 +135,84 @@ func TestLaunchReportSettle_NoRunID_EmptyRowRun_Keeps(t *testing.T) {
 	assert.Equal(t, []string{"run-0"}, got.PreviousRunIDs)
 }
 
-// A succeeded report naming an older run than the row records misses the
-// keyed swap: the newer run's list is kept.
-func TestLaunchReportSettle_OlderRun_Keeps(t *testing.T) {
-	f := newLaunchSettleFixture(t, "lrsettle-old")
+// heldRunClient is a broker whose runtime holds one entry of the agent,
+// labelled with run held, and refuses a delete naming another run as the
+// real broker does (a run-mismatch, ptone/scion#3080). A delete naming the
+// held run removes the entry.
+type heldRunClient struct {
+	*mockRuntimeBrokerClient
+	held       string
+	deleteRuns []string
+}
+
+func (c *heldRunClient) DeleteAgent(_ context.Context, _, _, _, _ string, opts DeleteAgentOptions) error {
+	c.deleteRuns = append(c.deleteRuns, opts.RunID)
+	if c.held == "" {
+		return nil
+	}
+	if opts.RunID != c.held {
+		return &DeleteRunMismatchError{RequestedRunID: opts.RunID, CurrentRunID: c.held, Err: ErrDeleteRunMismatch}
+	}
+	c.held = ""
+	return nil
+}
+
+// An async create that keeps a running entry (ptone/scion#2965): the
+// broker's Start found run-0's entry running and returned it, so the
+// succeeded report names run-0, not run-1 the hub recorded for the launch.
+// The hub adopts run-0 and clears the previous runs, and a later delete
+// removes the kept entry.
+func TestLaunchReportSettle_KeptRunningEntry_AdoptedAndDeleted(t *testing.T) {
+	f := newLaunchSettleFixture(t, "lrsettle-kept")
 	f.report(t, store.LaunchReportStateSucceeded, "run-0")
 	got := mustGetAgent(t, f.store, f.agent.ID)
-	assert.Equal(t, "run-1", got.RunID, "the row's run is unchanged")
+	assert.Equal(t, "run-0", got.RunID, "the kept entry's run is adopted")
+	assert.Empty(t, got.PreviousRunIDs, "the run settled")
+
+	client := &heldRunClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}, held: "run-0"}
+	d := NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default())
+	require.NoError(t, d.DispatchAgentDelete(context.Background(), got, false, false, false, time.Time{}),
+		"the delete names the run the broker holds")
+	assert.Equal(t, []string{"run-0"}, client.deleteRuns)
+	assert.Empty(t, client.held, "the kept running entry is removed")
+}
+
+// laterRunStore records run-2 for the agent right after the store applies a
+// launch report, as a dispatch that lands between the report and the
+// settle would.
+type laterRunStore struct {
+	store.Store
+	t *testing.T
+}
+
+func (s *laterRunStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID string, r store.LaunchReport) (store.LaunchReportAnswer, store.Agent, error) {
+	answer, updated, err := s.Store.ApplyLaunchReport(ctx, agentID, brokerID, r)
+	if err == nil {
+		_, setErr := s.Store.SetAgentRunID(ctx, agentID, "run-2", nil)
+		require.NoError(s.t, setErr)
+	}
+	return answer, updated, err
+}
+
+// The adoption is keyed on the run the row recorded when the report
+// applied: a run recorded after that is not overwritten.
+func TestLaunchReportSettle_LaterRun_Keeps(t *testing.T) {
+	f := newLaunchSettleFixture(t, "lrsettle-later")
+	f.srv.store = &laterRunStore{Store: f.store, t: t}
+	f.report(t, store.LaunchReportStateSucceeded, "run-0")
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	assert.Equal(t, "run-2", got.RunID, "the later run is kept")
+	assert.Equal(t, []string{"run-0", "run-1"}, got.PreviousRunIDs)
+}
+
+// A delete that holds the row keeps its run: the report neither adopts the
+// kept entry's run nor clears the previous runs.
+func TestLaunchReportSettle_DeleteHoldsRow_Keeps(t *testing.T) {
+	f := newLaunchSettleFixture(t, "lrsettle-claimed")
+	claimForTest(t, f.store, f.agent.ID, store.DeletionStateDeleting, time.Minute)
+	require.Equal(t, store.LaunchReportResultApplied, f.reportResult(t, store.LaunchReportStateSucceeded, "run-0"))
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	assert.Equal(t, "run-1", got.RunID, "the claimed row's run is unchanged")
 	assert.Equal(t, []string{"run-0"}, got.PreviousRunIDs)
 }
 
