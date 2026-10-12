@@ -613,7 +613,7 @@ func messageResponseID(resp *hubclient.MessageResponse) string {
 // stale project ID, "Project not found", or a bare 404 from an older hub or
 // a proxy) are not about the agent, so they and all other failures keep the
 // generic wording. Both go through wrapHubError, which (for a 404) adds no
-// local-only hint, and Execute prints no Usage block for hub failures; the
+// hub-check hint, and Execute prints no Usage block for hub failures; the
 // command exits 1.
 func agentMessageSendError(agentName string, err error) error {
 	var apiErr *apiclient.APIError
