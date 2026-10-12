@@ -130,7 +130,8 @@ func readRun(t *testing.T, dir, rcFile, stderr string) fallbackRun {
 	t.Helper()
 	run := fallbackRun{rc: -1, stderr: stderr}
 	if data, err := os.ReadFile(filepath.Join(dir, "log")); err == nil {
-		run.log = strings.Split(strings.TrimSpace(string(data)), "\n")
+		// Trim only the final newline: an argument may end in a space.
+		run.log = strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	}
 	if data, err := os.ReadFile(rcFile); err == nil {
 		run.rc, _ = strconv.Atoi(strings.TrimSpace(string(data)))
