@@ -32,13 +32,13 @@ import (
 // so the use graph has no edge for it. A shard in which no file imports the
 // package compiles, then fails at run time (sql: unknown driver "sqlite3").
 //
-// The generator therefore writes untagged imports files that blank-import
-// every package a test file of the package blank-imports. They compile in
-// every shard. A package goes into the file for its build condition: the OR
+// The generator therefore adds untagged imports files to the overlay that
+// blank-import every package a test file of the package blank-imports.
+// They compile in every shard build (the plain tree has none). A package goes into the file for its build condition: the OR
 // of the importing files' own constraints (without the hubshard clause),
 // each including the GOOS/GOARCH constraint of its file name.
-// So the default build links exactly the packages it linked before, and a
-// shard build links them under the same conditions.
+// So a shard build links them under the same conditions as the plain
+// build.
 
 // importsPrefix names the generated imports files: importsPrefix_test.go
 // holds the packages imported without a condition, importsPrefix_K_test.go
@@ -170,12 +170,12 @@ func importsFiles(files map[string]*fileInfo, pkg string) map[string][]byte {
 }
 
 // importBreakage lists the blank imports of tagged files that no untagged
-// file covers. An untagged file (a common test file, or an imports file on
-// disk in gen) covers a tagged file's import when it imports the same
+// file covers. An untagged file (a common test file, or a generated
+// imports file in gen) covers a tagged file's import when it imports the same
 // package under a build constraint that the tagged file's own constraint
 // implies, so every build that compiles the tagged file links the package
 // in every shard. Only files of package pkg count (see importsFiles);
-// importWarnings covers the external test package.
+// sideEffectWarnings covers the external test package.
 func importBreakage(files, gen map[string]*fileInfo, pkg string) []string {
 	importers := map[string][]*fileInfo{} // path -> untagged files importing it
 	for _, m := range []map[string]*fileInfo{files, gen} {
@@ -254,10 +254,11 @@ func collectTags(e constraint.Expr, tags map[string]bool) {
 	}
 }
 
-// sideEffectWarnings lists what -check cannot judge and a reviewer should:
+// sideEffectWarnings lists what -parity cannot judge and a reviewer should:
 //   - a tagged file with an init function that does more than discard
 //     values: the init runs only in that shard's binary, and another shard
-//     may rely on its effect (make hubshard makes such a file common);
+//     may rely on its effect (the generator makes such a file common, so
+//     this appears only if that rule changes);
 //   - a blank import in a tagged file of an external test package (not
 //     pkg): the imports files do not copy it, because the imported package
 //     may import pkg itself.
@@ -269,7 +270,7 @@ func sideEffectWarnings(files map[string]*fileInfo, pkg string) []string {
 			continue
 		}
 		if f.hasInit {
-			warnings = append(warnings, fmt.Sprintf("warning: %s: init function in a file tagged for shard %d runs only in that shard; review whether other files rely on it (make hubshard makes the file common)", n, f.diskShard))
+			warnings = append(warnings, fmt.Sprintf("warning: %s: init function in a file tagged for shard %d runs only in that shard; review whether other files rely on it", n, f.diskShard))
 		}
 		if f.pkgName != pkg {
 			for _, p := range f.blankImports {
@@ -336,27 +337,4 @@ func fileNameConstraint(name string) constraint.Expr {
 		return &constraint.TagExpr{Tag: l[n-1]}
 	}
 	return nil
-}
-
-// generatedProblems lists the generated imports files on disk (gen) that
-// differ from what the generator writes (want): missing, out of date (for
-// example hand-edited, or a test file's blank imports changed), or
-// obsolete. Each is a problem for -check, because the imports files are
-// what links the registered drivers into every shard.
-func generatedProblems(gen map[string]*fileInfo, want map[string][]byte) []string {
-	var problems []string
-	for _, n := range sortedKeys(want) {
-		switch f := gen[n]; {
-		case f == nil:
-			problems = append(problems, fmt.Sprintf("%s: generated imports file is missing", n))
-		case !bytes.Equal(f.src, want[n]):
-			problems = append(problems, fmt.Sprintf("%s: generated imports file differs from what make hubshard writes (blank imports changed, or hand-edited; do not edit it)", n))
-		}
-	}
-	for _, n := range sortedNames(gen) {
-		if want[n] == nil {
-			problems = append(problems, fmt.Sprintf("%s: generated imports file is obsolete (make hubshard removes it)", n))
-		}
-	}
-	return problems
 }

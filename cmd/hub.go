@@ -632,7 +632,7 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 type hubEndpointScope struct {
 	// Endpoint is the resolved value.
 	Endpoint string
-	// Source is "flag", "project", "global", "env", or "none".
+	// Source is "flag", "context", "project", "global", "env", or "none".
 	Source string
 	// Inherited is true when a project-scoped invocation uses a global or env setting.
 	Inherited bool
@@ -640,6 +640,11 @@ type hubEndpointScope struct {
 
 // getHubEndpointScope determines where the hub endpoint comes from.
 func getHubEndpointScope(resolvedPath string, isGlobal bool, settings *config.Settings) hubEndpointScope {
+	// The hub selected with 'scion use' is in hubEndpoint too, but it is not
+	// a --hub flag.
+	if hubSource == targetSourceContext {
+		return hubEndpointScope{Endpoint: hubEndpoint, Source: "context"}
+	}
 	// --hub flag takes top priority
 	if hubEndpoint != "" {
 		return hubEndpointScope{Endpoint: hubEndpoint, Source: "flag"}
@@ -672,6 +677,20 @@ func getHubEndpointScope(resolvedPath string, isGlobal bool, settings *config.Se
 	}
 
 	return hubEndpointScope{Source: "none"}
+}
+
+// endpointSourceNote returns the line hub status prints under the endpoint
+// to say where it came from, or "" when nothing is printed.
+func endpointSourceNote(s hubEndpointScope) string {
+	switch {
+	case s.Source == "context":
+		return "            (current context)"
+	case s.Inherited:
+		return fmt.Sprintf("            (inherited from %s)", s.Source)
+	case s.Source == "flag":
+		return "            (from --hub flag)"
+	}
+	return ""
 }
 
 func runHubStatus(cmd *cobra.Command, args []string) error {
@@ -786,13 +805,8 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	fmt.Println("==========")
 	fmt.Printf("Scope:      %s\n", scopeLabel)
 	fmt.Printf("Endpoint:   %s\n", valueOrNone(endpoint))
-	switch {
-	case endpointScope.Source == "flag":
-		fmt.Printf("            (from --hub flag)\n")
-	case endpointScope.Inherited:
-		fmt.Printf("            (inherited from %s)\n", endpointScope.Source)
-	case endpointScope.Source != "none":
-		fmt.Printf("            (from %s settings)\n", endpointScope.Source)
+	if note := endpointSourceNote(endpointScope); note != "" {
+		fmt.Println(note)
 	}
 	if !hubConfigured(settings) {
 		fmt.Println("            " + errHubNotConfigured.Error())
@@ -2427,10 +2441,8 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	hubsync.ClearStaleModeSettings(os.Stderr, resolvedPath, isGlobal)
 
 	// Save endpoint if provided via flag
-	if hubEndpoint != "" {
-		if err := config.UpdateSetting(resolvedPath, "hub.endpoint", hubEndpoint, isGlobal); err != nil {
-			return fmt.Errorf("failed to save endpoint: %w", err)
-		}
+	if err := persistHubFlagEndpoint(resolvedPath, isGlobal); err != nil {
+		return err
 	}
 
 	if isJSONOutput() {

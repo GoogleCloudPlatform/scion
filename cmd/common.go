@@ -347,6 +347,9 @@ func requireHub(projectPath string) (*HubContext, error) {
 		NonInteractive:   nonInteractive,
 		EndpointOverride: hubEndpoint,
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
+		// The hub selected with 'scion use' never links or registers a
+		// project that is already linked to a hub.
+		HubFromContext: hubSource == targetSourceContext,
 	}
 
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)

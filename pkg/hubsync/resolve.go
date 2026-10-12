@@ -201,10 +201,34 @@ func resolveProjectOnHub(ctx context.Context, client hubclient.Client, ref strin
 	}
 	switch len(resp.Projects) {
 	case 0:
-		return nil, fmt.Errorf("project '%s' not found on hub", ref)
+		return nil, &ProjectNotFoundError{Ref: ref}
 	case 1:
 		return &resp.Projects[0], nil
 	default:
-		return nil, fmt.Errorf("multiple projects found with name '%s' — please use a project ID or slug instead", ref)
+		return nil, &AmbiguousProjectError{Ref: ref, Projects: resp.Projects}
 	}
+}
+
+// ProjectNotFoundError is returned by ResolveProjectOnHub when no project
+// on the hub matches a slug or name reference.
+type ProjectNotFoundError struct {
+	// Ref is the reference that was looked up.
+	Ref string
+}
+
+func (e *ProjectNotFoundError) Error() string {
+	return fmt.Sprintf("project '%s' not found on hub", e.Ref)
+}
+
+// AmbiguousProjectError is returned by ResolveProjectOnHub when several
+// projects on the hub have the name given as the reference.
+type AmbiguousProjectError struct {
+	// Ref is the reference that was looked up.
+	Ref string
+	// Projects are the matching projects.
+	Projects []hubclient.Project
+}
+
+func (e *AmbiguousProjectError) Error() string {
+	return fmt.Sprintf("multiple projects found with name '%s' — please use a project ID or slug instead", e.Ref)
 }

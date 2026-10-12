@@ -2765,6 +2765,38 @@ var (
 			},
 		},
 	}
+	// TestIdentityLoginCodesColumns holds the columns for the "test_identity_login_codes" table.
+	TestIdentityLoginCodesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "code_hash", Type: field.TypeString, Unique: true},
+		{Name: "issued_by", Type: field.TypeString},
+		{Name: "issuer_credential_id", Type: field.TypeString, Default: ""},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "consumed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "user_id", Type: field.TypeUUID, Unique: true},
+	}
+	// TestIdentityLoginCodesTable holds the schema information for the "test_identity_login_codes" table.
+	TestIdentityLoginCodesTable = &schema.Table{
+		Name:       "test_identity_login_codes",
+		Columns:    TestIdentityLoginCodesColumns,
+		PrimaryKey: []*schema.Column{TestIdentityLoginCodesColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "test_identity_login_codes_users_test_identity_login_code",
+				Columns:    []*schema.Column{TestIdentityLoginCodesColumns[7]},
+				RefColumns: []*schema.Column{UsersColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "testidentitylogincode_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{TestIdentityLoginCodesColumns[4]},
+			},
+		},
+	}
 	// TestInfraMarkerColumns holds the columns for the "test_infra_marker" table.
 	TestInfraMarkerColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeString},
@@ -2773,12 +2805,74 @@ var (
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "created_by_host", Type: field.TypeString, Default: ""},
 		{Name: "attested", Type: field.TypeJSON, Nullable: true},
+		{Name: "web_session_key", Type: field.TypeBytes, Nullable: true},
 	}
 	// TestInfraMarkerTable holds the schema information for the "test_infra_marker" table.
 	TestInfraMarkerTable = &schema.Table{
 		Name:       "test_infra_marker",
 		Columns:    TestInfraMarkerColumns,
 		PrimaryKey: []*schema.Column{TestInfraMarkerColumns[0]},
+	}
+	// ThreadGroupsColumns holds the columns for the "thread_groups" table.
+	ThreadGroupsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "name_key", Type: field.TypeString},
+		{Name: "created_by", Type: field.TypeString},
+		{Name: "created_by_kind", Type: field.TypeEnum, Enums: []string{"user", "agent"}},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// ThreadGroupsTable holds the schema information for the "thread_groups" table.
+	ThreadGroupsTable = &schema.Table{
+		Name:       "thread_groups",
+		Columns:    ThreadGroupsColumns,
+		PrimaryKey: []*schema.Column{ThreadGroupsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "threadgroup_project_id_name_key",
+				Unique:  true,
+				Columns: []*schema.Column{ThreadGroupsColumns[1], ThreadGroupsColumns[3]},
+			},
+			{
+				Name:    "threadgroup_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{ThreadGroupsColumns[1]},
+			},
+		},
+	}
+	// ThreadGroupMembersColumns holds the columns for the "thread_group_members" table.
+	ThreadGroupMembersColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "group_id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "conversation_id", Type: field.TypeUUID},
+		{Name: "added_by", Type: field.TypeString},
+		{Name: "added_at", Type: field.TypeTime},
+	}
+	// ThreadGroupMembersTable holds the schema information for the "thread_group_members" table.
+	ThreadGroupMembersTable = &schema.Table{
+		Name:       "thread_group_members",
+		Columns:    ThreadGroupMembersColumns,
+		PrimaryKey: []*schema.Column{ThreadGroupMembersColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "threadgroupmember_conversation_id",
+				Unique:  true,
+				Columns: []*schema.Column{ThreadGroupMembersColumns[3]},
+			},
+			{
+				Name:    "threadgroupmember_group_id",
+				Unique:  false,
+				Columns: []*schema.Column{ThreadGroupMembersColumns[1]},
+			},
+			{
+				Name:    "threadgroupmember_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{ThreadGroupMembersColumns[2]},
+			},
+		},
 	}
 	// UsageReservationsColumns holds the columns for the "usage_reservations" table.
 	UsageReservationsColumns = []*schema.Column{
@@ -3025,7 +3119,10 @@ var (
 		SkillVersionsTable,
 		SubscriptionTemplatesTable,
 		TemplatesTable,
+		TestIdentityLoginCodesTable,
 		TestInfraMarkerTable,
+		ThreadGroupsTable,
+		ThreadGroupMembersTable,
 		UsageReservationsTable,
 		UsersTable,
 		UserAccessTokensTable,
@@ -3219,8 +3316,18 @@ func init() {
 	TemplatesTable.Annotation = &entsql.Annotation{
 		Table: "templates",
 	}
+	TestIdentityLoginCodesTable.ForeignKeys[0].RefTable = UsersTable
+	TestIdentityLoginCodesTable.Annotation = &entsql.Annotation{
+		Table: "test_identity_login_codes",
+	}
 	TestInfraMarkerTable.Annotation = &entsql.Annotation{
 		Table: "test_infra_marker",
+	}
+	ThreadGroupsTable.Annotation = &entsql.Annotation{
+		Table: "thread_groups",
+	}
+	ThreadGroupMembersTable.Annotation = &entsql.Annotation{
+		Table: "thread_group_members",
 	}
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UsersTable.Annotation = &entsql.Annotation{
