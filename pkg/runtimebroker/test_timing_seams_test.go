@@ -68,6 +68,7 @@ func fastLaunchTimings(keepaliveInterval time.Duration) *launchTimings {
 		keepaliveMinBackoff: 10 * time.Millisecond,
 		keepaliveMaxBackoff: 30 * time.Millisecond,
 		keepaliveInterval:   keepaliveInterval,
+		progressInterval:    50 * time.Millisecond,
 	}
 }
 
@@ -88,6 +89,7 @@ func TestLaunchSender_DefaultTimings(t *testing.T) {
 		reportMaxBackoff:    10 * time.Second,
 		keepaliveMinBackoff: 2 * time.Second,
 		keepaliveMaxBackoff: 5 * time.Second,
+		progressInterval:    2 * time.Second,
 	}
 	if s.timings != want {
 		t.Fatalf("default timings = %+v, want %+v", s.timings, want)

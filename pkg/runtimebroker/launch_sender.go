@@ -36,7 +36,13 @@ const (
 	claimAttemptTimeout      = 5 * time.Second
 	checkpointAttemptTimeout = 5 * time.Second
 	keepaliveAttemptTimeout  = 5 * time.Second
+	progressAttemptTimeout   = 5 * time.Second
 	terminalAttemptTimeout   = 5 * time.Second
+
+	// progressMinInterval is the least time between two progress posts of
+	// one launch (design wave 3 §3 E-b): steps recorded inside it are
+	// coalesced, and only the latest is posted.
+	progressMinInterval = 2 * time.Second
 
 	reportMinBackoff = 1 * time.Second
 	reportMaxBackoff = 10 * time.Second
@@ -57,6 +63,8 @@ type launchTimings struct {
 	// keepaliveInterval, when positive, replaces the interval newLaunchSender
 	// was given. Always zero in defaultLaunchTimings().
 	keepaliveInterval time.Duration
+	// progressInterval is the least time between two progress posts.
+	progressInterval time.Duration
 }
 
 // defaultLaunchTimings returns the production backoff ranges above.
@@ -66,6 +74,7 @@ func defaultLaunchTimings() launchTimings {
 		reportMaxBackoff:    reportMaxBackoff,
 		keepaliveMinBackoff: keepaliveMinBackoff,
 		keepaliveMaxBackoff: keepaliveMaxBackoff,
+		progressInterval:    progressMinInterval,
 	}
 }
 
@@ -105,6 +114,20 @@ type launchSender struct {
 	// failed{hub_unreachable}).
 	checkpointUnreachable bool
 
+	// Launch progress (design wave 3 §3 E-b), all guarded by mu.
+	// pendingStep/pendingMessage are the latest step Progress recorded;
+	// postedStep is the last one a progress post landed for; lastStep is
+	// the latest step from Progress or Checkpoint (the failure step);
+	// lastPostAt is when the last progress post started; lastLandedAt is
+	// when a progress post last got a definitive answer (it resets the
+	// keepalive timer).
+	pendingStep    string
+	pendingMessage string
+	postedStep     string
+	lastStep       string
+	lastPostAt     time.Time
+	lastLandedAt   time.Time
+
 	terminalOnce    sync.Once
 	terminalStarted int32 // atomic
 	stopKeepalive   chan struct{}
@@ -114,6 +137,10 @@ type launchSender struct {
 	abortCh     chan struct{}
 	abortOnce   sync.Once
 	keepaliveWG sync.WaitGroup
+	// progressSignal (capacity 1) wakes the progress poster; Progress
+	// sends on it without blocking.
+	progressSignal chan struct{}
+	progressWG     sync.WaitGroup
 }
 
 // newLaunchSender builds a sender for rec. keepaliveInterval <= 0 defaults to
@@ -132,6 +159,9 @@ func newLaunchSender(server *Server, rec *launchRecord, agentID, instanceID stri
 			keepaliveInterval = timings.keepaliveInterval
 		}
 	}
+	if timings.progressInterval <= 0 {
+		timings.progressInterval = progressMinInterval
+	}
 	return &launchSender{
 		server:            server,
 		agentID:           agentID,
@@ -141,6 +171,7 @@ func newLaunchSender(server *Server, rec *launchRecord, agentID, instanceID stri
 		timings:           timings,
 		stopKeepalive:     make(chan struct{}),
 		abortCh:           make(chan struct{}),
+		progressSignal:    make(chan struct{}, 1),
 	}
 }
 
@@ -447,6 +478,9 @@ func (s *launchSender) Checkpoint(ctx context.Context, step string) error {
 	if s.IsAborted() {
 		return errLaunchEndedAtCheckpoint
 	}
+	s.mu.Lock()
+	s.lastStep = step
+	s.mu.Unlock()
 	report := &hubclient.AgentLaunchReport{
 		LaunchID:   s.rec.ID,
 		InstanceID: s.instanceID,
@@ -518,6 +552,13 @@ func (s *launchSender) StartKeepalive(ctx context.Context) {
 			}
 			if s.isTerminalStarted() {
 				return
+			}
+			// A progress post that landed inside the interval already
+			// told the Hub the launch is alive (design wave 3 §3 E-b):
+			// wait out the rest of the interval from that post instead.
+			if since := time.Since(s.landedAt()); since < s.keepaliveInterval {
+				timer.Reset(s.keepaliveInterval - since)
+				continue
 			}
 			s.sendKeepaliveOnce(ctx)
 			if s.isTerminalStarted() {
@@ -611,6 +652,166 @@ func (s *launchSender) sendKeepaliveOnce(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// landedAt returns when a progress post last got a definitive answer.
+func (s *launchSender) landedAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastLandedAt
+}
+
+// Progress is the runtime's non-blocking step hook (api.StartOptions.Progress,
+// design wave 3 §3 E-b). It only records step as the latest one under mu and
+// wakes the progress poster without blocking: the runtime calls it inline,
+// so it must return at once whatever the Hub is doing. An empty step, or the
+// step already recorded, changes nothing.
+func (s *launchSender) Progress(step, message string) {
+	if step == "" {
+		return
+	}
+	s.mu.Lock()
+	if step == s.pendingStep {
+		s.mu.Unlock()
+		return
+	}
+	s.pendingStep = step
+	s.pendingMessage = message
+	s.lastStep = step
+	s.mu.Unlock()
+	s.signalProgress()
+}
+
+// signalProgress wakes the progress poster without blocking. The signal
+// channel holds one wake-up, so a wake-up already pending covers this one.
+func (s *launchSender) signalProgress() {
+	select {
+	case s.progressSignal <- struct{}{}:
+	default:
+	}
+}
+
+// LastStep returns the latest step the launch reached, from Progress or
+// Checkpoint, or "" if neither has been called.
+func (s *launchSender) LastStep() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastStep
+}
+
+// StartProgress starts the per-launch progress poster (design wave 3 §3
+// E-b). It posts a progress report carrying the latest recorded step, at
+// most once per progressInterval and only when that step differs from the
+// last one posted: steps recorded between two posts are coalesced and only
+// the latest is sent. A post is one attempt; when it gets no answer the step
+// stays pending and is tried again one interval later, with whatever step is
+// latest then. Answers are classified like a keepalive's (design §3.8.2's
+// gate-answer table): an abort answer (e.g. 409 stopped or superseded) is
+// recorded and wakes KeepaliveAborted. The poster exits once a terminal send
+// starts, the keepalive is stopped, an abort is recorded, or ctx is done.
+func (s *launchSender) StartProgress(ctx context.Context) {
+	s.progressWG.Add(1)
+	go func() {
+		defer s.progressWG.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.stopKeepalive:
+				return
+			case <-s.abortCh:
+				return
+			case <-s.progressSignal:
+			}
+			s.mu.Lock()
+			wait := s.timings.progressInterval - time.Since(s.lastPostAt)
+			s.mu.Unlock()
+			if wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-s.stopKeepalive:
+					timer.Stop()
+					return
+				case <-s.abortCh:
+					timer.Stop()
+					return
+				}
+			}
+			s.postProgressOnce(ctx)
+		}
+	}()
+}
+
+// WaitProgressStopped blocks until the progress poster has exited. Callers
+// stop it first, as for WaitKeepaliveStopped.
+func (s *launchSender) WaitProgressStopped() {
+	s.progressWG.Wait()
+}
+
+// postProgressOnce posts the latest recorded step if it has not been posted
+// yet: one attempt, with the step read now (not when the poster was woken),
+// so the latest step wins.
+func (s *launchSender) postProgressOnce(ctx context.Context) {
+	if s.isTerminalStarted() || s.IsCompleted() || s.IsAborted() {
+		return
+	}
+	s.mu.Lock()
+	step, message := s.pendingStep, s.pendingMessage
+	if step == "" || step == s.postedStep {
+		s.mu.Unlock()
+		return
+	}
+	s.lastPostAt = time.Now()
+	s.seq++
+	report := &hubclient.AgentLaunchReport{
+		LaunchID:   s.rec.ID,
+		InstanceID: s.instanceID,
+		Seq:        s.seq,
+		State:      hubclient.AgentLaunchReportStateProgress,
+		Step:       step,
+		Message:    message,
+		At:         s.lastPostAt,
+	}
+	s.mu.Unlock()
+
+	result, err := s.sendOnce(ctx, report, progressAttemptTimeout)
+	if err != nil {
+		// No answer: try again one interval later with whatever step is
+		// latest then.
+		s.signalProgress()
+		return
+	}
+	if s.isTerminalStarted() {
+		// Same rule as a keepalive answer that arrives after the terminal's
+		// first attempt started: only the terminal's answer counts now.
+		return
+	}
+	switch action := classifyGateAnswer(result); action {
+	case gateContinue:
+		s.markProgressLanded(step)
+	case gateCompleted:
+		s.markProgressLanded(step)
+		s.recordKeepaliveCompleted()
+	case gateStopNoCleanup:
+		// As for a keepalive: a 400/401 is not evidence the launch is over.
+		s.server.agentLifecycleLog.Error("runLaunch: progress report got a protocol/auth answer; continuing",
+			"agent_id", s.agentID, "launch_id", s.rec.ID, "step", step, "http_status", result.HTTPStatus)
+	default:
+		s.recordKeepaliveAbort(action, result)
+	}
+}
+
+// markProgressLanded records that a progress post for step got a
+// definitive continue answer.
+func (s *launchSender) markProgressLanded(step string) {
+	s.mu.Lock()
+	s.postedStep = step
+	s.lastLandedAt = time.Now()
+	s.mu.Unlock()
 }
 
 // SendTerminal sends the launch's terminal report (succeeded or failed),

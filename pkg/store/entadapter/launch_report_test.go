@@ -831,3 +831,45 @@ func TestReport_H1_RunningPhaseNonSucceededEndsAsRunningObserved(t *testing.T) {
 	assert.Equal(t, store.LaunchEndReasonRunningObserved, updated.LaunchEndReason)
 	assert.True(t, answer.Changed, "ending an active launch as running_observed is a real write and must report Changed")
 }
+
+// TestReport_BrokerProgressSequenceUpdatesLaunchStep replays the reports an
+// async Kubernetes launch's broker sends (ptone/scion#4670 phase E1b): claim,
+// a pre-create checkpoint, then a progress report carrying a runtime step,
+// then a keepalive at the same seq. The progress step must become the
+// agent's launch step (the SSE/REST launch view) and report Changed so the
+// hub publishes it; the keepalive must not undo it.
+func TestReport_BrokerProgressSequenceUpdatesLaunchStep(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a, launchID := beginTestLaunch(t, ctx, s, projectID, "e1b-progress-step")
+
+	report := func(seq int64, state, step, message string) (store.LaunchReportAnswer, store.Agent) {
+		t.Helper()
+		answer, updated, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+			LaunchID: launchID, InstanceID: "i1", State: state, Seq: seq, Step: step, Message: message,
+		})
+		require.NoError(t, err)
+		require.Zero(t, answer.HTTPStatus, "report %s seq %d answered %+v", state, seq, answer)
+		return answer, updated
+	}
+
+	report(1, store.LaunchReportStateClaim, "", "")
+	_, updated := report(2, store.LaunchReportStateCheckpoint, "pod_create", "")
+	assert.Equal(t, "pod_create", updated.LaunchStep)
+
+	answer, updated := report(3, store.LaunchReportStateProgress, "container_create", "preparing the container (image pull, volume mounts)")
+	assert.Equal(t, store.LaunchReportResultApplied, answer.Result)
+	assert.True(t, answer.Changed, "a progress report with a new step must report Changed, or the hub does not publish it")
+	assert.Equal(t, "container_create", updated.LaunchStep)
+	assert.Equal(t, "preparing the container (image pull, volume mounts)", updated.Message)
+
+	// The keepalive reuses the current seq.
+	answer, _ = report(3, store.LaunchReportStateProgress, "", "")
+	assert.Equal(t, store.LaunchReportResultDuplicate, answer.Result)
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	view := store.ComputeAgentLaunch(got, time.Now())
+	require.NotNil(t, view, "an active launch must have a launch view")
+	assert.Equal(t, "container_create", view.Step)
+}
