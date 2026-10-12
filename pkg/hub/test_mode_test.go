@@ -176,8 +176,10 @@ func anyStrings(ss []string) []any {
 }
 
 // The member level writes one test_mode_start line with the level and the
-// preconditions that admitted it; the status route keeps its three
-// booleans; the health summary shows the level and preconditions.
+// preconditions that admitted it; the status route reports the member tier
+// and no admin tier; the health summary shows the level and preconditions.
+// Only the status fields TM derives from the level are asserted: the
+// route's exact shape is upstream's (TestTestInfraStatus_BodyGolden).
 func TestTestMode_MemberStartupLineAndStatus(t *testing.T) {
 	buf := tiaCaptureAudit(t)
 	srv, _, err := tiaNewServer(t, tmMemberServerConfig())
@@ -195,7 +197,11 @@ func TestTestMode_MemberStartupLineAndStatus(t *testing.T) {
 
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false}`, strings.TrimSpace(rec.Body.String()))
+	var status TestInfraStatusResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &status))
+	assert.True(t, status.TestIdentities, "member level: test identities on")
+	assert.False(t, status.TestHubAdmin, "member level: no hub-admin kind")
+	assert.False(t, status.TestSuperAdmin, "member level: no super-admin kind")
 
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
