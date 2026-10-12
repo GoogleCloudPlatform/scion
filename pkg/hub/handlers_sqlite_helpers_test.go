@@ -4709,6 +4709,17 @@ func enableTestIdentitiesForTest(srv *Server) {
 	srv.authConfig.TestIdentitiesEnabled = true
 }
 
+// enableTestIdentityWebSessionsForTest gives srv a hub-local test identity
+// web session key (the effect of a test-infra marker with a key), so test
+// identity web sessions are available while test identities are on.
+func enableTestIdentityWebSessionsForTest(srv *Server) {
+	key := make([]byte, testIdentityWebKeyLen)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	srv.testIdentityWeb = newTestIdentityWebState(TestIdentityWebSessionKey{Key: key})
+}
+
 // newTestIdentityServer builds a test server with the feature on or off.
 func newTestIdentityServer(t *testing.T, enabled bool) (*Server, store.Store) {
 	t.Helper()

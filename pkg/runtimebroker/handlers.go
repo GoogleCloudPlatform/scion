@@ -49,6 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -4220,7 +4221,10 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	if req.Interrupt {
 		logMsg = "message delivered (interrupt, unbuffered)"
 	}
-	logAttrs := []any{"agent_id", id}
+	// The hub writes the message record; this delivery acknowledgement
+	// is a lifecycle entry, so a broker sharing the hub's message log
+	// does not list the message twice.
+	logAttrs := []any{"agent_id", id, logging.AttrLogKind, logging.LogKindEvent}
 	if req.ProjectID != "" {
 		logAttrs = append(logAttrs, "project_id", req.ProjectID)
 	}

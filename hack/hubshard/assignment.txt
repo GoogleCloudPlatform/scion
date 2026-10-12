@@ -159,6 +159,7 @@
 4 artifacts_orphans_test.go
 6 artifacts_permits_test.go
 6 artifacts_review_grant_test.go
+6 artifacts_review_grant_ui_test.go
 4 artifacts_review_test.go
 4 artifacts_scope_ceiling_test.go
 4 artifacts_settings_test.go
@@ -394,6 +395,7 @@
 0 controlchannel_helpers_test.go
 4 controlchannel_test.go
 1 controlchannel_tunnel_cancel_test.go
+3 conversation_participant_modes_test.go
 4 cpm_acceptance_test.go
 0 cpm_sqlite_helpers_test.go
 5 create_agent_quota_release_test.go
@@ -793,6 +795,7 @@
 5 handlers_test_identities_inbound_test.go
 5 handlers_test_identities_review_test.go
 6 handlers_test_identities_test.go
+3 handlers_test_identity_web_test.go
 3 handlers_test_infra_status_routed_test.go
 3 handlers_test_infra_status_test.go
 3 handlers_test_login_fixture_test.go
@@ -958,6 +961,7 @@
 5 message_delivery_failures_test.go
 5 message_id_envelope_3881_test.go
 4 message_log_conversation_id_test.go
+3 message_log_records_test.go
 0 message_sqlite_helpers_test.go
 1 message_wake_lifecycle_test.go
 6 messageability_detail_test.go
