@@ -1297,6 +1297,8 @@ func TestTestIdentityDelegation_ListLiveUsesTheArmDefinition(t *testing.T) {
 func TestWorkloadDelegation_PurgeScopedToDelegation(t *testing.T) {
 	e := newX2Env(t, true)
 	e.srv.SetDispatcher(&purgeRecDispatcher{})
+	// The fixtures below create a group, as in the Phase 3b purge tests.
+	fpAllowMembersToCreateGroups(t, e.s)
 	ctx := context.Background()
 	grantor, _ := e.bindingGrantor(t, "x2-purge-grantor")
 	admin := e.grantor(t, "x2-purge-admin")
