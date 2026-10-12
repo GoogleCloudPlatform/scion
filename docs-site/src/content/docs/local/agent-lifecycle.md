@@ -161,6 +161,8 @@ In Hub mode only one start of an agent runs at a time. If you start, resume, or 
 
 To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub, and works for agents in clone-per-agent, shared-workspace, and Hub-managed workspaces; agents in worktree-per-agent projects are not yet supported.
 
+Reincarnating is also how an existing agent picks up changed harness dotfiles, hook registrations, and skills, which are otherwise copied only when the agent is created. See [Changing a harness config affects new agents only](/scion/reference/harness-settings/#changing-a-harness-config-affects-new-agents-only).
+
 In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --broker <name|id>` also moves the agent to another Runtime Broker, keeping its workspace, when both Runtime Brokers mount the same NFS export. See [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
 
 ## Auto-Suspend of Stalled Agents

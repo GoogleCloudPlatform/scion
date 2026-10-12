@@ -1006,7 +1006,7 @@ full lifecycle.
 - `sync <name>` (alias `push`): Upload a local config to the Hub (changed files only), creating it or updating the same-named config in the target scope. Scope is the current project by default, or global with `--global`; the output shows the scope used. Flags: `--name` (publish under a different Hub name).
 - `pull <name>`: Download a config from the Hub. Flags: `--to <path>` (destination; defaults to the global dir).
 - `reset <name>`: Restore a config to the binary's embedded defaults.
-- `upgrade [name]`: Add missing support files and metadata without clobbering user values. Flags: `--dry-run`, `--activate-script`, `--force`. With no name, upgrades all configs in the global directory.
+- `upgrade [name]`: Add missing support files and metadata to the local copy without clobbering user values. Flags: `--dry-run`, `--activate-script`, `--force` (reset to the embedded defaults, overwriting local edits). With no name, upgrades all configs in the global directory. It does not change the Hub's copy or existing agents; see [Changing a harness config affects new agents only](/scion/reference/harness-settings/#changing-a-harness-config-affects-new-agents-only).
 - `delete <name>`: Delete a config from the Hub (does not remove local files). The web UI additionally offers an "Also delete stored files" option.
 
 ## Hub Integration
