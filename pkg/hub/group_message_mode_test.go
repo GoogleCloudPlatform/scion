@@ -121,17 +121,21 @@ func requireGroupModeDenied(t *testing.T, rr *httptest.ResponseRecorder, msgAndA
 // group conversation named by conversationID or threadID.
 func postOutboundGroup(t *testing.T, srv *Server, a *store.Agent, recipientEmail, conversationID, threadID string) *httptest.ResponseRecorder {
 	t.Helper()
-	return postOutboundGroupWith(t, srv, a, recipientEmail, conversationID, threadID, "group post from "+a.Slug)
+	channel := ""
+	if threadID != "" {
+		channel = "web"
+	}
+	return postOutboundGroupWith(t, srv, a, recipientEmail, conversationID, threadID, channel, "group post from "+a.Slug)
 }
 
 // postOutboundGroupMsg is postOutboundGroup by conversation_id with the
 // given message body.
 func postOutboundGroupMsg(t *testing.T, srv *Server, a *store.Agent, recipientEmail, conversationID, msg string) *httptest.ResponseRecorder {
 	t.Helper()
-	return postOutboundGroupWith(t, srv, a, recipientEmail, conversationID, "", msg)
+	return postOutboundGroupWith(t, srv, a, recipientEmail, conversationID, "", "", msg)
 }
 
-func postOutboundGroupWith(t *testing.T, srv *Server, a *store.Agent, recipientEmail, conversationID, threadID, msg string) *httptest.ResponseRecorder {
+func postOutboundGroupWith(t *testing.T, srv *Server, a *store.Agent, recipientEmail, conversationID, threadID, channel, msg string) *httptest.ResponseRecorder {
 	t.Helper()
 	srv.chatSendLimiter = newChatSendLimiter()
 	r := OutboundMessageRequest{
@@ -139,9 +143,7 @@ func postOutboundGroupWith(t *testing.T, srv *Server, a *store.Agent, recipientE
 		Msg:            msg,
 		ConversationID: conversationID,
 		ThreadID:       threadID,
-	}
-	if threadID != "" {
-		r.Channel = "web"
+		Channel:        channel,
 	}
 	body, err := json.Marshal(r)
 	require.NoError(t, err)
@@ -607,4 +609,58 @@ func TestGroupMessageMode_MentionJoin(t *testing.T) {
 		assert.True(t, groupModeIsParticipant(t, s, conv.ID, "agent", peer.ID),
 			"a mentioned project agent is added to the group conversation")
 	})
+}
+
+// TestGroupMessageMode_OutboundExternalThreadPost covers agent posts by
+// thread_id on an external channel for every mode: to an existing thread
+// conversation the agent belongs to, and to a thread that does not exist
+// yet, where a refused post creates no conversation.
+func TestGroupMessageMode_OutboundExternalThreadPost(t *testing.T) {
+	srv, s, project, _, user := def138Setup(t)
+	setupThreadTestChannels(t, srv, s, project, "web", "slack")
+	ctx := context.Background()
+	projectID := project.ID
+
+	for _, mode := range groupModeTestModes {
+		t.Run(mode+"/existing-added", func(t *testing.T) {
+			a := groupModeAgent(t, s, projectID, "", mode)
+			threadID := "gmm-slack-" + uuid.NewString()[:8]
+			extRef, err := messaging.ThreadConversationExternalRef(projectID, threadID)
+			require.NoError(t, err)
+			conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+				Kind:        "group",
+				Surface:     "slack",
+				ExternalRef: extRef,
+				ProjectID:   &projectID,
+				DriftState:  "active",
+			})
+			require.NoError(t, err)
+			addConvParticipant(t, s, conv.ID, "agent", a.ID)
+
+			rr := postOutboundGroupWith(t, srv, a, user.Email, "", threadID, "slack", "external thread post from "+a.Slug)
+			if mode == store.MessageModeNone {
+				requireGroupModeDenied(t, rr, "body: %s", rr.Body.String())
+			} else {
+				require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+			}
+		})
+
+		t.Run(mode+"/new-thread", func(t *testing.T) {
+			a := groupModeAgent(t, s, projectID, "", mode)
+			threadID := "gmm-slack-new-" + uuid.NewString()[:8]
+			extRef, err := messaging.ThreadConversationExternalRef(projectID, threadID)
+			require.NoError(t, err)
+
+			rr := postOutboundGroupWith(t, srv, a, user.Email, "", threadID, "slack", "external thread post from "+a.Slug)
+			_, lookupErr := s.GetConversationByExternalRef(ctx, "slack", extRef)
+			if groupModeIsProjectCell(mode) {
+				require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+				assert.NoError(t, lookupErr)
+			} else {
+				requireGroupModeDenied(t, rr, "body: %s", rr.Body.String())
+				assert.True(t, errors.Is(lookupErr, store.ErrNotFound),
+					"a refused post creates no conversation (err=%v)", lookupErr)
+			}
+		})
+	}
 }

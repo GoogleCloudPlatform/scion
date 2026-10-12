@@ -184,7 +184,9 @@ func writeGroupModeDenied(w http.ResponseWriter, reason, mode string) {
 // after resolution. none and unknown modes are refused. A refusal or a
 // lookup fault is written to w; ok reports whether the caller may go on.
 // surface is the conversation surface for an external channel, or "" for
-// native.
+// native. It is stricter than resolution in two edge cases, a soft-deleted
+// native topic and an external thread key that matches a native topic, and
+// fails closed (refuses) in both.
 func (s *Server) precheckThreadGroupPost(ctx context.Context, w http.ResponseWriter, sender *store.Agent, projectID, extRef, threadID, surface string) bool {
 	mode := effectiveGroupMessageMode(sender.MessageMode)
 	switch mode {

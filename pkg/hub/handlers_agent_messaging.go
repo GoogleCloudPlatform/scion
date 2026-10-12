@@ -2603,6 +2603,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					return
 				}
 			} else if authKind, authID := authenticatedSender(ctx); authKind == "agent" {
+				// Defensive fallback: the pre-check above sets
+				// threadPostSender for every agent thread post.
 				if _, ok := s.checkInboundAgentGroupPost(ctx, w, authID, convResult.ConversationID); !ok {
 					return
 				}
