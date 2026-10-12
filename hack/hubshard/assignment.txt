@@ -394,6 +394,7 @@
 0 controlchannel_helpers_test.go
 4 controlchannel_test.go
 1 controlchannel_tunnel_cancel_test.go
+3 conversation_participant_modes_test.go
 4 cpm_acceptance_test.go
 0 cpm_sqlite_helpers_test.go
 5 create_agent_quota_release_test.go
