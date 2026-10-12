@@ -17,7 +17,7 @@ The hook system is the low-level mechanism for capturing harness events inside a
 
 ### Hook Configuration
 
-Hooks are configured in the harness's embedded `settings.json`. For Claude Code (`pkg/harness/claude/embeds/settings.json`), **8 hook events** are registered:
+Hooks are configured in the harness's embedded `settings.json`. For Claude Code (`harnesses/claude/home/.claude/settings.json`), **9 hook events** are registered:
 
 | Hook Event | What Triggers It |
 |---|---|
@@ -27,8 +27,9 @@ Hooks are configured in the harness's embedded `settings.json`. For Claude Code 
 | `Stop` | Agent turn completes (main agent) |
 | `SubagentStop` | Subagent turn completes |
 | `PreToolUse` | Before a tool executes |
-| `PostToolUse` | After a tool executes |
-| `Notification` (matcher: `ToolPermission`) | Tool permission requested |
+| `PostToolUse` | After a tool executes successfully |
+| `PostToolUseFailure` | After a tool call fails |
+| `Notification` (matcher: `permission_prompt\|elicitation_dialog\|elicitation_url_dialog`) | Tool permission or elicitation requested |
 
 All hooks invoke the same command: `sciontool hook --dialect=claude`, receiving the hook payload as JSON via stdin.
 
@@ -72,7 +73,7 @@ The dialect parser maps harness-specific event names to a normalized vocabulary 
 | `session-end` | SessionEnd | SessionEnd |
 | `prompt-submit` | UserPromptSubmit | — |
 | `tool-start` | PreToolUse | BeforeTool |
-| `tool-end` | PostToolUse | AfterTool |
+| `tool-end` | PostToolUse, PostToolUseFailure | AfterTool |
 | `agent-end` | Stop | AfterAgent |
 | `subagent-end` | SubagentStop | — |
 | `model-start` | BeforeModel | BeforeModel |

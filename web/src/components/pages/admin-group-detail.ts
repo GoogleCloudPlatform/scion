@@ -94,20 +94,6 @@ export class ScionPageAdminGroupDetail extends LitElement {
       display: block;
     }
 
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
-
     .header-slug {
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.875rem;
@@ -389,12 +375,8 @@ export class ScionPageAdminGroupDetail extends LitElement {
     const ownerDisplay = this.ownerDisplayName || this.group.ownerId || '\u2014';
 
     return html`
-      <a href="/admin/groups" class="back-link">
-        <sl-icon name="arrow-left" aria-hidden="true"></sl-icon>
-        Back to Groups
-      </a>
-
       <scion-detail-header heading=${this.group.name}>
+        <scion-back-link slot="back" href="/admin/groups">Back to Groups</scion-back-link>
         <div slot="icon" class="group-icon ${this.group.groupType}" aria-hidden="true">
           <sl-icon name="${isProjectAgents ? 'cpu' : 'people'}"></sl-icon>
         </div>
@@ -579,10 +561,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
   private renderError() {
     return html`
-      <a href="/admin/groups" class="back-link">
-        <sl-icon name="arrow-left" aria-hidden="true"></sl-icon>
-        Back to Groups
-      </a>
+      <scion-back-link href="/admin/groups">Back to Groups</scion-back-link>
 
       <div class="error-state" role="alert">
         <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>

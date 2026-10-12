@@ -244,6 +244,10 @@ export class ScionChatComposer extends LitElement {
   @property()
   projectId = '';
 
+  /** The signed-in user's id; the artifact picker shows their artifacts as "You". */
+  @property()
+  currentUserId = '';
+
   // ---- Phase-3 properties ----
 
   /** Reply-to context: shows a reply preview bar above the input. */
@@ -503,8 +507,15 @@ export class ScionChatComposer extends LitElement {
     }
 
     @media (max-width: 768px) {
+      /* The attach button is a 44px square, the same size as Send at the
+         other end of the row, so both entry points have full touch targets
+         with the field between them. The icon stays at its size, centred. */
       .attach-btn::part(base) {
+        width: 44px;
+        height: 44px;
         min-height: 44px;
+        padding: 0;
+        justify-content: center;
       }
 
       /* Icon-only on mobile: a square accent button, freeing the width the
@@ -1791,6 +1802,7 @@ export class ScionChatComposer extends LitElement {
       <scion-artifact-picker
         .open=${this.artifactPickerOpen}
         .projectId=${this.projectId}
+        .currentUserId=${this.currentUserId}
         .remaining=${MAX_MESSAGE_ARTIFACTS - this.pendingArtifacts.length}
         .attachedIds=${this.pendingArtifacts.map((a) => a.id)}
         @artifact-picker-select=${(e: CustomEvent<ArtifactPickerSelectDetail>) =>

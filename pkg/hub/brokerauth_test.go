@@ -37,24 +37,6 @@ import (
 	"github.com/google/uuid"
 )
 
-func setupTestBrokerAuthService(t *testing.T) (*BrokerAuthService, store.Store) {
-	t.Helper()
-
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate store: %v", err)
-	}
-
-	config := DefaultBrokerAuthConfig()
-	svc := NewBrokerAuthService(config, s)
-	t.Cleanup(svc.Close)
-
-	return svc, s
-}
-
 func TestBrokerRegistrationAndJoin(t *testing.T) {
 	svc, _ := setupTestBrokerAuthService(t)
 	ctx := context.Background()
@@ -360,9 +342,6 @@ func TestJoinWithExpiredToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate store: %v", err)
-	}
 
 	config := DefaultBrokerAuthConfig()
 	config.JoinTokenExpiry = -1 * time.Hour // Already expired
@@ -539,9 +518,6 @@ func TestValidateBrokerSignature_ClockSkew(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate store: %v", err)
 	}
 
 	config := DefaultBrokerAuthConfig()
@@ -1268,63 +1244,6 @@ func TestBrokerReregistration_MergesLabels(t *testing.T) {
 // =============================================================================
 // X-Scion-On-Behalf-Of tests
 // =============================================================================
-
-// setupSignedBrokerRequest creates a broker with a secret and returns a helper
-// function that produces signed requests with the given method, path, and body.
-func setupSignedBrokerRequest(t *testing.T, svc *BrokerAuthService, s store.Store) (brokerID string, signReq func(method, path string, headers map[string]string) *http.Request) {
-	t.Helper()
-	ctx := context.Background()
-
-	brokerID = uuid.New().String()
-	broker := &store.RuntimeBroker{
-		ID:      brokerID,
-		Name:    "obo-test-broker",
-		Slug:    "obo-test-broker",
-		Status:  store.BrokerStatusOnline,
-		Created: time.Now(),
-		Updated: time.Now(),
-	}
-	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("failed to create runtime broker: %v", err)
-	}
-
-	secretKey := []byte("obo-test-secret-key-32-bytes!!!!")
-	secret := &store.BrokerSecret{
-		BrokerID:  brokerID,
-		SecretKey: secretKey,
-		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
-		Status:    store.BrokerSecretStatusActive,
-	}
-	if err := s.CreateBrokerSecret(ctx, secret); err != nil {
-		t.Fatalf("failed to create broker secret: %v", err)
-	}
-
-	nonceCounter := 0
-	signReq = func(method, path string, extraHeaders map[string]string) *http.Request {
-		nonceCounter++
-		timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-		nonce := "obo-nonce-" + strconv.Itoa(nonceCounter)
-
-		req := httptest.NewRequest(method, path, nil)
-		req.Header.Set(HeaderBrokerID, brokerID)
-		req.Header.Set(HeaderTimestamp, timestamp)
-		req.Header.Set(HeaderNonce, nonce)
-
-		for k, v := range extraHeaders {
-			req.Header.Set(k, v)
-		}
-
-		canonicalString := svc.buildCanonicalString(req, timestamp, nonce)
-		h := hmac.New(sha256.New, secretKey)
-		h.Write(canonicalString)
-		signature := base64.StdEncoding.EncodeToString(h.Sum(nil))
-		req.Header.Set(HeaderSignature, signature)
-
-		return req
-	}
-
-	return brokerID, signReq
-}
 
 func TestBrokerAuthMiddleware_OnBehalfOf_NoHeader(t *testing.T) {
 	svc, s := setupTestBrokerAuthService(t)

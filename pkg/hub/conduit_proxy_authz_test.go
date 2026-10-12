@@ -115,53 +115,6 @@ func TestConduitProxyRevocationClosesWebSocket(t *testing.T) {
 	assert.EqualValues(t, 1, f.sessions.Load(), "the agent session was re-established")
 }
 
-// proxyWS opens a WebSocket through the port proxy and checks one echo.
-func proxyWS(t *testing.T, f *conduitProxyFixture) *websocket.Conn {
-	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(f.base, "http") +
-		"/api/v1/agents/" + f.launched.ID + "/ports/" + strconv.Itoa(f.app.port) + "/proxy/ws"
-	c, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Authorization": {"Bearer " + f.userToken}})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Close() })
-	require.NoError(t, c.SetReadDeadline(time.Now().Add(10*time.Second)))
-	require.NoError(t, c.WriteMessage(websocket.TextMessage, []byte("ping")))
-	_, got, err := c.ReadMessage()
-	require.NoError(t, err)
-	require.Equal(t, "ping", string(got))
-	return c
-}
-
-// requireAuthzClose reads until the WebSocket closes and checks the code.
-func requireAuthzClose(t *testing.T, c *websocket.Conn) {
-	t.Helper()
-	require.NoError(t, c.SetReadDeadline(time.Now().Add(recheckWait)))
-	_, _, err := c.ReadMessage()
-	var ce *websocket.CloseError
-	require.ErrorAs(t, err, &ce)
-	assert.Equal(t, 4401, ce.Code)
-	assert.Equal(t, "authz_expired", ce.Text)
-}
-
-func echoApp() http.Handler {
-	up := websocket.Upgrader{}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := up.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer func() { _ = c.Close() }()
-		for {
-			mt, msg, err := c.ReadMessage()
-			if err != nil {
-				return
-			}
-			if err := c.WriteMessage(mt, msg); err != nil {
-				return
-			}
-		}
-	})
-}
-
 // TestConduitAuthzNotifyInServerStartupOrder: the server starts the relay
 // while its event publisher is still the no-op one and sets the real
 // publisher afterwards (cmd/server_foreground.go). A revocation committed

@@ -152,6 +152,12 @@ server:
     #                                   # perf_trace line per request (phase times,
     #                                   # authz store calls, decision audits, DB
     #                                   # pool waits). Observe only. Off by default.
+    # membership_sweep_report_only: false # Layer 0 (restart required). The
+    #                                   # membership-standing sweep logs and audits
+    #                                   # the agents it would hold and stop, and
+    #                                   # holds and stops none. Off by default
+    #                                   # (enforce). For the first boot after an
+    #                                   # upgrade.
 
   # -------------------------------------------------------------------------
   # Layer 0 — Broker (restart required)

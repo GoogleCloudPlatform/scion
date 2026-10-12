@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -248,7 +249,7 @@ func TestReportOpenSessionAtShutdown_RestartResumeReportedAgain(t *testing.T) {
 // daemon's sink adds it to the session state between the hook processes,
 // and the SessionEnd hook's report includes it.
 func TestSessionUsageRecorder_NativeUsageReachesSessionReport(t *testing.T) {
-	home, fake, _ := backstopEnv(t)
+	home, fake, newClient := backstopEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "native")
 	record := sessionUsageRecorder(home)
 
@@ -258,13 +259,23 @@ func TestSessionUsageRecorder_NativeUsageReachesSessionReport(t *testing.T) {
 	record(telemetry.SessionUsage{Calls: 1, TokensInput: 50, TokensOutput: 5})
 	runHooks(t, lateSessionEnd)
 
+	// With native usage the session-end hook holds the report, so usage
+	// the harness exports after session-end is added to it first.
+	if n := len(fake.Reports()); n != 0 {
+		t.Fatalf("got %d reports at session-end, want the report held", n)
+	}
+	record(telemetry.SessionUsage{Calls: 1, TokensInput: 7, TokensOutput: 3})
+
+	// The harness exits; the init daemon's shutdown check sends the held
+	// report at once, late usage included.
+	reportOpenSessionAtShutdown(home, exitOutcome{}, newClient)
 	reports := fake.Reports()
 	if len(reports) != 1 {
 		t.Fatalf("got %d reports, want 1: %+v", len(reports), reports)
 	}
 	p := reports[0]
-	if p.Tokens.Input != 150 || p.Tokens.Output != 25 || p.Tokens.Cached != 300 {
-		t.Errorf("tokens = %+v, want input 150, output 25, cached 300", p.Tokens)
+	if p.Session.ID != "sess-stop-1" || p.Tokens.Input != 157 || p.Tokens.Output != 28 || p.Tokens.Cached != 300 {
+		t.Errorf("session %q tokens = %+v, want sess-stop-1 with input 157, output 28, cached 300", p.Session.ID, p.Tokens)
 	}
 	if p.Session.TurnCount != 1 || p.Tools["Bash"].Calls != 2 {
 		t.Errorf("turns %d, tools %+v, want 1 turn and 2 Bash calls", p.Session.TurnCount, p.Tools)
@@ -276,11 +287,23 @@ func TestSessionUsageRecorder_NativeUsageReachesSessionReport(t *testing.T) {
 	if _, err := os.Stat(handlers.NewFileSessionState(home).Path); !os.IsNotExist(err) {
 		t.Errorf("state file after the report: %v, want it absent", err)
 	}
+	reportOpenSessionAtShutdown(home, exitOutcome{}, newClient)
 	if n := len(fake.Reports()); n != 1 {
-		t.Errorf("got %d reports after late usage, want 1", n)
+		t.Errorf("got %d reports after late usage and a second check, want 1", n)
 	}
 	if sessionUsageRecorder("") != nil {
 		t.Error("recorder without an agent home should be nil")
+	}
+}
+
+// Without native usage, session-end still sends at once.
+func TestProcessHookData_NonNativeSessionEndSendsAtOnce(t *testing.T) {
+	_, fake, _ := backstopEnv(t)
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	runHooks(t, openSessionEvents...)
+	runHooks(t, lateSessionEnd)
+	if reports := fake.Reports(); len(reports) != 1 || reports[0].Session.ID != "sess-stop-1" {
+		t.Fatalf("reports = %+v, want the session reported at session-end", reports)
 	}
 }
 
@@ -297,7 +320,7 @@ func (f *fakeSinkSetter) SetSessionUsageSink(sink telemetry.SessionUsageSink) {
 // state, so usage it receives reaches the SessionEnd report. A nil pipeline
 // is a no-op.
 func TestWireSessionUsage_InstallsStateRecorder(t *testing.T) {
-	home, fake, _ := backstopEnv(t)
+	home, fake, newClient := backstopEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "native")
 
 	setter := &fakeSinkSetter{}
@@ -309,6 +332,11 @@ func TestWireSessionUsage_InstallsStateRecorder(t *testing.T) {
 	runHooks(t, openSessionEvents...)
 	setter.sinks[0](telemetry.SessionUsage{Calls: 1, TokensInput: 7, TokensOutput: 4})
 	runHooks(t, lateSessionEnd)
+	// Native usage: session-end holds the report; the shutdown check sends it.
+	if n := len(fake.Reports()); n != 0 {
+		t.Fatalf("got %d reports at session-end, want the report held", n)
+	}
+	reportOpenSessionAtShutdown(home, exitOutcome{}, newClient)
 	reports := fake.Reports()
 	if len(reports) != 1 || reports[0].Tokens.Input != 7 || reports[0].Tokens.Output != 4 {
 		t.Errorf("reports = %+v, want one with input 7, output 4", reports)
@@ -316,4 +344,80 @@ func TestWireSessionUsage_InstallsStateRecorder(t *testing.T) {
 
 	wireSessionUsage(nil, home)
 	wireSessionUsage((*telemetry.Pipeline)(nil), home)
+}
+
+// writeKilledHookReport leaves the agent's state file as a session-end hook
+// process leaves it when it is killed after ending the session and before
+// reporting it: the finalized summary is a pending report claimed by a
+// process that no longer exists (a real child that has exited).
+func writeKilledHookReport(t *testing.T, home, sessionID string) {
+	t.Helper()
+	child := exec.Command("true")
+	if err := child.Run(); err != nil {
+		t.Skipf("cannot run a child process: %v", err)
+	}
+	state := map[string]any{
+		"version":    1,
+		"aggregator": map[string]any{},
+		"pending": []map[string]any{{
+			"summary": map[string]any{
+				"SessionID": sessionID,
+				"StartedAt": time.Now().Add(-time.Minute).UTC(),
+				"EndedAt":   time.Now().UTC(),
+				"Status":    "completed",
+				"TurnCount": 2,
+				"ToolCalls": map[string]any{"Bash": map[string]int{"calls": 3, "success": 3}},
+			},
+			"claim_pid":  child.Process.Pid,
+			"claimed_at": time.Now().UTC(),
+		}},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := handlers.NewFileSessionState(home).Path
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string][]byte{path: data, path + ".lock": nil} {
+		if err := os.WriteFile(name, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A session-end hook was killed between clearing the session and
+// reporting it. The shutdown backstop sends that report once; a second
+// check and later hooks send nothing more.
+func TestReportOpenSessionAtShutdown_SendsReportOfKilledHook(t *testing.T) {
+	home, fake, newClient := backstopEnv(t)
+	writeKilledHookReport(t, home, "sess-killed-1")
+
+	reportOpenSessionAtShutdown(home, stopOutcome(), newClient)
+	reports := fake.Reports()
+	if len(reports) != 1 {
+		t.Fatalf("got %d reports, want 1: %+v", len(reports), reports)
+	}
+	if p := reports[0]; p.Session.ID != "sess-killed-1" || p.Session.TurnCount != 2 || p.Tools["Bash"].Calls != 3 {
+		t.Errorf("payload = %+v", p)
+	}
+
+	reportOpenSessionAtShutdown(home, stopOutcome(), newClient)
+	runHooks(t, openSessionEvents[0])
+	if n := len(fake.Reports()); n != 1 {
+		t.Errorf("got %d reports, want 1 (the pending report must be sent once)", n)
+	}
+}
+
+// The same killed hook, with the next hook process picking the report up.
+func TestProcessHookData_SendsReportOfKilledHook(t *testing.T) {
+	home, fake, _ := backstopEnv(t)
+	writeKilledHookReport(t, home, "sess-killed-2")
+
+	runHooks(t, openSessionEvents...)
+	reports := fake.Reports()
+	if len(reports) != 1 || reports[0].Session.ID != "sess-killed-2" {
+		t.Fatalf("reports = %+v, want the killed hook's report once", reports)
+	}
 }

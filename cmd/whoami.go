@@ -52,6 +52,7 @@ type WhoamiResult struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Ancestry    []string          `json:"ancestry,omitempty"`
 	TaskSummary string            `json:"taskSummary,omitempty"`
+	MessageMode string            `json:"messageMode,omitempty"` // effective message mode (none, lineage, branch, project, hub)
 }
 
 // whoamiFull controls whether the --full flag was set.
@@ -88,7 +89,7 @@ When run outside an agent container, falls back to the system whoami command.`,
 			enrichFromHub(cmd, &result)
 		}
 
-		if isJSONOutput() {
+		if rootOptions(cmd).JSONOutput() {
 			return outputJSON(result)
 		}
 
@@ -159,6 +160,7 @@ func enrichFromHub(cmd *cobra.Command, result *WhoamiResult) {
 	result.Annotations = self.Annotations
 	result.Ancestry = self.Ancestry
 	result.TaskSummary = self.TaskSummary
+	result.MessageMode = self.MessageMode
 }
 
 // printFullPlainText prints a human-readable multi-line summary of all available fields.
@@ -195,6 +197,9 @@ func printFullPlainText(r WhoamiResult) {
 	if r.Activity != "" {
 		fmt.Printf("Activity: %s\n", r.Activity)
 	}
+	if r.MessageMode != "" {
+		fmt.Printf("Msg Mode: %s\n", r.MessageMode)
+	}
 	if r.HubURL != "" {
 		fmt.Printf("Hub:      %s\n", r.HubURL)
 	}
@@ -214,5 +219,5 @@ func runSystemWhoami() error {
 func init() {
 	rootCmd.AddCommand(whoamiCmd)
 	whoamiCmd.Flags().BoolVar(&whoamiFull, "full", false,
-		"Include enriched fields from the Hub (phase, activity, labels, ancestry)")
+		"Include enriched fields from the Hub (phase, activity, message mode, labels, ancestry)")
 }

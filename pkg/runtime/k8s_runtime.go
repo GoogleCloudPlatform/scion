@@ -100,6 +100,12 @@ type KubernetesRuntime struct {
 	// this in buildPod. Empty means no priority class is set (today's
 	// behaviour).
 	PriorityClassName string
+
+	// podTrack remembers the agent pods List() and Run() have seen, so a
+	// pod removed by a preemption or eviction before any List() observed
+	// it as terminal is still reported with that reason (see
+	// k8s_pod_tombstones.go).
+	podTrack podTracker
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -502,6 +508,8 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	if config.Name == "" {
 		config.Name = fmt.Sprintf("scion-%d", time.Now().UnixNano())
 	}
+	// A start supersedes any tombstone kept for the agent's previous pod.
+	r.noteAgentStart(namespace, config.Name)
 
 	// Stamp every object this start creates (per-agent Secrets, the
 	// SecretProviderClass and the pod, all of which copy scion.* labels from
@@ -819,6 +827,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		return "", fmt.Errorf("failed to create pod: %w", err)
 	}
 	podCreated = true
+	r.trackCreatedPod(createdPod)
 	hooks.created(api.ResourceHandle{Kind: api.ResourceKindPod, Namespace: namespace, Name: createdPod.Name, UID: string(createdPod.UID)})
 	releaseHomeLock()
 	releaseHomeLock = func() {}
@@ -2082,8 +2091,17 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// equivalent. No-auth mode builds a raw shell command string to avoid
 	// the double-sh-c wrapping that previously caused the no-auth command
 	// to be injected as terminal input instead of running standalone.
+	//
+	// nfsHome is the value that decides the NFS agent-home mount below. A
+	// pod-local home (no NFS home) is lost when the pod is deleted, so a
+	// resume has no harness session to continue: let it fall back to a
+	// fresh start instead of exiting (ptone/scion#2665).
+	nfsHome, err := nfsHomePod(config)
+	if err != nil {
+		return nil, err
+	}
 	var cmd []string
-	cmdLine, ok := harnessCmdLine(config)
+	cmdLine, ok := harnessCmdLine(config, harnessCmdLineOptions{FreshStartOnFailedResume: !nfsHome})
 	if !ok {
 		cmdLine = "sleep infinity"
 	}
@@ -2167,10 +2185,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	var extraVolumes []corev1.Volume
 	var extraVolumeMounts []corev1.VolumeMount
 
-	nfsHome, err := nfsHomePod(config)
-	if err != nil {
-		return nil, err
-	}
 	containerHome := util.GetHomeDir(config.UnixUsername)
 	fileProjections := r.k8sFileProjections(config)
 	if err := checkK8sHomeFileTargets(r.k8sHomeFilePlacements(config)); err != nil {
@@ -2417,8 +2431,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	allowPrivilegeEscalation := false
 	podSecurityContext := &corev1.PodSecurityContext{
 		FSGroup:      &fsGroupGID,
-		RunAsUser:    int64Ptr(containerUID),
-		RunAsGroup:   int64Ptr(containerUID),
+		RunAsUser:    int64Ptr(K8sContainerUID),
+		RunAsGroup:   int64Ptr(K8sContainerUID),
 		RunAsNonRoot: &runAsNonRoot,
 		SeccompProfile: &corev1.SeccompProfile{
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
@@ -2618,7 +2632,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// uid is the RunAsUser the agent runs as, gid is the NFS fsGroup.
 		// The configured NFS uid is not applied to RunAsUser, so it is not
 		// passed here either.
-		initCommand := nfsProvisionCommand(initGitClone, containerUID, fsGroupGID)
+		initCommand := nfsProvisionCommand(initGitClone, K8sContainerUID, fsGroupGID)
 
 		// F-111: shared dirs served from the workspace PVC by subPath
 		// (nfsSharedDirs below) are siblings of the workspace under the
@@ -3656,11 +3670,11 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 	if err != nil && (nfsHome || hs != nil) {
 		// An NFS-home start never force-deletes a pod it could not read:
 		// it may be a previous pod of this agent still writing to the home.
-		return fmt.Errorf("%w: cannot read the previous pod %s: %v", errPreviousPodUnconfirmed, podName, err)
+		return fmt.Errorf("%w: cannot read the previous pod %s: %w", errPreviousPodUnconfirmed, podName, err)
 	}
 	if err == nil && isNFSHomePod(pod) {
 		if derr := pods.Delete(ctx, podName, podDeleteOptions(pod)); derr != nil && !k8serrors.IsNotFound(derr) {
-			return fmt.Errorf("%w: failed to delete the previous pod %s: %v", errPreviousPodUnconfirmed, podName, derr)
+			return fmt.Errorf("%w: failed to delete the previous pod %s: %w", errPreviousPodUnconfirmed, podName, derr)
 		}
 		bound := nfsHomeTerminationBound(pod, hs)
 		runtimeLog.Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace, "bound", bound.String(), "phase", "home-wait")
@@ -3749,6 +3763,9 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		selector = "scion.name"
 	}
 
+	// Taken before listing: pods a concurrent Run() tracks after this point
+	// are not treated as vanished by this List() (k8s_pod_tombstones.go).
+	trackSnap := r.podTrack.snapshot()
 	pods, err := r.Client.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
@@ -3757,6 +3774,9 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 	}
 
 	var agents []api.AgentInfo
+	// reportedPods marks the pods this List() reports terminal or with a
+	// disruption reason; they never get a tombstone once gone.
+	reportedPods := make(map[types.UID]bool)
 	for _, p := range pods.Items {
 		// We already filtered by selector, but we still double check if scion.name is present
 		// just in case the selector logic changes or is broader.
@@ -3789,6 +3809,13 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 					exitCode = &ec
 					if ec != 0 {
 						exitReason = string(state.ExitReasonCrashed)
+					}
+					// The kubelet records OOMKilled when the container was
+					// killed for exceeding its memory limit; report it as
+					// its own reason (a crash, not a disruption). A
+					// DisruptionTarget or Evicted signal below still wins.
+					if cs.State.Terminated.Reason == k8sTerminatedReasonOOMKilled {
+						exitReason = string(state.ExitReasonOOMKilled)
 					}
 					if agentStatus == "" {
 						if cs.State.Terminated.ExitCode == 0 {
@@ -3835,44 +3862,28 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			}
 		}
 
-		projectPath := projectkeys.ProjectPathFromLabels(p.Annotations)
-		if projectPath == "" {
-			projectPath = projectkeys.ProjectPathFromLabels(p.Labels)
+		info := k8sPodBaseAgentInfo(&p)
+		info.ContainerStatus = status
+		info.Phase = agentStatus
+		info.ExitCode = exitCode
+		info.ExitReason = exitReason
+		info.Runtime = r.Name()
+		agents = append(agents, info)
+		if agentStatus == string(state.PhaseStopped) || agentStatus == string(state.PhaseError) || exitReason != "" {
+			reportedPods[p.UID] = true
 		}
-
-		var agentImage string
-		for _, c := range p.Spec.Containers {
-			if c.Name == agentContainerName {
-				agentImage = c.Image
-				break
-			}
-		}
-
-		agents = append(agents, api.AgentInfo{
-			ContainerID:     p.Name, // Pod name serves as the container identifier
-			RunID:           p.Labels[api.LabelRunID],
-			Name:            p.Labels["scion.name"],
-			Template:        p.Labels["scion.template"],
-			Project:         projectkeys.ProjectNameFromLabels(p.Labels),
-			ProjectID:       projectkeys.ProjectIDFromLabels(p.Labels),
-			ProjectPath:     projectPath,
-			Labels:          p.Labels,
-			Annotations:     p.Annotations,
-			ContainerStatus: status,
-			Phase:           agentStatus,
-			ExitCode:        exitCode,
-			ExitReason:      exitReason,
-			Image:           agentImage,
-			Runtime:         r.Name(),
-			Kubernetes: &api.AgentK8sMetadata{
-				Namespace: p.Namespace,
-				PodName:   p.Name,
-				UID:       string(p.UID),
-			},
-		})
 	}
+
+	// Pods removed by a preemption or eviction since the last List(),
+	// before any List() saw them terminal, are reported as tombstones to
+	// the heartbeat (see k8s_pod_tombstones.go).
+	agents = append(agents, r.reconcilePodTombstones(ctx, trackSnap, namespace, labelFilter, pods.Items, reportedPods)...)
 	return agents, nil
 }
+
+// k8sTerminatedReasonOOMKilled is the container termination reason the
+// kubelet records for a container killed for exceeding its memory limit.
+const k8sTerminatedReasonOOMKilled = "OOMKilled"
 
 func (r *KubernetesRuntime) GetLogs(ctx context.Context, id string) (string, error) {
 	var namespace string
@@ -4561,10 +4572,34 @@ func nfsInitContainerInjected(config RunConfig) bool {
 	return config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 }
 
-// containerUID is the uid agent pods run as (pod RunAsUser/RunAsGroup):
+// K8sContainerUID is the uid agent pods run as (pod RunAsUser/RunAsGroup):
 // the image's non-root scion user. The NFS provisioning init container
 // chowns the workspace to this uid so the agent owns what it clones.
-const containerUID int64 = 1000
+//
+// Heads-up: server.workspace_storage.nfs.uid is deliberately not applied
+// on Kubernetes (#2608); agents always run as 1000 here, and the broker
+// logs a warning when nfs.uid is set to another value (see
+// warnK8sNFSUIDIgnored in pkg/agent). Unlike the docker runtime, which
+// starts as root and drops to the configured uid, the pod is non-root from
+// the first process (RunAsUser/RunAsNonRoot in buildPod's
+// podSecurityContext), and the image's /etc/passwd only has scion as uid
+// 1000, so a different RunAsUser would have no user name, no home and no
+// way to su to it. The provision init container itself runs as uid 0
+// whatever the pod uid is (see its securityContext override and the
+// pod-level RunAsUser=1000/RunAsNonRoot=true note there); what depends on
+// 1000 is the chown target buildPod passes to nfsProvisionCommand, which is
+// K8sContainerUID, not the configured nfs.uid.
+//
+// Honouring nfs.uid on Kubernetes (option B) would need at least:
+//   - a passwd entry for the uid, e.g. written by an init container or
+//     provided at run time with nss_wrapper;
+//   - exec and attach that do not su to a user by name (ExecAsUserCmd and
+//     its callers in the broker PTY handlers);
+//   - a writable home directory for that uid;
+//   - a one-off re-own of existing workspace and agent trees on the export
+//     that are owned by 1000;
+//   - broker delete rights over files owned by that uid on the export.
+const K8sContainerUID int64 = 1000
 
 // nfsProvisionCommand builds the Command slice for the provisioning init
 // container. It invokes `sciontool provision` with numeric flags for depth
@@ -4572,7 +4607,7 @@ const containerUID int64 = 1000
 // (nfsProvisionEnv) to prevent shell injection.
 //
 // buildPod passes the identity the agent container runs as: uid is the pod
-// RunAsUser (containerUID) and gid is the pod fsGroup (the resolved
+// RunAsUser (K8sContainerUID) and gid is the pod fsGroup (the resolved
 // workspace_storage.nfs gid). A zero value omits the flag, so sciontool's
 // own default of 1000 applies.
 func nfsProvisionCommand(gc *api.GitCloneConfig, uid, gid int64) []string {

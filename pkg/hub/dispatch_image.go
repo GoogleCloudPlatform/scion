@@ -61,8 +61,8 @@ func explicitDispatchImage(ac *store.AgentAppliedConfig) string {
 // dispatcher's image registry, the form every dispatch sends.
 func (d *HTTPAgentDispatcher) dispatchImageForBroker(ac *store.AgentAppliedConfig) string {
 	image := explicitDispatchImage(ac)
-	if image != "" && d.imageRegistry != "" {
-		image = config.RewriteImageRegistry(image, d.imageRegistry)
+	if registry := d.ImageRegistry(); image != "" && registry != "" {
+		image = config.RewriteImageRegistry(image, registry)
 	}
 	return image
 }

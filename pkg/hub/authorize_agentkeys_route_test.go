@@ -53,7 +53,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -61,156 +60,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
-
-// validKeysBody is a minimal, valid /keys request body -- everywhere a test
-// below needs to get past ValidateBody so it can exercise the
-// resolution/authorization/admission behavior beyond it.
-var validKeysBody = map[string]string{"keys": "C-c"}
-
-// agentKeysRouteFixture builds a server plus two real projects/agents so the
-// tests below can exercise both /keys route shapes end-to-end.
-type agentKeysRouteFixture struct {
-	srv      *Server
-	store    store.Store
-	projectA *store.Project
-	projectB *store.Project
-	agentInA *store.Agent // target agent in project A
-	agentInB *store.Agent // target agent in project B
-	owner    *store.User  // owns agentInA and agentInB
-	nonOwner *store.User  // a hub user with no ownership/role on either agent
-}
-
-func newAgentKeysRouteFixture(t *testing.T) *agentKeysRouteFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	owner := &store.User{
-		ID: tid("agentkeys-route-owner"), Email: "agentkeys-route-owner@test.com",
-		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active",
-	}
-	require.NoError(t, s.CreateUser(ctx, owner))
-
-	nonOwner := &store.User{
-		ID: tid("agentkeys-route-nonowner"), Email: "agentkeys-route-nonowner@test.com",
-		DisplayName: "Non-Owner", Role: store.UserRoleMember, Status: "active",
-	}
-	require.NoError(t, s.CreateUser(ctx, nonOwner))
-
-	projA := &store.Project{ID: tid("agentkeys-route-proj-a"), Name: "Route A", Slug: "agentkeys-route-proj-a", OwnerID: owner.ID}
-	require.NoError(t, s.CreateProject(ctx, projA))
-	projB := &store.Project{ID: tid("agentkeys-route-proj-b"), Name: "Route B", Slug: "agentkeys-route-proj-b", OwnerID: owner.ID}
-	require.NoError(t, s.CreateProject(ctx, projB))
-	// The owner relationship on a project agent requires active project
-	// access (ptone/scion#2141); the binding grants no permissions itself.
-	grantProjectAccessOnly(t, s, owner.ID, projA.ID)
-	grantProjectAccessOnly(t, s, owner.ID, projB.ID)
-
-	// A real store.RuntimeBroker row, assigned to both fixture agents below,
-	// so RuntimeBrokerID resolves to something real -- required for the
-	// real-dispatcher integration tests (TestExecuteAgentKeys_RealHTTPDispatcher*
-	// in execute_agent_keys_test.go), which route through
-	// HTTPAgentDispatcher.DispatchAgentKeys and its own
-	// getBrokerEndpoint(ctx, target.RuntimeBrokerID) store lookup. Tests that
-	// use the fake dispatcher (fakeAgentKeysDispatcher) never look at this
-	// broker row at all, so its presence does not change their behavior; an
-	// authorized call with no dispatcher configured at all (the default
-	// unless a test opts in via SetDispatcher) still ends in 503
-	// keys_unavailable, since that determination is
-	// s.GetDispatcher() == nil, not anything about the target agent.
-	broker := &store.RuntimeBroker{
-		ID: tid("agentkeys-route-broker"), Name: "agentkeys-route-broker", Slug: "agentkeys-route-broker",
-		Endpoint: "http://broker.invalid:9800", Status: store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	agentA := &store.Agent{
-		ID: tid("agentkeys-route-agent-a"), Slug: "agentkeys-route-agent-a", Name: "Agent A",
-		ProjectID: projA.ID, Phase: string(state.PhaseRunning), OwnerID: owner.ID, RuntimeBrokerID: broker.ID,
-	}
-	require.NoError(t, s.CreateAgent(ctx, agentA))
-	agentB := &store.Agent{
-		ID: tid("agentkeys-route-agent-b"), Slug: "agentkeys-route-agent-b", Name: "Agent B",
-		ProjectID: projB.ID, Phase: string(state.PhaseRunning), OwnerID: owner.ID, RuntimeBrokerID: broker.ID,
-	}
-	require.NoError(t, s.CreateAgent(ctx, agentB))
-
-	return &agentKeysRouteFixture{
-		srv: srv, store: s, projectA: projA, projectB: projB,
-		agentInA: agentA, agentInB: agentB, owner: owner, nonOwner: nonOwner,
-	}
-}
-
-// agentToken mints a real, signed agent JWT for a synthetic caller "agent"
-// in callerProjectID with the given scopes. The credential-status gate in
-// the shared auth middleware (auth.go's evaluateAgentCredentialStatus) only
-// consults a credential-ID-keyed store, not store.Agent by ID -- a token
-// with no matching credential row authenticates via the documented legacy
-// compatibility path -- so the caller does not need its own store.Agent row
-// for these routing tests, unlike authorizeAgentKeys' *target*, which must
-// be a real row.
-func (f *agentKeysRouteFixture) agentToken(t *testing.T, callerAgentID, callerProjectID string, scopes ...AgentTokenScope) string {
-	t.Helper()
-	tok, err := f.srv.GetAgentTokenService().GenerateAgentToken(callerAgentID, callerProjectID, scopes, nil)
-	require.NoError(t, err)
-	return tok
-}
-
-// keysErrorEnvelope decodes a Hub error envelope response body, including
-// the details map so callers can inspect operation_id presence/value.
-type keysErrorEnvelope struct {
-	Code    string                 `json:"code"`
-	Message string                 `json:"message"`
-	Details map[string]interface{} `json:"details"`
-}
-
-func decodeKeysError(t *testing.T, body []byte) keysErrorEnvelope {
-	t.Helper()
-	var env struct {
-		Error keysErrorEnvelope `json:"error"`
-	}
-	require.NoError(t, json.Unmarshal(body, &env), "response body: %s", string(body))
-	return env.Error
-}
-
-// agentKeysLookupSpyStore wraps a store.Store and counts calls to the two
-// agent-resolution methods, so a test can prove no agent lookup ran before
-// a denial (contract §3.1 invariant 4 / AK-21c). When failLookups is set,
-// both methods return a generic (non-ErrNotFound) error instead of
-// delegating, simulating a store outage (round-2 review finding 4).
-type agentKeysLookupSpyStore struct {
-	store.Store
-	getAgentCalls       int32
-	getAgentBySlugCalls int32
-	failLookups         bool
-}
-
-var errAgentKeysSpyStoreFailure = errors.New("agentKeysLookupSpyStore: simulated store failure")
-
-func (s *agentKeysLookupSpyStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	atomic.AddInt32(&s.getAgentCalls, 1)
-	if s.failLookups {
-		return nil, errAgentKeysSpyStoreFailure
-	}
-	return s.Store.GetAgent(ctx, id)
-}
-
-func (s *agentKeysLookupSpyStore) GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error) {
-	atomic.AddInt32(&s.getAgentBySlugCalls, 1)
-	if s.failLookups {
-		return nil, errAgentKeysSpyStoreFailure
-	}
-	return s.Store.GetAgentBySlug(ctx, projectID, slug)
-}
-
-func (s *agentKeysLookupSpyStore) lookupCount() int32 {
-	return atomic.LoadInt32(&s.getAgentCalls) + atomic.LoadInt32(&s.getAgentBySlugCalls)
-}
 
 // TestAgentActionKeysRoute_TopLevel_CrossProjectAndMissing pins AK-21 (an
 // existing, foreign-project target: 422) and AK-21b (a target ID that does
@@ -443,61 +296,6 @@ func assertKeysInternalErrorOutcome(t *testing.T, label string, rec *httptest.Re
 	}
 	if got := spy.lookupCount(); got == 0 {
 		t.Fatalf("%s: expected the resolution attempt to reach the spied store (lookupCount=0)", label)
-	}
-}
-
-// keysDenialFixedMessage is agentKeysOutcomeMessage's fixed, sanitized
-// message for each outcome this file exercises (execute_agent_keys.go).
-var keysDenialFixedMessage = map[string]string{
-	"keys_denied":                    "Insufficient permissions",
-	"cross_project_keys_unsupported": "Cross-project keys access is not supported for agent callers",
-	"not_found":                      "Agent not found",
-	"keys_unavailable":               "Keys dispatch is currently unavailable",
-}
-
-// assertKeysDenialOutcome asserts rec matches (wantStatus, wantCode), that
-// the message is the exact fixed string for that outcome (never
-// KeysAuthzDecision.Reason or any other request-derived text), and that a
-// real, non-empty operation ID is present (contract §3 invariant 3: every
-// outcome from validation onward carries one).
-func assertKeysDenialOutcome(t *testing.T, label string, rec *httptest.ResponseRecorder, wantStatus int, wantCode string) {
-	t.Helper()
-	if rec.Code != wantStatus {
-		t.Fatalf("%s: status = %d, want %d: %s", label, rec.Code, wantStatus, rec.Body.String())
-	}
-	env := decodeKeysError(t, rec.Body.Bytes())
-	if env.Code != wantCode {
-		t.Errorf("%s: code = %q, want %q", label, env.Code, wantCode)
-	}
-	if wantMessage, ok := keysDenialFixedMessage[wantCode]; ok && env.Message != wantMessage {
-		t.Errorf("%s: message = %q, want exactly %q", label, env.Message, wantMessage)
-	}
-	opID, _ := env.Details["operation_id"].(string)
-	if opID == "" {
-		t.Errorf("%s: expected a non-empty operation_id in details, got %v", label, env.Details)
-	}
-	if bytes.Contains(rec.Body.Bytes(), []byte("keys: ")) {
-		t.Errorf("%s: body must not leak the internal audit reason prefix: %s", label, rec.Body.String())
-	}
-}
-
-// assertKeysDenialOutcomeAuditMatches asserts that the last "outcome"-event
-// "agent keys audit" record captured in log carries the exact same
-// operation_id as rec's response -- pinning "exactly one real operation ID"
-// (contract §3's phase-boundary clarification / the binding operation-ID
-// ruling) for outcomes where assertKeysDenialOutcome alone only checks
-// non-emptiness, not equality with what was actually minted and audited. A
-// second, freshly minted ID written into the response after the audit
-// record used the real one would pass assertKeysDenialOutcome but fail this
-// check. The caller must have installed log capture (installSentinelLogCapture)
-// before making the request that produced rec.
-func assertKeysDenialOutcomeAuditMatches(t *testing.T, label string, rec *httptest.ResponseRecorder, log *bytes.Buffer) {
-	t.Helper()
-	env := decodeKeysError(t, rec.Body.Bytes())
-	opID, _ := env.Details["operation_id"].(string)
-	outcome := lastOutcomeAuditRecord(t, log)
-	if outcome["operation_id"] != opID {
-		t.Errorf("%s: audit operation_id %q != response operation_id %q", label, outcome["operation_id"], opID)
 	}
 }
 

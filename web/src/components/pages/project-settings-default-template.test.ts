@@ -20,8 +20,6 @@
  * default is kept.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 let templatesStatus = 500;

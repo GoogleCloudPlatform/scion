@@ -95,7 +95,7 @@ func mockIsGitRepo(t *testing.T, result bool) {
 	t.Helper()
 	orig := isGitRepoFunc
 	t.Cleanup(func() { isGitRepoFunc = orig })
-	isGitRepoFunc = func() bool { return result }
+	isGitRepoFunc = func() (bool, error) { return result, nil }
 }
 
 func TestDetectLocalRuntime_PodmanPreferred(t *testing.T) {

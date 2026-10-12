@@ -51,7 +51,7 @@ func TestBypassCensus(t *testing.T) {
 	// from this allowlist. The test fails if a new bypass appears that is not
 	// in this list.
 	type allowEntry struct {
-		file        string // base filename
+		file        string // path relative to pkg/hub (base filename for pkg/hub itself)
 		lineSubstr  string // substring that must appear on the matching line
 		description string // why this is allowed
 	}
@@ -72,8 +72,8 @@ func TestBypassCensus(t *testing.T) {
 		{file: "authorize.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "requireAdmin implementation"},
 		{file: "admin_delegation_adoption.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "delegation-provenance adoption admin check: system admin only, no registered permission exists for it"},
 		{file: "route_metadata.go", lineSubstr: "requireAdmin(w, r)", description: "routeGuard fallback for unconverted routes (temporary)"},
-		{file: "identity.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "IsUnscopedLocalPlatformAdmin definition"},
-		{file: "identity.go", lineSubstr: `user.Role() != "admin"`, description: "IsUnscopedLocalPlatformAdmin implementation"},
+		{file: "internal/principal/identity.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "IsUnscopedLocalPlatformAdmin definition"},
+		{file: "internal/principal/identity.go", lineSubstr: `user.Role() != "admin"`, description: "IsUnscopedLocalPlatformAdmin implementation"},
 		{file: "authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "comment reference"},
 
 		// ─── AdminModeMiddleware bypass (infrastructure, KEEP) ───────────
@@ -98,6 +98,9 @@ func TestBypassCensus(t *testing.T) {
 		// ─── Passthrough gate ───────────────────────────────────────────
 		{file: "passthrough_gate.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "the embedded broker counts as owned by an unscoped local platform administrator"},
 
+		// ─── Hub test identities (ptone/scion#4240) ───────────────────────
+		{file: "handlers_test_identities.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(caller)", description: "testIdentityCallerSeesAll: after the test_identity.issue route guard admits the caller, an unscoped admin session sees and re-issues every test identity instead of only its own (result scope only, grants no access)"},
+
 		// ─── Session revocation (admin-only endpoint) ────────────────────
 		{file: "handlers_users_core.go", lineSubstr: "requireAdmin(w, r)", description: "revokeUserSessions: admin-only endpoint for session invalidation"},
 	}
@@ -113,22 +116,33 @@ func TestBypassCensus(t *testing.T) {
 		allowCounts[key]++
 	}
 
-	hubDir := "." // pkg/hub is the current package directory in test context
-	entries, err := os.ReadDir(hubDir)
-	if err != nil {
-		t.Fatalf("failed to read hub directory: %v", err)
+	// pkg/hub is the current package directory in test context. The
+	// principal types (IsUnscopedLocalPlatformAdmin among them) live in
+	// pkg/hub/internal/principal, so that directory is scanned too, with its
+	// files named by path relative to pkg/hub.
+	var names []string
+	for _, dir := range []string{".", "internal/principal"} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", dir, err)
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			if dir != "." {
+				name = dir + "/" + name
+			}
+			names = append(names, name)
+		}
 	}
 
 	var violations []string
 	matchCounts := map[allowKey]int{}
 
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-
-		data, err := os.ReadFile(filepath.Join(hubDir, name))
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.FromSlash(name))
 		if err != nil {
 			t.Fatalf("failed to read %s: %v", name, err)
 		}

@@ -28,6 +28,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -278,9 +279,9 @@ func (s *recordingStore) ListGrants(ctx context.Context, id string) ([]Grant, er
 	return s.Store.ListGrants(ctx, id)
 }
 
-func (s *recordingStore) RevokeLink(ctx context.Context, artifactID, linkID string) error {
+func (s *recordingStore) RevokeLink(ctx context.Context, artifactID, linkID string, actor *Actor) error {
 	s.record("RevokeLink")
-	return s.Store.RevokeLink(ctx, artifactID, linkID)
+	return s.Store.RevokeLink(ctx, artifactID, linkID, actor)
 }
 
 func (s *recordingStore) LinkActive(ctx context.Context, artifactID, linkID string, now time.Time) (bool, error) {
@@ -626,6 +627,93 @@ type failGrantsStore struct{ Store }
 
 func (failGrantsStore) ListGrants(context.Context, string) ([]Grant, error) {
 	return nil, errors.New("grants unavailable")
+}
+
+// TestAdminRoutesGrantReadFailureIsLoud: every sharing and grant
+// management route answers 500 internal when the admin decision needs the
+// artifact's grants and they cannot be read, never a 403 a working read
+// might not give, and changes nothing. The owner's decision never reads
+// the grants, so the caller is a non-owner user who reads through the home
+// project and administers through an admin grant: only the admin decision
+// reads the grants. The read check still runs first: a caller that cannot
+// read the artifact gets the 404 of a missing one on every route.
+func TestAdminRoutesGrantReadFailureIsLoud(t *testing.T) {
+	ctx := context.Background()
+	f, id := newLinkFixture(t)
+	admin := principal{PrincipalKindUser, "user-3", ""}
+	f.host.allow(admin, "project-1", PermissionRead)
+	if rec, _ := f.putGrant(userU, id, SubjectPrincipal, PrincipalRef(admin.kind, admin.ref), GrantAdmin); rec.Code != http.StatusCreated {
+		t.Fatalf("admin grant: %d %s", rec.Code, rec.Body.String())
+	}
+	_, grant := f.putGrant(userU, id, SubjectPrincipal, "user:user-6", GrantRead)
+	stranger := principal{PrincipalKindUser, "user-5", ""}
+	_, link := f.mustMintLink(userU, id, "")
+	future := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
+	jsonHdr := map[string]string{"Content-Type": "application/json"}
+
+	routes := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"create link", http.MethodPost, linksPath(id), ""},
+		{"list links", http.MethodGet, linksPath(id), ""},
+		{"revoke link", http.MethodDelete, linksPath(id) + "/" + link.Link.ID, ""},
+		{"patch artifact", http.MethodPatch, "/api/v1/artifacts/" + id, `{"expiresAt": "` + future + `"}`},
+		{"list grants", http.MethodGet, grantsPath(id), ""},
+		// handlePutGrant makes the same decision as adminArtifact inline,
+		// so that it can fall back to a review grant.
+		{"put grant", http.MethodPost, grantsPath(id), `{"subjectKind": "principal", "subjectRef": "user:user-4", "permission": "read"}`},
+		{"delete grant", http.MethodDelete, grantsPath(id) + "/" + grant.ID, ""},
+	}
+
+	// With the grants readable, the admin may administer, and a caller
+	// that cannot read gets the 404 of a missing artifact on every route.
+	if rec := f.do(&admin, http.MethodGet, grantsPath(id), nil, nil); rec.Code != http.StatusOK {
+		t.Fatalf("admin GET /grants with grants readable: %d %s", rec.Code, rec.Body.String())
+	}
+	missing := f.do(&stranger, http.MethodGet, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", nil, nil)
+	for _, rt := range routes {
+		rec := f.do(&stranger, rt.method, rt.path, []byte(rt.body), jsonHdr)
+		if rec.Code != http.StatusNotFound || rec.Body.String() != missing.Body.String() {
+			t.Errorf("%s by a caller that cannot read: %d %s, want the 404 of a missing artifact", rt.name, rec.Code, rec.Body.String())
+		}
+	}
+
+	beforeArtifact, err := f.store.GetArtifact(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeGrants, err := f.store.ListGrants(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.svc.SetStore(failGrantsStore{f.store})
+	for _, rt := range routes {
+		t.Run(rt.name, func(t *testing.T) {
+			rec := f.do(&admin, rt.method, rt.path, []byte(rt.body), jsonHdr)
+			if rec.Code != http.StatusInternalServerError || errCode(t, rec) != "internal" {
+				t.Errorf("%s %s with grants unreadable: %d %s, want 500 internal", rt.method, rt.path, rec.Code, rec.Body.String())
+			}
+			// No partial effect: no link or grant created, changed or
+			// removed, and the artifact unchanged.
+			gotGrants, err := f.store.ListGrants(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotGrants, beforeGrants) {
+				t.Errorf("grants changed:\n got %+v\nwant %+v", gotGrants, beforeGrants)
+			}
+			gotArtifact, err := f.store.GetArtifact(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotArtifact, beforeArtifact) {
+				t.Errorf("artifact changed:\n got %+v\nwant %+v", gotArtifact, beforeArtifact)
+			}
+		})
+	}
 }
 
 // TestLinkLifetimes: the default and maximum come from the limits; a
@@ -1132,9 +1220,9 @@ func TestGrantKindsEachCount(t *testing.T) {
 	}
 }
 
-func (s *recordingStore) DeleteGrant(ctx context.Context, artifactID, grantID string) error {
+func (s *recordingStore) DeleteGrant(ctx context.Context, artifactID, grantID string, actor *Actor) error {
 	s.record("DeleteGrant")
-	return s.Store.DeleteGrant(ctx, artifactID, grantID)
+	return s.Store.DeleteGrant(ctx, artifactID, grantID, actor)
 }
 
 // noExpiryStore returns resolved link grants without an expiry.

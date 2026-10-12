@@ -151,6 +151,13 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	var senderIdentity Identity
 	if strings.HasPrefix(req.Message.Sender, "user:") {
 		senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
+		// A hub test identity is reachable only through its own hub-issued
+		// token; this path resolves by email, so it refuses one outright.
+		if emailResolvedPrincipalRefused(senderEmail, nil) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"sender identity not eligible", map[string]interface{}{"sender": req.Message.Sender})
+			return
+		}
 		senderUser, err := s.store.GetUserByEmail(r.Context(), senderEmail)
 		if err != nil {
 			log.Warn("Could not resolve sender identity for permission check",
@@ -179,6 +186,12 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 					"sender": req.Message.Sender,
 					"status": senderUser.Status,
 				})
+			return
+		}
+		if emailResolvedPrincipalRefused(senderEmail, senderUser) {
+			log.Warn("broker inbound sender is a test identity", "sender", req.Message.Sender)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"sender identity not eligible", map[string]interface{}{"sender": req.Message.Sender})
 			return
 		}
 		// Cache the resolved user ID so downstream DM-ownership and
@@ -457,11 +470,22 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// package), so the gate here only skips the dispatch call; the
 	// persisted row below is stamped "deferred" via agentReincarnating.
 	agentReincarnating := reincarnationInFlight(agent)
+	// The hub's message record, written before the gate and the dispatch
+	// outcome (see logMessageRecord); the delivered line below is an event.
+	// Logged from a copy carrying the hub's recipient and conversation, so
+	// the dispatched message is unchanged.
+	recordMsg := *req.Message
+	recordMsg.Recipient = "agent:" + agent.Slug
+	recordMsg.RecipientID = agent.ID
+	if effectiveConv != nil {
+		recordMsg.ConversationID = effectiveConv.ConversationID
+	}
+	logMessageRecord(s.recordLog(), agent, &recordMsg)
 	if !agentReincarnating {
 		retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer retryCancel()
 
-		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
+		if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
 			GatewayTimeout(w, "Broker unreachable after 30s deadline")
 			return
 		} else if err != nil {
@@ -574,7 +598,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 				s.autoAdvanceSenderReadState(r.Context(), senderUserID, storeMsg.ThreadID, storeMsg.ID)
 			}
 		}
-		s.events.PublishUserMessage(r.Context(), storeMsg, nil)
+		s.events.PublishUserMessage(r.Context(), storeMsg, nil, nil)
 
 		// Group conversations: list the dispatched agent and the posting
 		// user as participants, mirroring the native group path (listing
@@ -623,6 +647,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"source", "broker-inbound",
 			"broker_id", broker.ID(),
 			"plugin_name", pluginName,
+			logging.AttrLogKind, logging.LogKindEvent,
 		}
 		if storeMsg.ConversationID != "" {
 			req.Message.ConversationID = storeMsg.ConversationID

@@ -15,10 +15,7 @@
 package hub
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"log/slog"
 	"strings"
 	"testing"
 
@@ -36,46 +33,6 @@ import (
 //
 // The only audit assertion that means anything is one made against the bytes
 // that leave the process.
-
-// captureAuditLogs redirects the default slog logger into a buffer for the
-// duration of the test. LogAuditLogger writes through the package-level
-// slog.LogAttrs, so this is the seam that sees real output.
-func captureAuditLogs(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	buf := &bytes.Buffer{}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return buf
-}
-
-// auditRecords parses every JSON log line in the buffer.
-func auditRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
-	t.Helper()
-	var out []map[string]any
-	for _, line := range strings.Split(buf.String(), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("log line is not JSON: %q: %v", line, err)
-		}
-		out = append(out, rec)
-	}
-	return out
-}
-
-// auditRecordWithMsg returns the first record whose "msg" matches, or nil.
-func auditRecordWithMsg(t *testing.T, buf *bytes.Buffer, msg string) map[string]any {
-	t.Helper()
-	for _, rec := range auditRecords(t, buf) {
-		if rec["msg"] == msg {
-			return rec
-		}
-	}
-	return nil
-}
 
 // ---------------------------------------------------------------------------
 // Item B: GCPTokenEvent.ServiceAccountID

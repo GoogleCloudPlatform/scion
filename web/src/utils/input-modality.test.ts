@@ -20,8 +20,6 @@
  * queries exactly {@link TOUCH_PRIMARY_QUERY}.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import { TouchPrimaryController, TOUCH_PRIMARY_QUERY } from './input-modality.js';

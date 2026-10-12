@@ -21,7 +21,9 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -102,6 +104,29 @@ func TestBuildDecisionAuditRecord_DeniedBy(t *testing.T) {
 	assert.Empty(t, allowed.DeniedBy)
 }
 
+// TestBuildDecisionAuditRecord_ResourceScopeEvidence checks that the
+// evaluated resource's scope evidence is copied verbatim (design C1.4) and
+// decides the decision-log scope rule.
+func TestBuildDecisionAuditRecord_ResourceScopeEvidence(t *testing.T) {
+	ctx := context.Background()
+	plain := BuildDecisionAuditRecord(ctx, AuthzRequest{Resource: Resource{Type: "project", ID: "p1", OwnerID: "u1", Labels: map[string]string{"a": "b"}}, Action: ActionRead}, Decision{Allowed: true})
+	assert.Empty(t, plain.ResourceParentType)
+	assert.Empty(t, plain.ResourceParentID)
+	assert.Zero(t, plain.ResourceAncestryLen)
+	assert.Empty(t, plain.ResourceScopeKind)
+	assert.False(t, plain.ResourceScopeUserIDSet)
+
+	contained := BuildDecisionAuditRecord(ctx, AuthzRequest{Resource: Resource{
+		Type: "agent", ID: "a1", ParentType: "project", ParentID: "p1", Ancestry: []string{"root", "p1"},
+		ScopeKind: "user", ScopeUserID: "u1",
+	}, Action: ActionRead}, Decision{Allowed: true})
+	assert.Equal(t, "project", contained.ResourceParentType)
+	assert.Equal(t, "p1", contained.ResourceParentID)
+	assert.Equal(t, 2, contained.ResourceAncestryLen)
+	assert.Equal(t, "user", contained.ResourceScopeKind)
+	assert.True(t, contained.ResourceScopeUserIDSet)
+}
+
 // TestDecide_CeilingDenyEmitsOneAuditRecord pins, with a synchronous
 // emitter, that one Decide call for a delegation-ceiling deny emits exactly
 // one audit record and that the record carries denied_by
@@ -158,6 +183,15 @@ func TestDecide_CeilingDenyEmitsOneAuditRecord(t *testing.T) {
 			assert.Equal(t, "delegation_ceiling", records[0].DeniedBy)
 
 			assert.Equal(t, decision.Reason, records[0].Reason)
+
+			// The decision log carries the attribution into the
+			// authorization/decide envelope (remaining-audit P1).
+			logCtx := logging.ContextWithRequestMeta(agentCtx, &logging.RequestMeta{RequestID: "deniedby-" + tc.agentID})
+			env, d := mapDecisionEnvelope(logCtx, records[0])
+			require.Equal(t, decisionAuditEnqueued, d, "agent principal on a system-scoped project is in domain")
+			payload := env.Payload.(auditevent.AuthorizationDecisionPayload)
+			assert.Equal(t, "delegation_ceiling", payload.DeniedBy)
+			assert.Equal(t, auditevent.OutcomeDeny, env.Outcome)
 		})
 	}
 }

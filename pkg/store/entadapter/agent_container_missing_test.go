@@ -77,7 +77,7 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 			SetExitReason(reason).SetExitCode(code).SetMessage(message).Exec(ctx))
 	}
 
-	for _, reason := range []string{"preempted", "evicted"} {
+	for _, reason := range []string{"preempted", "evicted", "oom_killed"} {
 		t.Run("keeps a "+reason+" exit reason", func(t *testing.T) {
 			a := create("kept-"+reason, nil)
 			setExit(t, a.ID, reason, 137, "node "+reason+" the pod")

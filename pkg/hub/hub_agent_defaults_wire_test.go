@@ -27,22 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// hubDefaultsDispatchAgent returns a minimal agent record for the dispatch
-// tests below. AppliedConfig must be non-nil: buildCreateRequest only builds
-// req.Config when the agent has one.
-func hubDefaultsDispatchAgent() *store.Agent {
-	return &store.Agent{
-		ID:              tid("agent-1"),
-		Name:            "test-agent",
-		Slug:            "test-agent",
-		OwnerID:         tid("user-1"),
-		RuntimeBrokerID: tid("host-1"),
-		AppliedConfig:   &store.AgentAppliedConfig{},
-	}
-}
 
 func hubDefaultsDispatcher(t *testing.T, srv *Server) *HTTPAgentDispatcher {
 	t.Helper()

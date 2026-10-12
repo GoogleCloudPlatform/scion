@@ -701,7 +701,7 @@ func updateTZTemplateEnv(t *testing.T, s store.Store, slug string, env map[strin
 	require.NoError(t, err)
 	tmpl.Config.Env = env
 	tmpl.ContentHash = "feedd00d"
-	require.NoError(t, s.UpdateTemplate(ctx, tmpl))
+	require.NoError(t, setTemplateContentForTest(ctx, s, tmpl))
 }
 
 // TestCreateAgent_TemplateTZUnaffectedByLaterTemplateEdit covers AC9: a

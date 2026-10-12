@@ -45,13 +45,20 @@ type identityMappingError struct {
 
 // identityMappingDispatchError recognises a broker's identity_not_mapped or
 // identity_ksa_mismatch refusal in err by its status (400) and error code,
-// never by its text, and returns the hub's translation of it. It returns
-// false for any other error.
+// never by its text, or the hub's own identity_not_mapped refusal before
+// dispatch (identityNotMappedPrecheck), and returns the hub's translation
+// of it. It returns false for any other error.
 //
 // The message names the account, the profile (or runtime entry) and the
 // broker, says who can fix it, and links the docs. The broker's own text is
 // written for its operator and is not passed on.
 func identityMappingDispatchError(err error) (identityMappingError, bool) {
+	// The hub's own refusal from the broker's report, before dispatch
+	// (ptone/scion#3329 phase 4b), is relayed the same way.
+	var pre *identityNotMappedPrecheck
+	if errors.As(err, &pre) && pre != nil {
+		return pre.translate(), true
+	}
 	var se *brokerStatusError
 	// se == nil covers a typed nil (*brokerStatusError)(nil) wrapped in a
 	// non-nil error, which errors.As accepts.
@@ -92,9 +99,19 @@ func identityMappingDispatchError(err error) (identityMappingError, bool) {
 
 	var msg string
 	if code == ErrCodeIdentityNotMapped {
-		msg = fmt.Sprintf("%s has no Kubernetes service account mapping on %s. "+
+		discovery := detail(api.BrokerErrDetailDiscovery)
+		namespace := detail(api.BrokerErrDetailNamespace)
+		discoveryText := identityDiscoveryText(discovery, namespace)
+		if discoveryText != "" {
+			details[api.BrokerErrDetailDiscovery] = discovery
+			if namespace != "" {
+				details[api.BrokerErrDetailNamespace] = namespace
+			}
+			discoveryText += " "
+		}
+		msg = fmt.Sprintf("%s has no Kubernetes service account mapping on %s. %s"+
 			"A broker operator must add it to kubernetes_service_account_mappings in that broker's settings; see %s",
-			accountText, scope, kubernetesIdentityMappingDocsURL)
+			accountText, scope, discoveryText, kubernetesIdentityMappingDocsURL)
 	} else {
 		requested := detail(api.BrokerErrDetailRequestedKSA)
 		mapped := detail(api.BrokerErrDetailMappedKSA)
@@ -108,15 +125,45 @@ func identityMappingDispatchError(err error) (identityMappingError, bool) {
 		if requested != "" {
 			requestedText = fmt.Sprintf("The requested Kubernetes service account %q", requested)
 		}
-		mappedText := "the one mapped"
-		if mapped != "" {
-			mappedText = fmt.Sprintf("%q, the one mapped", mapped)
+		discovered := detail(api.BrokerErrDetailKSASource) == api.BrokerKSASourceDiscovered
+		oneText, toText, remedy := "the one mapped", "to", "change kubernetes_service_account_mappings in that broker's settings"
+		if discovered {
+			details[api.BrokerErrDetailKSASource] = api.BrokerKSASourceDiscovered
+			oneText = "the one found by its iam.gke.io/gcp-service-account annotation"
+			toText = "for"
+			remedy = "add an entry to kubernetes_service_account_mappings in that broker's settings"
 		}
-		msg = fmt.Sprintf("%s does not match %s to %s on %s. "+
-			"Remove the explicit Kubernetes service account from the request, or ask a broker operator to change kubernetes_service_account_mappings in that broker's settings; see %s",
-			requestedText, mappedText, accountText, scope, kubernetesIdentityMappingDocsURL)
+		mappedText := oneText
+		if mapped != "" {
+			mappedText = fmt.Sprintf("%q, %s", mapped, oneText)
+		}
+		msg = fmt.Sprintf("%s does not match %s %s %s on %s. "+
+			"Remove the explicit Kubernetes service account from the request, or ask a broker operator to %s; see %s",
+			requestedText, mappedText, toText, accountText, scope, remedy, kubernetesIdentityMappingDocsURL)
 	}
 	return identityMappingError{Code: code, Message: msg, Details: details}, true
+}
+
+// identityDiscoveryText is the fixed sentence the hub adds to an
+// identity_not_mapped message for the broker's annotation lookup result
+// (api.BrokerErrDetailDiscovery), or "" for none or an unknown value. It is
+// built from the result value and namespace only; the broker's own text,
+// which can carry API server output, is never relayed.
+func identityDiscoveryText(result, namespace string) string {
+	where := "the agent's namespace"
+	if namespace != "" {
+		where = fmt.Sprintf("namespace %q", namespace)
+	}
+	switch result {
+	case api.BrokerKSADiscoveryNoMatch:
+		return fmt.Sprintf("No Kubernetes service account in %s carries the iam.gke.io/gcp-service-account annotation for it.", where)
+	case api.BrokerKSADiscoveryListFailed:
+		return fmt.Sprintf("The broker could not list Kubernetes service accounts in %s to find an annotated one; it needs read-only list access to serviceaccounts there.", where)
+	case api.BrokerKSADiscoveryUnavailable:
+		return "The broker could not look for a Kubernetes service account by its iam.gke.io/gcp-service-account annotation."
+	default:
+		return ""
+	}
 }
 
 // identityMappingScopeText names where the mapping was looked up: the

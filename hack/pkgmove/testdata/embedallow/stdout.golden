@@ -1,0 +1,44 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (2):
+  type   inner -> Inner  (hub/move.go:3)
+  field  Outer.inner -> Inner  (hub/move.go:9)
+
+Alias entries (2):
+  type  Outer = sub.Outer
+  type  inner = sub.Inner [test]
+
+Alias files (2):
+  hub/zz_alias_sub.go (13 lines)
+  hub/zz_alias_sub_test.go (13 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (2):
+  hub/stay.go
+  hub/stay_test.go
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 3. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== HIGH: exported struct field (reflection/encoding visibility changes) ==
+  hub/move.go:9: embedded Outer.inner -> Inner (follows the exported type): reflection, encoding, templates and %+v now see this field (types in other packages that embed Outer are not checked for shadowing)
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:3: hub.inner becomes sub.Inner for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+  hub/move.go:8: hub.Outer becomes sub.Outer for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK

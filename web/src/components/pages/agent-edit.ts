@@ -47,6 +47,17 @@ import '../shared/detail-header.js';
 import '../shared/status-badge.js';
 import './not-found.js';
 
+/**
+ * The fields the Edit page renders: Model, Max turns and Max duration. The
+ * rest of the shared form's fields arrive on this page with its full field
+ * set.
+ */
+export const AGENT_EDIT_FIELD_KEYS: readonly string[] = [
+  'config.model',
+  'config.max_turns',
+  'config.max_duration',
+];
+
 /** The agent PATCH response fields this page reads. */
 interface AgentPatchResponse {
   disposition?: AgentUpdateDisposition;
@@ -99,12 +110,18 @@ export function agentEditPlaceholders(agent: Agent): Record<string, AgentConfigP
   return out;
 }
 
-/** One line summarizing a save's disposition. */
+/** One line summarizing a save's disposition, by when each edit takes effect. */
 export function dispositionSummary(d: AgentUpdateDisposition | undefined): string {
-  const applied = d?.applied ?? [];
-  if (applied.length === 0) return 'Nothing to save.';
-  const names = applied.map((k) => k.replace(/^config\./, ''));
-  return `Saved ${names.join(', ')}.`;
+  const names = (keys: string[] | undefined) =>
+    (keys ?? []).map((k) => k.replace(/^config\./, '')).join(', ');
+  const parts: string[] = [];
+  const applied = names(d?.applied);
+  if (applied) parts.push(`Saved ${applied}.`);
+  const held = names(d?.held);
+  if (held) parts.push(`Saved ${held} for the next start.`);
+  const reincarnate = names(d?.heldForReincarnate);
+  if (reincarnate) parts.push(`Saved ${reincarnate}; takes effect at the next reincarnation.`);
+  return parts.length > 0 ? parts.join(' ') : 'Nothing to save.';
 }
 
 @customElement('scion-page-agent-edit')
@@ -297,6 +314,7 @@ export class ScionPageAgentEdit extends LitElement {
         : nothing}
       <scion-agent-config-form
         mode="edit"
+        .fieldKeys=${AGENT_EDIT_FIELD_KEYS}
         .values=${agent.appliedConfig?.inlineConfig ?? {}}
         .placeholders=${agentEditPlaceholders(agent)}
         .editability=${agent.editability ?? null}

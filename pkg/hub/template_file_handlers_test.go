@@ -21,139 +21,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// contentMockStorage extends mockStorage to also store file content for
-// Download support in template file handler tests.
-type contentMockStorage struct {
-	mockStorage
-	content map[string][]byte
-}
-
-func newContentMockStorage(bucket string) *contentMockStorage {
-	return &contentMockStorage{
-		mockStorage: mockStorage{
-			bucket:  bucket,
-			objects: make(map[string]*storage.Object),
-		},
-		content: make(map[string][]byte),
-	}
-}
-
-func (m *contentMockStorage) Upload(_ context.Context, objectPath string, reader io.Reader, opts storage.UploadOptions) (*storage.Object, error) {
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, err
-	}
-	obj := &storage.Object{
-		Name:     objectPath,
-		Size:     int64(len(data)),
-		Metadata: opts.Metadata,
-	}
-	m.objects[objectPath] = obj
-	m.content[objectPath] = data
-	return obj, nil
-}
-
-func (m *contentMockStorage) Download(_ context.Context, objectPath string) (io.ReadCloser, *storage.Object, error) {
-	data, ok := m.content[objectPath]
-	if !ok {
-		return nil, nil, storage.ErrNotFound
-	}
-	obj := m.objects[objectPath]
-	return io.NopCloser(bytes.NewReader(data)), obj, nil
-}
-
-func (m *contentMockStorage) Delete(_ context.Context, objectPath string) error {
-	delete(m.objects, objectPath)
-	delete(m.content, objectPath)
-	return nil
-}
-
-func (m *contentMockStorage) Exists(_ context.Context, objectPath string) (bool, error) {
-	_, ok := m.content[objectPath]
-	return ok, nil
-}
-
-// testTemplateFileServer creates a Server with content-aware mock storage.
-func testTemplateFileServer(t *testing.T) (*Server, store.Store, *contentMockStorage) {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("Skipping: sqlite driver not registered")
-		}
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
-
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken
-	srv, err := newTestHubServer(t, cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-
-	stor := newContentMockStorage("test-bucket")
-	srv.SetStorage(stor)
-
-	return srv, s, stor
-}
-
-// createTestTemplate creates a template in the store with the given files
-// pre-populated in storage.
-func createTestTemplate(t *testing.T, s store.Store, stor *contentMockStorage, files map[string]string) *store.Template {
-	t.Helper()
-	ctx := context.Background()
-
-	tmpl := &store.Template{
-		ID:            tid("tmpl-test-1"),
-		Name:          "test-template",
-		Slug:          "test-template",
-		Harness:       "claude",
-		Scope:         "global",
-		Status:        store.TemplateStatusActive,
-		StoragePath:   "templates/global/test-template",
-		StorageBucket: "test-bucket",
-		Updated:       time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC),
-	}
-
-	templateFiles := make([]store.TemplateFile, 0, len(files))
-	for path, content := range files {
-		objectPath := tmpl.StoragePath + "/" + path
-		stor.content[objectPath] = []byte(content)
-		stor.objects[objectPath] = &storage.Object{
-			Name: objectPath,
-			Size: int64(len(content)),
-		}
-
-		templateFiles = append(templateFiles, store.TemplateFile{
-			Path: path,
-			Size: int64(len(content)),
-			Hash: "sha256:placeholder",
-		})
-	}
-	tmpl.Files = templateFiles
-	tmpl.ContentHash = computeContentHash(templateFiles)
-
-	if err := s.CreateTemplate(ctx, tmpl); err != nil {
-		t.Fatalf("failed to create test template: %v", err)
-	}
-
-	return tmpl
-}
 
 func TestHandleTemplateFileList(t *testing.T) {
 	srv, s, stor := testTemplateFileServer(t)
@@ -281,8 +156,12 @@ func TestHandleTemplateFileWrite(t *testing.T) {
 		t.Error("expected content hash to change after file write")
 	}
 
-	// Verify storage was updated
-	storedContent := stor.content[tmpl.StoragePath+"/CLAUDE.md"]
+	// Verify storage was updated: the write migrated the legacy row to the
+	// blob layout and stored the new content as a blob.
+	if updated.Layout != store.TemplateLayoutBlobs {
+		t.Errorf("expected blob layout after write, got %q", updated.Layout)
+	}
+	storedContent := stor.content[blobObjectPath(updated, "# Updated Content\n\nNew instructions.")]
 	if string(storedContent) != "# Updated Content\n\nNew instructions." {
 		t.Errorf("unexpected stored content: %s", string(storedContent))
 	}
@@ -368,9 +247,14 @@ func TestHandleTemplateFileDelete(t *testing.T) {
 		t.Errorf("expected remaining file to be CLAUDE.md, got %s", updated.Files[0].Path)
 	}
 
-	// Verify removed from storage
-	if _, ok := stor.content[tmpl.StoragePath+"/home/.bashrc"]; ok {
-		t.Error("expected file to be removed from storage")
+	// The commit migrated the legacy row: the remaining file is a blob, and
+	// the removed file was not copied in. Commits no longer delete objects
+	// themselves (the blob garbage collector does, later).
+	if string(stor.content[blobObjectPath(updated, "# Agent")]) != "# Agent" {
+		t.Error("expected remaining file to be stored as a blob")
+	}
+	if _, ok := stor.content[blobObjectPath(updated, "# bashrc")]; ok {
+		t.Error("expected removed file not to be copied into the blob store")
 	}
 }
 
@@ -389,31 +273,6 @@ func TestHandleTemplateFileDelete_NotFound(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
 	}
-}
-
-// templateMultipartRequest creates a multipart form request for template file upload tests.
-func templateMultipartRequest(t *testing.T, templateID string, files map[string][]byte) *http.Request {
-	t.Helper()
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-
-	for fieldName, content := range files {
-		part, err := writer.CreateFormFile(fieldName, fieldName)
-		if err != nil {
-			t.Fatalf("failed to create form file: %v", err)
-		}
-		if _, err := part.Write(content); err != nil {
-			t.Fatalf("failed to write form file: %v", err)
-		}
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("failed to close multipart writer: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates/"+templateID+"/files", &buf)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	return req
 }
 
 func TestHandleTemplateFileUpload(t *testing.T) {
@@ -459,7 +318,7 @@ func TestHandleTemplateFileUpload(t *testing.T) {
 	}
 
 	// Verify storage
-	stored := stor.content[tmpl.StoragePath+"/config.yaml"]
+	stored := stor.content[blobObjectPath(updated, "key: value\n")]
 	if string(stored) != "key: value\n" {
 		t.Errorf("unexpected stored content: %s", string(stored))
 	}
@@ -561,88 +420,9 @@ func TestHandleTemplateFileUpload_OverwriteExisting(t *testing.T) {
 	}
 
 	// Verify storage updated
-	stored := stor.content[tmpl.StoragePath+"/CLAUDE.md"]
+	stored := stor.content[blobObjectPath(updated, "# New Content")]
 	if string(stored) != "# New Content" {
 		t.Errorf("unexpected stored content: %s", string(stored))
-	}
-}
-
-func TestDetectHarnessFromContent(t *testing.T) {
-	tests := []struct {
-		name         string
-		content      string
-		templateName string
-		wantHarness  string
-		wantConfig   string
-	}{
-		{
-			name:         "harness_config field",
-			content:      "harness_config: claude-web\n",
-			templateName: "my-template",
-			wantHarness:  "claude",
-			wantConfig:   "claude-web",
-		},
-		{
-			name:         "default_harness_config field",
-			content:      "default_harness_config: gemini-web\n",
-			templateName: "my-template",
-			wantHarness:  "gemini-cli",
-			wantConfig:   "gemini-web",
-		},
-		{
-			name:         "hyphenated keys normalized",
-			content:      "default-harness-config: gemini-pro\n",
-			templateName: "my-template",
-			wantHarness:  "gemini-cli",
-			wantConfig:   "gemini-pro",
-		},
-		{
-			name:         "legacy harness field",
-			content:      "harness: codex\n",
-			templateName: "my-template",
-			wantHarness:  "codex",
-			wantConfig:   "",
-		},
-		{
-			name:         "falls back to template name",
-			content:      "env:\n  FOO: bar\n",
-			templateName: "claude-default",
-			wantHarness:  "claude",
-			wantConfig:   "",
-		},
-		{
-			name:         "no match returns empty",
-			content:      "env:\n  FOO: bar\n",
-			templateName: "custom",
-			wantHarness:  "",
-			wantConfig:   "",
-		},
-		{
-			name:         "harness_config takes priority over default_harness_config",
-			content:      "harness_config: claude-web\ndefault_harness_config: gemini-web\n",
-			templateName: "my-template",
-			wantHarness:  "claude",
-			wantConfig:   "claude-web",
-		},
-		{
-			name:         "invalid yaml falls back to template name",
-			content:      ": invalid: yaml: [",
-			templateName: "gemini-template",
-			wantHarness:  "gemini-cli",
-			wantConfig:   "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := detectHarnessFromContent([]byte(tt.content), tt.templateName)
-			if got.Harness != tt.wantHarness {
-				t.Errorf("detectHarnessFromContent().Harness = %q, want %q", got.Harness, tt.wantHarness)
-			}
-			if got.DefaultHarnessConfig != tt.wantConfig {
-				t.Errorf("detectHarnessFromContent().DefaultHarnessConfig = %q, want %q", got.DefaultHarnessConfig, tt.wantConfig)
-			}
-		})
 	}
 }
 
@@ -679,12 +459,15 @@ func TestHandleTemplateFileWrite_UpdatesHarness(t *testing.T) {
 	}
 }
 
+// A write to another file re-derives the index from the stored
+// scion-agent.yaml, which is unchanged, so the index stays the same.
 func TestHandleTemplateFileWrite_NonConfigFileDoesNotChangeHarness(t *testing.T) {
 	srv, s, stor := testTemplateFileServer(t)
 	ctx := context.Background()
 
 	tmpl := createTestTemplate(t, s, stor, map[string]string{
-		"CLAUDE.md": "# Agent",
+		"CLAUDE.md":        "# Agent",
+		"scion-agent.yaml": "default_harness_config: claude-web\n",
 	})
 
 	body := `{"content": "default_harness_config: gemini\n"}`
@@ -706,6 +489,9 @@ func TestHandleTemplateFileWrite_NonConfigFileDoesNotChangeHarness(t *testing.T)
 	if updated.Harness != "claude" {
 		t.Errorf("expected harness to remain 'claude', got %q", updated.Harness)
 	}
+	if updated.DefaultHarnessConfig != "claude-web" {
+		t.Errorf("expected defaultHarnessConfig 'claude-web', got %q", updated.DefaultHarnessConfig)
+	}
 }
 
 func TestHandleTemplateFileDelete_ResetsHarness(t *testing.T) {
@@ -719,7 +505,7 @@ func TestHandleTemplateFileDelete_ResetsHarness(t *testing.T) {
 
 	// Update harness to match config file
 	tmpl.Harness = "gemini"
-	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
+	if err := setTemplateContentForTest(ctx, s, tmpl); err != nil {
 		t.Fatalf("failed to update template: %v", err)
 	}
 

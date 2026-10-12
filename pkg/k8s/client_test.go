@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s/api/v1alpha1"
 	"golang.org/x/oauth2"
@@ -434,5 +435,74 @@ func TestNewClientWithContext_ReportsBothKubeconfigAndInClusterErrors(t *testing
 
 	if !errors.Is(err, errMissingServiceAccountToken) {
 		t.Fatalf("expected in-cluster error in chain, got: %v", err)
+	}
+}
+
+func testKubeconfigFor(server string) string {
+	return `apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: ` + server + `
+  name: test-cluster
+contexts:
+- context:
+    cluster: test-cluster
+    user: test-user
+  name: test-context
+current-context: test-context
+users:
+- name: test-user
+  user:
+    token: fake-token
+`
+}
+
+// NewClientWithContextTimeout bounds every request, Verify included.
+func TestNewClientWithContextTimeout(t *testing.T) {
+	var versionCalls int
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/version" {
+			versionCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"major":"1","minor":"30","gitVersion":"v1.30.0"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ok.Close()
+	c, err := NewClientWithContextTimeout(writeTestKubeconfig(t, testKubeconfigFor(ok.URL)), "test-context", 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Config.Timeout != 3*time.Second {
+		t.Errorf("Config.Timeout = %v, want 3s", c.Config.Timeout)
+	}
+	if c.CurrentContext != "test-context" {
+		t.Errorf("CurrentContext = %q", c.CurrentContext)
+	}
+	if err := c.Verify(); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if versionCalls != 1 {
+		t.Errorf("version calls = %d, want 1", versionCalls)
+	}
+
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer hang.Close()
+	defer close(release)
+	c, err = NewClientWithContextTimeout(writeTestKubeconfig(t, testKubeconfigFor(hang.URL)), "", 200*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := c.Verify(); err == nil {
+		t.Fatal("Verify against a hung API server succeeded")
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("Verify took %v, want it bounded by the timeout", d)
 	}
 }

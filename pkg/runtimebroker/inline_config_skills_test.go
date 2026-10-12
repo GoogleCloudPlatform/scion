@@ -277,28 +277,6 @@ func TestDedupeSkillReferences(t *testing.T) {
 	}
 }
 
-func TestSkillBaseURI(t *testing.T) {
-	for in, want := range map[string]string{
-		"my-skill":                        "my-skill",
-		"my-skill@1.0":                    "my-skill",
-		"scion://my-skill@1.0":            "scion://my-skill",
-		"skill://scion/global/x@2.0":      "skill://scion/global/x",
-		"skill://u@host/a":                "skill://u@host/a",
-		"skill://u:p@host/a@1.0":          "skill://u:p@host/a",
-		"gh://o/r/s?token=X":              "gh://o/r/s?token=X",
-		"gh://o/r/s@v1?token=X":           "gh://o/r/s?token=X",
-		"gh://o/r/s@v1?token=a@b/c":       "gh://o/r/s?token=a@b/c",
-		"gh://o/r/s@v1#frag":              "gh://o/r/s#frag",
-		"gcp-skill://bucket/path/s@3":     "gcp-skill://bucket/path/s",
-		"gcp-skill://bucket/path/s/":      "gcp-skill://bucket/path/s/",
-		"skill://scion/global/no-at-tail": "skill://scion/global/no-at-tail",
-	} {
-		if got := skillBaseURI(in); got != want {
-			t.Errorf("skillBaseURI(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestApplyInlineConfigUpdate_VersionCollapse verifies the version case of
 // the dedupe: when the Hub sends a newer version of a skill the agent already
 // carries, the later version replaces the earlier one and the skill count

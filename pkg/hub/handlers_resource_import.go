@@ -170,6 +170,9 @@ func (s *Server) handleProjectImportResources(
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
+		if writeUnusableProvisionerImportError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
 	}
@@ -310,6 +313,9 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 				"Authentication required", nil)
 			return
 		}
+		if !requireProfileWriter(w, r) {
+			return
+		}
 		// projectID carries the user ID here. importFromRemote uses it for:
 		// 1. Auth token lookup in fetchRemoteForImport — will find no project,
 		//    so the fetch proceeds unauthenticated (correct for user scope).
@@ -336,6 +342,9 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 	imported, err := run(failureCollector(&failures))
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
+		if writeUnusableProvisionerImportError(w, err) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)

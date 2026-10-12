@@ -20,8 +20,6 @@
  * linkified scion://artifact/ URLs, and both opening the in-place preview.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { MessageArtifactRef } from '../../../client/artifacts.js';
 
@@ -139,6 +137,17 @@ describe('scion-chat-message artifact references', () => {
     chips(el)[1].click();
     await el.updateComplete;
     expect(previewTarget(el)).toEqual({ kind: 'artifact', id: B, seq: 0, name: 'Artifact' });
+  });
+
+  it('hands the signed-in user to the preview, for its "You" owner label', async () => {
+    const el = await mount('x', [readable(A, 'Design notes', 3, 'o')]);
+    el.currentUserId = 'u-self';
+    chips(el)[0].click();
+    await el.updateComplete;
+    const preview = el.shadowRoot?.querySelector('scion-chat-file-preview') as
+      | (HTMLElement & { currentUserId: string })
+      | null;
+    expect(preview?.currentUserId).toBe('u-self');
   });
 
   it('linkifies scion://artifact/ URLs and opens the preview on click', async () => {

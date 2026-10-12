@@ -21,8 +21,6 @@
  * follows the `lifecycle` capability like the header's lifecycle actions.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 /** Stand-in for the global stateManager: only the surface agent-detail.ts uses. */

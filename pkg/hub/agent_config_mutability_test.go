@@ -332,7 +332,7 @@ func TestReincarnateOnlyConfigEdits(t *testing.T) {
 	assert.Equal(t, []string{"config.skills", "config.system_prompt"}, provision)
 	assert.Equal(t, []string{"config.env", "config.image", "config.max_duration", "config.max_turns"}, cleared)
 
-	warnings := reincarnateOnlyEditWarnings(raw, &req, stored)
+	warnings := reincarnateOnlyEditWarnings(provision, cleared)
 	require.Len(t, warnings, 2)
 	assert.Contains(t, warnings[0], "config.skills, config.system_prompt: stored now; rendered at the next reincarnation")
 	assert.Contains(t, warnings[1], "config.env, config.image, config.max_duration, config.max_turns: cleared now")
@@ -361,22 +361,80 @@ func TestReincarnateOnlyConfigEdits(t *testing.T) {
 		provision, cleared := reincarnateOnlyConfigEdits(rawConfigOf(t, body), &req, stored)
 		assert.Empty(t, provision)
 		assert.Empty(t, cleared)
-		assert.Empty(t, reincarnateOnlyEditWarnings(rawConfigOf(t, body), &req, stored))
+		assert.Empty(t, reincarnateOnlyEditWarnings(reincarnateOnlyConfigEdits(rawConfigOf(t, body), &req, stored)))
 	})
 
 	five := rawConfigOf(t, `{"model":"m","max_turns":5}`)
-	assert.Empty(t, reincarnateOnlyEditWarnings(five, &api.ScionConfig{Model: "m", MaxTurns: 5}, stored))
-	assert.Empty(t, reincarnateOnlyEditWarnings(nil, nil, stored))
+	assert.Empty(t, reincarnateOnlyEditWarnings(reincarnateOnlyConfigEdits(five, &api.ScionConfig{Model: "m", MaxTurns: 5}, stored)))
+	assert.Empty(t, reincarnateOnlyEditWarnings(reincarnateOnlyConfigEdits(nil, nil, stored)))
 }
 
-func TestAgentUpdateAppliedKeys(t *testing.T) {
-	got := agentUpdateAppliedKeys("n", map[string]string{}, nil, "", true,
-		rawConfigOf(t, `{"max_turns":3,"Model":"m","bogus":1}`), false, true)
-	assert.Equal(t, []string{"config.max_turns", "config.model", "explicitTimezone", "labels", "name"}, got.Applied)
+func TestConfigEditDisposition(t *testing.T) {
+	body := `{"model":"m","Max_Turns":0,"max_duration":"0","thinking_level":0,"image":"img","system_prompt":"p","skills":[],"branch":"b","not_a_key":1,"env":{"B":"2"},"volumes":[]}`
+	var req api.ScionConfig
+	require.NoError(t, json.Unmarshal([]byte(body), &req))
+	tl := 40
+	stored := &api.ScionConfig{
+		Model: "old", MaxTurns: 3, MaxDuration: "1h", ThinkingLevel: &tl, Image: "img",
+		Env: map[string]string{"A": "1"}, Skills: []api.SkillReference{{URI: "s"}},
+	}
+	removed := map[string][]string{"env": {"A"}}
+	provision, cleared := reincarnateOnlyConfigEdits(rawConfigOf(t, body), &req, stored)
+	applied, held := configEditDisposition(rawConfigOf(t, body), &req, stored, provision, cleared, removed)
+	// max_duration "0" and thinking_level 0 apply at the next start; the
+	// image and branch are echoes and volumes clears nothing.
+	assert.Equal(t, []string{"config.max_duration", "config.model", "config.thinking_level"}, applied)
+	assert.Equal(t, []string{"config.env", "config.max_turns", "config.skills", "config.system_prompt"}, held)
 
-	empty := agentUpdateAppliedKeys("", nil, nil, "", false, nil, false, false)
-	require.NotNil(t, empty.Applied, "applied is an empty list, not null")
-	assert.Empty(t, empty.Applied)
+	t.Run("an env edit that removes nothing is applied", func(t *testing.T) {
+		raw := rawConfigOf(t, `{"env":{"A":"1","B":"2"}}`)
+		req := &api.ScionConfig{Env: map[string]string{"A": "1", "B": "2"}}
+		provision, cleared := reincarnateOnlyConfigEdits(raw, req, stored)
+		applied, held := configEditDisposition(raw, req, stored, provision, cleared, nil)
+		assert.Equal(t, []string{"config.env"}, applied)
+		assert.Empty(t, held)
+	})
+
+	t.Run("unchanged values are in neither list", func(t *testing.T) {
+		echo := `{"model":"old","system_prompt":"p"}`
+		var req api.ScionConfig
+		require.NoError(t, json.Unmarshal([]byte(echo), &req))
+		stored := &api.ScionConfig{Model: "old", SystemPrompt: "p"}
+		provision, cleared := reincarnateOnlyConfigEdits(rawConfigOf(t, echo), &req, stored)
+		applied, held := configEditDisposition(rawConfigOf(t, echo), &req, stored, provision, cleared, nil)
+		assert.Empty(t, applied)
+		assert.Empty(t, held)
+	})
+}
+
+func TestAgentUpdateDisposition(t *testing.T) {
+	before := agentPatchSnapshotOf(&store.Agent{
+		Name: "n", Labels: map[string]string{"a": "1"}, TaskSummary: "t",
+		AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeBlock}},
+	})
+
+	t.Run("echoes are in no list", func(t *testing.T) {
+		after := &store.Agent{
+			Name: "n", Labels: map[string]string{"a": "1"}, Annotations: map[string]string{}, TaskSummary: "t",
+			AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeBlock}},
+		}
+		got := agentUpdateDisposition(before, after, nil, nil, false)
+		for name, l := range map[string][]string{"applied": got.Applied, "held": got.Held, "heldForReincarnate": got.HeldForReincarnate} {
+			require.NotNil(t, l, "%s is an empty list, not null", name)
+			assert.Empty(t, l, name)
+		}
+	})
+
+	t.Run("changes are listed by effect", func(t *testing.T) {
+		after := &store.Agent{
+			Name: "renamed", Labels: map[string]string{"a": "2"}, Annotations: map[string]string{"k": "v"}, TaskSummary: "t2",
+			AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModePassthrough}},
+		}
+		got := agentUpdateDisposition(before, after, []string{"config.model"}, []string{"config.system_prompt"}, true)
+		assert.Equal(t, []string{"annotations", "config.model", "explicitTimezone", "gcp_identity", "labels", "name", "taskSummary"}, got.Applied)
+		assert.Empty(t, got.Held)
+		assert.Equal(t, []string{"config.system_prompt"}, got.HeldForReincarnate)
+	})
 }
 
 func TestConfigFieldUnchanged(t *testing.T) {
@@ -597,17 +655,22 @@ func TestRemovedEntriesWarnings(t *testing.T) {
 	}
 	all := map[string]bool{"env": true, "mcp_servers": true, "volumes": true}
 
-	got := removedEntriesWarnings(old, req, all, true)
+	warnings := func(old, req *api.ScionConfig, present map[string]bool, canViewEnv bool) []string {
+		return removedEntriesWarnings(removedConfigEntries(old, req, present, canViewEnv))
+	}
+	assert.Equal(t, map[string][]string{"env": {"GONE"}, "mcp_servers": {"b"}, "volumes": {"/x"}},
+		removedConfigEntries(old, req, all, true))
+	got := warnings(old, req, all, true)
 	require.Len(t, got, 3)
 	assert.Contains(t, got[0], "config.env: removed GONE now")
 	assert.Contains(t, got[1], "config.mcp_servers: removed b now")
 	assert.Contains(t, got[2], "config.volumes: removed /x now")
 
-	assert.Len(t, removedEntriesWarnings(old, req, all, false), 2, "env key names are hidden from a caller who cannot see the env")
-	assert.Empty(t, removedEntriesWarnings(old, req, map[string]bool{}, true), "keys the request does not name are not removals")
+	assert.Len(t, warnings(old, req, all, false), 2, "env key names are hidden from a caller who cannot see the env")
+	assert.Empty(t, warnings(old, req, map[string]bool{}, true), "keys the request does not name are not removals")
 	emptied := &api.ScionConfig{Env: map[string]string{}, MCPServers: map[string]api.MCPServerConfig{}, Volumes: []api.VolumeMount{}}
-	assert.Empty(t, removedEntriesWarnings(old, emptied, all, true), "an emptied key is the cleared warning's case")
-	assert.Empty(t, removedEntriesWarnings(nil, req, all, true))
+	assert.Empty(t, warnings(old, emptied, all, true), "an emptied key is the cleared warning's case")
+	assert.Empty(t, warnings(nil, req, all, true))
 }
 
 // TestStartMergeKeepsBase_ValuesThatApply: a value the start merge applies is

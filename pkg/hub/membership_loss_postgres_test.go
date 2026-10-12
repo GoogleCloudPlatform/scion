@@ -61,14 +61,6 @@ func newMSPostgresFixture(t *testing.T, name string) *msFixture {
 	return f
 }
 
-// prepareRemoval drops the user's bindings and enqueues a check, without
-// processing it.
-func (f *msFixture) prepareRemoval() {
-	f.t.Helper()
-	f.dropBindings(f.userID)
-	require.NoError(f.t, enqueueMembershipLossTx(context.Background(), f.s, f.userID, f.projectID, store.MembershipLossTriggerMemberRemove, AuditActor{}))
-}
-
 func assertNoDeadlock(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

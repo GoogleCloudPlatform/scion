@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,10 +119,12 @@ func echo(t *testing.T, st conduit.Stream, s string) {
 
 // waitTimer waits until the relay has armed a timer due at at (the
 // lifetime GoAway or a drain deadline) before the test advances the clock
-// past it. Serve arms the lifetime timer after the session is visible to
-// Local, and a Shutdown drain arms its deadline after the GoAway frame
-// is queued, so neither is guaranteed to be armed when the test sees the
-// session or the GoAway.
+// past it. A Shutdown drain arms its deadline after the GoAway frame is
+// queued, so it is not guaranteed to be armed when the test sees the
+// GoAway. (Serve arms the lifetime timer before the session is visible
+// to Local; TestLifetimeCap_ArmedBeforeReady covers that ordering. A test
+// that syncs on the dialer's Welcome rather than Local can still see the
+// session before the timer is armed, so it waits too.)
 func waitTimer(t *testing.T, n *relaytest.Node, at time.Time, what string) {
 	t.Helper()
 	if !n.Clock.WaitForTimer(10*time.Second, at) {
@@ -228,6 +231,41 @@ func TestLifetimeCap_GoAwayLeadAndDrainDeadline(t *testing.T) {
 	relaytest.WaitClosed(t, target.Done(), "target session to end")
 	if code := conduit.CodeOf(target.Err(), 0); code != conduit.CloseRelayRestart {
 		t.Fatalf("target session ended with %v, want 4503", target.Err())
+	}
+}
+
+// TestLifetimeCap_ArmedBeforeReady: the lifetime GoAway timer is armed
+// before the session becomes visible as ready. Serve is held right after
+// readiness; a caller that looks the session up and advances the clock to
+// the GoAway point then sees the GoAway at once, without waiting for the
+// timer (the order the hub PTY lifetime test relies on).
+func TestLifetimeCap_ArmedBeforeReady(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	n := lifetimeNode(t, w, 90*time.Second, 0)
+	w.SetPrincipal("a", agentPrincipal("L1", 1))
+	ready := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	n.Relay.SetAfterReadyHookForTest(func() {
+		ready <- struct{}{}
+		<-release
+	})
+	_, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), echoConfig())
+	relaytest.Wait(t, ready, "session ready")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ls, _, ok := n.Relay.Local(ctx, wel.GetSessionId())
+	if !ok {
+		t.Fatal("ready session not held by the relay")
+	}
+
+	n.Clock.Advance(30 * time.Second)
+	draining := ls.Info().Draining
+	unblock()
+	if !draining {
+		t.Fatal("no GoAway 60s before the cap: the lifetime timer was not armed when the session became ready")
 	}
 }
 

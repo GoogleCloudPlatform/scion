@@ -123,7 +123,7 @@ func TestArtifactsRetentionAndSweepOnRoutes(t *testing.T) {
 
 	// Expire it now and run the maintenance pass.
 	past := time.Now().Add(-time.Minute)
-	_, err = st.SetExpiry(ctx, id, &past)
+	_, err = st.SetExpiry(ctx, id, &past, &artifacts.Actor{Kind: "user", Ref: "test", Authority: artifacts.AuthorityOwner})
 	require.NoError(t, err)
 	srv.reapArtifactVersions(ctx)
 	_, err = st.GetArtifact(ctx, id)

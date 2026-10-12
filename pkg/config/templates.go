@@ -1267,12 +1267,18 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 				result.Filter.Sampling.Default = override.Filter.Sampling.Default
 			}
 			if override.Filter.Sampling.Rates != nil {
-				if result.Filter.Sampling.Rates == nil {
-					result.Filter.Sampling.Rates = make(map[string]float64)
+				// Build a fresh map: result.Filter.Sampling is only a
+				// shallow copy of base, so writing into its Rates would
+				// mutate the base config (for example a shared settings or
+				// hub default object) and leak rates between agents.
+				rates := make(map[string]float64, len(result.Filter.Sampling.Rates)+len(override.Filter.Sampling.Rates))
+				for k, v := range result.Filter.Sampling.Rates {
+					rates[k] = v
 				}
 				for k, v := range override.Filter.Sampling.Rates {
-					result.Filter.Sampling.Rates[k] = v
+					rates[k] = v
 				}
+				result.Filter.Sampling.Rates = rates
 			}
 		}
 	}

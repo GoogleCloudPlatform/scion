@@ -388,6 +388,13 @@ type BrokerCapabilities struct {
 	// then does the hub read a start's absence from that list as "no start
 	// in flight".
 	StartsInFlight bool `json:"startsInFlight,omitempty"`
+	// TemplateTiers indicates the broker takes hub settings as separate
+	// tiers (ptone/scion#4218): HubAgentDefaults.Telemetry as a default
+	// below the agent's own config telemetry (requester inline telemetry
+	// from older hubs, and the stored config), and TelemetryPolicy on
+	// create/start/restart as policy above everything. A hub may stop writing those values into
+	// InlineConfig only for a broker that reports this (ptone/scion#4222).
+	TemplateTiers bool `json:"templateTiers,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -407,11 +414,19 @@ type BrokerProfile struct {
 	// Kubernetes ServiceAccount, and whether the list was reported at all.
 	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
 	MappingsReported       bool                     `json:"mappingsReported,omitempty"`
+	// The remaining report fields mirror store.BrokerProfile.
+	MappingsComplete         bool       `json:"mappingsComplete,omitempty"`
+	MappingsIncompleteReason string     `json:"mappingsIncompleteReason,omitempty"`
+	AmbiguousGSAs            []string   `json:"ambiguousGSAs,omitempty"`
+	MappingsReportedAt       *time.Time `json:"mappingsReportedAt,omitempty"`
 }
 
 // BrokerProfileSAMapping mirrors store.BrokerProfileSAMapping.
 type BrokerProfileSAMapping struct {
-	GSA string `json:"gsa"`
+	GSA       string `json:"gsa"`
+	KSA       string `json:"ksa,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Source    string `json:"source,omitempty"`
 }
 
 // BrokerProjectInfo describes a project from a broker's perspective.

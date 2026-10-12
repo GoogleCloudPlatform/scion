@@ -99,7 +99,7 @@ func TestSSEHandler_DMMessagesScopedToParticipants(t *testing.T) {
 
 					for _, msg := range messages {
 						msg.CreatedAt = time.Unix(0, 0)
-						pub.PublishUserMessage(ctx, msg, nil)
+						pub.PublishUserMessage(ctx, msg, nil, nil)
 					}
 					synctest.Wait()
 					cancel()
@@ -111,26 +111,6 @@ func TestSSEHandler_DMMessagesScopedToParticipants(t *testing.T) {
 			})
 		}
 	}
-}
-
-// sseMessageIDs returns the message ids of the events written to an SSE body.
-func sseMessageIDs(t *testing.T, body string) []string {
-	t.Helper()
-	ids := []string{}
-	for _, line := range strings.Split(body, "\n") {
-		data, ok := strings.CutPrefix(line, "data: ")
-		if !ok {
-			continue
-		}
-		var frame struct {
-			Data struct {
-				ID string `json:"id"`
-			} `json:"data"`
-		}
-		require.NoError(t, json.Unmarshal([]byte(data), &frame))
-		ids = append(ids, frame.Data.ID)
-	}
-	return ids
 }
 
 func TestSSEEventVisible(t *testing.T) {
@@ -203,7 +183,7 @@ func TestPublishUserMessage_DMSubjectsScoped(t *testing.T) {
 				payloads = append(payloads, data)
 			}}
 			msg.CreatedAt = time.Unix(0, 0)
-			b.PublishUserMessage(context.Background(), msg, nil)
+			b.PublishUserMessage(context.Background(), msg, nil, nil)
 			require.NotEmpty(t, subjects)
 
 			participants := dmUserParticipants(msg.ThreadID)

@@ -79,8 +79,9 @@ var RelationshipPolicies = []RelationshipPolicy{
 		PermissionIDs: []string{
 			"agent.create", "agent.read", "agent.list", "agent.update", "agent.delete",
 			"agent.lifecycle", "agent.stop_all", "agent.message", "agent.set_message_mode",
-			"agent.grant_hub_mode", "agent.status_update", "agent.log_append", "agent.notify",
+			"agent.grant_hub_mode", "agent.status_update", "agent.notify",
 			"agent.token_refresh", "agent.port_forward", "agent.identity_token",
+			"agent.delegation.create",
 		},
 	},
 	// There is deliberately no owner/user/project row (ptone/scion#2586).
@@ -156,8 +157,9 @@ var RelationshipPolicies = []RelationshipPolicy{
 		PermissionIDs: []string{
 			"agent.create", "agent.read", "agent.list", "agent.update", "agent.delete",
 			"agent.lifecycle", "agent.stop_all", "agent.message", "agent.set_message_mode",
-			"agent.grant_hub_mode", "agent.status_update", "agent.log_append", "agent.notify",
+			"agent.grant_hub_mode", "agent.status_update", "agent.notify",
 			"agent.token_refresh", "agent.port_forward", "agent.identity_token",
+			"agent.delegation.create",
 		},
 	},
 	{
@@ -168,8 +170,8 @@ var RelationshipPolicies = []RelationshipPolicy{
 		ResourceType:   ResourceAgent,
 		PermissionIDs: []string{
 			"agent.create", "agent.delete", "agent.attach", "agent.lifecycle",
-			"agent.set_message_mode", "agent.status_update", "agent.log_append",
-			"agent.notify", "agent.token_refresh", "agent.port_forward", "agent.identity_token",
+			"agent.set_message_mode", "agent.status_update", "agent.notify",
+			"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 		},
 	},
 	{

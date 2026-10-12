@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/cmd/internal/cliutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -133,6 +134,13 @@ return an error instead of blocking.`,
 			globalMode = true
 		}
 
+		// Fill the hub endpoint and project from the current context
+		// ('scion use') where no flag, environment variable or directory
+		// project chose them. It runs after every --global form is known
+		// and before the project requirement check, so a selected project
+		// satisfies it.
+		resolveInvocationTarget(cmd, mode)
+
 		if globalMode && projectPath == "" {
 			projectPath = "global"
 		}
@@ -155,17 +163,23 @@ return an error instead of blocking.`,
 			}
 		}
 
-		// Load settings to get cli.autohelp
-		settings, err := config.LoadSettings(projectPath)
-		if err == nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
-			autoHelp = *settings.CLI.AutoHelp
-		}
+		// Hub-only commands never read local project settings: for them
+		// --project names a hub project, not a directory.
+		hubOnly := hubOnlyCommands[topLevelName(cmd)]
 
-		// Check versioned settings for cli.interactive_disabled
-		if vs, _, vsErr := config.LoadEffectiveSettings(projectPath); vsErr == nil && vs != nil {
-			if vs.CLI != nil && vs.CLI.InteractiveDisabled != nil && *vs.CLI.InteractiveDisabled {
-				nonInteractive = true
-				autoConfirm = true
+		if !hubOnly {
+			// Load settings to get cli.autohelp
+			settings, err := config.LoadSettings(projectPath)
+			if err == nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
+				autoHelp = *settings.CLI.AutoHelp
+			}
+
+			// Check versioned settings for cli.interactive_disabled
+			if vs, _, vsErr := config.LoadEffectiveSettings(projectPath); vsErr == nil && vs != nil {
+				if vs.CLI != nil && vs.CLI.InteractiveDisabled != nil && *vs.CLI.InteractiveDisabled {
+					nonInteractive = true
+					autoConfirm = true
+				}
 			}
 		}
 
@@ -204,7 +218,14 @@ return an error instead of blocking.`,
 		}
 
 		// Check for dev auth usage and warn if Hub is enabled
-		printDevAuthWarningIfNeeded(projectPath)
+		if !hubOnly {
+			printDevAuthWarningIfNeeded(projectPath)
+		}
+
+		// Hand the normalized root flag values to the command (see
+		// rootOptions). This must stay last so the snapshot reflects every
+		// adjustment above.
+		cmd.SetContext(cliutil.WithRootOptions(cmd.Context(), snapshotRootOptions()))
 
 		return nil
 	},
@@ -253,9 +274,12 @@ func Execute() {
 			tempProjectPath = "global"
 		}
 	}
-	settings, _ := config.LoadSettings(tempProjectPath)
-	if settings != nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
-		autoHelp = *settings.CLI.AutoHelp
+	// Hub-only commands skip it: their --project is not a directory.
+	if !hubOnlyCommands[topLevelName(target)] {
+		settings, _ := config.LoadSettings(tempProjectPath)
+		if settings != nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
+			autoHelp = *settings.CLI.AutoHelp
+		}
 	}
 
 	applyModeRestrictions(rootCmd, mode)
@@ -267,6 +291,15 @@ func Execute() {
 	}
 
 	cmd, err := rootCmd.ExecuteC()
+	if err != nil && topLevelName(cmd) == "ssh" {
+		// scion ssh follows the ssh convention: any failure before the
+		// remote command runs, from the root hook included, exits 255.
+		os.Exit(reportSSHError(os.Stderr, err))
+	}
+	if err != nil && plainErrorCommands[topLevelName(cmd)] {
+		// One plain line, no usage block, and the command's own exit code.
+		os.Exit(reportPlainError(os.Stderr, err))
+	}
 	if err != nil {
 		// A failure already reported in the JSON output only sets the exit
 		// status; printing it again would add noise for JSON consumers.
@@ -278,6 +311,15 @@ func Execute() {
 		}
 		os.Exit(exitCodeFor(err))
 	}
+}
+
+// plainErrorCommands are top-level commands whose failures are reported as
+// one plain stderr line with no usage block, and whose exit codes follow
+// the tunnel exit-code table. They run under ssh and editors, where the
+// error lands in a log. One command per line.
+var plainErrorCommands = map[string]bool{
+	"tunnel":     true,
+	"ssh-config": true,
 }
 
 // formatCLIError renders a failed command's error for f. The error banner is
@@ -557,7 +599,10 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 		return
 	}
 
-	// Check if Hub is enabled (either via settings or --hub flag override)
+	// Check if Hub is enabled (either via settings or --hub flag override).
+	// A hub selected with 'scion use' is in hubEndpoint too and counts the
+	// same way: a project from the current context is resolved on that hub
+	// without hub.enabled, so dev auth is really in use.
 	hubEnabled := settings.IsHubEnabled() || hubEndpoint != ""
 	if !hubEnabled {
 		return

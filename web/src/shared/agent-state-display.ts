@@ -72,6 +72,16 @@ export const PHASE_DISPLAY: Record<AgentPhase, StateDisplay> = {
 // ---------------------------------------------------------------------------
 
 export const ACTIVITY_DISPLAY: Record<AgentActivity, StateDisplay> = {
+  // Display only: the activity is still 'initializing' in the API. The
+  // container is up but the harness has not shown it reads input yet;
+  // messages sent now are held until it is ready (ptone/scion#4482).
+  initializing: {
+    emoji: '🚀',
+    icon: 'arrow-repeat',
+    variant: 'warning',
+    pulse: true,
+    label: 'starting',
+  },
   working: { emoji: '🔄', icon: 'circle-fill', variant: 'success', pulse: false },
   thinking: { emoji: '💭', icon: 'lightning-charge', variant: 'primary', pulse: true },
   executing: { emoji: '⚙️', icon: 'gear', variant: 'primary', pulse: true },

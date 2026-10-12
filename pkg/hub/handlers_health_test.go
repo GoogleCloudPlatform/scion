@@ -23,7 +23,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -114,15 +113,6 @@ func TestGetHealthInfo_DegradedWhenColocatedBrokerRegistrationFailed(t *testing.
 		"the raw registration error must not reach the public health check value")
 }
 
-// pingFailStore wraps a real store but reports the database as unreachable,
-// so GetHealthInfo's critical database check fails while everything else
-// (stats queries, summary aggregation) still works.
-type pingFailStore struct {
-	store.Store
-}
-
-func (pingFailStore) Ping(context.Context) error { return errors.New("database is down") }
-
 // TestDeriveHealthStatus pins the severity distinction from
 // ptone/scion#1094: only a critical check (database, workspace_storage) makes the composite
 // status unhealthy; any other non-healthy key only degrades it, so
@@ -197,32 +187,4 @@ func TestHealthz_StatusIsFirstField(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodGet, "/healthz", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, strings.HasPrefix(rec.Body.String(), `{"status":"unhealthy"`), "got %s", rec.Body.String())
-}
-
-func TestDecisionAuditHealth_CriticalWarningIndependentOfSink(t *testing.T) {
-	f := newAuditFixture(t, auditFixtureError)
-	f.requireAdmission(t)
-	f.observe(1, 1, true)
-	f.emit()
-	checks := map[string]string{"database": "healthy"}
-	f.router.server.checkDecisionAuditHealth(checks)
-	assert.Equal(t, decisionAuditFaultWarning, checks[decisionAuditNewHealthKey])
-	assert.NotContains(t, checks, decisionAuditLegacyHealthKey)
-	assert.Equal(t, HealthStatusDegraded, deriveHealthStatus(checks))
-	assert.False(t, criticalHealthChecks[decisionAuditNewHealthKey])
-	assert.False(t, criticalHealthChecks[decisionAuditLegacyHealthKey])
-	f.observe(2, 1, true)
-	f.router.server.checkDecisionAuditHealth(checks)
-	assert.Equal(t, decisionAuditFaultWarning, checks[decisionAuditNewHealthKey], "flag/refresh cannot clear fault")
-	assert.Equal(t, 1, f.handler.calls, "reading health must not invoke failed sink")
-	checks["database"] = "unhealthy"
-	assert.Equal(t, HealthStatusUnhealthy, deriveHealthStatus(checks))
-}
-
-func TestDecisionAuditHealth_LegacyWriterCheckRemoved(t *testing.T) {
-	f := newAuditFixture(t, auditFixtureAccept)
-	checks := map[string]string{"database": "healthy"}
-	f.router.server.checkDecisionAuditHealth(checks)
-	assert.NotContains(t, checks, decisionAuditLegacyHealthKey)
-	assert.Equal(t, HealthStatusHealthy, deriveHealthStatus(checks))
 }

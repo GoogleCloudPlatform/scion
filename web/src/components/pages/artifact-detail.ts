@@ -28,7 +28,10 @@
  * toolbar and saves the marked-up copy as a version of kind review; while
  * the current version is a review the page shows it as pending, and a
  * review's preview can show its marks, the text with every mark rejected
- * (Clean) or accepted (Accepted).
+ * (Clean) or accepted (Accepted). Edit, Review and Upload new version are
+ * shown only when the hub reports canPublish. Share is shown for canManage;
+ * Grant review access (the Share dialog limited to giving a user review
+ * access) for canGrantReview without canManage.
  * Route: /projects/{projectId}/artifacts/{artifactId}[/v/{seq}]
  */
 
@@ -218,18 +221,6 @@ export class ScionPageArtifactDetail extends LitElement {
       padding: 1.5rem;
       max-width: 1200px;
       margin: 0 auto;
-    }
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      color: var(--sl-color-neutral-600);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-    .back-link:hover {
-      color: var(--sl-color-primary-600);
     }
     .meta {
       display: flex;
@@ -685,9 +676,27 @@ export class ScionPageArtifactDetail extends LitElement {
     return !!v && v.seq === this.data!.artifact.currentSeq;
   }
 
+  /**
+   * The caller may publish new versions (GET's canPublish, the hub's own
+   * write decision). Edit, Review and Upload new version all publish a
+   * version, so all are hidden without it.
+   */
+  private get canPublish(): boolean {
+    return !!this.data?.canPublish;
+  }
+
+  /**
+   * The caller may give a user review access but not manage the artifact
+   * (GET's canGrantReview; design D24, ptone/scion#4014): the page offers
+   * Grant review access, the Share dialog limited to that, instead of Share.
+   */
+  private get canGrantReview(): boolean {
+    return !this.data?.canManage && !!this.data?.canGrantReview;
+  }
+
   private get canEdit(): boolean {
     const f = this.entry;
-    if (!f || !this.showsCurrent || this.text === null) return false;
+    if (!this.canPublish || !f || !this.showsCurrent || this.text === null) return false;
     const kind = rendererFor(f.mediaType);
     return (kind === 'markdown' || kind === 'text') && f.size <= MAX_INLINE_TEXT_BYTES;
   }
@@ -812,16 +821,29 @@ export class ScionPageArtifactDetail extends LitElement {
     // A failed reload leaves no text, so canReview is false then too.
     if (!this.canReview) {
       this.reviewing = false;
-      this.reviewNotice =
-        this.error || this.notFound
-          ? 'Your review was not saved and the current version could not be loaded; your text is below.'
-          : 'Your review was not saved: a newer version was published, and it cannot be reviewed here. Your text is below.';
+      this.reviewNotice = this.staleReviewNotice();
       this.discardedReview = discarded;
       return;
     }
     this.reviewText = lfText(this.text);
     this.reviewPreview = this.reviewText;
     this.discardedReview = discarded;
+  }
+
+  /**
+   * The notice when Review mode closes after a stale review because the
+   * reloaded current version cannot be reviewed here: it could not be
+   * loaded, the caller may no longer publish versions, or it is not a
+   * markdown entry the page can review.
+   */
+  private staleReviewNotice(): string {
+    if (this.error || this.notFound) {
+      return 'Your review was not saved and the current version could not be loaded; your text is below.';
+    }
+    if (!this.canPublish) {
+      return 'Your review was not saved: you can no longer publish versions of this artifact. Your text is below.';
+    }
+    return 'Your review was not saved: a newer version was published, and it cannot be reviewed here. Your text is below.';
   }
 
   private clearPreviewTimer(): void {
@@ -951,10 +973,6 @@ export class ScionPageArtifactDetail extends LitElement {
     }
     if (!this.data) return nothing;
     return html`
-      <a href=${`/projects/${encodeURIComponent(this.homeProject)}`} class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Project
-      </a>
       ${this.renderHeader()}
       ${this.editing
         ? this.renderEditor()
@@ -969,10 +987,11 @@ export class ScionPageArtifactDetail extends LitElement {
           this.publishOpen = false;
         }}
       ></scion-artifact-publish-dialog>
-      ${this.data?.canManage
+      ${this.data?.canManage || this.canGrantReview
         ? html`<scion-artifact-share-dialog
             .artifact=${this.data.artifact}
             .currentUserId=${this.pageData?.user?.id ?? ''}
+            .mode=${this.data?.canManage ? 'share' : 'review'}
             ?open=${this.shareOpen}
             @artifact-changed=${(e: CustomEvent<Artifact>): void => {
               if (this.data) this.data = { ...this.data, artifact: e.detail };
@@ -1019,12 +1038,18 @@ export class ScionPageArtifactDetail extends LitElement {
     const owner = this.label(a.ownerKind, a.ownerRef);
     const f = this.entry;
     const ownFiles = v ? v.files.filter((x) => !isRemoteFile(x)) : [];
-    // Every action needs a version, edit rights or (for Share) the right
-    // to manage the artifact; all are hidden while editing or reviewing.
+    // Every action needs a version, edit rights or (for Share and Grant
+    // review access) the right to manage the artifact or give review
+    // access; all are hidden while editing or reviewing.
     const hasActions =
-      !this.editing && !this.reviewing && (!!v || this.canEdit || !!this.data?.canManage);
+      !this.editing &&
+      !this.reviewing &&
+      (!!v || this.canEdit || !!this.data?.canManage || this.canGrantReview);
     return html`
       <scion-detail-header heading=${a.title}>
+        <scion-back-link slot="back" href=${`/projects/${encodeURIComponent(this.homeProject)}`}
+          >Project</scion-back-link
+        >
         <sl-icon slot="icon" name="file-earmark-richtext"></sl-icon>
         ${this.currentIsReview
           ? html`<sl-badge variant="warning" pill>
@@ -1072,7 +1097,17 @@ export class ScionPageArtifactDetail extends LitElement {
                       <sl-icon slot="prefix" name="person-plus"></sl-icon>
                       Share
                     </sl-button>`
-                  : nothing}
+                  : this.canGrantReview
+                    ? html`<sl-button
+                        size="small"
+                        @click=${(): void => {
+                          this.shareOpen = true;
+                        }}
+                      >
+                        <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                        Grant review access
+                      </sl-button>`
+                    : nothing}
                 ${v && f && ownFiles.length === 1
                   ? html`<sl-button
                       size="small"
@@ -1409,10 +1444,31 @@ export class ScionPageArtifactDetail extends LitElement {
       ${this.versions.length === 1
         ? html`<div class="single-version">
             Only one version so far.
-            <div class="buttons">
+            ${this.canPublish
+              ? html`<div class="buttons">
+                  <sl-button
+                    size="small"
+                    variant="primary"
+                    @click=${(): void => {
+                      this.publishOpen = true;
+                    }}
+                  >
+                    <sl-icon slot="prefix" name="upload"></sl-icon>
+                    Upload new version
+                  </sl-button>
+                  ${this.canEdit
+                    ? html`<sl-button size="small" @click=${this.startEdit}>
+                        <sl-icon slot="prefix" name="pencil"></sl-icon>
+                        Edit
+                      </sl-button>`
+                    : nothing}
+                </div>`
+              : nothing}
+          </div>`
+        : this.canPublish
+          ? html`<div class="more">
               <sl-button
                 size="small"
-                variant="primary"
                 @click=${(): void => {
                   this.publishOpen = true;
                 }}
@@ -1420,25 +1476,8 @@ export class ScionPageArtifactDetail extends LitElement {
                 <sl-icon slot="prefix" name="upload"></sl-icon>
                 Upload new version
               </sl-button>
-              ${this.canEdit
-                ? html`<sl-button size="small" @click=${this.startEdit}>
-                    <sl-icon slot="prefix" name="pencil"></sl-icon>
-                    Edit
-                  </sl-button>`
-                : nothing}
-            </div>
-          </div>`
-        : html`<div class="more">
-            <sl-button
-              size="small"
-              @click=${(): void => {
-                this.publishOpen = true;
-              }}
-            >
-              <sl-icon slot="prefix" name="upload"></sl-icon>
-              Upload new version
-            </sl-button>
-          </div>`}
+            </div>`
+          : nothing}
     `;
   }
 

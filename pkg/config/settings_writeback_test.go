@@ -396,6 +396,7 @@ var updateVersionedSettingKeys = []string{
 	"image_registry", "cli.autohelp", "hub.enabled", "hub.linked", "hub.endpoint",
 	"hub.local_only", "hub.brokerId", "hub.brokerToken", "hub.brokerNickname",
 	"server.auth.display_name", "server.auth.email", "server.auth.username",
+	"use_host_credentials",
 	"project_id", "hub.project_id",
 	"hub.token", "hub.apiKey", "hub.lastSyncedAt",
 	"bucket.provider", "bucket.name", "bucket.prefix", "hub_connections.foo.endpoint",
@@ -487,6 +488,13 @@ var structParityBases = []structParityBase{
 // runStructParity checks, for every key and a spread of values, that the
 // settings loaded after UpdateVersionedSetting equal those loaded after the
 // pre-ptone/scion#1800 struct round-trip (updateVersionedSettingStruct).
+//
+// There are thousands of cases, so the subtests run in parallel. That is
+// safe because each case works only in its own temporary directories.
+// UpdateVersionedSetting takes the package-wide settings-file lock
+// (LockSettingsFile), so that part of each case still runs one at a time.
+// Callers must not use t.Setenv or change package variables
+// (createTempFile, syncFile, ...) while the subtests run.
 func runStructParity(t *testing.T, bases []structParityBase) {
 	t.Helper()
 	values := []string{"new-value", "", "true", "false", "yes", "123"}
@@ -494,6 +502,7 @@ func runStructParity(t *testing.T, bases []structParityBase) {
 		for _, key := range updateVersionedSettingKeys {
 			for _, value := range values {
 				t.Run(base.name+"/"+key+"="+value, func(t *testing.T) {
+					t.Parallel()
 					newDir, oldDir := t.TempDir(), t.TempDir()
 					if base.file != "" {
 						for _, d := range []string{newDir, oldDir} {

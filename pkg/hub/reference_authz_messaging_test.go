@@ -29,7 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -179,41 +178,6 @@ func TestAgentOutbound_ThreadIDOfOtherProjectTopicMatchesMissing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, len(partsBefore), len(partsAfter), "no participant row is added to the other project's conversation")
 	assertOnlyControlMessage(t, srv, s, project, agent, user)
-}
-
-func seedGroupConversation(t *testing.T, s store.Store, projectID, name string) string {
-	t.Helper()
-	pid := projectID
-	conv, err := s.UpsertConversationByExternalRef(context.Background(), &store.Conversation{
-		Kind: "group", Surface: "native", ExternalRef: "group:" + projectID + ":" + name,
-		ProjectID: &pid, DriftState: "active",
-	})
-	require.NoError(t, err)
-	return conv.ID
-}
-
-func participantCount(t *testing.T, s store.Store, convID string) int {
-	t.Helper()
-	parts, err := s.ListParticipants(context.Background(), convID)
-	require.NoError(t, err)
-	return len(parts)
-}
-
-func postMessageWithConv(t *testing.T, srv *Server, sender Identity, target *store.Agent, convID string) refAnswer {
-	t.Helper()
-	body, err := json.Marshal(MessageRequest{StructuredMessage: &messages.StructuredMessage{
-		Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Sender: "x:" + sender.ID(), SenderID: sender.ID(),
-		Recipient: "agent:" + target.Slug, RecipientID: target.ID,
-		Msg: "into a group", Type: messages.TypeInstruction, ConversationID: convID,
-	}})
-	require.NoError(t, err)
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	r = r.WithContext(contextWithIdentity(r.Context(), sender))
-	rr := httptest.NewRecorder()
-	srv.handleAgentMessage(rr, r, target.ID)
-	return refAnswer{status: rr.Code, body: rr.Body.String()}
 }
 
 func TestAgentMessage_GroupConversationRequiresSenderReadAccess(t *testing.T) {

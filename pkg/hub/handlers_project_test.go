@@ -1159,9 +1159,12 @@ func TestDeleteProject_HubManaged_SkipsEmbeddedBroker(t *testing.T) {
 	assert.Contains(t, mockClient.cleanupSlugs, "cleanup-embedded")
 }
 
-// TestDeleteProject_GitBacked_NoCleanupDispatched verifies that deleting a git-backed
-// project does NOT trigger broker cleanup (those directories are externally managed).
-func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
+// TestDeleteProject_GitBacked_LinkedProvider_NoCleanupDispatched verifies that
+// deleting a git-backed project does NOT trigger cleanup on a broker where the
+// project is linked at a local path (that directory is externally managed).
+// Providers without a local path are covered by
+// TestDeleteProject_GitBacked_SlugProvider_DispatchesCleanup.
+func TestDeleteProject_GitBacked_LinkedProvider_NoCleanupDispatched(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -1187,6 +1190,7 @@ func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  "/srv/checkouts/nocleanup",
 		LinkedBy:   "test",
 	}))
 
@@ -1200,7 +1204,7 @@ func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// CleanupProject should NOT be called for git-backed projects
-	assert.Equal(t, 0, mockClient.cleanupCalls, "CleanupProject should not be called for git-backed projects")
+	assert.Equal(t, 0, mockClient.cleanupCalls, "CleanupProject should not be called for a git project linked at a local path")
 }
 
 // TestResolveRuntimeBroker_HubManagedProject_NoLocalPath verifies that when a broker

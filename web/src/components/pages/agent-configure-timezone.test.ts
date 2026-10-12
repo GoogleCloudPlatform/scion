@@ -22,8 +22,6 @@
  * the env table.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 import { browserTimeZone, setPreferredTimeZone } from '../../utils/time.js';

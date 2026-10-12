@@ -434,7 +434,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	if cfg.NoAuth || cfg.Harness != nil {
 		// harnessCmdLine covers both branches (NoAuth checked first,
 		// matching the priority order above); ok is always true here.
-		cmdLine, _ := harnessCmdLine(cfg)
+		cmdLine, _ := harnessCmdLine(cfg, harnessCmdLineOptions{})
 		agentWindowCmd := tmuxAgentWindowCmd("/bin/sh", cmdLine)
 		// Use poll loop instead of attach-session: CRI has no TTY for PID 1,
 		// so tmux attach-session would fail with "not a terminal". The poll
@@ -576,7 +576,6 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 		AgentID:   agentID,
 		Mode:      store.SharingModeSharedPlain,
 		GitClone:  cfg.GitClone,
-		Locker:    cfg.Locker,
 		NFSUID:    uid,
 		NFSGID:    gid,
 	}); err != nil {

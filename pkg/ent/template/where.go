@@ -95,6 +95,11 @@ func Config(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldConfig, v))
 }
 
+// AgentConfig applies equality check predicate on the "agent_config" field. It's identical to AgentConfigEQ.
+func AgentConfig(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldAgentConfig, v))
+}
+
 // ContentHash applies equality check predicate on the "content_hash" field. It's identical to ContentHashEQ.
 func ContentHash(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldContentHash, v))
@@ -128,6 +133,11 @@ func StorageBucket(v string) predicate.Template {
 // StoragePath applies equality check predicate on the "storage_path" field. It's identical to StoragePathEQ.
 func StoragePath(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldStoragePath, v))
+}
+
+// Layout applies equality check predicate on the "layout" field. It's identical to LayoutEQ.
+func Layout(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldLayout, v))
 }
 
 // Files applies equality check predicate on the "files" field. It's identical to FilesEQ.
@@ -740,6 +750,81 @@ func ConfigContainsFold(v string) predicate.Template {
 	return predicate.Template(sql.FieldContainsFold(FieldConfig, v))
 }
 
+// AgentConfigEQ applies the EQ predicate on the "agent_config" field.
+func AgentConfigEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldAgentConfig, v))
+}
+
+// AgentConfigNEQ applies the NEQ predicate on the "agent_config" field.
+func AgentConfigNEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldNEQ(FieldAgentConfig, v))
+}
+
+// AgentConfigIn applies the In predicate on the "agent_config" field.
+func AgentConfigIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldIn(FieldAgentConfig, vs...))
+}
+
+// AgentConfigNotIn applies the NotIn predicate on the "agent_config" field.
+func AgentConfigNotIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldNotIn(FieldAgentConfig, vs...))
+}
+
+// AgentConfigGT applies the GT predicate on the "agent_config" field.
+func AgentConfigGT(v string) predicate.Template {
+	return predicate.Template(sql.FieldGT(FieldAgentConfig, v))
+}
+
+// AgentConfigGTE applies the GTE predicate on the "agent_config" field.
+func AgentConfigGTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldGTE(FieldAgentConfig, v))
+}
+
+// AgentConfigLT applies the LT predicate on the "agent_config" field.
+func AgentConfigLT(v string) predicate.Template {
+	return predicate.Template(sql.FieldLT(FieldAgentConfig, v))
+}
+
+// AgentConfigLTE applies the LTE predicate on the "agent_config" field.
+func AgentConfigLTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldLTE(FieldAgentConfig, v))
+}
+
+// AgentConfigContains applies the Contains predicate on the "agent_config" field.
+func AgentConfigContains(v string) predicate.Template {
+	return predicate.Template(sql.FieldContains(FieldAgentConfig, v))
+}
+
+// AgentConfigHasPrefix applies the HasPrefix predicate on the "agent_config" field.
+func AgentConfigHasPrefix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasPrefix(FieldAgentConfig, v))
+}
+
+// AgentConfigHasSuffix applies the HasSuffix predicate on the "agent_config" field.
+func AgentConfigHasSuffix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasSuffix(FieldAgentConfig, v))
+}
+
+// AgentConfigIsNil applies the IsNil predicate on the "agent_config" field.
+func AgentConfigIsNil() predicate.Template {
+	return predicate.Template(sql.FieldIsNull(FieldAgentConfig))
+}
+
+// AgentConfigNotNil applies the NotNil predicate on the "agent_config" field.
+func AgentConfigNotNil() predicate.Template {
+	return predicate.Template(sql.FieldNotNull(FieldAgentConfig))
+}
+
+// AgentConfigEqualFold applies the EqualFold predicate on the "agent_config" field.
+func AgentConfigEqualFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldEqualFold(FieldAgentConfig, v))
+}
+
+// AgentConfigContainsFold applies the ContainsFold predicate on the "agent_config" field.
+func AgentConfigContainsFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldContainsFold(FieldAgentConfig, v))
+}
+
 // ContentHashEQ applies the EQ predicate on the "content_hash" field.
 func ContentHashEQ(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldContentHash, v))
@@ -1253,6 +1338,81 @@ func StoragePathEqualFold(v string) predicate.Template {
 // StoragePathContainsFold applies the ContainsFold predicate on the "storage_path" field.
 func StoragePathContainsFold(v string) predicate.Template {
 	return predicate.Template(sql.FieldContainsFold(FieldStoragePath, v))
+}
+
+// LayoutEQ applies the EQ predicate on the "layout" field.
+func LayoutEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldLayout, v))
+}
+
+// LayoutNEQ applies the NEQ predicate on the "layout" field.
+func LayoutNEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldNEQ(FieldLayout, v))
+}
+
+// LayoutIn applies the In predicate on the "layout" field.
+func LayoutIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldIn(FieldLayout, vs...))
+}
+
+// LayoutNotIn applies the NotIn predicate on the "layout" field.
+func LayoutNotIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldNotIn(FieldLayout, vs...))
+}
+
+// LayoutGT applies the GT predicate on the "layout" field.
+func LayoutGT(v string) predicate.Template {
+	return predicate.Template(sql.FieldGT(FieldLayout, v))
+}
+
+// LayoutGTE applies the GTE predicate on the "layout" field.
+func LayoutGTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldGTE(FieldLayout, v))
+}
+
+// LayoutLT applies the LT predicate on the "layout" field.
+func LayoutLT(v string) predicate.Template {
+	return predicate.Template(sql.FieldLT(FieldLayout, v))
+}
+
+// LayoutLTE applies the LTE predicate on the "layout" field.
+func LayoutLTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldLTE(FieldLayout, v))
+}
+
+// LayoutContains applies the Contains predicate on the "layout" field.
+func LayoutContains(v string) predicate.Template {
+	return predicate.Template(sql.FieldContains(FieldLayout, v))
+}
+
+// LayoutHasPrefix applies the HasPrefix predicate on the "layout" field.
+func LayoutHasPrefix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasPrefix(FieldLayout, v))
+}
+
+// LayoutHasSuffix applies the HasSuffix predicate on the "layout" field.
+func LayoutHasSuffix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasSuffix(FieldLayout, v))
+}
+
+// LayoutIsNil applies the IsNil predicate on the "layout" field.
+func LayoutIsNil() predicate.Template {
+	return predicate.Template(sql.FieldIsNull(FieldLayout))
+}
+
+// LayoutNotNil applies the NotNil predicate on the "layout" field.
+func LayoutNotNil() predicate.Template {
+	return predicate.Template(sql.FieldNotNull(FieldLayout))
+}
+
+// LayoutEqualFold applies the EqualFold predicate on the "layout" field.
+func LayoutEqualFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldEqualFold(FieldLayout, v))
+}
+
+// LayoutContainsFold applies the ContainsFold predicate on the "layout" field.
+func LayoutContainsFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldContainsFold(FieldLayout, v))
 }
 
 // FilesEQ applies the EQ predicate on the "files" field.

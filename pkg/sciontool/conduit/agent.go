@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
@@ -137,13 +138,23 @@ type Options struct {
 	// default net.Dialer). It is only ever called with a 127.0.0.1
 	// address.
 	DialLocal func(ctx context.Context, network, addr string) (net.Conn, error)
-	// SpawnPTY starts the tmux client for a PTY stream (test seam). By
-	// default it runs `tmux attach-session` on a local pty as PTYUser,
-	// when this build supports ptys and tmux is on PATH at New; when it
-	// is nil the agent neither advertises nor serves the pty kind.
+	// SpawnPTY starts the tmux client for a PTY stream (test seam). When
+	// it is nil and NoPTY is unset, New installs the default: it runs
+	// `tmux attach-session` on a local pty as PTYUser, when this build
+	// supports ptys and tmux is on PATH at New. When it is still nil
+	// after New (NoPTY set, or no default available) the agent neither
+	// advertises nor serves the pty kind.
 	SpawnPTY PTYSpawner
+	// NoPTY opts out of pty streams: New installs no default SpawnPTY,
+	// so the agent neither advertises nor serves the pty kind even when
+	// tmux is on PATH. SpawnPTY must be nil when NoPTY is set.
+	NoPTY bool
 	// PTYUser is who the default SpawnPTY runs the tmux client as.
 	PTYUser PTYUser
+	// SSH is the embedded SSH server that serves ssh streams (design
+	// §3.8). When nil the agent neither advertises nor serves the ssh
+	// kind. New validates it.
+	SSH *sshd.Config
 	// OnSession is called after each admitted session's grant keys are
 	// installed. Optional.
 	OnSession func(*conduitv1.Welcome)
@@ -156,6 +167,11 @@ type Options struct {
 	Clock   clock.Clock
 	Backoff *core.Backoff
 	Session core.Config
+
+	// RPCRoutes lists the routes Session.RPCHandler serves, advertised
+	// as Hello.capabilities.rpc. It must be empty when
+	// Session.RPCHandler is nil.
+	RPCRoutes []string
 
 	// ptyBeforeAccept, when set, runs after a PTY stream's client is
 	// spawned and before the stream is accepted (test hook).
@@ -176,12 +192,28 @@ type Agent struct {
 	// refusedSince is when the current run of 4409 refusals began (zero
 	// while none is in progress); an admitted session resets it.
 	refusedSince time.Time
+	// live is the most recently admitted session (nil before the first).
+	live core.LocalSession
+	// authToken is a refreshed token not yet sent as AuthRefresh, and
+	// authSeq its refresh sequence number; sentSeq is the sequence number
+	// of the last token sent. A token not newer than both is stale and
+	// never sent.
+	authToken string
+	authSeq   uint64
+	sentSeq   uint64
+
+	// authSendMu serializes AuthRefresh sends, so the newest token is
+	// always the last one sent.
+	authSendMu sync.Mutex
 }
 
 // New validates opts and returns an Agent.
 func New(opts Options) (*Agent, error) {
 	if opts.AgentID == "" || opts.ProjectID == "" {
 		return nil, errors.New("conduit: agent and project ids are required")
+	}
+	if len(opts.RPCRoutes) > 0 && opts.Session.RPCHandler == nil {
+		return nil, errors.New("conduit: RPCRoutes set without Session.RPCHandler")
 	}
 	if opts.Token == nil {
 		return nil, errors.New("conduit: Token is required")
@@ -198,7 +230,15 @@ func New(opts Options) (*Agent, error) {
 		d := &net.Dialer{Timeout: localDialTimeout}
 		opts.DialLocal = d.DialContext
 	}
-	if opts.SpawnPTY == nil {
+	if opts.SSH != nil {
+		if err := opts.SSH.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if opts.NoPTY && opts.SpawnPTY != nil {
+		return nil, errors.New("conduit: NoPTY and SpawnPTY are mutually exclusive")
+	}
+	if opts.SpawnPTY == nil && !opts.NoPTY {
 		opts.SpawnPTY = defaultPTYSpawner(opts.PTYUser)
 	}
 	clk := opts.Clock
@@ -247,6 +287,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		Config: cfg,
 		Hello:  a.hello,
 		OnSession: func(_ context.Context, s core.Session, w *conduitv1.Welcome) {
+			if ls, ok := s.(core.LocalSession); ok {
+				a.mu.Lock()
+				a.live = ls
+				a.mu.Unlock()
+			}
 			a.admitted()
 			a.applyWelcomeKeys(w)
 			log.Info("Conduit session established (session %s, relay %s, incarnation %q)",
@@ -276,6 +321,7 @@ func (a *Agent) hello() *conduitv1.Hello {
 		ClientVersion: a.opts.ClientVersion,
 		Capabilities: &conduitv1.Capabilities{
 			StreamKinds:         a.streamKinds(),
+			Rpc:                 a.opts.RPCRoutes,
 			EndpointIncarnation: a.opts.LaunchID,
 		},
 	}
@@ -413,6 +459,51 @@ func (a *Agent) refused(end core.End, cause string) (time.Duration, error) {
 	}
 	log.Warn("Conduit: refused (%v); retrying in %v", cause, core.BackoffMax)
 	return core.BackoffMax, nil
+}
+
+// ErrNoLiveSession is returned by RefreshAuth when no session is live:
+// the next session is admitted with the current token anyway.
+var ErrNoLiveSession = errors.New("conduit: no live session")
+
+// RefreshAuth sends token to the hub as AuthRefresh on the live session,
+// so the hub re-validates the session's credential in band (design §3.3)
+// without disturbing its streams. Call it after each successful token
+// refresh, with seq numbering the refreshes in the order they completed
+// (hub.TokenRefreshResult.Seq). Tokens are sent in seq order, whatever
+// order the calls arrive in: a token whose seq is not greater than the
+// newest one already sent or queued is stale (the hub may already have
+// replaced it) and is dropped, and a call whose token a concurrent call
+// already sent returns nil.
+func (a *Agent) RefreshAuth(token string, seq uint64) error {
+	a.mu.Lock()
+	if seq <= a.sentSeq || seq <= a.authSeq {
+		a.mu.Unlock()
+		return nil
+	}
+	a.authToken, a.authSeq = token, seq
+	a.mu.Unlock()
+
+	a.authSendMu.Lock()
+	defer a.authSendMu.Unlock()
+	a.mu.Lock()
+	s, tok, sendSeq := a.live, a.authToken, a.authSeq
+	a.authToken = ""
+	if tok != "" {
+		a.sentSeq = sendSeq
+	}
+	a.mu.Unlock()
+	if tok == "" {
+		return nil
+	}
+	if s == nil {
+		return ErrNoLiveSession
+	}
+	select {
+	case <-s.Done():
+		return ErrNoLiveSession
+	default:
+	}
+	return s.RefreshAuth([]byte(tok), 0)
 }
 
 // refreshCredential refreshes the agent token, at most once per

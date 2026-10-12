@@ -19,12 +19,6 @@ import (
 	"context"
 )
 
-// BrokerIdentity represents an authenticated Runtime Broker.
-type BrokerIdentity interface {
-	Identity
-	BrokerID() string
-}
-
 // brokerIdentityImpl implements BrokerIdentity.
 //
 // INTENTIONAL DESIGN: brokerIdentityImpl must not implement UserIdentity
@@ -75,9 +69,14 @@ func GetBrokerIdentityFromContext(ctx context.Context) BrokerIdentity {
 	if identity, ok := ctx.Value(brokerIdentityContextKey{}).(BrokerIdentity); ok && !isNilIdentity(identity) {
 		return identity
 	}
-	// Also check the generic identity key
-	if identity, ok := ctx.Value(identityContextKey{}).(BrokerIdentity); ok && !isNilIdentity(identity) {
-		return identity
+	// Also check the generic identity key. contextIdentityValue asserts
+	// Identity first; BrokerIdentity embeds Identity, so every stored value
+	// implementing BrokerIdentity also passes that assertion, and the result
+	// is the same as asserting BrokerIdentity on the raw context value.
+	if stored, ok := contextIdentityValue(ctx); ok {
+		if identity, ok := stored.(BrokerIdentity); ok && !isNilIdentity(identity) {
+			return identity
+		}
 	}
 	return nil
 }

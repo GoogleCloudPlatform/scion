@@ -36,26 +36,6 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
-// superAdminBindingCount counts system-scoped super-admin bindings for a user.
-func superAdminBindingCount(t *testing.T, s store.Store, userID string) int {
-	t.Helper()
-	ctx := context.Background()
-
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-
-	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
-	require.NoError(t, err)
-
-	count := 0
-	for _, b := range bindings {
-		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
-			count++
-		}
-	}
-	return count
-}
-
 // hubMemberBindingCount counts system-scoped hub-member bindings for a user.
 func hubMemberBindingCount(t *testing.T, s store.Store, userID string) int {
 	t.Helper()
@@ -74,25 +54,6 @@ func hubMemberBindingCount(t *testing.T, s store.Store, userID string) int {
 		}
 	}
 	return count
-}
-
-// getDevUser triggers provisioning and returns the dev user record.
-func getDevUser(t *testing.T, srv *Server, s store.Store) *store.User {
-	t.Helper()
-	ctx := context.Background()
-
-	// Trigger dev user creation.
-	doRequest(t, srv, http.MethodGet, "/api/v1/users", nil)
-
-	result, err := s.ListUsers(ctx, store.UserFilter{}, store.ListOptions{Limit: 100})
-	require.NoError(t, err)
-	for i := range result.Items {
-		if result.Items[i].Email == "dev@localhost" {
-			return &result.Items[i]
-		}
-	}
-	t.Fatal("dev user not found")
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -2581,23 +2542,6 @@ func TestBindingStateDrift_DemoteRejectsUnauthorizedBinding(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Viewer role transitions (design §5.B / §5.D, AC 3)
 // ---------------------------------------------------------------------------
-
-// assertHubRoleAccess checks the immediate authz effect of a hub role:
-// template.list is allowed for member and viewer; project.create is allowed
-// only for member.
-func assertHubRoleAccess(t *testing.T, srv *Server, s store.Store, userID string, wantProjectCreate bool) {
-	t.Helper()
-	ctx := context.Background()
-	u, err := s.GetUser(ctx, userID)
-	require.NoError(t, err)
-	identity := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web")
-
-	d := srv.authzService.CheckAccess(ctx, identity, templateScopeResource(store.TemplateScopeGlobal, ""), ActionList)
-	assert.True(t, d.Allowed, "template.list should be allowed; reason=%q", d.Reason)
-
-	d = srv.authzService.CheckAccess(ctx, identity, Resource{Type: "project"}, ActionCreate)
-	assert.Equal(t, wantProjectCreate, d.Allowed, "project.create allowed; reason=%q", d.Reason)
-}
 
 func TestUpdateUser_MemberToViewer(t *testing.T) {
 	srv, s := testServer(t)

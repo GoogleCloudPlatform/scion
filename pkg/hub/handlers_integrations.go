@@ -30,6 +30,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/pgprovider"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -425,7 +426,7 @@ func (s *Server) handleGetIntegration(w http.ResponseWriter, r *http.Request, na
 func (s *Server) resolveIntegrationSettings(ctx context.Context, mgr IntegrationManager, name string, runtimeCfg map[string]string) map[string]string {
 	if s.isHAIntegration(mgr, name) {
 		if s.entClient != nil {
-			provider := config.NewPostgresConfigProvider(s.entClient, name)
+			provider := pgprovider.NewPostgresConfigProvider(s.entClient, name)
 			if settings, err := provider.Load(ctx); err == nil {
 				// Merge runtime keys as underlay — provider values win.
 				for k, v := range runtimeCfg {
@@ -557,7 +558,7 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 				return
 			}
 			defer func() { _ = haTx.Rollback() }()
-			pgProvider := config.NewPostgresConfigProvider(haTx.Client(), name)
+			pgProvider := pgprovider.NewPostgresConfigProvider(haTx.Client(), name)
 			pgProvider.SetUpdatedBy(userID)
 			provider = pgProvider
 			haConfigTx = haTx

@@ -36,6 +36,14 @@ import { isMacPlatform } from '../utils/platform.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 import { showConfirm } from '../components/shared/confirm-dialog.js';
 import '../components/terminal/terminal-pane.js';
+import { render as litRender } from 'lit';
+import { keyed } from 'lit/directives/keyed.js';
+import { renderTestHubBanner } from '../components/shared/test-hub-banner.js';
+import {
+  TEST_INFRA_STATUS_EVENT,
+  getTestInfraStatus,
+  loadTestInfraStatus,
+} from './test-infra-status.js';
 
 interface RailEntry {
   session: TerminalSession;
@@ -209,6 +217,8 @@ const SLOT_PLACEMENTS: Record<TerminalLayout, ReadonlyArray<[string, string]>> =
 export class TerminalWorkspaceRoot {
   readonly element = document.createElement('div');
   private readonly header: ScionHeader = document.createElement('scion-header');
+  /** Holds the test-hub banner, above the header (shared/test-hub-banner.ts). */
+  private readonly testHubBannerHost = document.createElement('div');
   private readonly shell = document.createElement('div');
   private readonly rail = document.createElement('aside');
   private readonly railList = document.createElement('div');
@@ -225,6 +235,8 @@ export class TerminalWorkspaceRoot {
   private readonly layoutBar = document.createElement('div');
   private readonly paneHost = document.createElement('section');
   private readonly status = document.createElement('p');
+  /** The status message text, without the optional help (see setStatus). */
+  private statusMessage = NO_TERMINAL_SELECTED;
   /** Optional action shown with the status message (see setStatusAction). */
   private readonly statusAction = document.createElement('button');
   private readonly panes = new Map<string, ScionTerminalPane>();
@@ -398,7 +410,7 @@ export class TerminalWorkspaceRoot {
     // Pane host: CSS Grid container
     this.paneHost.className = 'terminal-pane-host';
     this.status.className = 'terminal-status';
-    this.status.textContent = NO_TERMINAL_SELECTED;
+    this.setStatusContent(NO_TERMINAL_SELECTED);
     this.statusAction.type = 'button';
     this.statusAction.className = 'terminal-status-action';
     this.statusAction.hidden = true;
@@ -429,7 +441,17 @@ export class TerminalWorkspaceRoot {
     document.addEventListener('focusin', this.handleGlobalFocusIn);
 
     this.shell.append(this.rail, this.createPaneArea());
-    this.element.append(this.header, this.shell, this.ariaLive, this.placeMenu);
+    this.testHubBannerHost.className = 'terminal-test-hub-banner';
+    this.element.append(
+      this.testHubBannerHost,
+      this.header,
+      this.shell,
+      this.ariaLive,
+      this.placeMenu
+    );
+    window.addEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
+    this.renderTestHubBanner();
+    if (!getTestInfraStatus()) void loadTestInfraStatus();
 
     // Subscribe to layout state (lives as long as the workspace root).
     // Also sync URL on layout changes (#1715).
@@ -621,6 +643,27 @@ export class TerminalWorkspaceRoot {
   setCurrentPath(path: string): void {
     this.currentPath = path;
     this.header.currentPath = path;
+    // A fresh banner for each path, as in the app shell; and a retry of a
+    // status fetch that failed earlier (a no-op once it is known).
+    this.renderTestHubBanner();
+    if (!getTestInfraStatus()) void loadTestInfraStatus();
+  }
+
+  private readonly handleTestInfraStatus = (): void => this.renderTestHubBanner();
+
+  /**
+   * Renders the test-hub banner above the header, keyed on the current path
+   * so a navigation renders a fresh element even if the previous one was
+   * removed. Puts the banner's container back first if it was removed.
+   */
+  private renderTestHubBanner(): void {
+    if (this.testHubBannerHost.parentNode !== this.element) {
+      this.element.insertBefore(this.testHubBannerHost, this.header);
+    }
+    litRender(
+      keyed(this.currentPath, renderTestHubBanner(getTestInfraStatus())),
+      this.testHubBannerHost
+    );
   }
 
   /**
@@ -709,7 +752,7 @@ export class TerminalWorkspaceRoot {
     // Sets single[0] without changing the active preset (#1701).
     // Navigation of an already-open agent must not trigger overflow.
     this.layoutManager.select(session.state.key);
-    this.status.textContent = NO_TERMINAL_SELECTED;
+    this.setStatusContent(NO_TERMINAL_SELECTED);
     this.setStatusAction(null);
     this.show(true);
     this.refresh();
@@ -737,6 +780,7 @@ export class TerminalWorkspaceRoot {
    * for the whole tab in production; tests call this between instances.
    */
   dispose(): void {
+    window.removeEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
     this.releasePaletteAgents();
@@ -1007,18 +1051,50 @@ export class TerminalWorkspaceRoot {
     this.queueRefresh();
   }
 
+  /** Replaces the status message, and its help when given. */
+  private setStatusContent(message: string, help?: { label: string; text: string }): void {
+    this.statusMessage = message;
+    if (!help) {
+      this.status.textContent = message;
+      return;
+    }
+    const text = document.createElement('span');
+    text.className = 'terminal-status-text';
+    text.textContent = message;
+    const dropdown = document.createElement('sl-dropdown');
+    dropdown.className = 'terminal-status-help';
+    dropdown.setAttribute('placement', 'bottom');
+    dropdown.setAttribute('distance', '4');
+    dropdown.toggleAttribute('hoist', true);
+    const trigger = document.createElement('sl-icon-button');
+    trigger.setAttribute('slot', 'trigger');
+    trigger.setAttribute('name', 'question-circle');
+    trigger.setAttribute('label', help.label);
+    const panel = document.createElement('div');
+    panel.className = 'terminal-status-help-panel';
+    panel.setAttribute('role', 'note');
+    panel.textContent = help.text;
+    dropdown.append(trigger, panel);
+    this.status.replaceChildren(text, dropdown);
+  }
+
   /** Back to the default status, without an action: the normal empty viewer. */
   clearStatus(): void {
-    this.status.textContent = NO_TERMINAL_SELECTED;
+    this.setStatusContent(NO_TERMINAL_SELECTED);
     this.setStatusAction(null);
   }
 
-  setStatus(message: string): void {
+  /**
+   * Shows a status message while no terminal is selected. With help, a
+   * small "?" button follows the text and opens the help text in a
+   * dropdown (Enter or Space on the focused button, or a click).
+   */
+  setStatus(message: string, help?: { label: string; text: string }): void {
     const state = this.layoutManager.getState();
     const slots = this.layoutManager.getVisibleSlots();
     const hasSelected = slots.some((s) => s !== null);
     if (hasSelected) return;
-    this.status.textContent = message;
+    this.setStatusContent(message, help);
     if (state.active === 'single' && state.single[0] === null) {
       this.refresh();
     }
@@ -1238,12 +1314,13 @@ export class TerminalWorkspaceRoot {
       isMultiPane &&
       !(this.narrowQuery?.matches ?? false) &&
       this.layoutManager.getZoomed() === null;
-    this.empty.hidden = total > 0 || showsPlaceholders;
-    const hasStatusMessage = this.status.textContent !== NO_TERMINAL_SELECTED;
+    const hasStatusMessage = this.statusMessage !== NO_TERMINAL_SELECTED;
     // A status with an action (the non-owner and moved-away screens) is
     // shown over the multi-pane placeholders too, whenever no terminal is
-    // selected: there is nothing in this window to drop.
+    // selected: there is nothing in this window to drop. It replaces the
+    // empty state: the terminals are open, only in another window.
     const hasStatusAction = this.statusAction.dataset.active === 'true';
+    this.empty.hidden = total > 0 || showsPlaceholders || (hasStatusAction && !hasSelected);
     this.status.hidden =
       hasStatusAction && !hasSelected
         ? false
@@ -1300,6 +1377,11 @@ export class TerminalWorkspaceRoot {
 
     // Expose effective layout so CSS can scope focus-outline to multi-pane modes.
     this.paneHost.dataset.effectiveLayout = effectivePreset;
+
+    // Pane headers are crowded on a narrow viewport and in the 4-up layout:
+    // there, the back links show as icons (ptone/scion#4324).
+    const compactHeader = isNarrow || effectivePreset === 'four';
+    for (const pane of this.panes.values()) pane.compactHeader = compactHeader;
   }
 
   /** Position each pane in the grid and manage empty slot placeholders. */
@@ -1545,7 +1627,7 @@ export class TerminalWorkspaceRoot {
     const wrap = document.createElement('span');
     wrap.className = 'terminal-bulk-action-wrap';
     const reason = document.createElement('span');
-    reason.className = 'terminal-bulk-reason terminal-aria-live';
+    reason.className = 'terminal-bulk-reason terminal-visually-hidden';
     reason.id = `${reasonId}-${this.instanceId}`;
     reason.hidden = true;
     button.setAttribute('aria-describedby', reason.id);
@@ -1807,13 +1889,33 @@ export class TerminalWorkspaceRoot {
 
   /**
    * Rail selection (a click, or Enter or Space on the rail button, which
-   * the browser turns into a click): navigates to the agent and moves
-   * keyboard focus into its terminal — see {@link focusRailTarget}.
+   * the browser turns into a click): in a multi-pane layout, first puts
+   * the terminal in the next free slot (see {@link placeInNextFreeSlot}),
+   * then navigates to the agent and moves keyboard focus into its
+   * terminal — see {@link focusRailTarget}.
    */
   private openSessionRoute(entry: RailEntry): void {
+    this.placeInNextFreeSlot(entry.state.key);
     this.railFocusAgentId = entry.state.agentId;
     this.dispatchNavigation(`/terminals/${entry.state.agentId}`);
     this.focusRailTarget();
+  }
+
+  /**
+   * With several panes on screen (a multi-pane preset, not narrow or
+   * zoomed), puts a rail terminal that is in none of the preset's slots
+   * into its lowest-index empty slot (ptone/scion#4324), where it connects
+   * once shown, like any placed pane. A terminal already in a slot is left
+   * where it is (the rail selection then focuses it), and with no empty
+   * slot nothing changes. The session is already open in this window, so,
+   * as for "Place in pane", there is nothing for the coordinator to decide.
+   */
+  private placeInNextFreeSlot(sessionKey: string): void {
+    if (this.isSinglePaneView() || this.layoutManager.getZoomed() !== null) return;
+    // The preset's own slots, whatever is zoomed: the guards above decide.
+    const slots = this.getActivePresetSlots(this.layoutManager.getState().active);
+    if (slots.includes(sessionKey) || !slots.includes(null)) return;
+    this.layoutManager.open(sessionKey);
   }
 
   private dispatchNavigation(path: string): void {
@@ -2075,6 +2177,15 @@ export class TerminalWorkspaceRoot {
          root like app-shell / chat-shell). */
       #terminal-workspace > scion-header {
         padding-inline: 1.5rem;
+      }
+      .terminal-test-hub-banner {
+        flex-shrink: 0;
+      }
+      .terminal-test-hub-banner sl-alert.test-hub-banner {
+        display: block;
+      }
+      .terminal-test-hub-banner sl-alert.test-hub-banner::part(base) {
+        border-radius: 0;
       }
       .terminal-workspace-shell {
         flex: 1;
@@ -2478,6 +2589,14 @@ export class TerminalWorkspaceRoot {
         clip: rect(0, 0, 0, 0);
         white-space: nowrap;
       }
+      .terminal-visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+      }
       .terminal-place-menu {
         position: fixed;
         z-index: 1000;
@@ -2518,6 +2637,26 @@ export class TerminalWorkspaceRoot {
         background: var(--scion-bg, #f8fafc);
         text-align: center;
         z-index: 1;
+      }
+      .terminal-status {
+        gap: 0.25rem;
+      }
+      .terminal-status-help::part(trigger) {
+        display: inline-flex;
+      }
+      .terminal-status-help sl-icon-button {
+        font-size: 1rem;
+      }
+      .terminal-status-help-panel {
+        max-width: 18rem;
+        padding: 0.6rem 0.75rem;
+        border: 1px solid var(--scion-border, #cbd5e1);
+        border-radius: 0.375rem;
+        background: var(--scion-surface, #ffffff);
+        color: var(--scion-text, #0f172a);
+        font-size: 0.875rem;
+        text-align: left;
+        box-shadow: 0 4px 12px rgb(15 23 42 / 0.12);
       }
       .terminal-status-action {
         position: absolute;

@@ -21,8 +21,6 @@
  * focuses the agent in the page's tree view.
  */
 
-// @vitest-environment happy-dom
-
 import {
   afterEach,
   beforeAll,

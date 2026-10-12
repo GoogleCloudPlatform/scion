@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -474,4 +475,20 @@ func rewriteLocalDownloadURLs(urls []DownloadURLInfo, hubEndpoint, resourceType,
 		}
 	}
 	return urls
+}
+
+// setDownloadContentLength sets Content-Length for a raw file download from
+// the size of the storage object being streamed, not from the database
+// record's size, which can be out of date relative to the stored object.
+//
+// Both storage backends normally report the object size. When the size is
+// unknown (nil object, or a non-positive size) the header is left off and
+// net/http frames the response itself: it computes the length for small
+// bodies (including "Content-Length: 0" for an empty one) or uses chunked
+// transfer encoding.
+func setDownloadContentLength(w http.ResponseWriter, obj *storage.Object) {
+	if obj == nil || obj.Size <= 0 {
+		return
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
 }

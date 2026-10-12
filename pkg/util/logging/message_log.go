@@ -33,7 +33,15 @@ const (
 	AttrRecipientID  = "recipient_id"
 	AttrMsgType      = "msg_type"
 	AttrMsgProjectID = "project_id"
+	// AttrLogKind marks an entry that is not a message record.
+	AttrLogKind = "log_kind"
 )
+
+// LogKindEvent is the AttrLogKind value for lifecycle and bookkeeping
+// entries (dispatch outcomes, delivery acknowledgements, summaries).
+// Message views list only entries without it, so each message appears
+// once.
+const LogKindEvent = "event"
 
 // MessageLoggerConfig configures the dedicated message logger.
 type MessageLoggerConfig struct {
@@ -65,7 +73,11 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 		}
 		handlers = append(handlers, cloudHandler)
 		cleanups = append(cleanups, func() {
-			_ = ch.logger.Flush()
+			// Shutdown flush failure: counted (writer=cloud,
+			// reason=flush_error); still no stderr line here.
+			if err := ch.logger.Flush(); err != nil {
+				CloudWriter().RecordFailure(CloudReasonFlushError)
+			}
 		})
 	}
 
@@ -229,7 +241,7 @@ func (h *messageCloudHandler) WithGroup(name string) slog.Handler {
 // promoteMessageAttrToLabels promotes message-specific attributes to GCP labels.
 func promoteMessageAttrToLabels(labels map[string]string, a slog.Attr) {
 	switch a.Key {
-	case AttrSender, AttrSenderID, AttrRecipient, AttrRecipientID, AttrMsgType, AttrMsgProjectID:
+	case AttrSender, AttrSenderID, AttrRecipient, AttrRecipientID, AttrMsgType, AttrMsgProjectID, AttrLogKind:
 		if v := a.Value.String(); v != "" {
 			labels[a.Key] = v
 		}

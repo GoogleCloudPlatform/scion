@@ -73,17 +73,6 @@ func jsonMap(t *testing.T, s string) map[string]interface{} {
 	return m
 }
 
-func sectionRowRaw(t *testing.T, f *fakeHubSettingStore, section string) map[string]interface{} {
-	t.Helper()
-	f.mu.Lock()
-	row := f.settings[section]
-	f.mu.Unlock()
-	require.NotNil(t, row, "%s row missing", section)
-	var m map[string]interface{}
-	require.NoError(t, json.Unmarshal(row.Value, &m))
-	return m
-}
-
 // mergeTelemetry runs mergeSectionOnCurrent for telemetry the way the
 // server-config PUT does, and returns the merged document as a map.
 func mergeTelemetry(t *testing.T, ops *OperationalSettings, body string) (map[string]interface{}, int64) {

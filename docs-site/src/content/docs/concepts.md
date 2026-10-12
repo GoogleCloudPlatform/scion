@@ -70,7 +70,7 @@ Agent state uses a **layered model** with three dimensions:
   with two off-the-happy-path destinations: `suspended` (paused for later resume) and `error` (the agent crashed).
 
 - **Activity** — What the agent is doing within the `running` phase:
-  `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`
+  `initializing` (shown as "starting"), `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`
   (the `crashed` value exists in the enum, but a real crash now surfaces as the `error` *phase* — see below — rather than as an activity)
 
 - **Detail** — Freeform context about the current activity (tool name, message, task summary).
@@ -97,7 +97,7 @@ The `error` phase is **restartable**: running `scion start` clears the error and
 
 #### Stalled, offline, and auto-suspend
 
-The `stalled` activity is set by the platform when an agent's heartbeat is still arriving (the process is alive) but no activity events have been seen for a while (default: 5 minutes). It flags an agent that appears hung. Agents that have declared themselves `blocked` are excluded from stalled detection. An agent that stays stalled long enough may be **auto-suspended** to reclaim its container — see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents).
+The `stalled` activity is set by the platform when an agent's heartbeat is still arriving (the process is alive) but no activity events have been seen for a while (default: 5 minutes). It flags an agent that appears hung. Agents that have declared themselves `blocked` are excluded from stalled detection. If `server.hub.auto_suspend_stalled` is on (off by default), the Hub also **auto-suspends** a stalled agent to reclaim its container — see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents).
 
 The `offline` activity status occurs when an agent heartbeat has not been heard from for some time. Currently, this may be due to an agent being unable to refresh its auth token, which disconnects it from sending its heartbeat and other updates. These agents can be stopped and restarted to be provisioned with a new auth token. They should be able to refresh this token as long as they can maintain a connection to the Hub.
 

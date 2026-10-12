@@ -391,9 +391,14 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// runs and the translation must happen here on the Go side.
 	if c.entry.Harness == "claude" {
 		selectedAuth := auth.SelectedType
+		region := claudeVertexRegion(resolved.EnvVars)
 		if selectedAuth == "" {
-			// Infer vertex-ai from presence of GCP project credential
-			if auth.GoogleCloudProject != "" {
+			// Infer vertex-ai only when a GCP project and a region are both
+			// present and no higher-priority credential is. This matches the
+			// provisioner (provision.py): AUTH order api-key, oauth-token,
+			// auth-file, then vertex-ai (ptone/scion#2071), and vertex-ai
+			// requires the project plus a region (ptone/scion#4557).
+			if auth.GoogleCloudProject != "" && region != "" && !hasHigherPriorityClaudeAuth(auth) {
 				selectedAuth = "vertex-ai"
 			}
 		}
@@ -401,8 +406,11 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 			if proj := resolved.EnvVars["GOOGLE_CLOUD_PROJECT"]; proj != "" {
 				resolved.EnvVars["ANTHROPIC_VERTEX_PROJECT_ID"] = proj
 			}
-			if region := resolved.EnvVars["GOOGLE_CLOUD_REGION"]; region != "" {
+			if region != "" {
 				resolved.EnvVars["CLOUD_ML_REGION"] = region
+			} else {
+				// An explicit selection is kept; report what is missing.
+				slog.Warn("claude vertex-ai auth selected but no region is set; set GOOGLE_CLOUD_LOCATION or GOOGLE_CLOUD_REGION")
 			}
 			resolved.EnvVars["CLAUDE_CODE_USE_VERTEX"] = "1"
 		}
@@ -412,6 +420,34 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// candidate set for the script. ResolveAuth provides the env/file material
 	// the runtime needs to project secrets into the container.
 	return resolved, nil
+}
+
+// claudeVertexRegionKeys are the region env names provision.py's vertex-ai
+// method accepts (any_of), in its precedence order.
+var claudeVertexRegionKeys = []string{"GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"}
+
+// claudeVertexRegion returns the first non-empty value among
+// claudeVertexRegionKeys in env, or "" when none is set.
+func claudeVertexRegion(env map[string]string) string {
+	for _, k := range claudeVertexRegionKeys {
+		if v := env[k]; v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// hasHigherPriorityClaudeAuth reports whether auth carries a Claude
+// credential that provision.py's AUTH order tries before vertex-ai:
+// api-key (ANTHROPIC_API_KEY), oauth-token (CLAUDE_CODE_OAUTH_TOKEN) or
+// auth-file (the ClaudeAuthFile field of the claude auth-file type).
+// Container-side credentials (an existing ~/.claude/.credentials.json in the
+// container, or a container env var) are not visible here; select the auth
+// type explicitly in that case.
+func hasHigherPriorityClaudeAuth(auth api.AuthConfig) bool {
+	return auth.EnvVars["ANTHROPIC_API_KEY"] != "" ||
+		auth.EnvVars["CLAUDE_CODE_OAUTH_TOKEN"] != "" ||
+		auth.Files["ClaudeAuthFile"] != ""
 }
 
 // ProvisionManifest is the JSON payload written to
@@ -1125,11 +1161,11 @@ func parseLibVersion(src string) string {
 
 // HarnessProvisionHookFilename is the fixed name this file always stages the
 // wrapper under. pkg/sciontool/hooks recognizes this one script by this exact
-// name (its own harnessProvisionHookFilename, kept in sync with this constant
-// by TestHarnessProvisionHookFilenameMatchesWriter) to run it under the
-// workload's own identity instead of root, even though the wrapper itself is
-// trusted, broker-delivered, root-owned content: that trust proves the
-// wrapper is genuine, not that what it execs is safe to run as root. Not
+// name (its own HarnessProvisionHookFilename, kept in sync with this constant
+// by this package's TestHarnessProvisionHookFilenameMatchesWriter) to run it
+// under the workload's own identity instead of root, even though the wrapper
+// itself is trusted, broker-delivered, root-owned content: that trust proves
+// the wrapper is genuine, not that what it execs is safe to run as root. Not
 // imported directly from that package: pkg/harness's own test package
 // already imports pkg/sciontool/hooks, so the reverse import would be a
 // cycle — see that package's own copy of this name for the full reasoning.

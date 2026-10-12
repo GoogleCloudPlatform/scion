@@ -33,13 +33,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func (f *reissueFixture) bulk(t *testing.T, dryRun bool) *ScopeReissueBulkResponse {
-	t.Helper()
-	resp, err := f.srv.runScopeReissueBulk(context.Background(), f.operator, dryRun)
-	require.NoError(t, err)
-	return resp
-}
-
 func bulkAgent(t *testing.T, resp *ScopeReissueBulkResponse, id string) ScopeReissueBulkAgent {
 	t.Helper()
 	for _, a := range resp.Agents {
@@ -275,18 +268,6 @@ func TestScopeReissueBulk_ClientCancelDoesNotStopRun(t *testing.T) {
 	assert.True(t, resp.BatchAuditRecorded)
 	require.Len(t, batchAudits(t, f.store), 1, "the batch row is written")
 	assert.Contains(t, scopeStrings(f.grant(t, f.child)), string(ScopeProjectArtifactWrite))
-}
-
-func (f *reissueFixture) adminSession(t *testing.T) UserIdentity {
-	t.Helper()
-	id := tid(f.projectID + "-admin")
-	if _, err := f.store.GetUser(context.Background(), id); err != nil {
-		require.NoError(t, f.store.CreateUser(context.Background(), &store.User{
-			ID: id, Email: id + "@test.com", DisplayName: "Admin", Role: "admin", Status: "active",
-		}))
-	}
-	grantSuperAdmin(t, f.store, id)
-	return NewAuthenticatedUser(id, id+"@test.com", "Admin", "admin", "")
 }
 
 // T13: with more agents than one page, every agent is processed; a page

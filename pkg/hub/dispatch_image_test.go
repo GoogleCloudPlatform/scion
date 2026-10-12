@@ -156,7 +156,7 @@ func TestDispatch_StartAndRestartCarryOnlyExplicitImage(t *testing.T) {
 
 	t.Run("explicit image is sent, registry-rewritten", func(t *testing.T) {
 		d, client, ag := autoExposeDispatchFixture(t)
-		d.SetImageRegistry("us-docker.pkg.dev/p/scion")
+		d.SetImageRegistryProvider(func() string { return "us-docker.pkg.dev/p/scion" })
 		ag.AppliedConfig = &store.AgentAppliedConfig{
 			Image:        "us-docker.pkg.dev/p/scion/user-image:v2",
 			InlineConfig: &api.ScionConfig{Image: "user-image:v2"},

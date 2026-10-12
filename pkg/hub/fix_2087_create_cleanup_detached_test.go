@@ -42,83 +42,6 @@ import (
 // and, when the row delete happened to succeed first, no agent row left for
 // the normal delete path to reclaim them from.
 
-// requestCancelWait bounds how long a mock waits to observe the request ctx
-// being canceled after it fires cancelRequest. If a refactor stops passing
-// the request ctx through, the test fails on ctxNotCanceled instead of
-// hanging until the package timeout.
-const requestCancelWait = 5 * time.Second
-
-// awaitCanceled waits up to requestCancelWait for ctx to be canceled and
-// reports whether it was.
-func awaitCanceled(ctx context.Context) bool {
-	select {
-	case <-ctx.Done():
-		return true
-	case <-time.After(requestCancelWait):
-		return false
-	}
-}
-
-// setAgentQuotaLimits gives both create-time limits a positive value so
-// that Reserve actually records a reservation for each: both are seeded
-// unlimited (0), and QuotaService.Reserve skips an unlimited limit entirely,
-// which would make a "no reservation left" assertion vacuous.
-func setAgentQuotaLimits(t *testing.T, s store.Store) {
-	t.Helper()
-	setBrokerAgentCeiling(t, s, 5)
-	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerProject)
-	require.NoError(t, err)
-	def.DefaultValue = 5
-	_, err = s.UpdateLimitDefinition(context.Background(), def)
-	require.NoError(t, err)
-}
-
-// reservationsHeld records whether each create-time reservation is held for
-// an agent ID at some point, so a test can prove the reservations existed
-// before asserting the cleanup released them.
-type reservationsHeld struct {
-	broker, project bool
-}
-
-func observeReservations(t *testing.T, s store.Store, agentID string) reservationsHeld {
-	return reservationsHeld{
-		broker:  hasReservation(t, s, store.LimitMaxAgentsPerBroker, agentID),
-		project: hasReservation(t, s, store.LimitMaxAgentsPerProject, agentID),
-	}
-}
-
-func assertReservationsHeldBeforeCleanup(t *testing.T, held reservationsHeld) {
-	t.Helper()
-	require.True(t, held.broker, "precondition: the per-broker reservation must be held before cleanup")
-	require.True(t, held.project, "precondition: the per-project reservation must be held before cleanup")
-}
-
-func assertNoReservations(t *testing.T, s store.Store, agentID string) {
-	t.Helper()
-	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, agentID),
-		"a create canceled before its failure cleanup must release the per-broker reservation")
-	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, agentID),
-		"a create canceled before its failure cleanup must release the per-project reservation")
-}
-
-// ctxObservation records how a cleanup step's ctx looked when it ran.
-type ctxObservation struct {
-	called      bool
-	err         error
-	hasDeadline bool
-	budget      time.Duration
-}
-
-func observeCtx(ctx context.Context) ctxObservation {
-	o := ctxObservation{called: true, err: ctx.Err()}
-	var deadline time.Time
-	deadline, o.hasDeadline = ctx.Deadline()
-	if o.hasDeadline {
-		o.budget = time.Until(deadline)
-	}
-	return o
-}
-
 // assertLiveBoundedCtx asserts a cleanup step ran on a live,
 // deadline-bounded ctx whose budget exceeds minBudget.
 func assertLiveBoundedCtx(t *testing.T, o ctxObservation, step string, minBudget time.Duration) {
@@ -378,9 +301,11 @@ func TestCleanupFailedCreate_CanceledCtx_EveryStepRunsDetached(t *testing.T) {
 	assertNoReservations(t, s, agent.ID)
 }
 
-// cancelAfterDeleteStore cancels the request after DeleteAgent of targetID
-// succeeds: the exact "stranded reservation" window from ptone/scion#2087,
-// where the row is gone and only the quota release is left to run.
+// cancelAfterDeleteStore cancels the request once a FinalizeAgentDeletion
+// that removed targetID has committed (the env-gather recreate removes the
+// row this way): the exact "stranded reservation" window from
+// ptone/scion#2087, where the row is gone and only the quota release is
+// left to run.
 type cancelAfterDeleteStore struct {
 	store.Store
 	targetID      string
@@ -388,45 +313,13 @@ type cancelAfterDeleteStore struct {
 	deleted       bool
 }
 
-func (c *cancelAfterDeleteStore) DeleteAgent(ctx context.Context, id string) error {
-	err := c.Store.DeleteAgent(ctx, id)
-	if err == nil && id == c.targetID {
+func (c *cancelAfterDeleteStore) FinalizeAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields, hook store.DeletionFinalizeHook) (int, error) {
+	n, err := c.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, hook)
+	if err == nil && n > 0 && id == c.targetID {
 		c.deleted = true
 		c.cancelRequest()
 	}
-	return err
-}
-
-// WithTx cancels the request once a transaction that deleted targetID has
-// committed: the row is gone only at commit.
-func (c *cancelAfterDeleteStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	tx := &deleteRecordingTx{targetID: c.targetID}
-	if err := c.Store.WithTx(ctx, func(inner store.Store) error {
-		tx.Store = inner
-		return fn(tx)
-	}); err != nil {
-		return err
-	}
-	if tx.deleted {
-		c.deleted = true
-		c.cancelRequest()
-	}
-	return nil
-}
-
-// deleteRecordingTx records whether DeleteAgent of targetID succeeded.
-type deleteRecordingTx struct {
-	store.Store
-	targetID string
-	deleted  bool
-}
-
-func (d *deleteRecordingTx) DeleteAgent(ctx context.Context, id string) error {
-	err := d.Store.DeleteAgent(ctx, id)
-	if err == nil && id == d.targetID {
-		d.deleted = true
-	}
-	return err
+	return n, err
 }
 
 // TestHandleExistingAgent_EnvGatherRecreate_CanceledAfterRowDelete_ReleasesQuota

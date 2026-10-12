@@ -19,7 +19,6 @@ package hub
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -33,28 +32,6 @@ import (
 // the broker create is in flight answers 409 delete_in_progress, not 201
 // (ptone/scion#3099). A failed or lapsed delete leaves the agent live, so
 // the create still answers 201 (the deletedOrDeleteHeld rule).
-
-// requireDeletedDuringCreate checks rec is the 409 delete_in_progress answer
-// for agentID, with no agent body, and returns its details.warnings.
-func requireDeletedDuringCreate(t *testing.T, rec *httptest.ResponseRecorder, agentID string) []string {
-	t.Helper()
-	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	var raw map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
-	assert.NotContains(t, raw, "agent", "the 409 carries no agent body")
-	var body ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, ErrCodeDeleteInProgress, body.Error.Code)
-	assert.Equal(t, deletedDuringCreateMessage, body.Error.Message)
-	assert.Equal(t, agentID, body.Error.Details["agentId"])
-	var warnings []string
-	if ws, ok := body.Error.Details["warnings"].([]interface{}); ok {
-		for _, w := range ws {
-			warnings = append(warnings, w.(string))
-		}
-	}
-	return warnings
-}
 
 // Every way a delete can hold the row when the broker create answers
 // (landingDeletes): a delete that holds the row or removed it answers 409,

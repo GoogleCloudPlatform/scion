@@ -52,6 +52,9 @@ const (
 	// (pkg/artifacts). Artifact permissions are checked in the hub's
 	// artifacts.Host adapter against the artifact's home project.
 	ResourceArtifact = "artifact"
+	// ResourceTestIdentity is the hub test identity collection
+	// (POST/GET /api/v1/test-identities).
+	ResourceTestIdentity = "test_identity"
 
 	// ResourceInbox and ResourceUserSkillInjection are self-scoped resource
 	// types: their records belong to one user and carry no project or hub
@@ -94,6 +97,17 @@ const (
 	// ActionWrite covers creating, changing and removing the holder's own
 	// self-scoped records.
 	ActionWrite = "write"
+	// ActionIssue covers issuing hub test identities.
+	ActionIssue = "issue"
+	// ActionIssueAdmin and ActionIssueSuperAdmin cover issuing the admin
+	// test identity kinds (test_hub_admin, test_super_admin).
+	ActionIssueAdmin      = "issue_admin"
+	ActionIssueSuperAdmin = "issue_super_admin"
+	// ActionDelegationCreate and ActionDelegationExchange are the agent
+	// delegation grant issuance and credential exchange actions
+	// (.design/agent-delegation.md §18.5).
+	ActionDelegationCreate   = "delegation_create"
+	ActionDelegationExchange = "delegation_exchange"
 
 	// PermissionGCPServiceAccountUse is the gcp_service_account.use
 	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
@@ -189,6 +203,8 @@ var Registry = []Permission{
 	{ID: "agent.message", Resource: ResourceAgent, Action: ActionMessage, CapabilityKind: CapabilityScope, UATScope: "agent:message", Description: "Send messages to agents", NonRouteUse: []string{"Phase 2: pkg/hub/authorize.go:authorizeAgentMessage"}},
 	{ID: "agent.set_message_mode", Resource: ResourceAgent, Action: ActionSetMessageMode, CapabilityKind: CapabilityResource, AgentScopes: []string{"project:agent:set_message_mode"}, Description: "Change agent message mode", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
 	{ID: "agent.grant_hub_mode", Resource: ResourceAgent, Action: "grant_hub_mode", CapabilityKind: CapabilityResource, Description: "Grant hub message mode (requires full role + hub mode for agent callers)", Enforcement: []string{"pkg/hub/authorize_message_mode_grant.go"}},
+	{ID: "agent.delegation.create", Resource: ResourceAgent, Action: ActionDelegationCreate, Description: "Issue an agent delegation grant to an agent the issuer controls", Enforcement: []string{"pkg/hub/handlers_agent_delegation.go:handleCreateAgentDelegation"}},
+	{ID: "agent.delegation.exchange", Resource: ResourceAgent, Action: ActionDelegationExchange, Description: "Exchange an agent delegation grant for a delegated credential (the bound agent, with its own agent token; no role binding is consulted)", Enforcement: []string{"pkg/hub/handlers_agent_delegation.go:handleExchangeAgentDelegation"}},
 
 	{ID: "project.create", Resource: ResourceProject, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.read", Resource: ResourceProject, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "project:read", AgentScopes: []string{"project:read"}, Description: "Read project metadata", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},
@@ -201,8 +217,8 @@ var Registry = []Permission{
 	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/read.go:PermissionRead"}},
 	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/publish.go:PermissionCreate", "pkg/artifacts/versions.go:PermissionCreate"}},
 	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", Description: "Edit artifact metadata (title, key, expiry)", Reserved: "no artifact route checks artifact.update; PATCH on an artifact is gated by artifact.manage (canAdminister)"},
-	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Reserved: "no artifact route checks artifact.delete; the service has no artifact delete route"},
-	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/links.go:func (s *Service) canAdminister", "pkg/artifacts/grants.go:func (s *Service) reviewGrantSubject"}},
+	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Reserved: "no artifact route checks artifact.delete; DELETE on an artifact is gated by artifact.manage (ptone/scion#4529)"},
+	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/links.go:func (s *Service) canAdminister", "pkg/artifacts/grants.go:func (s *Service) reviewGrantSubject", "pkg/artifacts/retire.go:func (s *Service) retireAuthority"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
@@ -281,14 +297,14 @@ var Registry = []Permission{
 	{ID: "hub.maintenance.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Execute maintenance operations", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.diagnostics.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub_diagnostics:read", Description: "Read diagnostics and logs", Enforcement: []string{"pkg/hub/route_metadata.go:admin.diagnostics.logs", "pkg/hub/route_metadata.go:admin.diagnostics.logsStream", "pkg/hub/route_metadata.go:admin.messaging.divergence", "pkg/hub/handlers_diagnostics.go:handleDiagnosticsLogsStream"}},
 	{ID: "hub.health.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub_health:read", Description: "Read health summary", Enforcement: []string{"pkg/hub/route_metadata.go:admin.health.summary", "pkg/hub/route_metadata.go:admin.gcpQuota"}},
-	{ID: "hub.admin_mode.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read admin mode state", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
-	{ID: "hub.admin_mode.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update admin mode", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.admin_mode.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read admin mode state", Enforcement: []string{"pkg/hub/route_metadata.go:admin.maintenance"}},
+	{ID: "hub.admin_mode.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update admin mode", NonRouteUse: []string{"PUT in pkg/hub/admin_mode.go:handleAdminMaintenance; the route guard checks hub.admin_mode.read"}},
 	{ID: "hub.integrations.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub_integrations:read", Description: "Read integrations", Enforcement: []string{"pkg/hub/route_metadata.go:admin.integrations", "pkg/hub/route_metadata.go:admin.integrations.byName"}},
 	{ID: "hub.integrations.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, UATScope: "hub_integrations:update", Description: "Update integration settings and restart integrations (install, update and credential settings need an interactive session)", Enforcement: []string{"pkg/hub/handlers_integrations.go:handleAdminIntegrationByName"}},
 	{ID: "hub.lifecycle_hooks.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub_lifecycle_hooks:read", Description: "Read lifecycle hooks", Enforcement: []string{"pkg/hub/route_metadata.go:admin.lifecycleHooks", "pkg/hub/hub_pre_start_hook_handlers.go:isHubAdminIdentity"}},
 	{ID: "hub.lifecycle_hooks.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, UATScope: "hub_lifecycle_hooks:update", Description: "Update lifecycle hooks", Enforcement: []string{"pkg/hub/handlers_lifecycle_hooks.go:handleAdminLifecycleHooks", "pkg/hub/hub_pre_start_hook_handlers.go:requireHubAdmin"}},
-	{ID: "hub.allow_list.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read allow list", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
-	{ID: "hub.allow_list.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update allow list", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.allow_list.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read allow list", Enforcement: []string{"pkg/hub/route_metadata.go:admin.allowList", "pkg/hub/route_metadata.go:admin.allowList.byEmail"}},
+	{ID: "hub.allow_list.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update allow list", NonRouteUse: []string{"writes in pkg/hub/admin_allow_list.go; the route guard checks hub.allow_list.read"}},
 	{ID: "hub.project_defaults.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub_project_defaults:read", Description: "Read project defaults", Enforcement: []string{"pkg/hub/route_metadata.go:admin.projectDefaults"}},
 	{ID: "hub.project_defaults.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, UATScope: "hub_project_defaults:update", Description: "Update project defaults", Enforcement: []string{"pkg/hub/admin_project_defaults.go:handleAdminProjectDefaults"}},
 	{ID: "hub.messaging.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, UATScope: "hub_messaging:update", Description: "Update messaging switches", Enforcement: []string{"pkg/hub/route_metadata.go:admin.messaging", "pkg/hub/admin_messaging.go:handleAdminMessaging"}},
@@ -297,16 +313,19 @@ var Registry = []Permission{
 	{ID: "hub.auth_reset.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Reset all auth", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.scheduler.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub_scheduler:read", Description: "Read scheduler", Enforcement: []string{"pkg/hub/route_metadata.go:admin.scheduler"}},
 	{ID: "hub.scheduler.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
-	{ID: "hub.federation.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read federation config", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
-	{ID: "hub.federation.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update federation config", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.federation.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read federation config", Reserved: "no route checks hub.federation.read"},
+	{ID: "hub.federation.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update federation config", Reserved: "no route checks hub.federation.update"},
 	{ID: "hub.teams_manifest.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub_teams_manifest:read", Description: "Read teams manifest", Enforcement: []string{"pkg/hub/route_metadata.go:admin.integrations.teamsManifest"}},
-	{ID: "hub.teams_manifest.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update teams manifest", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "hub.teams_manifest.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update teams manifest", Reserved: "no route checks hub.teams_manifest.update; the teams manifest route checks hub.teams_manifest.read"},
 	{ID: "hub.validate.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, UATScope: "hub_validate:execute", Description: "Validate resources", Enforcement: []string{"pkg/hub/route_metadata.go:admin.validateResources"}},
 	{ID: "hub.github_app.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub_github_app:read", Description: "Read GitHub app configuration", Enforcement: []string{"pkg/hub/route_metadata.go:githubApp.config.read", "pkg/hub/route_metadata.go:githubApp.installations.list", "pkg/hub/route_metadata.go:githubApp.installations.read"}},
 	{ID: "hub.github_app.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, UATScope: "hub_github_app:update", Description: "Manage GitHub App installations, discover and sync permissions (configuration updates need an interactive session)", Enforcement: []string{"pkg/hub/route_metadata.go:githubApp.installations.create", "pkg/hub/route_metadata.go:githubApp.installations.update", "pkg/hub/route_metadata.go:githubApp.installations.delete", "pkg/hub/route_metadata.go:githubApp.installations.discover", "pkg/hub/route_metadata.go:githubApp.syncPermissions"}},
 	{ID: "hub.metrics.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub_metrics:read", Description: "Read metrics dashboard", Enforcement: []string{"pkg/hub/route_metadata.go:admin.metricsDashboard", "pkg/hub/route_metadata.go:admin.metricsDashboard.legacy"}},
 	{ID: "hub.env_vars.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "List hub-level environment variables (read only; excludes secrets)", Enforcement: []string{"pkg/hub/handlers_env_secrets.go:listEnvVars"}},
 	{ID: "hub.audit.read", Resource: ResourceHub, Action: ActionManage, CapabilityKind: CapabilityNone, Description: "Explain authorization decisions for other principals (super-admin only)", NonRouteUse: []string{"audit_authz.go explain-for-other-principal gate"}},
+	{ID: "test_identity.issue", Resource: ResourceTestIdentity, Action: ActionIssue, CapabilityKind: CapabilityScope, UATScope: "test_identity:issue", Description: "Issue short-lived synthetic member or viewer test identities (only when the hub runs with --enable-test-identities)", Enforcement: []string{"pkg/hub/route_metadata.go:testIdentities.create", "pkg/hub/route_metadata.go:testIdentities.list", "pkg/hub/route_metadata.go:testIdentities.token", "pkg/hub/route_metadata.go:testIdentities.webLoginCode", "pkg/hub/route_metadata.go:testIdentities.delete", "pkg/hub/handlers_test_identities.go:testIdentityCaller"}},
+	{ID: "test_identity.issue_admin", Resource: ResourceTestIdentity, Action: ActionIssueAdmin, CapabilityKind: CapabilityScope, UATScope: "test_identity:issue_admin", Description: "Issue short-lived test identities holding an expiring hub-admin role (only on hubs started with the test admin gate); held only by super-admin", Enforcement: []string{"pkg/hub/route_metadata.go:testIdentities.admin.create", "pkg/hub/route_metadata.go:testIdentities.admin.revokeAll", "pkg/hub/handlers_test_admin_identities.go:testAdminIssuer"}},
+	{ID: "test_identity.issue_super_admin", Resource: ResourceTestIdentity, Action: ActionIssueSuperAdmin, CapabilityKind: CapabilityScope, UATScope: "test_identity:issue_super_admin", Description: "Issue short-lived test identities holding an expiring super-admin role (refused until the admin tier's policy phase)", Reserved: "no role holds it until admin tier phase A2: test super-admin issuance answers 404 while its gate is refused, and testAdminIssuer's capability check therefore never admits a caller"},
 
 	// Quota management (Phase 2B — Limits/Quotas)
 	{ID: "quota.read", Resource: ResourceQuota, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read limit definitions, entitlements, and usage", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
@@ -339,13 +358,13 @@ var Registry = []Permission{
 	{ID: "user.suspend", Resource: ResourceUser, Action: ActionSuspend, CapabilityKind: CapabilityResource, Description: "Suspend users", Enforcement: []string{"pkg/hub/handlers_users_core.go"}},
 	{ID: "user.promote", Resource: ResourceUser, Action: ActionPromote, CapabilityKind: CapabilityResource, Description: "Promote or demote users", Enforcement: []string{"pkg/hub/handlers_users_core.go"}},
 	{ID: "user.delete", Resource: ResourceUser, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete users", Enforcement: []string{"pkg/hub/handlers_users_core.go"}},
-	{ID: "user.list", Resource: ResourceUser, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "user:list", Description: "List users", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "user.list", Resource: ResourceUser, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "user:list", Description: "List users", Reserved: "no route checks user.list"},
 	{ID: "project.clone", Resource: ResourceProject, Action: ActionClone, CapabilityKind: CapabilityResource, UATScope: "project:clone", Description: "Clone projects", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "project.list", Resource: ResourceProject, Action: ActionList, CapabilityKind: CapabilityScope, Description: "List projects", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "skill.register", Resource: ResourceSkill, Action: ActionRegister, CapabilityKind: CapabilityScope, UATScope: "skill:register", Description: "Register skills in registries", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 
 	{ID: "agent.status_update", Resource: ResourceAgent, Action: "status_update", AgentScopes: []string{"agent:status:update"}, Description: "Update own agent status", NonRouteUse: []string{"agent token self-status endpoint"}},
-	{ID: "agent.log_append", Resource: ResourceAgent, Action: "log_append", AgentScopes: []string{"agent:log:append"}, Description: "Append own agent logs", NonRouteUse: []string{"agent token log append endpoint"}},
+	{ID: "agent.log_append", Resource: ResourceAgent, Action: "log_append", Description: "Append own agent logs", Reserved: "no handler checks agent.log_append; the agent:log:append agent scope maps to no permission while it is reserved"},
 	{ID: "project.secret_read", Resource: ResourceProject, Action: "secret_read", AgentScopes: []string{"project:secret:read"}, Description: "Read project secrets", NonRouteUse: []string{"agent secret/env resolution"}},
 	{ID: "agent.notify", Resource: ResourceAgent, Action: "notify", AgentScopes: []string{"project:agent:notify"}, Description: "Manage own notification subscriptions", NonRouteUse: []string{"agent notification endpoints"}},
 	{ID: "agent.token_refresh", Resource: ResourceAgent, Action: "token_refresh", AgentScopes: []string{"agent:token:refresh"}, Description: "Refresh own agent token", NonRouteUse: []string{"agent token refresh endpoint"}},
@@ -378,7 +397,7 @@ var Registry = []Permission{
 	// an active user"; see permissions.IsSelfPermission.
 	{ID: "inbox.read", Resource: ResourceInbox, Action: ActionRead, UATScope: "inbox:read", Description: "Read your own inbox, notifications and direct messages", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_messages.go", "pkg/hub/handlers_conversations.go", "pkg/hub/handlers_conversation_resolve.go", "pkg/hub/handlers_notifications.go"}},
 	{ID: "inbox.write", Resource: ResourceInbox, Action: ActionWrite, UATScope: "inbox:write", Description: "Send, change and remove your own inbox items and direct messages", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_messages.go", "pkg/hub/handlers_conversations.go", "pkg/hub/handlers_notifications.go"}},
-	{ID: "user_skill_injection.update", Resource: ResourceUserSkillInjection, Action: ActionUpdate, UATScope: "user_skill_injection:update", Description: "Change the skills injected into your own agents", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
+	{ID: "user_skill_injection.update", Resource: ResourceUserSkillInjection, Action: ActionUpdate, UATScope: "user_skill_injection:update", Description: "Change the skills injected into your own agents", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_skills_injection.go"}},
 }
 
 // IsReserved reports whether p is a reserved row (see Permission.Reserved).

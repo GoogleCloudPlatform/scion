@@ -170,6 +170,26 @@ func (_u *TemplateUpdate) ClearConfig() *TemplateUpdate {
 	return _u
 }
 
+// SetAgentConfig sets the "agent_config" field.
+func (_u *TemplateUpdate) SetAgentConfig(v string) *TemplateUpdate {
+	_u.mutation.SetAgentConfig(v)
+	return _u
+}
+
+// SetNillableAgentConfig sets the "agent_config" field if the given value is not nil.
+func (_u *TemplateUpdate) SetNillableAgentConfig(v *string) *TemplateUpdate {
+	if v != nil {
+		_u.SetAgentConfig(*v)
+	}
+	return _u
+}
+
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (_u *TemplateUpdate) ClearAgentConfig() *TemplateUpdate {
+	_u.mutation.ClearAgentConfig()
+	return _u
+}
+
 // SetContentHash sets the "content_hash" field.
 func (_u *TemplateUpdate) SetContentHash(v string) *TemplateUpdate {
 	_u.mutation.SetContentHash(v)
@@ -301,6 +321,26 @@ func (_u *TemplateUpdate) SetNillableStoragePath(v *string) *TemplateUpdate {
 // ClearStoragePath clears the value of the "storage_path" field.
 func (_u *TemplateUpdate) ClearStoragePath() *TemplateUpdate {
 	_u.mutation.ClearStoragePath()
+	return _u
+}
+
+// SetLayout sets the "layout" field.
+func (_u *TemplateUpdate) SetLayout(v string) *TemplateUpdate {
+	_u.mutation.SetLayout(v)
+	return _u
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_u *TemplateUpdate) SetNillableLayout(v *string) *TemplateUpdate {
+	if v != nil {
+		_u.SetLayout(*v)
+	}
+	return _u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (_u *TemplateUpdate) ClearLayout() *TemplateUpdate {
+	_u.mutation.ClearLayout()
 	return _u
 }
 
@@ -556,6 +596,12 @@ func (_u *TemplateUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.ConfigCleared() {
 		_spec.ClearField(template.FieldConfig, field.TypeString)
 	}
+	if value, ok := _u.mutation.AgentConfig(); ok {
+		_spec.SetField(template.FieldAgentConfig, field.TypeString, value)
+	}
+	if _u.mutation.AgentConfigCleared() {
+		_spec.ClearField(template.FieldAgentConfig, field.TypeString)
+	}
 	if value, ok := _u.mutation.ContentHash(); ok {
 		_spec.SetField(template.FieldContentHash, field.TypeString, value)
 	}
@@ -594,6 +640,12 @@ func (_u *TemplateUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.StoragePathCleared() {
 		_spec.ClearField(template.FieldStoragePath, field.TypeString)
+	}
+	if value, ok := _u.mutation.Layout(); ok {
+		_spec.SetField(template.FieldLayout, field.TypeString, value)
+	}
+	if _u.mutation.LayoutCleared() {
+		_spec.ClearField(template.FieldLayout, field.TypeString)
 	}
 	if value, ok := _u.mutation.Files(); ok {
 		_spec.SetField(template.FieldFiles, field.TypeString, value)
@@ -799,6 +851,26 @@ func (_u *TemplateUpdateOne) ClearConfig() *TemplateUpdateOne {
 	return _u
 }
 
+// SetAgentConfig sets the "agent_config" field.
+func (_u *TemplateUpdateOne) SetAgentConfig(v string) *TemplateUpdateOne {
+	_u.mutation.SetAgentConfig(v)
+	return _u
+}
+
+// SetNillableAgentConfig sets the "agent_config" field if the given value is not nil.
+func (_u *TemplateUpdateOne) SetNillableAgentConfig(v *string) *TemplateUpdateOne {
+	if v != nil {
+		_u.SetAgentConfig(*v)
+	}
+	return _u
+}
+
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (_u *TemplateUpdateOne) ClearAgentConfig() *TemplateUpdateOne {
+	_u.mutation.ClearAgentConfig()
+	return _u
+}
+
 // SetContentHash sets the "content_hash" field.
 func (_u *TemplateUpdateOne) SetContentHash(v string) *TemplateUpdateOne {
 	_u.mutation.SetContentHash(v)
@@ -930,6 +1002,26 @@ func (_u *TemplateUpdateOne) SetNillableStoragePath(v *string) *TemplateUpdateOn
 // ClearStoragePath clears the value of the "storage_path" field.
 func (_u *TemplateUpdateOne) ClearStoragePath() *TemplateUpdateOne {
 	_u.mutation.ClearStoragePath()
+	return _u
+}
+
+// SetLayout sets the "layout" field.
+func (_u *TemplateUpdateOne) SetLayout(v string) *TemplateUpdateOne {
+	_u.mutation.SetLayout(v)
+	return _u
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_u *TemplateUpdateOne) SetNillableLayout(v *string) *TemplateUpdateOne {
+	if v != nil {
+		_u.SetLayout(*v)
+	}
+	return _u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (_u *TemplateUpdateOne) ClearLayout() *TemplateUpdateOne {
+	_u.mutation.ClearLayout()
 	return _u
 }
 
@@ -1215,6 +1307,12 @@ func (_u *TemplateUpdateOne) sqlSave(ctx context.Context) (_node *Template, err 
 	if _u.mutation.ConfigCleared() {
 		_spec.ClearField(template.FieldConfig, field.TypeString)
 	}
+	if value, ok := _u.mutation.AgentConfig(); ok {
+		_spec.SetField(template.FieldAgentConfig, field.TypeString, value)
+	}
+	if _u.mutation.AgentConfigCleared() {
+		_spec.ClearField(template.FieldAgentConfig, field.TypeString)
+	}
 	if value, ok := _u.mutation.ContentHash(); ok {
 		_spec.SetField(template.FieldContentHash, field.TypeString, value)
 	}
@@ -1253,6 +1351,12 @@ func (_u *TemplateUpdateOne) sqlSave(ctx context.Context) (_node *Template, err 
 	}
 	if _u.mutation.StoragePathCleared() {
 		_spec.ClearField(template.FieldStoragePath, field.TypeString)
+	}
+	if value, ok := _u.mutation.Layout(); ok {
+		_spec.SetField(template.FieldLayout, field.TypeString, value)
+	}
+	if _u.mutation.LayoutCleared() {
+		_spec.ClearField(template.FieldLayout, field.TypeString)
 	}
 	if value, ok := _u.mutation.Files(); ok {
 		_spec.SetField(template.FieldFiles, field.TypeString, value)

@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -77,6 +76,9 @@ func saCheckDiagServerCounting(t *testing.T, pt *fakePTClient) (*Server, *store.
 	checker.SetCallObserver(srv.NoteSAAssignCheckCall)
 	enforceSAAssign(srv, NewCachedCallerPermissionChecker(checker, time.Minute, time.Minute))
 	sa := wiringSA(t, s, store.ScopeProject, project.ID, "diag-target@p.iam.gserviceaccount.com")
+	// Write this instance's registry row, so the summary's fleet hub
+	// status is healthy and only the diagnostic changes the status.
+	srv.newHubInstanceRegistry().tick(context.Background())
 	return srv, sa, project.ID, counting
 }
 
@@ -93,9 +95,12 @@ func createWithSA(t *testing.T, srv *Server, projectID, name string, sa *store.G
 	})
 }
 
-// adminHealthSummary fetches the admin health summary as an admin.
+// adminHealthSummary runs one registry tick, as the registry loop does
+// every 15 s, so the instance's row carries its current diagnostic, then
+// fetches the admin health summary as an admin.
 func adminHealthSummary(t *testing.T, srv *Server) HealthSummaryResponse {
 	t.Helper()
+	srv.newHubInstanceRegistry().tick(context.Background())
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
@@ -134,8 +139,20 @@ func TestSACheckDiag_HubIdentityRefused_ShownToAdminAndAssignmentDenied(t *testi
 	assert.Equal(t, saAssignCheckDiagCause, d.Cause)
 	assert.Contains(t, d.Remedy, "Grant the hub's identity")
 	assert.Equal(t, saAssignCheckDiagDocsURL, d.DocsURL)
-	assert.False(t, d.Since.IsZero())
+	require.NotNil(t, resp.HubInstances)
+	require.Len(t, resp.HubInstances.Items, 1)
+	label := resp.HubInstances.Items[0].Label
+	assert.Equal(t, []string{label}, d.Instances, "the instance whose row reports it")
 	assert.Equal(t, HealthStatusDegraded, resp.Status)
+	// The diagnostic reaches the summary through the instance's row, as
+	// check sa_assign_check, and counts through the fleet rule.
+	assert.Equal(t, "degraded", resp.HubInstances.Items[0].Checks[saAssignCheckName])
+	assert.Equal(t, HealthStatusDegraded, resp.Hub.Status)
+	assert.Contains(t, resp.Attention, HealthAttentionItem{
+		Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
+		Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: srv.InstanceID(), Name: label},
+		Message: "Service account assignment check cannot run on instance " + label,
+	})
 }
 
 func TestSACheckDiag_EndUserTextUnchanged(t *testing.T) {
@@ -285,35 +302,13 @@ func TestSACheckDiag_NotRecordedWhenNotEnforced(t *testing.T) {
 	assert.Nil(t, srv.saAssignCheckDiag.Load())
 }
 
-// Concurrent records must agree on one first-seen time: a record that
-// raced another must not replace the time the first one set.
-func TestSACheckDiag_ConcurrentRecordsKeepFirstSeen(t *testing.T) {
-	pt := &fakePTClient{}
-	srv, _, _ := saCheckDiagServer(t, pt)
-	denied := status.Error(codes.PermissionDenied, "caller lacks access")
-
-	const rounds, workers = 2000, 8
-	for round := 0; round < rounds; round++ {
-		srv.saAssignCheckDiag.Store(nil)
-		seen := make([]time.Time, workers)
-		var start, done sync.WaitGroup
-		start.Add(1)
-		for w := 0; w < workers; w++ {
-			done.Add(1)
-			go func(w int) {
-				defer done.Done()
-				start.Wait()
-				srv.NoteSAAssignCheckCall(denied)
-				seen[w] = srv.saAssignCheckDiag.Load().since
-			}(w)
-		}
-		start.Done()
-		done.Wait()
-		final := srv.saAssignCheckDiag.Load().since
-		for w, got := range seen {
-			if !got.Equal(final) {
-				t.Fatalf("round %d worker %d saw first-seen %v, final is %v", round, w, got, final)
-			}
-		}
-	}
+// /healthz does not carry the diagnostic: it is a check of this process
+// for the registry row only.
+func TestSACheckDiag_NotInHealthz(t *testing.T) {
+	pt := &fakePTClient{err: status.Error(codes.PermissionDenied, "caller lacks access")}
+	srv, sa, projectID := saCheckDiagServer(t, pt)
+	require.Equal(t, http.StatusForbidden, createWithSA(t, srv, projectID, "diag-healthz", sa).Code)
+	require.True(t, srv.saAssignCheckCannotRun())
+	_, ok := srv.GetHealthInfo(context.Background()).Checks[saAssignCheckName]
+	assert.False(t, ok)
 }

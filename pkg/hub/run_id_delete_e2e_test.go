@@ -29,9 +29,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
@@ -42,98 +40,6 @@ import (
 // (real run ID mint, persist and delete query) talks over HTTP to a real
 // runtimebroker.Server (real deleteAgent and resolveDeleteTarget) backed by
 // a fake runtime that honours the scion.run_id label.
-
-// runLabelManager is a broker agent.Manager whose runtime entries carry
-// labels, as Docker containers do. Only the methods the broker's delete
-// path uses are implemented; the embedded nil Manager makes any other call
-// panic, so the test notices if the delete path starts using more.
-type runLabelManager struct {
-	agent.Manager
-	mu      sync.Mutex
-	entries []api.AgentInfo
-	deletes []runtime.RunRef
-	stops   []runtime.RunRef
-}
-
-func (m *runLabelManager) List(_ context.Context, filter map[string]string) ([]api.AgentInfo, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var out []api.AgentInfo
-	for _, e := range m.entries {
-		match := true
-		for k, v := range filter {
-			if e.Labels[k] != v {
-				match = false
-				break
-			}
-		}
-		if match {
-			out = append(out, e)
-		}
-	}
-	return out, nil
-}
-
-func (m *runLabelManager) DeleteTarget(_ context.Context, _ string, ref runtime.RunRef, _ bool, _ string, _ bool) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.deletes = append(m.deletes, ref)
-	kept := m.entries[:0]
-	for _, e := range m.entries {
-		if e.ContainerID != ref.ID {
-			kept = append(kept, e)
-		}
-	}
-	m.entries = kept
-	return true, nil
-}
-
-// run adds a running entry labelled with runID, as pkg/agent.Start does
-// with the run ID the broker passes in StartOptions.
-func (m *runLabelManager) run(name, cid, projectID, projectPath, runID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.entries = append(m.entries, api.AgentInfo{
-		Name:        name,
-		ContainerID: cid,
-		ProjectID:   projectID,
-		ProjectPath: projectPath,
-		RunID:       runID,
-		Phase:       "running",
-		Labels: map[string]string{
-			"scion.agent":      "true",
-			"scion.name":       name,
-			"scion.project_id": projectID,
-			api.LabelRunID:     runID,
-		},
-	})
-}
-
-func (m *runLabelManager) snapshot() ([]api.AgentInfo, []runtime.RunRef) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]api.AgentInfo(nil), m.entries...), append([]runtime.RunRef(nil), m.deletes...)
-}
-
-// e2eBrokerClient sends deletes over HTTP to the real broker. Create stands
-// in for the broker's create handler, which ends in pkg/agent.Start
-// labelling the new container with req.RunID: it runs the entry on the
-// fake runtime with the run ID the hub sent.
-type e2eBrokerClient struct {
-	RuntimeBrokerClient
-	mgr         *runLabelManager
-	projectPath string
-	cids        int
-}
-
-func (c *e2eBrokerClient) CreateAgent(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
-	c.cids++
-	cid := "cid-" + string(rune('0'+c.cids))
-	c.mgr.run(req.Slug, cid, req.ProjectID, c.projectPath, req.RunID)
-	return &RemoteAgentResponse{Agent: &RemoteAgentInfo{
-		ID: req.ID, Slug: req.Slug, Name: req.Name, ContainerID: cid, Phase: "running", RunID: req.RunID,
-	}, Created: true}, nil
-}
 
 func TestRunID_E2E_StaleDeleteSparesRecreatedAgent(t *testing.T) {
 	ctx := context.Background()

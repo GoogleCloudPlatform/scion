@@ -397,6 +397,29 @@ func (s *Server) removeProjectInjectedSkill(w http.ResponseWriter, r *http.Reque
 // User-scope injected skills (/users/me/...)
 // =============================================================================
 
+// permUserSkillInjectionUpdate is the self-scoped permission a user access
+// token needs on the user-scope write routes (POST, PUT, DELETE).
+const permUserSkillInjectionUpdate = "user_skill_injection.update"
+
+// authorizeUserSkillInjectionWrite checks a user-scope injected-skills write
+// by the caller with authorizeSelfScoped. An interactive session or a dev
+// credential passes. A user access token needs the
+// user_skill_injection:update scope and a hub boundary, because a user's
+// injected skills belong to no project. Every other identity, including a
+// federated user, is refused, as on the inbox routes. A request whose
+// credential record names a user access token but whose identity is not a
+// token identity is refused too. It writes 403 on denial.
+func (s *Server) authorizeUserSkillInjectionWrite(w http.ResponseWriter, r *http.Request, userIdent UserIdentity) bool {
+	_, isToken := userIdent.(*ScopedUserIdentity)
+	if !isToken && GetCredentialContextFromContext(r.Context()).Kind == CredentialKindUAT {
+		resourceType, action := selfPermissionResourceAction(permUserSkillInjectionUpdate)
+		logAuthzDenial(r, userIdent, Resource{Type: resourceType}, action, selfScopeReasonCredential)
+		writeForbiddenStructured(w, "", resourceType, action)
+		return false
+	}
+	return s.authorizeSelfScoped(w, r, permUserSkillInjectionUpdate, "")
+}
+
 // handleUserMeInjectedSkills routes GET/POST/PUT on
 // /api/v1/users/me/injected-skills.
 func (s *Server) handleUserMeInjectedSkills(w http.ResponseWriter, r *http.Request) {
@@ -451,6 +474,9 @@ func (s *Server) addUserInjectedSkill(w http.ResponseWriter, r *http.Request) {
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !s.authorizeUserSkillInjectionWrite(w, r, userIdent) {
 		return
 	}
 
@@ -523,6 +549,9 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !s.authorizeUserSkillInjectionWrite(w, r, userIdent) {
 		return
 	}
 
@@ -607,6 +636,9 @@ func (s *Server) removeUserInjectedSkill(w http.ResponseWriter, r *http.Request,
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !s.authorizeUserSkillInjectionWrite(w, r, userIdent) {
 		return
 	}
 
@@ -839,7 +871,7 @@ func (s *Server) enrichSkillInjections(ctx context.Context, sis []store.SkillInj
 	entries := make([]api.SkillInjectionEntry, 0, len(sis))
 	for _, si := range sis {
 		e := skillInjectionToEntry(si)
-		baseURI := skillBaseURI(si.SkillURI)
+		baseURI := api.SkillBaseURI(si.SkillURI)
 		slug := skillSlugFromURI(baseURI)
 		if slug != "" {
 			if sk, ok := skillBySlug[slug]; ok {
@@ -852,18 +884,14 @@ func (s *Server) enrichSkillInjections(ctx context.Context, sis []store.SkillInj
 	return entries
 }
 
-// skillBaseURI strips the version specifier from a skill URI.
-// "scion://my-skill@1.0" → "scion://my-skill"; "scion://my-skill" → "scion://my-skill".
-func skillBaseURI(uri string) string {
-	if i := strings.LastIndex(uri, "@"); i > strings.Index(uri, "://") {
-		return uri[:i]
-	}
-	return uri
-}
-
 // skillSlugFromURI extracts a slug from the last path segment of a skill URI.
 // "scion://my-skill" → "my-skill"; "https://example.com/skills/my-skill" → "my-skill".
+// Any query or fragment is dropped first: api.SkillBaseURI keeps them in the
+// key, but they are not part of the slug.
 func skillSlugFromURI(uri string) string {
+	if idx := strings.IndexAny(uri, "?#"); idx >= 0 {
+		uri = uri[:idx]
+	}
 	// Strip scheme.
 	if idx := strings.Index(uri, "://"); idx >= 0 {
 		uri = uri[idx+3:]

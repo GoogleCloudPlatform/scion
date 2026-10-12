@@ -23,8 +23,6 @@
 package hub
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
@@ -35,54 +33,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
-
-// unreachableTestSetup creates a project and a topic whose default agent has
-// the given phase (and is optionally soft-deleted), and wires the given
-// dispatcher. Mirrors setupSendTest in handlers_chat_v2_test.go.
-func unreachableTestSetup(t *testing.T, phase string, deleted bool, disp AgentDispatcher) (*Server, store.Store, string, *store.Agent) {
-	t.Helper()
-	srv, s, wcs, proj, db := setupSendTest(t)
-	srv.SetDispatcher(disp)
-	ctx := t.Context()
-	a := &store.Agent{ID: tid("unreachable-" + phase), ProjectID: proj.ID, Name: "Unreachable", Slug: "unreachable-" + phase,
-		Phase: phase, OwnerID: DevUserID, CreatedBy: DevUserID}
-	if err := s.CreateAgent(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-	if deleted {
-		a.DeletedAt = time.Now()
-		if err := s.UpdateAgent(ctx, a); err != nil {
-			t.Fatal(err)
-		}
-	}
-	topicID := tid("unreachable-topic-" + phase)
-	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "unreachable-" + phase,
-		CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: a.Slug}); err != nil {
-		t.Fatal(err)
-	}
-	setTopicConversationID(t, db, s, topicID, proj.ID)
-	return srv, s, topicID, a
-}
-
-// unreachableSend posts content to topicID and returns the HTTP status, the
-// decoded JSON response body, and the persisted store row (nil if the
-// response carried no message ID).
-func unreachableSend(t *testing.T, srv *Server, s store.Store, topicID, content string) (int, map[string]any, *store.Message) {
-	t.Helper()
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
-		map[string]string{"content": content})
-	var resp map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v (body=%s)", err, rec.Body.String())
-	}
-	id, _ := resp["id"].(string)
-	var m *store.Message
-	if id != "" {
-		m, _ = s.GetMessage(t.Context(), id)
-	}
-	t.Logf("HTTP %d body=%s", rec.Code, rec.Body.String())
-	return rec.Code, resp, m
-}
 
 // Suspended default agent: the phase gate must persist the row failed,
 // report it in the response, and never dispatch.
@@ -255,12 +205,11 @@ func TestUnreachableNC_StartingDefault_DispatchedAsToday(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // R1: a human @mention in a topic whose default agent was deleted must still
-// notify. sendUnreachableDefaultAgent used to be a near-copy of
-// sendHumanToHuman that dropped fireHumanMentionNotifications entirely; it is
-// now merged into sendHumanToHuman via unreachableAgentOverride so the two
-// paths share one notification pipeline. This test would fail against that
-// regression.
-func TestUnreachableNC_DeletedDefault_HumanMentionStillNotifies(t *testing.T) {
+// make the mentioned human a member of the thread. The unreachable-default
+// path is merged into sendHumanToHuman via unreachableAgentOverride so the
+// two paths share one post-send pipeline. This test would fail if the
+// unreachable path dropped it.
+func TestUnreachableNC_DeletedDefault_HumanMentionStillMakesMember(t *testing.T) {
 	d := &brokerMockDispatcher{}
 	srv, s, topic, _ := unreachableTestSetup(t, "running", true, d)
 	ctx := t.Context()
@@ -321,12 +270,15 @@ func TestUnreachableNC_DeletedDefault_HumanMentionStillNotifies(t *testing.T) {
 		t.Fatalf("expected dispatchFailureCode=agent_unreachable, got %v", resp)
 	}
 
-	// fireHumanMentionNotifications runs in a goroutine; poll for it.
+	// Membership is recorded in a goroutine; poll for it.
+	require.NotEmpty(t, m.ConversationID, "message must be attributed to the thread conversation")
 	require.Eventually(t, func() bool {
-		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, humanUser.ID, false)
-		return err == nil && len(notifs) == 1
-	}, 2*time.Second, 20*time.Millisecond,
-		"human @mention must still notify when the topic default agent was deleted (R1)")
+		return isUserParticipant(t, s, m.ConversationID, humanUser.ID)
+	}, 5*time.Second, 20*time.Millisecond,
+		"human @mention must still make a member when the topic default agent was deleted (R1)")
+	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, humanUser.ID, false)
+	require.NoError(t, err)
+	require.Empty(t, notifs, "chat mentions must not create notification rows")
 }
 
 // R3: a leading @mention of a running agent must override a deleted topic
@@ -454,37 +406,6 @@ func TestUnreachableNC_DispatchErrorBranch_ResponseReasonSanitizedLikeRow(t *tes
 	if resp["dispatchFailureReason"] != want {
 		t.Fatalf("response reason = %q, want the persisted %q", resp["dispatchFailureReason"], want)
 	}
-}
-
-// transientAgentLookupStore wraps a store and injects a non-ErrNotFound error
-// from GetAgentBySlug for a specific slug, to exercise the nit-1 fix: a
-// transient store error resolving a topic's default agent must not be
-// classified the same as "deleted".
-type transientAgentLookupStore struct {
-	store.Store
-	failSlug string
-	err      error
-}
-
-func (t *transientAgentLookupStore) GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error) {
-	if slug == t.failSlug {
-		return nil, t.err
-	}
-	return t.Store.GetAgentBySlug(ctx, projectID, slug)
-}
-
-// errListAgentsStore wraps a store and forces ListAgents to fail, which is
-// the seam resolveRoutingAgents (via listAllProjectAgents) uses to list
-// project agents for mention resolution. Injecting a failure there is the
-// cleanest way to force resolveRoutingAgents to return a non-nil error
-// without adding a hacky new seam to production code.
-type errListAgentsStore struct {
-	store.Store
-	err error
-}
-
-func (e *errListAgentsStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
-	return nil, e.err
 }
 
 // Consider 2 (review round 2): a routing-plan error (resolveRoutingAgents
