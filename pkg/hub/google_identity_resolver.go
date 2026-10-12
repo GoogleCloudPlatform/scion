@@ -335,7 +335,15 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 			return nil, fmt.Errorf("google identity resolver: existing user record is nil")
 		}
 		// Found a user by email. Verify no conflicting binding exists.
-		existingBindings, _ := r.extIDs.GetExternalIdentitiesByUserID(ctx, existingUser.ID)
+		// The store returns an empty slice and a nil error for a user with
+		// no bindings, so every non-nil error, store.ErrNotFound included,
+		// is returned and no binding is created.
+		existingBindings, listErr := r.extIDs.GetExternalIdentitiesByUserID(ctx, existingUser.ID)
+		if listErr != nil {
+			r.log.Error("google identity resolver: existing identities lookup failed",
+				"sub", identity.Subject, "user_id", existingUser.ID, "error", listErr)
+			return nil, fmt.Errorf("look up existing identities for user: %w", listErr)
+		}
 		for _, eb := range existingBindings {
 			if eb.Provider == "google" && eb.Issuer == canonicalIssuer && eb.Subject != identity.Subject {
 				// Another Google subject is already bound to this user.
