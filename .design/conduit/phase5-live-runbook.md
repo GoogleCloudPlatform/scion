@@ -44,12 +44,15 @@ What you need:
 
 ### A1. Start from a clean workstation
 
-Move any earlier scion SSH files out of the way, so that the run starts
-from nothing:
+Move any earlier scion SSH files out of the way, and remove an existing
+`Include` line for them, so that the run starts from nothing:
 
 ```sh
 mkdir -p ~/scion-ssh-backup
-mv ~/.ssh/config.d/scion-* ~/.scion/ssh ~/scion-ssh-backup/ 2>/dev/null
+mv ~/.ssh/config.d/scion-* ~/scion-ssh-backup/ 2>/dev/null
+mv ~/.scion/ssh ~/scion-ssh-backup/ 2>/dev/null
+cp ~/.ssh/config ~/scion-ssh-backup/ssh-config 2>/dev/null
+sed -i.bak '/config\.d\/scion/d' ~/.ssh/config   # remove an existing Include line
 grep -n 'config.d/scion' ~/.ssh/config    # expect no output
 scion version
 ```
@@ -73,7 +76,8 @@ The browser login completes, and the command returns 0.
 scion ssh-config --write --hub HUB_URL
 echo "exit $?"
 head -1 ~/.ssh/config
-ls -l ~/.ssh/config.d/ ~/.scion/ssh/
+ls -ld ~/.ssh/config.d ~/.scion/ssh
+ls -l ~/.ssh/config.d/scion-HUB ~/.scion/ssh/known_hosts-HUB
 grep -A6 "^Host scion\.HUB\.PROJECT\.AGENT$" ~/.ssh/config.d/scion-HUB
 ```
 
@@ -82,8 +86,10 @@ Expected:
 - exit 0;
 - the first line of `~/.ssh/config` is `Include ~/.ssh/config.d/scion-*`;
 - one include file `~/.ssh/config.d/scion-HUB` and one known-hosts file
-  `~/.scion/ssh/known_hosts-HUB`, both mode `-rw-------`, in directories
-  of mode `drwx------`;
+  `~/.scion/ssh/known_hosts-HUB`, both mode `-rw-------`;
+- a directory that the command created has mode `drwx------`
+  (`~/.scion/ssh` always, after A1; `~/.ssh/config.d` only if it did not
+  exist before). A directory that already existed keeps its mode;
 - a `Host scion.HUB.PROJECT.AGENT` block with these lines:
   - `ProxyCommand <absolute path of scion> tunnel --stdio --ssh --hub HUB_URL --project PROJECT AGENT`
   - `HostKeyAlias scion.HUB.PROJECT.AGENT`
@@ -93,7 +99,7 @@ Expected:
   holds a public key (`ssh-ed25519 AAAA...`), not a fingerprint.
 
 **Record:** the command output, the first line of `~/.ssh/config`, the
-`ls -l` output, the agent's Host block, and its known-hosts line.
+`ls -ld` and `ls -l` output, the agent's Host block, and its known-hosts line.
 
 ### A4. Open a shell with scion ssh
 
@@ -209,8 +215,14 @@ step 3, the `ssh-config` output from step 4, and that step 6 connected.
 
 ### A8. Restore
 
+Only if you want the earlier setup back instead of the one written in
+this run:
+
 ```sh
-mv ~/scion-ssh-backup/scion-* ~/.ssh/config.d/ 2>/dev/null   # only if you want the old files back
+rm -f ~/.ssh/config.d/scion-*
+mv ~/scion-ssh-backup/scion-* ~/.ssh/config.d/ 2>/dev/null
+[ -d ~/scion-ssh-backup/ssh ] && rm -rf ~/.scion/ssh && mv ~/scion-ssh-backup/ssh ~/.scion/ssh
+cp ~/scion-ssh-backup/ssh-config ~/.ssh/config 2>/dev/null
 ```
 
 ### Part A checklist
@@ -289,7 +301,9 @@ reason, under "CI only" after the checklist.
 5. *Optional, test hub only, with the hub owner's agreement:* with the
    broker of `A1` stopped, the same command for `A1` exits 10 with
    `Error: the agent's runtime broker is not connected (runtime_broker_unavailable)`.
-6. A hub without tunnels. This needs a test hub whose REST API works and
+6. If you stopped the broker in step 5, restart it, and wait until the
+   `A1` tunnel from step 1 answers `200` again (reopen it if it exited).
+7. A hub without tunnels. This needs a test hub whose REST API works and
    whose conduit experiment is off (`HUB_OFF_URL`), with an agent `P/A` on
    it:
 
@@ -311,7 +325,7 @@ results.
 1. Create a token scoped to `P1`:
 
    ```sh
-   scion hub token create --hub HUB_URL --project P1 --name tunnel-check --scopes agent:port_access,project:read --expires 1h
+   scion hub token create --hub HUB_URL --project P1 --name tunnel-check --scopes agent:port_access,agent:read,project:read --expires 1h
    ```
 
 2. Use it from a separate home directory, so that the stored login isn't
@@ -319,6 +333,7 @@ results.
 
    ```sh
    export SCION_HUB_TOKEN=<the token>
+   unset SCION_DEV_TOKEN SCION_DEV_TOKEN_FILE
    export HOME=$(mktemp -d)
    scion tunnel --hub HUB_URL --project P1 A1 --port 8000 --local-port 18011 &
    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18011/      # 200
@@ -337,13 +352,28 @@ results.
 ### B(c). Expired credential
 
 1. Create a token with the shortest expiry the hub accepts (for example
-   `--expires 5m`) and use it as in B(b).
-2. Open a tunnel to `P1/A1` before the expiry, and leave it open.
+   `--expires 5m`, with the scopes of B(b)) and use it as in B(b),
+   including `unset SCION_DEV_TOKEN SCION_DEV_TOKEN_FILE`.
+2. Before the expiry, hold a stdio tunnel open to `P1/A1`, with its input
+   on a named pipe:
+
+   ```sh
+   mkfifo /tmp/held-in
+   scion tunnel --hub HUB_URL --project P1 A1 --port 8000 --stdio </tmp/held-in >/tmp/held-out &
+   exec 3>/tmp/held-in
+   ```
+
 3. After the expiry, open another tunnel:
    `scion tunnel --hub HUB_URL --project P1 A2 --port 8000 --stdio </dev/null`.
    It exits 3, with a one-line error ending in
    `log in with: scion hub auth login --hub HUB_URL`.
-4. The tunnel from step 2 still carries data.
+4. The held stream from step 2 still carries data:
+
+   ```sh
+   printf 'GET / HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3
+   sleep 2; head -1 /tmp/held-out     # HTTP/1.0 200 OK
+   exec 3>&-; rm -f /tmp/held-in /tmp/held-out
+   ```
 
 **Record:** the exit code and stderr line from step 3, and the step 4
 result.
@@ -392,7 +422,7 @@ and stderr lines of steps 4 to 6.
 ### B(e). No credential
 
 From a shell with no stored login and no `SCION_HUB_TOKEN`
-(`export HOME=$(mktemp -d); unset SCION_HUB_TOKEN`):
+(`export HOME=$(mktemp -d); unset SCION_HUB_TOKEN SCION_DEV_TOKEN SCION_DEV_TOKEN_FILE`):
 
 ```sh
 scion tunnel --stdio --ssh --hub HUB_URL --project P1 A1 2>&1 >/dev/null | cat -v; echo "exit ${PIPESTATUS[0]}"
