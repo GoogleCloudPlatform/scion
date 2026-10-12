@@ -113,9 +113,25 @@ func TestDialCancelAtHookSendsNoHello(t *testing.T) {
 		close(hooked)
 	})
 
-	s, _, err := Dial(ctx, l, Config{}, testHello())
+	s, _, dialErr := Dial(ctx, l, Config{}, testHello())
 	if s != nil {
-		_ = s.Close()
+		defer func() { _ = s.Close() }()
+	}
+	var acceptRes error
+	select {
+	case acceptRes = <-acceptErr:
+	case <-time.After(waitTimeout):
+		t.Fatal("relay Accept did not return after the dialer closed")
+	}
+	// The relay's Admit count is checked first: it is the one assertion
+	// a sent Hello always trips, whichever way the handshake then ends.
+	if n := adm.admits.Load(); n != 0 {
+		t.Fatalf("relay admitted %d sessions, want 0 (a Hello was sent)", n)
+	}
+	if acceptRes == nil {
+		t.Fatal("relay Accept succeeded for a cancelled dial")
+	}
+	if s != nil {
 		t.Fatal("Dial returned a session for a context cancelled at the hook")
 	}
 	select {
@@ -123,19 +139,8 @@ func TestDialCancelAtHookSendsNoHello(t *testing.T) {
 	default:
 		t.Fatal("after-dial hook did not run")
 	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Dial: %v, want %v", err, context.Canceled)
-	}
-	select {
-	case err := <-acceptErr:
-		if err == nil {
-			t.Fatal("relay Accept succeeded for a cancelled dial")
-		}
-	case <-time.After(waitTimeout):
-		t.Fatal("relay Accept did not return after the dialer closed")
-	}
-	if n := adm.admits.Load(); n != 0 {
-		t.Fatalf("relay admitted %d sessions, want 0 (a Hello was sent)", n)
+	if !errors.Is(dialErr, context.Canceled) {
+		t.Fatalf("Dial: %v, want %v", dialErr, context.Canceled)
 	}
 }
 
