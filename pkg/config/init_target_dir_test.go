@@ -15,6 +15,8 @@
 package config
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +42,23 @@ func gitCommitAll(t *testing.T, dir string) {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
 		}
 	}
+}
+
+// outsideRootErr returns the error an os.Root reports for a name that
+// leads outside the root directory.
+func outsideRootErr(t *testing.T) error {
+	t.Helper()
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	_, err = root.Open(filepath.Join("..", "x"))
+	var pe *fs.PathError
+	if !errors.As(err, &pe) {
+		t.Fatalf("os.Root.Open outside the root: got %v, want a *fs.PathError", err)
+	}
+	return pe.Err
 }
 
 // plainDir creates a directory under home that is not inside a repository.
@@ -252,15 +271,13 @@ func TestInitProject_ExplicitTargetRelativeAndSubdirectory(t *testing.T) {
 			if tc.abs {
 				target = filepath.Join(cwd, target)
 			}
-			if err := InitProject(target, nil, InitProjectOpts{SkipRuntimeCheck: true, ProjectID: api.NewUUID()}); err != nil {
+			id := api.NewUUID()
+			if err := InitProject(target, nil, InitProjectOpts{SkipRuntimeCheck: true, ProjectID: id}); err != nil {
 				t.Fatalf("InitProject(%q): %v", target, err)
 			}
 			full := filepath.Join(cwd, tc.target)
 			if tc.wantDir {
-				info, err := os.Lstat(full)
-				if err != nil || !info.IsDir() {
-					t.Fatalf("expected an in-repo %s directory, stat err = %v", full, err)
-				}
+				assertInRepoProjectID(t, full, id)
 			} else if !IsProjectMarkerFile(full) {
 				t.Fatalf("expected a marker file at %s", full)
 			}
@@ -344,12 +361,14 @@ func TestInitProject_ExplicitTargetEntryLinksOutsideRefused(t *testing.T) {
 		// destKind is what exists at dest before InitProject: "none",
 		// "file" (holding otherID) or "dir" (empty).
 		destKind string
+		// wantStep is the setup step the error must name.
+		wantStep string
 	}{
-		{"project-id link to a missing path", "project-id", "none"},
-		{"project-id link to a file holding another project ID", "project-id", "file"},
-		{"agents link to a directory", "agents", "dir"},
-		{"agents link to a missing path", "agents", "none"},
-		{"templates link to a directory", "templates", "dir"},
+		{"project-id link to a missing path", "project-id", "none", "failed to read project-id"},
+		{"project-id link to a file holding another project ID", "project-id", "file", "failed to read project-id"},
+		{"agents link to a directory", "agents", "dir", "failed to create agents directory"},
+		{"agents link to a missing path", "agents", "none", "failed to create agents directory"},
+		{"templates link to a directory", "templates", "dir", "failed to create templates directory"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home, clone := ownershipTestEnvNamed(t, "clone")
@@ -382,8 +401,13 @@ func TestInitProject_ExplicitTargetEntryLinksOutsideRefused(t *testing.T) {
 			t.Chdir(plainDir(t, home, "elsewhere"))
 
 			err := InitProject(scionDir, nil, InitProjectOpts{SkipRuntimeCheck: true, ProjectID: api.NewUUID()})
-			if err == nil || !strings.Contains(err.Error(), "cannot initialize project") {
-				t.Fatalf("InitProject: got %v, want a cannot initialize project error", err)
+			if err == nil || !strings.Contains(err.Error(), "cannot initialize project: "+tc.wantStep) {
+				t.Fatalf("InitProject: got %v, want a cannot initialize project error naming %q", err, tc.wantStep)
+			}
+			// The refusal must come from the project directory root, not
+			// from an incidental failure of a link-following call.
+			if want := outsideRootErr(t); !errors.Is(err, want) {
+				t.Errorf("InitProject: got %v, want an error wrapping %q", err, want)
 			}
 
 			switch tc.destKind {
