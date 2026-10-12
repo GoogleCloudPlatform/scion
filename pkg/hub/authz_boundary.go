@@ -655,9 +655,10 @@ func applyRestrictions(permIDs []string, restrictions []Restriction) []string {
 }
 
 // ProjectMembershipEvidence reports whether principal has a direct or
-// group-expanded ACTIVE project-scoped role binding for projectID,
-// permission-agnostic — membership is access, independent of which specific
-// permissions the bound role carries. Fails closed on an empty projectID, a
+// group-expanded ACTIVE project-scoped role binding for projectID, of a role
+// that confers membership (membershipBindings; a project-visitor binding is
+// not membership), permission-agnostic — membership is access, independent
+// of which specific permissions the bound role carries. Fails closed on an empty projectID, a
 // non-Active user status, or any store error. Local and federated user
 // principals only (see ErrUnsupportedPrincipalKind and requireActiveUser).
 //
@@ -680,6 +681,7 @@ func (a *AuthzService) ProjectMembershipEvidence(ctx context.Context, principal 
 	}
 
 	now := time.Now()
+	var candidates []*store.RoleBinding
 	for _, b := range bindings {
 		if b.ScopeType != ScopeTypeProject || b.ScopeID != projectID {
 			continue
@@ -687,6 +689,15 @@ func (a *AuthzService) ProjectMembershipEvidence(ctx context.Context, principal 
 		if !bindingActivationOK(b, now) {
 			continue
 		}
+		candidates = append(candidates, b)
+	}
+	// Only a role that confers membership is membership: a project-visitor
+	// binding is not.
+	candidates, err = membershipBindings(ctx, a.store, candidates)
+	if err != nil {
+		return false, "", projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
+	}
+	for _, b := range candidates {
 		compositeKey := b.PrincipalType + ":" + b.PrincipalID
 		if compositeKey == directKey {
 			return true, ProjectAccessSourceMembership, nil
@@ -1351,7 +1362,8 @@ func (a *AuthzService) permissionSurvivesProjectConstraints(ctx context.Context,
 }
 
 // hasRelevantProjectAdmission reports whether principal has an active
-// project-scoped role binding in AT LEAST ONE project WHERE that project's
+// project-scoped role binding of a role that confers membership
+// (membershipBindings) in AT LEAST ONE project WHERE that project's
 // own access-constraint reduction does not strip permissionID — the
 // "relevant project admission" evidence for a relationship-eligible
 // selector under a Hub boundary. This prevents a governing constraint that
@@ -1371,14 +1383,24 @@ func (a *AuthzService) hasRelevantProjectAdmission(ctx context.Context, principa
 		return false, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
 	}
 	now := time.Now()
-	projects := map[string]bool{}
+	var active []*store.RoleBinding
 	for _, b := range bindings {
 		if b.ScopeType != ScopeTypeProject {
 			continue
 		}
 		if bindingActivationOK(b, now) {
-			projects[b.ScopeID] = true
+			active = append(active, b)
 		}
+	}
+	// Project admission is membership: a binding of a role that does not
+	// confer membership (project-visitor) is not admission.
+	active, err = membershipBindings(ctx, a.store, active)
+	if err != nil {
+		return false, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
+	}
+	projects := map[string]bool{}
+	for _, b := range active {
+		projects[b.ScopeID] = true
 	}
 	for projectID := range projects {
 		ok, err := a.permissionSurvivesProjectConstraints(ctx, principal, projectID, permissionID)

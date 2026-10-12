@@ -30,7 +30,8 @@ import (
 // For every project p, chatMemberProjectIDs(ctx, u)[p] equals
 // CheckEffectiveMembership(ctx, u, p).IsMember, computed for all projects at
 // once: an active project-scoped role binding held directly, or through an
-// effective group (a group-bound owner role confers nothing). Hub-admin
+// effective group (a group-bound owner role confers nothing, nor does a role
+// that does not confer membership, such as project-visitor). Hub-admin
 // status, public visibility and generic read grants are not membership, so
 // an admin's unread state covers only the projects they belong to, not all
 // the projects they can read.
@@ -47,6 +48,9 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 	failed := make(map[string]bool)
 	roleNames := make(map[string]string)
 	roleMissing := make(map[string]bool)
+	// noMembership holds the role definitions that do not confer
+	// membership (project-visitor); their bindings are ignored.
+	noMembership := make(map[string]bool)
 	// roleName resolves a role definition's name, reporting whether the
 	// definition exists.
 	roleName := func(id string) (string, bool, error) {
@@ -65,6 +69,7 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 			return "", false, fmt.Errorf("get role definition %s: %w", id, err)
 		}
 		roleNames[id] = rd.Name
+		noMembership[id] = !rd.ConfersProjectMembership()
 		return rd.Name, true, nil
 	}
 
@@ -86,6 +91,9 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 		}
 		if !ok {
 			failed[rb.ScopeID] = true
+			continue
+		}
+		if noMembership[rb.RoleDefinitionID] {
 			continue
 		}
 		members[rb.ScopeID] = true
@@ -119,8 +127,9 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 				failed[rb.ScopeID] = true
 				continue
 			}
-			// Groups never confer owner; such a binding is ignored.
-			if name == store.ProjectRoleOwner {
+			// Groups never confer owner; such a binding is ignored, as is
+			// one of a role that does not confer membership.
+			if name == store.ProjectRoleOwner || noMembership[rb.RoleDefinitionID] {
 				continue
 			}
 			members[rb.ScopeID] = true
