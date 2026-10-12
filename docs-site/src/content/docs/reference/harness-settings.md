@@ -175,11 +175,11 @@ By design, an agent keeps the harness setup it was created with. Its home direct
 once, when the agent is created (see
 [Seeding from Harness-Configs & Templates](#seeding-from-harness-configs--templates)). That
 directory holds the harness-config's `home/` dotfiles, such as Claude's `.claude/settings.json`
-with its hook registrations, and the agent's skills, which come from the template chain and the
-platform skills rather than from the harness-config. Stopping and starting the agent does not
+with its hook registrations, and the agent's skills. The skills come from the template chain
+(including skill references it declares) and the platform skills, not from the harness-config. Stopping and starting the agent does not
 copy them again. For a harness that uses container-script provisioning, each start re-stages
-the provisioner bundle, such as `config.yaml`, `provision.py`, `scion_harness.py`,
-`dialect.yaml` and the capture-auth assets, and the hook wrapper script, and then runs
+the provisioner bundle (for example `config.yaml`, `provision.py`, `scion_harness.py`,
+`dialect.yaml` and the capture-auth assets) and the hook wrapper script, and then runs
 `provision.py`. Changes to `home/` dotfiles, including hook registrations kept there, therefore
 reach new agents only. Harnesses whose provisioner writes its hook configuration at start (for
 example Copilot, Antigravity and Grok Build) pick up changes to the provisioner on the agent's
@@ -202,7 +202,8 @@ To give an existing agent the new setup:
 2. **Rebuild the agent's home.**
    - **With a Hub:** run [`scion reincarnate <agent>`](/scion/reference/cli/#scion-reincarnate).
      It keeps the agent's identity and workspace and copies the harness-config's home files, the
-     template's skills and the platform skills in again. It overlays files: files that the new
+     skills from the template chain (including skill references it declares) and the platform
+     skills in again. It overlays files: files that the new
      version no longer has stay in place.
    - **Without a Hub, or in a worktree-per-agent project** (where reincarnate is not
      available): save the agent's work, then delete the agent with `scion delete` and start it
