@@ -61,8 +61,59 @@ func TestUpdateHoldsLockDuringRMW(t *testing.T) {
 		t.Fatalf("unexpected log: %s", got)
 	}
 	fi, err := os.Lstat(LockPath(info))
-	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o666 {
-		t.Fatalf("lock file = %v, %v; want regular 0666", fi, err)
+	if err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("lock file = %v, %v; want a regular file", fi, err)
+	}
+}
+
+// TestUpdateCreatesLockFileAtDefaultMode checks a new lock file keeps the
+// umask-narrowed create mode and is not widened to 0666.
+func TestUpdateCreatesLockFileAtDefaultMode(t *testing.T) {
+	old := unix.Umask(0o022)
+	t.Cleanup(func() { unix.Umask(old) })
+	info := filepath.Join(t.TempDir(), "agent-info.json")
+	if err := Update(info, Options{}, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(LockPath(info))
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o644 {
+		t.Fatalf("lock file = %v, %v; want regular 0644", fi, err)
+	}
+}
+
+// TestUpdateNoFollowParent checks that NoFollowParent refuses a symlink in
+// the lock file's parent path: the update runs unlocked and warns, and no
+// lock file appears behind the symlink. Without it (the host), the same
+// path is followed and locked.
+func TestUpdateNoFollowParent(t *testing.T) {
+	realDir := filepath.Join(t.TempDir(), "realDir")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	info := filepath.Join(link, "agent-info.json")
+
+	var debug, warn logSink
+	ran := false
+	if err := Update(info, Options{NoFollowParent: true, Logf: debug.logf, Warnf: warn.logf}, func() error { ran = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !ran || !strings.HasPrefix(warn.joined(), "agent-info lock file cannot be opened, writing without lock: "+LockPath(info)+": ") {
+		t.Fatalf("ran=%v warn=%q", ran, warn.joined())
+	}
+	if _, err := os.Lstat(filepath.Join(realDir, "agent-info.json.lock")); !os.IsNotExist(err) {
+		t.Fatalf("lock file created behind the symlink: %v", err)
+	}
+
+	// The host default follows the symlinked parent and takes the lock.
+	if err := Update(info, Options{Logf: debug.logf, Warnf: warn.logf}, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(filepath.Join(realDir, "agent-info.json.lock")); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("host lock file = %v, %v", fi, err)
 	}
 }
 
@@ -85,17 +136,27 @@ func TestUpdateTimeoutLogsAndRunsUnlocked(t *testing.T) {
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
 		t.Fatal(err)
 	}
-	var sink logSink
+	var debug, warn logSink
+	opts := Options{Wait: 30 * time.Millisecond, Logf: debug.logf, Warnf: warn.logf}
 	ran := false
 	start := time.Now()
-	if err := Update(info, Options{Wait: 30 * time.Millisecond, Logf: sink.logf}, func() error { ran = true; return nil }); err != nil {
+	if err := Update(info, opts, func() error { ran = true; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if elapsed := time.Since(start); elapsed < 30*time.Millisecond || elapsed > time.Second {
 		t.Fatalf("elapsed %s, want about the 30ms wait", elapsed)
 	}
-	if !ran || !strings.Contains(sink.joined(), "timed out") {
-		t.Fatalf("ran=%v log=%q", ran, sink.joined())
+	want := "agent-info lock wait timed out, writing without lock: " + LockPath(info) + ": waited 30ms"
+	if !ran || warn.joined() != want || debug.joined() != "" {
+		t.Fatalf("ran=%v warn=%q debug=%q, want warn %q", ran, warn.joined(), debug.joined(), want)
+	}
+
+	// A second timeout on the same path logs at debug, not Warn.
+	if err := Update(info, opts, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if warn.joined() != want || debug.joined() != want {
+		t.Fatalf("second timeout: warn=%q debug=%q", warn.joined(), debug.joined())
 	}
 }
 

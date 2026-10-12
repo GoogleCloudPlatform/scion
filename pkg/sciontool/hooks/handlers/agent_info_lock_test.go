@@ -244,3 +244,57 @@ func readInfo(t *testing.T, path string) map[string]any {
 	require.NoError(t, json.Unmarshal(data, &info))
 	return info
 }
+
+// TestStatusHandlerReadsInsideLock shows the read happens inside the lock:
+// while this test holds the lock, an update is started and the file is
+// changed on disk; after the release the update must see the changed file.
+// Code that read before taking the lock would write back the old content.
+func TestStatusHandlerReadsInsideLock(t *testing.T) {
+	t.Setenv("SCION_TEST_AGENTINFO_LOCK_WAIT", "10s")
+	path := filepath.Join(t.TempDir(), "agent-info.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"template":"t1"}`), 0o644))
+
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+	require.NoError(t, unix.Flock(int(f.Fd()), unix.LOCK_EX))
+
+	h := &StatusHandler{StatusPath: path}
+	done := make(chan error, 1)
+	go func() { done <- h.SetMessage("x") }()
+
+	// Give the update time to reach the lock (or, without one, to finish).
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, os.WriteFile(path, []byte(`{"template":"t2"}`), 0o644))
+	require.NoError(t, unix.Flock(int(f.Fd()), unix.LOCK_UN))
+	require.NoError(t, <-done)
+
+	info := readInfo(t, path)
+	assert.Equal(t, "t2", info["template"], "the update must read the file after taking the lock")
+	detail, _ := info["detail"].(map[string]any)
+	assert.Equal(t, "x", detail["message"])
+}
+
+// TestStatusHandlerRefusesSymlinkedLockParent checks the sciontool path
+// refuses a symlink in the lock file's parent path: no lock file is made
+// behind the symlink, and a warning is logged.
+func TestStatusHandlerRefusesSymlinkedLockParent(t *testing.T) {
+	realDir := filepath.Join(t.TempDir(), "realDir")
+	require.NoError(t, os.Mkdir(realDir, 0o755))
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(realDir, link))
+	logPath := filepath.Join(t.TempDir(), "agent.log")
+	log.SetLogPath(logPath)
+	t.Cleanup(func() { log.SetLogPath("") })
+
+	h := &StatusHandler{StatusPath: filepath.Join(link, "agent-info.json")}
+	// The no-follow write refuses the symlinked parent too, so the update
+	// itself fails, as it did before the lock.
+	assert.Error(t, h.SetMessage("x"))
+
+	_, err := os.Lstat(filepath.Join(realDir, "agent-info.json.lock"))
+	assert.True(t, os.IsNotExist(err), "lock file created behind the symlink: %v", err)
+	logData, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(logData), "[WARN] agent-info lock file cannot be opened, writing without lock: "+filepath.Join(link, "agent-info.json.lock"))
+}

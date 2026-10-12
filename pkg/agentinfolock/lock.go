@@ -21,12 +21,12 @@ Copyright 2026 The Scion Authors.
 // broker's agent list must stay non-blocking. When the lock file is not a
 // single-link regular file (the workload owns the agent home and can put
 // anything there), or cannot be opened or locked, the update runs without
-// the lock. A warning naming the file type and path is logged the first time
-// a problem is seen for a lock path in a process, and at debug after that
-// until the lock on that path is taken again. When another
-// holder keeps the lock longer than the wait, the update also runs without
-// it (logged at debug). The unlocked path calls the same rmw func, so the
-// read and write are the same either way.
+// the lock. When another holder keeps the lock longer than the wait, the
+// update also runs without it. Either way a warning naming the problem and
+// path is logged the first time it is seen for a lock path in a process, and
+// at debug after that until the lock on that path is taken again. The
+// unlocked path calls the same rmw func, so the read and write are the same
+// either way.
 //
 // flock is advisory and per open file description, which covers processes on
 // one kernel, including a Linux host and a bind-mounted container. It does
@@ -67,13 +67,21 @@ type Options struct {
 	// in test binaries only, TestWaitEnv when it is set. A non-zero Wait
 	// always takes precedence over TestWaitEnv.
 	Wait time.Duration
-	// Logf receives the timeout message. Nil means slog.Debug.
+	// Logf receives repeats of a warning for the same lock path. Nil means
+	// slog.Debug.
 	Logf func(format string, args ...any)
 	// Warnf receives the first message for a lock file that is not a
-	// single-link regular file or cannot be opened or locked; repeats for
-	// the same lock path go to Logf. Nil means slog.Warn (and slog.Debug
-	// for repeats), with kind, path and error as attributes.
+	// single-link regular file, cannot be opened or locked, or whose wait
+	// timed out; repeats for the same lock path go to Logf. Nil means
+	// slog.Warn (and slog.Debug for repeats), with kind, path and error as
+	// attributes.
 	Warnf func(format string, args ...any)
+	// NoFollowParent opens the lock file's parent directory with
+	// dirfd.OpenParentNoFollow, refusing a symlink in any path component
+	// (the update then runs unlocked and logs). sciontool sets it; the
+	// host leaves it false, because host paths can legitimately contain
+	// symlinks (for example /var on macOS, or a symlinked home).
+	NoFollowParent bool
 }
 
 // TestWaitEnv sets the lock wait in test binaries only (it is ignored
@@ -112,9 +120,10 @@ const (
 	problemNotRegular = "agent-info lock file is not a single-link regular file"
 	problemCannotOpen = "agent-info lock file cannot be opened"
 	problemCannotLock = "agent-info lock file cannot be locked"
+	problemTimedOut   = "agent-info lock wait timed out"
 )
 
-var problems = [...]string{problemNotRegular, problemCannotOpen, problemCannotLock}
+var problems = [...]string{problemNotRegular, problemCannotOpen, problemCannotLock, problemTimedOut}
 
 // unusableMsg is the fixed slog message for problem.
 func unusableMsg(problem string) string {

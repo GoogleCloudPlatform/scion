@@ -46,11 +46,16 @@ type StatusHandler struct {
 }
 
 // update runs one locked read-modify-write: it reads the map, lets mutate
-// change it, and writes it back unless mutate returns false.
+// change it, and writes it back unless mutate returns false. mutate runs
+// with h.mu held, which is not re-entrant, so it must not call any method
+// of h (or start another update): that would deadlock.
 func (h *StatusHandler) update(mutate func(info map[string]interface{}) bool) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	opts := h.lockOpts
+	// The workload owns $HOME: refuse a symlink anywhere in the lock
+	// file's path, as readAgentInfoMap and writeAgentInfoLocked do.
+	opts.NoFollowParent = true
 	if opts.Logf == nil {
 		opts.Logf = log.Debug
 	}
@@ -257,9 +262,8 @@ func (h *StatusHandler) UpdatePhaseAndMessage(phase state.Phase, activity state.
 // ReplaceActivityIf sets the activity to `to` only when the current activity
 // is `from`, and reports whether it did. The phase is left unchanged. It
 // lets `sciontool init` end the initializing activity without overwriting an
-// activity a hook has already written. The check and the write run under
-// the agent-info lock, so a hook in another process cannot land between
-// them while the lock is held (it is best effort; see pkg/agentinfolock).
+// activity a hook has already written. The check and the write are one
+// locked update (see update).
 func (h *StatusHandler) ReplaceActivityIf(from, to state.Activity) (bool, error) {
 	replaced := false
 	err := h.update(func(info map[string]interface{}) bool {

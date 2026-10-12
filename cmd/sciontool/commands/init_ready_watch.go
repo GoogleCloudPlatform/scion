@@ -90,13 +90,9 @@ const (
 //     buffer, which pastes buffered messages at the same deadline.
 //
 // The hub is only told "working" when the local swap from initializing
-// succeeds. The swap is a read-modify-write of agent-info.json under the
-// agent-info lock (pkg/agentinfolock, #4681), so a hook's status write in
-// another process cannot land between the watcher's read and write. The
-// lock is best effort with a short bounded wait, so the hook path stays
-// non-blocking; if a holder keeps it past that wait, the swap runs unlocked
-// and the old window (a hook write overwritten with working until the next
-// hook event) returns for that one write.
+// succeeds. The swap is one locked read-modify-write of agent-info.json
+// (StatusHandler.ReplaceActivityIf), so a hook's status write in another
+// process cannot land between the watcher's read and write.
 func watchHarnessReady(ctx context.Context, cfg readyWatchConfig) readyWatchOutcome {
 	poll := cfg.PollInterval
 	if poll <= 0 {

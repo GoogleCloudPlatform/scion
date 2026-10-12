@@ -8,17 +8,19 @@ package agentinfolock
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"golang.org/x/sys/unix"
 )
 
 // acquire opens the lock file and takes LOCK_EX, waiting up to opts.Wait.
 // ok is false when the update must run unlocked; the reason is logged.
 func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
-	f, err := openLockFile(lockPath)
+	f, err := openLockFile(lockPath, opts.NoFollowParent)
 	if err != nil {
 		var nr *notRegularError
 		if errors.As(err, &nr) {
@@ -43,7 +45,7 @@ func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
 		}
 		if !time.Now().Before(deadline) {
 			_ = f.Close()
-			opts.logf("timed out after %s waiting for lock %s, updating unlocked", wait, lockPath)
+			opts.warnUnusable(problemTimedOut, "", lockPath, fmt.Errorf("waited %s", wait))
 			return nil, false
 		}
 		time.Sleep(poll)
@@ -87,25 +89,39 @@ func fileKind(mode uint32) string {
 // and O_NONBLOCK so a FIFO cannot hang the open. Anything but a single-link
 // regular file is refused after an fstat on the open fd.
 //
-// A new lock file gets mode 0666: root (sciontool init), the container user
-// and the broker uid must all be able to open it. Its content is never read
-// or written. An existing file the caller cannot open read-write is opened
-// read-only, which is enough for flock on a local filesystem.
-func openLockFile(lockPath string) (*os.File, error) {
-	dir, err := os.Open(filepath.Dir(lockPath))
-	if err != nil {
-		return nil, err
+// With noFollowParent the parent is opened through dirfd.OpenParentNoFollow,
+// which refuses a symlink in any path component; otherwise it is opened by
+// path, following symlinks.
+//
+// A new lock file is created at the default mode (0666 narrowed by the
+// umask, normally 0644); its content is never read or written. An existing
+// file the caller cannot open read-write is opened read-only, which is
+// enough for flock on a local filesystem. A writer that cannot open it even
+// read-only, or cannot flock a read-only fd (NFS emulates flock with POSIX
+// locks, which need write access), writes unlocked and logs, as for any
+// other unusable lock file.
+func openLockFile(lockPath string, noFollowParent bool) (*os.File, error) {
+	var dirFd int
+	var leaf string
+	if noFollowParent {
+		fd, l, err := dirfd.OpenParentNoFollow(lockPath)
+		if err != nil {
+			return nil, err
+		}
+		dirFd, leaf = fd, l
+	} else {
+		fd, err := unix.Open(filepath.Dir(lockPath), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, &os.PathError{Op: "open", Path: filepath.Dir(lockPath), Err: err}
+		}
+		dirFd, leaf = fd, filepath.Base(lockPath)
 	}
-	defer func() { _ = dir.Close() }()
-	dirFd := int(dir.Fd())
-	leaf := filepath.Base(lockPath)
+	defer func() { _ = unix.Close(dirFd) }()
 	const base = unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
 
-	created := false
 	fd, err := unix.Openat(dirFd, leaf, base|unix.O_RDWR|unix.O_CREAT|unix.O_EXCL, 0o666)
 	switch {
 	case err == nil:
-		created = true
 	case errors.Is(err, unix.EEXIST):
 		fd, err = unix.Openat(dirFd, leaf, base|unix.O_RDWR, 0)
 		if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EROFS) {
@@ -131,10 +147,6 @@ func openLockFile(lockPath string) (*os.File, error) {
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 {
 		_ = f.Close()
 		return nil, &notRegularError{kind: fileKind(uint32(st.Mode))}
-	}
-	if created {
-		// The umask narrowed the create mode; widen it on the fd.
-		_ = unix.Fchmod(fd, 0o666)
 	}
 	return f, nil
 }
