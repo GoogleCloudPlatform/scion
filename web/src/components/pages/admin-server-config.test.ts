@@ -3294,7 +3294,7 @@ describe('scion-page-admin-server-config', () => {
         )
       );
       expect(panelText(element)).not.toContain('Public URL');
-      expect(panelText(element)).toContain('image_registry');
+      expect(panelText(element)).toContain('Image Registry');
       expect(field(element).querySelector('.superseded-badge')).toBeNull();
     });
 
