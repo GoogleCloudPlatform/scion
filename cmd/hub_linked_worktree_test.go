@@ -98,7 +98,7 @@ func TestPrintHubWorkspaceSource_Modes(t *testing.T) {
 		{
 			name:      "worktree-per-agent",
 			labels:    map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent},
-			contains:  []string{"git worktree per agent for repo " + remote, ".scion/agents/<name>/workspace"},
+			contains:  []string{"git worktree per agent for repo " + remote, "for a checkout linked on this machine", ".scion/agents/<name>/workspace", "otherwise the runtime broker makes per-agent worktrees of its own clone"},
 			forbidden: []string{"cloning", "local worktrees are not used"},
 		},
 		{

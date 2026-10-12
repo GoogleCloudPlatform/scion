@@ -1072,7 +1072,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		switch {
 		case decision.Refusal != "":
 			span.SetStatus(codes.Error, decision.Refusal)
-			return nil, &startContextError{Status: http.StatusConflict, Message: decision.Refusal}
+			return nil, &startContextError{
+				Status:  http.StatusConflict,
+				Message: decision.Refusal,
+				Code:    ErrCodeLocalWorktreeRefused,
+				Details: map[string]interface{}{api.BrokerErrDetailReason: decision.Refusal},
+			}
 		case decision.Route:
 			linkedCheckout = true
 			opts.Workspace = ""

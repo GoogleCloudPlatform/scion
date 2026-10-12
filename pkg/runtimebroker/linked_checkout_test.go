@@ -549,6 +549,14 @@ func TestBuildStartContext_LinkedCheckoutFailsClosed(t *testing.T) {
 			if !strings.Contains(sce.Message, tc.want) {
 				t.Errorf("Message = %q, want it to contain %q", sce.Message, tc.want)
 			}
+			// The CLI shows details.reason (never the free-text message),
+			// keyed by this code.
+			if sce.Code != ErrCodeLocalWorktreeRefused {
+				t.Errorf("Code = %q, want %q", sce.Code, ErrCodeLocalWorktreeRefused)
+			}
+			if got, _ := sce.Details[api.BrokerErrDetailReason].(string); got != sce.Message {
+				t.Errorf("Details[reason] = %q, want the message %q", got, sce.Message)
+			}
 			if _, err := os.Lstat(filepath.Join(dotScion, "workspace")); !os.IsNotExist(err) {
 				t.Errorf("base clone dir exists after a refusal (stat err: %v)", err)
 			}
