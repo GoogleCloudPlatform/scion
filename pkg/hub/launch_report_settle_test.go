@@ -41,8 +41,8 @@ type launchSettleFixture struct {
 	agent    *store.Agent
 	brokerID string
 	launchID string
-	// hooks is srv.store: the raw store behind a wrapper that, once armed,
-	// runs its afterReport hook right after the store applies a launch
+	// hooks is the wrapper installed as srv.store over the raw store; once
+	// armed, it runs afterReport right after the store applies a launch
 	// report, before the handler settles the run.
 	hooks *launchSettleStore
 	fault *storeFaultSwitch
@@ -65,7 +65,7 @@ func (w *launchSettleStore) ApplyLaunchReport(ctx context.Context, agentID, brok
 	return answer, updated, err
 }
 
-// afterReport arms hook to run right after the next applied report.
+// afterReport arms hook to run right after each applied report.
 func (f *launchSettleFixture) afterReport(hook func(ctx context.Context, agentID string)) {
 	f.hooks.afterReport = hook
 	f.fault.Arm()
