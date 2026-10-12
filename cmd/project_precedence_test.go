@@ -362,3 +362,27 @@ func TestTemplateSyncHubContext_SymlinkedGlobalDir(t *testing.T) {
 	assert.Equal(t, resolvedPath, hubCtx.ProjectPath)
 	assert.Equal(t, linkedID, hubCtx.ProjectID)
 }
+
+// TestGetProjectID_NoGitRemoteNonGlobal pins the error for a non-global
+// project with no project ID and no git origin remote: it points at
+// 'scion hub link' and, with local-only mode removed, no longer suggests
+// --no-hub.
+func TestGetProjectID_NoGitRemoteNonGlobal(t *testing.T) {
+	t.Chdir(t.TempDir()) // not a git repository: no origin remote
+	hubCtx := &HubContext{Settings: &config.Settings{}, IsGlobal: false}
+
+	for name, get := range map[string]func(*HubContext) (string, error){
+		"GetProjectID":        GetProjectID,
+		"getProjectIDForKeys": getProjectIDForKeys,
+	} {
+		t.Run(name, func(t *testing.T) {
+			id, err := get(hubCtx)
+			require.Error(t, err)
+			assert.Empty(t, id)
+			assert.Contains(t, err.Error(), "no git origin remote found for this project")
+			assert.Contains(t, err.Error(), "Run 'scion hub link' to link this project with the Hub")
+			assert.NotContains(t, err.Error(), "--no-hub")
+			assert.NotContains(t, err.Error(), "local-only")
+		})
+	}
+}
