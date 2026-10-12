@@ -1302,6 +1302,14 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{ExternalIdentitiesColumns[7]},
 			},
+			{
+				Name:    "externalidentity_user_id_federation",
+				Unique:  true,
+				Columns: []*schema.Column{ExternalIdentitiesColumns[7]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "provider = 'federation'",
+				},
+			},
 		},
 	}
 	// GcpServiceAccountsColumns holds the columns for the "gcp_service_accounts" table.

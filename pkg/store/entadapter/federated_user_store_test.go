@@ -206,6 +206,43 @@ func TestLinkFederatedIdentity_Refusals(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
+// An account holds at most one federation binding even when the read in
+// LinkFederatedIdentity is skipped, as when two links of one account run
+// at the same time: the database refuses the second insert. Other
+// providers may still bind several subjects to one user.
+func TestLinkFederatedIdentity_OneFederationBindingPerAccountInDatabase(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+
+	alice := createFederatedUser(t, cs, testFedIssuer, "alice@corp.com", store.UserStatusPending)
+	_, err := cs.LinkFederatedIdentity(ctx, alice.ID, testFedIssuer, "sub-alice", "alice@corp.com")
+	require.NoError(t, err)
+
+	second := func() *store.ExternalIdentityBinding {
+		return &store.ExternalIdentityBinding{
+			Provider: store.FederationIdentityProvider, Issuer: testFedIssuer, Subject: "sub-alice-2", UserID: alice.ID,
+		}
+	}
+	err = cs.CreateExternalIdentity(ctx, second())
+	require.Error(t, err, "a second federation binding for one account is refused by the database")
+	assert.True(t, isUniqueViolation(err), "want a unique violation, got %v", err)
+	assert.ErrorIs(t, cs.insertFederationBinding(ctx, second()), store.ErrAlreadyExists)
+
+	got, err := cs.GetFederatedUserBySubject(ctx, testFedIssuer, "sub-alice")
+	require.NoError(t, err)
+	assert.Equal(t, alice.ID, got.ID)
+	_, err = cs.GetFederatedUserBySubject(ctx, testFedIssuer, "sub-alice-2")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	human := &store.User{ID: uuid.NewString(), Email: "frank@corp.com", DisplayName: "Frank", Status: store.UserStatusActive}
+	require.NoError(t, cs.CreateUser(ctx, human))
+	for _, sub := range []string{"sub-frank-1", "sub-frank-2"} {
+		require.NoError(t, cs.CreateExternalIdentity(ctx, &store.ExternalIdentityBinding{
+			Provider: "google", Issuer: "https://accounts.google.com", Subject: sub, UserID: human.ID,
+		}), "the one-binding rule applies only to the federation provider")
+	}
+}
+
 // A binding under the federation provider that points at a non-federated
 // row (no store path writes one; this inserts it directly) never resolves.
 func TestGetFederatedUserBySubject_IgnoresNonFederatedRow(t *testing.T) {
@@ -293,6 +330,8 @@ func TestUpdateUser_FederatedRowKeepsIdentity(t *testing.T) {
 		"email change":   func(u *store.User) { u.Email = "alice@corp.com" },
 		"invited status": func(u *store.User) { u.Status = store.UserStatusInvited },
 		"member role":    func(u *store.User) { u.Role = store.UserRoleMember },
+		"invited by":     func(u *store.User) { by := uuid.NewString(); u.InvitedBy = &by },
+		"invite note":    func(u *store.User) { note := "welcome"; u.InviteNote = &note },
 	} {
 		t.Run(name, func(t *testing.T) {
 			u, err := cs.GetUser(ctx, fed.ID)
@@ -317,7 +356,7 @@ func TestUpdateUser_FederatedRowKeepsIdentity(t *testing.T) {
 	}
 }
 
-// The general role binding, group membership and access token paths refuse
+// The general role binding, group membership and user access credential paths refuse
 // a federated account.
 func TestGeneralGrantPaths_RefuseFederatedAccount(t *testing.T) {
 	cs := newFixtureTestStore(t)

@@ -224,7 +224,8 @@ type Store interface {
 	// the lower-cased email. The account must be UserKindFederated with
 	// HomeIssuer equal to the normalized issuer, and must not be linked
 	// already (ErrInvalidInput otherwise); a pair linked to any account
-	// returns ErrAlreadyExists. It does not change the account's status.
+	// returns ErrAlreadyExists, as does the later of two concurrent links
+	// of one account. It does not change the account's status.
 	LinkFederatedIdentity(ctx context.Context, userID, issuer, subject, email string) (*ExternalIdentityBinding, error)
 
 	// GetFederatedUserBySubject resolves the (issuer, subject) pair of a

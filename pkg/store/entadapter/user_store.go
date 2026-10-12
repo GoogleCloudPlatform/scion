@@ -411,7 +411,8 @@ func (s *UserStore) UpdateUser(ctx context.Context, u *store.User) error {
 	}
 	if current.Kind == user.KindFederated {
 		if u.Email != current.Email || u.Status == store.UserStatusInvited ||
-			(u.Role != "" && u.Role != store.UserRoleViewer) {
+			(u.Role != "" && u.Role != store.UserRoleViewer) ||
+			u.InvitedBy != nil || u.InviteNote != nil {
 			return store.ErrFederatedAccountRefused
 		}
 	} else {
