@@ -62,7 +62,7 @@ func validateFederatedUser(u *store.User) error {
 		return fmt.Errorf("%w: a federated account's email is assigned by the store", store.ErrInvalidInput)
 	}
 	if u.ExpiresAt != nil || u.IssuedBy != nil || u.Purpose != nil || u.IssuanceID != nil ||
-		u.IssuerCredentialID != nil || u.InvitedBy != nil || u.InviteNote != nil {
+		u.IssuerCredentialID != nil || u.IssuerDelegationID != nil || u.InvitedBy != nil || u.InviteNote != nil {
 		return fmt.Errorf("%w: test identity and invite fields are not set on a federated account", store.ErrInvalidInput)
 	}
 	if u.HomeIssuer == nil || store.NormalizeFederatedIssuer(*u.HomeIssuer) == "" {

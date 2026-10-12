@@ -96,6 +96,7 @@ func TestCreateFederatedUser_RefusesInvalidInput(t *testing.T) {
 		"email without @":  func(u *store.User) { s := "alice"; u.FederatedEmail = &s },
 		"expiry":           func(u *store.User) { u.ExpiresAt = &exp },
 		"invite note":      func(u *store.User) { u.InviteNote = &note },
+		"delegation id":    func(u *store.User) { d := uuid.NewString(); u.IssuerDelegationID = &d },
 		"bad id":           func(u *store.User) { u.ID = "not-a-uuid" },
 	} {
 		t.Run(name, func(t *testing.T) {
