@@ -247,11 +247,37 @@ func TestPutServerConfigDB_NestedDurationSettingsValidated(t *testing.T) {
 			}
 
 			for _, clear := range []string{`""`, `null`} {
+				if rr := putStartClaimConfigDB(t, srv, ops, tc.body(`"45m"`)); rr.Code != http.StatusOK {
+					t.Fatalf("re-set before clear: %d %s", rr.Code, rr.Body.String())
+				}
 				if rr := putStartClaimConfigDB(t, srv, ops, tc.body(clear)); rr.Code != http.StatusOK {
-					t.Errorf("clear %s: %d %s", clear, rr.Code, rr.Body.String())
+					t.Fatalf("clear %s: %d %s", clear, rr.Code, rr.Body.String())
+				}
+				if got := storedNestedKey(t, fakeStore, tc.section, tc.path...); got != "" {
+					t.Errorf("clear %s: stored %s = %q, want cleared", clear, tc.field, got)
 				}
 			}
 		})
+	}
+}
+
+// With invalid values in more than one map entry, the error names the
+// entry that sorts first, whatever the order in the body.
+func TestPutServerConfigDB_NestedDurationErrorNamesFirstMapEntry(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+	rr := putStartClaimConfigDB(t, srv, ops, `{"runtimes": {`+
+		`"rt-z": {"type": "substrate", "substrate": {"template_ready_timeout": "abc"}},`+
+		` "rt-m": {"type": "substrate", "substrate": {"template_ready_timeout": "10m"}},`+
+		` "rt-a": {"type": "substrate", "substrate": {"template_ready_timeout": "1hour"}}}}`)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422: %s", rr.Code, rr.Body.String())
+	}
+	var b durationErrorBody
+	if err := json.Unmarshal(rr.Body.Bytes(), &b); err != nil {
+		t.Fatalf("unmarshal %s: %v", rr.Body.String(), err)
+	}
+	if want := "runtimes.rt-a.substrate.template_ready_timeout"; b.Error.Details["field"] != want {
+		t.Errorf("field %v, want %q", b.Error.Details["field"], want)
 	}
 }
 
