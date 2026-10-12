@@ -48,7 +48,10 @@ import (
 //     the project tree.
 //   - When that identity is not available, the caller refuses; it does not
 //     fall back to another root and does not probe for one.
-//   - A wrong root silently reads as the zero HostState.
+//   - A wrong root is not detected. Depending on what is there it gives
+//     an error, the zero HostState, or the content of another
+//     host-state.json with a nil error, so a non-error, non-zero result
+//     does not show that the root is right.
 //
 // Mapping project layouts to roots is the caller's job (ptone/scion#4771).
 // The agent name comes from the broker request or dispatch context, not
