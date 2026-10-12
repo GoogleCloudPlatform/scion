@@ -76,6 +76,11 @@ type ServerConfigDBResponse struct {
 	// DeprecatedEnvKeys lists SCION_SERVER_* env vars that target Layer-1
 	// keys and should be migrated to SCION_SEED_* equivalents.
 	DeprecatedEnvKeys []DeprecatedEnvKeyInfo `json:"deprecated_env_keys,omitempty"`
+
+	// PublicURLStatus reports the hub endpoint in effect, where it came
+	// from, and the operator setting that pins it, if any (ptone/scion#3905).
+	// Read-only.
+	PublicURLStatus *PublicURLStatus `json:"public_url_status,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
@@ -221,6 +226,8 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	overrides := ops.EnvOverriddenKeys()
 	sort.Strings(overrides)
 	resp.EnvOverrides = overrides
+	// How the hub endpoint was resolved at startup (ptone/scion#3905).
+	resp.PublicURLStatus = s.publicURLStatus()
 
 	// Superseded keys (managed sections whose DB value diverges from bootstrap).
 	resp.SupersededKeys = s.computeSupersededKeys(ops)
@@ -422,6 +429,8 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		return nil
 	}
 
+	publicURLPinned := s.HubEndpoints().Pin != ""
+
 	// Load individual layers for source attribution.
 	seedEnvK := config.LoadSeedEnvKoanf()
 	serverEnvK := config.LoadEnvKoanf()
@@ -448,6 +457,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
+			if sec.Name == "endpoints" && key == "public_url" && publicURLPinned {
+				// An operator setting pins the endpoint on this node, so
+				// the database value does not supersede it; the field's
+				// pinned badge says so (ptone/scion#3905).
+				continue
+			}
 			dbVal, exists := dbMap[key]
 			if !exists && bootstrapAppliesWhenAbsent(sec.Name, key) {
 				// The DB row does not override this key; the bootstrap
@@ -479,10 +494,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 // bootstrapAppliesWhenAbsent reports whether a section key keeps its
 // bootstrap value when a managed DB row omits it. That is the case for
-// endpoints hub_name: a managed endpoints row carries hub_name only after
-// an admin changes it, and Snapshot falls back to the bootstrap value.
+// endpoints hub_name and public_url: a managed endpoints row carries them
+// only after an admin sets them, and Snapshot falls back to the bootstrap
+// value (for public_url, so does the hub's endpoint resolution at startup,
+// ptone/scion#3905).
 func bootstrapAppliesWhenAbsent(section, key string) bool {
-	return section == "endpoints" && key == "hub_name"
+	return section == "endpoints" && (key == "hub_name" || key == "public_url")
 }
 
 // applyRunningValuesForUnsetKeys sets, in a GET response, the running value
@@ -686,24 +703,29 @@ func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 }
 
 // endpointsNoRowBase is the endpoints base when no endpoints row exists:
-// the effective public_url, image_registry and monitoring_dashboard_url.
-// hub_name is left out: the bootstrap value applies without being written
-// (bootstrapAppliesWhenAbsent).
+// the effective image_registry and monitoring_dashboard_url. hub_name is left
+// out: the bootstrap value applies without being written
+// (bootstrapAppliesWhenAbsent). public_url is left out too: a public URL is
+// stored only when an admin sets it, so a bootstrap value never becomes a
+// saved value that would override a later settings.yaml change
+// (ptone/scion#3905).
 func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 	snap := ops.Snapshot()
 	return structToRawMap(opsettings.EndpointsSettings{
-		PublicURL:              snap.PublicURL,
 		ImageRegistry:          snap.ImageRegistry,
 		MonitoringDashboardURL: snap.MonitoringDashboardURL,
 	})
 }
 
-// endpointsSeededBase drops hub_name from a non-managed endpoints base: a
-// seeded row holds the bootstrap hub_name, which applies without being
-// written (Snapshot falls back to it) and may not match the schema
-// pattern, so it is not carried into the managed row.
+// endpointsSeededBase drops hub_name and public_url from a non-managed
+// endpoints base. A seeded row holds the bootstrap hub_name, which applies
+// without being written (Snapshot falls back to it) and may not match the
+// schema pattern, so it is not carried into the managed row. Its public_url
+// is bootstrap material as well; carrying it would turn it into a saved
+// value that overrides a later settings.yaml change (ptone/scion#3905).
 func endpointsSeededBase(base map[string]json.RawMessage) {
 	delete(base, "hub_name")
+	delete(base, "public_url")
 }
 
 // bodyMergeOptions returns the base rules of a section in
@@ -819,6 +841,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if !validateMonitoringDashboardURLRequest(w, &req.ServerConfigUpdateRequest) {
 		return
 	}
+	// A public URL saved in the database must pass the stricter rule the
+	// hub applies to it at startup (ptone/scion#3905).
+	if !validatePublicURLRequest(w, &req.ServerConfigUpdateRequest, ops.Snapshot().PublicURL) {
+		return
+	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
 		return
 	}
@@ -846,6 +873,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// (applyRunningValuesForUnsetKeys) leaves the key unset: it is neither
 	// written nor reported (ptone/scion#3904).
 	echoedRunning := s.echoedRunningValueKeys(r.Context(), ops, &req.ServerConfigUpdateRequest)
+	// An echo of the public URL in effect is not stored either, so a
+	// bootstrap value never becomes a saved value (ptone/scion#3905).
+	if echoedPublicURL(ops, &req.ServerConfigUpdateRequest) {
+		echoedRunning[config.PublicURLKey] = true
+	}
 	koanfKeys = dropKoanfKeys(koanfKeys, echoedRunning)
 
 	// Classify keys.
@@ -993,9 +1025,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Duration-valued keys (opsettings Section.Durations) must parse as a
-	// Go duration; "" or null clears. Checked on the documents built from
-	// the body, before any merge, so only the values sent are checked.
+	// Duration-valued keys (opsettings Section.Durations and
+	// NestedDurations) must parse as a Go duration; "" or null clears.
+	// Checked on the documents built from the body, before any merge, so
+	// only the values sent are checked.
 	if fieldErr := validateDurationSettings(sectionDocs); fieldErr != nil {
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, fieldErr.Error(), map[string]interface{}{
 			"field": fieldErr.field,
@@ -1167,17 +1200,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			// Validate duration strings before conversion (which silently
 			// falls back to zero for invalid values). Invalid durations like
 			// "1hour" would fail at time.ParseDuration during ApplySnapshot.
+			// A value sent in the body was checked by validateDurationSettings;
+			// this catches one carried over from the stored row by the merge.
 			if fedSettings.RefreshInterval != "" {
 				if _, err := time.ParseDuration(fedSettings.RefreshInterval); err != nil {
 					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid refresh_interval %q: %v", fedSettings.RefreshInterval, err), nil)
+						fmt.Sprintf("invalid refresh_interval %q: %v", fedSettings.RefreshInterval, err),
+						map[string]interface{}{"field": "server.federation.refresh_interval"})
 					return
 				}
 			}
 			if fedSettings.DebounceInterval != "" {
 				if _, err := time.ParseDuration(fedSettings.DebounceInterval); err != nil {
 					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid debounce_interval %q: %v", fedSettings.DebounceInterval, err), nil)
+						fmt.Sprintf("invalid debounce_interval %q: %v", fedSettings.DebounceInterval, err),
+						map[string]interface{}{"field": "server.federation.debounce_interval"})
 					return
 				}
 			}
@@ -1411,7 +1448,28 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			s.approveGCPIAMTransition(gcpIAMTransition{From: gcpIAMCur, To: gcpIAMNext})
 		}
 
+		// A change to the stored public URL is recorded before it is
+		// written, like a GCP permission-check change; if the record cannot
+		// be written, the change is not made (ptone/scion#3905).
+		publicURLBefore, publicURLAfter := "", ""
+		publicURLChange := false
+		if secName == "endpoints" {
+			publicURLBefore, publicURLAfter = storedManagedPublicURL(ops), publicURLFromSectionDoc(doc)
+			if publicURLChange = publicURLBefore != publicURLAfter; publicURLChange {
+				if err := s.auditPublicURLChange(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter); err != nil {
+					slog.Error("PUT server-config: failed to record public URL change", "error", err)
+					fileTxn.abort()
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+					return
+				}
+			}
+		}
+
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		if publicURLChange && err != nil {
+			s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter, err)
+		}
 		if secName == gcpIAMSection {
 			// The approval covers only this write's own self-apply.
 			s.clearGCPIAMApproval()
@@ -1455,6 +1513,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	writtenDocs := make(map[string]json.RawMessage, len(written))
 	for sec := range written {
 		writtenDocs[sec] = sectionDocs[sec]
+	}
+	// A row without public_url leaves the bootstrap value in effect, so the
+	// report compares that value, not its absence (ptone/scion#3905).
+	if doc, ok := beforeDocs["endpoints"]; ok {
+		beforeDocs["endpoints"] = publicURLInEffectDoc(ops, doc)
+	}
+	if doc, ok := writtenDocs["endpoints"]; ok {
+		writtenDocs["endpoints"] = publicURLInEffectDoc(ops, doc)
 	}
 	keyReport := reportSavedKeys(beforeDocs, writtenDocs)
 

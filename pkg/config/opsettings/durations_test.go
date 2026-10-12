@@ -16,6 +16,7 @@ package opsettings
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -45,5 +46,33 @@ func TestSectionDurationsAreSectionKeys(t *testing.T) {
 	}
 	if n == 0 {
 		t.Fatal("no duration keys registered")
+	}
+}
+
+// Every Section.NestedDurations entry is a koanf path of its section below
+// the section name, at least two levels deep in the section document, and
+// the nested families of ptone/scion#4660 are registered.
+func TestSectionNestedDurationsAreSectionKeys(t *testing.T) {
+	for _, sec := range Registry {
+		for _, kp := range sec.NestedDurations {
+			rest, ok := strings.CutPrefix(kp, sec.Name+".")
+			if !ok || !strings.Contains(rest, ".") {
+				t.Errorf("%s: nested duration key %q is not a nested path below the section name", sec.Name, kp)
+				continue
+			}
+			if got := OwningSection(strings.ReplaceAll(kp, "*", "x")); got != sec.Name {
+				t.Errorf("%s: nested duration key %q is owned by section %q", sec.Name, kp, got)
+			}
+		}
+	}
+	for _, want := range []struct{ section, key string }{
+		{"telemetry", "telemetry.cloud.batch.timeout"},
+		{"telemetry", "telemetry.hub.report_interval"},
+		{"runtimes", "runtimes.*.substrate.template_ready_timeout"},
+		{"harness_configs", "harness_configs.*.provisioner.timeout"},
+	} {
+		if s := SectionByName(want.section); s == nil || !slices.Contains(s.NestedDurations, want.key) {
+			t.Errorf("%s is not marked as a nested duration key", want.key)
+		}
 	}
 }

@@ -103,6 +103,11 @@ func externalEnvValues(cfg RunConfig, env map[string]string) map[string]string {
 			external[k] = append(external[k], v)
 		}
 	}
+	// Template env fallback values reach argv without going through cfg.Env
+	// (ptone/scion#4524); they were redacted when they rode cfg.Env.
+	for k, v := range cfg.FallbackEnv {
+		external[k] = append(external[k], v)
+	}
 
 	// Keep only entries that actually reached argv with that value. envFor
 	// overwrites some keys with synthesised values after parsing cfg.Env, and a

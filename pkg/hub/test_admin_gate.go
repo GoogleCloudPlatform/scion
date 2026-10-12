@@ -418,16 +418,18 @@ func (s *Server) RegisterInProcessPluginBroker(id string) {
 	s.inProcessPluginBrokers[id] = true
 }
 
-// testAdminAdmittedBroker reports whether brokerID is the co-located broker
-// or a plugin record this process provisioned. Both are in-memory facts set
-// by this process; no stored attribute is consulted.
+// testAdminAdmittedBroker reports whether brokerID is a co-located broker
+// (the embedded broker, or an activated co-located flat Runtime Broker
+// instance, as isEmbeddedBroker) or a plugin record this process
+// provisioned. All are in-memory facts set by this process; no stored
+// attribute is consulted.
 func (s *Server) testAdminAdmittedBroker(brokerID string) bool {
 	if brokerID == "" {
 		return false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return brokerID == s.embeddedBrokerID || s.inProcessPluginBrokers[brokerID]
+	return brokerID == s.embeddedBrokerID || s.embeddedFlatIDs[brokerID] || s.inProcessPluginBrokers[brokerID]
 }
 
 // testAdminBrokerAdmission is BrokerAuthService.brokerAdmission. While the
@@ -519,11 +521,20 @@ func (s *Server) VerifyTestAdminBrokerSet(ctx context.Context) error {
 	for id := range s.inProcessPluginBrokers {
 		plugins = append(plugins, id)
 	}
+	// The co-located flat Runtime Broker instances admitted with the
+	// embedded broker (testAdminAdmittedBroker); with several there is no
+	// single embedded broker ID, so the line names them here.
+	flat := make([]string, 0, len(s.embeddedFlatIDs))
+	for id := range s.embeddedFlatIDs {
+		flat = append(flat, id)
+	}
 	s.mu.RUnlock()
 	sort.Strings(plugins)
+	sort.Strings(flat)
 	if err := s.testAdminAudit.emit(testAdminAuditEventBrokerSet, map[string]any{
 		"level":              "WARN",
 		"embedded_broker_id": embedded.id,
+		"flat_broker_ids":    flat,
 		"plugin_broker_ids":  plugins,
 	}); err != nil {
 		return fmt.Errorf("test admin tier: broker check line could not be written: %w", err)
