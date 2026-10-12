@@ -2951,8 +2951,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	// 4. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
 		// An exported but empty variable is treated as unset, so it never
-		// blanks a value from the settings files. This also keeps an empty
-		// SCION_OTEL_INSECURE from being mapped onto tls.enabled.
+		// blanks a value from the settings files.
 		if value == "" {
 			return "", nil
 		}

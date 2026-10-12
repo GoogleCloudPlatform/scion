@@ -239,6 +239,7 @@ func TestLoadVersionedSettings_OtelInsecureKeepsConfiguredTLS(t *testing.T) {
 			path := filepath.Join(projectDir, "settings.yaml")
 			data, err := os.ReadFile(path)
 			require.NoError(t, err)
+			require.Contains(t, string(data), "      enabled: true", "fixture must hold the tls.enabled line this test rewrites")
 			data = []byte(strings.Replace(string(data), "      enabled: true", "      enabled: "+tc.configured, 1))
 			require.NoError(t, os.WriteFile(path, data, 0644))
 			t.Setenv("SCION_OTEL_INSECURE", tc.env)
