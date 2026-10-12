@@ -315,13 +315,19 @@ func (s *Server) registerAgentPort(w http.ResponseWriter, r *http.Request, agent
 		return
 	}
 	now := time.Now().UTC()
+	// ExposedBy names the kind of caller that registered the port: the
+	// agent itself, or a user holding agent.port_access on the agent.
+	exposedBy := "user"
+	if GetAgentIdentityFromContext(r.Context()) != nil {
+		exposedBy = "agent"
+	}
 	ports = append(ports, store.ExposedPort{
 		Port:      req.Port,
 		Label:     req.Label,
 		Host:      req.Host,
 		Mode:      "rw",
 		ExposedAt: now,
-		ExposedBy: "agent",
+		ExposedBy: exposedBy,
 	})
 	if err := s.store.UpdateAgentExposedPorts(r.Context(), agent.ID, ports); err != nil {
 		writeErrorFromErr(w, err, "")

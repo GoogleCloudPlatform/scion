@@ -55,6 +55,7 @@ func TestAgentPortRegistrationLifecycle(t *testing.T) {
 	assert.Equal(t, "dev", created.Label)
 	assert.Equal(t, "127.0.0.1", created.Host)
 	assert.Equal(t, "/api/v1/agents/"+agent.ID+"/ports/3000/proxy/", created.BasePath)
+	assert.Equal(t, "agent", created.ExposedBy, "a port the agent registers is recorded as exposed by the agent")
 
 	rec = doAgentTokenRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports", nil, token)
 	require.Equal(t, http.StatusOK, rec.Code)

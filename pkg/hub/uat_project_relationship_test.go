@@ -288,6 +288,13 @@ func TestProjectUAT_OwnerAdminPortAccessOnMembersAgent(t *testing.T) {
 			rec = doRequestWithUAT(t, srv, portKey, http.MethodDelete, base+"/ports/9090", nil)
 			assert.Equal(t, http.StatusNoContent, rec.Code,
 				"%s port_access token deletes a port on a member's agent: %s", tc.name, rec.Body.String())
+			// Clearing removes 8080 as well, so it is re-exposed for the
+			// other subtest's proxy check.
+			rec = doRequestWithUAT(t, srv, portKey, http.MethodDelete, base+"/ports", nil)
+			assert.Equal(t, http.StatusNoContent, rec.Code,
+				"%s port_access token clears a member's agent's ports: %s", tc.name, rec.Body.String())
+			agent.ExposedPorts = nil
+			uatpExposePort(t, s, agent, 8080)
 
 			req := httptest.NewRequest(http.MethodGet, base+"/ports/tunnel", nil)
 			req.Header.Set("Authorization", "Bearer "+portKey)

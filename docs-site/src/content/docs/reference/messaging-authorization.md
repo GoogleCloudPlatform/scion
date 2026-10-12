@@ -651,7 +651,9 @@ This permission is intentionally restricted:
   mode only with this scope selected, only for an agent inside the token's
   boundary, and only when its holder may change the mode with a session: the
   project-admin exclusion and the lineage-owner rule apply to the token too.
-  The scope is not part of `agent:manage`.
+  Granting `hub` mode with a token, whether by setting it, by a cascade to
+  descendants, or when creating an agent, needs a hub-bound token; a
+  project-bound token is refused. The scope is not part of `agent:manage`.
 - **Excluded from project admin** because folding mode changes into the admin
   role would let admins unseal `none`-mode agents, breaking the quarantine
   boundary.

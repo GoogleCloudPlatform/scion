@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -278,12 +279,34 @@ func TestPortRegistration_UsesAgentRecordTarget(t *testing.T) {
 
 		rec = doRequestWithUAT(t, f.srv, key, http.MethodPost, ports, map[string]any{"port": 3000})
 		require.Equal(t, http.StatusCreated, rec.Code, "%s token: %s", boundary.Kind, rec.Body.String())
+		var created exposedPortResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+		assert.Equal(t, "user", created.ExposedBy, "a port a user registers is recorded as exposed by a user")
 		rec = doRequestWithUAT(t, f.srv, key, http.MethodDelete, ports+"/3000", nil)
 		assert.Equal(t, http.StatusNoContent, rec.Code, "%s token: %s", boundary.Kind, rec.Body.String())
 		rec = doRequestWithUAT(t, f.srv, key, http.MethodPost, ports, map[string]any{"port": 3001})
 		require.Equal(t, http.StatusCreated, rec.Code, "%s token: %s", boundary.Kind, rec.Body.String())
 		rec = doRequestWithUAT(t, f.srv, key, http.MethodDelete, ports, nil)
 		assert.Equal(t, http.StatusNoContent, rec.Code, "%s token: %s", boundary.Kind, rec.Body.String())
+
+		// The per-agent exposed-port limit applies to a token: at the
+		// limit, a new port is refused and nothing is stored, and an
+		// already registered port is a conflict.
+		atLimit := make([]store.ExposedPort, 0, maxExposedPortsPerAgent)
+		for i := 0; i < maxExposedPortsPerAgent; i++ {
+			atLimit = append(atLimit, store.ExposedPort{Port: 4000 + i, Host: "127.0.0.1", Mode: "rw", ExposedAt: time.Now(), ExposedBy: "agent"})
+		}
+		require.NoError(t, f.store.UpdateAgentExposedPorts(ctx, f.agent.ID, atLimit))
+		rec = doRequestWithUAT(t, f.srv, key, http.MethodPost, ports, map[string]any{"port": 4000 + maxExposedPortsPerAgent})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "%s token, at the port limit: %s", boundary.Kind, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "maximum exposed ports per agent exceeded")
+		rec = doRequestWithUAT(t, f.srv, key, http.MethodPost, ports, map[string]any{"port": 4000})
+		assert.Equal(t, http.StatusConflict, rec.Code, "%s token, registered port at the limit: %s", boundary.Kind, rec.Body.String())
+		got, err = f.store.GetAgent(ctx, f.agent.ID)
+		require.NoError(t, err)
+		assert.Len(t, got.ExposedPorts, maxExposedPortsPerAgent, "%s token: a refused port is not stored", boundary.Kind)
+		rec = doRequestWithUAT(t, f.srv, key, http.MethodDelete, ports, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, "%s token: %s", boundary.Kind, rec.Body.String())
 	}
 	got, err = f.store.GetAgent(ctx, f.agent.ID)
 	require.NoError(t, err)
@@ -441,5 +464,8 @@ func TestAgentCreateToken_ProjectBoundaryTokensCannotGrantHubMode(t *testing.T) 
 
 	hubKey := f.mint(t, ownerID, hubBoundary(), "agent:create")
 	rec = doRequestWithUAT(t, srv, hubKey, http.MethodPost, "/api/v1/agents", body("atk-create-hub"))
-	assert.NotContains(t, rec.Body.String(), "Cannot grant hub message mode", rec.Body.String())
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	created, err := s.GetAgentBySlug(context.Background(), project.ID, "atk-create-hub")
+	require.NoError(t, err, "the hub token creates the agent")
+	assert.Equal(t, store.MessageModeHub, created.MessageMode)
 }
