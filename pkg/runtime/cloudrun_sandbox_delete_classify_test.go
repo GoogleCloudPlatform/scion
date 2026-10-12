@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,6 +40,7 @@ func TestClassifySandboxDelete(t *testing.T) {
 		want     sandboxDeleteResult
 	}{
 		{name: "zero exit", script: "exit 0", want: sandboxDeleteDeleted},
+		{name: "exit 0 while ctx cancelled", script: "exit 0", cancel: true, want: sandboxDeleteDeleted},
 		{name: "not found", script: notFound + "; exit 1", want: sandboxDeleteGone},
 		{name: "does not exist", script: "echo 'sandbox does not exist'; exit 2", want: sandboxDeleteGone},
 		{name: "other failure", script: "echo 'permission denied' >&2; exit 1", want: sandboxDeleteFailed},
@@ -68,6 +70,18 @@ func TestClassifySandboxDelete(t *testing.T) {
 }
 
 // withDeleteWorkaround sets deleteWorkaroundEnabled for one test.
+func TestSandboxDeleteOutputForLog(t *testing.T) {
+	short := "Error: sandbox not found"
+	if got := sandboxDeleteOutputForLog(short); got != short {
+		t.Errorf("sandboxDeleteOutputForLog(short) = %q, want it unchanged", got)
+	}
+	long := strings.Repeat("x", maxSandboxDeleteOutput)
+	got := sandboxDeleteOutputForLog(long)
+	if want := strings.Repeat("x", maxSandboxDeleteOutputLog) + "...(truncated)"; got != want {
+		t.Errorf("sandboxDeleteOutputForLog(64 KiB) has length %d, want %d", len(got), len(want))
+	}
+}
+
 func withDeleteWorkaround(t *testing.T, enabled bool) {
 	t.Helper()
 	prev := deleteWorkaroundEnabled

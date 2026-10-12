@@ -350,6 +350,19 @@ func classifySandboxDelete(ctx context.Context, out string, err error, timedOut 
 // maxSandboxDeleteOutput bounds how much delete output is read back.
 const maxSandboxDeleteOutput = 64 << 10
 
+// maxSandboxDeleteOutputLog bounds the copy of delete output that is
+// logged; classification still sees up to maxSandboxDeleteOutput.
+const maxSandboxDeleteOutputLog = 4 << 10
+
+// sandboxDeleteOutputForLog returns out truncated to
+// maxSandboxDeleteOutputLog bytes for logging.
+func sandboxDeleteOutputForLog(out string) string {
+	if len(out) <= maxSandboxDeleteOutputLog {
+		return out
+	}
+	return out[:maxSandboxDeleteOutputLog] + "...(truncated)"
+}
+
 // newSandboxDeleteOutput returns an unlinked temporary file to use as a
 // delete command's stdout and stderr, so the output is captured without
 // a pipe. A pipe would make cmd.Wait block until every holder of its
@@ -1421,10 +1434,10 @@ func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string) err
 	case sandboxDeleteDeleted:
 	case sandboxDeleteGone:
 		runtimeLog.Info("cloudrun-sandbox: delete --force found the sandbox already gone",
-			"sandbox", id, "output", out)
+			"sandbox", id, "output", sandboxDeleteOutputForLog(out))
 	default:
 		runtimeLog.Warn("cloudrun-sandbox: delete --force failed",
-			"sandbox", id, "result", result.String(), "error", err, "output", out)
+			"sandbox", id, "result", result.String(), "error", err, "output", sandboxDeleteOutputForLog(out))
 		return fmt.Errorf("cloudrun-sandbox: delete --force failed: %w", err)
 	}
 	r.state.remove(id)

@@ -130,7 +130,7 @@ func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id strin
 		result := classifySandboxDelete(ctx, out, err, false)
 		if err != nil {
 			slog.Warn("sandbox delete --force returned with error",
-				"sandbox", id, "result", result.String(), "error", err, "output", out)
+				"sandbox", id, "result", result.String(), "error", err, "output", sandboxDeleteOutputForLog(out))
 		} else {
 			deleteWorkaroundFixDetected.Do(func() {
 				slog.Warn("sandbox delete --force returned normally -- "+
@@ -146,8 +146,8 @@ func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id strin
 		out := readSandboxDeleteOutput(outFile)
 		slog.Warn("sandbox delete --force timed out, treating as success",
 			"sandbox", id, "timeout", timeout,
-			"result", classifySandboxDelete(ctx, out, nil, true).String(),
-			"output", out, "defect", deleteDefectRef)
+			"result", sandboxDeleteTimedOut.String(),
+			"output", sandboxDeleteOutputForLog(out), "defect", deleteDefectRef)
 		// Only reap orphaned runsc processes when the timeout actually fired.
 		// If the delete completed normally, there is by definition no orphan.
 		// CRITICAL: when the platform bug is fixed, a working delete returns
@@ -159,7 +159,7 @@ func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id strin
 		out := readSandboxDeleteOutput(outFile)
 		slog.Warn("sandbox delete --force cancelled",
 			"sandbox", id, "result", classifySandboxDelete(ctx, out, err, false).String(),
-			"error", err, "output", out)
+			"error", err, "output", sandboxDeleteOutputForLog(out))
 		return ctx.Err()
 	}
 
