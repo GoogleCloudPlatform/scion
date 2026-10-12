@@ -5,10 +5,13 @@ Copyright 2025 The Scion Authors.
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -146,7 +149,7 @@ func InitLimitsFile(limitsPath string, maxTurns, maxModelCalls, uid, gid int) er
 // incrementAndCheck reads the limits file, increments the given counter field,
 // checks if the limit is exceeded, and triggers shutdown if so.
 func (h *LimitsHandler) incrementAndCheck(counterField string, limit int, limitName string) error {
-	ls, err := h.readLimitsState()
+	ls, orig, err := h.readLimitsStateData()
 	if err != nil {
 		// If we can't read the file, log and continue - don't crash the hook pipeline
 		log.Error("Failed to read agent-limits.json: %v", err)
@@ -164,10 +167,17 @@ func (h *LimitsHandler) incrementAndCheck(counterField string, limit int, limitN
 		count = ls.ModelCallCount
 	}
 
-	// Write the updated state. Skip chown (uid<=0): this runs from a hook
-	// process that already runs as the scion user, so the rewritten file
-	// keeps the ownership it's created with.
-	if err := writeLimitsState(h.limitsPath, ls, 0, 0); err != nil {
+	// Write the updated state, keeping top-level keys of the file read
+	// above that LimitsState does not know (ptone/scion#4679). Skip chown
+	// (uid<=0): this runs from a hook process that already runs as the
+	// scion user, so the rewritten file keeps the ownership it's created
+	// with.
+	data, err := marshalLimitsStateKeepUnknown(orig, ls)
+	if err != nil {
+		log.Error("Failed to write agent-limits.json: %v", fmt.Errorf("marshaling limits state: %w", err))
+		return nil
+	}
+	if err := writeLimitsData(h.limitsPath, data, 0, 0); err != nil {
 		log.Error("Failed to write agent-limits.json: %v", err)
 		return nil
 	}
@@ -219,15 +229,112 @@ func (h *LimitsHandler) triggerLimitsExceeded(message string) {
 // read in this codebase, at no behavioral cost to the current dropped
 // caller.
 func (h *LimitsHandler) readLimitsState() (*LimitsState, error) {
+	ls, _, err := h.readLimitsStateData()
+	return ls, err
+}
+
+// readLimitsStateData is readLimitsState that also returns the raw bytes
+// read, for marshalLimitsStateKeepUnknown.
+func (h *LimitsHandler) readLimitsStateData() (*LimitsState, []byte, error) {
 	data, err := dirfd.ReadFileNoFollow(h.limitsPath, agentLimitsMaxBytes)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", h.limitsPath, err)
+		return nil, nil, fmt.Errorf("reading %s: %w", h.limitsPath, err)
 	}
 	var ls LimitsState
 	if err := json.Unmarshal(data, &ls); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", h.limitsPath, err)
+		return nil, nil, fmt.Errorf("parsing %s: %w", h.limitsPath, err)
 	}
-	return &ls, nil
+	return &ls, data, nil
+}
+
+// marshalLimitsStateKeepUnknown encodes ls for a read-modify-write of
+// agent-limits.json whose previous content was orig, keeping every
+// top-level key of orig that LimitsState does not know (ptone/scion#4679),
+// so a key another or newer writer added is not dropped on each update.
+//
+// The known keys are encoded exactly as json.MarshalIndent(ls, "", "  ")
+// encodes them. When orig has no unknown keys, or is not a JSON object
+// (missing, empty, null, corrupt), the result is byte-for-byte
+// json.MarshalIndent(ls, "", "  "). Otherwise the unknown keys follow the
+// known ones in sorted order, with their values as read (re-indented, not
+// re-escaped). A key that matches a known name case-insensitively counts as
+// known, since json.Unmarshal already read it into the struct.
+func marshalLimitsStateKeepUnknown(orig []byte, ls *LimitsState) ([]byte, error) {
+	plain, err := json.MarshalIndent(ls, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(orig, &raw); err != nil || len(raw) == 0 {
+		return plain, nil
+	}
+	var unknown []string
+	for k := range raw {
+		if !isKnownLimitsStateKey(k) {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return plain, nil
+	}
+	sort.Strings(unknown)
+
+	compact, err := json.Marshal(ls)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	buf.Write(compact[:len(compact)-1]) // drop the closing '}'
+	needComma := len(compact) > 2       // "{}" has no fields
+	for _, k := range unknown {
+		key, err := json.Marshal(k)
+		if err != nil {
+			return nil, err
+		}
+		if needComma {
+			buf.WriteByte(',')
+		}
+		needComma = true
+		buf.Write(key)
+		buf.WriteByte(':')
+		buf.Write(raw[k])
+	}
+	buf.WriteByte('}')
+
+	var out bytes.Buffer
+	if err := json.Indent(&out, buf.Bytes(), "", "  "); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+// limitsStateKnownKeys are the JSON keys of LimitsState's fields.
+var limitsStateKnownKeys = func() []string {
+	t := reflect.TypeOf(LimitsState{})
+	var names []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "-" || !f.IsExported() {
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		names = append(names, name)
+	}
+	return names
+}()
+
+// isKnownLimitsStateKey reports whether json.Unmarshal into LimitsState
+// would read key into a field (field names match case-insensitively).
+func isKnownLimitsStateKey(key string) bool {
+	for _, k := range limitsStateKnownKeys {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeLimitsState writes the limits state to disk atomically. When uid > 0,
@@ -256,6 +363,12 @@ func writeLimitsState(path string, ls *LimitsState, uid, gid int) error {
 	if err != nil {
 		return fmt.Errorf("marshaling limits state: %w", err)
 	}
+	return writeLimitsData(path, data, uid, gid)
+}
+
+// writeLimitsData installs already-encoded limits state at path, as
+// writeLimitsState describes.
+func writeLimitsData(path string, data []byte, uid, gid int) error {
 	// ReplaceLeaf, not RefuseSymlink: path lives inside agentHome, which the
 	// workload owns outright, so whatever currently sits at the leaf is a
 	// stale entry this install means to overwrite, not tamper to refuse.
