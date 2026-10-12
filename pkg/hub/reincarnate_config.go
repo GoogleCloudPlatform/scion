@@ -201,9 +201,9 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	// Do NOT alias Image/Model/Env to InlineConfig's backing map (design
 	// §3.3 A1 addendum 2, rule 3): InlineConfig is a fresh, independent copy,
 	// and Env gets its own clone (as buildAppliedConfig does on create), so
-	// resolveDerivedConfig's template-env merge and auto-expose project tier
-	// below cannot write through to CreateInputs.InlineConfig.Env or leave the
-	// new InlineConfig carrying merged values it didn't have explicitly.
+	// the auto-expose project tier below cannot write through to
+	// CreateInputs.InlineConfig.Env or leave the new InlineConfig carrying
+	// derived values it didn't have explicitly.
 	if createInputs.InlineConfig != nil {
 		fresh.InlineConfig = deepCopyScionConfig(createInputs.InlineConfig)
 		fresh.Image = fresh.InlineConfig.Image
