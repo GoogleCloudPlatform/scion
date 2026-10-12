@@ -897,8 +897,10 @@ export class ScionPageAgentCreate extends LitElement {
         warnings?: string[];
       };
       // The hub's create warnings (for example, a token issued without
-      // the artifact scopes); the toast stack outlives the navigation.
-      showResponseWarnings(result);
+      // the artifact scopes); the toast stack outlives the navigation. The
+      // start response may repeat one; `shownWarnings` toasts it once.
+      const shownWarnings = new Set<string>();
+      showResponseWarnings(result, shownWarnings);
       const agent = result.agent;
       const agentId = agent?.id || result.id;
 
@@ -924,7 +926,7 @@ export class ScionPageAgentCreate extends LitElement {
             const fallback = `HTTP ${startResp.status}`;
             startError = (await parseApiError(startResp, fallback)).message;
           } else {
-            await showResponseBodyWarnings(startResp);
+            await showResponseBodyWarnings(startResp, shownWarnings);
           }
         } catch (startErr) {
           startError =

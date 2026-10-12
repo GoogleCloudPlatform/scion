@@ -262,7 +262,7 @@ func printFullPlainText(r WhoamiResult) {
 		if list == "" {
 			list = "(none)"
 		}
-		fmt.Printf("Experiments: %s\n", list)
+		fmt.Printf("Exps:     %s\n", list)
 	}
 }
 

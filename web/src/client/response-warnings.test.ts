@@ -51,6 +51,14 @@ describe('showResponseWarnings', () => {
     expect(showToast).toHaveBeenNthCalledWith(2, 'second', 'warning', { duration: Infinity });
   });
 
+  it('skips warnings already shown in the same flow and records new ones', () => {
+    const shown = new Set<string>(['seen']);
+    expect(showResponseWarnings({ warnings: ['seen', 'new'] }, shown)).toEqual(['new']);
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith('new', 'warning', { duration: Infinity });
+    expect([...shown]).toEqual(['seen', 'new']);
+  });
+
   it('shows nothing without warnings', () => {
     expect(showResponseWarnings({ agent: { id: 'a' } })).toEqual([]);
     expect(showToast).not.toHaveBeenCalled();

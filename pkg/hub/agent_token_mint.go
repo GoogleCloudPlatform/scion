@@ -168,11 +168,11 @@ func droppedScopesWarning(agent *store.Agent, grant *AgentTokenGrant) string {
 	if grant == nil || len(grant.DroppedScopes) == 0 {
 		return ""
 	}
+	// The command names the agent by slug only: a display name may hold
+	// spaces or other characters that break the command when pasted.
 	agentName := "<agent>"
 	if agent != nil && agent.Slug != "" {
 		agentName = agent.Slug
-	} else if agent != nil && agent.Name != "" {
-		agentName = agent.Name
 	}
 	names := make([]string, len(grant.DroppedScopes))
 	for i, scope := range grant.DroppedScopes {
@@ -185,7 +185,7 @@ func droppedScopesWarning(agent *store.Agent, grant *AgentTokenGrant) string {
 	return fmt.Sprintf("agent token issued without the %s %s: the scope ceiling of the agent's creator does not allow %s, "+
 		"so artifact commands will fail with missing_scope. Recreating the agent from the same parent gives it the same scopes; "+
 		"once the creator holds them, a hub super-admin can run 'scion reset-auth %s --reissue-scopes'",
-		strings.Join(names, ", "), noun, verb, agentName)
+		strings.Join(names, " and "), noun, verb, agentName)
 }
 
 // SignAgentToken signs grant for runID with the server's token service.

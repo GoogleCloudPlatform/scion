@@ -270,7 +270,7 @@ func assertDroppedScopesWarning(t *testing.T, rec *httptest.ResponseRecorder, sl
 func TestDroppedScopesWarningText(t *testing.T) {
 	both := droppedScopesWarning(&store.Agent{Slug: "worker-1", Name: "Worker 1"},
 		&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
-	assert.Contains(t, both, "without the project:artifact:read, project:artifact:write scopes")
+	assert.Contains(t, both, "without the project:artifact:read and project:artifact:write scopes")
 	assert.Contains(t, both, "scope ceiling of the agent's creator does not allow them")
 	assert.Contains(t, both, "missing_scope")
 	assert.Contains(t, both, "same parent gives it the same scopes")
@@ -279,7 +279,12 @@ func TestDroppedScopesWarningText(t *testing.T) {
 	one := droppedScopesWarning(&store.Agent{Name: "Worker 2"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead}})
 	assert.Contains(t, one, "without the project:artifact:read scope:")
 	assert.Contains(t, one, "does not allow it,")
-	assert.Contains(t, one, "'scion reset-auth Worker 2 --reissue-scopes'")
+	assert.Contains(t, one, "'scion reset-auth <agent> --reissue-scopes'", "a display name is never used in the command")
+	assert.NotContains(t, one, "Worker 2")
+
+	slugged := droppedScopesWarning(&store.Agent{Slug: "worker-3", Name: "Worker 3 (docs site)"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactWrite}})
+	assert.Contains(t, slugged, "'scion reset-auth worker-3 --reissue-scopes'")
+	assert.NotContains(t, slugged, "Worker 3")
 
 	assert.Empty(t, droppedScopesWarning(&store.Agent{Slug: "w"}, &AgentTokenGrant{}))
 	assert.Empty(t, droppedScopesWarning(&store.Agent{Slug: "w"}, nil))

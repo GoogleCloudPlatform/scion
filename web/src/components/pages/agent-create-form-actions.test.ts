@@ -291,4 +291,30 @@ describe('Create Agent form actions', () => {
     });
     expect(navigations).toEqual(['/agents/agent-1']);
   });
+
+  it('toasts a warning repeated by the create and start responses once', async () => {
+    stubFetch(
+      undefined,
+      {
+        ok: true,
+        status: 200,
+        body: { agent: { id: 'agent-1' }, warnings: ['same warning', 'start only'] },
+      },
+      ['same warning']
+    );
+    const el = await mountAgentCreate();
+    const page = el as unknown as AgentCreateInternals;
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+
+    await clickStart(el);
+
+    expect(showToast).toHaveBeenCalledTimes(2);
+    expect(showToast).toHaveBeenNthCalledWith(1, 'same warning', 'warning', {
+      duration: Infinity,
+    });
+    expect(showToast).toHaveBeenNthCalledWith(2, 'start only', 'warning', {
+      duration: Infinity,
+    });
+  });
 });

@@ -37,26 +37,35 @@ export function responseWarnings(body: unknown): string[] {
 
 /**
  * Shows each warning of `body` as a warning toast that stays until closed
- * (they are actionable and often long), and returns them.
+ * (they are actionable and often long), and returns the ones it showed.
+ * When `shown` is given, a warning already in it is skipped and each shown
+ * warning is added, so one flow (create, then start) toasts a text once.
  */
-export function showResponseWarnings(body: unknown): string[] {
-  const warnings = responseWarnings(body);
-  for (const w of warnings) {
+export function showResponseWarnings(body: unknown, shown?: Set<string>): string[] {
+  const out: string[] = [];
+  for (const w of responseWarnings(body)) {
+    if (shown?.has(w)) continue;
+    shown?.add(w);
     showToast(w, 'warning', { duration: Infinity });
+    out.push(w);
   }
-  return warnings;
+  return out;
 }
 
 /**
- * Reads the JSON body of a successful `response` and shows its warnings. A
- * body that is missing or not JSON shows nothing. It consumes the body.
+ * Reads the JSON body of a successful `response` and shows its warnings
+ * (see showResponseWarnings for `shown`). A body that is missing or not
+ * JSON shows nothing. It consumes the body.
  */
-export async function showResponseBodyWarnings(response: Response): Promise<string[]> {
+export async function showResponseBodyWarnings(
+  response: Response,
+  shown?: Set<string>
+): Promise<string[]> {
   let body: unknown;
   try {
     body = await response.json();
   } catch {
     return [];
   }
-  return showResponseWarnings(body);
+  return showResponseWarnings(body, shown);
 }
