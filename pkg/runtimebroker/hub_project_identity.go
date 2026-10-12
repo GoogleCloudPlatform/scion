@@ -277,16 +277,37 @@ func (s *Server) projectAgentIDs(ctx context.Context, projectID string) (map[str
 // instance has agents in the project, so any such agent seen later is a new
 // one.
 func (s *Server) newProjectAgentsInUse(ctx context.Context, projectID string, known map[string]bool) (bool, error) {
-	if s.ownership != nil && s.locks().projectInUseByOthers(s, projectID) {
-		return true, nil
+	inUse, _, err := s.newProjectAgentsInUseReason(ctx, projectID, known)
+	return inUse, err
+}
+
+// Reasons newProjectAgentsInUseReason gives for a project in use.
+const (
+	projectInUseHere           = "a new agent of the project is in use on this Runtime Broker instance"
+	projectInUseSibling        = "another Runtime Broker instance of this host has live agents in the project"
+	projectInUseSiblingUnknown = "cannot tell: another Runtime Broker instance's records cannot be read"
+	projectInUseListingFailed  = "cannot tell: the project's agents could not be listed"
+)
+
+// newProjectAgentsInUseReason is newProjectAgentsInUse with the reason the
+// project counts as in use ("" when it does not), for the log.
+func (s *Server) newProjectAgentsInUseReason(ctx context.Context, projectID string, known map[string]bool) (bool, string, error) {
+	if s.ownership != nil {
+		used, unreadable := s.locks().projectUseByOthers(s, projectID)
+		switch {
+		case used:
+			return true, projectInUseSibling, nil
+		case unreadable:
+			return true, projectInUseSiblingUnknown, nil
+		}
 	}
 	if s.manager == nil {
 		// A broker without a manager runs no agents, so none can be in use.
-		return false, nil
+		return false, "", nil
 	}
 	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true", "scion.project_id": projectID})
 	if err != nil {
-		return true, err
+		return true, projectInUseListingFailed, err
 	}
 	for _, a := range agents {
 		if label, ok := a.Labels["scion.project_id"]; ok && label != projectID {
@@ -298,10 +319,10 @@ func (s *Server) newProjectAgentsInUse(ctx context.Context, projectID string, kn
 		switch state.Phase(a.Phase) {
 		case state.PhaseStopped, state.PhaseError:
 		default:
-			return true, nil
+			return true, projectInUseHere, nil
 		}
 	}
-	return false, nil
+	return false, "", nil
 }
 
 // alignHubManagedProjectIdentity applies recordHubProjectIdentity for an
