@@ -155,8 +155,8 @@ Two more `startHub()` options, both off by default:
   image registry setting (`SCION_IMAGE_REGISTRY` in `env`).
 
 The `harness-selftest` suite (`e2e/harness-selftest/`) checks these
-options against a stand-in binary, without Go:
-`npx playwright test -c e2e/harness-selftest/playwright.config.ts`.
+options against a stand-in binary, without Go or a browser:
+`npm run test:e2e-support` (also run by the ci.yml web job).
 
 ```typescript
 const state = await startHub({

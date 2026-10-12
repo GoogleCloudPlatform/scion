@@ -230,6 +230,14 @@ jobs:
         working-directory: ./web
         run: npm run test:e2e-perf
 
+      # Self-tests of the e2e harness (startHub options against a stand-in
+      # hub binary) and of the async create journey's pure helpers. Plain
+      # Playwright test runner: no browser, no Go, a few seconds.
+      - name: Test e2e support code (harness-selftest)
+        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
+        working-directory: ./web
+        run: npm run test:e2e-support
+
       - name: Run Web Tests
         if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
         working-directory: ./web

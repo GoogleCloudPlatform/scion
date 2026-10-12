@@ -373,7 +373,10 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     '--dev-auth',
   ];
   if (options.runtimeBroker) {
-    const brokerPort = await findFreePort();
+    // Two probes can return the same free port; the broker needs its own.
+    let brokerPort = await findFreePort();
+    for (let i = 0; i < 10 && brokerPort === port; i++) brokerPort = await findFreePort();
+    if (brokerPort === port) throw new Error('startHub: no free port for the runtime broker');
     args.push(
       '--enable-runtime-broker',
       '--runtime-broker-port',

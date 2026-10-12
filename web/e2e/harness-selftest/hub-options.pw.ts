@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 /**
  * Self-test of startHub's options (../harness/hub.ts) with a stand-in hub
  * binary. The stand-in is a Node script that records each invocation (argv
