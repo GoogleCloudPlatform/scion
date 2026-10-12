@@ -718,28 +718,32 @@ var hubOperations = []OperationSpec{
 	{
 		ID:          "quota.read",
 		Domain:      "quota",
-		Description: "Read limit definitions, entitlements, and usage",
+		Description: "Read limit definitions, entitlements, and usage. The route guard checks quota.read on the hub-scoped quota target",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}", Method: "GET"},
+			// handleLimitEntitlements (handlers_quota.go) lists a limit's
+			// entitlement bindings under the admin.limits.byId guard.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}/entitlements", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/entitlements/{id}", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/usage", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/usage/{limit}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "quota.read",
 		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestQuotaAdminToken_ResolvesHubTarget"}},
+		Bearer:           AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
 		ID:          "quota.create",
 		Domain:      "quota",
-		Description: "Create limit definitions and entitlement bindings",
+		Description: "Create limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:create",
 		EntryPoints: []EntryPoint{
 			// handleAdminEntitlementByID (handlers_quota.go) is GET/PUT/
 			// DELETE only; creation is nested under its parent limit
@@ -748,48 +752,69 @@ var hubOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}/entitlements", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "quota.create",
 		Effects:          []SecurityEffect{EffectCreateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestQuotaAdminToken_ResolvesHubTarget"}},
+		Bearer:           AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
 		ID:          "quota.update",
 		Domain:      "quota",
-		Description: "Update limit definitions and entitlement bindings",
+		Description: "Update limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:update",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/entitlements/{id}", Method: "PUT"},
-			// ptone/scion#2061 P2, ptone/scion#2177: writing a per-broker
-			// setting (design.md §5.3/§5.4) requires the key's declared
-			// permission; maxAgents (pkg/hub/brokersettings) declares
-			// quota.update, same as every other quota admin write.
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/settings", Method: "PUT"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "quota.update",
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestQuotaAdminToken_ResolvesHubTarget"}},
+		Bearer:           AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
+		ID:          "quota.brokersettings.update",
+		Domain:      "quota",
+		Description: "Replace a runtime broker's settings document. Requires broker.read on the broker and quota.update on the hub-scoped quota target for every write, including one that changes no key, and each changed key's declared permission (maxAgents declares quota.update)",
+		EntryPoints: []EntryPoint{
+			// ptone/scion#2061 P2, ptone/scion#2177: the per-broker
+			// settings PUT (design.md §5.3/§5.4) is dispatched inside
+			// handleRuntimeBrokerRoutes, not a separate mux pattern.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/settings", Method: "PUT"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "quota.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestBrokerSettingsPut_RequiresQuotaUpdateEvenWithoutChanges"},
+			{Package: "pkg/hub", Function: "TestBrokerSettingsPut_EachChangedKeyIsAuthorized"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
 		ID:          "quota.delete",
 		Domain:      "quota",
-		Description: "Delete limit definitions and entitlement bindings",
+		Description: "Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}", Method: "DELETE"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/entitlements/{id}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "quota.delete",
 		Effects:          []SecurityEffect{EffectDeleteResource},
@@ -802,7 +827,33 @@ var hubOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestQuotaAdminToken_ResolvesHubTarget"}},
+		Bearer:      AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
+		ID:          "quota.usage.self.read",
+		Domain:      "quota",
+		Description: "Read the caller's own quota usage: each limit's effective value and active count for the caller only",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/usage/me", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "none",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestUsageMe_ReturnsOnlyTheHolder"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Returns only the caller's own usage; carries no other user's records",
+			Scope:  "caller's own quota usage only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestUsageMe_ReturnsOnlyTheHolder"},
 	},
 	{
 		ID:          "hub.policies.removed",

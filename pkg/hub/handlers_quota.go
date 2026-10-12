@@ -157,8 +157,9 @@ type myUsageResponse struct {
 
 // handleAdminLimits handles GET (list) and POST (create) on
 // /api/v1/admin/limits.
-// Authorization: route guard checks quota.read for GET.
-// POST requires quota.create via inline Decide.
+// Authorization: the route guard checks quota.read on the hub-scoped quota
+// target for every method; POST also requires quota.create
+// (requireWritePermissionForQuota).
 func (s *Server) handleAdminLimits(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -288,7 +289,10 @@ func (s *Server) handleAdminUsageByLimit(w http.ResponseWriter, r *http.Request)
 	s.getUsageByLimit(w, r, limitID)
 }
 
-// handleUsageMe handles GET on /api/v1/usage/me.
+// handleUsageMe handles GET on /api/v1/usage/me. It needs no permission: the
+// response holds only the caller's own usage (getMyUsage keys every lookup
+// off the caller's identity), so a user access token reads it with any
+// selector on either boundary.
 func (s *Server) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -924,9 +928,11 @@ func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {
 // Authorization helper
 // ---------------------------------------------------------------------------
 
-// requireWritePermissionForQuota checks that the authenticated user has the
-// specified quota permission. It uses the same pattern as requireWritePermission
-// but with the "quota" resource type.
+// requireWritePermissionForQuota checks that the authenticated user holds the
+// specified quota permission on the hub-scoped quota target
+// (hubScopedResource("quota", "hub")), the same target the quota route guard
+// checks. A user access token is admitted only with the permission's
+// selector on a hub boundary; a target without hub evidence denies.
 func (s *Server) requireWritePermissionForQuota(w http.ResponseWriter, r *http.Request, permission string, action string) (UserIdentity, bool) {
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
@@ -945,7 +951,7 @@ func (s *Server) requireWritePermissionForQuota(w http.ResponseWriter, r *http.R
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "quota", ID: "hub"},
+		Resource:   hubScopedResource("quota", "hub"),
 		Action:     Action(action),
 		Permission: permission,
 	})

@@ -202,17 +202,28 @@ func TestBrokerSettings_Put_OwnerCannotClearViaOmission(t *testing.T) {
 		assertUnchanged(t)
 	})
 
-	// Re-sending the identical current value is a no-op for the stored
-	// value, so it needs no permission: this is the "either allowed or 403,
-	// pick one and test it" case from review round 1. It must also be a
-	// true no-op on an *existing* row (review round 3, F4/C1 coverage): no
-	// revision bump and no updatedBy rewrite, which would otherwise
-	// misattribute the admin-set value to the owner who merely re-sent it.
-	t.Run("identical value is allowed without permission", func(t *testing.T) {
+	// Every PUT needs quota.update, so re-sending the identical current
+	// value is refused for the owner and leaves the row as it was.
+	t.Run("identical value needs quota.update", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, owner, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+			"settings":         map[string]interface{}{"maxAgents": 3},
+			"expectedRevision": 1,
+		})
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertUnchanged(t)
+	})
+
+	// A caller holding quota.update who re-sends the identical current
+	// value gets 200 with a true no-op on the existing row: no revision
+	// bump and no updatedBy rewrite, which would otherwise misattribute
+	// the admin-set value to the caller who re-sent it.
+	t.Run("identical value is a no-op for a quota.update holder", func(t *testing.T) {
 		before, err := s.GetBrokerSettings(context.Background(), broker.ID)
 		require.NoError(t, err)
 
-		rec := doRequestAsUser(t, srv, owner, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+		granted := newPlainUser(t, s, "clear-omission-granted")
+		grantUserActionOnResource(t, s, granted.ID, "quota", "hub", ActionUpdate)
+		rec := doRequestAsUser(t, srv, granted, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
 			"settings":         map[string]interface{}{"maxAgents": 3},
 			"expectedRevision": 1,
 		})
@@ -344,6 +355,8 @@ func int64ptrForTest(v int64) *int64 { return &v }
 func TestBrokerSettings_Put_NoOpOnFreshBrokerCreatesNoRow(t *testing.T) {
 	srv, s := testServer(t)
 	owner := newPlainUser(t, s, "noop-owner")
+	// Every PUT needs quota.update, including a no-op one.
+	grantUserActionOnResource(t, s, owner.ID, "quota", "hub", ActionUpdate)
 	broker := newBrokerSettingsTestBroker(t, s, "noop-fresh", owner.ID)
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{

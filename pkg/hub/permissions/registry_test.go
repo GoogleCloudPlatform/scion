@@ -130,6 +130,12 @@ var expectedSelectorRegistry = map[string][]string{
 	"scheduled_event:list":   {"scheduled_event.list"},
 	"scheduled_event:read":   {"scheduled_event.read"},
 	"scheduled_event:update": {"scheduled_event.update"},
+
+	// quota selectors (hub-wide limit, entitlement and usage administration).
+	"quota:create": {"quota.create"},
+	"quota:delete": {"quota.delete"},
+	"quota:read":   {"quota.read"},
+	"quota:update": {"quota.update"},
 }
 
 func TestValidateSelectorRegistry_PinnedSnapshot(t *testing.T) {

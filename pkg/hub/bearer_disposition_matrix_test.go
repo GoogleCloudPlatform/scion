@@ -173,7 +173,8 @@ func bearerMatrixGuardSelector(ep authzop.EntryPoint) string {
 
 // bearerMatrixCompanionSelectors lists, per operation, the selectors an
 // admitting token carries besides the operation's own: the operation also
-// checks project:read or agent:read on a target the record names.
+// checks project:read or agent:read on a target the record names, or
+// broker:read on the broker whose settings it writes.
 var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"inbox.conversation.create":              {"project:read"},
 	"inbox.conversation.direct.read":         {"agent:read"},
@@ -182,6 +183,7 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"inbox.conversation.resolve":             {"project:read"},
 	"inbox.notification.subscription.create": {"project:read"},
 	"inbox.notification.template.create":     {"project:read"},
+	"quota.brokersettings.update":            {"broker:read"},
 }
 
 // TestBearerDispositionMatrix_CatalogEntryPoints drives real tokens through

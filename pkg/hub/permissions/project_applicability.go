@@ -143,10 +143,11 @@ var ProjectTargetApplicability = map[string]bool{
 	"test_identity.issue":       false,
 	"test_identity.issue_admin": false, "test_identity.issue_super_admin": false,
 
-	// quota.* — every live route (handlers_quota.go) authorizes against
-	// Resource{Type:"quota", ID:"hub"}, matching this family's own
-	// CollectionTargetClasses (HubResource for all four). Reviewed false: no
-	// project target exists for these permissions today.
+	// quota.* — every live check (the quota route guard, handlers_quota.go
+	// and broker_settings_handlers.go) authorizes against the hub-scoped
+	// quota target hubScopedResource("quota", "hub"), matching this family's
+	// own CollectionTargetClasses (HubResource for all four). False: no
+	// project target exists for these permissions.
 	"quota.read": false, "quota.create": false, "quota.update": false, "quota.delete": false,
 
 	// role.* — role DEFINITIONS are hub-wide, never project-scoped.
@@ -268,6 +269,11 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"hub.integrations.read": {BoundaryKindHub}, "hub.integrations.update": {BoundaryKindHub},
 	"hub.teams_manifest.read": {BoundaryKindHub}, "hub.diagnostics.read": {BoundaryKindHub},
 	"hub.github_app.read": {BoundaryKindHub}, "hub.github_app.update": {BoundaryKindHub},
+
+	// quota.* administer hub-wide limits, entitlements and usage, so their
+	// selectors are hub-only.
+	"quota.read": {BoundaryKindHub}, "quota.create": {BoundaryKindHub},
+	"quota.update": {BoundaryKindHub}, "quota.delete": {BoundaryKindHub},
 }
 
 // SelectorAllowedBoundaries returns the reviewed boundary kinds for a single
@@ -447,6 +453,10 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"hub.integrations.read": {TargetClassKindHubResource}, "hub.integrations.update": {TargetClassKindHubResource},
 	"hub.teams_manifest.read": {TargetClassKindHubResource}, "hub.diagnostics.read": {TargetClassKindHubResource},
 	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
+
+	// quota.* target the hub-wide quota records.
+	"quota.read": {TargetClassKindHubResource}, "quota.create": {TargetClassKindHubResource},
+	"quota.update": {TargetClassKindHubResource}, "quota.delete": {TargetClassKindHubResource},
 }
 
 // SupportedTargetClassesFor returns the reviewed classes for permissionID.

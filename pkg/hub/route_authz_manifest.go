@@ -121,7 +121,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/secrets/": "authenticated", // Secret by key
 
 	// ── Usage ──────────────────────────────────────────────────────────
-	"/api/v1/usage/me": "authenticated", // User usage — requires session
+	"/api/v1/usage/me": "authenticated", // Caller's own quota usage
 
 	// ── Session metrics ────────────────────────────────────────────────
 	"/api/v1/metrics/session/": "authenticated", // Session metrics (DB-backed)
