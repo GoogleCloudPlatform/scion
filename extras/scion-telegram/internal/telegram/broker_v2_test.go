@@ -2322,6 +2322,16 @@ func captureOpenedStores(t *testing.T) *[]Store {
 	return &opened
 }
 
+// reserveFreeAddr returns a 127.0.0.1 address that was free a moment ago.
+func reserveFreeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	return addr
+}
+
 // postWebhookUpdate sends a no-op update to a webhook server and returns the
 // response status.
 func postWebhookUpdate(t *testing.T, addr, secret string) (int, error) {
@@ -2399,11 +2409,6 @@ func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
 			busy, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
 			defer busy.Close()
-			// freeAddr is an address that was free a moment ago.
-			free, err := net.Listen("tcp", "127.0.0.1:0")
-			require.NoError(t, err)
-			freeAddr := free.Addr().String()
-			require.NoError(t, free.Close())
 
 			b := NewV2(slog.Default())
 			defer b.Close()
@@ -2412,6 +2417,8 @@ func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
 			require.NoError(t, b.Configure(cfg))
 			server, store, api := b.webhookServer, b.store, b.api
 			require.NotNil(t, server)
+			// Reserved after the good Configure, so its bind cannot take it.
+			freeAddr := reserveFreeAddr(t)
 
 			bad := make(map[string]string, len(cfg))
 			for k, v := range cfg {
@@ -2501,7 +2508,7 @@ func TestV2_Reconfigure_NewListenAddressSwitchesServer(t *testing.T) {
 	require.NoError(t, b.Configure(cfg))
 	oldAddr := b.webhookServer.actualAddr
 
-	cfg["webhook_listen"] = "localhost:0"
+	cfg["webhook_listen"] = reserveFreeAddr(t)
 	require.NoError(t, b.Configure(cfg))
 	newAddr := b.webhookServer.actualAddr
 	assert.NotEqual(t, oldAddr, newAddr)
