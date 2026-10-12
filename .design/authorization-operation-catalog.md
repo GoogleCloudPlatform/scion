@@ -4163,6 +4163,8 @@
 - `pkg/hub:TestFederationToken_UserAccessTokenNeedsMintScope`
 - `pkg/hub:TestFederationToken_AudienceAllowList`
 - `pkg/hub:TestFederationToken_AuditWritten`
+- `pkg/hub:TestFederationToken_AuditFailureIssuesNothing`
+- `pkg/hub:TestFederationToken_RefusedCredentialKinds`
 
 ---
 
