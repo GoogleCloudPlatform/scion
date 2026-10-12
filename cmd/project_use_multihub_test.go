@@ -644,12 +644,17 @@ func TestUseMultiHub_SettingsHubJoinsRegisteredHubs(t *testing.T) {
 
 	stdout, _, err := runScion(t, "use", "foo")
 	require.NoError(t, err)
-	assert.Equal(t, "Now using project 'foo' on hub 'local' ("+other.URL()+").\n", stdout)
 	assert.Positive(t, prod.lists.Load(), "the registered hubs are searched too")
 	assert.Positive(t, staging.lists.Load(), "the registered hubs are searched too")
+	// The settings hub gets an entry with a nickname derived from its URL
+	// (not "local": that is only for a hub reached with dev auth), and is
+	// now the current hub.
 	c := readTestContext(t)
-	require.NotNil(t, c.Hubs["local"])
-	assert.Equal(t, other.URL(), c.Hubs["local"].Endpoint)
+	name, h := c.HubByEndpoint(other.URL())
+	require.NotNil(t, h, "the settings hub got an entry")
+	assert.NotContains(t, []string{"prod", "staging"}, name)
+	assert.Equal(t, name, c.CurrentHub)
+	assert.Equal(t, "Now using project 'foo' on hub '"+name+"' ("+other.URL()+").\n", stdout)
 }
 
 // Each hub's lookup has its own timeout: a hub that never answers is
