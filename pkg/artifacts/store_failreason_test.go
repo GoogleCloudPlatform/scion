@@ -27,8 +27,11 @@ import (
 // without touching existing rows (a failed version keeps every value and
 // has no reason, so it lists as discarded), and Init stays idempotent.
 func TestStoreMigratesVersionFailReason(t *testing.T) {
-	if last := migrations[len(migrations)-1]; last.name != migrationVersionFailReason || last.name != "0008_version_fail_reason" {
-		t.Fatalf("last migration %q, want 0008_version_fail_reason", last.name)
+	if last := migrations[len(migrations)-1]; last.name != migrationVersionFailReason {
+		t.Fatalf("last migration %q, want %q", last.name, migrationVersionFailReason)
+	}
+	if got := migrationVersionFailReason; got != "0008_version_fail_reason" {
+		t.Fatalf("migrationVersionFailReason = %q, want 0008_version_fail_reason", got)
 	}
 	for _, b := range testBackends() {
 		t.Run(b.name, func(t *testing.T) {
