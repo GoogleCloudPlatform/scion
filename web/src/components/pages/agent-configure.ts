@@ -416,8 +416,8 @@ export class ScionPageAgentConfigure extends LitElement {
             ? 'Passthrough'
             : 'Block';
       return html`<div slot="help-text">
-        ${KUBERNETES_BLOCK_HINT} This agent's current identity is
-        "${modeLabel}", as previously configured; it stays in effect until you change it here.
+        ${KUBERNETES_BLOCK_HINT} This agent's current identity is "${modeLabel}", as previously
+        configured; it stays in effect until you change it here.
       </div>`;
     }
     return html`<div slot="help-text">
