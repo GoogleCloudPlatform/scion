@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -150,6 +151,15 @@ func (cfg AuthConfig) isTransportIdentity(email string) bool {
 // isTransportIdentity reports whether email is a transport identity of r.
 func (r *GoogleIdentityResolver) isTransportIdentity(email string) bool {
 	return isReservedPlatformIdentity(email, r.platformAuthSA) || r.driverPrincipals.contains(email)
+}
+
+// logProxyDriverCreateRefusal logs an admin request refused because it would
+// create a user for a proxy driver principal: the endpoint, the acting
+// principal and the email, with the specific reason. The answer to the
+// caller stays generic (proxyDriverPrincipalUserMessage).
+func logProxyDriverCreateRefusal(endpoint, actorID, email string) {
+	slog.Warn("user creation refused: the email is a proxy driver principal",
+		"endpoint", endpoint, "actor", actorID, "email", email, "reason", "proxy_driver_principal")
 }
 
 // writeDriverPrincipalRefusal answers a driver principal request that has no

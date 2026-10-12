@@ -661,24 +661,38 @@ func TestTIWebIAP_DriverIsNeverAUserOnOtherPaths(t *testing.T) {
 	})
 
 	t.Run("PAT", func(t *testing.T) {
-		ensureHubMembership(ctx, e.st, pre.ID)
-		projectID := generateID()
-		require.NoError(t, e.st.CreateProject(ctx, &store.Project{ID: projectID, Name: "ws2-driver-pat", Slug: "ws2-driver-pat-" + projectID[:8], CreatedBy: pre.ID}))
-		ownerRD, err := e.st.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-		require.NoError(t, err)
-		_, err = e.st.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: ownerRD.ID, PrincipalType: store.RoleBindingPrincipalUser,
-			PrincipalID: pre.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test"})
-		require.NoError(t, err)
-		mintCtx := contextWithCredentialContext(
-			contextWithIdentity(context.Background(), NewAuthenticatedUser(pre.ID, pre.Email, "Driver", "member", string(ClientTypeAPI))),
-			CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
-		key, _, err := e.srv.uatService.CreateToken(mintCtx, pre.ID, "driver-pat", projectID, []string{"agent:read"}, nil)
-		require.NoError(t, err, "a PAT minted before the email was listed")
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
-		req.Header.Set("Authorization", "Bearer "+key)
-		rec := httptest.NewRecorder()
-		e.srv.Handler().ServeHTTP(rec, req)
+		// mintPAT gives u a PAT on its own project, as the user would mint it.
+		mintPAT := func(u *store.User, name string) string {
+			ensureHubMembership(ctx, e.st, u.ID)
+			projectID := generateID()
+			require.NoError(t, e.st.CreateProject(ctx, &store.Project{ID: projectID, Name: name, Slug: name + "-" + projectID[:8], CreatedBy: u.ID}))
+			ownerRD, err := e.st.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+			require.NoError(t, err)
+			_, err = e.st.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: ownerRD.ID, PrincipalType: store.RoleBindingPrincipalUser,
+				PrincipalID: u.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test"})
+			require.NoError(t, err)
+			mintCtx := contextWithCredentialContext(
+				contextWithIdentity(context.Background(), NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, "member", string(ClientTypeAPI))),
+				CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
+			key, _, err := e.srv.uatService.CreateToken(mintCtx, u.ID, name, projectID, []string{"agent:read"}, nil)
+			require.NoError(t, err)
+			return key
+		}
+		me := func(key string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+			req.Header.Set("Authorization", "Bearer "+key)
+			rec := httptest.NewRecorder()
+			e.srv.Handler().ServeHTTP(rec, req)
+			return rec
+		}
+		rec := me(mintPAT(pre, "ws2-driver-pat")) // minted before the email was listed
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "driver PAT: %s", rec.Body.String())
+
+		// Control: an ordinary user's PAT, minted the same way, works.
+		ordPAT := &store.User{ID: generateID(), Email: "ordinary-pat-user@example.com", Role: "member", Status: "active", Created: time.Now()}
+		require.NoError(t, e.st.CreateUser(ctx, ordPAT))
+		rec = me(mintPAT(ordPAT, "ws2-ordinary-pat"))
+		assert.NotEqual(t, http.StatusUnauthorized, rec.Code, "ordinary PAT is authenticated: %s", rec.Body.String())
 	})
 
 	t.Run("admin-initiated creation", func(t *testing.T) {
@@ -687,6 +701,7 @@ func TestTIWebIAP_DriverIsNeverAUserOnOtherPaths(t *testing.T) {
 		rec := doRequest(t, e2.srv, http.MethodPost, "/api/v1/admin/allow-list", AllowListAddRequest{Email: another})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), proxyDriverPrincipalUserMessage)
+		assert.NotContains(t, rec.Body.String(), "driver", "the answer does not reveal the driver list")
 		rec = doRequest(t, e2.srv, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: another})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), proxyDriverPrincipalUserMessage)
@@ -715,9 +730,10 @@ func TestTIWebIAP_DriverIsNeverAUserOnOtherPaths(t *testing.T) {
 		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
 		var resp ErrorResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-		assert.Equal(t, provisionReasonProxyDriverPrincipal, resp.Error.Details["reason"])
+		assert.Equal(t, provisionReasonEmailNotAllowed, resp.Error.Details["reason"], "a generic reason")
 		assert.Equal(t, "email", resp.Error.Details["field"])
 		assert.Equal(t, proxyDriverPrincipalUserMessage, resp.Error.Message)
+		assert.NotContains(t, rec.Body.String(), "driver", "the answer does not reveal the driver list")
 		tiNoUserRow(t, f.s, another)
 		rec = provisionAs(t, f.srv, f.superAdmin, map[string]interface{}{"email": "provisioned-ordinary@example.com"})
 		assert.True(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "ordinary email: %d %s", rec.Code, rec.Body.String())

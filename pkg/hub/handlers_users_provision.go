@@ -74,9 +74,11 @@ const (
 	// provisionReasonReservedTestIdentity refuses an email in the reserved
 	// test-identity domain.
 	provisionReasonReservedTestIdentity = "reserved_test_identity_domain"
-	// provisionReasonProxyDriverPrincipal: the email is a proxy driver
-	// principal (auth.proxy.driverPrincipals), which never becomes a user.
-	provisionReasonProxyDriverPrincipal = "proxy_driver_principal"
+	// provisionReasonEmailNotAllowed: the email can never be a hub user (a
+	// proxy driver principal). Generic on purpose: the settings API does not
+	// reveal the driver list, so the answer does not either; the specific
+	// reason is logged (logProxyDriverCreateRefusal).
+	provisionReasonEmailNotAllowed = "email_not_allowed"
 )
 
 // Advisory warnings (design §5.3). They never fail the request.
@@ -441,10 +443,10 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	}
 	spec.InvitedBy = actor.ID()
 	if s.proxyDrivers.contains(spec.Email) {
-		slog.Warn("user provisioning refused: the email is a proxy driver principal", "reason", provisionReasonProxyDriverPrincipal)
+		logProxyDriverCreateRefusal("user provisioning", actor.ID(), spec.Email)
 		(&provisionRequestError{status: http.StatusUnprocessableEntity, code: ErrCodeUnprocessable,
 			message: proxyDriverPrincipalUserMessage,
-			details: map[string]interface{}{"field": "email", "reason": provisionReasonProxyDriverPrincipal}}).write(w)
+			details: map[string]interface{}{"field": "email", "reason": provisionReasonEmailNotAllowed}}).write(w)
 		return
 	}
 

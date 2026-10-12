@@ -283,7 +283,7 @@ func (s *Server) handleAdminAllowListAdd(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if s.proxyDrivers.contains(email) {
-		slog.Warn("allow-list add refused: the email is a proxy driver principal", "reason", provisionReasonProxyDriverPrincipal)
+		logProxyDriverCreateRefusal("allow-list add", user.ID(), email)
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, proxyDriverPrincipalUserMessage, nil)
 		return
 	}
