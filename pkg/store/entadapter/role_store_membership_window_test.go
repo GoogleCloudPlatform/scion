@@ -218,3 +218,27 @@ func TestRoleBindingActiveAt(t *testing.T) {
 		})
 	}
 }
+
+func TestRoleBindingActiveAt_NilBindingInactive(t *testing.T) {
+	assert.False(t, roleBindingActiveAt(nil, membershipWindowNow))
+	assert.False(t, roleBindingActiveAt(nil, time.Time{}))
+}
+
+// A RoleStore built without NewRoleStore has no clock; activeRoleBindings
+// falls back to the wall clock instead of panicking, drops nil entries,
+// and leaves the input slice unchanged.
+func TestActiveRoleBindings_NoClockUsesWallClock(t *testing.T) {
+	r := &RoleStore{}
+	wall := time.Now()
+	expired := &ent.RoleBinding{ExpiresAt: timePtr(wall.Add(-time.Hour))}
+	unbounded := &ent.RoleBinding{}
+	current := &ent.RoleBinding{NotBefore: timePtr(wall.Add(-time.Hour)), ExpiresAt: timePtr(wall.Add(time.Hour))}
+	future := &ent.RoleBinding{NotBefore: timePtr(wall.Add(time.Hour))}
+	in := []*ent.RoleBinding{expired, unbounded, nil, current, future}
+
+	got := r.activeRoleBindings(in)
+
+	assert.Equal(t, []*ent.RoleBinding{unbounded, current}, got)
+	assert.Equal(t, []*ent.RoleBinding{expired, unbounded, nil, current, future}, in,
+		"activeRoleBindings must not modify its input")
+}
