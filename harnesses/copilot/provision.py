@@ -404,6 +404,11 @@ def _load_config_strictly(raw: bytes) -> Any:
     RecursionError when the content is not strict UTF-8, not JSON, holds an
     integer too long to convert, or holds NaN or Infinity, which copilot's
     own JSON parser rejects.
+
+    Mirrors scion_harness.read_json_skipping_comment_lines, except that it
+    takes bytes, rejects NaN and Infinity, and lets UnicodeDecodeError and
+    the long-integer ValueError reach the caller as unreadable content.
+    Follow-up to share one helper: ptone/scion#4665.
     """
     text = raw.decode("utf-8")
     lines = [ln for ln in text.splitlines() if not ln.strip().startswith("//")]
@@ -422,7 +427,9 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
             loaded = scion_harness.load_json(settings_path)
             if isinstance(loaded, dict):
                 settings = loaded
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError, RecursionError):
+            # Unreadable, not UTF-8, not JSON, an integer too long to
+            # convert, or nested too deeply: rewritten with the defaults.
             pass
 
     defaults = {"autoUpdate": False, "banner": "never"}
@@ -447,12 +454,21 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
                 loaded = _load_config_strictly(raw)
                 if isinstance(loaded, dict):
                     config = loaded
-            except (ValueError, RecursionError):
+            except RecursionError:
+                # Too deep for Python's decoder, though the host (Go, 10000
+                # levels) may still read sign-in from it: never replace it.
+                ctx.info(
+                    "~/.copilot/config.json is nested too deeply to read; "
+                    "leaving it unchanged (workspace not added to "
+                    "trustedFolders)"
+                )
+                return
+            except ValueError:
                 # Not cleanly readable: not JSON, not UTF-8, an integer too
-                # long to convert, NaN or Infinity, or nested too deeply.
-                # Rewriting it could only write back a lossy copy, so a file
-                # that may hold sign-in (the host's rule) is left untouched
-                # and any other file is replaced.
+                # long to convert, or NaN or Infinity. Rewriting it could
+                # only write back a lossy copy, so a file that may hold
+                # sign-in (the host's rule) is left untouched and any other
+                # file is replaced.
                 if _config_holds_sign_in(raw):
                     ctx.info(
                         "~/.copilot/config.json is not clean JSON but may hold "

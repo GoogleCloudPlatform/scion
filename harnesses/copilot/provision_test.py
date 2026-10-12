@@ -409,6 +409,68 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         self.assertEqual(self._provision_must_succeed()["method"], "none")
         self._assert_replaced()
 
+    def test_too_deep_sign_in_file_is_untouched(self) -> None:
+        # Find the first depth Python's decoder rejects; Go's limit is
+        # 10000 levels, so the host may still read sign-in from it.
+        def doc(n: int) -> str:
+            return '{"copilot_hmac_key": "placeholder-hmac", "theme": ' + "[" * n + "]" * n + "}"
+
+        def too_deep(n: int) -> bool:
+            try:
+                json.loads(doc(n))
+            except RecursionError:
+                return True
+            return False
+
+        lo, hi = 1, 9998  # 9998 arrays + the object = 9999 levels, within Go's limit
+        self.assertTrue(too_deep(hi), "Python's decoder accepts 9999 levels; test needs updating")
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if too_deep(mid):
+                hi = mid
+            else:
+                lo = mid + 1
+        raw = doc(lo).encode()
+        self._write_raw(raw)
+        self._provision_must_succeed()
+        self.assertEqual(self._read_raw(), raw)
+
+    # --- settings.json read site --------------------------------------------
+
+    def _settings_path(self) -> str:
+        return os.path.join(self.home, ".copilot", "settings.json")
+
+    def _assert_settings_defaults(self) -> None:
+        with open(self._settings_path(), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"autoUpdate": False, "banner": "never"})
+
+    def _write_settings_raw(self, raw: bytes) -> None:
+        os.makedirs(os.path.dirname(self._settings_path()), exist_ok=True)
+        with open(self._settings_path(), "wb") as f:
+            f.write(raw)
+
+    def test_non_utf8_settings_is_replaced_with_defaults(self) -> None:
+        self._write_settings_raw(b'{"theme": "dark\xff"}')
+        self._provision_must_succeed()
+        self._assert_settings_defaults()
+
+    def test_long_int_settings_is_replaced_with_defaults(self) -> None:
+        self._write_settings_raw(('{"theme": ' + self.LONG_INT + '}').encode())
+        self._provision_must_succeed()
+        self._assert_settings_defaults()
+
+    def test_unparseable_settings_is_replaced_with_defaults(self) -> None:
+        self._write_settings_raw(b'{"theme": ')
+        self._provision_must_succeed()
+        self._assert_settings_defaults()
+
+    def test_clean_settings_keeps_values(self) -> None:
+        self._write_settings_raw(b'{"autoUpdate": true, "theme": "dark"}')
+        self._provision_must_succeed()
+        with open(self._settings_path(), encoding="utf-8") as f:
+            self.assertEqual(json.load(f),
+                             {"autoUpdate": True, "banner": "never", "theme": "dark"})
+
     def test_unparseable_config_is_still_replaced(self) -> None:
         self._write_raw(b'{"theme": ')
         self.assertEqual(self._provision_must_succeed()["method"], "none")
