@@ -388,6 +388,23 @@ run "alert_objects_only_with_channels" {
   }
 }
 
+run "alert_filter_dedupes_impersonators" {
+  command = apply
+
+  variables {
+    impersonators = [
+      "serviceAccount:orchestrator@example-project.iam.gserviceaccount.com",
+      "serviceAccount:orchestrator@example-project.iam.gserviceaccount.com",
+    ]
+    alert_notification_channels = ["projects/example-project/notificationChannels/1234567890"]
+  }
+
+  assert {
+    condition     = length(regexall("orchestrator@example-project\\.iam\\.gserviceaccount\\.com", google_logging_metric.foreign_token_mint[0].filter)) == 1
+    error_message = "a repeated impersonator must appear once in the alert filter."
+  }
+}
+
 # --- Validation ---
 
 run "rejects_empty_impersonators" {

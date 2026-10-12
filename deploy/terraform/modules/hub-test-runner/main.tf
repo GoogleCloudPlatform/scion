@@ -18,7 +18,7 @@
 
 locals {
   # Bare emails of the impersonators, for the alert filter.
-  impersonator_emails = sort([for m in var.impersonators : trimprefix(m, "serviceAccount:")])
+  impersonator_emails = sort([for m in toset(var.impersonators) : trimprefix(m, "serviceAccount:")])
 
   # The project's IAM policy as decoded JSON. try(): anything unreadable
   # counts as "no audit config", so the precondition fails closed.
