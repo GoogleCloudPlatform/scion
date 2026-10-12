@@ -216,6 +216,24 @@ func TestThreadGroupList_EmptyProjectIsNonNil(t *testing.T) {
 	assert.Empty(t, list)
 }
 
+// TestThreadGroupList_ByteOrder pins section 7c's order as byte order of
+// name_key on every dialect: a collation-aware database sort would put
+// "équipe" among the e's and ignore the hyphen in "a-b".
+func TestThreadGroupList_ByteOrder(t *testing.T) {
+	cs := newThreadGroupTestStore(t)
+	projectID := uuid.NewString()
+	for _, name := range []string{"zeta", "Équipe", "ab", "a-b", "Echo", "a b"} {
+		newThreadGroup(t, cs, projectID, name)
+	}
+	list, err := cs.ListThreadGroups(context.Background(), projectID)
+	require.NoError(t, err)
+	keys := make([]string, 0, len(list))
+	for _, g := range list {
+		keys = append(keys, g.NameKey)
+	}
+	assert.Equal(t, []string{"a b", "a-b", "ab", "echo", "zeta", "équipe"}, keys)
+}
+
 func TestThreadGroupCreate_Validation(t *testing.T) {
 	ctx := context.Background()
 	cs := newThreadGroupTestStore(t)
@@ -441,6 +459,8 @@ func TestThreadGroupRemoveMember(t *testing.T) {
 
 	require.NoError(t, cs.RemoveThreadGroupMember(ctx, g1.ID, c1))
 	require.NoError(t, cs.RemoveThreadGroupMember(ctx, g1.ID, c1), "idempotent")
+	require.NoError(t, cs.RemoveThreadGroupMember(ctx, "not-a-uuid", c2), "malformed group ID matches nothing")
+	require.ErrorIs(t, cs.RemoveThreadGroupMember(ctx, g1.ID, "not-a-uuid"), store.ErrInvalidInput)
 	got, err := cs.GetThreadGroup(ctx, g1.ID)
 	require.NoError(t, err)
 	assert.Equal(t, []string{c2}, memberConversationIDs(got))
@@ -771,4 +791,81 @@ func TestThreadGroupReads_SkipDeletedKeepArchived(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.ElementsMatch(t, []string{live, archived}, memberConversationIDs(&list[0]))
+}
+
+// --- Postgres row locks (design section 7d across transactions) -----------
+
+// TestThreadGroupSetMember_WaitsForUncommittedGroupDelete_Postgres: a filing
+// that races an uncommitted group delete waits on the group row lock (FOR
+// UPDATE) and, once the delete commits, finds no group: ErrNotFound and no
+// member row. Without the row lock it would insert an orphan member.
+func TestThreadGroupSetMember_WaitsForUncommittedGroupDelete_Postgres(t *testing.T) {
+	skipUnlessPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), lockOrderTimeout)
+	defer cancel()
+	cs := newThreadGroupTestStore(t)
+	projectID := uuid.NewString()
+	g := newThreadGroup(t, cs, projectID, "one")
+	conv := newGroupConversation(t, cs, projectID)
+
+	tx, err := cs.client.Tx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	require.NoError(t, newTxCompositeStore(tx).DeleteThreadGroup(ctx, g.ID))
+
+	done := make(chan error, 1)
+	go func() { done <- cs.SetThreadGroupMember(ctx, g.ID, conv, "u") }()
+	waitForLockWaiter(t, ctx, cs)
+	select {
+	case err := <-done:
+		t.Fatalf("SetThreadGroupMember returned before the delete committed: %v", err)
+	default:
+	}
+
+	require.NoError(t, tx.Commit())
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, store.ErrNotFound)
+	case <-ctx.Done():
+		t.Fatal("SetThreadGroupMember never returned")
+	}
+	assert.Zero(t, memberRows(t, cs, conv), "no orphan member row")
+}
+
+// TestThreadGroupDelete_WaitsForUncommittedFiling_Postgres: a group delete
+// that races an uncommitted filing waits on the group row, then removes the
+// member committed meanwhile. Deleting the members before the group row
+// would miss it and leave an orphan.
+func TestThreadGroupDelete_WaitsForUncommittedFiling_Postgres(t *testing.T) {
+	skipUnlessPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), lockOrderTimeout)
+	defer cancel()
+	cs := newThreadGroupTestStore(t)
+	projectID := uuid.NewString()
+	g := newThreadGroup(t, cs, projectID, "one")
+	conv := newGroupConversation(t, cs, projectID)
+
+	tx, err := cs.client.Tx(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	require.NoError(t, newTxCompositeStore(tx).SetThreadGroupMember(ctx, g.ID, conv, "u"))
+
+	done := make(chan error, 1)
+	go func() { done <- cs.DeleteThreadGroup(ctx, g.ID) }()
+	waitForLockWaiter(t, ctx, cs)
+	select {
+	case err := <-done:
+		t.Fatalf("DeleteThreadGroup returned before the filing committed: %v", err)
+	default:
+	}
+
+	require.NoError(t, tx.Commit())
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal("DeleteThreadGroup never returned")
+	}
+	assert.Zero(t, memberRows(t, cs, conv), "no orphan member row")
+	assert.Zero(t, groupMemberRows(t, cs, g.ID))
 }

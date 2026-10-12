@@ -3015,7 +3015,8 @@ type ThreadGroupStore interface {
 	GetThreadGroup(ctx context.Context, id string) (*ThreadGroup, error)
 
 	// ListThreadGroups returns a project's thread groups with their members,
-	// ordered by NameKey, each group's members ordered by AddedAt. A project
+	// ordered by NameKey in byte order (the same on every dialect), each
+	// group's members ordered by AddedAt. A project
 	// with no groups returns an empty, non-nil slice.
 	ListThreadGroups(ctx context.Context, projectID string) ([]ThreadGroup, error)
 
@@ -3038,8 +3039,8 @@ type ThreadGroupStore interface {
 	SetThreadGroupMember(ctx context.Context, groupID, conversationID, addedBy string) error
 
 	// RemoveThreadGroupMember takes a conversation out of a thread group. It
-	// is idempotent: a conversation that is not in that group is not an
-	// error.
+	// is idempotent: a conversation that is not in that group, or a group ID
+	// that matches no group (including a malformed one), is not an error.
 	RemoveThreadGroupMember(ctx context.Context, groupID, conversationID string) error
 
 	// RemoveThreadGroupMembersForConversation removes a conversation from

@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -52,27 +53,6 @@ func NewThreadGroupStore(client *ent.Client) *ThreadGroupStore {
 // Compile-time assertion.
 var _ store.ThreadGroupStore = (*ThreadGroupStore)(nil)
 
-// runInEntTx runs fn in a transaction on client and commits it if fn
-// returns nil. When inTx is set, client already wraps the ambient WithTx
-// transaction, so fn runs on it directly (a second Tx call would fail).
-func runInEntTx(ctx context.Context, client *ent.Client, inTx bool, fn func(c *ent.Client) error) error {
-	if inTx {
-		return fn(client)
-	}
-	tx, err := client.Tx(ctx)
-	if err != nil {
-		return markTransient(fmt.Errorf("begin transaction: %w", err))
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := fn(tx.Client()); err != nil {
-		return markTransient(err)
-	}
-	if err := tx.Commit(); err != nil {
-		return markTransient(fmt.Errorf("commit transaction: %w", err))
-	}
-	return nil
-}
-
 func entThreadGroupToStore(e *ent.ThreadGroup) store.ThreadGroup {
 	return store.ThreadGroup{
 		ID:            e.ID.String(),
@@ -101,15 +81,18 @@ func entThreadGroupMemberToStore(e *ent.ThreadGroupMember) store.ThreadGroupMemb
 // liveConversationMember restricts a member query to members whose
 // conversation row exists and is not soft-deleted (design section 7a: a
 // missed cleanup never shows up). Archived conversations stay visible
-// (section 7a2).
+// (section 7a2). It is a correlated EXISTS on the conversations primary key,
+// so the cost follows the group's members, not the size of the hub.
 func liveConversationMember() predicate.ThreadGroupMember {
 	return func(s *entsql.Selector) {
 		t := entsql.Table(conversation.Table)
-		s.Where(entsql.In(
-			s.C(threadgroupmember.FieldConversationID),
+		s.Where(entsql.Exists(
 			entsql.Select(t.C(conversation.FieldID)).
 				From(t).
-				Where(entsql.IsNull(t.C(conversation.FieldDeletedAt))),
+				Where(entsql.And(
+					entsql.ColumnsEQ(t.C(conversation.FieldID), s.C(threadgroupmember.FieldConversationID)),
+					entsql.IsNull(t.C(conversation.FieldDeletedAt)),
+				)),
 		))
 	}
 }
@@ -220,8 +203,8 @@ func (s *ThreadGroupStore) GetThreadGroup(ctx context.Context, id string) (*stor
 	return &groups[0], nil
 }
 
-// ListThreadGroups returns a project's thread groups, ordered by name key,
-// with their live members.
+// ListThreadGroups returns a project's thread groups, ordered by name key in
+// byte order, with their live members.
 func (s *ThreadGroupStore) ListThreadGroups(ctx context.Context, projectID string) ([]store.ThreadGroup, error) {
 	pid, err := parseUUID(projectID)
 	if err != nil {
@@ -241,6 +224,15 @@ func (s *ThreadGroupStore) ListThreadGroups(ctx context.Context, projectID strin
 	for _, r := range rows {
 		groups = append(groups, entThreadGroupToStore(r))
 	}
+	// Sort in Go, byte by byte: Postgres would order name_key by the
+	// database collation, so ORDER BY alone gives a dialect-dependent order
+	// for non-ASCII names and punctuation (design section 7c).
+	sort.SliceStable(groups, func(i, j int) bool {
+		if groups[i].NameKey != groups[j].NameKey {
+			return groups[i].NameKey < groups[j].NameKey
+		}
+		return groups[i].ID < groups[j].ID
+	})
 	if err := attachMembers(ctx, s.client, groups); err != nil {
 		return nil, err
 	}
@@ -338,10 +330,13 @@ func (s *ThreadGroupStore) SetThreadGroupMember(ctx context.Context, groupID, co
 }
 
 // RemoveThreadGroupMember takes a conversation out of a group. Idempotent.
+// A malformed group ID matches no group, so, as with the other group ID
+// lookups, it is treated as not found, which this idempotent call reports as
+// nil.
 func (s *ThreadGroupStore) RemoveThreadGroupMember(ctx context.Context, groupID, conversationID string) error {
-	gid, err := parseUUID(groupID)
+	gid, err := parseGetID(groupID)
 	if err != nil {
-		return err
+		return nil
 	}
 	cid, err := parseUUID(conversationID)
 	if err != nil {

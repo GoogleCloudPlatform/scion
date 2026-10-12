@@ -214,10 +214,10 @@ func (s *ConversationStore) GetConversation(ctx context.Context, id string) (*st
 
 // UpdateConversation updates an existing conversation.
 //
-// When the update newly sets deleted_at (the stored row had none), the
-// conversation's thread group membership is removed in the same transaction
-// (ptone/scion#4424, design section 7a). Clearing deleted_at does not bring
-// the membership back.
+// When the update carries a deleted_at, the conversation's thread group
+// membership is removed in the same transaction (ptone/scion#4424, design
+// section 7a). This is idempotent: a conversation that is already deleted
+// has no members. Clearing deleted_at does not bring the membership back.
 func (s *ConversationStore) UpdateConversation(ctx context.Context, conv *store.Conversation) error {
 	if conv == nil {
 		return fmt.Errorf("conversation is nil: %w", store.ErrInvalidInput)
@@ -236,17 +236,8 @@ func (s *ConversationStore) UpdateConversation(ctx context.Context, conv *store.
 		return s.updateConversation(ctx, s.client, uid, agentUID, conv)
 	}
 	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
-		wasLive, err := c.Conversation.Query().
-			Where(conversation.IDEQ(uid), conversation.DeletedAtIsNil()).
-			Exist(ctx)
-		if err != nil {
-			return err
-		}
 		if err := s.updateConversation(ctx, c, uid, agentUID, conv); err != nil {
 			return err
-		}
-		if !wasLive {
-			return nil
 		}
 		return removeThreadGroupMembersForConversation(ctx, c, uid)
 	})
