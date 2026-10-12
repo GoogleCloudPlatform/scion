@@ -394,7 +394,9 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_PreExistingDB_Idempotent \
 	TestUnreadMentionKeys_Postgres \
 	TestScheduledStore_Postgres \
-	TestWebChatStore_Postgres_MessagesInOtherSchema
+	TestWebChatStore_Postgres_MessagesInOtherSchema \
+	TestUserPrefsThreadGroupsMarker_Postgres \
+	TestUserPrefsThreadGroupsMigratedAt_Postgres_PreExistingDB
 
 test-webchat-postgres:
 	@echo "Running web chat store tests against Postgres..."

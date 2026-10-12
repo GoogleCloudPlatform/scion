@@ -327,6 +327,66 @@ func (s *ThreadGroupStore) SetThreadGroupMember(ctx context.Context, groupID, co
 	})
 }
 
+// AddThreadGroupMemberIfUnfiled files a conversation into a group only if
+// it is in no group yet, in one transaction that first checks (and on
+// Postgres locks) the group row, the same lock order as
+// SetThreadGroupMember. The insert is ON CONFLICT (conversation_id) DO
+// NOTHING, so a conversation filed before or concurrently is never moved.
+// It reports whether this call's row is the one that exists afterwards.
+func (s *ThreadGroupStore) AddThreadGroupMemberIfUnfiled(ctx context.Context, groupID, conversationID, addedBy string) (bool, error) {
+	gid, err := parseGetID(groupID)
+	if err != nil {
+		return false, err
+	}
+	cid, err := parseUUID(conversationID)
+	if err != nil {
+		return false, err
+	}
+	rowLocks := s.client.Driver().Dialect() == dialect.Postgres
+	filed := false
+	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		q := c.ThreadGroup.Query().Where(threadgroup.IDEQ(gid))
+		if rowLocks {
+			q = q.ForUpdate()
+		}
+		g, err := q.Only(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		id := uuid.New()
+		// CreateBulk, not Create: a single-row Create with DoNothing reads
+		// the row back with RETURNING and fails with sql.ErrNoRows when the
+		// insert is skipped (see armLaunchReaper).
+		err = c.ThreadGroupMember.CreateBulk(
+			c.ThreadGroupMember.Create().
+				SetID(id).
+				SetGroupID(gid).
+				SetProjectID(g.ProjectID).
+				SetConversationID(cid).
+				SetAddedBy(addedBy).
+				SetAddedAt(time.Now()),
+		).
+			OnConflictColumns(threadgroupmember.FieldConversationID).
+			DoNothing().
+			Exec(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		row, err := c.ThreadGroupMember.Query().
+			Where(threadgroupmember.ConversationIDEQ(cid)).
+			Only(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		filed = row.ID == id
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return filed, nil
+}
+
 // RemoveThreadGroupMember takes a conversation out of a group. Idempotent.
 // A malformed group ID matches no group, so, as with the other group ID
 // lookups, it is treated as not found, which this idempotent call reports as

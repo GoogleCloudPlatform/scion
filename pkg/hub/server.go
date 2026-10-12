@@ -5934,6 +5934,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// Start the scheduled chat message sweeper (exits when ctx is cancelled).
 	s.startScheduledSendSweeper(ctx)
 
+	// Start the migration of personal chat thread groups into project
+	// thread groups (ptone/scion#4424). It idles while
+	// hub.chat_thread_groups is off and exits when ctx is cancelled.
+	s.startThreadGroupMigrationSweeper(ctx)
+
 	// Start notification dispatcher (uses the current event publisher).
 	// The dispatcher is resolved lazily so it works even if SetDispatcher
 	// is called after Start().

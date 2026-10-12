@@ -159,7 +159,8 @@ CREATE TABLE IF NOT EXISTS webchat_user_prefs (
     space_order     TEXT,
     thread_sort_mode TEXT NOT NULL DEFAULT 'activity',
     thread_order    TEXT,
-    thread_groups   TEXT
+    thread_groups   TEXT,
+    thread_groups_migrated_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS webchat_dm (
@@ -983,14 +984,15 @@ DO UPDATE SET muted = EXCLUDED.muted
 func (s *pgWebChatStore) GetUserPrefs(ctx context.Context, userID string) (*WebChatUserPrefs, error) {
 	const query = `
 SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode,
-       COALESCE(thread_order, ''), COALESCE(thread_groups, '')
+       COALESCE(thread_order, ''), COALESCE(thread_groups, ''),
+       thread_groups_migrated_at IS NOT NULL
   FROM webchat_user_prefs
  WHERE user_id = $1
 `
 	var p WebChatUserPrefs
 	err := s.db.QueryRowContext(ctx, query, userID).Scan(
 		&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode,
-		&p.ThreadOrder, &p.ThreadGroups)
+		&p.ThreadOrder, &p.ThreadGroups, &p.ThreadGroupsMigrated)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return &WebChatUserPrefs{
@@ -1015,7 +1017,12 @@ DO UPDATE SET
     space_order = EXCLUDED.space_order,
     thread_sort_mode = EXCLUDED.thread_sort_mode,
     thread_order = EXCLUDED.thread_order,
-    thread_groups = EXCLUDED.thread_groups
+    thread_groups = EXCLUDED.thread_groups,
+    thread_groups_migrated_at = CASE
+        WHEN webchat_user_prefs.thread_groups IS NOT DISTINCT FROM EXCLUDED.thread_groups
+        THEN webchat_user_prefs.thread_groups_migrated_at
+        ELSE NULL
+    END
 `
 	var spaceOrder interface{}
 	if prefs.SpaceOrder != "" {
@@ -1035,6 +1042,63 @@ DO UPDATE SET
 		return fmt.Errorf("webchat store: set user prefs: %w", err)
 	}
 	return nil
+}
+
+// ListUserPrefsPendingThreadGroupMigration returns the rows whose personal
+// thread groups are not migrated yet.
+func (s *pgWebChatStore) ListUserPrefsPendingThreadGroupMigration(ctx context.Context) ([]WebChatUserPrefs, error) {
+	const query = `
+SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode,
+       COALESCE(thread_order, ''), thread_groups
+  FROM webchat_user_prefs
+ WHERE thread_groups IS NOT NULL AND thread_groups <> ''
+   AND thread_groups_migrated_at IS NULL
+ ORDER BY user_id
+`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list user prefs pending thread group migration: %w", err)
+	}
+	defer rows.Close()
+	var out []WebChatUserPrefs
+	for rows.Next() {
+		var p WebChatUserPrefs
+		if err := rows.Scan(&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode,
+			&p.ThreadOrder, &p.ThreadGroups); err != nil {
+			return nil, fmt.Errorf("webchat store: scan user prefs: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webchat store: list user prefs pending thread group migration: %w", err)
+	}
+	return out, nil
+}
+
+// MarkUserPrefsThreadGroupsMigrated marks a row migrated and writes its new
+// thread order if the row is unchanged since it was read.
+func (s *pgWebChatStore) MarkUserPrefsThreadGroupsMigrated(ctx context.Context, userID, threadGroups, oldThreadOrder, newThreadOrder string) (bool, error) {
+	const query = `
+UPDATE webchat_user_prefs
+   SET thread_order = $1, thread_groups_migrated_at = NOW()
+ WHERE user_id = $2
+   AND thread_groups_migrated_at IS NULL
+   AND COALESCE(thread_groups, '') = $3
+   AND COALESCE(thread_order, '') = $4
+`
+	var threadOrder interface{}
+	if newThreadOrder != "" {
+		threadOrder = newThreadOrder
+	}
+	res, err := s.db.ExecContext(ctx, query, threadOrder, userID, threadGroups, oldThreadOrder)
+	if err != nil {
+		return false, fmt.Errorf("webchat store: mark thread groups migrated: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("webchat store: mark thread groups migrated: %w", err)
+	}
+	return n > 0, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1372,6 +1436,9 @@ func (s *pgWebChatStore) runMigrations() error {
 	if err := s.addUserPrefsThreadColumns(); err != nil {
 		return fmt.Errorf("user prefs thread columns: %w", err)
 	}
+	if err := s.addUserPrefsThreadGroupsMigratedAt(); err != nil {
+		return fmt.Errorf("user prefs thread_groups_migrated_at column: %w", err)
+	}
 	return nil
 }
 
@@ -1538,6 +1605,24 @@ func (s *pgWebChatStore) addUserPrefsThreadColumns() error {
 	}
 
 	return s.markMigrationCompleted("user_prefs_thread_columns")
+}
+
+// addUserPrefsThreadGroupsMigratedAt adds the thread_groups_migrated_at
+// column (ptone/scion#4424, design section 5a) to webchat_user_prefs for
+// existing databases that lack it.
+func (s *pgWebChatStore) addUserPrefsThreadGroupsMigratedAt() error {
+	done, err := s.migrationCompleted("user_prefs_thread_groups_migrated_at")
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE webchat_user_prefs ADD COLUMN IF NOT EXISTS thread_groups_migrated_at TIMESTAMPTZ`)
+	if err != nil {
+		return err
+	}
+	return s.markMigrationCompleted("user_prefs_thread_groups_migrated_at")
 }
 
 // migrationCompleted checks whether a named migration has already run.
