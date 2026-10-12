@@ -655,12 +655,13 @@ func applyRestrictions(permIDs []string, restrictions []Restriction) []string {
 }
 
 // ProjectMembershipEvidence reports whether principal has a direct or
-// group-expanded ACTIVE project-scoped role binding for projectID, of a role
-// that confers membership (membershipBindings; a project-visitor binding is
-// not membership), permission-agnostic — membership is access, independent
-// of which specific permissions the bound role carries. Fails closed on an empty projectID, a
-// non-Active user status, or any store error. Local and federated user
-// principals only (see ErrUnsupportedPrincipalKind and requireActiveUser).
+// group-expanded ACTIVE project-scoped role binding for projectID, of a
+// role that confers membership (membershipBindings; a project-visitor
+// binding is not membership), permission-agnostic — membership is access,
+// independent of which specific permissions the bound role carries. Fails
+// closed on an empty projectID, a non-Active user status, or any store
+// error. Local and federated user principals only (see
+// ErrUnsupportedPrincipalKind and requireActiveUser).
 //
 // Deliberately not built from isProjectOwnerOrAdmin (its direct-membership
 // branch has no activation-window check).
@@ -675,7 +676,7 @@ func (a *AuthzService) ProjectMembershipEvidence(ctx context.Context, principal 
 		return false, "", err
 	}
 
-	directKey, groupKeys, bindings, err := a.projectMembershipInputs(ctx, principal)
+	directKey, groupKeys, bindings, roleDefs, err := a.projectMembershipInputs(ctx, principal)
 	if err != nil {
 		return false, "", err
 	}
@@ -693,7 +694,7 @@ func (a *AuthzService) ProjectMembershipEvidence(ctx context.Context, principal 
 	}
 	// Only a role that confers membership is membership: a project-visitor
 	// binding is not.
-	candidates, err = membershipBindings(ctx, a.store, candidates)
+	candidates, err = membershipBindings(candidates, roleDefs)
 	if err != nil {
 		return false, "", projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
 	}
@@ -710,40 +711,45 @@ func (a *AuthzService) ProjectMembershipEvidence(ctx context.Context, principal 
 }
 
 // projectMembershipInputs loads the principal closure and its unscoped role
-// bindings for ProjectMembershipEvidence. Its query shape (full closure, then
+// bindings for ProjectMembershipEvidence, and returns the resolver for their
+// role definitions. Its query shape (full closure, then
 // ListRoleBindingsForPrincipals with nil scope filters) is exactly the one
 // the request-local authz input memo serves, so when a memo is installed
 // and the mint-eligibility cache is not, it reads through the memo instead
 // of reloading: a scoped UAT's live project-access check and decide's own
-// steps 2-3 for the same principal then share one memo entry. Without a
-// memo (or with the mint-eligibility cache present) it loads exactly as
-// before. Load failures are tagged as project-access lookup faults on both
-// paths.
-func (a *AuthzService) projectMembershipInputs(ctx context.Context, principal PrincipalContext) (directKey string, groupKeys map[string]bool, bindings []*store.RoleBinding, err error) {
+// steps 2-4 for the same principal then share one memo entry, and the
+// resolver serves the memo's role definitions for those bindings. Without a
+// memo (or with the mint-eligibility cache present) it loads the closure and
+// bindings exactly as before, and the resolver loads only the definitions
+// it is asked for. Load failures are tagged as project-access lookup faults
+// on both paths.
+func (a *AuthzService) projectMembershipInputs(ctx context.Context, principal PrincipalContext) (directKey string, groupKeys map[string]bool, bindings []*store.RoleBinding, roleDefs roleDefsResolver, err error) {
 	if mintEligibilityCacheFromContext(ctx) == nil {
 		if h := a.inputsForPrincipal(ctx, principal); h != nil {
 			refs, err := h.Principals()
 			if err != nil {
-				return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: group resolution failed (fail-closed): %v", ErrProjectAccessDenied, err))
+				return "", nil, nil, nil, projectAccessLookupFault(fmt.Errorf("%w: group resolution failed (fail-closed): %v", ErrProjectAccessDenied, err))
 			}
 			bindings, err := h.Bindings()
 			if err != nil {
-				return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
+				return "", nil, nil, nil, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
 			}
 			directKey, groupKeys = closureKeys(refs)
-			return directKey, groupKeys, bindings, nil
+			// RoleDefs covers every binding Bindings returned, so the
+			// requested IDs are always a subset of its result.
+			return directKey, groupKeys, bindings, func([]string) (map[string]*RolePermissions, error) { return h.RoleDefs() }, nil
 		}
 	}
 
 	refs, directKey, groupKeys, err := a.principalClosure(ctx, principal)
 	if err != nil {
-		return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
+		return "", nil, nil, nil, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
 	}
 	bindings, err = a.store.ListRoleBindingsForPrincipals(ctx, refs, nil, nil)
 	if err != nil {
-		return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
+		return "", nil, nil, nil, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
 	}
-	return directKey, groupKeys, bindings, nil
+	return directKey, groupKeys, bindings, a.roleDefsLoader(ctx), nil
 }
 
 // closureKeys derives principalClosure's directKey and groupKeys from a
@@ -1394,7 +1400,7 @@ func (a *AuthzService) hasRelevantProjectAdmission(ctx context.Context, principa
 	}
 	// Project admission is membership: a binding of a role that does not
 	// confer membership (project-visitor) is not admission.
-	active, err = membershipBindings(ctx, a.store, active)
+	active, err = membershipBindings(active, a.roleDefsLoader(ctx))
 	if err != nil {
 		return false, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
 	}
