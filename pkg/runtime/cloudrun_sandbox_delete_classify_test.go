@@ -69,7 +69,6 @@ func TestClassifySandboxDelete(t *testing.T) {
 	}
 }
 
-// withDeleteWorkaround sets deleteWorkaroundEnabled for one test.
 func TestSandboxDeleteOutputForLog(t *testing.T) {
 	short := "Error: sandbox not found"
 	if got := sandboxDeleteOutputForLog(short); got != short {
@@ -82,6 +81,7 @@ func TestSandboxDeleteOutputForLog(t *testing.T) {
 	}
 }
 
+// withDeleteWorkaround sets deleteWorkaroundEnabled for one test.
 func withDeleteWorkaround(t *testing.T, enabled bool) {
 	t.Helper()
 	prev := deleteWorkaroundEnabled
