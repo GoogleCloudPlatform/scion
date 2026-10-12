@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1462,4 +1463,59 @@ func TestTestIdentityDelegation_LabelIsAlwaysValidUTF8(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, utf8.ValidString(stored.Label))
 	assert.Equal(t, "ab�cd", stored.Label)
+}
+
+// The web-login code route (WS1) is not a workload issuance route: a
+// workload token is refused there before any verification, for the
+// delegation that issued the identity and for any other one. The
+// management checks the route shares with the issuance routes are
+// delegation-scoped as well: D2 cannot manage D1's identity, and the rate
+// key is per delegation.
+func TestWorkloadDelegation_WebLoginCodeScopedToDelegation(t *testing.T) {
+	e := newX2Env(t, true)
+	key := make([]byte, testIdentityWebKeyLen)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	e.srv.testIdentityWeb = newTestIdentityWebState(TestIdentityWebSessionKey{Key: key})
+	webOn, _ := e.srv.testIdentityWebSessionGate()
+	require.True(t, webOn, "web sessions are available in this setup")
+
+	grantor, _ := e.bindingGrantor(t, "x2-web-grantor")
+	d1 := e.delegate(t, grantor, nil)
+	d2 := e.delegate(t, grantor, nil)
+	rec := e.mint(t, d1.ID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	i1 := tiDecode(t, rec).Identity
+	path := "/api/v1/test-identities/" + i1.ID + "/web-login-code"
+
+	assert.False(t, isTestIdentityIssuanceRoute(httptest.NewRequest(http.MethodPost, path, nil)))
+	verified := e.google.calls.Load()
+	for _, d := range []string{d1.ID, d2.ID} {
+		rec = e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), d, nil, nil)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "delegation %s: %s", d, rec.Body.String())
+	}
+	assert.Equal(t, verified, e.google.calls.Load(), "refused before any verification")
+	ctx := context.Background()
+	audits, _, err := e.s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: testIdentityWebCodeIssueMutation, TargetID: i1.ID})
+	require.NoError(t, err)
+	assert.Empty(t, audits, "no code was minted for a workload request")
+
+	// Positive control: the grantor's own session mints a code for it.
+	rec = doRequestAsUser(t, e.srv, grantor, http.MethodPost, path, nil)
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	// The shared management checks, with each delegation's state attached.
+	stateCtx := func(id string) context.Context {
+		d, err := e.s.GetTestIdentityDelegation(ctx, id)
+		require.NoError(t, err)
+		c := contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindWorkloadDelegation, ID: id})
+		return contextWithWorkloadDelegationState(c, &workloadDelegationState{delegation: d})
+	}
+	row, err := e.s.GetUser(ctx, i1.ID)
+	require.NoError(t, err)
+	caller := NewAuthenticatedUser(grantor.ID, grantor.Email, "", "member", "api")
+	assert.True(t, canManageTestIdentity(stateCtx(d1.ID), caller, row), "D1 manages its own identity")
+	assert.False(t, canManageTestIdentity(stateCtx(d2.ID), caller, row), "D2 does not manage D1's identity")
+	assert.Equal(t, "delegation:"+d2.ID, testIdentityRateKey(stateCtx(d2.ID), caller))
+	assert.Equal(t, grantor.ID, testIdentityRateKey(ctx, caller))
 }
