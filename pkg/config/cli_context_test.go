@@ -468,3 +468,85 @@ func TestCLIContextSelectAndClear(t *testing.T) {
 		t.Fatalf("clear must keep the known list: %+v", c.Projects)
 	}
 }
+
+// TestCLIContextOptionalV1Fields: the optional version-1 fields (a project's
+// local_path, a hub's transport, the imported record) are read from the
+// documented YAML keys and survive an update that does not touch them.
+func TestCLIContextOptionalV1Fields(t *testing.T) {
+	path := cliContextTestHome(t)
+	imported := time.Date(2026, 10, 12, 3, 0, 0, 0, time.UTC)
+	writeCLIContextFile(t, path, `version: 1
+current_hub: prod
+hubs:
+  prod:
+    endpoint: https://hub.example.com
+    transport: {mode: iap, audience: client-id.apps.example.com}
+projects:
+  - {hub: prod, id: p1, slug: foo, source: link, local_path: /src/foo}
+imported:
+  global: 2026-10-12T03:00:00Z
+`)
+	check := func(c *CLIContext) {
+		t.Helper()
+		h := c.Hubs["prod"]
+		if h == nil || h.Transport == nil || h.Transport.Mode != "iap" || h.Transport.Audience != "client-id.apps.example.com" {
+			t.Fatalf("transport = %+v", h)
+		}
+		if len(c.Projects) != 1 || c.Projects[0].LocalPath != "/src/foo" {
+			t.Fatalf("projects = %+v", c.Projects)
+		}
+		if c.Imported == nil || !c.Imported.Global.Equal(imported) {
+			t.Fatalf("imported = %+v", c.Imported)
+		}
+	}
+	c, err := LoadCLIContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(c)
+
+	if err := UpdateCLIContext(func(c *CLIContext) error {
+		c.EnsureHub("https://other.example.com", "other")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c, err = LoadCLIContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(c)
+	if c.Hubs["other"] == nil {
+		t.Fatal("the update was lost")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"transport:", "local_path: /src/foo", "imported:", "global: 2026-10-12T03:00:00Z"} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("written file lacks %q:\n%s", key, data)
+		}
+	}
+}
+
+// TestCLIContextOptionalV1FieldsOmittedWhenEmpty: a context without the
+// optional fields writes none of their keys.
+func TestCLIContextOptionalV1FieldsOmittedWhenEmpty(t *testing.T) {
+	path := cliContextTestHome(t)
+	if err := UpdateCLIContext(func(c *CLIContext) error {
+		name, _ := c.EnsureHub("https://hub.example.com", "prod")
+		return c.SelectProject(name, KnownProject{ID: "p1", Slug: "foo"}, time.Now())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"transport", "local_path", "imported"} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("written file has %q although it is unset:\n%s", key, data)
+		}
+	}
+}

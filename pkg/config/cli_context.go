@@ -77,6 +77,15 @@ type CLIContext struct {
 	Projects []KnownProject `yaml:"projects,omitempty"`
 	// Refreshed records when each hub's project listing was last fetched.
 	Refreshed map[string]time.Time `yaml:"refreshed,omitempty"`
+	// Imported records one-time imports of legacy hub settings.
+	Imported *CLIContextImports `yaml:"imported,omitempty"`
+}
+
+// CLIContextImports records when legacy hub settings were imported into the
+// context, so each import runs once.
+type CLIContextImports struct {
+	// Global is when the global settings' hub configuration was imported.
+	Global time.Time `yaml:"global,omitempty"`
 }
 
 // HubEntry is a named hub. It holds no credentials: logins stay in
@@ -86,6 +95,9 @@ type HubEntry struct {
 	Endpoint string `yaml:"endpoint"`
 	// CurrentProject is the project remembered for this hub.
 	CurrentProject *ProjectRef `yaml:"current_project,omitempty"`
+	// Transport holds the transport-layer auth settings (IAP, Cloud Run
+	// invoker) for reaching this hub.
+	Transport *HubTransportConfig `yaml:"transport,omitempty"`
 }
 
 // ProjectRef names a project on a hub.
@@ -110,6 +122,9 @@ type KnownProject struct {
 	Source string `yaml:"source,omitempty"`
 	// LastUsed is when the project was last selected.
 	LastUsed time.Time `yaml:"last_used,omitempty"`
+	// LocalPath is the workspace directory of a linked project on this
+	// machine, for link entries.
+	LocalPath string `yaml:"local_path,omitempty"`
 }
 
 // CLIContextPath returns the path of context.yaml in the global directory.
