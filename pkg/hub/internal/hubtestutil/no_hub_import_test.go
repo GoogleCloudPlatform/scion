@@ -86,6 +86,85 @@ func TestFindImportDetectsHub(t *testing.T) {
 	}
 }
 
+// TestOnlyTestCodeImportsHubtestutil fails if a non-test .go file anywhere
+// under pkg/hub imports this package: it holds test helpers (and imports
+// testing), so production code must never link it. Go's internal rule
+// already keeps importers inside pkg/hub/...
+func TestOnlyTestCodeImportsHubtestutil(t *testing.T) {
+	bad, err := nonTestImporters(filepath.Join(moduleRoot(t), "pkg", "hub"), selfPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) > 0 {
+		t.Fatalf("non-test files import %s; only _test.go files may:\n  %s", selfPath, strings.Join(bad, "\n  "))
+	}
+}
+
+// TestNonTestImportersDetects checks the scan against a fixture tree: a
+// production file importing the package is reported, a _test.go file is not.
+func TestNonTestImportersDetects(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, src string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("pkg/hub/ok_test.go", "package hub\n\nimport _ \""+selfPath+"\"\n")
+	write("pkg/hub/area/ok.go", "package area\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n")
+	bad, err := nonTestImporters(filepath.Join(root, "pkg", "hub"), selfPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) != 0 {
+		t.Fatalf("bad = %v, want none (only a _test.go file imports it)", bad)
+	}
+
+	write("pkg/hub/area/prod.go", "//go:build linux\n\npackage area\n\nimport hu \""+selfPath+"\"\n\nvar _ = hu.TID\n")
+	bad, err = nonTestImporters(filepath.Join(root, "pkg", "hub"), selfPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) != 1 || filepath.Base(bad[0]) != "prod.go" {
+		t.Fatalf("bad = %v, want exactly area/prod.go", bad)
+	}
+}
+
+// nonTestImporters returns the non-test .go files under dir (recursively,
+// regardless of build tags) that import path.
+func nonTestImporters(dir, path string) ([]string, error) {
+	var out []string
+	fset := token.NewFileSet()
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if n := d.Name(); p != dir && (n == "testdata" || strings.HasPrefix(n, ".") || strings.HasPrefix(n, "_")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, p, nil, parser.ImportsOnly)
+		if err != nil {
+			return err
+		}
+		for _, s := range f.Imports {
+			if ip, err := strconv.Unquote(s.Path.Value); err == nil && ip == path {
+				out = append(out, p)
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
 func moduleRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
