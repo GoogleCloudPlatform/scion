@@ -133,7 +133,7 @@ func TestTestAdminGate_NewAdmitsSuperAdminWithCompletePolicy(t *testing.T) {
 	assert.True(t, srv.testAdminTierEnabled(testAdminKindSuperAdmin))
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":true,"testIdentityWebSessions":false}`, strings.TrimSpace(rec.Body.String()))
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":true,"testIdentityWebSessions":false,"testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
 	require.NoError(t, srv.emitTestAdminGateStart())
 	assert.Contains(t, buf.String(), "hub-admin and super-admin authority")
 	assert.Contains(t, buf.String(), `"test_super_admin"`)
