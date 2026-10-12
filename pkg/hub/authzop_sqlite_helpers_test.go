@@ -961,3 +961,40 @@ func seedLiveInventoryArtifact(t *testing.T, ctx context.Context, st artifacts.S
 	require.NoError(t, st.CreatePublished(ctx, a, v, files, nil))
 	return a.ID
 }
+
+// liveInventoryDelegation is the agent delegation fixture of the live
+// method inventory: a grant bound to the fixture agent, a disposable twin
+// grant for the revoke entry, and an active credential of the first grant.
+type liveInventoryDelegation struct {
+	grant       string
+	grantRevoke string
+	credential  string
+}
+
+// seedLiveInventoryDelegation writes the live inventory's grants and
+// credential directly to the store. The dev user is the issuer; the dev
+// token reaches them as hub authority.
+func seedLiveInventoryDelegation(t *testing.T, ctx context.Context, s store.Store, agentID, projectID string) liveInventoryDelegation {
+	t.Helper()
+	grant := func(name string) string {
+		g := &store.AgentDelegationGrant{
+			AgentID: agentID, AgentProjectID: projectID, IssuerUserID: DevUserID,
+			BoundaryKind: "hub", CeilingVersion: 1, CeilingPermissionIDs: []string{"agent.read"},
+			Name: name, MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL,
+			ExpiresAt: time.Now().Add(time.Hour), IssuanceAuditID: uuid.New().String(),
+		}
+		require.NoError(t, s.CreateAgentDelegationGrant(ctx, g))
+		return g.ID
+	}
+	out := liveInventoryDelegation{grant: grant("li-grant"), grantRevoke: grant("li-grant-revoke")}
+	_, hash, err := newDelegatedCredentialToken()
+	require.NoError(t, err)
+	cred := &store.AgentDelegatedCredential{
+		GrantID: out.grant, AgentID: agentID, KeyHash: hash, Prefix: delegatedCredentialPrefix,
+		Audience: "scion-hub", CeilingPermissionIDs: []string{"agent.read"},
+		ExchangeAgentCredentialID: uuid.New().String(), ExpiresAt: time.Now().Add(30 * time.Minute),
+	}
+	require.NoError(t, s.CreateAgentDelegatedCredential(ctx, cred))
+	out.credential = cred.ID
+	return out
+}
