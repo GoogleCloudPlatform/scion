@@ -3025,7 +3025,67 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 			return err
 		}
 	}
+	err := k.Unmarshal("", settings)
+	if err == nil {
+		return nil
+	}
+	return unmarshalSkippingBadSettings(k, settings, err)
+}
+
+// unmarshalSkippingBadSettings handles a decode failure in
+// unmarshalVersionedSettings. One value that does not parse (for example
+// SCION_SERVER_BROKER_PORT=abc) must not discard the whole settings struct:
+// callers skip the entire section on error, which silently turns off hub
+// features. Each key whose value does not decode on its own is reset to its
+// embedded default, or dropped when there is none, with a warning that names
+// the key. The value is never logged, since it may be a secret. The rest of
+// the settings then decode as usual.
+func unmarshalSkippingBadSettings(k *koanf.Koanf, settings *VersionedSettings, decodeErr error) error {
+	bad := undecodableSettingsKeys(k)
+	if len(bad) == 0 {
+		// The failure is not tied to a single key. Report it as before.
+		return decodeErr
+	}
+
+	defaults := koanf.New(".")
+	if data, err := GetDefaultSettingsDataYAML(); err == nil {
+		_ = defaults.Load(rawbytes.Provider(data), yaml.Parser())
+	}
+	for _, key := range bad {
+		slog.Warn("settings: value does not parse; using the default for this setting", "key", key)
+		k.Delete(key)
+		if defaults.Exists(key) {
+			if err := k.Set(key, defaults.Get(key)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// The failed attempt may have partly filled settings. Decode again into
+	// the same empty maps both callers start from.
+	*settings = VersionedSettings{
+		Runtimes:       make(map[string]V1RuntimeConfig),
+		HarnessConfigs: make(map[string]HarnessConfigEntry),
+		Profiles:       make(map[string]V1ProfileConfig),
+	}
 	return k.Unmarshal("", settings)
+}
+
+// undecodableSettingsKeys returns the keys of k whose value fails to decode
+// into VersionedSettings when decoded alone.
+func undecodableSettingsKeys(k *koanf.Koanf) []string {
+	var bad []string
+	for _, key := range k.Keys() {
+		probe := koanf.New(".")
+		if err := probe.Load(confmap.Provider(map[string]interface{}{key: k.Get(key)}, "."), nil); err != nil {
+			bad = append(bad, key)
+			continue
+		}
+		if err := probe.Unmarshal("", &VersionedSettings{}); err != nil {
+			bad = append(bad, key)
+		}
+	}
+	return bad
 }
 
 // settingsExcludedEnvVars lists SCION_* variables that are never settings
