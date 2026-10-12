@@ -164,6 +164,11 @@ type ControlChannelClient struct {
 	// (conn.WritePing is used); tests set it to simulate a failed write.
 	writePing func(conn *wsprotocol.Connection) error
 
+	// afterDial, when set, runs after a successful dial and before the
+	// connection is stored. It is nil in production; tests set it to order a
+	// Close against a dial that has just completed.
+	afterDial func()
+
 	// Connection state
 	connected   bool
 	sessionID   string
@@ -400,10 +405,22 @@ func (c *ControlChannelClient) doConnect() error {
 		}
 		return fmt.Errorf("websocket dial failed: %w", err)
 	}
+	if c.afterDial != nil {
+		c.afterDial()
+	}
 
 	// Close, SendStreamData and CloseStream read c.conn under c.mu from other
-	// goroutines.
+	// goroutines. Close also cancels c.ctx under c.mu before it reads c.conn,
+	// so checking c.ctx and storing conn under c.mu here means either Close
+	// sees conn and closes it, or this sees the cancellation: a connect that
+	// completes after Close never sends the connect message, so no session is
+	// registered for a closed client.
 	c.mu.Lock()
+	if err := c.ctx.Err(); err != nil {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return err
+	}
 	c.conn = conn
 	c.mu.Unlock()
 
