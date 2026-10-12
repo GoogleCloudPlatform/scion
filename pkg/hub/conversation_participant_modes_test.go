@@ -101,6 +101,49 @@ func TestGetConversation_ParticipantMessageModes(t *testing.T) {
 	assert.NotContains(t, got["user-1"], "messageMode", "users have no message mode")
 }
 
+// TestGetConversation_ParticipantMessageModes_UserCaller checks that a user
+// who can read a project group sees the modes of in-project agents, and not
+// of agents in other projects (ptone/scion#4411).
+func TestGetConversation_ParticipantMessageModes_UserCaller(t *testing.T) {
+	srv, s := testServer(t)
+	project, member, conv := setupConvTestData(t, s)
+
+	userID := api.NewUUID()
+	user := &store.User{
+		ID:          userID,
+		Email:       "mode-reader@example.com",
+		DisplayName: "Mode Reader",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(context.Background(), user))
+	grantUserProjectAccess(t, s, userID, project.ID)
+
+	peer := createModeTestAgent(t, s, project.ID, "lineage-peer", store.MessageModeLineage)
+	other := createModeTestProject(t, s, "other-project-u")
+	foreign := createModeTestAgent(t, s, other.ID, "foreign-agent-u", store.MessageModeHub)
+
+	addConvParticipant(t, s, conv.ID, "agent", member.ID)
+	addConvParticipant(t, s, conv.ID, "agent", peer.ID)
+	addConvParticipant(t, s, conv.ID, "agent", foreign.ID)
+	addConvParticipant(t, s, conv.ID, "user", userID)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
+	req = req.WithContext(contextWithIdentity(context.Background(),
+		NewAuthenticatedUser(userID, user.Email, user.DisplayName, "member", "web")))
+	rr := httptest.NewRecorder()
+	srv.handleGetConversation(rr, req, conv.ID)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	got := participantsByID(t, rr.Body.Bytes())
+	require.Len(t, got, 4)
+	assert.Equal(t, store.MessageModeProject, got[member.ID]["messageMode"])
+	assert.Equal(t, store.MessageModeLineage, got[peer.ID]["messageMode"])
+	assert.NotContains(t, got[foreign.ID], "messageMode", "cross-project agent must not expose its mode")
+	assert.NotContains(t, got[userID], "messageMode", "users have no message mode")
+}
+
 // TestConversationParticipantViews_DirectConversations covers conversations
 // without a project (DMs), where only an agent caller's own project is in
 // scope.

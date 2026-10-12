@@ -28,16 +28,17 @@ import (
 type conversationParticipantView struct {
 	store.ConversationParticipant
 	// MessageMode is set only for an agent participant in the
-	// conversation's project (for a DM, the calling agent's project; see
-	// conversationModeProject). It is empty for users, for agents in other
+	// conversation's project (for a conversation without a project, a DM or
+	// legacy group, the calling agent's project; see conversationModeProject). It is empty for users, for agents in other
 	// projects, and when the agent could not be looked up.
 	MessageMode string `json:"messageMode,omitempty"`
 }
 
 // conversationGetResponse is the body of GET /api/v1/conversations/{id}.
 // It matches conversationResponse on the wire, with participants carrying
-// the message mode of agents in the conversation's project (for a DM, the
-// calling agent's project).
+// the message mode of agents in the conversation's project (for a
+// conversation without a project, a DM or legacy group, the calling agent's
+// project).
 type conversationGetResponse struct {
 	store.Conversation
 	Participants []conversationParticipantView `json:"participants,omitempty"`

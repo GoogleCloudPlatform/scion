@@ -134,9 +134,11 @@ var conversationGetCmd = &cobra.Command{
 	Long: `Get details of a single conversation including participants.
 
 The MSG MODE column shows each agent participant's message mode (see
-scion set-message-mode --help) in the conversation's project; for a DM,
-in the calling agent's project. It shows "-" for users and for any agent
-outside that project, and for every agent in a DM read by a user.
+scion set-message-mode --help) in the conversation's project; for a
+conversation without a project (a DM or legacy group), in the calling
+agent's project. It shows "-" for users, for any agent outside that
+project, and for every agent when a user reads a conversation without a
+project.
 
 Examples:
   scion conversation get conv:a1b2c3d4-...
@@ -183,9 +185,11 @@ var conversationParticipantsCmd = &cobra.Command{
 	Long: `List participants in a conversation.
 
 The MSG MODE column shows each agent participant's message mode (see
-scion set-message-mode --help) in the conversation's project; for a DM,
-in the calling agent's project. It shows "-" for users and for any agent
-outside that project, and for every agent in a DM read by a user.
+scion set-message-mode --help) in the conversation's project; for a
+conversation without a project (a DM or legacy group), in the calling
+agent's project. It shows "-" for users, for any agent outside that
+project, and for every agent when a user reads a conversation without a
+project.
 
 Examples:
   scion conversation participants conv:a1b2c3d4-...
@@ -512,8 +516,8 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 
 // participantModeCell is the MSG MODE cell for a participant: the agent's
 // message mode, or "-" for a user or an agent whose mode the hub did not
-// report (an agent outside the conversation's project, or any agent in a
-// DM read by a user).
+// report (an agent outside the conversation's project, or any agent when a
+// user reads a conversation without a project).
 func participantModeCell(p hubclient.ConversationParticipantDetail) string {
 	if p.MessageMode == "" {
 		return "-"
