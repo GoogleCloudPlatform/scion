@@ -831,7 +831,7 @@ func (s *Server) handleIssueTestIdentityToken(w http.ResponseWriter, r *http.Req
 	u, err := s.store.GetUser(ctx, id)
 	// An admin-kind identity gets exactly one token, at issuance: no
 	// re-issue (409), for its issuer or an unscoped platform admin.
-	if err == nil && u.IsTestAdmin() && canManageTestIdentity(caller, u) {
+	if err == nil && u.IsTestAdmin() && canManageTestIdentity(ctx, caller, u) {
 		writeError(w, http.StatusConflict, ErrCodeConflict, "an admin-kind test identity's token is never re-issued",
 			map[string]interface{}{"reason": testAdminReasonAdminKindTokens})
 		return
