@@ -571,7 +571,11 @@ func (s *UserStore) ListUsers(ctx context.Context, filter store.UserFilter, opts
 			order = user.ByDisplayName(sql.OrderAsc())
 		}
 	case "lastSeen":
-		order = user.ByLastSeen(sortOpt(opts.SortDir))
+		// Never-seen users (last_seen IS NULL) sort last in both directions.
+		// Postgres would otherwise put NULLs first under DESC (SQLite puts
+		// them last), so "most recently seen first" could list only users
+		// who have never signed in.
+		order = user.ByLastSeen(sortOpt(opts.SortDir), sql.OrderNullsLast())
 	default: // "created" and unspecified
 		order = user.ByCreated(sortOpt(opts.SortDir))
 	}
