@@ -16,6 +16,7 @@ package agent
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -433,4 +434,58 @@ func TestHandleAgentDirWithoutConfig_AdoptionRemovesMarker(t *testing.T) {
 		t.Fatalf("expected the adopted dir to have a config file: %v", err)
 	}
 	requireRemoved(t, filepath.Join(agentDir, keptAgentDirMarker))
+}
+
+// A marker that is already there (written by another process) makes a keep
+// a quiet no-op: no warning, and the existing keptAt stands.
+func TestRecordKeptAgentDir_ExistingMarkerIsSilent(t *testing.T) {
+	now := keptTestClock(t)
+	agentDir := t.TempDir()
+	first := now.Add(-time.Hour)
+	writeMarkerT(t, agentDir, first)
+
+	var records []slog.Record
+	old := slog.Default()
+	slog.SetDefault(slog.New(&collectHandler{records: &records}))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	recordKeptAgentDir("a", agentDir, keptReasonWorkspaceMayHoldWork)
+
+	for _, r := range records {
+		if r.Level >= slog.LevelWarn {
+			t.Errorf("unexpected warning: %s", r.Message)
+		}
+	}
+	if rec := readMarkerT(t, agentDir); !rec.KeptAt.Equal(first) {
+		t.Fatalf("keptAt = %v, want the existing %v", rec.KeptAt, first)
+	}
+}
+
+// With no retention window the sweep returns before listing the agents
+// root, and an old kept dir stays.
+func TestSweepExpiredKeptAgentDirs_ZeroRetentionSkipsListing(t *testing.T) {
+	keptTestRetention(t, 0)
+	now := keptTestClock(t)
+	root := t.TempDir()
+	dir := filepath.Join(root, "expired")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMarkerT(t, dir, now.Add(-1000*time.Hour))
+
+	orig := keptAgentDirReadDir
+	keptAgentDirReadDir = func(name string) ([]os.DirEntry, error) {
+		t.Errorf("agents root %s listed with no retention window", name)
+		return orig(name)
+	}
+	t.Cleanup(func() { keptAgentDirReadDir = orig })
+
+	sweepExpiredKeptAgentDirs(root, "", func(name string) string {
+		t.Errorf("homeOf(%q) called with no retention window", name)
+		return filepath.Join(root, name, "home")
+	})
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("expected the kept dir to stay: %v", err)
+	}
 }

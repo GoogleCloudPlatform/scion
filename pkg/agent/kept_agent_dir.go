@@ -78,14 +78,16 @@ type keptAgentDirRecord struct {
 	Reason string    `json:"reason"`
 }
 
-// keptAgentDirNow and keptAgentDirRetention are variables so tests can
-// replace them.
+// keptAgentDirNow, keptAgentDirRetention and the hooks below are variables
+// so tests can replace them.
 var (
 	keptAgentDirNow       = time.Now
 	keptAgentDirRetention = resolveKeptAgentDirRetention
 	// keptAgentDirBeforeRecheck runs after a kept directory is renamed for
 	// removal and before it is checked again.
 	keptAgentDirBeforeRecheck = func(tomb string) {}
+	// keptAgentDirReadDir lists an agents root for the sweep.
+	keptAgentDirReadDir = os.ReadDir
 )
 
 // resolveKeptAgentDirRetention returns the soft-delete retention window as
@@ -117,15 +119,16 @@ func resolveKeptAgentDirRetention() time.Duration {
 // ignored; the directory is kept either way.
 func recordKeptAgentDir(agentName, agentDir, reason string) {
 	path := filepath.Join(agentDir, keptAgentDirMarker)
-	if _, err := os.Lstat(path); err == nil || !errors.Is(err, fs.ErrNotExist) {
-		return
-	}
 	data, err := json.Marshal(keptAgentDirRecord{KeptAt: keptAgentDirNow().UTC(), Reason: reason})
 	if err != nil {
 		return
 	}
-	// O_EXCL: never write through an entry created since the check.
+	// O_EXCL refuses any existing entry, a symlink included, so an earlier
+	// keep (or another process's) wins and is never written through.
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, fs.ErrExist) {
+		return
+	}
 	if err != nil {
 		slog.Warn("GetAgent: could not record the kept agent directory",
 			"agent", agentName, "agent_dir", agentDir, "error", err)
@@ -162,7 +165,7 @@ func readKeptAgentDirRecord(agentDir string) (keptAgentDirRecord, bool) {
 	if err != nil {
 		return keptAgentDirRecord{}, false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, keptAgentDirMarkerMaxSize+1))
 	if err != nil || len(data) > keptAgentDirMarkerMaxSize {
 		return keptAgentDirRecord{}, false
@@ -264,11 +267,16 @@ func purgeExpiredKeptAgentDir(agentName, agentDir, agentHome string, retention t
 // sweepExpiredKeptAgentDirs removes the expired kept directories in
 // agentsRoot other than skipName's (GetAgent handles that one itself).
 // homeOf returns an agent's home path. Only plain directories holding a
-// marker are considered; the retention is resolved only when one is found.
+// marker are considered. With no retention window (0 or unset) it returns
+// before reading agentsRoot.
 // Entries named like a directory being removed are skipped: they may belong
 // to another process's removal in progress.
 func sweepExpiredKeptAgentDirs(agentsRoot, skipName string, homeOf func(name string) string) {
-	entries, err := os.ReadDir(agentsRoot)
+	retention := keptAgentDirRetention()
+	if retention <= 0 {
+		return
+	}
+	entries, err := keptAgentDirReadDir(agentsRoot)
 	if err != nil {
 		return
 	}
@@ -280,13 +288,6 @@ func sweepExpiredKeptAgentDirs(agentsRoot, skipName string, homeOf func(name str
 		if hasKeptAgentDirMarker(filepath.Join(agentsRoot, e.Name())) {
 			candidates = append(candidates, e.Name())
 		}
-	}
-	if len(candidates) == 0 {
-		return
-	}
-	retention := keptAgentDirRetention()
-	if retention <= 0 {
-		return
 	}
 	for _, name := range candidates {
 		purgeExpiredKeptAgentDir(name, filepath.Join(agentsRoot, name), homeOf(name), retention)
