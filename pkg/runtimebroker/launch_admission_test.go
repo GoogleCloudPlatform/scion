@@ -33,7 +33,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // asyncManager is a concurrency-safe agent.Manager fake for the async-create
