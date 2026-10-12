@@ -76,6 +76,16 @@ type ArtifactResponse struct {
 	// review; see canWriteErr): the decision POST /{id}/versions makes for the
 	// same request.
 	CanPublish bool `json:"canPublish,omitempty"`
+	// CanGrantReview, on a GET of the artifact or of one of its versions,
+	// is true when the caller may not manage the artifact but may give a
+	// user review access to it (a write grant; design D24,
+	// ptone/scion#4014): the delegating user of the agent that owns it, the
+	// project owners and admins of its home project, and super-admins. It
+	// is false whenever CanManage is true, since a manager grants through
+	// the full sharing routes. It is advisory: the grant itself is decided
+	// under the artifact's lock and can still be refused, for example for an
+	// existing admin grant or a concurrent move.
+	CanGrantReview bool `json:"canGrantReview,omitempty"`
 }
 
 // CreateVersionRequest is the body of POST /api/v1/artifacts (create an

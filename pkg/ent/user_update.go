@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
@@ -303,6 +304,25 @@ func (_u *UserUpdate) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserUpdate
 	return _u.SetTerminalWorkspaceID(v.ID)
 }
 
+// SetTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID.
+func (_u *UserUpdate) SetTestIdentityLoginCodeID(id uuid.UUID) *UserUpdate {
+	_u.mutation.SetTestIdentityLoginCodeID(id)
+	return _u
+}
+
+// SetNillableTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID if the given value is not nil.
+func (_u *UserUpdate) SetNillableTestIdentityLoginCodeID(id *uuid.UUID) *UserUpdate {
+	if id != nil {
+		_u = _u.SetTestIdentityLoginCodeID(*id)
+	}
+	return _u
+}
+
+// SetTestIdentityLoginCode sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (_u *UserUpdate) SetTestIdentityLoginCode(v *TestIdentityLoginCode) *UserUpdate {
+	return _u.SetTestIdentityLoginCodeID(v.ID)
+}
+
 // Mutation returns the UserMutation object of the builder.
 func (_u *UserUpdate) Mutation() *UserMutation {
 	return _u.mutation
@@ -395,6 +415,12 @@ func (_u *UserUpdate) RemoveExternalIdentities(v ...*ExternalIdentity) *UserUpda
 // ClearTerminalWorkspace clears the "terminal_workspace" edge to the UserTerminalWorkspace entity.
 func (_u *UserUpdate) ClearTerminalWorkspace() *UserUpdate {
 	_u.mutation.ClearTerminalWorkspace()
+	return _u
+}
+
+// ClearTestIdentityLoginCode clears the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (_u *UserUpdate) ClearTestIdentityLoginCode() *UserUpdate {
+	_u.mutation.ClearTestIdentityLoginCode()
 	return _u
 }
 
@@ -738,6 +764,35 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
+	if _u.mutation.TestIdentityLoginCodeCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TestIdentityLoginCodeTable,
+			Columns: []string{user.TestIdentityLoginCodeColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(testidentitylogincode.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.TestIdentityLoginCodeIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TestIdentityLoginCodeTable,
+			Columns: []string{user.TestIdentityLoginCodeColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(testidentitylogincode.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{user.Label}
@@ -1026,6 +1081,25 @@ func (_u *UserUpdateOne) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserUpd
 	return _u.SetTerminalWorkspaceID(v.ID)
 }
 
+// SetTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID.
+func (_u *UserUpdateOne) SetTestIdentityLoginCodeID(id uuid.UUID) *UserUpdateOne {
+	_u.mutation.SetTestIdentityLoginCodeID(id)
+	return _u
+}
+
+// SetNillableTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableTestIdentityLoginCodeID(id *uuid.UUID) *UserUpdateOne {
+	if id != nil {
+		_u = _u.SetTestIdentityLoginCodeID(*id)
+	}
+	return _u
+}
+
+// SetTestIdentityLoginCode sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (_u *UserUpdateOne) SetTestIdentityLoginCode(v *TestIdentityLoginCode) *UserUpdateOne {
+	return _u.SetTestIdentityLoginCodeID(v.ID)
+}
+
 // Mutation returns the UserMutation object of the builder.
 func (_u *UserUpdateOne) Mutation() *UserMutation {
 	return _u.mutation
@@ -1118,6 +1192,12 @@ func (_u *UserUpdateOne) RemoveExternalIdentities(v ...*ExternalIdentity) *UserU
 // ClearTerminalWorkspace clears the "terminal_workspace" edge to the UserTerminalWorkspace entity.
 func (_u *UserUpdateOne) ClearTerminalWorkspace() *UserUpdateOne {
 	_u.mutation.ClearTerminalWorkspace()
+	return _u
+}
+
+// ClearTestIdentityLoginCode clears the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (_u *UserUpdateOne) ClearTestIdentityLoginCode() *UserUpdateOne {
+	_u.mutation.ClearTestIdentityLoginCode()
 	return _u
 }
 
@@ -1484,6 +1564,35 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.TestIdentityLoginCodeCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TestIdentityLoginCodeTable,
+			Columns: []string{user.TestIdentityLoginCodeColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(testidentitylogincode.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.TestIdentityLoginCodeIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TestIdentityLoginCodeTable,
+			Columns: []string{user.TestIdentityLoginCodeColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(testidentitylogincode.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

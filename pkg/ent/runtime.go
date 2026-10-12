@@ -80,7 +80,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -2424,6 +2427,28 @@ func init() {
 	testidentitydelegationDescID := testidentitydelegationFields[0].Descriptor()
 	// testidentitydelegation.DefaultID holds the default value on creation for the id field.
 	testidentitydelegation.DefaultID = testidentitydelegationDescID.Default.(func() uuid.UUID)
+	testidentitylogincodeFields := schema.TestIdentityLoginCode{}.Fields()
+	_ = testidentitylogincodeFields
+	// testidentitylogincodeDescCodeHash is the schema descriptor for code_hash field.
+	testidentitylogincodeDescCodeHash := testidentitylogincodeFields[2].Descriptor()
+	// testidentitylogincode.CodeHashValidator is a validator for the "code_hash" field. It is called by the builders before save.
+	testidentitylogincode.CodeHashValidator = testidentitylogincodeDescCodeHash.Validators[0].(func(string) error)
+	// testidentitylogincodeDescIssuedBy is the schema descriptor for issued_by field.
+	testidentitylogincodeDescIssuedBy := testidentitylogincodeFields[3].Descriptor()
+	// testidentitylogincode.IssuedByValidator is a validator for the "issued_by" field. It is called by the builders before save.
+	testidentitylogincode.IssuedByValidator = testidentitylogincodeDescIssuedBy.Validators[0].(func(string) error)
+	// testidentitylogincodeDescIssuerCredentialID is the schema descriptor for issuer_credential_id field.
+	testidentitylogincodeDescIssuerCredentialID := testidentitylogincodeFields[4].Descriptor()
+	// testidentitylogincode.DefaultIssuerCredentialID holds the default value on creation for the issuer_credential_id field.
+	testidentitylogincode.DefaultIssuerCredentialID = testidentitylogincodeDescIssuerCredentialID.Default.(string)
+	// testidentitylogincodeDescCreatedAt is the schema descriptor for created_at field.
+	testidentitylogincodeDescCreatedAt := testidentitylogincodeFields[7].Descriptor()
+	// testidentitylogincode.DefaultCreatedAt holds the default value on creation for the created_at field.
+	testidentitylogincode.DefaultCreatedAt = testidentitylogincodeDescCreatedAt.Default.(func() time.Time)
+	// testidentitylogincodeDescID is the schema descriptor for id field.
+	testidentitylogincodeDescID := testidentitylogincodeFields[0].Descriptor()
+	// testidentitylogincode.DefaultID holds the default value on creation for the id field.
+	testidentitylogincode.DefaultID = testidentitylogincodeDescID.Default.(func() uuid.UUID)
 	testinframarkerFields := schema.TestInfraMarker{}.Fields()
 	_ = testinframarkerFields
 	// testinframarkerDescHubID is the schema descriptor for hub_id field.
@@ -2442,6 +2467,40 @@ func init() {
 	testinframarkerDescID := testinframarkerFields[0].Descriptor()
 	// testinframarker.IDValidator is a validator for the "id" field. It is called by the builders before save.
 	testinframarker.IDValidator = testinframarkerDescID.Validators[0].(func(string) error)
+	threadgroupFields := schema.ThreadGroup{}.Fields()
+	_ = threadgroupFields
+	// threadgroupDescName is the schema descriptor for name field.
+	threadgroupDescName := threadgroupFields[2].Descriptor()
+	// threadgroup.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	threadgroup.NameValidator = threadgroupDescName.Validators[0].(func(string) error)
+	// threadgroupDescNameKey is the schema descriptor for name_key field.
+	threadgroupDescNameKey := threadgroupFields[3].Descriptor()
+	// threadgroup.NameKeyValidator is a validator for the "name_key" field. It is called by the builders before save.
+	threadgroup.NameKeyValidator = threadgroupDescNameKey.Validators[0].(func(string) error)
+	// threadgroupDescCreatedAt is the schema descriptor for created_at field.
+	threadgroupDescCreatedAt := threadgroupFields[6].Descriptor()
+	// threadgroup.DefaultCreatedAt holds the default value on creation for the created_at field.
+	threadgroup.DefaultCreatedAt = threadgroupDescCreatedAt.Default.(func() time.Time)
+	// threadgroupDescUpdatedAt is the schema descriptor for updated_at field.
+	threadgroupDescUpdatedAt := threadgroupFields[7].Descriptor()
+	// threadgroup.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	threadgroup.DefaultUpdatedAt = threadgroupDescUpdatedAt.Default.(func() time.Time)
+	// threadgroup.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	threadgroup.UpdateDefaultUpdatedAt = threadgroupDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// threadgroupDescID is the schema descriptor for id field.
+	threadgroupDescID := threadgroupFields[0].Descriptor()
+	// threadgroup.DefaultID holds the default value on creation for the id field.
+	threadgroup.DefaultID = threadgroupDescID.Default.(func() uuid.UUID)
+	threadgroupmemberFields := schema.ThreadGroupMember{}.Fields()
+	_ = threadgroupmemberFields
+	// threadgroupmemberDescAddedAt is the schema descriptor for added_at field.
+	threadgroupmemberDescAddedAt := threadgroupmemberFields[5].Descriptor()
+	// threadgroupmember.DefaultAddedAt holds the default value on creation for the added_at field.
+	threadgroupmember.DefaultAddedAt = threadgroupmemberDescAddedAt.Default.(func() time.Time)
+	// threadgroupmemberDescID is the schema descriptor for id field.
+	threadgroupmemberDescID := threadgroupmemberFields[0].Descriptor()
+	// threadgroupmember.DefaultID holds the default value on creation for the id field.
+	threadgroupmember.DefaultID = threadgroupmemberDescID.Default.(func() uuid.UUID)
 	usagereservationFields := schema.UsageReservation{}.Fields()
 	_ = usagereservationFields
 	// usagereservationDescSubjectID is the schema descriptor for subject_id field.

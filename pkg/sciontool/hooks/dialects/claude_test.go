@@ -24,6 +24,7 @@ func TestClaudeDialect_Parse(t *testing.T) {
 		wantName   string
 		wantTool   string
 		wantPrompt string
+		wantError  string
 	}{
 		{
 			name: "PreToolUse event",
@@ -42,6 +43,23 @@ func TestClaudeDialect_Parse(t *testing.T) {
 			},
 			wantName: hooks.EventToolEnd,
 			wantTool: "Read",
+		},
+		{
+			// Claude Code sends a failed tool call as PostToolUseFailure,
+			// with the failure text in a string "error" field.
+			name: "PostToolUseFailure event",
+			input: map[string]interface{}{
+				"hook_event_name": "PostToolUseFailure",
+				"session_id":      "00000000-0000-0000-0000-000000000000",
+				"tool_name":       "Bash",
+				"tool_input":      map[string]interface{}{"command": "false"},
+				"tool_use_id":     "toolu_synthetic",
+				"error":           "Command exited with non-zero status code 1",
+				"is_interrupt":    false,
+			},
+			wantName:  hooks.EventToolEnd,
+			wantTool:  "Bash",
+			wantError: "Command exited with non-zero status code 1",
 		},
 		{
 			name: "SessionStart event",
@@ -121,6 +139,7 @@ func TestClaudeDialect_Parse(t *testing.T) {
 			if tt.wantPrompt != "" {
 				assert.Equal(t, tt.wantPrompt, event.Data.Prompt)
 			}
+			assert.Equal(t, tt.wantError, event.Data.Error)
 		})
 	}
 }

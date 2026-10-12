@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,7 +35,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 80
+const expectedTableCount = 83
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -112,6 +113,17 @@ func TestFixtureLoadable(t *testing.T) {
 	require.NoError(t, err, "user_terminal_workspaces fixture row must be readable via UserTerminalWorkspaceStore")
 	assert.Equal(t, []string{agentID}, workspace.AgentIDs)
 	assert.Equal(t, agentID, workspace.FrontmostAgentID)
+
+	// The thread group rows must be readable through the real store adapter
+	// (field.UUID ids, the stored name_key matching the Go helper, and the
+	// member's group conversation passing the live-conversation filter).
+	groups, err := entadapter.NewThreadGroupStore(client).ListThreadGroups(ctx, projectID)
+	require.NoError(t, err, "thread_groups fixture row must be readable via ThreadGroupStore")
+	require.Len(t, groups, 1)
+	assert.Equal(t, "Équipe Release", groups[0].Name)
+	assert.Equal(t, store.ThreadGroupNameKey(groups[0].Name), groups[0].NameKey)
+	require.Len(t, groups[0].Members, 1)
+	assert.Equal(t, groupConversationID, groups[0].Members[0].ConversationID)
 
 	// The conduit session rows must decode through the real registry store
 	// (capabilities JSON, NULL project/exec_scope, relay join).

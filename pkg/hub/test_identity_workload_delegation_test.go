@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 package hub
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -1413,4 +1415,107 @@ func TestWorkloadDelegation_AdminKindIdentityUnreachable(t *testing.T) {
 	rec = doRequestAsUser(t, e.srv, grantor, http.MethodPost, "/api/v1/test-identities/"+admin.ID+"/token", nil)
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Equal(t, before, tokenIssues())
+}
+
+// Upstream review (cost model): with no workload issuer configured,
+// isWorkloadDelegationRequest does no work beyond one header lookup for a
+// JWT-shaped bearer (it allocates nothing, so it neither reads nor decodes
+// the token); with a workload issuer configured the same request's token
+// payload is decoded (it allocates), and a token carrying the issuer
+// audience is routed to the arm.
+func TestIsWorkloadDelegationRequest_NoWorkWithoutWorkloadIssuer(t *testing.T) {
+	token := x2Token(t, x2TokenOpts{aud: testIssuerAudience(x2HubID)})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	assert.False(t, isWorkloadDelegationRequest(req, nil))
+	allocs := testing.AllocsPerRun(100, func() { _ = isWorkloadDelegationRequest(req, nil) })
+	assert.Zero(t, allocs, "no workload issuer: the bearer is not read or decoded")
+
+	wi := &workloadIssuerAuthenticator{audience: testIssuerAudience(x2HubID), allowlist: map[string]string{x2Sub: config.WorkloadIssuerTierMember}}
+	assert.True(t, isWorkloadDelegationRequest(req, wi), "with a workload issuer, the issuer-audience token is routed to the arm")
+	allocs = testing.AllocsPerRun(100, func() { _ = isWorkloadDelegationRequest(req, wi) })
+	assert.Positive(t, allocs, "control: with a workload issuer the payload is decoded")
+}
+
+// Upstream review (label UTF-8): the delegation label comes from the JSON
+// body, and encoding/json replaces invalid UTF-8 with U+FFFD while
+// decoding, so a stored label is always valid UTF-8, even for a request
+// whose label holds invalid bytes.
+func TestTestIdentityDelegation_LabelIsAlwaysValidUTF8(t *testing.T) {
+	e := newX2Env(t, true)
+	ctx := context.Background()
+	grantor := e.grantor(t, "x2-utf8-grantor")
+	body := []byte(`{"workloadSub":"` + x2Sub + `","scopes":["test_identity:issue"],"label":"ab` + "\xff" + `cd"}`)
+	require.False(t, utf8.Valid(body), "the request body carries an invalid byte")
+	token, _, _, err := e.srv.userTokenService.GenerateTokenPair(grantor.ID, grantor.Email, grantor.DisplayName, grantor.Role, ClientTypeWeb)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/test-identity-delegations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var v TestIdentityDelegationView
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &v))
+	assert.Equal(t, "ab�cd", v.Label)
+	stored, err := e.s.GetTestIdentityDelegation(ctx, v.ID)
+	require.NoError(t, err)
+	assert.True(t, utf8.ValidString(stored.Label))
+	assert.Equal(t, "ab�cd", stored.Label)
+}
+
+// The web-login code route (WS1) is not a workload issuance route: a
+// workload token is refused there before any verification, for the
+// delegation that issued the identity and for any other one. The
+// management checks the route shares with the issuance routes are
+// delegation-scoped as well: D2 cannot manage D1's identity, and the rate
+// key is per delegation.
+func TestWorkloadDelegation_WebLoginCodeRefusedForEveryDelegation(t *testing.T) {
+	e := newX2Env(t, true)
+	key := make([]byte, testIdentityWebKeyLen)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	e.srv.testIdentityWeb = newTestIdentityWebState(TestIdentityWebSessionKey{Key: key})
+	webOn, _ := e.srv.testIdentityWebSessionGate()
+	require.True(t, webOn, "web sessions are available in this setup")
+
+	grantor, _ := e.bindingGrantor(t, "x2-web-grantor")
+	d1 := e.delegate(t, grantor, nil)
+	d2 := e.delegate(t, grantor, nil)
+	rec := e.mint(t, d1.ID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	i1 := tiDecode(t, rec).Identity
+	path := "/api/v1/test-identities/" + i1.ID + "/web-login-code"
+
+	assert.False(t, isTestIdentityIssuanceRoute(httptest.NewRequest(http.MethodPost, path, nil)))
+	verified := e.google.calls.Load()
+	for _, d := range []string{d1.ID, d2.ID} {
+		rec = e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), d, nil, nil)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "delegation %s: %s", d, rec.Body.String())
+	}
+	assert.Equal(t, verified, e.google.calls.Load(), "refused before any verification")
+	ctx := context.Background()
+	audits, _, err := e.s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: testIdentityWebCodeIssueMutation, TargetID: i1.ID})
+	require.NoError(t, err)
+	assert.Empty(t, audits, "no code was minted for a workload request")
+
+	// Positive control: the grantor's own session mints a code for it.
+	rec = doRequestAsUser(t, e.srv, grantor, http.MethodPost, path, nil)
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	// The shared management checks, with each delegation's state attached.
+	stateCtx := func(id string) context.Context {
+		d, err := e.s.GetTestIdentityDelegation(ctx, id)
+		require.NoError(t, err)
+		c := contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindWorkloadDelegation, ID: id})
+		return contextWithWorkloadDelegationState(c, &workloadDelegationState{delegation: d})
+	}
+	row, err := e.s.GetUser(ctx, i1.ID)
+	require.NoError(t, err)
+	caller := NewAuthenticatedUser(grantor.ID, grantor.Email, "", "member", "api")
+	assert.True(t, canManageTestIdentity(stateCtx(d1.ID), caller, row), "D1 manages its own identity")
+	assert.False(t, canManageTestIdentity(stateCtx(d2.ID), caller, row), "D2 does not manage D1's identity")
+	assert.Equal(t, "delegation:"+d2.ID, testIdentityRateKey(stateCtx(d2.ID), caller))
+	assert.Equal(t, grantor.ID, testIdentityRateKey(ctx, caller))
 }

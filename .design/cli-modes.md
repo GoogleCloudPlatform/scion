@@ -213,6 +213,8 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `shared-dir create` | Y | - |
 | `shared-dir remove` | Y | - |
 | `shared-dir info` | Y | Y |
+| `ssh` | Y | - |
+| `ssh-config` | Y | - |
 | `start` | Y | Y |
 | `stop` | Y | Y |
 | `sync` | Y | - |

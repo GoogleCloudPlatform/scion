@@ -123,7 +123,7 @@ func testIdentityDelegationViewOf(d *store.TestIdentityDelegation, now time.Time
 		Created:     d.Created,
 		ExpiresAt:   d.ExpiresAt,
 		RevokedAt:   d.RevokedAt,
-		Live:        wi.checkDelegationLive(d, now) == nil,
+		Live:        wi != nil && wi.checkDelegationLive(d, now) == nil,
 	}
 	if d.RevokedBy != nil {
 		v.RevokedBy = *d.RevokedBy

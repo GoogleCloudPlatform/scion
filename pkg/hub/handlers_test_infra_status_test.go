@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -44,17 +42,17 @@ func serveTestInfraStatus(t *testing.T, srv *Server) *httptest.ResponseRecorder 
 func TestTestInfraStatus_AllFalseOnNonTestHub(t *testing.T) {
 	rec := serveTestInfraStatus(t, &Server{})
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIssuerAudience":""}`, rec.Body.String())
+	assert.JSONEq(t, `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIssuerAudience":""}`, rec.Body.String())
 }
 
 func TestTestInfraStatus_MemberTierOn(t *testing.T) {
 	srv := &Server{testIdentities: newTestIdentityState(true)}
 	rec := serveTestInfraStatus(t, srv)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIssuerAudience":""}`, rec.Body.String())
+	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIssuerAudience":""}`, rec.Body.String())
 }
 
-// TestTestInfraStatus_BodyGolden pins the body to exactly three booleans
+// TestTestInfraStatus_BodyGolden pins the body to exactly four booleans
 // and the issuer audience string: no hub id field, version, counts or any
 // other field.
 func TestTestInfraStatus_BodyGolden(t *testing.T) {
@@ -78,20 +76,20 @@ func TestTestInfraStatus_BodyGolden(t *testing.T) {
 			assert.True(t, isBool, "%s must be a bool, got %T", k, v)
 		}
 		sort.Strings(keys)
-		assert.Equal(t, []string{"testHubAdmin", "testIdentities", "testIssuerAudience", "testSuperAdmin"}, keys)
+		assert.Equal(t, []string{"testHubAdmin", "testIdentities", "testIdentityWebSessions", "testIssuerAudience", "testSuperAdmin"}, keys)
 
-		want := `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIssuerAudience":""}`
+		want := `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIssuerAudience":""}`
 		if enabled {
-			want = `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIssuerAudience":""}`
+			want = `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIssuerAudience":""}`
 		}
 		assert.Equal(t, want, strings.TrimSpace(rec.Body.String()), "exact body")
 	}
 
-	// The response type has exactly the three bool fields and the issuer
+	// The response type has exactly the four bool fields and the issuer
 	// audience string, so a new field cannot be added without changing
 	// this test.
 	typ := reflect.TypeOf(TestInfraStatusResponse{})
-	require.Equal(t, 4, typ.NumField())
+	require.Equal(t, 5, typ.NumField())
 	for i := 0; i < typ.NumField(); i++ {
 		want := reflect.Bool
 		if typ.Field(i).Name == "TestIssuerAudience" {
@@ -106,7 +104,7 @@ func TestTestInfraStatus_BodyGolden(t *testing.T) {
 func TestTestInfraStatus_IssuerAudienceFollowsTierAndAllowlist(t *testing.T) {
 	wi := &workloadIssuerAuthenticator{audience: testIssuerAudience("hub-a"), allowlist: map[string]string{"1": "member"}}
 	srv := &Server{testIdentities: newTestIdentityState(true), workloadIssuer: wi}
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIssuerAudience":"scion-test-issuer:hub-a"}`,
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIssuerAudience":"scion-test-issuer:hub-a"}`,
 		strings.TrimSpace(serveTestInfraStatus(t, srv).Body.String()))
 	srv = &Server{testIdentities: newTestIdentityState(false), workloadIssuer: wi}
 	assert.Empty(t, srv.testInfraGates().TestIssuerAudience, "member tier off")
@@ -135,7 +133,7 @@ func TestTestInfraStatus_AdminGatesFollowAdminTier(t *testing.T) {
 	assert.False(t, g.TestSuperAdmin, "super-admin kind off")
 	rec := serveTestInfraStatus(t, srv)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false,"testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
 
 	// The super-admin value reads its own kind (never set by a startup gate
 	// in this release; set directly here to pin the mapping).
