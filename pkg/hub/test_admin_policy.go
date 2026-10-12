@@ -325,6 +325,11 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"authz_delegation_ceiling.go:evaluateUserDelegatorAuthority":     {Policy: testAdminPolicyAllow, Reason: "delegation ceiling of a system-admin delegator; grant shaping for test admins is phase A3"},
 	"project_deletion_service.go:Delete":                             {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance"},
 	"project_deletion_service.go:checkDeletionGovernance":            {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance"},
+	// Test identity issuance and management: each refuses every test
+	// identity kind before (or instead of) its admin check.
+	"handlers_test_admin_identities.go:canIssueTestAdmin":                  {Policy: testAdminPolicyAllow, Reason: "issuer check; testAdminIssuer refuses non-human callers first, and the issuance capabilities are deny"},
+	"handlers_test_admin_identities.go:handleRevokeAllTestAdminIdentities": {Policy: testAdminPolicyAllow, Reason: "revoke-all refuses non-human callers (kindForPrincipal) before the super-admin check"},
+	"handlers_test_identities.go:testIdentityCallerSeesAll":                {Policy: testAdminPolicyAllow, Reason: "result scope of the test_identity.issue routes, which are deny for test identities"},
 }
 
 // testAdminSettingsSectionPolicy classifies every operational settings
