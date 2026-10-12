@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -165,7 +167,7 @@ func TestIdentityDefaultSet_ProjectAccountByEmailStoresID(t *testing.T) {
 	f := newIdDefFakeHub(t)
 
 	var runErr error
-	stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultSet(nil, []string{"worker@example.com"}) })
+	stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultSet(idDefCmd(t), []string{"worker@example.com"}) })
 	require.NoError(t, runErr)
 
 	assert.Equal(t, []string{"worker@example.com"}, f.statusRef, "the reference is resolved through the Hub")
@@ -189,7 +191,7 @@ func TestIdentityDefaultSet_ModeClearsAccount(t *testing.T) {
 			f.stored["defaultGCPIdentityServiceAccountID"] = idDefSAOne
 
 			var runErr error
-			_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultSet(nil, []string{arg}) })
+			_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultSet(idDefCmd(t), []string{arg}) })
 			require.NoError(t, runErr)
 
 			assert.Empty(t, f.statusRef, "a mode is not resolved as an account")
@@ -209,7 +211,7 @@ func TestIdentityDefaultSet_ProfileKeepsOtherProfiles(t *testing.T) {
 	identityDefaultProfile = "gke"
 
 	var runErr error
-	stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultSet(nil, []string{"Worker SA"}) })
+	stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultSet(idDefCmd(t), []string{"Worker SA"}) })
 	require.NoError(t, runErr)
 
 	require.Len(t, f.putBodies, 1)
@@ -226,7 +228,7 @@ func TestIdentityDefaultSet_ProfileRejectsMode(t *testing.T) {
 	f := newIdDefFakeHub(t)
 	identityDefaultProfile = "gke"
 
-	err := runIdentityDefaultSet(nil, []string{"passthrough"})
+	err := runIdentityDefaultSet(idDefCmd(t), []string{"passthrough"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "per-profile default is an account")
 	assert.Empty(t, f.putBodies)
@@ -234,7 +236,7 @@ func TestIdentityDefaultSet_ProfileRejectsMode(t *testing.T) {
 
 func TestIdentityDefaultSet_AssignWordRejected(t *testing.T) {
 	f := newIdDefFakeHub(t)
-	err := runIdentityDefaultSet(nil, []string{"assign"})
+	err := runIdentityDefaultSet(idDefCmd(t), []string{"assign"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "assign needs an account")
 	assert.Empty(t, f.putBodies)
@@ -243,7 +245,7 @@ func TestIdentityDefaultSet_AssignWordRejected(t *testing.T) {
 func TestIdentityDefaultSet_AmbiguousReferenceNotWritten(t *testing.T) {
 	f := newIdDefFakeHub(t)
 
-	err := runIdentityDefaultSet(nil, []string{"Shared"})
+	err := runIdentityDefaultSet(idDefCmd(t), []string{"Shared"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "identity_ambiguous")
 	assert.Contains(t, err.Error(), idDefSAOne+" (project)")
@@ -255,7 +257,7 @@ func TestIdentityDefaultSet_AmbiguousReferenceNotWritten(t *testing.T) {
 func TestIdentityDefaultSet_UnknownReferenceNotWritten(t *testing.T) {
 	f := newIdDefFakeHub(t)
 
-	err := runIdentityDefaultSet(nil, []string{"nobody@example.com"})
+	err := runIdentityDefaultSet(idDefCmd(t), []string{"nobody@example.com"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no GCP service account \"nobody@example.com\" is available")
 	assert.Empty(t, f.putBodies)
@@ -266,7 +268,7 @@ func TestIdentityDefaultSet_ForbiddenNamesRole(t *testing.T) {
 	f.putStatus = http.StatusForbidden
 	f.putError = `{"error":{"code":"forbidden","message":"Insufficient permissions"}}`
 
-	err := runIdentityDefaultSet(nil, []string{"passthrough"})
+	err := runIdentityDefaultSet(idDefCmd(t), []string{"passthrough"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Insufficient permissions", "the Hub's message is shown")
 	assert.Contains(t, err.Error(), "project.update")
@@ -278,7 +280,7 @@ func TestIdentityDefaultSet_HubRejectionShownAsIs(t *testing.T) {
 	f.putStatus = http.StatusBadRequest
 	f.putError = `{"error":{"code":"identity_mode_unsupported","message":"default GCP identity mode 'block' is not available for a Kubernetes-bound project; choose 'passthrough' or 'assign' instead"}}`
 
-	err := runIdentityDefaultSet(nil, []string{"block"})
+	err := runIdentityDefaultSet(idDefCmd(t), []string{"block"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not available for a Kubernetes-bound project")
 	assert.NotContains(t, err.Error(), "project.update")
@@ -290,7 +292,7 @@ func TestIdentityDefaultUnset_Project(t *testing.T) {
 	f.stored["defaultGCPIdentityServiceAccountID"] = idDefSAOne
 
 	var runErr error
-	stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultUnset(nil, nil) })
+	stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultUnset(idDefCmd(t), nil) })
 	require.NoError(t, runErr)
 
 	require.Len(t, f.putBodies, 1)
@@ -310,7 +312,7 @@ func TestIdentityDefaultUnset_ProfileKeepsOthers(t *testing.T) {
 	identityDefaultProfile = "gke"
 
 	var runErr error
-	_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultUnset(nil, nil) })
+	_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultUnset(idDefCmd(t), nil) })
 	require.NoError(t, runErr)
 
 	require.Len(t, f.putBodies, 1)
@@ -325,7 +327,7 @@ func TestIdentityDefaultUnset_LastProfileSendsEmptyMap(t *testing.T) {
 	identityDefaultProfile = "other"
 
 	var runErr error
-	_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultUnset(nil, nil) })
+	_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultUnset(idDefCmd(t), nil) })
 	require.NoError(t, runErr)
 
 	require.Len(t, f.putBodies, 1)
@@ -339,7 +341,7 @@ func TestIdentityDefaultUnset_MissingProfileWritesNothing(t *testing.T) {
 	identityDefaultProfile = "absent"
 
 	var runErr error
-	_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultUnset(nil, nil) })
+	_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultUnset(idDefCmd(t), nil) })
 	require.NoError(t, runErr)
 	assert.Empty(t, f.putBodies)
 }
@@ -354,7 +356,7 @@ func TestIdentityDefaultShow_LadderWithSources(t *testing.T) {
 	}
 
 	var runErr error
-	stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultShow(nil, nil) })
+	stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultShow(idDefCmd(t), nil) })
 	require.NoError(t, runErr)
 	assert.Empty(t, f.putBodies, "show never writes")
 
@@ -383,7 +385,7 @@ func TestIdentityDefaultShow_JSON(t *testing.T) {
 	identityDefaultJSON = true
 
 	var runErr error
-	stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultShow(nil, nil) })
+	stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultShow(idDefCmd(t), nil) })
 	require.NoError(t, runErr)
 
 	var ladder identityDefaultLadder
@@ -417,4 +419,50 @@ func TestProjectIdentityDefault_NotInAgentMode(t *testing.T) {
 		names = append(names, c.Name())
 	}
 	assert.True(t, slices.Contains(names, "show") && slices.Contains(names, "set") && slices.Contains(names, "unset"))
+}
+
+// idDefCmd returns a command carrying a context, as cobra sets one when the
+// command is executed; the run functions derive their timeout from it.
+func idDefCmd(t *testing.T) *cobra.Command {
+	t.Helper()
+	c := &cobra.Command{}
+	c.SetContext(context.Background())
+	return c
+}
+
+// idDefNilClient is a Hub client whose settings read and account status
+// return (nil, nil), to check the nil guards.
+type idDefNilClient struct{ hubclient.Client }
+
+func (idDefNilClient) Projects() hubclient.ProjectService { return idDefNilProjects{} }
+func (idDefNilClient) GCPServiceAccounts() hubclient.GCPServiceAccountService {
+	return idDefNilSAs{}
+}
+
+type idDefNilProjects struct{ hubclient.ProjectService }
+
+func (idDefNilProjects) GetSettings(context.Context, string) (*hubclient.ProjectSettings, error) {
+	return nil, nil
+}
+
+type idDefNilSAs struct {
+	hubclient.GCPServiceAccountService
+}
+
+func (idDefNilSAs) Status(context.Context, string, string) (*hubclient.GCPServiceAccountStatus, error) {
+	return nil, nil
+}
+
+func TestIdentityDefault_NilSettingsIsAnError(t *testing.T) {
+	_, err := readIdentityDefaults(context.Background(), idDefNilClient{}, idDefProject)
+	require.Error(t, err, "a missing settings body must not read as an empty per-profile map")
+	assert.Contains(t, err.Error(), "returned no project settings")
+	assert.Contains(t, err.Error(), "nothing was changed")
+}
+
+func TestIdentityDefault_NilAccountStatusIsAnError(t *testing.T) {
+	_, err := resolveIdentityDefaultAccount(context.Background(), idDefNilClient{}, idDefProject, "worker@example.com")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "returned no id")
+	assert.Contains(t, err.Error(), "nothing was changed")
 }

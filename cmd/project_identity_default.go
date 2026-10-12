@@ -167,7 +167,7 @@ func runIdentityDefaultShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	resolved, err := client.Projects().GetResolvedSettings(ctx, projectID)
@@ -372,7 +372,7 @@ func runIdentityDefaultSet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	update := &hubclient.ProjectGCPIdentityDefaultsUpdate{}
@@ -412,7 +412,7 @@ func runIdentityDefaultUnset(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	update := &hubclient.ProjectGCPIdentityDefaultsUpdate{}
@@ -447,6 +447,12 @@ func readIdentityDefaults(ctx context.Context, client hubclient.Client, projectI
 	if err != nil {
 		return nil, fmt.Errorf("failed to read project settings: %w", err)
 	}
+	// Not an empty value: the per-profile map built from it is written back
+	// whole, so treating a missing body as "no entries" would clear every
+	// other profile's default.
+	if current == nil {
+		return nil, errors.New("the Hub returned no project settings; nothing was changed")
+	}
 	return current, nil
 }
 
@@ -463,7 +469,7 @@ func resolveIdentityDefaultAccount(ctx context.Context, client hubclient.Client,
 		}
 		return "", fmt.Errorf("could not resolve GCP service account %q; nothing was changed: %w", ref, err)
 	}
-	if st.Account.ID == "" {
+	if st == nil || st.Account.ID == "" {
 		return "", fmt.Errorf("the Hub returned no id for GCP service account %q; nothing was changed", ref)
 	}
 	return st.Account.ID, nil
