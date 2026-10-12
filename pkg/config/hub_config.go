@@ -98,6 +98,12 @@ type HubServerConfig struct {
 	// (see pkg/hub neverAPIWritableSettingsKeys).
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
 
+	// TestIdentities is server.hub.test_identities: startup-only settings of
+	// hub-issued test identities, such as the workload issuer allowlist
+	// (ptone/scion#4240, phase X2). Like HubClass it is never writable
+	// through the settings API in any mode.
+	TestIdentities *TestIdentitiesConfig `json:"testIdentities,omitempty" yaml:"testIdentities,omitempty" koanf:"testIdentities"`
+
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
 	// it when set. See ValidateMonitoringDashboardURL.
@@ -991,6 +997,10 @@ type StorageConfig struct {
 	LocalPath string `json:"localPath" yaml:"localPath" koanf:"localPath"`
 }
 
+// DefaultBrokerHost is the built-in runtime broker listen host
+// (server.broker.host) used when settings do not set one.
+const DefaultBrokerHost = "0.0.0.0"
+
 // DefaultGlobalConfig returns the default global configuration.
 func DefaultGlobalConfig() GlobalConfig {
 	return GlobalConfig{
@@ -1009,7 +1019,7 @@ func DefaultGlobalConfig() GlobalConfig {
 		RuntimeBroker: RuntimeBrokerConfig{
 			Enabled:                       false,
 			Port:                          9800,
-			Host:                          "0.0.0.0",
+			Host:                          DefaultBrokerHost,
 			ReadTimeout:                   30 * time.Second,
 			WriteTimeout:                  120 * time.Second, // Longer for agent operations
 			CORSEnabled:                   true,
