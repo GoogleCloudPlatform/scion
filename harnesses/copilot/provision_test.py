@@ -435,6 +435,44 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         self._provision_must_succeed()
         self.assertEqual(self._read_raw(), raw)
 
+    def _assert_deep_sign_in_untouched(self, defect: bytes) -> None:
+        # A sign-in key, then a decode or convert defect, then 9998 nested
+        # arrays (9999 levels, within Go's 10000). The strict parse stops at
+        # the defect; the host-rule parse then reaches the deep part.
+        raw = (b'{"copilot_hmac_key": "placeholder-hmac", "model": ' + defect
+               + b', "theme": ' + b"[" * 9998 + b"]" * 9998 + b"}")
+        with self.assertRaises(ValueError):
+            provision._load_config_strictly(raw)
+        with self.assertRaises(RecursionError,
+                               msg="Python's decoder accepts 9999 levels; test needs updating"):
+            provision._config_holds_sign_in_or_too_deep(raw)
+        self._write_raw(raw)
+        self._provision_must_succeed()
+        self.assertEqual(self._read_raw(), raw)
+
+    def test_too_deep_sign_in_file_after_long_int_is_untouched(self) -> None:
+        self._assert_deep_sign_in_untouched(self.LONG_INT.encode())
+
+    def test_too_deep_sign_in_file_after_non_utf8_is_untouched(self) -> None:
+        self._assert_deep_sign_in_untouched(b'"x\xff"')
+
+    def test_float_overflow_config_is_replaced(self) -> None:
+        # 1e400 loads as inf and would be written back as Infinity.
+        for lit in ("1e400", "-1e400"):
+            with self.subTest(lit):
+                self._write_raw(('{"theme": ' + lit + '}').encode())
+                self.assertEqual(self._provision_must_succeed()["method"], "none")
+                self._assert_replaced()
+
+    def test_float_overflow_in_sign_in_file_is_untouched(self) -> None:
+        # The host accepts 1e400 (it never converts numbers), so keys decide.
+        for raw in (b'{"copilot_hmac_key": "placeholder-hmac", "theme": 1e400}',
+                    b'{"placeholder_key": 1e400}'):
+            with self.subTest(raw):
+                self._write_raw(raw)
+                self.assertEqual(self._provision_must_succeed()["method"], "auth-file")
+                self.assertEqual(self._read_raw(), raw)
+
     # --- settings.json read site --------------------------------------------
 
     def _settings_path(self) -> str:
@@ -464,6 +502,13 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         for const in ("NaN", "Infinity", "-Infinity"):
             with self.subTest(const):
                 self._write_settings_raw(('{"theme": ' + const + '}').encode())
+                self._provision_must_succeed()
+                self._assert_settings_defaults()
+
+    def test_float_overflow_settings_is_replaced_with_defaults(self) -> None:
+        for lit in ("1e400", "-1e400"):
+            with self.subTest(lit):
+                self._write_settings_raw(('{"theme": ' + lit + '}').encode())
                 self._provision_must_succeed()
                 self._assert_settings_defaults()
 
@@ -576,6 +621,13 @@ class ConfigFileMayHoldCredentialTest(unittest.TestCase):
         self.assertFalse(self._check('{"copilot_tokens": {"placeholder": ' + big + '}}'))
         self.assertTrue(self._check('{"placeholder_key": ' + big + '}'))
         self.assertTrue(self._check('{"copilot_hmac_key": "placeholder-hmac", "theme": -' + big + '}'))
+
+    def test_float_overflow_follows_keys(self) -> None:
+        # Unlike NaN, 1e400 is valid JSON; the host never converts it.
+        self.assertFalse(self._check('{"theme": 1e400}'))
+        self.assertTrue(self._check('{"placeholder_key": 1e400}'))
+        self.assertTrue(self._check('{"copilot_hmac_key": "placeholder-hmac", "theme": -1e400}'))
+        self.assertFalse(self._check('{"copilot_hmac_key": 1e400}'))
 
     def test_nan_and_infinity_are_not_sign_in(self) -> None:
         for const in ("NaN", "Infinity", "-Infinity"):

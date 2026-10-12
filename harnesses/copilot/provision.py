@@ -36,6 +36,7 @@ permissions on the secret file.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from typing import Any
@@ -97,6 +98,16 @@ def _reject_json_constant(name: str) -> Any:
     raise ValueError(f"invalid JSON constant {name}")
 
 
+def _reject_non_finite_float(literal: str) -> float:
+    # A literal such as 1e400 parses to inf, which json would write back as
+    # non-standard Infinity. Only the strict loaders use this: the host
+    # accepts 1e400 (it never converts numbers), so the sign-in rule must not.
+    value = float(literal)
+    if not math.isfinite(value):
+        raise ValueError("JSON number out of float range")
+    return value
+
+
 def _json_int_unconverted(literal: str) -> int:
     # The host decodes config.json into json.RawMessage values and never
     # converts numbers, so an integer literal beyond Python's int conversion
@@ -132,6 +143,17 @@ def _config_holds_sign_in(raw: bytes) -> bool:
 
     Values are only tested for emptiness; they are never logged or returned.
     """
+    try:
+        return _config_holds_sign_in_or_too_deep(raw)
+    except RecursionError:
+        return False
+
+
+def _config_holds_sign_in_or_too_deep(raw: bytes) -> bool:
+    """_config_holds_sign_in, but raise RecursionError for content nested too
+    deeply for Python's decoder. The host's decoder allows deeper nesting, so
+    such content may hold sign-in there; _ensure_settings must keep it.
+    """
     text = raw.decode("utf-8", errors="replace")
     kept = [ln for ln in text.split("\n") if not ln.lstrip(_GO_SPACE).startswith("//")]
     try:
@@ -140,7 +162,7 @@ def _config_holds_sign_in(raw: bytes) -> bool:
             parse_constant=_reject_json_constant,
             parse_int=_json_int_unconverted,
         )
-    except (ValueError, RecursionError):
+    except ValueError:
         return False
     if not isinstance(top, dict):
         return False
@@ -402,17 +424,23 @@ def _load_config_strictly(raw: bytes) -> Any:
     Lines that start with "//" are dropped, as copilot allows. Raises
     ValueError (UnicodeDecodeError and json.JSONDecodeError included) or
     RecursionError when the content is not strict UTF-8, not JSON, holds an
-    integer too long to convert, or holds NaN or Infinity, which copilot's
-    own JSON parser rejects.
+    integer too long to convert, holds NaN or Infinity, which copilot's own
+    JSON parser rejects, or holds a number beyond float range (1e400), which
+    would be written back as Infinity.
 
     Mirrors scion_harness.read_json_skipping_comment_lines, except that it
-    takes bytes, rejects NaN and Infinity, and lets UnicodeDecodeError and
-    the long-integer ValueError reach the caller as unreadable content.
+    takes bytes, rejects NaN, Infinity and numbers beyond float range, and
+    lets UnicodeDecodeError and the long-integer ValueError reach the caller
+    as unreadable content.
     Follow-up to share one helper: ptone/scion#4665.
     """
     text = raw.decode("utf-8")
     lines = [ln for ln in text.splitlines() if not ln.strip().startswith("//")]
-    return json.loads("\n".join(lines), parse_constant=_reject_json_constant)
+    return json.loads(
+        "\n".join(lines),
+        parse_constant=_reject_json_constant,
+        parse_float=_reject_non_finite_float,
+    )
 
 
 def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
@@ -425,13 +453,18 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
     if os.path.isfile(settings_path):
         try:
             with open(settings_path, "r", encoding="utf-8") as f:
-                loaded = json.load(f, parse_constant=_reject_json_constant)
+                loaded = json.load(
+                    f,
+                    parse_constant=_reject_json_constant,
+                    parse_float=_reject_non_finite_float,
+                )
             if isinstance(loaded, dict):
                 settings = loaded
         except (OSError, ValueError, RecursionError):
             # Unreadable, not UTF-8, not JSON, an integer too long to
-            # convert, NaN or Infinity, or nested too deeply: rewritten with
-            # the defaults, so non-standard JSON is never written back.
+            # convert, NaN or Infinity, a number beyond float range (1e400),
+            # or nested too deeply: rewritten with the defaults, so
+            # non-standard JSON is never written back.
             pass
 
     defaults = {"autoUpdate": False, "banner": "never"}
@@ -445,6 +478,10 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
 
     config_path = os.path.join(config_dir, "config.json")
     config: dict[str, Any] = {}
+    too_deep_note = (
+        "~/.copilot/config.json is nested too deeply to read; leaving it "
+        "unchanged (workspace not added to trustedFolders)"
+    )
     if os.path.isfile(config_path):
         try:
             with open(config_path, "rb") as f:
@@ -459,19 +496,22 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
             except RecursionError:
                 # Too deep for Python's decoder, though the host (Go, 10000
                 # levels) may still read sign-in from it: never replace it.
-                ctx.info(
-                    "~/.copilot/config.json is nested too deeply to read; "
-                    "leaving it unchanged (workspace not added to "
-                    "trustedFolders)"
-                )
+                ctx.info(too_deep_note)
                 return
             except ValueError:
                 # Not cleanly readable: not JSON, not UTF-8, an integer too
-                # long to convert, or NaN or Infinity. Rewriting it could
+                # long to convert, NaN or Infinity, or a number beyond float
+                # range. Rewriting it could
                 # only write back a lossy copy, so a file that may hold
                 # sign-in (the host's rule) is left untouched and any other
-                # file is replaced.
-                if _config_holds_sign_in(raw):
+                # file is replaced. The sign-in parse may itself hit the
+                # nesting limit past the defect: keep that file too.
+                try:
+                    may_hold_sign_in = _config_holds_sign_in_or_too_deep(raw)
+                except RecursionError:
+                    ctx.info(too_deep_note)
+                    return
+                if may_hold_sign_in:
                     ctx.info(
                         "~/.copilot/config.json is not clean JSON but may hold "
                         "sign-in; leaving it unchanged (workspace not added to "
