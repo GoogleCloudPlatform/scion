@@ -621,7 +621,7 @@ func TestHandleAgentDirWithoutConfig_CleanWorktreeWithOnlyIgnoredFileIsRemoved(t
 	}
 	logs := logBuf.String()
 	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "ignored_entries=1") || !strings.Contains(logs, "settings.local") {
-		t.Errorf("logs = %q, want a Warn with the ignored file count and path", logs)
+		t.Errorf("logs = %q, want a Warn with the ignored entries count and path", logs)
 	}
 }
 
