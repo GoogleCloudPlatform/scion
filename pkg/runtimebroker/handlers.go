@@ -2641,7 +2641,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		// row records the soft delete, and the mark only feeds local
 		// display. A failed mark (unparseable agent-info.json, a read-only
 		// home, a full disk) may not clear on a retry, so it is logged and
-		// the delete still answers 204.
+		// does not change the delete response.
 		if markErr := markAgentSoftDeleted(target.name, projectPath, deletedAt); markErr != nil {
 			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", markErr)
 		}
