@@ -44,23 +44,6 @@ func gitCommitAll(t *testing.T, dir string) {
 	}
 }
 
-// outsideRootErr returns the error an os.Root reports for a name that
-// leads outside the root directory.
-func outsideRootErr(t *testing.T) error {
-	t.Helper()
-	root, err := os.OpenRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = root.Close() }()
-	_, err = root.Open(filepath.Join("..", "x"))
-	var pe *fs.PathError
-	if !errors.As(err, &pe) {
-		t.Fatalf("os.Root.Open outside the root: got %v, want a *fs.PathError", err)
-	}
-	return pe.Err
-}
-
 // plainDir creates a directory under home that is not inside a repository.
 func plainDir(t *testing.T, home, name string) string {
 	t.Helper()
@@ -404,10 +387,12 @@ func TestInitProject_ExplicitTargetEntryLinksOutsideRefused(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "cannot initialize project: "+tc.wantStep) {
 				t.Fatalf("InitProject: got %v, want a cannot initialize project error naming %q", err, tc.wantStep)
 			}
-			// The refusal must come from the project directory root, not
-			// from an incidental failure of a link-following call.
-			if want := outsideRootErr(t); !errors.Is(err, want) {
-				t.Errorf("InitProject: got %v, want an error wrapping %q", err, want)
+			// The refusal must come from the os.Root opened on the project
+			// directory, which names the entry relative to that directory,
+			// not from a call that resolves the full path.
+			var pe *fs.PathError
+			if !errors.As(err, &pe) || pe.Path != tc.entry {
+				t.Errorf("InitProject: got %v, want a path error for the entry %q relative to the project directory", err, tc.entry)
 			}
 
 			switch tc.destKind {
