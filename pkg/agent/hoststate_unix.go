@@ -36,9 +36,10 @@ import (
 const hostStateNoFollowParent = true
 
 // hostStateDir is agentDir opened once: the resolved trusted root, then
-// each component below it with openat(O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK). Every later
-// operation on HostStateFile (open, temp create, rename) goes through the
-// fd, so a symlink swapped into the path afterwards is not followed either.
+// each component below it with openat(O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK).
+// Every later operation on HostStateFile (open, temp create, rename) goes
+// through the fd, so a symlink swapped into the path afterwards is not
+// followed either.
 type hostStateDir struct {
 	fd   int
 	path string // agentDir, for messages

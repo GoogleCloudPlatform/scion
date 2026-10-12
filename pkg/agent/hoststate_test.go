@@ -355,16 +355,15 @@ func TestHostStateDirectoryAtPathErrors(t *testing.T) {
 	}
 }
 
-// TestHostStateMarkerFileAtRootErrors passes a project directory whose
-// .scion is a marker file (the hub-native and non-git layout) as the root,
-// and a root whose .scion/agents is a file. Both are refused with their
-// own error and nothing is written.
+// TestHostStateMarkerFileAtRootErrors passes a root whose .scion is a
+// file, and a root whose .scion/agents is a file. Both are refused with
+// their own error and nothing is written.
 func TestHostStateMarkerFileAtRootErrors(t *testing.T) {
 	cases := map[string]struct {
 		file string
 		want error
 	}{
-		"marker file": {file: ".scion", want: errHostStateMarkerFile},
+		".scion file": {file: ".scion", want: errHostStateMarkerFile},
 		"agents file": {file: filepath.Join(".scion", "agents"), want: errHostStateNotDirectory},
 	}
 	for name, tc := range cases {
