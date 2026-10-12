@@ -491,7 +491,7 @@ func TestSSHConfig_HostBlockLines(t *testing.T) {
 }
 
 // The ProxyCommand line runs with a minimal PATH and an
-// unrelated working directory. A stand-in scion records its arguments.
+// unrelated working directory. A fake scion records its arguments.
 func TestSSHConfig_ProxyCommandRunsWithMinimalPATHAndUnrelatedDir(t *testing.T) {
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		t.Skip("needs /bin/sh")

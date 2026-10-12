@@ -88,7 +88,8 @@ func newSSHHubConn(endpoint, token string) (*sshHubConn, error) {
 }
 
 // sshAgentHostKeyResponse is the part of GET agent the host-key accessor
-// reads.
+// reads. The hub serves sshHostKey on both the GET by id and the
+// project-scoped GET by slug, and omits it when the agent has no key.
 type sshAgentHostKeyResponse struct {
 	SSHHostKey string `json:"sshHostKey"`
 }
@@ -180,6 +181,10 @@ func (h *sshHubConn) resolveSSHProjectID(ctx context.Context, project string) (i
 // recreated hint to stderr and returns nil, so ssh goes on to report the
 // mismatch itself. A missing agent returns exit 4 promptly.
 func checkSSHHostKeyPin(ctx context.Context, stderr io.Writer, home, endpoint, token, project, agent string) error {
+	// The endpoint as given must be a plain origin before it is normalized.
+	if _, err := sshEndpointURL(endpoint); err != nil {
+		return tunnelclient.Errorf(tunnelclient.ExitUsage, "%v", err)
+	}
 	normalized := tunnelclient.NormalizeEndpoint(endpoint)
 	if _, err := sshEndpointURL(normalized); err != nil {
 		return tunnelclient.Errorf(tunnelclient.ExitUsage, "%v", err)

@@ -17,10 +17,13 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +31,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	hubpkg "github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
@@ -121,4 +126,69 @@ func TestClassifySSHHubError(t *testing.T) {
 		assert.Equal(t, c.want, got.Code, c.name)
 		assert.NotContains(t, got.Msg, "\n", c.name)
 	}
+}
+
+// The accessor reads the field the hub serves on GET agent: a hub agent
+// response with a host key gives that key, and one without (the field is
+// omitted) gives none. A rename on either side fails this test.
+func TestAgentSSHHostKey_HubResponseContract(t *testing.T) {
+	key := testSSHPublicKey(t)
+	withKey, err := json.Marshal(hubpkg.AgentWithCapabilities{Agent: store.Agent{ID: "ag-1", Slug: "a"}, SSHHostKey: key})
+	require.NoError(t, err)
+	withoutKey, err := json.Marshal(hubpkg.AgentWithCapabilities{Agent: store.Agent{ID: "ag-2", Slug: "b"}})
+	require.NoError(t, err)
+	assert.NotContains(t, string(withoutKey), "sshHostKey", "an agent without a key omits the field")
+
+	var decoded sshAgentHostKeyResponse
+	require.NoError(t, json.Unmarshal(withKey, &decoded))
+	assert.Equal(t, key, decoded.SSHHostKey)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/agents/ag-1":
+			_, _ = w.Write(withKey)
+		case "/api/v1/agents/ag-2":
+			_, _ = w.Write(withoutKey)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	stubSSHTransport(t)
+	conn, err := newSSHHubConn(srv.URL, "tok")
+	require.NoError(t, err)
+	got, err := conn.agentSSHHostKey(context.Background(), "", "ag-1")
+	require.NoError(t, err)
+	assert.Equal(t, key, got)
+	got, err = conn.agentSSHHostKey(context.Background(), "", "ag-2")
+	require.NoError(t, err)
+	assert.Equal(t, "", got, "an absent field means no key")
+}
+
+// checkSSHHostKeyPin refuses an endpoint that is not a plain origin as given,
+// before normalising it, and sends no request.
+func TestCheckSSHHostKeyPin_RefusesRawEndpointBeforeNormalizing(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	stubSSHTransport(t)
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	for _, bad := range []string{
+		"http://user:pw@" + u.Host,
+		srv.URL + "/?x=1",
+		srv.URL + "/#frag",
+		srv.URL + " ",
+		"not a url",
+	} {
+		var stderr bytes.Buffer
+		err := checkSSHHostKeyPin(context.Background(), &stderr, t.TempDir(), bad, "tok", "p", "a")
+		assert.Equal(t, tunnelclient.ExitUsage, tunnelclient.CodeOf(err), bad)
+		assert.Empty(t, stderr.String(), bad)
+	}
+	assert.Equal(t, int32(0), requests.Load(), "no hub request for a refused endpoint")
 }

@@ -28,7 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
-// fakeSSHClient installs a stand-in ssh as the only program on PATH. It
+// fakeSSHClient installs a fake ssh as the only program on PATH. It
 // records its arguments and a copy of the known-hosts file it was given, and
 // exits with FAKE_SSH_EXIT.
 type fakeSSHClient struct {
