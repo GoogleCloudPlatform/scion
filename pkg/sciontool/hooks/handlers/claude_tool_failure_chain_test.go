@@ -22,12 +22,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// These tests send a failed Claude Code tool call through the same chain the
-// sciontool hook command builds (cmd/sciontool/commands/hook.go
-// processHookData): raw JSON, the built-in dialects, then the status handler
-// and the hub handler. The dialect name comes from the PostToolUseFailure
-// hook command in the bundled claude settings, so a settings, dialect or
-// handler regression in the failed-tool path shows up here.
+// These tests send a failed Claude Code tool call through a subset of the
+// chain the sciontool hook command builds (cmd/sciontool/commands/hook.go
+// processHookData): a HarnessProcessor with the built-in dialects, the status
+// handler and the hub handler (NewHubHandler against a test server), fed raw
+// JSON through ParseRaw and Dispatch. They do not build the other stages
+// processHookData adds: the mapping-dialect override, the ready marker, the
+// logging, prompt and limits handlers, the hub client budget, the hook
+// response and hook telemetry. The dialect name comes from the
+// PostToolUseFailure hook command in the bundled claude settings, so a
+// settings, dialect, status or hub regression in the failed-tool path shows
+// up here.
 
 const (
 	chainPreToolUse = `{"hook_event_name":"PreToolUse","session_id":"00000000-0000-0000-0000-000000000000",` +
