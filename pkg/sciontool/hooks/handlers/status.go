@@ -220,11 +220,17 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 // Notification event and, when owner (a sub-agent's agent_id) is not empty,
 // adds owner to the wait's owner list. A waiting_for_input the agent set
 // itself is left unchanged: a harness prompt must not turn it into a
-// notification-set wait that the prompt's answer would then clear. The
-// owner list change is part of the same locked update.
+// notification-set wait that the prompt's answer would then clear. A
+// sub-agent's question (owner not empty) also leaves blocked, completed,
+// limits_exceeded and crashed unchanged and records no owner (see
+// isHeldNonWaitingActivity). The owner list change is part of the same
+// locked update.
 func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 	return h.update(func(info map[string]interface{}) bool {
 		if isAgentSetWaiting(info) {
+			return false
+		}
+		if current, _ := info["activity"].(string); owner != "" && isHeldNonWaitingActivity(current) {
 			return false
 		}
 
@@ -261,6 +267,14 @@ func (h *StatusHandler) releaseNotificationWaitOwner(owner string) error {
 		setNotificationWaitOwners(info, remaining)
 		return true
 	})
+}
+
+// isHeldNonWaitingActivity reports whether activity is a held status other
+// than waiting_for_input: blocked, completed, limits_exceeded or crashed. A
+// sub-agent's question must not replace it, the same statuses a parent
+// tool-start keeps.
+func isHeldNonWaitingActivity(activity string) bool {
+	return isStickyActivity(activity) && activity != string(state.ActivityWaitingForInput)
 }
 
 // isNotificationWaiting reports whether info holds a waiting_for_input that a
