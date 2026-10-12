@@ -57,7 +57,7 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 	{"owner", "user", "project"}: {
 		"project.create", "project.read", "project.update", "project.delete",
 		"project.manage", "project.register", "project.set_messaging_policy",
-		"project.clone", "project.list", "project.secret_read",
+		"project.clone", "project.list", "project.secret_read", "project.manage_visitors",
 	},
 	{"owner", "user", "template"}:       {},
 	{"owner", "user", "harness_config"}: {},
