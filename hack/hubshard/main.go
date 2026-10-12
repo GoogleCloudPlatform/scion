@@ -83,7 +83,8 @@ import (
 const shardTag = "hubshard"
 
 // defaultShards is the -n default. The CI matrix (.github/workflows/ci.yml,
-// job hub-shard) lists the shards 1..defaultShards; keep the two in step.
+// job hub-shard-plan), the make targets and the nightly loops take the
+// shard list from -shards, so this is the one place the count lives.
 const defaultShards = 6
 
 // defaultMaxGroupDiv is the -maxgroupdiv default.
@@ -138,6 +139,7 @@ func run(args []string, stdout io.Writer) error {
 	list := flags.Int("list", 0, "print the tests (one per line, sorted) that shard K's test binary compiles under -tags")
 	skip := flags.Int("skip", 0, "print the go test -skip pattern for shard K under -tags: the anchored names of the common files' tests, which every shard compiles and only shard 1 runs (empty for shard 1)")
 	locate := flags.Bool("locate", false, "for each test name argument print \"<name> <K>\": the shard that runs it under -tags (a common file's tests run in shard 1); fail if a name is in no shard")
+	shards := flags.Bool("shards", false, "print the shard numbers 1..N (one per line), for scripts that loop over every shard")
 	untag := flags.Bool("untag", false, "remove every hubshard clause and generated imports file from -dir in place (for files tagged by an older generator)")
 	verbose := flags.Bool("v", false, "list common files and groups")
 	dump := flags.String("dumpgraph", "", "write the dependency graph to this file and exit")
@@ -146,13 +148,13 @@ func run(args []string, stdout io.Writer) error {
 		return err
 	}
 	modes := 0
-	for _, on := range []bool{*overlay != "", *parity, *list != 0, *skip != 0, *locate, *untag, *dump != ""} {
+	for _, on := range []bool{*overlay != "", *parity, *list != 0, *skip != 0, *locate, *shards, *untag, *dump != ""} {
 		if on {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return fmt.Errorf("-overlay, -parity, -list, -skip, -locate, -untag and -dumpgraph are exclusive")
+		return fmt.Errorf("-overlay, -parity, -list, -skip, -locate, -shards, -untag and -dumpgraph are exclusive")
 	}
 	if *locate != (flags.NArg() > 0) {
 		return fmt.Errorf("test name arguments go with -locate, and -locate needs at least one")
@@ -172,6 +174,13 @@ func run(args []string, stdout io.Writer) error {
 		}
 	}
 
+	if *shards {
+		var ks []string
+		for k := 1; k <= *n; k++ {
+			ks = append(ks, strconv.Itoa(k))
+		}
+		return printLines(stdout, ks)
+	}
 	if *untag {
 		return runUntag(*root, *dir, stdout)
 	}

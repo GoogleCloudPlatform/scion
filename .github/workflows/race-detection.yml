@@ -62,9 +62,9 @@ jobs:
     name: Race Detection — pkg/hub tagged (reporting only)
     runs-on: ubuntu-latest
     continue-on-error: true
-    # The pkg/hub package runs as its six test shards, one after another
-    # (hack/hubshard/README.md), so no step compiles the whole package's
-    # test binary; then the pkg/hub subpackages.
+    # The pkg/hub package runs shard by shard (make test-hub-shards; the
+    # shard list comes from hack/hubshard), so no step compiles the whole
+    # package's test binary; then the pkg/hub subpackages.
     timeout-minutes: 180
     steps:
       - name: Checkout code
@@ -83,9 +83,7 @@ jobs:
           set -o pipefail
           {
             rc=0
-            for k in 1 2 3 4 5 6; do
-              make test-hub-shard SHARD="$k" NOSQLITE=1 RACE=1 || rc=1
-            done
+            make test-hub-shards NOSQLITE=1 RACE=1 || rc=1
             go test -race -tags no_sqlite -count=1 -timeout 45m \
               $(go list ./pkg/hub/... | grep -vx 'github.com/GoogleCloudPlatform/scion/pkg/hub') || rc=1
             exit "$rc"

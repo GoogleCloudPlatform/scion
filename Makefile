@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-hub-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-hub-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -103,12 +103,9 @@ HUB_PKG := github.com/GoogleCloudPlatform/scion/pkg/hub
 # run go list.
 non_hub_pkgs = go list -tags '$(1)' ./... | grep -vx '$(HUB_PKG)'
 
-# HUBSHARD_N is the number of pkg/hub test shards (hack/hubshard's -n
-# default; the CI matrix in .github/workflows/ci.yml lists 1..6).
-HUBSHARD_N := 6
-
-# SHARD selects the pkg/hub test shard (1..$(HUBSHARD_N)) for
-# test-hub-shard, build-hub-shard, vet-hub-shard and test-hub-postgres.
+# SHARD selects the pkg/hub test shard (1..N, N from
+# go run ./hack/hubshard -shards) for test-hub-shard, build-hub-shard,
+# vet-hub-shard and test-hub-postgres.
 SHARD ?= 1
 
 ## test-hub-sqlite: Run pkg/hub (every shard), perf/bench/seed, pkg/conduit, pkg/store/entadapter and pkg/artifacts tests with SQLite
@@ -116,11 +113,8 @@ SHARD ?= 1
 # "make test-fast" never compiles (see ptone/scion#1118), plus the
 # non-hub SQLite packages (test-sqlite-nonhub). pkg/hub runs shard by
 # shard (test-hub-shard), never as one test binary. CI runs the same
-# pieces in parallel jobs: SQLite Tests (non-hub) and pkg/hub shard K/6.
-test-hub-sqlite: test-sqlite-nonhub
-	@for k in $$(seq 1 $(HUBSHARD_N)); do \
-		./hack/hubshard/shard.sh test $$k || exit 1; \
-	done
+# pieces in parallel jobs: SQLite Tests (non-hub) and pkg/hub shard K/N.
+test-hub-sqlite: test-sqlite-nonhub test-hub-shards
 
 ## test-sqlite-nonhub: Run the pkg/hub subpackages, perf/bench/seed, pkg/conduit, pkg/store/entadapter and pkg/artifacts tests with SQLite
 # perf/bench/seed's and pkg/store/entadapter's own SQLite-backed tests carry
@@ -166,7 +160,7 @@ test-cmd-sqlite:
 # go run ./hack/hubshard prints the shard sizes; -untag strips tags an
 # older generator committed. See hack/hubshard/README.md.
 hubshard-parity:
-	@go run ./hack/hubshard -n $(HUBSHARD_N) -parity
+	@go run ./hack/hubshard -parity
 
 ## test-hub-shard: Run pkg/hub test shard SHARD=K (NOSQLITE=1: with -tags no_sqlite; RACE=1: with -race)
 # Generates the shard overlay in a temp dir (the tree is not modified),
@@ -174,6 +168,17 @@ hubshard-parity:
 # runs it. The common files' tests run only in shard 1.
 test-hub-shard:
 	@./hack/hubshard/shard.sh test $(SHARD) $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race)
+
+## test-hub-shards: Run every pkg/hub test shard in turn (NOSQLITE=1, RACE=1 as for test-hub-shard)
+# The shard list comes from go run ./hack/hubshard -shards. Every shard
+# runs even when an earlier one fails; the target fails if any did.
+test-hub-shards:
+	@shards=$$(go run ./hack/hubshard -shards) || exit 1; \
+	failed=; \
+	for k in $$shards; do \
+		./hack/hubshard/shard.sh test $$k $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race) || failed="$$failed $$k"; \
+	done; \
+	if [ -n "$$failed" ]; then echo "ERROR: pkg/hub shard(s) failed:$$failed" >&2; exit 1; fi
 
 ## build-hub-shard: Compile (go test -c, discarded) pkg/hub test shard SHARD=K (NOSQLITE=1: with -tags no_sqlite)
 build-hub-shard:

@@ -376,6 +376,25 @@ func TestListSkipLocate(t *testing.T) {
 	}
 }
 
+func TestShards(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "1\n2\n3\n4\n5\n6\n"},
+		{[]string{"-n", "2"}, "1\n2\n"},
+	} {
+		var b bytes.Buffer
+		// -shards reads no files: a missing -dir must not matter.
+		if err := run(append(append([]string{"-dir", "/nonexistent"}, tc.args...), "-shards"), &b); err != nil {
+			t.Fatal(err)
+		}
+		if b.String() != tc.want {
+			t.Errorf("-shards %v = %q, want %q", tc.args, b.String(), tc.want)
+		}
+	}
+}
+
 func TestRejectsCommittedTags(t *testing.T) {
 	root, dir := writeFixture(t)
 	files, _ := overlayFiles(t, baseArgs(root, dir, "-n", "2"))

@@ -680,10 +680,38 @@ jobs:
   # build overlay (the tree carries none), checks that its binary holds
   # exactly the tests hack/hubshard expects, and runs them; the common
   # files' tests run only in shard 1, so every test runs exactly once (make
-  # hubshard-parity checks it in Build & Test). The shard list must match
-  # hack/hubshard's defaultShards (HUBSHARD_N in the Makefile).
+  # hubshard-parity checks it in Build & Test). The shard list comes from
+  # hack/hubshard (hub-shard-plan), so the shard count lives in one place.
+  hub-shard-plan:
+    name: pkg/hub shard plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: List the pkg/hub shards
+        id: plan
+        run: |
+          shards=$(go run ./hack/hubshard -shards)
+          echo "shards=$(echo "$shards" | jq -cs .)" >> "$GITHUB_OUTPUT"
+          echo "count=$(echo "$shards" | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "pkg/hub shards: $(echo "$shards" | tr '\n' ' ')"
+
   hub-shard:
-    name: pkg/hub shard ${{ matrix.shard }}/6
+    name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }}
+    needs: hub-shard-plan
     # runner is the single place to change the runner label for every
     # shard job.
     runs-on: ${{ matrix.runner }}
@@ -692,7 +720,7 @@ jobs:
       fail-fast: false
       matrix:
         runner: [ubuntu-latest]
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: ${{ fromJSON(needs.hub-shard-plan.outputs.shards) }}
     services:
       postgres:
         # Pulled through the Google Docker Hub mirror to avoid the Docker Hub unauthenticated pull limit (ptone/scion#4147).
@@ -737,7 +765,7 @@ jobs:
         run: make test-hub-shard SHARD="$SHARD" NOSQLITE=1
 
       # go vet with -tags no_sqlite and -tags 'integration volume_test
-      # tzcontract': the six shards together cover every pkg/hub file the
+      # tzcontract': the shards together cover every pkg/hub file the
       # module-wide make lint and make vet-integration covered.
       - name: Vet pkg/hub shard
         if: ${{ !cancelled() }}
@@ -765,17 +793,18 @@ jobs:
   # required checks. It fails unless every shard succeeded.
   hub-sqlite-tests:
     name: pkg/hub SQLite Tests
-    needs: hub-shard
+    needs: [hub-shard-plan, hub-shard]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Check shard results
         env:
+          PLAN: ${{ needs.hub-shard-plan.result }}
           RESULT: ${{ needs.hub-shard.result }}
         run: |
-          if [ "$RESULT" != success ]; then
-            echo "::error title=pkg/hub shards::one or more pkg/hub shard jobs did not succeed (result: $RESULT); see the pkg/hub shard K/6 jobs."
+          if [ "$PLAN" != success ] || [ "$RESULT" != success ]; then
+            echo "::error title=pkg/hub shards::the pkg/hub shard plan (result: $PLAN) or one or more pkg/hub shard jobs (result: $RESULT) did not succeed; see the pkg/hub shard jobs."
             exit 1
           fi
 

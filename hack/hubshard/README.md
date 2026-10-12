@@ -26,9 +26,9 @@ go test -overlay /tmp/ov/overlay.json -tags hubshard,hubshard_3 ./pkg/hub
   //go:build !no_sqlite && (!hubshard || hubshard_3)
   ```
 
-CI never compiles the whole `pkg/hub` test package: the `pkg/hub shard K/6`
+CI never compiles the whole `pkg/hub` test package: the `pkg/hub shard K/N`
 jobs run the shards in parallel, and the `pkg/hub SQLite Tests` check
-passes only when all six do.
+passes only when all of them do (N = 6 today, from `-shards`).
 
 ## Commands
 
@@ -39,6 +39,7 @@ make build-hub-shard SHARD=2           # compile only (binary discarded)
 make vet-hub-shard SHARD=2             # go vet the shard with both vet tag sets
 make test-hub-postgres SHARD=2         # the shard's Postgres tests (needs the Postgres env vars)
 make hubshard-parity                   # parse only: every test runs in exactly one shard
+make test-hub-shards                   # every shard in turn (NOSQLITE=1, RACE=1 as above)
 make test-hub-sqlite                   # every shard in turn, plus the non-hub SQLite packages
 go run ./hack/hubshard                 # print the shard sizes
 go run ./hack/hubshard -v              # ... and the common files (with the reason) and groups
@@ -49,7 +50,8 @@ temporary directory (removed on exit), so they never leave modified files
 behind. Other tags combine as usual: `shard.sh` passes `no_sqlite` or
 `integration` next to the shard tags.
 
-Tool flags: `-n N` (shard count, default 6; the CI matrix lists 1..6),
+Tool flags: `-n N` (shard count, default 6), `-shards` (print 1..N; the
+CI matrix and `make test-hub-shards` loop over it),
 `-overlay DIR`, `-parity`, `-list K` (the tests shard K's binary compiles,
 under `-tags`), `-skip K` (the `go test -skip` pattern for shard K, see
 below), `-locate NAME...` (the shard that runs each named test), `-untag`
@@ -213,4 +215,6 @@ common:
 
 The peak grows by about 1.45 GiB per 100k test lines, so the present
 shards (about 145.6k lines each) project to about 6 GiB. When the shards
-drift well past that, raise `-n` (and the CI matrix and `HUBSHARD_N`).
+drift well past that, raise `defaultShards` in `main.go`: the CI matrix, the
+make targets and the nightly loops all take the shard list from
+`go run ./hack/hubshard -shards`.
