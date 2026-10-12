@@ -272,6 +272,29 @@ function makeBindings() {
   };
 }
 
+/**
+ * Path (with query), method and string body of a fetch call. A Request
+ * input supplies its own URL and method, so every call is classified.
+ */
+function requestInfo(
+  input: string | URL | Request,
+  init?: RequestInit
+): { path: string; method: string; body?: string } {
+  let path: string;
+  let method = init?.method;
+  if (typeof input === 'string') {
+    path = input;
+  } else if (input instanceof URL) {
+    path = input.pathname + input.search;
+  } else {
+    const u = new URL(input.url, 'http://localhost');
+    path = u.pathname + u.search;
+    method = method ?? input.method;
+  }
+  const body = typeof init?.body === 'string' ? init.body : undefined;
+  return { path, method: (method ?? 'GET').toUpperCase(), body };
+}
+
 /** Every role-binding permission the panel reads. */
 const ALL_ROLE_BINDING_PERMISSIONS = [
   'role_binding.read',
@@ -301,9 +324,7 @@ function makeFetchHandler(opts?: { permissions?: string[]; adminStatusStatus?: n
   const calls: { url: string; method: string; body?: string }[] = [];
 
   const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
-    const method = init?.method ?? 'GET';
-    const body = typeof init?.body === 'string' ? init.body : undefined;
+    const { path, method, body } = requestInfo(url, init);
     calls.push({ url: path, method, body });
 
     if (path === '/api/v1/auth/admin-status') {
@@ -351,6 +372,13 @@ function makeFetchHandler(opts?: { permissions?: string[]; adminStatusStatus?: n
     return Promise.resolve(new Response('{}', { status: 200 }));
   };
   return { handler, calls };
+}
+
+/** Rendered shadow-DOM elements, ignoring style elements. */
+function renderedElements(el: HTMLElement): string[] {
+  return queryAll(el, '*')
+    .filter((n) => n.tagName !== 'STYLE')
+    .map((n) => n.tagName.toLowerCase());
 }
 
 /** Role-binding list GETs among the recorded calls. */
@@ -568,8 +596,8 @@ describe('Behavioral: pending admin status', () => {
       url: string | URL | Request,
       init?: RequestInit
     ): Promise<Response> => {
-      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
-      calls.push({ url: path, method: init?.method ?? 'GET' });
+      const { path, method } = requestInfo(url, init);
+      calls.push({ url: path, method });
       if (path === '/api/v1/auth/admin-status') {
         return new Promise(() => {}); // never resolves
       }
@@ -588,6 +616,20 @@ describe('Behavioral: pending admin status', () => {
     expect(addBtn).toBeUndefined();
     expect(queryAll(el, 'sl-icon-button[name="trash"]').length).toBe(0);
     expect(listCalls(calls).length).toBe(0);
+  });
+
+  it('renders no header and no loading state until admin status resolves', async () => {
+    const el = await createEl((url, init) => {
+      const { path } = requestInfo(url, init);
+      if (path === '/api/v1/auth/admin-status') {
+        return new Promise(() => {}); // never resolves
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    expect(query(el, 'h2')).toBeNull();
+    expect(query(el, '.loading-state')).toBeNull();
+    expect(renderedElements(el)).toEqual([]);
   });
 });
 
@@ -696,9 +738,7 @@ describe('Behavioral: error feedback on failed mutation', () => {
   it('shows error feedback when DELETE fails', async () => {
     const calls: { url: string; method: string; body?: string }[] = [];
     const failingHandler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
-      const method = init?.method ?? 'GET';
-      const body = typeof init?.body === 'string' ? init.body : undefined;
+      const { path, method, body } = requestInfo(url, init);
       calls.push({ url: path, method, body });
 
       if (path.includes('/api/v1/admin/role-bindings/b-direct') && method === 'DELETE') {
@@ -813,7 +853,7 @@ describe('Behavioral: buttons follow the permissions array', () => {
 
   it('shows both controls for a super-admin', async () => {
     const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      const { path } = requestInfo(url, init);
       if (path === '/api/v1/auth/admin-status') {
         return Promise.resolve(
           new Response(JSON.stringify({ isAdmin: true, isSuperAdmin: true, permissions: [] }), {
@@ -877,8 +917,8 @@ describe('Behavioral: boundary notice follows hub.audit.read', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
-        calls.push({ url: path, method: init?.method ?? 'GET' });
+        const { path, method } = requestInfo(url, init);
+        calls.push({ url: path, method });
         if (path === '/api/v1/auth/admin-status') {
           return Promise.resolve(adminStatusResponse(permissions));
         }
@@ -918,5 +958,41 @@ describe('Behavioral: boundary notice follows hub.audit.read', () => {
 
     expect(effectiveAccessCalls.length).toBe(1);
     expect(query(el, '.notice')?.textContent).toContain('2 access');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 23. Behavioral: a failed admin status is read again on the next load       */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: admin status retry', () => {
+  it('shows the controls on reload after a failed admin status', async () => {
+    let adminStatusOk = false;
+    const calls: { url: string; method: string }[] = [];
+    const { handler: allowAll } = makeFetchHandler();
+    const el = await createEl((url, init) => {
+      const { path, method } = requestInfo(url, init);
+      calls.push({ url: path, method });
+      if (path === '/api/v1/auth/admin-status' && !adminStatusOk) {
+        return Promise.resolve(new Response('{}', { status: 500 }));
+      }
+      return allowAll(url, init);
+    });
+
+    // Failed: everything hidden, no list request.
+    expect(renderedElements(el)).toEqual([]);
+    expect(listCalls(calls).length).toBe(0);
+
+    adminStatusOk = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).loadEffectiveRoles();
+    await tick(el, 100);
+
+    expect(calls.filter((c) => c.url === '/api/v1/auth/admin-status').length).toBe(2);
+    expect(listCalls(calls).length).toBe(1);
+    const addBtns = queryAll(el, 'sl-button[variant="primary"]');
+    expect(addBtns.find((b) => b.textContent?.trim().includes('Add Binding'))).toBeTruthy();
+    expect(queryAll(el, 'sl-icon-button[name="trash"]').length).toBe(1);
+    expect(calls.filter((c) => c.method !== 'GET')).toEqual([]);
   });
 });

@@ -44,6 +44,9 @@ describe('scion-effective-role-provenance lifecycle times (tz-refactor task 20)'
     el = document.createElement('scion-effective-role-provenance');
     document.body.appendChild(el);
     el.loading = false;
+    // Grant the list read directly; the panel renders nothing without it.
+    el._permissionsRead = true;
+    el._canRead = true;
     el.bindings = [
       {
         id: 'rb-1',

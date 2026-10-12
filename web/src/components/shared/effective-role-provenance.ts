@@ -112,8 +112,8 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   @state() private _canDelete = false;
   /** Whether the current user can list role bindings (role_binding.read). */
   @state() private _canRead = false;
-  /** Whether the role-binding permissions have been read from admin status. */
-  @state() private _mutationPreChecked = false;
+  /** Whether role-binding permissions were read from a loaded admin status. */
+  @state() private _permissionsRead = false;
   /** Whether a mutation (delete/create) is currently in progress. */
   @state() private _mutationInProgress = false;
   /** Feedback message after a mutation attempt. */
@@ -460,7 +460,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     this._mutationFeedback = null;
 
     try {
-      if (!this._mutationPreChecked) {
+      if (!this._permissionsRead) {
         await this.loadRoleBindingAccess();
       }
       // The list route checks role_binding.read; without it, send nothing
@@ -524,7 +524,9 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     this._canRead = hasAnyPermission(status, ['role_binding.read']);
     this._canCreate = hasAnyPermission(status, ['role_binding.create']);
     this._canDelete = hasAnyPermission(status, ['role_binding.delete']);
-    this._mutationPreChecked = true;
+    // A missing or failed admin status is not kept: the next load reads it
+    // again, and until then the panel stays hidden.
+    this._permissionsRead = status !== null;
   }
 
   // ---------------------------------------------------------------------------
@@ -646,8 +648,9 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
-    // Without role_binding.read the list is never fetched; show nothing.
-    if (this._mutationPreChecked && !this._canRead) return nothing;
+    // Show nothing until admin status has been read and allows the list;
+    // without role_binding.read the list is never fetched.
+    if (!this._permissionsRead || !this._canRead) return nothing;
     if (this.compact) {
       return this.renderCompact();
     }
@@ -683,7 +686,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   }
 
   private renderAddButton() {
-    if (!this._mutationPreChecked || !this._canCreate) return nothing;
+    if (!this._permissionsRead || !this._canCreate) return nothing;
     return html`
       <sl-button
         size="small"
@@ -785,7 +788,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
               </span>`
             : ''}
         </div>
-        ${isDirect && this._canDelete && this._mutationPreChecked
+        ${isDirect && this._canDelete && this._permissionsRead
           ? html`
               <div class="role-card-actions">
                 <sl-icon-button

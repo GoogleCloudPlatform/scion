@@ -544,7 +544,7 @@ describe('effective-role-provenance uses shared assignment form', () => {
     // Grant the role-binding permissions directly.
     comp._canCreate = true;
     comp._canRead = true;
-    comp._mutationPreChecked = true;
+    comp._permissionsRead = true;
     comp.requestUpdate();
     await comp.updateComplete;
 
@@ -569,7 +569,7 @@ describe('effective-role-provenance uses shared assignment form', () => {
     const comp = el as any;
     comp._canCreate = true;
     comp._canRead = true;
-    comp._mutationPreChecked = true;
+    comp._permissionsRead = true;
     comp.requestUpdate();
     await comp.updateComplete;
 
@@ -599,7 +599,7 @@ describe('effective-role-provenance uses shared assignment form', () => {
     const comp = el as any;
     comp._canCreate = true;
     comp._canRead = true;
-    comp._mutationPreChecked = true;
+    comp._permissionsRead = true;
     comp.requestUpdate();
     await comp.updateComplete;
 
@@ -669,7 +669,7 @@ describe('effective-role-provenance uses shared assignment form', () => {
     const comp = el as any;
     comp._canCreate = true;
     comp._canRead = true;
-    comp._mutationPreChecked = true;
+    comp._permissionsRead = true;
     comp.requestUpdate();
     await comp.updateComplete;
 
