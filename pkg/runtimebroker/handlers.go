@@ -6814,7 +6814,7 @@ var nfsCleanupAttemptHook func(attempt int)
 // Project IDs can be reused (re-linking the same checkout brings the same ID
 // back), so immediately before each attempt the cleanup checks that no agent
 // of the project that this broker did not already know when the delete
-// arrived is in use (newProjectAgentsInUse; a listing error counts as in
+// arrived is in use (newProjectAgentsInUseReason; a listing error counts as in
 // use; on a flat Runtime Broker instance, another instance of the host with
 // live agents in the project, or that cannot say, counts too) and otherwise
 // keeps the tree, logged at Info with the reason. The deleted project's own

@@ -117,7 +117,9 @@ func (l *WorkspaceLocks) projectInUseByOthers(self *Server, projectID string) bo
 
 // projectUseByOthers reports, for the servers other than self sharing this
 // service, whether one has live agents in the project (used) and whether
-// one's answer cannot be read (unreadable).
+// one's answer cannot be read (unreadable). It stops at the first server
+// with live agents, so unreadable then covers only the servers read before
+// it.
 func (l *WorkspaceLocks) projectUseByOthers(self *Server, projectID string) (used, unreadable bool) {
 	l.usersMu.Lock()
 	defer l.usersMu.Unlock()
@@ -129,10 +131,10 @@ func (l *WorkspaceLocks) projectUseByOthers(self *Server, projectID string) (use
 		if err != nil {
 			unreadable = true
 		} else if inUse {
-			used = true
+			return true, unreadable
 		}
 	}
-	return used, unreadable
+	return false, unreadable
 }
 
 // ErrOwnershipSlugReservedElsewhere is a slug another Runtime Broker
