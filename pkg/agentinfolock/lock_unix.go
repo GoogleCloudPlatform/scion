@@ -25,6 +25,7 @@ func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
 	}
 	wait := opts.wait()
 	deadline := time.Now().Add(wait)
+	poll := minPoll
 	for {
 		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
@@ -40,7 +41,10 @@ func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
 			opts.logf("timed out after %s waiting for lock %s, updating unlocked", wait, lockPath)
 			return nil, false
 		}
-		time.Sleep(pollInterval)
+		time.Sleep(poll)
+		if poll < maxPoll {
+			poll = min(2*poll, maxPoll)
+		}
 	}
 	return func() {
 		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)

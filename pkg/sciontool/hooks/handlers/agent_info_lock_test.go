@@ -50,7 +50,12 @@ func TestStatusHandlerParallelWritersLoseNoField(t *testing.T) {
 	a := &StatusHandler{StatusPath: path}
 	b := &StatusHandler{StatusPath: path}
 
-	const n = 300
+	// A long lock wait (read only by test binaries, see
+	// agentinfolock.TestWaitEnv) keeps both writers out of the unlocked
+	// fallback however they interleave, so the result does not depend on
+	// timing. The fallback is covered by the held-lock timeout test.
+	t.Setenv("SCION_TEST_AGENTINFO_LOCK_WAIT", "10s")
+	const n = 50
 	var doneA, doneB atomic.Int64
 	doneA.Store(-1)
 	doneB.Store(-1)

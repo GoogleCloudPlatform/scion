@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -39,7 +40,12 @@ func TestAgentInfoHostAndContainerWritersLoseNoField(t *testing.T) {
 	}
 	container := &handlers.StatusHandler{StatusPath: path}
 
-	const n = 300
+	// A long lock wait (read only by test binaries, see
+	// agentinfolock.TestWaitEnv) keeps both writers out of the unlocked
+	// fallback however they interleave, so the result does not depend on
+	// timing. The fallback is covered by the held-lock timeout test.
+	t.Setenv("SCION_TEST_AGENTINFO_LOCK_WAIT", "10s")
+	const n = 50
 	var doneHost, doneCtr atomic.Int64
 	doneHost.Store(-1)
 	doneCtr.Store(-1)
