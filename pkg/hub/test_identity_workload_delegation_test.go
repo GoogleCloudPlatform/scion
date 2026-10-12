@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -1413,4 +1414,52 @@ func TestWorkloadDelegation_AdminKindIdentityUnreachable(t *testing.T) {
 	rec = doRequestAsUser(t, e.srv, grantor, http.MethodPost, "/api/v1/test-identities/"+admin.ID+"/token", nil)
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Equal(t, before, tokenIssues())
+}
+
+// Upstream review (cost model): with no workload issuer configured,
+// isWorkloadDelegationRequest does no work beyond one header lookup for a
+// JWT-shaped bearer (it allocates nothing, so it neither reads nor decodes
+// the token); with a workload issuer configured the same request's token
+// payload is decoded (it allocates), and a token carrying the issuer
+// audience is routed to the arm.
+func TestIsWorkloadDelegationRequest_NoWorkWithoutWorkloadIssuer(t *testing.T) {
+	token := x2Token(t, x2TokenOpts{aud: testIssuerAudience(x2HubID)})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	assert.False(t, isWorkloadDelegationRequest(req, nil))
+	allocs := testing.AllocsPerRun(100, func() { _ = isWorkloadDelegationRequest(req, nil) })
+	assert.Zero(t, allocs, "no workload issuer: the bearer is not read or decoded")
+
+	wi := &workloadIssuerAuthenticator{audience: testIssuerAudience(x2HubID), allowlist: map[string]string{x2Sub: config.WorkloadIssuerTierMember}}
+	assert.True(t, isWorkloadDelegationRequest(req, wi), "with a workload issuer, the issuer-audience token is routed to the arm")
+	allocs = testing.AllocsPerRun(100, func() { _ = isWorkloadDelegationRequest(req, wi) })
+	assert.Positive(t, allocs, "control: with a workload issuer the payload is decoded")
+}
+
+// Upstream review (label UTF-8): the delegation label comes from the JSON
+// body, and encoding/json replaces invalid UTF-8 with U+FFFD while
+// decoding, so a stored label is always valid UTF-8, even for a request
+// whose label holds invalid bytes.
+func TestTestIdentityDelegation_LabelIsAlwaysValidUTF8(t *testing.T) {
+	e := newX2Env(t, true)
+	ctx := context.Background()
+	grantor := e.grantor(t, "x2-utf8-grantor")
+	body := []byte(`{"workloadSub":"` + x2Sub + `","scopes":["test_identity:issue"],"label":"ab` + "\xff" + `cd"}`)
+	require.False(t, utf8.Valid(body), "the request body carries an invalid byte")
+	token, _, _, err := e.srv.userTokenService.GenerateTokenPair(grantor.ID, grantor.Email, grantor.DisplayName, grantor.Role, ClientTypeWeb)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/test-identity-delegations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var v TestIdentityDelegationView
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &v))
+	assert.Equal(t, "ab�cd", v.Label)
+	stored, err := e.s.GetTestIdentityDelegation(ctx, v.ID)
+	require.NoError(t, err)
+	assert.True(t, utf8.ValidString(stored.Label))
+	assert.Equal(t, "ab�cd", stored.Label)
 }
