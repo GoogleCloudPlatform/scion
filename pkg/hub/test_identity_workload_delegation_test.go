@@ -1142,7 +1142,7 @@ type x2RevokeOnGrantorRead struct {
 func (s *x2RevokeOnGrantorRead) GetUser(ctx context.Context, id string) (*store.User, error) {
 	if id == s.grantorID {
 		s.once.Do(func() {
-			_, _ = s.Store.RevokeTestIdentityDelegation(ctx, s.delegationID, id, time.Now())
+			_, _ = s.RevokeTestIdentityDelegation(ctx, s.delegationID, id, time.Now())
 		})
 	}
 	return s.Store.GetUser(ctx, id)

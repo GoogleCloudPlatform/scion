@@ -211,7 +211,12 @@ export function buildFixture() {
     // Not a test hub: no test-hub banner.
     '/api/v1/test-infra/status': {
       status: 200,
-      body: { testIdentities: false, testHubAdmin: false, testSuperAdmin: false, testIssuerAudience: '' },
+      body: {
+        testIdentities: false,
+        testHubAdmin: false,
+        testSuperAdmin: false,
+        testIssuerAudience: '',
+      },
     },
     '/api/v1/chat/spaces': { status: 200, body: { spaces: [] } },
     '/api/v1/chat/dms': { status: 200, body: { dms: [] } },
