@@ -235,6 +235,9 @@ func TestDialWithConfig_DialedConnectionHasNoHandshakeDeadline(t *testing.T) {
 	cfg.HandshakeTimeout = 200 * time.Millisecond
 
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseServer := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseServer) // a failed dial must not leave the handler parked
 	serverGot := make(chan error, 1)
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -262,7 +265,7 @@ func TestDialWithConfig_DialedConnectionHasNoHandshakeDeadline(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	time.Sleep(3 * cfg.HandshakeTimeout) // well past any deadline the handshake set
-	close(release)
+	releaseServer()
 
 	read := make(chan error, 1)
 	go func() {
