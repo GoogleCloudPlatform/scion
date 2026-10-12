@@ -198,6 +198,9 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// test_identity.issue — issuance and listing target the hub-level
 	// test identity collection.
 	"test_identity.issue": {TargetClassKindHubResource},
+	// test_identity.issue_admin and issue_super_admin — admin-kind
+	// issuance and revoke-all target the same hub-level collection.
+	"test_identity.issue_admin": {TargetClassKindHubResource}, "test_identity.issue_super_admin": {TargetClassKindHubResource},
 	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
 	"hub.metrics.read": {TargetClassKindHubResource}, "hub.audit.read": {},
 	"hub.env_vars.read": {TargetClassKindHubResource},

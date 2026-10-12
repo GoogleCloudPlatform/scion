@@ -168,6 +168,7 @@ export function buildFixture() {
       body: {
         experiments: {
           'hub.artifacts': false,
+          'hub.chat_thread_groups': false,
           'web.agent_edit': false,
           'web.chat_scheduled_send': false,
           'web.gcs_links': false,
@@ -211,7 +212,12 @@ export function buildFixture() {
     // Not a test hub: no test-hub banner.
     '/api/v1/test-infra/status': {
       status: 200,
-      body: { testIdentities: false, testHubAdmin: false, testSuperAdmin: false },
+      body: {
+        testIdentities: false,
+        testHubAdmin: false,
+        testSuperAdmin: false,
+        testIdentityWebSessions: false,
+      },
     },
     '/api/v1/chat/spaces': { status: 200, body: { spaces: [] } },
     '/api/v1/chat/dms': { status: 200, body: { dms: [] } },

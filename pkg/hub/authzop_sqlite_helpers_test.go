@@ -529,6 +529,10 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// super-admin (newBearerMatrixFixture), so that user's hub token may
 	// re-issue for it; the dev user reaches it as an admin session.
 	enableTestIdentitiesForTest(srv)
+	enableTestIdentityWebSessionsForTest(srv)
+	// Admin-kind test identity routes (admin tier A1): turn the test admin
+	// gate on, so they answer past their 404 gate.
+	srv.testAdminGate = testAdminGate{hubAdmin: true}
 	f.testIdentity = tiStoreFixture(t, s, tid("bdm-super-admin"), now.Add(time.Hour)).ID
 	f.testIdentityDel = tiStoreFixture(t, s, tid("bdm-super-admin"), now.Add(time.Hour)).ID
 
@@ -610,7 +614,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/artifacts/{id}/versions/{seq}/files/{path}": {"id": f.artifact, "seq": "1", "path": "live.md"},
 
 		// --- test identity family ---
-		"/api/v1/test-identities/{id}/token": {"id": f.testIdentity},
+		"/api/v1/test-identities/{id}/token":          {"id": f.testIdentity},
+		"/api/v1/test-identities/{id}/web-login-code": {"id": f.testIdentity},
 
 		// --- agent family ---
 		"/api/v1/agents/{id}":                                                  {"id": f.agent},

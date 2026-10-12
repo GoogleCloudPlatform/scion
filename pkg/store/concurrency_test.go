@@ -96,6 +96,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockNotificationOrphanGC,
 		LockHubInstancePrune,
 		LockTestIdentityIssuance,
+		LockTestIdentityReaper,
 		LockAgentDelegatedCredentialPurge,
 	}
 
@@ -196,6 +197,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockNotificationOrphanGC", LockNotificationOrphanGC},
 		{"LockHubInstancePrune", LockHubInstancePrune},
 		{"LockTestIdentityIssuance", LockTestIdentityIssuance},
+		{"LockTestIdentityReaper", LockTestIdentityReaper},
 		{"LockAgentDelegatedCredentialPurge", LockAgentDelegatedCredentialPurge},
 	}
 
