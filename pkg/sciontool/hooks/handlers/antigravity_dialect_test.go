@@ -130,6 +130,7 @@ func TestAntigravityFixture_EventSequence(t *testing.T) {
 // scion.usage.tokens must have no data points at all: there is nothing to
 // report, and nothing must synthesize a value.
 func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	// Pin the full label set metricAttrs()/recordEndMetrics stamp on
 	// gen_ai.api.calls (design §3.2): agent_id, project_id and harness from
@@ -290,6 +291,7 @@ func TestAntigravityFixture_ModelFromPayload(t *testing.T) {
 // first so the PostInvocation pairs with it and the duration histogram is
 // recorded (the unpaired path records calls only).
 func TestAntigravityDialect_ModelLabelFallsBackToUnknown(t *testing.T) {
+	scrubTelemetryEnv(t)
 	md, _ := loadAntigravityFixture(t)
 	for _, tc := range []struct{ envModel, want string }{
 		{"configured-model", "configured-model"},
@@ -345,6 +347,7 @@ func TestAntigravityDialect_ModelLabelFallsBackToUnknown(t *testing.T) {
 // unaffected either way (design D4, narrow): the one real tool call still
 // shows up.
 func TestAntigravityFixture_UsageSourceUnsetPublishesNothing(t *testing.T) {
+	scrubTelemetryEnv(t)
 	// Explicitly unset, not just left alone: the antigravity provision.py sets
 	// SCION_USAGE_SOURCE=hooks in every antigravity agent, so a bare `go
 	// test` run inside one would otherwise see it ambiently set and fail
