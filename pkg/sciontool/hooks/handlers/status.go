@@ -69,6 +69,16 @@ const activitySourceNotification = "notification"
 // the parent's tool-end (for example the parent's Agent tool returning for
 // another sub-agent) leave it in place. A wait with no list behaves as before:
 // any tool-end or agent-end clears it.
+//
+// Updates to the list are best-effort across processes. h.mu only serializes
+// writers inside one process, and each hook event runs in its own sciontool
+// process, so two sub-agents' hooks that fire at the same moment can each
+// read the file, change the list and write it back, and one change is lost.
+// The effect is bounded and never worse than having no list: a lost entry
+// lets that question be cleared early, as any tool-end did before; a lost
+// removal keeps the wait until the parent's Agent tool-end after SubagentStop,
+// or the parent's Stop, next prompt or next tool-start, so it never outlives
+// the turn. ReplaceActivityIf documents the same single-file window.
 const notificationWaitAgentsKey = "notificationWaitAgents"
 
 // maxNotificationWaitAgents caps notificationWaitAgentsKey. Past the cap, a
@@ -136,8 +146,11 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 			return h.UpdateActivity(state.ActivityWaitingForInput, "")
 		}
 
-		// Tool-start clears waiting_for_input (user has responded) but
-		// preserves completed (tools may fire after task_completed as wrap-up).
+		// Tool-start clears waiting_for_input of either kind (the user has
+		// responded) and keeps every other held status: completed (tools may
+		// fire after task_completed as wrap-up), blocked, limits_exceeded and
+		// crashed. The HubHandler reports executing only when this write
+		// happened, so the Hub and the local status agree.
 		return h.updateActivityIfNotSticky(result.activity, event.Data.ToolName, clearAnyWaiting, "")
 	}
 
@@ -166,17 +179,15 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 	return h.updateActivityIfNotSticky(result.activity, "", clearNone, "")
 }
 
-// setWaitingFromNotification sets waiting_for_input and marks it as set by a
-// Notification event, with no owning sub-agent.
-func (h *StatusHandler) setWaitingFromNotification() error {
-	return h.setWaitingFromNotificationFor("")
-}
-
 // setWaitingFromNotificationFor sets waiting_for_input, marks it as set by a
 // Notification event and, when owner (a sub-agent's agent_id) is not empty,
 // adds owner to the wait's owner list. A waiting_for_input the agent set
 // itself is left unchanged: a harness prompt must not turn it into a
 // notification-set wait that the prompt's answer would then clear.
+//
+// The owner list update is a read-modify-write of agent-info.json and is
+// best-effort across hook processes; see notificationWaitAgentsKey for the
+// lost-update window and why it is bounded.
 func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -206,7 +217,9 @@ func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 
 // releaseNotificationWaitOwner removes owner from the owner list of a
 // notification-set waiting_for_input. The activity is not changed. Nothing is
-// written when owner is not listed.
+// written when owner is not listed. Like setWaitingFromNotificationFor, this
+// read-modify-write is best-effort across hook processes (see
+// notificationWaitAgentsKey).
 func (h *StatusHandler) releaseNotificationWaitOwner(owner string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -496,6 +509,9 @@ func (h *StatusHandler) updateActivityIfNotSticky(activity state.Activity, toolN
 
 	if blocks, released := stickyBlocksUpdate(info, clear, subagent); blocks {
 		if released {
+			// Only this sub-agent's owner entry changed. This write is
+			// best-effort across hook processes, like every owner list
+			// update (see notificationWaitAgentsKey).
 			return h.writeAgentInfoLocked(info)
 		}
 		return nil // Activity is sticky, don't overwrite

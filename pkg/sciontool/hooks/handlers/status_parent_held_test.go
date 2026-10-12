@@ -529,3 +529,143 @@ func TestParentHeld_CapturedClaudeSubagentReplay(t *testing.T) {
 		}
 	})
 }
+
+// setWaitingFromNotification sets a notification-set waiting_for_input with
+// no owning sub-agent. Test-only helper: production code calls
+// setWaitingFromNotificationFor.
+func (h *StatusHandler) setWaitingFromNotification() error {
+	return h.setWaitingFromNotificationFor("")
+}
+
+// The B1 guard applies to every dialect that sends a Notification. A gemini
+// or codex Notification during a wait the agent set itself keeps that wait
+// (no marker) and sends no Hub update. The parent's next tool-start still
+// clears it on both sides.
+func TestParentHeld_OtherDialectNotificationKeepsAgentSetWait(t *testing.T) {
+	parse := func(t *testing.T, d interface {
+		Parse(map[string]interface{}) (*hooks.Event, error)
+	}, payload map[string]interface{}) *hooks.Event {
+		t.Helper()
+		e, err := d.Parse(payload)
+		require.NoError(t, err)
+		return e
+	}
+	for _, tc := range []struct {
+		name      string
+		notify    func(*testing.T) *hooks.Event
+		toolStart func(*testing.T) *hooks.Event
+	}{
+		{"gemini",
+			func(t *testing.T) *hooks.Event {
+				return parse(t, dialects.NewGeminiDialect(), map[string]interface{}{
+					"hook_event_name": "Notification", "session_id": "gemini-synthetic-session", "message": "Approve tool?",
+				})
+			},
+			func(t *testing.T) *hooks.Event {
+				return parse(t, dialects.NewGeminiDialect(), map[string]interface{}{
+					"hook_event_name": "BeforeTool", "session_id": "gemini-synthetic-session", "tool_name": "run_shell_command",
+				})
+			}},
+		{"codex",
+			func(t *testing.T) *hooks.Event {
+				return parse(t, dialects.NewCodexDialect(), map[string]interface{}{
+					"type": "notification", "session_id": "codex-synthetic-session", "message": "Approve command?",
+				})
+			},
+			func(t *testing.T) *hooks.Event {
+				return parse(t, dialects.NewCodexDialect(), map[string]interface{}{
+					"type": "tool-start", "session_id": "codex-synthetic-session", "tool_name": "shell",
+				})
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			notify := tc.notify(t)
+			require.Equal(t, hooks.EventNotification, notify.Name)
+			require.Equal(t, tc.name, notify.Dialect)
+
+			sh, hh, sent := claudeHubSetup(t)
+			parentHeldHold(t, sh, "waiting_for_input")
+
+			got, info := parentHeldStep(t, sh, hh, sent, notify)
+			assert.Equal(t, "waiting_for_input", info["activity"])
+			assert.NotContains(t, info, activitySourceKey, "the wait stays agent-set")
+			assert.Empty(t, got, "no hub update replaces the agent-set wait")
+
+			start := tc.toolStart(t)
+			require.Equal(t, hooks.EventToolStart, start.Name)
+			got, info = parentHeldStep(t, sh, hh, sent, start)
+			assert.Equal(t, "executing", info["activity"])
+			assert.Equal(t, []string{parentHeldExecuting}, got)
+		})
+	}
+}
+
+// parentHeldWriteInfo replaces agent-info.json with info.
+func parentHeldWriteInfo(t *testing.T, path string, info map[string]interface{}) {
+	t.Helper()
+	data, err := json.Marshal(info)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+}
+
+// A malformed owner list is tolerated. A non-list value, or a list with no
+// usable string entries, counts as no owners, so the wait behaves as an
+// owner-less notification wait (the behaviour before owner tracking). A
+// list already over the cap is read in full: listed owners can still release
+// themselves, and no new owner is added.
+func TestParentHeld_MalformedOwnerList(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value interface{}
+	}{
+		{"string", "x"},
+		{"number", 42},
+		{"object", map[string]interface{}{"a": "b"}},
+		{"non-string entries", []interface{}{1, nil, "", true}},
+	} {
+		t.Run(tc.name+"/sub-agent tool-end clears", func(t *testing.T) {
+			sh, hh, sent := claudeHubSetup(t)
+			parentHeldWriteInfo(t, sh.StatusPath, map[string]interface{}{
+				"activity": "waiting_for_input", activitySourceKey: activitySourceNotification, notificationWaitAgentsKey: tc.value,
+			})
+			assert.Empty(t, waitOwnersOf(readAgentInfoMap(t, sh.StatusPath)))
+
+			got, info := parentHeldStep(t, sh, hh, sent, parentHeldSub(t, "PostToolUse", "Bash", parentHeldSubC))
+			assert.Equal(t, "working", info["activity"])
+			assert.NotContains(t, info, notificationWaitAgentsKey)
+			assert.Equal(t, []string{parentHeldWorking}, got)
+		})
+		t.Run(tc.name+"/sub-agent question replaces it", func(t *testing.T) {
+			sh, hh, sent := claudeHubSetup(t)
+			parentHeldWriteInfo(t, sh.StatusPath, map[string]interface{}{
+				"activity": "waiting_for_input", activitySourceKey: activitySourceNotification, notificationWaitAgentsKey: tc.value,
+			})
+
+			got, info := parentHeldStep(t, sh, hh, sent, parentHeldSub(t, "Notification", "", parentHeldSubA))
+			assert.Equal(t, "waiting_for_input", info["activity"])
+			assert.Equal(t, []string{parentHeldSubA}, waitOwnersOf(info))
+			assert.Equal(t, []string{parentHeldWaiting}, got)
+		})
+	}
+
+	t.Run("over the cap", func(t *testing.T) {
+		list := make([]interface{}, maxNotificationWaitAgents+6)
+		for i := range list {
+			list[i] = fmt.Sprintf("a%016x", i)
+		}
+		sh, hh, sent := claudeHubSetup(t)
+		parentHeldWriteInfo(t, sh.StatusPath, map[string]interface{}{
+			"activity": "waiting_for_input", activitySourceKey: activitySourceNotification, notificationWaitAgentsKey: list,
+		})
+
+		got, info := parentHeldStep(t, sh, hh, sent, parentHeldSub(t, "Notification", "", parentHeldSubA))
+		assert.Len(t, waitOwnersOf(info), len(list), "no new owner past the cap")
+		assert.NotContains(t, waitOwnersOf(info), parentHeldSubA)
+		assert.Equal(t, []string{parentHeldWaiting}, got)
+
+		got, info = parentHeldStep(t, sh, hh, sent, parentHeldSub(t, "PostToolUse", "Bash", fmt.Sprintf("a%016x", 0)))
+		assert.Equal(t, "waiting_for_input", info["activity"], "other listed owners still hold the wait")
+		assert.Len(t, waitOwnersOf(info), len(list)-1)
+		assert.Empty(t, got)
+	})
+}

@@ -9,6 +9,12 @@ The capture used a throwaway project directory and loaded project settings
 only. A project-level hook copied each payload's stdin to a file. No other
 hooks ran.
 
+Hooks were registered for these events only: `SessionStart`, `PreToolUse`,
+`PostToolUse`, `SubagentStop`, `Notification` and `Stop`. No `Notification`
+fired in this turn (no permission prompt). Claude Code sends other events
+too, for example `UserPromptSubmit`, which were not hooked, so these 7
+records are not everything Claude Code sends in a turn.
+
 ## Contents (7 records, in event order)
 
 1. `SessionStart` (parent)

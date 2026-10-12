@@ -285,23 +285,23 @@ func (h *HubHandler) isLocalWaitAgentSet() bool {
 	return isAgentSetWaiting(readLocalAgentInfo())
 }
 
-// readLocalActivity reads the current activity from the local agent-info.json file.
-//
-// The read goes through dirfd.ReadFileNoFollow with agentInfoMaxBytes, the
-// same bounded, no-follow read StatusHandler.readAgentInfoMap uses on this
-// file: a symlink at any path component, a FIFO, a hardlinked file, or a
-// file over the size cap is refused rather than followed or read in full.
-// A missing file returns "" silently, as before. A refusal also returns ""
-// (not sticky), the same fail-open result an unreadable file always gave,
-// and logs only the reason at debug level, never the file's contents.
+// readLocalActivity returns the activity recorded in the local
+// agent-info.json, or "" when it cannot be read (see readLocalAgentInfo).
 func readLocalActivity() string {
 	activity, _ := readLocalAgentInfo()["activity"].(string)
 	return activity
 }
 
-// readLocalAgentInfo reads the local agent-info.json into a map, with the
-// same bounded, no-follow read as readLocalActivity. It returns an empty map
-// when the file is missing, refused or not valid JSON.
+// readLocalAgentInfo reads the local agent-info.json into a map.
+//
+// The read goes through dirfd.ReadFileNoFollow with agentInfoMaxBytes, the
+// same bounded, no-follow read StatusHandler.readAgentInfoMap uses on this
+// file: a symlink at any path component, a FIFO, a hardlinked file, or a
+// file over the size cap is refused rather than followed or read in full.
+// A missing file returns an empty map silently. A refusal or invalid JSON
+// also returns an empty map (activity "", not sticky), the same fail-open
+// result an unreadable file always gave, and a refusal logs only the reason
+// at debug level, never the file's contents.
 func readLocalAgentInfo() map[string]interface{} {
 	info := map[string]interface{}{}
 	home := os.Getenv("HOME")
@@ -313,7 +313,7 @@ func readLocalAgentInfo() map[string]interface{} {
 	data, err := dirfd.ReadFileNoFollow(statusPath, agentInfoMaxBytes)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			log.Debug("Hub: not reading local activity: %v", err)
+			log.Debug("Hub: not reading local agent-info: %v", err)
 		}
 		return info
 	}
