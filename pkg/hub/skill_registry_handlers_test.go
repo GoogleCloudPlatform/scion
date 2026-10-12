@@ -1,4 +1,4 @@
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 // Copyright 2026 Google LLC
 //

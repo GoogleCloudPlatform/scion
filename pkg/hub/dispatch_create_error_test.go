@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -173,6 +171,57 @@ func TestDispatchCreateErrorResponse_SkillResolutionRelaysStatusAndRetryAfter(t 
 			// The broker's structured details are forwarded (#2546 N3).
 			if resp.Error.Details["skill"] != "gh://owner/repo/my-skill@main" || resp.Error.Details["cause"] != "irrelevant-for-this-test" {
 				t.Errorf("expected details {skill, cause} forwarded from the broker, got %v", resp.Error.Details)
+			}
+		})
+	}
+}
+
+// TestDispatchCreateErrorResponse_RelaysRuntimeCause: a broker runtime_error
+// carrying a known details.cause code (api.IsBrokerRuntimeCause,
+// ptone/scion#4555) keeps the generic 502 and its message, and relays only
+// that code as details.cause. An unknown or malformed code, a cause under
+// another error code, or no cause at all leaves details empty.
+func TestDispatchCreateErrorResponse_RelaysRuntimeCause(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantCause string
+	}{
+		{"runtime_forbidden relayed", `{"error":{"code":"runtime_error","message":"Failed to create agent","details":{"cause":"runtime_forbidden","other":"x"}}}`, "runtime_forbidden"},
+		{"no details", `{"error":{"code":"runtime_error","message":"Failed to create agent"}}`, ""},
+		{"runtime_unauthorized relayed", `{"error":{"code":"runtime_error","message":"Failed to create agent","details":{"cause":"runtime_unauthorized"}}}`, "runtime_unauthorized"},
+		{"well-formed unknown code dropped", `{"error":{"code":"runtime_error","message":"Failed to create agent","details":{"cause":"runtime_other"}}}`, ""},
+		{"malformed code dropped", `{"error":{"code":"runtime_error","message":"Failed to create agent","details":{"cause":"pods \"a\" is forbidden"}}}`, ""},
+		{"other error code", `{"error":{"code":"internal_error","message":"boom","details":{"cause":"runtime_forbidden"}}}`, ""},
+		{"not json", "boom", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &brokerStatusError{StatusCode: http.StatusInternalServerError, Body: tt.body}
+			w := httptest.NewRecorder()
+			dispatchCreateErrorResponse(w, err, "")
+
+			if w.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502: %s", w.Code, w.Body.String())
+			}
+			var resp ErrorResponse
+			if decErr := json.NewDecoder(w.Body).Decode(&resp); decErr != nil {
+				t.Fatalf("decode: %v", decErr)
+			}
+			if resp.Error.Code != ErrCodeRuntimeError {
+				t.Errorf("code = %q, want %q", resp.Error.Code, ErrCodeRuntimeError)
+			}
+			if want := "Failed to dispatch to runtime broker: " + err.Error(); resp.Error.Message != want {
+				t.Errorf("message = %q, want %q", resp.Error.Message, want)
+			}
+			if tt.wantCause == "" {
+				if resp.Error.Details != nil {
+					t.Errorf("details = %v, want none", resp.Error.Details)
+				}
+				return
+			}
+			if got := resp.Error.Details["cause"]; got != tt.wantCause || len(resp.Error.Details) != 1 {
+				t.Errorf("details = %v, want only cause=%q", resp.Error.Details, tt.wantCause)
 			}
 		})
 	}

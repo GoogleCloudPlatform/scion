@@ -382,8 +382,14 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 // The project directory gets a .scion marker file, and the actual project
 // data lives under ~/.scion/project-configs/.
 func initExternalProject(projectDir string, opt InitProjectOpts) error {
-	// projectDir is the intended <project>/.scion path.
-	projectRoot := filepath.Dir(projectDir)
+	// projectDir is the intended <project>/.scion path. Resolve it first so
+	// a relative target (for example ".scion") names the containing
+	// directory rather than ".", the same as the equivalent absolute target.
+	absProjectDir, err := filepath.Abs(projectDir)
+	if err != nil {
+		return fmt.Errorf("cannot initialize project: failed to resolve %s: %w", projectDir, err)
+	}
+	projectRoot := filepath.Dir(absProjectDir)
 	markerPath := filepath.Join(projectRoot, DotScion)
 
 	// TODO(project-migration): Remove this check after a few releases.
@@ -412,8 +418,10 @@ func initExternalProject(projectDir string, opt InitProjectOpts) error {
 
 	// New project identity
 	projectID := opt.newProjectID()
-	projectName := filepath.Base(projectRoot)
-	projectSlug := api.Slugify(projectName)
+	projectName, projectSlug, err := externalProjectNameAndSlug(projectRoot)
+	if err != nil {
+		return err
+	}
 
 	marker := &ProjectMarker{
 		ProjectID:   projectID,
@@ -429,12 +437,11 @@ func initExternalProject(projectDir string, opt InitProjectOpts) error {
 
 	// Write settings with workspace-path and project_id before ensureProjectDirs
 	// (which would create a settings.yaml without workspace_path if one doesn't exist yet).
-	absProjectRoot, _ := filepath.Abs(projectRoot)
 	if err := mkdirUnderProjectConfigs(externalPath, 0755); err != nil {
 		return fmt.Errorf("failed to create external project directory: %w", err)
 	}
 	if GetSettingsPath(externalPath) == "" {
-		if err := writeProjectSettings(externalPath, absProjectRoot, projectID, opt); err != nil {
+		if err := writeProjectSettings(externalPath, projectRoot, projectID, opt); err != nil {
 			return err
 		}
 	}
@@ -454,6 +461,23 @@ func initExternalProject(projectDir string, opt InitProjectOpts) error {
 	}
 
 	return nil
+}
+
+// externalProjectNameAndSlug derives the project name and slug from the
+// absolute project root (the directory that contains the .scion target). It
+// returns an error when the derived slug would be empty, so that nothing is
+// stored under an empty slug.
+func externalProjectNameAndSlug(projectRoot string) (name, slug string, err error) {
+	if projectRoot == filepath.Dir(projectRoot) {
+		// A filesystem root has no directory name to derive a slug from.
+		return "", "", fmt.Errorf("cannot initialize project: the target's containing directory %s has no name usable as a project slug; initialize the project in a named directory", projectRoot)
+	}
+	name = filepath.Base(projectRoot)
+	slug = api.Slugify(name)
+	if slug == "" {
+		return "", "", fmt.Errorf("cannot initialize project: the directory name %q of %s gives an empty project slug; use a directory name that contains ASCII letters or digits (A-Z, a-z, 0-9)", name, projectRoot)
+	}
+	return name, slug, nil
 }
 
 // initInRepoProject creates a git project with .scion as a directory in the repo.

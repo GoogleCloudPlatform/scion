@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import importlib.util
+import re
 import tempfile
 import tomllib
 import unittest
@@ -1407,6 +1408,177 @@ class CodexProvisionTest(unittest.TestCase):
                     after = f.read()
         self.assertEqual(after, original, "file must be left untouched when the edit doesn't preserve content")
         self.assertEqual(len(warnings), 1)
+
+
+class CodexShippedHookConfigTest(unittest.TestCase):
+    """The shipped home/.codex/config.toml wires every hook event Scion maps.
+
+    ptone/scion#4461: SessionStart, SessionEnd and SubagentStop were handled
+    by scion_notify.sh and dialect.yaml but never registered, so codex never
+    sent them. Verified against @openai/codex 0.162.1 (rust-v0.162.1).
+    """
+
+    HARNESS_DIR = os.path.dirname(os.path.abspath(__file__))
+    CONFIG_PATH = os.path.join(HARNESS_DIR, "home", ".codex", "config.toml")
+    NOTIFY_PATH = os.path.join(HARNESS_DIR, "home", ".codex", "scion_notify.sh")
+    DIALECT_PATH = os.path.join(HARNESS_DIR, "dialect.yaml")
+    NOTIFY_COMMAND = "sh /home/scion/.codex/scion_notify.sh"
+
+    # Every hook event the shipped config must register.
+    REQUIRED_EVENTS = (
+        "SessionStart",
+        "SessionEnd",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "SubagentStop",
+    )
+
+    # Hook event names codex 0.162.1 accepts (codex-rs/config/src/
+    # hook_config.rs HookEventsToml). Anything else is a typo codex rejects.
+    CODEX_EVENTS = frozenset(
+        REQUIRED_EVENTS
+        + ("PermissionRequest", "PreCompact", "PostCompact", "SubagentStart", "Interrupt")
+    )
+
+    # SessionStart sources codex 0.162.1 sends (codex-rs/hooks/src/events/
+    # session_start.rs). compact is left out on purpose: it fires after a
+    # mid-turn auto-compaction and would reset blocked/waiting/completed
+    # status to working.
+    SESSION_START_SOURCES = ("startup", "resume", "clear", "fork")
+    SESSION_START_EXCLUDED = ("compact",)
+
+    @staticmethod
+    def _codex_matcher_matches(pattern: str, value: str) -> bool:
+        # Mirrors HookMatcher in codex-rs/hooks/src/engine/matcher.rs at
+        # rust-v0.162.1: "" and "*" match all; a pattern of only
+        # [A-Za-z0-9_|] is an exact match on any |-separated name; anything
+        # else is a regex search.
+        if pattern in ("", "*"):
+            return True
+        if all(ch.isascii() and (ch.isalnum() or ch in "_|") for ch in pattern):
+            return value in pattern.split("|")
+        return re.search(pattern, value) is not None
+
+    def _load_config(self) -> dict[str, Any]:
+        with open(self.CONFIG_PATH, "rb") as f:
+            return tomllib.load(f)
+
+    def _notify_forwarded_events(self) -> set[str]:
+        # The case arm in scion_notify.sh that pipes to sciontool hook.
+        with open(self.NOTIFY_PATH, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.endswith(")") and "UserPromptSubmit" in stripped:
+                    return {ev.strip() for ev in stripped[:-1].split("|")}
+        self.fail("no hook-forwarding case arm found in scion_notify.sh")
+
+    def _dialect_mapped_events(self) -> set[str]:
+        # Top-level keys under `mappings:` in dialect.yaml (two-space indent).
+        mapped: set[str] = set()
+        in_mappings = False
+        with open(self.DIALECT_PATH, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("mappings:"):
+                    in_mappings = True
+                    continue
+                if in_mappings and line and not line[0].isspace() and not line.startswith("#"):
+                    break
+                if in_mappings and line.startswith("  ") and not line.startswith("   "):
+                    key = line.strip()
+                    if key.endswith(":") and not key.startswith("#"):
+                        mapped.add(key[:-1])
+        return mapped
+
+    def test_hooks_feature_enabled(self) -> None:
+        self.assertIs(self._load_config()["features"]["hooks"], True)
+
+    def test_required_hook_events_are_registered(self) -> None:
+        hooks = self._load_config().get("hooks", {})
+        for event in self.REQUIRED_EVENTS:
+            with self.subTest(event=event):
+                groups = hooks.get(event)
+                self.assertTrue(groups, f"{event} is not registered in config.toml")
+                commands = [
+                    h.get("command")
+                    for g in groups
+                    for h in g.get("hooks", [])
+                    if h.get("type") == "command"
+                ]
+                self.assertIn(self.NOTIFY_COMMAND, commands)
+                if event == "SessionStart":
+                    continue  # Narrowed matcher; see test_session_start_matcher_*.
+                # Every other matcher must match all inputs: "" and "*" are
+                # codex's match-all forms, ".*" is the match-all regex the
+                # tool events use.
+                self.assertTrue(all(g.get("matcher", "") in ("", "*", ".*") for g in groups))
+
+    def test_session_start_matcher_covers_sources_and_excludes_compact(self) -> None:
+        groups = self._load_config()["hooks"]["SessionStart"]
+        matchers = [g.get("matcher", "") for g in groups]
+
+        def fires(source: str) -> bool:
+            return any(self._codex_matcher_matches(m, source) for m in matchers)
+
+        for source in self.SESSION_START_SOURCES:
+            with self.subTest(source=source):
+                self.assertTrue(fires(source), f"SessionStart hook does not fire for source={source}")
+        for source in self.SESSION_START_EXCLUDED:
+            with self.subTest(source=source):
+                self.assertFalse(fires(source), f"SessionStart hook must not fire for source={source}")
+
+    def test_session_start_matcher_is_exact_source_list(self) -> None:
+        # The matcher must stay in codex's exact-match form (no regex
+        # characters) and name exactly the intended sources.
+        groups = self._load_config()["hooks"]["SessionStart"]
+        self.assertEqual(len(groups), 1)
+        matcher = groups[0].get("matcher", "")
+        self.assertRegex(matcher, r"^[A-Za-z0-9_|]+$")
+        self.assertEqual(set(matcher.split("|")), set(self.SESSION_START_SOURCES))
+
+    def test_codex_matcher_emulation(self) -> None:
+        # Guards the emulation itself. The Edit|Write and Bash/BashOutput
+        # cases are copied from codex's matcher tests in
+        # codex-rs/hooks/src/events/common.rs (rust-v0.162.1); the others
+        # are our own edge cases.
+        m = self._codex_matcher_matches
+        self.assertTrue(m("", "compact"))
+        self.assertTrue(m("*", "compact"))
+        self.assertTrue(m("Edit|Write", "Write"))
+        self.assertFalse(m("Edit|Write", "Bash"))
+        self.assertFalse(m("Bash", "BashOutput"))
+        self.assertTrue(m("^Bash", "BashOutput"))
+        self.assertFalse(m("startup|resume", "startup_x"))
+        self.assertTrue(m("^auto$", "auto"))
+
+    def test_registered_events_are_known_to_codex(self) -> None:
+        unknown = set(self._load_config().get("hooks", {})) - self.CODEX_EVENTS
+        self.assertEqual(unknown, set(), "config.toml registers hook events codex 0.162.1 does not accept")
+
+    def test_registered_events_are_forwarded_and_mapped(self) -> None:
+        registered = set(self._load_config().get("hooks", {}))
+        forwarded = self._notify_forwarded_events()
+        mapped = self._dialect_mapped_events()
+        self.assertEqual(registered - forwarded, set(), "registered but not forwarded by scion_notify.sh")
+        self.assertEqual(registered - mapped, set(), "registered but not mapped in dialect.yaml")
+
+    def test_reconcile_keeps_hook_registrations(self) -> None:
+        # provision.py rewrites config.toml at every start; the hook tables
+        # must survive it.
+        with open(self.CONFIG_PATH, encoding="utf-8") as f:
+            real_config = f.read()
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(real_config)
+                provision._reconcile_codex_toml(_test_ctx(), None, None, model="gpt-6.1-sol", reasoning_effort="high")
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+        self.assertEqual(data["hooks"], self._load_config()["hooks"])
 
 
 if __name__ == "__main__":
