@@ -68,8 +68,10 @@ type StatusReport struct {
 
 // Status probes the target hub with the session's credential and checks,
 // on the request actually sent, that the bearer is the profile's own and
-// the transport principal is the profile's IAP service account. The probe
-// is GET /api/v1/auth/me for an alias, and GET /api/v1/test-identities
+// the transport credential matches the profile: with transport iap, an ID
+// token for the profile's IAP service account with exactly the profile's
+// IAP audience; with transport none, no transport token. The probe is
+// GET /api/v1/auth/me for an alias, and GET /api/v1/test-identities
 // (limit 1) for the issuer, the only routes the workload credential is
 // accepted on.
 func (s *Session) Status(ctx context.Context) *StatusReport {

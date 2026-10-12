@@ -33,8 +33,11 @@ var errHubProfileGateFailed = errors.New("hub status: the hub profile checks fai
 
 // runHubProfileStatus prints the profile part of 'scion hub status' and
 // exits non-zero when the request sent to the target did not carry the
-// profile's bearer, or its transport principal is not the profile's IAP
-// service account. Tokens are decoded locally and never printed.
+// profile's bearer, its transport credential does not match the profile
+// (with transport iap, an ID token for the profile's IAP service account
+// with exactly the profile's IAP audience; with transport none, no
+// transport token at all), or the target refused the credential. Tokens
+// are decoded locally and never printed.
 func runHubProfileStatus(cmd *cobra.Command) error {
 	s, err := openHubProfileSession(hubProfileAs != "")
 	if err != nil {
