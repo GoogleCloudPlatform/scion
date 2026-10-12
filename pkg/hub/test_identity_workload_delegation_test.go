@@ -1208,7 +1208,13 @@ func TestWorkloadDelegation_RevokedAfterAuthMintsNothing(t *testing.T) {
 		e.srv.workloadIssuer.store = &x2RevokeOnGrantorRead{Store: e.s, grantorID: grantor.ID, delegationID: d.ID}
 		rec = e.workload(t, http.MethodPost, "/api/v1/test-identities/"+id+"/web-login-code", x2Token(t, x2TokenOpts{}), d.ID, nil, nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-		assert.NotContains(t, rec.Body.String(), "code\"")
+		// The error envelope's error.code is fine; no web-login code field
+		// may appear at the top level.
+		var top map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+		assert.NotContains(t, top, "code")
+		assert.NotContains(t, top, "codeId")
+		assert.Contains(t, top, "error")
 		assert.Empty(t, x2WebCodeAudits(t, e, id), "no web-login code audit")
 		got, err := e.s.GetTestIdentityDelegation(ctx, d.ID)
 		require.NoError(t, err)

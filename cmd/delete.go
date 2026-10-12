@@ -540,11 +540,12 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 		// nothing local is touched: the worktree is kept, and the sync
 		// state is left alone so that a later sync sees the agent as
 		// stale once the hub finishes.
-		msg := hubDeletePendingMessage(outcome)
+		// A target-hub profile has no local worktree to keep.
+		kept := "local worktree kept"
 		if hubCtx.profileLocalOnly() {
-			// A target-hub profile has no local worktree to keep.
-			msg = fmt.Sprintf("delete accepted; cannot observe completion (%s)", hubDeletePendingReason(outcome))
+			kept = ""
 		}
+		msg := hubDeletePendingMessage(outcome, kept)
 		if isJSONOutput() {
 			job.result = map[string]interface{}{
 				"agent":   agentName,
