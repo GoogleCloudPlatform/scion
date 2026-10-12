@@ -177,6 +177,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `hub profile` (`add`, `list`, `show`, `remove`) | Y | Y (`add`/`show`/`remove` refuse a profile for the agent's own hub) |
 | `hub test-identity` `issue`, `token`, `list`, `delete`, `teardown` | Y | Y (runtime: only with a target-hub profile for another hub, ptone/scion#4240) |
 | `hub test-identity delegate` (all) | Y | - (human consent step) |
+| `hub test-identity web-code` | Y | - (human only; not with a profile) |
 | `hub groves` (all) | Y | - |
 | `hub brokers` (all) | Y | - |
 | `hub enable` | Y | - |

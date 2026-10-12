@@ -166,7 +166,7 @@ func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
 		return err
 	}
 	if !hubProfileAllowed[path] {
-		return fmt.Errorf("'%s' is not available with a hub profile (%q): with a profile selected, only the target-hub commands run (hub status, hub profile, hub test-identity, hub projects, artifact publish/get/versions/delete); unset %s or drop --hub-profile to use it", cmd.CommandPath(), hubProfileName(), hubprofile.EnvHubProfile)
+		return fmt.Errorf("'%s' is not available with a hub profile (%q): with a profile selected, only the target-hub commands run (hub status, hub profile, hub test-identity except delegate and web-code, hub projects, artifact publish/get/versions/delete); unset %s or drop --hub-profile to use it", cmd.CommandPath(), hubProfileName(), hubprofile.EnvHubProfile)
 	}
 	if hubEndpoint != "" || noHub {
 		return errors.New("--hub and --no-hub cannot be used with a hub profile: the profile names the hub")

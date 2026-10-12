@@ -128,7 +128,7 @@ Only these commands run with a profile:
 
 - `hub status`
 - `hub profile`
-- `hub test-identity`, except `delegate`
+- `hub test-identity`, except `delegate` and `web-code`
 - `hub projects`: list, `info`, `create` and `delete`, with the project named explicitly
 - `artifact publish`, `get`, `versions` and `delete`; `publish` needs `--project <name or id>`
   on the target
@@ -190,8 +190,8 @@ Inside an agent (`SCION_CLI_MODE=agent`), these commands are available:
 endpoint is not the agent's own hub. Without a profile, or with a profile for the agent's own
 hub, they are refused. With a profile selected, the `artifact` commands act on the target as the
 `--as` identity, and the profile for the agent's own hub is refused for them too.
-`hub test-identity delegate` (the human consent step), the other `hub` commands and
-`hub projects` are not available in agent mode.
+`hub test-identity delegate` (the human consent step), `hub test-identity web-code`, the other
+`hub` commands and `hub projects` are not available in agent mode.
 
 ## Troubleshooting
 

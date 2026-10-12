@@ -302,6 +302,10 @@ func TestHubTestIdentityWebCodeCmd_HumanModeOnly(t *testing.T) {
 			if tc.present {
 				assert.NotNil(t, resolveCommandPath(root, p))
 			} else {
+				// The parent and a sibling stay (target-hub profiles), so
+				// web-code is removed by its own path, not with its parent.
+				assert.NotNil(t, resolveCommandPath(root, "hub.test-identity"))
+				assert.NotNil(t, resolveCommandPath(root, "hub.test-identity.issue"))
 				assert.Nil(t, resolveCommandPath(root, p))
 			}
 		})

@@ -71,6 +71,7 @@ func TestHubProfileGate_UnlistedCommandsRefused(t *testing.T) {
 		"list", "whoami", "start", "create", "delete", "look", "logs", "message", "stop",
 		"hub.enable", "hub.link", "hub.secret", "hub.auth.login", "hub.token", "hub.env",
 		"hub.test-identity.delegate.create", "hub.test-identity.delegate.list", "hub.test-identity.delegate.revoke",
+		"hub.test-identity.web-code",
 		"artifact.share", "templates.import", "server", "clean", "sync", "config.set", "project.list",
 	}
 	for _, p := range refused {

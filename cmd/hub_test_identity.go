@@ -70,7 +70,7 @@ profile's issuer delegation on another test hub, issued identities go to the
 run cache (issue --as <alias> --run <label>), 'teardown --run <label>'
 removes a whole run, and the commands also run in agent mode, but only
 against a profile for another hub. 'delegate' is the human consent step on
-the target hub.
+the target hub. 'web-code' is not available with a profile or in agent mode.
 
 Examples:
   # Issue a member identity; its token goes to ./fixture.token
