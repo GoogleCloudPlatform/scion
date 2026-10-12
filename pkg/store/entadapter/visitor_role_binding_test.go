@@ -189,6 +189,11 @@ func TestCreateVisitorRoleBinding_Refusals(t *testing.T) {
 			tc.mutate(rb)
 			_, err := env.cs.CreateVisitorRoleBinding(ctx, rb)
 			assert.ErrorIs(t, err, tc.want)
+			if tc.want != store.ErrVisitorBindingRefused {
+				// ErrVisitorBindingRefused wraps ErrInvalidInput: the
+				// refusal must come from the named check, not the guard.
+				assert.NotErrorIs(t, err, store.ErrVisitorBindingRefused)
+			}
 		})
 	}
 

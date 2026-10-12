@@ -128,7 +128,10 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 				continue
 			}
 			// Groups never confer owner; such a binding is ignored, as is
-			// one of a role that does not confer membership.
+			// one of a role that does not confer membership. That second
+			// check is defensive: the store binds such a role only to a user
+			// principal (CreateVisitorRoleBinding), so no group binding of
+			// one is written today.
 			if name == store.ProjectRoleOwner || noMembership[rb.RoleDefinitionID] {
 				continue
 			}

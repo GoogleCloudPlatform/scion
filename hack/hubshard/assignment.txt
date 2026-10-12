@@ -1085,6 +1085,7 @@
 1 project_template_handlers_test.go
 1 project_update_owner_race_test.go
 4 project_visibility_test.go
+5 project_visitor_membership_test.go
 6 project_webdav_symlink_test.go
 5 project_webdav_test.go
 2 project_workspace_authz_test.go

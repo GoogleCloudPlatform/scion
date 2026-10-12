@@ -187,7 +187,10 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 				return EffectiveMembershipResult{Err: rdErr}
 			}
 			// Groups can only confer admin or member, never owner, and a
-			// role that does not confer membership is ignored.
+			// role that does not confer membership is ignored. That second
+			// check is defensive: the store binds such a role only to a user
+			// principal (CreateVisitorRoleBinding), so no group binding of
+			// one is written today.
 			if rd.Name == store.ProjectRoleOwner || !rd.ConfersProjectMembership() {
 				continue
 			}
