@@ -1572,6 +1572,9 @@ type Server struct {
 	// portProxyMetrics counts agent port proxy upstream header timeouts
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
 	portProxyMetrics atomic.Pointer[portProxyMetrics]
+	// conduitRefreshMetrics counts agent AuthRefresh outcomes
+	// (conduit_agent_refresh.go); nil until SetConduitAgentRefreshMetrics.
+	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu     sync.Mutex
@@ -4551,6 +4554,16 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 		return false
 	}
 
+	// Skip agents that stalled while initializing: the harness never
+	// showed it was reading input, so a long start (or a lost readiness
+	// report) is not idleness and must not suspend the agent. The stall
+	// marker itself still applies, for visibility.
+	if agent.StalledFromActivity == string(state.ActivityInitializing) {
+		slog.Info("Scheduler: skipping auto-suspend; agent stalled while initializing",
+			"agent_id", agent.ID, "agent_name", agent.Name)
+		return false
+	}
+
 	// Skip agents whose harness does not support resume — suspending
 	// them would imply resumability that doesn't exist.
 	if agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig != "" {
@@ -5775,6 +5788,10 @@ func (s *Server) registerSchedulerHandlers() {
 	// Membership standing (ptone/scion#3433): outbox drain and stop
 	// retry, expiry scan and full sweep. Not gated by any setting.
 	s.registerMembershipStandingReconciler()
+
+	// Test identity expiry reaper (ptone/scion#4240): only with
+	// --enable-test-identities.
+	s.registerTestIdentityReaper()
 
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())

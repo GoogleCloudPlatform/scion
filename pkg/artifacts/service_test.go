@@ -81,7 +81,8 @@ func TestUnconfiguredServiceRoutes(t *testing.T) {
 		{http.MethodGet, "/api/v1/artifacts", http.StatusBadRequest},
 		{http.MethodGet, "/api/v1/artifacts?mine=1", http.StatusServiceUnavailable},
 		{http.MethodPut, "/api/v1/artifacts", http.StatusMethodNotAllowed},
-		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
+		{http.MethodPut, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusServiceUnavailable},
 		{http.MethodDelete, "/api/v1/artifacts/abc", http.StatusNotFound},
 	} {
 		rec := httptest.NewRecorder()
@@ -106,6 +107,19 @@ func TestHostIsStringOnly(t *testing.T) {
 	}
 	assertStringOnly(t, host)
 	assertStringOnly(t, reflect.TypeOf((*ScopeExplainer)(nil)).Elem())
+	assertStringOnly(t, reflect.TypeOf((*ScopeAdministrator)(nil)).Elem())
+	// The batch lookups take a list of string ids and answer a map from
+	// id to bool: still strings and bools only.
+	for _, ext := range []reflect.Type{reflect.TypeOf((*PrincipalChecker)(nil)).Elem(), reflect.TypeOf((*ScopeChecker)(nil)).Elem()} {
+		if ext.NumMethod() != 1 {
+			t.Fatalf("%s has %d methods, want 1", ext.Name(), ext.NumMethod())
+		}
+		m := ext.Method(0).Type
+		want := reflect.TypeOf(func(context.Context, []string) (map[string]bool, error) { return nil, nil })
+		if m != want {
+			t.Errorf("%s.%s is %v, want %v", ext.Name(), ext.Method(0).Name, m, want)
+		}
+	}
 }
 
 func assertStringOnly(t *testing.T, host reflect.Type) {

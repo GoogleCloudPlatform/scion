@@ -208,20 +208,17 @@ describe('scion-chat-members thread default', () => {
     expect(divider(el)).toBeNull();
   });
 
-  it('renders no sub-heading and no divider when the default agent is filtered out', async () => {
+  it('renders no sub-heading and no divider when the default agent is not a member', async () => {
     const el = await mount([
       agent({ id: 'agent-1', displayName: 'Coder', slug: 'coder' }),
       agent({ id: 'agent-2', displayName: 'Reviewer', slug: 'reviewer' }),
     ]);
-    el.defaultAgentSlug = 'reviewer';
-    el.unreadFromIds = ['agent-1'];
-    // Switch to the unread filter, which hides Reviewer (agent-2).
-    (el.shadowRoot?.querySelectorAll('.filter-toggle button')[1] as HTMLElement)?.click();
+    el.defaultAgentSlug = 'planner';
     await el.updateComplete;
 
     expect(subheading(el)).toBeNull();
     expect(divider(el)).toBeNull();
-    expect(rowNames(el)).toEqual(['Coder']);
+    expect(rowNames(el)).toEqual(['Coder', 'Reviewer']);
   });
 
   it('shows the sub-heading with no divider when the default is the only agent', async () => {
@@ -232,6 +229,51 @@ describe('scion-chat-members thread default', () => {
     expect(subheading(el)?.textContent?.trim()).toBe('Thread default');
     expect(divider(el)).toBeNull();
     expect(rowNames(el)).toEqual(['Coder']);
+  });
+});
+
+describe('scion-chat-members unread', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function memberRow(el: ScionChatMembers, name: string): Element | undefined {
+    return [...(el.shadowRoot?.querySelectorAll('.member-item') ?? [])].find(
+      (row) => row.querySelector('.member-name')?.textContent?.trim() === name
+    );
+  }
+
+  it('shows the unread dot on members in unreadFromIds and lists every member', async () => {
+    const el = await mount([
+      agent({ id: 'agent-1', displayName: 'Coder', slug: 'coder' }),
+      agent({ id: 'agent-2', displayName: 'Reviewer', slug: 'reviewer' }),
+    ]);
+    el.humans = [
+      { id: 'user-1', kind: 'user', displayName: 'Ada' },
+      { id: 'user-2', kind: 'user', displayName: 'Bob' },
+    ];
+    el.unreadFromIds = ['agent-1', 'user-2'];
+    await el.updateComplete;
+
+    expect(memberRow(el, 'Coder')?.querySelector('.unread-dot')).not.toBeNull();
+    expect(memberRow(el, 'Reviewer')?.querySelector('.unread-dot')).toBeNull();
+    expect(memberRow(el, 'Ada')?.querySelector('.unread-dot')).toBeNull();
+    expect(memberRow(el, 'Bob')?.querySelector('.unread-dot')).not.toBeNull();
+  });
+
+  it('renders no All/Unread filter control, only the sort menu', async () => {
+    const el = await mount([agent()]);
+    el.unreadFromIds = ['agent-1'];
+    await el.updateComplete;
+
+    const toolbar = el.shadowRoot?.querySelector('.members-toolbar');
+    expect(toolbar?.querySelector('.sort-btn')).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('.filter-toggle')).toBeNull();
+    const labels = [...(el.shadowRoot?.querySelectorAll('button') ?? [])].map((b) =>
+      b.textContent?.trim()
+    );
+    expect(labels).not.toContain('All');
+    expect(labels).not.toContain('Unread');
   });
 });
 
@@ -327,5 +369,101 @@ describe('scion-chat-members wobble', () => {
     await el.updateComplete;
 
     expect(isWobbling(el)).toBe(false);
+  });
+});
+
+describe('scion-chat-members people search', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  const humans = [
+    { id: 'u1', kind: 'user' as const, displayName: 'Ann', email: 'ann@example.com' },
+    { id: 'u2', kind: 'user' as const, displayName: 'Bob', email: 'bob@example.com' },
+  ];
+
+  function names(el: ScionChatMembers): string[] {
+    return Array.from(el.shadowRoot?.querySelectorAll('.member-name') ?? []).map(
+      (n) => n.textContent?.trim() ?? ''
+    );
+  }
+
+  it('is hidden while the people list is complete', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.people-search input')).toBeNull();
+  });
+
+  it('on a truncated list: filters what is listed and asks the page to search the hub', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    await el.updateComplete;
+    const queries: string[] = [];
+    el.addEventListener('member-search', (e) =>
+      queries.push((e as CustomEvent<{ query: string }>).detail.query)
+    );
+    const input = el.shadowRoot?.querySelector('.people-search input') as HTMLInputElement;
+    expect(input).toBeTruthy();
+
+    input.value = 'bob@';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    expect(queries).toEqual(['bob@']);
+    expect(names(el)).toEqual(['Bob']);
+  });
+
+  it('says "Searching…" rather than "No matches" while the server search is pending', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    el.searching = true;
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector('.people-search input') as HTMLInputElement;
+    input.value = 'zed';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    const notes = (): string[] =>
+      Array.from(el.shadowRoot?.querySelectorAll('.people-section .empty-note') ?? []).map(
+        (n) => n.textContent?.trim() ?? ''
+      );
+    expect(notes()).toEqual(['Searching…']);
+    // Announced to assistive technology as it changes.
+    expect(el.shadowRoot?.querySelector('.people-section .empty-note')?.getAttribute('role')).toBe(
+      'status'
+    );
+
+    el.searching = false;
+    await el.updateComplete;
+    expect(notes()).toEqual(['No matches']);
+  });
+
+  it('notes neutrally that the list is bounded while no query is typed', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    await el.updateComplete;
+    const text = el.shadowRoot?.textContent ?? '';
+    expect(text).toContain('Showing up to 100 people. Search to find others.');
+  });
+
+  it('drops the query when the list stops being truncated', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector('.people-search input') as HTMLInputElement;
+    input.value = 'bob';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    el.humansTruncated = false;
+    await el.updateComplete;
+    expect(names(el)).toEqual(['Ann', 'Bob']);
+    el.humansTruncated = true;
+    await el.updateComplete;
+    expect(names(el)).toEqual(['Ann', 'Bob']);
   });
 });

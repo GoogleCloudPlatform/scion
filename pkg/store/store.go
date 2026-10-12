@@ -199,6 +199,15 @@ type Store interface {
 	// spans the user and role-binding sub-stores.
 	CreateTestAdminUser(ctx context.Context, user *User, roleDefinitionID string) (*RoleBinding, error)
 
+	// ListFixtureRootedResources returns the agents (soft-deleted ones
+	// included), schedules, groups and projects whose creation-time
+	// provenance stamp has fixture_root_id == rootID (ptone/scion#4240,
+	// Phase 3b). Only the stamp selects: a row with no stamp, or another
+	// root, is never returned, whatever its owner or creator. At most
+	// limit rows of each kind are returned (limit <= 0: no limit), and
+	// Truncated reports whether any kind had more.
+	ListFixtureRootedResources(ctx context.Context, rootID string, limit int) (*FixtureRootedResources, error)
+
 	// Agent operations
 	AgentStore
 
@@ -470,6 +479,14 @@ type AgentStore interface {
 	// run-ID write, with RunID set to runID: either both are recorded or
 	// neither is.
 	SetAgentRunID(ctx context.Context, agentID, runID string, cred *AgentCredential) (previous string, err error)
+
+	// SetAgentSSHHostKey records publicKey (an authorized_keys line) as the
+	// SSH host key of the agent's run runID. The reported host key is bound
+	// to the reporting agent's current run: the write applies only while
+	// the stored run_id equals runID (non-empty) and no delete holds the
+	// row, checked in the same statement. The first host key reported for
+	// a run is kept; a repeat of the same key succeeds (unchanged).
+	SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (SSHHostKeyResult, error)
 
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
 	// it currently equals expectedRunID, and reports whether it did. A
@@ -1118,6 +1135,23 @@ type ContainerMissingPrecondition struct {
 	RunID string
 }
 
+// SSHHostKeyResult is the outcome of SetAgentSSHHostKey.
+type SSHHostKeyResult int
+
+const (
+	// SSHHostKeyWritten: the key was recorded for the run.
+	SSHHostKeyWritten SSHHostKeyResult = iota + 1
+	// SSHHostKeyUnchanged: the same key was already recorded for the run.
+	SSHHostKeyUnchanged
+	// SSHHostKeyNotCurrentRun: the run is not current, or nothing was
+	// recorded for it (for example a missing or deleted agent, or a delete
+	// holding the row); nothing written.
+	SSHHostKeyNotCurrentRun
+	// SSHHostKeyAlreadySet: a different key is already recorded for the
+	// run; it is kept and nothing is written.
+	SSHHostKeyAlreadySet
+)
+
 // AgentStatusUpdate contains fields for status-only updates.
 type AgentStatusUpdate struct {
 	Phase           string            `json:"phase,omitempty"`
@@ -1735,6 +1769,14 @@ type UserStore interface {
 	// liveAt keeps only users whose expiry is after liveAt. A positive
 	// limit caps the number returned.
 	ListTestFixtureUsers(ctx context.Context, issuedBy string, liveAt time.Time, limit int) ([]User, error)
+
+	// ListExpiredTestFixtureUsers returns the test fixture users q selects,
+	// ordered by (expires_at, id) ascending. The test identity expiry
+	// reaper reads it: one query for the identities to hold (expired
+	// within the grace period) and a keyset-paged one for the identities
+	// to purge, so identities whose purge cannot complete never hide later
+	// ones.
+	ListExpiredTestFixtureUsers(ctx context.Context, q ExpiredTestFixtureQuery) ([]User, error)
 
 	// LockTestFixtureIssuance serializes test fixture issuance until the
 	// surrounding transaction ends, so that a live-count check and the

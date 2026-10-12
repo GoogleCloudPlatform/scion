@@ -37,7 +37,7 @@ const missingFileBrokerBody = `{"error":{"code":"template_error","message":"Fail
 
 // TestWrapHubError_BrokerFailureCategories covers ptone/scion#3323: a broker
 // failure relayed by the Hub is shown as a short category, never with the
-// broker's raw body or the "scion hub disable" hint.
+// broker's raw body or the hub-check hint.
 func TestWrapHubError_BrokerFailureCategories(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -101,7 +101,7 @@ func TestWrapHubError_BrokerFailureCategories(t *testing.T) {
 			for _, n := range tt.notContain {
 				assert.NotContains(t, msg, n)
 			}
-			assert.NotContains(t, msg, "scion hub disable")
+			assert.NotContains(t, msg, "scion hub status")
 			assert.NotContains(t, msg, "runtime broker returned error")
 			assert.NotContains(t, msg, "\n", "summary must be a single line: %q", msg)
 
@@ -157,14 +157,14 @@ func TestWrapHubError_BrokerFailureOperationNeutral(t *testing.T) {
 	assert.Contains(t, msg, "failed to suspend agent via Hub: runtime broker failure: the runtime broker's container runtime operation failed")
 	assert.NotContains(t, msg, "create")
 	assert.NotContains(t, msg, "start")
-	assert.NotContains(t, msg, "scion hub disable")
+	assert.NotContains(t, msg, "scion hub status")
 }
 
-// TestWrapHubError_PlainHub5xxKeepsLocalOnlyHint pins that only relayed
+// TestWrapHubError_PlainHub5xxKeepsHubCheckHint pins that only relayed
 // broker failures lose the hint: a Hub 5xx of its own still gets it.
-func TestWrapHubError_PlainHub5xxKeepsLocalOnlyHint(t *testing.T) {
+func TestWrapHubError_PlainHub5xxKeepsHubCheckHint(t *testing.T) {
 	err := wrapHubError(apiErr(http.StatusBadGateway, "runtime_error", "Failed to dispatch to runtime broker: dial tcp: connection refused"))
-	assert.Contains(t, err.Error(), "scion hub disable")
+	assert.Contains(t, err.Error(), testHubCheckHint)
 }
 
 // TestStartAgentViaHub_BrokerFailureCategory drives scion start's hub path
@@ -185,6 +185,6 @@ func TestStartAgentViaHub_BrokerFailureCategory(t *testing.T) {
 	msg := err.Error()
 	assert.Contains(t, msg, "failed to start agent via Hub: runtime broker failure: a template or harness-config file is missing on the runtime broker")
 	assert.Contains(t, msg, "broker code: template_error")
-	assert.NotContains(t, msg, "scion hub disable")
+	assert.NotContains(t, msg, "scion hub status")
 	assert.NotContains(t, msg, "runtime broker returned error")
 }

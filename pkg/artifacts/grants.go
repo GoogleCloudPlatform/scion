@@ -214,7 +214,7 @@ func (s *Service) crossScopeAllowed(ctx context.Context) bool {
 // handleListGrants implements GET /{id}/grants: the principal and scope
 // grants, the home project's first, then oldest first.
 func (s *Service) handleListGrants(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.adminArtifact(w, r, id)
+	b, a, _, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -418,11 +418,11 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 		writeNotFound(w)
 		return
 	}
-	b, a, ok := s.adminArtifact(w, r, id)
+	b, a, actor, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
-	switch err := b.store.DeleteGrant(r.Context(), a.ID, grantID); {
+	switch err := b.store.DeleteGrant(r.Context(), a.ID, grantID, actor); {
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "home_grant", "the home project's grant cannot be removed; move the artifact instead")
 	case errors.Is(err, ErrNotFound):
@@ -451,7 +451,7 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 // home project gets a read grant unless it already has a scope grant.
 // Both changes happen in one store transaction.
 func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.adminArtifact(w, r, id)
+	b, a, actor, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -485,7 +485,7 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 	}
-	u := ArtifactUpdate{SetExpiry: req.ExpiresAt.Set, ExpiresAt: req.ExpiresAt.Value, MaxGrants: MaxGrantsPerArtifact}
+	u := ArtifactUpdate{SetExpiry: req.ExpiresAt.Set, ExpiresAt: req.ExpiresAt.Value, MaxGrants: MaxGrantsPerArtifact, Actor: actor}
 	if req.ScopeRef != nil && *req.ScopeRef != a.ScopeRef {
 		kind, ref, _, _ := s.host.Principal(ctx)
 		u.HomeGrant = &Grant{

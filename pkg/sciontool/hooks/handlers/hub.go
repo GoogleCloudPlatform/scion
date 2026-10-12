@@ -83,6 +83,16 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 	// only: outcome and elapsed_ms, never the request body.
 	callStart := time.Now()
 
+	// A codex sub-agent's new-work or tool-start event must not clear a
+	// status the parent agent holds. The StatusHandler runs first in the same
+	// hook process and keeps a held status locally; the Hub follows it. The
+	// guard runs before the switch, so a held sub-agent session-start skips
+	// its ReportState call too.
+	if isCodexSubagentEvent(event) && (isNewWorkEvent(event.Name) || event.Name == hooks.EventToolStart) && h.isLocalActivitySticky() {
+		log.Debug("Hub: Skipping %s from codex sub-agent (local activity is sticky)", event.Name)
+		return nil
+	}
+
 	var err error
 	switch event.Name {
 	case hooks.EventSessionStart:
@@ -162,7 +172,10 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		})
 
 	case hooks.EventToolEnd, hooks.EventAgentEnd, hooks.EventModelEnd:
-		// Check if local activity is sticky before sending working
+		// Check if local activity is sticky before sending working. The
+		// StatusHandler runs first in the same hook process, so a
+		// waiting_for_input that a Notification set has already been
+		// replaced locally on tool-end/agent-end; this mirrors that result.
 		if h.isLocalActivitySticky() {
 			log.Debug("Hub: Skipping working (local activity is sticky)")
 			return nil

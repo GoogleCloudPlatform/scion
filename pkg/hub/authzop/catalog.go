@@ -467,6 +467,11 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "handleIssueTestAdminIdentity", Symbol: "CreateTestAdminUser", OperationID: "testidentity.admin.create"},
 	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "revokeTestAdminIdentity", Symbol: "DeleteRoleBindingsForPrincipal", OperationID: "testidentity.admin.revokeall"},
 	{File: "pkg/hub/handlers_test_admin_identities.go", Function: "revokeTestAdminIdentity", Symbol: "UpdateUser", OperationID: "testidentity.admin.revokeall"},
+	// Test identity purge (ptone/scion#4240, Phase 3b): resources selected
+	// by their fixture_root_id stamp, removed under testidentity.delete.
+	{File: "pkg/hub/fixture_purge.go", Function: "purgeFixtureGroup", Symbol: "DeleteGroup", OperationID: "testidentity.delete"},
+	{File: "pkg/hub/project_fixture_purge.go", Function: "purgeFixtureProject", Symbol: "DeleteRoleBinding", OperationID: "testidentity.delete"},
+	{File: "pkg/hub/project_fixture_purge.go", Function: "purgeFixtureProject", Symbol: "DeleteProject", OperationID: "testidentity.delete"},
 	// pkg/hub/user_delete_data.go — deleted user's user-scope secrets when no secret backend is configured (ptone/scion#2769)
 	{File: "pkg/hub/user_delete_data.go", Function: "removeUserScopedSecretRowsWithoutBackend", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Reads a deleted user's user-scope secret row only to tell a value stored in the hub database from an external reference; never returned; runs after user.admin.delete or the allow-list delete commits, or from the startup sweep for users that no longer exist", Scope: "pkg/hub/user_delete_data.go"}},
 	{File: "pkg/hub/user_delete_data.go", Function: "removeUserScopedSecretRowsWithoutBackend", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Deletes a deleted user's user-scope secret rows whose value is stored in the hub database when no secret backend is configured; runs after user.admin.delete or the allow-list delete commits, or from the startup sweep for users that no longer exist", Scope: "pkg/hub/user_delete_data.go"}},

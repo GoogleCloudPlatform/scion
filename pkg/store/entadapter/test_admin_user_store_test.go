@@ -24,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -387,4 +389,49 @@ func TestUpdateUser_EmailStaysInTestAdminDomain(t *testing.T) {
 	require.NoError(t, cs.CreateUser(ctx, human))
 	human.Email = "moved@" + store.TestHubAdminEmailDomain
 	require.ErrorIs(t, cs.UpdateUser(ctx, human), store.ErrTestFixtureKindRefused)
+}
+
+// The issuance binding check compares expiries at their stored precision:
+// a binding expiry equal to the identity's before the identity's round
+// trip (sub-microsecond digits the stored row no longer has) is allowed,
+// and the expiry to store is returned at that precision. One microsecond
+// later is refused.
+func TestCheckTestAdminSystemBinding_ComparesAtStoredPrecision(t *testing.T) {
+	stored := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
+	u := &ent.User{Kind: user.Kind(store.UserKindTestHubAdmin), ExpiresAt: &stored}
+	same := stored.Add(999 * time.Nanosecond)
+	rb := &store.RoleBinding{ScopeType: store.RoleScopeSystem, CreatedBy: store.TestIdentityIssuanceCreatedBy, ExpiresAt: &same}
+	exp, err := checkTestAdminSystemBinding(u, rb)
+	require.NoError(t, err)
+	require.NotNil(t, exp)
+	assert.True(t, exp.Equal(stored), "the expiry is stored at the identity's precision")
+
+	later := stored.Add(time.Microsecond)
+	rb.ExpiresAt = &later
+	_, err = checkTestAdminSystemBinding(u, rb)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+// An identity expiry with sub-microsecond digits is issued on either
+// backend, and the stored binding expires exactly when the stored identity
+// does.
+func TestCreateTestAdminUser_SubMicrosecondExpiry(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	rd := newTestAdminSystemRole(t, cs, "hub-admin")
+	exp := time.Now().Add(time.Hour).Truncate(time.Microsecond).Add(999 * time.Nanosecond)
+	u := newTestAdminUser(store.UserKindTestHubAdmin, uuid.NewString(), exp)
+	created, err := cs.CreateTestAdminUser(ctx, u, rd.ID)
+	require.NoError(t, err)
+	require.NotNil(t, created.ExpiresAt)
+
+	got, err := cs.GetUser(ctx, u.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ExpiresAt)
+	bindings, err := cs.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, u.ID)
+	require.NoError(t, err)
+	require.Len(t, bindings, 1)
+	require.NotNil(t, bindings[0].ExpiresAt)
+	assert.True(t, bindings[0].ExpiresAt.Equal(*got.ExpiresAt), "binding %v, identity %v", bindings[0].ExpiresAt, got.ExpiresAt)
+	assert.True(t, created.ExpiresAt.Equal(*got.ExpiresAt))
 }

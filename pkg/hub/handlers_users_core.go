@@ -601,6 +601,14 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			return errActivateInvitedUser
 		}
 
+		// Suspension must not leave a scope with no active constraint
+		// admin (the same check as role-binding removal and deletion).
+		if updates.Status != nil && *updates.Status == store.UserStatusSuspended && beforeStatus != store.UserStatusSuspended {
+			if err := checkUserRemovalAdminLockout(ctx, tx, time.Now(), txUser.ID, userRemovalSuspend); err != nil {
+				return err
+			}
+		}
+
 		// Role transition: derives classification from canonical binding state
 		// inside the transaction, not from User.Role (R4-fix).
 		var bindingMutation bindingMutationKind
@@ -698,6 +706,9 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
+		if writeConstraintAdminLockoutError(w, err) {
+			return
+		}
 		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) || errors.Is(err, errRoleOnTestFixture) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else if errors.Is(err, errBindingStateDrift) {
@@ -1185,6 +1196,11 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		if err := s.checkLastSuperAdminTx(ctx, tx, user.ID, superAdminRD); err != nil {
 			return err
 		}
+		// Constraint-admin lockout guard, shared with suspension and
+		// role-binding removal.
+		if err := checkUserRemovalAdminLockout(ctx, tx, time.Now(), user.ID, userRemovalDelete); err != nil {
+			return err
+		}
 
 		// Agent guard, binding cascade, skill injections, group
 		// memberships and the user row (deleteUserRowCascadeTx).
@@ -1212,7 +1228,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		if errors.Is(err, errLastSuperAdmin) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot delete the last super-admin; promote another user first", nil)
-		} else if !writeUserDeleteCascadeError(w, err) {
+		} else if !writeConstraintAdminLockoutError(w, err) && !writeUserDeleteCascadeError(w, err) {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"user deletion failed: "+err.Error(), nil)
 		}
@@ -1573,4 +1589,16 @@ func (s *Server) membershipNow() time.Time {
 		return s.membershipService.nowFunc()
 	}
 	return time.Now()
+}
+
+// writeConstraintAdminLockoutError writes a constraint-admin lockout
+// refusal with the status the role-binding path uses
+// (governanceErrorStatus) and reports whether err was one.
+func writeConstraintAdminLockoutError(w http.ResponseWriter, err error) bool {
+	var ge *GovernanceError
+	if !errors.As(err, &ge) || ge.Code != ErrCodeConstraintAdminLockout {
+		return false
+	}
+	writeError(w, governanceErrorStatus(ge.Code), ge.Code, ge.Message, ge.Details)
+	return true
 }
