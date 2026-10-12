@@ -15,17 +15,21 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 )
 
 const readyTestInterval = 10 * time.Millisecond
@@ -401,4 +405,123 @@ func TestDaemonRegistryCheck_UsesGlobalDirNotCwdProject(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("targets = %+v, want only the web port", targets)
 	}
+}
+
+// healthBodyServer serves body on /healthz and returns its port.
+func healthBodyServer(t *testing.T, body string) int {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	_, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+// runServerStatusJSON runs 'server status --json' and returns its answer.
+func runServerStatusJSON(t *testing.T) serverStatusInfo {
+	t.Helper()
+	savedJSON := serverStatusJSON
+	t.Cleanup(func() { serverStatusJSON = savedJSON })
+	serverStatusJSON = true
+	out := captureStdout(t, func() {
+		if err := runServerStatus(serverStatusCmd, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var info serverStatusInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		t.Fatalf("status output %q: %v", out, err)
+	}
+	return info
+}
+
+// TestServerStatus_ProbesStartedWebAndBrokerPorts: 'server status' finds a
+// combined server started with non-default --web-port and
+// --runtime-broker-port (its saved start args), not only one on 8080.
+func TestServerStatus_ProbesStartedWebAndBrokerPorts(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	t.Setenv("SCION_SERVER_MODE", "")
+	webPort := healthBodyServer(t, `{"status":"healthy","hub":{"status":"healthy"}}`)
+	brokerPort := newFakeBrokerHealthServer(t, "healthy")
+	args := []string{"server", "start", "--foreground",
+		"--web-port=" + strconv.Itoa(webPort), "--runtime-broker-port=" + strconv.Itoa(brokerPort)}
+	if err := daemon.SaveArgs(serverDaemonComponent, globalDir, args); err != nil {
+		t.Fatal(err)
+	}
+
+	info := runServerStatusJSON(t)
+	if !info.WebRunning || !info.HubRunning {
+		t.Errorf("web and hub on web port %d not found: %+v", webPort, info)
+	}
+	if !info.BrokerRunning {
+		t.Errorf("broker on port %d not found: %+v", brokerPort, info)
+	}
+}
+
+// TestServerStatus_ProbesStartedHubPort: a standalone hub started with a
+// non-default --port (web disabled) is found on that port, not only on 9810.
+func TestServerStatus_ProbesStartedHubPort(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	t.Setenv("SCION_SERVER_MODE", "")
+	hubPort := healthBodyServer(t, `{"status":"healthy"}`)
+	args := []string{"server", "start", "--foreground", "--enable-web=false",
+		"--port=" + strconv.Itoa(hubPort), "--web-port=" + strconv.Itoa(unusedPort(t))}
+	if err := daemon.SaveArgs(serverDaemonComponent, globalDir, args); err != nil {
+		t.Fatal(err)
+	}
+
+	info := runServerStatusJSON(t)
+	if !info.HubRunning {
+		t.Errorf("hub on port %d not found: %+v", hubPort, info)
+	}
+	if info.WebRunning {
+		t.Errorf("web reported running with nothing on the web port: %+v", info)
+	}
+}
+
+func TestServerStatusBaseURLs(t *testing.T) {
+	t.Run("no saved args: defaults", func(t *testing.T) {
+		_, globalDir := brokerTestHome(t)
+		t.Setenv("SCION_SERVER_MODE", "")
+		web, hub, broker := serverStatusBaseURLs(globalDir)
+		want := []string{"http://127.0.0.1:8080", "http://127.0.0.1:9810", "http://127.0.0.1:9800"}
+		if got := []string{web, hub, broker}; strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+	t.Run("saved args set every port", func(t *testing.T) {
+		_, globalDir := brokerTestHome(t)
+		t.Setenv("SCION_SERVER_MODE", "")
+		args := []string{"server", "start", "--foreground", "--web-port=18080", "--port=19810", "--runtime-broker-port=19800"}
+		if err := daemon.SaveArgs(serverDaemonComponent, globalDir, args); err != nil {
+			t.Fatal(err)
+		}
+		web, hub, broker := serverStatusBaseURLs(globalDir)
+		want := []string{"http://127.0.0.1:18080", "http://127.0.0.1:19810", "http://127.0.0.1:19800"}
+		if got := []string{web, hub, broker}; strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+	t.Run("settings ports without saved args", func(t *testing.T) {
+		_, globalDir := brokerTestHome(t)
+		t.Setenv("SCION_SERVER_MODE", "")
+		writeGlobalSettings(t, globalDir, "schema_version: \"1\"\nserver:\n  hub:\n    port: 19811\n  broker:\n    port: 19801\n")
+		_, hub, broker := serverStatusBaseURLs(globalDir)
+		if hub != "http://127.0.0.1:19811" || broker != "http://127.0.0.1:19801" {
+			t.Errorf("hub %s, broker %s; want the settings ports", hub, broker)
+		}
+	})
 }

@@ -902,10 +902,10 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	// The broker is probed on the server's configured broker port
-	// (--runtime-broker-port or server.broker.port), not always 9800.
-	brokerURL := fmt.Sprintf("http://127.0.0.1:%d", serverBrokerPort(globalDir))
-	probed := probeServerStatus(client, "http://127.0.0.1:8080", "http://127.0.0.1:9810", brokerURL)
+	// Probe the ports the server was started with (its saved start args and
+	// config), not the defaults.
+	webBase, hubBase, brokerBase := serverStatusBaseURLs(globalDir)
+	probed := probeServerStatus(client, webBase, hubBase, brokerBase)
 	status.HubRunning = probed.HubRunning
 	status.BrokerRunning = probed.BrokerRunning
 	status.WebRunning = probed.WebRunning
@@ -1122,7 +1122,10 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		if msg != "" {
 			fmt.Println(msg)
 		}
-		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, requireImageRegistryForBroker) {
+		// The server runs in the global directory, so check the registry
+		// there: a registry set only in the current project does not keep
+		// its broker on.
+		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, daemonRegistryCheck(globalDir)) {
 			fmt.Println(brokerSkippedNotice)
 		}
 

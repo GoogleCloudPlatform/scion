@@ -109,6 +109,35 @@ func (e *serverNotReadyError) Error() string {
 // run in the child's working directory); it is only called in workstation
 // mode with the broker enabled.
 func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string, registryCheck func() error) []serverReadyTarget {
+	l := serverListenersFromArgs(args, cfg, fallbackMode, registryCheck)
+	var targets []serverReadyTarget
+	switch {
+	case l.Web && l.Hub:
+		targets = append(targets, serverReadyTarget{Name: "hub API and web", URL: healthzURL(l.HubHost, l.WebPort), NeedsHub: true})
+	case l.Web:
+		targets = append(targets, serverReadyTarget{Name: "web", URL: healthzURL(l.HubHost, l.WebPort)})
+	case l.Hub:
+		targets = append(targets, serverReadyTarget{Name: "hub API", URL: healthzURL(l.HubHost, l.HubPort)})
+	}
+	if l.Broker {
+		targets = append(targets, serverReadyTarget{Name: "runtime broker", URL: healthzURL(l.BrokerHost, l.BrokerPort)})
+	}
+	return targets
+}
+
+// serverListeners is what a 'server start --foreground' argv resolves to:
+// which components run and the host and port each listens on. The web
+// listener uses HubHost.
+type serverListeners struct {
+	Hub, Broker, Web    bool
+	HubHost, BrokerHost string
+	HubPort, BrokerPort int
+	WebPort             int
+}
+
+// serverListenersFromArgs resolves the components, hosts and ports of the
+// server started with args, as described on serverReadyTargetsFromArgs.
+func serverListenersFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string, registryCheck func() error) serverListeners {
 	fs := pflag.NewFlagSet("server-start-ready", pflag.ContinueOnError)
 	fs.ParseErrorsAllowlist.UnknownFlags = true
 	fs.SetOutput(io.Discard)
@@ -180,19 +209,35 @@ func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbac
 		brokerPortVal = *brokerPortFlag
 	}
 
-	var targets []serverReadyTarget
-	switch {
-	case *web && *hub:
-		targets = append(targets, serverReadyTarget{Name: "hub API and web", URL: healthzURL(hubHostVal, *webPortFlag), NeedsHub: true})
-	case *web:
-		targets = append(targets, serverReadyTarget{Name: "web", URL: healthzURL(hubHostVal, *webPortFlag)})
-	case *hub:
-		targets = append(targets, serverReadyTarget{Name: "hub API", URL: healthzURL(hubHostVal, hubPortVal)})
+	return serverListeners{
+		Hub: *hub, Broker: *broker, Web: *web,
+		HubHost: hubHostVal, BrokerHost: brokerHostVal,
+		HubPort: hubPortVal, BrokerPort: brokerPortVal,
+		WebPort: *webPortFlag,
 	}
-	if *broker {
-		targets = append(targets, serverReadyTarget{Name: "runtime broker", URL: healthzURL(brokerHostVal, brokerPortVal)})
+}
+
+// serverStatusBaseURLs returns the base URLs (no trailing slash) 'server
+// status' probes: the web port, the standalone hub port and the runtime
+// broker port of the server, with their hosts. They come from the server's
+// saved start args (none for a foreground server) and the config those args
+// name, resolved as waitForDaemonServerReady does, so a server started on
+// other ports than the defaults is found there.
+func serverStatusBaseURLs(globalDir string) (webBase, hubBase, brokerBase string) {
+	saved, err := daemon.LoadArgs(serverDaemonComponent, globalDir)
+	if err != nil {
+		saved = nil
 	}
-	return targets
+	cfg, err := config.LoadGlobalConfig(serverConfigPathFromArgs(saved))
+	if err != nil {
+		cfg = nil
+	}
+	// The registry check only decides whether the broker runs, not where it
+	// listens; status probes every component.
+	noRegistryCheck := func() error { return nil }
+	l := serverListenersFromArgs(saved, cfg, config.LoadServerMode(), noRegistryCheck)
+	base := func(host string, port int) string { return strings.TrimSuffix(healthzURL(host, port), "/healthz") }
+	return base(l.HubHost, l.WebPort), base(l.HubHost, l.HubPort), base(l.BrokerHost, l.BrokerPort)
 }
 
 // healthzURL builds the /healthz URL for a listener bound to host:port. A
