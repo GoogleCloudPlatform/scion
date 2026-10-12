@@ -576,7 +576,8 @@ func TestSAParentCeiling_HostPassthroughWritesGCPIdentity(t *testing.T) {
 	rec = doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agent.ID,
 		map[string]interface{}{"gcp_identity": map[string]string{"metadata_mode": "passthrough"}})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, []string{"gcp_identity"}, patchDisposition(t, rec).Applied)
+	// The translation also writes the translated-from annotation.
+	assert.Equal(t, []string{"annotations", "gcp_identity"}, patchDisposition(t, rec).Applied)
 	rows = activeAssignments(t, s, agent.ID)
 	require.Len(t, rows, 1)
 	assert.Equal(t, store.SAAssignmentOriginHostPassthroughTranslation, rows[0].Origin)
