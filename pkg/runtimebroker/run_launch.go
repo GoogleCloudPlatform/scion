@@ -131,7 +131,6 @@ type launchCtx struct {
 	mgr             agent.Manager
 	key             launchKey
 	sharedWorkspace bool
-	supersededDone  <-chan struct{}
 	// downloadWorkspaceFromGCS, when set, replaces Server.downloadWorkspaceFromGCS
 	// for this launch. Always nil in production (beginAsyncLaunch never sets
 	// it); tests use it to control how long the download step takes without
@@ -214,30 +213,14 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		return
 	}
 	// The claim has been applied: any failure from here on is reported
-	// under the launching step (design §3.9), including a ctx' deadline
-	// reached while still waiting on a superseded launch below.
+	// under the launching step (design §3.9).
 	currentStep = "launching"
 
-	// Step 2, F5: wait for a superseded record's cleanup before writing the
-	// shared marker, then write it (create launches only).
-	WaitSuperseded(ctx, lc.supersededDone)
-	if err := ctx.Err(); err != nil {
-		switch {
-		case errors.Is(err, context.Canceled):
-			// A local stop/delete (launchRegistry.CancelLocal) woke the
-			// wait, not a real ctx' deadline. Same rule as the claim's
-			// local-cancel case: the Hub already knows, or will
-			// independently learn, this launch is over, so no terminal.
-			return
-		default:
-			// context.DeadlineExceeded: ctx' ran out while waiting on the
-			// predecessor. The marker has not been written yet, so fail
-			// directly rather than writing it only to immediately treat
-			// the launch as timed out.
-			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "launch_timeout", "launch timed out waiting for a superseded launch to finish")
-			return
-		}
-	}
+	// Step 2: write the shared marker (create launches only). There is no
+	// superseded launch to wait for here: the create already registered
+	// under the name and waited for any earlier start of it before
+	// buildStartContext, and the launch took that registration over
+	// (createAgent, beginAsyncLaunch; ptone/scion#2632).
 	if rec.Kind == store.LaunchKindCreate && lc.opts.ProjectPath != "" {
 		if err := writeLaunchMarker(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID); err != nil {
 			// A marker write failure silently disables file cleanup for this
@@ -338,8 +321,8 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// A local stop/delete (launchRegistry.CancelLocal) woke Start
 			// via ctx' cancellation, not a real deadline (the
 			// launch_timeout case is context.DeadlineExceeded, handled by
-			// classifyStartError below). Same rule as the claim's and
-			// WaitSuperseded's local-cancel cases: the Hub already knows,
+			// classifyStartError below). Same rule as the claim's
+			// local-cancel case: the Hub already knows,
 			// or will independently learn, this launch is over, so no
 			// terminal. Keyed on ctx' rather than on sr.err: the
 			// exec-based runtimes (docker, podman, apple) return the killed

@@ -47,6 +47,19 @@ const (
 	// one mapped to its GCP service account (400). The details also name
 	// the requested and mapped Kubernetes ServiceAccounts.
 	BrokerErrCodeIdentityKSAMismatch = "identity_ksa_mismatch"
+
+	// BrokerErrCodePriorStartInProgress marks a create refused because an
+	// earlier start of the same agent name on the broker was still
+	// finishing its failure cleanup when the broker's supersede wait ended
+	// (503, with Retry-After). Retrying the same create shortly is expected
+	// to succeed (ptone/scion#2632).
+	BrokerErrCodePriorStartInProgress = "prior_start_in_progress"
+
+	// BrokerErrCodeStartCancelled marks a create whose start was cancelled
+	// on the broker before it took the agent name: a stop or delete of the
+	// agent, or a newer start of the same name, reached the broker first
+	// (409). Retry only if the create is still wanted (ptone/scion#2632).
+	BrokerErrCodeStartCancelled = "start_cancelled"
 )
 
 // Values of details.cause on a broker runtime_error answer to a create

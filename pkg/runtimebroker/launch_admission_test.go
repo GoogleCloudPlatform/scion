@@ -612,12 +612,11 @@ func TestAsyncCreate_ClaimOtherOwner_AbortsNoStartNoCleanup(t *testing.T) {
 // specific check.
 //
 // To make this check's removal observable on its own (not just masked by
-// the identical IsAborted checks later in runLaunch), a predecessor record
-// is pre-registered for the same key and deliberately never released: if
-// this check does its job, the launch returns before ever reaching
-// WaitSuperseded, so the stuck predecessor is irrelevant. If this check is
-// missing, the launch falls through into WaitSuperseded and blocks forever,
-// so cleanup never happens within the wait below -- a distinct,
+// the identical IsAborted check after the marker write), the launch marker
+// cannot be written: a regular file stands where the markers directory
+// would go. If this check does its job, the launch returns before the
+// marker step and sends no terminal. If it is missing, the marker write
+// fails and the launch reports failed{runtime_error} -- a distinct,
 // unmistakable failure rather than one a later check could incidentally
 // paper over.
 func TestAsyncCreate_AbortRecordedBeforeClaimSucceeds_NoStart(t *testing.T) {
@@ -625,9 +624,13 @@ func TestAsyncCreate_AbortRecordedBeforeClaimSucceeds_NoStart(t *testing.T) {
 	srv, rtb := newAsyncTestServer(t, mgr)
 	srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
 
-	key := launchKey{Slug: "agent-guard-b"}
-	stuckRec := newLaunchRecord("L-stuck-for-guard-b", "agent-stuck-for-guard-b", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
-	srv.launchRegistry.Begin(key, stuckRec) // never released by this test
+	projectPath := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(projectPath, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "launch-markers"), []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("block the launch markers directory: %v", err)
+	}
 
 	releaseClaim := make(chan struct{})
 	abortAnswered := make(chan struct{})
@@ -645,7 +648,8 @@ func TestAsyncCreate_AbortRecordedBeforeClaimSucceeds_NoStart(t *testing.T) {
 		"name": "agent-guard-b", "asyncLaunch": true,
 		"launchId":             "L-guard-b",
 		"launchTimeoutSeconds": 300, "launchKeepaliveSeconds": 1,
-		"config": map[string]any{"template": "claude"},
+		"projectPath": projectPath,
+		"config":      map[string]any{"template": "claude"},
 	})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
@@ -663,7 +667,7 @@ func TestAsyncCreate_AbortRecordedBeforeClaimSucceeds_NoStart(t *testing.T) {
 	close(releaseClaim)
 
 	if !waitUntil(t, 3*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
-		t.Fatal("expected the already-recorded abort to trigger cleanup right after the claim succeeds, without ever blocking on WaitSuperseded (the predecessor here is never released)")
+		t.Fatal("expected the already-recorded abort to trigger cleanup right after the claim succeeds, before the marker step")
 	}
 	if n := mgr.StartCallCount(); n != 0 {
 		t.Fatalf("Start must never be called when the abort was already recorded before the claim succeeded, got %d calls", n)
@@ -672,83 +676,6 @@ func TestAsyncCreate_AbortRecordedBeforeClaimSucceeds_NoStart(t *testing.T) {
 		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
 			t.Fatalf("an abort recorded before the claim succeeds must send no terminal, got %+v", r.Report)
 		}
-	}
-}
-
-// TestAsyncCreate_AbortRecordedDuringWaitSuperseded_NoMarkerNoStart covers
-// the IsAborted check right after WaitSuperseded/the marker write: a
-// pre-registered record for the same key makes WaitSuperseded actually
-// block, during which a keepalive abort is recorded (and given time to
-// finish); the claim has already succeeded by then (the earlier IsAborted
-// check passed), so only this specific check can be stopping the launch.
-//
-// workspaceStoragePath is set (with a fake, failing download) so that if
-// this check is missing, the launch falls through into the GCS download
-// step, which records the call and fails fast -- observable independently
-// of the IsAborted check after the download (that one would never even be
-// reached, since a download error fails the launch directly), so this test
-// cannot be satisfied by that later check doing the work instead.
-func TestAsyncCreate_AbortRecordedDuringWaitSuperseded_NoMarkerNoStart(t *testing.T) {
-	mgr := newAsyncManager()
-	srv, rtb := newAsyncTestServer(t, mgr)
-	srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
-	// A real WorktreeBase, so the workspace directory passes validation
-	// (at admission and in the download) and a launch that wrongly reaches
-	// the download calls the fake this test looks at.
-	srv.config.WorktreeBase = t.TempDir()
-	fake := installFakeWorkspaceSync(t, srv, errors.New("fake sync failure"))
-
-	key := launchKey{Slug: "agent-guard-c"}
-	oldRec := newLaunchRecord("L-old-for-guard-c", "agent-old-for-guard-c", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
-	srv.launchRegistry.Begin(key, oldRec)
-
-	abortAnswered := make(chan struct{})
-	var abortAnsweredOnce sync.Once
-	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
-		if claimState(req) {
-			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
-		}
-		abortAnsweredOnce.Do(func() { close(abortAnswered) })
-		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonDeleted}, nil
-	}
-
-	w := postCreate(t, srv, map[string]any{
-		"name": "agent-guard-c", "asyncLaunch": true,
-		"launchId":             "L-guard-c",
-		"launchTimeoutSeconds": 300, "launchKeepaliveSeconds": 1,
-		"workspaceStoragePath":   "some/path",
-		"workspaceStorageBucket": "hub-bucket",
-		"config":                 map[string]any{"template": "claude"},
-	})
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-
-	select {
-	case <-abortAnswered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("expected the keepalive's abort-triggering answer")
-	}
-	// The claim already succeeded well before this (it is answered
-	// immediately, with no blocking); the new launch is now parked in
-	// WaitSuperseded, since oldRec is still registered. Let
-	// recordKeepaliveAbort finish, then release the predecessor.
-	time.Sleep(100 * time.Millisecond)
-	srv.launchRegistry.Finish(key, oldRec)
-
-	if !waitUntil(t, 3*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
-		t.Fatal("expected the already-recorded abort to trigger cleanup once WaitSuperseded returns")
-	}
-	if n := mgr.StartCallCount(); n != 0 {
-		t.Fatalf("Start must never be called when the abort was already recorded during WaitSuperseded, got %d calls", n)
-	}
-	for _, r := range rtb.getLaunchReports() {
-		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded {
-			t.Fatalf("an abort recorded during WaitSuperseded must send no terminal, got %+v", r.Report)
-		}
-	}
-	if calls := fake.Calls(); len(calls) != 0 {
-		t.Fatalf("the launch reached the GCS download step despite the abort already being recorded during WaitSuperseded, got %+v", calls)
 	}
 }
 

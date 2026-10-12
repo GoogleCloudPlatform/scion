@@ -1246,6 +1246,42 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A create that starts the agent (sync or async) registers under the
+	// agent's name before any name-addressed work: buildStartContext (which
+	// can provision the agent's worktree and its branch-keyed sharer
+	// registry entry), the GCS workspace download and provisioning. An
+	// earlier start of the same name on this broker is cancelled and waited
+	// for here, so its failure cleanup, which removes files by name, has
+	// finished before this create writes any of them (ptone/scion#2632).
+	// The registration lets a delete or stop of the agent on this broker
+	// cancel the start, instead of it running on (for example, blocked in
+	// skill resolution) and failing minutes later. A synchronous start takes
+	// the name's launch marker further down (takeName); an async create
+	// hands the registration over to its launch (beginAsyncLaunch).
+	var ss *syncStart
+	var startCtxForStart context.Context
+	var finishTracked func()
+	if !req.ProvisionOnly {
+		var startCtx context.Context
+		var ssErr error
+		startCtx, ss, ssErr = s.beginCreateRegistration(ctx, req)
+		if ssErr != nil {
+			s.writeCreateRegistrationError(w, span, req, ssErr, markAttemptFailed)
+			return
+		}
+		// Released on every return from here on. ss.finish runs before
+		// finishTracked, so the start stays tracked as in flight until
+		// Manager.Start, Run's deferred cleanup and ss.finish have all
+		// returned.
+		defer func() {
+			ss.finish()
+			if finishTracked != nil {
+				finishTracked()
+			}
+		}()
+		startCtxForStart = startCtx
+	}
+
 	// Build unified start context (project path, env, template, git-clone, secrets, manager)
 	s.agentLifecycleLog.Info("Agent dispatch: pre-flight complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(createStart).String())
@@ -1257,6 +1293,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// enforceHarnessConfigPolicy pre-check above is an early, side-effect-free
 	// refusal only, and when the two disagree the hook's refusal stands.
 	ctx = s.withHarnessConfigPolicy(ctx)
+	if testHookCreateBeforeBuildStartContext != nil {
+		testHookCreateBeforeBuildStartContext(req)
+	}
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:               req.Name,
 		AgentID:            req.ID,
@@ -1368,7 +1407,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			s.agentLifecycleLog.Warn("async launch requested for a runtime that does not support async launch; falling back to synchronous create",
 				"agent_id", req.ID, "name", req.Name, "runtime", sc.RuntimeType)
 		default:
-			s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, attempt, markAttemptFailed, span, createStart)
+			s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, ss, attempt, markAttemptFailed, span, createStart)
 			return
 		}
 	}
@@ -1403,42 +1442,28 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A full synchronous start registers itself under the agent's name and
-	// takes the name's launch marker before provisioning anything, as an
-	// async launch does (runLaunch). This runs after the GCS workspace
-	// download above, so that download's own path validation is still the
-	// first thing to touch the project directory. The registration lets a
-	// delete or stop of the agent on this broker cancel the start, instead
-	// of it running on (for example, blocked in skill resolution) and
-	// failing minutes later; the marker lets the failure cleanup below
-	// confirm it still owns the name before removing files addressed by
-	// that name.
-	var ss *syncStart
-	if !req.ProvisionOnly {
-		var startCtx context.Context
-		var ssErr error
-		startCtx, ss, ssErr = s.beginSyncStart(ctx, req, opts)
-		if ssErr != nil {
+	// A full synchronous start takes the name's launch marker before
+	// provisioning anything, as an async launch does (runLaunch). This runs
+	// after the GCS workspace download above, so that download's own path
+	// validation is still the first thing to touch the project directory.
+	// The marker lets the failure cleanup below confirm it still owns the
+	// name before removing files addressed by that name.
+	if ss != nil {
+		if err := ss.takeName(opts); err != nil {
 			s.agentLifecycleLog.Error("Agent create failed before start",
 				"agent_id", req.ID, "project_id", req.ProjectID,
-				"name", req.Name, "slug", req.Slug, "error", ssErr)
-			span.SetStatus(codes.Error, ssErr.Error())
-			if errors.Is(ssErr, errInvalidLaunchSlug) {
-				markAttemptFailed(http.StatusBadRequest, "invalid slug")
-				ValidationError(w, "invalid slug", nil)
-				return
-			}
+				"name", req.Name, "slug", req.Slug, "error", err)
+			span.SetStatus(codes.Error, err.Error())
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
-			RuntimeError(w, "Failed to create agent: "+ssErr.Error())
+			RuntimeError(w, "Failed to create agent: "+err.Error())
 			return
 		}
 		// Tracked as a start in flight until Manager.Start, Run's deferred
-		// cleanup and ss.finish have all returned: finishTracked is
-		// deferred first, so it runs last.
-		trackCtx, finishTracked := s.startsInFlight.begin(startCtx, ss.key)
+		// cleanup and ss.finish have all returned (the deferred release
+		// above runs finishTracked last).
+		var trackCtx context.Context
+		trackCtx, finishTracked = s.startsInFlight.begin(startCtxForStart, ss.key)
 		s.startsInFlight.setRunID(trackCtx, opts.RunID)
-		defer finishTracked()
-		defer ss.finish()
 		ctx = trackCtx
 	}
 
@@ -2316,6 +2341,12 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// agent recreated under the same name.
 	runID := query.Get("runId")
 	span.SetAttributes(attribute.String("scion.agent.run_id", runID))
+	// agentId, when the hub sends it, is the hub's ID of the agent being
+	// deleted. It is only compared against the agent ID an in-flight launch
+	// on this broker was registered with, so a late delete for an old agent
+	// leaves alone the start of a newer agent of the same name
+	// (ptone/scion#2632). Without it, the cancel matches by name as before.
+	hubAgentID := query.Get(api.AgentIDQueryParam)
 	if runID != "" && scionrt.ValidateRunID(runID) != nil {
 		// A run ID is a label value on the runtime entry; anything else
 		// is a malformed request, not a runtime failure to retry.
@@ -2336,7 +2367,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// gone. A key that matches no in-flight start is a harmless no-op. A
 	// delete naming a run leaves a start of a different run alone
 	// (ptone/scion#2550).
-	s.cancelLocalLaunchForRun(launchKey{ProjectID: projectID, Slug: id}, runID)
+	s.cancelLocalLaunchForRun(launchKey{ProjectID: projectID, Slug: id}, hubAgentID, runID)
 
 	s.agentLifecycleLog.Debug("Agent delete: resolving target",
 		"agent_id", id, "project_id", projectID, "run_id", runID)
@@ -2424,7 +2455,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// launch is a harmless no-op. Not redundant with the early cancel: this
 	// key carries the resolved entry's project, which the early one lacks
 	// when the delete names no projectId. Run-aware for the same reason.
-	s.cancelLocalLaunchForRun(launchKey{ProjectID: agentProjectID, Slug: target.name}, runID)
+	s.cancelLocalLaunchForRun(launchKey{ProjectID: agentProjectID, Slug: target.name}, hubAgentID, runID)
 
 	filesToDelete := deleteFiles
 	if deleteFiles && projectPath == "" && projectID != "" {
@@ -2768,8 +2799,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			s.agentLifecycleLog.Debug("No task in start request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
 	}
-	// The expected runtime target is checked before beginSyncStart and any
-	// runtime call. A start without it is accepted: it can only use the
+	// The expected runtime target is checked before any runtime call. A start without it is accepted: it can only use the
 	// server's own target.
 	if refusal := s.expectedTargetRefusal(startReq.ExpectedRuntimeTargetID, false); refusal != nil {
 		span.SetStatus(codes.Error, refusal.code)
@@ -3350,6 +3380,10 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// recreated under the same name. Without it, behaviour is as before.
 	runID := r.URL.Query().Get("runId")
 	span.SetAttributes(attribute.String("scion.agent.run_id", runID))
+	// agentId, when the hub sends it, keeps the launch cancels below from
+	// waking the start of a newer agent of the same name; see deleteAgent
+	// (ptone/scion#2632).
+	hubAgentID := r.URL.Query().Get(api.AgentIDQueryParam)
 	key := launchKey{ProjectID: projectID, Slug: id}
 
 	// Resolve the project-scoped container so that same-slug agents in
@@ -3377,7 +3411,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	if runID == "" {
 		// Wake any local launch waiting on this agent (design §3.8.1); see
 		// the identical comment in deleteAgent.
-		s.cancelLocalLaunch(key)
+		s.cancelLocalLaunch(key, hubAgentID)
 		// Cancel a start of this agent still running on this broker and
 		// wait for its cleanup before stopping, so a start whose hub cancel
 		// was lost cannot create a container after this stop.
@@ -3399,7 +3433,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// this run may have finished (creating its container) between the
 		// lookup above and the cancel, which a stale miss would report as
 		// "not found" while that container runs.
-		wokeLaunch := s.cancelLocalLaunchForRun(key, runID)
+		wokeLaunch := s.cancelLocalLaunchForRun(key, hubAgentID, runID)
 		cancelledOwn = s.cancelInFlightStartRun(ctx, key, runID)
 		if wokeLaunch {
 			cancelledOwn++

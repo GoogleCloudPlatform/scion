@@ -18,40 +18,64 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// defaultSyncStartSupersedeWait bounds how long a synchronous create waits
-// for an earlier start of the same agent name on this broker (one it has
-// just cancelled) to finish its own failure cleanup, before giving up. It
-// matches the 60s budget that cleanup itself runs under on the async path
-// (cleanupAbortedLaunch).
-const defaultSyncStartSupersedeWait = 60 * time.Second
+// defaultCreateSupersedeWait bounds how long a create waits for an earlier
+// start of the same agent name on this broker (one it has just cancelled)
+// to finish its own failure cleanup, before refusing with a retryable 503
+// (prior_start_in_progress). It is kept well under the hub's create
+// deadline (about 30s from the CLI) so the refusal reaches the caller as
+// itself rather than as a timeout, and leaves the create budget to
+// provision when the wait does end in time. The superseded start's cleanup
+// still runs under its own 60s budget (cleanupAbortedLaunch); only the
+// newer create gives up.
+const defaultCreateSupersedeWait = 15 * time.Second
 
-// errSyncStartSupersedeTimeout is returned by beginSyncStart when an earlier
-// start of the same name did not finish within the wait.
-var errSyncStartSupersedeTimeout = errors.New("an earlier start of this agent is still finishing")
+// createSupersedeRetryAfter is the Retry-After, in seconds, sent with the
+// prior_start_in_progress 503.
+const createSupersedeRetryAfter = "5"
 
-// errInvalidLaunchSlug is returned by beginSyncStart when the agent's slug
-// (or, without one, its name) is not a single path element and so cannot
-// name a launch marker file. createAgent maps it to 400.
+// errCreateSupersedeTimeout is returned by beginCreateRegistration when an
+// earlier start of the same name did not finish within the wait. createAgent
+// maps it to 503 prior_start_in_progress.
+var errCreateSupersedeTimeout = errors.New("an earlier start of this agent is still finishing")
+
+// errCreateStartCancelled is returned when a create's registration was
+// cancelled before the create took the name: by a stop or delete of the
+// agent on this broker, by a newer start of the same name, or by the
+// request itself ending. createAgent maps it to 409 start_cancelled.
+var errCreateStartCancelled = errors.New("the start was cancelled before it began")
+
+// errInvalidLaunchSlug is returned by beginCreateRegistration when the
+// agent's slug (or, without one, its name) is not a single path element and
+// so cannot name a launch marker file. createAgent maps it to 400.
 var errInvalidLaunchSlug = errors.New("agent slug must be a single path element")
 
-// syncStart is the bookkeeping for one synchronous (non-async) create's
-// Manager.Start, mirroring what runLaunch keeps for an async launch:
+// syncStart is the bookkeeping for one create's registration under the
+// agent's name, mirroring what runLaunch keeps for an async launch:
 //
 //   - a launchRegistry record under (projectID, slug), so a delete or stop
 //     of the agent on this broker cancels the start (launchRegistry
 //     CancelLocal), and a later start for the same name cancels this one and
-//     waits for it to finish before touching any files;
-//   - a launch marker for the slug holding this start's own owner value, so
-//     the start's failure cleanup can check, immediately before removing
-//     files by name, that no newer start (sync or async, on any replica
-//     sharing the storage) has since taken the name.
+//     waits for it to finish before doing any name-addressed work;
+//   - for a synchronous start, a launch marker for the slug holding this
+//     start's own owner value (takeName), so the start's failure cleanup can
+//     check, immediately before removing files by name, that no newer start
+//     (sync or async, on any replica sharing the storage) has since taken
+//     the name.
+//
+// Every create that is not provision-only takes one before
+// buildStartContext. An async create hands its registry record over to the
+// launch (handOff) and so never writes a marker here; runLaunch writes its
+// own.
 type syncStart struct {
 	key             launchKey
 	rec             *launchRecord
@@ -59,25 +83,33 @@ type syncStart struct {
 	projectPath     string
 	sharedWorkspace bool
 	registry        *launchRegistry
+	// ctx is the context beginCreateRegistration returned; it is done once
+	// the registration has been cancelled (stop, delete, newer start).
+	ctx context.Context
+	// handedOff is set once handOff has replaced rec in the registry with
+	// an async launch's record; finish then leaves the registry alone.
+	handedOff bool
 }
 
-// beginSyncStart registers a synchronous start for req and writes its launch
-// marker. It returns a context derived from ctx that is cancelled when the
-// agent is deleted or stopped on this broker, or when a newer start for the
-// same name begins; the caller runs the start under it and must call finish
-// exactly once when the create ends.
+// beginCreateRegistration registers a create for req under the agent's
+// name, before any name-addressed work (buildStartContext, the GCS
+// workspace download, provisioning) runs. It returns a context derived from
+// ctx that is cancelled when the agent is deleted or stopped on this
+// broker, or when a newer start for the same name begins; the caller must
+// call finish exactly once when the create ends.
 //
 // If an earlier start of the same name is still running here, it is
 // cancelled and waited for (bounded by ctx and the supersede wait) before
-// the marker is written, so that start's failure cleanup always runs either
-// entirely before this start writes its marker (and so before it provisions
-// anything) or, after the marker write, sees that it no longer owns the name.
-func (s *Server) beginSyncStart(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (context.Context, *syncStart, error) {
+// this returns, so that start's failure cleanup has fully run before this
+// create writes anything addressed by the name. The wait ends with
+// errCreateSupersedeTimeout or errCreateStartCancelled, and the
+// registration is released.
+func (s *Server) beginCreateRegistration(ctx context.Context, req CreateAgentRequest) (context.Context, *syncStart, error) {
 	slug := req.Slug
 	if slug == "" {
 		slug = req.Name
 	}
-	// The slug is joined onto the launch markers directory below. createAgent
+	// The slug is joined onto the launch markers directory later. createAgent
 	// already checks Name and Slug at the request boundary; this check keeps
 	// the helper safe on its own, before any registry or filesystem use.
 	if !isSingleCleanPathElement(slug) {
@@ -85,23 +117,22 @@ func (s *Server) beginSyncStart(ctx context.Context, req CreateAgentRequest, opt
 	}
 	startCtx, cancel := context.WithCancel(ctx)
 	ss := &syncStart{
-		key:             launchKey{ProjectID: req.ProjectID, Slug: slug},
-		owner:           "sync-" + uuid.NewString(),
-		projectPath:     opts.ProjectPath,
-		sharedWorkspace: opts.SharedWorkspace,
-		registry:        s.launchRegistry,
+		key:      launchKey{ProjectID: req.ProjectID, Slug: slug},
+		owner:    "sync-" + uuid.NewString(),
+		registry: s.launchRegistry,
+		ctx:      startCtx,
 	}
 	ss.rec = newLaunchRecord(ss.owner, req.ID, store.LaunchKindCreate, "", time.Time{}, cancel)
-	ss.rec.RunID = opts.RunID
+	ss.rec.RunID = req.RunID
 
 	var supersededDone <-chan struct{}
 	if ss.registry != nil {
 		supersededDone = ss.registry.Begin(ss.key, ss.rec)
 	}
 	if supersededDone != nil {
-		wait := s.syncStartSupersedeWait
+		wait := s.createSupersedeWait
 		if wait <= 0 {
-			wait = defaultSyncStartSupersedeWait
+			wait = defaultCreateSupersedeWait
 		}
 		timer := time.NewTimer(wait)
 		select {
@@ -110,23 +141,52 @@ func (s *Server) beginSyncStart(ctx context.Context, req CreateAgentRequest, opt
 		case <-startCtx.Done():
 			timer.Stop()
 			ss.finish()
-			return nil, nil, startCtx.Err()
+			return nil, nil, errCreateStartCancelled
 		case <-timer.C:
 			ss.finish()
-			return nil, nil, errSyncStartSupersedeTimeout
-		}
-	}
-
-	if ss.projectPath != "" {
-		if err := writeLaunchMarker(ss.projectPath, ss.sharedWorkspace, slug, ss.owner); err != nil {
-			// Without the marker the failure cleanup can never confirm
-			// ownership and would leave the files behind, so fail here, as
-			// runLaunch does, rather than start with no way to clean up.
-			ss.finish()
-			return nil, nil, fmt.Errorf("failed to write launch marker: %w", err)
+			return nil, nil, errCreateSupersedeTimeout
 		}
 	}
 	return startCtx, ss, nil
+}
+
+// takeName writes this start's launch marker for the slug, under the
+// project path and workspace sharing buildStartContext resolved. A
+// synchronous start calls it once, before provisioning anything; with no
+// project path there is nothing to write, and ownsName is always false.
+func (ss *syncStart) takeName(opts api.StartOptions) error {
+	ss.projectPath = opts.ProjectPath
+	ss.sharedWorkspace = opts.SharedWorkspace
+	if ss.projectPath == "" {
+		return nil
+	}
+	if err := writeLaunchMarker(ss.projectPath, ss.sharedWorkspace, ss.key.Slug, ss.owner); err != nil {
+		// Without the marker the failure cleanup can never confirm
+		// ownership and would leave the files behind, so fail here, as
+		// runLaunch does, rather than start with no way to clean up. Clear
+		// the path so finish does not try to remove a marker it never
+		// wrote.
+		ss.projectPath = ""
+		return fmt.Errorf("failed to write launch marker: %w", err)
+	}
+	return nil
+}
+
+// handOff replaces this registration's record in the registry with rec, an
+// async launch's record, without cancelling either: the launch continues
+// the create under the name this registration has already waited for. It
+// returns false, leaving the registry unchanged, if the registration was
+// already cancelled or replaced (a stop, delete or newer start took the
+// name while buildStartContext ran); the caller then refuses the create.
+func (ss *syncStart) handOff(rec *launchRecord) bool {
+	if ss.registry == nil {
+		return false
+	}
+	if !ss.registry.Handoff(ss.key, ss.rec, rec, func() bool { return ss.ctx.Err() != nil }) {
+		return false
+	}
+	ss.handedOff = true
+	return true
 }
 
 // ownsName reports, via a fresh read of the slug's launch marker, whether
@@ -140,14 +200,20 @@ func (ss *syncStart) ownsName() bool {
 	return launchMarkerMatches(ss.projectPath, ss.sharedWorkspace, ss.key.Slug, ss.owner)
 }
 
+// testHookCreateBeforeBuildStartContext, when set (tests only), runs in
+// createAgent immediately before buildStartContext.
+var testHookCreateBeforeBuildStartContext func(req CreateAgentRequest)
+
 // testHookSyncStartFinish, when set (tests only), runs at the start of
 // syncStart.finish.
 var testHookSyncStartFinish func(key launchKey)
 
 // finish removes this start's marker (only if it still holds this start's
 // owner value), then releases the registry record, which lets a newer start
-// waiting in beginSyncStart proceed. The marker goes first so its
-// check-and-remove cannot remove a marker the newer start writes.
+// waiting in beginCreateRegistration proceed. The marker goes first so its
+// check-and-remove cannot remove a marker the newer start writes. After a
+// handOff the registry record belongs to the async launch, so only this
+// registration's own done channel is closed.
 func (ss *syncStart) finish() {
 	if testHookSyncStartFinish != nil {
 		testHookSyncStartFinish(ss.key)
@@ -155,7 +221,7 @@ func (ss *syncStart) finish() {
 	if ss.projectPath != "" {
 		removeLaunchMarkerIfMatches(ss.projectPath, ss.sharedWorkspace, ss.key.Slug, ss.owner)
 	}
-	if ss.registry != nil {
+	if ss.registry != nil && !ss.handedOff {
 		ss.registry.Finish(ss.key, ss.rec)
 	} else {
 		close(ss.rec.done)
@@ -164,21 +230,52 @@ func (ss *syncStart) finish() {
 }
 
 // cancelLocalLaunch cancels any in-flight start (sync or async) registered
-// on this broker under key. A server built without a launch registry (for
-// example, constructed directly in a test rather than via New) has nothing
-// to cancel.
-func (s *Server) cancelLocalLaunch(key launchKey) {
-	if s.launchRegistry == nil {
-		return
-	}
-	s.launchRegistry.CancelLocal(key)
+// on this broker under key, unless it belongs to an agent other than
+// agentID (the hub's agent ID from the stop or delete; "" matches any, see
+// launchRegistry.CancelLocalFor). A server built without a launch registry
+// (for example, constructed directly in a test rather than via New) has
+// nothing to cancel.
+func (s *Server) cancelLocalLaunch(key launchKey, agentID string) {
+	s.cancelLocalLaunchForRun(key, agentID, "")
 }
 
-// cancelLocalLaunchForRun is cancelLocalLaunch for a delete naming run
-// runID; see launchRegistry.CancelLocalForRun.
-func (s *Server) cancelLocalLaunchForRun(key launchKey, runID string) bool {
+// cancelLocalLaunchForRun is cancelLocalLaunch for a stop or delete naming
+// run runID; see launchRegistry.CancelLocalFor. It reports whether it woke
+// a launch.
+func (s *Server) cancelLocalLaunchForRun(key launchKey, agentID, runID string) bool {
 	if s.launchRegistry == nil {
 		return false
 	}
-	return s.launchRegistry.CancelLocalForRun(key, runID)
+	return s.launchRegistry.CancelLocalFor(key, agentID, runID)
+}
+
+// writeCreateRegistrationError answers a create whose registration under
+// the agent's name failed (beginCreateRegistration, or an async create's
+// handOff): 400 for an invalid slug, a retryable 503 prior_start_in_progress
+// (with Retry-After) when an earlier start of the name did not finish within
+// the wait, and 409 start_cancelled when the registration was cancelled
+// first. The dispatch attempt is marked failed with the same status, so a
+// RequestID replay runs the create again rather than replaying the refusal.
+func (s *Server) writeCreateRegistrationError(w http.ResponseWriter, span trace.Span, req CreateAgentRequest, err error, markAttemptFailed func(int, string)) {
+	s.agentLifecycleLog.Warn("Agent create refused before start",
+		"agent_id", req.ID, "project_id", req.ProjectID, "run_id", req.RunID,
+		"name", req.Name, "slug", req.Slug, "error", err)
+	span.SetStatus(codes.Error, err.Error())
+	switch {
+	case errors.Is(err, errInvalidLaunchSlug):
+		markAttemptFailed(http.StatusBadRequest, "invalid slug")
+		ValidationError(w, "invalid slug", nil)
+	case errors.Is(err, errCreateSupersedeTimeout):
+		markAttemptFailed(http.StatusServiceUnavailable, api.BrokerErrCodePriorStartInProgress)
+		w.Header().Set("Retry-After", createSupersedeRetryAfter)
+		writeError(w, http.StatusServiceUnavailable, api.BrokerErrCodePriorStartInProgress,
+			"Failed to create agent: "+err.Error()+"; retry shortly", nil)
+	case errors.Is(err, errCreateStartCancelled):
+		markAttemptFailed(http.StatusConflict, api.BrokerErrCodeStartCancelled)
+		writeError(w, http.StatusConflict, api.BrokerErrCodeStartCancelled,
+			"Failed to create agent: "+err.Error()+" (stopped, deleted, or superseded by a newer start of the same name)", nil)
+	default:
+		markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
+		RuntimeError(w, "Failed to create agent: "+err.Error())
+	}
 }

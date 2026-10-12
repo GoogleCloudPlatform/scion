@@ -114,58 +114,6 @@ func TestLaunchRegistry_FinishOnlyRemovesIfStillCurrent(t *testing.T) {
 	}
 }
 
-func TestWaitSuperseded_NilIsNoOp(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	WaitSuperseded(ctx, nil) // must return immediately, not block for the ctx timeout
-}
-
-func TestWaitSuperseded_ReturnsOnCtxDoneIfNeverClosed(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	never := make(chan struct{})
-	start := time.Now()
-	WaitSuperseded(ctx, never)
-	if time.Since(start) > time.Second {
-		t.Fatal("WaitSuperseded did not respect ctx as a backstop")
-	}
-}
-
-// TestLaunchRegistry_BeginThenWaitSupersededBlocksUntilFinish exercises the
-// exact Begin+WaitSuperseded sequence runLaunch uses (design §3.8.2 step
-// 5.2, F5): a new launch's marker write must wait for the superseded
-// record's own cleanup (Finish) to complete, not just for Begin to return.
-func TestLaunchRegistry_BeginThenWaitSupersededBlocksUntilFinish(t *testing.T) {
-	r := newLaunchRegistry()
-	key := launchKey{ProjectID: "p1", Slug: "agent-1"}
-
-	oldRec := newLaunchRecord("L1", "agent-id-1", "create", "", time.Now().Add(time.Minute), func() {})
-	r.Begin(key, oldRec)
-
-	newRec := newLaunchRecord("L2", "agent-id-1", "create", "", time.Now().Add(time.Minute), func() {})
-	supersededDone := r.Begin(key, newRec)
-
-	waited := make(chan struct{})
-	go func() {
-		WaitSuperseded(context.Background(), supersededDone)
-		close(waited)
-	}()
-
-	select {
-	case <-waited:
-		t.Fatal("WaitSuperseded returned before the superseded launch finished cleaning up")
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	r.Finish(key, oldRec)
-
-	select {
-	case <-waited:
-	case <-time.After(time.Second):
-		t.Fatal("WaitSuperseded did not return after the superseded launch's Finish")
-	}
-}
-
 func TestLaunchRecord_SetOwnerHub_PinsOnlyOnce(t *testing.T) {
 	rec := newLaunchRecord("L1", "agent-id-1", "create", "", time.Now().Add(time.Minute), func() {})
 	if got := rec.OwnerHub(); got != "" {

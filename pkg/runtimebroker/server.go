@@ -334,9 +334,9 @@ type Server struct {
 	// newLaunchSender). Nil in production; only tests set it.
 	launchTimingOverride *launchTimings
 
-	// syncStartSupersedeWait overrides defaultSyncStartSupersedeWait when
-	// positive (see beginSyncStart). Zero in production.
-	syncStartSupersedeWait time.Duration
+	// createSupersedeWait overrides defaultCreateSupersedeWait when
+	// positive (see beginCreateRegistration). Zero in production.
+	createSupersedeWait time.Duration
 
 	stateDir string
 

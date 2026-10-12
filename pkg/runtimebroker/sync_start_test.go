@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -296,10 +297,12 @@ func TestSyncCreate_SameNameSupersedesAndWaitsForCleanup(t *testing.T) {
 }
 
 // If the superseded start does not finish within the wait, the newer create
-// fails instead of provisioning over files the older start may be removing.
+// is refused with a retryable 503 prior_start_in_progress (with
+// Retry-After), instead of provisioning over files the older start may be
+// removing (ptone/scion#2632).
 func TestSyncCreate_SupersedeWaitTimeoutFails(t *testing.T) {
 	srv, mgr, projectPath, agentDir := newSyncStartTestServer(t)
-	srv.syncStartSupersedeWait = time.Millisecond
+	srv.createSupersedeWait = time.Millisecond
 
 	aStarted := make(chan struct{})
 	releaseA := make(chan struct{})
@@ -318,11 +321,14 @@ func TestSyncCreate_SupersedeWaitTimeoutFails(t *testing.T) {
 		return nil, errors.New("unexpected start")
 	}
 	bw := createSync(srv, "agent-b-id", projectPath)
-	if bw.Code != http.StatusInternalServerError {
-		t.Fatalf("agent B create status = %d, want a runtime error: %s", bw.Code, bw.Body.String())
+	if bw.Code != http.StatusServiceUnavailable {
+		t.Fatalf("agent B create status = %d, want %d: %s", bw.Code, http.StatusServiceUnavailable, bw.Body.String())
 	}
-	if !strings.Contains(bw.Body.String(), errSyncStartSupersedeTimeout.Error()) {
-		t.Errorf("agent B create body = %s, want the supersede-timeout error", bw.Body.String())
+	if code := errorCodeOf(t, bw); code != api.BrokerErrCodePriorStartInProgress {
+		t.Errorf("agent B create error code = %q, want %q", code, api.BrokerErrCodePriorStartInProgress)
+	}
+	if got := bw.Header().Get("Retry-After"); got != createSupersedeRetryAfter {
+		t.Errorf("agent B create Retry-After = %q, want %q", got, createSupersedeRetryAfter)
 	}
 	close(releaseA)
 	select {
@@ -332,19 +338,33 @@ func TestSyncCreate_SupersedeWaitTimeoutFails(t *testing.T) {
 	}
 }
 
-// beginSyncStart refuses a slug that is not a single path element before it
-// registers anything or touches the filesystem.
-func TestBeginSyncStart_RejectsInvalidSlug(t *testing.T) {
+// errorCodeOf returns the error.code of a broker error response.
+func errorCodeOf(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v (%s)", err, w.Body.String())
+	}
+	return body.Error.Code
+}
+
+// beginCreateRegistration refuses a slug that is not a single path element
+// before it registers anything or touches the filesystem.
+func TestBeginCreateRegistration_RejectsInvalidSlug(t *testing.T) {
 	for _, slug := range []string{"../x", "a/b", "", "."} {
 		t.Run(fmt.Sprintf("%q", slug), func(t *testing.T) {
 			srv, _, projectPath, _ := newSyncStartTestServer(t)
 			req := CreateAgentRequest{ID: "agent-id", Slug: slug}
-			_, ss, err := srv.beginSyncStart(context.Background(), req, api.StartOptions{ProjectPath: projectPath})
+			_, ss, err := srv.beginCreateRegistration(context.Background(), req)
 			if !errors.Is(err, errInvalidLaunchSlug) {
-				t.Fatalf("beginSyncStart error = %v, want errInvalidLaunchSlug", err)
+				t.Fatalf("beginCreateRegistration error = %v, want errInvalidLaunchSlug", err)
 			}
 			if ss != nil {
-				t.Fatal("beginSyncStart returned a start for an invalid slug")
+				t.Fatal("beginCreateRegistration returned a start for an invalid slug")
 			}
 			if _, statErr := os.Stat(filepath.Join(projectPath, "launch-markers")); !os.IsNotExist(statErr) {
 				t.Errorf("launch markers directory was created for an invalid slug (stat err %v)", statErr)
