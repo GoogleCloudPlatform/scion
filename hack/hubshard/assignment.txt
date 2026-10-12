@@ -386,6 +386,7 @@
 6 conduit_stream_authz_test.go
 5 conduit_stream_deadline_test.go
 3 conduit_tcp_ports_test.go
+1 conduit_tunnel_authz_test.go
 3 conduit_tunnel_splice_test.go
 1 conduit_tunnel_test.go
 3 consistency_check_guard_test.go
