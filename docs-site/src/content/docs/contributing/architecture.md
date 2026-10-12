@@ -290,7 +290,7 @@ scion start <name> --task "..." --hub
 5. **Template hydration**: The Hub resolves the template, attaches its content hash for broker-side caching.
 6. **Dispatch**: The Hub dispatches the creation request to the selected Runtime Broker via:
    - **Direct HTTP** if the broker has a reachable endpoint.
-   - **Control Channel** (WebSocket connection) if the broker is behind a NAT/firewall.
+   - **Control Channel** (WebSocket connection) if the Runtime Broker is behind a NAT/firewall.
 7. **Broker execution**: The Runtime Broker provisions and starts the agent using the same `agent.Manager` and `runtime.Runtime` code path as Solo mode.
 8. **Status reporting**: The broker reports status back to the Hub via heartbeats and agent status updates.
 
