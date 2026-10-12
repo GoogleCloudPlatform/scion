@@ -256,6 +256,10 @@ const (
 	// LockAgentLaunchDeadline it is a transaction-scoped
 	// pg_advisory_xact_lock, not taken through AdvisoryLocker.
 	LockTestIdentityIssuance AdvisoryLockKey = 0x5C10002C
+	// LockTestIdentityReaper guards the periodic test identity expiry
+	// reaper (ptone/scion#4240, Phase 3b), so one replica per tick holds
+	// expired identities' agents and purges what each one created.
+	LockTestIdentityReaper AdvisoryLockKey = 0x5C10002D
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

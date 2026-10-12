@@ -108,6 +108,8 @@ func TestSchemaShadowGuard_Postgres(t *testing.T) {
 		assert.Equal(t, empty, shadow.CurrentSchema)
 		assert.Equal(t, hub, shadow.ShadowedSchema)
 		assert.Contains(t, err.Error(), "allow_shadowed_schema")
+		assert.False(t, shadow.Maintenance, "hub server startup keeps its own refusal text")
+		assert.True(t, strings.HasPrefix(err.Error(), "refusing to start: "), "startup refusal text changed: %v", err)
 		assert.Zero(t, tableCount(t, raw, empty), "a refused start must not create tables in the empty schema")
 	})
 

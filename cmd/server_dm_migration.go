@@ -148,7 +148,7 @@ func openDMMigrationStore(ctx context.Context) (*entadapter.CompositeStore, erro
 		if err != nil {
 			return nil, fmt.Errorf("opening sqlite: %w", err)
 		}
-		if err := migrateMaintenanceDB(ctx, client, dmMigrationExecute); err != nil {
+		if err := migrateMaintenanceDB(ctx, client, dmMigrationExecute, cfg.Database.AllowShadowedSchema); err != nil {
 			_ = client.Close()
 			return nil, err
 		}
@@ -159,7 +159,7 @@ func openDMMigrationStore(ctx context.Context) (*entadapter.CompositeStore, erro
 		if err != nil {
 			return nil, fmt.Errorf("opening postgres (verify DSN and network connectivity): %w", err)
 		}
-		if err := migrateMaintenanceDB(ctx, client, dmMigrationExecute); err != nil {
+		if err := migrateMaintenanceDB(ctx, client, dmMigrationExecute, cfg.Database.AllowShadowedSchema); err != nil {
 			_ = client.Close()
 			return nil, err
 		}
