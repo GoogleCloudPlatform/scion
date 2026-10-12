@@ -137,6 +137,9 @@ func (m *mockHubClient) ProjectPreStartHooks(projectID string) hubclient.Project
 func (m *mockHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }
 func (m *mockHubClient) Artifacts() hubclient.ArtifactService               { return nil }
 func (m *mockHubClient) TestIdentities() hubclient.TestIdentityService      { return nil }
+func (m *mockHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
+	return nil
+}
 func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
 	return nil, nil
 }

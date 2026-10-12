@@ -118,6 +118,22 @@ return an error instead of blocking.`,
 		mode := resolveMode()
 		configureDebugOutput(mode, debugMode)
 
+		// Target-hub profiles (ptone/scion#4240): refuse commands outside
+		// the profile allow-list, and apply the agent-mode target rule.
+		if err := checkHubProfileGate(cmd, mode); err != nil {
+			return err
+		}
+		if hubProfileSelected() {
+			// A profile names its hub: no local project, settings, registry
+			// or agent-container hub checks apply, and none are read.
+			if mode == ModeAgent {
+				nonInteractive = true
+				autoConfirm = true
+			}
+			cmd.SetContext(cliutil.WithRootOptions(cmd.Context(), snapshotRootOptions()))
+			return nil
+		}
+
 		// Detect agent container context without a reachable Hub endpoint.
 		// SCION_HOST_UID is set by the runtime when launching agent containers.
 		// If present but no non-localhost Hub endpoint is configured, the CLI
@@ -267,8 +283,9 @@ func Execute() {
 			tempProjectPath = "global"
 		}
 	}
-	// Hub-only commands skip it: their --project is not a directory.
-	if !hubOnlyCommands[topLevelName(target)] {
+	// Hub-only commands skip it: their --project is not a directory. So do
+	// hub profile invocations, which never read local project settings.
+	if !hubOnlyCommands[topLevelName(target)] && !hubProfileRequested() {
 		settings, _ := config.LoadSettings(tempProjectPath)
 		if settings != nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
 			autoHelp = *settings.CLI.AutoHelp
