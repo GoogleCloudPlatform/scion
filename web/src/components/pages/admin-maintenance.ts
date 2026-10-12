@@ -1432,9 +1432,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           : html`
               ${active.length > 0
                 ? html`
-                    <div class="card-list">
-                      ${active.map((m) => this.renderMigrationCard(m))}
-                    </div>
+                    <div class="card-list">${active.map((m) => this.renderMigrationCard(m))}</div>
                   `
                 : nothing}
               ${this.renderCompletedMigrations(completed)}
