@@ -210,43 +210,49 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 // settleLaunchedRun settles the run of a launch whose succeeded report the
 // store applied (see the caller). row is the agent as that report's
 // transaction left it, so row.RunID is the run the hub recorded for the
-// launch when the report applied. The write is one compare-and-swap from
-// row.RunID to the run the broker reports, which also clears the previous
-// runs:
+// launch when the report applied. The write is one guarded swap from
+// row.RunID to the run the broker reports (store.AdoptAgentRunID), which
+// also clears the previous runs:
 //   - the same run: a same-value swap that only clears the previous runs;
 //   - another run: the broker kept a running entry of the name and reports
 //     its run (agent.AgentManager.Start returns a running entry when the
 //     start has no task), and the hub adopts it (ptone/scion#2965).
 //
-// Keyed on row.RunID, the swap never overwrites a run that a later
-// dispatch recorded after the report applied. Nothing is written while a
-// delete holds the row: the delete names the runs of its claim snapshot,
-// and a failed delete re-claims with the row's runs. A report with no run
-// ID changes nothing. Best-effort: a failed write is logged and leaves the
-// row as it was, which costs a later delete only a run-scoped refusal or
-// extra 404s.
+// The swap is checked in the same statement as the write. It never
+// overwrites a run recorded after the report applied (keyed on row.RunID,
+// and on row.RunIDUpdatedAt, so a run that changed and changed back is not
+// matched either), and it writes nothing while the row is soft-deleted or a
+// delete holds it, so a delete's claim snapshot never misses the settled
+// run. A row with no RunIDUpdatedAt (its run has not changed since the
+// column was added, so no dispatch recorded this launch's run) and a report
+// with no run ID change nothing. Best-effort: a failed write is logged and
+// leaves the row as it was, which costs a later delete only a run-scoped
+// refusal or extra 404s. On a swap, row is updated to match.
 func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *RemoteAgentInfo) {
 	if info == nil || info.RunID == "" {
 		return
 	}
-	if row.DeletionHoldsRow(time.Now()) {
-		s.agentLifecycleLog.Debug("Launch report: a delete holds the agent; not settling the launched run",
+	if row.RunIDUpdatedAt == nil {
+		s.agentLifecycleLog.Debug("Launch report: the agent's run has no recorded change time; not settling the launched run",
 			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID)
 		return
 	}
-	swapped, err := s.store.CompareAndSwapAgentRunID(ctx, row.ID, row.RunID, info.RunID)
+	swapped, err := s.store.AdoptAgentRunID(ctx, row.ID, row.RunID, info.RunID, *row.RunIDUpdatedAt)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Launch report: failed to settle the launched run",
 			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID, "error", err)
 		return
 	}
 	if !swapped {
-		s.agentLifecycleLog.Debug("Launch report: another run is recorded; not settling the launched run",
+		s.agentLifecycleLog.Debug("Launch report: another run is recorded or a delete holds the agent; not settling the launched run",
 			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID)
 		return
 	}
-	if info.RunID != row.RunID {
+	minted := row.RunID
+	row.RunID = info.RunID
+	row.PreviousRunIDs = nil
+	if info.RunID != minted {
 		s.agentLifecycleLog.Info("Launch report: adopted the broker's run ID",
-			"agent_id", row.ID, "agent", row.Slug, "minted_run_id", row.RunID, "run_id", info.RunID)
+			"agent_id", row.ID, "agent", row.Slug, "minted_run_id", minted, "run_id", info.RunID)
 	}
 }

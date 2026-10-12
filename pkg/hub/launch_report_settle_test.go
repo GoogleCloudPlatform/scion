@@ -205,6 +205,34 @@ func TestLaunchReportSettle_LaterRun_Keeps(t *testing.T) {
 	assert.Equal(t, []string{"run-0", "run-1"}, got.PreviousRunIDs)
 }
 
+// claimAfterReportStore claims a delete of the agent right after the store
+// applies a launch report, as a delete that claims the row between the
+// report and the settle would.
+type claimAfterReportStore struct {
+	store.Store
+	t *testing.T
+}
+
+func (s *claimAfterReportStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID string, r store.LaunchReport) (store.LaunchReportAnswer, store.Agent, error) {
+	answer, updated, err := s.Store.ApplyLaunchReport(ctx, agentID, brokerID, r)
+	if err == nil {
+		claimForTest(s.t, s.Store, agentID, store.DeletionStateDeleting, time.Minute)
+	}
+	return answer, updated, err
+}
+
+// A delete that claims the row after the report applied, before the settle,
+// keeps its run: the swap is guarded in the store, not only on the report's
+// snapshot of the row.
+func TestLaunchReportSettle_DeleteClaimedAfterReport_Keeps(t *testing.T) {
+	f := newLaunchSettleFixture(t, "lrsettle-claimed-after")
+	f.srv.store = &claimAfterReportStore{Store: f.store, t: t}
+	require.Equal(t, store.LaunchReportResultApplied, f.reportResult(t, store.LaunchReportStateSucceeded, "run-0"))
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	assert.Equal(t, "run-1", got.RunID, "the claimed row's run is unchanged")
+	assert.Equal(t, []string{"run-0"}, got.PreviousRunIDs)
+}
+
 // A delete that holds the row keeps its run: the report neither adopts the
 // kept entry's run nor clears the previous runs.
 func TestLaunchReportSettle_DeleteHoldsRow_Keeps(t *testing.T) {
