@@ -605,3 +605,34 @@ func TestFinishHubDelete_ProfileNoWorktreeWording(t *testing.T) {
 		assert.Equal(t, tc.worktree, strings.Contains(job.result["message"].(string), "worktree"), tc.name)
 	}
 }
+
+// Review rev-4: the list --all refusal matches only the list command.
+// stop --all and delete --stopped act on the named project under a
+// profile: they are not refused, and they reach the target.
+func TestHubProfileAgents_StopAllAndDeleteStoppedAllowed(t *testing.T) {
+	e := newX3bEnv(t)
+	e.issue(t, "owner")
+	pa := func(args ...string) []string {
+		return append(append([]string{"--hub-profile", "t1"}, args...), "--project", x3bProjectName, "--as", "owner", "--run", "r1")
+	}
+	r, err := e.run(t, pa("start", "a1", "--no-wait")...)
+	require.NoError(t, err, r.stdout+r.stderr)
+
+	r, err = e.run(t, pa("stop", "--all")...)
+	require.NoError(t, err, r.stdout+r.stderr)
+	assert.NotContains(t, r.stdout+r.stderr, "is not available with a hub profile")
+	r, err = e.run(t, pa("delete", "--stopped")...)
+	require.NoError(t, err, r.stdout+r.stderr)
+	assert.NotContains(t, r.stdout+r.stderr, "is not available with a hub profile")
+
+	e.agents.mu.Lock()
+	assert.Equal(t, []string{"a1"}, e.agents.stops, "stop --all stopped the running agent")
+	assert.Equal(t, []string{"a1"}, e.agents.deletes, "delete --stopped deleted the stopped agent")
+	e.agents.mu.Unlock()
+
+	// The refusal itself still applies to list --all.
+	_, err = e.run(t, pa("list", "--all")...)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--all is not available with a hub profile")
+	e.assertClean(t)
+}
