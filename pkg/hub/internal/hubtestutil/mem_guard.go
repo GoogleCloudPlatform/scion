@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package hubtestutil
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ import (
 
 // The pkg/hub test binary has been OOM-killed on shared hosts at over 100 GB
 // of anonymous RSS. A chunked run of every test on main peaks at about 700 MB
-// RSS. startMemGuard makes a runaway fail the run itself, with goroutine
+// RSS. StartMemGuard makes a runaway fail the run itself, with goroutine
 // stacks that name the running test, instead of letting the kernel
 // OOM-killer take down the host.
 //
@@ -42,12 +42,12 @@ const (
 	// memGuardDefaultCap is the process memory at which the binary dumps
 	// diagnostics and exits. It is more than 5x the measured healthy peak.
 	memGuardDefaultCap = 4 << 30
-	// memGuardCapEnv overrides the cap in bytes. Zero disables the guard,
+	// MemGuardCapEnv overrides the cap in bytes. Zero disables the guard,
 	// including its soft limit.
-	memGuardCapEnv = "SCION_HUB_TEST_MEM_CAP_BYTES"
-	// memGuardIntervalEnv overrides the sampling interval (a
+	MemGuardCapEnv = "SCION_HUB_TEST_MEM_CAP_BYTES"
+	// MemGuardIntervalEnv overrides the sampling interval (a
 	// time.ParseDuration string). The regression test uses it.
-	memGuardIntervalEnv = "SCION_HUB_TEST_MEM_GUARD_INTERVAL"
+	MemGuardIntervalEnv = "SCION_HUB_TEST_MEM_GUARD_INTERVAL"
 
 	// memGuardMinSoftLimit is the smallest soft limit worth setting. Below
 	// it the GC would run almost continuously, so tiny caps get none.
@@ -58,18 +58,18 @@ const (
 	memGuardMetricReleased  = "/memory/classes/heap/released:bytes"
 )
 
-// memGuardRunning records that startMemGuard started a watchdog, so a test
+// MemGuardRunning records that StartMemGuard started a watchdog, so a test
 // can check that the TestMain wiring is in place.
-var memGuardRunning atomic.Bool
+var MemGuardRunning atomic.Bool
 
-// startMemGuard starts the memory watchdog and returns a function that
+// StartMemGuard starts the memory watchdog and returns a function that
 // stops it.
-func startMemGuard() (stop func()) {
+func StartMemGuard() (stop func()) {
 	limit := uint64(memGuardDefaultCap)
-	if v := os.Getenv(memGuardCapEnv); v != "" {
+	if v := os.Getenv(MemGuardCapEnv); v != "" {
 		n, err := strconv.ParseUint(v, 10, 64)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "memory guard: ignoring invalid %s=%q: %v\n", memGuardCapEnv, v, err)
+			fmt.Fprintf(os.Stderr, "memory guard: ignoring invalid %s=%q: %v\n", MemGuardCapEnv, v, err)
 		} else {
 			limit = n
 		}
@@ -78,10 +78,10 @@ func startMemGuard() (stop func()) {
 		return func() {}
 	}
 	interval := memGuardDefaultInterval
-	if v := os.Getenv(memGuardIntervalEnv); v != "" {
+	if v := os.Getenv(MemGuardIntervalEnv); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d <= 0 {
-			fmt.Fprintf(os.Stderr, "memory guard: ignoring invalid %s=%q\n", memGuardIntervalEnv, v)
+			fmt.Fprintf(os.Stderr, "memory guard: ignoring invalid %s=%q\n", MemGuardIntervalEnv, v)
 		} else {
 			interval = d
 		}
@@ -94,18 +94,18 @@ func startMemGuard() (stop func()) {
 	}
 
 	done := make(chan struct{})
-	memGuardRunning.Store(true)
-	go runMemGuard(done, os.Stderr, interval, limit, memGuardUsage, memGuardAbort)
+	MemGuardRunning.Store(true)
+	go RunMemGuard(done, os.Stderr, interval, limit, MemGuardUsage, memGuardAbort)
 	return func() {
-		memGuardRunning.Store(false)
+		MemGuardRunning.Store(false)
 		close(done)
 	}
 }
 
-// runMemGuard calls sample every interval and calls abort once the usage
+// RunMemGuard calls sample every interval and calls abort once the usage
 // exceeds limit. It returns when done is closed, after abort, or when sample
 // reports that no signal is available, which it reports to w.
-func runMemGuard(done <-chan struct{}, w io.Writer, interval time.Duration, limit uint64,
+func RunMemGuard(done <-chan struct{}, w io.Writer, interval time.Duration, limit uint64,
 	sample func() (used uint64, source string, ok bool), abort func(used, limit uint64, source string)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -127,9 +127,9 @@ func runMemGuard(done <-chan struct{}, w io.Writer, interval time.Duration, limi
 	}
 }
 
-// memGuardUsage returns the larger of the process RSS and the Go runtime's
+// MemGuardUsage returns the larger of the process RSS and the Go runtime's
 // mapped memory, and names which one it is. Neither read stops the world.
-func memGuardUsage() (uint64, string, bool) {
+func MemGuardUsage() (uint64, string, bool) {
 	var used uint64
 	source := ""
 	ok := false
@@ -177,7 +177,7 @@ func memGuardRSS() (uint64, bool) {
 // heap profile is meant to survive.
 func memGuardAbort(used, limit uint64, source string) {
 	fmt.Fprintf(os.Stderr, "\nmemory guard: %s %d MiB exceeds cap %d MiB (%s); aborting the test binary.\n",
-		source, used>>20, limit>>20, memGuardCapEnv)
+		source, used>>20, limit>>20, MemGuardCapEnv)
 	if f, err := os.CreateTemp("", "hub-test-mem-*.pprof"); err == nil {
 		if err := pprof.WriteHeapProfile(f); err == nil {
 			fmt.Fprintf(os.Stderr, "memory guard: heap profile written to %s\n", f.Name())

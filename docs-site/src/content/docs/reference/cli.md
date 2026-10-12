@@ -1142,6 +1142,25 @@ scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my
 
 - `scion tunnel status [--json]`: Show the open tunnels of your running `scion tunnel` processes: the Hub endpoint, the credential identity (kind, subject and scope, never the secret), the session IDs and the open tunnels. With `--hub`, only tunnels to that Hub are shown. Reads local state only and never prompts.
 
+### `scion expose` / `scion unexpose`
+
+Register or remove an agent-local HTTP port with the Hub's port forwarding proxy. Run these inside an agent container: they act as the calling agent, using its own Hub identity, and fail with `must be run inside an agent container with a hub connection` anywhere else. Available in agent mode. They need no local project. See [Manual Port Management](/scion/hosted/user/port-forwarding/#manual-port-management).
+
+**Usage:** `scion expose <port> [--label <text>] [--host <addr>]`, `scion expose --list`, `scion unexpose <port>`
+
+- **Flags (`expose`):**
+    - `--label <string>`: Optional label to identify the service.
+    - `--host <string>`: Local host to forward to. Default: `127.0.0.1`.
+    - `--list`: List the agent's exposed ports (port, label, proxy URL) and the auto-expose status instead of exposing one.
+
+Both commands are idempotent: exposing a port that is already exposed, or unexposing one that is not, succeeds. They replace `sciontool expose` and `sciontool unexpose`, which now print a message naming the `scion` command and exit `1`.
+
+```bash
+scion expose 8080 --label my-web-app
+scion expose --list
+scion unexpose 8080
+```
+
 ## Artifacts
 
 ### `scion artifact`
