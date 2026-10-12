@@ -265,23 +265,38 @@ func (s *Service) manageable(w http.ResponseWriter, r *http.Request, b backend, 
 
 // capabilities fills the caller's rights on a, an artifact it can read
 // (readableArtifact checked it), into resp: CanManage from canAdminister,
-// CanPublish from canWriteErr and CanGrantReview from mayGrantReview (only
-// when CanManage is false), the decisions the management, write and grant
-// routes make for the same request. A failed grants read answers 500 and
-// returns false.
+// CanPublish and CanReview from canWriteErr (reviewCapability), and
+// CanGrantReview from mayGrantReview (only when CanManage is false), the
+// decisions the management, write and grant routes make for the same
+// request. A failed grants read answers 500 and returns false.
 func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, resp *ArtifactResponse) bool {
 	var ok bool
 	if resp.CanManage, ok = s.manageable(w, r, b, a); !ok {
 		return false
 	}
-	canPublish, err := s.canWriteErr(r.Context(), b, a)
+	access, err := s.canWriteErr(r.Context(), b, a)
 	if err != nil {
 		writeGrantsReadFailed(w, r, err)
 		return false
 	}
-	resp.CanPublish = canPublish
+	resp.CanPublish, resp.CanReview = reviewCapability(true, access)
 	resp.CanGrantReview = !resp.CanManage && s.mayGrantReview(r.Context(), a)
 	return true
+}
+
+// reviewCapability maps the write decision to CanPublish and CanReview for
+// a caller whose read check answered readable. CanReview is true only for
+// a reader whose access allows review versions and nothing more: it adds
+// nothing when CanPublish is true, and it is never true without the read.
+// capabilities runs only after readableArtifact, so it always passes true;
+// the parameter states that precondition where the capability is
+// decided, and the kill check for "canReview without the read check"
+// mutates it.
+func reviewCapability(readable bool, access writeAccess) (canPublish, canReview bool) {
+	if !readable {
+		return false, false
+	}
+	return access.canPublish(), access == accessReviewGrant
 }
 
 // writeGrantsReadFailed logs a failed grant read and answers 500.
