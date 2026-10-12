@@ -130,8 +130,8 @@ func assertUserPrefsThreadGroupsMarker(t *testing.T, wcs WebChatStore) {
 }
 
 func TestUserPrefsThreadGroupsMarker_SQLite(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	assertUserPrefsThreadGroupsMarker(t, wcs)
 }
@@ -152,12 +152,12 @@ func TestUserPrefsThreadGroupsMarker_Postgres(t *testing.T) {
 // The column is added to a database created before it existed, and a row
 // written before the upgrade is pending (NULL marker).
 func TestUserPrefsThreadGroupsMigratedAt_SQLite_PreExistingDB(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 	_, err := db.Exec(preExistingSQLiteSchemaSQL)
 	require.NoError(t, err)
 	require.False(t, sqliteColumnExists(db, "webchat_user_prefs", "thread_groups_migrated_at"))
 
-	wcs := NewWebChatStore(db, "sqlite3")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	require.True(t, sqliteColumnExists(db, "webchat_user_prefs", "thread_groups_migrated_at"))
 	require.True(t, sqliteMigrationRecorded(db, "add_user_prefs_thread_groups_migrated_at"))
