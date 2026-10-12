@@ -404,8 +404,8 @@ func TestStoreCandidatesSharedWithScope(t *testing.T) {
 
 // TestStorePutReviewGrant: a review grant is written only while the
 // artifact is agent-owned and homed where the caller's authority was
-// checked, never lowers a write or admin grant, and accepts only a review
-// grant to a user, on both dialects.
+// checked, never replaces a read, write or admin grant, and accepts only a
+// review grant to a user, on both dialects.
 func TestStorePutReviewGrant(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()

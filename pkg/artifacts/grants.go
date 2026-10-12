@@ -377,7 +377,9 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 	}
 	created, err := b.store.PutReviewGrant(ctx, g, MaxGrantsPerArtifact, a.ScopeRef)
 	switch {
-	case errors.Is(err, ErrReviewGrantRefused):
+	case errors.Is(err, ErrReviewGrantRefused), errors.Is(err, ErrReviewReplacesAccess):
+		// Both refusals give the uniform 403, whichever store check runs
+		// first.
 		writeAdminForbidden(w)
 		return
 	case errors.Is(err, ErrTooManyGrants):

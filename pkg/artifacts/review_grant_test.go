@@ -211,12 +211,12 @@ func TestReviewGrantUserOwnedUnchanged(t *testing.T) {
 	}
 }
 
-// TestReviewGrantNeverLowersAdmin: a user who already holds a read, write
+// TestReviewGrantNeverReplacesGrant: a user who already holds a read, write
 // or admin grant keeps it; the review grant is refused with the same 403
 // as every other refusal, so the granter learns nothing about the
 // existing grant. (reviewer also reads through the home project, so the
 // refusal comes from the existing grant, not the subject check.)
-func TestReviewGrantNeverLowersAdmin(t *testing.T) {
+func TestReviewGrantNeverReplacesGrant(t *testing.T) {
 	for _, perm := range []string{GrantRead, GrantWrite, GrantAdmin} {
 		t.Run(perm, func(t *testing.T) {
 			f, id := newReviewGrantFixture(t)
@@ -393,5 +393,25 @@ func TestReviewGrantKeepsPrincipalRead(t *testing.T) {
 	}
 	if rec := f.do(&outsider, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
 		t.Errorf("GET after the refusal: %d", rec.Code)
+	}
+}
+
+// replacingReviewStore answers PutReviewGrant with ErrReviewReplacesAccess,
+// as the store would if its checks ran in another order.
+type replacingReviewStore struct{ Store }
+
+func (replacingReviewStore) PutReviewGrant(context.Context, *Grant, int, string) (bool, error) {
+	return false, ErrReviewReplacesAccess
+}
+
+// TestReviewGrantReplaceRefusalIsUniform: on the review-access path, a
+// store refusal for an existing grant answers the same 403 as every other
+// refusal, whichever store error reports it.
+func TestReviewGrantReplaceRefusalIsUniform(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	want := response(f.postGrantBody(member, id, "junk"))
+	f.svc.SetStore(replacingReviewStore{f.store})
+	if got := response(f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))); got != want {
+		t.Errorf("replace refusal:\n%s\nwant\n%s", got, want)
 	}
 }
