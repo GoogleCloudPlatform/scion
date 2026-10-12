@@ -585,7 +585,6 @@
 3 ge_exchange_test.go
 0 ge_helpers_test.go
 0 ge_sqlite_helpers_test.go
-0 git_lsremote_helpers_test.go
 6 github_failure_cache_test.go
 1 github_resolution_store_test.go
 3 google_credential_cache_test.go
@@ -908,7 +907,6 @@
 3 layer1_apply_coverage_test.go
 2 layer1_live_apply_test.go
 4 layer1_snapshot_file_test.go
-0 leak_guard_helpers_test.go
 3 lifecycle_hook_evaluator_test.go
 3 lifecycle_hook_executor_test.go
 6 lifecycle_hook_integration_test.go
@@ -935,7 +933,6 @@
 0 material_test_helpers_test.go
 4 material_user_scope_test.go
 5 material_value_audit_test.go
-0 mem_guard_helpers_test.go
 1 mem_guard_test.go
 1 members_group_principal_guard_test.go
 1 membership_create_root_test.go
@@ -945,7 +942,6 @@
 4 membership_loss_triggers_test.go
 5 membership_material_chain_test.go
 0 membership_sqlite_helpers_test.go
-0 memsqlite_helpers_test.go
 6 memsqlite_test.go
 1 mention_pair_limiter_test.go
 5 mention_translate_test.go
@@ -1310,7 +1306,6 @@
 3 suspended_page_browser_test.go
 5 suspended_page_test.go
 4 sweep_test.go
-0 syncbuffer_helpers_test.go
 4 system_handlers_db_test.go
 4 system_handlers_test.go
 0 system_sqlite_helpers_test.go
@@ -1338,7 +1333,6 @@
 1 test_admin_census_test.go
 2 test_admin_gate_test.go
 3 test_server_cleanup_test.go
-0 testmigrate_helpers_test.go
 1 testmigrate_parallel_test.go
 0 teststore_sqlite_helpers_test.go
 3 teststore_template_test.go
@@ -1402,4 +1396,5 @@
 2 workspace_storage_bucket_test.go
 4 workspace_storage_test.go
 4 workspace_upload_gcs_only_test.go
+0 zz_alias_hubtestutil_test.go
 1 zz_alias_principal_test.go
