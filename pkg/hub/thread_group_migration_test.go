@@ -1256,13 +1256,13 @@ func TestThreadGroupMigration_EventsPublishedWhenProjectFailsMidway(t *testing.T
 // single-group builder (threadGroupResponse) returns for the same group.
 func TestThreadGroupMigration_EventPayloadMatchesSingleGroupBuilder(t *testing.T) {
 	f := newTGMFixture(t)
-	t1, t2 := f.topic(f.proj.ID, "t1"), f.topic(f.proj.ID, "t2")
-	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("a1", "Alpha", t1, t2), tgmPG("a2", "Beta", t2)}}), "")
+	t1, t2, t3 := f.topic(f.proj.ID, "t1"), f.topic(f.proj.ID, "t2"), f.topic(f.proj.ID, "t3")
+	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("a1", "Alpha", t1, t2), tgmPG("a2", "Beta", t3)}}), "")
 	f.spy.take()
 	f.pass()
 
 	events := f.spy.take()
-	require.NotEmpty(t, events)
+	require.Len(t, events, 2, "Alpha and Beta, built in one batch")
 	for _, e := range events {
 		g, err := f.s.GetThreadGroup(context.Background(), e.group.ID)
 		require.NoError(t, err)
