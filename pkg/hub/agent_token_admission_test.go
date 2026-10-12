@@ -242,8 +242,9 @@ func TestStopAllHubForm_RequiresStopAllSelectorAndHubBoundary(t *testing.T) {
 // deleting and clearing an agent's exposed ports is authorized by
 // agent.port_access on the agent record: a token needs agent:port_access and
 // a boundary that contains the agent's project, and a session user needs
-// agent.port_access on the agent. The loopback-host rule and the reserved
-// ports apply to a token too.
+// agent.port_access on the agent. The loopback-host rule, the reserved ports
+// and the per-agent exposed-port limit apply to a token too, and a port a
+// token registers is recorded as exposed by a user.
 func TestPortRegistration_UsesAgentRecordTarget(t *testing.T) {
 	f := newAgentTokenFixture(t, "atk-port")
 	ctx := context.Background()
@@ -441,9 +442,8 @@ func TestSetMessageModeToken_ProjectBoundaryTokensCannotGrantHubMode(t *testing.
 }
 
 // TestAgentCreateToken_ProjectBoundaryTokensCannotGrantHubMode pins that a
-// project-boundary token cannot create an agent in hub message mode, while
-// the same request is not refused by the grant rule for a hub-boundary
-// token.
+// project-boundary token cannot create an agent in hub message mode, and
+// that a hub-boundary token of the same user creates it in hub mode.
 func TestAgentCreateToken_ProjectBoundaryTokensCannotGrantHubMode(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)

@@ -280,8 +280,8 @@ func TestProjectUAT_OwnerAdminPortAccessOnMembersAgent(t *testing.T) {
 			assert.Equal(t, http.StatusForbidden, rec.Code, "%s port_access token must not attach: %s", tc.name, rec.Body.String())
 
 			// Port registration is authorized on the agent record, so the
-			// same token registers and deletes a port of the member's agent.
-			// Port 8080 stays exposed for the other subtest's proxy check.
+			// same token registers, deletes and clears ports of the member's
+			// agent.
 			rec = doRequestWithUAT(t, srv, portKey, http.MethodPost, base+"/ports", map[string]any{"port": 9090})
 			assert.Equal(t, http.StatusCreated, rec.Code,
 				"%s port_access token registers a port on a member's agent: %s", tc.name, rec.Body.String())
