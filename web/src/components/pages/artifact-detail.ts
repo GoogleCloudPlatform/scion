@@ -83,6 +83,10 @@ import {
 } from '../../utils/critic.js';
 import type { CriticCounts, CriticTool } from '../../utils/critic.js';
 import '../shared/artifact-markdown-frame.js';
+import {
+  renderUntrustedViewFrame,
+  untrustedViewFrameStyles,
+} from '../shared/untrusted-view-frame.js';
 import '../shared/detail-header.js';
 import '../shared/artifact-publish-dialog.js';
 import '../shared/artifact-share-dialog.js';
@@ -213,7 +217,9 @@ export class ScionPageArtifactDetail extends LitElement {
   @query('.untrusted') private untrustedFrame?: HTMLElement;
   @query('scion-code-editor.review-editor') private reviewEditor?: ScionCodeEditor;
 
-  static override styles = css`
+  static override styles = [
+    untrustedViewFrameStyles,
+    css`
     :host {
       display: block;
       padding: 1.5rem;
@@ -273,35 +279,6 @@ export class ScionPageArtifactDetail extends LitElement {
     }
     .notice {
       margin-bottom: 0.75rem;
-    }
-    .untrusted {
-      border: 2px solid var(--sl-color-warning-500, #f59e0b);
-      border-radius: var(--scion-radius, 0.5rem);
-      overflow: hidden;
-      background: var(--scion-surface, #ffffff);
-      display: flex;
-      flex-direction: column;
-    }
-    .untrusted-bar {
-      display: flex;
-      align-items: center;
-      gap: 0.4rem;
-      padding: 0.3rem 0.75rem;
-      font-size: 0.75rem;
-      color: var(--sl-color-warning-800, #92400e);
-      background: var(--sl-color-warning-50, #fffbeb);
-      border-bottom: 1px solid var(--sl-color-warning-300, #fcd34d);
-    }
-    .untrusted iframe {
-      display: block;
-      width: 100%;
-      height: 70vh;
-      border: none;
-      background: #ffffff;
-    }
-    .untrusted:fullscreen iframe {
-      height: 100%;
-      flex: 1;
     }
     table {
       width: 100%;
@@ -466,7 +443,8 @@ export class ScionPageArtifactDetail extends LitElement {
       color: var(--sl-color-danger-500);
       margin-bottom: 0.5rem;
     }
-  `;
+  `,
+  ];
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -1251,18 +1229,7 @@ export class ScionPageArtifactDetail extends LitElement {
               </sl-button>
             </span>`}
       </div>
-      <div class="untrusted">
-        <div class="untrusted-bar">
-          <sl-icon name="shield-lock"></sl-icon>
-          Content published by ${owner} · runs sandboxed, isolated from Scion
-        </div>
-        <iframe
-          title=${`${this.data!.artifact.title} (sandboxed)`}
-          sandbox="allow-scripts"
-          referrerpolicy="no-referrer"
-          src=${this.view.url}
-        ></iframe>
-      </div>
+      ${renderUntrustedViewFrame({ url: this.view.url, title: this.data!.artifact.title, owner })}
     `;
   }
 

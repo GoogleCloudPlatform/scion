@@ -308,11 +308,37 @@ describe('scion-chat-file-preview artifact target', () => {
     expect(frame.getAttribute('title')).toBe('Site (sandboxed)');
     const bar = (q(el, '.untrusted-bar')?.textContent ?? '').replace(/\s+/g, ' ').trim();
     expect(bar).toBe(
-      'Content published by agent-1 · runs sandboxed, isolated from Scion · bundle of 2 files'
+      'Content published by agent-1 · runs sandboxed, isolated from Scion'
     );
     expect(q(el, 'sl-alert')).toBeNull();
     expect(q(el, '.version-badge')?.textContent?.trim()).toBe('v3 · current');
     expect(buttons(el)).toEqual(['Copy link', 'Open in artifact viewer']);
+  });
+
+  it('shows the same bar for a single-file HTML entry with a remote file', async () => {
+    const m = htmlMeta(3);
+    m.version.files = [
+      { path: 'index.html', size: 120, sha256: 'x', mediaType: 'text/html' },
+      {
+        path: '_remote/abc',
+        size: 10,
+        sha256: 'y',
+        mediaType: 'image/png',
+        origin: 'remote',
+        fetchStatus: 'ok',
+      } as (typeof m.version.files)[number],
+    ];
+    apiFetchMock.mockImplementation((path: string) =>
+      Promise.resolve(
+        path.endsWith('/view')
+          ? json({ url: VIEW_URL, expiresAt: '2099-01-01T00:00:00Z' })
+          : json(m)
+      )
+    );
+    const el = await open();
+    const bar = (q(el, '.untrusted-bar')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    expect(bar).toBe('Content published by agent-1 · runs sandboxed, isolated from Scion');
+    expect(q(el, 'iframe')?.getAttribute('src')).toBe(VIEW_URL);
   });
 
   it('warns about remote images in an HTML view, as the artifact page does', async () => {

@@ -57,7 +57,6 @@ import {
   artifactFileUrl,
   artifactPagePath,
   formatArtifactRef,
-  isRemoteFile,
   rendererFor,
   type ArtifactFile,
   type ArtifactResponse,
@@ -67,6 +66,7 @@ import { principalLabel, principalName, projectName } from '../../../client/prin
 import '../code-editor.js';
 import '../markdown-preview.js';
 import '../artifact-markdown-frame.js';
+import { renderUntrustedViewFrame, untrustedViewFrameStyles } from '../untrusted-view-frame.js';
 
 /** An attachment target, addressed by its opaque attachment ID. */
 export interface AttachmentPreviewTarget {
@@ -147,18 +147,11 @@ interface ArtifactInfo {
   markdown?: { id: string; seq: number; files: ArtifactFile[] };
   /**
    * Set for an HTML entry. Artifact HTML is rendered only through a view
-   * minted for the version, in the same sandboxed frame the artifact page
-   * uses (see renderArtifactHtml); its bytes are never fetched here.
+   * minted for the version, in the artifact page's own untrusted view frame
+   * (shared/untrusted-view-frame.ts); its bytes are never fetched here.
    */
-  htmlView?: { url: string; remoteImages: boolean; fileCount: number };
+  htmlView?: { url: string; remoteImages: boolean };
 }
-
-/**
- * The HTML view frame's sandbox, the same as the artifact page's: scripts
- * run, but on the view's own origin and never with allow-same-origin, so the
- * content cannot reach Scion's origin, cookies or storage.
- */
-export const HTML_VIEW_SANDBOX = 'allow-scripts';
 
 /** Image MIME types rendered inline (mirrors chat-message.ts's IMAGE_MIMES). */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -703,15 +696,7 @@ export class ScionChatFilePreview extends LitElement {
       };
       const renderer = rendererFor(entry.mediaType);
       if (renderer === 'html') {
-        await this.loadArtifactView(
-          data,
-          version.seq,
-          version.files,
-          artifact,
-          base,
-          gen,
-          controller
-        );
+        await this.loadArtifactView(data, version.seq, artifact, base, gen, controller);
         return;
       }
       if (
@@ -789,7 +774,6 @@ export class ScionChatFilePreview extends LitElement {
   private async loadArtifactView(
     data: ArtifactResponse,
     seq: number,
-    files: ArtifactFile[],
     artifact: ArtifactInfo,
     base: LoadState,
     gen: number,
@@ -823,18 +807,14 @@ export class ScionChatFilePreview extends LitElement {
       status: 'ready',
       artifact: {
         ...artifact,
-        htmlView: {
-          url: view.url,
-          remoteImages: view.remoteImages === true,
-          fileCount: files.filter((f) => !isRemoteFile(f)).length,
-        },
+        htmlView: { url: view.url, remoteImages: view.remoteImages === true },
       },
     };
   }
 
   /**
-   * An HTML entry: the artifact page's view frame, with the same
-   * attributes and untrusted-content bar (artifact-detail.ts renderHtmlView).
+   * An HTML entry: the untrusted view frame the artifact page renders
+   * (renderUntrustedViewFrame), under the same remote-images notice.
    */
   private renderArtifactHtml(info: ArtifactInfo, view: NonNullable<ArtifactInfo['htmlView']>) {
     const owner = principalLabel(
@@ -850,19 +830,7 @@ export class ScionChatFilePreview extends LitElement {
             Remote images are not loaded in HTML artifacts; include them in the bundle.
           </sl-alert>`
         : nothing}
-      <div class="untrusted">
-        <div class="untrusted-bar">
-          <sl-icon name="shield-lock"></sl-icon>
-          Content published by ${owner} · runs sandboxed, isolated from Scion
-          ${view.fileCount > 1 ? html`· bundle of ${view.fileCount} files` : nothing}
-        </div>
-        <iframe
-          title=${`${info.title} (sandboxed)`}
-          sandbox=${HTML_VIEW_SANDBOX}
-          referrerpolicy="no-referrer"
-          src=${view.url}
-        ></iframe>
-      </div>
+      ${renderUntrustedViewFrame({ url: view.url, title: info.title, owner })}
     `;
   }
 
@@ -1171,7 +1139,9 @@ export class ScionChatFilePreview extends LitElement {
     `;
   }
 
-  static override styles = css`
+  static override styles = [
+    untrustedViewFrameStyles,
+    css`
     :host {
       display: contents;
     }
@@ -1215,27 +1185,7 @@ export class ScionChatFilePreview extends LitElement {
       margin: 0.5rem;
     }
     .untrusted {
-      border: 2px solid var(--sl-color-warning-500, #f59e0b);
-      background: var(--scion-surface, #ffffff);
-      display: flex;
-      flex-direction: column;
-    }
-    .untrusted-bar {
-      display: flex;
-      align-items: center;
-      gap: 0.4rem;
-      padding: 0.3rem 0.75rem;
-      font-size: 0.75rem;
-      color: var(--sl-color-warning-800, #92400e);
-      background: var(--sl-color-warning-50, #fffbeb);
-      border-bottom: 1px solid var(--sl-color-warning-300, #fcd34d);
-    }
-    .untrusted iframe {
-      display: block;
-      width: 100%;
-      height: calc(var(--scion-app-height, 100dvh) * 0.65);
-      border: none;
-      background: #ffffff;
+      --untrusted-frame-height: calc(var(--scion-app-height, 100dvh) * 0.65);
     }
     .artifact-label {
       display: inline-flex;
@@ -1265,7 +1215,8 @@ export class ScionChatFilePreview extends LitElement {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-  `;
+  `,
+  ];
 }
 
 declare global {
