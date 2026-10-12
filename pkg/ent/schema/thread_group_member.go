@@ -31,8 +31,9 @@ import (
 //
 // group_id, project_id and conversation_id are plain UUID columns with no Ent
 // edges. project_id is denormalized from the group so project cleanup is a
-// single statement. The unique conversation_id index makes a thread belong
-// to at most one project group; filing it elsewhere moves it.
+// single statement, backed by the project_id index. The unique
+// conversation_id index makes a thread belong to at most one project group;
+// filing it elsewhere moves it.
 type ThreadGroupMember struct {
 	ent.Schema
 }
@@ -58,6 +59,9 @@ func (ThreadGroupMember) Indexes() []ent.Index {
 		index.Fields("conversation_id").
 			Unique(),
 		index.Fields("group_id"),
+		// Project cleanup (DeleteThreadGroupsForProject, run inside
+		// CompositeStore.DeleteProject) deletes by project_id.
+		index.Fields("project_id"),
 	}
 }
 
