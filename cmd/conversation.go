@@ -63,7 +63,8 @@ var conversationCmd = &cobra.Command{
 	Short:   "Manage conversations",
 	Long: `View and manage conversations you participate in.
 
-Conversations require Hub mode. Enable with 'scion hub enable <endpoint>'.
+Conversations go through the hub (start the local one with 'scion server start',
+or set a remote one with 'scion config set hub.endpoint <url>').
 
 Commands:
   scion conversation list                       List your conversations

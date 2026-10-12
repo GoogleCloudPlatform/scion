@@ -29,7 +29,6 @@ type RootOptions struct {
 	Profile        string // --profile / -p
 	OutputFormat   string // --format
 	HubEndpoint    string // --hub
-	NoHub          bool   // --no-hub
 	AutoConfirm    bool   // --yes / -y
 	NonInteractive bool   // --non-interactive
 	Debug          bool   // --debug

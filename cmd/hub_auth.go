@@ -91,8 +91,8 @@ so 'scion hub status' and other hub commands use it. It is saved to global
 settings, since credentials are global and project settings are often
 tracked in git; it goes to the project's settings only when that project
 already has hub settings, or with an explicit --global=false. An existing
-hub.endpoint is never overwritten. If hub mode is off, an interactive login
-offers to enable it (in the same settings); otherwise run 'scion hub enable'.
+hub.endpoint is never overwritten. A configured endpoint is all the CLI
+needs to use the hub.
 
 Example:
   scion hub auth login

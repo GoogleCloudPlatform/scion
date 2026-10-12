@@ -34,7 +34,6 @@ func snapshotRootOptions() cliutil.RootOptions {
 		Profile:        profile,
 		OutputFormat:   outputFormat,
 		HubEndpoint:    hubEndpoint,
-		NoHub:          noHub,
 		AutoConfirm:    autoConfirm,
 		NonInteractive: nonInteractive,
 		Debug:          debugMode,

@@ -15,6 +15,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/spf13/cobra"
@@ -27,7 +28,7 @@ var (
 	profile        string
 	outputFormat   string
 	hubEndpoint    string // Hub API endpoint override
-	noHub          bool   // Disable Hub integration for this invocation
+	noHub          bool   // Removed --no-hub flag (hidden; any use fails with errNoHubRemoved)
 	autoConfirm    bool   // Auto-confirm prompts (--yes flag)
 	nonInteractive bool   // Full non-interactive mode (implies --yes, errors on ambiguous prompts)
 	autoHelp       = true // Default to true, updated in PersistentPreRunE
@@ -117,6 +118,13 @@ return an error instead of blocking.`,
 		// settings, so it is resolved once here and reused below.
 		mode := resolveMode()
 		configureDebugOutput(mode, debugMode)
+
+		// --no-hub was removed with local-only mode. The flag stays,
+		// hidden, for one release so that old scripts get this guidance
+		// instead of an unknown-flag error.
+		if noHub {
+			return errNoHubRemoved
+		}
 
 		// Detect agent container context without a reachable Hub endpoint.
 		// SCION_HOST_UID is set by the runtime when launching agent containers.
@@ -446,7 +454,8 @@ func init() {
 
 	// Hub integration flags
 	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub API endpoint URL (overrides SCION_HUB_ENDPOINT)")
-	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Disable Hub integration for this invocation (local-only mode)")
+	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Removed: local-only mode no longer exists; scion always uses a hub")
+	_ = rootCmd.PersistentFlags().MarkHidden("no-hub")
 
 	// Confirmation and non-interactive flags
 	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Answer Yes to every confirmation prompt, including destructive ones (required to confirm when stdin is not a terminal)")
@@ -524,11 +533,8 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 
 // GetHubEndpoint returns the effective Hub endpoint based on flags, settings,
 // and environment variables.
-// Returns empty string if Hub is disabled or not configured.
+// Returns empty string if no hub is configured.
 func GetHubEndpoint(settings interface{ GetHubEndpoint() string }) string {
-	if noHub {
-		return ""
-	}
 	if hubEndpoint != "" {
 		return hubEndpoint
 	}
@@ -549,15 +555,8 @@ func GetHubEndpoint(settings interface{ GetHubEndpoint() string }) string {
 	return ""
 }
 
-// IsHubEnabled returns true if Hub integration is enabled for this invocation.
-func IsHubEnabled() bool {
-	return !noHub
-}
-
-// IsNoHub returns true if Hub integration is explicitly disabled for this invocation.
-func IsNoHub() bool {
-	return noHub
-}
+// errNoHubRemoved is returned for any use of the removed --no-hub flag.
+var errNoHubRemoved = fmt.Errorf("--no-hub was removed together with local-only mode; scion always uses a hub. See %s", hubsync.LocalModeRemovalDocsURL)
 
 // IsAutoConfirm returns true if prompts should be auto-confirmed.
 func IsAutoConfirm() bool {
@@ -571,24 +570,17 @@ func IsNonInteractive() bool {
 	return nonInteractive
 }
 
-// printDevAuthWarningIfNeeded checks if dev auth is being used with Hub and prints a warning.
+// printDevAuthWarningIfNeeded checks if dev auth is being used with a hub and prints a warning.
 // This function is called on every command invocation via PersistentPreRunE.
 func printDevAuthWarningIfNeeded(projectPath string) {
-	// Skip if --no-hub flag is set
-	if noHub {
-		return
-	}
-
-	// Try to load settings to check if Hub is enabled
 	settings, err := config.LoadSettings(projectPath)
 	if err != nil {
 		// If we can't load settings, skip the warning
 		return
 	}
 
-	// Check if Hub is enabled (either via settings or --hub flag override)
-	hubEnabled := settings.IsHubEnabled() || hubEndpoint != ""
-	if !hubEnabled {
+	// No hub configured: nothing to warn about.
+	if GetHubEndpoint(settings) == "" {
 		return
 	}
 

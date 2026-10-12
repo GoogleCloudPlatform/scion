@@ -59,9 +59,8 @@ Scopes common CLI flows need:
   scion delete                   project:read, agent:delete
 
 Token scopes limit what the CLI can do on the Hub. Local actions, such
-as scion clean and any command run with --no-hub, act on the local
-machine with the user's file permissions, and token scopes don't limit
-them.
+as scion clean, act on the local machine with the user's file
+permissions, and token scopes don't limit them.
 
 A stored interactive login (from scion hub auth login) takes precedence
 over SCION_HUB_TOKEN. To run the CLI under a scoped token, use an

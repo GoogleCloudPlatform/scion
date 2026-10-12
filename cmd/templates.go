@@ -58,62 +58,65 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Check if Hub is available (suppress errors, just skip Hub if not available)
-	var hubCtx *HubContext
+	// --local lists the filesystem templates only and makes no hub call
+	// (D5: the offline template views stay). Otherwise hub errors are
+	// returned: there is no silent fallback to a filesystem-only list.
+	var localOnly bool
+	if cmd != nil {
+		localOnly, _ = cmd.Flags().GetBool("local")
+	}
 	var hubGlobal, hubProject, hubUser []hubclient.Template
-	hubAvailable := false
-
-	if !noHub {
-		hubCtx, _ = CheckHubAvailabilityWithOptions(projectPath, true)
-		if hubCtx != nil {
-			hubAvailable = true
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-
-			// Get project ID for filtering project-scoped templates
-			projectID, _ := GetProjectID(hubCtx)
-
-			// Fetch global templates from Hub
-			globalResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
-				Scope:  "global",
-				Status: "active",
-			})
-			if err == nil {
-				hubGlobal = globalResp.Templates
-			}
-
-			// Fetch project templates from Hub (if we have a project ID)
-			if projectID != "" {
-				projectResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
-					Scope:     "project",
-					ProjectID: projectID,
-					Status:    "active",
-				})
-				if err == nil {
-					hubProject = projectResp.Templates
-				}
-			}
-
-			// Fetch user-scoped templates from Hub
-			userResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
-				Scope:  "user",
-				Status: "active",
-			})
-			if err == nil {
-				hubUser = userResp.Templates
-			}
-
-			// Sort hub templates by name for consistent output
-			sort.Slice(hubGlobal, func(i, j int) bool {
-				return hubGlobal[i].Name < hubGlobal[j].Name
-			})
-			sort.Slice(hubProject, func(i, j int) bool {
-				return hubProject[i].Name < hubProject[j].Name
-			})
-			sort.Slice(hubUser, func(i, j int) bool {
-				return hubUser[i].Name < hubUser[j].Name
-			})
+	if !localOnly {
+		hubCtx, err := requireHub(projectPath)
+		if err != nil {
+			return err
 		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// Get project ID for filtering project-scoped templates
+		projectID, _ := GetProjectID(hubCtx)
+
+		// Fetch global templates from Hub
+		globalResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
+			Scope:  "global",
+			Status: "active",
+		})
+		if err == nil {
+			hubGlobal = globalResp.Templates
+		}
+
+		// Fetch project templates from Hub (if we have a project ID)
+		if projectID != "" {
+			projectResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
+				Scope:     "project",
+				ProjectID: projectID,
+				Status:    "active",
+			})
+			if err == nil {
+				hubProject = projectResp.Templates
+			}
+		}
+
+		// Fetch user-scoped templates from Hub
+		userResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
+			Scope:  "user",
+			Status: "active",
+		})
+		if err == nil {
+			hubUser = userResp.Templates
+		}
+
+		// Sort hub templates by name for consistent output
+		sort.Slice(hubGlobal, func(i, j int) bool {
+			return hubGlobal[i].Name < hubGlobal[j].Name
+		})
+		sort.Slice(hubProject, func(i, j int) bool {
+			return hubProject[i].Name < hubProject[j].Name
+		})
+		sort.Slice(hubUser, func(i, j int) bool {
+			return hubUser[i].Name < hubUser[j].Name
+		})
 	}
 
 	if isJSONOutput() {
@@ -144,7 +147,7 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 			output["local"] = localSection
 		}
 
-		if hubAvailable {
+		if !localOnly {
 			hubSection := map[string][]templateEntry{}
 			if len(hubGlobal) > 0 {
 				entries := make([]templateEntry, len(hubGlobal))
@@ -177,19 +180,21 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 
-	if hubAvailable {
-		// Hub mode: group by local/hub, then by global/project/user
-		printTemplateListHubMode(w, localGlobal, localProject, hubGlobal, hubProject, hubUser)
+	if localOnly {
+		// Filesystem only: group by global/project
+		printLocalTemplateList(w, localGlobal, localProject)
 	} else {
-		// Local mode: group by global/project
-		printTemplateListLocalMode(w, localGlobal, localProject)
+		// Group by local/hub, then by global/project/user
+		printTemplateListHubMode(w, localGlobal, localProject, hubGlobal, hubProject, hubUser)
 	}
 
 	_ = w.Flush()
 	return nil
 }
 
-func printTemplateListLocalMode(w *tabwriter.Writer, global, project []*config.Template) {
+// printLocalTemplateList prints the filesystem templates for
+// 'templates list --local', grouped by global/project.
+func printLocalTemplateList(w *tabwriter.Writer, global, project []*config.Template) {
 	hasGlobal := len(global) > 0
 	hasProject := len(project) > 0
 
@@ -317,10 +322,15 @@ func runTemplateShow(cmd *cobra.Command, args []string) error {
 		AutoConfirm: autoConfirm,
 	}
 
-	// Check if Hub is available (suppress errors for read operations)
+	// A hub error is returned (no silent fallback to the filesystem);
+	// --local is the explicit filesystem-only view.
 	var hubCtx *HubContext
-	if !noHub && !localOnly {
-		hubCtx, _ = CheckHubAvailabilityWithOptions(projectPath, true)
+	if !localOnly {
+		var err error
+		hubCtx, err = requireHub(projectPath)
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx := context.Background()
@@ -455,10 +465,15 @@ func runTemplateDelete(cmd *cobra.Command, args []string) error {
 		AutoConfirm: autoConfirm,
 	}
 
-	// Check if Hub is available (suppress errors for delete operations)
+	// A hub error is returned (no silent fallback to the filesystem);
+	// --local is the explicit filesystem-only view.
 	var hubCtx *HubContext
-	if !noHub && !localOnly {
-		hubCtx, _ = CheckHubAvailabilityWithOptions(projectPath, true)
+	if !localOnly {
+		var err error
+		hubCtx, err = requireHub(projectPath)
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx := context.Background()
@@ -506,9 +521,6 @@ func deleteTemplateMatch(ctx context.Context, match *TemplateMatch, hubCtx *HubC
 		fmt.Printf("Local template '%s' deleted successfully.\n", match.Name)
 	} else {
 		// Delete hub template
-		if hubCtx == nil {
-			return fmt.Errorf("hub context not available for deleting hub template")
-		}
 		deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		if err := hubCtx.Client.Templates().Delete(deleteCtx, match.HubTemplate.ID); err != nil {
@@ -560,10 +572,15 @@ func runTemplateClone(cmd *cobra.Command, args []string) error {
 		AutoConfirm: autoConfirm,
 	}
 
-	// Check if Hub is available for cloning from Hub templates
+	// A hub error is returned (no silent fallback to the filesystem);
+	// --local is the explicit filesystem-only view.
 	var hubCtx *HubContext
-	if !noHub && !localOnly {
-		hubCtx, _ = CheckHubAvailabilityWithOptions(projectPath, true)
+	if !localOnly {
+		var err error
+		hubCtx, err = requireHub(projectPath)
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx := context.Background()
@@ -624,10 +641,6 @@ func cloneLocalTemplate(srcPath, destName string, destGlobal bool) error {
 
 // cloneFromHubTemplate pulls a Hub template and clones it locally.
 func cloneFromHubTemplate(hubCtx *HubContext, match *TemplateMatch, destName string, destGlobal bool) error {
-	if hubCtx == nil {
-		return fmt.Errorf("hub context not available for cloning hub template")
-	}
-
 	// Determine destination path
 	var destTemplatesDir string
 	var err error
@@ -770,14 +783,10 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check Hub availability first (we need it for sync anyway)
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub integration is not enabled, use 'scion hub enable' first")
-	}
-
 	PrintUsingHub(hubCtx.Endpoint)
 
 	destScope := templateScopeFromGlobalFlag()
@@ -902,14 +911,10 @@ func runTemplatePull(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check Hub availability
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub integration is not enabled, use 'scion hub enable' first")
-	}
-
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Build resolution options - Hub only for pull
@@ -1388,14 +1393,10 @@ func runTemplateStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check Hub availability
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub integration is not enabled, use 'scion hub enable' first")
-	}
-
 	PrintUsingHub(hubCtx.Endpoint)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1609,6 +1610,9 @@ func init() {
 	// Flags for update-default command
 	templatesUpdateDefaultCmd.Flags().Bool("force", false, "Overwrite the existing default template")
 
+	// Flags for list command
+	templatesListCmd.Flags().Bool("local", false, "Only list local filesystem templates")
+
 	// Flags for show command
 	templatesShowCmd.Flags().Bool("local", false, "Only search local filesystem")
 	templatesShowCmd.Flags().Bool("hub", false, "Only search Hub")
@@ -1646,11 +1650,13 @@ func init() {
 		Long:  `List and inspect templates used to provision new agents.`,
 	}
 	rootCmd.AddCommand(templateCmd)
-	templateCmd.AddCommand(&cobra.Command{
+	listAlias := &cobra.Command{
 		Use:   "list",
 		Short: "List available templates",
 		RunE:  runTemplateList,
-	})
+	}
+	listAlias.Flags().Bool("local", false, "Only list local filesystem templates")
+	templateCmd.AddCommand(listAlias)
 	showAlias := &cobra.Command{
 		Use:   "show <name>",
 		Short: "Show template configuration",

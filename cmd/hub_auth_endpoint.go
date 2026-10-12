@@ -22,8 +22,6 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -91,7 +89,7 @@ type loginEndpointOptions struct {
 	// HubURL is the hub the login authenticated against.
 	HubURL string
 	// ProjectPath is the resolved project (or global) path of the
-	// invocation; its effective settings decide whether hub mode is on.
+	// invocation.
 	ProjectPath string
 	// IsGlobal reports whether the invocation runs in the global context
 	// (no project), so only global settings apply.
@@ -99,10 +97,6 @@ type loginEndpointOptions struct {
 	// TargetGlobal selects the settings a new hub.endpoint (and hub.enabled)
 	// is written to: global settings, else the project's own settings.
 	TargetGlobal bool
-	// Interactive reports whether the user can answer a prompt.
-	Interactive bool
-	// Confirm asks a yes/no question (default yes).
-	Confirm func(prompt string) bool
 }
 
 // loginEndpointTargetGlobal decides where 'hub auth login' saves a new
@@ -138,10 +132,8 @@ func projectCarriesHubConfig(projectPath string) bool {
 // global), it saves the hub URL to the target settings (see
 // loginEndpointTargetGlobal), so 'hub status' and every other hub command
 // find the hub the stored credentials belong to. An endpoint that is already
-// set is never overwritten; a note says how to use the other hub. When hub
-// mode is off for that endpoint it then offers, interactively only, to
-// enable it in the same settings; otherwise it prints the 'scion hub enable'
-// hint.
+// set is never overwritten; a note says how to use the other hub. A
+// configured endpoint is all the CLI needs to use the hub.
 func persistLoginEndpoint(out io.Writer, opts loginEndpointOptions) error {
 	scope := "global"
 	if !opts.TargetGlobal {
@@ -157,21 +149,7 @@ func persistLoginEndpoint(out io.Writer, opts loginEndpointOptions) error {
 	case !sameHubURL(configured, opts.HubURL):
 		_, _ = fmt.Fprintf(out, "Note: hub.endpoint is %s (%s settings) and was left unchanged.\n", configured, configuredScope)
 		_, _ = fmt.Fprintf(out, "To use %s, pass --hub %s or run 'scion config set hub.endpoint %s'.\n", opts.HubURL, opts.HubURL, opts.HubURL)
-		return nil
 	}
-
-	settings, err := config.LoadSettings(opts.ProjectPath)
-	if err != nil || settings.IsHubEnabled() {
-		return nil
-	}
-	if opts.Interactive && opts.Confirm != nil && opts.Confirm("Hub mode is not enabled. Enable it now (scion hub enable)?") {
-		if err := config.UpdateSetting(opts.ProjectPath, "hub.enabled", "true", opts.TargetGlobal); err != nil {
-			return fmt.Errorf("failed to enable hub mode: %w", err)
-		}
-		_, _ = fmt.Fprintf(out, "Hub mode enabled (%s scope).\n", scope)
-		return nil
-	}
-	_, _ = fmt.Fprintln(out, "Hub mode is not enabled. Run 'scion hub enable' to route agent operations through this hub.")
 	return nil
 }
 
@@ -207,10 +185,6 @@ func persistLoginEndpointForInvocation(cmd *cobra.Command, hubURL string) {
 		ProjectPath:  resolvedPath,
 		IsGlobal:     isGlobal,
 		TargetGlobal: loginEndpointTargetGlobal(resolvedPath, isGlobal, explicitNotGlobal),
-		Interactive:  util.IsTerminal() && !nonInteractive,
-		Confirm: func(prompt string) bool {
-			return hubsync.ConfirmAction(prompt, true, autoConfirm)
-		},
 	})
 	if err != nil {
 		fmt.Printf("Warning: %v\n", err)
