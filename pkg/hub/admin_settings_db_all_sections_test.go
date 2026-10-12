@@ -315,6 +315,13 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
 				f := layer1FieldFor(t, sec.Name, koanf)
 				srv, fake, ops := newTestDBServer(t)
+				// Clearing a saved public URL is recorded before it is
+				// written, and not made without the record
+				// (ptone/scion#3905), so that save needs an audit store.
+				var audit *settingsAuditStore
+				if koanf == config.PublicURLKey {
+					audit = withSettingsAuditStore(srv)
+				}
 
 				seed := sample
 				if f.docPath != nil {
@@ -348,6 +355,12 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 				}
 				_, ok = valueAtPath(doc, f.docPath)
 				assert.False(t, ok, "an explicit null must clear %s; row %s", koanf, row.Value)
+				if audit != nil {
+					recs := audit.records()
+					require.Len(t, recs, 1, "only the clear changes the stored public URL")
+					assert.Equal(t, want, recs[0].BeforeSummary)
+					assert.Empty(t, recs[0].AfterSummary)
+				}
 			})
 		}
 	}
