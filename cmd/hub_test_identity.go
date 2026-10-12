@@ -502,7 +502,6 @@ func issueTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclient
 		return fmt.Errorf("failed to issue test identity: %w", err)
 	}
 	if err := file.write(resp.AccessToken); err != nil {
-		_ = os.Remove(file.path)
 		_, _ = fmt.Fprintf(errOut, "Test identity %s was issued, but its token could not be written; run \"scion hub test-identity token %s --out <file>\" for a new one, or delete it.\n", resp.Identity.ID, resp.Identity.ID)
 		return fmt.Errorf("failed to write --out %s: %w", file.path, err)
 	}
@@ -526,7 +525,6 @@ func reissueTestIdentityToken(ctx context.Context, out, errOut io.Writer, svc hu
 		return fmt.Errorf("failed to issue a token for test identity %s: %w", opts.ID, err)
 	}
 	if err := file.write(resp.AccessToken); err != nil {
-		_ = os.Remove(file.path)
 		_, _ = fmt.Fprintf(errOut, "A token for test identity %s was issued, but could not be written; run this command again with a new --out.\n", opts.ID)
 		return fmt.Errorf("failed to write --out %s: %w", file.path, err)
 	}

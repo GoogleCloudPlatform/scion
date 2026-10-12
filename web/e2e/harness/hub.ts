@@ -407,9 +407,9 @@ export function runScionCLI(state: HubState, args: string[]): string {
     });
   } catch (err) {
     const e = err as { status?: number; stderr?: string };
+    // eslint-disable-next-line preserve-caught-error -- the exec error carries raw stderr and argv; only the redacted text is kept
     throw new Error(
-      `scion ${args.slice(0, 3).join(' ')} failed (exit ${String(e.status)}): ${redact(String(e.stderr ?? '')).trim()}`,
-      { cause: err }
+      `scion ${args.slice(0, 3).join(' ')} failed (exit ${String(e.status)}): ${redact(String(e.stderr ?? '')).trim()}`
     );
   }
 }

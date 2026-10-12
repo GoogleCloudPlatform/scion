@@ -310,3 +310,25 @@ func TestHubTestIdentityWebCodeCmd_HumanModeOnly(t *testing.T) {
 	require.NotNil(t, f)
 	assert.Equal(t, []string{"true"}, f.Annotations[cobra.BashCompOneRequiredFlag])
 }
+
+// writeExact (and write, which uses it) removes the file when the write
+// fails, so no partial secret is left: the only cleanup on the web-code
+// path, and the token paths rely on it too. A closed file forces the
+// failure.
+func TestTokenFileWriteExact_FailureRemovesFile(t *testing.T) {
+	for name, write := range map[string]func(*tokenFile) error{
+		"writeExact": func(tf *tokenFile) error { return tf.writeExact("synthetic-placeholder") },
+		"write":      func(tf *tokenFile) error { return tf.write("synthetic-placeholder") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(resolvedTempDir(t), "code.txt")
+			tf, err := createTokenFile(path)
+			require.NoError(t, err)
+			require.NoError(t, tf.f.Close())
+
+			require.Error(t, write(tf), "a write to a closed file must fail")
+			_, err = os.Lstat(path)
+			assert.True(t, os.IsNotExist(err), "the file is removed after a failed write, got %v", err)
+		})
+	}
+}
