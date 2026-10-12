@@ -85,11 +85,11 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 		return h.UpdatePhase(result.phase, result.activity, "")
 	}
 
-	// A codex sub-agent's new-work or tool-start event is activity inside the
+	// A sub-agent's new-work or tool-start event is activity inside the
 	// parent's session, not the parent resuming. It follows the tool-end and
 	// agent-end rule: a status the parent agent set and still holds (for
 	// example an ask_user waiting_for_input, or completed) stays in place.
-	if isCodexSubagentEvent(event) && (isNewWorkEvent(event.Name) || event.Name == hooks.EventToolStart) {
+	if isHeldSubagentEvent(event) {
 		return h.updateActivityIfNotSticky(result.activity, event.Data.ToolName, clearNotificationWaiting)
 	}
 
@@ -102,7 +102,7 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 	// Tool-start events require special handling for sticky states.
 	if event.Name == hooks.EventToolStart {
 		// Claude-specific: ExitPlanMode and AskUserQuestion set waiting_for_input (sticky).
-		if event.Dialect == "claude" && (event.Data.ToolName == "ExitPlanMode" || event.Data.ToolName == "AskUserQuestion") {
+		if isClaudeUserWaitTool(event) {
 			return h.UpdateActivity(state.ActivityWaitingForInput, "")
 		}
 
@@ -381,18 +381,36 @@ func isNewWorkEvent(name string) bool {
 	return false
 }
 
-// isCodexSubagentEvent reports whether a codex hook event came from a
-// sub-agent rather than the parent agent. Codex sends the root session's
-// session_id on a sub-agent's hook events; only agent_id names the child.
-// An event whose agent_id is set and differs from session_id is therefore a
-// sub-agent's. Other dialects are not checked, so their handling is
-// unchanged.
-func isCodexSubagentEvent(event *hooks.Event) bool {
-	if event.Dialect != "codex" {
+// isSubagentEvent reports whether a codex or claude hook event came from a
+// sub-agent rather than the parent agent. Both harnesses send the parent
+// session's session_id on a sub-agent's hook events and name the child only
+// in agent_id. An event whose agent_id is set and differs from session_id is
+// therefore a sub-agent's. Other dialects are not checked, so their handling
+// is unchanged.
+func isSubagentEvent(event *hooks.Event) bool {
+	if event.Dialect != "codex" && event.Dialect != "claude" {
 		return false
 	}
 	agentID, _ := event.Data.Raw["agent_id"].(string)
 	return agentID != "" && agentID != event.Data.SessionID
+}
+
+// isClaudeUserWaitTool reports whether a claude tool-start is for a tool that
+// asks the user (ExitPlanMode, AskUserQuestion) and so sets waiting_for_input.
+func isClaudeUserWaitTool(event *hooks.Event) bool {
+	return event.Name == hooks.EventToolStart && event.Dialect == "claude" &&
+		(event.Data.ToolName == "ExitPlanMode" || event.Data.ToolName == "AskUserQuestion")
+}
+
+// isHeldSubagentEvent reports whether an event is a sub-agent's new-work or
+// tool-start event that must not clear a status the parent agent holds. A
+// sub-agent's ExitPlanMode or AskUserQuestion tool-start is excluded: the
+// user is being asked, so it still sets waiting_for_input.
+func isHeldSubagentEvent(event *hooks.Event) bool {
+	if !isSubagentEvent(event) || isClaudeUserWaitTool(event) {
+		return false
+	}
+	return isNewWorkEvent(event.Name) || event.Name == hooks.EventToolStart
 }
 
 // eventToPhaseActivity maps normalized events to phase/activity pairs.
