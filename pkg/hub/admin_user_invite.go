@@ -81,6 +81,7 @@ func (s *Server) handleAdminUserInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.proxyDrivers.contains(email) {
+		slog.Warn("invite refused: the email is a proxy driver principal", "reason", provisionReasonProxyDriverPrincipal)
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, proxyDriverPrincipalUserMessage, nil)
 		return
 	}

@@ -759,6 +759,8 @@ func TestServer_DefaultMetricsWiring_OTelSetterStillMovesSnapshot(t *testing.T) 
 // identity on both Google paths, the GE exchange and the external-bearer
 // path, because New wires the driver set into the shared resolver. No
 // account is created, and an identity that is not a driver still works.
+// The driver legs report with Errorf so that removing the wiring fails
+// both of them.
 func TestGEExchange_Route_RefusesDriverPrincipal(t *testing.T) {
 	const driver = "browser-driver@example.com"
 	s, err := newTestStore(t, ":memory:")
@@ -779,9 +781,13 @@ func TestGEExchange_Route_RefusesDriverPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
+	// The driver identity is authoritative (hosted domain set), so without
+	// the driver refusal it would be resolved and provisioned: only that
+	// refusal can produce the 403s below.
 	driverIdentity := validGmailIdentity()
 	driverIdentity.Subject = "google-sub-driver"
 	driverIdentity.Email = driver
+	driverIdentity.HostedDomain = "example.com"
 
 	exchange := func(identity *ValidatedGoogleIdentity) *httptest.ResponseRecorder {
 		srv.geExchangeService.validator = &fakeGoogleValidator{idTokenResult: identity}
@@ -796,7 +802,7 @@ func TestGEExchange_Route_RefusesDriverPrincipal(t *testing.T) {
 
 	rec := exchange(driverIdentity)
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("GE exchange for a driver: expected 403, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("GE exchange for a driver: expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), "user not authorized") {
 		t.Errorf("expected the not-authorized answer, got %s", rec.Body.String())
@@ -805,7 +811,7 @@ func TestGEExchange_Route_RefusesDriverPrincipal(t *testing.T) {
 		t.Errorf("no token may be returned: %s", rec.Body.String())
 	}
 	if _, err := s.GetUserByEmail(context.Background(), driver); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("expected no user row for the driver, got err=%v", err)
+		t.Errorf("expected no user row for the driver, got err=%v", err)
 	}
 
 	rec = exchange(validGmailIdentity())
@@ -821,19 +827,39 @@ func TestGEExchange_Route_RefusesDriverPrincipal(t *testing.T) {
 	// driver's ID token as the bearer of a protected route.
 	srv.authConfig.FederationAuth = federationAuthPointer(newGoogleTrustFederationAuth(t, "test-client-id.apps.googleusercontent.com"))
 	srv.authConfig.GoogleValidator = &fakeGoogleValidator{idTokenResult: driverIdentity}
-	claims := validIDTokenClaims()
-	claims["email"] = driver
-	claims["sub"] = "google-sub-driver"
-	claims["aud"] = "test-client-id.apps.googleusercontent.com"
-	bearer := signIDToken(newGCVTestKeyPair("route-kid"), claims)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
+	kp := newGCVTestKeyPair("route-kid")
+	bearerFor := func(email, sub string) string {
+		claims := validIDTokenClaims()
+		claims["email"] = email
+		claims["sub"] = sub
+		claims["hd"] = "example.com"
+		claims["aud"] = "test-client-id.apps.googleusercontent.com"
+		return signIDToken(kp, claims)
+	}
+	projects := func(bearer string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	rec = projects(bearerFor(driver, "google-sub-driver"))
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("external bearer for a driver: expected 403, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("external bearer for a driver: expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
 	if _, err := s.GetUserByEmail(context.Background(), driver); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("expected no user row for the driver after the external bearer, got err=%v", err)
+		t.Errorf("expected no user row for the driver after the external bearer, got err=%v", err)
+	}
+
+	// Control on the same server and path: an authoritative identity that
+	// is not a driver is resolved and served.
+	other := validGmailIdentity()
+	other.Subject = "google-sub-other-route"
+	other.Email = "someone-else@example.com"
+	other.HostedDomain = "example.com"
+	srv.authConfig.GoogleValidator = &fakeGoogleValidator{idTokenResult: other}
+	rec = projects(bearerFor(other.Email, other.Subject))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("external bearer for another identity: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

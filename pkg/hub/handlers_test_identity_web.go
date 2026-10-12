@@ -864,14 +864,6 @@ func (ws *WebServer) redeemClientIP(r *http.Request) string {
 	return host
 }
 
-// redeemRateKey is the per-IP rate-limit key of a redeem request whose
-// client address (redeemClientIP) is clientIP: the IP for IPv4 and the /64
-// prefix for IPv6 (testLoginRateKey), so a client cannot spread requests
-// over the addresses of its /64.
-func redeemRateKey(clientIP string) string {
-	return testLoginRateKey(clientIP)
-}
-
 // redeemOriginAllowed reports whether the request's Origin is absent or the
 // hub's own origin (the configured base URL, or the request host when none
 // is configured), and Sec-Fetch-Site is not cross-site.
@@ -943,7 +935,8 @@ func writeRedeemInvalid(w http.ResponseWriter) {
 // redeems a web-login code for a fresh test identity web session.
 func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Request) {
 	// The client address, read once (behind proxy auth through the hub's
-	// trusted proxies), for the per-IP limit and every audit row.
+	// trusted proxies), for the per-IP limit (IPv4 address or IPv6 /64,
+	// testLoginRateKey) and every audit row.
 	clientIP := ws.redeemClientIP(r)
 	ok, cause := ws.testIdentityWebGate()
 	if !ok {
@@ -954,7 +947,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 			// identity session this browser carries. The rate limit
 			// runs first, so refusals cannot drive unbounded audit
 			// writes.
-			if !ws.testIdentityRedeemLimiter.Allow(redeemRateKey(clientIP)) {
+			if !ws.testIdentityRedeemLimiter.Allow(testLoginRateKey(clientIP)) {
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many redeem requests", nil)
 				return
@@ -979,7 +972,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
-	if !ws.testIdentityRedeemLimiter.Allow(redeemRateKey(clientIP)) {
+	if !ws.testIdentityRedeemLimiter.Allow(testLoginRateKey(clientIP)) {
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many redeem requests", nil)
 		return

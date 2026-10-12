@@ -644,6 +644,41 @@ func TestTIWebIAP_DriverIsNeverAUserOnOtherPaths(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "access token: %s", rec.Body.String())
 		rec = doRequestNoAuth(t, e.srv, http.MethodPost, "/api/v1/auth/refresh", AuthRefreshRequest{RefreshToken: refresh})
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "refresh: %s", rec.Body.String())
+
+		// Control: an ordinary user's tokens work in the same env, so the
+		// 401s above can only come from the transport predicate.
+		ord := &store.User{ID: generateID(), Email: "ordinary-token-user@example.com", Role: "member", Status: "active", Created: time.Now()}
+		require.NoError(t, e.st.CreateUser(ctx, ord))
+		oAccess, oRefresh, _, err := e.srv.userTokenService.GenerateTokenPair(ord.ID, ord.Email, ord.DisplayName, ord.Role, ClientTypeWeb)
+		require.NoError(t, err)
+		req = httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+		req.Header.Set("Authorization", "Bearer "+oAccess)
+		rec = httptest.NewRecorder()
+		e.srv.Handler().ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code, "ordinary access token: %s", rec.Body.String())
+		rec = doRequestNoAuth(t, e.srv, http.MethodPost, "/api/v1/auth/refresh", AuthRefreshRequest{RefreshToken: oRefresh})
+		assert.Equal(t, http.StatusOK, rec.Code, "ordinary refresh: %s", rec.Body.String())
+	})
+
+	t.Run("PAT", func(t *testing.T) {
+		ensureHubMembership(ctx, e.st, pre.ID)
+		projectID := generateID()
+		require.NoError(t, e.st.CreateProject(ctx, &store.Project{ID: projectID, Name: "ws2-driver-pat", Slug: "ws2-driver-pat-" + projectID[:8], CreatedBy: pre.ID}))
+		ownerRD, err := e.st.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		require.NoError(t, err)
+		_, err = e.st.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: ownerRD.ID, PrincipalType: store.RoleBindingPrincipalUser,
+			PrincipalID: pre.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test"})
+		require.NoError(t, err)
+		mintCtx := contextWithCredentialContext(
+			contextWithIdentity(context.Background(), NewAuthenticatedUser(pre.ID, pre.Email, "Driver", "member", string(ClientTypeAPI))),
+			CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
+		key, _, err := e.srv.uatService.CreateToken(mintCtx, pre.ID, "driver-pat", projectID, []string{"agent:read"}, nil)
+		require.NoError(t, err, "a PAT minted before the email was listed")
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		rec := httptest.NewRecorder()
+		e.srv.Handler().ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "driver PAT: %s", rec.Body.String())
 	})
 
 	t.Run("admin-initiated creation", func(t *testing.T) {
@@ -651,11 +686,58 @@ func TestTIWebIAP_DriverIsNeverAUserOnOtherPaths(t *testing.T) {
 		e2 := newTIIAPEnv(t, []string{another})
 		rec := doRequest(t, e2.srv, http.MethodPost, "/api/v1/admin/allow-list", AllowListAddRequest{Email: another})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		assert.Contains(t, rec.Body.String(), "proxy driver principal")
+		assert.Contains(t, rec.Body.String(), proxyDriverPrincipalUserMessage)
 		rec = doRequest(t, e2.srv, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: another})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		assert.Contains(t, rec.Body.String(), "proxy driver principal")
+		assert.Contains(t, rec.Body.String(), proxyDriverPrincipalUserMessage)
+		assert.NotContains(t, rec.Body.String(), "driver", "the answer does not reveal the driver list")
 		tiNoUserRow(t, e2.st, another)
+
+		// Bulk invite and allow-list import: the ordinary email is
+		// invited, the driver is skipped.
+		rec = doRequest(t, e2.srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{Emails: []UserInviteRequest{{Email: another}, {Email: "bulk-ordinary@example.com"}}})
+		assert.True(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "bulk invite: %d %s", rec.Code, rec.Body.String())
+		_, err := e2.st.GetUserByEmail(ctx, "bulk-ordinary@example.com")
+		assert.NoError(t, err, "bulk invite: the ordinary email is invited")
+		tiNoUserRow(t, e2.st, another)
+		rec = doRequest(t, e2.srv, http.MethodPost, "/api/v1/admin/allow-list/import", AllowListBulkAddRequest{Emails: []AllowListAddRequest{{Email: another}, {Email: "import-ordinary@example.com"}}})
+		assert.True(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "import: %d %s", rec.Code, rec.Body.String())
+		_, err = e2.st.GetUserByEmail(ctx, "import-ordinary@example.com")
+		assert.NoError(t, err, "import: the ordinary email is added")
+		tiNoUserRow(t, e2.st, another)
+	})
+
+	t.Run("user provisioning", func(t *testing.T) {
+		const another = "provisioned-browser-driver@example.com"
+		f := newProvisionFixture(t) // provisioning needs a hub without dev auth
+		f.srv.proxyDrivers = newDriverPrincipalSet([]string{another})
+		rec := provisionAs(t, f.srv, f.superAdmin, map[string]interface{}{"email": another})
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, provisionReasonProxyDriverPrincipal, resp.Error.Details["reason"])
+		assert.Equal(t, "email", resp.Error.Details["field"])
+		assert.Equal(t, proxyDriverPrincipalUserMessage, resp.Error.Message)
+		tiNoUserRow(t, f.s, another)
+		rec = provisionAs(t, f.srv, f.superAdmin, map[string]interface{}{"email": "provisioned-ordinary@example.com"})
+		assert.True(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "ordinary email: %d %s", rec.Code, rec.Body.String())
+	})
+
+	t.Run("test-login", func(t *testing.T) {
+		e3 := newTIIAPEnv(t, []string{userDriver}, func(c *WebServerConfig) { c.EnableTestLogin = true })
+		login := func(email string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(`{"email":"`+email+`","role":"member"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", testLoginAuthHeader(t, e3.srv.userTokenService))
+			rec := httptest.NewRecorder()
+			e3.ws.Handler().ServeHTTP(rec, req)
+			return rec
+		}
+		rec := login(userDriver)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		tiNoUserRow(t, e3.st, userDriver)
+		rec = login("test-login-ordinary@example.com")
+		assert.Equal(t, http.StatusOK, rec.Code, "ordinary test-login: %s", rec.Body.String())
 	})
 }
 

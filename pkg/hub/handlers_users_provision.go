@@ -441,6 +441,7 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	}
 	spec.InvitedBy = actor.ID()
 	if s.proxyDrivers.contains(spec.Email) {
+		slog.Warn("user provisioning refused: the email is a proxy driver principal", "reason", provisionReasonProxyDriverPrincipal)
 		(&provisionRequestError{status: http.StatusUnprocessableEntity, code: ErrCodeUnprocessable,
 			message: proxyDriverPrincipalUserMessage,
 			details: map[string]interface{}{"field": "email", "reason": provisionReasonProxyDriverPrincipal}}).write(w)

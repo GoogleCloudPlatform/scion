@@ -79,8 +79,10 @@ const (
 	testIdentityWebNoDriversLogLine = "test-identity web sessions unavailable: proxy auth mode with no driverPrincipals"
 
 	// proxyDriverPrincipalUserMessage is the message of an admin request
-	// that would create a user for a proxy driver principal.
-	proxyDriverPrincipalUserMessage = "this email is a proxy driver principal (auth.proxy.driverPrincipals) and cannot be a hub user"
+	// that would create a user for a proxy driver principal. It is generic
+	// on purpose: the settings API does not reveal the driver list, so the
+	// user-facing answer does not either. The specific reason is logged.
+	proxyDriverPrincipalUserMessage = "this email cannot be a hub user"
 
 	// testIdentityRedeemEmailKeyPrefix starts the redeem rate-limit key of
 	// a verified proxy assertion email, keeping it apart from source IP

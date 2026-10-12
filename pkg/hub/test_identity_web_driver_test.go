@@ -189,9 +189,11 @@ func TestDriverPrincipal_RefusedByGoogleIdentityResolver(t *testing.T) {
 	}
 	assert.Empty(t, userStore.users, "no account is created for a driver")
 
-	u, err := resolver.Resolve(context.Background(), identity("someone@example.com", false), ResolvePolicy{PreAuthorized: true})
+	// The control is an authoritative identity (a gmail address), so only
+	// the driver refusal can tell the two apart.
+	u, err := resolver.Resolve(context.Background(), identity("someone@gmail.com", false), ResolvePolicy{PreAuthorized: true})
 	require.NoError(t, err, "another identity still resolves")
-	assert.Equal(t, "someone@example.com", u.Email)
+	assert.Equal(t, "someone@gmail.com", u.Email)
 }
 
 // The redeem rate-limit key of an email never collides with a source IP key.
