@@ -80,3 +80,15 @@ a fixed expected result per case (boundaries, unbounded, set-but-zero bounds,
 zero evaluation time). `TestEvaluate_StoredBindingWindowMatchesIsBindingActive`
 runs stored bindings through `toCandidateBindings` and the kernel evaluator and
 checks the decision matches `isBindingActive`.
+
+## Follow-up: nil bindings and the store clock
+
+A nil binding is never active: `roleBindingActiveAt` and `bindingActivationOK`
+return false, and `candidateActivationBounds` returns `setZeroBound` for both
+bounds (zero bounds would read as unbounded, which is active).
+`activeRoleBindings` uses `time.Now` when the `RoleStore` has no clock set, and
+still returns a new slice rather than filtering its input in place. Tests:
+`TestRoleBindingActiveAt_NilBindingInactive`,
+`TestActiveRoleBindings_NoClockUsesWallClock`,
+`TestBindingActivationOK_NilBindingInactive`,
+`TestCandidateActivationBounds_NilBindingNeverActive`.
