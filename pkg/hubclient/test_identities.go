@@ -54,6 +54,14 @@ type TestIdentityService interface {
 	// TestIdentityPurgeIncomplete. An identity that is already gone, or one
 	// the caller may not purge, returns an empty report.
 	Purge(ctx context.Context, id string) (*TestIdentityPurgeReport, error)
+
+	// WebLoginCode mints a single-use web-login code for a live test
+	// identity (POST /api/v1/test-identities/{id}/web-login-code). The code
+	// is redeemed at POST /auth/test-identity/redeem for a browser session
+	// as the identity. It is valid for 5 minutes and a new code replaces
+	// any earlier unredeemed one. The hub answers 404 when web sessions are
+	// not available on it.
+	WebLoginCode(ctx context.Context, id string) (*TestIdentityWebLoginCode, error)
 }
 
 // TestIdentityPurgeCounts counts what a purge removed.
@@ -148,6 +156,15 @@ type TestIdentityTokenResponse struct {
 	TokenExpiresAt time.Time    `json:"tokenExpiresAt"`
 }
 
+// TestIdentityWebLoginCode is the response of WebLoginCode. Code is a
+// secret: callers write it only to a private file and never log or print
+// it.
+type TestIdentityWebLoginCode struct {
+	Code      string    `json:"code"`
+	CodeID    string    `json:"codeId"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
 // ListTestIdentitiesOptions are the query options of List.
 type ListTestIdentitiesOptions struct {
 	// Limit caps the number of identities returned; 0 means the hub
@@ -191,6 +208,26 @@ func (s *testIdentityService) Token(ctx context.Context, id string, req *TestIde
 		return nil, err
 	}
 	return apiclient.DecodeRequired[TestIdentityTokenResponse](resp)
+}
+
+// WebLoginCode mints a web-login code. It is sent once, never retried,
+// since each mint replaces the previous code.
+func (s *testIdentityService) WebLoginCode(ctx context.Context, id string) (*TestIdentityWebLoginCode, error) {
+	if id == "" {
+		return nil, fmt.Errorf("test identity id is required")
+	}
+	resp, err := s.c.postNoRetry(ctx, "/api/v1/test-identities/"+url.PathEscape(id)+"/web-login-code", struct{}{}, nil)
+	if err != nil {
+		return nil, err
+	}
+	code, err := apiclient.DecodeRequired[TestIdentityWebLoginCode](resp)
+	if err != nil {
+		return nil, err
+	}
+	if code.Code == "" {
+		return nil, fmt.Errorf("hub returned no web-login code")
+	}
+	return code, nil
 }
 
 // List returns test identities.
