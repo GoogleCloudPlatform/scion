@@ -92,7 +92,7 @@ func InstallHermeticGitSparseCheckout() (restore func()) {
 }
 
 // gitSparseCheckoutCall is one recorded call to a stubbed sparse checkout.
-type gitSparseCheckoutCall struct {
+type GitSparseCheckoutCall struct {
 	Parts    config.GitHubURLParts
 	DestPath string
 	Token    string
@@ -101,14 +101,14 @@ type gitSparseCheckoutCall struct {
 // gitSparseCheckoutStub records calls made to a stubbed sparse checkout.
 type GitSparseCheckoutStub struct {
 	mu    sync.Mutex
-	calls []gitSparseCheckoutCall
+	calls []GitSparseCheckoutCall
 }
 
 // Calls returns a copy of the recorded calls.
-func (s *GitSparseCheckoutStub) Calls() []gitSparseCheckoutCall {
+func (s *GitSparseCheckoutStub) Calls() []GitSparseCheckoutCall {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]gitSparseCheckoutCall(nil), s.calls...)
+	return append([]GitSparseCheckoutCall(nil), s.calls...)
 }
 
 // stubGitSparseCheckout makes pkg/config's sparse checkout runner write files
@@ -123,7 +123,7 @@ func StubGitSparseCheckout(t *testing.T, files map[string]string) *GitSparseChec
 	stub := &GitSparseCheckoutStub{}
 	restore := config.SetGitSparseCheckoutForTest(func(_ context.Context, parts *config.GitHubURLParts, destPath, token string) error {
 		stub.mu.Lock()
-		stub.calls = append(stub.calls, gitSparseCheckoutCall{Parts: *parts, DestPath: destPath, Token: token})
+		stub.calls = append(stub.calls, GitSparseCheckoutCall{Parts: *parts, DestPath: destPath, Token: token})
 		stub.mu.Unlock()
 		for rel, body := range files {
 			p := filepath.Join(destPath, filepath.FromSlash(rel))
