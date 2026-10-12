@@ -26,12 +26,23 @@
  *   the broker pulls agent images from) are both needed.
  * Without a usable runtime the broker still registers; launches then fail
  * at the broker, and the spec skips the checks that need a real launch.
+ *
+ * The journey runs without credentials: agents reach running through the
+ * shipped harnesses' no-auth fallback (drop-to-shell). The credential guard
+ * refuses to start while a harness credential variable is set. The
+ * harness (E2E_HARNESS_CONFIG, default the form's default) decides the
+ * agent image, <registry>/scion-<harness>:latest; the bad image fixture is
+ * a tag that does not exist in that same repo (E2E_BAD_IMAGE_REPO or
+ * E2E_BAD_IMAGE override it). Both refs are printed.
  */
 
 import { execFileSync } from 'node:child_process';
+import * as crypto from 'node:crypto';
 
 import { startHub } from '../harness/hub.js';
+import { assertNoHarnessCredentialEnv } from './credential-guard.js';
 import {
+  FORM_DEFAULT_HARNESS,
   createStateFile,
   hubStateFilePath,
   isRemoteTarget,
@@ -70,11 +81,21 @@ async function globalSetup(): Promise<void> {
     console.info('[setup] Remote target: no local hub.');
     return;
   }
+  assertNoHarnessCredentialEnv();
   const registry = process.env.E2E_IMAGE_REGISTRY || undefined;
   const { capable, reason } = launchCapability(registry);
   const suiteStateFile = createStateFile();
   const hubStateFile = hubStateFilePath(suiteStateFile);
   const imageRegistry = registry ?? PLACEHOLDER_REGISTRY;
+  const harnessConfig = process.env.E2E_HARNESS_CONFIG || FORM_DEFAULT_HARNESS;
+  const agentImage = `${imageRegistry}/scion-${harnessConfig}:latest`;
+  const badRepo = process.env.E2E_BAD_IMAGE_REPO || `scion-${harnessConfig}`;
+  const badImage =
+    process.env.E2E_BAD_IMAGE ||
+    `${imageRegistry}/${badRepo}:e2e-no-such-tag-${crypto.randomBytes(3).toString('hex')}`;
+  console.info(`[setup] Harness config: ${harnessConfig} (no-auth drop-to-shell)`);
+  console.info(`[setup] Agent image (expected): ${agentImage}`);
+  console.info(`[setup] Bad image fixture: ${badImage}`);
 
   const state = await startHub({
     testLogin: false,
@@ -93,6 +114,9 @@ async function globalSetup(): Promise<void> {
     launchCapable: capable,
     launchCapableReason: reason,
     imageRegistry,
+    harnessConfig,
+    agentImage,
+    badImage,
   };
   writeSuiteState(suiteStateFile, suiteState);
   console.info(

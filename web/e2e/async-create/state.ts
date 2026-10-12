@@ -44,7 +44,16 @@ export interface LocalSuiteState {
   launchCapableReason: string;
   /** The image registry the hub's broker uses. */
   imageRegistry: string;
+  /** Harness config the form picks (E2E_HARNESS_CONFIG, else the form's default). */
+  harnessConfig: string;
+  /** The image that harness resolves to on this registry (logged; not enforced). */
+  agentImage: string;
+  /** Image of the bad image fixture template: a tag that does not exist. */
+  badImage: string;
 }
+
+/** The create form's default harness config (agent-create.ts). */
+export const FORM_DEFAULT_HARNESS = 'antigravity';
 
 /** The target the spec runs against. */
 export interface JourneyTarget {
@@ -54,8 +63,10 @@ export interface JourneyTarget {
   hub?: HubState;
   launchCapable: boolean;
   launchCapableReason: string;
-  /** Registry for the bad image fixture (local), when known. */
-  imageRegistry?: string;
+  /** Local only: image of the bad image fixture template. */
+  badImage?: string;
+  /** Local only: the image the harness resolves to (for the evidence). */
+  agentImage?: string;
   /** Remote only: a template, seeded out of band, whose image does not exist. */
   badImageTemplate?: string;
   /** Remote only: an existing project to create agents in (kept). */
@@ -64,7 +75,7 @@ export interface JourneyTarget {
   codeFile?: string;
   /** Remote only: the test identity's email. */
   identityEmail?: string;
-  /** Harness config to pick in the form; the form's default when unset. */
+  /** Harness config to pick in the form; the form's default when unset (remote). */
   harnessConfig?: string;
 }
 

@@ -29,7 +29,9 @@
  *   the launch banner and then the agent reaches running; the Status tab
  *   phases only move forward; the SSE status events carry launch
  *   {state, step, error, endReason} and end with the launch ended without
- *   an error.
+ *   an error. The running path is a FIXTURE: the shipped harness's no-auth
+ *   fallback (drop-to-shell), with no credentials anywhere; the agent's
+ *   appliedConfig must show noAuth and harnessAuth "none".
  * - Failure panel, no container runtime (only where agents cannot start):
  *   the broker fails the launch; the failed-create panel shows a known
  *   code and a message, Delete and Create again, and no Start or Resume.
@@ -174,8 +176,9 @@ function resolveTarget(): JourneyTarget {
     hub,
     launchCapable: suite.launchCapable,
     launchCapableReason: suite.launchCapableReason,
-    imageRegistry: suite.imageRegistry,
-    harnessConfig: process.env.E2E_HARNESS_CONFIG || undefined,
+    badImage: suite.badImage,
+    agentImage: suite.agentImage,
+    harnessConfig: suite.harnessConfig,
   };
 }
 
@@ -232,6 +235,14 @@ async function chooseOption(page: Page, selectSelector: string, text: string): P
   await select.locator('sl-option').filter({ hasText: text }).first().click();
 }
 
+/** Picks an option of a Shoelace select by its value. */
+async function chooseOptionValue(page: Page, selectSelector: string, value: string): Promise<void> {
+  const select = page.locator(SELECTORS.createPage).locator(selectSelector);
+  await select.click();
+  await select.locator(`sl-option[value="${value}"]`).click();
+  await expect(select).toHaveJSProperty('value', value);
+}
+
 /** Fills the create form and submits it; returns what the browser saw. */
 async function submitCreateForm(
   tracked: TrackedPage,
@@ -246,7 +257,7 @@ async function submitCreateForm(
   await expect(form.locator(SELECTORS.createName)).toBeVisible();
   await form.locator(SELECTORS.createName).locator('input').fill(opts.name);
   if (opts.templateName) await chooseOption(page, SELECTORS.createTemplate, opts.templateName);
-  if (t.harnessConfig) await chooseOption(page, SELECTORS.createHarness, t.harnessConfig);
+  if (t.harnessConfig) await chooseOptionValue(page, SELECTORS.createHarness, t.harnessConfig);
   await form.locator(SELECTORS.createTask).locator('textarea').fill(opts.task);
 
   const createResponse = page.waitForResponse(
@@ -366,17 +377,6 @@ async function deleteFromPanel(page: Page, agentId: string): Promise<void> {
     .toBe(true);
 }
 
-/**
- * The image of the bad image fixture: E2E_BAD_IMAGE, else a tag that does
- * not exist in the agent image repo of the hub's registry (so the failure
- * is an image pull error, not an auth or registry error).
- */
-function badImageRef(t: JourneyTarget): string {
-  if (process.env.E2E_BAD_IMAGE) return process.env.E2E_BAD_IMAGE;
-  const repo = process.env.E2E_BAD_IMAGE_REPO || 'scion-claude';
-  return `${t.imageRegistry ?? ''}/${repo}:e2e-no-such-tag-${suffix()}`;
-}
-
 /** The bad image fixture template: seeded on a local hub, given on a remote one. */
 async function badImageTemplate(): Promise<string> {
   const t = target();
@@ -394,7 +394,7 @@ async function badImageTemplate(): Promise<string> {
     [
       'schema_version: "1"',
       'description: "e2e fixture: an image tag that does not exist"',
-      `image: "${badImageRef(t)}"`,
+      `image: "${t.badImage!}"`,
       '',
     ].join('\n')
   );
@@ -439,6 +439,12 @@ test.describe.serial('async agent create from the web form', () => {
       mode: t.mode,
       launchCapable: t.launchCapable,
       launchCapableReason: t.launchCapableReason,
+    };
+    journey.evidence.fixture = {
+      runningPath: 'FIXTURE: no-auth drop-to-shell (no harness credentials)',
+      harnessConfig: t.harnessConfig ?? 'form default',
+      agentImage: t.agentImage,
+      badImage: t.badImage ?? `template ${t.badImageTemplate ?? '(none)'}`,
     };
     console.info(
       `[journey] target ${t.mode}; launch capable: ${String(t.launchCapable)} ` +
@@ -572,6 +578,19 @@ test.describe.serial('async agent create from the web form', () => {
     expect(last.error ?? '', 'no launch error at the end').toBe('');
     expect(['succeeded', 'running_observed']).toContain(last.endReason);
     expectForwardOnly(phaseSequence(sse.map((r) => r.phase ?? '')), 'SSE phases');
+
+    // The running path is the credential-free no-auth fallback: the agent
+    // must have started without credentials.
+    const agentRes = await member().get(`/api/v1/agents/${submit.agentId}`);
+    expect(agentRes.status()).toBe(200);
+    const agentBody = (await agentRes.json()) as {
+      agent?: { appliedConfig?: { noAuth?: boolean; harnessAuth?: string } };
+      appliedConfig?: { noAuth?: boolean; harnessAuth?: string };
+    };
+    const applied = agentBody.appliedConfig ?? agentBody.agent?.appliedConfig;
+    journey.evidence.a2NoAuth = { noAuth: applied?.noAuth, harnessAuth: applied?.harnessAuth };
+    expect(applied?.noAuth, 'appliedConfig.noAuth: started without credentials').toBe(true);
+    expect(applied?.harnessAuth, 'appliedConfig.harnessAuth').toBe('none');
 
     // A1b over the whole launch, and no reload.
     await expectNoStartNoReload(tracked, submit);

@@ -15,16 +15,21 @@ npx playwright test -c e2e/async-create/playwright.config.ts
 ```
 
 Where Docker works, also set `E2E_IMAGE_REGISTRY` (the registry the broker
-pulls agent images from), and `E2E_HARNESS_CONFIG` if the form's default
-harness cannot authenticate there. Without a usable container runtime the
+pulls agent images from). The journey runs without credentials: agents
+reach running through the shipped harness's no-auth fallback
+(drop-to-shell), and the setup refuses to start while any credential
+variable named in `harnesses/*/config.yaml` auth metadata is set.
+`E2E_HARNESS_CONFIG` picks the harness config (default `antigravity`, the
+form's default); its image is `<registry>/scion-<harness>:latest`, and the
+setup log prints it. Without a usable container runtime the
 broker still registers; the checks that need a real launch (A2/A3, A4)
 are skipped with the reason, and the no-runtime failure panel check runs
 instead. `E2E_LAUNCH_CAPABLE=1|0` overrides the detection.
 `E2E_LAUNCH_TIMEOUT_MS` (default 300000) bounds each launch.
 
 The bad image fixture template points at a tag that does not exist in
-the agent image repo of that registry (`E2E_BAD_IMAGE_REPO`, default
-`scion-claude`), so the launch fails on the image pull. `E2E_BAD_IMAGE`
+the same harness's image repo (`E2E_BAD_IMAGE_REPO`, default
+`scion-<harness>`), so the launch fails on the image pull. `E2E_BAD_IMAGE`
 gives the full image reference instead.
 
 Existing non-IAP hub: set `E2E_TARGET_URL`, `E2E_TEST_IDENTITY_CODE_FILE`
