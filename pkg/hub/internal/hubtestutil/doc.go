@@ -26,5 +26,6 @@
 // The declarations were moved verbatim from pkg/hub's *_helpers_test.go files
 // by hack/hubshard/extract export (family
 // hack/hubshard/extract/families/hubtestutil-wave1.txt); only the names that
-// pkg/hub uses were exported. Their doc comments still use the old names.
+// pkg/hub uses were exported. A separate comment-only commit then updated
+// their doc comments to the exported names.
 package hubtestutil

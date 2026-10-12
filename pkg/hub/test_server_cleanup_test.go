@@ -360,7 +360,7 @@ func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
 }
 
 // TestLeakGuardReportsUnclosedStore checks that the package-exit leak guard
-// (leak_guard_helpers_test.go) sees an unclosed store and names it in its
+// (internal/hubtestutil/leak_guard.go) sees an unclosed store and names it in its
 // failure output, and passes again once the store is closed.
 func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 	// Let goroutines from earlier tests (for example the connectionOpener

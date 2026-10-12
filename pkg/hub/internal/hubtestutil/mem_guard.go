@@ -29,7 +29,7 @@ import (
 
 // The pkg/hub test binary has been OOM-killed on shared hosts at over 100 GB
 // of anonymous RSS. A chunked run of every test on main peaks at about 700 MB
-// RSS. startMemGuard makes a runaway fail the run itself, with goroutine
+// RSS. StartMemGuard makes a runaway fail the run itself, with goroutine
 // stacks that name the running test, instead of letting the kernel
 // OOM-killer take down the host.
 //
@@ -42,10 +42,10 @@ const (
 	// memGuardDefaultCap is the process memory at which the binary dumps
 	// diagnostics and exits. It is more than 5x the measured healthy peak.
 	memGuardDefaultCap = 4 << 30
-	// memGuardCapEnv overrides the cap in bytes. Zero disables the guard,
+	// MemGuardCapEnv overrides the cap in bytes. Zero disables the guard,
 	// including its soft limit.
 	MemGuardCapEnv = "SCION_HUB_TEST_MEM_CAP_BYTES"
-	// memGuardIntervalEnv overrides the sampling interval (a
+	// MemGuardIntervalEnv overrides the sampling interval (a
 	// time.ParseDuration string). The regression test uses it.
 	MemGuardIntervalEnv = "SCION_HUB_TEST_MEM_GUARD_INTERVAL"
 
@@ -58,11 +58,11 @@ const (
 	memGuardMetricReleased  = "/memory/classes/heap/released:bytes"
 )
 
-// memGuardRunning records that startMemGuard started a watchdog, so a test
+// MemGuardRunning records that StartMemGuard started a watchdog, so a test
 // can check that the TestMain wiring is in place.
 var MemGuardRunning atomic.Bool
 
-// startMemGuard starts the memory watchdog and returns a function that
+// StartMemGuard starts the memory watchdog and returns a function that
 // stops it.
 func StartMemGuard() (stop func()) {
 	limit := uint64(memGuardDefaultCap)
@@ -102,7 +102,7 @@ func StartMemGuard() (stop func()) {
 	}
 }
 
-// runMemGuard calls sample every interval and calls abort once the usage
+// RunMemGuard calls sample every interval and calls abort once the usage
 // exceeds limit. It returns when done is closed, after abort, or when sample
 // reports that no signal is available, which it reports to w.
 func RunMemGuard(done <-chan struct{}, w io.Writer, interval time.Duration, limit uint64,
@@ -127,7 +127,7 @@ func RunMemGuard(done <-chan struct{}, w io.Writer, interval time.Duration, limi
 	}
 }
 
-// memGuardUsage returns the larger of the process RSS and the Go runtime's
+// MemGuardUsage returns the larger of the process RSS and the Go runtime's
 // mapped memory, and names which one it is. Neither read stops the world.
 func MemGuardUsage() (uint64, string, bool) {
 	var used uint64

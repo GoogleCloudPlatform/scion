@@ -19,7 +19,7 @@ import (
 	"testing"
 )
 
-// openTestMemorySQLite opens a private in-memory SQLite database on the given
+// OpenTestMemorySQLite opens a private in-memory SQLite database on the given
 // registered driver ("sqlite3" for mattn/go-sqlite3, "sqlite" for
 // modernc.org/sqlite) and closes it in t.Cleanup. Callers may still close it
 // themselves; closing twice is harmless.

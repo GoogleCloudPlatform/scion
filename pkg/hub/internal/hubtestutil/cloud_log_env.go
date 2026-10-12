@@ -21,12 +21,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
-// ambientGCPProjectEnvKeys are the env vars logging.ResolveProjectID reads.
+// AmbientGCPProjectEnvKeys are the env vars logging.ResolveProjectID reads.
 // When either is set, New() builds real Cloud Logging clients unless
 // ServerConfig.DisableCloudLogQuery is set (ptone/scion#3188).
 var AmbientGCPProjectEnvKeys = []string{logging.EnvGCPProjectID, logging.EnvGoogleCloudProject}
 
-// clearAmbientGCPProjectEnv unsets the GCP project env vars for the whole
+// ClearAmbientGCPProjectEnv unsets the GCP project env vars for the whole
 // test binary, so servers built by helpers that call New() directly (not
 // through testServer, which sets DisableCloudLogQuery) do not open outbound
 // Cloud Logging connections because of the environment the tests happen to

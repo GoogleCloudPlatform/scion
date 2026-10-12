@@ -20,16 +20,16 @@ import (
 	"github.com/google/uuid"
 )
 
-// tid deterministically maps a human-readable test identifier (e.g. "user-1")
+// TID deterministically maps a human-readable test identifier (e.g. "user-1")
 // to a stable UUID string. The Ent-backed store uses UUID primary keys, so test
-// fixtures cannot use arbitrary strings as IDs; wrapping a readable name in tid
-// preserves test legibility and cross-reference consistency (tid("user-1")
+// fixtures cannot use arbitrary strings as IDs; wrapping a readable name in TID
+// preserves test legibility and cross-reference consistency (TID("user-1")
 // always returns the same UUID) while satisfying the UUID requirement.
 func TID(name string) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String()
 }
 
-// tidSlugSafe returns a lowercase, slug-safe fragment derived from a test
+// TIDSlugSafe returns a lowercase, slug-safe fragment derived from a test
 // name (which may contain "/" from subtests).
 func TIDSlugSafe(name string) string {
 	out := make([]byte, 0, len(name))

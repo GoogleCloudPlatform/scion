@@ -18,8 +18,8 @@ import (
 	"sync/atomic"
 )
 
-// storeFaultSwitch gates a store wrapper's failure injection. Wrappers
-// delegate to the inner store until Arm is called. A nil *storeFaultSwitch
+// StoreFaultSwitch gates a store wrapper's failure injection. Wrappers
+// delegate to the inner store until Arm is called. A nil *StoreFaultSwitch
 // is always active, so a wrapper built without a switch keeps failing
 // unconditionally (the pre-switch behavior).
 type StoreFaultSwitch struct {
