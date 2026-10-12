@@ -46,6 +46,7 @@
 2 admin_signals_test.go
 0 admin_sqlite_helpers_test.go
 3 admin_user_invite_test.go
+5 admin_validate_template_config_test.go
 2 agent_ceiling_gate_test.go
 1 agent_compact_field_parity_test.go
 6 agent_compact_view_test.go
