@@ -27,43 +27,70 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPersistHubFlagEndpoint(t *testing.T) {
-	t.Run("a context hub is not written", func(t *testing.T) {
-		setupContextTest(t)
-		writeGlobalSettings(t, "image_registry: registry.example.test/team\n")
-		saveTestContext(t, ctxTestHub, ctxTestProjectID)
-		resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman)
-		require.Equal(t, targetSourceContext, hubSource)
-		require.Empty(t, hubFlagEndpoint())
-
-		globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
-		before := readFileT(t, filepath.Join(globalDir, "settings.yaml"))
-		require.NoError(t, persistHubFlagEndpoint(globalDir, true))
-		assert.Equal(t, before, readFileT(t, filepath.Join(globalDir, "settings.yaml")))
-	})
-
-	t.Run("the --hub flag is written", func(t *testing.T) {
-		setupContextTest(t)
-		writeGlobalSettings(t, "image_registry: registry.example.test/team\n")
-		saveTestContext(t, ctxTestHub, ctxTestProjectID)
-		hubEndpoint = "https://flag.example.com"
-		resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman)
-		require.Equal(t, "https://flag.example.com", hubFlagEndpoint())
-
-		globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
-		require.NoError(t, persistHubFlagEndpoint(globalDir, true))
-		s, err := config.LoadSettingsFromDir(globalDir)
-		require.NoError(t, err)
-		require.NotNil(t, s.Hub)
-		assert.Equal(t, "https://flag.example.com", s.Hub.Endpoint)
-	})
+// settingsEndpoint returns hub.endpoint from the settings file in dir ("" if
+// none).
+func settingsEndpoint(t *testing.T, dir string) string {
+	t.Helper()
+	s, err := config.LoadSettingsFromDir(dir)
+	require.NoError(t, err)
+	if s.Hub == nil {
+		return ""
+	}
+	return s.Hub.Endpoint
 }
 
-// TestHubEnable_ContextHubNotPersisted: 'scion hub enable' outside any
-// project, on the hub selected with 'scion use', enables hub mode but does
-// not write that hub into the global hub.endpoint.
-func TestHubEnable_ContextHubNotPersisted(t *testing.T) {
-	setupContextTest(t)
+// TestPersistHubFlagEndpoint covers the shared write path of hub enable and
+// hub link: a hub from the current context is never written, at project or
+// global scope, and an explicit --hub still is.
+func TestPersistHubFlagEndpoint(t *testing.T) {
+	for _, scope := range []string{"project", "global"} {
+		t.Run(scope+": a context hub is not written", func(t *testing.T) {
+			setupContextTest(t)
+			writeGlobalSettings(t, "image_registry: registry.example.test/team\n")
+			saveTestContext(t, ctxTestHub, ctxTestProjectID)
+			root := makeDirProject(t, "")
+			globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
+			projectDir := filepath.Join(root, ".scion")
+			resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman)
+			require.Equal(t, targetSourceContext, hubSource)
+			require.Equal(t, ctxTestHub, hubEndpoint)
+			require.Empty(t, hubFlagEndpoint())
+
+			globalBefore := readFileT(t, filepath.Join(globalDir, "settings.yaml"))
+			projectBefore := readFileT(t, filepath.Join(projectDir, "settings.yaml"))
+			target, isGlobal := projectDir, false
+			if scope == "global" {
+				target, isGlobal = globalDir, true
+			}
+			require.NoError(t, persistHubFlagEndpoint(target, isGlobal))
+			assert.Equal(t, globalBefore, readFileT(t, filepath.Join(globalDir, "settings.yaml")), "global settings unchanged")
+			assert.Equal(t, projectBefore, readFileT(t, filepath.Join(projectDir, "settings.yaml")), "project settings unchanged")
+		})
+
+		t.Run(scope+": the --hub flag is written", func(t *testing.T) {
+			setupContextTest(t)
+			writeGlobalSettings(t, "image_registry: registry.example.test/team\n")
+			saveTestContext(t, ctxTestHub, ctxTestProjectID)
+			root := makeDirProject(t, "")
+			globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
+			projectDir := filepath.Join(root, ".scion")
+			hubEndpoint = "https://flag.example.com"
+			resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman)
+			require.Equal(t, "https://flag.example.com", hubFlagEndpoint())
+
+			target, isGlobal := projectDir, false
+			if scope == "global" {
+				target, isGlobal = globalDir, true
+			}
+			require.NoError(t, persistHubFlagEndpoint(target, isGlobal))
+			assert.Equal(t, "https://flag.example.com", settingsEndpoint(t, target))
+		})
+	}
+}
+
+// healthOnlyHub is a fake hub that answers only the health check.
+func healthOnlyHub(t *testing.T) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/healthz" {
@@ -73,17 +100,75 @@ func TestHubEnable_ContextHubNotPersisted(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	writeGlobalSettings(t, "image_registry: registry.example.test/team\n")
-	saveTestContext(t, srv.URL, ctxTestProjectID)
+	return srv
+}
 
-	enable := findCommand(t, "hub", "enable")
-	resolveInvocationTarget(enable, ModeHuman)
-	require.Equal(t, srv.URL, hubEndpoint)
-	_ = captureStdout(t, func() { require.NoError(t, runHubEnable(enable, nil)) })
+// TestHubEnable_EndpointSource: 'scion hub enable' outside any project
+// enables hub mode in the global settings (its own write) but writes the
+// endpoint only when it came from --hub, never from the current context.
+func TestHubEnable_EndpointSource(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		flag bool
+	}{{name: "context hub is not written"}, {name: "--hub is written", flag: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupContextTest(t)
+			srv := healthOnlyHub(t)
+			writeGlobalSettings(t, "image_registry: registry.example.test/team\n")
+			saveTestContext(t, srv.URL, ctxTestProjectID)
+			if tc.flag {
+				hubEndpoint = srv.URL
+			}
 
-	s, err := config.LoadSettingsFromDir(filepath.Join(os.Getenv("HOME"), ".scion"))
-	require.NoError(t, err)
-	if s.Hub != nil {
-		assert.Empty(t, s.Hub.Endpoint, "the context hub must not be written to the global hub.endpoint")
+			enable := findCommand(t, "hub", "enable")
+			resolveInvocationTarget(enable, ModeHuman)
+			require.Equal(t, srv.URL, hubEndpoint)
+			_ = captureStdout(t, func() { require.NoError(t, runHubEnable(enable, nil)) })
+
+			got := settingsEndpoint(t, filepath.Join(os.Getenv("HOME"), ".scion"))
+			if tc.flag {
+				assert.Equal(t, srv.URL, got)
+			} else {
+				assert.Empty(t, got, "the context hub must not be written to the global hub.endpoint")
+			}
+		})
+	}
+}
+
+// TestHubLink_EndpointSource: 'scion --global hub link' on the hub selected
+// with 'scion use' links (writing link identity) but does not pin that hub
+// as hub.endpoint; with --hub the endpoint is still saved.
+func TestHubLink_EndpointSource(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		flag bool
+	}{{name: "context hub is not written"}, {name: "--hub is written", flag: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupContextTest(t)
+			origYes, origOffer := autoConfirm, offerTemplateSyncOnLinkFn
+			t.Cleanup(func() { autoConfirm, offerTemplateSyncOnLinkFn = origYes, origOffer })
+			offerTemplateSyncOnLinkFn = func(_, _, _ string, _ bool) {}
+			writeGlobalSettings(t, "schema_version: \"1\"\n")
+			t.Chdir(os.Getenv("HOME"))
+			globalMode, autoConfirm = true, true
+			t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+			server, registered := fakeLinkHub(t)
+			saveTestContext(t, server.URL, ctxTestProjectID)
+			if tc.flag {
+				hubEndpoint = server.URL
+			}
+
+			resolveInvocationTarget(hubLinkCmd, ModeHuman)
+			require.Equal(t, server.URL, hubEndpoint)
+			_ = captureStdout(t, func() { require.NoError(t, runHubLink(hubLinkCmd, nil)) })
+			require.True(t, *registered, "the project was linked")
+
+			got := settingsEndpoint(t, filepath.Join(os.Getenv("HOME"), ".scion"))
+			if tc.flag {
+				assert.Equal(t, server.URL, got)
+			} else {
+				assert.Empty(t, got, "the context hub must not be pinned as hub.endpoint")
+			}
+		})
 	}
 }
