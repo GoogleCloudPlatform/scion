@@ -230,8 +230,9 @@ func openRecoveryStore(ctx context.Context, cfg *config.GlobalConfig) (*entadapt
 		return nil, fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
 	}
 
-	// Run migrations to ensure schema is up to date
-	if err := cs.Migrate(ctx); err != nil {
+	// Run migrations to ensure schema is up to date, behind the same
+	// PostgreSQL search_path shadow guard as server start.
+	if err := migrateHubStore(ctx, cs, cfg.Database.AllowShadowedSchema); err != nil {
 		_ = entClient.Close()
 		return nil, fmt.Errorf("failed to run database migration: %w", err)
 	}

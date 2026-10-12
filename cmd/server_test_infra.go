@@ -336,8 +336,9 @@ func openTestInfraClient(ctx context.Context, cfg *config.GlobalConfig) (*ent.Cl
 	if err != nil {
 		return nil, err
 	}
-	// The same migration entry point as the server and recover-authz.
-	if err := entadapter.NewCompositeStore(client).Migrate(ctx); err != nil {
+	// The same migration entry point, and PostgreSQL search_path shadow
+	// guard, as the server and recover-authz.
+	if err := migrateHubStore(ctx, entadapter.NewCompositeStore(client), cfg.Database.AllowShadowedSchema); err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("failed to run database migration: %w", err)
 	}
