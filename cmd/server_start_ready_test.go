@@ -503,6 +503,27 @@ func TestServerStatus_ProbesStartedHubPort(t *testing.T) {
 	}
 }
 
+// TestServerStatus_IgnoresSavedArgsWithoutDaemon: the saved start args of an
+// earlier daemon outlive 'server stop', so with no daemon running 'server
+// status' does not probe the ports they name.
+func TestServerStatus_IgnoresSavedArgsWithoutDaemon(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	t.Setenv("SCION_SERVER_MODE", "")
+	brokerPort := newFakeBrokerHealthServer(t, "healthy")
+	args := []string{"server", "start", "--foreground", "--runtime-broker-port=" + strconv.Itoa(brokerPort)}
+	if err := daemon.SaveArgs(serverDaemonComponent, globalDir, args); err != nil {
+		t.Fatal(err)
+	}
+
+	info := runServerStatusJSON(t)
+	if info.DaemonRunning {
+		t.Fatalf("no daemon PID was written, yet the daemon is reported running: %+v", info)
+	}
+	if info.BrokerRunning {
+		t.Errorf("broker found on port %d from the saved args of a daemon that is not running: %+v", brokerPort, info)
+	}
+}
+
 func TestServerStatusBaseURLs(t *testing.T) {
 	saveArgs := func(t *testing.T, globalDir string, extra ...string) {
 		t.Helper()
@@ -548,9 +569,6 @@ func TestServerStatusBaseURLs(t *testing.T) {
 			}
 			if tt.args != nil {
 				saveArgs(t, globalDir, tt.args...)
-			}
-			if tt.running {
-				markServerDaemonRunning(t, globalDir)
 			}
 			web, hub, broker := serverStatusBaseURLs(globalDir, tt.running)
 			if got := [3]string{web, hub, broker}; got != tt.want {
