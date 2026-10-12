@@ -463,11 +463,8 @@ describe('effective-role-provenance uses shared assignment form', () => {
   beforeAll(async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+      vi.fn((url: string | URL | Request) => {
         const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
-        if (path.includes('/api/v1/admin/role-bindings') && init?.method === 'POST') {
-          return Promise.resolve(new Response(JSON.stringify({}), { status: 400 }));
-        }
         if (path.includes('/api/v1/admin/role-bindings')) {
           return Promise.resolve(
             new Response(JSON.stringify({ items: [] }), {
@@ -502,11 +499,8 @@ describe('effective-role-provenance uses shared assignment form', () => {
   async function createEffectiveRoleEl(): Promise<HTMLElement> {
     vi.stubGlobal(
       'fetch',
-      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+      vi.fn((url: string | URL | Request) => {
         const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
-        if (path.includes('/api/v1/admin/role-bindings') && init?.method === 'POST') {
-          return Promise.resolve(new Response(JSON.stringify({}), { status: 400 }));
-        }
         if (path.includes('/api/v1/admin/role-bindings')) {
           return Promise.resolve(
             new Response(JSON.stringify({ items: [] }), {
@@ -547,8 +541,9 @@ describe('effective-role-provenance uses shared assignment form', () => {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const comp = el as any;
-    // Bypass capability gate
+    // Grant the role-binding permissions directly.
     comp._canCreate = true;
+    comp._canRead = true;
     comp._mutationPreChecked = true;
     comp.requestUpdate();
     await comp.updateComplete;
@@ -573,6 +568,7 @@ describe('effective-role-provenance uses shared assignment form', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const comp = el as any;
     comp._canCreate = true;
+    comp._canRead = true;
     comp._mutationPreChecked = true;
     comp.requestUpdate();
     await comp.updateComplete;
@@ -602,6 +598,7 @@ describe('effective-role-provenance uses shared assignment form', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const comp = el as any;
     comp._canCreate = true;
+    comp._canRead = true;
     comp._mutationPreChecked = true;
     comp.requestUpdate();
     await comp.updateComplete;
@@ -671,6 +668,7 @@ describe('effective-role-provenance uses shared assignment form', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const comp = el as any;
     comp._canCreate = true;
+    comp._canRead = true;
     comp._mutationPreChecked = true;
     comp.requestUpdate();
     await comp.updateComplete;
@@ -685,7 +683,7 @@ describe('effective-role-provenance uses shared assignment form', () => {
     await comp.updateComplete;
     await new Promise((r) => setTimeout(r, 50));
 
-    // Clear any earlier POST calls from the capability probing
+    // Count only the POST that createBinding sends.
     postCalls.length = 0;
 
     await comp.createBinding();

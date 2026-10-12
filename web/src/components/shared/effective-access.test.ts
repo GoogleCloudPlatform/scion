@@ -33,10 +33,12 @@
  * Permission Viewer is tracked in .design/effective-permission-viewer.md.
  */
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import type { ScionEffectiveRoleProvenance } from './effective-role-provenance.js';
+import { clearAdminStatus } from '../../client/admin-status.js';
+import { stateManager } from '../../client/state.js';
 
 // Mock confirm-dialog at module level so showConfirm auto-confirms in all tests.
 vi.mock('./confirm-dialog.js', () => ({
@@ -270,15 +272,32 @@ function makeBindings() {
   };
 }
 
+/** Every role-binding permission the panel reads. */
+const ALL_ROLE_BINDING_PERMISSIONS = [
+  'role_binding.read',
+  'role_binding.create',
+  'role_binding.delete',
+];
+
+/** Admin-status response body for a viewer holding `permissions`. */
+function adminStatusResponse(permissions: string[]): Response {
+  return new Response(JSON.stringify({ isAdmin: false, isSuperAdmin: false, permissions }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
 /**
- * Build a fetch handler that responds to API probes and binding loads.
+ * Build a fetch handler that answers the admin-status read and the
+ * role-binding requests, recording every call.
  *
- * @param opts.createStatus  HTTP status for the POST probe (400=allowed, 403=denied)
- * @param opts.deleteStatus  HTTP status for the DELETE probe (404=allowed, 403=denied)
+ * @param opts.permissions  Permission IDs listed by admin-status
+ *   (defaults to all role-binding permissions).
+ * @param opts.adminStatusStatus  HTTP status for admin-status (default 200).
  */
-function makeFetchHandler(opts?: { createStatus?: number; deleteStatus?: number }) {
-  const createStatus = opts?.createStatus ?? 400;
-  const deleteStatus = opts?.deleteStatus ?? 404;
+function makeFetchHandler(opts?: { permissions?: string[]; adminStatusStatus?: number }) {
+  const permissions = opts?.permissions ?? ALL_ROLE_BINDING_PERMISSIONS;
+  const adminStatusStatus = opts?.adminStatusStatus ?? 200;
   const calls: { url: string; method: string; body?: string }[] = [];
 
   const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -287,22 +306,19 @@ function makeFetchHandler(opts?: { createStatus?: number; deleteStatus?: number 
     const body = typeof init?.body === 'string' ? init.body : undefined;
     calls.push({ url: path, method, body });
 
-    // Mutation pre-check: POST probe (create)
-    if (path === '/api/v1/admin/role-bindings' && method === 'POST' && body === '{}') {
-      return Promise.resolve(new Response('{}', { status: createStatus }));
+    if (path === '/api/v1/auth/admin-status') {
+      if (adminStatusStatus !== 200) {
+        return Promise.resolve(new Response('{}', { status: adminStatusStatus }));
+      }
+      return Promise.resolve(adminStatusResponse(permissions));
     }
 
-    // Mutation pre-check: DELETE probe (delete sentinel)
-    if (path.includes('/api/v1/admin/role-bindings/00000000') && method === 'DELETE') {
-      return Promise.resolve(new Response('{}', { status: deleteStatus }));
-    }
-
-    // Actual POST to create a binding
-    if (path === '/api/v1/admin/role-bindings' && method === 'POST' && body !== '{}') {
+    // Create a binding
+    if (path === '/api/v1/admin/role-bindings' && method === 'POST') {
       return Promise.resolve(new Response(JSON.stringify({ id: 'new-binding' }), { status: 201 }));
     }
 
-    // Actual DELETE to remove a binding
+    // Remove a binding
     if (path.includes('/api/v1/admin/role-bindings/b-direct') && method === 'DELETE') {
       return Promise.resolve(new Response('', { status: 204 }));
     }
@@ -337,6 +353,11 @@ function makeFetchHandler(opts?: { createStatus?: number; deleteStatus?: number 
   return { handler, calls };
 }
 
+/** Role-binding list GETs among the recorded calls. */
+function listCalls(calls: { url: string; method: string }[]) {
+  return calls.filter((c) => c.method === 'GET' && c.url.startsWith('/api/v1/admin/role-bindings'));
+}
+
 async function createEl(
   fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>,
   props?: { principalType?: string; principalId?: string }
@@ -354,10 +375,17 @@ async function createEl(
 
 beforeAll(async () => {
   await import('./effective-role-provenance.js');
+  await import('./effective-access-boundary-notice.js');
+});
+
+beforeEach(() => {
+  clearAdminStatus();
+  stateManager.setCurrentUserId('viewer-1');
 });
 
 afterEach(() => {
   document.body.innerHTML = '';
+  clearAdminStatus();
   vi.restoreAllMocks();
 });
 
@@ -437,7 +465,9 @@ describe('Behavioral: role-binding list renders', () => {
 
 describe('Behavioral: create-only permission', () => {
   it('shows Add Binding button but no trash icons', async () => {
-    const { handler } = makeFetchHandler({ createStatus: 400, deleteStatus: 403 });
+    const { handler } = makeFetchHandler({
+      permissions: ['role_binding.read', 'role_binding.create'],
+    });
     const el = await createEl(handler);
 
     // Add Binding button should be visible
@@ -457,7 +487,9 @@ describe('Behavioral: create-only permission', () => {
 
 describe('Behavioral: delete-only permission', () => {
   it('shows trash icon on direct binding but no Add Binding button', async () => {
-    const { handler } = makeFetchHandler({ createStatus: 403, deleteStatus: 404 });
+    const { handler } = makeFetchHandler({
+      permissions: ['role_binding.read', 'role_binding.delete'],
+    });
     const el = await createEl(handler);
 
     // Add Binding button should NOT be visible
@@ -477,7 +509,7 @@ describe('Behavioral: delete-only permission', () => {
 
 describe('Behavioral: neither create nor delete permission', () => {
   it('shows no Add Binding button and no trash icons', async () => {
-    const { handler } = makeFetchHandler({ createStatus: 403, deleteStatus: 403 });
+    const { handler } = makeFetchHandler({ permissions: ['role_binding.read'] });
     const el = await createEl(handler);
 
     const addBtns = queryAll(el, 'sl-button[variant="primary"]');
@@ -495,7 +527,7 @@ describe('Behavioral: neither create nor delete permission', () => {
 
 describe('Behavioral: both create and delete permissions', () => {
   it('shows Add Binding button and trash icon on direct binding', async () => {
-    const { handler } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const { handler } = makeFetchHandler();
     const el = await createEl(handler);
 
     // Add Binding button present
@@ -509,7 +541,7 @@ describe('Behavioral: both create and delete permissions', () => {
   });
 
   it('trash icon is only on direct bindings, not group-derived', async () => {
-    const { handler } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const { handler } = makeFetchHandler();
     const el = await createEl(handler);
 
     // There are 2 role cards total
@@ -526,49 +558,36 @@ describe('Behavioral: both create and delete permissions', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 13. Behavioral: pending probes hide action controls                         */
+/* 13. Behavioral: pending admin status hides controls and the list           */
 /* -------------------------------------------------------------------------- */
 
-describe('Behavioral: pending probes', () => {
-  it('Add Binding button and trash icons are hidden before probes resolve', async () => {
-    const neverResolve = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-      const method = init?.method ?? 'GET';
-      const path = typeof _url === 'string' ? _url : _url instanceof URL ? _url.pathname : _url.url;
-
-      // Binding list responds immediately so we have content
-      if (path.includes('/api/v1/admin/role-bindings') && method === 'GET') {
-        return Promise.resolve(
-          new Response(JSON.stringify(makeBindings()), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          })
-        );
-      }
-
-      // Mutation probes: hang forever
-      if ((method === 'POST' || method === 'DELETE') && path.includes('role-bindings')) {
+describe('Behavioral: pending admin status', () => {
+  it('hides Add Binding and trash icons and sends no list request until admin status resolves', async () => {
+    const calls: { url: string; method: string }[] = [];
+    const pendingAdminStatus = (
+      url: string | URL | Request,
+      init?: RequestInit
+    ): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      calls.push({ url: path, method: init?.method ?? 'GET' });
+      if (path === '/api/v1/auth/admin-status') {
         return new Promise(() => {}); // never resolves
       }
-
-      return Promise.resolve(new Response('{}', { status: 200 }));
+      return Promise.resolve(
+        new Response(JSON.stringify(makeBindings()), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
     };
 
-    vi.stubGlobal('fetch', vi.fn(neverResolve));
-    const el = document.createElement('scion-effective-role-provenance') as InstanceType<
-      typeof ScionEffectiveRoleProvenance
-    >;
-    el.principalType = 'user';
-    el.principalId = 'user-1';
-    document.body.appendChild(el);
-    await tick(el, 300);
+    const el = await createEl(pendingAdminStatus);
 
-    // While probes are pending, neither Add Binding nor trash should render
     const addBtns = queryAll(el, 'sl-button[variant="primary"]');
     const addBtn = addBtns.find((b) => b.textContent?.trim().includes('Add Binding'));
     expect(addBtn).toBeUndefined();
-
-    const trashBtns = queryAll(el, 'sl-icon-button[name="trash"]');
-    expect(trashBtns.length).toBe(0);
+    expect(queryAll(el, 'sl-icon-button[name="trash"]').length).toBe(0);
+    expect(listCalls(calls).length).toBe(0);
   });
 });
 
@@ -601,7 +620,7 @@ describe('Behavioral: direct vs inherited binding provenance', () => {
 
 describe('Behavioral: delete confirmation and request', () => {
   it('clicking trash triggers DELETE request for direct binding', async () => {
-    const { handler, calls } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const { handler, calls } = makeFetchHandler();
     const el = await createEl(handler);
 
     const trashBtn = query(el, 'sl-icon-button[name="trash"]') as HTMLElement;
@@ -614,7 +633,7 @@ describe('Behavioral: delete confirmation and request', () => {
   });
 
   it('sends DELETE and triggers refresh on success', async () => {
-    const { handler, calls } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const { handler, calls } = makeFetchHandler();
     const el = await createEl(handler);
     const initialGetCalls = calls.filter(
       (c) => c.method === 'GET' && c.url.includes('role-bindings')
@@ -642,7 +661,7 @@ describe('Behavioral: delete confirmation and request', () => {
 
 describe('Behavioral: create binding request payload', () => {
   it('Add Binding dialog shows locked principal with lock icon', async () => {
-    const { handler } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const { handler } = makeFetchHandler();
     const el = await createEl(handler);
 
     const addBtns = queryAll(el, 'sl-button[variant="primary"]');
@@ -695,11 +714,8 @@ describe('Behavioral: error feedback on failed mutation', () => {
           })
         );
       }
-      if (path === '/api/v1/admin/role-bindings' && method === 'POST') {
-        return Promise.resolve(new Response('{}', { status: 400 }));
-      }
-      if (path.includes('00000000') && method === 'DELETE') {
-        return Promise.resolve(new Response('{}', { status: 404 }));
+      if (path === '/api/v1/auth/admin-status') {
+        return Promise.resolve(adminStatusResponse(ALL_ROLE_BINDING_PERMISSIONS));
       }
       return Promise.resolve(new Response('{}', { status: 200 }));
     };
@@ -721,7 +737,7 @@ describe('Behavioral: error feedback on failed mutation', () => {
 
 describe('Behavioral: successful refresh after mutation', () => {
   it('refreshes binding list after successful delete', async () => {
-    const { handler, calls } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
+    const { handler, calls } = makeFetchHandler();
     const el = await createEl(handler);
 
     const initialGetCalls = calls.filter(
@@ -740,25 +756,39 @@ describe('Behavioral: successful refresh after mutation', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 19. Behavioral: independent probe results                                   */
+/* 19. Behavioral: no write request while rendering                           */
 /* -------------------------------------------------------------------------- */
 
-describe('Behavioral: independent create/delete probes', () => {
-  it('probes POST and DELETE endpoints separately', async () => {
-    const { handler, calls } = makeFetchHandler({ createStatus: 400, deleteStatus: 404 });
-    await createEl(handler);
+describe('Behavioral: no write request while rendering', () => {
+  it('sends no POST or DELETE while rendering', async () => {
+    for (const permissions of [ALL_ROLE_BINDING_PERMISSIONS, ['role_binding.read'], []]) {
+      clearAdminStatus();
+      const { handler, calls } = makeFetchHandler({ permissions });
+      await createEl(handler);
 
-    const postProbe = calls.find(
-      (c) => c.method === 'POST' && c.url === '/api/v1/admin/role-bindings' && c.body === '{}'
-    );
-    expect(postProbe).toBeTruthy();
-
-    const deleteProbe = calls.find((c) => c.method === 'DELETE' && c.url.includes('00000000'));
-    expect(deleteProbe).toBeTruthy();
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls.filter((c) => c.method !== 'GET')).toEqual([]);
+      document.body.innerHTML = '';
+    }
   });
 
-  it('sets _canCreate=true and _canDelete=false when only POST succeeds', async () => {
-    const { handler } = makeFetchHandler({ createStatus: 400, deleteStatus: 403 });
+  it('reads permissions from admin status', async () => {
+    const { handler, calls } = makeFetchHandler();
+    await createEl(handler);
+
+    expect(calls.filter((c) => c.url === '/api/v1/auth/admin-status').length).toBe(1);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 20. Behavioral: buttons follow the admin-status permissions array          */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: buttons follow the permissions array', () => {
+  it('shows Add Binding with role_binding.create and no trash without role_binding.delete', async () => {
+    const { handler } = makeFetchHandler({
+      permissions: ['role_binding.read', 'role_binding.create'],
+    });
     const el = await createEl(handler);
 
     const addBtns = queryAll(el, 'sl-button[variant="primary"]');
@@ -768,8 +798,10 @@ describe('Behavioral: independent create/delete probes', () => {
     expect(queryAll(el, 'sl-icon-button[name="trash"]').length).toBe(0);
   });
 
-  it('sets _canCreate=false and _canDelete=true when only DELETE succeeds', async () => {
-    const { handler } = makeFetchHandler({ createStatus: 403, deleteStatus: 404 });
+  it('shows trash with role_binding.delete and no Add Binding without role_binding.create', async () => {
+    const { handler } = makeFetchHandler({
+      permissions: ['role_binding.read', 'role_binding.delete'],
+    });
     const el = await createEl(handler);
 
     const addBtns = queryAll(el, 'sl-button[variant="primary"]');
@@ -777,5 +809,114 @@ describe('Behavioral: independent create/delete probes', () => {
     expect(addBtn).toBeUndefined();
 
     expect(queryAll(el, 'sl-icon-button[name="trash"]').length).toBe(1);
+  });
+
+  it('shows both controls for a super-admin', async () => {
+    const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (path === '/api/v1/auth/admin-status') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ isAdmin: true, isSuperAdmin: true, permissions: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return makeFetchHandler().handler(url, init);
+    };
+    const el = await createEl(handler);
+
+    const addBtns = queryAll(el, 'sl-button[variant="primary"]');
+    expect(addBtns.find((b) => b.textContent?.trim().includes('Add Binding'))).toBeTruthy();
+    expect(queryAll(el, 'sl-icon-button[name="trash"]').length).toBe(1);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 21. Behavioral: role-binding list follows role_binding.read                */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: role-binding list follows role_binding.read', () => {
+  it('skips the role-binding list and renders nothing without role_binding.read', async () => {
+    const { handler, calls } = makeFetchHandler({
+      permissions: ['role_binding.create', 'role_binding.delete'],
+    });
+    const el = await createEl(handler);
+
+    expect(listCalls(calls).length).toBe(0);
+    expect(queryAll(el, '.role-card').length).toBe(0);
+    expect(query(el, '.error-state')).toBeNull();
+    expect(query(el, 'sl-button')).toBeNull();
+  });
+
+  it('loads the role-binding list with role_binding.read', async () => {
+    const { handler, calls } = makeFetchHandler({ permissions: ['role_binding.read'] });
+    const el = await createEl(handler);
+
+    expect(listCalls(calls).length).toBe(1);
+    expect(queryAll(el, '.role-card').length).toBe(2);
+  });
+
+  it('skips the role-binding list when admin status fails', async () => {
+    const { handler, calls } = makeFetchHandler({ adminStatusStatus: 500 });
+    const el = await createEl(handler);
+
+    expect(listCalls(calls).length).toBe(0);
+    expect(queryAll(el, '.role-card').length).toBe(0);
+    expect(query(el, 'sl-button')).toBeNull();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 22. Behavioral: boundary notice follows hub.audit.read                     */
+/* -------------------------------------------------------------------------- */
+
+describe('Behavioral: boundary notice follows hub.audit.read', () => {
+  async function createNotice(permissions: string[]) {
+    const calls: { url: string; method: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        calls.push({ url: path, method: init?.method ?? 'GET' });
+        if (path === '/api/v1/auth/admin-status') {
+          return Promise.resolve(adminStatusResponse(permissions));
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ count: 2 }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+    const el = document.createElement('scion-effective-access-boundary-notice') as HTMLElement & {
+      contextType: string;
+      contextId: string;
+      updateComplete: Promise<boolean>;
+    };
+    el.contextType = 'agent';
+    el.contextId = 'agent-1';
+    document.body.appendChild(el);
+    await tick(el, 300);
+    const effectiveAccessCalls = calls.filter((c) =>
+      c.url.startsWith('/api/v1/admin/effective-access')
+    );
+    return { el, calls, effectiveAccessCalls };
+  }
+
+  it('skips the effective-access fetch without hub.audit.read', async () => {
+    const { el, calls, effectiveAccessCalls } = await createNotice(ALL_ROLE_BINDING_PERMISSIONS);
+
+    expect(effectiveAccessCalls.length).toBe(0);
+    expect(calls.filter((c) => c.method !== 'GET')).toEqual([]);
+    expect(query(el, '.notice')).toBeNull();
+  });
+
+  it('fetches effective access with hub.audit.read alone', async () => {
+    const { el, effectiveAccessCalls } = await createNotice(['hub.audit.read']);
+
+    expect(effectiveAccessCalls.length).toBe(1);
+    expect(query(el, '.notice')?.textContent).toContain('2 access');
   });
 });

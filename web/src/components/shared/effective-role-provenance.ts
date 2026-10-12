@@ -36,6 +36,9 @@ import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
+import { stateManager } from '../../client/state.js';
+import { hasAnyPermission } from '../../lib/admin-permissions.js';
 import { showConfirm } from './confirm-dialog.js';
 import { getLifecycleStatus } from './role-binding-utils.js';
 
@@ -107,7 +110,9 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   @state() private _canCreate = false;
   /** Whether the current user can delete role bindings (role_binding.delete). */
   @state() private _canDelete = false;
-  /** Whether capability pre-check for create/delete has resolved. */
+  /** Whether the current user can list role bindings (role_binding.read). */
+  @state() private _canRead = false;
+  /** Whether the role-binding permissions have been read from admin status. */
   @state() private _mutationPreChecked = false;
   /** Whether a mutation (delete/create) is currently in progress. */
   @state() private _mutationInProgress = false;
@@ -454,17 +459,19 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     this.error = null;
     this._mutationFeedback = null;
 
-    // Pre-click capability gate: check create/delete authorization concurrently
-    // with binding load so action buttons only appear for authorized users.
-    void this.preCheckMutationAccess();
-
     try {
+      if (!this._mutationPreChecked) {
+        await this.loadRoleBindingAccess();
+      }
+      // The list route checks role_binding.read; without it, send nothing
+      // and render nothing.
+      if (!this._canRead) return;
+
       // Fetch role bindings for this principal (direct and group-derived)
       const url = `/api/v1/admin/role-bindings?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(this.principalId)}&includeGroupDerived=true`;
       // suppressAccessDeniedToast: this component renders the failure inline
       // ("Insufficient permissions" with a Retry button), so a global toast is
-      // a duplicate notification — the same RC-C rationale as the mutation
-      // probes below.
+      // a duplicate notification.
       const res = await apiFetch(url, { suppressAccessDeniedToast: true });
 
       if (!res.ok) {
@@ -502,68 +509,22 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   }
 
   /**
-   * Pre-check whether the current user can create and/or delete role bindings.
+   * Read the current user's role-binding permissions from the shared admin
+   * status (GET /api/v1/auth/admin-status), which lists the user's
+   * system-scoped permission IDs. Each value matches the permission its
+   * server route checks: role_binding.read for the list, and
+   * role_binding.create and role_binding.delete (independent permissions
+   * that custom roles can grant separately) for the action buttons.
    *
-   * role_binding.create and role_binding.delete are independent permissions
-   * in the backend (permissions/registry.go). Custom roles can grant one
-   * without the other, so each action is probed separately:
-   *
-   *   - POST /api/v1/admin/role-bindings with empty body:
-   *       400 → authorized (role_binding.create); 403 → not.
-   *   - DELETE /api/v1/admin/role-bindings/00000000-0000-0000-0000-000000000000:
-   *       404 → authorized (role_binding.delete, binding not found);
-   *       403 → not.
-   *
-   * Both probes run concurrently. Buttons remain hidden until both resolve
-   * (_mutationPreChecked). Toast noise from 403 responses is suppressed
-   * since these are expected authorization probes.
+   * A missing or failed admin status grants nothing. This only decides
+   * what the panel shows and fetches; the server authorizes every request.
    */
-  private async preCheckMutationAccess(): Promise<void> {
-    if (this._mutationPreChecked) return;
-
-    const probeCreate = async (): Promise<boolean> => {
-      try {
-        const res = await apiFetch('/api/v1/admin/role-bindings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
-          suppressAccessDeniedToast: true,
-        });
-        // 400 = authorized but invalid body; 403 = not authorized.
-        return res.status !== 403;
-      } catch {
-        // Network error — default to visible, server will reject if needed.
-        return true;
-      }
-    };
-
-    const probeDelete = async (): Promise<boolean> => {
-      try {
-        // Probe with a well-formed but nonexistent UUID. The backend checks
-        // role_binding.delete authorization before looking up the binding, so
-        // 404 means authorized (binding not found) and 403 means not.
-        const sentinelId = '00000000-0000-0000-0000-000000000000';
-        const res = await apiFetch(`/api/v1/admin/role-bindings/${sentinelId}`, {
-          method: 'DELETE',
-          suppressAccessDeniedToast: true,
-        });
-        return res.status !== 403;
-      } catch {
-        return true;
-      }
-    };
-
-    try {
-      const [canCreate, canDelete] = await Promise.all([probeCreate(), probeDelete()]);
-      this._canCreate = canCreate;
-      this._canDelete = canDelete;
-    } catch {
-      // Fallback: show both, server is authoritative.
-      this._canCreate = true;
-      this._canDelete = true;
-    } finally {
-      this._mutationPreChecked = true;
-    }
+  private async loadRoleBindingAccess(): Promise<void> {
+    const status = await loadAdminStatus(stateManager.getCurrentUserId());
+    this._canRead = hasAnyPermission(status, ['role_binding.read']);
+    this._canCreate = hasAnyPermission(status, ['role_binding.create']);
+    this._canDelete = hasAnyPermission(status, ['role_binding.delete']);
+    this._mutationPreChecked = true;
   }
 
   // ---------------------------------------------------------------------------
@@ -685,6 +646,8 @@ export class ScionEffectiveRoleProvenance extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
+    // Without role_binding.read the list is never fetched; show nothing.
+    if (this._mutationPreChecked && !this._canRead) return nothing;
     if (this.compact) {
       return this.renderCompact();
     }
