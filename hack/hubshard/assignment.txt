@@ -852,6 +852,7 @@
 5 hub_agent_defaults_test.go
 5 hub_agent_defaults_wire_test.go
 3 hub_config_token_test.go
+5 hub_endpoints_server_test.go
 3 hub_gcp_identity_default_settings_test.go
 4 hub_gcp_identity_default_test.go
 1 hub_instance_prune_test.go
@@ -1105,6 +1106,7 @@
 1 pty_preflight_test.go
 6 pty_session_log_test.go
 0 pty_sqlite_helpers_test.go
+5 public_url_settings_test.go
 5 publish_guard_test.go
 4 publish_site_enumeration_test.go
 0 publish_sqlite_helpers_test.go
