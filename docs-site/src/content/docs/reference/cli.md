@@ -1347,9 +1347,12 @@ available inside agent containers.
   or for Kubernetes and Cloud Run the runtime's own diagnostics (cluster connectivity, namespace
   access, RBAC permissions, CSI drivers).
 
-**Exit status:** non-zero when the Hub is unreachable or `/healthz` reports it unhealthy, when the
-health summary status is `unhealthy`, or when a runtime diagnostic check fails. A `degraded`
-summary is a warning and exits zero, as does a summary you are not allowed to read.
+**Exit status:** doctor reports check results and does not turn them into an exit status. It
+exits zero whenever it ran, including when the Hub is unreachable or `/healthz` reports it
+unhealthy, when the health summary status is `unhealthy`, or when a runtime diagnostic check
+fails; read the results from the text output or from `status` in the JSON output. It exits
+non-zero only when the command itself fails, for example on an invalid flag or when it cannot
+write its output.
 
 **JSON output:** `--format json` prints a single object for every runtime:
 
@@ -1365,9 +1368,9 @@ summary is a warning and exits zero, as does a summary you are not allowed to re
 }
 ```
 
-`status` is `fail` when the command exits non-zero, `warn` when any check warned or failed, and
-`pass` otherwise. `healthSummary` is the Hub's summary response unchanged, and is omitted when it
-could not be read. `runtime` is omitted when no project was found.
+`status` is `fail` when any check failed, `warn` when any check warned, and `pass` otherwise. It
+does not affect the exit status. `healthSummary` is the Hub's summary response unchanged, and is
+omitted when it could not be read. `runtime` is omitted when no project was found.
 
 **Platform Health for an assistant agent:** an assistant agent that a hub admin has authorized
 to monitor the platform runs `scion doctor` from an environment a person owns, not from inside an

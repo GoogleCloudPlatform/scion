@@ -82,13 +82,17 @@ a hub-boundary token and use it with no stored login (see "scion hub token
     --scopes hub_health:read,broker:read,agent:list --expires 30d
   SCION_HUB_TOKEN=scion_pat_... scion doctor --format json
 
-Exit status: non-zero when the Hub is unreachable or reports unhealthy
-(/healthz), when the platform health summary is unhealthy, or when a
-runtime diagnostic check fails. A degraded summary is a warning and exits
-zero.
+Exit status: doctor reports check results and does not turn them into an
+exit status. It exits zero whenever it ran, even when the Hub is
+unreachable, the platform health summary is unhealthy or a runtime
+diagnostic check fails; read the results from the output. It exits
+non-zero only when the command itself fails, for example on an invalid
+flag or when it cannot write its output.
 
---format json prints one JSON object and nothing else on stdout. The raw
-health summary is under "healthSummary" when it was readable.`,
+--format json prints one JSON object and nothing else on stdout. Its
+"status" is fail when any check failed, warn when any check warned, and
+pass otherwise. The raw health summary is under "healthSummary" when it
+was readable.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDoctor()
 	},
@@ -120,15 +124,12 @@ type doctorReport struct {
 	Runtime string
 	// Checks are the runtime checks.
 	Checks []scionruntime.CheckResult
-
-	// failures are the reasons the command exits non-zero.
-	failures []string
 }
 
 // doctorJSON is the --format json document.
 type doctorJSON struct {
-	// Status is fail when the command exits non-zero, else warn when any
-	// check warned or failed, else pass.
+	// Status is fail when any check failed, else warn when any check
+	// warned, else pass. It does not affect the exit status.
 	Status         string                     `json:"status"`
 	General        []scionruntime.CheckResult `json:"general"`
 	HubChecks      []scionruntime.CheckResult `json:"hubChecks"`
@@ -189,21 +190,12 @@ func (r *doctorReport) add(section *[]scionruntime.CheckResult, c scionruntime.C
 	}
 }
 
-// fail records a reason for a non-zero exit.
-func (r *doctorReport) fail(reason string) {
-	r.failures = append(r.failures, reason)
-}
-
-// finish writes the JSON document in JSON mode and returns the error that
-// sets the exit status, if any. In JSON mode the error is marked as
-// already reported, so nothing more is printed.
+// finish writes the JSON document in JSON mode. Check results never make
+// it return an error: the only errors are failures to produce the output
+// itself.
 func (r *doctorReport) finish() error {
-	var err error
-	if len(r.failures) > 0 {
-		err = fmt.Errorf("doctor found problems: %s", strings.Join(r.failures, "; "))
-	}
 	if !r.json {
-		return err
+		return nil
 	}
 	doc := doctorJSON{
 		Status:         r.overallStatus(),
@@ -221,26 +213,24 @@ func (r *doctorReport) finish() error {
 	if _, wErr := fmt.Fprintln(r.stdout, string(data)); wErr != nil {
 		return wErr
 	}
-	if err != nil {
-		return &jsonReportedError{msg: err.Error()}
-	}
 	return nil
 }
 
-// overallStatus is fail when the command exits non-zero, warn when any
-// check warned or failed, and pass otherwise.
+// overallStatus is fail when any check failed, warn when any check warned,
+// and pass otherwise.
 func (r *doctorReport) overallStatus() string {
-	if len(r.failures) > 0 {
-		return "fail"
-	}
+	status := "pass"
 	for _, section := range [][]scionruntime.CheckResult{r.General, r.HubChecks, r.PlatformHealth, r.Checks} {
 		for _, c := range section {
-			if c.Status == "warn" || c.Status == "fail" {
-				return "warn"
+			switch c.Status {
+			case "fail":
+				return "fail"
+			case "warn":
+				status = "warn"
 			}
 		}
 	}
-	return "pass"
+	return status
 }
 
 func nonNilChecks(c []scionruntime.CheckResult) []scionruntime.CheckResult {
@@ -328,9 +318,6 @@ func (r *doctorReport) hubChecks(hubEP string, client hubclient.Client, linkedPr
 	// D1: Hub Connectivity
 	d1, hubAnswered := probeDoctorHubConnectivity(hubEP, client)
 	r.add(&r.HubChecks, d1)
-	if d1.Status == "fail" {
-		r.fail("hub connectivity check failed")
-	}
 	hubConnected := d1.Status == "pass" || d1.Status == "warn"
 
 	// D2: Hub Authentication
@@ -357,7 +344,7 @@ func (r *doctorReport) hubChecks(hubEP string, client hubclient.Client, linkedPr
 }
 
 // platformHealthSection reports the Platform Health lines and keeps the
-// raw summary for JSON output. An unhealthy summary sets a non-zero exit.
+// raw summary for JSON output.
 func (r *doctorReport) platformHealthSection(ph doctorPlatformHealth) {
 	checks := ph.checks
 	if ph.summary != nil {
@@ -369,9 +356,6 @@ func (r *doctorReport) platformHealthSection(ph doctorPlatformHealth) {
 	}
 	if ph.summary != nil {
 		r.HealthSummary = ph.summary.Raw
-		if ph.summary.Status == healthSummaryUnhealthy {
-			r.fail("platform health is unhealthy")
-		}
 	}
 }
 
@@ -462,7 +446,6 @@ func (r *doctorReport) runtimeSection(rtName string, diag scionruntime.Diagnosab
 	switch {
 	case fails > 0:
 		r.text(fmt.Sprintf("%s%d checks passed, %d warnings, %d failures%s\n", util.Red, passes, warns, fails, util.Reset))
-		r.fail(fmt.Sprintf("%d diagnostic check(s) failed", fails))
 	case warns > 0:
 		r.text(fmt.Sprintf("%s%d checks passed, %d warnings%s\n", util.Yellow, passes, warns, util.Reset))
 	default:

@@ -199,8 +199,11 @@ func singleLineHealthSummary(s *hubclient.HealthSummary) (*hubclient.HealthSumma
 	if err != nil {
 		return nil, err
 	}
-	cp.Raw = s.Raw
+	// The clone has no Raw (it is not part of the JSON form). Attach it
+	// only after the walk, so reflection never visits the raw body byte by
+	// byte; it holds no strings to clean.
 	singleLineStrings(reflect.ValueOf(cp).Elem())
+	cp.Raw = s.Raw
 	return cp, nil
 }
 

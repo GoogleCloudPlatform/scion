@@ -104,3 +104,38 @@ func TestHealthSummary_ErrorStatusesAreAPIErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestHealthSummary_NullOrEmptyBodyIsAnError(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "null", status: http.StatusOK, body: "null"},
+		{name: "null with whitespace", status: http.StatusOK, body: " null\n"},
+		{name: "empty", status: http.StatusOK, body: ""},
+		{name: "no content", status: http.StatusNoContent, body: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := c.HealthSummary(context.Background())
+			if err == nil {
+				t.Fatalf("err = nil, summary = %+v; want an error", got)
+			}
+			if got != nil {
+				t.Errorf("summary = %+v, want nil", got)
+			}
+		})
+	}
+}

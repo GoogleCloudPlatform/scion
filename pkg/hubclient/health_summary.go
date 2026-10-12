@@ -15,8 +15,10 @@
 package hubclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -300,6 +302,10 @@ func (c *client) HealthSummary(ctx context.Context) (*HealthSummary, error) {
 	raw, err := apiclient.DecodeRequired[json.RawMessage](resp)
 	if err != nil {
 		return nil, err
+	}
+	// A JSON null body decodes without error but carries no summary.
+	if raw == nil || bytes.Equal(bytes.TrimSpace(*raw), []byte("null")) {
+		return nil, errors.New("empty or null health summary response")
 	}
 	var summary HealthSummary
 	if err := json.Unmarshal(*raw, &summary); err != nil {

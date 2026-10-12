@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -280,20 +281,21 @@ func TestDoctorHubChecks_SummaryReplacesListChecks(t *testing.T) {
 	assert.Less(t, strings.Index(out, `gpu-1" is offline`), strings.Index(out, "fixer has crashed"))
 }
 
-func TestDoctorExit_UnhealthySummaryFails(t *testing.T) {
+func TestDoctorExit_UnhealthySummaryExitsZero(t *testing.T) {
 	s := degradedSummary()
 	s.Status = healthSummaryUnhealthy
 	f := &fakeDoctorHub{summaryBody: summaryJSON(t, s)}
 	srv := f.serve(t)
 
-	r := &doctorReport{stdout: io.Discard}
+	var buf bytes.Buffer
+	r := &doctorReport{stdout: &buf}
 	r.platformHealthSection(r.hubChecks(srv.URL, newDoctorTestClient(t, srv.URL), ""))
-	err := r.finish()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "platform health is unhealthy")
+	assert.NoError(t, r.finish(), "check results do not set the exit status")
+	assert.Equal(t, "fail", r.overallStatus())
+	assert.Contains(t, buf.String(), "✗ health-summary: Platform is unhealthy")
 }
 
-func TestDoctorExit_HubConnectivityFailureFails(t *testing.T) {
+func TestDoctorExit_HubConnectivityFailureExitsZero(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	url := srv.URL
 	srv.Close() // nothing listens: D1 fails
@@ -303,9 +305,67 @@ func TestDoctorExit_HubConnectivityFailureFails(t *testing.T) {
 	assert.Equal(t, "fail", r.HubChecks[0].Status)
 	assert.Equal(t, "skip", r.PlatformHealth[0].Status)
 	assert.Equal(t, "Skipped (Hub connectivity check failed)", r.PlatformHealth[0].Message)
+	assert.NoError(t, r.finish(), "check results do not set the exit status")
+	assert.Equal(t, "fail", r.overallStatus())
+}
+
+func TestDoctorJSON_HubConnectivityFailureExitsZero(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close() // nothing listens: D1 fails
+
+	var buf bytes.Buffer
+	r := &doctorReport{stdout: &buf, json: true}
+	r.platformHealthSection(r.hubChecks(url, newDoctorTestClient(t, url), ""))
+	require.NoError(t, r.finish(), "check results do not set the exit status")
+
+	var doc struct {
+		Status    string                     `json:"status"`
+		HubChecks []scionruntime.CheckResult `json:"hubChecks"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &doc), "stdout: %s", buf.String())
+	assert.Equal(t, "fail", doc.Status)
+	assert.Equal(t, "fail", findCheck(t, doc.HubChecks, "hub-connectivity").Status)
+}
+
+// failingWriter fails every write.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+func TestDoctorJSON_OutputWriteFailureExitsNonZero(t *testing.T) {
+	r := &doctorReport{stdout: failingWriter{}, json: true}
+	r.add(&r.General, scionruntime.CheckResult{Name: "git", Status: "pass", Message: "ok"})
 	err := r.finish()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "hub connectivity check failed")
+	require.Error(t, err, "failing to write the output is a failure of the command itself")
+	assert.Contains(t, err.Error(), "write failed")
+}
+
+func TestDoctorJSON_StatusFollowsChecks(t *testing.T) {
+	tests := []struct {
+		name     string
+		statuses []string
+		want     string
+	}{
+		{name: "all pass", statuses: []string{"pass", "info", "skip"}, want: "pass"},
+		{name: "a warning", statuses: []string{"pass", "warn", "skip"}, want: "warn"},
+		{name: "a failure", statuses: []string{"warn", "fail", "pass"}, want: "fail"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			r := &doctorReport{stdout: &buf, json: true}
+			for i, st := range tt.statuses {
+				r.add(&r.General, scionruntime.CheckResult{Name: fmt.Sprintf("c%d", i), Status: st, Message: "m"})
+			}
+			require.NoError(t, r.finish())
+			var doc struct {
+				Status string `json:"status"`
+			}
+			require.NoError(t, json.Unmarshal(buf.Bytes(), &doc))
+			assert.Equal(t, tt.want, doc.Status)
+		})
+	}
 }
 
 // fallbackAgentsBody lists one agent per case the D4 fallback must handle.
@@ -402,7 +462,8 @@ func TestDoctorJSON_CleanForNonDiagnosableRuntime(t *testing.T) {
 	assert.ErrorIs(t, dec.Decode(&extra), io.EOF, "nothing may follow the JSON object")
 	assert.True(t, strings.HasPrefix(buf.String(), "{"), "stdout must start with the JSON object")
 
-	assert.JSONEq(t, `"warn"`, string(doc["status"]))
+	// The failed docker check makes the status fail, with exit zero.
+	assert.JSONEq(t, `"fail"`, string(doc["status"]))
 	assert.JSONEq(t, `"docker"`, string(doc["runtime"]))
 	assert.JSONEq(t, f.summaryBody, string(doc["healthSummary"]))
 	for _, key := range []string{"general", "hubChecks", "platformHealth", "checks"} {
@@ -414,7 +475,7 @@ func TestDoctorJSON_CleanForNonDiagnosableRuntime(t *testing.T) {
 	assert.Equal(t, "fail", checks[1].Status)
 }
 
-func TestDoctorJSON_UnhealthyIsReportedInJSON(t *testing.T) {
+func TestDoctorJSON_UnhealthyIsReportedInJSONAndExitsZero(t *testing.T) {
 	s := degradedSummary()
 	s.Status = healthSummaryUnhealthy
 	f := &fakeDoctorHub{summaryBody: summaryJSON(t, s)}
@@ -423,10 +484,7 @@ func TestDoctorJSON_UnhealthyIsReportedInJSON(t *testing.T) {
 	var buf bytes.Buffer
 	r := &doctorReport{stdout: &buf, json: true}
 	r.platformHealthSection(r.hubChecks(srv.URL, newDoctorTestClient(t, srv.URL), ""))
-	err := r.finish()
-	require.Error(t, err)
-	var reported *jsonReportedError
-	assert.True(t, errors.As(err, &reported), "the failure is carried by the JSON, not printed again")
+	require.NoError(t, r.finish(), "the result is carried by the JSON, not the exit status")
 
 	var doc struct {
 		Status string `json:"status"`
@@ -513,10 +571,8 @@ func TestDoctorHubChecks_UnhealthyHealthzStillReadsSummary(t *testing.T) {
 	assert.Equal(t, "fail", r.PlatformHealth[0].Status)
 	assert.Contains(t, r.PlatformHealth[0].Message, "Platform is unhealthy")
 	assert.NotNil(t, r.HealthSummary)
-	err := r.finish()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "hub connectivity check failed")
-	assert.Contains(t, err.Error(), "platform health is unhealthy")
+	assert.NoError(t, r.finish(), "check results do not set the exit status")
+	assert.Equal(t, "fail", r.overallStatus())
 }
 
 func TestDoctorHubChecks_UnhealthyHealthzSummaryUnavailable(t *testing.T) {
@@ -605,28 +661,25 @@ func failingDiagnosable() fakeDiagnosable {
 	}}
 }
 
-func TestDoctorRuntime_DiagnosableFailureText(t *testing.T) {
+func TestDoctorRuntime_DiagnosableFailureTextExitsZero(t *testing.T) {
 	var buf bytes.Buffer
 	r := &doctorReport{stdout: &buf}
 	r.runtimeSection("kubernetes", failingDiagnosable(), scionruntime.DiagnosticOpts{})
 
-	err := r.finish()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "1 diagnostic check(s) failed")
+	assert.NoError(t, r.finish(), "check results do not set the exit status")
+	assert.Equal(t, "fail", r.overallStatus())
 	out := buf.String()
 	assert.Contains(t, out, "Runtime Diagnostics (kubernetes)")
 	assert.Contains(t, out, "✗ rbac: cannot create pods")
 	assert.Contains(t, out, "1 checks passed, 0 warnings, 1 failures")
 }
 
-func TestDoctorRuntime_DiagnosableFailureJSON(t *testing.T) {
+func TestDoctorRuntime_DiagnosableFailureJSONExitsZero(t *testing.T) {
 	var buf bytes.Buffer
 	r := &doctorReport{stdout: &buf, json: true}
 	r.runtimeSection("kubernetes", failingDiagnosable(), scionruntime.DiagnosticOpts{})
 
-	err := r.finish()
-	var reported *jsonReportedError
-	require.True(t, errors.As(err, &reported), "err = %v", err)
+	require.NoError(t, r.finish(), "check results do not set the exit status")
 
 	dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
 	var doc struct {
@@ -779,4 +832,19 @@ func TestRenderDoctorHealthSummary_PassingCheckValues(t *testing.T) {
 	assert.Contains(t, brokers, "gpu-1; offline; version 1.4.0; last reported self-health healthy;")
 	assert.Contains(t, brokers, "east; online;")
 	assert.NotContains(t, brokers, "east; online; version 1.4.0; runtime docker/default; storage nfs (unhealthy); last reported")
+}
+
+func TestSingleLineHealthSummary_KeepsRawBodyUnchanged(t *testing.T) {
+	s := degradedSummary()
+	s.Brokers.Items[0].Name = "x\ny"
+	// Raw bytes are attached after the string walk and kept verbatim.
+	s.Raw = json.RawMessage("{\"status\":\"degraded\",\n\"x\":\"\\u0007\"}")
+	want := append(json.RawMessage(nil), s.Raw...)
+
+	got, err := singleLineHealthSummary(&s)
+	require.NoError(t, err)
+	assert.Equal(t, "x y", got.Brokers.Items[0].Name)
+	assert.Equal(t, "x\ny", s.Brokers.Items[0].Name, "the input is not modified")
+	assert.Equal(t, want, got.Raw)
+	assert.Equal(t, want, s.Raw)
 }
