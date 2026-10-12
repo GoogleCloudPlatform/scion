@@ -32,15 +32,16 @@ import (
 )
 
 // scion hub test-identity (ptone/scion#4240): issue, re-issue tokens for,
-// list and delete hub test identities. Available in human mode only: the
-// "hub" subtree is not in agentAllowed (cli_mode.go), since issuance needs
-// a user or issuer credential that agents do not hold.
+// mint web-login codes for, list and delete hub test identities. Available
+// in human mode only: the "hub" subtree is not in agentAllowed
+// (cli_mode.go), since issuance needs a user or issuer credential that
+// agents do not hold.
 //
-// A token is a secret. It is written only to the file named by --out,
-// created exclusively (never overwriting an existing path or following a
-// symlink) with mode 0600. Standard output and standard error carry only
-// non-secret facts: the identity's ID, email, role, expiry and the token
-// file path.
+// A token or web-login code is a secret. It is written only to the file
+// named by --out, created exclusively (never overwriting an existing path
+// or following a symlink) with mode 0600. Standard output and standard
+// error carry only non-secret facts: the identity's ID, email, role,
+// expiry, the code ID and the output file path.
 
 var hubTestIdentityCmd = &cobra.Command{
 	Use:   "test-identity",
@@ -66,6 +67,9 @@ Examples:
 
   # List your live test identities
   scion hub test-identity list
+
+  # Mint a single-use web-login code for a browser session; it goes to ./code.txt
+  scion hub test-identity web-code <id> --out ./code.txt
 
   # Delete a test identity when the run is done
   scion hub test-identity delete <id>`,
@@ -144,6 +148,33 @@ Examples:
 	RunE: runHubTestIdentityDelete,
 }
 
+var hubTestIdentityWebCodeCmd = &cobra.Command{
+	Use:   "web-code ID --out FILE",
+	Short: "Mint a single-use web-login code for a browser session as a test identity",
+	Long: `Mint a single-use web-login code for a live test identity you issued, and
+write it to --out. A browser (for example a Playwright test) redeems the
+code with POST /auth/test-identity/redeem and then holds a web session as
+the test identity until the identity expires.
+
+The code is valid for 5 minutes and can be redeemed once. Minting a new
+code replaces any earlier code that was not redeemed yet. The hub must run
+with test identities enabled at the member level and carry the test
+infrastructure marker ("scion server test-infra mark"), which holds the
+hub-local web session key; otherwise the hub answers that web sessions are
+not available.
+
+--out must name a path that does not exist yet: an existing file, a
+symlink, or a path under a symlinked directory is refused. The file is
+created with mode 0600 and holds only the code. The code is never printed;
+only the identity ID, the code ID, the code expiry and the file path are.
+
+Examples:
+  scion hub test-identity web-code 6f1c... --out ./code.txt
+  scion hub test-identity web-code 6f1c... --out /tmp/run-42/code.txt --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runHubTestIdentityWebCode,
+}
+
 // Flag values.
 var (
 	testIdentityRole           string
@@ -163,6 +194,7 @@ func init() {
 	hubTestIdentityCmd.AddCommand(hubTestIdentityTokenCmd)
 	hubTestIdentityCmd.AddCommand(hubTestIdentityListCmd)
 	hubTestIdentityCmd.AddCommand(hubTestIdentityDeleteCmd)
+	hubTestIdentityCmd.AddCommand(hubTestIdentityWebCodeCmd)
 	hubTestIdentityDeleteCmd.Flags().BoolVar(&testIdentityPurge, "purge", false, "Also remove the agents, schedules, groups and projects the identity created")
 
 	hubTestIdentityIssueCmd.Flags().StringVar(&testIdentityRole, "role", "member", `Role of the identity: "member" or "viewer"`)
@@ -178,6 +210,10 @@ func init() {
 	hubTestIdentityTokenCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Print the identity as JSON (never the token)")
 	_ = hubTestIdentityTokenCmd.MarkFlagRequired("out")
 
+	hubTestIdentityWebCodeCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the code to (required; must not exist; created 0600)")
+	hubTestIdentityWebCodeCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Print the code ID, expiry and file as JSON (never the code)")
+	_ = hubTestIdentityWebCodeCmd.MarkFlagRequired("out")
+
 	hubTestIdentityListCmd.Flags().IntVar(&testIdentityListLimit, "limit", 0, "Maximum number of identities to list (default: the hub's, 100)")
 	hubTestIdentityListCmd.Flags().BoolVar(&testIdentityIncludeExpired, "include-expired", false, "Also list expired identities")
 	hubTestIdentityListCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Output in JSON format")
@@ -191,6 +227,13 @@ type testIdentityIssueOptions struct {
 	Purpose  string
 	Out      string
 	JSON     bool
+}
+
+// testIdentityWebCodeOptions are the inputs of mintTestIdentityWebCode.
+type testIdentityWebCodeOptions struct {
+	ID   string
+	Out  string
+	JSON bool
 }
 
 // testIdentityTokenOptions are the inputs of reissueTestIdentityToken.
@@ -223,6 +266,18 @@ func runHubTestIdentityToken(cmd *cobra.Command, args []string) error {
 	defer cancel()
 	return reissueTestIdentityToken(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), client.TestIdentities(), testIdentityTokenOptions{
 		ID: args[0], TTL: testIdentityTTL, Out: testIdentityOut, JSON: testIdentityJSON,
+	})
+}
+
+func runHubTestIdentityWebCode(cmd *cobra.Command, args []string) error {
+	_, client, err := loadHubClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+	return mintTestIdentityWebCode(ctx, cmd.OutOrStdout(), client.TestIdentities(), testIdentityWebCodeOptions{
+		ID: args[0], Out: testIdentityOut, JSON: testIdentityJSON,
 	})
 }
 
@@ -468,6 +523,94 @@ func reissueTestIdentityToken(ctx context.Context, out, errOut io.Writer, svc hu
 		return fmt.Errorf("failed to write --out %s: %w", file.path, err)
 	}
 	return printTestIdentityToken(out, "New token for", resp, file.path, opts.JSON)
+}
+
+// refuseSymlinkedParents refuses path when any directory component of it
+// is a symlink, so the file cannot land somewhere other than the directory
+// named. Components are checked on the absolute path; a component that does
+// not exist is left to the exclusive create, which then fails.
+func refuseSymlinkedParents(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("cannot use --out %s: %w", path, err)
+	}
+	dir := filepath.Dir(abs)
+	for {
+		fi, err := os.Lstat(dir)
+		if err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			hint := ""
+			if resolved, rerr := filepath.EvalSymlinks(filepath.Dir(abs)); rerr == nil {
+				hint = fmt.Sprintf(" (use the resolved directory %s)", resolved)
+			}
+			return fmt.Errorf("refusing --out %s: directory %s is a symlink; name a path without symlinked directories%s", path, dir, hint)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
+}
+
+// testIdentityWebCodeOutput is the --json output of web-code. It has no
+// code field.
+type testIdentityWebCodeOutput struct {
+	IdentityID string    `json:"identityId"`
+	CodeID     string    `json:"codeId"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	CodeFile   string    `json:"codeFile"`
+}
+
+// mintTestIdentityWebCode mints a web-login code for a live test identity
+// and writes only the code to opts.Out. The code never reaches out or an
+// error.
+func mintTestIdentityWebCode(ctx context.Context, out io.Writer, svc hubclient.TestIdentityService, opts testIdentityWebCodeOptions) error {
+	if opts.Out == "" {
+		return newUsageError("--out is required: the code is written only to a file")
+	}
+	if err := refuseSymlinkedParents(opts.Out); err != nil {
+		return err
+	}
+	file, err := createTokenFile(opts.Out)
+	if err != nil {
+		return err
+	}
+	resp, err := svc.WebLoginCode(ctx, opts.ID)
+	if err != nil {
+		file.abandon()
+		if apiclient.IsNotFoundError(err) {
+			return fmt.Errorf("failed to mint a web-login code for test identity %s (not found, not one you issued, or web sessions are not available on this hub): %w", opts.ID, err)
+		}
+		return fmt.Errorf("failed to mint a web-login code for test identity %s: %w", opts.ID, err)
+	}
+	if _, err := io.WriteString(file.f, resp.Code); err != nil {
+		_ = file.f.Close()
+		_ = os.Remove(file.path)
+		return fmt.Errorf("failed to write --out %s; mint a new code with a new --out: %w", file.path, err)
+	}
+	if err := file.f.Sync(); err != nil {
+		_ = file.f.Close()
+		_ = os.Remove(file.path)
+		return fmt.Errorf("failed to write --out %s; mint a new code with a new --out: %w", file.path, err)
+	}
+	if err := file.f.Close(); err != nil {
+		_ = os.Remove(file.path)
+		return fmt.Errorf("failed to write --out %s; mint a new code with a new --out: %w", file.path, err)
+	}
+	absPath := file.path
+	if abs, err := filepath.Abs(file.path); err == nil {
+		absPath = abs
+	}
+	if opts.JSON {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(testIdentityWebCodeOutput{IdentityID: opts.ID, CodeID: resp.CodeID, ExpiresAt: resp.ExpiresAt, CodeFile: absPath})
+	}
+	_, _ = fmt.Fprintf(out, "Web-login code for test identity %s\n", opts.ID)
+	_, _ = fmt.Fprintf(out, "  Code ID:       %s\n", resp.CodeID)
+	_, _ = fmt.Fprintf(out, "  Expires:       %s (single use)\n", formatTestIdentityTime(resp.ExpiresAt))
+	_, _ = fmt.Fprintf(out, "  Code file:     %s (mode 0600)\n", absPath)
+	return nil
 }
 
 // listTestIdentities lists test identities as the hub returns them: the

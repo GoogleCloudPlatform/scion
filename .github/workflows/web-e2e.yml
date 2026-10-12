@@ -22,6 +22,12 @@
 # needs a production build: some of its tests check the Shoelace icon files
 # in web/dist, so that job runs npm run build first.
 #
+# test-identity-session is the exception: it runs against the real Go hub
+# binary (a throwaway member-level test hub started by its global setup,
+# ptone/scion#4240). Only that job sets up Go (go.mod version, the same
+# setup-go module cache as ci.yml) and builds the binary (make build) and
+# the web assets (npm run build) before the suite runs.
+#
 # Not covered here:
 # - web/e2e/chat-mobile: the chat-mobile-e2e job in ci.yml owns it (sharded,
 #   with a stable required-check name), so it is not run twice.
@@ -88,6 +94,7 @@ jobs:
           - terminal-pane
           - terminal-workspace
           - test-hub-banner
+          - test-identity-session
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -104,6 +111,20 @@ jobs:
       - name: Install dependencies
         working-directory: ./web
         run: npm ci
+
+      # test-identity-session only: the suite starts the real hub binary.
+      - name: Setup Go (test-identity-session)
+        if: matrix.suite == 'test-identity-session'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build hub binary and web assets (test-identity-session)
+        if: matrix.suite == 'test-identity-session'
+        run: |
+          make build
+          npm --prefix web run build
 
       # terminal-workspace tests (workspace.pw.ts, dm-buttons.pw.ts) read
       # icon files from the production build output in web/dist/client.
@@ -159,6 +180,9 @@ jobs:
         working-directory: ./web
         env:
           SUITE: ${{ matrix.suite }}
+          # Read only by test-identity-session: the binary and web assets
+          # were built in the step above.
+          E2E_PREBUILT: '1'
         run: |
           CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"
           if [ ! -x "$CHROMIUM_EXECUTABLE" ]; then
