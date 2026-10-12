@@ -4014,8 +4014,9 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 		isSelf = agentIdent.ID() == agent.ID
 	}
 	// CO1: agent.read carries no AgentScopes mapping, so an agent identity is
-	// denied reading any *other* agent here, except an agent it directly
-	// launched in its project (authz_launcher_read.go). An agent reading its
+	// denied reading any *other* agent here, except an agent it launched,
+	// directly or through its descendants, in its project
+	// (authz_launcher_read.go). An agent reading its
 	// own record is exempt, matching getProjectAgent's self-read contract (see
 	// TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): this is the
 	// route the in-container CLI uses for `scion whoami --full` (GetSelf), and

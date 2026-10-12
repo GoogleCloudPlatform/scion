@@ -1261,8 +1261,9 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 	},
 
-	// An agent reads the status of an agent it directly launched, in the
-	// same project, on the single-agent GET routes only
+	// An agent reads the status of an agent it launched, directly or
+	// through its descendants, in the same project, on the single-agent
+	// GET routes only
 	// (TestLauncherRead_OnlySingleAgentReadWidened).
 	{"launcher", "agent", "agent"}: {"agent.read"},
 

@@ -14,14 +14,23 @@
 
 package hub
 
-import "github.com/GoogleCloudPlatform/scion/pkg/store"
+import (
+	"slices"
 
-// Launcher status read (ptone/scion#3409).
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// Launcher status read (ptone/scion#3409, ptone/scion#4568).
 //
-// An agent may read the status of an agent it directly launched, in the
-// same project, through the single-agent GET routes. Nothing else is
-// granted: the rule admits only agent.read with ActionRead, and only for
-// a Resource built by agentStatusReadResource.
+// An agent may read the status of an agent it launched, directly or
+// through its descendants, in the same project, through the single-agent
+// GET routes. Nothing else is granted: the rule admits only agent.read
+// with ActionRead, and only for a Resource built by
+// agentStatusReadResource. The same predicate is the agent-scope
+// exception (authz.go) and the delegation-ceiling exception
+// (checkDelegationCeiling), so the three cannot drift apart. Logs,
+// streams, events and every other agent.read route build agentResource
+// without the stored target and are not covered.
 
 // RelationshipRuleLauncher names the launcher status-read relationship.
 const RelationshipRuleLauncher RelationshipRuleID = "launcher"
@@ -38,15 +47,18 @@ func agentStatusReadResource(a *store.Agent) Resource {
 	return r
 }
 
-// launcherStatusReadHolds reports whether caller directly launched the
-// target agent of resource, in caller's project, for a single-agent read.
+// descendantStatusReadHolds reports whether caller launched the target agent
+// of resource, directly or through its descendants, in caller's project,
+// for a single-agent read.
 //
 // Every fact about the target comes from resource.launchedTarget, the
-// handler's store record: the launcher is the last entry of its stored
-// Ancestry, and its stored ProjectID must equal the caller's project.
+// handler's store record: the caller is an entry of its stored Ancestry
+// (written at create from the creator's authenticated identity and its
+// own stored Ancestry, and never rewritten), and its stored ProjectID must
+// equal the caller's project.
 // The caller contributes only its authenticated ID and project; any
 // ancestry the caller's credential carries is not consulted.
-func launcherStatusReadHolds(caller AgentIdentity, resource Resource, action Action, permissionID string) bool {
+func descendantStatusReadHolds(caller AgentIdentity, resource Resource, action Action, permissionID string) bool {
 	if caller == nil || action != ActionRead || permissionID != permissionAgentRead {
 		return false
 	}
@@ -61,8 +73,7 @@ func launcherStatusReadHolds(caller AgentIdentity, resource Resource, action Act
 	if callerID == "" || callerID == target.ID {
 		return false
 	}
-	n := len(target.Ancestry)
-	if n == 0 || target.Ancestry[n-1] != callerID {
+	if !slices.Contains(target.Ancestry, callerID) {
 		return false
 	}
 	projectID := caller.ProjectID()
@@ -70,13 +81,13 @@ func launcherStatusReadHolds(caller AgentIdentity, resource Resource, action Act
 }
 
 // launcherCandidate returns the launcher relationship candidate when
-// launcherStatusReadHolds, or false.
+// descendantStatusReadHolds, or false.
 func launcherCandidate(principal PrincipalContext, resource Resource, action Action, permissionID string) (relationshipCandidate, bool) {
 	if principal.Kind != PrincipalKindAgent {
 		return relationshipCandidate{}, false
 	}
 	caller, ok := principal.Identity.(AgentIdentity)
-	if !ok || caller.ID() != principal.ID || !launcherStatusReadHolds(caller, resource, action, permissionID) {
+	if !ok || caller.ID() != principal.ID || !descendantStatusReadHolds(caller, resource, action, permissionID) {
 		return relationshipCandidate{}, false
 	}
 	return relationshipCandidate{

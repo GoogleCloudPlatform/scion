@@ -33,7 +33,8 @@ import (
 )
 
 // Tests for ptone/scion#3409: an agent may read the status of an agent it
-// directly launched, in the same project.
+// launched, in the same project; since ptone/scion#4568 that includes
+// every descendant (handlers_descendant_read_test.go).
 
 // launcherReadAgent stores an agent in the shared agent fixture.
 func launcherReadAgent(t *testing.T, f *bypassAgentsFixture, name, projectID string, ancestry []string) *store.Agent {
@@ -114,7 +115,6 @@ func TestLauncherRead_DeniedTargetsMatchMissing(t *testing.T) {
 
 			targets := map[string]*store.Agent{
 				"unrelated agent in the same project": f.sibling,
-				"grandchild":                          grandchild,
 				"child in another project":            otherProjectChild,
 			}
 			for targetName, target := range targets {
@@ -124,6 +124,11 @@ func TestLauncherRead_DeniedTargetsMatchMissing(t *testing.T) {
 				assert.Equal(t, missing.Code, rec.Code, "%s: %s", targetName, rec.Body.String())
 				assert.Equal(t, missing.Body.String(), rec.Body.String(), targetName)
 			}
+
+			// A grandchild is a descendant: its status is readable
+			// (ptone/scion#4568).
+			rec := f.asAgent(t, http.MethodGet, launcherReadPaths(f.proj.ID, grandchild.ID)[name], nil)
+			assert.Equal(t, http.StatusOK, rec.Code, "grandchild: %s", rec.Body.String())
 		})
 	}
 }
@@ -204,7 +209,9 @@ func TestLauncherRead_DecidesFromStoredTarget(t *testing.T) {
 	}{
 		{"stored launcher matches", caller(nil, projectID), target([]string{rootID, callerID}), true},
 		{"caller claims to be the launcher", caller([]string{rootID, callerID}, projectID), target([]string{rootID}), false},
-		{"caller is an earlier ancestor", caller(nil, projectID), target([]string{rootID, callerID, tid("launcher-stored-mid")}), false},
+		// ptone/scion#4568: any descendant's status is readable.
+		{"caller is an earlier ancestor", caller(nil, projectID), target([]string{rootID, callerID, tid("launcher-stored-mid")}), true},
+		{"caller claims an earlier ancestry slot", caller([]string{rootID, callerID}, projectID), target([]string{rootID, tid("launcher-stored-mid")}), false},
 		{"caller in another project", caller(nil, tid("launcher-stored-other")), target([]string{rootID, callerID}), false},
 		{"target has no ancestry", caller(nil, projectID), target(nil), false},
 	}
@@ -258,7 +265,7 @@ func launcherRuleFixture() (*agentIdentityWrapper, *store.Agent) {
 // launcher.
 func TestLauncherStatusReadHolds_Refusals(t *testing.T) {
 	launcher, child := launcherRuleFixture()
-	require.True(t, launcherStatusReadHolds(launcher, agentStatusReadResource(child), ActionRead, permissionAgentRead),
+	require.True(t, descendantStatusReadHolds(launcher, agentStatusReadResource(child), ActionRead, permissionAgentRead),
 		"the launcher reads its child")
 
 	t.Run("hub delivery identity", func(t *testing.T) {
@@ -267,7 +274,7 @@ func TestLauncherStatusReadHolds_Refusals(t *testing.T) {
 			projectID:    launcher.ProjectID(),
 			boundAgentID: launcher.ID(),
 		}
-		assert.False(t, launcherStatusReadHolds(delivery, agentStatusReadResource(child), ActionRead, permissionAgentRead))
+		assert.False(t, descendantStatusReadHolds(delivery, agentStatusReadResource(child), ActionRead, permissionAgentRead))
 	})
 
 	t.Run("self in its own last slot", func(t *testing.T) {
@@ -276,13 +283,31 @@ func TestLauncherStatusReadHolds_Refusals(t *testing.T) {
 			ProjectID: launcher.ProjectID(),
 			Ancestry:  []string{tid("launcher-rule-root"), launcher.ID()},
 		}
-		assert.False(t, launcherStatusReadHolds(launcher, agentStatusReadResource(self), ActionRead, permissionAgentRead))
+		assert.False(t, descendantStatusReadHolds(launcher, agentStatusReadResource(self), ActionRead, permissionAgentRead))
+	})
+
+	t.Run("grandchild is a descendant", func(t *testing.T) {
+		grandchild := &store.Agent{
+			ID:        tid("launcher-rule-grandchild"),
+			ProjectID: launcher.ProjectID(),
+			Ancestry:  []string{tid("launcher-rule-root"), launcher.ID(), child.ID},
+		}
+		assert.True(t, descendantStatusReadHolds(launcher, agentStatusReadResource(grandchild), ActionRead, permissionAgentRead))
+	})
+
+	t.Run("sibling is not a descendant", func(t *testing.T) {
+		sibling := &store.Agent{
+			ID:        tid("launcher-rule-sibling"),
+			ProjectID: launcher.ProjectID(),
+			Ancestry:  []string{tid("launcher-rule-root"), tid("launcher-rule-parent")},
+		}
+		assert.False(t, descendantStatusReadHolds(launcher, agentStatusReadResource(sibling), ActionRead, permissionAgentRead))
 	})
 
 	t.Run("resource ID differs from the stored target", func(t *testing.T) {
 		res := agentStatusReadResource(child)
 		res.ID = tid("launcher-rule-other")
-		assert.False(t, launcherStatusReadHolds(launcher, res, ActionRead, permissionAgentRead))
+		assert.False(t, descendantStatusReadHolds(launcher, res, ActionRead, permissionAgentRead))
 	})
 }
 

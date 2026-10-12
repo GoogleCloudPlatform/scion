@@ -1211,6 +1211,10 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				decision.DeniedBy = DeniedByDelegationCeiling
 				decision.DenyCause = ceilingCause
 				decision.adoptionRemediable = ceilingCause == DenyCauseCeilingUnrecorded && hopNote.adoptable
+			} else if strings.HasSuffix(ceilingReason, "("+descendantReadReasonMarker+")") {
+				// Record in the decision that the ceiling admitted a
+				// descendant status read (authz_launcher_read.go).
+				decision.Reason += " (" + descendantReadReasonMarker + ")"
 			}
 		}
 	}
@@ -1808,7 +1812,7 @@ func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 			}
 			// agent.read has no agent scope. The launcher status read
 			// (authz_launcher_read.go) admits it for one stored target.
-			if permissionID == permissionAgentRead && launcherStatusReadHolds(agent, resource, ActionRead, permissionID) {
+			if permissionID == permissionAgentRead && descendantStatusReadHolds(agent, resource, ActionRead, permissionID) {
 				return true
 			}
 			_, ok := allowed[permissionID]

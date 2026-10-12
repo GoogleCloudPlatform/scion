@@ -199,9 +199,10 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 		})
 	}
 
-	// Launcher: an agent reading the status of an agent it directly
-	// launched (authz_launcher_read.go). Decided from the target's stored
-	// record, never from the caller's ancestry claim.
+	// Launcher: an agent reading the status of an agent it launched,
+	// directly or through its descendants (authz_launcher_read.go).
+	// Decided from the target's stored record, never from the caller's
+	// ancestry claim.
 	if c, ok := launcherCandidate(principal, resource, action, permissionID); ok {
 		out = append(out, c)
 	}

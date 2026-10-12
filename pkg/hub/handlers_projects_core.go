@@ -2784,8 +2784,8 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 // an agent reading its own record. getAgent applies the same exemption.
 // Reading a *different* agent in the caller's project goes through the
 // same agent.read check as getAgent (authorizeSingleAgentRead), which
-// denies it unless the caller directly launched that agent
-// (authz_launcher_read.go). An agent caller that is denied, or that names
+// denies it unless the caller launched that agent, directly or through
+// its descendants (authz_launcher_read.go). An agent caller that is denied, or that names
 // an agent in another project, gets the same 404 as for a missing agent.
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	if !checkAgentReadScope(w, r) {
