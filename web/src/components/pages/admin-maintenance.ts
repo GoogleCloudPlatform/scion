@@ -740,13 +740,17 @@ export class ScionPageAdminMaintenance extends LitElement {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: newValue }),
       });
-      if (res.ok) {
-        const data = (await res.json()) as MaintenanceStateResponse;
-        this.maintenanceEnabled = data.enabled;
-        this.maintenanceBreakGlass = data.break_glass === true;
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
-    } catch {
-      // Silently ignore — keep current state on failure.
+      const data = (await res.json()) as MaintenanceStateResponse;
+      this.maintenanceEnabled = data.enabled;
+      this.maintenanceBreakGlass = data.break_glass === true;
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to update maintenance mode');
+      // The toggle renders from maintenanceEnabled, which is set only from a
+      // server response; re-read it so the toggle shows the saved state.
+      await this.fetchMaintenanceState();
     }
   }
 

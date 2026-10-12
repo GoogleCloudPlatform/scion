@@ -26,6 +26,8 @@ import { showToast } from '../../utils/toast.js';
 
 const SERVER_ERROR = 'migration lock is held by another run';
 
+const TOGGLE_ERROR = 'settings store is read-only';
+
 const MIGRATIONS = [
   {
     key: 'mig-a',
@@ -53,6 +55,8 @@ interface Options {
   runStatus?: number;
   /** Status for GET /api/v1/admin/maintenance/operations. */
   listStatus?: number;
+  /** Status for PUT /api/v1/admin/maintenance. */
+  toggleStatus?: number;
 }
 
 function json(body: unknown, status = 200): Promise<Response> {
@@ -83,6 +87,14 @@ function handler(opts: Options) {
         return json({ error: { code: 'internal', message: 'list unavailable' } }, status);
       }
       return json({ migrations: MIGRATIONS, operations: OPERATIONS });
+    }
+    if (path === '/api/v1/admin/maintenance' && method === 'PUT') {
+      const status = opts.toggleStatus ?? 200;
+      if (status >= 400) {
+        return json({ error: { code: 'internal', message: TOGGLE_ERROR } }, status);
+      }
+      const { enabled } = JSON.parse(String(init?.body)) as { enabled: boolean };
+      return json({ enabled, message: '' });
     }
     if (path === '/api/v1/admin/maintenance') {
       return json({ enabled: false, message: '' });
@@ -223,5 +235,37 @@ describe('admin maintenance run request errors', () => {
     expect(root.querySelector('.error-state')?.textContent).toContain('Failed to Load');
     expect(root.querySelector('.error-details')?.textContent).toContain('list unavailable');
     expect(root.querySelector('.card-list')).toBeNull();
+  });
+});
+
+describe('admin maintenance mode toggle errors', () => {
+  function toggleState(e: Page): { active: boolean; label: string } {
+    const root = e.shadowRoot!;
+    return {
+      active: root.querySelector('.toggle-track')!.classList.contains('active'),
+      label: root.querySelector('.toggle-label')!.textContent!.trim(),
+    };
+  }
+
+  it('keeps the page, toasts the server error and shows the saved state when the toggle fails', async () => {
+    el = await mount({ toggleStatus: 500 });
+    expect(toggleState(el)).toEqual({ active: false, label: 'Disabled' });
+
+    el.shadowRoot!.querySelector<HTMLElement>('.toggle-track')!.click();
+    await settle(el);
+
+    expectPageRendered(el);
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(showToast).mock.calls[0][0]).toContain(TOGGLE_ERROR);
+    expect(toggleState(el)).toEqual({ active: false, label: 'Disabled' });
+  });
+
+  it('shows the new state when the toggle succeeds', async () => {
+    el = await mount({});
+    el.shadowRoot!.querySelector<HTMLElement>('.toggle-track')!.click();
+    await settle(el);
+
+    expect(showToast).not.toHaveBeenCalled();
+    expect(toggleState(el)).toEqual({ active: true, label: 'Enabled' });
   });
 });
