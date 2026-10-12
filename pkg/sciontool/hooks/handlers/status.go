@@ -85,11 +85,11 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 		return h.UpdatePhase(result.phase, result.activity, "")
 	}
 
-	// A codex sub-agent's new-work or tool-start event is activity inside the
+	// A sub-agent's new-work or tool-start event is activity inside the
 	// parent's session, not the parent resuming. It follows the tool-end and
 	// agent-end rule: a status the parent agent set and still holds (for
 	// example an ask_user waiting_for_input, or completed) stays in place.
-	if isCodexSubagentEvent(event) && (isNewWorkEvent(event.Name) || event.Name == hooks.EventToolStart) {
+	if isHeldSubagentEvent(event) {
 		return h.updateActivityIfNotSticky(result.activity, event.Data.ToolName, clearNotificationWaiting)
 	}
 
@@ -102,7 +102,14 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 	// Tool-start events require special handling for sticky states.
 	if event.Name == hooks.EventToolStart {
 		// Claude-specific: ExitPlanMode and AskUserQuestion set waiting_for_input (sticky).
-		if event.Dialect == "claude" && (event.Data.ToolName == "ExitPlanMode" || event.Data.ToolName == "AskUserQuestion") {
+		if isClaudeUserWaitTool(event) {
+			// A sub-agent's question is a harness prompt inside the
+			// parent's session, not a status the parent set. Record it as
+			// notification-set, so the sub-agent's own tool-end (the user
+			// answered) or later events clear it.
+			if isSubagentEvent(event) {
+				return h.setWaitingFromNotification()
+			}
 			return h.UpdateActivity(state.ActivityWaitingForInput, "")
 		}
 
@@ -212,6 +219,40 @@ func (h *StatusHandler) UpdatePhase(phase state.Phase, activity state.Activity, 
 	delete(info, "sessionStatus")
 
 	return h.writeAgentInfoLocked(info)
+}
+
+// ReplaceActivityIf sets the activity to `to` only when the current activity
+// is `from`, and reports whether it did. The phase is left unchanged. It
+// lets `sciontool init` end the initializing activity without overwriting an
+// activity a hook has already written. Hooks run in other processes, so the
+// check and the write are not atomic across processes; the window is a
+// single read-modify-write of a small local file.
+func (h *StatusHandler) ReplaceActivityIf(from, to state.Activity) (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	info := h.readAgentInfoMap()
+	current, _ := info["activity"].(string)
+	if current != string(from) {
+		return false, nil
+	}
+	info["activity"] = string(to)
+	delete(info, "toolName")
+	delete(info, "status")
+	delete(info, "sessionStatus")
+	if err := h.writeAgentInfoLocked(info); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CurrentActivity returns the activity recorded in agent-info.json, or ""
+// when the file is missing or unreadable.
+func (h *StatusHandler) CurrentActivity() state.Activity {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	current, _ := h.readAgentInfoMap()["activity"].(string)
+	return state.Activity(current)
 }
 
 // SetMessage writes a message to the agent-info.json detail section.
@@ -381,18 +422,37 @@ func isNewWorkEvent(name string) bool {
 	return false
 }
 
-// isCodexSubagentEvent reports whether a codex hook event came from a
-// sub-agent rather than the parent agent. Codex sends the root session's
-// session_id on a sub-agent's hook events; only agent_id names the child.
-// An event whose agent_id is set and differs from session_id is therefore a
-// sub-agent's. Other dialects are not checked, so their handling is
-// unchanged.
-func isCodexSubagentEvent(event *hooks.Event) bool {
-	if event.Dialect != "codex" {
+// isSubagentEvent reports whether a codex or claude hook event came from a
+// sub-agent rather than the parent agent. Both harnesses send the parent
+// session's session_id on a sub-agent's hook events and name the child only
+// in agent_id. An event whose agent_id is set and differs from session_id is
+// therefore a sub-agent's. Other dialects are not checked, so their handling
+// is unchanged.
+func isSubagentEvent(event *hooks.Event) bool {
+	if event.Dialect != "codex" && event.Dialect != "claude" {
 		return false
 	}
 	agentID, _ := event.Data.Raw["agent_id"].(string)
 	return agentID != "" && agentID != event.Data.SessionID
+}
+
+// isClaudeUserWaitTool reports whether a claude tool-start is for a tool that
+// asks the user (ExitPlanMode, AskUserQuestion) and so sets waiting_for_input.
+func isClaudeUserWaitTool(event *hooks.Event) bool {
+	return event.Name == hooks.EventToolStart && event.Dialect == "claude" &&
+		(event.Data.ToolName == "ExitPlanMode" || event.Data.ToolName == "AskUserQuestion")
+}
+
+// isHeldSubagentEvent reports whether an event is a sub-agent's new-work or
+// tool-start event that must not clear a status the parent agent holds. A
+// sub-agent's ExitPlanMode or AskUserQuestion tool-start is excluded: the
+// user is being asked, so it still sets waiting_for_input (recorded as
+// notification-set, see Handle).
+func isHeldSubagentEvent(event *hooks.Event) bool {
+	if !isSubagentEvent(event) || isClaudeUserWaitTool(event) {
+		return false
+	}
+	return isNewWorkEvent(event.Name) || event.Name == hooks.EventToolStart
 }
 
 // eventToPhaseActivity maps normalized events to phase/activity pairs.
@@ -403,7 +463,11 @@ func eventToPhaseActivity(event *hooks.Event) *eventResult {
 		return &eventResult{phase: state.PhaseStarting, isPhase: true}
 
 	case hooks.EventPostStart:
-		return &eventResult{phase: state.PhaseRunning, activity: state.ActivityWorking, isPhase: true}
+		// The harness process is up but not yet known to read input;
+		// `sciontool init` replaces initializing with working once the
+		// harness is ready (or at state.ReadyDeadline). Any hook event
+		// replaces it too, since initializing is not sticky.
+		return &eventResult{phase: state.PhaseRunning, activity: state.ActivityInitializing, isPhase: true}
 
 	case hooks.EventSessionStart:
 		// session-start clears sticky — treated as activity-only (working)

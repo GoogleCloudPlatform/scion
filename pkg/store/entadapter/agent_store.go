@@ -146,6 +146,8 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		t := *a.RunIDUpdatedAt
 		sa.RunIDUpdatedAt = &t
 	}
+	sa.SSHHostKey = a.SSHHostKey
+	sa.SSHHostKeyRunID = a.SSHHostKeyRunID
 	sa.Fixture = fixtureProvenanceFromColumns(a.FixtureRootID, a.FixtureIssuerID)
 	sa.PinnedRuntimeBrokerID = derefString(a.PinnedRuntimeBrokerID)
 	sa.PinnedRuntimeTargetID = derefString(a.PinnedRuntimeTargetID)
@@ -2725,6 +2727,47 @@ func runIDWritable(now time.Time) predicate.Agent {
 			),
 		),
 	)
+}
+
+// SetAgentSSHHostKey implements store.AgentStore.SetAgentSSHHostKey: one
+// conditional write, applied only while run_id equals runID, no delete
+// holds the row and no key is recorded for runID yet. When it writes
+// nothing, a read of the row tells the outcomes apart.
+func (s *AgentStore) SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (store.SSHHostKeyResult, error) {
+	if runID == "" || publicKey == "" {
+		return store.SSHHostKeyNotCurrentRun, nil
+	}
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.Agent.Update().
+		Where(
+			agent.IDEQ(uid), agent.RunIDEQ(runID), runIDWritable(time.Now()),
+			agent.Or(agent.SSHHostKeyRunIDIsNil(), agent.SSHHostKeyRunIDNEQ(runID)),
+		).
+		SetSSHHostKey(publicKey).
+		SetSSHHostKeyRunID(runID).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	if n > 0 {
+		return store.SSHHostKeyWritten, nil
+	}
+	row, err := s.client.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil()).Only(ctx)
+	switch {
+	case ent.IsNotFound(err):
+		return store.SSHHostKeyNotCurrentRun, nil
+	case err != nil:
+		return 0, mapError(err)
+	case row.RunID != runID || row.SSHHostKeyRunID != runID:
+		// Another run, or a delete holds the row.
+		return store.SSHHostKeyNotCurrentRun, nil
+	case row.SSHHostKey == publicKey:
+		return store.SSHHostKeyUnchanged, nil
+	}
+	return store.SSHHostKeyAlreadySet, nil
 }
 
 // CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.

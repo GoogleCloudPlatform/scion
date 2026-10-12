@@ -47,6 +47,14 @@ export interface User {
   avatar?: string | undefined;
   role?: UserRole | undefined;
   preferences?: UserPreferences | undefined;
+  /** Set only for a test identity web session (GET /auth/me). */
+  testIdentity?: TestIdentitySessionInfo | undefined;
+}
+
+/** The testIdentity member of GET /auth/me for a test identity web session. */
+export interface TestIdentitySessionInfo {
+  /** The identity's expiry, ISO 8601. The session ends then. */
+  expiresAt: string;
 }
 
 /**
@@ -63,6 +71,7 @@ export interface AuthMeResponse {
   avatar?: string;
   role?: UserRole;
   preferences?: UserPreferences;
+  testIdentity?: TestIdentitySessionInfo;
 }
 
 /**
@@ -402,6 +411,7 @@ export interface AgentMessageabilityDetail extends AgentMessageability {
  * Agent runtime activity (only meaningful when phase=running)
  */
 export type AgentActivity =
+  | 'initializing'
   | 'working'
   | 'thinking'
   | 'executing'
