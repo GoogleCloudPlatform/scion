@@ -1109,7 +1109,8 @@ func (s *Server) handleDeleteTestIdentity(w http.ResponseWriter, r *http.Request
 //
 // The caller must be allowed to delete the identity (canDeleteTestIdentity).
 // When the identity row is already gone, its stamped leftovers are removed
-// for the issuer recorded on them, or an unscoped platform admin session.
+// for the issuer recorded on them, or an unscoped platform admin session;
+// never for a workload delegation request (see below).
 // Every other case (an ID that is no test identity, a human user, a test
 // identity the caller may not delete, an identity with nothing left) gets
 // the same 200 with an empty report, so the route reveals nothing about
@@ -1163,7 +1164,14 @@ func (s *Server) handlePurgeTestIdentity(w http.ResponseWriter, r *http.Request,
 			InternalError(w)
 			return
 		}
-		if !ok || (!testIdentityCallerSeesAll(caller) && issuer != caller.ID()) {
+		// A workload delegation manages only identities stamped with its own
+		// delegation (canManageTestIdentity). The leftovers of a deleted
+		// identity record only the issuing user, not the delegation, so a
+		// workload delegation request cannot be shown to own them and gets
+		// the same empty report; the grantor's session or an admin session
+		// purges them.
+		if !ok || GetCredentialContextFromContext(ctx).Kind == CredentialKindWorkloadDelegation ||
+			(!testIdentityCallerSeesAll(caller) && issuer != caller.ID()) {
 			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
 			return
 		}

@@ -1287,3 +1287,76 @@ func TestTestIdentityDelegation_ListLiveUsesTheArmDefinition(t *testing.T) {
 		assert.False(t, it.Live, it.ID)
 	}
 }
+
+// Merge review R1: the Phase 3b purge (DELETE ...?purge=true) is scoped to
+// the issuing delegation. A delegation purges only its own live identity;
+// the leftovers of an already deleted identity (which record the issuing
+// user, not the delegation) are never purged by a workload delegation
+// request, its own or another; the grantor's session and an admin session
+// still purge them.
+func TestWorkloadDelegation_PurgeScopedToDelegation(t *testing.T) {
+	e := newX2Env(t, true)
+	e.srv.SetDispatcher(&purgeRecDispatcher{})
+	ctx := context.Background()
+	grantor, _ := e.bindingGrantor(t, "x2-purge-grantor")
+	admin := e.grantor(t, "x2-purge-admin")
+	d1 := e.delegate(t, grantor, nil)
+	d2 := e.delegate(t, grantor, nil)
+	tok := func() string { return x2Token(t, x2TokenOpts{}) }
+	purgePath := func(id string) string { return "/api/v1/test-identities/" + id + "?purge=true" }
+	issueWithGroup := func(name string) (TestIdentityView, string) {
+		rec := e.mint(t, d1.ID)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		resp := tiDecode(t, rec)
+		group := fpCreateGroup(t, e.srv, resp.AccessToken, CreateGroupRequest{Name: name})
+		return resp.Identity, group
+	}
+	groupExists := func(id string) bool {
+		_, err := e.s.GetGroup(ctx, id)
+		if errors.Is(err, store.ErrNotFound) {
+			return false
+		}
+		require.NoError(t, err)
+		return true
+	}
+	emptyReport := func(rec *httptest.ResponseRecorder, id string) {
+		t.Helper()
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, *emptyTestIdentityPurgeReport(id), fpPurgeReport(t, rec))
+	}
+
+	// Live identity: D2 gets the empty report and nothing is removed; D1
+	// purges its own identity and its stamped group.
+	live, liveGroup := issueWithGroup("x2-purge-live")
+	emptyReport(e.workload(t, http.MethodDelete, purgePath(live.ID), tok(), d2.ID, nil, nil), live.ID)
+	assert.True(t, groupExists(liveGroup))
+	assert.True(t, fpUserExists(t, e.s, live.ID))
+	rec := e.workload(t, http.MethodDelete, purgePath(live.ID), tok(), d1.ID, nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r := fpPurgeReport(t, rec)
+	assert.True(t, r.IdentityDeleted)
+	assert.Equal(t, 1, r.Deleted.Groups)
+	assert.False(t, groupExists(liveGroup))
+
+	// Deleted identity (D1 deletes it; its group is left): neither D2 nor
+	// D1 purges the leftovers; the grantor's own session does.
+	gone, goneGroup := issueWithGroup("x2-purge-gone")
+	require.Equal(t, http.StatusNoContent, e.workload(t, http.MethodDelete, "/api/v1/test-identities/"+gone.ID, tok(), d1.ID, nil, nil).Code)
+	require.False(t, fpUserExists(t, e.s, gone.ID))
+	emptyReport(e.workload(t, http.MethodDelete, purgePath(gone.ID), tok(), d2.ID, nil, nil), gone.ID)
+	emptyReport(e.workload(t, http.MethodDelete, purgePath(gone.ID), tok(), d1.ID, nil, nil), gone.ID)
+	assert.True(t, groupExists(goneGroup), "no workload delegation purges a deleted identity's leftovers")
+	rec = doRequestAsUser(t, e.srv, grantor, http.MethodDelete, purgePath(gone.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, 1, fpPurgeReport(t, rec).Deleted.Groups)
+	assert.False(t, groupExists(goneGroup))
+
+	// An admin session also purges a deleted identity's leftovers.
+	gone2, gone2Group := issueWithGroup("x2-purge-gone-admin")
+	require.Equal(t, http.StatusNoContent, e.workload(t, http.MethodDelete, "/api/v1/test-identities/"+gone2.ID, tok(), d1.ID, nil, nil).Code)
+	emptyReport(e.workload(t, http.MethodDelete, purgePath(gone2.ID), tok(), d1.ID, nil, nil), gone2.ID)
+	rec = doRequestAsUser(t, e.srv, admin, http.MethodDelete, purgePath(gone2.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, 1, fpPurgeReport(t, rec).Deleted.Groups)
+	assert.False(t, groupExists(gone2Group))
+}
