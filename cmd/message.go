@@ -1764,11 +1764,6 @@ func filterMentionNames(names []string, selfSlug, primarySlug string) []string {
 	return out
 }
 
-// printMentionResults prints one line per mention result to stderr,
-// describing the outcome for names that were not cleanly delivered. Skipped
-// entirely under --json output, where the caller includes the results in the
-// JSON response instead. Callers must call it before printing the send
-// confirmation, so the confirmation stays the last line of output.
 // printNoAgentWoken prints one line to stderr when the hub reports that a
 // group post reached no agent.
 func printNoAgentWoken(result *hubclient.OutboundMessageResult) {
@@ -1783,9 +1778,14 @@ func printNoAgentWoken(result *hubclient.OutboundMessageResult) {
 		}
 		return
 	}
-	fmt.Fprintln(os.Stderr, "No agent was woken: mention an agent or set a default agent for this conversation.")
+	fmt.Fprintln(os.Stderr, "No agent was woken by this post.")
 }
 
+// printMentionResults prints one line per mention result to stderr,
+// describing the outcome for names that were not cleanly delivered. Skipped
+// entirely under --json output, where the caller includes the results in the
+// JSON response instead. Callers must call it before printing the send
+// confirmation, so the confirmation stays the last line of output.
 func printMentionResults(results []messages.MentionResult) {
 	if isJSONOutput() {
 		return

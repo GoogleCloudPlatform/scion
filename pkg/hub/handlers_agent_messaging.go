@@ -1615,7 +1615,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		respBody["mention_results"] = mentionResults
 	}
 	// Which agents a group post reached, and an explicit flag when none.
-	if isGroupPost {
+	// Types that never reach an agent (outside mentionFanoutTypes) report
+	// neither.
+	if isGroupPost && mentionFanoutTypes[req.Type] {
 		if defaultAgentResult != nil {
 			respBody["default_agent_result"] = defaultAgentResult
 		}

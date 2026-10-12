@@ -40,7 +40,11 @@ import (
 
 // Default-agent result statuses that are not mention-delivery statuses.
 const (
+	// defaultAgentStatusSelf: the sender is the default agent.
 	defaultAgentStatusSelf = "self"
+	// defaultAgentStatusUnreachable: the configured default agent was
+	// deleted or no longer exists.
+	defaultAgentStatusUnreachable = "unreachable"
 )
 
 // groupDefaultWakeInput is the input to wakeGroupDefaultAgent.
@@ -78,30 +82,44 @@ func (s *Server) wakeGroupDefaultAgent(ctx context.Context, in groupDefaultWakeI
 		return nil
 	}
 
-	def, err := s.resolveGroupDefaultAgent(ctx, in.Conv.ConversationID, in.Sender.ProjectID)
+	gd, err := s.resolveGroupDefaultAgent(ctx, in.Conv.ConversationID, in.Sender.ProjectID)
 	if err != nil {
 		s.messageLog.Error("group default agent: lookup failed",
 			"conversation_id", in.Conv.ConversationID, "error", err)
 		return &messages.MentionResult{Status: "error", Error: "default agent lookup failed"}
 	}
-	if def == nil {
+	if gd.Agent == nil {
+		if gd.UnreachableSlug != "" {
+			return &messages.MentionResult{Slug: gd.UnreachableSlug, Status: defaultAgentStatusUnreachable,
+				Error: "the conversation's default agent no longer exists"}
+		}
 		return nil
 	}
+	def := gd.Agent
 	if def.ID == in.Sender.ID {
 		return &messages.MentionResult{Slug: def.Slug, Status: defaultAgentStatusSelf}
 	}
 
-	aggregateCtx, cancel := context.WithTimeout(ctx, mentionFanoutAggregateTimeout)
-	defer cancel()
 	// The copy lands in the group conversation itself: the default agent
 	// is configured on this conversation, so it belongs there whether the
-	// sender named the conversation by ID or by thread key.
+	// sender named the conversation by ID or by thread key. A conversation
+	// resolved by thread key carries no external_ref, so the stored one
+	// is used for the copy's thread key.
+	parent := in.Conv
+	if parent.ExternalRef == "" && gd.ExternalRef != "" {
+		withRef := *parent
+		withRef.ExternalRef = gd.ExternalRef
+		parent = &withRef
+	}
+
+	aggregateCtx, cancel := context.WithTimeout(ctx, mentionFanoutAggregateTimeout)
+	defer cancel()
 	out := s.deliverAgentMentionCopy(ctx, aggregateCtx, agentMentionFanoutInput{
 		Sender:             in.Sender,
 		SenderIdent:        in.SenderIdent,
 		Msg:                in.Msg,
 		Type:               in.Type,
-		ParentConv:         in.Conv,
+		ParentConv:         parent,
 		ParentConvVerified: true,
 		ParentMessageID:    in.ParentMessageID,
 		Channel:            in.Channel,
@@ -114,72 +132,95 @@ func (s *Server) wakeGroupDefaultAgent(ctx context.Context, in groupDefaultWakeI
 	return &messages.MentionResult{Slug: def.Slug, Status: out.Status, Error: out.Error, AgentPhase: out.AgentPhase}
 }
 
+// groupDefault is the result of resolveGroupDefaultAgent.
+type groupDefault struct {
+	// Agent is the live default agent, or nil.
+	Agent *store.Agent
+	// UnreachableSlug names a configured default agent of the project
+	// that was deleted or no longer exists. Set only when Agent is nil.
+	UnreachableSlug string
+	// ExternalRef is the conversation's stored external_ref.
+	ExternalRef string
+}
+
 // resolveGroupDefaultAgent returns the default agent of the group
-// conversation conversationID, or nil when it has none. The source is the
-// conversation's default_agent_id, then, for a native thread, the thread
-// topic's default agent (the source a human post uses). A default outside
-// projectID, deleted, or no longer resolvable counts as none. A non-nil
-// error is a transient lookup failure.
-func (s *Server) resolveGroupDefaultAgent(ctx context.Context, conversationID, projectID string) (*store.Agent, error) {
+// conversation conversationID. The source is the conversation's
+// default_agent_id, then the default agent of the webchat topic linked to
+// the conversation (the source a human post uses). As on the human path,
+// a default that names an agent of another project counts as none, and a
+// deleted or missing one is reported as unreachable. A non-nil error is a
+// transient lookup failure.
+func (s *Server) resolveGroupDefaultAgent(ctx context.Context, conversationID, projectID string) (groupDefault, error) {
 	if conversationID == "" || projectID == "" {
-		return nil, nil
+		return groupDefault{}, nil
 	}
 	conv, err := s.store.GetConversation(ctx, conversationID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, nil
+			return groupDefault{}, nil
 		}
-		return nil, err
+		return groupDefault{}, err
 	}
 	if conv == nil || conv.ProjectID == nil || *conv.ProjectID != projectID {
-		return nil, nil
+		return groupDefault{}, nil
 	}
+	gd := groupDefault{ExternalRef: conv.ExternalRef}
+
 	if conv.DefaultAgentID != nil && *conv.DefaultAgentID != "" {
-		return s.lookupProjectDefaultAgent(ctx, projectID, *conv.DefaultAgentID)
+		// default_agent_id is always an agent ID.
+		a, err := s.store.GetAgent(ctx, *conv.DefaultAgentID)
+		if err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				return groupDefault{}, err
+			}
+			a = nil
+		}
+		gd.Agent, gd.UnreachableSlug = classifyDefaultAgent(a, projectID, *conv.DefaultAgentID)
+		return gd, nil
 	}
 
-	refProject, threadID, perr := messaging.ParseThreadConversationExternalRef(conv.ExternalRef)
-	if perr != nil || refProject != projectID {
-		return nil, nil
-	}
-	s.mu.RLock()
-	wcs := s.webChatStore
-	s.mu.RUnlock()
-	if wcs == nil {
-		return nil, nil
-	}
-	topic, err := wcs.GetTopic(ctx, threadID)
+	topic, err := s.linkedTopic(ctx, conv)
 	if err != nil {
-		return nil, err
+		return groupDefault{}, err
 	}
 	if topic == nil || topic.ProjectID != projectID || topic.DefaultAgent == "" {
-		return nil, nil
+		return gd, nil
 	}
-	return s.lookupProjectDefaultAgent(ctx, projectID, topic.DefaultAgent)
-}
-
-// lookupProjectDefaultAgent resolves ref, a slug or an agent ID, to a live
-// agent of projectID, as the human send path resolves a topic default:
-// slug first, then ID. It returns nil when ref names no live agent of the
-// project.
-func (s *Server) lookupProjectDefaultAgent(ctx context.Context, projectID, ref string) (*store.Agent, error) {
-	a, err := s.store.GetAgentBySlug(ctx, projectID, ref)
+	// A topic default may be a slug or an ID: slug first, as the human
+	// send path resolves it.
+	a, err := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return nil, err
+		return groupDefault{}, err
 	}
 	if err != nil || a == nil {
-		a, err = s.store.GetAgent(ctx, ref)
+		a, err = s.store.GetAgent(ctx, topic.DefaultAgent)
 		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return nil, nil
+			if !errors.Is(err, store.ErrNotFound) {
+				return groupDefault{}, err
 			}
-			return nil, err
+			a = nil
 		}
 	}
-	if a == nil || a.ProjectID != projectID || !a.DeletedAt.IsZero() {
-		return nil, nil
+	gd.Agent, gd.UnreachableSlug = classifyDefaultAgent(a, projectID, topic.DefaultAgent)
+	return gd, nil
+}
+
+// classifyDefaultAgent sorts a looked-up default agent a (nil when not
+// found) configured as ref: a live agent of projectID is returned as the
+// default; a deleted agent of projectID, or no agent at all, is reported
+// by slug (or ref) as unreachable; an agent of another project is
+// neither.
+func classifyDefaultAgent(a *store.Agent, projectID, ref string) (*store.Agent, string) {
+	switch {
+	case a == nil:
+		return nil, ref
+	case a.ProjectID != projectID:
+		return nil, ""
+	case !a.DeletedAt.IsZero():
+		return nil, a.Slug
+	default:
+		return a, ""
 	}
-	return a, nil
 }
 
 // wokenAgentSlugs lists the agents a post reached: mention results that

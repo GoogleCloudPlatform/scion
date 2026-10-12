@@ -31,7 +31,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
@@ -94,11 +96,16 @@ type groupWakeResponse struct {
 
 func (f *groupWakeFixture) post(t *testing.T, msg, msgType string) groupWakeResponse {
 	t.Helper()
-	body, _ := json.Marshal(OutboundMessageRequest{
+	return f.postRequest(t, OutboundMessageRequest{
 		Msg:             msg,
 		Type:            msgType,
 		ConversationRef: "conv:" + f.convID,
 	})
+}
+
+func (f *groupWakeFixture) postRequest(t *testing.T, r OutboundMessageRequest) groupWakeResponse {
+	t.Helper()
+	body, _ := json.Marshal(r)
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/agents/"+f.sender.ID+"/outbound-message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -110,6 +117,20 @@ func (f *groupWakeFixture) post(t *testing.T, msg, msgType string) groupWakeResp
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.NotEmpty(t, resp.MessageID)
 	return resp
+}
+
+// requireNoMentionRowFor asserts that no mention copy addressed to agentID
+// was stored in conversationID.
+func requireNoMentionRowFor(t *testing.T, s store.Store, conversationID, agentID string) {
+	t.Helper()
+	rows, err := s.ListMessages(context.Background(), store.MessageFilter{
+		ConversationID: conversationID, Type: messages.TypeMention,
+	}, store.ListOptions{Limit: 50})
+	require.NoError(t, err)
+	for _, m := range rows.Items {
+		require.NotEqual(t, agentID, m.RecipientID,
+			"no message row may be stored for an agent that was not woken")
+	}
 }
 
 func requireNoAgentWoken(t *testing.T, resp groupWakeResponse) {
@@ -198,8 +219,12 @@ func TestGroupDefaultAgentWake_DefaultDeniedPairwise(t *testing.T) {
 	require.NotNil(t, resp.DefaultAgentResult)
 	require.Equal(t, f.target.Slug, resp.DefaultAgentResult.Slug)
 	require.Equal(t, "unauthorized", resp.DefaultAgentResult.Status)
+	// The pre-check's own wording ("message delivery denied"), not the
+	// later delivery's ("Message delivery denied"): the pairwise check
+	// must refuse before delivery is attempted, so no row is stored.
 	require.Equal(t, "message delivery denied", resp.DefaultAgentResult.Error,
 		"the pairwise check must refuse before delivery is attempted")
+	requireNoMentionRowFor(t, f.s, f.convID, f.target.ID)
 	requireNoAgentWoken(t, resp)
 
 	participants, err := f.s.ListParticipants(ctx, f.convID)
@@ -221,6 +246,7 @@ func TestGroupDefaultAgentWake_SelfPostDoesNotWakeSelf(t *testing.T) {
 	require.NotNil(t, resp.DefaultAgentResult)
 	require.Equal(t, f.sender.Slug, resp.DefaultAgentResult.Slug)
 	require.Equal(t, "self", resp.DefaultAgentResult.Status)
+	requireNoMentionRowFor(t, f.s, f.convID, f.sender.ID)
 	requireNoAgentWoken(t, resp)
 }
 
@@ -232,5 +258,83 @@ func TestGroupDefaultAgentWake_ExcludedTypeDoesNotWake(t *testing.T) {
 
 	require.Empty(t, dispatchesTo(f.dispatcher, f.target.ID))
 	require.Nil(t, resp.DefaultAgentResult)
+	require.Empty(t, resp.WokenAgents)
+	require.Nil(t, resp.NoAgentWoken, "a type that never reaches an agent must not report no_agent_woken")
+}
+
+func TestGroupDefaultAgentWake_HumanOnlyMentionWakesDefault(t *testing.T) {
+	f := newGroupWakeFixture(t)
+	f.setDefault(t, f.target.ID)
+
+	// The project owner is a human member; mentioning only a human is not
+	// an agent mention.
+	resp := f.post(t, "cc @parity-owner@test.example on this", "")
+
+	got := dispatchesTo(f.dispatcher, f.target.ID)
+	require.Len(t, got, 1, "a post that mentions only a human must reach the default agent")
+	require.Empty(t, resp.MentionResults)
+	require.NotNil(t, resp.DefaultAgentResult)
+	require.Equal(t, "delivered", resp.DefaultAgentResult.Status)
+	require.Equal(t, []string{f.target.Slug}, resp.WokenAgents)
+	require.Nil(t, resp.NoAgentWoken)
+}
+
+func TestGroupDefaultAgentWake_DeletedDefaultReportedUnreachable(t *testing.T) {
+	f := newGroupWakeFixture(t)
+	f.setDefault(t, f.target.ID)
+	markAgentSoftDeleted(t, f.s, f.target.ID)
+
+	resp := f.post(t, "status update for the group", "")
+
+	require.Empty(t, dispatchesTo(f.dispatcher, f.target.ID))
+	require.NotNil(t, resp.DefaultAgentResult)
+	require.Equal(t, f.target.Slug, resp.DefaultAgentResult.Slug)
+	require.Equal(t, "unreachable", resp.DefaultAgentResult.Status)
 	requireNoAgentWoken(t, resp)
+}
+
+// A post by thread ID into a native thread whose topic names the default
+// agent: the copy lands in the thread's conversation and carries the
+// thread's key.
+func TestGroupDefaultAgentWake_ThreadKeyPostWakesTopicDefault(t *testing.T) {
+	f := newGroupWakeFixture(t)
+	ctx := context.Background()
+	wcs := f.srv.webChatStore
+	require.NotNil(t, wcs)
+
+	topicID := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: f.projectID, Name: "gdw-thread",
+		DefaultAgent: f.target.Slug,
+		CreatedBy:    tid("parity-owner"), CreatedAt: time.Now(),
+	}))
+	topicConvID, err := wcs.GetTopicConversationID(ctx, topicID)
+	require.NoError(t, err)
+	require.NotEmpty(t, topicConvID)
+	conv, err := f.s.GetConversation(ctx, topicConvID)
+	require.NoError(t, err)
+	require.Nil(t, conv.DefaultAgentID, "precondition: the default comes from the topic only")
+
+	resp := f.postRequest(t, OutboundMessageRequest{
+		Recipient: "user:parity-owner@test.example",
+		Msg:       "status update for the thread",
+		ThreadID:  topicID,
+		Channel:   "web",
+	})
+
+	got := dispatchesTo(f.dispatcher, f.target.ID)
+	require.Len(t, got, 1, "the topic's default agent must receive the thread post exactly once")
+	require.NotNil(t, got[0].StructuredMessage)
+	require.Equal(t, messages.TypeMention, got[0].StructuredMessage.Type)
+	require.Equal(t, topicConvID, got[0].StructuredMessage.ConversationID)
+	require.Equal(t, conv.ExternalRef, got[0].StructuredMessage.ThreadID,
+		"the copy must carry the thread conversation's key")
+	require.Equal(t, conv.ExternalRef, got[0].StructuredMessage.Metadata["mention_source"])
+	require.Equal(t, "default_agent", got[0].StructuredMessage.Metadata["mention_position"])
+
+	require.NotNil(t, resp.DefaultAgentResult)
+	require.Equal(t, f.target.Slug, resp.DefaultAgentResult.Slug)
+	require.Equal(t, "delivered", resp.DefaultAgentResult.Status)
+	require.Equal(t, []string{f.target.Slug}, resp.WokenAgents)
+	require.Nil(t, resp.NoAgentWoken)
 }

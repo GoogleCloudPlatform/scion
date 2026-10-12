@@ -85,7 +85,7 @@ func TestSendMessageViaConversation_NoAgentWokenNotice(t *testing.T) {
 	})
 	stdout, stderr := sendGroupPostForNotice(t, hubCtx)
 	assert.Contains(t, stdout, "Message sent to conv:conv-group")
-	assert.Contains(t, stderr, "No agent was woken: mention an agent or set a default agent for this conversation.")
+	assert.Contains(t, stderr, "No agent was woken by this post.")
 }
 
 func TestSendMessageViaConversation_NoAgentWokenNoticeNamesDefault(t *testing.T) {
