@@ -57,6 +57,7 @@ func TestResolveHubEndpoints_Precedence(t *testing.T) {
 		{"base URL env pins a file value", HubEndpoints{Operator: fileURL, OperatorSource: "file", Pin: "SCION_SERVER_BASE_URL"}, dbURL, fileURL, "file"},
 		{"database value normalized", HubEndpoints{Operator: fileURL, OperatorSource: "file"}, "HTTPS://db.example.com/", dbURL, HubEndpointSourceDatabase},
 		{"database value equal to operator", HubEndpoints{Operator: "http://hub.internal:8080", OperatorSource: "file"}, "http://hub.internal:8080/", "http://hub.internal:8080", "file"},
+		{"database value differing only in case", HubEndpoints{Operator: "https://hub.example.com", OperatorSource: "file"}, "HTTPS://hub.example.com/", "https://hub.example.com", "file"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -71,19 +72,29 @@ func TestResolveHubEndpoints_Precedence(t *testing.T) {
 	}
 }
 
+// publicURLRejectedForms are public URL values the settings database must
+// not hold. The save test (TestPutServerConfigDB_PublicURLRejected) and the
+// startup fallback test share this table.
+var publicURLRejectedForms = map[string]string{
+	"relative":                 "db.example.com",
+	"no host":                  "https://",
+	"other scheme":             "ftp://db.example.com",
+	"http non-loopback":        "http://db.example.com",
+	"http localhost subdomain": "http://db.localhost",
+	"credentials":              "https://u:p@db.example.com",
+	"fragment":                 "https://db.example.com/#x",
+	"query":                    "https://db.example.com/?a=b",
+	"path":                     "https://db.example.com/hub",
+	"port out of range":        "https://db.example.com:99999",
+	"ipv6 zone":                "http://[fe80::1%25eth0]:80",
+}
+
 // TestResolveHubEndpoints_InvalidDatabaseValueFallsBack checks that an
 // invalid database value is not used: the operator endpoint applies and an
 // error is logged.
 func TestResolveHubEndpoints_InvalidDatabaseValueFallsBack(t *testing.T) {
-	for _, bad := range []string{
-		"http://db.example.com",
-		"https://user:pw@db.example.com",
-		"https://db.example.com/#frag",
-		"https://db.example.com/?q=1",
-		"https://db.example.com/sub",
-		"db.example.com",
-	} {
-		t.Run(bad, func(t *testing.T) {
+	for name, bad := range publicURLRejectedForms {
+		t.Run(name, func(t *testing.T) {
 			got, logged := resolveForTest(t, HubEndpoints{Operator: "https://file.example.com", OperatorSource: "file"}, bad)
 			if got.Public != "https://file.example.com" || got.PublicSource != "file" {
 				t.Errorf("Public = %q (source %q), want the file value", got.Public, got.PublicSource)
@@ -119,6 +130,13 @@ func TestResolveHubEndpoints_LogLines(t *testing.T) {
 	}
 	if strings.Contains(logged, "overrides the settings.yaml value") {
 		t.Errorf("a pinned endpoint must not log a database override, got:\n%s", logged)
+	}
+
+	// A pinned endpoint whose saved value is the same URL logs nothing about
+	// the saved value.
+	_, logged = resolveForTest(t, HubEndpoints{Operator: "https://env.example.com", OperatorSource: "env", Pin: "SCION_SERVER_HUB_ENDPOINT"}, "HTTPS://env.example.com/")
+	if strings.Contains(logged, "is not used") {
+		t.Errorf("a saved value equal to the pinned endpoint must not be reported as ignored, got:\n%s", logged)
 	}
 
 	_, logged = resolveForTest(t, HubEndpoints{Operator: "http://localhost:8080", OperatorSource: "localhost"}, "https://db.example.com")

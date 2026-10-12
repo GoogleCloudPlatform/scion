@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -144,10 +143,12 @@ func hubEndpointsFromConfig(cfg ServerConfig) HubEndpoints {
 }
 
 // ResolveHubEndpoints computes the public endpoint from the operator
-// endpoint fields of base (Operator, OperatorSource, Pin) and dbValue, the server.hub.public_url stored in the
-// settings database ("" when none), and logs the result: one line for each
-// endpoint, plus a line when the database value replaces a settings.yaml
-// value. An invalid database value is logged as an error and not used.
+// endpoint fields of base (Operator, OperatorSource, Pin) and dbValue, the
+// server.hub.public_url stored in the settings database ("" when none), and
+// logs the result: one line for each endpoint, plus a line when the database
+// value replaces a settings.yaml value. An invalid database value is logged
+// as an error and not used. Values are compared after normalisation
+// (samePublicURL).
 func ResolveHubEndpoints(base HubEndpoints, dbValue string, logger *slog.Logger) HubEndpoints {
 	if logger == nil {
 		logger = slog.Default()
@@ -159,11 +160,11 @@ func ResolveHubEndpoints(base HubEndpoints, dbValue string, logger *slog.Logger)
 	switch {
 	case dbValue == "":
 	case base.Pin != "":
-		if strings.TrimRight(dbValue, "/") != strings.TrimRight(base.Operator, "/") {
+		if !samePublicURL(dbValue, base.Operator) {
 			logger.Info("Hub public URL saved in the settings database is not used: an operator setting pins the hub endpoint",
 				"pinned_by", base.Pin)
 		}
-	case strings.TrimRight(dbValue, "/") == strings.TrimRight(base.Operator, "/"):
+	case samePublicURL(dbValue, base.Operator):
 		// The stored value is the operator value (for example a row seeded
 		// from settings.yaml); it is not an override.
 	default:

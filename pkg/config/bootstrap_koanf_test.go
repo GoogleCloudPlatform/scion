@@ -854,8 +854,15 @@ func TestPublicURLEnvName(t *testing.T) {
 		t.Errorf("LoadEnvKoanf %s = %q, want the SCION_SERVER_HUB_ENDPOINT value", PublicURLKey, got)
 	}
 
-	unmatched := FindUnmatchedSettingsEnv([]string{"SCION_SERVER_HUB_PUBLICURL=x", "SCION_SERVER_HUB_ENDPOINT=y"}, func(k string) bool { return k == PublicURLKey })
-	if len(unmatched) != 1 || unmatched[0].Name != "SCION_SERVER_HUB_PUBLICURL" || unmatched[0].Suggestion != "SCION_SERVER_HUB_ENDPOINT" {
-		t.Errorf("FindUnmatchedSettingsEnv = %+v, want only SCION_SERVER_HUB_PUBLICURL suggesting SCION_SERVER_HUB_ENDPOINT", unmatched)
+	unmatched := FindUnmatchedSettingsEnv([]string{
+		"SCION_SERVER_HUB_PUBLICURL=x", "SCION_SERVER_HUB_ENDPOINT=y",
+		"SCION_SEED_SERVER_HUB_PUBLICURL=x", "SCION_SEED_SERVER_HUB_ENDPOINT=y",
+	}, func(k string) bool { return k == PublicURLKey })
+	want := []UnmatchedEnvName{
+		{Name: "SCION_SEED_SERVER_HUB_PUBLICURL", Suggestion: "SCION_SEED_SERVER_HUB_ENDPOINT"},
+		{Name: "SCION_SERVER_HUB_PUBLICURL", Suggestion: "SCION_SERVER_HUB_ENDPOINT"},
+	}
+	if !reflect.DeepEqual(unmatched, want) {
+		t.Errorf("FindUnmatchedSettingsEnv = %+v, want %+v", unmatched, want)
 	}
 }

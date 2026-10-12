@@ -31,7 +31,7 @@ const PublicURLKey = "server.hub.public_url"
 //
 // A non-empty value must be an absolute URL of the form scheme://host[:port]:
 //   - scheme https, or http only when the host is a loopback address or
-//     localhost (http on any other host is rejected);
+//     localhost (IsLoopbackHost; http on any other host is rejected);
 //   - a host that is an IP literal or a hostname of letters, digits, '_',
 //     '-' and '.', with no IPv6 zone;
 //   - no user credentials, query or fragment;
@@ -80,7 +80,7 @@ func ValidatePublicURL(raw string) (string, error) {
 	if net.ParseIP(host) == nil && !isValidAgentEndpointHostname(host) {
 		return "", fmt.Errorf("%s: host must be an IP address or a hostname of letters, digits, '_', '-', and '.'", PublicURLKey)
 	}
-	if scheme == "http" && !isLoopbackHost(host) {
+	if scheme == "http" && !IsLoopbackHost(host) {
 		return "", fmt.Errorf("%s: must use https; http is accepted only for localhost or a loopback address", PublicURLKey)
 	}
 	authority := host
@@ -96,13 +96,15 @@ func ValidatePublicURL(raw string) (string, error) {
 	return scheme + "://" + authority, nil
 }
 
-// isLoopbackHost reports whether host is localhost, a name under
-// .localhost, or a loopback IP address.
-func isLoopbackHost(host string) bool {
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
-	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+// IsLoopbackHost reports whether host is a loopback address (127.0.0.0/8,
+// ::1, or "localhost"). It returns false for non-loopback IPs (including
+// "0.0.0.0" and "::") and for unresolvable hostnames. It is the one loopback
+// rule shared by the public URL check and the dev-auth bind check
+// (hub.IsLoopbackHost).
+func IsLoopbackHost(host string) bool {
+	if host == "localhost" {
 		return true
 	}
-	ip := net.ParseIP(h)
+	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }

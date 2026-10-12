@@ -691,24 +691,29 @@ func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 }
 
 // endpointsNoRowBase is the endpoints base when no endpoints row exists:
-// the effective public_url, image_registry and monitoring_dashboard_url.
-// hub_name is left out: the bootstrap value applies without being written
-// (bootstrapAppliesWhenAbsent).
+// the effective image_registry and monitoring_dashboard_url. hub_name is left
+// out: the bootstrap value applies without being written
+// (bootstrapAppliesWhenAbsent). public_url is left out too: a public URL is
+// stored only when an admin sets it, so a bootstrap value never becomes a
+// saved value that would override a later settings.yaml change
+// (ptone/scion#3905).
 func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 	snap := ops.Snapshot()
 	return structToRawMap(opsettings.EndpointsSettings{
-		PublicURL:              snap.PublicURL,
 		ImageRegistry:          snap.ImageRegistry,
 		MonitoringDashboardURL: snap.MonitoringDashboardURL,
 	})
 }
 
-// endpointsSeededBase drops hub_name from a non-managed endpoints base: a
-// seeded row holds the bootstrap hub_name, which applies without being
-// written (Snapshot falls back to it) and may not match the schema
-// pattern, so it is not carried into the managed row.
+// endpointsSeededBase drops hub_name and public_url from a non-managed
+// endpoints base. A seeded row holds the bootstrap hub_name, which applies
+// without being written (Snapshot falls back to it) and may not match the
+// schema pattern, so it is not carried into the managed row. Its public_url
+// is bootstrap material as well; carrying it would turn it into a saved
+// value that overrides a later settings.yaml change (ptone/scion#3905).
 func endpointsSeededBase(base map[string]json.RawMessage) {
 	delete(base, "hub_name")
+	delete(base, "public_url")
 }
 
 // bodyMergeOptions returns the base rules of a section in
@@ -856,6 +861,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// (applyRunningValuesForUnsetKeys) leaves the key unset: it is neither
 	// written nor reported (ptone/scion#3904).
 	echoedRunning := s.echoedRunningValueKeys(r.Context(), ops, &req.ServerConfigUpdateRequest)
+	// An echo of the public URL in effect is not stored either, so a
+	// bootstrap value never becomes a saved value (ptone/scion#3905).
+	if echoedPublicURL(ops, &req.ServerConfigUpdateRequest) {
+		echoedRunning[config.PublicURLKey] = true
+	}
 	koanfKeys = dropKoanfKeys(koanfKeys, echoedRunning)
 
 	// Classify keys.
@@ -1411,11 +1421,28 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			s.approveGCPIAMTransition(gcpIAMTransition{From: gcpIAMCur, To: gcpIAMNext})
 		}
 
+		// A change to the stored public URL is recorded before it is
+		// written, like a GCP permission-check change; if the record cannot
+		// be written, the change is not made (ptone/scion#3905).
+		publicURLBefore, publicURLAfter := "", ""
+		publicURLChange := false
 		if secName == "endpoints" {
-			s.auditPublicURLChange(r.Context(), gcpIAMSurfaceSave, storedPublicURL(ops), publicURLFromSectionDoc(doc))
+			publicURLBefore, publicURLAfter = storedManagedPublicURL(ops), publicURLFromSectionDoc(doc)
+			if publicURLChange = publicURLBefore != publicURLAfter; publicURLChange {
+				if err := s.auditPublicURLChange(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter); err != nil {
+					slog.Error("PUT server-config: failed to record public URL change", "error", err)
+					fileTxn.abort()
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+					return
+				}
+			}
 		}
 
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		if publicURLChange && err != nil {
+			s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter, err)
+		}
 		if secName == gcpIAMSection {
 			// The approval covers only this write's own self-apply.
 			s.clearGCPIAMApproval()

@@ -19,6 +19,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -43,17 +45,7 @@ func storedEndpointsPublicURL(t *testing.T, fake *fakeHubSettingStore) (string, 
 // public URL saved in the settings database: 422 validation_error naming the
 // key, the value not echoed, and nothing written (ptone/scion#3905).
 func TestPutServerConfigDB_PublicURLRejected(t *testing.T) {
-	for name, value := range map[string]string{
-		"relative":          "hub.example.com",
-		"no host":           "https://",
-		"other scheme":      "ftp://hub.example.com",
-		"http non-loopback": "http://hub.example.com",
-		"credentials":       "https://u:p@hub.example.com",
-		"fragment":          "https://hub.example.com/#x",
-		"query":             "https://hub.example.com/?a=b",
-		"path":              "https://hub.example.com/hub",
-		"port out of range": "https://hub.example.com:99999",
-	} {
+	for name, value := range publicURLRejectedForms {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			srv, fake, ops := newTestDBServer(t)
@@ -86,6 +78,7 @@ func TestPutServerConfigDB_PublicURLRejected(t *testing.T) {
 func TestPutServerConfigDB_PublicURLNormalized(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	srv, fake, ops := newTestDBServer(t)
+	withSettingsAuditStore(srv)
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"HTTPS://hub.example.com/"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	got, ok := storedEndpointsPublicURL(t, fake)
@@ -94,56 +87,114 @@ func TestPutServerConfigDB_PublicURLNormalized(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), `"pending_restart":["server.hub.public_url"]`)
 }
 
-// TestPutServerConfigDB_PublicURLEchoNotRechecked checks that sending back
-// the value the GET view shows (here a settings.yaml value the stricter
-// database rule would reject) does not fail a save of another field.
-func TestPutServerConfigDB_PublicURLEchoNotRechecked(t *testing.T) {
+// newBootstrapPublicURLServer boots a DB-mode server whose settings.yaml sets
+// server.hub.public_url to fileURL. With seeded true, the endpoints row is
+// seeded from that bootstrap, as syncHubSettings seeds it at every start;
+// otherwise there is no row.
+func newBootstrapPublicURLServer(t *testing.T, fileURL string, seeded bool) (*Server, *fakeHubSettingStore, *OperationalSettings) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	fake := newFakeHubSettingStore()
-	fileK := newFileKoanf(t, map[string]any{config.PublicURLKey: "http://hub.internal:8080"})
-	ops := NewOperationalSettings(fake, fileK, emptyKoanf())
+	if seeded {
+		doc := json.RawMessage(`{"public_url":"` + fileURL + `"}`)
+		_, err := fake.UpsertHubSetting(context.Background(), "endpoints", doc, "seed", -1, "seeded")
+		require.NoError(t, err)
+	}
+	ops := NewOperationalSettings(fake, newFileKoanf(t, map[string]any{config.PublicURLKey: fileURL}), emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
 	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
 	srv.SetOperationalSettings(ops)
-
-	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"http://hub.internal:8080","monitoring_dashboard_url":"https://dash.example.com/d"}}}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	return srv, fake, ops
 }
 
-// TestPublicURLWrites_Audited checks that a change to the stored public URL,
-// by a save or by a section reset, is recorded through the hub settings
-// audit path with the actor and the old and new values.
-func TestPublicURLWrites_Audited(t *testing.T) {
+// TestPutServerConfigDB_BootstrapPublicURLNotStored checks that a settings
+// save never stores the bootstrap public URL as a saved value: not when it
+// saves another endpoints field, and not when it echoes the public URL the
+// GET view shows. A later settings.yaml change then still takes effect at
+// startup (ptone/scion#3905).
+func TestPutServerConfigDB_BootstrapPublicURLNotStored(t *testing.T) {
+	const fileURL = "http://hub.internal:8080" // a file value the database rule would reject
+	for _, seeded := range []bool{true, false} {
+		for name, body := range map[string]string{
+			"sibling field only": `{"server":{"hub":{"monitoring_dashboard_url":"https://dash.example.com/d"}}}`,
+			"echoed public URL":  `{"server":{"hub":{"public_url":"` + fileURL + `","monitoring_dashboard_url":"https://dash.example.com/d"}}}`,
+			"image registry":     `{"image_registry":"registry.example.com"}`,
+		} {
+			t.Run(fmt.Sprintf("seeded=%v/%s", seeded, name), func(t *testing.T) {
+				srv, fake, ops := newBootstrapPublicURLServer(t, fileURL, seeded)
+				audits := withSettingsAuditStore(srv)
+				rr := putServerConfigDB(t, srv, ops, body)
+				require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+				row, err := fake.GetHubSetting(context.Background(), "endpoints")
+				require.NoError(t, err)
+				assert.Equal(t, "managed", row.Origin, "the save made the endpoints row managed")
+				assert.Empty(t, publicURLFromSectionDoc(row.Value), "the bootstrap public URL is not stored")
+				assert.Empty(t, audits.records(), "no public URL change is recorded")
+
+				stored, err := StoredPublicURL(context.Background(), fake)
+				require.NoError(t, err)
+				assert.Empty(t, stored)
+				resolved, _ := resolveForTest(t, HubEndpoints{Operator: "https://changed-file.example.com", OperatorSource: "file"}, stored)
+				assert.Equal(t, "https://changed-file.example.com", resolved.Public, "a later settings.yaml change takes effect")
+				assert.Equal(t, "file", resolved.PublicSource)
+			})
+		}
+	}
+}
+
+// publicURLAuditFixture is a DB-mode server with a SQLite store for audit
+// records.
+func publicURLAuditFixture(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings, store.Store) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	srv, _, ops := newTestDBServer(t)
+	srv, fake, ops := newTestDBServer(t)
 	st := newGCPIdentitySettingsStore(t)
 	srv.store = st
+	return srv, fake, ops, st
+}
 
-	audits := func() []*store.MutationAuditRecord {
-		recs, _, err := st.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: gcpIAMAuditMutation})
-		require.NoError(t, err)
-		var out []*store.MutationAuditRecord
-		for _, r := range recs {
-			if r.TargetID == config.PublicURLKey {
-				out = append(out, r)
-			}
+// publicURLAudits returns the audit records of mutationType for the public
+// URL key.
+func publicURLAudits(t *testing.T, st store.Store, mutationType string) []*store.MutationAuditRecord {
+	t.Helper()
+	recs, _, err := st.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: mutationType})
+	require.NoError(t, err)
+	var out []*store.MutationAuditRecord
+	for _, r := range recs {
+		if r.TargetID == config.PublicURLKey {
+			out = append(out, r)
 		}
-		return out
 	}
+	return out
+}
+
+func resetEndpoints(t *testing.T, srv *Server) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr,
+		adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/endpoints", ""))
+	return rr
+}
+
+// TestPublicURLWrites_Audited checks that a change to the saved public URL,
+// by a save or by a section reset, is recorded through the hub settings
+// audit path with the actor and the old and new values, and that an
+// unchanged value records nothing.
+func TestPublicURLWrites_Audited(t *testing.T) {
+	srv, _, ops, st := publicURLAuditFixture(t)
 
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"https://one.example.com"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"https://two.example.com"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	// An unchanged value records nothing.
 	rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"https://two.example.com"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	reset := httptest.NewRecorder()
-	srv.handleAdminServerConfigSectionReset(reset,
-		adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/endpoints", ""))
+	reset := resetEndpoints(t, srv)
 	require.Equal(t, http.StatusOK, reset.Code, reset.Body.String())
 
-	recs := audits()
+	recs := publicURLAudits(t, st, gcpIAMAuditMutation)
 	require.Len(t, recs, 3, "two saves and a reset")
 	pairs := map[string]string{}
 	for _, r := range recs {
@@ -156,4 +207,73 @@ func TestPublicURLWrites_Audited(t *testing.T) {
 		"https://one.example.com": "https://two.example.com",
 		"https://two.example.com": "",
 	}, pairs)
+	assert.Empty(t, publicURLAudits(t, st, gcpIAMNotAppliedMutation))
+}
+
+// TestPublicURLWrites_ConflictRecordsNotApplied checks that a save that
+// hits a revision conflict leaves the change recorded as not applied, as
+// the GCP permission-check settings do.
+func TestPublicURLWrites_ConflictRecordsNotApplied(t *testing.T) {
+	srv, fake, ops, st := publicURLAuditFixture(t)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"https://new.example.com"}},"expected_revisions":{"endpoints":99}}`)
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	_, err := fake.GetHubSetting(context.Background(), "endpoints")
+	require.ErrorIs(t, err, store.ErrNotFound, "nothing is written")
+
+	notApplied := publicURLAudits(t, st, gcpIAMNotAppliedMutation)
+	require.Len(t, notApplied, 1)
+	assert.Equal(t, "", notApplied[0].BeforeSummary)
+	assert.Equal(t, "https://new.example.com", notApplied[0].AfterSummary)
+}
+
+// TestPublicURLWrites_SeededResetRecordsNothing checks that resetting a
+// seeded endpoints row records nothing: it holds bootstrap material, not a
+// saved value.
+func TestPublicURLWrites_SeededResetRecordsNothing(t *testing.T) {
+	srv, fake, ops, st := publicURLAuditFixture(t)
+	_, err := fake.UpsertHubSetting(context.Background(), "endpoints",
+		json.RawMessage(`{"public_url":"https://file.example.com"}`), "seed", -1, "seeded")
+	require.NoError(t, err)
+	_, err = ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	reset := resetEndpoints(t, srv)
+	require.Equal(t, http.StatusOK, reset.Code, reset.Body.String())
+	assert.Empty(t, publicURLAudits(t, st, gcpIAMAuditMutation))
+	assert.Empty(t, publicURLAudits(t, st, gcpIAMNotAppliedMutation))
+}
+
+// failingAuditStore is a store whose audit writes fail.
+type failingAuditStore struct {
+	store.Store
+}
+
+func (failingAuditStore) CreateMutationAudit(context.Context, *store.MutationAuditRecord) error {
+	return errors.New("injected audit failure")
+}
+
+// TestPublicURLWrites_AuditFailureBlocksChange checks that a public URL
+// change whose audit record cannot be written is not made, by a save or by
+// a reset.
+func TestPublicURLWrites_AuditFailureBlocksChange(t *testing.T) {
+	srv, fake, ops, st := publicURLAuditFixture(t)
+	_, err := fake.UpsertHubSetting(context.Background(), "endpoints",
+		json.RawMessage(`{"public_url":"https://saved.example.com"}`), "admin@example.com", -1, "managed")
+	require.NoError(t, err)
+	_, err = ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv.store = failingAuditStore{Store: st}
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"https://new.example.com"}}}`)
+	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+	got, ok := storedEndpointsPublicURL(t, fake)
+	require.True(t, ok)
+	assert.Equal(t, "https://saved.example.com", got, "the save is not made")
+
+	reset := resetEndpoints(t, srv)
+	require.Equal(t, http.StatusInternalServerError, reset.Code, reset.Body.String())
+	got, ok = storedEndpointsPublicURL(t, fake)
+	require.True(t, ok)
+	assert.Equal(t, "https://saved.example.com", got, "the reset is not made")
 }

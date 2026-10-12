@@ -617,6 +617,7 @@ func TestPutServerConfigDB_AccessNoRowBaseFromSnapshot(t *testing.T) {
 	ops := NewOperationalSettings(fake, fileK, emptyKoanf())
 	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
 	srv.SetOperationalSettings(ops)
+	withSettingsAuditStore(srv)
 
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"invite"},"hub":{"public_url":"https://hub.example.com"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -1137,6 +1138,7 @@ func TestSystemRegistry_UnchangedManagedRowNotRewritten(t *testing.T) {
 func TestPutServerConfigDB_EndpointsSeededRowEnvPinnedMonitoringURLNotCarried(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	srv, fake, ops := newTestDBServer(t)
+	withSettingsAuditStore(srv)
 	ops.envOverrides = map[string]bool{config.MonitoringDashboardURLKey: true}
 	fake.seedWithOrigin("endpoints", json.RawMessage(`{"public_url":"https://old.example.com","monitoring_dashboard_url":"https://env.example.com/d"}`), "seeded")
 	_, err := ops.Refresh(context.Background())

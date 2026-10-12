@@ -2213,6 +2213,7 @@ func TestPutServerConfigDB_ExplicitEmptyNotificationChannels_ClearsField(t *test
 func TestPutServerConfigDB_ExplicitEmptyPublicURL_ClearsField(t *testing.T) {
 	// N6: Explicitly sending public_url as "" should clear it.
 	srv, fakeStore, ops := newTestDBServer(t)
+	withSettingsAuditStore(srv)
 
 	fakeStore.seed("endpoints", json.RawMessage(`{"public_url":"https://old.url","image_registry":"registry.test"}`))
 	_, _ = ops.Refresh(context.Background())

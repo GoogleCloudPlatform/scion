@@ -22,9 +22,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -212,4 +214,36 @@ func fileModePutServerConfig(t *testing.T, srv *Server, body string) (*httptest.
 	rr := httptest.NewRecorder()
 	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
 	return rr, filepath.Join(tmpHome, ".scion", "settings.yaml")
+}
+
+// settingsAuditStore records the mutation audit records a settings write
+// makes, for tests whose server has no other store. A change to the stored
+// public URL is recorded before it is written and is not made when the
+// record cannot be written (ptone/scion#3905), so such a save needs a store.
+// Its other store methods are not implemented.
+type settingsAuditStore struct {
+	store.Store
+	mu   sync.Mutex
+	recs []*store.MutationAuditRecord
+}
+
+func (s *settingsAuditStore) CreateMutationAudit(_ context.Context, rec *store.MutationAuditRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recs = append(s.recs, rec)
+	return nil
+}
+
+// records returns the audit records written so far.
+func (s *settingsAuditStore) records() []*store.MutationAuditRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*store.MutationAuditRecord(nil), s.recs...)
+}
+
+// withSettingsAuditStore gives srv a settingsAuditStore and returns it.
+func withSettingsAuditStore(srv *Server) *settingsAuditStore {
+	st := &settingsAuditStore{}
+	srv.store = st
+	return st
 }

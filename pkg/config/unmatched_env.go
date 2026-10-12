@@ -97,6 +97,14 @@ var knownInertServerEnvNames = map[string]string{
 	"SCION_SERVER_ENV": "",
 }
 
+// knownInertSeedEnvNames maps SCION_SEED_* names that set nothing to the
+// spelling that does, where the segment-collapse heuristic cannot find it.
+var knownInertSeedEnvNames = map[string]string{
+	// server.hub.public_url is set by the HUB_ENDPOINT spelling
+	// (ptone/scion#3905).
+	"SCION_SEED_SERVER_HUB_PUBLICURL": "SCION_SEED_SERVER_HUB_ENDPOINT",
+}
+
 // knownInertServerEnvNotes adds a short explanation to the warning for
 // known-inert names whose suggestion alone would mislead.
 var knownInertServerEnvNotes = map[string]string{
@@ -172,6 +180,10 @@ func FindUnmatchedSettingsEnv(environ []string, isLayer1 func(string) bool) []Un
 				Suggestion: suggestEnvName(name, serverEnvPrefix, func(n string) bool { return serverEnvMatches(n, isLayer1) }),
 			})
 		case strings.HasPrefix(name, seedEnvPrefix):
+			if s, ok := knownInertSeedEnvNames[name]; ok {
+				out = append(out, UnmatchedEnvName{Name: name, Suggestion: s})
+				continue
+			}
 			if seedEnvMatches(name, isLayer1) {
 				continue
 			}

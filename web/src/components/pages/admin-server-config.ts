@@ -4330,7 +4330,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field full-width">
             <label>Public URL</label>
             <span class="hint"
-              >The Hub URL for agents, invite links and sign-in. Applies after a restart.</span
+              >The Hub URL for agents, invite links and integrations. Applies after a restart.</span
             >
             ${this.renderFieldValue(
               PUBLIC_URL_KEY,

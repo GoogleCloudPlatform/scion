@@ -62,6 +62,7 @@ func TestReportSavedKeys_GitHubAppFieldsNeedAppID(t *testing.T) {
 // (ptone/scion#3904, ptone/scion#4453).
 func TestPutServerConfigDB_ConflictReportsWrittenKeysOnly(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
+	withSettingsAuditStore(srv)
 
 	// First save: writes the access section as a managed row.
 	rr := putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"admin_emails":["a@example.com"]}}}`)

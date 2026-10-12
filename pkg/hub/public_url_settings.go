@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -30,16 +31,16 @@ import (
 // validatePublicURLRequest checks the server.hub.public_url a settings
 // database save sends with config.ValidatePublicURL, normalizes it in place,
 // and writes a 422 validation_error naming the key when it fails. An omitted
-// key, an explicit "" (clear) and an unchanged echo of current (the value the
-// GET view shows) pass without the check, so saving another field does not
-// fail over a stored value that predates the rule; such a value is still
-// checked at startup. It reports whether the request may continue.
+// key, an explicit "" (clear) and an echo of current (the value the GET view
+// shows) pass without the check; the echo is then dropped from the save
+// (echoedPublicURL), so it is never stored. It reports whether the request
+// may continue.
 func validatePublicURLRequest(w http.ResponseWriter, req *ServerConfigUpdateRequest, current string) bool {
 	if req == nil || req.Server == nil || req.Server.Hub == nil {
 		return true
 	}
 	sent := req.Server.Hub.PublicURL
-	if sent == "" || sent == current {
+	if sent == "" || samePublicURL(sent, current) {
 		return true
 	}
 	normalized, err := config.ValidatePublicURL(sent)
@@ -75,19 +76,49 @@ func (s *Server) publicURLStatus() *PublicURLStatus {
 	return &PublicURLStatus{Effective: e.Public, Source: e.PublicSource, PinnedBy: e.Pin}
 }
 
-// storedPublicURL returns the public_url stored in the endpoints row, or ""
-// when no row is stored (bootstrap values are not stored values).
-func storedPublicURL(ops *OperationalSettings) string {
+// storedManagedPublicURL returns the public_url an admin saved in the
+// endpoints row, or "" when there is no row or the row is seeded. A seeded
+// row holds bootstrap material (settings.yaml and the environment), not a
+// saved value, so clearing or resetting it changes no stored value. By the
+// time a request runs, startup has applied BackfillOrigin, so the origin
+// column is authoritative; an empty origin (a row predating it) counts as
+// managed, as BackfillOrigin would mark it.
+func storedManagedPublicURL(ops *OperationalSettings) string {
 	if ops == nil {
 		return ""
 	}
 	ops.mu.RLock()
 	state, ok := ops.cache["endpoints"]
 	ops.mu.RUnlock()
-	if !ok {
+	if !ok || state.Origin == "seeded" {
 		return ""
 	}
 	return publicURLFromSectionDoc(state.Value)
+}
+
+// echoedPublicURL reports whether a settings save sends back the public URL
+// the GET view shows (the value in effect from the database, or else the
+// bootstrap value). Such a value is an echo, not a change: it is dropped from
+// the save so a bootstrap value is never stored as a saved value, and a
+// later settings.yaml change still takes effect (ptone/scion#3905).
+func echoedPublicURL(ops *OperationalSettings, req *ServerConfigUpdateRequest) bool {
+	if ops == nil || req == nil || req.Server == nil || req.Server.Hub == nil {
+		return false
+	}
+	sent := req.Server.Hub.PublicURL
+	return sent != "" && samePublicURL(sent, ops.Snapshot().PublicURL)
+}
+
+// samePublicURL reports whether a and b name the same public URL: equal
+// after config.ValidatePublicURL normalisation, or, when either does not
+// normalise, equal after trimming a trailing slash.
+func samePublicURL(a, b string) bool {
+	na, errA := config.ValidatePublicURL(a)
+	nb, errB := config.ValidatePublicURL(b)
+	if errA == nil && errB == nil {
+		return na == nb
+	}
+	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
 }
 
 // publicURLFromSectionDoc returns public_url from an endpoints section
@@ -106,21 +137,13 @@ func publicURLFromSectionDoc(doc json.RawMessage) string {
 }
 
 // auditPublicURLChange records a change to the stored server.hub.public_url
-// through the hub settings audit path: a hub_setting_update mutation audit
-// record naming the key, the old and new stored values, and the actor. It
-// does nothing when the value does not change. A record that cannot be
-// written is logged and does not block the save; the settings row still
-// carries updated_by.
-func (s *Server) auditPublicURLChange(ctx context.Context, surface, before, after string) {
-	if before == after {
-		return
-	}
-	if err := s.writePublicURLAudit(ctx, surface, before, after); err != nil {
-		slog.Error("Failed to record the hub public URL change in the audit log", "error", err)
-	}
-}
-
-func (s *Server) writePublicURLAudit(ctx context.Context, surface, before, after string) error {
+// before it is written, through the hub settings audit path the GCP
+// permission-check settings use: a hub_setting_update mutation audit record
+// naming the key, the old and new stored values, and the actor. If the record
+// cannot be written, it returns an error and the caller does not make the
+// change. If the write then fails, the caller records that with
+// auditPublicURLNotApplied.
+func (s *Server) auditPublicURLChange(ctx context.Context, surface, before, after string) error {
 	if s.store == nil {
 		return errors.New("no store for the audit record")
 	}
@@ -146,4 +169,36 @@ func (s *Server) writePublicURLAudit(ctx context.Context, surface, before, after
 		"principal_kind", rec.ActorPrincipalKind, "principal", rec.ActorPrincipalID,
 		"audit_id", rec.ID)
 	return nil
+}
+
+// auditPublicURLNotApplied records that a change recorded by
+// auditPublicURLChange was not written (the section write failed or hit a
+// revision conflict), as auditGCPIAMNotApplied does for the GCP
+// permission-check settings. A failed record is logged and does not change
+// the response.
+func (s *Server) auditPublicURLNotApplied(ctx context.Context, surface, before, after string, cause error) {
+	slog.Error("Hub public URL setting change was recorded but not written",
+		"key", config.PublicURLKey, "new", after, "error", cause)
+	rec := &store.MutationAuditRecord{
+		MutationType:  gcpIAMNotAppliedMutation, // hub_setting_update_not_applied
+		TargetType:    gcpIAMAuditTarget,
+		TargetID:      config.PublicURLKey,
+		BeforeSummary: before,
+		AfterSummary:  after,
+		ExecutorKind:  gcpIAMSurfaceKind,
+		ExecutorID:    surface,
+	}
+	auditActorFromContext(ctx).ApplyActor(rec)
+	rec.Timestamp = time.Now().UTC()
+	if s.store == nil {
+		slog.Warn("failed to emit mutation audit record",
+			"mutation_type", rec.MutationType, "error", "no store")
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+	defer cancel()
+	if err := s.store.CreateMutationAudit(writeCtx, rec); err != nil {
+		slog.Warn("failed to emit mutation audit record",
+			"mutation_type", rec.MutationType, "error", err)
+	}
 }

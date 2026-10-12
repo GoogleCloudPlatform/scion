@@ -82,6 +82,7 @@ func TestMonitoringDashboardURL_SaveAppliesLive(t *testing.T) {
 
 func TestMonitoringDashboardURL_WriteSemantics(t *testing.T) {
 	srv, fakeStore, ops := newMonitoringDBServer(t)
+	withSettingsAuditStore(srv)
 	rr := putMonitoringConfig(t, srv, ops, `{"server":{"hub":{"monitoring_dashboard_url":"`+testDashboardURL+`"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
@@ -176,6 +177,7 @@ func TestMonitoringDashboardURL_BootstrapAppliesAndIsKept(t *testing.T) {
 	require.NoError(t, err)
 	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
 	srv.SetOperationalSettings(ops)
+	withSettingsAuditStore(srv)
 	ops.server = srv
 	ApplySnapshot(srv, ops.Snapshot())
 	assert.Equal(t, testDashboardURL, srv.monitoringDashboardURL())
@@ -273,6 +275,7 @@ func TestMonitoringDashboardURL_EnvOverrideNotWrittenToRow(t *testing.T) {
 	require.NoError(t, err)
 	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
 	srv.SetOperationalSettings(ops)
+	withSettingsAuditStore(srv)
 	ops.server = srv
 
 	assert.Contains(t, ops.EnvOverriddenKeys(), config.MonitoringDashboardURLKey)
