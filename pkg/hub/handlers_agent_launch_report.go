@@ -28,9 +28,10 @@ import (
 // /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/launch. `claim` and
 // `checkpoint` are sent synchronously and gate the launch (§3.8.2); `progress`
 // covers step changes and the keepalive. Agent is present only on a
-// `succeeded` report; only the subset of it store.LaunchReport documents
-// (Runtime) is applied here — the full echo (exposed ports, applied config,
-// etc.) is not, since no broker sends this report yet.
+// `succeeded` report; of its fields the hub applies only Runtime (through
+// store.LaunchReport), WorkspacePlacement and RunID (see
+// handleAgentLaunchReport). The rest of the echo (exposed ports, applied
+// config, etc.) is not applied.
 type AgentLaunchReport struct {
 	LaunchID   string           `json:"launchId"`
 	InstanceID string           `json:"instanceId"`
