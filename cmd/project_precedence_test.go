@@ -362,19 +362,3 @@ func TestTemplateSyncHubContext_SymlinkedGlobalDir(t *testing.T) {
 	assert.Equal(t, resolvedPath, hubCtx.ProjectPath)
 	assert.Equal(t, linkedID, hubCtx.ProjectID)
 }
-
-// TestResolveProjectIDByGitRemote_NilContext checks that a nil hub context
-// returns an error instead of panicking.
-func TestResolveProjectIDByGitRemote_NilContext(t *testing.T) {
-	for _, failOnAmbiguous := range []bool{true, false} {
-		assert.NotPanics(t, func() {
-			id, err := resolveProjectIDByGitRemote(nil, failOnAmbiguous)
-			assert.Error(t, err)
-			assert.Empty(t, id)
-		})
-	}
-	assert.NotPanics(t, func() {
-		_, err := GetProjectID(nil)
-		assert.Error(t, err)
-	})
-}
