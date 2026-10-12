@@ -2059,24 +2059,26 @@ describe('chat page — late route lookups', () => {
   it.each([
     {
       name: 'an empty projects list',
-      answer: async () =>
-        new Response(JSON.stringify({ projects: [], totalCount: 0 }), { status: 200 }),
+      answer: () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ projects: [], totalCount: 0 }), { status: 200 })
+        ),
     },
     {
       name: 'a non-OK response',
-      answer: async () => new Response('{}', { status: 500 }),
+      answer: () => Promise.resolve(new Response('{}', { status: 500 })),
     },
     {
       name: 'a failed request',
-      answer: async (): Promise<Response> => {
-        throw new TypeError('Failed to fetch');
-      },
+      answer: (): Promise<Response> => Promise.reject(new TypeError('Failed to fetch')),
     },
   ])('a slug lookup answered by $name resolves nothing and asks again', async ({ answer }) => {
     vi.mocked(apiFetch).mockClear();
     vi.mocked(apiFetch).mockImplementation(answer);
     onTestFinished(() => {
-      vi.mocked(apiFetch).mockImplementation(async () => new Response('{}', { status: 200 }));
+      vi.mocked(apiFetch).mockImplementation(() =>
+        Promise.resolve(new Response('{}', { status: 200 }))
+      );
     });
     const el = createPage();
 
