@@ -20,11 +20,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -318,10 +320,18 @@ func TestHubRegistryCommands_GateAndAgentMode(t *testing.T) {
 		assert.False(t, commandRequiresProject(c), "hub %s needs no project", name)
 		assert.False(t, agentAllowed["hub."+name], "hub %s is human-only", name)
 	}
+	// Inside an agent container (SCION_HOST_UID) with a non-local hub, the
+	// container check passes, so the refusal comes from the command.
 	setupRegistryTest(t)
 	t.Setenv("SCION_HOST_UID", "1000")
-	_, _, err := runScion(t, "hub", "list")
-	require.Error(t, err)
+	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
+	for _, args := range [][]string{{"hub", "list"}, {"hub", "add", "prod", "https://other.example.com"}} {
+		_, _, err := runScion(t, args...)
+		require.Error(t, err, "%v", args)
+		assert.Equal(t, "the hub list is not available inside an agent", err.Error(), "%v", args)
+	}
+	_, err := os.Stat(contextFilePath())
+	assert.True(t, os.IsNotExist(err), "nothing is written inside an agent")
 }
 
 // --hub takes a nickname: the hook replaces it with the entry's endpoint.
@@ -415,7 +425,9 @@ func TestResolveInvocationTarget_NicknameScope(t *testing.T) {
 }
 
 // The first run that reads the context imports the global hub.endpoint as
-// the current hub, written once, without changing the settings file.
+// a hub entry, written once, without changing the settings file. It does
+// not select the hub: outside a project the CLI keeps following the global
+// hub.endpoint, including a later change to it.
 func TestResolveInvocationTarget_ImportsGlobalEndpoint(t *testing.T) {
 	setupContextTest(t)
 	enableGlobalHubImport(t)
@@ -423,30 +435,73 @@ func TestResolveInvocationTarget_ImportsGlobalEndpoint(t *testing.T) {
 	writeHomeGlobalSettings(t, settings)
 
 	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
-	assert.Equal(t, ctxTestHub, hubEndpoint)
-	assert.Equal(t, targetSourceContext, hubSource)
+	assert.Empty(t, hubEndpoint, "the imported hub is not the current hub, so nothing is filled")
+	assert.Empty(t, hubSource)
 
 	c := readTestContext(t)
-	assert.Equal(t, "hub", c.CurrentHub)
+	assert.Empty(t, c.CurrentHub)
 	require.NotNil(t, c.Hubs["hub"])
+	assert.Equal(t, ctxTestHub, c.Hubs["hub"].Endpoint)
 	assert.Equal(t, &config.HubTransportConfig{Mode: "iap", Audience: "aud-1"}, c.Hubs["hub"].Transport)
 	assert.True(t, c.GlobalImported())
-	got, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".scion", "settings.yaml"))
+	globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
+	got, err := os.ReadFile(filepath.Join(globalDir, "settings.yaml"))
 	require.NoError(t, err)
 	assert.Equal(t, settings, string(got), "no settings file is rewritten")
 
+	// A later change to the global hub.endpoint is followed outside a
+	// project; the context file is not rewritten.
 	before, err := os.ReadFile(contextFilePath())
 	require.NoError(t, err)
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: https://other.example.com\n")
 	resetContextTargets()
 	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
+	assert.Empty(t, hubEndpoint)
+	s, err := config.LoadSettings(globalDir)
+	require.NoError(t, err)
+	assert.Equal(t, "https://other.example.com", GetHubEndpoint(s))
 	after, err := os.ReadFile(contextFilePath())
 	require.NoError(t, err)
 	assert.Equal(t, string(before), string(after), "written once")
 }
 
+// Bare 'scion use' after the import shows the global settings as the
+// source, with the entry's name while the endpoints match and '-' after
+// the global endpoint changed; 'scion use <project>' then selects the hub.
+func TestUse_AfterGlobalImport(t *testing.T) {
+	srv, _ := setupUseTest(t)
+	enableGlobalHubImport(t)
+
+	stdout, _, err := runScion(t, "use", "--format", "json")
+	require.NoError(t, err)
+	var got useShowJSON
+	require.NoError(t, json.Unmarshal([]byte(stdout), &got))
+	assert.Equal(t, useHubJSON{Name: "local", Endpoint: srv.URL, Source: useSourceGlobalSettings}, got.Effective.Hub)
+	assert.Nil(t, got.Context, "no hub is selected")
+
+	stdout, _, err = runScion(t, "use")
+	require.NoError(t, err)
+	assert.Regexp(t, `^Hub:\s+local\s+`+regexp.QuoteMeta(srv.URL)+`\s+\(global settings\)\n`, stdout)
+
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: https://other.example.com\n")
+	stdout, _, err = runScion(t, "use", "--format", "json")
+	require.NoError(t, err)
+	got = useShowJSON{}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &got))
+	assert.Equal(t, useHubJSON{Endpoint: "https://other.example.com", Source: useSourceGlobalSettings}, got.Effective.Hub)
+	stdout, _, err = runScion(t, "use")
+	require.NoError(t, err)
+	assert.Regexp(t, `^Hub:\s+-\s+https://other.example.com\s+\(global settings\)\n`, stdout)
+
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+srv.URL+"\n")
+	_, _, err = runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "local", readTestContext(t).CurrentHub, "an explicit selection sets the current hub")
+}
+
 // Phase acceptance: an existing user's global hub.endpoint shows up in
-// 'hub list' with no other command run; the local workstation hub is
-// named "local".
+// 'hub list' with no other command run, named "local" for the local
+// workstation hub, and not marked current.
 func TestHubList_ShowsImportedGlobalEndpoint(t *testing.T) {
 	srv, _ := setupUseTest(t)
 	enableGlobalHubImport(t)
@@ -455,7 +510,7 @@ func TestHubList_ShowsImportedGlobalEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	w := maxLen("ENDPOINT", srv.URL)
 	assert.Equal(t, "CURRENT  NAME   "+padRight("ENDPOINT", w)+"  AUTH\n"+
-		"*        local  "+padRight(srv.URL, w)+"  dev\n", stdout)
+		"         local  "+padRight(srv.URL, w)+"  dev\n", stdout)
 }
 
 // Phase acceptance: hub add, use --hub, hub list marks it current, and a
@@ -699,4 +754,82 @@ func TestHubTransportSettings(t *testing.T) {
 	ts = hubTransportSettings(settings, ctxTestHub)
 	require.NotNil(t, ts)
 	assert.Equal(t, "settings-aud", ts.Audience, "agents never read the hub list")
+}
+
+// A successful login adds a URL given with --hub-url to the hub list
+// (announced, not made current); a hub from the environment is not added.
+func TestFinishHubAuthLogin_RegistersOnlyExplicitURL(t *testing.T) {
+	const newHub = "https://new.example.com"
+	token := &hubclient.CLITokenResponse{AccessToken: "tok", ExpiresIn: 3600}
+
+	t.Run("--hub-url", func(t *testing.T) {
+		setupLoginContextTest(t)
+		hubAuthHubURL = newHub + "/"
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
+		out := captureStdout(t, func() {
+			require.NoError(t, finishHubAuthLogin(hubAuthLoginCmd, hubAuthHubURL, token))
+		})
+		assert.Contains(t, out, "Registered hub 'new' ("+newHub+"); rename with 'scion hub rename'.\n")
+		c := readTestContext(t)
+		require.NotNil(t, c.Hubs["new"])
+		assert.Equal(t, newHub, c.Hubs["new"].Endpoint)
+		assert.Equal(t, "prod", c.CurrentHub, "a login never makes the hub current")
+		assert.True(t, credentials.IsAuthenticated(newHub))
+	})
+
+	t.Run("environment", func(t *testing.T) {
+		setupLoginContextTest(t)
+		t.Setenv("SCION_HUB_ENDPOINT", newHub)
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
+		hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
+		require.Equal(t, newHub, hubURL)
+		before, err := os.ReadFile(contextFilePath())
+		require.NoError(t, err)
+		out := captureStdout(t, func() {
+			require.NoError(t, finishHubAuthLogin(hubAuthLoginCmd, hubURL, token))
+		})
+		assert.NotContains(t, out, "Registered hub")
+		after, err := os.ReadFile(contextFilePath())
+		require.NoError(t, err)
+		assert.Equal(t, string(before), string(after), "the hub list is unchanged")
+		assert.True(t, credentials.IsAuthenticated(newHub))
+	})
+}
+
+// sameHubURL compares hub URLs after NormalizeEndpoint.
+func TestSameHubURL_Normalised(t *testing.T) {
+	assert.True(t, sameHubURL("https://hub.example.com:443", "https://hub.example.com"))
+	assert.True(t, sameHubURL("HTTPS://Hub.Example.com/", "https://hub.example.com"))
+	assert.False(t, sameHubURL("https://hub.example.com:8443", "https://hub.example.com"))
+	assert.False(t, sameHubURL("https://hub.example.com/Base", "https://hub.example.com/base"), "the path keeps its case")
+
+	// No false override note when the environment spells the current hub
+	// with its default port.
+	setupRegistryTest(t)
+	saveTestContext(t, ctxTestHub, "")
+	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com:443")
+	stdout, stderr, err := runScion(t, "use", "--hub", "prod")
+	require.NoError(t, err)
+	assert.NotContains(t, stdout+stderr, "overrides the current hub")
+}
+
+// The AUTH column uses only the four labels of the design.
+func TestHubAuthLabel(t *testing.T) {
+	tests := []struct {
+		info authInfo
+		want string
+	}{
+		{authInfo{MethodType: "oauth", OAuthCreds: &credentials.HubCredentials{User: &credentials.User{Email: "alice@example.com"}}}, "oauth (alice@example.com)"},
+		{authInfo{MethodType: "oauth"}, "oauth"},
+		{authInfo{MethodType: "devauth", IsDevAuth: true}, "dev"},
+		{authInfo{MethodType: "agent_token", IsDevAuth: true}, "dev"},
+		{authInfo{MethodType: "bearer"}, "env token"},
+		{authInfo{MethodType: "agent_token", Source: "SCION_AUTH_TOKEN env"}, "env token"},
+		{authInfo{MethodType: "agent_token", Source: "scion-token file"}, "env token"},
+		{authInfo{MethodType: "proxy-auth"}, "none"},
+		{authInfo{MethodType: "none"}, "none"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, hubAuthLabel(tt.info), "%+v", tt.info)
+	}
 }

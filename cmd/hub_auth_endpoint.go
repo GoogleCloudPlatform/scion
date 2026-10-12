@@ -19,7 +19,6 @@ import (
 	"io"
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -99,11 +98,11 @@ func settingsHubEndpoint() string {
 	return settings.GetHubEndpoint()
 }
 
-// sameHubURL reports whether a and b name the same hub, ignoring a trailing
-// slash and letter case in the scheme and host.
+// sameHubURL reports whether a and b name the same hub: equal after
+// config.NormalizeEndpoint (trailing slash, letter case in the scheme and
+// host, and the default port do not matter).
 func sameHubURL(a, b string) bool {
-	norm := func(s string) string { return strings.ToLower(strings.TrimRight(strings.TrimSpace(s), "/")) }
-	return norm(a) == norm(b)
+	return config.NormalizeEndpoint(a) == config.NormalizeEndpoint(b)
 }
 
 // loginEndpointOptions carries what persistLoginEndpoint needs, so tests can

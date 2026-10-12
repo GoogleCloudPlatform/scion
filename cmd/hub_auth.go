@@ -175,6 +175,13 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	return finishHubAuthLogin(cmd, hubURL, tokenResp)
+}
+
+// finishHubAuthLogin completes a successful login: it stores the
+// credential, adds a URL given explicitly with --hub-url or --hub to the
+// hub list, and records the endpoint in settings where that applies.
+func finishHubAuthLogin(cmd *cobra.Command, hubURL string, tokenResp *hubclient.CLITokenResponse) error {
 	if err := storeTokenAndPrintResult(hubURL, tokenResp); err != nil {
 		return err
 	}

@@ -142,7 +142,11 @@ var hubResponds = func(endpoint string) error {
 	return hubclient.HintProxyError(err)
 }
 
-// hubAuthLabel is the AUTH column of 'hub list' for info.
+// hubAuthLabel is the AUTH column of 'hub list' for info, one of the four
+// labels: "oauth (<user>)", "dev", "env token" or "none". A token that is
+// not a login (SCION_HUB_TOKEN, SCION_AUTH_TOKEN or the agent token file)
+// is "env token"; transport-only proxy auth carries no CLI credential and
+// is "none".
 func hubAuthLabel(info authInfo) string {
 	switch {
 	case info.MethodType == "oauth":
@@ -152,12 +156,8 @@ func hubAuthLabel(info authInfo) string {
 		return "oauth"
 	case info.IsDevAuth:
 		return "dev"
-	case info.MethodType == "bearer", info.MethodType == "agent_token" && info.Source != "scion-token file":
+	case info.MethodType == "bearer", info.MethodType == "agent_token":
 		return "env token"
-	case info.MethodType == "agent_token":
-		return "agent token"
-	case info.MethodType == "proxy-auth":
-		return "transport"
 	}
 	return "none"
 }
