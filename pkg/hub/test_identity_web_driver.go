@@ -27,10 +27,13 @@ import (
 // request carries the proxy's verified assertion naming the driver. Such a
 // driver is listed in auth.proxy.driverPrincipals and is a transport, never
 // a user:
-//   - a verified assertion for a driver principal is refused with 403
-//     (driver_principal_has_no_session) wherever it would otherwise find or
-//     create a user: the web fresh-identity path (proxyAuthMiddleware), API
-//     Step 3a (UnifiedAuthMiddleware) and the external-bearer path;
+//   - it is refused wherever it would otherwise find or create a user: a
+//     verified assertion on the web fresh-identity path
+//     (proxyAuthMiddleware) and at API Step 3a (UnifiedAuthMiddleware) gets
+//     403 driver_principal_has_no_session; a Google identity is refused by
+//     GoogleIdentityResolver.Resolve (ErrAccessDenied, a plain 403), which
+//     both Google paths use (the external-bearer path and the GE exchange).
+//     TestTIWebIAP_DriverRefusalSitesAreTheOnlyIngress keeps it that way;
 //   - it may redeem a web-login code (handleTestIdentityRedeem verifies
 //     the assertion itself and records its email as the session's driver,
 //     tiDriver);
@@ -234,12 +237,15 @@ func testIdentityRedeemEmailRateKey(email string) string {
 //   - its email equals both the current verified assertion email and the
 //     session's driver.
 //
+// A test identity session that the classifier refuses on such a request
+// (behind proxy auth, with a bearer that is not hub-issued) is cleared
+// through w, as on every other consumer; the bearer still goes on
+// unchanged.
+//
 // The result is only ever the test identity's own token, so the request
 // never gets more than the test identity could do with its issued token.
-func (ws *WebServer) fixtureSessionBearer(r *http.Request) string {
-	audience := strings.TrimSpace(ws.config.ProxyDriverTokenAudience)
-	if !ws.proxyMode() || ws.config.ProxyAuthenticator == nil || audience == "" ||
-		ws.driverTokenValidator == nil || ws.sessionStore == nil || ws.userTokenSvc == nil {
+func (ws *WebServer) fixtureSessionBearer(w http.ResponseWriter, r *http.Request) string {
+	if !ws.proxyMode() || ws.config.ProxyAuthenticator == nil || ws.sessionStore == nil || ws.userTokenSvc == nil {
 		return ""
 	}
 	if _, present := ws.readTestIdentityMarker(r); !present {
@@ -268,10 +274,19 @@ func (ws *WebServer) fixtureSessionBearer(r *http.Request) string {
 		return ""
 	}
 	res := ws.classifyTestIdentitySession(r, session, nil)
+	if res.state == tiSessionInvalid {
+		ws.logger().Info("Clearing test identity web session", "reason", res.reason)
+		ws.clearTestIdentitySession(w, r, session)
+		return ""
+	}
 	if res.state != tiSessionValid || res.marker == nil || res.assertionEmail == "" {
 		return ""
 	}
 
+	audience := strings.TrimSpace(ws.config.ProxyDriverTokenAudience)
+	if audience == "" || ws.driverTokenValidator == nil {
+		return ""
+	}
 	id, err := ws.driverTokenValidator.ValidateIDToken(r.Context(), token, []string{audience})
 	if err != nil || id == nil {
 		ws.logger().Debug("Driver bearer not replaced: not a valid driver ID token", "error", err)

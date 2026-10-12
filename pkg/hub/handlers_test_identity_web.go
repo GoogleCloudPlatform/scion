@@ -846,13 +846,32 @@ type testIdentityRedeemRequest struct {
 	Code string `json:"code"`
 }
 
-// redeemClientIP returns the host part of the connection's remote address.
-func redeemClientIP(r *http.Request) string {
+// redeemClientIP returns the client address of a redeem request, for the
+// audit and the per-IP rate limit. Behind proxy auth the connection comes
+// from the proxy, so the client is read through the hub's trusted proxies
+// (server trusted_proxies): X-Forwarded-For right to left past trusted hops
+// (geExchangeClientIP). A forwarding header from a peer that is not a
+// trusted proxy is ignored. Otherwise it is the host part of the
+// connection's remote address.
+func (ws *WebServer) redeemClientIP(r *http.Request) string {
+	if ws.proxyMode() && ws.testIdentityHub != nil {
+		return geExchangeClientIP(r, parseTrustedProxies(ws.testIdentityHub.config.TrustedProxies))
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// redeemRateKey is the per-IP rate-limit key of a redeem request: the
+// client address of redeemClientIP behind proxy auth, the connection's
+// source address otherwise.
+func (ws *WebServer) redeemRateKey(r *http.Request) string {
+	if ws.proxyMode() && ws.testIdentityHub != nil {
+		return ws.redeemClientIP(r)
+	}
+	return testLoginRateKey(r.RemoteAddr)
 }
 
 // redeemOriginAllowed reports whether the request's Origin is absent or the
@@ -886,7 +905,7 @@ func (ws *WebServer) redeemOriginAllowed(r *http.Request) bool {
 // there is none). A write failure is logged and does not change the answer.
 func (ws *WebServer) auditTestIdentityRedeemRefusal(r *http.Request, reason, hashPrefix, userID, assertionEmail string) {
 	slog.WarnContext(r.Context(), "test identity web session redeem refused", "reason", reason,
-		"code_hash_prefix", hashPrefix, "client_ip", redeemClientIP(r), "assertion_email", assertionEmail)
+		"code_hash_prefix", hashPrefix, "client_ip", ws.redeemClientIP(r), "assertion_email", assertionEmail)
 	if ws.store == nil {
 		return
 	}
@@ -900,7 +919,7 @@ func (ws *WebServer) auditTestIdentityRedeemRefusal(r *http.Request, reason, has
 		UserID         string `json:"user_id,omitempty"`
 		ClientIP       string `json:"client_ip"`
 		AssertionEmail string `json:"assertion_email"`
-	}{reason, hashPrefix, userID, redeemClientIP(r), assertionEmail})
+	}{reason, hashPrefix, userID, ws.redeemClientIP(r), assertionEmail})
 	record := &store.MutationAuditRecord{
 		MutationType:        testIdentityWebSessionRefuseMutation,
 		ActorPrincipalKind:  "system",
@@ -934,7 +953,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 			// identity session this browser carries. The rate limit
 			// runs first, so refusals cannot drive unbounded audit
 			// writes.
-			if !ws.testIdentityRedeemLimiter.Allow(testLoginRateKey(r.RemoteAddr)) {
+			if !ws.testIdentityRedeemLimiter.Allow(ws.redeemRateKey(r)) {
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many redeem requests", nil)
 				return
@@ -959,7 +978,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
-	if !ws.testIdentityRedeemLimiter.Allow(testLoginRateKey(r.RemoteAddr)) {
+	if !ws.testIdentityRedeemLimiter.Allow(ws.redeemRateKey(r)) {
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many redeem requests", nil)
 		return
@@ -1088,7 +1107,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		DriverPrincipal  string `json:"driver_principal"`
 		SessionExpiresAt string `json:"session_expires_at"`
 		ClientIP         string `json:"client_ip"`
-	}{row.ID, code.ID, prefix, driverPrincipalOrNone(assertionEmail), expiry.UTC().Format(time.RFC3339), redeemClientIP(r)})
+	}{row.ID, code.ID, prefix, driverPrincipalOrNone(assertionEmail), expiry.UTC().Format(time.RFC3339), ws.redeemClientIP(r)})
 	record := &store.MutationAuditRecord{
 		MutationType:        testIdentityWebSessionCreateMutation,
 		ActorPrincipalKind:  "system",

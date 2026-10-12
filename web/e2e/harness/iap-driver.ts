@@ -43,11 +43,10 @@ export interface IapDriverOptions {
    */
   token: () => Promise<string>;
   /**
-   * The hub origin, e.g. https://test-hub.example. Defaults to the origin of
-   * the context's baseURL. Only requests to exactly this origin get the
-   * header.
+   * The hub origin (or any URL on it), e.g. https://test-hub.example.
+   * Required. Only requests to exactly this origin get the header.
    */
-  baseURL?: string;
+  baseURL: string;
   /** Refresh this long before the token's exp claim. Default 60 s. */
   refreshBeforeMs?: number;
   /**
@@ -86,12 +85,6 @@ export function jwtExpiryMs(token: string): number | undefined {
   }
 }
 
-/** The origin of the context's baseURL, from Playwright's context options. */
-function contextOrigin(context: BrowserContext): string | undefined {
-  const base = (context as unknown as { _options?: { baseURL?: string } })._options?.baseURL;
-  return base ? new URL(base).origin : undefined;
-}
-
 /** The origin of url, or undefined for a URL without one (data:, blob:). */
 function originOf(url: string): string | undefined {
   try {
@@ -118,9 +111,9 @@ export async function installIapDriver(
   context: BrowserContext,
   opts: IapDriverOptions
 ): Promise<UninstallIapDriver> {
-  const hubOrigin = opts.baseURL ? new URL(opts.baseURL).origin : contextOrigin(context);
+  const hubOrigin = opts.baseURL ? originOf(opts.baseURL) : undefined;
   if (!hubOrigin) {
-    throw new Error('installIapDriver: set baseURL on the context or in opts');
+    throw new Error('installIapDriver: opts.baseURL must be the hub URL');
   }
   const refreshBefore = opts.refreshBeforeMs ?? DEFAULT_REFRESH_BEFORE_MS;
   const fallbackLifetime = opts.fallbackLifetimeMs ?? DEFAULT_FALLBACK_LIFETIME_MS;

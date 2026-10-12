@@ -94,12 +94,27 @@ async function newHubContext(browser: Browser): Promise<BrowserContext> {
 test('adds the driver token to same-origin requests only', async ({ browser }) => {
   const context = await newHubContext(browser);
   const token = syntheticToken('one', Date.now() + 3600_000);
-  await installIapDriver(context, { token: async () => token });
+  await installIapDriver(context, { baseURL: hub.url, token: async () => token });
   const page = await context.newPage();
 
   await page.goto('/page-1');
   await page.evaluate(async (otherURL) => {
     await fetch('/api/same');
+    await new Promise<void>((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.onloadend = () => resolve();
+      xhr.open('GET', '/api/xhr-same');
+      xhr.send();
+    });
+    await new Promise<void>((resolve) => {
+      const es = new EventSource('/events-same');
+      const done = () => {
+        es.close();
+        resolve();
+      };
+      es.onerror = done;
+      es.onopen = done;
+    });
     await fetch(`${otherURL}/api/cross`);
     await new Promise<void>((resolve) => {
       const img = new Image();
@@ -111,6 +126,9 @@ test('adds the driver token to same-origin requests only', async ({ browser }) =
 
   expect(authFor(hub, '/page-1')).toEqual([`Bearer ${token}`]);
   expect(authFor(hub, '/api/same')).toEqual([`Bearer ${token}`]);
+  expect(authFor(hub, '/api/xhr-same')).toEqual([`Bearer ${token}`]);
+  expect(authFor(hub, '/events-same').length).toBeGreaterThan(0);
+  expect(authFor(hub, '/events-same').every((a) => a === `Bearer ${token}`)).toBe(true);
   expect(authFor(other, '/api/cross')).toEqual([undefined]);
   expect(authFor(other, '/img/cross.png')).toEqual([undefined]);
   expect(authFor(other, '/page-other')).toEqual([undefined]);
@@ -124,6 +142,7 @@ test('refreshes the token through the callback before it expires', async ({ brow
   let calls = 0;
   const issued: string[] = [];
   await installIapDriver(context, {
+    baseURL: hub.url,
     now: () => clock,
     refreshBeforeMs: 60_000,
     token: async () => {
@@ -152,7 +171,10 @@ test('refreshes the token through the callback before it expires', async ({ brow
 
 test('keeps an Authorization header the page set itself', async ({ browser }) => {
   const context = await newHubContext(browser);
-  await installIapDriver(context, { token: async () => syntheticToken('d', Date.now() + 3600_000) });
+  await installIapDriver(context, {
+    baseURL: hub.url,
+    token: async () => syntheticToken('d', Date.now() + 3600_000),
+  });
   const page = await context.newPage();
   await page.goto('/page-x');
   await page.evaluate(() => fetch('/api/explicit', { headers: { Authorization: 'Bearer page-set' } }));
@@ -174,6 +196,7 @@ test('never logs or stores the token, and aborts when the callback fails', async
   }
   try {
     await installIapDriver(context, {
+      baseURL: hub.url,
       now: () => clock,
       refreshBeforeMs: 60_000,
       token: async () => {
@@ -214,9 +237,10 @@ test('never logs or stores the token, and aborts when the callback fails', async
   }
 });
 
-test('uninstall stops adding the header; a context without baseURL is refused', async ({ browser }) => {
+test('uninstall stops adding the header; a missing or invalid baseURL is refused', async ({ browser }) => {
   const context = await newHubContext(browser);
   const uninstall = await installIapDriver(context, {
+    baseURL: hub.url,
     token: async () => syntheticToken('u', Date.now() + 3600_000),
   });
   const page = await context.newPage();
@@ -229,7 +253,9 @@ test('uninstall stops adding the header; a context without baseURL is refused', 
   await context.close();
 
   const bare = await browser.newContext();
-  await expect(installIapDriver(bare, { token: async () => 'x' })).rejects.toThrow(/baseURL/);
+  for (const baseURL of ['', 'not a url', 'data:,x']) {
+    await expect(installIapDriver(bare, { baseURL, token: async () => 'x' })).rejects.toThrow(/baseURL/);
+  }
   await bare.close();
 });
 

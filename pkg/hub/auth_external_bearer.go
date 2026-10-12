@@ -449,13 +449,6 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 		attempt.principal = ExternalBearerPrincipalUser
 	}
 
-	// A driver principal (auth.proxy.driverPrincipals, phase WS2) is a
-	// transport for test identity web sessions, never a user: refused
-	// before Resolve could find or create an account for it.
-	if cfg.DriverPrincipals.contains(id.Email) {
-		return nil, attempt, fmt.Errorf("external bearer: %w: driver principal", ErrAccessDenied)
-	}
-
 	policy := ResolvePolicy{}
 	if id.IsServiceAccount {
 		if kind == externalBearerAccessToken {

@@ -88,6 +88,12 @@ type GoogleIdentityResolver struct {
 	// directly without setting it.
 	platformAuthSA string
 
+	// driverPrincipals is the hub's auth.proxy.driverPrincipals set
+	// (ptone/scion#4240, phase WS2), set via SetDriverPrincipals. Resolve
+	// never resolves or provisions a user for a driver principal. Empty by
+	// default, which leaves the check inert.
+	driverPrincipals driverPrincipalSet
+
 	// policyDeps carries the additional server-config-derived callbacks
 	// (role assignment, super-admin binding, grant sync, audit) that
 	// applyLiveSignInPolicy uses to give an existing record found by email
@@ -158,6 +164,16 @@ func (r *GoogleIdentityResolver) SetPlatformAuthSA(email string) {
 	r.platformAuthSA = email
 }
 
+// SetDriverPrincipals records the hub's proxy driver principals (WS2) so
+// Resolve refuses to resolve or provision a user for one: a driver
+// principal is a transport for test identity web sessions, never a user.
+// Resolve is the one resolution entry point of both Google identity paths
+// (the external-bearer path and the GE exchange endpoint), so this single
+// check covers both.
+func (r *GoogleIdentityResolver) SetDriverPrincipals(drivers driverPrincipalSet) {
+	r.driverPrincipals = drivers
+}
+
 // NewGoogleIdentityResolver creates a GoogleIdentityResolver.
 //
 // authorize implements the Hub sign-in policy (domain restriction, invite-only,
@@ -220,6 +236,10 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 	// the two callers of Resolve differ in whether this duplicates an
 	// existing rejection or is the applicable check.
 	if isReservedPlatformIdentity(identity.Email, r.platformAuthSA) {
+		return nil, ErrAccessDenied
+	}
+	// A proxy driver principal never becomes a user (WS2).
+	if r.driverPrincipals.contains(identity.Email) {
 		return nil, ErrAccessDenied
 	}
 	// The reserved test-identity domain is never provisioned or resolved

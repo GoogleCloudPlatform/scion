@@ -169,7 +169,7 @@ await assertTestIdentity(page, { email: issued.identity.email });
 | --- | --- |
 | `redeemTestIdentity(context, opts)` | `POST /auth/test-identity/redeem` with `{code}` from `opts.code` or `opts.codeFile`; expects 204 and leaves the session cookie in the context. With `codeFile`, the file is read and removed after a successful redeem. `opts.baseURL` defaults to the context's baseURL. `opts.proxyAuthorization` is sent as `Proxy-Authorization` (IAP-fronted hubs). Any other answer throws with the status and the hub error code only, never a body. |
 | `assertTestIdentity(target, {email, role?})` | `target` is a page or a request context. Reads `GET /auth/me` and fails on an email mismatch, on a role mismatch when `role` is given, or when the session is not a test identity session; also checks that `GET /api/v1/auth/me` answers for the same email. Returns `{email, role, expiresAt}`. |
-| `installIapDriver(context, {token})` (`iap-driver.ts`) | IAP-fronted hubs only. Adds `Authorization: Bearer <token>` to the context's requests to the hub origin (page navigations, `fetch`, XHR, event streams), never to any other origin, and keeps an `Authorization` header a page sets itself. `token` is an async callback that returns the driver's Google OIDC ID token (audience: the IAP OAuth client ID); it is called on first use and again 60 s before the cached token's `exp` (`refreshBeforeMs`), and concurrent requests share one call. The token is never logged and never written to disk, `storageState` or traces by the hook. If the callback fails, the request is aborted rather than sent without the token. `opts.baseURL` defaults to the context's baseURL. Returns a function that removes the hook. Redeem still goes through `redeemTestIdentity` with `proxyAuthorization`. |
+| `installIapDriver(context, {baseURL, token})` (`iap-driver.ts`) | IAP-fronted hubs only. Adds `Authorization: Bearer <token>` to the context's requests to the hub origin (page navigations, `fetch`, XHR, event streams), never to any other origin, and keeps an `Authorization` header a page sets itself. `token` is an async callback that returns the driver's Google OIDC ID token (audience: the IAP OAuth client ID); it is called on first use and again 60 s before the cached token's `exp` (`refreshBeforeMs`), and concurrent requests share one call. The token is never logged and never written to disk, `storageState` or traces by the hook. If the callback fails, the request is aborted rather than sent without the token. `opts.baseURL` (required) is the hub URL; only its origin gets the header. Returns a function that removes the hook. Redeem still goes through `redeemTestIdentity` with `proxyAuthorization`. |
 | `withTracingPaused(context, fn)` | Runs `fn` with trace recording paused (used by the redeem). |
 
 ### Rules
@@ -212,7 +212,7 @@ import { installIapDriver } from './iap-driver.js';
 const context = await browser.newContext({ baseURL: hubURL });
 const driverToken = () => mintDriverIdToken(); // your callback; returns a fresh ID token
 await redeemTestIdentity(context, { codeFile, proxyAuthorization: `Bearer ${await driverToken()}` });
-await installIapDriver(context, { token: driverToken });
+await installIapDriver(context, { baseURL: hubURL, token: driverToken });
 const page = await context.newPage();
 await page.goto('/', { waitUntil: 'domcontentloaded' });
 ```
@@ -220,9 +220,11 @@ await page.goto('/', { waitUntil: 'domcontentloaded' });
 - Redeem from Node with `proxyAuthorization`, then install the hook before
   the first navigation.
 - The session works only with the driver that redeemed it: a request with
-  another principal's assertion, or none, ends the session.
-- When the session ends, the driver gets `403` with
-  `driver_principal_has_no_session`: it has no hub account of its own.
+  another principal's assertion, or none, clears the session.
+- When the session has ended, the driver never acts as itself: page
+  navigations get `403` with `driver_principal_has_no_session`, and API
+  requests carrying the driver's ID token get `401` (or a plain `403`
+  where the hub trusts Google tokens).
 - `web/e2e/iap-driver/` checks the hook in a real browser against two local
   servers (no IAP needed).
 

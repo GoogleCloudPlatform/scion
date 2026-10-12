@@ -18,9 +18,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,15 +145,15 @@ func TestDriverPrincipal_RefusedAtStep3a(t *testing.T) {
 }
 
 // C3: a driver principal's Google ID token on the external-bearer path is
-// refused before the resolver can find or create an account for it.
+// refused by the resolver before it can find or create an account for it.
 func TestDriverPrincipal_RefusedOnExternalBearer(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newSAJWKSEndpoints(kp)
 	defer endpoints.close()
 	userStore := newFakeUserStore()
 	resolver := NewGoogleIdentityResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil, slog.Default())
+	resolver.SetDriverPrincipals(newDriverPrincipalSet([]string{tiDriverEmail}))
 	cfg := newExternalBearerConfigWithSA(t, newTestValidator(endpoints), resolver, []string{"ti-test"})
-	cfg.DriverPrincipals = newDriverPrincipalSet([]string{tiDriverEmail})
 
 	w, result := doExternalBearerRequest(cfg, signIDToken(kp, serviceAccountIDTokenClaims(tiDriverEmail)))
 	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
@@ -159,6 +165,33 @@ func TestDriverPrincipal_RefusedOnExternalBearer(t *testing.T) {
 	w, result = doExternalBearerRequest(cfg, signIDToken(kp, serviceAccountIDTokenClaims("worker@ti-test.iam.gserviceaccount.com")))
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	assert.True(t, result.reached)
+}
+
+// C3 for both Google paths: GoogleIdentityResolver.Resolve, which the
+// external-bearer path and the GE exchange share, never resolves or
+// provisions a driver principal, user email or service account alike.
+func TestDriverPrincipal_RefusedByGoogleIdentityResolver(t *testing.T) {
+	userEmailDriver := "browser-driver@example.com"
+	userStore := newFakeUserStore()
+	resolver := NewGoogleIdentityResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil, slog.Default())
+	resolver.SetDriverPrincipals(newDriverPrincipalSet([]string{tiDriverEmail, userEmailDriver}))
+	identity := func(email string, sa bool) *ValidatedGoogleIdentity {
+		return &ValidatedGoogleIdentity{Subject: "sub-" + email, Email: email, EmailVerified: true,
+			Issuer: googleIssuerHTTPS, IsServiceAccount: sa, UpstreamExpiry: time.Now().Add(time.Hour)}
+	}
+	for _, c := range []struct {
+		email string
+		sa    bool
+	}{{tiDriverEmail, true}, {userEmailDriver, false}, {"Browser-Driver@Example.com", false}} {
+		u, err := resolver.Resolve(context.Background(), identity(c.email, c.sa), ResolvePolicy{PreAuthorized: true})
+		assert.Nil(t, u, c.email)
+		assert.ErrorIs(t, err, ErrAccessDenied, c.email)
+	}
+	assert.Empty(t, userStore.users, "no account is created for a driver")
+
+	u, err := resolver.Resolve(context.Background(), identity("someone@example.com", false), ResolvePolicy{PreAuthorized: true})
+	require.NoError(t, err, "another identity still resolves")
+	assert.Equal(t, "someone@example.com", u.Email)
 }
 
 // The redeem rate-limit key of an email never collides with a source IP key.
@@ -205,4 +238,152 @@ func TestNeverAPIWritable_ProxyDriverKeysMatched(t *testing.T) {
 		}
 		assert.Equal(t, want, got, body)
 	}
+}
+
+// tiCall is one call site found by tiCensus: the enclosing function and the
+// position of the call.
+type tiCall struct {
+	fn  string
+	pos token.Pos
+}
+
+// tiCensus parses every non-test .go file of the package and returns, per
+// selector name, the call sites x.<name>(...) with the selector expression
+// x rendered as source-like text ("cfg.ProxyAuthenticator").
+func tiCensus(t *testing.T) (map[string]map[string][]tiCall, *token.FileSet) {
+	t.Helper()
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+	out := map[string]map[string][]tiCall{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		require.NoError(t, err, name)
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				recv := tiExprText(sel.X)
+				if out[sel.Sel.Name] == nil {
+					out[sel.Sel.Name] = map[string][]tiCall{}
+				}
+				out[sel.Sel.Name][recv] = append(out[sel.Sel.Name][recv], tiCall{fn: fd.Name.Name, pos: call.Pos()})
+				return true
+			})
+		}
+	}
+	return out, fset
+}
+
+func tiExprText(e ast.Expr) string {
+	switch v := e.(type) {
+	case *ast.Ident:
+		return v.Name
+	case *ast.SelectorExpr:
+		return tiExprText(v.X) + "." + v.Sel.Name
+	case *ast.CallExpr:
+		return tiExprText(v.Fun) + "()"
+	default:
+		return "?"
+	}
+}
+
+func tiFuncs(calls map[string][]tiCall, recvSuffix string) []string {
+	set := map[string]bool{}
+	for recv, cs := range calls {
+		if strings.HasSuffix(recv, recvSuffix) {
+			for _, c := range cs {
+				set[c.fn] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for f := range set {
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func tiFirst(calls map[string][]tiCall, recvSuffix, fn string) token.Pos {
+	var first token.Pos
+	for recv, cs := range calls {
+		if !strings.HasSuffix(recv, recvSuffix) {
+			continue
+		}
+		for _, c := range cs {
+			if c.fn == fn && (first == token.NoPos || c.pos < first) {
+				first = c.pos
+			}
+		}
+	}
+	return first
+}
+
+// Advisor recommendation (C3 by construction): the driver refusal sites are
+// the only places in the package where a verified proxy assertion or an
+// external Google identity becomes a user, and each refusal comes before
+// the user lookup or provisioning in its function. A new ingress path makes
+// this test fail until it is given the same refusal and listed here.
+func TestTIWebIAP_DriverRefusalSitesAreTheOnlyIngress(t *testing.T) {
+	census, fset := tiCensus(t)
+
+	// Proxy assertions: verified only at API Step 3a, on the web
+	// fresh-identity path, and by the driver binding / redeem helper,
+	// which never creates a user.
+	assert.Equal(t, []string{"UnifiedAuthMiddleware", "proxyAuthMiddleware", "verifiedProxyAssertion"},
+		tiFuncs(census["Authenticate"], "ProxyAuthenticator"), "every ProxyAuthenticator.Authenticate caller")
+	assert.Equal(t, []string{"handleTestIdentityRedeem", "testIdentityDriverBinding"},
+		tiFuncs(census["verifiedProxyAssertion"], "ws"), "verifiedProxyAssertion feeds only the binding and redeem")
+	// Step 3a: the driver refusal comes after the assertion and before the
+	// provisioner, which nothing else calls.
+	assert.Equal(t, []string{"UnifiedAuthMiddleware"}, tiFuncs(census["ProxyUserProvisioner"], "cfg"), "ProxyUserProvisioner callers")
+	auth, refuse3a, prov := tiFirst(census["Authenticate"], "ProxyAuthenticator", "UnifiedAuthMiddleware"),
+		tiFirst(census["contains"], "cfg.DriverPrincipals", "UnifiedAuthMiddleware"),
+		tiFirst(census["ProxyUserProvisioner"], "cfg", "UnifiedAuthMiddleware")
+	require.NotEqual(t, token.NoPos, refuse3a, "Step 3a has a driver refusal")
+	assert.True(t, auth < refuse3a && refuse3a < prov, "Step 3a: assertion %v, refusal %v, provisioner %v", fset.Position(auth), fset.Position(refuse3a), fset.Position(prov))
+	// Web fresh path: the refusal comes after the assertion and before the
+	// find-or-create.
+	wauth, wrefuse := tiFirst(census["Authenticate"], "ProxyAuthenticator", "proxyAuthMiddleware"),
+		tiFirst(census["contains"], "ws.proxyDrivers", "proxyAuthMiddleware")
+	wlookup := tiFirst(census["GetUserByEmail"], "ws.store", "proxyAuthMiddleware")
+	wcreate := tiFirst(census["CreateUser"], "ws.store", "proxyAuthMiddleware")
+	require.NotEqual(t, token.NoPos, wrefuse, "the web fresh path has a driver refusal")
+	assert.True(t, wauth < wrefuse && wrefuse < wlookup && wrefuse < wcreate, "web fresh path: assertion %v, refusal %v, lookup %v, create %v",
+		fset.Position(wauth), fset.Position(wrefuse), fset.Position(wlookup), fset.Position(wcreate))
+
+	// External Google identities: resolved to a user only through
+	// GoogleIdentityResolver.Resolve, from the external-bearer path and the
+	// GE exchange, and Resolve refuses a driver before anything else.
+	resolveCallers := map[string]bool{}
+	for recv, cs := range census["Resolve"] {
+		if strings.HasSuffix(recv, "GoogleResolver") || strings.HasSuffix(recv, "s.resolver") {
+			for _, c := range cs {
+				resolveCallers[c.fn] = true
+			}
+		}
+	}
+	assert.Equal(t, map[string]bool{"authenticateExternalBearer": true, "Exchange": true}, resolveCallers, "GoogleIdentityResolver.Resolve callers")
+	assert.Equal(t, []string{"Exchange", "ValidateIDToken", "authenticateExternalBearer", "fixtureSessionBearer", "verifyWorkloadToken"},
+		tiFuncs(census["ValidateIDToken"], ""), "every Google ID token verification site (the caching decorator, the driver token and workload delegation never create a user)")
+	rrefuse := tiFirst(census["contains"], "r.driverPrincipals", "Resolve")
+	rfirst := tiFirst(census["GetExternalIdentity"], "r.extIDs", "Resolve")
+	require.NotEqual(t, token.NoPos, rrefuse, "Resolve has a driver refusal")
+	require.NotEqual(t, token.NoPos, rfirst)
+	assert.True(t, rrefuse < rfirst, "Resolve refuses a driver (%v) before its first lookup (%v)", fset.Position(rrefuse), fset.Position(rfirst))
 }

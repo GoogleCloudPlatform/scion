@@ -139,9 +139,10 @@ type AuthConfig struct {
 	// DriverPrincipals is the hub's auth.proxy.driverPrincipals set
 	// (ptone/scion#4240, phase WS2). A verified proxy assertion for a
 	// driver principal is refused at Step 3a with 403 before any user is
-	// provisioned, and a Google identity for one is refused on the
-	// external-bearer path before it is resolved: a driver principal is a
-	// transport for test identity web sessions, never a user.
+	// provisioned (a Google identity for one is refused by
+	// GoogleIdentityResolver.Resolve, on the external-bearer path and the
+	// GE exchange alike): a driver principal is a transport for test
+	// identity web sessions, never a user.
 	DriverPrincipals driverPrincipalSet
 	// KindForPrincipal reads a user principal's stored kind
 	// (Server.kindForPrincipal). The JWT arm's row block uses it for the

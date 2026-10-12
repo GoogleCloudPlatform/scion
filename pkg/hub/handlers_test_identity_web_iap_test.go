@@ -531,6 +531,49 @@ func TestTIWebIAP_RedeemRateLimitedPerEmail(t *testing.T) {
 	}
 }
 
+// N3: behind the proxy the connection comes from the proxy, so the audit
+// client_ip and the per-IP limit read the client through the hub's trusted
+// proxies (X-Forwarded-For); a forwarding header from a peer that is not a
+// trusted proxy is ignored.
+func TestTIWebIAP_RedeemClientIPThroughTrustedProxy(t *testing.T) {
+	e := newTIIAPEnv(t, []string{tiDriverEmail})
+	e.srv.config.TrustedProxies = []string{"192.0.2.0/24"}
+	clientIPs := func() map[string]bool {
+		out := map[string]bool{}
+		for _, a := range tiWebAudits(t, e.st, testIdentityWebSessionRefuseMutation) {
+			var row struct {
+				ClientIP string `json:"client_ip"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(a.AfterSummary), &row))
+			out[row.ClientIP] = true
+		}
+		return out
+	}
+
+	trusted := e.withAssertion("forwarded-1@example.com", tiRedeemReq("scion_tiwc_x"))
+	trusted.headers["X-Forwarded-For"] = "203.0.113.7, 192.0.2.20"
+	assert.Equal(t, http.StatusForbidden, e.doFrom("192.0.2.10:5555", trusted).Code)
+	assert.Equal(t, map[string]bool{"203.0.113.7": true}, clientIPs(), "trusted peer: the first untrusted hop")
+
+	untrusted := e.withAssertion("forwarded-2@example.com", tiRedeemReq("scion_tiwc_x"))
+	untrusted.headers["X-Forwarded-For"] = "203.0.113.8"
+	assert.Equal(t, http.StatusForbidden, e.doFrom("198.51.100.9:5555", untrusted).Code)
+	assert.Equal(t, map[string]bool{"203.0.113.7": true, "198.51.100.9": true}, clientIPs(), "untrusted peer: the header is ignored")
+
+	// The per-IP bucket is the forwarded client's, not the proxy's.
+	e.ws.testIdentityRedeemLimiter = newTestLoginLimiter()
+	e.ws.testIdentityRedeemLimiter.burst = 1
+	e.ws.testIdentityRedeemLimiter.perSecond = 0.0001
+	send := func(client, email string) int {
+		r := e.withAssertion(email, tiRedeemReq("scion_tiwc_x"))
+		r.headers["X-Forwarded-For"] = client
+		return e.doFrom("192.0.2.10:5555", r).Code
+	}
+	assert.Equal(t, http.StatusForbidden, send("203.0.113.1", "limit-1@example.com"))
+	assert.Equal(t, http.StatusTooManyRequests, send("203.0.113.1", "limit-2@example.com"), "same client again")
+	assert.Equal(t, http.StatusForbidden, send("203.0.113.2", "limit-3@example.com"), "another client through the same proxy")
+}
+
 // --- A4: the driver binding, per consumer ---------------------------------------
 
 // Every session consumer honours a test identity web session behind the
@@ -712,10 +755,10 @@ func TestTIWebIAP_NonProxyHubRefusesDriverBoundSession(t *testing.T) {
 	assert.Equal(t, http.StatusOK, e.apiMe(e.login(fx.Identity.ID)).Code, "a driverless session works")
 }
 
-// Package-wide: no code outside the classifier reads the test identity
-// session values (marker, expiry, driver) to admit a session, and every
-// consumer in web.go goes through classifyTestIdentitySession.
-func TestTIWebIAP_NoConsumerBypassesTheClassifier(t *testing.T) {
+// Package-wide: only the classifier reads the test identity session values
+// (marker, expiry, driver) to admit a session, and every consumer in web.go
+// goes through classifyTestIdentitySession.
+func TestTIWebIAP_EveryConsumerUsesTheClassifier(t *testing.T) {
 	files, err := os.ReadDir(".")
 	require.NoError(t, err)
 	allowed := map[string]bool{
@@ -905,15 +948,19 @@ func TestTIWebIAP_BearerRuleTruthTable(t *testing.T) {
 	assert.NotContains(t, logs.String(), b.valid, "the driver token is never logged")
 
 	otherKP := newGCVTestKeyPair("ti-driver-kid")
+	// cleared: the session no longer passes the classifier on that request
+	// (binding), so it is also cleared (design rule 3), while the bearer
+	// still goes on unchanged.
 	unchanged := map[string]struct {
 		assertion string
 		bearer    string
 		jar       []*http.Cookie
 		extra     map[string]string
+		cleared   bool
 	}{
 		"no test identity session":           {tiDriverEmail, b.valid, nil, nil},
-		"assertion of another driver":        {tiDriver2Email, b.googleToken(tiDriver2Email, nil), b.jar, nil},
-		"no assertion":                       {"", b.valid, b.jar, nil},
+		"assertion of another driver":        {tiDriver2Email, b.googleToken(tiDriver2Email, nil), b.jar, nil, true},
+		"no assertion":                       {"", b.valid, b.jar, nil, true},
 		"token email is not the assertion's": {tiDriverEmail, b.googleToken(tiDriver2Email, nil), b.jar, nil},
 		"token email is not a driver":        {tiDriverEmail, b.googleToken("worker@ti-test.iam.gserviceaccount.com", nil), b.jar, nil},
 		"audience mismatch": {tiDriverEmail, b.googleToken(tiDriverEmail, func(c map[string]interface{}) {
@@ -942,6 +989,8 @@ func TestTIWebIAP_BearerRuleTruthTable(t *testing.T) {
 		assert.Equal(t, "Bearer "+c.bearer, seen, "%s: the bearer reaches the hub unchanged", name)
 		assert.True(t, rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden, "%s: %d %s", name, rec.Code, rec.Body.String())
 		assert.NotContains(t, rec.Body.String(), b.fx.Identity.Email, name)
+		assert.Equal(t, c.cleared, tiWebCleared(rec, webSessionName), "%s: scion_sess cleared", name)
+		assert.Equal(t, c.cleared, tiWebCleared(rec, testIdentitySessionCookie), "%s: scion_ti cleared", name)
 	}
 
 	// A hub-issued bearer is always unchanged, even with a valid test
@@ -963,7 +1012,8 @@ func TestTIWebIAP_BearerRuleTruthTable(t *testing.T) {
 		assert.Equal(t, "Bearer "+tok, seen, name)
 	}
 
-	// The session survives the unchanged requests and still works.
+	// The jar was never updated from the answers above, so it still holds
+	// the session cookie, which still works with its own driver.
 	rec, _ = b.call(tiDriverEmail, b.valid, b.jar, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
@@ -974,6 +1024,8 @@ func TestTIWebIAP_BearerRuleTruthTable(t *testing.T) {
 	rec, seen = b.call(tiDriverEmail, b.valid, b.jar, nil)
 	assert.Equal(t, "Bearer "+b.valid, seen, "revoked session: unchanged")
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.True(t, tiWebCleared(rec, webSessionName), "revoked session: cleared")
+	assert.True(t, tiWebCleared(rec, testIdentitySessionCookie), "revoked session: scion_ti cleared")
 }
 
 // With no driver token audience configured the rule never applies, and on

@@ -897,7 +897,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		// If the caller already supplied an Authorization header, pass through.
 		if r.Header.Get("Authorization") != "" {
 			// Proxy mode only, downgrade-only: see fixtureSessionBearer.
-			if tok := ws.fixtureSessionBearer(r); tok != "" {
+			if tok := ws.fixtureSessionBearer(w, r); tok != "" {
 				r2 := r.Clone(r.Context())
 				r2.Header.Set("Authorization", "Bearer "+tok)
 				next.ServeHTTP(w, r2)

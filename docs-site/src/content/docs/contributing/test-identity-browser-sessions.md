@@ -100,17 +100,20 @@ A proxy hub with test identities on and **no** driver principals still starts. W
 
 ### Driver principals have no hub account
 
-A verified assertion for a driver principal never signs in or creates a user. Without a test identity session, the hub answers `403` with `details.reason: driver_principal_has_no_session` on page routes and on `/api/v1/`, so a run whose session has ended fails loudly instead of acting as the service account.
+A verified assertion for a driver principal never signs in or creates a user, so a run whose session has ended fails loudly instead of acting as the service account:
+
+- page navigations, and `/api/v1/` requests that carry only the assertion, get `403` with `details.reason: driver_principal_has_no_session`;
+- `/api/v1/` requests that carry the driver's ID token in `Authorization` (as the Playwright hook sends them) get `401`, or a plain `403` where the hub trusts Google tokens. They never act as the driver.
 
 ### Redeeming behind IAP
 
-Redeem the code from Node (Playwright's `context.request`) with the driver's ID token in `Proxy-Authorization`, which IAP consumes. The hub checks IAP's assertion itself and requires a driver principal. It records the driver in the new session. A redeem without a valid assertion, or from a principal that is not a driver, is refused (`401` or `403`) before the code is read, so the code stays usable. Each refusal is audited with the reason, the first 8 hex digits of the code's hash (never the code), the client IP and the assertion email. Redeem is rate-limited per client IP and per assertion email.
+Redeem the code from Node (Playwright's `context.request`) with the driver's ID token in `Proxy-Authorization`, which IAP consumes. The hub checks IAP's assertion itself and requires a driver principal. It records the driver in the new session. A redeem without a valid assertion, or from a principal that is not a driver, is refused (`401` or `403`) before the code is read, so the code stays usable. Each refusal is audited with the reason, the first 8 hex digits of the code's hash (never the code), the client IP and the assertion email. Redeem is rate-limited per client IP and per assertion email. Behind the proxy the connection comes from the proxy itself: the hub reads the client IP from `X-Forwarded-For` only when the connecting peer is one of its trusted proxies, and otherwise records and limits the proxy's address, which leaves the per-email limit as the effective one.
 
 On hubs without proxy auth nothing changes: redeem needs no assertion and ignores one.
 
 ### The session is bound to its driver
 
-Behind the proxy, the hub honours a test identity session only on a request that carries a valid assertion for the driver that redeemed it. This applies to page routes, `/auth/me`, `/api/v1/` requests, the event stream (when it opens and on each 30-second heartbeat) and logout. With another principal's assertion, or none, the session is ended with `401`, so a copied cookie is useless to anyone else behind the same IAP, and to a browser without IAP. A session made on a hub without proxy auth is never honoured behind the proxy, and the reverse.
+Behind the proxy, the hub honours a test identity session only on a request that carries a valid assertion for the driver that redeemed it. This applies to page routes, `/auth/me`, `/api/v1/` requests, the event stream (when it opens and on each 30-second heartbeat) and logout. With another principal's assertion, or none, the session is cleared, so a copied cookie is useless to anyone else behind the same IAP, and to a browser without IAP. The request itself gets `401`; on `/api/v1/` it goes on without the session and gets only what its assertion or bearer alone gets, never the test identity. A session made on a hub without proxy auth is never honoured behind the proxy, and the reverse.
 
 An open event stream also ends when the assertion it was opened with expires. The browser then reconnects with a fresh one.
 
@@ -128,7 +131,7 @@ Otherwise the request is handled as it is today: a hub-issued bearer acts as its
 
 ### Playwright
 
-The harness's `installIapDriver(context, { token })` (`web/e2e/harness/iap-driver.ts`) adds the driver's ID token to the context's requests to the hub origin only, never to another origin. It calls your `token` callback for a fresh token shortly before the cached one expires, and never logs or saves the token.
+The harness's `installIapDriver(context, { baseURL, token })` (`web/e2e/harness/iap-driver.ts`) adds the driver's ID token to the context's requests to the hub origin (`baseURL`, required) only, never to another origin. It calls your `token` callback for a fresh token shortly before the cached one expires, and never logs or saves the token.
 
 ```typescript
 import { redeemTestIdentity } from './harness/auth.js';
@@ -136,7 +139,7 @@ import { installIapDriver } from './harness/iap-driver.js';
 
 const context = await browser.newContext({ baseURL: hubURL });
 await redeemTestIdentity(context, { codeFile, proxyAuthorization: `Bearer ${await driverToken()}` });
-await installIapDriver(context, { token: driverToken });
+await installIapDriver(context, { baseURL: hubURL, token: driverToken });
 const page = await context.newPage();
 await page.goto('/', { waitUntil: 'domcontentloaded' });
 ```
