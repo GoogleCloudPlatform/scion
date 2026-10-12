@@ -346,7 +346,17 @@ results.
    not-found error: a project that the token cannot see reads as not
    found. The `P1` tunnel still answers `200` afterwards, and its session
    stays up.
-3. Revoke the token afterwards (`scion hub token revoke` in your normal
+3. With the same token, ask for an ssh tunnel to an agent in `P1`:
+
+   ```sh
+   scion tunnel --hub HUB_URL --project P1 A1 --ssh --stdio </dev/null; echo "exit $?"
+   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18011/      # 200
+   ```
+
+   The ssh tunnel is refused with exit 5 and a one-line not-permitted
+   error. The `P1` tcp tunnel still answers `200`, and its session stays
+   up.
+4. Revoke the token afterwards (`scion hub token revoke` in your normal
    shell).
 
 **Record:** the exit codes and stderr lines, and the `curl` results.
@@ -470,6 +480,7 @@ that it holds no token before sharing it).
 | (a) | hub with REST working and conduit off | exit 11, never 4 (CI only if no such hub) |
 | (b) | scoped token, inside its project | succeeds |
 | (b) | scoped token, project it cannot see | exit 4, one-line not-found error; the open tunnel continues |
+| (b) | scoped token, tunnel kind outside its scopes (ssh) | refused, exit 5, one-line not-permitted error; the open tunnel continues |
 | (c) | expired credential at a new tunnel | exit 3 with the login line; the open tunnel continues |
 | (d) | two hubs: one include file and one known-hosts file per hub, one `Include` line | as listed |
 | (d) | `a-b`/`c` and `a`/`b-c` | distinct Host names |
@@ -485,5 +496,4 @@ that it holds no token before sharing it).
 - (a) Three or more tunnels on one session, and the session cap (`429 rate_limited`): CI only, because the CLI opens one session per process; these become live checks with the multiplexer (5.7).
 - (c) The retry on a fresh session after a 401 on an admitted session, and the refusal of a changed identity: CI only, because the CLI opens one session per process; these become live checks with the multiplexer (5.7).
 - (a) Exit 11 for a hub without tunnels, if no test hub with REST working and the conduit experiment off is available: CI only, because the CLI checks the credential over REST before the dial, and an endpoint without the hub API gives a different exit.
-- (b) A per-tunnel hub refusal for scope (exit 5): CI only, because no visible-project scope refusal is reachable from the CLI. The hub test TestConduitTunnel_ProjectScopedTokenRefusedPerTunnel proves it.
 - (d) A truncated agent listing leaves the files unchanged: CI only, because a live hub can't be made to return a truncated listing.
