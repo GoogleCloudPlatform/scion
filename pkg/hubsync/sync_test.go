@@ -2491,28 +2491,65 @@ func TestAddRemoveSyncedAgent(t *testing.T) {
 	}
 }
 
-func TestWrapHubError_SuppressesLocalHintForAgents(t *testing.T) {
+func TestWrapHubError_SuppressesHubCheckHintForAgents(t *testing.T) {
 	baseErr := errors.New("hub connection refused")
 
-	t.Run("standalone CLI includes local-only hint", func(t *testing.T) {
-		t.Setenv("SCION_AGENT_ID", "") // Ensure agent context is cleared.
-		got := wrapHubError(baseErr)
-		if !strings.Contains(got.Error(), "local-only mode") {
-			t.Errorf("expected local-only mode hint for standalone CLI, got: %s", got)
+	t.Run("standalone CLI includes the hub-check hint", func(t *testing.T) {
+		clearHubCredentialEnv(t)
+		got := wrapHubError("https://hub.example.com", baseErr)
+		if got.Error() != "hub connection refused\n\nCheck the hub with 'scion hub status'." {
+			t.Errorf("unexpected message for standalone CLI: %q", got)
+		}
+		if strings.Contains(got.Error(), "--no-hub") || strings.Contains(got.Error(), "local-only") {
+			t.Errorf("hint must not suggest local-only mode, got: %s", got)
 		}
 	})
 
-	t.Run("hub-managed agent omits local-only hint", func(t *testing.T) {
+	t.Run("hub-managed agent omits the hint", func(t *testing.T) {
+		clearHubCredentialEnv(t)
 		t.Setenv("SCION_AGENT_ID", "agent-uuid-123")
-		got := wrapHubError(baseErr)
-		if strings.Contains(got.Error(), "local-only mode") {
-			t.Errorf("expected no local-only mode hint for hub-managed agent, got: %s", got)
+		got := wrapHubError("https://hub.example.com", baseErr)
+		if got.Error() != baseErr.Error() {
+			t.Errorf("expected the bare error for a hub-managed agent, got: %s", got)
 		}
 		// The original error should still be present.
 		if !errors.Is(got, baseErr) {
 			t.Errorf("expected wrapped error to contain base error")
 		}
 	})
+}
+
+func TestHubCheckHint(t *testing.T) {
+	const localHint = "Is the local server running? Check with 'scion server status'; start it with 'scion server start'."
+	const remoteHint = "Check the hub with 'scion hub status'."
+	tests := []struct {
+		name     string
+		endpoint string
+		devToken string
+		want     string
+	}{
+		{name: "local workstation endpoint", endpoint: "http://127.0.0.1:8080", devToken: "scion_dev_abc", want: localHint},
+		{name: "loopback without dev token", endpoint: "http://127.0.0.1:8080", want: remoteHint},
+		{name: "remote endpoint", endpoint: "https://hub.example.com", devToken: "scion_dev_abc", want: remoteHint},
+		{name: "no endpoint", endpoint: "", devToken: "scion_dev_abc", want: remoteHint},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearHubCredentialEnv(t)
+			t.Setenv("SCION_DEV_TOKEN", tc.devToken)
+			if got := HubCheckHint(tc.endpoint); got != tc.want {
+				t.Errorf("HubCheckHint(%q) = %q, want %q", tc.endpoint, got, tc.want)
+			}
+			want := "boom\n\n" + tc.want
+			if tc.endpoint == "" {
+				want = "boom" // no endpoint: no hint
+			}
+			got := wrapHubError(tc.endpoint, errors.New("boom"))
+			if got.Error() != want {
+				t.Errorf("wrapHubError(%q) = %q, want %q", tc.endpoint, got, want)
+			}
+		})
+	}
 }
 
 // setupGlobalHubProject points HOME at a temporary global project that is
@@ -2626,5 +2663,20 @@ func TestEnsureHubReady_NonInteractiveAmbiguousProject(t *testing.T) {
 	}
 	if registers != 0 {
 		t.Errorf("expected no register call, got %d", registers)
+	}
+}
+
+// TestWrapHubError_Nil checks that a nil error stays nil, for every kind of
+// endpoint and inside a hub-managed agent.
+func TestWrapHubError_Nil(t *testing.T) {
+	clearHubCredentialEnv(t)
+	for _, ep := range []string{"", "https://hub.example.com", "http://127.0.0.1:8080"} {
+		if got := wrapHubError(ep, nil); got != nil {
+			t.Errorf("wrapHubError(%q, nil) = %v, want nil", ep, got)
+		}
+	}
+	t.Setenv("SCION_AGENT_ID", "agent-uuid-123")
+	if got := wrapHubError("https://hub.example.com", nil); got != nil {
+		t.Errorf("wrapHubError in a hub-managed agent = %v, want nil", got)
 	}
 }

@@ -616,7 +616,7 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 // was confirmed but whose local cleanup failed. The command still succeeds.
 // stop --rm keeps the git branch, so the retry command does too.
 func stopRmCleanupWarning(agentName string, err error) string {
-	return fmt.Sprintf("removed via Hub but local cleanup failed: %v; run '%s' to retry", err, noHubDeleteCommand(agentName, true))
+	return fmt.Sprintf("removed via Hub but local cleanup failed: %v; run '%s' to retry", err, cleanupOnlyCommand(agentName, true))
 }
 
 // stopQueuedNotRemovedMessage is printed when stop --rm finds the stop queued
