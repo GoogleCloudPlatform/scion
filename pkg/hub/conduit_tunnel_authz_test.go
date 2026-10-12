@@ -303,8 +303,8 @@ func (f *tunnelAuthzFixture) openTunnel(t *testing.T, c *tunnelClient, agentID, 
 	return tu
 }
 
-// echo checks one round trip through the tunnel.
-func (tu *authzTunnel) echo(t *testing.T, msg string) {
+// tunnelEcho checks one round trip through the tunnel.
+func (tu *authzTunnel) tunnelEcho(t *testing.T, msg string) {
 	t.Helper()
 	if tu.kind == grant.StreamKindTCP {
 		roundTrip(t, tu.st, msg)
@@ -368,8 +368,8 @@ func TestConduitTunnelAuthz_RevokedClosed4401WithinRecheckInterval(t *testing.T)
 			c := f.userClient(t)
 			revoked := f.openTunnel(t, c, f.launched.ID, kind)
 			other := f.openTunnel(t, f.ownerClient(t), f.launched.ID, kind)
-			revoked.echo(t, "before")
-			other.echo(t, "before")
+			revoked.tunnelEcho(t, "before")
+			other.tunnelEcho(t, "before")
 			require.Equal(t, 2, f.authz.Len())
 			deadline := f.tracked(t, c, revoked.st.ID()).Deadline()
 			require.True(t, deadline.After(f.relayClock.Now().Add(recheck)), "only the sweep can catch the revocation")
@@ -379,7 +379,7 @@ func TestConduitTunnelAuthz_RevokedClosed4401WithinRecheckInterval(t *testing.T)
 
 			requireAuthzExpired(t, revoked.end(t))
 			f.metrics.wait(t, conduitAuthzTriggerSweep+"/"+conduitAuthzOutcomeClosed+"/"+kind, 1)
-			other.echo(t, "after")
+			other.tunnelEcho(t, "after")
 			assert.Nil(t, c.ls.Err(), "the session stays up")
 			require.Eventually(t, func() bool { return f.authz.Len() == 1 }, recheckWait, 20*time.Millisecond)
 		})
@@ -400,7 +400,7 @@ func TestConduitTunnelAuthz_IntervalRenewsThenCloses4401(t *testing.T) {
 			require.Less(t, 3*interval, f.authz.cfg.RecheckInterval, "no sweep runs in this test")
 			c := f.userClient(t)
 			tu := f.openTunnel(t, c, f.launched.ID, kind)
-			tu.echo(t, "before")
+			tu.tunnelEcho(t, "before")
 			st := f.tracked(t, c, tu.st.ID())
 			d0 := st.Deadline()
 			require.False(t, d0.IsZero(), "the tunnel has an authorization deadline")
@@ -410,7 +410,7 @@ func TestConduitTunnelAuthz_IntervalRenewsThenCloses4401(t *testing.T) {
 				f.relayClock.Advance(interval)
 				f.metrics.wait(t, renewed, i)
 				assert.Equal(t, d0.Add(time.Duration(i)*interval), st.Deadline(), "renewal %d moves the deadline by one interval", i)
-				tu.echo(t, "after renewal "+strconv.Itoa(i))
+				tu.tunnelEcho(t, "after renewal "+strconv.Itoa(i))
 			}
 
 			f.revokeKind(t, kind)
@@ -435,7 +435,7 @@ func TestConduitTunnelAuthz_DialerAuthRefreshRefused4400(t *testing.T) {
 			f := newTunnelAuthzFixture(t, 0)
 			c := f.userClient(t)
 			tu := f.openTunnel(t, c, f.launched.ID, kind)
-			tu.echo(t, "before")
+			tu.tunnelEcho(t, "before")
 			st := f.tracked(t, c, tu.st.ID())
 			d0 := st.Deadline()
 			require.False(t, d0.IsZero())
@@ -479,7 +479,7 @@ func TestConduitTunnelAuthz_DialerAuthRefreshRefused4400(t *testing.T) {
 			assert.EqualValues(t, conduit.CloseProtocolError, conduit.CodeOf(sender.ls.Err(), 0), "want 4400 bad_frame, got %v", sender.ls.Err())
 
 			assert.Equal(t, d0, st.Deadline(), "a dialer-sent renewal moved the deadline")
-			tu.echo(t, "still open")
+			tu.tunnelEcho(t, "still open")
 			assert.Nil(t, c.ls.Err(), "the tunnel's session stays up")
 			assert.Equal(t, 1, f.authz.Len())
 		})
