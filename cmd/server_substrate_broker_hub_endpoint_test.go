@@ -218,7 +218,11 @@ func TestSubstrateBrokerHubEndpointResolution(t *testing.T) {
 
 			cfg, err := config.LoadGlobalConfig("")
 			require.NoError(t, err)
-			settings, _ := loadServerSettings("")
+			// The loader loadServerSettings wraps at startup. Call it
+			// directly: loadServerSettings only logs a load error and falls
+			// back to empty settings, which would hide a broken fixture.
+			settings, err := config.LoadSettings("")
+			require.NoError(t, err)
 			require.Equal(t, substrateBrokerManifestHubURL, cfg.RuntimeBroker.HubEndpoint,
 				"server.broker.hub_endpoint from the ConfigMap should reach the server config")
 
