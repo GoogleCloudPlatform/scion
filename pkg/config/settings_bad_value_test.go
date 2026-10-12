@@ -219,3 +219,38 @@ func TestLoadVersionedSettings_BadValueWarnsOncePerKey(t *testing.T) {
 	}
 	assert.Equal(t, 1, strings.Count(logs.String(), "key=server.broker.port"))
 }
+
+// TestLoadVersionedSettings_OtelInsecureKeepsConfiguredTLS: a bad
+// SCION_OTEL_INSECURE keeps the configured telemetry.cloud.tls.enabled,
+// whether true or false, while a valid value still overrides it inverted.
+func TestLoadVersionedSettings_OtelInsecureKeepsConfiguredTLS(t *testing.T) {
+	for _, tc := range []struct {
+		configured string
+		env        string
+		want       bool
+	}{
+		{configured: "true", env: "sometimes", want: true},
+		{configured: "false", env: "sometimes", want: false},
+		{configured: "true", env: "true", want: false},
+		{configured: "false", env: "false", want: true},
+	} {
+		t.Run("configured_"+tc.configured+"_env_"+tc.env, func(t *testing.T) {
+			projectDir, logs := setupBadValueProject(t, "5", "true")
+			path := filepath.Join(projectDir, "settings.yaml")
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			data = []byte(strings.Replace(string(data), "      enabled: true", "      enabled: "+tc.configured, 1))
+			require.NoError(t, os.WriteFile(path, data, 0644))
+			t.Setenv("SCION_OTEL_INSECURE", tc.env)
+
+			vs, err := LoadVersionedSettings(projectDir)
+			require.NoError(t, err)
+			require.NotNil(t, vs.Telemetry)
+			require.NotNil(t, vs.Telemetry.Cloud)
+			require.NotNil(t, vs.Telemetry.Cloud.TLS)
+			require.NotNil(t, vs.Telemetry.Cloud.TLS.Enabled)
+			assert.Equal(t, tc.want, *vs.Telemetry.Cloud.TLS.Enabled)
+			assert.Equal(t, tc.env == "sometimes", strings.Contains(logs.String(), "key=SCION_OTEL_INSECURE"))
+		})
+	}
+}
