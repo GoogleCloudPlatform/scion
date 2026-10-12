@@ -302,8 +302,10 @@ func promptHubRegistration(isGlobal bool) error {
 	} else {
 		fmt.Printf("Linked to existing project on Hub: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
-	// Store the hub project ID separately if it differs from the local project_id
-	if resp.Project.ID != projectID {
+	// Always store the hub project ID in the project's own settings, even
+	// when it equals the local project_id, so the link never depends on a
+	// value inherited from another settings file.
+	if resp.Project.ID != "" {
 		if err := config.UpdateSetting(resolvedPath, "hub.projectId", resp.Project.ID, isGlobal); err != nil {
 			fmt.Printf("Warning: failed to save hub project ID: %v\n", err)
 		}

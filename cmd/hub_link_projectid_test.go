@@ -110,6 +110,54 @@ func TestRunHubLink_RelinkWithLinkedGlobalKeepsProjectHubID(t *testing.T) {
 	assertOwnHubID("re-link")
 }
 
+// TestPromptHubRegistration_AlwaysWritesHubProjectID checks the hub
+// registration offered by 'scion init': it records hub.projectId in the
+// project's own settings (the external directory of a split-storage git
+// project) even when the hub ID equals the local project ID, while the global
+// settings are linked to another hub project.
+func TestPromptHubRegistration_AlwaysWritesHubProjectID(t *testing.T) {
+	const localID = "0b5e6a1c-0000-4000-8000-0000000000c1"
+	clearHubEnvForUnlinkTest(t)
+	t.Setenv("SCION_HUB_PROJECT_ID", "")
+	origYes, origNoHub := autoConfirm, noHub
+	t.Cleanup(func() { autoConfirm, noHub = origYes, origNoHub })
+
+	server, _ := nameKeepingHub(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	globalDir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(
+		"schema_version: \"1\"\nhub:\n  enabled: true\n  linked: true\n  endpoint: \""+server.URL+
+			"\"\n  project_id: \"global-hub-project-id\"\n"), 0o644))
+
+	repo := filepath.Join(home, "work", "initrepo")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	gitRun(t, repo, "init", "-q")
+	scionDir := filepath.Join(repo, ".scion")
+	require.NoError(t, os.MkdirAll(scionDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(scionDir, "project-id"), []byte(localID+"\n"), 0o644))
+	extDir := config.GetProjectConfigDir(scionDir)
+	require.NotEqual(t, scionDir, extDir, "split storage puts settings outside the repo")
+	t.Chdir(repo)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	autoConfirm, noHub = true, false
+
+	var err error
+	captureStderr(t, func() {
+		captureStdout(t, func() { err = promptHubRegistration(false) })
+	})
+	require.NoError(t, err)
+
+	ext, err := config.LoadSingleFileVersioned(extDir)
+	require.NoError(t, err)
+	require.NotNil(t, ext.Hub, "the project's own settings have a hub block")
+	assert.Equal(t, localID, ext.Hub.ProjectID, "hub.project_id in the project's own settings")
+	merged, err := config.LoadSettings(scionDir)
+	require.NoError(t, err)
+	assert.Equal(t, localID, merged.GetHubProjectID(), "merged settings resolve to the project")
+}
+
 // nameKeepingHub is a local workstation hub that remembers the ID and name
 // of the project registered on it and answers lookups of that ID with that
 // name, so a second 'scion hub link' takes the already-linked path. The
