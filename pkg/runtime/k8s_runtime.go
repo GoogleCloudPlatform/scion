@@ -2448,6 +2448,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// here; the variable only drives the umask.
 	envVars = withSupplementalGIDsEnv(envVars, sharedDirGroups(config))
 
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only names no source above set (plain or secret-backed), never a
+	// suppressed key.
+	envVars = appendK8sFallbackEnv(envVars, config.FallbackEnv, config.SuppressedFallbackKeys)
+
 	// Determine image pull policy
 	pullPolicy := corev1.PullIfNotPresent
 	if config.Kubernetes != nil && config.Kubernetes.ImagePullPolicy != "" {

@@ -1112,6 +1112,17 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		args = append(args, "--mount", m)
 	}
 
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only keys no source above set, never a suppressed key.
+	emitted := make(map[string]bool, len(env))
+	for k := range env {
+		emitted[k] = true
+	}
+	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
+		k, v, _ := strings.Cut(e, "=")
+		env[k] = v
+	}
+
 	// Environment variables via --env flags (repeatable, confirmed by AC-0 retest).
 	for _, e := range envArgs(env) {
 		args = append(args, "--env", e)

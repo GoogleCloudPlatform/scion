@@ -1388,6 +1388,12 @@ type StartOptions struct {
 	// or target already exists. Like KubernetesBlockIdentity it is never
 	// persisted, so it is recomputed on every dispatch.
 	HostCredentialFiles bool
+
+	// TemplateEnvSource is a local template path (hydrated by the broker on a
+	// start or restart of an agent with a Hub template) used only to compute
+	// the template env fallback (ptone/scion#4524). Unlike Template, it never
+	// affects image, harness-config or agent config resolution.
+	TemplateEnvSource string
 }
 
 // KubernetesBlockIdentity describes how a GCP identity "block" pod runs on
