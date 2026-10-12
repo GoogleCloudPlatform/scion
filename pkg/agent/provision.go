@@ -1924,7 +1924,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	util.Debugf("provision: home/skills copy completed in %s", time.Since(homeCopyStart))
 
 	// Step 3a2: Inject platform skills from embedded resources
-	hubEnabled := (settings != nil && settings.IsHubEnabled()) || api.IsBrokerModeFromContext(ctx)
+	hubEnabled := platformSkillsHubEnabled(ctx, settings)
 	injCtx := workspaceSkillsInjectionContext{
 		IsGit:              isGitWorkspace,
 		HubEnabled:         hubEnabled,
@@ -2182,9 +2182,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if hConfig.AuthSelectedType != "" {
 				settingsCfg.AuthSelectedType = hConfig.AuthSelectedType
 			}
-			if settings.Telemetry != nil {
-				settingsCfg.Telemetry = config.ConvertV1TelemetryToAPI(settings.Telemetry)
-			}
+			// settings.Telemetry is deliberately NOT merged here
+			// (ptone/scion#4241). finalScionCfg is persisted to
+			// scion-agent.json below, where a baked settings value would
+			// rank as agent config at Start, above the hub default
+			// telemetry tier, and later settings changes would never reach
+			// the agent. Start applies settings telemetry in its own tier
+			// on every start.
+			//
 			// Template has highest priority IN THIS MERGE, so it overrides
 			// settings here. We construct a config with ONLY the settings env,
 			// then merge finalScionCfg over it.
@@ -2559,6 +2564,13 @@ type workspaceSkillsInjectionContext struct {
 	// ForceOverwrite can still respect "template skills take precedence"
 	// rather than clobbering a template's intentional override.
 	TemplateSkillNames map[string]bool
+}
+
+// platformSkillsHubEnabled reports whether hub_enabled platform skills are
+// injected: always for an agent a broker provisions, and for a local agent
+// when a hub endpoint is configured. hub.enabled is not consulted.
+func platformSkillsHubEnabled(ctx context.Context, settings *config.VersionedSettings) bool {
+	return api.IsBrokerModeFromContext(ctx) || (settings != nil && settings.IsHubConfigured())
 }
 
 // shouldInjectSkill checks whether a skill should be injected based on its

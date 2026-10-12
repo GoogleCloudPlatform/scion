@@ -1966,6 +1966,10 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// Interrupt delivery is synchronous at the broker for each
 		// recipient, so an interrupted send to a primary plus k mentions
 		// blocks this request for up to k+1 deliveries.
+		// A running agent that is still initializing (does not accept
+		// input yet) is downgraded to the buffered dispatch inside
+		// dispatchWithBrokerRetry (effectiveInterrupt), the single place
+		// that decides it.
 		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
