@@ -62,6 +62,11 @@ export const SELECTORS = {
   createTaskInput: 'sl-textarea#task textarea',
   selectOption: 'sl-option',
   createSubmit: '.form-actions sl-button[variant="primary"]',
+  // Additional Options disclosure and its Container image field
+  // (agent-config-form.ts, key config.image, General tab).
+  createAdvanced: 'sl-details[summary="Additional Options"]',
+  createAdvancedHeader: 'sl-details[summary="Additional Options"] [part="header"]',
+  createImageInput: 'scion-agent-config-form .field[data-key="config.image"] sl-input input',
   createError: '.form-card .error-banner',
 
   // Confirm dialog (components/shared/confirm-dialog.ts).

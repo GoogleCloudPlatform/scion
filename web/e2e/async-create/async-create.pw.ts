@@ -35,10 +35,13 @@
  *   the broker fails the launch; the failed-create panel shows a known
  *   code and a message, Delete and Create again, and no Start or Resume.
  *   This is not A4: it does not exercise a bad image.
- * - A4 (needs a real launch): a template whose image tag does not exist
- *   gives the same panel after an async (201) submit.
- * - A5 (afterAll): the agents, the project, the fixture template and the
- *   test identity are deleted and checked absent; only then is the
+ * - A4 (needs a real launch): an image tag that does not exist, typed into
+ *   the form's Container image field (request config.image), gives the
+ *   same panel after an async (201) submit; then Delete from the panel,
+ *   and the cause pin: the failed agent's appliedConfig.image is the exact
+ *   typed ref.
+ * - A5 (afterAll): the agents, the project and the test identity are
+ *   deleted and checked absent; only then is the
  *   evidence (DOM timeline, SSE launch payloads, request log; no cookies
  *   or tokens) written to the test output directory.
  *
@@ -145,6 +148,8 @@ interface SubmitResult {
   status: number;
   launch: { state?: string; active?: boolean; kind?: string } | undefined;
   template: string | undefined;
+  /** body.config.image of the browser's create request, or null. */
+  requestImage: string | null;
   submitAt: number;
   respondedAt: number;
   docIdBefore: string;
@@ -162,7 +167,6 @@ const journey: {
   identityId?: string;
   projectId?: string;
   projectCreated: boolean;
-  template?: { name: string; id: string };
   agents: CreatedAgent[];
   a1Page?: TrackedPage;
   a1Submit?: SubmitResult;
@@ -273,13 +277,6 @@ async function trackedPage(): Promise<TrackedPage> {
   return tracked;
 }
 
-/** Picks an option of a Shoelace select by its visible text. */
-async function chooseOption(page: Page, selectSelector: string, text: string): Promise<void> {
-  const select = page.locator(SELECTORS.createPage).locator(selectSelector);
-  await select.click();
-  await select.locator(SELECTORS.selectOption).filter({ hasText: text }).first().click();
-}
-
 /** Picks an option of a Shoelace select by its value. */
 async function chooseOptionValue(page: Page, selectSelector: string, value: string): Promise<void> {
   const select = page.locator(SELECTORS.createPage).locator(selectSelector);
@@ -291,7 +288,7 @@ async function chooseOptionValue(page: Page, selectSelector: string, value: stri
 /** Fills the create form and submits it; returns what the browser saw. */
 async function submitCreateForm(
   tracked: TrackedPage,
-  opts: { name: string; templateName?: string; task: string; check: string }
+  opts: { name: string; image?: string; task: string; check: string }
 ): Promise<SubmitResult> {
   const { page } = tracked;
   const t = target();
@@ -301,9 +298,15 @@ async function submitCreateForm(
   const form = page.locator(SELECTORS.createPage);
   await expect(form.locator(SELECTORS.createName)).toBeVisible();
   await form.locator(SELECTORS.createNameInput).fill(opts.name);
-  if (opts.templateName) await chooseOption(page, SELECTORS.createTemplate, opts.templateName);
   if (t.harnessConfig) await chooseOptionValue(page, SELECTORS.createHarness, t.harnessConfig);
   await form.locator(SELECTORS.createTaskInput).fill(opts.task);
+  if (opts.image) {
+    // The Container image field of Additional Options (request config.image).
+    await form.locator(SELECTORS.createAdvancedHeader).click();
+    const imageInput = form.locator(SELECTORS.createImageInput);
+    await expect(imageInput).toBeVisible();
+    await imageInput.fill(opts.image);
+  }
 
   const createResponse = page.waitForResponse(
     (res) => res.request().method() === 'POST' && CREATE_PATH.test(new URL(res.url()).pathname)
@@ -315,6 +318,8 @@ async function submitCreateForm(
   const res = await createResponse;
   const respondedAt = Date.now();
   const status = res.status();
+  // What the browser sent as the request image (body.config.image).
+  const sent = (res.request().postDataJSON() ?? {}) as { config?: { image?: string } };
   const body = (await res.json().catch(() => ({}))) as {
     agent?: {
       id?: string;
@@ -329,6 +334,7 @@ async function submitCreateForm(
     status,
     launch: body.agent?.launch,
     template: body.agent?.template,
+    requestImage: sent.config?.image ?? null,
     submitAt,
     respondedAt,
     docIdBefore,
@@ -591,38 +597,40 @@ function noteAgentDelete(agentId: string, statuses: Array<number | null>, forced
   entry.forced ||= forced;
 }
 
-/** The bad image fixture template: seeded on a local hub, given on a remote one. */
-async function badImageTemplate(): Promise<string> {
-  const t = target();
-  if (t.mode === 'remote') {
-    if (!t.badImageTemplate) throw new Error('set E2E_BAD_IMAGE_TEMPLATE for a remote target');
-    return t.badImageTemplate;
+/**
+ * Whether the page or the launch view names an image cause for the failure:
+ * the bad tag or an image-not-found class in the panel message, or an
+ * image-specific code in the panel or the final launch error.
+ */
+function imageFailureReason(
+  message: string,
+  code: string,
+  launch: { error?: string; endReason?: string } | null,
+  badImage: string | undefined
+): { exposed: boolean; source: string | null } {
+  const tag = badImage?.split(':').at(-1) ?? '';
+  if (tag && message.includes(tag)) return { exposed: true, source: 'panel message names the tag' };
+  if (/image|pull|manifest|not found/i.test(message)) {
+    return { exposed: true, source: 'panel message names an image cause' };
   }
-  if (journey.template) return journey.template.name;
-  const hub = localHub()!;
-  const name = `e2e-bad-image-${suffix()}`;
-  const dir = path.join(hub.homeDir!, '.scion', 'templates', name);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, 'scion-agent.yaml'),
-    [
-      'schema_version: "1"',
-      'description: "e2e fixture: an image tag that does not exist"',
-      `image: "${t.badImage!}"`,
-      '',
-    ].join('\n')
-  );
-  runScionCLI(hub, ['templates', 'push', name]);
-  fs.rmSync(dir, { recursive: true, force: true });
-  const list = await adminRequest(hub, 'GET', '/api/v1/templates?limit=100');
-  const found = (
-    (list.body as { templates?: Array<{ id: string; name: string; status?: string }> })
-      ?.templates ?? []
-  ).find((tpl) => tpl.name === name);
-  if (!found) throw new Error(`fixture template ${name} not found after push`);
-  expect(found.status, 'fixture template status').toBe('active');
-  journey.template = { name, id: found.id };
-  return name;
+  for (const c of [code, launch?.error ?? '']) {
+    if (c === 'image_pull_failed' || c === 'invalid_image') {
+      return { exposed: true, source: `code ${c}` };
+    }
+  }
+  return { exposed: false, source: null };
+}
+
+/**
+ * The exact bad image ref the failure checks type into the Container image
+ * field: seeded per run on a local hub, E2E_BAD_IMAGE on a remote target.
+ */
+function badImageRef(): string {
+  const ref = target().badImage ?? '';
+  if (!ref) {
+    throw new Error('the exact bad image ref is unknown: set E2E_BAD_IMAGE for a remote target');
+  }
+  return ref;
 }
 
 function phaseRank(phase: string): number {
@@ -769,12 +777,6 @@ async function finalCleanupState(): Promise<{ readAt: string; states: Record<str
       'project'
     );
   }
-  if (hub && journey.template) {
-    states[`template ${journey.template.name}`] = await read(
-      `/api/v1/templates/${journey.template.id}`,
-      'template'
-    );
-  }
   if (hub && journey.identityId) {
     const listed = runScionCLI(hub, [
       'hub',
@@ -788,6 +790,13 @@ async function finalCleanupState(): Promise<{ readAt: string; states: Record<str
       : 'absent';
   }
   return { readAt: new Date().toISOString(), states };
+}
+
+/** Playwright annotations as evidence records (type and description). */
+function annotationsOf(
+  annotations: ReadonlyArray<{ type: string; description?: string }>
+): Array<{ type: string; description: string | null }> {
+  return annotations.map((a) => ({ type: a.type, description: a.description ?? null }));
 }
 
 /** First line of a thrown value's message. */
@@ -843,6 +852,7 @@ const ORACLE_ROW_MAP: Record<string, { test: string; note?: string }> = {
   A3b: { test: TITLE_A4 },
   A3c: { test: TITLE_A4 },
   A3d: { test: TITLE_A4 },
+  A3e: { test: TITLE_A4, note: 'cause pin: appliedConfig.image === the exact typed ref' },
   A4: { test: TITLE_A5, note: 'the afterAll hook' },
   A5: {
     test: TITLE_A5,
@@ -861,6 +871,9 @@ test.describe.serial('async agent create from the web form', () => {
       status: testInfo.status,
       skipReason: testInfo.annotations.find((a) => a.type === 'skip')?.description ?? null,
       durationMs: testInfo.duration,
+      // Every Playwright annotation (D1, FINDING, FORCED DELETE, skip), so they
+      // can be verified from the evidence.
+      annotations: annotationsOf(testInfo.annotations),
     };
   });
 
@@ -881,7 +894,7 @@ test.describe.serial('async agent create from the web form', () => {
           : '(asserted in A2; credential guard not run: remote target)'),
       harnessConfig: t.harnessConfig ?? 'form default',
       expectedAgentImage: t.agentImage ?? null,
-      badImage: t.badImage ?? `template ${t.badImageTemplate ?? '(none)'}`,
+      badImage: t.badImage ?? null,
     };
     console.info(
       `[journey] target ${t.mode}; launch capable: ${String(t.launchCapable)} ` +
@@ -1082,16 +1095,16 @@ test.describe.serial('async agent create from the web form', () => {
       'Not known to lack a container runtime (set E2E_LAUNCH_CAPABLE=0 for a remote target)'
     );
     test.setTimeout(LAUNCH_TIMEOUT + 360_000);
-    const template = await badImageTemplate();
+    const image = badImageRef();
     const tracked = await trackedPage();
     const submit = await submitCreateForm(tracked, {
       name: `e2e-async-noruntime-${suffix()}`,
-      templateName: template,
+      image,
       task: 'e2e async create journey, no runtime',
       check: 'failure-panel-no-runtime',
     });
     await expectAsyncSubmit(tracked, submit);
-    expect(submit.template, 'the agent uses the fixture template').toBe(template);
+    expect(submit.requestImage, 'the form sent the typed image as config.image').toBe(image);
     const panel = await expectFailedCreatePanel(tracked.page);
     await expectNoStartNoReload(tracked, submit);
     const noRuntimeEvidence: Record<string, unknown> = {
@@ -1122,84 +1135,92 @@ test.describe.serial('async agent create from the web form', () => {
       `A4 NOT COVERED: needs a broker that can start containers (${t.launchCapableReason})`
     );
     test.setTimeout(LAUNCH_TIMEOUT + 360_000);
-    const template = await badImageTemplate();
+    // The bad ref is typed into the form's Container image field: the
+    // request image, the broker's top image tier.
+    const image = badImageRef();
     const tracked = await trackedPage();
     const submit = await submitCreateForm(tracked, {
       name: `e2e-async-badimage-${suffix()}`,
-      templateName: template,
+      image,
       task: 'e2e async create journey, bad image',
       check: 'A4',
     });
-    // The async path first: 201 with the launch active, not a 4xx at submit.
+    // The async path first: 201 with the launch active, not a 4xx at submit
+    // (A3a), and the browser sent the typed image.
     await expectAsyncSubmit(tracked, submit);
-    expect(submit.template, 'the agent uses the fixture template').toBe(template);
+    expect(submit.requestImage, 'the form sent the typed image as config.image').toBe(image);
+
+    // 1. Graded UX rows, asserted and recorded first (A3b, A3c): the
+    //    failed-create panel with code and message, Delete and Create
+    //    again, no Start/Resume in the header; then no /start, no reload.
     const panel = await expectFailedCreatePanel(tracked.page);
+    await expectNoStartNoReload(tracked, submit);
+    // 2. Evidence, written before anything else can fail. The facts the
+    //    cause pin needs are read now, while the agent still exists.
+    const applied = await appliedConfigOf(submit.agentId);
+    const sse = await sseRecords(tracked.page, submit.agentId);
+    const lastLaunch = sse.filter((r) => r.launch).at(-1)?.launch ?? null;
+    const a2 = journey.a2Running;
+    const appliedImage = applied?.image ?? '';
+    const imageReason = imageFailureReason(panel.message, panel.code, lastLaunch, image);
+    const a4Evidence: Record<string, unknown> = {
+      status: submit.status,
+      launch: submit.launch,
+      requestImage: submit.requestImage,
+      code: panel.code,
+      messageLength: panel.message.length,
+      panel: {
+        visible: true,
+        deleteAction: true,
+        createAgainAction: true,
+        forbiddenHeaderActions: false,
+      },
+      finalLaunch: lastLaunch,
+      a4ImageReasonExposed: imageReason.exposed,
+      imageReasonSource: imageReason.source,
+      appliedConfig: {
+        noAuth: applied?.noAuth,
+        harnessAuth: applied?.harnessAuth,
+        harnessConfig: applied?.harnessConfig,
+        image: appliedImage || null,
+        expectedImage: image,
+        a2RunningImage: a2?.image || null,
+        a2HarnessConfig: a2?.harnessConfig ?? null,
+        causePinnedBy: 'appliedConfig.image === typed ref (exact)',
+      },
+      stateSequence: stateSequence(await timelineRows(tracked.page, submit.agentId)),
+      reload: await reloadCheck(tracked, submit),
+      timeline: await timelineRows(tracked.page, submit.agentId),
+      sse,
+      requests: requestsSinceSubmit(tracked, submit),
+    };
+    journey.evidence.a4 = a4Evidence;
+    // Recorded finding, never silent and never a failure on its own: the
+    // failure cause text is not exposed to clients yet (upstream #4666).
+    if (!imageReason.exposed) {
+      test.info().annotations.push({
+        type: 'FINDING',
+        description:
+          'no image-specific launch failure reason exposed (panel message, launch error ' +
+          `${panel.code} and endReason ${String(lastLaunch?.endReason)} name no image cause)`,
+      });
+    }
+
+    // 3. Delete from the failed page (A3d).
+    await deleteFromPanel(tracked, submit.agentId, 'A4 (panel Delete)', a4Evidence);
+
+    // 4. Cause pin, hard (A3e): the failed agent's appliedConfig.image is the
+    //    EXACT typed ref, with an image failure code and the same
+    //    credential-free auth and harness config as A2 (which ran). An empty
+    //    or different image fails.
     expect(
       IMAGE_FAILURE_CODES as readonly string[],
       `code ${panel.code} is an image failure code`
     ).toContain(panel.code);
-    // On Docker a pull failure maps to the catch-all runtime_error, and the
-    // panel message is the broker's fixed text (it never carries the pull
-    // error). Pin the cause instead: same credential-free auth path as A2
-    // (which reached running with the same harness), and the agent really
-    // used the bad image from the template.
-    const applied = await appliedConfigOf(submit.agentId);
-    const a2 = journey.a2Running;
-    const a4Applied = {
-      noAuth: applied?.noAuth,
-      harnessAuth: applied?.harnessAuth,
-      harnessConfig: applied?.harnessConfig,
-      image: applied?.image,
-      expectedImage: t.badImage ?? null,
-      a2RunningImage: a2?.image || null,
-      causePinnedBy: t.badImage
-        ? a2?.image
-          ? 'exact bad image ref and differs from A2 image'
-          : 'exact bad image ref'
-        : a2?.image
-          ? 'differs from A2 image'
-          : 'not pinned',
-      a2HarnessConfig: a2?.harnessConfig ?? null,
-    };
-    // Written before the checks, so a failing A4 (e.g. "not pinned") still
-    // carries its evidence; the rest is added after them.
-    const a4Evidence: Record<string, unknown> = {
-      status: submit.status,
-      launch: submit.launch,
-      appliedConfig: a4Applied,
-      code: panel.code,
-      messageLength: panel.message.length,
-    };
-    journey.evidence.a4 = a4Evidence;
     expectNoAuth(applied);
-    // Serial mode: A2 reached running before A4 runs. Same harness config,
-    // no credentials, and the image is what differs between the launches.
     expect(a2, 'A2 ran first (serial)').toBeDefined();
     expect(applied?.harnessConfig, 'A4 uses the same harness config as A2').toBe(a2?.harnessConfig);
-    expect(applied?.image ?? '', 'appliedConfig.image is set').not.toBe('');
-    // The exact bad ref where the suite knows it (local hub, or E2E_BAD_IMAGE).
-    if (t.badImage) {
-      expect(applied?.image, 'appliedConfig.image is the bad image').toBe(t.badImage);
-    }
-    if (a2?.image) {
-      expect(applied?.image, 'A4 image differs from A2 running image').not.toBe(a2.image);
-    } else {
-      // A2's image is unknown (see the A2 TODO): only the exact ref pins the
-      // cause, so it is required.
-      expect(
-        t.badImage ?? '',
-        'image cause cannot be pinned: A2 image unknown; set E2E_BAD_IMAGE for a remote target'
-      ).not.toBe('');
-    }
-    await expectNoStartNoReload(tracked, submit);
-    Object.assign(a4Evidence, {
-      stateSequence: stateSequence(await timelineRows(tracked.page, submit.agentId)),
-      reload: await reloadCheck(tracked, submit),
-      timeline: await timelineRows(tracked.page, submit.agentId),
-      sse: await sseRecords(tracked.page, submit.agentId),
-      requests: requestsSinceSubmit(tracked, submit),
-    });
-    await deleteFromPanel(tracked, submit.agentId, 'A4 (panel Delete)', a4Evidence);
+    expect(appliedImage, 'appliedConfig.image is the exact typed ref').toBe(image);
     await tracked.page.close();
   });
 
@@ -1246,21 +1267,6 @@ test.describe.serial('async agent create from the web form', () => {
     // and the evidence still run.
     await cleanUpAgentsAndProject(cleanup, residue);
 
-    // The fixture template (local hub).
-    if (hub && journey.template) {
-      const tpl = journey.template;
-      try {
-        const del = await adminRequest(hub, 'DELETE', `/api/v1/templates/${tpl.id}`);
-        cleanup.template = `DELETE ${del.status}`;
-        const get = await adminRequest(hub, 'GET', `/api/v1/templates/${tpl.id}`);
-        const templateState = classifyRead(get.status, get.body, 'template');
-        cleanup.templateState = templateState;
-        if (!isGone(templateState)) residue.push(`template ${tpl.name}`);
-      } catch (err) {
-        residue.push(`cleanup error (template ${tpl.name}): ${firstLine(err)}`);
-      }
-    }
-
     // The test identity (local hub). Without --purge the delete is refused
     // while the identity still owns agents or projects.
     if (hub && journey.identityId) {
@@ -1295,7 +1301,7 @@ test.describe.serial('async agent create from the web form', () => {
         'and this evidence is written before that';
     }
 
-    // FINAL state, after every delete (agents, project, template, identity):
+    // FINAL state, after every delete (agents, project, identity):
     // each resource read again directly. A row that vanished through the
     // project delete shows as gone here but keeps its own delete result in
     // cleanup.agents.
@@ -1328,6 +1334,7 @@ test.describe.serial('async agent create from the web form', () => {
       status: 'this afterAll; see the Playwright report',
       residue: residue.length,
       violations: violations.length,
+      annotations: annotationsOf(testInfo.annotations),
     };
     // Prominent flag for the grader (see recordForcedDelete).
     journey.evidence.forcedDeleteOnLaunchCapableRun = (

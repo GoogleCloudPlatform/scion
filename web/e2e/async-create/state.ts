@@ -47,7 +47,7 @@ export interface LocalSuiteState {
   harnessConfig: string;
   /** The image that harness resolves to on this registry (logged; not enforced). */
   agentImage: string;
-  /** Image of the bad image fixture template: a tag that does not exist. */
+  /** Bad image ref the failure checks type into the form: a tag that does not exist. */
   badImage: string;
 }
 
@@ -69,12 +69,10 @@ export interface JourneyTarget {
    * remote: only with E2E_LAUNCH_CAPABLE=0).
    */
   noRuntimeConfirmed: boolean;
-  /** Image of the bad image fixture template (local: seeded; remote: E2E_BAD_IMAGE). */
+  /** Bad image ref typed into the form (local: generated per run; remote: E2E_BAD_IMAGE). */
   badImage?: string;
   /** Local only: the image the harness resolves to (for the evidence). */
   agentImage?: string;
-  /** Remote only: a template, seeded out of band, whose image does not exist. */
-  badImageTemplate?: string;
   /** Remote only: an existing project to create agents in (kept). */
   projectId?: string;
   /** Remote only: the file holding the test identity's web-login code. */
@@ -127,8 +125,8 @@ export function isRemoteTarget(): boolean {
  *   identity (`scion hub test-identity web-code <id> --out <file>`).
  * - E2E_TEST_IDENTITY_EMAIL: that identity's email.
  * - E2E_LAUNCH_CAPABLE=1: the hub's broker can start containers.
- * - E2E_BAD_IMAGE_TEMPLATE: template whose image tag does not exist.
- * - E2E_BAD_IMAGE: optional, that template's image ref (A4 asserts it).
+ * - E2E_BAD_IMAGE: an image ref whose tag does not exist; the failure checks
+ *   type it into the Container image field and A4 asserts it exactly.
  * - E2E_TARGET_PROJECT_ID: optional project with a provider broker; a
  *   hub-managed project is created (and deleted) when unset.
  * - E2E_HARNESS_CONFIG: optional harness config to pick in the form.
@@ -163,11 +161,9 @@ export function remoteTargetFromEnv(): JourneyTarget {
     noRuntimeConfirmed: capable === '0',
     codeFile,
     identityEmail,
-    ...(env.E2E_BAD_IMAGE_TEMPLATE ? { badImageTemplate: env.E2E_BAD_IMAGE_TEMPLATE } : {}),
     ...(env.E2E_TARGET_PROJECT_ID ? { projectId: env.E2E_TARGET_PROJECT_ID } : {}),
     ...(env.E2E_HARNESS_CONFIG ? { harnessConfig: env.E2E_HARNESS_CONFIG } : {}),
-    // The image of E2E_BAD_IMAGE_TEMPLATE, when the runner knows it: A4 then
-    // asserts the exact ref, as on a local hub.
+    // The bad image ref typed into the form's Container image field.
     ...(env.E2E_BAD_IMAGE ? { badImage: env.E2E_BAD_IMAGE } : {}),
   };
 }

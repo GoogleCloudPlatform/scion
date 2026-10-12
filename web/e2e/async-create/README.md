@@ -27,18 +27,18 @@ are skipped with the reason, and the no-runtime failure panel check runs
 instead. `E2E_LAUNCH_CAPABLE=1|0` overrides the detection.
 `E2E_LAUNCH_TIMEOUT_MS` (default 300000) bounds each launch.
 
-The bad image fixture template points at a tag that does not exist in
-the same harness's image repo (`E2E_BAD_IMAGE_REPO`, default
-`scion-<harness>`), so the launch fails on the image pull. `E2E_BAD_IMAGE`
-gives the full image reference instead.
+The bad image ref is a tag that does not exist in the same harness's
+image repo (`E2E_BAD_IMAGE_REPO`, default `scion-<harness>`), so the
+launch fails on the image pull; `E2E_BAD_IMAGE` gives the full ref
+instead. The failure checks type it into the form's Container image
+field; no template sets an image (templates do not carry one).
 
 Existing non-IAP hub: set `E2E_TARGET_URL`, `E2E_TEST_IDENTITY_CODE_FILE`
 and `E2E_TEST_IDENTITY_EMAIL` for a member test identity issued out of
 band (`scion hub test-identity issue` / `web-code --out`), plus
-`E2E_LAUNCH_CAPABLE=1`, `E2E_BAD_IMAGE_TEMPLATE` and `E2E_BAD_IMAGE`
-(that template's image ref; A4 asserts it exactly). `E2E_BAD_IMAGE` is
-required while D1 is open (see below): A2's image is then unknown, and
-without the exact ref A4 fails. Optional: `E2E_TARGET_PROJECT_ID`. The redeem removes the code file
+`E2E_LAUNCH_CAPABLE=1` and `E2E_BAD_IMAGE` (an image ref whose tag does
+not exist; the failure checks type it into the form's Container image
+field and A4 asserts it exactly). Optional: `E2E_TARGET_PROJECT_ID`. The redeem removes the code file
 (the code is single-use). The runner deletes that identity afterwards; the spec cannot
 verify that, and its evidence is written before it. The no-runtime failure
 panel check runs on a remote target only with `E2E_LAUNCH_CAPABLE=0`.
@@ -56,7 +56,7 @@ launch payloads, request log, cleanup result; no cookies or tokens) under
 Cleanup evidence: `cleanup.agents` gives each agent's DELETE answers,
 `brokerDeleteFailed` (any 5xx, forced or not), whether it was gone before
 the project delete, and `cleanAgentDelete`; `cleanup.final` re-reads every
-agent, the project, the template and the identity after all deletes. A
+agent, the project and the identity after all deletes. A
 row removed only by the project delete is gone in `final` but not a clean
 agent delete. `forcedDeletes` lists every force fallback next to
 `launchCapable`. The panel checks record the page's own DELETE answers as
@@ -80,8 +80,18 @@ A2 records the agent's `appliedConfig.image` but does not require it: on
 an async create the hub does not yet record the image the broker
 resolved (product defect D1, ptone/scion#4818 (part of #2153)), so
 `a2AppliedConfig.a2AppliedConfigImageMissing` is true and the test carries
-a D1 annotation. A4 then pins the failure cause
-with the exact bad image ref, which the local hub always knows (remote:
-`E2E_BAD_IMAGE`); without either, A4 fails.
+a D1 annotation.
+
+A4 types the bad image ref into the form's Container image field
+(Additional Options; request `config.image`, the broker's top image tier).
+It first asserts and records the graded rows (failed-create panel, code
+and message, Delete and Create again, no Start or Resume, no reload), then
+deletes the agent from the panel, and only then pins the failure cause:
+the failed agent's `appliedConfig.image` is the exact typed ref, with an
+image failure code and the same credential-free auth and harness config
+as A2; an empty or different image fails. A launch failure that names no
+image cause sets `a4ImageReasonExposed: false` and a `FINDING` annotation
+(recorded, not failed). Every Playwright annotation is mirrored into
+`results[<test title>].annotations` in the evidence.
 
 Selectors and state names live in `selectors.ts` only.

@@ -30,7 +30,7 @@
  * shipped harnesses' no-auth fallback (drop-to-shell). The credential guard
  * refuses to start while a harness credential variable is set. The
  * harness (E2E_HARNESS_CONFIG, default the form's default) decides the
- * agent image, <registry>/scion-<harness>:latest; the bad image fixture is
+ * agent image, <registry>/scion-<harness>:latest; the bad image ref is
  * a tag that does not exist in that same repo (E2E_BAD_IMAGE_REPO or
  * E2E_BAD_IMAGE override it). Both refs are printed.
  */
