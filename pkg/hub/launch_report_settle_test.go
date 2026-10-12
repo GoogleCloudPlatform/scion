@@ -41,6 +41,34 @@ type launchSettleFixture struct {
 	agent    *store.Agent
 	brokerID string
 	launchID string
+	// hooks is srv.store: the raw store behind a wrapper that, once armed,
+	// runs its afterReport hook right after the store applies a launch
+	// report, before the handler settles the run.
+	hooks *launchSettleStore
+	fault *storeFaultSwitch
+}
+
+// launchSettleStore runs afterReport (when armed) right after a launch
+// report is applied, as another hub write landing between the report and
+// the settle would.
+type launchSettleStore struct {
+	store.Store
+	fault       *storeFaultSwitch
+	afterReport func(ctx context.Context, agentID string)
+}
+
+func (w *launchSettleStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID string, r store.LaunchReport) (store.LaunchReportAnswer, store.Agent, error) {
+	answer, updated, err := w.Store.ApplyLaunchReport(ctx, agentID, brokerID, r)
+	if err == nil && w.fault.Active() && w.afterReport != nil {
+		w.afterReport(ctx, agentID)
+	}
+	return answer, updated, err
+}
+
+// afterReport arms hook to run right after the next applied report.
+func (f *launchSettleFixture) afterReport(hook func(ctx context.Context, agentID string)) {
+	f.hooks.afterReport = hook
+	f.fault.Arm()
 }
 
 // newLaunchSettleFixture is an agent with an active create launch whose row
@@ -48,6 +76,9 @@ type launchSettleFixture struct {
 func newLaunchSettleFixture(t *testing.T, name string) *launchSettleFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	hooks, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *launchSettleStore {
+		return &launchSettleStore{Store: inner, fault: f}
+	})
 	ctx := context.Background()
 	brokerID := tid("broker-" + name)
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
@@ -68,7 +99,7 @@ func newLaunchSettleFixture(t *testing.T, name string) *launchSettleFixture {
 	}
 	launchID, err := s.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute)
 	require.NoError(t, err)
-	return &launchSettleFixture{srv: srv, store: s, agent: agent, brokerID: brokerID, launchID: launchID}
+	return &launchSettleFixture{srv: srv, store: s, agent: agent, brokerID: brokerID, launchID: launchID, hooks: hooks, fault: fault}
 }
 
 func (f *launchSettleFixture) report(t *testing.T, reportState, runID string) {
@@ -177,48 +208,18 @@ func TestLaunchReportSettle_KeptRunningEntry_AdoptedAndDeleted(t *testing.T) {
 	assert.Empty(t, client.held, "the kept running entry is removed")
 }
 
-// laterRunStore records run-2 for the agent right after the store applies a
-// launch report, as a dispatch that lands between the report and the
-// settle would.
-type laterRunStore struct {
-	store.Store
-	t *testing.T
-}
-
-func (s *laterRunStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID string, r store.LaunchReport) (store.LaunchReportAnswer, store.Agent, error) {
-	answer, updated, err := s.Store.ApplyLaunchReport(ctx, agentID, brokerID, r)
-	if err == nil {
-		_, setErr := s.Store.SetAgentRunID(ctx, agentID, "run-2", nil)
-		require.NoError(s.t, setErr)
-	}
-	return answer, updated, err
-}
-
 // The adoption is keyed on the run the row recorded when the report
 // applied: a run recorded after that is not overwritten.
 func TestLaunchReportSettle_LaterRun_Keeps(t *testing.T) {
 	f := newLaunchSettleFixture(t, "lrsettle-later")
-	f.srv.store = &laterRunStore{Store: f.store, t: t}
+	f.afterReport(func(ctx context.Context, agentID string) {
+		_, err := f.store.SetAgentRunID(ctx, agentID, "run-2", nil)
+		require.NoError(t, err)
+	})
 	f.report(t, store.LaunchReportStateSucceeded, "run-0")
 	got := mustGetAgent(t, f.store, f.agent.ID)
 	assert.Equal(t, "run-2", got.RunID, "the later run is kept")
 	assert.Equal(t, []string{"run-0", "run-1"}, got.PreviousRunIDs)
-}
-
-// claimAfterReportStore claims a delete of the agent right after the store
-// applies a launch report, as a delete that claims the row between the
-// report and the settle would.
-type claimAfterReportStore struct {
-	store.Store
-	t *testing.T
-}
-
-func (s *claimAfterReportStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID string, r store.LaunchReport) (store.LaunchReportAnswer, store.Agent, error) {
-	answer, updated, err := s.Store.ApplyLaunchReport(ctx, agentID, brokerID, r)
-	if err == nil {
-		claimForTest(s.t, s.Store, agentID, store.DeletionStateDeleting, time.Minute)
-	}
-	return answer, updated, err
 }
 
 // A delete that claims the row after the report applied, before the settle,
@@ -226,7 +227,9 @@ func (s *claimAfterReportStore) ApplyLaunchReport(ctx context.Context, agentID, 
 // snapshot of the row.
 func TestLaunchReportSettle_DeleteClaimedAfterReport_Keeps(t *testing.T) {
 	f := newLaunchSettleFixture(t, "lrsettle-claimed-after")
-	f.srv.store = &claimAfterReportStore{Store: f.store, t: t}
+	f.afterReport(func(_ context.Context, agentID string) {
+		claimForTest(t, f.store, agentID, store.DeletionStateDeleting, time.Minute)
+	})
 	require.Equal(t, store.LaunchReportResultApplied, f.reportResult(t, store.LaunchReportStateSucceeded, "run-0"))
 	got := mustGetAgent(t, f.store, f.agent.ID)
 	assert.Equal(t, "run-1", got.RunID, "the claimed row's run is unchanged")
