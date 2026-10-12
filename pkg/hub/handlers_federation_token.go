@@ -130,9 +130,10 @@ func (s *Server) handleFederationToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// JWT times are whole seconds; truncating here keeps iat, nbf, exp, the
-	// response expires_at and the audit expires_at equal. The audit record
-	// keeps the untruncated time.
+	// JWT times are whole seconds; truncating here, together with the
+	// whole-seconds lifetime that ValidateUserTokens enforces, keeps iat,
+	// nbf, exp, the response expires_at and the audit expires_at equal. The
+	// audit record keeps the untruncated time.
 	issuedAt := time.Now()
 	now := issuedAt.Truncate(time.Second)
 	expiresAt := now.Add(oidcCfg.EffectiveUserTokenLifetime())

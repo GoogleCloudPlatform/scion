@@ -848,7 +848,8 @@ type OIDCProviderConfig struct {
 	// issued. Read at startup; a change needs a restart.
 	UserTokenAudiences []string `json:"user_token_audiences,omitempty" yaml:"user_token_audiences,omitempty" koanf:"user_token_audiences"`
 	// UserTokenLifetime is the validity of those credentials. Zero means
-	// DefaultUserTokenLifetime; it may not exceed MaxUserTokenLifetime.
+	// DefaultUserTokenLifetime; otherwise it must be a whole number of
+	// seconds and may not exceed MaxUserTokenLifetime.
 	UserTokenLifetime time.Duration `json:"user_token_lifetime,omitempty" yaml:"user_token_lifetime,omitempty" koanf:"user_token_lifetime"`
 }
 
@@ -876,7 +877,8 @@ func NormalizeUserTokenAudience(aud string) string {
 }
 
 // ValidateUserTokens checks UserTokenAudiences and UserTokenLifetime: the
-// lifetime must be between zero and MaxUserTokenLifetime, and each audience
+// lifetime must be a whole number of seconds between zero and
+// MaxUserTokenLifetime (credential times are whole seconds), and each audience
 // must be a distinct http(s) URL with a host and no user info, query or
 // fragment.
 func (c OIDCProviderConfig) ValidateUserTokens() error {
@@ -885,6 +887,8 @@ func (c OIDCProviderConfig) ValidateUserTokens() error {
 		errs = append(errs, fmt.Errorf("user_token_lifetime %s must not be negative", c.UserTokenLifetime))
 	} else if c.UserTokenLifetime > MaxUserTokenLifetime {
 		errs = append(errs, fmt.Errorf("user_token_lifetime %s exceeds the maximum of %s", c.UserTokenLifetime, MaxUserTokenLifetime))
+	} else if c.UserTokenLifetime%time.Second != 0 {
+		errs = append(errs, fmt.Errorf("user_token_lifetime %s must be a whole number of seconds", c.UserTokenLifetime))
 	}
 	seen := make(map[string]bool)
 	for i, aud := range c.UserTokenAudiences {

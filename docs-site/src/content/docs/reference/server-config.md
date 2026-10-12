@@ -783,7 +783,7 @@ Configuration for the Hub's built-in OIDC Identity Provider feature.
 | `issuer_url` | string | | The public issuer URL of this Hub. If empty, the hub public URL is used. |
 | `token_lifetime` | duration | `"15m"` | Validity duration for minted OIDC identity tokens (e.g. `"15m"`, `"1h"`). |
 | `user_token_audiences` | list | `[]` | Peer hub issuer URLs for which this hub issues user access credentials to its own users (`POST /api/v1/auth/federation-token`, `scion hub auth federation-token`). Empty means none are issued. Experimental: also needs the `federation.project_visitors` experiment. Read at startup; a change needs a restart. |
-| `user_token_lifetime` | duration | `"15m"` | Validity of those user access credentials; at most `"1h"`. Read at startup. |
+| `user_token_lifetime` | duration | `"15m"` | Validity of those user access credentials; a whole number of seconds, at most `"1h"`. Read at startup. |
 
 ### OIDC Federation (`server.federation`)
 
