@@ -185,4 +185,16 @@ func TestGoogleIdentityResolver_Resolve_EmailNotFound_Provisions(t *testing.T) {
 	if binding.UserID != user.ID {
 		t.Fatalf("expected binding for user %s, got %s", user.ID, binding.UserID)
 	}
+	userStore.mu.Lock()
+	userCount := len(userStore.users)
+	userStore.mu.Unlock()
+	if userCount != 1 {
+		t.Fatalf("expected exactly 1 user in the store, got %d", userCount)
+	}
+	extStore.mu.Lock()
+	bindingCount := len(extStore.bindings)
+	extStore.mu.Unlock()
+	if bindingCount != 1 {
+		t.Fatalf("expected exactly 1 binding in the store, got %d", bindingCount)
+	}
 }
