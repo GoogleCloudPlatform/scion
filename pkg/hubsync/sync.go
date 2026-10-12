@@ -231,6 +231,11 @@ type EnsureHubReadyOptions struct {
 	// directory it resolved itself is not an explicit target and keeps
 	// SCION_PROJECT_ID in a hub-connected container (ptone/scion#3123).
 	ExplicitProject bool
+	// ExplicitHub reports that the user chose the hub explicitly for this
+	// invocation: the project came from the CLI's current context ('scion
+	// use'), which names a project on a specific hub. A hub project
+	// reference then resolves on that hub without the hub.enabled gate.
+	ExplicitHub bool
 }
 
 // ErrProjectUnlinked is returned by EnsureHubReady for a project whose
