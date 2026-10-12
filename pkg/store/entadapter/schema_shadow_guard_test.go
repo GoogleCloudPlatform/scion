@@ -73,6 +73,22 @@ func TestSchemaShadowError_Text(t *testing.T) {
 	assert.NotContains(t, msg, "drop the empty", "the guard does not know the schema is empty")
 }
 
+// TestSchemaShadowError_ExactText pins the full refusal text. Hub server
+// startup's text is byte-identical to the one it had before the maintenance
+// commands got the guard; the maintenance commands differ only in the
+// opening words (ptone/scion#4432).
+func TestSchemaShadowError_ExactText(t *testing.T) {
+	const rest = `PostgreSQL current schema "custom" has no hub tables, but schema "public" later on the search_path does. ` +
+		`Migrating now would create a new, empty hub table set in "custom" that hides the existing data in "public". ` +
+		`Fix the connection's search_path (for example put "public" first, or drop the "custom" schema if nothing else uses it), ` +
+		`or set server.database.allow_shadowed_schema: true (SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA=true) ` +
+		`to create the new table set in "custom" anyway`
+	startup := &SchemaShadowError{CurrentSchema: "custom", ShadowedSchema: "public"}
+	assert.Equal(t, "refusing to start: "+rest, startup.Error())
+	maintenance := &SchemaShadowError{CurrentSchema: "custom", ShadowedSchema: "public", Maintenance: true}
+	assert.Equal(t, "refusing to migrate the hub database: "+rest, maintenance.Error())
+}
+
 // TestSchemaShadowMarkerTables pins the marker: both tables are required, so
 // a schema holding only one of them is not a hub install.
 func TestSchemaShadowMarkerTables(t *testing.T) {
@@ -92,9 +108,9 @@ func TestCheckSchemaShadowing_DialectGate(t *testing.T) {
 	require.NoError(t, db.Close())
 	ctx := context.Background()
 
-	assert.NoError(t, checkSchemaShadowing(ctx, dialect.SQLite, db, false, nil))
-	assert.NoError(t, checkSchemaShadowing(ctx, dialect.Postgres, nil, false, nil))
-	err = checkSchemaShadowing(ctx, dialect.Postgres, db, false, nil)
+	assert.NoError(t, checkSchemaShadowing(ctx, dialect.SQLite, db, false, false, nil))
+	assert.NoError(t, checkSchemaShadowing(ctx, dialect.Postgres, nil, false, false, nil))
+	err = checkSchemaShadowing(ctx, dialect.Postgres, db, false, false, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "checking PostgreSQL search_path")
 }

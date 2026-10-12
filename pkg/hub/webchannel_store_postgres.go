@@ -1324,7 +1324,9 @@ func (s *pgWebChatStore) GetTopicConversationIDIncludingDeleted(ctx context.Cont
 
 // runMigrations executes idempotent data migrations.
 // A Postgres session-level advisory lock prevents concurrent replicas from
-// racing through the check-then-mark migration pattern.
+// racing through the check-then-mark migration pattern. A migration whose
+// Ent-managed table does not exist yet is left unrecorded, so a later Init
+// runs it once the table exists.
 func (s *pgWebChatStore) runMigrations() error {
 	acquireCtx, cancelAcquire := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelAcquire()
@@ -1570,13 +1572,16 @@ func (s *pgWebChatStore) migrateThreadIDs(batchSize int) error {
 		return nil
 	}
 
-	// Check if the messages table exists (it's Ent-managed and may not exist in tests).
+	// messages is Ent-managed and may not exist yet. With no table there is
+	// nothing to backfill, so leave the migration unrecorded: the next Init
+	// runs it once the table exists.
 	tableExists, err := s.tableExists(context.Background(), "messages")
 	if err != nil {
 		return err
 	}
 	if !tableExists {
-		return s.markMigrationCompleted("thread_id_backfill")
+		slog.Debug("Webchat thread_id backfill deferred: messages table does not exist yet")
+		return nil
 	}
 	messagesTable, err := s.table(context.Background(), "messages")
 	if err != nil {
@@ -2246,13 +2251,15 @@ func (s *pgWebChatStore) addThreadIDIndex() error {
 		return nil
 	}
 
-	// Check if the messages table exists.
+	// As in migrateThreadIDs: with no messages table there is nothing to
+	// index, so leave the migration unrecorded for the next Init.
 	tableExists, err := s.tableExists(context.Background(), "messages")
 	if err != nil {
 		return err
 	}
 	if !tableExists {
-		return s.markMigrationCompleted("thread_id_index")
+		slog.Debug("Webchat thread_id index deferred: messages table does not exist yet")
+		return nil
 	}
 	messagesTable, err := s.table(context.Background(), "messages")
 	if err != nil {

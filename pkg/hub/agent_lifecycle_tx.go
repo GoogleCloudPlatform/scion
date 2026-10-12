@@ -283,13 +283,21 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 	if err != nil {
 		return err
 	}
+	// A delete run by the test identity purge records the stamp it relied
+	// on (fixturePurgeBasisFor: only when the context carries the purge's
+	// basis and the agent's own stamp names the same root).
+	basis := fixturePurgeBasisFor(ctx, a.Fixture)
+	if basis != nil && actor.CorrelationID == "" {
+		actor.CorrelationID = basis.RunID
+	}
 	record, err := lifecycleAudit(mutationTypeAgentHardDelete, a.ID, actor, now, struct {
-		OpID                   string `json:"op_id"`
-		EdgesDeactivated       int    `json:"edges_deactivated"`
-		AssignmentsDeactivated int    `json:"assignments_deactivated"`
-		IncompleteCreate       bool   `json:"incomplete_create,omitempty"`
-		SoftDeleteOpID         string `json:"soft_delete_op_id,omitempty"`
-	}{opID, n, assignments, a.IsIncompleteCreate(), a.SoftDeleteOpID})
+		OpID                   string             `json:"op_id"`
+		EdgesDeactivated       int                `json:"edges_deactivated"`
+		AssignmentsDeactivated int                `json:"assignments_deactivated"`
+		IncompleteCreate       bool               `json:"incomplete_create,omitempty"`
+		SoftDeleteOpID         string             `json:"soft_delete_op_id,omitempty"`
+		ProvenanceBasis        *fixturePurgeBasis `json:"provenance_basis,omitempty"`
+	}{opID, n, assignments, a.IsIncompleteCreate(), a.SoftDeleteOpID, basis})
 	if err != nil {
 		return err
 	}
@@ -476,6 +484,14 @@ type reincarnateAuthority struct {
 	Role          string
 	Ceiling       store.EffectCeiling
 	Provenance    store.AuthorityProvenance
+	// Assignment, set only on a same-role repair, is the agent's
+	// service-account assignment re-recorded from the requester, who passed
+	// the assignment gate for the agent's account (resolveRepairAssignment).
+	Assignment *store.AgentServiceAccountAssignment
+	// AssignmentNotRecorded, set only on a same-role repair whose requester
+	// did not pass that gate, is the plan warning; the agent keeps its
+	// existing assignment.
+	AssignmentNotRecorded string
 }
 
 // reincarnateClaimTx claims agent for a reincarnation in one transaction.
@@ -489,7 +505,8 @@ type reincarnateAuthority struct {
 // re-record when auth is non-nil (deactivate the agent's active edges with
 // cause reincarnate_replaced, create the requester's edge), the
 // service-account assignment replacement when sa is non-nil (a
-// --service-account patch; the requester is its source), the
+// --service-account patch, or the re-record of a same-role repair; the
+// requester is its source), the
 // reincarnate-claim hooks, and the agent_reincarnate_claim audit record.
 // Any error rolls everything back, so nothing is claimed.
 //
@@ -565,13 +582,24 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 		if err := runAgentTxHooks(ctx, "reincarnate-claim", hooks, tx, &row, actor); err != nil {
 			return err
 		}
+		// service_account_recorded is true when the claim recorded an
+		// assignment, false on a same-role repair whose requester did not
+		// pass the assignment gate, and absent otherwise.
+		var saRecorded *bool
+		switch {
+		case sa != nil:
+			saRecorded = new(bool)
+			*saRecorded = true
+		case auth != nil && auth.AssignmentNotRecorded != "":
+			saRecorded = new(bool)
+		}
 		record, err := lifecycleAudit(mutationTypeAgentReincarnateClaim, row.ID, actor, now, struct {
 			OpID                 string `json:"op_id"`
 			ReincarnationID      string `json:"reincarnation_id"`
 			ReRecorded           bool   `json:"re_recorded"`
 			EdgesReplaced        int    `json:"edges_replaced"`
-			ServiceAccountRecord bool   `json:"service_account_recorded,omitempty"`
-		}{opID, rec.ID, auth != nil, replaced, sa != nil})
+			ServiceAccountRecord *bool  `json:"service_account_recorded,omitempty"`
+		}{opID, rec.ID, auth != nil, replaced, saRecorded})
 		if err != nil {
 			return err
 		}

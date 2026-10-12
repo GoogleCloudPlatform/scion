@@ -253,6 +253,16 @@ var (
 		},
 		Indexes: []*schema.Index{
 			{
+				Name:    "agent_fixture_root_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[1]},
+			},
+			{
+				Name:    "agent_fixture_issuer_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[2]},
+			},
+			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
 				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[86]},
@@ -448,7 +458,7 @@ var (
 		{Name: "root_principal_type", Type: field.TypeString},
 		{Name: "root_principal_id", Type: field.TypeString},
 		{Name: "via_agent_id", Type: field.TypeUUID, Nullable: true},
-		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"member_remove", "member_role_change", "member_principal_delete", "admin_binding_delete", "ownership_transfer", "group_change", "binding_expiry", "system_scope_change", "restore_check", "reconcile"}},
+		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"member_remove", "member_role_change", "member_principal_delete", "admin_binding_delete", "ownership_transfer", "group_change", "binding_expiry", "system_scope_change", "restore_check", "reconcile", "test_identity_expiry"}},
 		{Name: "actor_kind", Type: field.TypeString, Default: ""},
 		{Name: "actor_id", Type: field.TypeString, Default: ""},
 		{Name: "correlation_id", Type: field.TypeString, Default: ""},
@@ -1405,6 +1415,18 @@ var (
 				OnDelete:   schema.SetNull,
 			},
 		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "group_fixture_root_id",
+				Unique:  false,
+				Columns: []*schema.Column{GroupsColumns[1]},
+			},
+			{
+				Name:    "group_fixture_issuer_id",
+				Unique:  false,
+				Columns: []*schema.Column{GroupsColumns[2]},
+			},
+		},
 	}
 	// GroupMembershipsColumns holds the columns for the "group_memberships" table.
 	GroupMembershipsColumns = []*schema.Column{
@@ -1767,7 +1789,7 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "user_id", Type: field.TypeString},
 		{Name: "project_id", Type: field.TypeString, Nullable: true},
-		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"member_remove", "member_role_change", "member_principal_delete", "admin_binding_delete", "ownership_transfer", "group_change", "binding_expiry", "system_scope_change", "restore_check", "reconcile"}},
+		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"member_remove", "member_role_change", "member_principal_delete", "admin_binding_delete", "ownership_transfer", "group_change", "binding_expiry", "system_scope_change", "restore_check", "reconcile", "test_identity_expiry"}},
 		{Name: "actor_kind", Type: field.TypeString, Default: ""},
 		{Name: "actor_id", Type: field.TypeString, Default: ""},
 		{Name: "correlation_id", Type: field.TypeString, Default: ""},
@@ -2120,6 +2142,18 @@ var (
 		Name:       "projects",
 		Columns:    ProjectsColumns,
 		PrimaryKey: []*schema.Column{ProjectsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "project_fixture_root_id",
+				Unique:  false,
+				Columns: []*schema.Column{ProjectsColumns[1]},
+			},
+			{
+				Name:    "project_fixture_issuer_id",
+				Unique:  false,
+				Columns: []*schema.Column{ProjectsColumns[2]},
+			},
+		},
 	}
 	// ProjectContributorsColumns holds the columns for the "project_contributors" table.
 	ProjectContributorsColumns = []*schema.Column{
@@ -2401,6 +2435,16 @@ var (
 		Columns:    SchedulesColumns,
 		PrimaryKey: []*schema.Column{SchedulesColumns[0]},
 		Indexes: []*schema.Index{
+			{
+				Name:    "schedule_fixture_root_id",
+				Unique:  false,
+				Columns: []*schema.Column{SchedulesColumns[14]},
+			},
+			{
+				Name:    "schedule_fixture_issuer_id",
+				Unique:  false,
+				Columns: []*schema.Column{SchedulesColumns[15]},
+			},
 			{
 				Name:    "schedule_project_id_name",
 				Unique:  true,
@@ -3025,6 +3069,10 @@ func init() {
 		Table: "access_constraint_history",
 	}
 	AgentsTable.ForeignKeys[0].RefTable = ProjectsTable
+	AgentsTable.Annotation = &entsql.Annotation{}
+	AgentsTable.Annotation.Checks = map[string]string{
+		"agents_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
+	}
 	AgentDelegatedCredentialsTable.Annotation = &entsql.Annotation{
 		Table: "agent_delegated_credentials",
 	}
@@ -3095,6 +3143,10 @@ func init() {
 		Table: "github_installations",
 	}
 	GroupsTable.ForeignKeys[0].RefTable = UsersTable
+	GroupsTable.Annotation = &entsql.Annotation{}
+	GroupsTable.Annotation.Checks = map[string]string{
+		"groups_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
+	}
 	GroupMembershipsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupMembershipsTable.ForeignKeys[1].RefTable = UsersTable
 	GroupMembershipsTable.ForeignKeys[2].RefTable = AgentsTable
@@ -3150,6 +3202,9 @@ func init() {
 	ProjectsTable.Annotation = &entsql.Annotation{
 		Table: "projects",
 	}
+	ProjectsTable.Annotation.Checks = map[string]string{
+		"projects_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
+	}
 	ProjectContributorsTable.Annotation = &entsql.Annotation{
 		Table: "project_contributors",
 	}
@@ -3168,6 +3223,9 @@ func init() {
 	}
 	SchedulesTable.Annotation = &entsql.Annotation{
 		Table: "schedules",
+	}
+	SchedulesTable.Annotation.Checks = map[string]string{
+		"schedules_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
 	}
 	ScheduledEventsTable.Annotation = &entsql.Annotation{
 		Table: "scheduled_events",

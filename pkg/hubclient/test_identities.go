@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -45,6 +46,53 @@ type TestIdentityService interface {
 	// 409 API error while the identity owns agents or is the last owner of
 	// a project (see TestIdentityDeleteConflict).
 	Delete(ctx context.Context, id string) error
+
+	// Purge deletes a test identity together with the agents, schedules,
+	// groups and projects it created (DELETE ...?purge=true). A complete
+	// purge returns the report and a nil error. One that did not complete
+	// returns the report and a 409 API error (run it again); see
+	// TestIdentityPurgeIncomplete. An identity that is already gone, or one
+	// the caller may not purge, returns an empty report.
+	Purge(ctx context.Context, id string) (*TestIdentityPurgeReport, error)
+}
+
+// TestIdentityPurgeCounts counts what a purge removed.
+type TestIdentityPurgeCounts struct {
+	Agents    int `json:"agents"`
+	Schedules int `json:"schedules"`
+	Groups    int `json:"groups"`
+	Projects  int `json:"projects"`
+}
+
+// TestIdentityPurgeItem is a resource a purge did not remove.
+type TestIdentityPurgeItem struct {
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	ProjectID string `json:"projectId,omitempty"`
+	Status    string `json:"status"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// TestIdentityPurgeKeptProject is a project a purge kept.
+type TestIdentityPurgeKeptProject struct {
+	ID              string `json:"id"`
+	Reason          string `json:"reason"`
+	BindingsRemoved int    `json:"bindingsRemoved"`
+	Ownerless       bool   `json:"ownerless,omitempty"`
+}
+
+// TestIdentityPurgeReport is the hub's report of a purge.
+type TestIdentityPurgeReport struct {
+	IdentityID         string                         `json:"identityId"`
+	Complete           bool                           `json:"complete"`
+	IdentityDeleted    bool                           `json:"identityDeleted"`
+	Deleted            TestIdentityPurgeCounts        `json:"deleted"`
+	NotDone            []TestIdentityPurgeItem        `json:"notDone,omitempty"`
+	Unproven           []TestIdentityPurgeItem        `json:"unproven,omitempty"`
+	UnprovenTruncated  bool                           `json:"unprovenTruncated,omitempty"`
+	KeptProjects       []TestIdentityPurgeKeptProject `json:"keptProjects,omitempty"`
+	IdentityKeptReason string                         `json:"identityKeptReason,omitempty"`
+	Truncated          bool                           `json:"truncated,omitempty"`
 }
 
 // testIdentityService is the implementation of TestIdentityService.
@@ -173,6 +221,48 @@ func (s *testIdentityService) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// Purge deletes a test identity and what it created. It is sent once,
+// never retried by the transport; running it again is safe.
+func (s *testIdentityService) Purge(ctx context.Context, id string) (*TestIdentityPurgeReport, error) {
+	if id == "" {
+		return nil, fmt.Errorf("test identity id is required")
+	}
+	resp, err := s.c.delete(ctx, "/api/v1/test-identities/"+url.PathEscape(id)+"?purge=true", nil)
+	if err != nil {
+		return nil, err
+	}
+	report, err := apiclient.DecodeRequired[TestIdentityPurgeReport](resp)
+	if err != nil {
+		if r, ok := TestIdentityPurgeIncomplete(err); ok {
+			return r, err
+		}
+		return nil, err
+	}
+	return report, nil
+}
+
+// TestIdentityPurgeIncomplete returns the report carried by a purge answer
+// that did not complete (details.reason purge_incomplete). ok is false when
+// err is not such an answer.
+func TestIdentityPurgeIncomplete(err error) (*TestIdentityPurgeReport, bool) {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Details == nil {
+		return nil, false
+	}
+	if reason, _ := apiErr.Details["reason"].(string); reason != "purge_incomplete" {
+		return nil, false
+	}
+	raw, err2 := json.Marshal(apiErr.Details["report"])
+	if err2 != nil {
+		return nil, false
+	}
+	var report TestIdentityPurgeReport
+	if json.Unmarshal(raw, &report) != nil {
+		return nil, false
+	}
+	return &report, true
 }
 
 // TestIdentityBlockingAgent is an agent that blocks a test identity delete.
