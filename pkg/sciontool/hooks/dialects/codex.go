@@ -6,7 +6,10 @@ package dialects
 
 import "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 
-// CodexDialect parses Codex notify payloads.
+// CodexDialect parses Codex notify payloads and Codex hook payloads
+// (UserPromptSubmit, PreToolUse, PostToolUse, Stop, SubagentStop and the
+// session events), mapping them to the same normalized events as the staged
+// harnesses/codex/dialect.yaml.
 type CodexDialect struct{}
 
 func NewCodexDialect() *CodexDialect {

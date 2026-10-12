@@ -5,11 +5,10 @@ Copyright 2025 The Scion Authors.
 package dialects
 
 import (
-	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -91,10 +90,7 @@ func TestCodexDialect_StatusFields(t *testing.T) {
 // staged into codex agents.
 func loadStagedCodexDialect(t *testing.T) *MappingDialect {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	require.True(t, ok, "runtime.Caller failed")
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	md, err := LoadMappingDialect(filepath.Join(root, "harnesses", "codex", "dialect.yaml"))
+	md, err := LoadMappingDialect(testutil.HarnessDialectPath(t, "codex"))
 	require.NoError(t, err)
 	require.Equal(t, "codex", md.Name())
 	return md
@@ -103,6 +99,17 @@ func loadStagedCodexDialect(t *testing.T) *MappingDialect {
 // TestCodexDialect_MatchesStagedDialect checks that the built-in codex
 // dialect maps every event the staged codex dialect file maps, to the same
 // normalized event name, so the two cannot drift apart.
+//
+// The check covers event names only and runs in one direction: every raw
+// name in the staged file must normalize identically in the built-in
+// dialect, but raw names that only the built-in dialect maps are not
+// checked, and neither is field extraction. That is sufficient because the
+// staged file is the reference: agent status and the other handlers key off
+// the normalized event name, so a staged mapping the built-in dialect lacks
+// or maps differently is the drift that changes behaviour, while a built-in
+// extra only matters for payloads the staged dialect would pass through
+// unmapped anyway. TestCodexDialect_HookEventMappings pins the expected
+// names independently of the staged file.
 func TestCodexDialect_MatchesStagedDialect(t *testing.T) {
 	staged := loadStagedCodexDialect(t)
 	builtin := NewCodexDialect()

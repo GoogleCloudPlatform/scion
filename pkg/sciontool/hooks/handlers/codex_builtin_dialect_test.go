@@ -6,12 +6,12 @@ package handlers
 
 import (
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,10 +21,7 @@ import (
 // status the same way whether they are parsed by the built-in codex dialect
 // or by the staged harnesses/codex/dialect.yaml.
 func TestCodexBuiltinDialect_StatusMatchesStagedDialect(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	require.True(t, ok, "runtime.Caller failed")
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	staged, err := dialects.LoadMappingDialect(filepath.Join(root, "harnesses", "codex", "dialect.yaml"))
+	staged, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, "codex"))
 	require.NoError(t, err)
 	builtin := dialects.NewCodexDialect()
 
