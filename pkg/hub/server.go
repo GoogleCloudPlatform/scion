@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1634,6 +1635,17 @@ type Server struct {
 	// co-located registration so callers can report it distinctly.
 	embeddedBrokerPending chan struct{}
 	embeddedBrokerRegErr  string
+	// embeddedFlat records the co-located flat Runtime Broker instances
+	// (several may share this process, ptone/scion#3272): the activated
+	// Runtime Broker IDs, each instance's refusal by instance key, and the
+	// instance keys startup expects an outcome for before releasing
+	// waiters (ExpectEmbeddedFlatInstances).
+	embeddedFlatIDs      map[string]bool
+	embeddedFlatByKey    map[string]string // instance key -> activated Runtime Broker ID
+	embeddedFlatFailures map[string]string
+	embeddedFlatOutcomes map[string]bool
+	embeddedFlatExpected []string
+
 	// inProcessPluginBrokers holds the ids of the message-broker plugin
 	// records this process provisioned itself (RegisterInProcessPluginBroker).
 	// The test admin tier admits those ids; it never trusts a stored
@@ -3456,6 +3468,94 @@ func (s *Server) EmbeddedBrokerRegistrationFailed(err error) {
 	s.resolveEmbeddedBrokerPendingLocked()
 }
 
+// ExpectEmbeddedFlatInstances records the instance keys of the co-located
+// flat Runtime Broker instances this process hosts. With it, waiters on a
+// pending co-located registration are released only once every listed
+// instance has an outcome (activated or refused), so a waiter is never told
+// "not embedded" for an instance still being activated. Without it the
+// first outcome releases them (one instance).
+func (s *Server) ExpectEmbeddedFlatInstances(keys []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.embeddedFlatExpected = append([]string(nil), keys...)
+	s.resolveEmbeddedFlatPendingLocked()
+}
+
+// recordEmbeddedFlatActivated records an activated co-located flat
+// instance. Callers must hold s.mu.
+func (s *Server) recordEmbeddedFlatActivatedLocked(key, brokerID string) {
+	if s.embeddedFlatIDs == nil {
+		s.embeddedFlatIDs = map[string]bool{}
+		s.embeddedFlatByKey = map[string]string{}
+	}
+	s.embeddedFlatIDs[brokerID] = true
+	s.embeddedFlatByKey[key] = brokerID
+	delete(s.embeddedFlatFailures, key)
+	s.markEmbeddedFlatOutcomeLocked(key)
+}
+
+// EmbeddedFlatInstanceFailed records that the co-located flat instance key
+// was not activated, or stopped serving after activation (any refusal:
+// configuration, identity, unresolved ownership, registration,
+// acknowledgement, or its services failing to start). An instance recorded as
+// embedded stops being embedded. Every recorded refusal is reported through
+// the co-located registration failure (health and admin summary), so one
+// refused instance is visible even when its siblings activated.
+func (s *Server) EmbeddedFlatInstanceFailed(key string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id, ok := s.embeddedFlatByKey[key]; ok {
+		delete(s.embeddedFlatIDs, id)
+		delete(s.embeddedFlatByKey, key)
+	}
+	if s.embeddedFlatFailures == nil {
+		s.embeddedFlatFailures = map[string]string{}
+	}
+	msg := "unknown error"
+	if err != nil {
+		msg = err.Error()
+	}
+	s.embeddedFlatFailures[key] = msg
+	keys := make([]string, 0, len(s.embeddedFlatFailures))
+	for k := range s.embeddedFlatFailures {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) == 1 && len(s.embeddedFlatExpected) <= 1 {
+		s.embeddedBrokerRegErr = msg
+	} else {
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("instance %q: %s", k, s.embeddedFlatFailures[k]))
+		}
+		s.embeddedBrokerRegErr = strings.Join(parts, "; ")
+	}
+	s.markEmbeddedFlatOutcomeLocked(key)
+}
+
+func (s *Server) markEmbeddedFlatOutcomeLocked(key string) {
+	if s.embeddedFlatOutcomes == nil {
+		s.embeddedFlatOutcomes = map[string]bool{}
+	}
+	s.embeddedFlatOutcomes[key] = true
+	s.resolveEmbeddedFlatPendingLocked()
+}
+
+// resolveEmbeddedFlatPendingLocked releases waiters once every expected
+// flat instance has an outcome (or, with no expectation recorded, on the
+// first outcome). Callers must hold s.mu.
+func (s *Server) resolveEmbeddedFlatPendingLocked() {
+	if len(s.embeddedFlatOutcomes) == 0 {
+		return
+	}
+	for _, k := range s.embeddedFlatExpected {
+		if !s.embeddedFlatOutcomes[k] {
+			return
+		}
+	}
+	s.resolveEmbeddedBrokerPendingLocked()
+}
+
 // resolveEmbeddedBrokerPendingLocked releases waiters on a pending co-located
 // registration. Callers must hold s.mu.
 func (s *Server) resolveEmbeddedBrokerPendingLocked() {
@@ -3472,9 +3572,43 @@ var embeddedBrokerWaitTimeout = 15 * time.Second
 // embeddedBrokerState describes the Hub's embedded broker for callers that
 // need to explain a negative isEmbeddedBroker result.
 type embeddedBrokerState struct {
-	id      string // recorded embedded broker ID, "" if none
-	regErr  string // non-empty when co-located registration failed
-	pending bool   // registration still outstanding after the wait
+	id      string          // the embedded broker ID when there is exactly one, "" otherwise
+	ids     map[string]bool // every embedded broker ID (legacy or co-located flat instances)
+	regErr  string          // non-empty when co-located registration failed
+	pending bool            // registration still outstanding after the wait
+}
+
+// has reports whether brokerID is an embedded broker of this process.
+func (st embeddedBrokerState) has(brokerID string) bool {
+	return brokerID != "" && st.ids[brokerID]
+}
+
+// sortedIDs returns the embedded broker IDs, sorted.
+func (st embeddedBrokerState) sortedIDs() []string {
+	ids := make([]string, 0, len(st.ids))
+	for id := range st.ids {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// embeddedBrokerStateLocked snapshots the embedded broker state. Callers
+// must hold s.mu.
+func (s *Server) embeddedBrokerStateLocked() embeddedBrokerState {
+	st := embeddedBrokerState{ids: map[string]bool{}, regErr: s.embeddedBrokerRegErr, pending: s.embeddedBrokerPending != nil}
+	if s.embeddedBrokerID != "" {
+		st.ids[s.embeddedBrokerID] = true
+	}
+	for id := range s.embeddedFlatIDs {
+		st.ids[id] = true
+	}
+	if len(st.ids) == 1 {
+		for id := range st.ids {
+			st.id = id
+		}
+	}
+	return st
 }
 
 // waitForEmbeddedBroker returns the embedded broker state, first waiting up to
@@ -3495,11 +3629,7 @@ func (s *Server) waitForEmbeddedBroker(ctx context.Context) embeddedBrokerState 
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return embeddedBrokerState{
-		id:      s.embeddedBrokerID,
-		regErr:  s.embeddedBrokerRegErr,
-		pending: s.embeddedBrokerPending != nil,
-	}
+	return s.embeddedBrokerStateLocked()
 }
 
 // embeddedBrokerSnapshot returns the current embedded broker state without
@@ -3518,11 +3648,7 @@ func (s *Server) waitForEmbeddedBroker(ctx context.Context) embeddedBrokerState 
 func (s *Server) embeddedBrokerSnapshot() embeddedBrokerState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return embeddedBrokerState{
-		id:      s.embeddedBrokerID,
-		regErr:  s.embeddedBrokerRegErr,
-		pending: s.embeddedBrokerPending != nil,
-	}
+	return s.embeddedBrokerStateLocked()
 }
 
 // SetStatelessEmbeddedBrokerID records a co-located broker whose runtime
@@ -3545,11 +3671,28 @@ func (s *Server) SetRuntimeReloadFunc(fn func() bool) {
 	s.runtimeReloadFunc = fn
 }
 
-// GetEmbeddedBrokerID returns the co-located broker ID, if any.
+// GetEmbeddedBrokerID returns the co-located broker ID when this process
+// has exactly one embedded broker, "" otherwise (none, or several
+// co-located flat instances: see GetEmbeddedBrokerIDs).
 func (s *Server) GetEmbeddedBrokerID() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.embeddedBrokerID
+	return s.embeddedBrokerStateLocked().id
+}
+
+// GetEmbeddedBrokerIDs returns every embedded broker ID of this process,
+// sorted.
+func (s *Server) GetEmbeddedBrokerIDs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.embeddedBrokerStateLocked().sortedIDs()
+}
+
+// hasEmbeddedBroker reports whether this process has any embedded broker.
+func (s *Server) hasEmbeddedBroker() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.embeddedBrokerStateLocked().ids) > 0
 }
 
 // GetStatelessEmbeddedBrokerID returns the embedded stateless broker ID, if any.
@@ -3567,7 +3710,10 @@ func (s *Server) GetStatelessEmbeddedBrokerID() string {
 func (s *Server) isEmbeddedBroker(brokerID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.embeddedBrokerID != "" && s.embeddedBrokerID == brokerID
+	if brokerID == "" {
+		return false
+	}
+	return s.embeddedBrokerID == brokerID || s.embeddedFlatIDs[brokerID]
 }
 
 // SetStorage sets the storage backend for template files.

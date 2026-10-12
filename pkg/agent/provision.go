@@ -592,7 +592,7 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 // A2). A List error is not treated as "not running" by the caller — see the
 // call site's comment.
 func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (bool, error) {
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": name})
+	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": name})
 	if err != nil {
 		return false, err
 	}
@@ -666,6 +666,7 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 //   - a sibling agent's directory (both branches resolve strictly this
 //     agent's own agentDir via checkAgentDirContained/CheckAgentDirContained).
 func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	ctx = m.withWorkspaceLock(ctx)
 	hasGitClone := opts.GitClone != nil
 	if !api.ReincarnateEligible(hasGitClone, opts.Workspace, opts.EmptyPerAgentWorkspace) {
 		return nil, fmt.Errorf("%w: agent %q is neither clone-per-agent, empty-per-agent, nor has an explicit workspace; reincarnate currently supports those workspace modes only", ErrReprovisionRefused, opts.Name)
@@ -880,6 +881,7 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	ctx = m.withWorkspaceLock(ctx)
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
 	if err != nil {
@@ -1594,6 +1596,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	} else if isGit {
 		// Case 2: Git Repository (and no explicit workspace)
+		// A flat Runtime Broker instance serializes the repository's
+		// worktree and sharer changes with every instance of its host (the
+		// host's workspace lock), through the rest of provisioning.
+		if repoRoot, rootErr := util.RepoRootDir(projectDir); rootErr == nil && repoRoot != "" {
+			unlockRepo, lockErr := lockWorkspace(ctx, repoRoot)
+			if lockErr != nil {
+				return "", "", nil, fmt.Errorf("workspace lock: %w", lockErr)
+			}
+			defer unlockRepo()
+		}
 		targetBranch := branch
 		if targetBranch == "" {
 			// Use slugified agent name for valid git branch names
@@ -2785,7 +2797,7 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 	if opts.Env != nil {
 		projectID = opts.Env["SCION_PROJECT_ID"]
 	}
-	entries, err := m.Runtime.List(ctx, map[string]string{"scion.name": api.Slugify(opts.Name)})
+	entries, err := m.listRuntime(ctx, map[string]string{"scion.name": api.Slugify(opts.Name)})
 	if err != nil {
 		return true
 	}

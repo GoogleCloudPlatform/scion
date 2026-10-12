@@ -93,6 +93,7 @@ func sortedEnvVarKeys(envVars map[string]string) []string {
 }
 
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	ctx = m.withWorkspaceLock(ctx)
 	startEntry := time.Now()
 	// callerHubEndpoint is opts.Env's SCION_HUB_ENDPOINT exactly as the
 	// caller passed it in — captured before anything below ever writes to
@@ -172,7 +173,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
-	agents, listErr := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	// Owner-filtered on a flat instance (listRuntime): a pre-clean never sees, or removes, another instance's object.
+	agents, listErr := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if listErr == nil {
 		for _, a := range agents {
 			// Skip agents from a different project
@@ -2470,6 +2472,11 @@ authDone:
 					l[k] = v
 				}
 			}
+			// The reserved owner label is set last, by the manager only,
+			// so nothing above can set or replace it.
+			for k, v := range m.ownerLabels() {
+				l[k] = v
+			}
 			return l
 		}(),
 		Annotations: projectkeys.ProjectPathLabels(projectDir),
@@ -2477,6 +2484,9 @@ authDone:
 		// §3.8.4); nil on the synchronous path.
 		Checkpoint:        opts.Checkpoint,
 		OnResourceCreated: opts.OnResourceCreated,
+		// Observes every created resource (flat instance ownership
+		// records) without changing cleanup ownership.
+		ObserveResourceCreated: opts.ObserveResourceCreated,
 	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())
@@ -2523,10 +2533,16 @@ authDone:
 	}
 
 	// Fetch fresh info and verify the container is actually running
-	allAgents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	allAgents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if err == nil {
 		for _, a := range allAgents {
-			if a.ContainerID == id || strings.EqualFold(a.Name, opts.Name) {
+			matched := a.ContainerID == id || strings.EqualFold(a.Name, opts.Name)
+			// An owned (flat instance) manager matches by name only within
+			// the agent's project, never another project's same-named agent.
+			if matched && m.owner != nil && a.ContainerID != id && !matchAgentProject(a, projectName, projectID) {
+				matched = false
+			}
+			if matched {
 				// Check if the container has already exited
 				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
 					// Try to get logs for diagnosis
