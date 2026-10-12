@@ -132,7 +132,9 @@ var afterDialHook func(ctx context.Context)
 
 // Dial opens a session to the relay: it dials the transport, sends hello
 // and waits for Welcome. A GoAway in place of Welcome (admission refused)
-// is returned as a *CloseError carrying 4401/4403.
+// is returned as a *CloseError carrying 4401/4403. If ctx is cancelled by
+// the time the connect returns, Dial closes the connection and returns
+// ctx's error without sending hello.
 func Dial(ctx context.Context, d transport.Dialer, cfg Config, hello *conduitv1.Hello) (Session, *conduitv1.Welcome, error) {
 	cfg = cfg.withDefaults()
 	if _, err := PrincipalKindFromProto(hello.GetPrincipalKind()); err != nil {
