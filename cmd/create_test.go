@@ -16,7 +16,6 @@ package cmd
 
 import (
 	"bytes"
-	"os"
 	"strings"
 	"testing"
 
@@ -25,27 +24,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// createTestState captures and restores package-level vars for test isolation.
-type createTestState struct {
-	home        string
-	projectPath string
-	noHub       bool
-}
-
-func saveCreateTestState() createTestState {
-	return createTestState{
-		home:        os.Getenv("HOME"),
-		projectPath: projectPath,
-		noHub:       noHub,
-	}
-}
-
-func (s createTestState) restore() {
-	_ = os.Setenv("HOME", s.home)
-	projectPath = s.projectPath
-	noHub = s.noHub
-}
 
 func TestCreateCmd_HarnessFlagDefaultsToEmpty(t *testing.T) {
 	// Regression test: the --harness flag on createCmd must default to ""
