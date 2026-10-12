@@ -72,6 +72,8 @@ function createFetchHandler(opts?: {
   serviceAccounts?: Array<Record<string, unknown>>;
   /** Receives the body of every PUT to the project settings. */
   settingsPuts?: Array<Record<string, unknown>>;
+  /** When set, every settings PUT is refused with this 400 error message. */
+  settingsPutError?: string;
 }) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
@@ -79,6 +81,14 @@ function createFetchHandler(opts?: {
     if (init?.method === 'PUT' && path.endsWith('/settings') && typeof init.body === 'string') {
       const body = JSON.parse(init.body) as Record<string, unknown>;
       opts?.settingsPuts?.push(body);
+      if (opts?.settingsPutError) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: { message: opts.settingsPutError } }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
       return Promise.resolve(
         new Response(JSON.stringify(body), {
           status: 200,
@@ -259,6 +269,64 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     expect(settingsPuts).toHaveLength(1);
     expect(settingsPuts[0].defaultGCPIdentityMode).toBe('block');
     expect(settingsPuts[0].defaultGCPIdentityServiceAccountID).toBe('');
+  });
+
+  // A hub without the Kubernetes Block change (ptone/scion#4067) refuses a
+  // new Block default for a Kubernetes-bound project with a 400. The page
+  // shows the hub's message and announces it to screen readers.
+  it('shows and announces the hub error when an older hub refuses a Block default', async () => {
+    const message =
+      "default GCP identity mode 'block' is not available for a Kubernetes-bound project; " +
+      "choose 'passthrough' or 'assign' instead";
+    const settingsPuts: Array<Record<string, unknown>> = [];
+    element = await createComponent(
+      createFetchHandler({
+        brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
+        settingsPuts,
+        settingsPutError: message,
+      })
+    );
+    const page = element as unknown as ProjectSettingsInternals;
+
+    const select = gcpIdentitySelect(element) as HTMLElement & { value: string };
+    select.value = 'block';
+    select.dispatchEvent(new Event('sl-change', { bubbles: true, composed: true }));
+    await page.updateComplete;
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await page.handleSaveConfig();
+    await page.updateComplete;
+
+    expect(settingsPuts).toHaveLength(1);
+    expect(page.settingsError).toBe(message);
+    const status = element.shadowRoot!.querySelector('.config-status.error');
+    expect(status).not.toBeNull();
+    expect(status!.getAttribute('role')).toBe('alert');
+    expect(status!.textContent).toContain(message);
+  });
+
+  // The generic "Block prevents access" does not hold on Kubernetes.
+  it('does not claim Block prevents access in the field help of a Kubernetes-bound project', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
+      })
+    );
+
+    const text = fieldHelpText(element);
+    expect(text).not.toContain('prevents access');
+    expect(text).toContain('"Block" works as described above');
+    expect(text.toLowerCase()).not.toContain('metadata');
+  });
+
+  it('keeps the generic field help for a project that is not Kubernetes-bound', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        brokers: [makeBroker('b1', [{ name: 'default', type: 'docker', available: true }])],
+      })
+    );
+
+    expect(fieldHelpText(element)).toContain('"Block" prevents access');
   });
 
   it('leaves Block enabled when linked brokers mix runtime types', async () => {

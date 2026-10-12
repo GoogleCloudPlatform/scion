@@ -1406,6 +1406,25 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   /**
+   * The default picker's field help. On a Kubernetes-bound project the
+   * generic "Block prevents access" does not hold (the pod's service account
+   * can still get a federated token), so Block is left to the help-text slot
+   * (KUBERNETES_BLOCK_HINT).
+   */
+  private get gcpIdentityFieldHelp(): string {
+    if (this.projectIsKubernetesOnly) {
+      return (
+        'Controls the GCP identity of new agents. "Passthrough" allows host identity, "Assign" ' +
+        'binds a specific service account, and "Block" works as described above.'
+      );
+    }
+    return (
+      'Controls GCP metadata server access for new agents. "Block" prevents access, ' +
+      '"Passthrough" allows host identity, "Assign" binds a specific service account.'
+    );
+  }
+
+  /**
    * Describes the hub default GCP identity this project inherits while its
    * own setting is "inherit". For "assign" it names the service account (the
    * mode alone doesn't say which identity agents get); for "passthrough" it
@@ -1528,6 +1547,12 @@ export class ScionPageProjectSettings extends LitElement {
     } else {
       this.gcpServiceAccounts = [...this.gcpServiceAccounts, account];
     }
+  }
+
+  /** A failed save's message, announced to screen readers (role="alert"). */
+  private renderSettingsError(): TemplateResult | typeof nothing {
+    if (!this.settingsError) return nothing;
+    return html`<span class="config-status error" role="alert">${this.settingsError}</span>`;
   }
 
   private async handleSaveConfig(): Promise<void> {
@@ -2483,11 +2508,7 @@ export class ScionPageProjectSettings extends LitElement {
                   <sl-option value="assign">Assign Service Account</sl-option>
                   ${this.renderKubernetesBlockHint()}
                 </sl-select>
-                <span class="field-help"
-                  >Controls GCP metadata server access for new agents. "Block" prevents access,
-                  "Passthrough" allows host identity, "Assign" binds a specific service
-                  account.</span
-                >
+                <span class="field-help">${this.gcpIdentityFieldHelp}</span>
                 ${this.renderInheritedGCPIdentityHint()}
               </div>
 
@@ -2756,9 +2777,7 @@ export class ScionPageProjectSettings extends LitElement {
         ${canEdit && this.activeConfigTab !== 'brokers'
           ? html`
               <div class="config-actions">
-                ${this.settingsError
-                  ? html`<span class="config-status error">${this.settingsError}</span>`
-                  : ''}
+                ${this.renderSettingsError()}
                 ${this.settingsSuccess
                   ? html`<span class="config-status success">${this.settingsSuccess}</span>`
                   : ''}

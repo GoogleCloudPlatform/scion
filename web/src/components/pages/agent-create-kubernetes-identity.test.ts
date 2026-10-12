@@ -389,6 +389,9 @@ describe('Create Agent: GCP identity on Kubernetes targets (Block offered)', () 
     await chooseSelect(el, gcpIdentitySelect(el)!, 'block');
     expect(page.gcpIdentityUserSet).toBe(true);
     expect(page.gcpMetadataMode).toBe('block');
+    // The generic Block text does not hold on Kubernetes.
+    expect(gcpIdentityHint(el)).toBe(KUBERNETES_BLOCK_HINT);
+    expect(gcpIdentityHint(el)).not.toContain('Token requests are denied');
 
     await page.handleSubmit(new Event('submit'));
 
@@ -495,7 +498,8 @@ describe('Create Agent: GCP identity on Kubernetes targets (Block offered)', () 
     const select = gcpIdentitySelect(el);
     expect((select as HTMLElement & { value: string }).value).toBe('block');
     expect(select!.querySelector('sl-option[value="block"]')).not.toBeNull();
-    expect(gcpIdentityHint(el)).toContain(KUBERNETES_BLOCK_HINT);
+    expect(gcpIdentityHint(el)).toBe(KUBERNETES_BLOCK_HINT);
+    expect(gcpIdentityHint(el)).not.toContain('Token requests are denied');
 
     await page.handleSubmit(new Event('submit'));
 

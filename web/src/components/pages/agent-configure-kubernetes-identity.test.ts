@@ -176,6 +176,14 @@ function blockOption(el: HTMLElement): Element | null {
   return gcpIdentitySelect(el)?.querySelector('sl-option[value="block"]') ?? null;
 }
 
+/** The GCP identity field's text outside the select (the `.hint` div), whitespace-normalized. */
+function gcpModeHint(el: HTMLElement): string {
+  const field = gcpIdentitySelect(el)?.closest('.form-field');
+  const hint = Array.from(field?.children ?? []).find((c) => c.classList.contains('hint'));
+  const raw = hint?.textContent ?? '';
+  return raw.replace(/\s+/g, ' ').trim();
+}
+
 /** Whitespace-normalized: Lit template literals preserve literal newlines/indentation verbatim in textContent. */
 function gcpIdentityHelpTextSlot(el: HTMLElement): string {
   const raw = gcpIdentitySelect(el)?.querySelector('[slot="help-text"]')?.textContent ?? '';
@@ -291,6 +299,7 @@ describe('agent-configure: GCP identity on a Kubernetes target (Block offered)',
     const page = element as unknown as AgentConfigureInternals;
     expect(page.gcpMetadataMode).toBe('block');
     expect(gcpIdentityHelpTextSlot(element)).toContain('current identity is "Block"');
+    expect(gcpModeHint(element)).not.toContain('Token requests are denied');
   });
 
   it('resaves a stored "block" unchanged without sending gcp_identity at all', async () => {
@@ -328,6 +337,37 @@ describe('agent-configure: GCP identity on a Kubernetes target (Block offered)',
     expect(page.error).toBeNull();
     expect(patchBodies).toHaveLength(1);
     expect(patchBodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+  });
+
+  // The generic Block text ("token requests are denied") does not hold on
+  // Kubernetes; the help-text slot's Kubernetes Block hint describes it.
+  it('describes a Block pick on a Kubernetes target only with the Kubernetes Block hint', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      })
+    );
+    const page = element as unknown as AgentConfigureInternals;
+
+    await chooseSelect(page, gcpIdentitySelect(element)!, 'block');
+
+    expect(gcpModeHint(element)).toBe('');
+    expect(gcpIdentityHelpTextSlot(element)).toBe(KUBERNETES_BLOCK_HINT);
+    const field = gcpIdentitySelect(element)!.closest('.form-field')!;
+    expect(field.textContent).not.toContain('Token requests are denied');
+  });
+
+  it('keeps the generic Block text for a stored Block on a docker broker', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        agent: makeAgent({
+          appliedConfig: { profile: '', gcpIdentity: { metadataMode: 'block' } },
+        }),
+        brokerProfiles: [{ name: 'default', type: 'docker', available: true }],
+      })
+    );
+
+    expect(gcpModeHint(element)).toContain('Token requests are denied');
   });
 
   it('sends an explicit Block on Start too, for a known-Kubernetes target', async () => {

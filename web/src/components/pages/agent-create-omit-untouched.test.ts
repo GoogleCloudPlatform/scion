@@ -439,8 +439,9 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
   });
 
   // Kubernetes-only broker, no profile chosen, block default: Block is a
-  // valid outcome on Kubernetes (ptone/scion#4077), so the picker shows it
-  // with the precedence note, and submit omits gcp_identity.
+  // valid outcome on Kubernetes (ptone/scion#4077), so the picker shows it,
+  // described by the Kubernetes Block hint, with the precedence note, and
+  // submit omits gcp_identity.
   it('shows a block default with the precedence note on a kubernetes broker with no profile chosen', async () => {
     projectDefaultMode = 'block';
     projectProfileDefaults = { large: 'sa-a' };
@@ -448,10 +449,7 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
     const c = await mount();
     await selectTarget(c, twoProfileTarget('kubernetes', ''));
     expect(gcpIdentitySelect(c).value).toBe('block');
-    expect(gcpIdentityHint(c)).toBe(
-      'Prevents the agent from accessing any GCP identity. Token requests are denied. ' +
-        `${profilePrecedence} ${KUBERNETES_BLOCK_HINT}`
-    );
+    expect(gcpIdentityHint(c)).toBe(`${KUBERNETES_BLOCK_HINT} ${profilePrecedence}`);
     expect(await submit(c)).not.toHaveProperty('gcp_identity');
   });
 

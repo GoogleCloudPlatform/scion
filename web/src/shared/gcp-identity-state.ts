@@ -42,12 +42,15 @@ export const PROFILE_DEFAULT_PRECEDENCE_HINT =
  * What Block means on a Kubernetes target (ptone/scion#4077). The broker
  * accepts Block there: the pod runs as the runtime profile's block service
  * account, or the namespace's default service account when the profile names
- * none, and no GCP credentials are mounted.
+ * none, and no GCP credentials are mounted. On Workload Identity nodes that
+ * service account still gets a federated token, so the text names IAM grants
+ * as the limit and never claims that no token is issued. Shown instead of
+ * the generic Block description on a Kubernetes target.
  */
 export const KUBERNETES_BLOCK_HINT =
   "On Kubernetes, Block runs the agent as the runtime profile's block service account, or " +
   "the namespace's default service account if none is configured, with no GCP credentials " +
-  'mounted.';
+  "mounted. The agent's GCP access is whatever IAM grants that service account holds.";
 
 /** The project's GCP identity defaults, from its settings. */
 export interface GcpProjectDefaults {
@@ -265,17 +268,23 @@ export class GcpIdentityState {
 
   /** The picker's hint text. */
   get hint(): string {
+    // On a Kubernetes target, Block is described only by KUBERNETES_BLOCK_HINT:
+    // the generic text ("token requests are denied") does not hold there.
+    const kubernetesBlock =
+      this.targetKubernetesOnly && !this.noIdentityModeChosen && this.gcpMetadataMode === 'block';
     const base = this.noIdentityModeChosen
       ? NO_IDENTITY_MODE_HINT
-      : this.gcpMetadataMode === 'block'
-        ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-        : this.gcpMetadataMode === 'assign'
-          ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-          : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership.";
+      : kubernetesBlock
+        ? KUBERNETES_BLOCK_HINT
+        : this.gcpMetadataMode === 'block'
+          ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+          : this.gcpMetadataMode === 'assign'
+            ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+            : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership.";
     const precedence = this.showProfileDefaultPrecedence
       ? ` ${PROFILE_DEFAULT_PRECEDENCE_HINT}`
       : '';
-    const k8s = this.targetKubernetesOnly ? ` ${KUBERNETES_BLOCK_HINT}` : '';
+    const k8s = this.targetKubernetesOnly && !kubernetesBlock ? ` ${KUBERNETES_BLOCK_HINT}` : '';
     return base + precedence + k8s;
   }
 

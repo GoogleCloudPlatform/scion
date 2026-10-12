@@ -61,11 +61,22 @@ describe('GcpIdentityState', () => {
     expect(g.gcpMetadataMode).toBe('block');
     expect(g.validate()).toBeNull();
     expect(g.toRequest()).toEqual({ metadata_mode: 'block' });
-    expect(g.hint).toContain(KUBERNETES_BLOCK_HINT);
+    // On Kubernetes, Block is described only by the Kubernetes hint, once.
+    expect(g.hint).toBe(KUBERNETES_BLOCK_HINT);
+    expect(g.hint).not.toContain('Token requests are denied');
     // A later target change does not touch the pick.
     g.setTarget(false, '');
     expect(g.toRequest()).toEqual({ metadata_mode: 'block' });
     expect(g.hint).not.toContain(KUBERNETES_BLOCK_HINT);
+    expect(g.hint).toContain('Token requests are denied');
+  });
+
+  it('keeps the Kubernetes Block hint after another mode on a Kubernetes target', () => {
+    const g = new GcpIdentityState();
+    g.setTarget(true, '');
+    g.pickMode('passthrough');
+    expect(g.hint.endsWith(` ${KUBERNETES_BLOCK_HINT}`)).toBe(true);
+    expect(g.hint).not.toContain('Token requests are denied');
   });
 
   it('shows a Block project default as Block on a Kubernetes target, submittable untouched', () => {
@@ -76,13 +87,18 @@ describe('GcpIdentityState', () => {
     expect(g.gcpMetadataMode).toBe('block');
     expect(g.validate()).toBeNull();
     expect(g.toRequest()).toBeUndefined();
+    expect(g.hint).toBe(KUBERNETES_BLOCK_HINT);
   });
 
   it('describes Block on Kubernetes without naming the metadata endpoint', () => {
     expect(KUBERNETES_BLOCK_HINT).toContain('block service account');
     expect(KUBERNETES_BLOCK_HINT).toContain("namespace's default service account");
     expect(KUBERNETES_BLOCK_HINT).toContain('no GCP credentials');
+    expect(KUBERNETES_BLOCK_HINT).toContain('IAM grants');
     expect(KUBERNETES_BLOCK_HINT.toLowerCase()).not.toContain('metadata');
+    // A Workload Identity pod still gets a federated token: never claim otherwise.
+    expect(KUBERNETES_BLOCK_HINT.toLowerCase()).not.toContain('token');
+    expect(KUBERNETES_BLOCK_HINT.toLowerCase()).not.toContain('denied');
   });
 
   it('shows an untouched Assign default with its account', () => {

@@ -427,6 +427,23 @@ export class ScionPageAgentConfigure extends LitElement {
     </div>`;
   }
 
+  /**
+   * The selected mode's description under the GCP identity select. On a
+   * known-Kubernetes target Block is described only by the help-text slot
+   * (KUBERNETES_BLOCK_HINT): the generic Block text ("token requests are
+   * denied") does not hold there.
+   */
+  private renderGcpModeHint(): TemplateResult | typeof nothing {
+    if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) return nothing;
+    const text =
+      this.gcpMetadataMode === 'block'
+        ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+        : this.gcpMetadataMode === 'assign'
+          ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+          : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership.";
+    return html`<div class="hint">${text}</div>`;
+  }
+
   private async loadGCPServiceAccounts(): Promise<void> {
     // Non-critical: a failed fetch just won't show the assign option.
     this.gcpServiceAccounts = [];
@@ -1712,13 +1729,7 @@ export class ScionPageAgentConfigure extends LitElement {
           <sl-option value="passthrough">Passthrough</sl-option>
           ${this.renderKubernetesBlockHint()}
         </sl-select>
-        <div class="hint">
-          ${this.gcpMetadataMode === 'block'
-            ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-            : this.gcpMetadataMode === 'assign'
-              ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-              : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
-        </div>
+        ${this.renderGcpModeHint()}
       </div>
 
       ${this.gcpMetadataMode === 'assign'
