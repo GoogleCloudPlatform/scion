@@ -803,7 +803,11 @@ func (s *Server) testAdminSettingsWriteGuard(ctx context.Context, section string
 //     on the owner is the root's own).
 //
 // A kind or membership read error allows no scope (fail closed). Agents
-// with a human root are not restricted.
+// with a human root are not restricted. Blast radius of that fail-closed
+// choice: a transient kind-read fault withholds the material of a
+// human-rooted agent too, for that one dispatch (the kind is unknown, so
+// the root is not treated as human); the next dispatch reads the kind
+// again.
 func (d *HTTPAgentDispatcher) testAdminRootScopes(ctx context.Context, agent *store.Agent) (restricted bool, allowed map[string]bool, root string) {
 	if d.authzService == nil || agent == nil {
 		return false, nil, ""
