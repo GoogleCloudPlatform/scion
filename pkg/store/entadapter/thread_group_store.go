@@ -124,7 +124,7 @@ func attachMembers(ctx context.Context, c *ent.Client, groups []store.ThreadGrou
 		).
 		All(ctx)
 	if err != nil {
-		return err
+		return mapError(err)
 	}
 	for _, m := range members {
 		if i, ok := idx[m.GroupID.String()]; ok {
@@ -212,22 +212,19 @@ func (s *ThreadGroupStore) ListThreadGroups(ctx context.Context, projectID strin
 	}
 	rows, err := s.client.ThreadGroup.Query().
 		Where(threadgroup.ProjectIDEQ(pid)).
-		Order(
-			ent.Asc(threadgroup.FieldNameKey),
-			ent.Asc(threadgroup.FieldID),
-		).
 		All(ctx)
 	if err != nil {
-		return nil, err
+		return nil, mapError(err)
 	}
 	groups := make([]store.ThreadGroup, 0, len(rows))
 	for _, r := range rows {
 		groups = append(groups, entThreadGroupToStore(r))
 	}
-	// Sort in Go, byte by byte: Postgres would order name_key by the
-	// database collation, so ORDER BY alone gives a dialect-dependent order
-	// for non-ASCII names and punctuation (design section 7c).
-	sort.SliceStable(groups, func(i, j int) bool {
+	// Sort in Go, byte by byte, and not with ORDER BY: Postgres would order
+	// name_key by the database collation, a dialect-dependent order for
+	// non-ASCII names and punctuation (design section 7c). (NameKey, ID) is
+	// a total order, so an unstable sort is enough.
+	sort.Slice(groups, func(i, j int) bool {
 		if groups[i].NameKey != groups[j].NameKey {
 			return groups[i].NameKey < groups[j].NameKey
 		}
@@ -268,13 +265,13 @@ func (s *ThreadGroupStore) DeleteThreadGroup(ctx context.Context, id string) err
 	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
 		n, err := c.ThreadGroup.Delete().Where(threadgroup.IDEQ(uid)).Exec(ctx)
 		if err != nil {
-			return err
+			return mapError(err)
 		}
 		if n == 0 {
 			return store.ErrNotFound
 		}
 		_, err = c.ThreadGroupMember.Delete().Where(threadgroupmember.GroupIDEQ(uid)).Exec(ctx)
-		return err
+		return mapError(err)
 	})
 }
 
@@ -307,12 +304,12 @@ func (s *ThreadGroupStore) SetThreadGroupMember(ctx context.Context, groupID, co
 		case err == nil && existing.GroupID == gid:
 			return nil // already filed here: idempotent, keeps added_at
 		case err != nil && !ent.IsNotFound(err):
-			return err
+			return mapError(err)
 		}
 		now := time.Now()
 		// The upsert on the unique conversation_id index also covers a
 		// concurrent first filing of the same conversation.
-		return c.ThreadGroupMember.Create().
+		err = c.ThreadGroupMember.Create().
 			SetGroupID(gid).
 			SetProjectID(g.ProjectID).
 			SetConversationID(cid).
@@ -326,6 +323,7 @@ func (s *ThreadGroupStore) SetThreadGroupMember(ctx context.Context, groupID, co
 				u.SetAddedAt(now)
 			}).
 			Exec(ctx)
+		return mapError(err)
 	})
 }
 
@@ -348,7 +346,7 @@ func (s *ThreadGroupStore) RemoveThreadGroupMember(ctx context.Context, groupID,
 			threadgroupmember.ConversationIDEQ(cid),
 		).
 		Exec(ctx)
-	return err
+	return mapError(err)
 }
 
 // RemoveThreadGroupMembersForConversation removes a conversation from any
@@ -365,7 +363,7 @@ func removeThreadGroupMembersForConversation(ctx context.Context, c *ent.Client,
 	_, err := c.ThreadGroupMember.Delete().
 		Where(threadgroupmember.ConversationIDEQ(cid)).
 		Exec(ctx)
-	return err
+	return mapError(err)
 }
 
 // DeleteThreadGroupsForProject deletes a project's groups and their member
@@ -379,9 +377,9 @@ func (s *ThreadGroupStore) DeleteThreadGroupsForProject(ctx context.Context, pro
 	}
 	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
 		if _, err := c.ThreadGroup.Delete().Where(threadgroup.ProjectIDEQ(pid)).Exec(ctx); err != nil {
-			return err
+			return mapError(err)
 		}
 		_, err := c.ThreadGroupMember.Delete().Where(threadgroupmember.ProjectIDEQ(pid)).Exec(ctx)
-		return err
+		return mapError(err)
 	})
 }
