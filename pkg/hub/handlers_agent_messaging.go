@@ -3672,8 +3672,13 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	}
 	runningAgents = authorizedAgents
 
-	// Log the broadcast
+	// Log the broadcast. Each recipient gets its own record (broadcastDirect
+	// or the proxy's deliverToAgent), so the summary is a lifecycle entry;
+	// with no recipients it is the broadcast's one record.
 	logAttrs := []any{"project_id", projectID}
+	if len(runningAgents) > 0 {
+		logAttrs = append(logAttrs, logging.AttrLogKind, logging.LogKindEvent)
+	}
 	logAttrs = append(logAttrs, req.StructuredMessage.LogAttrs()...)
 	s.logMessage("broadcast message published", logAttrs...)
 
@@ -3798,7 +3803,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			broadcastDispatchCtx = withDispatchMessageID(ctx, storeMsg.ID)
 		}
 		retryCtx, retryCancel := context.WithTimeout(broadcastDispatchCtx, 30*time.Second)
-		dispatchErr := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
+		dispatchErr := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
 		retryCancel()
 
 		if dispatchErr != nil {

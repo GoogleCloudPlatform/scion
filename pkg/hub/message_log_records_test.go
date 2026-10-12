@@ -26,6 +26,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -34,6 +36,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -401,4 +405,231 @@ func TestMessageLog_ProcessMentions_OneRecord(t *testing.T) {
 
 	recs := recordsForRecipient(t, messageLogEntries(t, buf), "agent:rec-mention-target")
 	require.Len(t, recs, 1)
+}
+
+// Routed inbound: the primary and an @mentioned agent each get exactly
+// one record (written before dispatch); the delivered lines are events.
+func TestMessageLog_RoutedInbound_PrimaryAndMention_OneRecordEach(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+	logger, buf := newJSONMessageLogger()
+	env.srv.SetMessageLogger(logger)
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "records check @beta",
+			Type:    messages.TypeInstruction,
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	entries := messageLogEntries(t, buf)
+	assert.Len(t, recordsForRecipient(t, entries, "agent:alpha"), 1, "primary: %v", entries)
+	assert.Len(t, recordsForRecipient(t, entries, "agent:beta"), 1, "mention: %v", entries)
+	assert.Len(t, messageRecords(t, entries), 2, "no other records: %v", entries)
+	delivered := findMessageLogEntry(t, entries, "routed inbound message delivered")
+	assert.Equal(t, logging.LogKindEvent, delivered[logging.AttrLogKind])
+}
+
+// Outbound to a user through the broker proxy (recordLogged true): the
+// proxy's delivery line is the one record and the hub line is an event.
+func TestMessageLog_OutboundToUser_BrokerPath_OneRecord(t *testing.T) {
+	srv, _, project, agent, user := def141BrokerSetup(t)
+	logger, buf := newJSONMessageLogger()
+	srv.SetMessageLogger(logger)
+	bp := srv.GetMessageBrokerProxy()
+	require.NotNil(t, bp)
+	bp.messageLog = logger
+
+	rr := postOutboundNoConv(t, srv, project.ID, agent.ID, user.Email, "records broker reply")
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	// deliverToUser runs on a subscriber goroutine.
+	require.Eventually(t, func() bool {
+		return len(messageRecords(t, messageLogEntries(t, buf))) >= 1
+	}, 5*time.Second, 10*time.Millisecond, "no message record written")
+	time.Sleep(50 * time.Millisecond)
+	entries := messageLogEntries(t, buf)
+	recs := messageRecords(t, entries)
+	require.Len(t, recs, 1, "exactly one message record: %v", entries)
+	assert.Equal(t, "user message delivered via broker", recs[0]["msg"])
+	assert.Equal(t, "records broker reply", recs[0]["message_content"])
+	sent := findMessageLogEntry(t, entries, "outbound message sent")
+	assert.Equal(t, logging.LogKindEvent, sent[logging.AttrLogKind])
+}
+
+// Notification sweep retry: exactly one record.
+func TestMessageLog_NotificationRetry_OneRecord(t *testing.T) {
+	env := setupNotificationTest(t)
+	logger, buf := newJSONMessageLogger()
+	env.nd.messageLog = logger
+	ctx := context.Background()
+
+	require.NoError(t, env.store.CreateNotification(ctx, &store.Notification{
+		ID:             api.NewUUID(),
+		SubscriptionID: env.sub.ID,
+		AgentID:        env.watched.ID,
+		ProjectID:      env.project.ID,
+		SubscriberType: store.SubscriberTypeAgent,
+		SubscriberID:   env.subscriber.Slug,
+		Status:         "COMPLETED",
+		Message:        "watched-agent has reached a state of COMPLETED",
+		Dispatched:     false,
+		CreatedAt:      time.Now().Add(-2 * time.Minute),
+	}))
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	env.nd.RetryDispatch(ctx, &notifs[0])
+	require.Len(t, env.dispatcher.getCalls(), 1)
+
+	recs := recordsForRecipient(t, messageLogEntries(t, buf), "agent:"+env.subscriber.Slug)
+	require.Len(t, recs, 1)
+}
+
+// Artifact review notices: exactly one record.
+func TestMessageLog_ArtifactReview_OneRecord(t *testing.T) {
+	srv, s := testServer(t)
+	_, agents := setupGroupTest(t, s, "3852-review", map[string]string{
+		"rec-review-owner": string(state.PhaseRunning),
+	})
+	srv.SetDispatcher(&brokerMockDispatcher{})
+	logger, buf := newJSONMessageLogger()
+	srv.SetMessageLogger(logger)
+
+	owner := agents["rec-review-owner"]
+	require.NoError(t, srv.deliverArtifactReview(context.Background(), artifacts.ReviewNotice{
+		ArtifactID:   "rec-review-artifact",
+		Seq:          2,
+		OwnerKind:    artifacts.PrincipalKindAgent,
+		OwnerRef:     owner.ID,
+		ReviewerKind: artifacts.PrincipalKindUser,
+		ReviewerRef:  DevUserID,
+	}))
+
+	recs := recordsForRecipient(t, messageLogEntries(t, buf), "agent:rec-review-owner")
+	require.Len(t, recs, 1)
+}
+
+// DELIVERY_FAILED and DELIVERY_DEFERRED notices: one record each.
+func TestMessageLog_DeliveryNotices_OneRecordEach(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	sender := setupBrokerTestAgent(t, s, projectID, "rec-notice-sender", "running")
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer func() { _ = b.Close() }()
+	dispatcher := &brokerMockDispatcher{}
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	logger, buf := newJSONMessageLogger()
+	proxy.messageLog = logger
+
+	msg := messages.NewInstruction("agent:rec-notice-sender", "agent:rec-notice-target", "hello")
+	msg.SenderID = sender.ID
+	ctx := context.Background()
+	proxy.publishDeliveryFailed(ctx, projectID, "rec-notice-target", msg, errors.New("broker refused"))
+	proxy.publishDeliveryDeferred(ctx, "rec-notice-target", msg)
+
+	recs := recordsForRecipient(t, messageLogEntries(t, buf), "agent:rec-notice-sender")
+	require.Len(t, recs, 2, "one record per notice")
+	assert.Contains(t, recs[0]["message_content"], "delivery failed")
+	assert.Contains(t, recs[1]["message_content"], "reincarnating")
+}
+
+// postBroadcast sends a project broadcast as the dev user.
+func postBroadcast(t *testing.T, srv *Server, projectID, body string) {
+	t.Helper()
+	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/broadcast", projectID), map[string]interface{}{
+		"structured_message": &messages.StructuredMessage{
+			Sender: "user:test", Msg: body, Type: messages.TypeInstruction,
+		},
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+}
+
+// Direct broadcast: one record per recipient; the summary is an event.
+func TestMessageLog_BroadcastDirect_RecordPerRecipient(t *testing.T) {
+	srv, s := testServer(t)
+	projectID, _ := setupGroupTest(t, s, "3852-bcast", map[string]string{
+		"rec-bcast-a": string(state.PhaseRunning),
+		"rec-bcast-b": string(state.PhaseRunning),
+	})
+	srv.SetDispatcher(&brokerMockDispatcher{})
+	logger, buf := newJSONMessageLogger()
+	srv.SetMessageLogger(logger)
+
+	postBroadcast(t, srv, projectID, "records broadcast")
+
+	entries := messageLogEntries(t, buf)
+	assert.Len(t, recordsForRecipient(t, entries, "agent:rec-bcast-a"), 1, "%v", entries)
+	assert.Len(t, recordsForRecipient(t, entries, "agent:rec-bcast-b"), 1, "%v", entries)
+	assert.Len(t, messageRecords(t, entries), 2, "no summary record: %v", entries)
+	summary := findMessageLogEntry(t, entries, "broadcast message published")
+	assert.Equal(t, logging.LogKindEvent, summary[logging.AttrLogKind])
+}
+
+// A broadcast that reaches no recipient still appears once: the summary
+// is its record.
+func TestMessageLog_Broadcast_NoRecipients_SummaryIsRecord(t *testing.T) {
+	srv, s := testServer(t)
+	projectID, _ := setupGroupTest(t, s, "3852-bcast-none", map[string]string{
+		"rec-bcast-stopped": string(state.PhaseStopped),
+	})
+	srv.SetDispatcher(&brokerMockDispatcher{})
+	logger, buf := newJSONMessageLogger()
+	srv.SetMessageLogger(logger)
+
+	postBroadcast(t, srv, projectID, "records broadcast none")
+
+	recs := messageRecords(t, messageLogEntries(t, buf))
+	require.Len(t, recs, 1)
+	assert.Equal(t, "broadcast message published", recs[0]["msg"])
+}
+
+// Broadcast through the broker proxy: one record per recipient from the
+// proxy's delivery; the summary is an event.
+func TestMessageLog_BroadcastProxy_RecordPerRecipient(t *testing.T) {
+	srv, s := testServer(t)
+	projectID, agents := setupGroupTest(t, s, "3852-bcast-proxy", map[string]string{
+		"rec-bproxy-a": string(state.PhaseRunning),
+		"rec-bproxy-b": string(state.PhaseRunning),
+	})
+	dispatcher := &brokerMockDispatcher{}
+	srv.SetDispatcher(dispatcher)
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	bus := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = bus.Close() })
+	proxy := NewMessageBrokerProxy(bus, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	logger, buf := newJSONMessageLogger()
+	proxy.messageLog = logger
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	srv.SetMessageBrokerProxy(proxy)
+	srv.SetMessageLogger(logger)
+	for slug := range agents {
+		proxy.subscribeAgent(projectID, slug)
+	}
+
+	postBroadcast(t, srv, projectID, "records broadcast proxy")
+
+	require.Eventually(t, func() bool {
+		entries := messageLogEntries(t, buf)
+		return len(recordsForRecipient(t, entries, "agent:rec-bproxy-a")) >= 1 &&
+			len(recordsForRecipient(t, entries, "agent:rec-bproxy-b")) >= 1
+	}, 5*time.Second, 10*time.Millisecond, "per-recipient records not written")
+	time.Sleep(50 * time.Millisecond)
+	entries := messageLogEntries(t, buf)
+	assert.Len(t, recordsForRecipient(t, entries, "agent:rec-bproxy-a"), 1, "%v", entries)
+	assert.Len(t, recordsForRecipient(t, entries, "agent:rec-bproxy-b"), 1, "%v", entries)
+	assert.Len(t, messageRecords(t, entries), 2, "no summary record: %v", entries)
+	summary := findMessageLogEntry(t, entries, "broadcast message published")
+	assert.Equal(t, logging.LogKindEvent, summary[logging.AttrLogKind])
 }

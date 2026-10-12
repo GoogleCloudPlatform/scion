@@ -1940,6 +1940,10 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		msg.DeliveryText = messaging.RenderDeliveryText(renderInput)
 	}
 
+	// The hub's message record for the primary, written before the phase
+	// gate and the dispatch outcome (see logMessageRecord).
+	logMessageRecord(s.recordLog(), primaryAgent, msg)
+
 	// Dispatch to the primary agent — skipped entirely when the phase gate
 	// above already marked the row failed or deferred.
 	dispatcher := s.GetDispatcher()
@@ -1966,7 +1970,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// recipient, so an interrupted send to a primary plus k mentions
 		// blocks this request for up to k+1 deliveries.
 		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
-		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
+		if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
 			_ = s.markFailed(ctx, storeMsg.ID, err.Error())
 			// Mirror the store update above in storeMsg so the response
@@ -2102,6 +2106,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				}
 				s.events.PublishUserMessage(ctx, mentionStoreMsg, attachmentRefs, nil)
 			}
+			// The mention's record, written before the migration and hold
+			// gates and the dispatch outcome (see logMessageRecord).
+			logMessageRecord(s.recordLog(), mentionAgent, mentionMsg)
 
 			// Phase 9b(ii): render the delivery envelope for the mention.
 			// Additive model: fan-out recipients get IsMention=true (type:"mention")
@@ -2166,7 +2173,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				// stopped and error secondaries also take the buffered
 				// non-interrupt dispatch.
 				mentionInterrupt := interrupt && state.Phase(mentionAgent.Phase) == state.PhaseRunning
-				if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
+				if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
 					mentionDispatchOK = false
 					// Like the primary: a synchronous dispatch failure must

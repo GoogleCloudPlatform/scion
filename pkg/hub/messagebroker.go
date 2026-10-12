@@ -657,6 +657,19 @@ func canPersistUserDM(recipientID string, writeDeny bool) bool {
 // deliverToUser handles a broker message addressed to a human user by persisting
 // it to the message store and publishing a user.message SSE event.
 func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic string, msg *messages.StructuredMessage) {
+	// One message record per message: the success path below writes it;
+	// an early return (conversation or persist failure) writes it here so
+	// the message still appears once.
+	recorded := false
+	defer func() {
+		if recorded || p.messageLog == nil {
+			return
+		}
+		attrs := []any{"project_id", projectID, "topic", topic, "source", "broker"}
+		attrs = append(attrs, msg.LogAttrs()...)
+		p.messageLog.Info("user message not persisted", attrs...)
+	}()
+
 	// Persist to message store (write-through; non-fatal if store fails).
 	// AgentID is the sender's agent ID when an agent sends to a user.
 	agentID := ""
@@ -905,6 +918,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		logAttrs = append(logAttrs, msg.LogAttrs()...)
 		p.messageLog.Info("user message delivered via broker", logAttrs...)
 	}
+	recorded = true
 }
 
 // subscribeGlobalBroadcast creates a broker subscription for global broadcasts.
@@ -1159,6 +1173,15 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		})
 	}
 
+	// The hub's message record, written before the gate and the dispatch
+	// outcome (see logMessageRecord). It is logged from a copy so the
+	// dispatched message is unchanged.
+	recordMsg := *msg
+	if storeMsg.ConversationID != "" {
+		recordMsg.ConversationID = storeMsg.ConversationID
+	}
+	logMessageRecord(p.messageLog, agent, &recordMsg)
+
 	// Migration gate: the message is persisted above (visible on catch-up)
 	// but must not be dispatched while the recipient is mid-migration — the
 	// old container may already be gone and the new one may not exist yet.
@@ -1196,6 +1219,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			"agent_name", agent.Name,
 			"project_id", agent.ProjectID,
 			"source", "broker",
+			logging.AttrLogKind, logging.LogKindEvent,
 		}
 		if storeMsg.ConversationID != "" {
 			msg.ConversationID = storeMsg.ConversationID

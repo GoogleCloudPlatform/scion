@@ -470,6 +470,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// package), so the gate here only skips the dispatch call; the
 	// persisted row below is stamped "deferred" via agentReincarnating.
 	agentReincarnating := reincarnationInFlight(agent)
+	// The hub's message record, written before the gate and the dispatch
+	// outcome (see logMessageRecord); the delivered line below is an event.
+	logMessageRecord(s.recordLog(), agent, req.Message)
 	if !agentReincarnating {
 		retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer retryCancel()
@@ -636,6 +639,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"source", "broker-inbound",
 			"broker_id", broker.ID(),
 			"plugin_name", pluginName,
+			logging.AttrLogKind, logging.LogKindEvent,
 		}
 		if storeMsg.ConversationID != "" {
 			req.Message.ConversationID = storeMsg.ConversationID
