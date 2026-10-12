@@ -382,5 +382,12 @@ func (s *Server) registerGroupPrimary(ctx context.Context, groupConversationID s
 	if groupConversationID == "" {
 		return
 	}
+	// The sender (the request's identity) must be allowed to add the
+	// agent under its message mode (group_message_mode.go).
+	if ok, reason := s.groupAgentJoinAllowed(ctx, GetIdentityFromContext(ctx), agent); !ok {
+		s.messageLog.Info("primary not registered as group participant: message mode",
+			"conversation_id", groupConversationID, "agent_id", agent.ID, "reason", reason)
+		return
+	}
 	s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{agent})
 }

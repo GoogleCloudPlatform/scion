@@ -15,10 +15,13 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
@@ -464,5 +467,48 @@ runtimes:
 				t.Fatalf("run %d: non-deterministic registration, got %v, want %v", i, keys, first)
 			}
 		}
+	}
+}
+
+// TestDiscoverAuxiliaryRuntimes_UnresolvedProfileLogLevel: an unresolvable
+// non-active profile is reported at Info with a hint; the active profile's
+// failure stays a warning (ptone/scion#3605).
+func TestDiscoverAuxiliaryRuntimes_UnresolvedProfileLogLevel(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := newDiscoveryTestServer(t, "docker")
+	s.resolveAuxiliaryRuntime = stubResolver(t, nil) // every profile fails to resolve
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	writeProjectSettings(t, projectDir, `schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: k8s
+  remote:
+    runtime: k8s
+runtimes:
+  k8s:
+    type: kubernetes
+`)
+	s.discoverAuxiliaryRuntimesForProjects([]string{projectDir})
+
+	out := buf.String()
+	var remoteLine, localLine string
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(line, "profile=remote"):
+			remoteLine = line
+		case strings.Contains(line, "profile=local"):
+			localLine = line
+		}
+	}
+	if !strings.Contains(remoteLine, "level=INFO") || !strings.Contains(remoteLine, "hint=") {
+		t.Errorf("non-active profile: want an Info line with a hint, got %q", remoteLine)
+	}
+	if !strings.Contains(localLine, "level=WARN") {
+		t.Errorf("active profile: want a warning, got %q", localLine)
 	}
 }

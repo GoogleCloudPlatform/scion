@@ -390,8 +390,8 @@ func newScheduledSendFixtureOn(t *testing.T, srv *Server, s store.Store, alice, 
 	t.Cleanup(ep.Close)
 	srv.SetEventPublisher(ep)
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -476,13 +476,13 @@ func newTestScheduledRow(key, sender string, fireAt time.Time) *ScheduledChatMes
 func openScheduledStorePair(t *testing.T) ([2]ScheduledMessageStore, string) {
 	t.Helper()
 	path := t.TempDir() + "/webchat.db"
-	dsn := "file:" + path + "?_busy_timeout=10000&_journal_mode=WAL"
+	dsn := "file:" + path + "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_timezone=UTC"
 	var out [2]ScheduledMessageStore
 	for i := range out {
-		db, err := sql.Open("sqlite3", dsn)
+		db, err := sql.Open("sqlite", dsn)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
-		wcs := NewWebChatStore(db, "sqlite3")
+		wcs := NewWebChatStore(db, "sqlite")
 		require.NoError(t, wcs.Init())
 		out[i] = scheduledMessageStoreFrom(wcs)
 		require.NotNil(t, out[i])
@@ -625,7 +625,7 @@ func newMemberFanoutFixtureOn(t *testing.T, srv *Server, s store.Store, alice, b
 
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 

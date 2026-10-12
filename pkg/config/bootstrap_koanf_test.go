@@ -653,7 +653,7 @@ func TestLoadBootstrapKoanfWithConfigPath_ConfigServerKeyUsedWhenGlobalHasNone(t
 	scionDir, cfgDir := writeConfigPathFixture(t,
 		"schema_version: \"1\"\nimage_registry: global.example.com\n",
 		"schema_version: \"1\"\nimage_registry: cfg.example.com\nserver:\n  hub:\n    stalled_threshold: 9m\n    public_url: https://cfg.example.com\n")
-	t.Setenv("SCION_SERVER_HUB_PUBLICURL", "https://env.example.com")
+	t.Setenv("SCION_SERVER_HUB_ENDPOINT", "https://env.example.com")
 
 	for _, path := range []string{cfgDir, filepath.Join(cfgDir, "settings.yaml")} {
 		assertStalledThresholdAgrees(t, path, "9m0s")
@@ -829,5 +829,40 @@ func TestLoadBootstrapKoanfWithConfigPath_LegacyFileInGlobalDir(t *testing.T) {
 		if got := LoadBootstrapKoanfWithConfigPath(c.path).Int("hub.port"); got != gc.Hub.Port {
 			t.Errorf("LoadBootstrapKoanfWithConfigPath(%q): hub.port = %d, LoadGlobalConfig = %d; want them to agree", c.path, got, gc.Hub.Port)
 		}
+	}
+}
+
+// TestPublicURLEnvName checks that server.hub.public_url is reached by
+// SCION_SERVER_HUB_ENDPOINT (and SCION_SEED_SERVER_HUB_ENDPOINT), the
+// variable the hub's endpoint resolution reads, and that the derived
+// spelling HUB_PUBLICURL, which the hub does not read, sets nothing
+// (ptone/scion#3905).
+func TestPublicURLEnvName(t *testing.T) {
+	if got := serverEnvToOpsettingsKey("HUB_ENDPOINT"); got != PublicURLKey {
+		t.Errorf("serverEnvToOpsettingsKey(HUB_ENDPOINT) = %q, want %q", got, PublicURLKey)
+	}
+	if got := serverEnvToOpsettingsKey("HUB_PUBLICURL"); got != "" {
+		t.Errorf("serverEnvToOpsettingsKey(HUB_PUBLICURL) = %q, want it dropped", got)
+	}
+	if got := seedEnvToOpsettingsKey("SERVER_HUB_ENDPOINT"); got != PublicURLKey {
+		t.Errorf("seedEnvToOpsettingsKey(SERVER_HUB_ENDPOINT) = %q, want %q", got, PublicURLKey)
+	}
+
+	t.Setenv("SCION_SERVER_HUB_ENDPOINT", "https://env.example.com")
+	t.Setenv("SCION_SERVER_HUB_PUBLICURL", "https://ignored.example.com")
+	if got := LoadEnvKoanf().String(PublicURLKey); got != "https://env.example.com" {
+		t.Errorf("LoadEnvKoanf %s = %q, want the SCION_SERVER_HUB_ENDPOINT value", PublicURLKey, got)
+	}
+
+	unmatched := FindUnmatchedSettingsEnv([]string{
+		"SCION_SERVER_HUB_PUBLICURL=x", "SCION_SERVER_HUB_ENDPOINT=y",
+		"SCION_SEED_SERVER_HUB_PUBLICURL=x", "SCION_SEED_SERVER_HUB_ENDPOINT=y",
+	}, func(k string) bool { return k == PublicURLKey })
+	want := []UnmatchedEnvName{
+		{Name: "SCION_SEED_SERVER_HUB_PUBLICURL", Suggestion: "SCION_SEED_SERVER_HUB_ENDPOINT"},
+		{Name: "SCION_SERVER_HUB_PUBLICURL", Suggestion: "SCION_SERVER_HUB_ENDPOINT"},
+	}
+	if !reflect.DeepEqual(unmatched, want) {
+		t.Errorf("FindUnmatchedSettingsEnv = %+v, want %+v", unmatched, want)
 	}
 }
