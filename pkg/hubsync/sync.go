@@ -236,6 +236,13 @@ type EnsureHubReadyOptions struct {
 	// use'), which names a project on a specific hub. A hub project
 	// reference then resolves on that hub without the hub.enabled gate.
 	ExplicitHub bool
+	// HubFromContext reports that the endpoint (EndpointOverride) is the hub
+	// selected with 'scion use', not one given with --hub or found in
+	// settings. For a project already linked to a hub (hub.projectId set)
+	// but not known to this hub, EnsureHubReady then does not link or
+	// register it: it returns the "project must be linked" error, so the
+	// context's hub never rewrites the project's link.
+	HubFromContext bool
 }
 
 // ErrProjectUnlinked is returned by EnsureHubReady for a project whose
@@ -277,6 +284,17 @@ func ProjectLinkedSetting(projectPath string, isGlobal bool) *bool {
 func projectExplicitlyUnlinked(projectPath string, isGlobal bool) bool {
 	linked := ProjectLinkedSetting(projectPath, isGlobal)
 	return linked != nil && !*linked
+}
+
+// errProjectMustBeLinked is the error for a project that has to be linked to
+// the hub before the operation.
+func errProjectMustBeLinked() error {
+	msg := "project must be linked to Hub to perform this operation\n\n" +
+		"Link this project: scion hub link"
+	if !config.IsHubManagedAgent() {
+		msg += "\nOr use local-only mode: scion --no-hub <command>"
+	}
+	return errors.New(msg)
 }
 
 // EnsureHubReady performs all Hub pre-flight checks before agent operations.
@@ -500,6 +518,13 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			return nil, ScopedTokenProjectNotFoundError(effectiveProjectID)
 		}
 
+		// A project linked to a hub must not be linked again, or registered,
+		// on the hub selected with 'scion use': nothing below runs (no ID or
+		// name match, no auto-link, no prompt, no registration).
+		if opts.HubFromContext && settings.GetHubProjectID() != "" {
+			return nil, errProjectMustBeLinked()
+		}
+
 		// Get project name for the prompt
 		projectName := getProjectName(resolvedPath, isGlobal)
 
@@ -567,12 +592,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				if opts.AutoLinkLocal && IsLocalWorkstationEndpoint(endpoint) {
 					_, _ = fmt.Fprintf(promptOut, "Linking project '%s' to the local hub at %s\n", projectName, endpoint)
 				} else if !ShowLinkPrompt(projectName, opts.AutoConfirm) {
-					msg := "project must be linked to Hub to perform this operation\n\n" +
-						"Link this project: scion hub link"
-					if !config.IsHubManagedAgent() {
-						msg += "\nOr use local-only mode: scion --no-hub <command>"
-					}
-					return nil, errors.New(msg)
+					return nil, errProjectMustBeLinked()
 				}
 			}
 		}
