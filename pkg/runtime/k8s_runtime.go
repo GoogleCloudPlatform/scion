@@ -644,22 +644,18 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	if err := hooks.checkpoint(ctx, CheckpointStepPreClean); err != nil {
 		return "", err
 	}
-	// NFS-home agents: one start at a time per agent, across brokers that
-	// share the store, from before the previous pod is removed until the new
-	// pod exists, so two pods never write to the same home.
+	// NFS-home agents: two pods must never write to the same home. The hub
+	// start claim admits one start of an agent at a time, across hub
+	// replicas and brokers. Here, the pre-clean waits until the previous
+	// pod's termination is confirmed before the new pod is created (and
+	// refuses with previous_pod_unconfirmed otherwise), and every object
+	// carries this start's ID, so the cleanup of a failed start never
+	// removes a newer start's pod and mark-seeded refuses once a newer start
+	// owns the home.
 	nfsHomeStart, err := nfsHomePod(config)
 	if err != nil {
 		return "", err
 	}
-	releaseHomeLock := func() {}
-	if nfsHomeStart {
-		release, err := acquireHomeStartLock(ctx, config)
-		if err != nil {
-			return "", err
-		}
-		releaseHomeLock = release
-	}
-	defer func() { releaseHomeLock() }()
 
 	if runID := config.Labels[api.LabelRunID]; runID != "" {
 		// Run-scoped pre-clean (ptone/scion#2550), with the same NFS-home
@@ -829,8 +825,6 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	podCreated = true
 	r.trackCreatedPod(createdPod)
 	hooks.created(api.ResourceHandle{Kind: api.ResourceKindPod, Namespace: namespace, Name: createdPod.Name, UID: string(createdPod.UID)})
-	releaseHomeLock()
-	releaseHomeLock = func() {}
 	runtimeLog.Info("Pod created", "agent", config.Name, "namespace", namespace,
 		"phase", "pod-create", "elapsed_ms", time.Since(podCreateStart).Milliseconds())
 
@@ -2091,8 +2085,17 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// equivalent. No-auth mode builds a raw shell command string to avoid
 	// the double-sh-c wrapping that previously caused the no-auth command
 	// to be injected as terminal input instead of running standalone.
+	//
+	// nfsHome is the value that decides the NFS agent-home mount below. A
+	// pod-local home (no NFS home) is lost when the pod is deleted, so a
+	// resume has no harness session to continue: let it fall back to a
+	// fresh start instead of exiting (ptone/scion#2665).
+	nfsHome, err := nfsHomePod(config)
+	if err != nil {
+		return nil, err
+	}
 	var cmd []string
-	cmdLine, ok := harnessCmdLine(config)
+	cmdLine, ok := harnessCmdLine(config, harnessCmdLineOptions{FreshStartOnFailedResume: !nfsHome})
 	if !ok {
 		cmdLine = "sleep infinity"
 	}
@@ -2176,10 +2179,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	var extraVolumes []corev1.Volume
 	var extraVolumeMounts []corev1.VolumeMount
 
-	nfsHome, err := nfsHomePod(config)
-	if err != nil {
-		return nil, err
-	}
 	containerHome := util.GetHomeDir(config.UnixUsername)
 	fileProjections := r.k8sFileProjections(config)
 	if err := checkK8sHomeFileTargets(r.k8sHomeFilePlacements(config)); err != nil {

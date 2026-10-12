@@ -920,6 +920,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// project settings: env-gather and the NFS check below load them before
 	// buildStartContext (which repeats this check) does (ptone/scion#1799).
 	if req.Config != nil && req.Config.SharedWorkspace {
+		// A marker naming an earlier ID of the same project (a re-link) is
+		// carried over to the current ID first (ptone/scion#4440).
+		if err := s.relinkSharedProjectIdentity(ctx, req.ProjectPath, req.ProjectSlug, req.ProjectID, req.Name); err != nil {
+			sce := projectRelinkStartContextError(err)
+			markAttemptFailed(sce.Status, "shared-workspace project re-link failed")
+			span.SetStatus(codes.Error, "shared-workspace project re-link failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
+			return
+		}
 		if err := verifySharedProjectIdentity(req.ProjectPath, req.ProjectID); err != nil {
 			sce := s.projectIdentityStartContextError(err, req.Name)
 			markAttemptFailed(sce.Status, "shared-workspace project identity check failed")
@@ -7564,7 +7573,7 @@ func scionEntry(path string) string {
 }
 
 // projectIDAtPath returns the project identity recorded at path, or "".
-// For a .scion directory it is the project-id (or legacy grove-id) file. For a
+// For a .scion directory it is the project-id file. For a
 // .scion marker file (non-git linked project) it is the marker's project ID.
 // If path is a project's external config dir, which has no project-id file,
 // the result is "".
