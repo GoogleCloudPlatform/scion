@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -170,4 +171,21 @@ func TestUpdateAgentStatus_RunningClearsLaunchCause(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", after.LaunchError)
 	assert.Equal(t, "", after.LaunchCause)
+}
+
+// TestReport_Cause_SucceededClearsCause: a succeeded report clears a cause
+// left on the row, with launch_error.
+func TestReport_Cause_SucceededClearsCause(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a, launchID := beginTestLaunch(t, ctx, s, projectID, "cause-succeeded-clears")
+	require.NoError(t, s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).SetLaunchCause(testLaunchCause).Exec(ctx))
+
+	answer, updated, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.LaunchReportResultApplied, answer.Result)
+	assert.Equal(t, "running", updated.Phase)
+	assert.Equal(t, "", updated.LaunchCause)
 }

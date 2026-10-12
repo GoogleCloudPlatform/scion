@@ -130,3 +130,59 @@ func TestLaunchFailureCause(t *testing.T) {
 		})
 	}
 }
+
+// unreachableCheckpointManager's Start blocks on a pre-create checkpoint the
+// hub never answers, then fails with a Kubernetes refusal, so the launch
+// ends on the checkpoint hub_unreachable override with a start error that
+// has a cause.
+type unreachableCheckpointManager struct {
+	*asyncManager
+}
+
+func (m *unreachableCheckpointManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	if opts.Checkpoint == nil {
+		return nil, errors.New("runLaunch did not pass the checkpoint hook")
+	}
+	_ = opts.Checkpoint(ctx, "pod_create")
+	return nil, k8sStartFailure(forbiddenPodsError())
+}
+
+// TestRunLaunch_CheckpointUnreachableCarriesNoCause: the hub_unreachable
+// override's failed report carries no cause, even when the start error has
+// one: a cause only qualifies a runtime_error.
+func TestRunLaunch_CheckpointUnreachableCarriesNoCause(t *testing.T) {
+	mgr := &unreachableCheckpointManager{newAsyncManager()}
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if req.State == hubclient.AgentLaunchReportStateCheckpoint {
+			return nil, errors.New("simulated unreachable")
+		}
+		return appliedAnswer, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	rec := newLaunchRecord("L-cp-unreachable-cause", "agent-cp-unreachable-cause", store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
+	lc := launchCtx{opts: api.StartOptions{Name: "agent-cp-unreachable-cause"}, mgr: mgr, key: launchKey{Slug: "agent-cp-unreachable-cause"}}
+
+	done := make(chan struct{})
+	go func() {
+		srv.runLaunch(ctx, rec, lc)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("runLaunch did not return")
+	}
+
+	terms := terminalReports(rtb)
+	if len(terms) != 1 || terms[0].State != hubclient.AgentLaunchReportStateFailed {
+		t.Fatalf("terminals = %+v, want one failed", terms)
+	}
+	if terms[0].ErrorCode != "hub_unreachable" {
+		t.Fatalf("failed error code = %q, want hub_unreachable", terms[0].ErrorCode)
+	}
+	if terms[0].Cause != "" {
+		t.Fatalf("failed cause = %q, want none on hub_unreachable", terms[0].Cause)
+	}
+}

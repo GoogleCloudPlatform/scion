@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 // This file covers the failure cause a failed launch report carries
 // (ptone/scion#4666): which causes the hub stores, and that the agent API's

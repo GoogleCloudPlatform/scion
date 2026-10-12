@@ -364,12 +364,14 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		s.agentLifecycleLog.Error("runLaunch: agent start failed", append([]any{
 			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
 			"launch_id", rec.ID, "error_code", code, "error", sr.err}, runtimeFailureLogAttrs(sr.err)...)...)
-		cause := launchFailureCause(code, sr.err)
 		if sender.CheckpointUnreachable() {
 			// A pre-create checkpoint blocked until ctx' expired with no
 			// definitive Hub answer (design §3.8.2: failed{hub_unreachable}).
-			code, message, cause = "hub_unreachable", "checkpoint: hub unreachable", ""
+			code, message = "hub_unreachable", "checkpoint: hub unreachable"
 		}
+		// Computed from the final code: only a runtime_error carries a
+		// cause, so the hub_unreachable override above carries none.
+		cause := launchFailureCause(code, sr.err)
 		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, code, message, cause)
 		return
 	}

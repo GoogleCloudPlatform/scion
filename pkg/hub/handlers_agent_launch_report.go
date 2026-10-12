@@ -149,6 +149,13 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		ErrorCode:  sanitizeFailureReason(req.ErrorCode),
 		Cause:      launchReportCause(req),
 	}
+	if req.Cause != "" && sr.Cause == "" {
+		// The raw cause is untrusted broker text, so only its length is
+		// logged, with the sanitized code it came with.
+		s.agentLifecycleLog.Debug("Launch report: dropped a cause the hub does not relay",
+			"agent_id", agentID, "broker_id", brokerID,
+			"error_code", sr.ErrorCode, "cause_len", len(req.Cause))
+	}
 	if req.Agent != nil {
 		sr.Runtime = req.Agent.Runtime
 	}
