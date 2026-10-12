@@ -282,8 +282,8 @@ func launchWaitBudget(a *Agent) time.Duration {
 	return launchWaitFallback
 }
 
-// WaitForLaunch fetches the agent immediately and then every 2 s until it
-// is running, the launch has ended without running, or the wait ends.
+// WaitForLaunch fetches the agent immediately and then every
+// opts.PollInterval (default 2 s) until it is running, the launch has ended without running, or the wait ends.
 //
 // start is the agent from the create or start answer. It may be nil. When
 // it shows an active launch, the launch counts as accepted: a refused or
@@ -292,9 +292,11 @@ func launchWaitBudget(a *Agent) time.Duration {
 // plus 30 s; without it, the first fetched agent's; else 5 min.
 //
 // An agent in phase error or stopped whose launch is still active is
-// re-read for up to 5 s (within the budget) so the outcome can carry the
-// launch error code from the write that ends the launch; if that does not
-// arrive, the failure is reported with what was read (Code may be "").
+// re-read for at least 5 s, until the first read after that (so about 6 s
+// at the default poll interval, longer with a larger PollInterval), and
+// never past the budget, so the outcome can carry the launch error code
+// from the write that ends the launch; if that does not arrive, the
+// failure is reported with what was read (Code may be "").
 //
 // A nil error means the wait saw the end of the launch: the outcome reports
 // whether the agent is running, or how it failed. Otherwise the error is
@@ -476,7 +478,10 @@ func launchInterruptedError(ctx context.Context, agentID string) error {
 // EnsureRunningBeforeSendByID reads the agent once (GET agent by ID or
 // slug) and, when it shows an active launch, waits for the launch as
 // EnsureRunningBeforeSend does. It returns nil at once when the agent is not
-// launching. A failed read is returned wrapped. Callers use it before
+// launching. A failed read is returned wrapped, as is, without the retry
+// or the caller-kind handling of WaitForLaunch: a transient error (network,
+// 5xx, 408, 429) fails it too. Callers should treat a read error as a send
+// failure and report it, or retry the call. Callers use it before
 // sending a message to an agent that may still be launching, which the Hub
 // would refuse; it is the form for callers that hold only an ID or slug, or
 // an agent read earlier.

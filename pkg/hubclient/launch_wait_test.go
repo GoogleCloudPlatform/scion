@@ -82,6 +82,8 @@ func (s *scriptedGetService) Get(ctx context.Context, agentID string) (*Agent, e
 	}
 	r := s.script[i]
 	if r.fn != nil {
+		// Release the lock while fn blocks; it is re-taken for the outer
+		// deferred Unlock (defers run in reverse order).
 		s.mu.Unlock()
 		defer s.mu.Lock()
 		return r.fn(ctx)
