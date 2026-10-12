@@ -259,8 +259,11 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save daemon args: %v\n", err)
 	}
 
-	// Verify it started
-	time.Sleep(500 * time.Millisecond)
+	// Wait until the started components answer /healthz, so a command run
+	// right after start (e.g. 'scion hub link') can reach the server.
+	if err := waitForDaemonServerReady(globalDir, daemonArgs); err != nil {
+		return err
+	}
 	running, pid, _ = daemon.StatusComponent(serverDaemonComponent, globalDir)
 	if !running {
 		return fmt.Errorf("daemon failed to start. Check log at: %s", daemon.GetLogPathComponent(serverDaemonComponent, globalDir))
@@ -554,8 +557,10 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	// Verify it started
-	time.Sleep(500 * time.Millisecond)
+	// Wait until the restarted components answer /healthz.
+	if err := waitForDaemonServerReady(globalDir, daemonArgs); err != nil {
+		return err
+	}
 	running, pid, _ = daemon.StatusComponent(serverDaemonComponent, globalDir)
 	if !running {
 		return fmt.Errorf("daemon failed to start. Check log at: %s", daemon.GetLogPathComponent(serverDaemonComponent, globalDir))
@@ -897,10 +902,10 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	// The broker is probed on the server's configured broker port
-	// (--runtime-broker-port or server.broker.port), not always 9800.
-	brokerURL := fmt.Sprintf("http://127.0.0.1:%d", serverBrokerPort(globalDir))
-	probed := probeServerStatus(client, "http://127.0.0.1:8080", "http://127.0.0.1:9810", brokerURL)
+	// Probe the ports the server was started with (its saved start args and
+	// config), not the defaults.
+	webBase, hubBase, brokerBase := serverStatusBaseURLs(globalDir, running)
+	probed := probeServerStatus(client, webBase, hubBase, brokerBase)
 	status.HubRunning = probed.HubRunning
 	status.BrokerRunning = probed.BrokerRunning
 	status.WebRunning = probed.WebRunning
@@ -933,6 +938,33 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// serverStatusBaseURLs returns the base URLs (no trailing slash) 'server
+// status' probes: the web port, the standalone hub port and the runtime
+// broker port of the server, with their hosts, resolved by
+// serverListenersFromArgs as the start wait does. While the daemon runs they
+// come from its saved start args and the config those args name. Otherwise
+// the saved args are ignored: they outlive 'server stop' (restart reads
+// them) and a foreground server saves none, so the ports come from the
+// config and the defaults, as a foreground server's do.
+func serverStatusBaseURLs(globalDir string, daemonRunning bool) (webBase, hubBase, brokerBase string) {
+	var saved []string
+	if daemonRunning {
+		if args, err := daemon.LoadArgs(serverDaemonComponent, globalDir); err == nil {
+			saved = args
+		}
+	}
+	cfg, err := config.LoadGlobalConfig(serverConfigPathFromArgs(saved))
+	if err != nil {
+		cfg = nil
+	}
+	// The registry check only decides whether the broker runs, not where it
+	// listens; status probes every component.
+	noRegistryCheck := func() error { return nil }
+	l := serverListenersFromArgs(saved, cfg, config.LoadServerMode(), noRegistryCheck)
+	base := func(host string, port int) string { return strings.TrimSuffix(healthzURL(host, port), "/healthz") }
+	return base(l.HubHost, l.WebPort), base(l.HubHost, l.HubPort), base(l.BrokerHost, l.BrokerPort)
 }
 
 // formatServerStatusComponents renders the "Components:" lines of
@@ -1117,7 +1149,10 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		if msg != "" {
 			fmt.Println(msg)
 		}
-		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, requireImageRegistryForBroker) {
+		// The server runs in the global directory, so check the registry
+		// there: a registry set only in the current project does not keep
+		// its broker on.
+		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, daemonRegistryCheck(globalDir)) {
 			fmt.Println(brokerSkippedNotice)
 		}
 

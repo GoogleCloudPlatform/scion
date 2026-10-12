@@ -237,7 +237,15 @@ NO_RENDERED_SETTINGS=(existing-secret)
 #    +2  pod-name-default: the default render sets it once from metadata.name,
 #        and an extraEnv POD_NAME is accepted and replaces it
 # 362 - 1 + 2 = 363.
-EXPECTED_TOTAL=363
+#
+# 363 -> 362 for workspaceStorage.nfs and runtime.gke:
+#    -1  the NOT_YET needle for "Filestore", removed from the notes
+#     0  the seven workspaceStorage.nfs PROBE_MUTATION entries and the
+#        runtime.gke leaf: the values walk asserts its results in aggregate,
+#        so new leaves add no assertion
+# 363 - 1 = 362. Summed, then read off the driver's output:
+#   bash hack/verify.sh 2>&1 | sed -n 's/^assertions: \([0-9]*\)\/.*/\1/p'
+EXPECTED_TOTAL=362
 
 failures=0
 assertions=0
@@ -2117,6 +2125,18 @@ declare -A PROBE_MUTATION=(
   [storage.bucket]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt'
   [storage.provider]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt'
   [updateStrategy.type]='--set-string|updateStrategy.type=RollingUpdate'
+  # THE NFS LEAVES ALL CARRY THE SAME PREAMBLE, for the Cloud SQL reason above:
+  # with enabled false every other field is refused as inert, and enabled
+  # without its four required companions is refused as incomplete. Each entry
+  # turns the share on and ends with its own leaf's override. Placeholders only
+  # (RFC 5737 address).
+  [workspaceStorage.nfs.enabled]='--set-string|workspaceStorage.nfs.server=192.0.2.10|--set-string|workspaceStorage.nfs.export=/probe_share|--set-string|workspaceStorage.nfs.shareId=probe-share|--set-string|workspaceStorage.nfs.pvName=probe-pv|--set|workspaceStorage.nfs.enabled=true'
+  [workspaceStorage.nfs.server]='--set|workspaceStorage.nfs.enabled=true|--set-string|workspaceStorage.nfs.server=192.0.2.10|--set-string|workspaceStorage.nfs.export=/probe_share|--set-string|workspaceStorage.nfs.shareId=probe-share|--set-string|workspaceStorage.nfs.pvName=probe-pv|--set-string|workspaceStorage.nfs.server=192.0.2.11'
+  [workspaceStorage.nfs.export]='--set|workspaceStorage.nfs.enabled=true|--set-string|workspaceStorage.nfs.server=192.0.2.10|--set-string|workspaceStorage.nfs.export=/probe_share|--set-string|workspaceStorage.nfs.shareId=probe-share|--set-string|workspaceStorage.nfs.pvName=probe-pv|--set-string|workspaceStorage.nfs.export=/probe_other_share'
+  [workspaceStorage.nfs.mountRoot]='--set|workspaceStorage.nfs.enabled=true|--set-string|workspaceStorage.nfs.server=192.0.2.10|--set-string|workspaceStorage.nfs.export=/probe_share|--set-string|workspaceStorage.nfs.shareId=probe-share|--set-string|workspaceStorage.nfs.pvName=probe-pv|--set-string|workspaceStorage.nfs.mountRoot=/srv/probe-root'
+  [workspaceStorage.nfs.shareId]='--set|workspaceStorage.nfs.enabled=true|--set-string|workspaceStorage.nfs.server=192.0.2.10|--set-string|workspaceStorage.nfs.export=/probe_share|--set-string|workspaceStorage.nfs.shareId=probe-share|--set-string|workspaceStorage.nfs.pvName=probe-pv|--set-string|workspaceStorage.nfs.shareId=probe-other-share'
+  [workspaceStorage.nfs.pvName]='--set|workspaceStorage.nfs.enabled=true|--set-string|workspaceStorage.nfs.server=192.0.2.10|--set-string|workspaceStorage.nfs.export=/probe_share|--set-string|workspaceStorage.nfs.shareId=probe-share|--set-string|workspaceStorage.nfs.pvName=probe-pv|--set-string|workspaceStorage.nfs.pvName=probe-other-pv'
+  [workspaceStorage.nfs.subpathRoot]='--set|workspaceStorage.nfs.enabled=true|--set-string|workspaceStorage.nfs.server=192.0.2.10|--set-string|workspaceStorage.nfs.export=/probe_share|--set-string|workspaceStorage.nfs.shareId=probe-share|--set-string|workspaceStorage.nfs.pvName=probe-pv|--set-string|workspaceStorage.nfs.subpathRoot=probe/other'
 )
 
 # A COMPLETE OAUTH WEB CREDENTIAL, IN THE PROBE'S BASELINE AND NOT IN BASE.
@@ -3583,14 +3603,20 @@ declare -A NOT_YET=(
   # them as unlanded - and the needle went red because the render now carries
   # client_secret.
   ["GCS credentials beyond the bucket name"]='settings:credentials|service_account|key_file'
-  ["Filestore"]='settings:workspace_storage'
+  # "Filestore" WAS HERE. workspaceStorage.nfs renders server.workspace_storage
+  # and the hub's NFS mount, so the notes stopped listing it as unconfigured;
+  # the conditional workspaceStorage.nfs paragraph after the sentence replaces
+  # it. Its needle watched only the PERMUTATIONS corpus, which no NFS values
+  # file is in, so it could not go red - the same blind spot "the session
+  # secret" had. Deleted, not commented out of the join, and EXPECTED_NOT_YET
+  # moves with it in this same diff.
   # "the session secret" WAS HERE. The chart delivers it by environment variable
   # from auth.sessionSecret or auth.existingSecret, so the notes stopped listing
   # it as unconfigured (chart-iap-transport review, N7). Its needle looked only
   # in settings.yaml, where the secret never goes, so it could not go red.
   ["Ingress or the IAP-enforcing load balancer"]='kinds:^kind: (Ingress|BackendConfig)'
 )
-EXPECTED_NOT_YET=3
+EXPECTED_NOT_YET=2
 
 # The sentence, read out of the shipped template. It carries no template
 # actions - checked, it is static prose - so the source text and the rendered

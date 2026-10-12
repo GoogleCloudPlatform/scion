@@ -862,8 +862,8 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	projectID := setupBrokerTestProject(t, s)
 	ctx := context.Background()
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -938,7 +938,7 @@ func TestDEF20_NativeTopicUsesTopicConversation(t *testing.T) {
 		t.Fatal("CompositeStore.DB() returned nil")
 	}
 
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("webchat store Init: %v", err)
 	}
@@ -1234,8 +1234,8 @@ func TestDeliverToUser_MentionExcludedFromDMActivity(t *testing.T) {
 	projectID := setupBrokerTestProject(t, s)
 	ctx := context.Background()
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

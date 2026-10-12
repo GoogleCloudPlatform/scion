@@ -36,8 +36,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestArtifactsReviewOnRoutes: a project member with a write grant reviews
-// an agent's artifact through the hub routes. A review with an unmarked
+// TestArtifactsReviewOnRoutes: a project member with a review grant
+// (ptone/scion#4538) reviews an agent's artifact through the hub routes;
+// GET states canReview and not canPublish, and a publish version is
+// refused with review_only. A review with an unmarked
 // edit is refused with 422 and announces nothing; an accepted review
 // becomes current, ?resolve=clean returns the parent, and the owning agent
 // receives one artifact-review system notice from the hub whose body names
@@ -80,9 +82,19 @@ func TestArtifactsReviewOnRoutes(t *testing.T) {
 	require.Equal(t, http.StatusOK, doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts/"+id+"/versions/1/finalize", nil, ownerTok).Code)
 
 	_, err = db.Exec(`INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		"g-review", id, artifacts.SubjectPrincipal, artifacts.PrincipalRef(artifacts.PrincipalKindUser, reviewer.ID), artifacts.GrantWrite,
+		"g-review", id, artifacts.SubjectPrincipal, artifacts.PrincipalRef(artifacts.PrincipalKindUser, reviewer.ID), artifacts.GrantReview,
 		time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z07:00"))
 	require.NoError(t, err)
+
+	rec = userArtifactRequest(t, srv, reviewer, http.MethodGet, "/api/v1/artifacts/"+id, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var caps artifacts.ArtifactResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &caps))
+	assert.True(t, caps.CanReview, "canReview")
+	assert.False(t, caps.CanPublish, "canPublish")
+	rec = userArtifactRequest(t, srv, reviewer, http.MethodPost, "/api/v1/artifacts/"+id+"/versions", manifest("", "", "# Replaced\n"))
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), artifacts.CodeReviewOnly)
 
 	review := func(body string) *httpRecorder {
 		t.Helper()
