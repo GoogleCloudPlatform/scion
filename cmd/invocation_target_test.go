@@ -253,6 +253,11 @@ func TestResolveInvocationTarget(t *testing.T) {
 			want: hubOnly,
 		},
 		{
+			name: "config set gets the hub but no project",
+			cmd:  []string{"config", "set"},
+			want: hubOnly,
+		},
+		{
 			name: "doctor gets the hub but no project",
 			cmd:  []string{"doctor"},
 			want: hubOnly,

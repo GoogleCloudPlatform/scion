@@ -195,7 +195,10 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
 		}
 	}
 
-	if projectPath == "" && !globalMode && commandRequiresProject(cmd) {
+	// config subcommands act on local settings files, never on a hub
+	// project, so they never get an injected project (they still see the
+	// context hub). commandRequiresProject alone does not exempt them.
+	if projectPath == "" && !globalMode && commandRequiresProject(cmd) && !commandInSubtree(cmd, "config") {
 		effectiveHub := hubEndpoint
 		if effectiveHub == "" {
 			effectiveHub = envHub
