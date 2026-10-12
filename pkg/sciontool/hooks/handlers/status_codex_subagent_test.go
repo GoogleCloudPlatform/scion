@@ -86,18 +86,18 @@ func TestCodexSubagent_DialectMapsEvents(t *testing.T) {
 	} {
 		event := codexSubagentEvent(t, raw)
 		assert.Equal(t, want, event.Name, raw)
-		assert.True(t, isCodexSubagentEvent(event), raw)
-		assert.False(t, isCodexSubagentEvent(codexParentEvent(t, raw)), raw)
+		assert.True(t, isSubagentEvent(event), raw)
+		assert.False(t, isSubagentEvent(codexParentEvent(t, raw)), raw)
 	}
 }
 
 func TestCodexSubagent_IsSubagentEvent(t *testing.T) {
 	sameAsSession := codexEvent(t, "UserPromptSubmit", codexSubagentRootSession)
-	assert.False(t, isCodexSubagentEvent(sameAsSession), "agent_id equal to session_id is the parent")
+	assert.False(t, isSubagentEvent(sameAsSession), "agent_id equal to session_id is the parent")
 
 	notString := codexParentEvent(t, "UserPromptSubmit")
 	notString.Data.Raw["agent_id"] = 42
-	assert.False(t, isCodexSubagentEvent(notString), "non-string agent_id is ignored")
+	assert.False(t, isSubagentEvent(notString), "non-string agent_id is ignored")
 
 	// With session_id missing, a set agent_id still marks a sub-agent event:
 	// the safe direction, since it can only keep a held status.
@@ -108,15 +108,16 @@ func TestCodexSubagent_IsSubagentEvent(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Empty(t, noSession.Data.SessionID)
-	assert.True(t, isCodexSubagentEvent(noSession), "agent_id without session_id is a sub-agent event")
+	assert.True(t, isSubagentEvent(noSession), "agent_id without session_id is a sub-agent event")
 
-	claude := waitClearClaudeEvent(t, map[string]interface{}{
-		"hook_event_name": "UserPromptSubmit",
+	gemini, err := dialects.NewGeminiDialect().Parse(map[string]interface{}{
+		"hook_event_name": "BeforeAgent",
 		"session_id":      codexSubagentRootSession,
 		"agent_id":        codexSubagentChildID,
 		"prompt":          "synthetic prompt",
 	})
-	assert.False(t, isCodexSubagentEvent(claude), "only codex events are checked")
+	require.NoError(t, err)
+	assert.False(t, isSubagentEvent(gemini), "only codex and claude events are checked")
 }
 
 // A sub-agent event while the parent holds an agent-set waiting_for_input
@@ -247,46 +248,9 @@ func TestCodexSubagent_NotificationWaitingCleared(t *testing.T) {
 	}
 }
 
-// Claude events are not checked for agent_id: a claude prompt-submit that
-// carries one still clears an agent-set wait, as before.
-func TestCodexSubagent_ClaudeUnchanged(t *testing.T) {
-	for _, tc := range []struct {
-		raw  string
-		want string
-	}{
-		{"UserPromptSubmit", "thinking"},
-		{"PreToolUse", "executing"},
-	} {
-		t.Run(tc.raw, func(t *testing.T) {
-			statusPath := filepath.Join(t.TempDir(), "agent-info.json")
-			h := &StatusHandler{StatusPath: statusPath}
-			waitClearAskUser(t, h)
-
-			require.NoError(t, h.Handle(waitClearClaudeEvent(t, map[string]interface{}{
-				"hook_event_name": tc.raw,
-				"session_id":      codexSubagentRootSession,
-				"agent_id":        codexSubagentChildID,
-				"prompt":          "synthetic prompt",
-				"tool_name":       "Bash",
-				"tool_input":      map[string]interface{}{"command": "ls"},
-			})))
-
-			assert.Equal(t, tc.want, readAgentInfo(t, statusPath).Activity)
-		})
-	}
-}
-
 // The Hub follows the local result: a sub-agent event that the parent's
 // held status absorbs sends no Hub update.
 func TestCodexSubagent_HubFollowsLocal(t *testing.T) {
-	claudePrompt := func(t *testing.T) *hooks.Event {
-		return waitClearClaudeEvent(t, map[string]interface{}{
-			"hook_event_name": "UserPromptSubmit",
-			"session_id":      codexSubagentRootSession,
-			"agent_id":        codexSubagentChildID,
-			"prompt":          "synthetic prompt",
-		})
-	}
 	for _, tc := range []struct {
 		name string
 		// held is the parent's activity before the event; "" means
@@ -307,7 +271,14 @@ func TestCodexSubagent_HubFollowsLocal(t *testing.T) {
 		{"sub-agent prompt with no hold", "", false, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "UserPromptSubmit") }, "thinking", "thinking"},
 		{"parent prompt with ask_user", state.ActivityWaitingForInput, false, func(t *testing.T) *hooks.Event { return codexParentEvent(t, "UserPromptSubmit") }, "thinking", "thinking"},
 		{"parent tool-start with ask_user", state.ActivityWaitingForInput, false, func(t *testing.T) *hooks.Event { return codexParentEvent(t, "PreToolUse") }, "executing", "executing"},
-		{"claude prompt with agent_id and ask_user", state.ActivityWaitingForInput, false, claudePrompt, "thinking", "thinking"},
+		{"claude sub-agent prompt with ask_user", state.ActivityWaitingForInput, false, func(t *testing.T) *hooks.Event {
+			return waitClearClaudeEvent(t, map[string]interface{}{
+				"hook_event_name": "UserPromptSubmit",
+				"session_id":      codexSubagentRootSession,
+				"agent_id":        codexSubagentChildID,
+				"prompt":          "synthetic prompt",
+			})
+		}, "", "waiting_for_input"},
 		{"sub-agent tool-start with notification wait", "", true, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "PreToolUse") }, "executing", "executing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
