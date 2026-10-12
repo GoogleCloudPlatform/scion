@@ -19,7 +19,7 @@ import (
 	"sync"
 )
 
-// syncBuffer is a bytes.Buffer safe for a background writer. It lives in
+// SyncBuffer is a bytes.Buffer safe for a background writer. It lives in
 // an untagged file so both the default and the no_sqlite test builds see it.
 type SyncBuffer struct {
 	mu  sync.Mutex

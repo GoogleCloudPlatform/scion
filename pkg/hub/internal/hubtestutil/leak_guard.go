@@ -26,7 +26,7 @@ import (
 )
 
 // The package-exit leak guard (ptone/scion#3641) catches the class of leak
-// that used to surface only when the memory guard (mem_guard_helpers_test.go)
+// that used to surface only when the memory guard (mem_guard.go)
 // hit its cap: test stores that are never closed, and servers built with
 // New() that are never shut down. Each unclosed *sql.DB keeps a
 // database/sql.(*DB).connectionOpener goroutine (and about 3 MiB of
@@ -35,7 +35,7 @@ import (
 // server graph, reachable.
 //
 // At package exit, checkPackageLeaks counts the goroutines whose stack
-// contains one of leakGuardSignatures and fails the run when the total is
+// contains one of LeakGuardSignatures and fails the run when the total is
 // above leakGuardMaxGoroutines, printing every offending stack so the
 // creating test helper is easy to find (run with
 // GODEBUG=tracebackancestors=20 to also see the full creation chain).
@@ -52,7 +52,7 @@ import (
 // shows up as one goroutine per test run of the leaking test.
 const (
 	// leakGuardMaxGoroutines is the largest tolerated number of goroutines
-	// matching leakGuardSignatures at package exit. Measured after the fix:
+	// matching LeakGuardSignatures at package exit. Measured after the fix:
 	// 0 at the end of every shard (and of the full package). The margin of
 	// 5 absorbs stragglers; do not raise it to hide a leak.
 	//
@@ -77,7 +77,7 @@ const (
 	leakGuardDisableEnv = "SCION_HUB_TEST_LEAK_GUARD_OFF"
 )
 
-// leakGuardSignatures are the stack substrings that identify a leaked
+// LeakGuardSignatures are the stack substrings that identify a leaked
 // store or server background goroutine.
 var LeakGuardSignatures = []string{
 	// One per open *sql.DB: an unclosed test store.
@@ -91,11 +91,11 @@ var LeakGuardSignatures = []string{
 	"hub.(*OIDCKeyManager).Start",
 }
 
-// leakGuardStoreSignature is the leakGuardSignatures entry for an unclosed
+// LeakGuardStoreSignature is the LeakGuardSignatures entry for an unclosed
 // store; every other entry is a server background loop.
 const LeakGuardStoreSignature = "database/sql.(*DB).connectionOpener"
 
-// leakGuardResult is what checkPackageLeaks found.
+// LeakGuardResult is what checkPackageLeaks found.
 type LeakGuardResult struct {
 	counts map[string]int
 	Total  int
@@ -104,8 +104,8 @@ type LeakGuardResult struct {
 	IDs map[string]bool
 }
 
-// scanLeakedGoroutines returns the live goroutines that match
-// leakGuardSignatures. A goroutine counts once, under the first signature
+// ScanLeakedGoroutines returns the live goroutines that match
+// LeakGuardSignatures. A goroutine counts once, under the first signature
 // it matches. Goroutines whose ID is in exclude are skipped (a block
 // whose ID cannot be parsed is never excluded or recorded); Go never
 // reuses a goroutine ID within a process, so an excluded ID can only ever
@@ -114,7 +114,7 @@ func ScanLeakedGoroutines(exclude map[string]bool) LeakGuardResult {
 	return ScanStacks(allGoroutineStacks(), exclude)
 }
 
-// scanStacks is scanLeakedGoroutines over a given runtime.Stack dump.
+// ScanStacks is ScanLeakedGoroutines over a given runtime.Stack dump.
 func ScanStacks(stacks []byte, exclude map[string]bool) LeakGuardResult {
 	res := LeakGuardResult{counts: map[string]int{}, IDs: map[string]bool{}}
 	for _, block := range strings.Split(string(stacks), "\n\n") {
@@ -171,8 +171,8 @@ func checkPackageLeaks(w io.Writer, max int, settle time.Duration, alwaysReport 
 	return CheckLeaksExcluding(w, max, settle, alwaysReport, nil)
 }
 
-// checkLeaksExcluding is checkPackageLeaks, ignoring the goroutines whose
-// IDs are in exclude (see scanLeakedGoroutines).
+// CheckLeaksExcluding is checkPackageLeaks, ignoring the goroutines whose
+// IDs are in exclude (see ScanLeakedGoroutines).
 func CheckLeaksExcluding(w io.Writer, max int, settle time.Duration, alwaysReport bool, exclude map[string]bool) bool {
 	deadline := time.Now().Add(settle)
 	res := ScanLeakedGoroutines(exclude)
@@ -198,7 +198,7 @@ func CheckLeaksExcluding(w io.Writer, max int, settle time.Duration, alwaysRepor
 	return false
 }
 
-// runLeakGuard is called by TestMain after m.Run. It returns the exit code
+// RunLeakGuard is called by TestMain after m.Run. It returns the exit code
 // to use: code unchanged when the guard passes or is disabled, 1 when it
 // fails a run that otherwise passed.
 func RunLeakGuard(code int) int {

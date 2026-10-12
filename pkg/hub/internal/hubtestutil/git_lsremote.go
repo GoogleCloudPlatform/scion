@@ -31,7 +31,7 @@ import (
 // stub the seam still behave deterministically, without touching the network.
 var errGitLsRemoteDisabled = errors.New("pkg/hub tests: real git ls-remote is disabled (ptone/scion#3670); use stubGitLsRemote")
 
-// installHermeticGitLsRemote replaces pkg/config's git ls-remote runner for
+// InstallHermeticGitLsRemote replaces pkg/config's git ls-remote runner for
 // the whole pkg/hub test binary so no test can shell out to a real
 // `git ls-remote https://github.com/...` (which hit the network and could hang
 // with no deadline, ptone/scion#3670). Called from TestMain; returns a restore
@@ -42,7 +42,7 @@ func InstallHermeticGitLsRemote() (restore func()) {
 	})
 }
 
-// gitLsRemoteStub records the repo URLs passed to a stubbed ls-remote runner.
+// GitLsRemoteStub records the repo URLs passed to a stubbed ls-remote runner.
 type GitLsRemoteStub struct {
 	mu   sync.Mutex
 	urls []string
@@ -55,7 +55,7 @@ func (s *GitLsRemoteStub) URLs() []string {
 	return append([]string(nil), s.urls...)
 }
 
-// stubGitLsRemote makes pkg/config's git ls-remote runner return the canned
+// StubGitLsRemote makes pkg/config's git ls-remote runner return the canned
 // `git ls-remote --heads` output for the rest of the test, restoring the
 // previous runner via t.Cleanup. Tests should assert on the returned stub's
 // URLs so a regression that bypasses the seam (and would exec real git) fails
@@ -81,7 +81,7 @@ func StubGitLsRemote(t *testing.T, output string) *GitLsRemoteStub {
 // hits it without stubbing gets a clear error instead of a real `git fetch`.
 var errGitSparseCheckoutDisabled = errors.New("pkg/hub tests: real git sparse checkout is disabled (ptone/scion#3750); use stubGitSparseCheckout")
 
-// installHermeticGitSparseCheckout replaces pkg/config's sparse git checkout
+// InstallHermeticGitSparseCheckout replaces pkg/config's sparse git checkout
 // runner for the whole pkg/hub test binary so no test can shell out to a real
 // `git fetch https://github.com/...` (ptone/scion#3750). Called from TestMain;
 // returns a restore func.
@@ -91,14 +91,14 @@ func InstallHermeticGitSparseCheckout() (restore func()) {
 	})
 }
 
-// gitSparseCheckoutCall is one recorded call to a stubbed sparse checkout.
+// GitSparseCheckoutCall is one recorded call to a stubbed sparse checkout.
 type GitSparseCheckoutCall struct {
 	Parts    config.GitHubURLParts
 	DestPath string
 	Token    string
 }
 
-// gitSparseCheckoutStub records calls made to a stubbed sparse checkout.
+// GitSparseCheckoutStub records calls made to a stubbed sparse checkout.
 type GitSparseCheckoutStub struct {
 	mu    sync.Mutex
 	calls []GitSparseCheckoutCall
@@ -111,7 +111,7 @@ func (s *GitSparseCheckoutStub) Calls() []GitSparseCheckoutCall {
 	return append([]GitSparseCheckoutCall(nil), s.calls...)
 }
 
-// stubGitSparseCheckout makes pkg/config's sparse checkout runner write files
+// StubGitSparseCheckout makes pkg/config's sparse checkout runner write files
 // (path relative to the checked-out folder -> contents) into destPath for the
 // rest of the test, restoring the previous runner via t.Cleanup. Use it for
 // tests that exercise the git fallback after a failed tarball download, and
