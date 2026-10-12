@@ -18,6 +18,11 @@
  * The web's copies of the hub's launch predicates (ptone/scion#4664):
  * isAgentLaunching mirrors store.Agent.IsInFlight and isIncompleteCreate
  * mirrors store.Agent.IsIncompleteCreate (pkg/store/models.go).
+ *
+ * Every launch here has a shape the hub can send. `active` is the hub's
+ * in-flight predicate, so it is true only in the pre-running phases; a create
+ * that winds down after a failure or stop keeps `state: 'active'` with
+ * `active: false` (store.ComputeAgentLaunch, pkg/store/launch_view.go).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -25,29 +30,44 @@ import { describe, it, expect } from 'vitest';
 import type { AgentLaunch, AgentPhase } from './types.js';
 import { isAgentLaunching, isIncompleteCreate } from './types.js';
 
-function launch(overrides: Partial<AgentLaunch> = {}): AgentLaunch {
-  return { id: 'l-1', state: 'active', active: true, kind: 'create', ...overrides };
-}
+const base = { id: 'l-1', kind: 'create' };
 
-const ended = launch({ state: 'ended', active: false });
+/** A create launch in flight: only in created, provisioning, cloning, starting. */
+const inFlight: AgentLaunch = { ...base, state: 'active', active: true, step: 'launching' };
+
+/** A create launch winding down after a failure or stop, before its error is recorded. */
+const windingDown: AgentLaunch = { ...base, state: 'active', active: false, step: 'launching' };
+
+/** A create launch that failed. */
+const failed: AgentLaunch = {
+  ...base,
+  state: 'ended',
+  active: false,
+  error: 'runtime_error',
+  endReason: 'failed',
+};
+
+/** A create launch that succeeded. */
+const succeeded: AgentLaunch = { ...base, state: 'ended', active: false, endReason: 'succeeded' };
+
+const inFlightPhases: AgentPhase[] = ['created', 'provisioning', 'cloning', 'starting'];
+const incompletePhases: AgentPhase[] = ['suspended', 'stopping', 'stopped', 'error'];
 
 describe('isAgentLaunching', () => {
-  it.each<AgentPhase>(['created', 'provisioning', 'cloning', 'starting'])(
-    'is true for an active launch in phase %s',
-    (phase) => {
-      expect(isAgentLaunching({ phase, launch: launch() })).toBe(true);
-    }
-  );
+  it.each(inFlightPhases)('is true for a launch in flight in phase %s', (phase) => {
+    expect(isAgentLaunching({ phase, launch: inFlight })).toBe(true);
+  });
 
-  it.each<AgentPhase>(['running', 'error', 'stopped'])(
-    'is false for an active launch in phase %s',
-    (phase) => {
-      expect(isAgentLaunching({ phase, launch: launch() })).toBe(false);
-    }
-  );
+  it.each(incompletePhases)('is false for a create winding down in phase %s', (phase) => {
+    expect(isAgentLaunching({ phase, launch: windingDown })).toBe(false);
+  });
 
-  it('is false for an ended launch', () => {
-    expect(isAgentLaunching({ phase: 'provisioning', launch: ended })).toBe(false);
+  it('is false for a launch that succeeded', () => {
+    expect(isAgentLaunching({ phase: 'running', launch: succeeded })).toBe(false);
+  });
+
+  it('is false for a launch that failed', () => {
+    expect(isAgentLaunching({ phase: 'error', launch: failed })).toBe(false);
   });
 
   it('is false without a launch', () => {
@@ -56,35 +76,26 @@ describe('isAgentLaunching', () => {
 });
 
 describe('isIncompleteCreate', () => {
-  it.each<AgentPhase>(['suspended', 'stopping', 'stopped', 'error'])(
-    'is true for a failed create launch in phase %s',
-    (phase) => {
-      const failed = { ...ended, error: 'runtime_error' };
-      expect(isIncompleteCreate({ phase, launch: failed })).toBe(true);
-    }
-  );
-
-  it('is true for a create launch still winding down on error', () => {
-    expect(isIncompleteCreate({ phase: 'error', launch: launch() })).toBe(true);
+  it.each(incompletePhases)('is true for a failed create in phase %s', (phase) => {
+    expect(isIncompleteCreate({ phase, launch: failed })).toBe(true);
   });
 
-  it('is false for an ended create launch with no error', () => {
-    expect(
-      isIncompleteCreate({ phase: 'stopped', launch: { ...ended, endReason: 'succeeded' } })
-    ).toBe(false);
+  it.each(incompletePhases)('is true for a create winding down in phase %s', (phase) => {
+    expect(isIncompleteCreate({ phase, launch: windingDown })).toBe(true);
   });
 
-  it('is false in a phase the agent ran or is launching in', () => {
-    expect(
-      isIncompleteCreate({ phase: 'running', launch: { ...ended, error: 'runtime_error' } })
-    ).toBe(false);
-    expect(isIncompleteCreate({ phase: 'provisioning', launch: launch() })).toBe(false);
+  it('is false for an agent stopped after its create succeeded', () => {
+    expect(isIncompleteCreate({ phase: 'stopped', launch: succeeded })).toBe(false);
+  });
+
+  it('is false for an agent that runs or is still launching', () => {
+    expect(isIncompleteCreate({ phase: 'running', launch: succeeded })).toBe(false);
+    expect(isIncompleteCreate({ phase: 'provisioning', launch: inFlight })).toBe(false);
   });
 
   it('is false for a launch that is not a create', () => {
-    expect(
-      isIncompleteCreate({ phase: 'error', launch: { ...ended, kind: 'start', error: 'x' } })
-    ).toBe(false);
+    const start: AgentLaunch = { ...failed, kind: 'start' };
+    expect(isIncompleteCreate({ phase: 'error', launch: start })).toBe(false);
   });
 
   it('is false without a launch', () => {

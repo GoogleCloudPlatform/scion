@@ -118,7 +118,8 @@ describe('agent page during an async launch', () => {
 
     const banner = host.querySelector('[data-testid="agent-launch-banner"]');
     expect(banner).not.toBeNull();
-    expect(text(banner!.querySelector('.launch-title'))).toBe('Launching: launching');
+    expect(text(banner!.querySelector('.launch-title'))).toBe('Launching');
+    expect(text(banner!.querySelector('.launch-step'))).toBe('Step: launching');
     expect(text(banner!.querySelector('.launch-message'))).toBe('pulling image');
   });
 
@@ -187,6 +188,28 @@ describe('agent page for a create that did not complete', () => {
       makeAgent({ phase: 'suspended', launch: failedLaunch({ error: 'launch_stopped' }) })
     );
 
+    expect(labels).not.toContain('Resume');
+  });
+
+  // A create winding down after a failure or stop: the launch is still
+  // active (state), but no longer in flight (active), and has no error yet.
+  // The hub already refuses to start it ("its create is still stopping").
+  const windingDown = makeAgent({
+    phase: 'stopped',
+    launch: { id: 'l-1', state: 'active', active: false, kind: 'create', step: 'launching' },
+  });
+
+  it('shows a create winding down as stopping', () => {
+    const host = renderBanner(windingDown);
+
+    expect(host.querySelector('[data-testid="agent-launch-banner"]')).toBeNull();
+    expect(text(host.querySelector('[data-testid="launch-error-code"]'))).toBe('stopping');
+  });
+
+  it('hides Start and Resume for a create winding down', () => {
+    const labels = headerButtonLabels(windingDown);
+
+    expect(labels).not.toContain('Start');
     expect(labels).not.toContain('Resume');
   });
 

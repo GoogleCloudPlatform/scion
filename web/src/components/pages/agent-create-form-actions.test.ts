@@ -326,6 +326,25 @@ describe('Create Agent form actions', () => {
     expect(page.error).toBeFalsy();
   });
 
+  it('does not start an async create that is winding down, and opens its page', async () => {
+    // The launch is still active (state) but no longer in flight (active);
+    // the hub refuses a start with 409 agent_create_incomplete.
+    stubFetch({
+      phase: 'stopping',
+      launch: { id: 'l-1', state: 'active', active: false, kind: 'create', step: 'launching' },
+    });
+    const el = await mountAgentCreate();
+    const page = el as unknown as AgentCreateInternals;
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+
+    await clickStart(el);
+
+    expect(requests.map((r) => r.url)).toEqual(['/api/v1/agents']);
+    expect(showToast).not.toHaveBeenCalled();
+    expect(navigations).toEqual(['/agents/agent-1']);
+  });
+
   it('still starts the agent when the hub answered synchronously after not launching', async () => {
     stubFetch({
       phase: 'created',

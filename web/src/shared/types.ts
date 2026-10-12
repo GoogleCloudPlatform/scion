@@ -465,7 +465,17 @@ export function isAgentRunning(agent: Agent): boolean {
  */
 export interface AgentLaunch {
   id: string;
+  /**
+   * The launch's own state. It stays `active` while a failed or stopped
+   * create winds down, after the agent has left the in-flight phases.
+   */
   state: 'active' | 'ended';
+  /**
+   * The hub's in-flight predicate (store.Agent.IsInFlight): the launch is
+   * active and the agent is still in a pre-running phase. It is not the same
+   * as `state === 'active'`; it is false in every phase an incomplete create
+   * can be in.
+   */
   active: boolean;
   /** create | start | restart. Only `create` launches are async today. */
   kind: string;
@@ -486,24 +496,13 @@ export interface AgentLaunchFields {
   launch?: AgentLaunch;
 }
 
-/** Phases a launch occupies before the agent runs (store.InFlightPhases). */
-const LAUNCH_IN_FLIGHT_PHASES: ReadonlySet<AgentPhase> = new Set([
-  'created',
-  'provisioning',
-  'cloning',
-  'starting',
-]);
-
 /**
- * Whether the hub is still launching the agent asynchronously, mirroring the
- * hub's in-flight predicate (store.Agent.IsInFlight).
+ * Whether the hub is still launching the agent asynchronously. The hub
+ * computes this as `launch.active` from its in-flight predicate
+ * (store.Agent.IsInFlight), which already includes the phase check.
  */
 export function isAgentLaunching(agent: AgentLaunchFields): boolean {
-  return (
-    agent.launch?.active === true &&
-    agent.phase !== undefined &&
-    LAUNCH_IN_FLIGHT_PHASES.has(agent.phase)
-  );
+  return agent.launch?.active === true;
 }
 
 /**
@@ -520,7 +519,9 @@ export function isIncompleteCreate(agent: AgentLaunchFields): boolean {
     case 'stopping':
     case 'stopped':
     case 'error':
-      return launch.active || !!launch.error;
+      // The hub's wind-down arm is LaunchState == "active", which reaches
+      // the web as `state`; `active` is always false in these phases.
+      return launch.state === 'active' || !!launch.error;
     default:
       return false;
   }

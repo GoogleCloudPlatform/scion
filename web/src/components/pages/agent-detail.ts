@@ -442,6 +442,11 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--sl-color-primary-700, #1d4ed8);
       margin-bottom: 0.25rem;
     }
+    .agent-launch-banner .launch-step {
+      font-size: 0.875rem;
+      font-family: var(--scion-font-mono, monospace);
+      color: var(--sl-color-primary-700, #1d4ed8);
+    }
     .agent-launch-banner .launch-message {
       font-size: 0.875rem;
       color: var(--scion-text-secondary, #475569);
@@ -1395,7 +1400,8 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="agent-launch-banner" data-testid="agent-launch-banner">
           <sl-spinner></sl-spinner>
           <div class="launch-content">
-            <div class="launch-title">Launching${step ? html`: ${launchStepLabel(step)}` : ''}</div>
+            <div class="launch-title">Launching</div>
+            ${step ? html`<div class="launch-step">Step: ${launchStepLabel(step)}</div>` : nothing}
             ${message ? html`<div class="launch-message">${message}</div>` : nothing}
           </div>
         </div>
@@ -1423,7 +1429,7 @@ export class ScionPageAgentDetail extends LitElement {
   private renderIncompleteCreateBanner(agent: Agent, message?: string): TemplateResult {
     const launch = agent.launch!;
     const code = launch.error;
-    const reason = launch.active ? 'stopping' : launchEndReasonLabel(launch.endReason);
+    const reason = launch.state === 'active' ? 'stopping' : launchEndReasonLabel(launch.endReason);
     const task = agent.appliedConfig?.task;
     const canDelete = can(agent._capabilities, 'delete') && !this.deletionLease.isDeleting(agent);
     return html`
@@ -1462,7 +1468,7 @@ export class ScionPageAgentDetail extends LitElement {
                     size="small"
                     ?loading=${this.actionLoading['delete']}
                     ?disabled=${this.actionLoading['delete']}
-                    @click=${(e: MouseEvent) => this.handleAction('delete', e)}
+                    @click=${(e: MouseEvent): void => void this.handleAction('delete', e)}
                   >
                     <sl-icon slot="prefix" name="trash"></sl-icon>
                     Delete
@@ -1654,8 +1660,10 @@ export class ScionPageAgentDetail extends LitElement {
     // While the hub is deleting, hide every lifecycle action and Delete.
     const deleting = this.deletionLease.isDeleting(agent);
     const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
-    // Start and Resume are hidden while the hub launches the agent, and for
-    // a create that did not complete, which the hub refuses to start (409
+    // Start and Resume are hidden while the hub launches the agent (before
+    // the launch deadline the hub answers a start with the launching agent,
+    // so the button would do nothing), and for a create that did not
+    // complete, which the hub refuses to start or resume (409
     // agent_create_incomplete); the launch banner offers delete instead.
     const startOk = lifecycleOk && !isAgentLaunching(agent) && !isIncompleteCreate(agent);
     return html`
