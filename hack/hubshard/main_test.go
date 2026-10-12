@@ -15,15 +15,20 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
 
 const header = "// Copyright 2026 Google LLC\n\npackage hub\n\n"
+
+const license = "// Copyright 2026 Google LLC\n//\n// Licensed under the Apache License, Version 2.0.\n\n"
 
 var fixture = map[string]string{
 	// TestMain and the helper it needs: common.
@@ -53,23 +58,16 @@ var fixture = map[string]string{
 	"k_test.go": "/* Copyright 2026 Google LLC */ package hub\n",
 	// Several blocks, one closing and reopening on the same line.
 	"l_test.go": "/* a */ /* b\n */ /* c */\n//go:build linux\n\npackage hub\n",
+	// A license header with an empty // line: the shard clause replaces it,
+	// so the line count (and every line number) stays the same.
+	"m_test.go": license + "package hub\n\nimport \"testing\"\n\nfunc TestM(t *testing.T) {}\n",
 	// A *_helpers_test.go file is common even when no test file uses it.
 	"unused_helpers_test.go": header + "func unusedHelper() {}\n",
 }
 
-func writeFixture(t *testing.T) (dir, assign string) {
+func writeFixture(t *testing.T) (root, dir string) {
 	t.Helper()
-	root := t.TempDir()
-	dir = filepath.Join(root, "hub")
-	if err := os.Mkdir(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, src := range fixture {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return dir, filepath.Join(root, "assignment.txt")
+	return writeFiles(t, fixture)
 }
 
 func read(t *testing.T, dir, name string) string {
@@ -81,22 +79,74 @@ func read(t *testing.T, dir, name string) string {
 	return string(b)
 }
 
-func TestGenerate(t *testing.T) {
-	dir, assign := writeFixture(t)
-	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
+// baseArgs points the tool at a fixture tree.
+func baseArgs(root, dir string, extra ...string) []string {
+	return append([]string{"-root", root, "-dir", dir}, extra...)
+}
+
+// overlayFiles runs -overlay and returns the overlay's files by base name
+// (overlay.json excluded) and the parsed Replace map.
+func overlayFiles(t *testing.T, args []string) (map[string]string, map[string]string) {
+	t.Helper()
+	out := t.TempDir()
+	if err := run(append(args, "-overlay", out), io.Discard); err != nil {
 		t.Fatal(err)
 	}
+	var cfg struct{ Replace map[string]string }
+	if err := json.Unmarshal([]byte(read(t, out, "overlay.json")), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{}
+	for from, to := range cfg.Replace {
+		if filepath.Dir(to) != out {
+			t.Errorf("overlay target %s outside %s", to, out)
+		}
+		if filepath.Base(from) != filepath.Base(to) {
+			t.Errorf("overlay maps %s to %s", from, to)
+		}
+		files[filepath.Base(from)] = read(t, out, filepath.Base(to))
+	}
+	return files, cfg.Replace
+}
 
-	for _, common := range []string{"main_test.go", "setup_helper_test.go", "helpers_test.go", "unused_helpers_test.go"} {
-		if got := read(t, dir, common); got != fixture[common] {
-			t.Errorf("%s: common file changed:\n%s", common, got)
+// shardOfOverlay returns the shard of each tagged file in the overlay.
+func shardOfOverlay(t *testing.T, files map[string]string) map[string]int {
+	t.Helper()
+	as := map[string]int{}
+	for name, src := range files {
+		_, e, err := headerBuildLine([]byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e != nil {
+			as[name] = shardOf(e)
 		}
 	}
-	_, as, err := readAssignment(assign)
-	if err != nil {
-		t.Fatal(err)
+	return as
+}
+
+func TestOverlay(t *testing.T) {
+	root, dir := writeFixture(t)
+	files, replace := overlayFiles(t, baseArgs(root, dir, "-n", "2"))
+
+	// The tree is untouched.
+	for name, src := range fixture {
+		if got := read(t, dir, name); got != src {
+			t.Errorf("%s changed in the tree:\n%s", name, got)
+		}
 	}
-	for _, sharded := range []string{"a_test.go", "b_test.go", "c_test.go", "d_test.go", "e_test.go", "f_test.go", "g_test.go", "h_test.go", "i_test.go", "j_test.go", "k_test.go", "l_test.go"} {
+	for from := range replace {
+		if !filepath.IsAbs(from) || filepath.Dir(from) != dir {
+			t.Errorf("overlay key %s: want an absolute path in %s", from, dir)
+		}
+	}
+	for _, common := range []string{"main_test.go", "setup_helper_test.go", "helpers_test.go", "unused_helpers_test.go"} {
+		if _, ok := files[common]; ok {
+			t.Errorf("%s: common file in the overlay", common)
+		}
+	}
+	as := shardOfOverlay(t, files)
+	for _, sharded := range []string{"a_test.go", "b_test.go", "c_test.go", "d_test.go", "e_test.go", "f_test.go", "g_test.go", "h_test.go", "i_test.go", "j_test.go", "k_test.go", "l_test.go", "m_test.go"} {
 		if as[sharded] < 1 || as[sharded] > 2 {
 			t.Errorf("%s: want shard 1 or 2, got %d", sharded, as[sharded])
 		}
@@ -104,226 +154,267 @@ func TestGenerate(t *testing.T) {
 	if as["c_test.go"] != as["d_test.go"] {
 		t.Errorf("c and d must share a shard: %d vs %d", as["c_test.go"], as["d_test.go"])
 	}
-
-	if got := read(t, dir, "a_test.go"); !strings.HasPrefix(got, "//go:build !hubshard || hubshard_") || !strings.HasSuffix(got, fixture["a_test.go"]) {
+	if got := files["a_test.go"]; !strings.HasPrefix(got, "//go:build !hubshard || hubshard_") || !strings.HasSuffix(got, fixture["a_test.go"]) {
 		t.Errorf("a_test.go: unexpected header:\n%s", got)
 	}
-	if got := read(t, dir, "b_test.go"); !strings.HasPrefix(got, "//go:build !no_sqlite && (!hubshard || hubshard_") {
+	if got := files["b_test.go"]; !strings.HasPrefix(got, "//go:build !no_sqlite && (!hubshard || hubshard_") {
 		t.Errorf("b_test.go: constraint not combined:\n%s", got)
 	}
-	if got := read(t, dir, "g_test.go"); !strings.Contains(got, "//go:build (!unix || openbsd) && (!hubshard || hubshard_") {
+	if got := files["g_test.go"]; !strings.Contains(got, "//go:build (!unix || openbsd) && (!hubshard || hubshard_") {
 		t.Errorf("g_test.go: OR constraint not parenthesised:\n%s", got)
 	}
-
 	for name, want := range map[string]string{
 		"i_test.go": "//go:build !no_sqlite && (!hubshard || hubshard_",
 		"j_test.go": "//go:build linux && (!hubshard || hubshard_",
 		"k_test.go": "//go:build !hubshard || hubshard_",
 		"l_test.go": "//go:build linux && (!hubshard || hubshard_",
+		"m_test.go": "//go:build !hubshard || hubshard_",
 	} {
-		got := read(t, dir, name)
+		got := files[name]
 		if n := strings.Count(got, "//go:build"); n != 1 || !strings.Contains(got, want) {
 			t.Errorf("%s: want one build line containing %q, got %d:\n%s", name, want, n, got)
 		}
 	}
+	// m_test.go keeps its line count: the clause took the empty // line.
+	if got, want := strings.Count(files["m_test.go"], "\n"), strings.Count(fixture["m_test.go"], "\n"); got != want {
+		t.Errorf("m_test.go: %d lines in the overlay, %d in the tree:\n%s", got, want, files["m_test.go"])
+	}
+	if !strings.HasPrefix(files["m_test.go"], "// Copyright 2026 Google LLC\n//go:build ") {
+		t.Errorf("m_test.go: clause not on the empty // line:\n%s", files["m_test.go"])
+	}
 
-	// Idempotent: a second run changes nothing, and -check passes.
-	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-check"}, io.Discard); err != nil {
-		t.Fatalf("check after generate: %v", err)
+	// Every rewritten file compiles, per go/build, in its own shard only.
+	for name, src := range files {
+		if isImportsFile(name) {
+			continue
+		}
+		for k := 1; k <= 2; k++ {
+			tags := shardTags(k, nil)
+			want, err := matchSrc(name, []byte(fixture[name]), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := matchSrc(name, []byte(src), tags)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want && got != (as[name] == k) {
+				t.Errorf("%s: go/build compiles it in shard %d = %v, assigned to %d", name, k, got, as[name])
+			}
+		}
+	}
+
+	// Deterministic: a second run writes the same overlay.
+	again, _ := overlayFiles(t, baseArgs(root, dir, "-n", "2"))
+	if len(again) != len(files) {
+		t.Fatalf("second run: %d files, first %d", len(again), len(files))
+	}
+	for name, src := range files {
+		if again[name] != src {
+			t.Errorf("%s differs between runs", name)
+		}
 	}
 }
 
-func TestStableAssignment(t *testing.T) {
-	dir, assign := writeFixture(t)
-	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
-		t.Fatal(err)
+func TestParity(t *testing.T) {
+	root, dir := writeFixture(t)
+	var out bytes.Buffer
+	if err := run(baseArgs(root, dir, "-n", "2", "-parity"), &out); err != nil {
+		t.Fatalf("-parity: %v\n%s", err, out.String())
 	}
-	_, before, _ := readAssignment(assign)
-
-	// A new, unrelated file must not move existing files.
-	src := header + "import \"testing\"\n\nfunc TestNew(t *testing.T) {}\n" + strings.Repeat("// pad\n", 50)
-	if err := os.WriteFile(filepath.Join(dir, "z_test.go"), []byte(src), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-check"}, io.Discard); err != nil {
-		t.Fatalf("-check should accept a new self-contained untagged file: %v", err)
-	}
-	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-check", "-strict"}, io.Discard); err == nil {
-		t.Fatal("-check -strict should report the new untagged file")
-	}
-	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign}, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	_, after, _ := readAssignment(assign)
-	for f, k := range before {
-		if after[f] != k {
-			t.Errorf("%s moved from shard %d to %d", f, k, after[f])
+	for _, want := range []string{"parity default: ", "parity no_sqlite: ", "parity integration: ", "parity vet-integration: ", "parity vet: ", "parity ok"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("-parity output lacks %q:\n%s", want, out.String())
 		}
-	}
-	if after["z_test.go"] == 0 {
-		t.Error("new file was not assigned")
 	}
 }
 
-func TestCheckBreakage(t *testing.T) {
-	// Each case starts from a freshly generated fixture (N=2), edits it, and
-	// runs -check. want is "" when -check must pass, else a substring of
-	// the error.
-	retag := func(t *testing.T, dir, name, line string) {
+// fixtureSharding builds the sharding of the fixture without the CLI, so
+// a test can doctor it.
+func fixtureSharding(t *testing.T, n int) *sharding {
+	t.Helper()
+	_, dir := writeFixture(t)
+	files, err := loadFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	an := analyze(files)
+	s, err := newSharding(dir, files, an, assignShards(an, files, n), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestParityCatchesIgnoredClause(t *testing.T) {
+	// A sharded file whose clause go/build does not see compiles in every
+	// shard. Simulate it with the untagged source.
+	s := fixtureSharding(t, 2)
+	s.genFiles["a_test.go"] = s.files["a_test.go"]
+	err := s.parity(io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "a_test.go: assigned to shard") {
+		t.Fatalf("want a tag placement problem for a_test.go, got %v", err)
+	}
+}
+
+func TestParityCatchesCrossShardUse(t *testing.T) {
+	s := fixtureSharding(t, 2)
+	other := 3 - s.assign["f_test.go"]
+	for _, n := range []string{"a_test.go", "b_test.go", "e_test.go", "g_test.go", "h_test.go", "m_test.go"} {
+		if s.assign[n] != other {
+			continue
+		}
+		s.an.uses[n] = map[string]bool{"f_test.go": true}
+		err := s.parity(io.Discard)
+		if err == nil || !strings.Contains(err.Error(), n+" uses f_test.go") {
+			t.Fatalf("want a cross-shard use problem, got %v", err)
+		}
+		return
+	}
+	t.Fatal("fixture: no file in the other shard")
+}
+
+func TestBreakage(t *testing.T) {
+	s := fixtureSharding(t, 2)
+	retag := func(name, line string) map[string]*fileInfo {
 		t.Helper()
-		src := read(t, dir, name)
-		i := strings.Index(src, "\n")
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(line+src[i:]), 0o644); err != nil {
+		m := map[string]*fileInfo{}
+		for n, f := range s.genFiles {
+			m[n] = f
+		}
+		src := string(s.genFiles[name].src)
+		if _, e, _ := headerBuildLine([]byte(src)); e != nil {
+			src = src[strings.Index(src, "\n")+1:]
+		}
+		g, err := parseFile(name, []byte(line+"\n"+src))
+		if err != nil {
 			t.Fatal(err)
 		}
+		m[name] = g
+		return m
 	}
-	add := func(t *testing.T, dir, name, src string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	other := func(k int) int { return 3 - k }
-	for _, tc := range []struct {
-		name   string
-		edit   func(t *testing.T, dir string, as map[string]int)
-		want   string
-		manual bool // make hubshard cannot fix it
-	}{
-		{"new file using a common helper", func(t *testing.T, dir string, _ map[string]int) {
-			add(t, dir, "new_test.go", header+"import \"testing\"\n\nfunc TestNew(t *testing.T) { _ = helperA() }\n")
-		}, "", false},
-		{"new file using a sharded file", func(t *testing.T, dir string, as map[string]int) {
-			add(t, dir, "new_test.go", header+"import \"testing\"\n\nfunc TestNew(t *testing.T) { helperF() }\n")
-		}, "new_test.go uses f_test.go", false},
-		{"new file adding a method to a sharded file's type", func(t *testing.T, dir string, _ map[string]int) {
-			add(t, dir, "new_test.go", header+"func (fakeD) Other() {}\n")
-		}, "new_test.go uses d_test.go", false},
-		{"sharded file using another shard", func(t *testing.T, dir string, as map[string]int) {
-			// Find a sharded file in the shard f is not in, and make it use helperF.
-			for _, n := range []string{"a_test.go", "b_test.go", "e_test.go", "g_test.go", "h_test.go"} {
-				if as[n] == other(as["f_test.go"]) {
-					src := read(t, dir, n)
-					add(t, dir, n, src+"\nfunc useF() { helperF() }\n")
-					return
-				}
-			}
-			t.Fatal("fixture: no file in the other shard")
-		}, "uses f_test.go", false},
-		{"deleted file", func(t *testing.T, dir string, _ map[string]int) {
-			if err := os.Remove(filepath.Join(dir, "e_test.go")); err != nil {
-				t.Fatal(err)
-			}
-		}, "e_test.go: in the assignment file but does not exist", false},
-		{"tag for a shard that does not exist", func(t *testing.T, dir string, _ map[string]int) {
-			retag(t, dir, "a_test.go", "//go:build !hubshard || hubshard_9")
-		}, "a_test.go: hubshard tag is not", false},
-		{"hand-edited tag", func(t *testing.T, dir string, as map[string]int) {
-			retag(t, dir, "a_test.go", fmt.Sprintf("//go:build !hubshard || hubshard_%d", other(as["a_test.go"])))
-		}, "a_test.go: tagged for shard", false},
-		{"hubshard_0 on a common file", func(t *testing.T, dir string, _ map[string]int) {
-			retag(t, dir, "helpers_test.go", "//go:build !hubshard || hubshard_0")
-		}, "helpers_test.go: hubshard tag is not", false},
-		{"hubshard_01", func(t *testing.T, dir string, as map[string]int) {
-			retag(t, dir, "a_test.go", fmt.Sprintf("//go:build !hubshard || hubshard_0%d", as["a_test.go"]))
-		}, "a_test.go: hubshard tag is not", false},
-		{"two clauses", func(t *testing.T, dir string, _ map[string]int) {
-			retag(t, dir, "a_test.go", "//go:build (!hubshard || hubshard_1) && (!hubshard || hubshard_2)")
-		}, "a_test.go: hubshard tag is not", false},
-		{"hubshard_x", func(t *testing.T, dir string, _ map[string]int) {
-			retag(t, dir, "a_test.go", "//go:build !hubshard || hubshard_x")
-		}, "a_test.go: hubshard tag is not", false},
-		{"bare !hubshard", func(t *testing.T, dir string, _ map[string]int) {
-			retag(t, dir, "a_test.go", "//go:build !hubshard")
-		}, "a_test.go: hubshard tag outside a (!hubshard || hubshard_K) clause", true},
-		{"common file tagged", func(t *testing.T, dir string, _ map[string]int) {
-			retag(t, dir, "helpers_test.go", "//go:build !hubshard || hubshard_1")
-		}, "helpers_test.go: tagged for shard 1, the assignment file says common (0)", false},
-		{"tagged but not listed (renamed)", func(t *testing.T, dir string, _ map[string]int) {
-			if err := os.Rename(filepath.Join(dir, "e_test.go"), filepath.Join(dir, "e2_test.go")); err != nil {
-				t.Fatal(err)
-			}
-		}, "e2_test.go: tagged for shard", false},
+	other := 3 - s.assign["a_test.go"]
+	for _, tc := range []struct{ name, line, want string }{
+		{"tag for a shard that does not exist", "//go:build !hubshard || hubshard_9", "a_test.go: hubshard tag is not"},
+		{"wrong shard", fmt.Sprintf("//go:build !hubshard || hubshard_%d", other), "a_test.go: tagged for shard"},
+		{"hubshard_01", fmt.Sprintf("//go:build !hubshard || hubshard_0%d", s.assign["a_test.go"]), "a_test.go: hubshard tag is not"},
+		{"two clauses", "//go:build (!hubshard || hubshard_1) && (!hubshard || hubshard_2)", "a_test.go: hubshard tag is not"},
+		{"bare !hubshard", "//go:build !hubshard", "a_test.go: hubshard tag outside"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir, assign := writeFixture(t)
-			args := []string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign}
-			if err := run(append(args, "-n", "2"), io.Discard); err != nil {
-				t.Fatal(err)
-			}
-			_, as, _ := readAssignment(assign)
-			tc.edit(t, dir, as)
-			err := run(append(args, "-check"), io.Discard)
-			switch {
-			case tc.want == "" && err != nil:
-				t.Fatalf("-check: %v", err)
-			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
-				t.Fatalf("-check: want an error containing %q, got %v", tc.want, err)
-			}
-			if tc.manual {
-				return
-			}
-			// make hubshard fixes the case.
-			if err := run(args, io.Discard); err != nil {
-				t.Fatal(err)
-			}
-			if err := run(append(args, "-check", "-strict"), io.Discard); err != nil {
-				t.Fatalf("-check -strict after make hubshard: %v", err)
+			got := strings.Join(breakage(s.an, retag("a_test.go", tc.line), s.assign, 2), "\n")
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("want %q, got %q", tc.want, got)
 			}
 		})
 	}
+	if got := breakage(s.an, s.genFiles, s.assign, 2); len(got) != 0 {
+		t.Errorf("generated files: %v", got)
+	}
 }
 
-func TestNewFileJoinsGroups(t *testing.T) {
-	// p and q start in different shards. A new file that uses both joins
-	// them into one group, which moves to the shard holding most of its
-	// lines (p's).
-	root := t.TempDir()
-	dir := filepath.Join(root, "hub")
-	if err := os.Mkdir(dir, 0o755); err != nil {
+func TestListSkipLocate(t *testing.T) {
+	root, dir := writeFixture(t)
+	args := baseArgs(root, dir, "-n", "2")
+	files, _ := overlayFiles(t, args)
+	as := shardOfOverlay(t, files)
+	runOut := func(extra ...string) (string, error) {
+		var b bytes.Buffer
+		err := run(append(append([]string(nil), args...), extra...), &b)
+		return b.String(), err
+	}
+
+	for k := 1; k <= 2; k++ {
+		got, err := runOut("-list", fmt.Sprint(k))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var want []string
+		for name, src := range fixture {
+			if as[name] != 0 && as[name] != k {
+				continue
+			}
+			if ok, _ := matchSrc(name, []byte(src), nil); !ok {
+				continue
+			}
+			for _, l := range strings.Split(src, "\n") {
+				if strings.HasPrefix(l, "func Test") && !strings.HasPrefix(l, "func TestMain") {
+					want = append(want, strings.TrimPrefix(l[:strings.Index(l, "(")], "func "))
+				}
+			}
+		}
+		sort.Strings(want)
+		if got != strings.Join(want, "\n")+"\n" && !(len(want) == 0 && got == "") {
+			t.Errorf("-list %d = %q, want %v", k, got, want)
+		}
+	}
+
+	// helpers_test.go (common) declares no test; add one to see -skip.
+	if err := os.WriteFile(filepath.Join(dir, "common_helpers_test.go"), []byte(header+"import \"testing\"\n\nfunc TestCommon(t *testing.T) {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	assign := filepath.Join(root, "assignment.txt")
-	write := func(name, src string) {
-		t.Helper()
+	if got, err := runOut("-skip", "1"); err != nil || got != "\n" {
+		t.Errorf("-skip 1 = %q, %v; want an empty line", got, err)
+	}
+	if got, err := runOut("-skip", "2"); err != nil || got != "^(TestCommon)$\n" {
+		t.Errorf("-skip 2 = %q, %v", got, err)
+	}
+
+	got, err := runOut("-locate", "TestA", "TestCommon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("TestA %d\nTestCommon 1\n", as["a_test.go"]); got != want {
+		t.Errorf("-locate = %q, want %q", got, want)
+	}
+	if _, err := runOut("-locate", "TestNoSuch"); err == nil || !strings.Contains(err.Error(), "TestNoSuch") {
+		t.Errorf("-locate of a missing test: %v", err)
+	}
+	// TestB is !no_sqlite: not in a no_sqlite build.
+	if _, err := runOut("-tags", "no_sqlite", "-locate", "TestB"); err == nil {
+		t.Error("-locate TestB under no_sqlite should fail")
+	}
+}
+
+func TestRejectsCommittedTags(t *testing.T) {
+	root, dir := writeFixture(t)
+	files, _ := overlayFiles(t, baseArgs(root, dir, "-n", "2"))
+	// Commit the overlay into the tree, as an older generator did.
+	for name, src := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	write("p_test.go", header+"func helperP() {}\n"+strings.Repeat("// pad\n", 100))
-	write("q_test.go", header+"func helperQ() {}\n"+strings.Repeat("// pad\n", 10))
-	// -maxgroupdiv 1: no size cut, so nothing becomes common.
-	args := []string{"-root", root, "-dir", dir, "-assign", assign, "-maxgroupdiv", "1"}
-	if err := run(append(args, "-n", "2"), io.Discard); err != nil {
+	err := run(baseArgs(root, dir, "-parity"), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "-untag") || !strings.Contains(err.Error(), "a_test.go") {
+		t.Fatalf("want the committed tags rejected, got %v", err)
+	}
+	var out bytes.Buffer
+	if err := run(baseArgs(root, dir, "-untag"), &out); err != nil {
 		t.Fatal(err)
 	}
-	_, before, _ := readAssignment(assign)
-	if before["p_test.go"] == before["q_test.go"] || before["p_test.go"] == 0 || before["q_test.go"] == 0 {
-		t.Fatalf("setup: want p and q in different shards, got %v", before)
-	}
-	write("x_test.go", header+"import \"testing\"\n\nfunc TestX(t *testing.T) { helperP(); helperQ() }\n")
-	if err := run(args, io.Discard); err != nil {
+	// -untag restores the tree byte for byte, both clause forms included.
+	got, err := filepath.Glob(filepath.Join(dir, "*"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, after, _ := readAssignment(assign)
-	for _, name := range []string{"p_test.go", "q_test.go", "x_test.go"} {
-		if after[name] != before["p_test.go"] {
-			t.Errorf("%s: want shard %d (p's), got %d", name, before["p_test.go"], after[name])
+	if len(got) != len(fixture) {
+		t.Errorf("after -untag: %d files, want %d", len(got), len(fixture))
+	}
+	for name, src := range fixture {
+		if g := read(t, dir, name); g != src {
+			t.Errorf("%s: untag round trip:\n got %q\nwant %q", name, g, src)
 		}
 	}
-	if got := read(t, dir, "q_test.go"); !strings.HasPrefix(got, fmt.Sprintf("//go:build !hubshard || hubshard_%d\n", before["p_test.go"])) {
-		t.Errorf("q_test.go not retagged:\n%s", got)
+	if err := run(baseArgs(root, dir, "-parity"), io.Discard); err != nil {
+		t.Fatalf("-parity after -untag: %v", err)
 	}
 }
 
 func TestStrayShardClauses(t *testing.T) {
-	// A tagged file outside -dir (in a subpackage or elsewhere) fails the
-	// run; -dir's own tagged files do not.
-	dir, assign := writeFixture(t)
-	root := filepath.Dir(dir)
-	if err := run([]string{"-root", root, "-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
-		t.Fatal(err)
-	}
+	// A tagged file outside -dir (in a subpackage or elsewhere) fails every
+	// mode, -untag included (it does not touch them).
+	root, dir := writeFixture(t)
 	tagged := "// Copyright 2026 Google LLC\n\n//go:build !no_sqlite && (!hubshard || hubshard_2)\n\npackage sub\n"
 	for _, p := range []string{filepath.Join(dir, "sub", "moved_test.go"), filepath.Join(root, "other", "moved_test.go")} {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -345,40 +436,78 @@ func TestStrayShardClauses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := run([]string{"-root", root, "-dir", dir, "-assign", assign, "-check"}, io.Discard)
-	if err == nil {
-		t.Fatal("-check should report hubshard tags outside -dir")
-	}
-	for _, want := range []string{filepath.Join("hub", "sub", "moved_test.go"), filepath.Join("other", "moved_test.go")} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error does not name %s: %v", want, err)
+	for _, mode := range []string{"-parity", "-untag"} {
+		err := run(baseArgs(root, dir, mode), io.Discard)
+		if err == nil {
+			t.Fatalf("%s should report hubshard tags outside -dir", mode)
 		}
-	}
-	for _, unwanted := range []string{".hidden", "word_test.go", "a_test.go"} {
-		if strings.Contains(err.Error(), unwanted) {
-			t.Errorf("error names %s: %v", unwanted, err)
+		for _, want := range []string{filepath.Join("hub", "sub", "moved_test.go"), filepath.Join("other", "moved_test.go")} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: error does not name %s: %v", mode, want, err)
+			}
+		}
+		for _, unwanted := range []string{".hidden", "word_test.go", "a_test.go"} {
+			if strings.Contains(err.Error(), unwanted) {
+				t.Errorf("%s: error names %s: %v", mode, unwanted, err)
+			}
 		}
 	}
 }
 
-func TestUntagRoundTrip(t *testing.T) {
-	// A file that becomes common gets its original bytes back.
-	dir, assign := writeFixture(t)
-	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
+func TestSpareCommentLine(t *testing.T) {
+	for src, want := range map[string]int{
+		license + "package hub\n":                    1,
+		"// a\n//\n// b\npackage hub\n":              -1, // doc comment: no blank line after it
+		"// a\n\n// doc\n//\n// more\npackage hub\n": -1,
+		"// a\n//\n\n// doc\n//\npackage hub\n":      1,
+		"/* a */\n//\n\npackage hub\n":               -1,
+		"// Copyright\n\npackage hub\n":              -1,
+		"package hub\n//\n\n":                        -1,
+	} {
+		if got := spareCommentLine(strings.SplitAfter(src, "\n")); got != want {
+			t.Errorf("spareCommentLine(%q) = %d, want %d", src, got, want)
+		}
+	}
+}
+
+func TestIsListedTest(t *testing.T) {
+	src := header + `import "testing"
+
+func Test(t *testing.T)            {}
+func TestA(t *testing.T)           {}
+func Testify(t *testing.T)         {}
+func TestMain(m *testing.M)        {}
+func Test_x(t *testing.T)          {}
+func BenchmarkB(b *testing.B)      {}
+func FuzzF(f *testing.F)           {}
+func ExampleWith() {
+	// Output: x
+}
+func ExampleWithout() {}
+func ExampleUnordered() {
+	// some code
+	x := 1
+	_ = x
+	// Unordered output:
+	// x
+}
+func ExampleNotLast() {
+	// Output: x
+
+	// a later comment group: not an output comment
+}
+
+type T struct{}
+
+func (T) TestMethod(t *testing.T) {}
+`
+	f, err := parseFile("x_test.go", []byte(src))
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"a_test.go", "b_test.go", "g_test.go", "i_test.go", "j_test.go", "k_test.go", "l_test.go"} {
-		f, err := loadFiles(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		out, err := rewrite(f[name], 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(out) != fixture[name] {
-			t.Errorf("%s: untag round trip:\n got %q\nwant %q", name, out, fixture[name])
-		}
+	want := []string{"Test", "TestA", "Test_x", "BenchmarkB", "FuzzF", "ExampleWith", "ExampleUnordered"}
+	if strings.Join(f.tests, " ") != strings.Join(want, " ") {
+		t.Errorf("tests = %v, want %v", f.tests, want)
 	}
 }
 
