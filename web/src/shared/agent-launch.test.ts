@@ -59,9 +59,8 @@ describe('isIncompleteCreate', () => {
   it.each<AgentPhase>(['suspended', 'stopping', 'stopped', 'error'])(
     'is true for a failed create launch in phase %s',
     (phase) => {
-      expect(isIncompleteCreate({ phase, launch: { ...ended, error: 'runtime_error' } })).toBe(
-        true
-      );
+      const failed = { ...ended, error: 'runtime_error' };
+      expect(isIncompleteCreate({ phase, launch: failed })).toBe(true);
     }
   );
 
@@ -70,9 +69,9 @@ describe('isIncompleteCreate', () => {
   });
 
   it('is false for an ended create launch with no error', () => {
-    expect(isIncompleteCreate({ phase: 'stopped', launch: { ...ended, endReason: 'succeeded' } })).toBe(
-      false
-    );
+    expect(
+      isIncompleteCreate({ phase: 'stopped', launch: { ...ended, endReason: 'succeeded' } })
+    ).toBe(false);
   });
 
   it('is false in a phase the agent ran or is launching in', () => {
