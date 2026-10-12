@@ -329,6 +329,222 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         })
         self.assertEqual(resolved["method"], "api-key")
 
+    # --- config.json that is not cleanly readable (ptone/scion#4624) -------
+    # A file that cannot be decoded or converted is handled like unparseable
+    # JSON: replaced, unless the host's rule says it may hold sign-in, in
+    # which case it is left byte-for-byte untouched. Provisioning continues.
+
+    LONG_INT = "1" * 5000  # beyond Python's 4300-digit int conversion limit
+
+    def _write_raw(self, raw: bytes) -> None:
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        with open(self.config_path, "wb") as f:
+            f.write(raw)
+
+    def _read_raw(self) -> bytes:
+        with open(self.config_path, "rb") as f:
+            return f.read()
+
+    def _provision_must_succeed(self) -> dict:
+        # A formerly escaping exception is reported as a test failure.
+        try:
+            return self._provision({})
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"provisioning raised {type(exc).__name__}: {exc}")
+
+    def _assert_replaced(self) -> None:
+        with open(self.config_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f),
+                             {"trustedFolders": [os.path.join(self.home, "workspace")]})
+
+    def test_non_utf8_config_is_replaced(self) -> None:
+        self._write_raw(b'{"theme": "dark"}\xff\n')
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self._assert_replaced()
+
+    def test_non_utf8_in_settings_string_is_replaced(self) -> None:
+        # Never rewritten with U+FFFD: not sign-in, so replaced.
+        self._write_raw(b'{"theme": "dark\xff"}')
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self._assert_replaced()
+
+    def test_non_utf8_in_sign_in_file_is_untouched(self) -> None:
+        raw = b'{"copilot_hmac_key": "placeholder-hmac", "theme": "dark\xff"}'
+        self._write_raw(raw)
+        self.assertEqual(self._provision_must_succeed()["method"], "auth-file")
+        self.assertEqual(self._read_raw(), raw)
+
+    def test_long_int_config_is_replaced(self) -> None:
+        self._write_raw(('{"theme": ' + self.LONG_INT + '}').encode())
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self._assert_replaced()
+
+    def test_long_int_in_sign_in_file_is_untouched(self) -> None:
+        raw = ('{"copilot_hmac_key": "placeholder-hmac", "theme": '
+               + self.LONG_INT + '}').encode()
+        self._write_raw(raw)
+        self.assertEqual(self._provision_must_succeed()["method"], "auth-file")
+        self.assertEqual(self._read_raw(), raw)
+
+    def test_long_int_unknown_key_is_untouched(self) -> None:
+        # An unknown key counts as possible sign-in on the host (fail open).
+        raw = ('{"placeholder_key": ' + self.LONG_INT + '}').encode()
+        self._write_raw(raw)
+        self.assertEqual(self._provision_must_succeed()["method"], "auth-file")
+        self.assertEqual(self._read_raw(), raw)
+
+    def test_nan_and_infinity_config_is_replaced(self) -> None:
+        # Copilot's JSON parser rejects these and the host reads the file as
+        # not a JSON object, so it is replaced rather than kept.
+        for const in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(const):
+                self._write_raw(('{"theme": ' + const + '}').encode())
+                self.assertEqual(self._provision_must_succeed()["method"], "none")
+                self._assert_replaced()
+
+    def test_nan_with_credential_is_replaced(self) -> None:
+        raw = b'{"copilot_hmac_key": "placeholder-hmac", "theme": NaN}'
+        self._write_raw(raw)
+        # NaN makes the content unparseable on the host too: not sign-in.
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self._assert_replaced()
+
+    def test_too_deep_sign_in_file_is_untouched(self) -> None:
+        # Find the first depth Python's decoder rejects; Go's limit is
+        # 10000 levels, so the host may still read sign-in from it.
+        def doc(n: int) -> str:
+            return '{"copilot_hmac_key": "placeholder-hmac", "theme": ' + "[" * n + "]" * n + "}"
+
+        def too_deep(n: int) -> bool:
+            try:
+                json.loads(doc(n))
+            except RecursionError:
+                return True
+            return False
+
+        lo, hi = 1, 9998  # 9998 arrays + the object = 9999 levels, within Go's limit
+        self.assertTrue(too_deep(hi), "Python's decoder accepts 9999 levels; test needs updating")
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if too_deep(mid):
+                hi = mid
+            else:
+                lo = mid + 1
+        raw = doc(lo).encode()
+        self._write_raw(raw)
+        self._provision_must_succeed()
+        self.assertEqual(self._read_raw(), raw)
+
+    def _assert_deep_sign_in_untouched(self, defect: bytes) -> None:
+        # A sign-in key, then a decode or convert defect, then 9998 nested
+        # arrays (9999 levels, within Go's 10000). The strict parse stops at
+        # the defect; the host-rule parse then reaches the deep part.
+        raw = (b'{"copilot_hmac_key": "placeholder-hmac", "model": ' + defect
+               + b', "theme": ' + b"[" * 9998 + b"]" * 9998 + b"}")
+        with self.assertRaises(ValueError):
+            provision._load_config_strictly(raw)
+        with self.assertRaises(RecursionError,
+                               msg="Python's decoder accepts 9999 levels; test needs updating"):
+            provision._config_holds_sign_in_or_too_deep(raw)
+        self._write_raw(raw)
+        self._provision_must_succeed()
+        self.assertEqual(self._read_raw(), raw)
+
+    def test_too_deep_sign_in_file_after_long_int_is_untouched(self) -> None:
+        self._assert_deep_sign_in_untouched(self.LONG_INT.encode())
+
+    def test_too_deep_sign_in_file_after_non_utf8_is_untouched(self) -> None:
+        self._assert_deep_sign_in_untouched(b'"x\xff"')
+
+    def test_float_overflow_config_is_replaced(self) -> None:
+        # 1e400 loads as inf and would be written back as Infinity.
+        for lit in ("1e400", "-1e400"):
+            with self.subTest(lit):
+                self._write_raw(('{"theme": ' + lit + '}').encode())
+                self.assertEqual(self._provision_must_succeed()["method"], "none")
+                self._assert_replaced()
+
+    def test_float_overflow_in_sign_in_file_is_untouched(self) -> None:
+        # The host accepts 1e400 (it never converts numbers), so keys decide.
+        for raw in (b'{"copilot_hmac_key": "placeholder-hmac", "theme": 1e400}',
+                    b'{"placeholder_key": 1e400}'):
+            with self.subTest(raw):
+                self._write_raw(raw)
+                self.assertEqual(self._provision_must_succeed()["method"], "auth-file")
+                self.assertEqual(self._read_raw(), raw)
+
+    # --- settings.json read site --------------------------------------------
+
+    def _settings_path(self) -> str:
+        return os.path.join(self.home, ".copilot", "settings.json")
+
+    def _assert_settings_defaults(self) -> None:
+        with open(self._settings_path(), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"autoUpdate": False, "banner": "never"})
+
+    def _write_settings_raw(self, raw: bytes) -> None:
+        os.makedirs(os.path.dirname(self._settings_path()), exist_ok=True)
+        with open(self._settings_path(), "wb") as f:
+            f.write(raw)
+
+    def test_non_utf8_settings_is_replaced_with_defaults(self) -> None:
+        self._write_settings_raw(b'{"theme": "dark\xff"}')
+        self._provision_must_succeed()
+        self._assert_settings_defaults()
+
+    def test_long_int_settings_is_replaced_with_defaults(self) -> None:
+        self._write_settings_raw(('{"theme": ' + self.LONG_INT + '}').encode())
+        self._provision_must_succeed()
+        self._assert_settings_defaults()
+
+    def test_nan_and_infinity_settings_is_replaced_with_defaults(self) -> None:
+        # Kept, they would be written back as non-standard JSON.
+        for const in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(const):
+                self._write_settings_raw(('{"theme": ' + const + '}').encode())
+                self._provision_must_succeed()
+                self._assert_settings_defaults()
+
+    def test_float_overflow_settings_is_replaced_with_defaults(self) -> None:
+        for lit in ("1e400", "-1e400"):
+            with self.subTest(lit):
+                self._write_settings_raw(('{"theme": ' + lit + '}').encode())
+                self._provision_must_succeed()
+                self._assert_settings_defaults()
+
+    def test_unparseable_settings_is_replaced_with_defaults(self) -> None:
+        self._write_settings_raw(b'{"theme": ')
+        self._provision_must_succeed()
+        self._assert_settings_defaults()
+
+    def test_clean_settings_keeps_values(self) -> None:
+        self._write_settings_raw(b'{"autoUpdate": true, "theme": "dark"}')
+        self._provision_must_succeed()
+        with open(self._settings_path(), encoding="utf-8") as f:
+            self.assertEqual(json.load(f),
+                             {"autoUpdate": True, "banner": "never", "theme": "dark"})
+
+    def test_unparseable_config_is_still_replaced(self) -> None:
+        self._write_raw(b'{"theme": ')
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self._assert_replaced()
+
+    def test_clean_config_is_kept_unchanged(self) -> None:
+        ws = os.path.join(self.home, "workspace")
+        self._write_raw(json.dumps({"theme": "dark", "trustedFolders": [ws]}).encode())
+        before = self._read_raw()
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self.assertEqual(self._read_raw(), before)
+
+    def test_clean_config_gains_workspace(self) -> None:
+        self._write_raw(b'// comment line\n{"theme": "dark", "trustedFolders": ["/src"]}')
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        with open(self.config_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {
+                "theme": "dark",
+                "trustedFolders": ["/src", os.path.join(self.home, "workspace")],
+            })
+
 
 class ConfigFileMayHoldCredentialTest(unittest.TestCase):
     """The content rule behind the auth-file present_check.
@@ -397,6 +613,27 @@ class ConfigFileMayHoldCredentialTest(unittest.TestCase):
         self.assertTrue(self._check(b'{"placeholder_key": "\xff"}'))
         self.assertFalse(self._check(b'{"trustedFolders": []}\xff'))
 
+    def test_long_int_follows_keys(self) -> None:
+        # The host never converts numbers (json.RawMessage), so an integer
+        # past Python's 4300-digit limit does not make content unparseable.
+        big = "1" * 5000
+        self.assertFalse(self._check('{"theme": ' + big + '}'))
+        self.assertFalse(self._check('{"copilot_tokens": {"placeholder": ' + big + '}}'))
+        self.assertTrue(self._check('{"placeholder_key": ' + big + '}'))
+        self.assertTrue(self._check('{"copilot_hmac_key": "placeholder-hmac", "theme": -' + big + '}'))
+
+    def test_float_overflow_follows_keys(self) -> None:
+        # Unlike NaN, 1e400 is valid JSON; the host never converts it.
+        self.assertFalse(self._check('{"theme": 1e400}'))
+        self.assertTrue(self._check('{"placeholder_key": 1e400}'))
+        self.assertTrue(self._check('{"copilot_hmac_key": "placeholder-hmac", "theme": -1e400}'))
+        self.assertFalse(self._check('{"copilot_hmac_key": 1e400}'))
+
+    def test_nan_and_infinity_are_not_sign_in(self) -> None:
+        for const in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(const):
+                self.assertFalse(self._check('{"placeholder_key": ' + const + '}'))
+
     def test_deep_nesting_is_not_sign_in(self) -> None:
         # Too deep for Python's decoder, so unparseable here. Go's limit is
         # 10000 levels; which shallower depths still differ from the host
@@ -416,7 +653,7 @@ HOST_FIXTURES = os.path.join(REPO_ROOT, "pkg", "harness", "testdata", "copilot_c
 
 # Floors pinned so that a moved, emptied or refactored host file cannot make
 # the cross-checks below pass vacuously. Raise them when the host lists grow.
-MIN_HOST_FIXTURES = 32
+MIN_HOST_FIXTURES = 34
 HOST_SETTINGS_KEY_COUNT = 12
 HOST_CREDENTIAL_KEY_COUNT = 3
 

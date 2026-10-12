@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 // This file covers design §6 H-4: `launch` (with `deadline` and
 // `remainingSeconds`) is required on GET and List agent responses for an
