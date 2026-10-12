@@ -107,6 +107,15 @@ async function reloadThroughSpinner(e: Page): Promise<void> {
   await settle(e);
 }
 
+// The migrations section only; other sections such as quick actions also use .card.
+function migrationsSection(e: Page): HTMLElement | null {
+  const sections = Array.from(e.shadowRoot?.querySelectorAll<HTMLElement>('.section') ?? []);
+  return (
+    sections.find((s) => s.querySelector('.section-title')?.textContent?.trim() === 'Migrations') ??
+    null
+  );
+}
+
 function details(e: Page): HTMLElement | null {
   return e.shadowRoot?.querySelector('sl-details.completed-migrations') ?? null;
 }
@@ -144,7 +153,7 @@ describe('admin maintenance completed migrations', () => {
     el = await mount(mixed);
     const d = details(el);
     expect(titles(d)).toEqual(['Title a', 'Title c']);
-    const outside = Array.from(el.shadowRoot?.querySelectorAll('.card') ?? []).filter(
+    const outside = Array.from(migrationsSection(el)?.querySelectorAll('.card') ?? []).filter(
       (c) => !d?.contains(c)
     );
     expect(outside.map((c) => c.querySelector('.card-title')?.textContent?.trim())).toEqual([
@@ -175,7 +184,7 @@ describe('admin maintenance completed migrations', () => {
   it('is not shown when there are no completed migrations', async () => {
     el = await mount([migration('b', 'pending'), migration('d', 'failed')]);
     expect(details(el)).toBeNull();
-    expect(titles(el.shadowRoot)).toEqual(['Title b', 'Title d']);
+    expect(titles(migrationsSection(el))).toEqual(['Title b', 'Title d']);
   });
 
   it('shows only the element when every migration is completed', async () => {
@@ -183,8 +192,8 @@ describe('admin maintenance completed migrations', () => {
     const d = details(el);
     expect(d).not.toBeNull();
     expect(d?.getAttribute('summary')).toBe('Completed migrations (2)');
-    expect(el.shadowRoot?.querySelector('.empty-inline')).toBeNull();
-    const outside = Array.from(el.shadowRoot?.querySelectorAll('.card') ?? []).filter(
+    expect(migrationsSection(el)?.querySelector('.empty-inline')).toBeNull();
+    const outside = Array.from(migrationsSection(el)?.querySelectorAll('.card') ?? []).filter(
       (c) => !d?.contains(c)
     );
     expect(outside.length).toBe(0);
@@ -245,7 +254,7 @@ describe('admin maintenance completed migrations', () => {
   it('keeps the run action working on cards outside the element', async () => {
     el = await mount(mixed);
     const d = details(el);
-    const failed = Array.from(el.shadowRoot?.querySelectorAll('.card') ?? []).find(
+    const failed = Array.from(migrationsSection(el)?.querySelectorAll('.card') ?? []).find(
       (c) => c.querySelector('.card-title')?.textContent?.trim() === 'Title d'
     );
     expect(failed).toBeDefined();
