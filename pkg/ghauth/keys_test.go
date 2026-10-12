@@ -56,6 +56,7 @@ func TestRepoKey(t *testing.T) {
 		{"acme-corp", "templates.git", "GH_ACME_CORP__TEMPLATES"},
 		{"acme-corp", "templates.GIT", "GH_ACME_CORP__TEMPLATES"},
 		{"acme-corp", "my.git.tools", "GH_ACME_CORP__MY_GIT_TOOLS"},
+		{"acme-corp", ".git", "GH_ACME_CORP___GIT"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.owner+"/"+tt.repo, func(t *testing.T) {

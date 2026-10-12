@@ -331,7 +331,7 @@ The same secret names authenticate remote imports into a project. This covers im
 | :--- | :--- | :--- |
 | 1 | `GH_{OWNER}__{REPO}` | Repo-specific convention secret |
 | 2 | `GH_{OWNER}` | Owner-level convention secret |
-| 3 | GitHub App installation token | Only if the project has a GitHub App installation |
+| 3 | GitHub App installation token | Only if the Hub has the GitHub App configured and the project has an installation; if minting the token fails, the next option is tried |
 | 4 | `GITHUB_TOKEN` | Project secret |
 | 5 | Unauthenticated | No credential found; works for public repos only |
 
@@ -340,7 +340,7 @@ For example, with a `GH_ACME_CORP` project secret, a project-scope import from `
 Limits:
 
 - Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip`, including `github.com/.../archive/...` links), rclone sources and other hosts are always fetched without one.
-- Global-scope (Hub-level) imports and `scion harness-config install` are unauthenticated, so they work only with public repositories.
+- Global-scope (Hub-level) imports, user-scope imports and `scion harness-config install` are unauthenticated, so they work only with public repositories.
 
 ### Injection Mode Behavior
 
