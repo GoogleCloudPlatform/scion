@@ -21,9 +21,9 @@ import (
 	"testing"
 )
 
-// setupExternalLayoutInit isolates HOME, mocks runtime detection and forces
-// the external (non-git) layout. It returns the temp HOME.
-func setupExternalLayoutInit(t *testing.T) string {
+// forceExternalLayoutWithTempHome isolates HOME, mocks runtime detection and
+// forces the external (non-git) layout. It returns the temp HOME.
+func forceExternalLayoutWithTempHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -32,8 +32,9 @@ func setupExternalLayoutInit(t *testing.T) string {
 	return home
 }
 
-// mkProjectDir creates <fresh temp dir>/<name> and returns it.
-func mkProjectDir(t *testing.T, name string) string {
+// mkNamedDirInTempDir creates <fresh temp dir>/<name> and returns it, so a
+// test controls the base name the project name and slug are derived from.
+func mkNamedDirInTempDir(t *testing.T, name string) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), name)
 	if err := os.Mkdir(dir, 0755); err != nil {
@@ -43,10 +44,10 @@ func mkProjectDir(t *testing.T, name string) string {
 }
 
 func TestInitProject_ExternalRelativeTargetMatchesAbsolute(t *testing.T) {
-	setupExternalLayoutInit(t)
+	forceExternalLayoutWithTempHome(t)
 
 	// Relative ".scion" target, run from inside the project directory.
-	relDir := mkProjectDir(t, "My Project")
+	relDir := mkNamedDirInTempDir(t, "My Project")
 	t.Chdir(relDir)
 	if err := InitProject(DotScion, GetMockHarnesses()); err != nil {
 		t.Fatalf("InitProject(relative) failed: %v", err)
@@ -57,7 +58,7 @@ func TestInitProject_ExternalRelativeTargetMatchesAbsolute(t *testing.T) {
 	}
 
 	// Absolute target for a directory with the same name, run from elsewhere.
-	absDir := mkProjectDir(t, "My Project")
+	absDir := mkNamedDirInTempDir(t, "My Project")
 	t.Chdir(t.TempDir())
 	if err := InitProject(filepath.Join(absDir, DotScion), GetMockHarnesses()); err != nil {
 		t.Fatalf("InitProject(absolute) failed: %v", err)
@@ -87,9 +88,9 @@ func TestInitProject_ExternalRelativeTargetMatchesAbsolute(t *testing.T) {
 }
 
 func TestInitProject_ExternalEmptySlugIsRefused(t *testing.T) {
-	home := setupExternalLayoutInit(t)
+	home := forceExternalLayoutWithTempHome(t)
 
-	dir := mkProjectDir(t, "!!!")
+	dir := mkNamedDirInTempDir(t, "!!!")
 	t.Chdir(dir)
 
 	err := InitProject(DotScion, GetMockHarnesses())
@@ -110,5 +111,35 @@ func TestInitProject_ExternalEmptySlugIsRefused(t *testing.T) {
 		t.Errorf("%s has entries %v; want none", configs, entries)
 	} else if readErr != nil && !os.IsNotExist(readErr) {
 		t.Fatalf("ReadDir(%s): %v", configs, readErr)
+	}
+}
+
+func TestExternalProjectNameAndSlug(t *testing.T) {
+	root := string(filepath.Separator)
+	tests := []struct {
+		projectRoot string
+		wantName    string
+		wantSlug    string
+		wantErr     string
+	}{
+		{projectRoot: filepath.Join(root, "work", "My Project"), wantName: "My Project", wantSlug: "my-project"},
+		{projectRoot: filepath.Join(root, "work", "!!!"), wantErr: "ASCII letters or digits (a-z, 0-9)"},
+		{projectRoot: root, wantErr: "has no name usable as a project slug"},
+	}
+	for _, tt := range tests {
+		name, slug, err := externalProjectNameAndSlug(tt.projectRoot)
+		if tt.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("externalProjectNameAndSlug(%q) error = %v, want one containing %q", tt.projectRoot, err, tt.wantErr)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("externalProjectNameAndSlug(%q) error = %v", tt.projectRoot, err)
+			continue
+		}
+		if name != tt.wantName || slug != tt.wantSlug {
+			t.Errorf("externalProjectNameAndSlug(%q) = %q, %q; want %q, %q", tt.projectRoot, name, slug, tt.wantName, tt.wantSlug)
+		}
 	}
 }
