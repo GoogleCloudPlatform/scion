@@ -348,26 +348,39 @@ func (h *artifactHost) ScopesExist(ctx context.Context, refs []string) (map[stri
 
 var _ artifacts.ScopeExplainer = (*artifactHost)(nil)
 
-// MissingScope implements artifacts.ScopeExplainer. Only an agent that
-// presented a real token (one with a token id) gets an answer: the scope
-// that Principal requires before serving it, then the token scopes the
-// permission maps to. Users and unauthenticated callers get "".
+// MissingScope implements artifacts.ScopeExplainer: the first scope
+// MissingScopes reports, or "".
 func (h *artifactHost) MissingScope(ctx context.Context, permission string) string {
+	if missing := h.MissingScopes(ctx, permission); len(missing) > 0 {
+		return missing[0]
+	}
+	return ""
+}
+
+var _ artifacts.ScopesExplainer = (*artifactHost)(nil)
+
+// MissingScopes implements artifacts.ScopesExplainer. Only an agent that
+// presented a real token (one with a token id) gets an answer: every scope
+// it lacks among the scope that Principal requires before serving it and
+// the token scopes the permission maps to, in that order (ptone/scion#4571).
+// Users and unauthenticated callers get nil.
+func (h *artifactHost) MissingScopes(ctx context.Context, permission string) []string {
 	perm, ok := artifactPermission(permission)
 	if !ok {
-		return ""
+		return nil
 	}
 	agent, ok := GetIdentityFromContext(ctx).(*agentIdentityWrapper)
 	if !ok || agent == nil || agent.AgentTokenClaims == nil || agent.ID() == "" || agent.TokenID() == "" {
-		return ""
+		return nil
 	}
+	var missing []string
 	if !agentHasAnyScope(agent, []string{string(ScopeProjectArtifactRead)}) {
-		return string(ScopeProjectArtifactRead)
+		missing = append(missing, string(ScopeProjectArtifactRead))
 	}
-	if len(perm.AgentScopes) > 0 && !agentHasAnyScope(agent, perm.AgentScopes) {
-		return perm.AgentScopes[0]
+	if len(perm.AgentScopes) > 0 && !agentHasAnyScope(agent, perm.AgentScopes) && !slices.Contains(missing, perm.AgentScopes[0]) {
+		missing = append(missing, perm.AgentScopes[0])
 	}
-	return ""
+	return missing
 }
 
 // artifactPermission returns the registry row for id when it is an artifact

@@ -416,6 +416,7 @@ func TestArtifactsPreArtifactCeilingTokenOnRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, "an agent without the artifact scopes is told which one it lacks: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), `"code":"`+artifacts.CodeMissingScope+`"`)
 	assert.Contains(t, rec.Body.String(), string(ScopeProjectArtifactRead))
+	assert.Contains(t, rec.Body.String(), string(ScopeProjectArtifactWrite), "a publish lacking both scopes names write too (ptone/scion#4571)")
 }
 
 // TestArtifactServiceReachableOnlyThroughHTTPAuth pins that the artifact
