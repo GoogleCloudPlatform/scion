@@ -610,7 +610,8 @@ func TestRunTemplateList_LocalMakesNoHubRequest(t *testing.T) {
 
 // templateListHub is a hub-connected test hub whose template list answers
 // per scope: a scope in failScopes gets a 500, any other scope one template
-// named "<scope>-tpl".
+// named "<scope>-tpl". It serves nothing else, so callers must not target
+// the global project explicitly (that looks up the hub's Global project).
 func templateListHub(t *testing.T, failScopes ...string) {
 	t.Helper()
 	hermeticCLIEnv(t)
@@ -653,7 +654,11 @@ func TestRunTemplateList_HubListErrors(t *testing.T) {
 		orig := saveTemplateTestState()
 		defer orig.restore()
 		templateListHub(t, "global")
-		globalMode = true
+		// No explicit project: the hub-connected path takes the project ID
+		// from SCION_PROJECT_ID. (An explicit --global here would look up
+		// the hub's Global project, which this test hub does not serve.)
+		globalMode, projectPath = false, ""
+		t.Chdir(t.TempDir())
 
 		var err error
 		captureStdIO(t, func() { err = runTemplateList(nil, nil) })
@@ -664,7 +669,11 @@ func TestRunTemplateList_HubListErrors(t *testing.T) {
 		orig := saveTemplateTestState()
 		defer orig.restore()
 		templateListHub(t, "project", "user")
-		globalMode = true
+		// No explicit project: the hub-connected path takes the project ID
+		// from SCION_PROJECT_ID. (An explicit --global here would look up
+		// the hub's Global project, which this test hub does not serve.)
+		globalMode, projectPath = false, ""
+		t.Chdir(t.TempDir())
 
 		var err error
 		stdout, stderr := captureStdIO(t, func() { err = runTemplateList(nil, nil) })
