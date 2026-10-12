@@ -99,12 +99,16 @@ func runProjectUse(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
 			return errors.New("--clear takes no project")
 		}
-		return runUseClear(os.Stdout)
+		return runUseClear(cmd.OutOrStdout())
 	}
 	if len(args) == 1 {
-		return runUseSelect(os.Stdout, os.Stderr, args[0])
+		ctx := cmd.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return runUseSelect(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0])
 	}
-	return runUseShow(os.Stdout)
+	return runUseShow(cmd.OutOrStdout(), cmd.ErrOrStderr())
 }
 
 // updateUseContext writes context.yaml for 'scion use', replacing an
@@ -333,8 +337,8 @@ func useAuthLine(info authInfo, endpoint string) string {
 }
 
 // runUseShow is bare 'scion use': it reads local state only.
-func runUseShow(out io.Writer) error {
-	c := loadUseContext(os.Stderr)
+func runUseShow(out, stderr io.Writer) error {
+	c := loadUseContext(stderr)
 	t := describeUseTarget(c)
 	hubName, _ := c.HubByEndpoint(t.HubEndpoint)
 
@@ -354,7 +358,10 @@ func runUseShow(out io.Writer) error {
 
 	var info authInfo
 	if t.HubEndpoint != "" {
-		settings, _ := config.LoadSettings(useSettingsPath())
+		settings, err := config.LoadSettings(useSettingsPath())
+		if err != nil {
+			settings = &config.Settings{}
+		}
 		info = getAuthInfo(settings, t.HubEndpoint)
 	}
 
@@ -448,7 +455,7 @@ var useHubBaseName = func(endpoint string) string {
 
 // runUseSelect is 'scion use <project>': it resolves ref on the effective
 // hub and saves it as the current project.
-func runUseSelect(out, stderr io.Writer, ref string) error {
+func runUseSelect(ctx context.Context, out, stderr io.Writer, ref string) error {
 	settings, err := config.LoadSettings(useSettingsPath())
 	if err != nil {
 		settings = &config.Settings{}
@@ -464,7 +471,7 @@ func runUseSelect(out, stderr io.Writer, ref string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create hub client: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if _, err := client.Health(ctx); err != nil {
 		return wrapHubError(fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))

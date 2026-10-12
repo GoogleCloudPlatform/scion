@@ -58,7 +58,7 @@ func contextDisabled(mode CLIMode) bool {
 
 // envHubEndpoint returns the hub endpoint set in the environment and the
 // name of the variable it came from.
-func envHubEndpoint() (endpoint, name string) {
+func envHubEndpoint() (endpoint, varName string) {
 	for _, name := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL"} {
 		if v := os.Getenv(name); v != "" {
 			return v, name
@@ -165,7 +165,7 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
 	}
 	ctx, err := config.LoadCLIContext()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: ignoring the current context: %v\n", err)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: ignoring the current context: %v\n", err)
 		contextWarned = true
 		return
 	}

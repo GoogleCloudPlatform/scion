@@ -17,6 +17,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -82,4 +83,19 @@ func TestRecordLoginEndpoint_HubURLStillPersists(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, s.Hub)
 	assert.Equal(t, "https://other.example.com", s.Hub.Endpoint)
+}
+
+// TestRecordLoginEndpoint_WritesToCommandOut: the context-hub login line goes
+// to the command's stdout.
+func TestRecordLoginEndpoint_WritesToCommandOut(t *testing.T) {
+	setupLoginContextTest(t)
+	resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman)
+	require.Equal(t, targetSourceContext, hubSource)
+	var out strings.Builder
+	hubAuthLoginCmd.SetOut(&out)
+	t.Cleanup(func() { hubAuthLoginCmd.SetOut(nil) })
+
+	stdout := captureStdout(t, func() { recordLoginEndpoint(hubAuthLoginCmd, ctxTestHub) })
+	assert.Equal(t, "Logged in to "+ctxTestHub+" (current hub, selected with 'scion use'); settings unchanged.\n", out.String())
+	assert.Empty(t, stdout)
 }

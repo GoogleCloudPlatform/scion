@@ -177,7 +177,7 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 // persistLoginEndpointForInvocation saves the endpoint as before.
 func recordLoginEndpoint(cmd *cobra.Command, hubURL string) {
 	if hubAuthHubURL == "" && hubSource == targetSourceContext {
-		fmt.Printf("Logged in to %s (current hub, selected with 'scion use'); settings unchanged.\n", hubURL)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Logged in to %s (current hub, selected with 'scion use'); settings unchanged.\n", hubURL)
 		return
 	}
 	persistLoginEndpointForInvocation(cmd, hubURL)

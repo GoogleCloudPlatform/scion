@@ -15,7 +15,9 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -437,4 +439,37 @@ func TestUseShow_RepeatedRunsKeepContextSource(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, stdout, "(current context)", "run %d", i+1)
 	}
+}
+
+// TestUseShow_WritesToCommandWriters: bare 'scion use' writes its output to
+// the command's stdout and its warnings to the command's stderr.
+func TestUseShow_WritesToCommandWriters(t *testing.T) {
+	setupUseTest(t)
+	writeHomeGlobalSettings(t, "")
+	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml"), []byte("version: [1\n"), 0o600))
+	var out, errOut strings.Builder
+	useCmd.SetOut(&out)
+	useCmd.SetErr(&errOut)
+	t.Cleanup(func() { useCmd.SetOut(nil); useCmd.SetErr(nil) })
+
+	stdout, stderr, err := runScion(t, "use")
+	require.NoError(t, err)
+	assert.Equal(t, noHubSelectedMessage+"\n", out.String())
+	assert.Equal(t, 1, strings.Count(errOut.String(), "Warning: ignoring the current context"), errOut.String())
+	assert.Empty(t, stdout, "nothing goes to the process stdout")
+	assert.NotContains(t, stderr, "Warning: ignoring the current context")
+}
+
+// TestUseSelectProject_UsesCommandContext: 'scion use <project>' calls the
+// hub with the command's context, so a cancelled context stops it before
+// anything is saved.
+func TestUseSelectProject_UsesCommandContext(t *testing.T) {
+	setupUseTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := runUseSelect(ctx, io.Discard, io.Discard, "foo")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	_, statErr := os.Stat(filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml"))
+	assert.True(t, os.IsNotExist(statErr), "nothing is saved")
 }

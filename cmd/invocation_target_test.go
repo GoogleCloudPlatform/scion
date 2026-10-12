@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -416,4 +417,20 @@ func TestPersistentPreRun_ConfigOutsideProjectKeepsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "not in a scion project")
 	assert.Empty(t, projectPath, "no project is injected for config")
 	assert.Equal(t, ctxTestHub, hubEndpoint, "the context hub still applies")
+}
+
+// TestResolveInvocationTarget_WarningToCommandErr: the warning about an
+// unreadable context.yaml goes to the command's stderr.
+func TestResolveInvocationTarget_WarningToCommandErr(t *testing.T) {
+	home := setupContextTest(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "context.yaml"), []byte("version: [1\n"), 0o600))
+	list := findCommand(t, "list")
+	var errOut bytes.Buffer
+	list.SetErr(&errOut)
+	t.Cleanup(func() { list.SetErr(nil) })
+
+	stderr := captureStderr(t, func() { resolveInvocationTarget(list, ModeHuman) })
+	assert.Contains(t, errOut.String(), "Warning: ignoring the current context")
+	assert.Empty(t, stderr)
 }
