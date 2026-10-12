@@ -41,14 +41,18 @@ import (
 //
 // How they travel depends on the broker's templateTiers capability:
 //
+// Requester telemetry is on/off only, for every broker: its other fields
+// are dropped with a create warning (warnRequesterTelemetryDropped). Only the
+// delivery channel depends on the broker's templateTiers capability:
+//
 //   - capable broker: the hub default in HubAgentDefaults.Telemetry, the
-//     policy in TelemetryPolicy, and only the requester's on/off as
+//     policy in TelemetryPolicy, and the requester's on/off as
 //     SCION_TELEMETRY_ENABLED (the requester flag tier, below policy).
 //     InlineConfig.Telemetry is not sent. The ladder is broker settings <
 //     hub default < requester on/off < project policy.
-//   - legacy broker: the pre-#4222 payload, InlineConfig.Telemetry = the
-//     requester's telemetry, else a copy of the hub default, with the
-//     policy written over Enabled. Removed in ptone/scion#4224.
+//   - legacy broker: the same ladder folded into InlineConfig.Telemetry: a
+//     copy of the hub default, the requester's Enabled over it, then the
+//     policy over Enabled. Removed in ptone/scion#4224.
 //
 // Template telemetry reaches no broker by any hub path (ptone/scion#4524).
 
@@ -98,7 +102,7 @@ func requesterTelemetry(ac *store.AgentAppliedConfig) *api.TelemetryConfig {
 }
 
 // requesterTelemetryDroppedFields names the fields of a requester telemetry
-// block, other than enabled, that a templateTiers broker does not receive.
+// block, other than enabled, that no broker receives.
 func requesterTelemetryDroppedFields(t *api.TelemetryConfig) []string {
 	if t == nil {
 		return nil
@@ -159,20 +163,25 @@ func (d *HTTPAgentDispatcher) dispatchTelemetry(ctx context.Context, agent *stor
 }
 
 // inlineTelemetry is the InlineConfig.Telemetry this dispatch sends: nil for
-// a templateTiers broker, the legacy merge otherwise. The result never
-// aliases the hub default or the requester's record.
+// a templateTiers broker; for a legacy broker the hub default, the
+// requester's Enabled over it, then the policy over Enabled. The requester's
+// other fields are never sent. The result never aliases the hub default or
+// the requester's record.
 func (t telemetryDispatch) inlineTelemetry() *api.TelemetryConfig {
 	if t.templateTiers {
 		return nil
 	}
 	var out *api.TelemetryConfig
-	switch {
-	case t.requester != nil:
-		c := *t.requester
-		out = &c
-	case t.hubDefault != nil:
+	if t.hubDefault != nil {
 		c := *t.hubDefault
 		out = &c
+	}
+	if t.requester != nil && t.requester.Enabled != nil {
+		if out == nil {
+			out = &api.TelemetryConfig{}
+		}
+		v := *t.requester.Enabled
+		out.Enabled = &v
 	}
 	if t.policy != nil {
 		if out == nil {
@@ -255,21 +264,13 @@ func (s *Server) hubTelemetryDefault() *api.TelemetryConfig {
 }
 
 // warnRequesterTelemetryDropped adds a create warning when the requester's
-// telemetry sets fields other than enabled and the agent's broker reports
-// templateTiers, which receives only the on/off (injectRequesterEnabled).
-// A legacy broker still receives the whole block inline, so nothing is
-// dropped there and no warning is given.
+// telemetry sets fields other than enabled: no broker receives them, only
+// the on/off (inlineTelemetry, injectRequesterEnabled).
 func (s *Server) warnRequesterTelemetryDropped(ctx context.Context, agent *store.Agent) {
 	if agent == nil {
 		return
 	}
-	fields := requesterTelemetryDroppedFields(requesterTelemetry(agent.AppliedConfig))
-	if len(fields) == 0 || agent.RuntimeBrokerID == "" {
-		return
+	if fields := requesterTelemetryDroppedFields(requesterTelemetry(agent.AppliedConfig)); len(fields) > 0 {
+		addDispatchWarnings(ctx, requesterTelemetryDroppedWarning(fields))
 	}
-	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
-	if err != nil || broker == nil || broker.Capabilities == nil || !broker.Capabilities.TemplateTiers {
-		return
-	}
-	addDispatchWarnings(ctx, requesterTelemetryDroppedWarning(fields))
 }

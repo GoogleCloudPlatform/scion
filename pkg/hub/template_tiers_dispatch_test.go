@@ -213,42 +213,64 @@ func TestTemplateTiers_HubTelemetryDelivery(t *testing.T) {
 	})
 }
 
-// TestTemplateTiers_RequesterTelemetry: a templateTiers broker gets only the
-// requester's on/off, as SCION_TELEMETRY_ENABLED, and create warns about the
-// dropped fields; a legacy broker gets the requester's block as before.
+// TestTemplateTiers_RequesterTelemetry: requester telemetry is on/off only
+// for every broker, and create warns about the dropped fields. A
+// templateTiers broker gets the on/off as SCION_TELEMETRY_ENABLED; a legacy
+// broker gets it inline, over the hub default and under the project policy.
 func TestTemplateTiers_RequesterTelemetry(t *testing.T) {
-	reqCfg := func() *api.ScionConfig {
-		on := true
-		return &api.ScionConfig{Telemetry: &api.TelemetryConfig{Enabled: &on, Cloud: &api.TelemetryCloudConfig{Endpoint: tiersReqEndpoint}}}
+	reqCfg := func(enabled bool) *api.ScionConfig {
+		return &api.ScionConfig{Telemetry: &api.TelemetryConfig{Enabled: &enabled, Cloud: &api.TelemetryCloudConfig{Endpoint: tiersReqEndpoint}}}
+	}
+	warned := func(t *testing.T, w *dispatchWarnings) {
+		t.Helper()
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		assert.Contains(t, strings.Join(w.list, "\n"), "telemetry cloud", "the dropped fields are named in a create warning")
 	}
 	t.Run("templateTiers broker", func(t *testing.T) {
 		f := newTiersFixture(t, true)
 		ctx, warnings := withDispatchWarnings(t.Context())
-		agent := f.newAgent(t, ctx, "req-tel-capable", reqCfg())
+		agent := f.newAgent(t, ctx, "req-tel-capable", reqCfg(true))
 		req, err := f.d.buildCreateRequest(ctx, agent, "test")
 		require.NoError(t, err)
 		if req.InlineConfig != nil {
 			assert.Nil(t, req.InlineConfig.Telemetry)
 		}
 		assert.Equal(t, "true", req.ResolvedEnv[envTelemetryEnabled], "enabled arrives as SCION_TELEMETRY_ENABLED")
-		warnings.mu.Lock()
-		got := strings.Join(warnings.list, "\n")
-		warnings.mu.Unlock()
-		assert.Contains(t, got, "telemetry cloud", "the dropped fields are named in a create warning")
+		warned(t, warnings)
 	})
-	t.Run("legacy broker", func(t *testing.T) {
+	t.Run("legacy broker, project policy over the requester", func(t *testing.T) {
 		f := newTiersFixture(t, false)
 		ctx, warnings := withDispatchWarnings(t.Context())
-		agent := f.newAgent(t, ctx, "req-tel-legacy", reqCfg())
+		agent := f.newAgent(t, ctx, "req-tel-legacy", reqCfg(true))
 		req, err := f.d.buildCreateRequest(ctx, agent, "test")
 		require.NoError(t, err)
 		require.NotNil(t, req.InlineConfig)
-		require.NotNil(t, req.InlineConfig.Telemetry)
-		assert.Equal(t, tiersReqEndpoint, req.InlineConfig.Telemetry.Cloud.Endpoint, "a legacy broker keeps the requester's block")
+		tel := req.InlineConfig.Telemetry
+		require.NotNil(t, tel)
+		require.NotNil(t, tel.Cloud)
+		assert.Equal(t, tiersHubEndpoint, tel.Cloud.Endpoint, "the requester's other fields are dropped; the hub default fills them")
+		require.NotNil(t, tel.Enabled)
+		assert.False(t, *tel.Enabled, "the project policy beats the requester's on")
 		assert.NotContains(t, req.ResolvedEnv, envTelemetryEnabled)
-		warnings.mu.Lock()
-		assert.Empty(t, warnings.list)
-		warnings.mu.Unlock()
+		warned(t, warnings)
+	})
+	t.Run("legacy broker, requester over the hub default", func(t *testing.T) {
+		f := newTiersFixture(t, false)
+		ctx, warnings := withDispatchWarnings(t.Context())
+		f.project.Annotations = map[string]string{}
+		require.NoError(t, f.s.UpdateProject(ctx, f.project))
+		agent := f.newAgent(t, ctx, "req-tel-legacy-nopolicy", reqCfg(false))
+		req, err := f.d.buildCreateRequest(ctx, agent, "test")
+		require.NoError(t, err)
+		require.NotNil(t, req.InlineConfig)
+		tel := req.InlineConfig.Telemetry
+		require.NotNil(t, tel)
+		require.NotNil(t, tel.Cloud)
+		assert.Equal(t, tiersHubEndpoint, tel.Cloud.Endpoint)
+		require.NotNil(t, tel.Enabled)
+		assert.False(t, *tel.Enabled, "the requester's off beats the hub default's on")
+		warned(t, warnings)
 	})
 }
 
@@ -610,8 +632,15 @@ func TestTelemetryDispatch_Units(t *testing.T) {
 	assert.Nil(t, legacy.telemetryPolicy())
 	assert.Nil(t, legacy.hubAgentDefaults(nil))
 
-	legacyReq := telemetryDispatch{hubDefault: hub, requester: requester}
-	assert.Equal(t, tiersReqEndpoint, legacyReq.inlineTelemetry().Cloud.Endpoint, "the requester beats the hub default inline")
+	legacyReq := telemetryDispatch{hubDefault: hub, requester: &api.TelemetryConfig{Enabled: &off, Cloud: &api.TelemetryCloudConfig{Endpoint: tiersReqEndpoint}}}
+	tel = legacyReq.inlineTelemetry()
+	assert.Equal(t, tiersHubEndpoint, tel.Cloud.Endpoint, "the requester's other fields never reach the broker")
+	assert.False(t, *tel.Enabled, "the requester's on/off beats the hub default")
+	assert.True(t, *hub.Enabled, "the hub default is never modified")
+	reqOnly := telemetryDispatch{requester: requester}.inlineTelemetry()
+	require.NotNil(t, reqOnly)
+	assert.Nil(t, reqOnly.Cloud)
+	assert.True(t, *reqOnly.Enabled)
 
 	capable := telemetryDispatch{templateTiers: true, hubDefault: hub, policy: &off, requester: requester}
 	assert.Nil(t, capable.inlineTelemetry())

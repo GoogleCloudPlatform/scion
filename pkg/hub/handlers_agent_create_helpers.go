@@ -458,7 +458,7 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 		}
 	}
 
-	// A templateTiers broker gets only the requester's telemetry on/off
+	// No broker gets more than the requester's telemetry on/off
 	// (dispatchTelemetry); say so when the request set more.
 	s.warnRequesterTelemetryDropped(ctx, agent)
 

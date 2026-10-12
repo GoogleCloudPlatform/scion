@@ -638,6 +638,10 @@ func (s *Server) BackfillTemplateAgentConfigs(ctx context.Context) int {
 	if result == nil {
 		return 0
 	}
+	if len(result.Items) >= templateAgentConfigBackfillLimit {
+		s.resourceLog.Info("template agent config backfill: row cap reached; rows past it are derived lazily on first read",
+			"cap", templateAgentConfigBackfillLimit)
+	}
 	derived := 0
 	for i := range result.Items {
 		if ctx.Err() != nil {

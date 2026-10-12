@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // TestLoadConfigMessageMode: scion-agent.yaml's message_mode (a job key the
@@ -55,5 +57,18 @@ func TestLoadConfigMessageMode(t *testing.T) {
 	}
 	if _, err := load(t, "message_mode: everyone\n"); err == nil || !strings.Contains(err.Error(), "message_mode") {
 		t.Errorf("invalid mode: want a message_mode error, got %v", err)
+	}
+}
+
+// TestMergeScionConfigMessageMode: a template-chain merge keeps the job key
+// message_mode: an override's value wins, and an unset override keeps the
+// base value.
+func TestMergeScionConfigMessageMode(t *testing.T) {
+	base := &api.ScionConfig{MessageMode: "lineage"}
+	if got := MergeScionConfig(base, &api.ScionConfig{MessageMode: "branch"}).MessageMode; got != "branch" {
+		t.Errorf("override: got %q, want branch", got)
+	}
+	if got := MergeScionConfig(base, &api.ScionConfig{Model: "m"}).MessageMode; got != "lineage" {
+		t.Errorf("unset override: got %q, want lineage", got)
 	}
 }

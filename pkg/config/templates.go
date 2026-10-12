@@ -912,6 +912,9 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if override.Model != "" {
 		result.Model = override.Model
 	}
+	if override.MessageMode != "" {
+		result.MessageMode = override.MessageMode
+	}
 	// ThinkingLevel is a *int: nil means "unset", so a nil override never
 	// clobbers a base value. Copy the pointee rather than the pointer — the
 	// merge's shallow copy above already aliases base's fields, and adding a
