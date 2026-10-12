@@ -38,8 +38,23 @@ import (
 
 // newTestAdminSystemRole creates a system-scoped role definition for the
 // issuance binding (the hub seeds hub-admin; the store tests seed their own).
+// newTestAdminSystemRole returns a system role definition. For the
+// built-in hub-admin and super-admin names it is that role (created when
+// the store has not seeded it), since an admin-kind issuance binding must
+// hold its kind's exact role; any other name gets a fresh custom role.
 func newTestAdminSystemRole(t *testing.T, cs *CompositeStore, name string) *store.RoleDefinition {
 	t.Helper()
+	if name == store.SystemRoleHubAdmin || name == store.SystemRoleSuperAdmin {
+		if rd, err := cs.GetRoleDefinitionByName(context.Background(), name, store.RoleScopeSystem); err == nil {
+			return rd
+		}
+		rd, err := cs.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
+			ID: uuid.NewString(), Name: name, Description: "test admin role",
+			ScopeType: store.RoleScopeSystem, Permissions: []string{"user.read"},
+		})
+		require.NoError(t, err)
+		return rd
+	}
 	rd, err := cs.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
 		ID: uuid.NewString(), Name: name + "-" + uuid.NewString()[:8], Description: "test admin role",
 		ScopeType: store.RoleScopeSystem, Permissions: []string{"user.read"},
@@ -184,17 +199,8 @@ func TestCreateTestAdminUser_Validation(t *testing.T) {
 func TestCreateTestAdminUser_SuperAdminBinding(t *testing.T) {
 	cs := newFixtureTestStore(t)
 	ctx := context.Background()
-	roleID := func(name string) string {
-		rd, err := cs.GetRoleDefinitionByName(ctx, name, store.RoleScopeSystem)
-		if err != nil {
-			rd, err = cs.CreateRoleDefinition(ctx, &store.RoleDefinition{
-				ID: uuid.NewString(), Name: name, ScopeType: store.RoleScopeSystem, Permissions: []string{"user.read"},
-			})
-			require.NoError(t, err)
-		}
-		return rd.ID
-	}
-	superRole, hubAdminRole := roleID(store.SystemRoleSuperAdmin), roleID(store.SystemRoleHubAdmin)
+	superRole := newTestAdminSystemRole(t, cs, store.SystemRoleSuperAdmin).ID
+	hubAdminRole := newTestAdminSystemRole(t, cs, store.SystemRoleHubAdmin).ID
 
 	u := newTestAdminUser(store.UserKindTestSuperAdmin, uuid.NewString(), time.Now().Add(30*time.Minute))
 	rb, err := cs.CreateTestAdminUser(ctx, u, superRole)
@@ -225,6 +231,34 @@ func TestCreateTestAdminUser_SuperAdminBinding(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrSuperAdminBindingRestricted)
 }
 
+// An admin-kind issuance binding must hold its kind's exact system role:
+// a mismatched role is refused with ErrInvalidInput for each admin kind
+// (a test_hub_admin offered super-admin is refused by the super-admin
+// guard first), and the row rolls back.
+func TestCreateTestAdminUser_MismatchedRoleRefused(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	hubAdmin := newTestAdminSystemRole(t, cs, store.SystemRoleHubAdmin)
+	superAdmin := newTestAdminSystemRole(t, cs, store.SystemRoleSuperAdmin)
+	custom := newTestAdminSystemRole(t, cs, "custom")
+	for _, tc := range []struct {
+		kind string
+		role *store.RoleDefinition
+		want error
+	}{
+		{store.UserKindTestHubAdmin, custom, store.ErrInvalidInput},
+		{store.UserKindTestSuperAdmin, custom, store.ErrInvalidInput},
+		{store.UserKindTestSuperAdmin, hubAdmin, store.ErrInvalidInput},
+		{store.UserKindTestHubAdmin, superAdmin, store.ErrSuperAdminBindingRestricted},
+	} {
+		u := newTestAdminUser(tc.kind, uuid.NewString(), time.Now().Add(30*time.Minute))
+		_, err := cs.CreateTestAdminUser(ctx, u, tc.role.ID)
+		require.ErrorIs(t, err, tc.want, "%s with %s", tc.kind, tc.role.Name)
+		_, err = cs.GetUser(ctx, u.ID)
+		require.ErrorIs(t, err, store.ErrNotFound, "%s with %s: the row rolls back", tc.kind, tc.role.Name)
+	}
+}
+
 // The DB CHECK rejects an admin-kind row without an expiry.
 func TestUsers_DBCheckRejectsTestAdminWithoutExpiry(t *testing.T) {
 	cs := newFixtureTestStore(t)
@@ -250,7 +284,7 @@ func TestCreateRoleBinding_TestAdminSystemBindingGuard(t *testing.T) {
 	other := newTestAdminSystemRole(t, cs, "other")
 	exp := time.Now().Add(time.Hour)
 	u := newTestAdminUser(store.UserKindTestHubAdmin, uuid.NewString(), exp)
-	_, err := cs.CreateTestAdminUser(ctx, u, rd.ID)
+	issued, err := cs.CreateTestAdminUser(ctx, u, rd.ID)
 	require.NoError(t, err)
 
 	later := exp.Add(time.Minute)
@@ -261,15 +295,25 @@ func TestCreateRoleBinding_TestAdminSystemBindingGuard(t *testing.T) {
 		"ordinary creator":      {CreatedBy: "someone", ExpiresAt: &earlier},
 		"outlives the identity": {CreatedBy: store.TestIdentityIssuanceCreatedBy, ExpiresAt: &later},
 	} {
-		rb.RoleDefinitionID = other.ID
+		rb.RoleDefinitionID = rd.ID
 		rb.PrincipalType = store.RoleBindingPrincipalUser
 		rb.PrincipalID = u.ID
 		rb.ScopeType = store.RoleScopeSystem
 		_, err := cs.CreateRoleBinding(ctx, rb)
 		assert.ErrorIs(t, err, store.ErrInvalidInput, name)
 	}
+	// An issuance-shaped binding of another role is refused (the kind's
+	// exact role only).
 	_, err = cs.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: other.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: u.ID,
+		ScopeType: store.RoleScopeSystem, CreatedBy: store.TestIdentityIssuanceCreatedBy, ExpiresAt: &earlier,
+	})
+	assert.ErrorIs(t, err, store.ErrInvalidInput, "issuance-shaped binding of a role other than the kind's")
+	// With the issuance binding gone, an issuance-shaped binding of the
+	// kind's role within the identity's lifetime is accepted.
+	require.NoError(t, cs.DeleteRoleBinding(ctx, issued.ID))
+	_, err = cs.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: u.ID,
 		ScopeType: store.RoleScopeSystem, CreatedBy: store.TestIdentityIssuanceCreatedBy, ExpiresAt: &earlier,
 	})
 	assert.NoError(t, err, "an issuance-shaped binding within the identity's lifetime is accepted")
