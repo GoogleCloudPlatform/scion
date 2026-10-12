@@ -277,6 +277,13 @@ func sandboxProbeSaysGone(probeCtx context.Context, out string, err error) bool 
 	if err == nil || probeCtx.Err() != nil {
 		return false
 	}
+	return exitedWithGoneOutput(out, err)
+}
+
+// exitedWithGoneOutput reports whether err is a non-zero exit of a CLI
+// that exited on its own (not killed by a signal) and whose output
+// contains one of sandboxGoneOutputs.
+func exitedWithGoneOutput(out string, err error) bool {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || !exitErr.Exited() {
 		return false
@@ -288,6 +295,87 @@ func sandboxProbeSaysGone(probeCtx context.Context, out string, err error) bool 
 		}
 	}
 	return false
+}
+
+// sandboxDeleteResult classifies the outcome of `sandbox delete --force`.
+type sandboxDeleteResult int
+
+const (
+	// sandboxDeleteDeleted: the CLI exited zero.
+	sandboxDeleteDeleted sandboxDeleteResult = iota
+	// sandboxDeleteGone: the CLI exited non-zero on its own with not-found
+	// output (sandboxGoneOutputs): the sandbox was already gone.
+	sandboxDeleteGone
+	// sandboxDeleteFailed: any other non-zero exit, a CLI that could not
+	// start or was killed, and ctx cancellation during the delete.
+	sandboxDeleteFailed
+	// sandboxDeleteTimedOut: the delete-hang workaround's timeout fired.
+	sandboxDeleteTimedOut
+)
+
+func (r sandboxDeleteResult) String() string {
+	switch r {
+	case sandboxDeleteDeleted:
+		return "deleted"
+	case sandboxDeleteGone:
+		return "gone"
+	case sandboxDeleteFailed:
+		return "failed"
+	case sandboxDeleteTimedOut:
+		return "timedOut"
+	}
+	return fmt.Sprintf("sandboxDeleteResult(%d)", int(r))
+}
+
+// classifySandboxDelete classifies a `sandbox delete --force` run under
+// ctx. out is the CLI's combined output, err its exec error, and timedOut
+// reports that the delete-hang workaround's timeout fired. A cancelled
+// ctx makes any unsuccessful delete "failed", even with not-found output:
+// a killed CLI's partial output is not a definitive answer.
+func classifySandboxDelete(ctx context.Context, out string, err error, timedOut bool) sandboxDeleteResult {
+	switch {
+	case timedOut:
+		return sandboxDeleteTimedOut
+	case err == nil:
+		return sandboxDeleteDeleted
+	case ctx.Err() != nil:
+		return sandboxDeleteFailed
+	case exitedWithGoneOutput(out, err):
+		return sandboxDeleteGone
+	default:
+		return sandboxDeleteFailed
+	}
+}
+
+// maxSandboxDeleteOutput bounds how much delete output is read back.
+const maxSandboxDeleteOutput = 64 << 10
+
+// newSandboxDeleteOutput returns an unlinked temporary file to use as a
+// delete command's stdout and stderr, so the output is captured without
+// a pipe. A pipe would make cmd.Wait block until every holder of its
+// write end exits, and the delete-hang defect leaves orphaned runsc
+// processes holding inherited fds (cloudrun_sandbox_delete_workaround.go).
+// The caller must Close the file. A nil file (on error) leaves the output
+// uncaptured, as before.
+func newSandboxDeleteOutput() *os.File {
+	f, err := os.CreateTemp("", "scion-sandbox-delete-*")
+	if err != nil {
+		runtimeLog.Warn("cloudrun-sandbox: cannot capture delete output", "error", err)
+		return nil
+	}
+	_ = os.Remove(f.Name())
+	return f
+}
+
+// readSandboxDeleteOutput returns what has been written to f so far,
+// bounded by maxSandboxDeleteOutput. Reading a regular file never blocks,
+// even while an orphaned process still writes to it.
+func readSandboxDeleteOutput(f *os.File) string {
+	if f == nil {
+		return ""
+	}
+	b, _ := io.ReadAll(io.NewSectionReader(f, 0, maxSandboxDeleteOutput))
+	return strings.TrimSpace(string(b))
 }
 
 // reconcile checks each entry for liveness and removes entries whose
@@ -1316,9 +1404,27 @@ func (r *CloudRunSandboxRuntime) deleteOrWorkaround(ctx context.Context, id stri
 
 // deletePlain is the non-workaround path: plain `sandbox delete --force`.
 // Used when SCION_CLOUDRUN_DELETE_WORKAROUND=off.
+//
+// A sandbox that is already gone (sandboxDeleteGone) counts as deleted:
+// the entry is removed and nil returned. Any failure keeps the entry.
 func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string) error {
 	cmd := exec.CommandContext(ctx, r.bin, "delete", "--force", id)
-	if err := cmd.Run(); err != nil {
+	outFile := newSandboxDeleteOutput()
+	if outFile != nil {
+		defer outFile.Close()
+		cmd.Stdout = outFile
+		cmd.Stderr = outFile
+	}
+	err := cmd.Run()
+	out := readSandboxDeleteOutput(outFile)
+	switch result := classifySandboxDelete(ctx, out, err, false); result {
+	case sandboxDeleteDeleted:
+	case sandboxDeleteGone:
+		runtimeLog.Info("cloudrun-sandbox: delete --force found the sandbox already gone",
+			"sandbox", id, "output", out)
+	default:
+		runtimeLog.Warn("cloudrun-sandbox: delete --force failed",
+			"sandbox", id, "result", result.String(), "error", err, "output", out)
 		return fmt.Errorf("cloudrun-sandbox: delete --force failed: %w", err)
 	}
 	r.state.remove(id)
