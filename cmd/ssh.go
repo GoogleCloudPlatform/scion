@@ -116,7 +116,7 @@ func runSSH(ctx context.Context, env *sshCommandEnv, args []string) int {
 		defer cleanup()
 	}
 	if err != nil {
-		fmt.Fprintf(env.stderr, "scion ssh: %s\n", sshOneLine(err.Error()))
+		_, _ = fmt.Fprintf(env.stderr, "scion ssh: %s\n", sshOneLine(err.Error()))
 		return sshExitFailure
 	}
 	sshBin, err := exec.LookPath("ssh")
@@ -140,7 +140,7 @@ func runSSH(ctx context.Context, env *sshCommandEnv, args []string) int {
 		if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
 			return exitErr.ExitCode()
 		}
-		fmt.Fprintf(env.stderr, "scion ssh: running ssh: %s\n", sshOneLine(err.Error()))
+		_, _ = fmt.Fprintf(env.stderr, "scion ssh: running ssh: %s\n", sshOneLine(err.Error()))
 		return sshExitFailure
 	}
 	return tunnelclient.ExitOK

@@ -75,7 +75,7 @@ Exit codes: 0 success, 1 other error, 3 no usable or refused credential,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		env, err := defaultSSHCommandEnv()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "scion ssh-config: %s\n", sshOneLine(err.Error()))
+			_, _ = fmt.Fprintf(os.Stderr, "scion ssh-config: %s\n", sshOneLine(err.Error()))
 			sshExit(tunnelclient.CodeOf(err))
 			return nil
 		}
@@ -412,7 +412,7 @@ func (h *sshHubConn) resolveSSHTarget(ctx context.Context, ref, settingsProjectI
 // printed to env.stderr as one plain line.
 func runSSHConfig(ctx context.Context, env *sshCommandEnv, args []string, write bool) int {
 	if err := sshConfigMain(ctx, env, args, write); err != nil {
-		fmt.Fprintf(env.stderr, "scion ssh-config: %s\n", sshOneLine(err.Error()))
+		_, _ = fmt.Fprintf(env.stderr, "scion ssh-config: %s\n", sshOneLine(err.Error()))
 		return tunnelclient.CodeOf(err)
 	}
 	return tunnelclient.ExitOK
@@ -449,22 +449,22 @@ func sshConfigAllAgents(ctx context.Context, env *sshCommandEnv, hub *sshHubTarg
 		return err
 	}
 	for _, host := range res.skipped {
-		fmt.Fprintf(env.stderr, "warning: %s has no SSH host key yet; skipped\n", host)
+		_, _ = fmt.Fprintf(env.stderr, "warning: %s has no SSH host key yet; skipped\n", host)
 	}
 	for _, problem := range res.invalid {
-		fmt.Fprintf(env.stderr, "warning: %s; skipped\n", problem)
+		_, _ = fmt.Fprintf(env.stderr, "warning: %s; skipped\n", problem)
 	}
 	if !write {
-		fmt.Fprintf(env.stdout, "# %s\n%s\n# %s\n%s", res.includeFile, res.includeContent, res.knownHostsFile, res.knownContent)
+		_, _ = fmt.Fprintf(env.stdout, "# %s\n%s\n# %s\n%s", res.includeFile, res.includeContent, res.knownHostsFile, res.knownContent)
 		return nil
 	}
 	for _, host := range res.changed {
-		fmt.Fprintf(env.stdout, "host key for %s changed (agent was recreated); known_hosts line rewritten\n", host)
+		_, _ = fmt.Fprintf(env.stdout, "host key for %s changed (agent was recreated); known_hosts line rewritten\n", host)
 	}
 	for _, host := range res.removed {
-		fmt.Fprintf(env.stdout, "removed %s (no longer listed)\n", host)
+		_, _ = fmt.Fprintf(env.stdout, "removed %s (no longer listed)\n", host)
 	}
-	fmt.Fprintf(env.stdout, "wrote %s (%d hosts) and %s\n", res.includeFile, res.hosts, res.knownHostsFile)
+	_, _ = fmt.Fprintf(env.stdout, "wrote %s (%d hosts) and %s\n", res.includeFile, res.hosts, res.knownHostsFile)
 	warnUnreachableSSHHubs(ctx, env, res.otherHubs)
 	return nil
 }
@@ -512,7 +512,7 @@ func warnUnreachableSSHHubs(ctx context.Context, env *sshCommandEnv, others []ss
 			continue
 		}
 		if err := env.probe(ctx, f.endpoint); err != nil {
-			fmt.Fprintf(env.stderr, "warning: %s: recorded hub endpoint %s cannot be reached; if that hub is gone, remove the file by hand\n", f.path, f.endpoint)
+			_, _ = fmt.Fprintf(env.stderr, "warning: %s: recorded hub endpoint %s cannot be reached; if that hub is gone, remove the file by hand\n", f.path, f.endpoint)
 		}
 	}
 }
@@ -561,11 +561,11 @@ func sshConfigOneAgent(ctx context.Context, env *sshCommandEnv, hub *sshHubTarge
 	known := renderKnownHosts(keys)
 
 	if !write {
-		fmt.Fprintf(env.stdout, "# %s\n%s\n# %s\n%s", p.includeFile(hub.label), include, p.knownHostsFile(hub.label), known)
+		_, _ = fmt.Fprintf(env.stdout, "# %s\n%s\n# %s\n%s", p.includeFile(hub.label), include, p.knownHostsFile(hub.label), known)
 		return nil
 	}
 	if hadPin && old != norm {
-		fmt.Fprintf(env.stdout, "host key for %s changed (agent was recreated); known_hosts line rewritten\n", host)
+		_, _ = fmt.Fprintf(env.stdout, "host key for %s changed (agent was recreated); known_hosts line rewritten\n", host)
 	}
 	if err := writeSSHHubPlan(p, &sshRegenResult{
 		label:          hub.label,
@@ -576,7 +576,7 @@ func sshConfigOneAgent(ctx context.Context, env *sshCommandEnv, hub *sshHubTarge
 	}); err != nil {
 		return tunnelclient.Errorf(tunnelclient.ExitError, "writing ssh files: %v", err)
 	}
-	fmt.Fprintf(env.stdout, "wrote %s (%d hosts) and %s\n", p.includeFile(hub.label), len(blocks), p.knownHostsFile(hub.label))
+	_, _ = fmt.Fprintf(env.stdout, "wrote %s (%d hosts) and %s\n", p.includeFile(hub.label), len(blocks), p.knownHostsFile(hub.label))
 	var others []sshIncludeFileInfo
 	for _, f := range hub.files {
 		if f.endpoint != hub.endpoint && f.path != p.includeFile(hub.label) {
