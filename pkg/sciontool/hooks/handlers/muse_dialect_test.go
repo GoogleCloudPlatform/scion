@@ -31,6 +31,7 @@ import (
 // follow-up"). The test sets the env var itself to exercise the opted-in
 // state.
 func TestMuseCodeHookTokensReachUsageMetric(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 
 	specPath := testutil.HarnessDialectPath(t, "muse-code")

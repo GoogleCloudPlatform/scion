@@ -16,19 +16,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 )
 
-// scrubHubEnvKeys lists the environment variables scrubHubEnv clears.
-// SCION_AGENT_ID, SCION_PROJECT and SCION_PROJECT_ID are agent identity
-// values the container sets ambiently; handlers stamp some of them onto
-// telemetry, so leaving them set would make results depend on where the
-// tests run.
-var scrubHubEnvKeys = []string{
-	"SCION_HUB_ENDPOINT",
-	"SCION_HUB_URL",
-	"SCION_AUTH_TOKEN",
-	"SCION_AGENT_ID",
-	"SCION_AGENT_MODE",
+// agentIdentityEnvKeys lists the agent identity variables scrubHubEnv clears
+// in addition to testutil.HubEnvKeys(). SCION_HARNESS, SCION_PROJECT and
+// SCION_PROJECT_ID are values the container sets ambiently; handlers stamp
+// some of them onto telemetry, so leaving them set would make results depend
+// on where the tests run.
+var agentIdentityEnvKeys = []string{
+	"SCION_HARNESS",
 	"SCION_PROJECT",
 	projectkeys.EnvProjectID,
 }
@@ -40,7 +37,8 @@ var scrubHubEnvKeys = []string{
 // See issue #123.
 func scrubHubEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range scrubHubEnvKeys {
+	testutil.ScrubHubEnv(t)
+	for _, key := range agentIdentityEnvKeys {
 		t.Setenv(key, "")
 	}
 }

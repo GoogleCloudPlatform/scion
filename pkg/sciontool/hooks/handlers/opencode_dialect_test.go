@@ -141,6 +141,7 @@ func apiCallTotal(rm metricdata.ResourceMetrics) int64 {
 //   - agent-end and session events fire (session.created x2, session.idle);
 //   - tool_input is populated (not the old bridge's fixed "{}").
 func TestOpencodeDialectFixtureDrivesCanonicalUsage(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_HARNESS", "opencode")
 
@@ -242,6 +243,7 @@ func TestOpencodeDialectFixtureDrivesCanonicalUsage(t *testing.T) {
 // vetting gate): with SCION_USAGE_SOURCE unset, no usage is published, but
 // every other hook signal (tool calls, sessions) still is.
 func TestOpencodeDialectSuppressesUsageWhenSourceUnset(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_HARNESS", "opencode")
 	// An empty value is treated as unset.
 	t.Setenv("SCION_USAGE_SOURCE", "")
@@ -309,6 +311,7 @@ func TestOpencodeDialectSuppressesUsageWhenSourceUnset(t *testing.T) {
 // doubling rather than some other inconsistency, documenting where the
 // dedupe responsibility actually lives.
 func TestOpencodeHandlerHasNoDedupeReplayDoubles(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_HARNESS", "opencode")
 
@@ -389,6 +392,7 @@ func TestOpencodeDialectStepFinishMappingOmitsExtractTokensFields(t *testing.T) 
 // tokens.cache.write=7 (see scion-bridge.test.mjs's matching synthetic case
 // for the bridge side of this same path).
 func TestOpencodeDialectCacheWriteMapsToNonZeroTokenType(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_HARNESS", "opencode")
 
@@ -484,6 +488,7 @@ var opencodeRun3AgentEndPayload = map[string]interface{}{
 // a failed turn's error status reaches the agent.turn.end span, while the
 // turn is still a single agent-end.
 func TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan(t *testing.T) {
+	scrubTelemetryEnv(t)
 	md := loadOpencodeDialect(t)
 
 	event, err := md.Parse(opencodeRun3AgentEndPayload)
@@ -534,6 +539,7 @@ func TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan(t *testing.T) {
 // gen_ai.api.duration is recorded; the test pins that too. The duration
 // label precedence is covered by the antigravity tests, which pair.
 func TestOpencodeDialectModelLabelFromPayload(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_HARNESS", "opencode")
 	t.Setenv("SCION_MODEL", "configured-model-should-lose")
