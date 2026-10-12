@@ -45,8 +45,14 @@ var ErrHomeGrantAdmin = errors.New("artifacts: the home scope's grant may only b
 
 // ErrReviewGrantRefused is returned by PutReviewGrant when the artifact's
 // home or owner changed since the caller's authority was checked, or the
-// subject already holds a grant the review grant would lower.
+// subject already holds a principal grant other than review.
 var ErrReviewGrantRefused = errors.New("artifacts: review grant refused")
+
+// ErrReviewReplacesAccess is returned by PutGrant for a review grant to a
+// user who holds a principal read, write or admin grant on the artifact:
+// the review grant would take that grant's row, and with it the user's
+// read.
+var ErrReviewReplacesAccess = errors.New("artifacts: a review grant cannot replace a read, write or admin grant")
 
 // ErrCrossScopeDisabled is returned by PutGrant for a scope grant to a
 // scope other than the artifact's home while sharing across scopes is off.
@@ -94,11 +100,17 @@ const (
 	SubjectLink = "link"
 )
 
-// Grant permissions, weakest first.
+// Grant permissions. Read, write and admin are each stronger than the one
+// before. Review (ptone/scion#4538), for a user principal only, is apart
+// from that ladder: it appends versions of kind review only, gives no read
+// of its own, and counts only while its holder reads the artifact through
+// another path (the home project or a grant to one of the holder's
+// projects).
 const (
-	GrantRead  = "read"
-	GrantWrite = "write"
-	GrantAdmin = "admin"
+	GrantRead   = "read"
+	GrantReview = "review"
+	GrantWrite  = "write"
+	GrantAdmin  = "admin"
 )
 
 // PrincipalRef is the subject ref of a principal grant.
@@ -341,18 +353,19 @@ type Store interface {
 	// stored grant's). created reports which. Under the artifact's lock it
 	// reads the artifact's home scope and refuses an admin grant to it
 	// (ErrHomeGrantAdmin) and, unless crossScope, a scope grant to any
-	// other scope (ErrCrossScopeDisabled). It refuses with
-	// ErrTooManyGrants when adding would exceed maxGrants principal and
-	// scope grants, and returns ErrNotFound when the artifact is absent or
-	// deleted.
+	// other scope (ErrCrossScopeDisabled), and a review grant over a
+	// subject's read, write or admin grant (ErrReviewReplacesAccess). It
+	// refuses with ErrTooManyGrants when adding would exceed maxGrants
+	// principal and scope grants, and returns ErrNotFound when the artifact
+	// is absent or deleted.
 	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool) (created bool, err error)
 
-	// PutReviewGrant is PutGrant for a review grant: g must be a write
-	// grant to a user principal. Under the artifact's lock it also refuses,
-	// with ErrReviewGrantRefused and writing nothing, when the artifact is
-	// no longer homed in home or not owned by an agent, or when the user
-	// already holds a grant other than read or write on it (an admin grant
-	// is never lowered this way).
+	// PutReviewGrant is PutGrant for a review grant (design D24): g must
+	// be a review grant to a user principal. Under the artifact's lock it
+	// also refuses, with ErrReviewGrantRefused and writing nothing, when
+	// the artifact is no longer homed in home or not owned by an agent, or
+	// when the user already holds a principal grant other than review on it
+	// (a read, write or admin grant is never replaced this way).
 	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string) (created bool, err error)
 
 	// DeleteGrant deletes principal or scope grant grantID of artifact

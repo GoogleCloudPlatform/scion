@@ -21,6 +21,20 @@ When an agent is created, Scion composes its home directory by layering files fr
 
 This multi-layered approach allows you to define a "base" Gemini configuration once, and then overlay different "roles" (like Code Reviewer or Security Auditor) on top of it.
 
+### When harness-config changes reach an agent
+
+A harness-config has two parts that reach an agent at different times:
+
+- **`home/` files** (for example `home/.claude/settings.json`, which registers the Claude Code hooks) are copied into the agent home only when the agent is provisioned: when it is created, and when it is [reincarnated](/scion/local/agent-lifecycle/#reincarnating-an-agent). Starting an existing agent reuses its agent home and does not copy them again.
+- **The provisioning bundle** (`config.yaml` and the provisioner scripts) is cleared and staged again from the harness-config on every start.
+
+So after you change a harness-config's `home/` files, an existing agent keeps its old copies through stops and starts. Reincarnate or recreate the agent to pick up the change.
+
+Where the start reads the harness-config from depends on the mode:
+
+- **Workstation:** a local agent uses the harness-config on disk (template-bundled, then project, then global). When the workstation server starts, it syncs the global harness-configs (`~/.scion/harness-configs/`) to the Hub: it imports each one the Hub does not have yet (except a built-in that was deleted on the Hub) and re-uploads each one whose content hash changed.
+- **Hosted:** the Hub stores each harness-config as a record plus its files in storage, written by `scion harness-config sync` (alias `push`) or re-imported by `scion harness-config update`. When the Runtime Broker creates, starts or restarts an agent, it fetches the Hub's current version of the agent's harness-config (cached on the broker by content hash), not the version the agent was created with. A start still keeps the agent's existing `home/` files.
+
 ## Managing Harness-Configs
 
 A **harness-config** is a named, versioned bundle that defines a harness: its `config.yaml`

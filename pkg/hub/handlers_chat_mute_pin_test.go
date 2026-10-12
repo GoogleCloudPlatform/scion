@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 // ---------------------------------------------------------------------------
