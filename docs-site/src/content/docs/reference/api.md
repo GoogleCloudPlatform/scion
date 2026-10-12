@@ -381,6 +381,8 @@ Every permission, legacy admin route, admin role check, operational settings sec
 
 Denied to both kinds: reading or writing the server configuration (`GET`/`PUT /api/v1/admin/server-config`, section resets, the schema), every settings and experiment write (`PUT /api/v1/admin/experiments` included), federation, the GitHub App, hub environment variables and hub-scope secrets, integrations, maintenance operations, admin mode, auth reset, signing key rotation, lifecycle hook, allow list, project default, messaging and scheduler updates, hub-wide injected skills, access constraint administration, user promotion and role change, test identity issuance, delegation adoption, the GCP permission check settings, GCP identity passthrough on the co-located broker, and runtime broker credential remint and rotation. Everything else the role holds is allowed.
 
+A test admin also cannot grant a denied permission to anyone: a role binding, a custom role definition or a group membership whose permissions include one is refused with `403`. This means a test admin cannot bind the built-in `hub-admin` role, which holds denied permissions, to another principal. Project roles stay grantable.
+
 The refusal is `403`; settings writes carry `details.reason: "test_admin_policy"`. Each refusal writes a `test_admin_policy_denial` line tagged `[scion-test-admin-audit]`.
 
 ##### Test admin audit lines

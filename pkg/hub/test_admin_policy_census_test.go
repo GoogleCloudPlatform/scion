@@ -354,3 +354,49 @@ func (w *taFlakyWriter) Write(p []byte) (int, error) {
 	}
 	return w.out.Write(p)
 }
+
+// Review C1: CanDelegate runs the test-admin delegation check before the
+// role-claim super-admin shortcut and before any type-specific
+// non-amplification check, so neither admits a deny-classified grant by an
+// admin kind.
+func TestTestAdminPolicy_CanDelegateChecksPolicyFirst(t *testing.T) {
+	var refusePos, shortcutPos token.Pos
+	var typeChecks []token.Pos
+	found := false
+	walkPkgHubFuncs(t, func(file string, fn *ast.FuncDecl, _ *token.FileSet) {
+		if file != "authz_candelegate.go" || fn.Name.Name != "CanDelegate" || fn.Recv == nil {
+			return
+		}
+		found = true
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name := ""
+			switch f := call.Fun.(type) {
+			case *ast.Ident:
+				name = f.Name
+			case *ast.SelectorExpr:
+				name = f.Sel.Name
+			}
+			switch {
+			case name == "refuseTestAdminDeniedGrant" && refusePos == 0:
+				refusePos = call.Pos()
+			case name == "IsUnscopedLocalPlatformAdmin" && shortcutPos == 0:
+				shortcutPos = call.Pos()
+			case strings.HasPrefix(name, "canDelegate"):
+				typeChecks = append(typeChecks, call.Pos())
+			}
+			return true
+		})
+	})
+	require.True(t, found, "CanDelegate exists")
+	require.NotZero(t, refusePos, "CanDelegate calls refuseTestAdminDeniedGrant")
+	require.NotZero(t, shortcutPos)
+	assert.Less(t, refusePos, shortcutPos, "the policy check runs before the super-admin shortcut")
+	require.NotEmpty(t, typeChecks)
+	for _, p := range typeChecks {
+		assert.Less(t, refusePos, p, "the policy check runs before the type-specific checks")
+	}
+}

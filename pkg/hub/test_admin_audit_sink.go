@@ -79,7 +79,8 @@ var testAdminAuditOutput io.Writer = os.Stdout
 // issuance, every request by an admin-kind test identity (before the
 // handler, and its completion), every test-admin policy refusal, and
 // revoke-all. Callers fail closed on a write error: issuance and admin-kind
-// requests answer 503.
+// requests (their request line) answer 503; the response line, written
+// after the handler, is best-effort.
 //
 // No line ever carries a token or other credential: callers pass
 // identifiers only (user, issuance, credential record IDs).
@@ -375,6 +376,11 @@ func (s *Server) testAdminRequestAuditMiddleware(next http.Handler) http.Handler
 		if len(denied) > 0 {
 			done["policy_denials"] = denied
 		}
+		// The response line is best-effort on purpose: the handler has
+		// already run, so a write failure here cannot be answered with a
+		// 503. The request line above is the fail-closed one. A failed
+		// write does not advance the chain, so the gap shows up only as a
+		// request line without its response line.
 		if err := s.testAdminAudit.emit(testAdminAuditEventResponse, done); err != nil {
 			slog.Error("test admin audit: response line could not be written", "error", err)
 		}

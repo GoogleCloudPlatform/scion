@@ -84,8 +84,47 @@ type testFixtureClampCache struct {
 	// time.Now.
 	now func() time.Time
 	// policyDenied, when set, is told about every test-admin policy
-	// refusal decide makes (Server.recordTestAdminPolicyDenial).
-	policyDenied func(ctx context.Context, userID, permissionID string)
+	// refusal the authorization service makes (decide step 0c: class
+	// permission; CanDelegate: class delegation), for
+	// Server.recordTestAdminPolicyDenial.
+	policyDenied func(ctx context.Context, userID, class, subject string)
+}
+
+// principalIsCagedTestAdmin reports whether the user principal userID is
+// subject to the test-admin policy: an admin-kind test identity (read
+// through kindForPrincipal) while an admin kind is enabled. When the
+// service's store is not the clamped store (no kind cache, and so no tier
+// switch), the kind is read uncached and every admin-kind identity is
+// caged whatever the tier: such an identity holds no authority without
+// the tier anyway, so this only fails closed. A read error is returned and
+// callers deny. A service without a store has no users to cage.
+func (a *AuthzService) principalIsCagedTestAdmin(ctx context.Context, userID string) (bool, error) {
+	if a == nil || a.store == nil {
+		return false, nil
+	}
+	if cache := a.kindCache(); cache != nil && !cache.adminTierOn() {
+		return false, nil
+	}
+	k, err := a.kindForPrincipal(ctx, userID)
+	if err != nil {
+		return true, err
+	}
+	return k.isTestAdmin(), nil
+}
+
+// reportTestAdminPolicyDenial passes a test-admin policy refusal to the
+// server's audit hook, when one is wired.
+func (a *AuthzService) reportTestAdminPolicyDenial(ctx context.Context, userID, class, subject string) {
+	cache := a.kindCache()
+	if cache == nil {
+		return
+	}
+	cache.mu.Lock()
+	hook := cache.policyDenied
+	cache.mu.Unlock()
+	if hook != nil {
+		hook(ctx, userID, class, subject)
+	}
 }
 
 // adminTierOn reports whether any admin test identity kind is enabled.
@@ -102,7 +141,7 @@ func (c *testFixtureClampCache) adminTierOn() bool {
 // setAuthzTestAdminPolicyDenied wires the hook decide calls on a test-admin
 // policy refusal. Server.New calls it once; transaction-bound services
 // share the cache.
-func setAuthzTestAdminPolicyDenied(svc *AuthzService, fn func(ctx context.Context, userID, permissionID string)) {
+func setAuthzTestAdminPolicyDenied(svc *AuthzService, fn func(ctx context.Context, userID, class, subject string)) {
 	c := svc.kindCache()
 	if c == nil {
 		return

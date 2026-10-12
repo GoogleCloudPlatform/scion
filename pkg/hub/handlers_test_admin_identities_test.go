@@ -1230,8 +1230,9 @@ func TestTestAdmin_AE1ReadScenario(t *testing.T) {
 	// Members hold user.read: the user read is 200 for them too.
 	assert.Equal(t, http.StatusOK, get(member.AccessToken, "/api/v1/users/"+human.ID).Code)
 	// The hub-admin per-agent GET is 403 (hub-admin has no agent.read).
-	// This flips to 200 when ptone/scion#4543 (D79: hub-admin read-only
-	// agent list and get) merges.
+	// (D79, hub-admin read-only agent read: ptone/scion#4543 was closed as
+	// not planned and superseded by ptone/scion#4604; a consideration, not
+	// a pending flip.)
 	assert.Equal(t, http.StatusForbidden, get(resp.AccessToken, "/api/v1/agents/"+agentIDs[0]).Code)
 	for _, path := range []string{"/api/v1/projects/" + projectID, "/api/v1/agents/" + agentIDs[0]} {
 		rec := get(member.AccessToken, path)

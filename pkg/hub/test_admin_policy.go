@@ -102,8 +102,14 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"project.set_messaging_policy": testAdminPolicyAllow,
 	"project.clone":                testAdminPolicyAllow,
 	"project.list":                 testAdminPolicyAllow,
-	// Secret value reads for agent material resolution.
-	"project.secret_read": testAdminPolicyDeny,
+	// Agent material resolution: held inside the built-in project-owner
+	// and project-admin roles and used when an agent's secrets are
+	// resolved, not a user-exercised value read. Allow, so a test admin can
+	// still grant project owner and admin roles (CanDelegate's deny check
+	// covers every permission a granted role holds). Secret values stay
+	// denied: secret.use, hub.env_vars.read and the hub-scope env/secret
+	// role gate are deny (TestTestAdminPolicy_SecretValueReadsDenied).
+	"project.secret_read": testAdminPolicyAllow,
 
 	// Artifacts, skills, templates, harness configs.
 	"artifact.read":         testAdminPolicyAllow,
@@ -262,7 +268,6 @@ var testAdminMustDenyPermissions = []string{
 	"test_identity.issue_super_admin",
 	"access_constraint.admin",
 	"user.promote",
-	"project.secret_read",
 	"secret.use",
 }
 
@@ -317,7 +322,7 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"authorize_message.go:authorizeAgentMessage":                  {Policy: testAdminPolicyAllow, Reason: "messaging agents"},
 	"handlers_agent_message_mode.go:handleSetMessageMode":         {Policy: testAdminPolicyAllow, Reason: "agent message mode"},
 	"deletion_redact.go:callerSeesDeletionDetail":                 {Policy: testAdminPolicyAllow, Reason: "deletion detail display"},
-	"authz_candelegate.go:CanDelegate":                            {Policy: testAdminPolicyAllow, Reason: "delegation by an admin; grant shaping for test admins is phase A3"},
+	"authz_candelegate.go:CanDelegate":                            {Policy: testAdminPolicyAllow, Reason: "the role-claim shortcut runs after refuseTestAdminDeniedGrant, which refuses any grant by an admin kind holding a deny-classified permission (census-pinned); forced expiry of what remains is phase A3"},
 	// System-admin binding checks outside decide (IsSystemAdmin, IsHubAdmin).
 	"handlers_agent_create_helpers.go:brokerProviderHasOwnerConsent": {Policy: testAdminPolicyAllow, Reason: "reads whether the broker provider's linker (not the caller) is a system admin"},
 	"handlers_brokers.go:brokerRemintTargetAuthorized":               {Policy: testAdminPolicyDeny, Reason: "runtime broker credential remint (key material)"},

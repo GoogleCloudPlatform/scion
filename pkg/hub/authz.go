@@ -854,34 +854,28 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// error denies. Only user principals are checked, and only while an
 	// admin kind is enabled on this hub (otherwise no admin-kind identity
 	// holds authority: the clamp drops its bindings and the row block
-	// refuses its tokens).
+	// refuses its tokens); a service whose store has no kind cache reads
+	// the kind uncached and cages every admin kind
+	// (principalIsCagedTestAdmin).
 	if principal.Kind == PrincipalKindUser && testAdminPermissionDenied(permissionID) {
-		if cache := a.kindCache(); cache.adminTierOn() {
-			k, kerr := a.kindForPrincipal(ctx, principal.ID)
-			if kerr != nil || k.isTestAdmin() {
-				reason := testAdminPolicyDenyReason
-				if kerr != nil {
-					reason = testAdminPolicyKindErrorReason
-				}
-				cache.mu.Lock()
-				hook := cache.policyDenied
-				cache.mu.Unlock()
-				if hook != nil {
-					hook(ctx, principal.ID, permissionID)
-				}
-				d := Decision{Allowed: false, Reason: reason, DeniedBy: DeniedByTestAdminPolicy, AlwaysAudit: true}
-				if request.Explain {
-					d.Provenance = &DecisionProvenance{
-						Permission:      permissionID,
-						DenyReasons:     []string{reason},
-						Grants:          []GrantDetail{},
-						InactiveGrants:  []GrantDetail{},
-						Restrictions:    []RestrictionProvenance{},
-						MembershipPaths: []MembershipPathDetail{},
-					}
-				}
-				return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+		if caged, kerr := a.principalIsCagedTestAdmin(ctx, principal.ID); caged {
+			reason := testAdminPolicyDenyReason
+			if kerr != nil {
+				reason = testAdminPolicyKindErrorReason
 			}
+			a.reportTestAdminPolicyDenial(ctx, principal.ID, "permission", permissionID)
+			d := Decision{Allowed: false, Reason: reason, DeniedBy: DeniedByTestAdminPolicy, AlwaysAudit: true}
+			if request.Explain {
+				d.Provenance = &DecisionProvenance{
+					Permission:      permissionID,
+					DenyReasons:     []string{reason},
+					Grants:          []GrantDetail{},
+					InactiveGrants:  []GrantDetail{},
+					Restrictions:    []RestrictionProvenance{},
+					MembershipPaths: []MembershipPathDetail{},
+				}
+			}
+			return decorateDecision(d, request, principal, credential, auditPermissionID(request))
 		}
 	}
 

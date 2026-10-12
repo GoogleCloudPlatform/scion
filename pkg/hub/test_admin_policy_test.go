@@ -141,8 +141,11 @@ func TestTestSuperAdmin_Issuance(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
 	assert.Equal(t, testAdminReasonSuperAdminCap, taReason(t, rec))
 
-	// Two super-admin issuances per issuer per hour: expire the identities
-	// (freeing the caps) and the third issuance in the hour is refused.
+	// Two super-admin issuances per issuer per hour. The per-issuer limiter
+	// is a token bucket on wall time (two tokens, refilled at 2/h), not on
+	// the test identity clock: the clock below only expires the identities
+	// so the caps free up, and the third issuance, a moment later in wall
+	// time, finds the bucket empty.
 	srv.testIdentities.now = func() time.Time { return time.Now().Add(31 * time.Minute) }
 	tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
 	srv.testIdentities.now = func() time.Time { return time.Now().Add(62 * time.Minute) }
@@ -409,6 +412,18 @@ func TestTestAdminPolicy_LegacyRoutesAndRoleGates(t *testing.T) {
 	assert.True(t, ok)
 }
 
+// tsaErrCode returns the error.code of an API error response.
+func tsaErrCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	return body.Error.Code
+}
+
 func contextWithIdentityAndUser(u UserIdentity) context.Context {
 	ctx := contextWithIdentity(context.Background(), u)
 	ctx = context.WithValue(ctx, userContextKey{}, u)
@@ -669,24 +684,30 @@ func TestTestSuperAdmin_LastHumanAdmin(t *testing.T) {
 	rec := doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/users/"+lastHuman.ID, nil)
 	t.Logf("delete last human super-admin: %d %s", rec.Code, rec.Body.String())
 	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Equal(t, ErrCodeConflict, tsaErrCode(t, rec))
+	assert.Contains(t, rec.Body.String(), "cannot delete the last super-admin")
 	stillAdmin("delete")
 	rec = doRequestWithToken(t, srv, tok, http.MethodPatch, "/api/v1/users/"+lastHuman.ID, map[string]any{"status": store.UserStatusSuspended})
 	t.Logf("suspend last human super-admin: %d %s", rec.Code, rec.Body.String())
-	assert.GreaterOrEqual(t, rec.Code, 400)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Equal(t, ErrCodeConstraintAdminLockout, tsaErrCode(t, rec))
 	stillAdmin("suspend")
 	rec = doRequestWithToken(t, srv, tok, http.MethodPatch, "/api/v1/users/"+lastHuman.ID, map[string]any{"role": store.UserRoleMember})
 	t.Logf("demote last human super-admin: %d %s", rec.Code, rec.Body.String())
 	assert.Equal(t, http.StatusForbidden, rec.Code, "user.promote is denied to test identities")
+	assert.Equal(t, ErrCodeForbidden, tsaErrCode(t, rec))
+	assert.Contains(t, rec.Body.String(), "requires user.promote permission")
 	stillAdmin("demote")
 	b := bindingOf(lastHuman.ID)
 	require.NotNil(t, b)
 	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/admin/role-bindings/"+b.ID, nil)
 	t.Logf("remove last human super-admin binding: %d %s", rec.Code, rec.Body.String())
-	assert.GreaterOrEqual(t, rec.Code, 400)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Equal(t, "last_admin", tsaErrCode(t, rec))
 	stillAdmin("binding removal")
 	rec = doRequestWithToken(t, srv, tok, http.MethodPost, "/api/v1/users/"+lastHuman.ID+"/revoke-sessions", nil)
 	t.Logf("revoke last human super-admin sessions: %d %s", rec.Code, rec.Body.String())
-	assert.Less(t, rec.Code, 300, "web session revocation is allowed (users.sessions.revoke)")
+	assert.Equal(t, http.StatusOK, rec.Code, "web session revocation is allowed (users.sessions.revoke)")
 
 	// With a second human admin, the first human's binding can go; the
 	// admin_emails reconcile at restart restores it.
@@ -694,7 +715,7 @@ func TestTestSuperAdmin_LastHumanAdmin(t *testing.T) {
 	require.NotNil(t, bindingOf(second.ID))
 	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/admin/role-bindings/"+b.ID, nil)
 	t.Logf("remove a non-last human super-admin binding: %d %s", rec.Code, rec.Body.String())
-	require.Less(t, rec.Code, 300, rec.Body.String())
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	assert.Nil(t, bindingOf(lastHuman.ID))
 	_, err = ReconcileSuperAdminBindings(ctx, s, []string{lastHuman.Email, second.Email}, "member")
 	require.NoError(t, err)
@@ -840,4 +861,147 @@ func TestTestSuperAdmin_GateRequiresCompletePolicy(t *testing.T) {
 	require.ErrorIs(t, validateTestAdminGateConfig(cfg, true), ErrTestSuperAdminRequiresPolicyRegistry)
 	cfg.TestAdminGate.SuperAdmin = false
 	require.NoError(t, validateTestAdminGateConfig(cfg, true), "the hub-admin kind does not need the policy")
+}
+
+// --- Delegation by an admin kind (review C1) ----------------------------------
+
+// An admin-kind test identity cannot grant a deny-classified permission to
+// anyone, through (a) a direct role binding, (b) a group binding or a group
+// membership whose group holds such a role, or (c) a custom role definition;
+// grants of allow-classified permissions still work; (d) a human
+// super-admin is unaffected. Both admin kinds.
+func TestTestAdminPolicy_DelegationOfDeniedPermissionsRefused(t *testing.T) {
+	srv, s, buf := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-dlg-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "tsa-dlg-iss2", store.SystemRoleSuperAdmin)
+	superKind := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	hubKind := tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin)
+	humanTok := taTokenFor(t, srv, taUser(t, s, "tsa-dlg-human", store.SystemRoleSuperAdmin))
+	grantee := taUser(t, s, "tsa-dlg-grantee", store.SystemRoleHubMember)
+
+	// Roles written by the store (not by a test identity).
+	denyRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{ID: generateID(), Name: "tsa-dlg-deny-" + generateID()[:6],
+		ScopeType: store.RoleScopeSystem, Permissions: []string{"user.read", "hub.config.update"}})
+	require.NoError(t, err)
+	allowRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{ID: generateID(), Name: "tsa-dlg-allow-" + generateID()[:6],
+		ScopeType: store.RoleScopeSystem, Permissions: []string{"user.read"}})
+	require.NoError(t, err)
+	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	group := tiGroupWithSystemRole(t, s, "tsa-dlg-group-"+generateID()[:6], store.SystemRoleHubMember, issuer.ID)
+	denyGroup := tiGroupWithSystemRole(t, s, "tsa-dlg-dgroup-"+generateID()[:6], store.SystemRoleHubMember, issuer.ID)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: denyRole.ID, PrincipalType: store.RoleBindingPrincipalGroup,
+		PrincipalID: denyGroup.ID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
+	require.NoError(t, err)
+
+	binding := func(roleID, principalType, principalID string) map[string]any {
+		return map[string]any{"roleDefinitionId": roleID, "principalType": principalType, "principalId": principalID, "scopeType": "system"}
+	}
+	customRole := func(perms ...string) map[string]any {
+		return map[string]any{"name": "tsa-dlg-custom-" + generateID()[:8], "scopeType": "system", "permissions": perms}
+	}
+	refused := []struct {
+		name, method, path string
+		body               map[string]any
+	}{
+		{"(a) role binding of a deny-holding role to a human", http.MethodPost, "/api/v1/admin/role-bindings", binding(denyRole.ID, "user", grantee.ID)},
+		{"(a) role binding of the built-in hub-admin role to a human", http.MethodPost, "/api/v1/admin/role-bindings", binding(hubAdminRD.ID, "user", grantee.ID)},
+		{"(b) role binding of a deny-holding role to a group", http.MethodPost, "/api/v1/admin/role-bindings", binding(denyRole.ID, "group", group.ID)},
+		{"(b) membership in a group holding a deny role", http.MethodPost, "/api/v1/groups/" + denyGroup.ID + "/members", map[string]any{"memberType": "user", "memberId": grantee.ID, "role": "member"}},
+		{"(c) custom role with hub.config.update", http.MethodPost, "/api/v1/admin/roles", customRole("user.read", "hub.config.update")},
+		{"(c) custom role with test_identity.issue_super_admin", http.MethodPost, "/api/v1/admin/roles", customRole(permissionTestIdentityIssueSuperAdmin)},
+	}
+	for _, tc := range refused {
+		for who, tok := range map[string]string{"test_super_admin": superKind.AccessToken, "test_hub_admin": hubKind.AccessToken} {
+			rec := doRequestWithToken(t, srv, tok, tc.method, tc.path, tc.body)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", who, tc.name, rec.Body.String())
+		}
+	}
+	// The grantee and the deny group gained nothing.
+	bs, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, grantee.ID)
+	require.NoError(t, err)
+	for _, b := range bs {
+		assert.NotEqual(t, denyRole.ID, b.RoleDefinitionID)
+		assert.NotEqual(t, hubAdminRD.ID, b.RoleDefinitionID)
+	}
+
+	// Allow-only grants still work for both kinds.
+	for who, tok := range map[string]string{"test_super_admin": superKind.AccessToken, "test_hub_admin": hubKind.AccessToken} {
+		rec := doRequestWithToken(t, srv, tok, http.MethodPost, "/api/v1/admin/roles", customRole("user.read"))
+		assert.Less(t, rec.Code, 300, "%s allow-only custom role: %s", who, rec.Body.String())
+		target := taUser(t, s, "tsa-dlg-ok-"+who, store.SystemRoleHubMember)
+		rec = doRequestWithToken(t, srv, tok, http.MethodPost, "/api/v1/admin/role-bindings", binding(allowRole.ID, "user", target.ID))
+		assert.Less(t, rec.Code, 300, "%s allow-only role binding: %s", who, rec.Body.String())
+	}
+
+	// (d) A human super-admin is unaffected by the new refusal.
+	for _, tc := range refused {
+		rec := doRequestWithToken(t, srv, humanTok, tc.method, tc.path, tc.body)
+		assert.Less(t, rec.Code, 300, "human super-admin %s: %s", tc.name, rec.Body.String())
+	}
+
+	// The refusal is the test-admin policy's (before the super-admin
+	// shortcut), and it is in the sink.
+	for _, id := range []string{superKind.Identity.ID, hubKind.Identity.ID} {
+		d := srv.authzService.CanDelegate(ctx, tsaIdentity(t, s, id), GrantDescriptor{Type: GrantTypeCustomRole,
+			CustomRolePermissions: []string{"hub.config.update"}, ScopeType: store.RoleScopeSystem})
+		assert.False(t, d.Allowed)
+		assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, d.Reason)
+	}
+	found := false
+	for _, l := range tsaSinkLines(buf, testAdminAuditEventPolicyDenial) {
+		if l["class"] == "delegation" && l["issuance_id"] == superKind.Identity.IssuanceID {
+			found = true
+		}
+	}
+	assert.True(t, found, "a delegation refusal is written to the sink")
+}
+
+// project.secret_read is allow (agent material resolution inside the
+// project owner/admin roles), but secret values stay denied to both admin
+// kinds: secret.use is deny, and the hub-scope secret and environment
+// variable reads refuse them; a human super-admin reads them.
+func TestTestAdminPolicy_SecretValueReadsDenied(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	issuer := taUser(t, s, "tsa-sec-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "tsa-sec-iss2", store.SystemRoleSuperAdmin)
+	superKind := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	hubKind := tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin)
+	human := taTokenFor(t, srv, issuer)
+	assert.False(t, testAdminPermissionDenied("project.secret_read"))
+	assert.True(t, testAdminPermissionDenied("secret.use"))
+	for _, path := range []string{"/api/v1/secrets?scope=hub", "/api/v1/env?scope=hub"} {
+		for who, tok := range map[string]string{"test_super_admin": superKind.AccessToken, "test_hub_admin": hubKind.AccessToken} {
+			rec := doRequestWithToken(t, srv, tok, http.MethodGet, path, nil)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s GET %s: %s", who, path, rec.Body.String())
+		}
+		rec := doRequestWithToken(t, srv, human, http.MethodGet, path, nil)
+		assert.Equal(t, http.StatusOK, rec.Code, "human super-admin GET %s: %s", path, rec.Body.String())
+	}
+}
+
+// Review N5: decide step 0c and the delegation check do not depend on the
+// clamp's kind cache. An authorization service whose store is not the
+// clamped store reads the kind uncached and still refuses a deny-classified
+// permission to an admin kind; a human super-admin is unaffected.
+func TestTestAdminPolicy_CageWithoutKindCache(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-nc-iss", store.SystemRoleSuperAdmin)
+	superKind := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	svc := NewAuthzService(s, slog.Default())
+	svc.store = s // the plain store: no clamp, no kind cache
+	require.Nil(t, svc.kindCache())
+	decide := func(u UserIdentity) Decision {
+		return svc.Decide(ctx, AuthzRequest{Principal: principalContextForIdentity(u), Credential: credentialContextForIdentity(u),
+			Resource: Resource{Type: permissions.ResourceHub, ID: "hub"}, Permission: "hub.config.update"})
+	}
+	d := decide(tsaIdentity(t, s, superKind.Identity.ID))
+	assert.False(t, d.Allowed)
+	assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, d.Reason)
+	assert.True(t, decide(tsaIdentity(t, s, issuer.ID)).Allowed, "a human super-admin is unaffected")
+	dd := svc.CanDelegate(ctx, tsaIdentity(t, s, superKind.Identity.ID), GrantDescriptor{Type: GrantTypeCustomRole,
+		CustomRolePermissions: []string{"hub.config.update"}, ScopeType: store.RoleScopeSystem})
+	assert.Equal(t, DeniedByTestAdminPolicy, dd.DeniedBy, dd.Reason)
 }

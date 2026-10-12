@@ -2583,8 +2583,8 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		func() time.Time { return srv.testIdentities.clock() })
 	// The test-admin policy refusals decide makes are written to the test
 	// admin audit sink.
-	setAuthzTestAdminPolicyDenied(srv.authzService, func(ctx context.Context, userID, permissionID string) {
-		srv.recordTestAdminPolicyDenial(ctx, userID, "permission", permissionID)
+	setAuthzTestAdminPolicyDenied(srv.authzService, func(ctx context.Context, userID, class, subject string) {
+		srv.recordTestAdminPolicyDenial(ctx, userID, class, subject)
 	})
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
