@@ -27,9 +27,6 @@ func TestFailureDoublesAndCaps(t *testing.T) {
 			t.Fatalf("failure %d: got %v, want %v", i+1, got, w*time.Second)
 		}
 	}
-	if b.Failures() != len(want) {
-		t.Fatalf("Failures() = %d, want %d", b.Failures(), len(want))
-	}
 }
 
 func TestResetReturnsToBase(t *testing.T) {
@@ -57,5 +54,21 @@ func TestJitterOnlyShortensWithinFraction(t *testing.T) {
 		if got > 10*time.Second || got < 8*time.Second {
 			t.Fatalf("r=%v: AtMax() = %v, want within [8s, 10s]", r, got)
 		}
+	}
+}
+
+func TestNonPositiveBaseAndSmallMax(t *testing.T) {
+	b := &Backoff{}
+	for i := 0; i < 3; i++ {
+		if got := b.Failure(); got != DefaultBase {
+			t.Fatalf("zero Backoff failure %d: got %v, want %v", i+1, got, DefaultBase)
+		}
+	}
+	b = &Backoff{Base: 10 * time.Second, Max: time.Second}
+	if got := b.Failure(); got != 10*time.Second {
+		t.Fatalf("Max below Base: got %v, want %v", got, 10*time.Second)
+	}
+	if got := b.AtMax(); got != 10*time.Second {
+		t.Fatalf("Max below Base AtMax: got %v, want %v", got, 10*time.Second)
 	}
 }

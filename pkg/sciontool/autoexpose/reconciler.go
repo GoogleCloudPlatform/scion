@@ -16,7 +16,9 @@ package autoexpose
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -72,6 +74,15 @@ type Reconciler struct {
 	backoff backoff.Backoff
 	state   loopState
 
+	// pass counts reconcile passes. rejectExpose and rejectUnexpose hold,
+	// per port the hub refused to register or deregister with a 4xx that
+	// retrying cannot fix soon (for example a 422 at the hub's port limit),
+	// the pass from which that port is tried again. Such a refusal does
+	// not back off the loop, so other ports keep the normal cadence.
+	pass           int
+	rejectExpose   map[int]int
+	rejectUnexpose map[int]int
+
 	// after returns a channel that fires after d. Defaults to time.After;
 	// overridable in tests.
 	after func(d time.Duration) <-chan time.Time
@@ -90,6 +101,16 @@ const (
 // including while the hub does not accept the agent's credential.
 const DefaultMaxBackoff = 5 * time.Minute
 
+// rejectedPortRetry is roughly how long a port the hub refused (see
+// Reconciler.rejectExpose) waits before it is tried again.
+const rejectedPortRetry = 5 * time.Minute
+
+// Package-level log hooks so tests can count state-change log lines.
+var (
+	logError = log.Error
+	logInfo  = log.Info
+)
+
 // cacheRefreshInterval is the number of ticks between forced cache refreshes.
 // Between refreshes, the reconciler uses its local cache to avoid HTTP calls.
 const cacheRefreshInterval = 10
@@ -97,10 +118,12 @@ const cacheRefreshInterval = 10
 // NewReconciler creates a new auto-expose reconciler.
 func NewReconciler(client HubPortClient, cfg Config) *Reconciler {
 	return &Reconciler{
-		client:      client,
-		cfg:         cfg,
-		scan:        ScanListeners,
-		autoExposed: make(map[int]bool),
+		client:         client,
+		cfg:            cfg,
+		scan:           ScanListeners,
+		autoExposed:    make(map[int]bool),
+		rejectExpose:   make(map[int]int),
+		rejectUnexpose: make(map[int]int),
 		backoff: backoff.Backoff{
 			Base:   cfg.Interval,
 			Max:    max(DefaultMaxBackoff, cfg.Interval),
@@ -118,11 +141,14 @@ func (r *Reconciler) SetMessageClient(mc MessageClient) {
 
 // Run starts the reconciliation loop. It blocks until ctx is cancelled.
 //
-// While reconciles succeed they run every cfg.Interval. After a failure the
-// delay doubles per consecutive failure up to the backoff cap, and a 401
-// from the hub moves straight to the cap: the agent token can be refreshed
-// in place while the container runs, so the loop keeps retrying slowly
-// rather than stopping. A successful reconcile restores the base interval.
+// While reconciles succeed they run every cfg.Interval. After a failure (a
+// scan error, a transport error, or a hub 5xx or 429) the delay doubles per
+// consecutive failure up to the backoff cap, and a 401 from the hub moves
+// straight to the cap. The agent token can be replaced in place while the
+// container runs (by the token refresh loop or a reset-auth), so the loop
+// keeps retrying slowly rather than stopping. A successful reconcile
+// restores the base interval. A hub 4xx refusing one port is handled per
+// port (see rejectExpose) and does not slow the loop.
 func (r *Reconciler) Run(ctx context.Context) {
 	for {
 		delay := r.nextDelay(r.reconcileOnce(ctx))
@@ -139,23 +165,27 @@ func (r *Reconciler) Run(ctx context.Context) {
 func (r *Reconciler) nextDelay(err error) time.Duration {
 	if err == nil {
 		if r.state != stateHealthy {
-			log.Info("auto-expose: hub requests succeeded again; resuming every %s", r.cfg.Interval)
+			logInfo("auto-expose: hub requests succeeded again; resuming every %s", r.cfg.Interval)
 		}
 		r.state = stateHealthy
 		r.backoff.Reset()
 		return r.cfg.Interval
 	}
+	// After a failure the next pass always asks the hub for the registered
+	// ports, so a success means the hub answered (not just a warm cache),
+	// and no change made earlier in a failed pass leaves the cache stale.
+	r.ticksSinceRefresh = cacheRefreshInterval
 	if scionhub.IsUnauthorized(err) {
 		delay := r.backoff.AtMax()
 		if r.state != stateUnauthorized {
-			log.Error("auto-expose: hub refused the agent credential (401); retrying every %s until it is accepted", r.backoff.Max)
+			logError("auto-expose: hub refused the agent credential (401); retrying every %s until it is accepted", r.backoff.Max)
 		}
 		r.state = stateUnauthorized
 		return delay
 	}
 	delay := r.backoff.Failure()
 	if r.state != stateBackoff {
-		log.Error("auto-expose: reconcile failed: %v; backing off (up to %s between attempts)", err, r.backoff.Max)
+		logError("auto-expose: reconcile failed: %v; backing off (up to %s between attempts)", err, r.backoff.Max)
 	} else {
 		log.Debug("auto-expose: reconcile failed: %v; next attempt in %s", err, delay)
 	}
@@ -164,9 +194,12 @@ func (r *Reconciler) nextDelay(err error) time.Duration {
 }
 
 // reconcileOnce runs one scan-and-reconcile pass. It returns the first error
-// from the scan or the hub; a 401 ends the pass early since further hub
-// calls with the same credential would be refused too.
+// from the scan or the hub that should back off the loop (see
+// isLoopFailure); a 401 ends the pass early since further hub calls with
+// the same credential would be refused too.
 func (r *Reconciler) reconcileOnce(ctx context.Context) error {
+	r.pass++
+
 	// 1. Scan for listening sockets.
 	sockets, err := r.scan()
 	if err != nil {
@@ -175,6 +208,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 
 	// 2. Filter through policy.
 	wanted := r.filterPorts(sockets)
+	r.pruneRejected(wanted)
 
 	// 3. Get currently registered ports (from cache or hub).
 	registered, err := r.getRegistered(ctx, false)
@@ -189,9 +223,21 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	toUnexpose := r.diffToUnexpose(wanted)
 
 	var firstErr error
-	fail := func(err error) bool {
+	// fail records a per-port error and reports whether the pass should
+	// end now (a 401).
+	fail := func(op string, port int, err error, rejected map[int]int) bool {
+		if !isLoopFailure(err) {
+			if _, seen := rejected[port]; !seen {
+				logError("auto-expose: hub refused to %s port %d: %v; retrying that port in %s", op, port, err, rejectedPortRetry)
+			} else {
+				log.Debug("auto-expose: hub refused to %s port %d again: %v", op, port, err)
+			}
+			rejected[port] = r.pass + r.rejectedRetryPasses()
+			return false
+		}
+		log.Debug("auto-expose: failed to %s port %d: %v", op, port, err)
 		if firstErr == nil {
-			firstErr = err
+			firstErr = fmt.Errorf("failed to %s port %d: %w", op, port, err)
 		}
 		return scionhub.IsUnauthorized(err)
 	}
@@ -200,24 +246,24 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	changed := false
 	for _, port := range toExpose {
 		if err := r.registerPort(ctx, port); err != nil {
-			log.Debug("auto-expose: failed to register port %d: %v", port, err)
-			if fail(fmt.Errorf("failed to register port %d: %w", port, err)) {
+			if fail("register", port, err, r.rejectExpose) {
 				return firstErr
 			}
 			continue
 		}
+		delete(r.rejectExpose, port)
 		changed = true
 	}
 
 	// 7. Deregister stale ports.
 	for _, port := range toUnexpose {
 		if err := r.deregisterPort(ctx, port); err != nil {
-			log.Debug("auto-expose: failed to deregister port %d: %v", port, err)
-			if fail(fmt.Errorf("failed to deregister port %d: %w", port, err)) {
+			if fail("deregister", port, err, r.rejectUnexpose) {
 				return firstErr
 			}
 			continue
 		}
+		delete(r.rejectUnexpose, port)
 		changed = true
 	}
 
@@ -228,6 +274,48 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+// isLoopFailure reports whether err from a hub call says the hub or the
+// path to it is unhealthy (transport errors, 5xx, 429, 401), so the loop
+// should back off. Other 4xx answers refuse one port and are handled per
+// port.
+func isLoopFailure(err error) bool {
+	var se *scionhub.StatusError
+	if !errors.As(err, &se) {
+		return true
+	}
+	return se.StatusCode >= 500 || se.StatusCode == http.StatusTooManyRequests || se.StatusCode == http.StatusUnauthorized
+}
+
+// rejectedRetryPasses is the number of passes a refused port waits.
+func (r *Reconciler) rejectedRetryPasses() int {
+	if r.cfg.Interval <= 0 {
+		return 1
+	}
+	return max(1, int(rejectedPortRetry/r.cfg.Interval))
+}
+
+// pruneRejected forgets refusals that no longer apply: an expose refusal
+// once the port stops listening, an unexpose refusal once the port listens
+// again or is no longer ours.
+func (r *Reconciler) pruneRejected(wanted map[int]bool) {
+	for port := range r.rejectExpose {
+		if !wanted[port] {
+			delete(r.rejectExpose, port)
+		}
+	}
+	for port := range r.rejectUnexpose {
+		if wanted[port] || !r.autoExposed[port] {
+			delete(r.rejectUnexpose, port)
+		}
+	}
+}
+
+// heldBack reports whether a refused port is still waiting for its retry.
+func (r *Reconciler) heldBack(rejected map[int]int, port int) bool {
+	retryAt, ok := rejected[port]
+	return ok && r.pass < retryAt
 }
 
 // filterPorts applies the configured policy to scanned sockets, returning
@@ -293,6 +381,9 @@ func (r *Reconciler) diffToExpose(wanted map[int]bool, registered map[int]string
 		if _, exists := registered[port]; exists {
 			continue
 		}
+		if r.heldBack(r.rejectExpose, port) {
+			continue
+		}
 		// Respect max ports limit.
 		if autoCount+len(result) >= r.cfg.MaxPorts {
 			break
@@ -307,7 +398,7 @@ func (r *Reconciler) diffToExpose(wanted map[int]bool, registered map[int]string
 func (r *Reconciler) diffToUnexpose(wanted map[int]bool) []int {
 	var result []int
 	for port := range r.autoExposed {
-		if !wanted[port] {
+		if !wanted[port] && !r.heldBack(r.rejectUnexpose, port) {
 			result = append(result, port)
 		}
 	}
@@ -381,7 +472,11 @@ func (r *Reconciler) registerPort(ctx context.Context, port int) error {
 // deregisterPort removes a port from the Hub and stops tracking it.
 func (r *Reconciler) deregisterPort(ctx context.Context, port int) error {
 	if err := r.client.DeletePort(ctx, port); err != nil {
-		return err
+		// A 404 means the port is no longer registered: nothing to undo.
+		var se *scionhub.StatusError
+		if !errors.As(err, &se) || se.StatusCode != http.StatusNotFound {
+			return err
+		}
 	}
 
 	delete(r.autoExposed, port)

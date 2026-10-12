@@ -22,6 +22,10 @@ import (
 	"time"
 )
 
+// DefaultBase replaces a non-positive Backoff.Base, so a misconfigured
+// Backoff never retries in a hot loop.
+const DefaultBase = time.Second
+
 // DefaultJitter is the fraction of each delay that may be randomly removed
 // so that many agents do not retry in lockstep.
 const DefaultJitter = 0.2
@@ -29,10 +33,11 @@ const DefaultJitter = 0.2
 // Backoff tracks consecutive failures of one loop. It is not safe for
 // concurrent use; each loop owns its own Backoff.
 type Backoff struct {
-	// Base is the delay used while the loop is healthy and the first
-	// failure delay.
+	// Base is the first failure delay. A non-positive Base is treated as
+	// DefaultBase.
 	Base time.Duration
-	// Max caps the delay.
+	// Max caps the delay. A Max below the effective Base is treated as
+	// that Base (no growth).
 	Max time.Duration
 	// Jitter is the fraction (0..1) of a delay that may be removed at
 	// random. Jitter only shortens a delay, so Max is never exceeded.
@@ -43,9 +48,6 @@ type Backoff struct {
 	failures int
 }
 
-// Failures returns the number of consecutive failures recorded.
-func (b *Backoff) Failures() int { return b.failures }
-
 // Reset clears the failure count after a success.
 func (b *Backoff) Reset() { b.failures = 0 }
 
@@ -53,28 +55,29 @@ func (b *Backoff) Reset() { b.failures = 0 }
 // Base doubled once per consecutive failure, capped at Max, with jitter.
 func (b *Backoff) Failure() time.Duration {
 	b.failures++
-	d := b.Base
-	for i := 1; i < b.failures && d < b.Max; i++ {
+	base, limit := b.bounds()
+	d := base
+	for i := 1; i < b.failures && d < limit; i++ {
 		d *= 2
 	}
-	return b.jitter(b.capped(d))
+	return b.jitter(min(d, limit))
 }
 
 // AtMax records a failure and returns the capped delay with jitter. Loops
 // use it when retrying sooner cannot help, such as a refused credential.
 func (b *Backoff) AtMax() time.Duration {
 	b.failures++
-	return b.jitter(b.capped(b.Max))
+	_, limit := b.bounds()
+	return b.jitter(limit)
 }
 
-func (b *Backoff) capped(d time.Duration) time.Duration {
-	if b.Max > 0 && d > b.Max {
-		return b.Max
+// bounds returns the effective base and cap.
+func (b *Backoff) bounds() (base, limit time.Duration) {
+	base = b.Base
+	if base <= 0 {
+		base = DefaultBase
 	}
-	if d < b.Base {
-		return b.Base
-	}
-	return d
+	return base, max(b.Max, base)
 }
 
 func (b *Backoff) jitter(d time.Duration) time.Duration {

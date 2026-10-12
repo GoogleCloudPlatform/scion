@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -137,5 +138,47 @@ func TestRun_Unauthorized401FromHub(t *testing.T) {
 	}
 	if n := hits.Load(); n != 4 {
 		t.Fatalf("hub requests = %d, want 4 (one per attempt)", n)
+	}
+}
+
+// A refused upgrade with a status other than 401 (here 403) maps to a
+// StatusError carrying the response body, and backs off exponentially
+// rather than jumping to the cap.
+func TestRun_ForbiddenHandshakeBacksOffExponentially(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	m := NewManager(scionhub.NewClientWithConfig(srv.URL, "agent-credential", "agent-1"))
+	_, err := m.runOnce(context.Background())
+	var se *scionhub.StatusError
+	if !errors.As(err, &se) || se.StatusCode != http.StatusForbidden || !strings.Contains(se.Body, "forbidden") {
+		t.Fatalf("runOnce error = %#v, want a 403 StatusError with the response body", err)
+	}
+	if scionhub.IsUnauthorized(err) {
+		t.Fatal("a 403 must not be treated as a 401")
+	}
+
+	got := runScripted(t, m, nil, 3)
+	if want := secs(5, 10, 20); !reflect.DeepEqual(got, want) {
+		t.Fatalf("delays = %v, want %v", got, want)
+	}
+}
+
+func TestRun_LogsOnlyOnStateChange(t *testing.T) {
+	var errs int
+	orig := logError
+	logError = func(string, ...interface{}) { errs++ }
+	t.Cleanup(func() { logError = orig })
+
+	err401 := &scionhub.StatusError{StatusCode: http.StatusUnauthorized}
+	script := []connectResult{
+		{false, errDial}, {false, errDial}, {false, errDial}, // one line: entering backoff
+		{false, err401}, {false, err401}, {false, err401}, // one line: entering 401 mode
+	}
+	runScripted(t, NewManager(nil), script, 6)
+	if errs != 2 {
+		t.Fatalf("error log lines = %d, want 2", errs)
 	}
 }

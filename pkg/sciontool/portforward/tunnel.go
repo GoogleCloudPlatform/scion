@@ -43,7 +43,13 @@ const (
 	maxReconnectDelay    = 5 * time.Minute
 	localRequestTimeout  = 60 * time.Second
 	maxLocalResponseBody = 64 << 20
+	// handshakeBodyLimit bounds how much of a refused upgrade's response
+	// body goes into the error.
+	handshakeBodyLimit = 1 << 10
 )
+
+// Package-level log hooks so tests can count state-change log lines.
+var logError = log.Error
 
 type Manager struct {
 	client  *scionhub.Client
@@ -80,8 +86,9 @@ func NewManager(client *scionhub.Client) *Manager {
 // After a session that connected, the next connect waits reconnectDelay.
 // Each consecutive failed connect doubles the delay up to
 // maxReconnectDelay. A 401 on the upgrade request moves straight to
-// maxReconnectDelay: the agent token can be refreshed in place while the
-// container runs, so the tunnel keeps retrying slowly rather than stopping.
+// maxReconnectDelay: the agent token can be replaced in place while the
+// container runs (by the token refresh loop or a reset-auth), so the tunnel
+// keeps retrying slowly rather than stopping.
 func (m *Manager) Run(ctx context.Context) {
 	if m == nil || m.client == nil || !m.client.IsConfigured() {
 		return
@@ -108,13 +115,13 @@ func (m *Manager) run(ctx context.Context) {
 		case scionhub.IsUnauthorized(err):
 			delay = m.backoff.AtMax()
 			if state != tunnelUnauthorized {
-				log.Error("Port-forward tunnel: hub refused the agent credential (401); retrying every %s until it is accepted", m.backoff.Max)
+				logError("Port-forward tunnel: hub refused the agent credential (401); retrying every %s until it is accepted", m.backoff.Max)
 			}
 			state = tunnelUnauthorized
 		default:
 			delay = m.backoff.Failure()
 			if state != tunnelBackoff {
-				log.Error("Port-forward tunnel: connect failed: %v; backing off (up to %s between attempts)", err, m.backoff.Max)
+				logError("Port-forward tunnel: connect failed: %v; backing off (up to %s between attempts)", err, m.backoff.Max)
 			} else {
 				log.Debug("Port-forward tunnel: connect failed: %v; next attempt in %s", err, delay)
 			}
@@ -158,7 +165,13 @@ func (m *Manager) runOnce(ctx context.Context) (connected bool, err error) {
 	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, endpoint, header)
 	if err != nil {
 		if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols {
-			return false, &scionhub.StatusError{StatusCode: resp.StatusCode, Body: err.Error()}
+			// On a refused upgrade the dialer returns the response with
+			// (up to 1 KiB of) its body still readable.
+			var body []byte
+			if resp.Body != nil {
+				body, _ = io.ReadAll(io.LimitReader(resp.Body, handshakeBodyLimit))
+			}
+			return false, &scionhub.StatusError{StatusCode: resp.StatusCode, Body: string(body)}
 		}
 		return false, err
 	}
