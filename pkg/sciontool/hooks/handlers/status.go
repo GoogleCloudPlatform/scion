@@ -74,11 +74,12 @@ const activitySourceNotification = "notification"
 // writers inside one process, and each hook event runs in its own sciontool
 // process, so two sub-agents' hooks that fire at the same moment can each
 // read the file, change the list and write it back, and one change is lost.
-// The effect is bounded and never worse than having no list: a lost entry
-// lets that question be cleared early, as any tool-end did before; a lost
-// removal keeps the wait until the parent's Agent tool-end after SubagentStop,
-// or the parent's Stop, next prompt or next tool-start, so it never outlives
-// the turn. ReplaceActivityIf documents the same single-file window.
+// The effect is bounded. A lost entry lets that question be cleared early,
+// as any tool-end did before. A lost removal can hold the wait longer than
+// before: until the stale owner's SubagentStop plus the parent's Agent
+// tool-end, or at the latest the parent's next Stop, prompt or tool-start (an
+// interrupted turn with no Stop waits for the next prompt).
+// ReplaceActivityIf documents the same single-file window.
 const notificationWaitAgentsKey = "notificationWaitAgents"
 
 // maxNotificationWaitAgents caps notificationWaitAgentsKey. Past the cap, a
