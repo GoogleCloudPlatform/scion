@@ -221,8 +221,8 @@ module "hub_gke" {
 # is read here at the root: modules/hub-gke must not consume hub-lb
 # attributes beyond the front-door contract, but this module may.
 #
-# Gated on enabled only: invalid input fails the root variable's validation,
-# and the module's own validations report the same mistake again.
+# Gated on enabled only. test_runner.impersonators is validated in one
+# place, the module's own variable, which fails the plan on invalid input.
 module "hub_test_runner" {
   source = "../../modules/hub-test-runner"
   count  = var.test_runner.enabled ? 1 : 0

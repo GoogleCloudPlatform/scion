@@ -410,7 +410,8 @@ run "newer_gke_minor_passes" {
 # a counted module. Each enabled run overrides the module's IAM-policy read
 # with an iamcredentials DATA_READ audit config; the precondition itself is
 # covered by the module's own tests (a child module's precondition cannot be
-# named in a root test's expect_failures).
+# named in a root test's expect_failures). For the same reason the
+# impersonator validations, which live only in the module, are tested there.
 
 run "test_runner_enabled_adds_the_module" {
   command = plan
@@ -543,57 +544,6 @@ run "test_runner_outputs_pass_through" {
     ]
     error_message = "the module must grant token creation on both accounts and IAP on this hub's backend service for -uat only."
   }
-}
-
-run "test_runner_rejects_empty_impersonators" {
-  command = plan
-
-  variables {
-    test_runner = {
-      enabled = true
-    }
-  }
-
-  expect_failures = [var.test_runner]
-}
-
-run "test_runner_rejects_group_member" {
-  command = plan
-
-  variables {
-    test_runner = {
-      enabled       = true
-      impersonators = ["group:testers@example.com"]
-    }
-  }
-
-  expect_failures = [var.test_runner]
-}
-
-run "test_runner_rejects_user_member" {
-  command = plan
-
-  variables {
-    test_runner = {
-      enabled       = true
-      impersonators = ["user:someone@example.com"]
-    }
-  }
-
-  expect_failures = [var.test_runner]
-}
-
-run "test_runner_rejects_mixed_case_email" {
-  command = plan
-
-  variables {
-    test_runner = {
-      enabled       = true
-      impersonators = ["serviceAccount:Orchestrator@example-project.iam.gserviceaccount.com"]
-    }
-  }
-
-  expect_failures = [var.test_runner]
 }
 
 # --- Test identities chart value ---

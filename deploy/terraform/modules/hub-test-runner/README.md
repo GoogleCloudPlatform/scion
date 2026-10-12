@@ -48,6 +48,10 @@ a separate change.
 | `backend_service_name` | the test hub's IAP backend service (`hub-lb`'s `backend_service.name`) |
 | `alert_notification_channels` | optional notification channel IDs; empty creates no alert objects |
 
+Validation of `impersonators` lives only here (`variables.tf`);
+`configurations/hub-gke` passes `test_runner.impersonators` through
+unvalidated.
+
 Outputs: `uat_email`, `uat_unique_id`, `issuer_email`, `issuer_unique_id`,
 plus `iam_grants` and `alerts_enabled` for operators and tests.
 

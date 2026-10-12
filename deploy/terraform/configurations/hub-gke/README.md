@@ -270,8 +270,7 @@ test_runner = {
 
 - `impersonators` must be non-empty when enabled, and every entry must be a
   `serviceAccount:` member with a lowercase email. `group:` and `user:` are
-  rejected. Invalid input is reported by the root variable and again by the
-  module's own validations.
+  rejected. This validation lives only in `modules/hub-test-runner`.
 - The plan fails unless the project records `DATA_READ` audit logs for
   `iamcredentials.googleapis.com` (or `allServices`) without exempting an
   impersonator in either config. Apply
@@ -325,6 +324,8 @@ composes and plans, the front-door contract, the LB's timeout and health check,
 the digest pin, `auth=password`, `create_hub_rbac = false`, both
 first-install states, the NEG zones (from `node_locations`) and the GKE version
 check, the firewall's pod-range destination, that the test-hub settings add
-nothing by default, the `test_runner` validations, module wiring and
-pass-through outputs, and the `hub.testIdentities.enabled` chart value. They cannot prove the APIs accept the resources, the NEG
-timing, or that the hub boots. Those are live checks.
+nothing by default, the `test_runner` module wiring and
+pass-through outputs, and the `hub.testIdentities.enabled` chart value (the
+`test_runner.impersonators` validations are tested in the module). They
+cannot prove the APIs accept the resources, the NEG timing, or that the hub
+boots. Those are live checks.
