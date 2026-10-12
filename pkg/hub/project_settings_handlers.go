@@ -26,7 +26,6 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -264,6 +263,16 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
+		// The per-profile entries this request adds or changes, taken
+		// before the annotations are overwritten. Only these are warned
+		// about, as only these were validated.
+		var changedProfileDefaults map[string]string
+		if present[projectSettingsFieldGCPIdentitySAIDByProfile] {
+			changedProfileDefaults = changedProfileDefaultSAIDs(
+				profileDefaultSAIDsFromAnnotations(project.Annotations),
+				merged.DefaultGCPIdentityServiceAccountIDByProfile)
+		}
+
 		applyProjectSettingsToAnnotations(project, merged)
 
 		if err := s.store.UpdateProject(ctx, project); err != nil {
@@ -272,7 +281,10 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		}
 
 		s.events.PublishProjectUpdated(ctx, project)
-		writeJSON(w, http.StatusOK, projectSettingsFromAnnotations(project))
+		writeJSON(w, http.StatusOK, projectSettingsWithWarnings{
+			ProjectSettings: projectSettingsFromAnnotations(project),
+			Warnings:        s.profileDefaultSAWarnings(ctx, project.ID, changedProfileDefaults),
+		})
 
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
@@ -436,24 +448,32 @@ const (
 // loading splits dotted profile names.
 var profileDefaultNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
 
-// validateProfileDefaultSAIDs checks every entry of the per-profile default
-// service account map: at most maxProfileDefaultSAEntries entries, a profile
-// name matching profileDefaultNamePattern, and a service account that passes
-// validateProjectDefaultSAID. A nil or empty map is always accepted
-// (nil keeps the stored map, empty clears it).
+// validateProfileDefaultSAIDs checks the per-profile default service account
+// map a request sets against the stored one: at most
+// maxProfileDefaultSAEntries entries, and for each added or changed entry a
+// profile name matching profileDefaultNamePattern and a service account
+// that passes validateProjectDefaultSAID. A nil or empty map is always
+// accepted (nil keeps the stored map, empty clears it).
+//
+// Only added or changed entries are checked (changedProfileDefaultSAIDs).
+// The map is replaced as a whole, so a request that sets or removes one
+// profile resends the others; an entry kept as stored was validated when it
+// was saved, and re-checking it would let a stored entry that has since gone
+// stale (its account deleted or un-verified) block an unrelated change. For
+// the same reason removing an entry is always allowed: it is the operator's
+// escape from an entry that has gone bad, as clearing the project default is.
 func (s *Server) validateProfileDefaultSAIDs(w http.ResponseWriter, ctx context.Context, project *store.Project, byProfile map[string]string) bool {
-	if len(byProfile) > maxProfileDefaultSAEntries {
+	stored := profileDefaultSAIDsFromAnnotations(project.Annotations)
+	// A request that does not grow the map passes the bound even when the
+	// stored map exceeds it, so entries can still be removed.
+	if len(byProfile) > maxProfileDefaultSAEntries && len(byProfile) > len(stored) {
 		BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile: at most %d entries are allowed", maxProfileDefaultSAEntries))
 		return false
 	}
-	profiles := make([]string, 0, len(byProfile))
-	for profile := range byProfile {
-		profiles = append(profiles, profile)
-	}
+	changed := changedProfileDefaultSAIDs(stored, byProfile)
 	// Sorted so the first reported error is deterministic.
-	sort.Strings(profiles)
-	for _, profile := range profiles {
-		saID := byProfile[profile]
+	for _, profile := range slices.Sorted(maps.Keys(changed)) {
+		saID := changed[profile]
 		if !profileDefaultNamePattern.MatchString(profile) {
 			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile: profile name %q is invalid; use 1-%d letters, digits, '-' or '_', starting with a letter or digit", profile, maxProfileDefaultNameLen))
 			return false
@@ -467,6 +487,20 @@ func (s *Server) validateProfileDefaultSAIDs(w http.ResponseWriter, ctx context.
 		}
 	}
 	return true
+}
+
+// changedProfileDefaultSAIDs returns the entries of next that are not in
+// stored with the same service account ID: the entries a per-profile
+// default PUT adds or changes. Removed entries are not included.
+func changedProfileDefaultSAIDs(stored, next map[string]string) map[string]string {
+	changed := make(map[string]string, len(next))
+	for profile, saID := range next {
+		if old, ok := stored[profile]; ok && old == saID {
+			continue
+		}
+		changed[profile] = saID
+	}
+	return changed
 }
 
 // profileDefaultSAIDsFromAnnotations decodes the per-profile default service
