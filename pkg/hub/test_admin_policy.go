@@ -102,13 +102,21 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"project.set_messaging_policy": testAdminPolicyAllow,
 	"project.clone":                testAdminPolicyAllow,
 	"project.list":                 testAdminPolicyAllow,
-	// Agent material resolution: held inside the built-in project-owner
-	// and project-admin roles and used when an agent's secrets are
-	// resolved, not a user-exercised value read. Allow, so a test admin can
-	// still grant project owner and admin roles (CanDelegate's deny check
-	// covers every permission a granted role holds). Secret values stay
-	// denied: secret.use, hub.env_vars.read and the hub-scope env/secret
-	// role gate are deny (TestTestAdminPolicy_SecretValueReadsDenied).
+	// project.secret_read is the project secret read gate of the agent
+	// material path (material_runtime.go), held inside the built-in
+	// project-owner and project-admin roles. Allow, on two grounds: (1) no
+	// user route exercises it: its only enforcement sites are in the agent
+	// fetch and resolution path, gated by the agent JWT scope
+	// ScopeProjectSecretRead; (2) hub-class containment: the test admin
+	// tier runs only on test-class hubs, so the blast radius is that test
+	// hub's project secrets. Accepted path: a test admin grants (or holds)
+	// project owner/admin, and an agent rooted in that project reads the
+	// project's secret values (normal owner semantics). Allow also keeps
+	// project roles grantable (CanDelegate refuses a role holding any deny
+	// permission). The hub env surface stays deny (hub.env_vars.read, the
+	// hub-scope env/secret role gate; TestTestAdminPolicy_SecretValueReadsDenied).
+	// Re-review if project.secret_read gains a user route, or if the
+	// test-class hub containment is relaxed.
 	"project.secret_read": testAdminPolicyAllow,
 
 	// Artifacts, skills, templates, harness configs.

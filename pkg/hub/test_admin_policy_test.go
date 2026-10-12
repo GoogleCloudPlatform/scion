@@ -958,10 +958,12 @@ func TestTestAdminPolicy_DelegationOfDeniedPermissionsRefused(t *testing.T) {
 	assert.True(t, found, "a delegation refusal is written to the sink")
 }
 
-// project.secret_read is allow (agent material resolution inside the
-// project owner/admin roles), but secret values stay denied to both admin
-// kinds: secret.use is deny, and the hub-scope secret and environment
-// variable reads refuse them; a human super-admin reads them.
+// project.secret_read is allow (the agent material path's project secret
+// gate; no user route exercises it). The user-facing hub secret and
+// environment variable reads stay denied to both admin kinds; a human
+// super-admin reads them. (Agents rooted in a project a test admin owns
+// read that project's secrets: the accepted path, see the classification
+// comment.)
 func TestTestAdminPolicy_SecretValueReadsDenied(t *testing.T) {
 	srv, s, _ := tsaServer(t)
 	issuer := taUser(t, s, "tsa-sec-iss", store.SystemRoleSuperAdmin)
@@ -970,7 +972,7 @@ func TestTestAdminPolicy_SecretValueReadsDenied(t *testing.T) {
 	hubKind := tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin)
 	human := taTokenFor(t, srv, issuer)
 	assert.False(t, testAdminPermissionDenied("project.secret_read"))
-	assert.True(t, testAdminPermissionDenied("secret.use"))
+	assert.True(t, testAdminPermissionDenied("hub.env_vars.read"))
 	for _, path := range []string{"/api/v1/secrets?scope=hub", "/api/v1/env?scope=hub"} {
 		for who, tok := range map[string]string{"test_super_admin": superKind.AccessToken, "test_hub_admin": hubKind.AccessToken} {
 			rec := doRequestWithToken(t, srv, tok, http.MethodGet, path, nil)
