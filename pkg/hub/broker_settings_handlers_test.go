@@ -221,7 +221,9 @@ func TestBrokerSettings_Put_OwnerCannotClearViaOmission(t *testing.T) {
 		before, err := s.GetBrokerSettings(context.Background(), broker.ID)
 		require.NoError(t, err)
 
-		granted := newPlainUser(t, s, "clear-omission-granted")
+		// A hub member holds broker.read on every broker; quota.update is
+		// granted on top.
+		granted := newHubMemberUser(t, s, "clear-omission-granted")
 		grantUserActionOnResource(t, s, granted.ID, "quota", "hub", ActionUpdate)
 		rec := doRequestAsUser(t, srv, granted, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
 			"settings":         map[string]interface{}{"maxAgents": 3},
