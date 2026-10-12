@@ -342,7 +342,7 @@ func CheckNotOwnHub(endpoint string, getenv func(string) string) error {
 // sameHub reports whether two parsed endpoints name one hub (see
 // CheckNotOwnHub).
 func sameHub(a, b hubAddr) bool {
-	if a.host != b.host && !(a.loopback && b.loopback) {
+	if a.host != b.host && (!a.loopback || !b.loopback) {
 		return false
 	}
 	isDefault := func(p string) bool { return p == "80" || p == "443" }
