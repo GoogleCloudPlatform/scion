@@ -103,13 +103,15 @@ account for agents running under one broker profile.
 
 The project default is an account (id, email or display name), or one of
 the modes passthrough or block. A per-profile default is always an
-account. The words passthrough and block are read as modes; to name an
-account whose display name is one of them, use its id or email.
+account. The words passthrough and block are read as modes, and a bare
+assign is refused (it needs an account); to name an account whose display
+name is one of these words, use its id or email.
 
 Setting the project default replaces both the mode and the account: a
 mode clears the stored account, and an account sets the mode to assign.
 Setting a per-profile default adds or replaces that profile's entry and
-keeps the entries of other profiles.`,
+keeps the entries of other profiles. It reads the stored map and writes it
+back whole, so two concurrent per-profile writes are last-writer-wins.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runIdentityDefaultSet,
 }
@@ -170,16 +172,7 @@ func runIdentityDefaultShow(cmd *cobra.Command, args []string) error {
 
 	resolved, err := client.Projects().GetResolvedSettings(ctx, projectID)
 	if err != nil {
-		if !apiclient.IsNotFoundError(err) {
-			return fmt.Errorf("failed to read project settings: %w", err)
-		}
-		// An older Hub has no resolved-settings route. Fall back to the
-		// plain settings; the hub rung is then unknown.
-		ps, gerr := client.Projects().GetSettings(ctx, projectID)
-		if gerr != nil {
-			return fmt.Errorf("failed to read project settings: %w", gerr)
-		}
-		resolved = &hubclient.ResolvedProjectSettings{Project: ps}
+		return fmt.Errorf("failed to read project settings: %w", err)
 	}
 
 	ladder := buildIdentityDefaultLadder(projectID, resolved, identityDefaultAccountNames(ctx, client, projectID))
@@ -382,13 +375,6 @@ func runIdentityDefaultSet(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Read first: the per-profile map is replaced whole on PUT, so the new
-	// map is built from the stored one.
-	current, err := client.Projects().GetSettings(ctx, projectID)
-	if err != nil {
-		return fmt.Errorf("failed to read project settings: %w", err)
-	}
-
 	update := &hubclient.ProjectGCPIdentityDefaultsUpdate{}
 	switch {
 	case mode != "":
@@ -401,6 +387,10 @@ func runIdentityDefaultSet(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if identityDefaultProfile != "" {
+			current, err := readIdentityDefaults(ctx, client, projectID)
+			if err != nil {
+				return err
+			}
 			byProfile := maps.Clone(current.DefaultGCPIdentityServiceAccountIDByProfile)
 			if byProfile == nil {
 				byProfile = map[string]string{}
@@ -425,13 +415,12 @@ func runIdentityDefaultUnset(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	current, err := client.Projects().GetSettings(ctx, projectID)
-	if err != nil {
-		return fmt.Errorf("failed to read project settings: %w", err)
-	}
-
 	update := &hubclient.ProjectGCPIdentityDefaultsUpdate{}
 	if identityDefaultProfile != "" {
+		current, err := readIdentityDefaults(ctx, client, projectID)
+		if err != nil {
+			return err
+		}
 		if _, ok := current.DefaultGCPIdentityServiceAccountIDByProfile[identityDefaultProfile]; !ok {
 			statusf("No default account is set for profile %q; nothing changed.\n", identityDefaultProfile)
 			return printIdentityDefaultsResult(current)
@@ -446,6 +435,19 @@ func runIdentityDefaultUnset(cmd *cobra.Command, args []string) error {
 	}
 
 	return writeIdentityDefaults(ctx, client, projectID, update)
+}
+
+// readIdentityDefaults reads the stored settings for a per-profile write.
+// The per-profile map is replaced whole on PUT, so the new map is built from
+// the stored one. The hub has no conditional PUT, so two concurrent
+// per-profile writes are last-writer-wins. Project-default writes do not
+// read first: they send their two fields outright.
+func readIdentityDefaults(ctx context.Context, client hubclient.Client, projectID string) (*hubclient.ProjectSettings, error) {
+	current, err := client.Projects().GetSettings(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read project settings: %w", err)
+	}
+	return current, nil
 }
 
 // resolveIdentityDefaultAccount resolves an account reference through the

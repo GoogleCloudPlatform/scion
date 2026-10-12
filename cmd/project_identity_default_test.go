@@ -51,6 +51,7 @@ type idDefFakeHub struct {
 	resolved  map[string]any // the "settings" part of /settings/resolved
 	putBodies []map[string]any
 	statusRef []string
+	gets      int    // GETs of /settings
 	putStatus int    // when non-zero, PUT fails with this status
 	putError  string // error body for a failing PUT
 }
@@ -64,6 +65,7 @@ func (f *idDefFakeHub) handler(t *testing.T) http.HandlerFunc {
 		statusPrefix := "/api/v1/projects/" + idDefProject + "/gcp-service-accounts/"
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == settingsPath:
+			f.gets++
 			_ = json.NewEncoder(w).Encode(f.stored)
 		case r.Method == http.MethodGet && r.URL.Path == settingsPath+"/resolved":
 			_ = json.NewEncoder(w).Encode(map[string]any{"project": f.stored, "settings": f.resolved})
@@ -176,6 +178,7 @@ func TestIdentityDefaultSet_ProjectAccountByEmailStoresID(t *testing.T) {
 	assert.Equal(t, map[string]any{"other": idDefSATwo}, f.stored["defaultGCPIdentityServiceAccountIDByProfile"],
 		"setting the project default keeps the per-profile defaults")
 	assert.Contains(t, stdout, "Project default: assign "+idDefSAOne)
+	assert.Zero(t, f.gets, "a project-default write does not read the settings first")
 }
 
 func TestIdentityDefaultSet_ModeClearsAccount(t *testing.T) {
@@ -190,6 +193,7 @@ func TestIdentityDefaultSet_ModeClearsAccount(t *testing.T) {
 			require.NoError(t, runErr)
 
 			assert.Empty(t, f.statusRef, "a mode is not resolved as an account")
+			assert.Zero(t, f.gets, "a project-default write does not read the settings first")
 			require.Len(t, f.putBodies, 1)
 			assert.Equal(t, map[string]any{
 				"defaultGCPIdentityMode":             strings.ToLower(arg),
@@ -212,6 +216,7 @@ func TestIdentityDefaultSet_ProfileKeepsOtherProfiles(t *testing.T) {
 	assert.Equal(t, map[string]any{
 		"defaultGCPIdentityServiceAccountIDByProfile": map[string]any{"gke": idDefSAOne, "other": idDefSATwo},
 	}, f.putBodies[0], "only the per-profile map is sent, with the other profile's entry kept")
+	assert.Equal(t, 1, f.gets, "a per-profile write reads the stored map first")
 	assertOnlyIdentityFieldsSent(t, f)
 	assert.Contains(t, stdout, "gke: "+idDefSAOne)
 	assert.Contains(t, stdout, "other: "+idDefSATwo)
@@ -296,6 +301,7 @@ func TestIdentityDefaultUnset_Project(t *testing.T) {
 	assertOnlyIdentityFieldsSent(t, f)
 	assert.Equal(t, map[string]any{"other": idDefSATwo}, f.stored["defaultGCPIdentityServiceAccountIDByProfile"])
 	assert.Contains(t, stdout, "Project default: not set")
+	assert.Zero(t, f.gets, "a project-default unset does not read the settings first")
 }
 
 func TestIdentityDefaultUnset_ProfileKeepsOthers(t *testing.T) {
