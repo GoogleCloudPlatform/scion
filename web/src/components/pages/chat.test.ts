@@ -36,6 +36,7 @@ import {
   beforeAll,
   beforeEach,
   afterEach,
+  onTestFinished,
   type MockInstance,
 } from 'vitest';
 import { html, nothing, render, type TemplateResult } from 'lit';
@@ -2053,6 +2054,41 @@ describe('chat page — late route lookups', () => {
     await vi.waitFor(() => expect(el._slugToProjectId.get('alpha')).toBe('p1'));
     expect(el._projectIdToSlug.get('p1')).toBe('alpha');
     expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/v1/projects?slug=alpha&limit=1');
+  });
+
+  it.each([
+    {
+      name: 'an empty projects list',
+      answer: async () =>
+        new Response(JSON.stringify({ projects: [], totalCount: 0 }), { status: 200 }),
+    },
+    {
+      name: 'a non-OK response',
+      answer: async () => new Response('{}', { status: 500 }),
+    },
+    {
+      name: 'a failed request',
+      answer: async (): Promise<Response> => {
+        throw new TypeError('Failed to fetch');
+      },
+    },
+  ])('a slug lookup answered by $name resolves nothing and asks again', async ({ answer }) => {
+    vi.mocked(apiFetch).mockClear();
+    vi.mocked(apiFetch).mockImplementation(answer);
+    onTestFinished(() => {
+      vi.mocked(apiFetch).mockImplementation(async () => new Response('{}', { status: 200 }));
+    });
+    const el = createPage();
+
+    expect(await el.resolveProjectBySlug('alpha')).toBe('');
+    expect(el._slugToProjectId.size).toBe(0);
+    expect(el._projectIdToSlug.size).toBe(0);
+
+    expect(await el.resolveProjectBySlug('alpha')).toBe('');
+    const lookups = vi
+      .mocked(apiFetch)
+      .mock.calls.filter(([path]) => path === '/api/v1/projects?slug=alpha&limit=1');
+    expect(lookups).toHaveLength(2);
   });
 
   it('a burst of rail reloads does not pull the user back to the thread the URL named before', async () => {
