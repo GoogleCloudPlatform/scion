@@ -58,6 +58,8 @@ func main() {
 		err = runExport(os.Args[2:])
 	case "verify-export":
 		err = runVerifyExport(os.Args[2:])
+	case "comment-only":
+		err = runCommentOnly(os.Args[2:])
 	default:
 		usage()
 	}
@@ -68,7 +70,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: extract move -dir DIR -family FILE [-n]\n       extract bulk -dir DIR [-by area|origin] [-origins GLOB] [-keep FILE] [-n]\n       extract verify -before DIR -after DIR\n       extract export -dir DIR -to DIR [-import PATH] [-alias FILE] -family FILE [-n]\n       extract verify-export -before DIR -after DIR -to DIR [-import PATH] [-alias FILE] -family FILE")
+	fmt.Fprintln(os.Stderr, "usage: extract move -dir DIR -family FILE [-n]\n       extract bulk -dir DIR [-by area|origin] [-origins GLOB] [-keep FILE] [-n]\n       extract verify -before DIR -after DIR\n       extract export -dir DIR -to DIR [-import PATH] [-alias FILE] -family FILE [-n]\n       extract verify-export -before DIR -after DIR -to DIR [-import PATH] [-alias FILE] -family FILE\n       extract comment-only -before DIR -after DIR")
 	os.Exit(2)
 }
 
@@ -250,6 +252,30 @@ func runVerifyExport(args []string) error {
 	if !r.ok() {
 		return fmt.Errorf("verification failed")
 	}
+	return nil
+}
+
+// runCommentOnly checks that the Go files of two directories differ only in
+// comments, for a hand-written comment fix on top of generated code.
+func runCommentOnly(args []string) error {
+	fs := flag.NewFlagSet("comment-only", flag.ExitOnError)
+	before := fs.String("before", "", "directory before the change")
+	after := fs.String("after", "", "directory after the change")
+	_ = fs.Parse(args)
+	if *before == "" || *after == "" {
+		return fmt.Errorf("-before and -after are required")
+	}
+	diffs, err := commentOnlyDiff(*before, *after)
+	if err != nil {
+		return err
+	}
+	for _, d := range diffs {
+		fmt.Println(d)
+	}
+	if len(diffs) > 0 {
+		return fmt.Errorf("%d file(s) differ in code, not only in comments", len(diffs))
+	}
+	fmt.Println("RESULT: OK (comments and whitespace only)")
 	return nil
 }
 

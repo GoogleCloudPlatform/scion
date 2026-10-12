@@ -352,19 +352,48 @@ func planExport(p *pkgInfo, spec exportSpec, targetDir, importPath, aliasFile st
 	return ep, nil
 }
 
-// signatureRefs returns the moved names an exported declaration's alias
-// must be able to spell: those in a func's type parameters, parameters and
-// results, or in a var's declared type.
+// signatureRefs returns the moved type names that staying code can reach
+// through an exported declaration, and that must therefore be exported too:
+// those in a func's type parameters, parameters and results; in a var's
+// declared type; and, for a type, in the types of its exported fields and in
+// the signatures of its exported methods (GitSparseCheckoutStub.Calls returns
+// []gitSparseCheckoutCall, so that type is exported as well).
 func signatureRefs(p *pkgInfo, d *declInfo) []string {
 	var nodes []ast.Node
 	switch n := d.node.(type) {
 	case *ast.FuncDecl:
 		nodes = append(nodes, n.Type)
 	case *ast.GenDecl:
-		if n.Tok == token.VAR {
+		switch n.Tok {
+		case token.VAR:
 			for _, s := range n.Specs {
 				if vs := s.(*ast.ValueSpec); vs.Type != nil && hasName(vs.Names, d.key) {
 					nodes = append(nodes, vs.Type)
+				}
+			}
+		case token.TYPE:
+			if ts := typeSpec(d, d.key); ts != nil {
+				if st, ok := ts.Type.(*ast.StructType); ok {
+					for _, f := range st.Fields.List {
+						exported := len(f.Names) == 0 // embedded: promoted members are reachable
+						for _, fn := range f.Names {
+							if token.IsExported(fn.Name) {
+								exported = true
+							}
+						}
+						if exported {
+							nodes = append(nodes, f.Type)
+						}
+					}
+				} else {
+					// Interfaces, named slices, func types, ...: everything is spelled
+					// in the type itself.
+					nodes = append(nodes, ts.Type)
+				}
+			}
+			for _, m := range p.decls {
+				if fd, ok := m.node.(*ast.FuncDecl); ok && m.recv == d.key && fd.Name.IsExported() {
+					nodes = append(nodes, fd.Type)
 				}
 			}
 		}
@@ -416,7 +445,11 @@ func hasName(ids []*ast.Ident, n string) bool {
 func (ep *exportPlan) classify(d *declInfo) (aliasKind, error) {
 	switch n := d.node.(type) {
 	case *ast.FuncDecl:
-		ep.helperCall[d.key] = helperReceiver(n)
+		h, err := helperReceiver(n)
+		if err != nil {
+			return 0, err
+		}
+		ep.helperCall[d.key] = h
 		return aliasFunc, nil
 	case *ast.GenDecl:
 		switch n.Tok {
@@ -458,10 +491,13 @@ func (ep *exportPlan) classify(d *declInfo) (aliasKind, error) {
 }
 
 // helperReceiver returns the name of the parameter on which a func calls
-// Helper() as a top-level statement of its body, or "".
-func helperReceiver(fd *ast.FuncDecl) string {
+// Helper() as a top-level statement of its body, or "". A Helper() call
+// anywhere else (a nested block, a closure, a non-parameter receiver, a
+// second call) is refused: the wrapper's own Helper() call could not mirror
+// it, so failure attribution might change.
+func helperReceiver(fd *ast.FuncDecl) (string, error) {
 	if fd.Body == nil {
-		return ""
+		return "", nil
 	}
 	params := map[string]bool{}
 	for _, f := range fd.Type.Params.List {
@@ -469,24 +505,38 @@ func helperReceiver(fd *ast.FuncDecl) string {
 			params[n.Name] = true
 		}
 	}
+	recv := ""
+	var top *ast.CallExpr
 	for _, st := range fd.Body.List {
 		es, ok := st.(*ast.ExprStmt)
 		if !ok {
 			continue
 		}
 		call, ok := es.X.(*ast.CallExpr)
-		if !ok || len(call.Args) != 0 {
+		if !ok || !isHelperCall(call) {
 			continue
 		}
-		se, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || se.Sel.Name != "Helper" {
-			continue
-		}
-		if id, ok := se.X.(*ast.Ident); ok && params[id.Name] {
-			return id.Name
+		if id, ok := call.Fun.(*ast.SelectorExpr).X.(*ast.Ident); ok && params[id.Name] && top == nil {
+			recv, top = id.Name, call
 		}
 	}
-	return ""
+	var stray []string
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && call != top && isHelperCall(call) {
+			stray = append(stray, fmt.Sprint(call.Pos()))
+		}
+		return true
+	})
+	if len(stray) > 0 {
+		return "", fmt.Errorf("%s calls Helper() other than as a top-level statement on a parameter; a wrapper cannot mirror that, so it is not exported", fd.Name.Name)
+	}
+	return recv, nil
+}
+
+// isHelperCall reports whether call is x.Helper() with no arguments.
+func isHelperCall(call *ast.CallExpr) bool {
+	se, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && se.Sel.Name == "Helper" && len(call.Args) == 0
 }
 
 // assignments lists the places in the package that write the top-level var

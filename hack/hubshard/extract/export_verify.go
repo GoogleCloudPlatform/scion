@@ -274,3 +274,83 @@ func tokenDiff(b, a string, renames map[string]string) string {
 	}
 	return ""
 }
+
+// commentOnlyDiff compares the .go files of two directories and returns one
+// line per file whose Go tokens differ when comments are ignored, or that
+// exists on only one side. An empty result means the change between the
+// directories touches comments (and whitespace) only.
+func commentOnlyDiff(before, after string) ([]string, error) {
+	list := func(dir string) (map[string]bool, error) {
+		names, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil {
+			return nil, err
+		}
+		m := map[string]bool{}
+		for _, n := range names {
+			m[filepath.Base(n)] = true
+		}
+		return m, nil
+	}
+	b, err := list(before)
+	if err != nil {
+		return nil, err
+	}
+	a, err := list(after)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for n := range a {
+		if !b[n] {
+			out = append(out, n+": only after")
+		}
+	}
+	for _, n := range sortedKeys(b) {
+		if !a[n] {
+			out = append(out, n+": only before")
+			continue
+		}
+		bs, err := os.ReadFile(filepath.Join(before, n))
+		if err != nil {
+			return nil, err
+		}
+		as, err := os.ReadFile(filepath.Join(after, n))
+		if err != nil {
+			return nil, err
+		}
+		bt, err := scanTokens(string(bs))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", n, err)
+		}
+		at, err := scanTokens(string(as))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", n, err)
+		}
+		bt, at = dropComments(bt), dropComments(at)
+		if len(bt) != len(at) {
+			out = append(out, fmt.Sprintf("%s: %d code tokens before, %d after", n, len(bt), len(at)))
+			continue
+		}
+		for i := range bt {
+			if bt[i] != at[i] {
+				out = append(out, fmt.Sprintf("%s: code token %d: %s %q -> %s %q", n, i, bt[i].t, bt[i].lit, at[i].t, at[i].lit))
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// dropComments removes comment tokens. A comment that ends a line stands
+// in for the automatic semicolon in the scanner's output, so the remaining
+// stream is the same whether or not a line ends with a comment.
+func dropComments(ts []tok) []tok {
+	var out []tok
+	for _, t := range ts {
+		if t.t != token.COMMENT {
+			out = append(out, t)
+		}
+	}
+	return out
+}

@@ -182,8 +182,11 @@ What `export` does:
   and the methods of requested types. It refuses a test entry point, part
   of a grouped declaration, and any moved declaration that uses a
   declaration that stays (request that one too, or leave both in place).
-- Exports only the names that staying code uses (and the types their
-  signatures need). Inside the moved code it renames exactly those
+- Exports only the names that staying code uses, plus the moved types that
+  staying code can reach through them: types in an exported func's or typed
+  var's signature, in an exported type's exported fields, and in its exported
+  methods' signatures (`GitSparseCheckoutStub.Calls` returns
+  `[]GitSparseCheckoutCall`). Inside the moved code it renames exactly those
   identifiers; everything else, doc comments included, is byte-for-byte
   the original. Doc comments keep the old names.
 - Writes one target file per origin (`x_helpers_test.go` -> `x.go`). Target
@@ -193,7 +196,9 @@ What `export` does:
   - type: `type x = pkg.X`; const: `const x = pkg.X`;
   - func: a wrapper with the original signature that forwards its
     arguments. If the original calls `t.Helper()` (as a top-level statement),
-    the wrapper does too, so failures are still reported at the test's line;
+    the wrapper does too, so failures are still reported at the test's line.
+    A `Helper()` call anywhere else in the body (a nested block, a closure,
+    a non-parameter receiver) is refused, since a wrapper could not mirror it;
   - var: a value alias (`var x = pkg.X`) only for a slice or map literal,
     which shares its backing store; a pointer alias (`var x = &pkg.X`) for a
     var declared with a type and no value (a state holder such as
@@ -224,3 +229,13 @@ What `verify-export` checks, independently of the rendering:
 
 Then `make hubshard`, since deleted helper files leave stale
 `assignment.txt` entries.
+
+A hand-written comment fix on top of a generated export (for example doc
+comments that still use the old names) goes in its own commit, and
+`comment-only` checks it touches nothing but comments:
+
+```sh
+mkdir -p /tmp/gen && git archive <generated commit> pkg/hub | tar -x -C /tmp/gen
+/tmp/extract comment-only -before /tmp/gen/pkg/hub -after pkg/hub
+/tmp/extract comment-only -before /tmp/gen/pkg/hub/internal/hubtestutil -after pkg/hub/internal/hubtestutil
+```

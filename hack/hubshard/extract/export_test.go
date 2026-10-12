@@ -354,13 +354,64 @@ func TestExportRefusals(t *testing.T) {
 			names: []string{"v", "mk"},
 			want:  "cannot tell whether a copy behaves",
 		},
-		"constrained dependency": {
+		"staying constrained dependency": {
 			files: map[string]string{
 				"a_helpers_test.go": hdr + "package hub\n\nfunc h() int { return k }\n",
 				"k_test.go":         "//go:build linux\n\npackage hub\n\nconst k = 1\n",
 			},
 			names: []string{"h"},
 			want:  "which stays",
+		},
+		"constrained origin needs a constrained import": {
+			// checkConstraints, not step 3: h uses no package declaration, but its
+			// import is not imported by any unconstrained file, so widening h to
+			// the unconstrained target would add it to other builds.
+			files: map[string]string{
+				"a_helpers_test.go": hdr + "//go:build linux\n\npackage hub\n\nimport \"os/user\"\n\nfunc h() string { u, _ := user.Current(); return u.Name }\n",
+				"b_test.go":         hdr + "//go:build linux\n\npackage hub\n\nvar _ = h()\n",
+			},
+			names: []string{"h"},
+			want:  "would add import \"os/user\"",
+		},
+		"incremented var": {
+			files: map[string]string{
+				"a_helpers_test.go": hdr + "package hub\n\nvar counts = map[string]int{}\n",
+				"b_test.go":         hdr + "package hub\n\nfunc bump() { counts[\"a\"]++ }\n",
+			},
+			names: []string{"counts"},
+			want:  "is assigned",
+		},
+		"range-assigned var": {
+			files: map[string]string{
+				"a_helpers_test.go": hdr + "package hub\n\nvar cur = []string{\"\"}\n",
+				"b_test.go":         hdr + "package hub\n\nfunc fill() {\n\tfor _, cur[0] = range []string{\"a\"} {\n\t}\n}\n",
+			},
+			names: []string{"cur"},
+			want:  "is assigned",
+		},
+		"Helper in a nested block": {
+			files: map[string]string{
+				"a_helpers_test.go": hdr + "package hub\n\nimport \"testing\"\n\nfunc h(t testing.TB, ok bool) {\n\tif !ok {\n\t\tt.Helper()\n\t}\n}\n",
+				"b_test.go":         hdr + "package hub\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) { h(t, true) }\n",
+			},
+			names: []string{"h"},
+			want:  "calls Helper() other than as a top-level statement",
+		},
+		"Helper in a closure": {
+			files: map[string]string{
+				"a_helpers_test.go": hdr + "package hub\n\nimport \"testing\"\n\nfunc h(t testing.TB) func() {\n\treturn func() { t.Helper() }\n}\n",
+				"b_test.go":         hdr + "package hub\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) { h(t)() }\n",
+			},
+			names: []string{"h"},
+			want:  "calls Helper() other than as a top-level statement",
+		},
+		"Helper on a non-parameter": {
+			files: map[string]string{
+				"a_helpers_test.go": hdr + "package hub\n\nimport \"testing\"\n\nvar tb testing.TB\n\nfunc h() {\n\ttb.Helper()\n}\n",
+				"b_test.go":         hdr + "package hub\n\nfunc use() { h() }\n",
+			},
+			names: []string{"tb", "h"},
+			want:  "calls Helper() other than as a top-level statement",
 		},
 	}
 	for name, c := range cases {
@@ -410,5 +461,78 @@ func TestReadExportSpec(t *testing.T) {
 		if _, err := readExportSpec(p); err == nil {
 			t.Errorf("readExportSpec(%q) succeeded", bad)
 		}
+	}
+}
+
+func TestExportMethodSignatureTypes(t *testing.T) {
+	dir := writePkg(t, map[string]string{
+		"a_helpers_test.go": hdr + `package hub
+
+// call is one recorded call.
+type call struct{ Name string }
+
+// stub records calls.
+type stub struct{ calls []call }
+
+// Calls returns the recorded calls.
+func (s *stub) Calls() []call { return s.calls }
+
+func (s *stub) last() call { return s.calls[len(s.calls)-1] }
+
+type holder struct {
+	Inner inner
+	priv  hidden
+}
+
+type inner struct{}
+
+type hidden struct{}
+
+func newStub() *stub { return &stub{} }
+
+func newHolder() holder { return holder{} }
+`,
+		"b_test.go": hdr + "package hub\n\nvar _ = newStub().Calls()\n\nvar _ = newHolder()\n",
+	})
+	target := filepath.Join(t.TempDir(), "support")
+	ep := runExportOn(t, dir, target, exportSpec{names: []string{"call", "stub", "holder", "inner", "hidden", "newStub", "newHolder"}})
+	for k, want := range map[string]string{"call": "Call", "stub": "Stub", "inner": "Inner", "newStub": "NewStub", "holder": "Holder"} {
+		if ep.exported[k] != want {
+			t.Errorf("exported[%s] = %q, want %q (exports: %v)", k, ep.exported[k], want, ep.exported)
+		}
+	}
+	for _, k := range []string{"hidden"} {
+		if _, ok := ep.exported[k]; ok {
+			t.Errorf("%s is reachable only through an unexported field and must stay unexported", k)
+		}
+	}
+	got := readFile(t, filepath.Join(target, "a.go"))
+	for _, want := range []string{
+		"func (s *Stub) Calls() []Call { return s.calls }",
+		"func (s *Stub) last() Call { return s.calls[len(s.calls)-1] }",
+		"type Holder struct {\n\tInner Inner\n\tpriv  hidden\n}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("target lacks %q:\n%s", want, got)
+		}
+	}
+	if alias := readFile(t, filepath.Join(dir, defaultAliasFile)); !strings.Contains(alias, "type call = support.Call") {
+		t.Errorf("alias file lacks the call alias:\n%s", alias)
+	}
+}
+
+func TestCommentOnlyDiff(t *testing.T) {
+	b := writePkg(t, map[string]string{"a.go": "package p\n\n// f does x.\nfunc f() int { return 1 } // one\n", "b.go": "package p\n"})
+	same := writePkg(t, map[string]string{"a.go": "package p\n\n// F-ish: f does y.\n// More.\nfunc f() int { return 1 }\n", "b.go": "package p\n\n// doc\n"})
+	if d, err := commentOnlyDiff(b, same); err != nil || len(d) != 0 {
+		t.Fatalf("comment-only change reported: %v %v", d, err)
+	}
+	code := writePkg(t, map[string]string{"a.go": "package p\n\n// f does x.\nfunc f() int { return 2 }\n", "b.go": "package p\n"})
+	if d, _ := commentOnlyDiff(b, code); len(d) != 1 {
+		t.Fatalf("code change not reported: %v", d)
+	}
+	gone := writePkg(t, map[string]string{"a.go": "package p\n\n// f does x.\nfunc f() int { return 1 }\n"})
+	if d, _ := commentOnlyDiff(b, gone); len(d) != 1 {
+		t.Fatalf("removed file not reported: %v", d)
 	}
 }
