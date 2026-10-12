@@ -17,13 +17,14 @@ package hub
 // A refused sign-in on the web OAuth callback, the proxy sign-in path and
 // the identity resolver's new-user branch records one login_denied audit
 // entry with the same reason as provisionUser (ptone/scion#4537). Allowed
-// sign-ins record none, and the allow/deny outcome is the same as before
-// the audit write.
+// sign-ins record none, and the allow/deny outcome is unaffected by the
+// audit write.
 
 import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -98,12 +99,16 @@ func newAuditResolver(st store.Store, srv *Server) *GoogleIdentityResolver {
 	return resolver
 }
 
+// resolveNewUser resolves email as a Workspace identity whose hosted domain
+// is the email domain, so Resolve treats the email as authoritative and
+// reaches the new-user branch (provisionNewUser).
 func resolveNewUser(resolver *GoogleIdentityResolver, email string) (*store.User, error) {
 	return resolver.Resolve(context.Background(), &ValidatedGoogleIdentity{
 		Subject:       "sub-" + email,
 		Email:         email,
 		EmailVerified: true,
 		Issuer:        googleIssuerHTTPS,
+		HostedDomain:  email[strings.LastIndex(email, "@")+1:],
 	}, ResolvePolicy{})
 }
 
