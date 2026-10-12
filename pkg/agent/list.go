@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -389,31 +390,34 @@ func terminalRuntimePhase(agent api.AgentInfo) string {
 }
 
 func persistAgentInfoState(path, phase, activity string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
+	// Locked read-modify-write; see updateSavedAgentInfo (#4681).
+	return agentinfolock.Update(path, agentinfolock.Options{}, func() error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
 
-	var info api.AgentInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return err
-	}
+		var info api.AgentInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			return err
+		}
 
-	if info.Phase == phase && info.Activity == activity {
-		return nil
-	}
+		if info.Phase == phase && info.Activity == activity {
+			return nil
+		}
 
-	info.Phase = phase
-	info.Activity = activity
+		info.Phase = phase
+		info.Activity = activity
 
-	updated, err := marshalAgentInfoKeepUnknown(data, &info)
-	if err != nil {
-		return err
-	}
+		updated, err := marshalAgentInfoKeepUnknown(data, &info)
+		if err != nil {
+			return err
+		}
 
-	return writeAgentInfoFile(path, updated, fi.Mode().Perm())
+		return writeAgentInfoFile(path, updated, fi.Mode().Perm())
+	})
 }

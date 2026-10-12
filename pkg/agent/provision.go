@@ -31,6 +31,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -2432,7 +2433,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if finalScionCfg.Info != nil {
 		infoData, err := json.MarshalIndent(finalScionCfg.Info, "", "  ")
 		if err == nil {
-			_ = os.WriteFile(filepath.Join(agentHome, "agent-info.json"), infoData, 0644)
+			// Temp file and rename, so a reader never sees a truncated
+			// file (#4681). No container runs during provisioning; the
+			// lock keeps the write ordered with any other host writer.
+			infoPath := filepath.Join(agentHome, "agent-info.json")
+			if err := agentinfolock.Update(infoPath, agentinfolock.Options{}, func() error {
+				return writeAgentInfoFile(infoPath, infoData, 0o644)
+			}); err != nil {
+				slog.Warn("Provision: failed to write agent-info.json",
+					"agent", agentName, "error", err)
+			}
 		}
 	}
 
@@ -2863,31 +2873,42 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 
 	// If agent-info.json doesn't exist, we can't update it.
 	// This might happen if provisioning failed or hasn't finished.
-	mode := os.FileMode(0o644)
-	if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+	// Checked before the lock too, so no lock file is left in a home
+	// that has no agent-info.json.
+	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
 		return nil
-	} else if err == nil {
-		mode = fi.Mode().Perm()
 	}
 
-	data, err := os.ReadFile(agentInfoPath)
-	if err != nil {
-		return err
-	}
+	// The read, update and write run under the agent-info lock, so a
+	// concurrent writer in the container (sciontool) or another host
+	// process cannot lose this update or have its own lost (#4681).
+	return agentinfolock.Update(agentInfoPath, agentinfolock.Options{}, func() error {
+		mode := os.FileMode(0o644)
+		if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+			return nil
+		} else if err == nil {
+			mode = fi.Mode().Perm()
+		}
 
-	var info api.AgentInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return err
-	}
+		data, err := os.ReadFile(agentInfoPath)
+		if err != nil {
+			return err
+		}
 
-	update(&info)
+		var info api.AgentInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			return err
+		}
 
-	newData, err := marshalAgentInfoKeepUnknown(data, &info)
-	if err != nil {
-		return err
-	}
+		update(&info)
 
-	return writeAgentInfoFile(agentInfoPath, newData, mode)
+		newData, err := marshalAgentInfoKeepUnknown(data, &info)
+		if err != nil {
+			return err
+		}
+
+		return writeAgentInfoFile(agentInfoPath, newData, mode)
+	})
 }
 
 func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
@@ -3046,6 +3067,18 @@ func RestoreAgentDeleteState(agentName string, projectPath string, st AgentDelet
 		}
 		info.Phase = st.Phase
 		info.DeletedAt = st.DeletedAt
+	})
+}
+
+// MarkAgentSoftDeleted sets Phase "deleted" and, when deletedAt is not
+// zero, DeletedAt in one locked update of agent-info.json, so a concurrent
+// writer never sees or keeps only half of the soft-delete mark.
+func MarkAgentSoftDeleted(agentName string, projectPath string, deletedAt time.Time) error {
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		info.Phase = "deleted"
+		if !deletedAt.IsZero() {
+			info.DeletedAt = deletedAt
+		}
 	})
 }
 

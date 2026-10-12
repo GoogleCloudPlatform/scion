@@ -2520,16 +2520,15 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	var preMarkOK bool
 	if softDelete && projectPath != "" && !filesOfOtherRun {
 		preMark, preMarkOK = agent.GetAgentDeleteState(target.name, projectPath)
-		deletedAtStr := query.Get("deletedAt")
-		if err := agent.UpdateAgentConfig(target.name, projectPath, "deleted", "", ""); err != nil {
-			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", err)
-		}
-		if deletedAtStr != "" {
-			if deletedAt, err := time.Parse(time.RFC3339, deletedAtStr); err == nil {
-				if err := agent.UpdateAgentDeletedAt(target.name, projectPath, deletedAt); err != nil {
-					s.agentLifecycleLog.Warn("Failed to write deletedAt to agent-info.json", "agent_id", id, "error", err)
-				}
+		// Phase and deletedAt are written in one locked update (#4681).
+		var deletedAt time.Time
+		if deletedAtStr := query.Get("deletedAt"); deletedAtStr != "" {
+			if t, err := time.Parse(time.RFC3339, deletedAtStr); err == nil {
+				deletedAt = t
 			}
+		}
+		if err := agent.MarkAgentSoftDeleted(target.name, projectPath, deletedAt); err != nil {
+			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", err)
 		}
 	}
 
