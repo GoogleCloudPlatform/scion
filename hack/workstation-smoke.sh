@@ -24,8 +24,9 @@
 #   3. scion hub link              links to the local hub without a prompt
 #   4. scion hub status            reports the project as linked
 #   5. scion list                  returns an empty list through the hub
-#  5b. scion use <project>         from a directory outside any project
-#                                  selects the linked project; scion list
+#  5b. scion use <slug>            from a directory outside any project
+#                                  selects the linked project (then again by
+#                                  its UUID); scion list
 #                                  then returns the empty list through the
 #                                  hub, and scion use shows source "context"
 #   6. scion server stop           stops the server
@@ -311,12 +312,19 @@ tr -d '[:space:]' <"$WORK/list.json" | grep -Eq '^(\[\]|null)$' || {
 log "5b. outside any project, scion use selects the project and scion list targets it"
 HUB_PROJECT_ID="$(tr -d '\n' <"$WORK/status.json" | grep -o '"hubProjectId"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | head -n 1)"
 [ -n "$HUB_PROJECT_ID" ] || { cat "$WORK/status.json" >&2; fail "hub status did not report the hub project ID"; }
+"$SCION" ${TARGET[@]+"${TARGET[@]}"} hub projects info "$HUB_PROJECT_ID" --format json >"$WORK/project.json" 2>"$WORK/project.err" || {
+  cat "$WORK/project.json" "$WORK/project.err" >&2; fail "scion hub projects info"; }
+HUB_PROJECT_SLUG="$(sed -n 's/^  "slug": "\([^"]*\)".*/\1/p' "$WORK/project.json" | head -n 1)"
+[ -n "$HUB_PROJECT_SLUG" ] || { cat "$WORK/project.json" >&2; fail "hub projects info did not report the project slug"; }
 USE_DIR="$(mktemp -d "$WORK/use.XXXXXX")"
-(cd "$USE_DIR" && "$SCION" use "$HUB_PROJECT_ID") >"$WORK/use.out" 2>&1 || {
-  cat "$WORK/use.out" >&2; fail "scion use <project>"; }
-cat "$WORK/use.out"
-grep -q "^Now using project '.*' on hub 'local' (http://127.0.0.1:" "$WORK/use.out" || {
-  fail "scion use did not select the project on the local hub"; }
+# By slug (the usual path: slug, then name lookup), then by UUID.
+for ref in "$HUB_PROJECT_SLUG" "$HUB_PROJECT_ID"; do
+  (cd "$USE_DIR" && "$SCION" use "$ref") >"$WORK/use.out" 2>&1 || {
+    cat "$WORK/use.out" >&2; fail "scion use $ref"; }
+  cat "$WORK/use.out"
+  grep -q "^Now using project '.*' on hub 'local' (http://127.0.0.1:" "$WORK/use.out" || {
+    fail "scion use $ref did not select the project on the local hub"; }
+done
 (cd "$USE_DIR" && "$SCION" list --format json) >"$WORK/list-use.json" 2>"$WORK/list-use.err" || {
   cat "$WORK/list-use.json" "$WORK/list-use.err" >&2; fail "scion list after scion use"; }
 tr -d '[:space:]' <"$WORK/list-use.json" | grep -Eq '^(\[\]|null)$' || {
