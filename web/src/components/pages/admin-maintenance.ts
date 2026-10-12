@@ -335,6 +335,27 @@ export class ScionPageAdminMaintenance extends LitElement {
       gap: 1rem;
     }
 
+    .card-list + .completed-migrations {
+      display: block;
+      margin-top: 1rem;
+    }
+
+    .completed-migrations::part(base) {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+    }
+
+    .completed-migrations::part(header) {
+      font-size: 0.9375rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      padding: 0.875rem 1rem;
+    }
+
+    .completed-migrations::part(content) {
+      padding: 0 1rem 1rem 1rem;
+    }
+
     .card {
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius, 0.5rem);
@@ -1390,6 +1411,8 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   private renderMigrations() {
+    const completed = this.migrations.filter((m) => m.status === 'completed');
+    const active = this.migrations.filter((m) => m.status !== 'completed');
     return html`
       <div class="section">
         <h2 class="section-title">Migrations</h2>
@@ -1400,11 +1423,30 @@ export class ScionPageAdminMaintenance extends LitElement {
         ${this.migrations.length === 0
           ? html`<div class="empty-inline">No migrations registered.</div>`
           : html`
-              <div class="card-list">
-                ${this.migrations.map((m) => this.renderMigrationCard(m))}
-              </div>
+              ${active.length > 0
+                ? html`
+                    <div class="card-list">
+                      ${active.map((m) => this.renderMigrationCard(m))}
+                    </div>
+                  `
+                : nothing}
+              ${this.renderCompletedMigrations(completed)}
             `}
       </div>
+    `;
+  }
+
+  /**
+   * Completed migrations are grouped in one collapsible element, collapsed by
+   * default. The open state is left to the element itself (no `open` binding),
+   * so a poll refresh keeps it expanded or collapsed as the user left it.
+   */
+  private renderCompletedMigrations(completed: MaintenanceOperation[]) {
+    if (completed.length === 0) return nothing;
+    return html`
+      <sl-details class="completed-migrations" summary="Completed migrations (${completed.length})">
+        <div class="card-list">${completed.map((m) => this.renderMigrationCard(m))}</div>
+      </sl-details>
     `;
   }
 
