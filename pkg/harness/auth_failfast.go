@@ -90,9 +90,9 @@ func CheckStagedAuth(harnessName string, authMeta *config.HarnessAuthMetadata, n
 	}
 	staged, err := readStagedAuthCandidates(in.AgentHome)
 	if err != nil {
-		// A missing or unreadable candidates file is not this check's
-		// concern (ApplyAuthSettings writes it just before the check); the
-		// provisioner reports it with its own error.
+		// A missing, unreadable or malformed candidates file is not this
+		// check's concern (ApplyAuthSettings writes it just before the
+		// check); the provisioner reports it with its own error.
 		return nil
 	}
 
