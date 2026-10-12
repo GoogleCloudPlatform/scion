@@ -159,6 +159,7 @@
 4 artifacts_orphans_test.go
 6 artifacts_permits_test.go
 6 artifacts_review_grant_test.go
+6 artifacts_review_grant_ui_test.go
 4 artifacts_review_test.go
 4 artifacts_scope_ceiling_test.go
 4 artifacts_settings_test.go
@@ -959,6 +960,7 @@
 5 message_delivery_failures_test.go
 5 message_id_envelope_3881_test.go
 4 message_log_conversation_id_test.go
+3 message_log_records_test.go
 0 message_sqlite_helpers_test.go
 1 message_wake_lifecycle_test.go
 6 messageability_detail_test.go
