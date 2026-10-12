@@ -80,7 +80,9 @@ and `--uat-sa`.
 
 Select the profile for a command with `--hub-profile t1`, or for a whole session with
 `SCION_HUB_PROFILE=t1`. Name the run with `--run <label>` or `SCION_HUB_RUN`. `--as` and
-`--run` are flags of the `hub` and `artifact` commands and apply only with a profile.
+`--run` are flags of the `hub` and `artifact` commands and of the agent commands that run with a
+profile (`create`, `start`, `list`, `stop`, `delete`, `look`, `logs`), and apply only with a
+profile.
 
 :::caution
 A profile must name another hub. The CLI refuses a profile whose endpoint names the agent's own
@@ -128,19 +130,76 @@ Only these commands run with a profile:
 
 - `hub status`
 - `hub profile`
-- `hub test-identity`, except `delegate` and `web-code`
+- `hub test-identity`, except `delegate`
 - `hub projects`: list, `info`, `create` and `delete`, with the project named explicitly
 - `artifact publish`, `get`, `versions` and `delete`; `publish` needs `--project <name or id>`
   on the target
+- the agent commands `create`, `start`, `list`, `stop`, `delete`, `look` and `logs`, with
+  `--project <name or id>` on the target (see [Agents on the target](#agents-on-the-target))
 
-They read no local project settings. Every other command, such as the agent commands,
-`whoami` and anything that touches local state, is refused while a profile is selected.
+They read no local project settings. Every other command, such as `message`, `whoami`,
+`resume` and anything that touches local state, is refused while a profile is selected.
 
 A member token used with `--as` is re-issued automatically through the delegation within 5
 minutes of its expiry. `scion hub test-identity token --as owner` re-issues it at once. Once
 the identity itself has expired, commands are refused with "issue a new one".
 
-## 5. Check the gate with `hub status`
+## 5. Open a browser session as an identity
+
+`hub test-identity web-code` mints a single-use web-login code for an identity of the run, on
+the target, through the profile's issuer delegation:
+
+```bash
+ID=$(jq -r .identityId ~/.scion/hub-profiles/t1/run-r1/owner.json)
+dir=$(mktemp -d); dir=$(cd "$dir" && pwd -P)
+scion hub test-identity web-code "$ID" --out "$dir/code.txt"
+```
+
+The code goes **only** to the file named by `--out`, exactly as without a profile: the path must
+not exist yet (an existing file, a symlink, or a path under a symlinked directory is refused
+before any request is sent), the file is created with mode `0600`, and the code is never
+printed. A browser redeems it at `POST /auth/test-identity/redeem` on the target (see
+[Browser Sessions as Test Identities](/scion/contributing/test-identity-browser-sessions/)).
+`--as` does not apply: the issuer delegation mints the code. The target mints codes only for
+member and viewer identities issued through the same delegation, and only where its own test
+identity web sessions are available; for any other identity it answers `404`. `hub test-identity
+list` shows the ids of the delegation's identities.
+
+## 6. Agents on the target
+
+With `--project <name or id>`, the agent commands act on agents of that project on the target,
+as the `--as` identity:
+
+```bash
+scion create a1 "provision only" --project uat-throwaway --as owner
+scion start a2 "do the task" --project uat-throwaway --as owner --no-wait
+scion list --project uat-throwaway --as owner
+scion look a2 --project uat-throwaway --as owner
+scion logs a2 --project uat-throwaway --as owner
+scion stop a2 --project uat-throwaway --as owner
+scion delete a1 a2 --project uat-throwaway --as owner
+```
+
+The project is always named with `--project`; the profile names none, and the current
+directory's project is never used. These commands work only through the target hub's API:
+
+- no local project is resolved, no local settings are read, and no hub sync runs;
+- no agent directory, worktree, sync state or agent name cache is written or removed;
+- `--type` must name a template that exists on the target; a local template is never read or
+  uploaded;
+- no local environment value is sent to the target. A start does not ask for missing
+  environment values, and if the target asks anyway the start fails: set the values as secrets
+  or environment on the target hub instead.
+
+They fail closed, before any agent request, where they would need local state or another
+credential: `--attach`, `--workspace`, `--upload-template`, `delete --cleanup-only`,
+`list --all` and the relationship filters of `list` (`--descendants`, `--ancestors`,
+`--lineage`) are refused with a profile. `stop --all` and `delete --stopped` act on the named
+project. `look` and `logs` read the terminal output and the agent log through the target's
+relay to its broker. `message` is not available with a profile: it names the sender from the
+agent's own identity on its own hub.
+
+## 7. Check the gate with `hub status`
 
 ```bash
 scion hub status            # the issuer delegation
@@ -165,7 +224,7 @@ profile credential and exits non-zero in three cases:
 
 Run it before a journey starts.
 
-## 6. Tear down the run
+## 8. Tear down the run
 
 ```bash
 scion hub test-identity teardown --run r1          # delete
@@ -183,15 +242,18 @@ Inside an agent (`SCION_CLI_MODE=agent`), these commands are available:
 
 - `hub status`
 - `hub profile`
-- `hub test-identity` `issue`, `token`, `list`, `delete` and `teardown`
+- `hub test-identity` `issue`, `token`, `list`, `delete`, `teardown` and `web-code`
 - `artifact publish`, `get` and `versions` (agent commands with or without a profile)
+- `create`, `start`, `list`, `stop`, `delete`, `look` and `logs` (agent commands with or without
+  a profile)
 
 `hub status` and the `hub test-identity` commands run only with a target-hub profile whose
 endpoint is not the agent's own hub. Without a profile, or with a profile for the agent's own
-hub, they are refused. With a profile selected, the `artifact` commands act on the target as the
-`--as` identity, and the profile for the agent's own hub is refused for them too.
-`hub test-identity delegate` (the human consent step), `hub test-identity web-code`, the other
-`hub` commands and `hub projects` are not available in agent mode.
+hub, they are refused. The `artifact` commands and the agent commands keep their usual
+behaviour on the agent's own hub without a profile. With a profile selected they act on the
+target as the `--as` identity, and a profile for the agent's own hub is refused for them too.
+`hub test-identity delegate` (the human consent step), the other `hub` commands and
+`hub projects` are not available in agent mode.
 
 ## Troubleshooting
 
