@@ -189,8 +189,8 @@ func TestEnsureHubReady_HubFromContextControls(t *testing.T) {
 
 // TestEnsureHubReady_RecordLinkAfterRegistration: when EnsureHubReady
 // registers or links a project, RecordLink gets the hub endpoint, the ID
-// the hub knows the project by and the project path. A project that is
-// already registered, and a refused registration, record nothing.
+// the hub knows the project by and the project path. A refused
+// registration records nothing.
 func TestEnsureHubReady_RecordLinkAfterRegistration(t *testing.T) {
 	type call struct {
 		endpoint, id, path string

@@ -238,9 +238,33 @@ func TestHubUnlink_RemovesLinkEntry(t *testing.T) {
 	assert.Equal(t, ctxTestProjectID, c.Hubs["prod"].CurrentProject.ID, "the current project is not touched")
 }
 
+// TestHubUnlink_NotLinkedRemovesLeftoverEntry: unlink on a project that is
+// already unlinked still removes a link entry left behind for it.
+func TestHubUnlink_NotLinkedRemovesLeftoverEntry(t *testing.T) {
+	setupContextTest(t)
+	origYes := autoConfirm
+	t.Cleanup(func() { autoConfirm = origYes })
+	root := t.TempDir()
+	dotScion := filepath.Join(root, ".scion")
+	require.NoError(t, os.MkdirAll(dotScion, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dotScion, "settings.yaml"),
+		[]byte("project_id: dir-project-id\nhub:\n  linked: false\n"), 0o644))
+	t.Chdir(root)
+	saveLinkEntry(t, dotScion, linkTestHub, "linked")
+	projectPath, autoConfirm = dotScion, true
+
+	var runErr error
+	stdout := captureStdout(t, func() { runErr = runHubUnlink(hubUnlinkCmd, nil) })
+	require.NoError(t, runErr)
+	assert.Contains(t, stdout, "This project is not linked to the Hub.")
+	entry, _ := readTestContext(t).LinkEntryFor(config.LinkPathForProject(dotScion))
+	assert.Nil(t, entry, "the leftover link entry is removed")
+}
+
 // TestRegisterLocalHub covers what 'scion server start' does to the hub
 // list: it registers the local hub once, and makes it current only when
-// no hub is current.
+// no hub is current and the global hub.endpoint is unset or names the
+// local hub.
 func TestRegisterLocalHub(t *testing.T) {
 	const local = "http://127.0.0.1:8080"
 	const registered = "Registered hub 'local' (" + local + "); rename with 'scion hub rename'.\n"
@@ -262,6 +286,27 @@ func TestRegisterLocalHub(t *testing.T) {
 		assert.Empty(t, out.String(), "a second start prints nothing")
 		assert.Equal(t, before, readFileT(t, contextFilePath()), "a second start does not rewrite the file")
 		assert.Len(t, readTestContext(t).Hubs, 1)
+	})
+
+	t.Run("global hub.endpoint is the local hub: registered and current", func(t *testing.T) {
+		setupContextTest(t)
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+local+"/\n")
+		var out, errOut bytes.Buffer
+		registerLocalHub(&out, &errOut, local)
+		assert.Equal(t, registered, out.String())
+		assert.Equal(t, "local", readTestContext(t).CurrentHub)
+	})
+
+	t.Run("global hub.endpoint names a remote hub: registered, not current", func(t *testing.T) {
+		setupContextTest(t)
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: https://remote.example.com\n")
+		var out, errOut bytes.Buffer
+		registerLocalHub(&out, &errOut, local)
+		assert.Equal(t, registered, out.String(), "the local hub is still registered")
+		c := readTestContext(t)
+		require.NotNil(t, c.Hubs["local"])
+		assert.Empty(t, c.CurrentHub, "the remote hub of the global settings keeps applying outside projects")
+		assert.Equal(t, "https://remote.example.com", settingsEndpoint(t, filepath.Join(os.Getenv("HOME"), ".scion")), "global settings unchanged")
 	})
 
 	t.Run("another hub is current: registered, not current", func(t *testing.T) {

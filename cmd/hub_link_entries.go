@@ -107,20 +107,27 @@ func contextLinkRecorder(out, stderr io.Writer) func(endpoint, hubProjectID, pro
 }
 
 // registerLocalHub adds the local workstation hub at endpoint to the hub
-// list as "local" when no entry has that endpoint, and makes the hub at
-// endpoint current when no hub is current. A new entry is announced on
-// out. A failure is a warning on stderr. Inside an agent the hub list is
-// not used.
+// list as "local" when no entry has that endpoint. It makes the hub at
+// endpoint current only when no hub is current and the global settings
+// name no other hub (hub.endpoint unset, or the local endpoint itself).
+// While the CLI still reads hub.endpoint from the global settings, that
+// keeps a user whose global hub.endpoint names a remote hub on that hub
+// outside project directories, as before server start stopped writing
+// hub.endpoint (it only ever wrote it when unset). A new entry is
+// announced on out. A failure is a warning on stderr. Inside an agent the
+// hub list is not used.
 func registerLocalHub(out, stderr io.Writer, endpoint string) {
 	if contextDisabled(resolveMode()) {
 		return
 	}
+	globalEndpoint, _ := fileHubEndpoint("", true)
+	mayBecomeCurrent := globalEndpoint == "" || config.NormalizeEndpoint(globalEndpoint) == config.NormalizeEndpoint(endpoint)
 	var name string
 	var created, changed bool
 	err := config.UpdateCLIContext(func(c *config.CLIContext) error {
 		name, created = c.EnsureHub(endpoint, localHubName)
 		changed = created
-		if c.CurrentHub == "" {
+		if c.CurrentHub == "" && mayBecomeCurrent {
 			c.CurrentHub = name
 			changed = true
 		}
@@ -132,7 +139,7 @@ func registerLocalHub(out, stderr io.Writer, endpoint string) {
 	switch {
 	case errors.Is(err, errLocalHubKnown):
 	case err != nil:
-		_, _ = fmt.Fprintf(stderr, "Warning: failed to add the local hub to the hub list: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "Warning: could not add the local hub to the hub list: %v\n", err)
 	case created:
 		printRegisteredHub(out, name, config.NormalizeEndpoint(endpoint))
 	}

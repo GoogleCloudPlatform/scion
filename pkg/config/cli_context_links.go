@@ -38,13 +38,7 @@ func LinkPathForProject(projectDir string) string {
 	if projectDir == "" {
 		return ""
 	}
-	dir := filepath.Clean(projectDir)
-	if abs, err := filepath.Abs(dir); err == nil {
-		dir = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolved
-	}
+	dir := cleanLinkPath(projectDir)
 	sep := string(filepath.Separator)
 	if strings.Contains(dir, sep+ProjectConfigsDir+sep) {
 		if s, err := LoadSettings(dir); err == nil && s != nil && s.WorkspacePath != "" {
