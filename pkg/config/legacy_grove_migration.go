@@ -228,17 +228,14 @@ func currentProjectMigrationReporter() Reporter {
 // fixture to another uid (which requires root).
 var geteuid = os.Geteuid
 
-// chmodFile mimics (*os.File).Chmod, indirected so a test can force the
-// legacy key migration's mode fix-up to fail, so its cleanup path can be
-// exercised without a filesystem that actually rejects chmod.
+// chmodFile mimics (*os.File).Chmod for the legacy key migration's mode
+// fix-up. It is a test seam: a package var that a test may replace.
 var chmodFile = func(f *os.File, mode os.FileMode) error {
 	return f.Chmod(mode)
 }
 
-// syncFile mimics (*os.File).Sync, indirected so a test can force a failure
-// after the file's content is already fully written, so the legacy key
-// migration's handling of that case can be exercised without a real fsync
-// failure.
+// syncFile mimics (*os.File).Sync for the legacy key migration. It is a
+// test seam: a package var that a test may replace.
 var syncFile = func(f *os.File) error {
 	return f.Sync()
 }
@@ -264,9 +261,8 @@ var backupCloseFile = func(f *os.File) error {
 	return f.Close()
 }
 
-// checkGitTracked is indirected through a package var so tests can count
-// calls and assert it is never invoked on a path that did not migrate
-// anything (the no-op, conflict, and skipped cases).
+// checkGitTracked reports whether a migrated file is tracked by git. It is
+// a test seam: a package var that a test may replace.
 var checkGitTracked = gitTracked
 
 // projectMigrationDirState serialises and deduplicates the legacy key
@@ -878,9 +874,9 @@ type legacyKeyAction struct {
 // number of goroutines and call sites: each distinct key's event (Migrated,
 // Conflict, Skipped) is reported at most once per process for that file,
 // using per-path state (keyed by the exact path given) — keyed additionally
-// by which legacy key the event is about, since one call can legitimately migrate several
-// distinct keys (a marker file's grove-id, grove-name and grove-slug) and
-// each of those must still be reported the first time. Every call still
+// by which legacy key the event is about, since one call can legitimately
+// migrate several distinct keys (a marker file's grove-id, grove-name and
+// grove-slug) and each of those must still be reported the first time. Every call still
 // re-examines the filesystem, so a file edited or migrated by another
 // process between calls is always picked up correctly.
 func migrateLegacyYAMLKeys(file string, renames []legacyYAMLKeyRename, report Reporter) map[string]string {

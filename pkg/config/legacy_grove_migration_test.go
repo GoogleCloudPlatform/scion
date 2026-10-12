@@ -673,9 +673,9 @@ func TestMigrateLegacyYAMLKeys_NoLegacyKeysNoWrite(t *testing.T) {
 
 // TestMigrateLegacyYAMLKeys_NotOwner covers the owner-check failure path,
 // via the deterministic geteuid seam: the file is left untouched, Skipped
-// is reported, and the legacy value is returned for in-memory use. A genuinely read-only
-// filesystem is a different branch (the file is still owned by this
-// process, so CreateTemp fails instead) — see
+// is reported, and the legacy value is returned for in-memory use. A
+// genuinely read-only filesystem is a different branch (the file is still
+// owned by this process, so CreateTemp fails instead) — see
 // TestHubProjectIDOverride_UnwritableProjectFileOutranksGlobal's real-chmod
 // subtest for that path.
 func TestMigrateLegacyYAMLKeys_NotOwner(t *testing.T) {
