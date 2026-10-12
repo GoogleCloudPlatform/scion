@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // Project-scoped chat thread groups: /api/v1/thread-groups
@@ -140,9 +141,18 @@ func writeThreadGroupStoreError(w http.ResponseWriter, err error, resource strin
 	}
 }
 
-// writeThreadGroupLimit writes the 422 for a thread group limit.
-func writeThreadGroupLimit(w http.ResponseWriter, message string) {
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeQuotaExceeded, message, nil)
+// threadGroupsPerProjectError is the 422 for a project at
+// store.MaxThreadGroupsPerProject groups.
+func threadGroupsPerProjectError() *apiError {
+	return &apiError{status: http.StatusUnprocessableEntity, code: ErrCodeQuotaExceeded,
+		message: fmt.Sprintf("a project can have at most %d thread groups", store.MaxThreadGroupsPerProject)}
+}
+
+// threadGroupFullError is the 422 for a thread group at
+// store.MaxThreadsPerThreadGroup threads.
+func threadGroupFullError() *apiError {
+	return &apiError{status: http.StatusUnprocessableEntity, code: ErrCodeQuotaExceeded,
+		message: fmt.Sprintf("a thread group can hold at most %d threads", store.MaxThreadsPerThreadGroup)}
 }
 
 // threadGroupCreatorKind returns the created_by_kind for identity.
@@ -302,13 +312,15 @@ func (s *Server) handleCreateThreadGroup(w http.ResponseWriter, r *http.Request)
 		writeThreadGroupStoreError(w, err, "Thread group")
 		return
 	}
-	existing, err := s.store.ListThreadGroups(ctx, req.ProjectID)
+	// The limit is soft: a best-effort check before the write, with no
+	// transactional count, so concurrent creates can pass it together.
+	count, err := s.store.CountThreadGroups(ctx, req.ProjectID)
 	if err != nil {
 		writeThreadGroupStoreError(w, err, "Project")
 		return
 	}
-	if len(existing) >= store.MaxThreadGroupsPerProject {
-		writeThreadGroupLimit(w, fmt.Sprintf("a project can have at most %d thread groups", store.MaxThreadGroupsPerProject))
+	if count >= store.MaxThreadGroupsPerProject {
+		threadGroupsPerProjectError().write(w)
 		return
 	}
 	g := &store.ThreadGroup{
@@ -426,37 +438,27 @@ func (s *Server) handleAddThreadGroupThread(w http.ResponseWriter, r *http.Reque
 		BadRequest(w, "Invalid request body")
 		return
 	}
-	convID, apiErr := s.resolveThreadGroupMember(ctx, g.ProjectID, req)
+	convID, apiErr := s.resolveThreadGroupMember(ctx, identity, g.ProjectID, req)
 	if apiErr != nil {
 		apiErr.write(w)
 		return
 	}
 
-	// Find where the thread is filed now: already here is a no-op, and a
-	// move also changes the group it leaves.
-	groups, err := s.store.ListThreadGroups(ctx, g.ProjectID)
+	// Find where the thread is filed now (a point lookup): already here is
+	// a no-op, and a move also changes the group it leaves.
+	fromGroupID, err := s.store.GetThreadGroupIDForConversation(ctx, convID)
 	if err != nil {
 		writeThreadGroupStoreError(w, err, "Thread group")
 		return
-	}
-	var fromGroupID string
-	targetMembers := len(g.Members)
-	for i := range groups {
-		if groups[i].ID == g.ID {
-			targetMembers = len(groups[i].Members)
-		}
-		for _, m := range groups[i].Members {
-			if m.ConversationID == convID {
-				fromGroupID = groups[i].ID
-			}
-		}
 	}
 	if fromGroupID == g.ID {
 		s.writeThreadGroup(w, r, g.ID, http.StatusOK)
 		return
 	}
-	if targetMembers >= store.MaxThreadsPerThreadGroup {
-		writeThreadGroupLimit(w, fmt.Sprintf("a thread group can hold at most %d threads", store.MaxThreadsPerThreadGroup))
+	// The limit is soft: a best-effort check of the members just read, with
+	// no transactional count, so concurrent adds can pass it together.
+	if len(g.Members) >= store.MaxThreadsPerThreadGroup {
+		threadGroupFullError().write(w)
 		return
 	}
 	if err := s.store.SetThreadGroupMember(ctx, g.ID, convID, identity.ID()); err != nil {
@@ -480,11 +482,13 @@ func (s *Server) handleAddThreadGroupThread(w http.ResponseWriter, r *http.Reque
 //     is not found;
 //   - the conversation exists and is not deleted, and a thread-backed
 //     conversation's topic is not deleted;
-//   - the conversation is a group conversation (direct is 400) of projectID
-//     (another project's conversation is not found, so its existence is
-//     not disclosed);
+//   - the conversation is a group conversation of projectID (another
+//     project's conversation is not found, so its existence is not
+//     disclosed). A direct conversation is 400 only for one of its own two
+//     participants; anyone else gets the not-found answer, so holding a
+//     DM's ID does not reveal that the DM exists;
 //   - it is not the project's #general thread (400).
-func (s *Server) resolveThreadGroupMember(ctx context.Context, projectID string, req addThreadGroupThreadRequest) (string, *apiError) {
+func (s *Server) resolveThreadGroupMember(ctx context.Context, identity Identity, projectID string, req addThreadGroupThreadRequest) (string, *apiError) {
 	notFound := &apiError{status: http.StatusNotFound, code: ErrCodeNotFound, message: "Thread not found"}
 	if (req.ConversationID == "") == (req.ThreadID == "") {
 		return "", &apiError{status: http.StatusBadRequest, code: ErrCodeInvalidRequest, message: "exactly one of conversationId and threadId is required"}
@@ -521,6 +525,9 @@ func (s *Server) resolveThreadGroupMember(ctx context.Context, projectID string,
 		return "", notFound
 	}
 	if conv.Kind == "direct" {
+		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
+			return "", notFound
+		}
 		return "", &apiError{status: http.StatusBadRequest, code: ErrCodeInvalidRequest, message: "direct conversations cannot be added to a thread group"}
 	}
 	if conv.Kind != "group" || conv.ProjectID == nil || *conv.ProjectID != projectID {
@@ -555,6 +562,11 @@ func (s *Server) handleRemoveThreadGroupThread(w http.ResponseWriter, r *http.Re
 	if g == nil {
 		return
 	}
+	if _, err := uuid.Parse(conversationID); err != nil {
+		// A malformed ID cannot be a member: idempotent 204.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	member := false
 	for _, m := range g.Members {
 		if m.ConversationID == conversationID {
@@ -576,11 +588,18 @@ func (s *Server) handleRemoveThreadGroupThread(w http.ResponseWriter, r *http.Re
 // POST /api/v1/conversations before the conversation is minted (design
 // section 2): the experiment must be on (400 otherwise), the group must
 // exist in projectID (404 otherwise, so another project's group is not
-// disclosed), and it must have room for one more thread (422). The caller
-// has already authorized projectID.
+// disclosed), and it must have room for one more thread (422). An agent
+// must belong to projectID (403). The caller has already authorized
+// projectID.
 func (s *Server) threadGroupForNewConversation(ctx context.Context, threadGroupID, projectID string) (*store.ThreadGroup, *apiError) {
 	if !s.experimentEnabled(experiments.ChatThreadGroups) {
 		return nil, &apiError{status: http.StatusBadRequest, code: ErrCodeInvalidRequest, message: "thread groups are not enabled"}
+	}
+	// The strict agent same-project rule of every thread group mutation
+	// (design section 3): handleCreateConversation authorizes only
+	// project:read on the body project.
+	if ai := GetAgentIdentityFromContext(ctx); ai != nil && ai.ProjectID() != projectID {
+		return nil, &apiError{status: http.StatusForbidden, code: ErrCodeForbidden, message: "agents can only file threads into thread groups of their own project"}
 	}
 	g, err := s.store.GetThreadGroup(ctx, threadGroupID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -592,8 +611,9 @@ func (s *Server) threadGroupForNewConversation(ctx context.Context, threadGroupI
 	if g.ProjectID != projectID {
 		return nil, &apiError{status: http.StatusNotFound, code: ErrCodeNotFound, message: "Thread group not found"}
 	}
+	// Soft limit, as in handleAddThreadGroupThread.
 	if len(g.Members) >= store.MaxThreadsPerThreadGroup {
-		return nil, &apiError{status: http.StatusUnprocessableEntity, code: ErrCodeQuotaExceeded, message: fmt.Sprintf("a thread group can hold at most %d threads", store.MaxThreadsPerThreadGroup)}
+		return nil, threadGroupFullError()
 	}
 	return g, nil
 }
@@ -623,18 +643,12 @@ func (s *Server) removeDeletedTopicFromThreadGroups(ctx context.Context, topic *
 	}
 	var fromGroupID string
 	if s.experimentEnabled(experiments.ChatThreadGroups) {
-		groups, err := s.store.ListThreadGroups(ctx, topic.ProjectID)
+		id, err := s.store.GetThreadGroupIDForConversation(ctx, topic.ConversationID)
 		if err != nil {
-			slog.WarnContext(ctx, "handleTopicDelete: list thread groups failed",
+			slog.WarnContext(ctx, "handleTopicDelete: thread group lookup failed",
 				"topicID", topic.ID, "conversationID", topic.ConversationID, "error", err)
 		}
-		for i := range groups {
-			for _, m := range groups[i].Members {
-				if m.ConversationID == topic.ConversationID {
-					fromGroupID = groups[i].ID
-				}
-			}
-		}
+		fromGroupID = id
 	}
 	if err := s.store.RemoveThreadGroupMembersForConversation(ctx, topic.ConversationID); err != nil {
 		slog.WarnContext(ctx, "handleTopicDelete: thread group member cleanup failed",

@@ -3087,6 +3087,17 @@ type ThreadGroupStore interface {
 	// with no groups returns an empty, non-nil slice.
 	ListThreadGroups(ctx context.Context, projectID string) ([]ThreadGroup, error)
 
+	// CountThreadGroups returns how many thread groups a project has,
+	// without loading them or their members (the hub's per-project limit
+	// check).
+	CountThreadGroups(ctx context.Context, projectID string) (int, error)
+
+	// GetThreadGroupIDForConversation returns the ID of the thread group a
+	// conversation is filed in, or "" when it is in none (including a
+	// malformed ID). It is a point lookup on the unique conversation index
+	// and does not check that the conversation is live.
+	GetThreadGroupIDForConversation(ctx context.Context, conversationID string) (string, error)
+
 	// RenameThreadGroup renames a thread group and bumps UpdatedAt (last
 	// writer wins). Returns ErrNotFound if it does not exist,
 	// ErrAlreadyExists if another group in the project has the same name

@@ -309,6 +309,15 @@ func TestThreadGroups_MemberUserFullLifecycle(t *testing.T) {
 	require.Len(t, list.ThreadGroups, 1)
 	assert.Len(t, list.ThreadGroups[0].Threads, 2)
 
+	// Rename: a name another group has (in any case) is 409, an invalid
+	// name 400, and neither publishes.
+	f.mkGroup(t, f.projA, "Taken")
+	rec = f.session(t, f.member, http.MethodPatch, base, map[string]string{"name": "TAKEN"})
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	rec = f.session(t, f.member, http.MethodPatch, base, map[string]string{"name": "   "})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Empty(t, f.spy.take())
+
 	// Rename.
 	rec = f.session(t, f.member, http.MethodPatch, base, map[string]string{"name": "Shipped"})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -326,6 +335,9 @@ func TestThreadGroups_MemberUserFullLifecycle(t *testing.T) {
 	assert.Equal(t, ThreadGroupEventUpdated, ev[0].action)
 	assert.Len(t, ev[0].group.Threads, 1)
 	rec = f.session(t, f.member, http.MethodDelete, base+"/threads/"+conv.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	// A malformed conversation ID cannot be a member: 204 as well.
+	rec = f.session(t, f.member, http.MethodDelete, base+"/threads/not-a-uuid", nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	assert.Empty(t, f.spy.take())
 
@@ -472,10 +484,16 @@ func TestThreadGroups_AddThreadValidation(t *testing.T) {
 		return f.session(t, f.member, http.MethodPost, path, body)
 	}
 
+	// A direct conversation is 400 for one of its participants, and the
+	// not-found answer for anyone else (a DM's ID reveals nothing).
 	direct := f.direct(t, f.member, "agent", f.agentA.ID)
 	rec := add(map[string]string{"conversationId": direct.ID})
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "direct conversations")
+	othersDM := f.direct(t, f.owner, "agent", f.agentA.ID)
+	rec = add(map[string]string{"conversationId": othersDM.ID})
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "direct")
 
 	otherConv, otherTopic := f.thread(t, f.projB, "other-project-thread")
 	assert.Equal(t, http.StatusNotFound, add(map[string]string{"conversationId": otherConv.ID}).Code)
@@ -522,7 +540,7 @@ func TestThreadGroups_AddThreadValidation(t *testing.T) {
 	assert.Equal(t, ext.ID, got.Threads[0].ConversationID)
 	assert.Empty(t, got.Threads[0].ThreadID)
 	assert.Equal(t, ext.DisplayName, got.Threads[0].Name)
-	assert.Zero(t, threadGroupMemberCount(t, f.s, direct.ID)+threadGroupMemberCount(t, f.s, otherConv.ID)+
+	assert.Zero(t, threadGroupMemberCount(t, f.s, direct.ID)+threadGroupMemberCount(t, f.s, othersDM.ID)+threadGroupMemberCount(t, f.s, otherConv.ID)+
 		threadGroupMemberCount(t, f.s, generalConv)+threadGroupMemberCount(t, f.s, deletedConv.ID))
 }
 
@@ -590,6 +608,15 @@ func TestCreateConversation_WithThreadGroup(t *testing.T) {
 	assert.Equal(t, ThreadGroupEventUpdated, ev[0].action)
 	require.Len(t, ev[0].group.Threads, 1)
 	assert.Equal(t, "filed-thread", ev[0].group.Threads[0].Name)
+
+	// An agent of another project cannot file into this project's group,
+	// even when policy lets it read the project: 403, nothing minted.
+	grantAgentProjectAccess(t, f.s, f.agentB.ID, f.projA)
+	rec = f.agentCall(t, f.agentB.ID, f.projB, http.MethodPost, "/api/v1/conversations",
+		map[string]string{"displayName": "foreign-agent-create", "projectId": f.projA, "threadGroupId": g.ID})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assertNoConversationNamed(t, f.s, "foreign-agent-create")
+	assert.Empty(t, f.spy.take())
 
 	// An agent defaulting to its own project can file too.
 	rec = f.agentCall(t, f.agentA.ID, f.projA, http.MethodPost, "/api/v1/conversations",
