@@ -22,36 +22,49 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 )
 
-// hostStateNoFollowParent is passed as agentinfolock.Options.NoFollowParent,
-// so the lock file is also opened without following a symlink in any
-// component of agentDir.
+// hostStateNoFollowParent is passed as agentinfolock.Options.NoFollowParent.
+// UpdateHostState gives agentinfolock the lock path below the resolved
+// root, so the walk from / meets no symlink above the root, and a symlink
+// below it makes the update run unlocked (and then fail in the read).
 const hostStateNoFollowParent = true
 
-// hostStateDir is agentDir opened once without following a symlink in any
-// path component. Every later operation on HostStateFile (open, temp
-// create, rename) goes through the fd, so a symlink swapped into the path
-// afterwards is not followed either.
+// hostStateDir is agentDir opened once: the resolved trusted root, then
+// each component below it with openat(O_DIRECTORY|O_NOFOLLOW). Every later
+// operation on HostStateFile (open, temp create, rename) goes through the
+// fd, so a symlink swapped into the path afterwards is not followed either.
 type hostStateDir struct {
 	fd   int
-	path string
+	path string // agentDir, for messages
 }
 
-// openHostStateDir opens agentDir by walking every component with
-// openat(O_DIRECTORY|O_NOFOLLOW). A symlink anywhere in agentDir, including
-// agentDir itself, makes it fail. A missing agentDir gives an error that
+// openHostStateDir opens l.root (already resolved, so no symlink is met)
+// and walks l.rel without following a symlink. A symlink in any component
+// below the root makes it fail. A missing component gives an error that
 // matches fs.ErrNotExist.
-func openHostStateDir(agentDir string) (*hostStateDir, error) {
-	fd, _, err := dirfd.OpenParentNoFollow(HostStatePath(agentDir))
+func openHostStateDir(l hostStateLayout) (*hostStateDir, error) {
+	const dirFlags = unix.O_DIRECTORY | unix.O_RDONLY | unix.O_CLOEXEC
+	fd, err := unix.Open(l.root, dirFlags, 0)
 	if err != nil {
-		return nil, fmt.Errorf("host state dir %s: %w", agentDir, err)
+		return nil, &os.PathError{Op: "open", Path: l.root, Err: err}
 	}
-	return &hostStateDir{fd: fd, path: agentDir}, nil
+	cur := l.root
+	for _, name := range l.rel {
+		cur = filepath.Join(cur, name)
+		child, err := unix.Openat(fd, name, dirFlags|unix.O_NOFOLLOW, 0)
+		_ = unix.Close(fd)
+		if err != nil {
+			return nil, fmt.Errorf("host state dir: %w", &os.PathError{Op: "open", Path: cur, Err: err})
+		}
+		fd = child
+	}
+	return &hostStateDir{fd: fd, path: cur}, nil
 }
 
 func (d *hostStateDir) close() { _ = unix.Close(d.fd) }
@@ -68,9 +81,9 @@ func (d *hostStateDir) openFile() (*os.File, error) {
 	if err != nil {
 		var st unix.Stat_t
 		if serr := unix.Fstatat(d.fd, HostStateFile, &st, unix.AT_SYMLINK_NOFOLLOW); serr == nil && st.Mode&unix.S_IFMT == unix.S_IFLNK {
-			return nil, fmt.Errorf("%w: %s", errHostStateSymlink, HostStatePath(d.path))
+			return nil, fmt.Errorf("%w: %s", errHostStateSymlink, filepath.Join(d.path, HostStateFile))
 		}
-		return nil, &os.PathError{Op: "open", Path: HostStatePath(d.path), Err: err}
+		return nil, &os.PathError{Op: "open", Path: filepath.Join(d.path, HostStateFile), Err: err}
 	}
 	return f, nil
 }
@@ -117,7 +130,7 @@ func (d *hostStateDir) writeFile(data []byte) error {
 		return err
 	}
 	if err := dirfd.RenameAt(d.fd, name, HostStateFile); err != nil {
-		return fmt.Errorf("host state file %s: rename: %w", HostStatePath(d.path), err)
+		return fmt.Errorf("host state file %s: rename: %w", filepath.Join(d.path, HostStateFile), err)
 	}
 	ok = true
 	return nil

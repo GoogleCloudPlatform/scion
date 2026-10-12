@@ -30,13 +30,53 @@ import (
 )
 
 func TestHostStateMissingFileIsZero(t *testing.T) {
-	dir := hostStateTempDir(t)
-	hs, err := ReadHostState(dir)
+	a := newHostStateAgent(t)
+	hs, err := ReadHostState(a.root, a.name)
 	if err != nil {
 		t.Fatalf("ReadHostState: %v", err)
 	}
 	if hs.RunID != "" || hs.unknown != nil {
 		t.Fatalf("got %+v, want zero", hs)
+	}
+}
+
+func TestHostStateMissingAgentDir(t *testing.T) {
+	root := t.TempDir()
+	hs, err := ReadHostState(root, "absent")
+	if err != nil || hs.RunID != "" {
+		t.Fatalf("ReadHostState: hs=%+v err=%v, want zero and nil", hs, err)
+	}
+	if err := UpdateHostState(root, "absent", func(hs *HostState) error { hs.RunID = "x"; return nil }); err == nil {
+		t.Fatal("UpdateHostState: want error when agentDir is missing")
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Fatalf("UpdateHostState created entries in root: %v", entries)
+	}
+}
+
+func TestHostStateBadArgumentsRefused(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"", ".", "..", "a/b", "../x", "x/..", "a\\b", "a\x00b"} {
+		if _, err := HostStatePath(root, name); !errors.Is(err, errHostStateAgentName) {
+			t.Errorf("HostStatePath(%q): err=%v, want errHostStateAgentName", name, err)
+		}
+		if _, err := ReadHostState(root, name); !errors.Is(err, errHostStateAgentName) {
+			t.Errorf("ReadHostState(%q): err=%v, want errHostStateAgentName", name, err)
+		}
+		called := false
+		err := UpdateHostState(root, name, func(*HostState) error { called = true; return nil })
+		if !errors.Is(err, errHostStateAgentName) || called {
+			t.Errorf("UpdateHostState(%q): err=%v called=%v, want errHostStateAgentName", name, err, called)
+		}
+	}
+	if _, err := ReadHostState("relative/root", "agent-1"); err == nil {
+		t.Error("ReadHostState: want error for a relative root")
+	}
+	if err := UpdateHostState("relative/root", "agent-1", func(*HostState) error { return nil }); err == nil {
+		t.Error("UpdateHostState: want error for a relative root")
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Fatalf("entries created in root: %v", entries)
 	}
 }
 
@@ -49,16 +89,16 @@ func TestHostStateCorruptFileErrors(t *testing.T) {
 		"badtype": `{"runId": 7}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			dir := hostStateTempDir(t)
-			path := HostStatePath(dir)
+			a := newHostStateAgent(t)
+			path := a.path
 			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := ReadHostState(dir); err == nil {
+			if _, err := ReadHostState(a.root, a.name); err == nil {
 				t.Fatal("ReadHostState: want error for corrupt file")
 			}
 			called := false
-			err := UpdateHostState(dir, func(*HostState) error { called = true; return nil })
+			err := UpdateHostState(a.root, a.name, func(*HostState) error { called = true; return nil })
 			if err == nil || called {
 				t.Fatalf("UpdateHostState: err=%v called=%v, want error and no mutate", err, called)
 			}
@@ -74,58 +114,58 @@ func TestHostStateUnreadableFileErrors(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("needs a non-root unix user")
 	}
-	dir := hostStateTempDir(t)
-	if err := os.WriteFile(HostStatePath(dir), []byte(`{"runId":"x"}`), 0o000); err != nil {
+	a := newHostStateAgent(t)
+	if err := os.WriteFile(a.path, []byte(`{"runId":"x"}`), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadHostState(dir); err == nil || errors.Is(err, os.ErrNotExist) {
+	if _, err := ReadHostState(a.root, a.name); err == nil || errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ReadHostState: err=%v, want a non-NotExist error", err)
 	}
 }
 
 func TestHostStateRunIDRoundTrip(t *testing.T) {
-	dir := hostStateTempDir(t)
-	if err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "run-123"; return nil }); err != nil {
+	a := newHostStateAgent(t)
+	if err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "run-123"; return nil }); err != nil {
 		t.Fatalf("UpdateHostState: %v", err)
 	}
-	hs, err := ReadHostState(dir)
+	hs, err := ReadHostState(a.root, a.name)
 	if err != nil {
 		t.Fatalf("ReadHostState: %v", err)
 	}
 	if hs.RunID != "run-123" {
 		t.Fatalf("RunID = %q, want run-123", hs.RunID)
 	}
-	if err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = ""; return nil }); err != nil {
+	if err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = ""; return nil }); err != nil {
 		t.Fatalf("UpdateHostState clear: %v", err)
 	}
-	raw := readRawHostState(t, dir)
+	raw := readRawHostState(t, a.path)
 	if _, ok := raw["runId"]; ok {
 		t.Fatalf("cleared runId still in file: %v", raw)
 	}
 }
 
 func TestHostStateMutateErrorWritesNothing(t *testing.T) {
-	dir := hostStateTempDir(t)
+	a := newHostStateAgent(t)
 	want := errors.New("boom")
-	err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "x"; return want })
+	err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "x"; return want })
 	if !errors.Is(err, want) {
 		t.Fatalf("err = %v, want %v", err, want)
 	}
-	if _, err := os.Lstat(HostStatePath(dir)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(a.path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("file written despite mutate error: %v", err)
 	}
 }
 
 func TestHostStateUnknownFieldsSurviveUpdate(t *testing.T) {
-	dir := hostStateTempDir(t)
+	a := newHostStateAgent(t)
 	orig := `{"runId":"old","futureKey":{"a":[1,2]},"other":"v"}`
-	if err := os.WriteFile(HostStatePath(dir), []byte(orig), 0o600); err != nil {
+	if err := os.WriteFile(a.path, []byte(orig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "new"; return nil }); err != nil {
+	if err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "new"; return nil }); err != nil {
 		t.Fatalf("UpdateHostState: %v", err)
 	}
-	raw := readRawHostState(t, dir)
+	raw := readRawHostState(t, a.path)
 	if string(raw["runId"]) != `"new"` {
 		t.Fatalf("runId = %s, want \"new\"", raw["runId"])
 	}
@@ -141,26 +181,26 @@ func TestHostStateSymlinkRefused(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks need privileges on windows")
 	}
-	dir := hostStateTempDir(t)
+	a := newHostStateAgent(t)
 	target := filepath.Join(t.TempDir(), "target.json")
 	const content = `{"runId":"target"}`
 	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, HostStatePath(dir)); err != nil {
+	if err := os.Symlink(target, a.path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadHostState(dir); !errors.Is(err, errHostStateSymlink) {
+	if _, err := ReadHostState(a.root, a.name); !errors.Is(err, errHostStateSymlink) {
 		t.Fatalf("ReadHostState: err=%v, want errHostStateSymlink", err)
 	}
-	err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "x"; return nil })
+	err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "x"; return nil })
 	if !errors.Is(err, errHostStateSymlink) {
 		t.Fatalf("UpdateHostState: err=%v, want errHostStateSymlink", err)
 	}
 	if got, _ := os.ReadFile(target); string(got) != content {
 		t.Fatalf("symlink target changed: %q", got)
 	}
-	if fi, err := os.Lstat(HostStatePath(dir)); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+	if fi, err := os.Lstat(a.path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("symlink replaced: fi=%v err=%v", fi, err)
 	}
 }
@@ -169,22 +209,22 @@ func TestHostStateFileMode0600(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix permissions")
 	}
-	dir := hostStateTempDir(t)
+	a := newHostStateAgent(t)
 	// A pre-existing file with a wider mode is replaced by a 0600 one.
-	if err := os.WriteFile(HostStatePath(dir), []byte(`{}`), 0o644); err != nil {
+	if err := os.WriteFile(a.path, []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "r"; return nil }); err != nil {
+	if err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "r"; return nil }); err != nil {
 		t.Fatalf("UpdateHostState: %v", err)
 	}
-	fi, err := os.Stat(HostStatePath(dir))
+	fi, err := os.Stat(a.path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := fi.Mode().Perm(); got != 0o600 {
 		t.Fatalf("mode = %o, want 600", got)
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(a.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +242,7 @@ func TestHostStateParallelUpdatesLoseNothing(t *testing.T) {
 		t.Skip("agentinfolock has no flock on this platform")
 	}
 	t.Setenv(agentinfolock.TestWaitEnv, "30s")
-	dir := hostStateTempDir(t)
+	a := newHostStateAgent(t)
 	const workers, rounds = 8, 25
 	var wg sync.WaitGroup
 	errs := make(chan error, workers*rounds)
@@ -212,7 +252,7 @@ func TestHostStateParallelUpdatesLoseNothing(t *testing.T) {
 			defer wg.Done()
 			for r := 0; r < rounds; r++ {
 				key := fmt.Sprintf("k-%d-%d", w, r)
-				errs <- UpdateHostState(dir, func(hs *HostState) error {
+				errs <- UpdateHostState(a.root, a.name, func(hs *HostState) error {
 					if hs.unknown == nil {
 						hs.unknown = map[string]json.RawMessage{}
 					}
@@ -230,7 +270,7 @@ func TestHostStateParallelUpdatesLoseNothing(t *testing.T) {
 			t.Fatalf("UpdateHostState: %v", err)
 		}
 	}
-	raw := readRawHostState(t, dir)
+	raw := readRawHostState(t, a.path)
 	for w := 0; w < workers; w++ {
 		for r := 0; r < rounds; r++ {
 			key := fmt.Sprintf("k-%d-%d", w, r)
@@ -245,19 +285,19 @@ func TestHostStateParallelUpdatesLoseNothing(t *testing.T) {
 }
 
 func TestHostStateTooLargeErrors(t *testing.T) {
-	dir := hostStateTempDir(t)
+	a := newHostStateAgent(t)
 	big := `{"runId":"x","pad":"` + strings.Repeat("a", maxHostStateSize) + `"}`
-	if err := os.WriteFile(HostStatePath(dir), []byte(big), 0o600); err != nil {
+	if err := os.WriteFile(a.path, []byte(big), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadHostState(dir); !errors.Is(err, errHostStateTooLarge) {
+	if _, err := ReadHostState(a.root, a.name); !errors.Is(err, errHostStateTooLarge) {
 		t.Fatalf("ReadHostState: err=%v, want errHostStateTooLarge", err)
 	}
-	err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "y"; return nil })
+	err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "y"; return nil })
 	if !errors.Is(err, errHostStateTooLarge) {
 		t.Fatalf("UpdateHostState: err=%v, want errHostStateTooLarge", err)
 	}
-	if got, _ := os.ReadFile(HostStatePath(dir)); string(got) != big {
+	if got, _ := os.ReadFile(a.path); string(got) != big {
 		t.Fatal("too large file changed")
 	}
 
@@ -267,30 +307,30 @@ func TestHostStateTooLargeErrors(t *testing.T) {
 	if len(exact) != maxHostStateSize {
 		t.Fatalf("test setup: len %d", len(exact))
 	}
-	if err := os.WriteFile(HostStatePath(dir), []byte(exact), 0o600); err != nil {
+	if err := os.WriteFile(a.path, []byte(exact), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadHostState(dir); err != nil {
+	if _, err := ReadHostState(a.root, a.name); err != nil {
 		t.Fatalf("ReadHostState at cap: %v", err)
 	}
 }
 
 func TestHostStateKnownKeyOtherCase(t *testing.T) {
-	dir := hostStateTempDir(t)
-	if err := os.WriteFile(HostStatePath(dir), []byte(`{"RunID":"old","other":1}`), 0o600); err != nil {
+	a := newHostStateAgent(t)
+	if err := os.WriteFile(a.path, []byte(`{"RunID":"old","other":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	hs, err := ReadHostState(dir)
+	hs, err := ReadHostState(a.root, a.name)
 	if err != nil {
 		t.Fatalf("ReadHostState: %v", err)
 	}
 	if hs.RunID != "old" {
 		t.Fatalf("RunID = %q, want old", hs.RunID)
 	}
-	if err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "new"; return nil }); err != nil {
+	if err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "new"; return nil }); err != nil {
 		t.Fatalf("UpdateHostState: %v", err)
 	}
-	raw := readRawHostState(t, dir)
+	raw := readRawHostState(t, a.path)
 	if _, ok := raw["RunID"]; ok {
 		t.Fatalf("other-case known key kept as unknown: %v", raw)
 	}
@@ -300,36 +340,53 @@ func TestHostStateKnownKeyOtherCase(t *testing.T) {
 }
 
 func TestHostStateDirectoryAtPathErrors(t *testing.T) {
-	dir := hostStateTempDir(t)
-	if err := os.Mkdir(HostStatePath(dir), 0o700); err != nil {
+	a := newHostStateAgent(t)
+	if err := os.Mkdir(a.path, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadHostState(dir); err == nil {
+	if _, err := ReadHostState(a.root, a.name); err == nil {
 		t.Fatal("ReadHostState: want error for a directory at the path")
 	}
-	if err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "x"; return nil }); err == nil {
+	if err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "x"; return nil }); err == nil {
 		t.Fatal("UpdateHostState: want error for a directory at the path")
 	}
-	if fi, err := os.Lstat(HostStatePath(dir)); err != nil || !fi.IsDir() {
+	if fi, err := os.Lstat(a.path); err != nil || !fi.IsDir() {
 		t.Fatalf("directory replaced: fi=%v err=%v", fi, err)
 	}
 }
 
-// hostStateTempDir returns a temp dir with symlinks resolved: on unix the
-// host state code refuses a symlink in any component of agentDir, and on
-// macOS t.TempDir() is under the symlink /var.
-func hostStateTempDir(t *testing.T) string {
+// hostStateAgent is a test agent dir at <root>/.scion/agents/<name>.
+type hostStateAgent struct {
+	root, name, dir, path string
+}
+
+// newHostStateAgent creates an agent dir below a fresh temp root. The root
+// is used as t.TempDir() returns it: symlinks above the root (macOS /var)
+// are trusted.
+func newHostStateAgent(t *testing.T) hostStateAgent {
 	t.Helper()
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+	return newHostStateAgentIn(t, t.TempDir(), "agent-1")
+}
+
+func newHostStateAgentIn(t *testing.T, root, name string) hostStateAgent {
+	t.Helper()
+	dir := filepath.Join(root, ".scion", "agents", name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path, err := HostStatePath(root, name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return dir
+	if path != filepath.Join(dir, HostStateFile) {
+		t.Fatalf("HostStatePath = %s, want %s", path, filepath.Join(dir, HostStateFile))
+	}
+	return hostStateAgent{root: root, name: name, dir: dir, path: path}
 }
 
-func readRawHostState(t *testing.T, dir string) map[string]json.RawMessage {
+func readRawHostState(t *testing.T, path string) map[string]json.RawMessage {
 	t.Helper()
-	data, err := os.ReadFile(HostStatePath(dir))
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}

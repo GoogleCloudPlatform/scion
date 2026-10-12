@@ -30,57 +30,85 @@ import (
 )
 
 func TestHostStateFIFOAtPathErrors(t *testing.T) {
-	dir := hostStateTempDir(t)
-	if err := syscall.Mkfifo(HostStatePath(dir), 0o600); err != nil {
+	a := newHostStateAgent(t)
+	if err := syscall.Mkfifo(a.path, 0o600); err != nil {
 		t.Skipf("mkfifo: %v", err)
 	}
 	// O_NONBLOCK keeps the open from blocking; the regular-file check
 	// then refuses the FIFO.
-	if _, err := ReadHostState(dir); err == nil {
+	if _, err := ReadHostState(a.root, a.name); err == nil {
 		t.Fatal("ReadHostState: want error for a FIFO at the path")
 	}
-	if err := UpdateHostState(dir, func(hs *HostState) error { hs.RunID = "x"; return nil }); err == nil {
+	if err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "x"; return nil }); err == nil {
 		t.Fatal("UpdateHostState: want error for a FIFO at the path")
 	}
 }
 
-// TestHostStateSymlinkedAgentDirParentRefused puts a symlink in a parent
-// component of agentDir, and at agentDir itself. Both the read and the
-// update are refused, and nothing is written in the real directory the
-// symlink points to.
-func TestHostStateSymlinkedAgentDirParentRefused(t *testing.T) {
-	base := hostStateTempDir(t)
-	outside := filepath.Join(base, "outside")
-	if err := os.MkdirAll(filepath.Join(outside, "agent"), 0o700); err != nil {
+// TestHostStateSymlinkAboveRootAccepted reaches the trusted root through
+// an ordinary symlink (the macOS /var case). The update works, the file
+// lands in the real agentDir, and the lock is taken there (its lock file
+// exists), not skipped.
+func TestHostStateSymlinkAboveRootAccepted(t *testing.T) {
+	base := t.TempDir()
+	realAgent := newHostStateAgentIn(t, filepath.Join(base, "real"), "agent-1")
+	linkRoot := filepath.Join(base, "link")
+	if err := os.Symlink(realAgent.root, linkRoot); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(base, "link")
-	if err := os.Symlink(outside, link); err != nil {
-		t.Fatal(err)
+	if err := UpdateHostState(linkRoot, "agent-1", func(hs *HostState) error { hs.RunID = "r1"; return nil }); err != nil {
+		t.Fatalf("UpdateHostState through a symlink above the root: %v", err)
 	}
-	agentLink := filepath.Join(base, "agent-link")
-	if err := os.Symlink(filepath.Join(outside, "agent"), agentLink); err != nil {
-		t.Fatal(err)
+	hs, err := ReadHostState(linkRoot, "agent-1")
+	if err != nil || hs.RunID != "r1" {
+		t.Fatalf("ReadHostState: hs=%+v err=%v", hs, err)
 	}
-	for name, agentDir := range map[string]string{
-		"parent":   filepath.Join(link, "agent"),
-		"agentDir": agentLink,
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := ReadHostState(agentDir); err == nil {
-				t.Fatal("ReadHostState: want error through a symlinked path")
+	fi, err := os.Lstat(realAgent.path)
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("file in real agentDir: fi=%v err=%v", fi, err)
+	}
+	if _, err := os.Lstat(agentinfolock.LockPath(realAgent.path)); err != nil {
+		t.Fatalf("lock file not created in real agentDir: %v", err)
+	}
+}
+
+// TestHostStateSymlinkBelowRootRefused puts a symlink at each component
+// below the trusted root (.scion, agents, the agent name). The read and the
+// update are refused, mutate is not called, and nothing is written in the
+// directory the symlink points to.
+func TestHostStateSymlinkBelowRootRefused(t *testing.T) {
+	for _, level := range []string{".scion", "agents", "agent-1"} {
+		t.Run(level, func(t *testing.T) {
+			root := t.TempDir()
+			outside := newHostStateAgentIn(t, t.TempDir(), "agent-1")
+			var linkAt, target string
+			switch level {
+			case ".scion":
+				linkAt, target = filepath.Join(root, ".scion"), filepath.Join(outside.root, ".scion")
+			case "agents":
+				linkAt, target = filepath.Join(root, ".scion", "agents"), filepath.Join(outside.root, ".scion", "agents")
+			default:
+				linkAt, target = filepath.Join(root, ".scion", "agents", "agent-1"), outside.dir
+			}
+			if err := os.MkdirAll(filepath.Dir(linkAt), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, linkAt); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadHostState(root, "agent-1"); err == nil {
+				t.Fatal("ReadHostState: want error through a symlink below the root")
 			}
 			called := false
-			err := UpdateHostState(agentDir, func(hs *HostState) error { called = true; hs.RunID = "x"; return nil })
+			err := UpdateHostState(root, "agent-1", func(hs *HostState) error { called = true; hs.RunID = "x"; return nil })
 			if err == nil || called {
 				t.Fatalf("UpdateHostState: err=%v called=%v, want error and no mutate", err, called)
 			}
-			entries, err := os.ReadDir(filepath.Join(outside, "agent"))
+			entries, err := os.ReadDir(outside.dir)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if len(entries) != 0 {
-				t.Fatalf("written outside agentDir: %v", entries)
+				t.Fatalf("written through the symlink: %v", entries)
 			}
 		})
 	}
@@ -91,8 +119,8 @@ func TestHostStateSymlinkedAgentDirParentRefused(t *testing.T) {
 // then be lost, but each write is atomic with its own random temp name:
 // no update fails, the file always parses, and no temp file is left.
 func TestHostStateUnlockedParallelWritesStayWhole(t *testing.T) {
-	dir := hostStateTempDir(t)
-	if err := os.Mkdir(agentinfolock.LockPath(HostStatePath(dir)), 0o700); err != nil {
+	a := newHostStateAgent(t)
+	if err := os.Mkdir(agentinfolock.LockPath(a.path), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	const workers, rounds = 8, 25
@@ -104,7 +132,7 @@ func TestHostStateUnlockedParallelWritesStayWhole(t *testing.T) {
 			defer wg.Done()
 			for r := 0; r < rounds; r++ {
 				key := fmt.Sprintf("k-%d-%d", w, r)
-				errs <- UpdateHostState(dir, func(hs *HostState) error {
+				errs <- UpdateHostState(a.root, a.name, func(hs *HostState) error {
 					if hs.unknown == nil {
 						hs.unknown = map[string]json.RawMessage{}
 					}
@@ -121,11 +149,11 @@ func TestHostStateUnlockedParallelWritesStayWhole(t *testing.T) {
 			t.Fatalf("UpdateHostState: %v", err)
 		}
 	}
-	raw := readRawHostState(t, dir)
+	raw := readRawHostState(t, a.path)
 	if len(raw) == 0 {
 		t.Fatal("no keys written")
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(a.dir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,21 +19,36 @@ package agent
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // hostStateNoFollowParent is passed as agentinfolock.Options.NoFollowParent;
 // agentinfolock has no lock on these platforms, so it has no effect.
 const hostStateNoFollowParent = true
 
-// hostStateDir is agentDir by path. Without openat, symlinks in parent
-// components are followed on these platforms; only a symlink at
-// HostStateFile itself is refused.
+// hostStateDir is agentDir by path. Without openat, the components below
+// the trusted root are checked with Lstat in openHostStateDir and the file
+// with Lstat in openFile; the checks are not atomic.
 type hostStateDir struct {
 	path string
 }
 
-func openHostStateDir(agentDir string) (*hostStateDir, error) {
-	return &hostStateDir{path: agentDir}, nil
+// openHostStateDir refuses a symlink or non-directory in any component of
+// l.rel below the resolved root. A missing component gives an error that
+// matches fs.ErrNotExist.
+func openHostStateDir(l hostStateLayout) (*hostStateDir, error) {
+	cur := l.root
+	for _, name := range l.rel {
+		cur = filepath.Join(cur, name)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			return nil, fmt.Errorf("host state dir: %w", err)
+		}
+		if !fi.IsDir() {
+			return nil, fmt.Errorf("host state dir: %s is not a directory (or is a symlink)", cur)
+		}
+	}
+	return &hostStateDir{path: cur}, nil
 }
 
 func (d *hostStateDir) close() {}
@@ -42,7 +57,7 @@ func (d *hostStateDir) close() {}
 // Without O_NOFOLLOW the check is an Lstat before the open, so it is not
 // atomic.
 func (d *hostStateDir) openFile() (*os.File, error) {
-	path := HostStatePath(d.path)
+	path := filepath.Join(d.path, HostStateFile)
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -56,5 +71,5 @@ func (d *hostStateDir) openFile() (*os.File, error) {
 // writeFile writes data to HostStateFile with writeAgentInfoFile, the
 // package's temp-file-and-rename helper (random temp name in agentDir).
 func (d *hostStateDir) writeFile(data []byte) error {
-	return writeAgentInfoFile(HostStatePath(d.path), data, 0o600)
+	return writeAgentInfoFile(filepath.Join(d.path, HostStateFile), data, 0o600)
 }
