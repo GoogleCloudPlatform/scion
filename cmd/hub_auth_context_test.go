@@ -113,7 +113,7 @@ func setupLoginLinkTest(t *testing.T) (globalFile, projectFile string) {
 	writeHomeGlobalSettings(t, "image_registry: registry.example.test/team\n")
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
 	dotScion := makeLinkedDirProject(t, "")
-	saveLinkEntry(t, dotScion, linkTestHub, "linked")
+	saveLinkEntry(t, dotScion, linkEntryTestHub, "linked")
 	return filepath.Join(os.Getenv("HOME"), ".scion", "settings.yaml"), filepath.Join(dotScion, "settings.yaml")
 }
 
@@ -127,10 +127,10 @@ func TestRecordLoginEndpoint_LinkEntryHubLeavesSettings(t *testing.T) {
 	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
 	require.Equal(t, targetSourceDirectory, hubSource)
 	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
-	require.Equal(t, linkTestHub, hubURL)
+	require.Equal(t, linkEntryTestHub, hubURL)
 
 	out := captureStdout(t, func() { recordLoginEndpoint(hubAuthLoginCmd, hubURL) })
-	assert.Equal(t, "Logged in to "+linkTestHub+" (the hub this directory is linked to); settings unchanged.\n", out)
+	assert.Equal(t, "Logged in to "+linkEntryTestHub+" (the hub this directory is linked to); settings unchanged.\n", out)
 	assert.Equal(t, globalBefore, readFileT(t, globalFile), "global settings unchanged")
 	assert.Equal(t, projectBefore, readFileT(t, projectFile), "project settings unchanged")
 	assert.Empty(t, settingsEndpoint(t, filepath.Dir(globalFile)))

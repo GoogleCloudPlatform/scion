@@ -31,9 +31,9 @@ import (
 )
 
 const (
-	linkTestHub       = "https://linked.example.com"
-	linkTestHubID     = "dir-hub-id"
-	linkTestPinnedHub = "https://pinned.example.com"
+	linkEntryTestHub       = "https://linked.example.com"
+	linkEntryTestHubID     = "dir-hub-id"
+	linkEntryTestPinnedHub = "https://pinned.example.com"
 )
 
 // makeLinkedDirProject creates a directory project linked to a hub project
@@ -44,7 +44,7 @@ func makeLinkedDirProject(t *testing.T, endpoint string) string {
 	root := t.TempDir()
 	dotScion := filepath.Join(root, ".scion")
 	require.NoError(t, os.MkdirAll(dotScion, 0o755))
-	settings := "project_id: dir-project-id\nhub:\n  linked: true\n  projectId: " + linkTestHubID + "\n"
+	settings := "project_id: dir-project-id\nhub:\n  linked: true\n  projectId: " + linkEntryTestHubID + "\n"
 	if endpoint != "" {
 		settings += "  endpoint: " + endpoint + "\n"
 	}
@@ -59,7 +59,7 @@ func saveLinkEntry(t *testing.T, dotScion, endpoint, hubName string) {
 	t.Helper()
 	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
 		name, _ := c.EnsureHub(endpoint, hubName)
-		return c.SetLinkEntry(name, config.KnownProject{ID: linkTestHubID, Slug: "bar"}, config.LinkPathForProject(dotScion), time.Now())
+		return c.SetLinkEntry(name, config.KnownProject{ID: linkEntryTestHubID, Slug: "bar"}, config.LinkPathForProject(dotScion), time.Now())
 	}))
 }
 
@@ -78,8 +78,8 @@ func TestResolveInvocationTarget_LinkEntry(t *testing.T) {
 		wantHub       string
 		wantHubSource string
 	}{
-		{name: "after a hub switch the link entry's hub is used", wantHub: linkTestHub, wantHubSource: targetSourceDirectory},
-		{name: "the link entry beats an endpoint pinned in settings", pinned: linkTestPinnedHub, wantHub: linkTestHub, wantHubSource: targetSourceDirectory},
+		{name: "after a hub switch the link entry's hub is used", wantHub: linkEntryTestHub, wantHubSource: targetSourceDirectory},
+		{name: "the link entry beats an endpoint pinned in settings", pinned: linkEntryTestPinnedHub, wantHub: linkEntryTestHub, wantHubSource: targetSourceDirectory},
 		{name: "the --hub flag beats the link entry", flag: "https://flag.example.com", wantHub: "https://flag.example.com"},
 		{name: "the environment beats the link entry", env: "https://env.example.com"},
 	}
@@ -90,7 +90,7 @@ func TestResolveInvocationTarget_LinkEntry(t *testing.T) {
 			// The current hub is another hub, with a remembered project.
 			saveTestContext(t, ctxTestHub, ctxTestProjectID)
 			dotScion := makeLinkedDirProject(t, tc.pinned)
-			saveLinkEntry(t, dotScion, linkTestHub, "linked")
+			saveLinkEntry(t, dotScion, linkEntryTestHub, "linked")
 			hubEndpoint = tc.flag
 
 			require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
@@ -108,7 +108,7 @@ func TestResolveInvocationTarget_LinkEntry(t *testing.T) {
 func TestResolveInvocationTarget_NoLinkEntryKeepsSettings(t *testing.T) {
 	setupContextTest(t)
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
-	makeLinkedDirProject(t, linkTestPinnedHub)
+	makeLinkedDirProject(t, linkEntryTestPinnedHub)
 
 	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	assert.Empty(t, hubEndpoint, "the settings endpoint applies (read later by GetHubEndpoint)")
@@ -121,7 +121,7 @@ func TestUseShow_DirectoryLink(t *testing.T) {
 	setupUseTest(t)
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
 	dotScion := makeLinkedDirProject(t, "")
-	saveLinkEntry(t, dotScion, linkTestHub, "linked")
+	saveLinkEntry(t, dotScion, linkEntryTestHub, "linked")
 
 	stdout, _, err := runScion(t, "use", "--format", "json")
 	require.NoError(t, err)
@@ -134,7 +134,7 @@ func TestUseShow_DirectoryLink(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(stdout), &got), stdout)
 	assert.Equal(t, "directory", got.Effective.Hub.Source)
-	assert.Equal(t, linkTestHub, got.Effective.Hub.Endpoint)
+	assert.Equal(t, linkEntryTestHub, got.Effective.Hub.Endpoint)
 
 	stdout, _, err = runScion(t, "use")
 	require.NoError(t, err)
@@ -157,21 +157,21 @@ func TestHubFlagMismatchWarning(t *testing.T) {
 	}{
 		{
 			name: "link entry, unregistered URL", linkEntry: true, flag: "https://other.example.com", cmd: []string{"list"},
-			want: "Warning: this directory is linked to hub 'linked' (" + linkTestHub + "), but --hub selects https://other.example.com" + tail,
+			want: "Warning: this directory is linked to hub 'linked' (" + linkEntryTestHub + "), but --hub selects https://other.example.com" + tail,
 		},
 		{
 			name: "link entry, nickname", linkEntry: true, flag: "prod", cmd: []string{"list"},
-			want: "Warning: this directory is linked to hub 'linked' (" + linkTestHub + "), but --hub selects 'prod' (" + ctxTestHub + ")" + tail,
+			want: "Warning: this directory is linked to hub 'linked' (" + linkEntryTestHub + "), but --hub selects 'prod' (" + ctxTestHub + ")" + tail,
 		},
 		{
 			name: "link entry, registered URL", linkEntry: true, flag: ctxTestHub, cmd: []string{"list"},
-			want: "Warning: this directory is linked to hub 'linked' (" + linkTestHub + "), but --hub selects 'prod' (" + ctxTestHub + ")" + tail,
+			want: "Warning: this directory is linked to hub 'linked' (" + linkEntryTestHub + "), but --hub selects 'prod' (" + ctxTestHub + ")" + tail,
 		},
 		{
-			name: "endpoint pinned in settings, no link entry", pinned: linkTestPinnedHub, flag: "https://other.example.com", cmd: []string{"list"},
-			want: "Warning: this directory is linked to hub " + linkTestPinnedHub + ", but --hub selects https://other.example.com" + tail,
+			name: "endpoint pinned in settings, no link entry", pinned: linkEntryTestPinnedHub, flag: "https://other.example.com", cmd: []string{"list"},
+			want: "Warning: this directory is linked to hub " + linkEntryTestPinnedHub + ", but --hub selects https://other.example.com" + tail,
 		},
-		{name: "the same hub: no warning", linkEntry: true, flag: linkTestHub + "/", cmd: []string{"list"}},
+		{name: "the same hub: no warning", linkEntry: true, flag: linkEntryTestHub + "/", cmd: []string{"list"}},
 		{name: "not a project command: no warning", linkEntry: true, flag: "https://other.example.com", cmd: []string{"config", "list"}},
 		{name: "--project given: no warning", linkEntry: true, flag: "https://other.example.com", cmd: []string{"list"}, project: "some-slug"},
 	}
@@ -181,7 +181,7 @@ func TestHubFlagMismatchWarning(t *testing.T) {
 			saveTestContext(t, ctxTestHub, ctxTestProjectID)
 			dotScion := makeLinkedDirProject(t, tc.pinned)
 			if tc.linkEntry {
-				saveLinkEntry(t, dotScion, linkTestHub, "linked")
+				saveLinkEntry(t, dotScion, linkEntryTestHub, "linked")
 			}
 			hubEndpoint, projectPath = tc.flag, tc.project
 			c := findCommand(t, tc.cmd...)
@@ -200,7 +200,7 @@ func TestHubFlagMismatchWarning(t *testing.T) {
 func TestHubFlagMismatchWarning_UnlinkedProject(t *testing.T) {
 	setupContextTest(t)
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
-	makeDirProject(t, linkTestPinnedHub)
+	makeDirProject(t, linkEntryTestPinnedHub)
 	hubEndpoint = "https://other.example.com"
 	c := findCommand(t, "list")
 	var stderr bytes.Buffer
@@ -219,9 +219,9 @@ func TestHubUnlink_RemovesLinkEntry(t *testing.T) {
 	t.Cleanup(func() { autoConfirm = origYes })
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
 	dotScion := makeLinkedDirProject(t, "")
-	saveLinkEntry(t, dotScion, linkTestHub, "linked")
+	saveLinkEntry(t, dotScion, linkEntryTestHub, "linked")
 	other := filepath.Join(t.TempDir(), ".scion")
-	saveLinkEntry(t, other, linkTestHub, "linked")
+	saveLinkEntry(t, other, linkEntryTestHub, "linked")
 	projectPath, autoConfirm = dotScion, true
 
 	var runErr error
@@ -250,7 +250,7 @@ func TestHubUnlink_NotLinkedRemovesLeftoverEntry(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dotScion, "settings.yaml"),
 		[]byte("project_id: dir-project-id\nhub:\n  linked: false\n"), 0o644))
 	t.Chdir(root)
-	saveLinkEntry(t, dotScion, linkTestHub, "linked")
+	saveLinkEntry(t, dotScion, linkEntryTestHub, "linked")
 	projectPath, autoConfirm = dotScion, true
 
 	var runErr error
