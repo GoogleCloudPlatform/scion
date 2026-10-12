@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubprofile/hubprofiletest"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
@@ -186,6 +187,40 @@ func TestSession_RefusesOwnHub(t *testing.T) {
 	_, err := h.open(testProfile(h.target, TransportNone), "", "")
 	require.ErrorIs(t, err, ErrOwnHub)
 	assert.Empty(t, h.target.Recorded())
+}
+
+// N3: the runner mints an issuer token only for an audience of the issuer
+// form, never the IAP audience or anything else the target publishes.
+func TestSession_RefusesUnexpectedIssuerAudience(t *testing.T) {
+	for _, tc := range []struct {
+		name, aud, iap string
+	}{
+		{"the IAP audience", testIAPAudience, ""},
+		{"arbitrary", "https://storage.googleapis.com", ""},
+		{"bare prefix", IssuerAudiencePrefix, ""},
+		{"control character", IssuerAudiencePrefix + "hub\n1", ""},
+		{"equal to the profile's IAP audience", IssuerAudiencePrefix + "x", IssuerAudiencePrefix + "x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, false)
+			aud := tc.aud
+			h.target.AudienceOverride = &aud
+			p := testProfile(h.target, TransportNone)
+			if tc.iap != "" {
+				p.Transport = TransportIAP
+				p.IAPAudience = tc.iap
+				p.UATServiceAccount = testUATSA
+				h.target.AudienceOverride = &aud
+			}
+			s := h.mustOpen(p, "", "")
+			_, err := s.IssuerAudience(context.Background())
+			require.Error(t, err)
+			for _, tok := range h.gcp.MintedTokens() {
+				c, _ := transportauth.DecodeIDTokenClaims(tok)
+				assert.NotEqual(t, testIssuerSA, c.Email, "no issuer token was minted")
+			}
+		})
+	}
 }
 
 // Profile credentials go only to the target host, never to another URL
@@ -346,6 +381,11 @@ func TestTeardown_RemovesEveryIdentityOfTheRunAndTheCache(t *testing.T) {
 	// An orphan of the run: issued, but its cache file is gone.
 	orphan := issueOwner(t, h, p, "lost", "member")
 	require.NoError(t, RemoveEntry(h.home, "t1", "r1", "lost"))
+	// An expired orphan of the run: no cache file, past its expiry, still
+	// on the hub (the reaper has not run).
+	expired := issueOwner(t, h, p, "old", "member")
+	require.NoError(t, RemoveEntry(h.home, "t1", "r1", "old"))
+	h.target.Expire(expired.IdentityID)
 	// An identity of another run on the same delegation is kept.
 	s2 := h.mustOpen(p, "", "r2")
 	other, err := IssueToCache(context.Background(), s2, IssueRequest{Alias: "owner"})
@@ -358,11 +398,11 @@ func TestTeardown_RemovesEveryIdentityOfTheRunAndTheCache(t *testing.T) {
 
 	issuer := h.mustOpen(p, "", "r1")
 	client, _ := issuer.IssuerClient()
-	for _, id := range []string{owner.IdentityID, viewer.IdentityID, orphan.IdentityID} {
+	for _, id := range []string{owner.IdentityID, viewer.IdentityID, orphan.IdentityID, expired.IdentityID} {
 		err := client.TestIdentities().Delete(context.Background(), id)
 		assert.True(t, apiclient.IsNotFoundError(err), "identity %s is gone (404)", id)
 	}
-	list, err := client.TestIdentities().List(context.Background(), nil)
+	list, err := client.TestIdentities().List(context.Background(), &hubclient.ListTestIdentitiesOptions{IncludeExpired: true})
 	require.NoError(t, err)
 	var ids []string
 	for _, it := range list.Items {

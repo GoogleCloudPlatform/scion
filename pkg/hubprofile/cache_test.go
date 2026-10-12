@@ -89,6 +89,19 @@ func TestCacheRefusesSymlinks(t *testing.T) {
 	assert.Contains(t, err.Error(), "symlink")
 	entries, _ := os.ReadDir(real)
 	assert.Empty(t, entries)
+
+	// N7: an existing run dir below a symlinked profile cache dir is not
+	// followed either.
+	home3 := t.TempDir()
+	elsewhere := filepath.Join(home3, "elsewhere")
+	require.NoError(t, os.MkdirAll(filepath.Join(elsewhere, "run-r1"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(home3, ".scion", "hub-profiles"), 0o700))
+	require.NoError(t, os.Symlink(elsewhere, filepath.Join(home3, ".scion", "hub-profiles", "t1")))
+	_, err = ReserveEntry(home3, "t1", "r1", "owner")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "symlink")
+	entries, _ = os.ReadDir(filepath.Join(elsewhere, "run-r1"))
+	assert.Empty(t, entries, "nothing was written through the symlinked profile dir")
 }
 
 func TestCacheReadRefusesOpenModes(t *testing.T) {

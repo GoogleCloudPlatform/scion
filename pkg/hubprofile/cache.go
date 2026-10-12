@@ -103,7 +103,7 @@ func ReserveEntry(home, profile, run, alias string) (*Reservation, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
+	if err := ensurePrivateDir(Dir(home), filepath.Dir(path)); err != nil {
 		return nil, err
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)

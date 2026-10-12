@@ -17,7 +17,8 @@ The pieces:
   step: it lets the target's issuer service account issue member and viewer identities within
   that person's own live `test_identity.issue` authority.
 - **The runner** holds a profile naming the target, its service accounts and the delegation id.
-  It obtains ID tokens through its assigned service account, so it never handles a credential.
+  It obtains short-lived ID tokens through its assigned service account, so it needs no key
+  file or long-lived credential.
 
 ## Operator prerequisites
 
@@ -41,8 +42,10 @@ does not configure or enforce them.
   account's subject. It does not record which agent minted the token. That record lives in
   the IAM Credentials data access logs of the issuer account's project, which we recommend
   turning on.
-- **Revocation** takes effect immediately in either of two ways: revoke the delegation on the
-  target, or remove the IAM grant.
+- **Revocation.** Revoking the delegation on the target stops new issuance at once. Removing
+  the IAM grant stops new issuer tokens; tokens already minted stay valid until they expire (at
+  most an hour). Identities already issued are unaffected either way: tear the run down, or
+  delete them, to end them.
 
 ## 1. Create the delegation (human, on the target)
 
@@ -76,11 +79,18 @@ fields above. For a target without IAP, use `--transport none` and leave out `--
 and `--uat-sa`.
 
 Select the profile for a command with `--hub-profile t1`, or for a whole session with
-`SCION_HUB_PROFILE=t1`. Name the run with `--run <label>` or `SCION_HUB_RUN`.
+`SCION_HUB_PROFILE=t1`. Name the run with `--run <label>` or `SCION_HUB_RUN`. `--as` and
+`--run` are flags of the `hub` and `artifact` commands and apply only with a profile.
 
 :::caution
-A profile always names another hub. A profile whose endpoint is the agent's own hub
-(`SCION_HUB_ENDPOINT`) is refused.
+A profile must name another hub. The CLI refuses a profile whose endpoint names the agent's own
+hub (`SCION_HUB_ENDPOINT` or `SCION_HUB_URL`), and refuses every profile when either of those is
+set but is not an absolute URL. The check compares parsed host names and ports: lowercase,
+without a trailing dot, IP literals in canonical form, and loopback and container bridge host
+names (such as `host.docker.internal`) treated as one host. It does not resolve DNS aliases, so
+a profile naming another name for the agent's own hub, such as its public URL while
+`SCION_HUB_ENDPOINT` holds a bridge address, is not detected. The target hub's own delegation
+remains the boundary.
 :::
 
 ## 3. Issue identities into the run cache
@@ -174,9 +184,12 @@ Inside an agent (`SCION_CLI_MODE=agent`), these commands are available:
 - `hub status`
 - `hub profile`
 - `hub test-identity` `issue`, `token`, `list`, `delete` and `teardown`
+- `artifact publish`, `get` and `versions` (agent commands with or without a profile)
 
-The issuing commands run only with a target-hub profile whose endpoint is not the agent's own
-hub. Without a profile, or with a profile for the agent's own hub, they are refused.
+`hub status` and the `hub test-identity` commands run only with a target-hub profile whose
+endpoint is not the agent's own hub. Without a profile, or with a profile for the agent's own
+hub, they are refused. With a profile selected, the `artifact` commands act on the target as the
+`--as` identity, and the profile for the agent's own hub is refused for them too.
 `hub test-identity delegate` (the human consent step), the other `hub` commands and
 `hub projects` are not available in agent mode.
 

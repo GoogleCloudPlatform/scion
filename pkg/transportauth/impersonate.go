@@ -71,29 +71,57 @@ const (
 var ErrNotAssignMode = errors.New("the assigned service account is not available: SCION_METADATA_MODE is not \"assign\"")
 
 // AssignModeMetadataBaseURL returns the metadata emulator base URL
-// ("http://<GCE_METADATA_HOST>") when getenv reports assign mode and a
-// loopback emulator address, and an error otherwise. The emulator always
-// runs in the agent's own network namespace, so a non-loopback host is
-// refused.
+// ("http://<host>:<port>") when getenv reports assign mode and
+// GCE_METADATA_HOST is exactly a loopback host with an optional numeric
+// port, and an error otherwise. The emulator always runs in the agent's own
+// network namespace, so anything else (another host, user info, a path,
+// query or fragment, a non-numeric port) is refused. The base URL is
+// rebuilt from the parsed host and port, never from the raw value.
 func AssignModeMetadataBaseURL(getenv func(string) string) (string, error) {
 	if getenv(EnvMetadataMode) != metadataModeAssign {
 		return "", ErrNotAssignMode
 	}
-	host := strings.TrimSpace(getenv(EnvGCEMetadataHost))
-	if host == "" {
+	raw := strings.TrimSpace(getenv(EnvGCEMetadataHost))
+	if raw == "" {
 		return "", fmt.Errorf("the metadata emulator is not available: %s is not set", EnvGCEMetadataHost)
 	}
-	h, _, err := net.SplitHostPort(host)
-	if err != nil {
-		h = host
+	refuse := fmt.Errorf("refusing metadata emulator address %q: it must be a loopback host with an optional port", raw)
+	// User info is refused outright, never parsed around; so is anything
+	// that is not a bare host[:port].
+	if strings.ContainsAny(raw, "/?#@\\ ") {
+		return "", refuse
 	}
-	if h != "localhost" {
-		ip := net.ParseIP(h)
-		if ip == nil || !ip.IsLoopback() {
-			return "", fmt.Errorf("refusing metadata emulator address %q: it must be a loopback address", host)
+	u, err := url.Parse("http://" + raw)
+	if err != nil || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.Host != raw {
+		return "", refuse
+	}
+	host, port := u.Hostname(), u.Port()
+	if strings.HasSuffix(raw, ":") || (port != "" && !allDigits(port)) {
+		return "", refuse
+	}
+	// The loopback check runs on the parsed host, not the raw value.
+	if !IsLoopbackHost(host) {
+		return "", refuse
+	}
+	hostport := host
+	if port != "" {
+		hostport = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		hostport = "[" + host + "]"
+	}
+	return "http://" + hostport, nil
+}
+
+func allDigits(s string) bool {
+	if s == "" || len(s) > 5 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
 		}
 	}
-	return "http://" + host, nil
+	return true
 }
 
 // AccessTokenProvider yields OAuth access tokens for the caller's own

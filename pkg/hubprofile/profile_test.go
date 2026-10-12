@@ -107,18 +107,46 @@ func TestCheckNotOwnHub(t *testing.T) {
 		"http://hub.example.com:443", // same effective port
 		"http://hub.example.com",     // both default ports: http and https of one host
 		"https://hub.example.com/other/path",
+		"https://hub.example.com.", // trailing dot
+		"https://hub.example.com.:443/",
 	} {
 		assert.ErrorIs(t, CheckNotOwnHub(ep, own), ErrOwnHub, ep)
 	}
 	assert.NoError(t, CheckNotOwnHub("https://t1.example.com", own))
 	assert.NoError(t, CheckNotOwnHub("https://hub.example.com:8443", own), "another explicit port is another hub")
+
+	// Loopback aliases and IP literal forms are one host.
+	for _, tc := range []struct{ own, target string }{
+		{"http://127.0.0.1:8080", "http://127.0.0.1:8080/"},
+		{"http://localhost:8080", "http://127.0.0.1:8080"},
+		{"http://127.0.0.1:8080", "http://localhost.:8080"},
+		{"http://[::1]:8080", "http://[0:0:0:0:0:0:0:1]:8080"},
+		{"http://127.0.0.1:8080", "http://[::ffff:127.0.0.1]:8080"},
+		{"http://[::1]:8080", "http://127.0.0.2:8080"},
+		// The container bridge address of the agent's own hub.
+		{"http://host.docker.internal:8080", "http://localhost:8080"},
+		{"http://host.containers.internal:8080", "http://127.0.0.1:8080"},
+		{"http://HOST.DOCKER.INTERNAL.:8080", "http://[::1]:8080"},
+	} {
+		assert.ErrorIs(t, CheckNotOwnHub(tc.target, env(map[string]string{"SCION_HUB_ENDPOINT": tc.own})), ErrOwnHub, "%s vs %s", tc.target, tc.own)
+	}
 	local := env(map[string]string{"SCION_HUB_ENDPOINT": "http://127.0.0.1:8080"})
-	assert.ErrorIs(t, CheckNotOwnHub("http://127.0.0.1:8080/", local), ErrOwnHub)
 	assert.NoError(t, CheckNotOwnHub("http://127.0.0.1:9090", local), "local test hubs on two ports")
+	assert.NoError(t, CheckNotOwnHub("http://localhost:9090", local))
+
 	// SCION_HUB_URL counts too.
 	assert.ErrorIs(t, CheckNotOwnHub("https://hub2.example.com", env(map[string]string{"SCION_HUB_URL": "https://hub2.example.com"})), ErrOwnHub)
 	// No own hub (a workstation): nothing to refuse.
 	assert.NoError(t, CheckNotOwnHub("https://hub.example.com", env(nil)))
+
+	// Fail closed: an own-hub value that does not parse to an absolute URL
+	// refuses every profile, instead of comparing a raw string.
+	for _, bad := range []string{"hub.example.com:443", "hub.example.com", "//hub.example.com", "ftp://hub.example.com", "https://user@hub.example.com"} {
+		err := CheckNotOwnHub("https://t1.example.com", env(map[string]string{"SCION_HUB_ENDPOINT": bad}))
+		assert.ErrorIs(t, err, ErrOwnHubUnknown, bad)
+	}
+	// User info in the target is refused outright.
+	assert.Error(t, CheckNotOwnHub("https://user@t1.example.com", own))
 }
 
 func TestSaveLoadListRemove(t *testing.T) {

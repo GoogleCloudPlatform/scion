@@ -161,6 +161,9 @@ type Target struct {
 	tokenTTL  time.Duration
 	idLife    time.Duration
 	tokenHits int
+	// AudienceOverride, when set, replaces the issuer audience the
+	// target publishes (set before use).
+	AudienceOverride *string
 }
 
 func NewTarget(t testing.TB, clk *Clock, iap bool) *Target {
@@ -204,7 +207,13 @@ func (f *Target) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if r.URL.Path == "/api/v1/test-infra/status" {
-		writeJSON(w, http.StatusOK, map[string]any{"testIdentities": true, "testHubAdmin": false, "testSuperAdmin": false, "testIssuerAudience": IssuerAudience})
+		aud := IssuerAudience
+		f.mu.Lock()
+		if f.AudienceOverride != nil {
+			aud = *f.AudienceOverride
+		}
+		f.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"testIdentities": true, "testHubAdmin": false, "testSuperAdmin": false, "testIssuerAudience": aud})
 		return
 	}
 	for _, h := range []string{"X-Scion-Agent-Token", "X-Scion-Broker-ID", "X-Scion-Federation-Token"} {
@@ -261,7 +270,7 @@ func (f *Target) serveIssuance(w http.ResponseWriter, r *http.Request) {
 	case rest == "" && r.Method == http.MethodGet:
 		items := []map[string]any{}
 		for _, u := range f.ids {
-			if !u.deleted && u.Delegation == Delegation && now.Before(u.ExpiresAt) {
+			if !u.deleted && u.Delegation == Delegation && (now.Before(u.ExpiresAt) || r.URL.Query().Get("includeExpired") == "true") {
 				items = append(items, identityView(u, now))
 			}
 		}
@@ -303,6 +312,16 @@ func (f *Target) tokenResponseLocked(u *Identity, now time.Time) map[string]any 
 	tok := JWT(map[string]any{"uid": u.ID, "email": u.Email, "role": u.Role, "type": "access", "exp": exp.Unix(), "n": len(f.tokens) + 1, "secret": "FIXTURE-TOKEN"})
 	f.tokens[tok] = u.ID
 	return map[string]any{"identity": identityView(u, now), "accessToken": tok, "tokenType": "Bearer", "expiresIn": int64(exp.Sub(now).Seconds()), "tokenExpiresAt": exp}
+}
+
+// Expire moves identity id's expiry into the past (it stays on the hub,
+// as before the reaper runs).
+func (f *Target) Expire(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if u := f.ids[id]; u != nil {
+		u.ExpiresAt = f.clk.Now().Add(-time.Minute)
+	}
 }
 
 // TokenHits returns how many token re-issues the target served.

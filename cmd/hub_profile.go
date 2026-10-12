@@ -42,8 +42,9 @@ import (
 //   - only the commands in hubProfileAllowed run. They reach the target
 //     only through the profile client and read no local project settings;
 //     every other command is refused before it runs;
-//   - a profile whose endpoint is the agent's own hub (SCION_HUB_ENDPOINT)
-//     is refused.
+//   - a profile whose endpoint names the agent's own hub (SCION_HUB_ENDPOINT,
+//     SCION_HUB_URL) is refused; the comparison is by parsed host name and
+//     port (hubprofile.CheckNotOwnHub) and does not resolve DNS aliases.
 
 var (
 	hubProfileFlag string // --hub-profile
@@ -180,11 +181,14 @@ func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
 	return nil
 }
 
-// profileFlagIsOurs reports whether name on cmd is the root persistent
-// flag (not a same-named local flag such as 'skills add --as').
+// profileFlagIsOurs reports whether name on cmd is the profile flag of the
+// hub or artifact tree (not a same-named local flag) and was given.
 func profileFlagIsOurs(cmd *cobra.Command, name string) bool {
 	f := cmd.Flags().Lookup(name)
-	return f != nil && f == rootCmd.PersistentFlags().Lookup(name) && f.Changed
+	if f == nil || !f.Changed {
+		return false
+	}
+	return f == hubCmd.PersistentFlags().Lookup(name) || f == artifactCmd.PersistentFlags().Lookup(name)
 }
 
 // checkProfileNotOwnHub loads a profile and refuses it when its endpoint is
@@ -293,7 +297,12 @@ metadata server in "assign" mode) through IAM Credentials generateIdToken,
 so the assigned account needs roles/iam.serviceAccountOpenIdTokenCreator on
 both target accounts.
 
-A profile whose endpoint is this agent's own hub is refused.`,
+A profile whose endpoint names this agent's own hub (SCION_HUB_ENDPOINT or
+SCION_HUB_URL) is refused, and every profile is refused while either of
+those is set but is not an absolute URL. The check compares parsed host
+names and ports (loopback and container bridge names count as one host);
+it does not resolve DNS aliases, so another name for the same hub is not
+detected. The target hub's own delegation remains the boundary.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runHubProfileAdd,
 }
@@ -337,8 +346,13 @@ var (
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&hubProfileFlag, "hub-profile", "", "Target-hub profile to use (overrides SCION_HUB_PROFILE); see 'scion hub profile'")
-	rootCmd.PersistentFlags().StringVar(&hubProfileAs, "as", "", "With a hub profile: act as this cached test identity of the run")
-	rootCmd.PersistentFlags().StringVar(&hubProfileRun, "run", "", "With a hub profile: the run label of cached test identities (overrides SCION_HUB_RUN)")
+	// --as and --run apply only with a hub profile, and only to the command
+	// trees a profile can use (hub and artifact), so they do not appear on
+	// unrelated commands such as start or create.
+	for _, c := range []*cobra.Command{hubCmd, artifactCmd} {
+		c.PersistentFlags().StringVar(&hubProfileAs, "as", "", "Only with a hub profile: act as this cached test identity of the run")
+		c.PersistentFlags().StringVar(&hubProfileRun, "run", "", "Only with a hub profile: the run label of cached test identities (overrides SCION_HUB_RUN)")
+	}
 
 	hubCmd.AddCommand(hubProfileCmd)
 	hubProfileCmd.AddCommand(hubProfileAddCmd, hubProfileListCmd, hubProfileShowCmd, hubProfileRemoveCmd)

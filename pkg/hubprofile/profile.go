@@ -34,7 +34,6 @@ package hubprofile
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -43,6 +42,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 const (
@@ -231,117 +232,129 @@ func NormalizeEndpoint(raw string) (string, error) {
 }
 
 func isLoopbackHost(h string) bool {
-	if h == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(h)
-	return ip != nil && ip.IsLoopback()
-}
-
-// OwnHubEndpoints returns the agent's own hub endpoints from the
-// environment (SCION_HUB_ENDPOINT and SCION_HUB_URL), normalized. Values
-// that do not parse are returned raw, lowercased, so they still compare.
-func OwnHubEndpoints(getenv func(string) string) []string {
-	var out []string
-	for _, k := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL"} {
-		v := strings.TrimSpace(getenv(k))
-		if v == "" {
-			continue
-		}
-		if n, err := normalizeAny(v); err == nil {
-			out = append(out, n)
-		} else {
-			out = append(out, strings.ToLower(strings.TrimRight(v, "/")))
-		}
-	}
-	return out
-}
-
-// normalizeAny normalizes like NormalizeEndpoint but accepts http on any
-// host, for comparing against the agent's own hub.
-func normalizeAny(raw string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Host == "" {
-		return "", errors.New("not an absolute URL")
-	}
-	scheme := strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
-	port := u.Port()
-	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
-		port = ""
-	}
-	hostport := host
-	if strings.Contains(host, ":") {
-		hostport = "[" + host + "]"
-	}
-	if port != "" {
-		hostport += ":" + port
-	}
-	return scheme + "://" + hostport + strings.TrimRight(u.EscapedPath(), "/"), nil
+	return transportauth.IsLoopbackHost(h)
 }
 
 // ErrOwnHub is returned when a profile's endpoint is the agent's own hub.
 var ErrOwnHub = errors.New("the profile's endpoint is this agent's own hub; a target-hub profile must name another hub")
 
-// CheckNotOwnHub refuses an endpoint on the agent's own hub. Endpoints
-// compare by host name and port, never by path: one host name is the same
-// hub when the effective ports (the scheme's default when none is given)
-// are equal, or when both are default ports (80 or 443), so http and https
-// of one host also count as the same hub. Two explicit non-default ports
-// on one host are different hubs (local test hubs).
+// ErrOwnHubUnknown is returned when SCION_HUB_ENDPOINT or SCION_HUB_URL is
+// set but is not an absolute URL with a host, so the agent's own hub cannot
+// be compared (the check fails closed).
+var ErrOwnHubUnknown = errors.New("cannot determine this agent's own hub: SCION_HUB_ENDPOINT or SCION_HUB_URL is not an absolute URL")
+
+// bridgeHostNames are the container bridge host names that reach the
+// agent's host (mirrors pkg/runtimebroker bridgeHostnames). For the own-hub
+// comparison they count as loopback: an agent's SCION_HUB_ENDPOINT is often
+// rewritten to one of them.
+var bridgeHostNames = map[string]bool{
+	"host.docker.internal":     true,
+	"host.containers.internal": true,
+}
+
+// hubAddr is a parsed hub endpoint reduced to what the own-hub comparison
+// uses: the canonical host name and the effective port.
+type hubAddr struct {
+	host     string // CanonicalHost of the parsed host name
+	port     string // explicit port, or the scheme's default
+	loopback bool   // a loopback or container bridge host
+}
+
+// parseHubAddr parses an absolute http(s) URL with a host. User info is
+// refused outright.
+func parseHubAddr(raw string) (hubAddr, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || u.Opaque != "" {
+		return hubAddr{}, errors.New("not an absolute URL with a host")
+	}
+	if u.User != nil {
+		return hubAddr{}, errors.New("user info is not allowed")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return hubAddr{}, errors.New("not an http or https URL")
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+		if scheme == "http" {
+			port = "80"
+		}
+	}
+	// Canonicalize first (case, trailing dot, IP form), then classify the
+	// parsed host.
+	h := transportauth.CanonicalHost(u.Hostname())
+	if h == "" {
+		return hubAddr{}, errors.New("not an absolute URL with a host")
+	}
+	return hubAddr{host: h, port: port, loopback: transportauth.IsLoopbackHost(h) || bridgeHostNames[h]}, nil
+}
+
+// ownHubAddrs parses the agent's own hub endpoints from SCION_HUB_ENDPOINT
+// and SCION_HUB_URL. A set but unparsable value is an error (fail closed).
+func ownHubAddrs(getenv func(string) string) ([]hubAddr, error) {
+	var out []hubAddr
+	for _, k := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL"} {
+		v := strings.TrimSpace(getenv(k))
+		if v == "" {
+			continue
+		}
+		a, err := parseHubAddr(v)
+		if err != nil {
+			return nil, fmt.Errorf("%w (%s: %v)", ErrOwnHubUnknown, k, err)
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// CheckNotOwnHub refuses an endpoint on the agent's own hub
+// (SCION_HUB_ENDPOINT, SCION_HUB_URL), and fails closed when one of those
+// is set but cannot be parsed. Both sides are parsed and canonicalized
+// before the comparison: host names compare lowercase without a trailing
+// dot, IP literals in canonical form, and any two loopback or container
+// bridge hosts (localhost, 127.0.0.0/8, ::1, host.docker.internal,
+// host.containers.internal) count as one host. On one host the effective
+// ports (the scheme's default when none is given) must be equal, or both
+// be default ports (80 or 443); two explicit non-default ports are
+// different hubs. Paths are ignored.
+//
+// It compares names, not servers: a DNS alias of the agent's own hub, or its
+// public URL when SCION_HUB_ENDPOINT holds a bridge or internal address, is
+// not detected. The target hub's own delegation remains the boundary.
 func CheckNotOwnHub(endpoint string, getenv func(string) string) error {
-	n, err := normalizeAny(endpoint)
+	target, err := parseHubAddr(endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid endpoint %q: %v", endpoint, err)
+	}
+	owns, err := ownHubAddrs(getenv)
 	if err != nil {
 		return err
 	}
-	for _, own := range OwnHubEndpoints(getenv) {
-		if sameHub(n, own) {
+	for _, own := range owns {
+		if sameHub(target, own) {
 			return ErrOwnHub
 		}
 	}
 	return nil
 }
 
-// sameHub reports whether two normalized endpoints name one hub (see
+// sameHub reports whether two parsed endpoints name one hub (see
 // CheckNotOwnHub).
-func sameHub(a, b string) bool {
-	ua, errA := url.Parse(a)
-	ub, errB := url.Parse(b)
-	if errA != nil || errB != nil || ua.Host == "" || ub.Host == "" {
-		return hostOf(a) == hostOf(b)
-	}
-	if !strings.EqualFold(ua.Hostname(), ub.Hostname()) {
+func sameHub(a, b hubAddr) bool {
+	if a.host != b.host && !(a.loopback && b.loopback) {
 		return false
 	}
-	pa, pb := effectivePort(ua), effectivePort(ub)
 	isDefault := func(p string) bool { return p == "80" || p == "443" }
-	return pa == pb || (isDefault(pa) && isDefault(pb))
+	return a.port == b.port || (isDefault(a.port) && isDefault(b.port))
 }
 
-func effectivePort(u *url.URL) string {
-	if p := u.Port(); p != "" {
-		return p
-	}
-	if strings.EqualFold(u.Scheme, "http") {
-		return "80"
-	}
-	return "443"
-}
-
-func stripScheme(s string) string {
-	if i := strings.Index(s, "://"); i >= 0 {
-		return s[i+3:]
-	}
-	return s
-}
-
-// hostOf returns host[:port] of a normalized endpoint.
-func hostOf(s string) string {
-	s = stripScheme(s)
-	if i := strings.Index(s, "/"); i >= 0 {
-		s = s[:i]
-	}
-	return s
+// sameEndpoint reports whether two endpoint strings name one hub; false
+// when either does not parse.
+func sameEndpoint(a, b string) bool {
+	pa, errA := parseHubAddr(a)
+	pb, errB := parseHubAddr(b)
+	return errA == nil && errB == nil && sameHub(pa, pb)
 }
 
 // Dir returns ~/.scion/hub-profiles for home.
@@ -362,32 +375,47 @@ func HomeDir() (string, error) {
 	return home, nil
 }
 
-// ensurePrivateDir creates dir (and its missing parents under base) with
-// mode 0700, refusing a symlink at any component it inspects.
-func ensurePrivateDir(dir string) error {
-	if fi, err := os.Lstat(dir); err == nil {
+// ensurePrivateDir creates dir, which must be base or below it, with mode
+// 0700. base is ~/.scion/hub-profiles: it and every component from it down
+// to dir is inspected with Lstat, created when missing, and refused when it
+// is a symlink or not a directory, so an existing directory below a
+// symlinked component is never followed. Components above base (such as
+// ~/.scion) are created with MkdirAll when missing and not inspected.
+func ensurePrivateDir(base, dir string) error {
+	rel, err := filepath.Rel(base, dir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("refusing %s: not below %s", dir, base)
+	}
+	if _, err := os.Lstat(base); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(base), 0o700); err != nil {
+			return err
+		}
+	}
+	cur := base
+	parts := []string{}
+	if rel != "." {
+		parts = strings.Split(rel, string(filepath.Separator))
+	}
+	for i := -1; i < len(parts); i++ {
+		if i >= 0 {
+			cur = filepath.Join(cur, parts[i])
+		}
+		fi, err := os.Lstat(cur)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(cur, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+				return err
+			}
+			fi, err = os.Lstat(cur)
+		}
+		if err != nil {
+			return err
+		}
 		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing %s: it is a symlink", dir)
+			return fmt.Errorf("refusing %s: it is a symlink", cur)
 		}
 		if !fi.IsDir() {
-			return fmt.Errorf("refusing %s: it is not a directory", dir)
+			return fmt.Errorf("refusing %s: it is not a directory", cur)
 		}
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := ensurePrivateDir(filepath.Dir(dir)); err != nil {
-		return err
-	}
-	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
-	}
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-		return fmt.Errorf("refusing %s: it is not a directory", dir)
 	}
 	return nil
 }
@@ -412,7 +440,7 @@ func Save(home string, p *Profile, replace bool) error {
 	if err != nil {
 		return err
 	}
-	if err := ensurePrivateDir(Dir(home)); err != nil {
+	if err := ensurePrivateDir(Dir(home), Dir(home)); err != nil {
 		return err
 	}
 	data, err := yaml.Marshal(p)

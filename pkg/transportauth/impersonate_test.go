@@ -158,6 +158,24 @@ func TestAssignModeMetadataBaseURL(t *testing.T) {
 		{"no host", map[string]string{EnvMetadataMode: "assign"}, "", "GCE_METADATA_HOST is not set"},
 		{"remote host", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "metadata.example.com:80"}, "", "loopback"},
 		{"link-local", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "169.254.169.254"}, "", "loopback"},
+		{"ipv6 loopback", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "[::1]:18380"}, "http://[::1]:18380", ""},
+		{"no port", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "localhost"}, "http://localhost", ""},
+		// Hostile values: user info, path, query, fragment, odd ports.
+		{"userinfo trick", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "localhost:18380@evil.example"}, "", "loopback"},
+		{"userinfo first", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "user@localhost:18380"}, "", "loopback"},
+		{"path", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "127.0.0.1:80/x"}, "", "loopback"},
+		{"query", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "localhost:18380?x=evil.example"}, "", "loopback"},
+		{"fragment", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "localhost:18380#evil.example"}, "", "loopback"},
+		{"backslash", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "localhost:18380\\evil.example"}, "", "loopback"},
+		{"non-numeric port", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "localhost:http"}, "", "loopback"},
+		{"empty port", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "localhost:"}, "", "loopback"},
+		{"scheme given", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "http://localhost:18380"}, "", "loopback"},
+		{"loopback-looking name", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "localhost.evil.example:18380"}, "", "loopback"},
+		{"space", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "localhost :18380"}, "", "loopback"},
+		{"trailing dot", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "localhost.:18380"}, "", "loopback"},
+		{"hub.localhost", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "hub.localhost:18380"}, "", "loopback"},
+		{"unspecified", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "0.0.0.0:18380"}, "", "loopback"},
+		{"mapped loopback", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "[::ffff:127.0.0.1]:18380"}, "http://[::ffff:127.0.0.1]:18380", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -43,7 +43,20 @@ const (
 	ReissueMargin = transportauth.RefreshMargin
 
 	testInfraStatusPath = "/api/v1/test-infra/status"
+
+	// IssuerAudiencePrefix prefixes every hub's issuer audience
+	// ("scion-test-issuer:<hub id>", computed by the hub).
+	IssuerAudiencePrefix = "scion-test-issuer:"
 )
+
+func hasControlOrSpace(s string) bool {
+	for _, r := range s {
+		if r <= ' ' || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
 
 // Bearer sources reported by a session.
 const (
@@ -183,7 +196,7 @@ func Open(opts Options, deps Deps) (*Session, error) {
 		if err != nil {
 			return nil, err
 		}
-		if eh, err := normalizeAny(e.Endpoint); err != nil || hostOf(eh) != hostOf(endpoint) {
+		if !sameEndpoint(e.Endpoint, endpoint) {
 			return nil, fmt.Errorf("cached identity %q was issued on another hub (%s), not %s", opts.Alias, e.Endpoint, endpoint)
 		}
 		s.entry = e
@@ -307,6 +320,15 @@ func (s *Session) IssuerAudience(ctx context.Context) (string, error) {
 	}
 	if st.TestIssuerAudience == "" {
 		return "", errors.New("the target hub does not accept workload issuer delegation (its test-infra status has no issuer audience)")
+	}
+	// The target names the audience the runner mints an issuer token for:
+	// accept only the issuer audience form, never the IAP audience, so a
+	// target cannot obtain an issuer token for another purpose.
+	if !strings.HasPrefix(st.TestIssuerAudience, IssuerAudiencePrefix) || len(st.TestIssuerAudience) == len(IssuerAudiencePrefix) || hasControlOrSpace(st.TestIssuerAudience) {
+		return "", fmt.Errorf("the target hub's issuer audience is not of the form %s<hub id>; refusing to mint an issuer token for it", IssuerAudiencePrefix)
+	}
+	if st.TestIssuerAudience == s.opts.Profile.IAPAudience {
+		return "", errors.New("the target hub's issuer audience equals the profile's IAP audience; refusing to mint an issuer token for it")
 	}
 	s.issuerAudience = st.TestIssuerAudience
 	return s.issuerAudience, nil

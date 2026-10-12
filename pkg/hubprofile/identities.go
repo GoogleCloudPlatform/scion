@@ -199,7 +199,10 @@ func Teardown(ctx context.Context, s *Session, purge bool) (*TeardownReport, err
 		remove(a, e.IdentityID)
 	}
 
-	list, err := svc.List(ctx, &hubclient.ListTestIdentitiesOptions{Limit: 100})
+	// Expired identities stay on the hub until the reaper removes them, so
+	// list them too: an expired identity of the run is deleted like a live
+	// one.
+	list, err := svc.List(ctx, &hubclient.ListTestIdentitiesOptions{Limit: 100, IncludeExpired: true})
 	if err != nil {
 		rep.Complete = false
 		rep.Items = append(rep.Items, TeardownItem{Outcome: "failed", Detail: "listing the delegation's identities: " + err.Error()})

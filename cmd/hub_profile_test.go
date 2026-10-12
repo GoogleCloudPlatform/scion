@@ -188,11 +188,19 @@ func runProfileRoot(t *testing.T, args ...string) (profileRun, error) {
 	restoreAllSilenceUsage(t)
 	resetRootProjectFlag(t)
 	saveCLIModeState(t)
-	for _, name := range []string{"hub-profile", "as", "run", "hub", "no-hub", "format"} {
+	for _, name := range []string{"hub-profile", "hub", "no-hub", "format"} {
 		f := rootCmd.PersistentFlags().Lookup(name)
 		require.NotNil(t, f, name)
 		require.NoError(t, f.Value.Set(f.DefValue))
 		f.Changed = false
+	}
+	for _, c := range []*cobra.Command{hubCmd, artifactCmd} {
+		for _, name := range []string{"as", "run"} {
+			f := c.PersistentFlags().Lookup(name)
+			require.NotNil(t, f, name)
+			require.NoError(t, f.Value.Set(f.DefValue))
+			f.Changed = false
+		}
 	}
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
