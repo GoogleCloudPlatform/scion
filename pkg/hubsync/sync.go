@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -1748,8 +1749,9 @@ func ReadAgentTokenFile() string {
 		// A refusal on the way to the file (for example ~/.scion being a
 		// link) reports ELOOP or ENOTDIR rather than ErrNotExist. Only warn
 		// when something actually exists at the token path; Lstat reads
-		// metadata only and cannot block on a special file.
-		if _, serr := os.Lstat(filepath.Join(home, agentTokenFileRel)); errors.Is(serr, fs.ErrNotExist) {
+		// metadata only and cannot block on a special file. ENOTDIR from
+		// Lstat means ~/.scion is not a directory, so no token can exist.
+		if _, serr := os.Lstat(filepath.Join(home, agentTokenFileRel)); errors.Is(serr, fs.ErrNotExist) || errors.Is(serr, syscall.ENOTDIR) {
 			return ""
 		}
 		warnf("ignoring agent token file: %v", err)

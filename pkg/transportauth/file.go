@@ -55,11 +55,12 @@ const (
 // refuse anything that is not a regular file.
 type FileReadFunc func(path string) (string, error)
 
-// DefaultTransportTokenFilePath returns $HOME/.scion/transport-token for
-// the current user, or "" when the home directory cannot be resolved.
+// DefaultTransportTokenFilePath returns $HOME/.scion/transport-token, or
+// "" when HOME is unset. It takes HOME from the environment, the same
+// source ReadTransportTokenFile uses to decide what lies under HOME.
 func DefaultTransportTokenFilePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	home := os.Getenv("HOME")
+	if home == "" {
 		return ""
 	}
 	return filepath.Join(home, ".scion", TransportTokenFileName)

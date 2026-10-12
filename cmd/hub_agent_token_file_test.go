@@ -104,9 +104,8 @@ func TestReadAgentTokenFile_RefusesLinkAndFIFO(t *testing.T) {
 // token file stays silent, and a present one is refused with a warning.
 func TestReadAgentTokenFile_LinkedScionDir(t *testing.T) {
 	t.Run("no token file is silent", func(t *testing.T) {
-		home := t.TempDir()
-		clearAgentAuthEnv(t)
-		t.Setenv("HOME", home)
+		home := clearAgentAuthEnv(t)
+		require.NoError(t, os.Remove(filepath.Join(home, ".scion")))
 		require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(home, ".scion")))
 
 		var token string
@@ -116,9 +115,8 @@ func TestReadAgentTokenFile_LinkedScionDir(t *testing.T) {
 	})
 
 	t.Run("token file is refused with a warning", func(t *testing.T) {
-		home := t.TempDir()
-		clearAgentAuthEnv(t)
-		t.Setenv("HOME", home)
+		home := clearAgentAuthEnv(t)
+		require.NoError(t, os.Remove(filepath.Join(home, ".scion")))
 		other := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(other, "scion-token"), []byte("other-token"), 0o600))
 		require.NoError(t, os.Symlink(other, filepath.Join(home, ".scion")))
@@ -128,6 +126,19 @@ func TestReadAgentTokenFile_LinkedScionDir(t *testing.T) {
 		assert.Equal(t, "", token)
 		assert.Contains(t, stderr, "Warning: ignoring agent token file")
 	})
+}
+
+// TestReadAgentTokenFile_ScionIsRegularFile: a regular file at ~/.scion
+// means no token file can exist, so the CLI stays silent.
+func TestReadAgentTokenFile_ScionIsRegularFile(t *testing.T) {
+	home := clearAgentAuthEnv(t)
+	require.NoError(t, os.Remove(filepath.Join(home, ".scion")))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion"), []byte("not a directory"), 0o600))
+
+	var token string
+	stderr := captureStderr(t, func() { token = readAgentTokenFile() })
+	assert.Equal(t, "", token)
+	assert.Equal(t, "", stderr)
 }
 
 // TestReadAgentTokenFile_LinkedHomePrefix: a home directory reached

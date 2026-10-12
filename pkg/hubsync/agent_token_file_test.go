@@ -183,3 +183,17 @@ func TestReadAgentTokenFile_RefusesOversizedFileWithWarning(t *testing.T) {
 		t.Errorf("warning %q does not mention the size limit", warn)
 	}
 }
+
+// TestReadAgentTokenFile_ScionIsRegularFileIsQuiet: a regular file at
+// ~/.scion means no token file can exist, so the CLI stays silent.
+func TestReadAgentTokenFile_ScionIsRegularFileIsQuiet(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".scion"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, warn := readAgentTokenFileBounded(t)
+	if got != "" || warn != "" {
+		t.Errorf("got %q, warning %q; want both empty", got, warn)
+	}
+}
