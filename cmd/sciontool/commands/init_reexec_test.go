@@ -13,6 +13,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 )
 
 // TestProcEnvironRetainsUnsetVar demonstrates the underlying kernel behavior
@@ -109,7 +110,7 @@ func TestReExecIntegration(t *testing.T) {
 		t.Skip("skipping: /proc filesystem not available")
 	}
 
-	scrubHubEnv(t)
+	testutil.ScrubHubEnv(t)
 
 	// Build sciontool
 	binPath := buildSciontool(t)

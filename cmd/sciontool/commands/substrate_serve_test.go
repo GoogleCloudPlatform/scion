@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 )
 
 // TestVerifySelfBinaryRootOwned_RefusesNonRootOwnedBinary proves
@@ -344,8 +345,8 @@ func TestSubstrateServeCommand_Integration_SIGTERMNotForwarded(t *testing.T) {
 	}
 
 	// Clear Hub env vars so the subprocess cannot talk to a real Hub — the
-	// same scrubHubEnv used by TestInitCommand_Integration.
-	scrubHubEnv(t)
+	// same testutil.ScrubHubEnv used by TestInitCommand_Integration.
+	testutil.ScrubHubEnv(t)
 
 	// substrate-serve's synchronous /bootstrap precondition
 	// (checkPrivilegeDropFeasible) deliberately refuses to bootstrap

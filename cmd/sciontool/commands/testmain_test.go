@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
@@ -152,7 +153,7 @@ const selfCheckHelperEnv = "SUBSTRATE_SELFCHECK_HELPER_TEST"
 //  1. Every SCION_HUB*/token/agent-identity env var, plus SCION_HOST_UID/GID
 //     and SCION_KEEPID_UID, is cleared for the entire process: removes the
 //     *input* hub.NewClient()'s own testing.Testing() guard depends on, for
-//     every test here, not just ones that remember to call scrubHubEnv.
+//     every test here, not just ones that remember to call testutil.ScrubHubEnv.
 //  2. scionUserLookup and lookupUserByID default to "not found" for the
 //     whole test binary: no lookup here can resolve a real account, even
 //     when a test overrides the var back to a fake one (scoped with
@@ -185,7 +186,7 @@ func TestMain(m *testing.M) {
 
 	// The log level variables are cleared so tests that read agent.log do
 	// not depend on the caller's SCION_LOG_LEVEL / SCION_DEBUG.
-	envVarsToClear := append(append([]string{}, hubEnvVars...),
+	envVarsToClear := append(testutil.HubEnvKeys(),
 		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID",
 		loglevel.EnvLogLevel, loglevel.EnvDebug)
 	for _, v := range envVarsToClear {
