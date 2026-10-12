@@ -82,11 +82,12 @@ const (
 	// proxyDriverPrincipalUserMessage is the message of an admin request
 	// that would create a user for a proxy driver principal. The message and
 	// the reason never name drivers or the driver list (the settings API
-	// hides the list). The refusal itself still tells a caller with invite
-	// or provisioning rights that the email is refused as a transport
-	// identity; that inference is accepted, as with the platform service
-	// account's reserved_identity provisioning warning. The specific reason
-	// is logged (logProxyDriverCreateRefusal).
+	// hides the list). The refusal is specific to transport identities, so
+	// a caller with invite or provisioning rights can tell that the email is
+	// a transport identity, as the platform service account's
+	// reserved_identity provisioning warning already shows; this is the
+	// intended behaviour. The specific reason is logged
+	// (logProxyDriverCreateRefusal).
 	proxyDriverPrincipalUserMessage = "this email cannot be a hub user"
 	// proxyDriverPrincipalLogReason is the log reason of such a refusal.
 	proxyDriverPrincipalLogReason = "proxy_driver_principal"
