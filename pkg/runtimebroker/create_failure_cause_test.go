@@ -83,7 +83,7 @@ func TestRuntimeFailureCause(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cause, reason, code := runtimeFailureCause(tc.err)
+			reason, code, cause := runtimeFailureCause(tc.err)
 			if cause != tc.wantCause {
 				t.Errorf("cause = %v, want %v", cause, tc.wantCause)
 			}

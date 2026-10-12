@@ -454,18 +454,18 @@ var runtimeCauseCodes = map[metav1.StatusReason]string{
 // runtime's opaque start errors do not), so the cause is reached through
 // errors.As and Unwrap.
 //
+//   - reason is the Kubernetes status reason ("" when there is none).
+//   - code is the fixed, client-safe details.cause code for reason, or ""
+//     when reason has none (runtimeCauseCodes).
 //   - cause is the first Kubernetes API status in err's chain (errors.As
 //     also searches multi-%w errors). Without one, it is the deepest error
 //     reached by single-error errors.Unwrap, which stops at an error that
 //     wraps several (a multi-%w error) and returns that error. Its text can
 //     name a namespace, ServiceAccount or object, so it is for server logs
 //     only.
-//   - reason is the Kubernetes status reason ("" when there is none).
-//   - code is the fixed, client-safe details.cause code for reason, or ""
-//     when reason has none (runtimeCauseCodes).
-func runtimeFailureCause(err error) (cause error, reason metav1.StatusReason, code string) {
+func runtimeFailureCause(err error) (reason metav1.StatusReason, code string, cause error) {
 	if err == nil {
-		return nil, "", ""
+		return "", "", nil
 	}
 	var status k8serrors.APIStatus
 	if errors.As(err, &status) {
@@ -484,7 +484,7 @@ func runtimeFailureCause(err error) (cause error, reason metav1.StatusReason, co
 			cause = next
 		}
 	}
-	return cause, reason, runtimeCauseCodes[reason]
+	return reason, runtimeCauseCodes[reason], cause
 }
 
 // runtimeFailureLogAttrs returns the log attributes describing err's cause
@@ -493,7 +493,7 @@ func runtimeFailureCause(err error) (cause error, reason metav1.StatusReason, co
 // set. Server logs only: none of these may reach a client body except the
 // fixed code.
 func runtimeFailureLogAttrs(err error) []any {
-	cause, reason, code := runtimeFailureCause(err)
+	reason, code, cause := runtimeFailureCause(err)
 	if cause == nil {
 		return nil
 	}
@@ -514,7 +514,7 @@ func runtimeFailureLogAttrs(err error) []any {
 // names never reach the body.
 func writeCreateRuntimeError(w http.ResponseWriter, err error) {
 	var details map[string]interface{}
-	if _, _, code := runtimeFailureCause(err); code != "" {
+	if _, code, _ := runtimeFailureCause(err); code != "" {
 		details = map[string]interface{}{"cause": code}
 	}
 	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError(opCreateAgent, err).Error(), details)
