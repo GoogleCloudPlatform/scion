@@ -23,6 +23,22 @@ import { setupChatMobileMocks, PROJECT_A } from './mock-api.js';
 
 const THREAD_ID = 'thread-05';
 
+function messagesFor(threadId: string): Record<string, unknown>[] {
+  const base = Date.parse('2026-09-01T00:00:00Z');
+  return Array.from({ length: 3 }, (_, i) => ({
+    id: `${threadId}-msg-${i}`,
+    projectId: PROJECT_A.id,
+    sender: 'user',
+    senderId: 'user-ada',
+    recipient: 'thread',
+    recipientId: threadId,
+    msg: `${threadId} message ${i}`,
+    type: 'chat',
+    threadId,
+    createdAt: new Date(base + i * 60_000).toISOString(),
+  }));
+}
+
 /** The thread component's conversation key. */
 function openKey(page: Page): Promise<string> {
   return page.evaluate(
@@ -57,11 +73,18 @@ test('a cold load of /chat/{slug}/{thread} opens that thread before the rail loa
     void route.fulfill({ json: { projects, totalCount: projects.length } });
   });
 
+  await page.route(/\/api\/v1\/chat\/conversations\/([^/?]+)\/messages/, (route) => {
+    const items = route.request().url().includes(`/conversations/${THREAD_ID}/`)
+      ? messagesFor(THREAD_ID)
+      : [];
+    void route.fulfill({ json: { items, messages: items } });
+  });
+
   try {
     await page.goto(`/chat/${PROJECT_A.slug}/${THREAD_ID}`, { waitUntil: 'domcontentloaded' });
 
     await expect.poll(() => openKey(page), { timeout: 15_000 }).toBe(THREAD_ID);
-    await expect(page.getByText(`(#10)`).first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(`${THREAD_ID} message 2`)).toBeVisible({ timeout: 10_000 });
     await expect(page).toHaveURL(`/chat/${PROJECT_A.slug}/${THREAD_ID}`);
     expect(slugQueries).toContain(PROJECT_A.slug);
   } finally {
