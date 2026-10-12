@@ -520,6 +520,28 @@ func newCCTestRig(t *testing.T) *ccTestRig {
 }
 
 // info tunnels a Hub-signed GET /api/v1/info to id over its control channel.
+// infoVia sends a signed GET /api/v1/info for instance id through the Hub
+// connection c (whatever session it is), with a short timeout, and returns
+// the status. Only a live broker answers.
+func (r *ccTestRig) infoVia(t *testing.T, c *hub.BrokerConnection, id string) (int, error) {
+	t.Helper()
+	secret, err := r.s.GetBrokerSecret(r.ctx, id)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, "http://runtime-broker/api/v1/info", nil)
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: id, SecretKey: secret.SecretKey}).ApplyAuth(req))
+	headers := map[string]string{}
+	for k := range req.Header {
+		headers[k] = req.Header.Get(k)
+	}
+	tctx, tcancel := context.WithTimeout(r.ctx, 500*time.Millisecond)
+	defer tcancel()
+	resp, err := c.TunnelRequest(tctx, wsprotocol.NewRequestEnvelope("req-via-"+id+"-"+time.Now().Format(time.RFC3339Nano), http.MethodGet, "/api/v1/info", "", headers, nil))
+	if err != nil {
+		return 0, err
+	}
+	return resp.StatusCode, nil
+}
+
 func (r *ccTestRig) info(t *testing.T, id string) (int, string, error) {
 	t.Helper()
 	secret, err := r.s.GetBrokerSecret(r.ctx, id)
@@ -587,21 +609,24 @@ func TestFlatHost_ControlChannelStaleSessionFenced(t *testing.T) {
 
 	// The old A session disconnects: it must not remove the new connection.
 	require.NoError(t, oldA.Shutdown(context.Background()))
-	// Wait until the Hub has torn the old session down (its requests fail
-	// as closed), rather than for a fixed time.
-	require.Eventually(t, func() bool {
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		defer cancel()
-		_, err := oldSession.TunnelRequest(ctx, &wsprotocol.RequestEnvelope{Type: wsprotocol.TypeRequest, Method: http.MethodGet, Path: "/api/v1/info"})
-		return err != nil
-	}, 10*time.Second, 50*time.Millisecond, "the Hub tears the old A session down")
 	// While both A servers ran they shared one identity, so their sessions
-	// may have displaced each other; the old server's last session may
-	// even have been current when it stopped. The new A server's session
-	// is (re)established, and from then on no teardown of the old server's
-	// sessions drops it.
-	require.Eventually(t, func() bool { return r.mgr.IsConnected(idA) }, 10*time.Second, 20*time.Millisecond,
-		"the new A server holds the connection")
+	// may have displaced each other: the session the Hub holds for A when
+	// the old server stops may be the OLD server's last one, whose socket is
+	// closed but whose teardown the Hub has not processed yet. Waiting for
+	// the first old session to fail, or for A to look connected, does not
+	// tell them apart. Wait instead until the session the Hub holds for A
+	// answers a tunneled request: only a live server can answer, and the
+	// old one is stopped, so that session is the new A server's.
+	require.Eventually(t, func() bool {
+		c := r.mgr.GetConnection(idA)
+		if c == nil {
+			return false
+		}
+		code, err := r.infoVia(t, c, idA)
+		return err == nil && code == http.StatusOK
+	}, 15*time.Second, 50*time.Millisecond, "the Hub holds the new A server's session")
+	// From then on no teardown of an old A session drops it: the Hub only
+	// removes the session it holds, never a newer one.
 	require.Never(t, func() bool { return !r.mgr.IsConnected(idA) }, 300*time.Millisecond, 10*time.Millisecond,
 		"the stale session's disconnect leaves the new A connection")
 	code, body, err := r.info(t, idA)
