@@ -323,9 +323,12 @@ var sqliteOpenPackages = map[string]string{
 //   - a driver name computed at run time is not evaluated;
 //   - names are resolved through one flat map per top-level declaration,
 //     filled only from string-literal const, var and := declarations. A
-//     function parameter, a non-literal := (driver := pick()) or a later
-//     plain = does not shadow a package-level name, so the package value is
-//     used. That reports a false use (fails closed; fix it or allowlist it);
+//     function parameter or a non-literal := (driver := pick()) does not
+//     shadow a package-level name, so the package value is used. That
+//     reports a false use (fails closed; fix it or allowlist it);
+//   - a plain = is never tracked. It neither shadows a package-level name
+//     (a false use, fails closed) nor updates a recorded value, so
+//     reassigning a name to "sqlite3" hides a use;
 //   - a name declared in an inner block or closure stays visible to later
 //     calls in the enclosing scope, which can hide a use;
 //   - a dot-imported Open (a bare identifier call) is not matched.
