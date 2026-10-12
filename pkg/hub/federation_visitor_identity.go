@@ -20,7 +20,7 @@ package hub
 // bindings, DM keys and audit records key it like any user.
 //
 // It implements UserIdentity and FederatedIdentity. It is never a session,
-// interactive or user access token identity: credentialContextForIdentity
+// interactive or user access credential identity: credentialContextForIdentity
 // classifies it as CredentialKindFederation, and principalContextForIdentity
 // as PrincipalKindVisitor (store principal type "user" for binding lookups,
 // see NormalizePrincipalType). Only the federated branch of the auth

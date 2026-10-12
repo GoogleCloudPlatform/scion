@@ -17,7 +17,11 @@ package authzop
 // testIdentityOperations are the hub test identity operations
 // (ptone/scion#4240). The routes answer 404 unless the hub runs with
 // --enable-test-identities. Each requires test_identity.issue at hub scope
-// and admits a hub-boundary user access token carrying test_identity:issue.
+// and admits a hub-boundary user access token carrying test_identity:issue,
+// and a workload-bound issuer delegation (phase X2), which acts for its
+// human grantor within its single scope and manages only the identities
+// issued through it. The delegation operations themselves (create, list,
+// revoke) admit an interactive session only.
 var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.create",
@@ -27,7 +31,7 @@ var testIdentityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialWorkloadDelegation},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "test_identity.issue",
 		Effects:          []SecurityEffect{EffectCreateResource, EffectMintCredential},
@@ -40,7 +44,7 @@ var testIdentityOperations = []OperationSpec{
 		AuditObligation: &AuditObligation{
 			EventType:     "test_identity_issue",
 			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
-			AfterFields:   []string{"user_id", "role", "issued_by", "purpose", "expires_at", "token_ttl_seconds"},
+			AfterFields:   []string{"user_id", "role", "issued_by", "purpose", "expires_at", "token_ttl_seconds", "workload_delegation"},
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
@@ -58,7 +62,7 @@ var testIdentityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialWorkloadDelegation},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "test_identity.issue",
 		Effects:          []SecurityEffect{EffectListScoped},
@@ -78,7 +82,7 @@ var testIdentityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}/token", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialWorkloadDelegation},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "test_identity.issue",
 		Effects:          []SecurityEffect{EffectMintCredential},
@@ -91,13 +95,44 @@ var testIdentityOperations = []OperationSpec{
 		AuditObligation: &AuditObligation{
 			EventType:     "test_identity_token_issue",
 			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
-			AfterFields:   []string{"user_id", "role", "issued_by", "token_ttl_seconds"},
+			AfterFields:   []string{"user_id", "role", "issued_by", "token_ttl_seconds", "workload_delegation"},
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialConflict},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestTestIdentity_TokenReissue"},
+		},
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
+	},
+	{
+		ID:          "testidentity.webcode.issue",
+		Domain:      "testidentity",
+		Description: "Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer or an unscoped platform admin session; only on hubs where test identity web sessions are available",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}/web-login-code", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "test_identity.issue",
+		Effects:          []SecurityEffect{EffectMintCredential},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "Only the identity's issuer (or an unscoped platform admin session) mints a code; at most one unredeemed code per identity, redeemable once, never past the identity's expiry",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "test_identity_web_code_issue",
+			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
+			AfterFields:   []string{"user_id", "code_id", "code_expires_at", "issued_by"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestTestIdentityWeb_Mint"},
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
@@ -109,7 +144,7 @@ var testIdentityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialWorkloadDelegation},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "test_identity.issue",
 		Effects:          []SecurityEffect{EffectDeleteResource},
@@ -193,6 +228,88 @@ var testIdentityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestTestAdmin_RevokeAll"},
+		},
+		Bearer: SessionOnly(ReasonCredentialManagement),
+	},
+	{
+		ID:          "testidentity.delegation.create",
+		Domain:      "testidentity",
+		Description: "Delegate member-tier test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope, a member cap and a lifetime of at most 7 days",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identity-delegations", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "test_identity.issue",
+		Effects:          []SecurityEffect{EffectIssueCredential},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "Only a live human user's interactive session may delegate; the scope is exactly test_identity:issue, the subject must be allow-listed for its tier, and every mint re-checks the grantor's live bindings, the delegation and the allowlist",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "test_identity_delegation_create",
+			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
+			AfterFields:   []string{"delegation_id", "grantor", "workload_sub", "scope", "member_cap", "label", "expires_at"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, "validation_error"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestTestIdentityDelegation_CreateAuthorization"},
+		},
+		Bearer: SessionOnly(ReasonCredentialManagement),
+	},
+	{
+		ID:          "testidentity.delegation.list",
+		Domain:      "testidentity",
+		Description: "List test identity issuer delegations: the caller's own, or every delegation for an unscoped platform admin session",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identity-delegations", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "test_identity.issue",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestTestIdentityDelegation_ListAndRevoke"},
+		},
+		Bearer: SessionOnly(ReasonCredentialManagement),
+	},
+	{
+		ID:          "testidentity.delegation.revoke",
+		Domain:      "testidentity",
+		Description: "Revoke a test identity issuer delegation, for its grantor or an unscoped platform admin session; the next mint through it is refused",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identity-delegations/{id}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "test_identity.issue",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "Only the grantor or an unscoped platform admin session revokes; any other caller gets 404",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "test_identity_delegation_revoke",
+			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
+			BeforeFields:  []string{"delegation_id", "grantor", "workload_sub", "scope"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestTestIdentityDelegation_ListAndRevoke"},
 		},
 		Bearer: SessionOnly(ReasonCredentialManagement),
 	},

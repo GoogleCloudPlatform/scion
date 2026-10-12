@@ -158,8 +158,16 @@ type Tx struct {
 	SubscriptionTemplate *SubscriptionTemplateClient
 	// Template is the client for interacting with the Template builders.
 	Template *TemplateClient
+	// TestIdentityDelegation is the client for interacting with the TestIdentityDelegation builders.
+	TestIdentityDelegation *TestIdentityDelegationClient
+	// TestIdentityLoginCode is the client for interacting with the TestIdentityLoginCode builders.
+	TestIdentityLoginCode *TestIdentityLoginCodeClient
 	// TestInfraMarker is the client for interacting with the TestInfraMarker builders.
 	TestInfraMarker *TestInfraMarkerClient
+	// ThreadGroup is the client for interacting with the ThreadGroup builders.
+	ThreadGroup *ThreadGroupClient
+	// ThreadGroupMember is the client for interacting with the ThreadGroupMember builders.
+	ThreadGroupMember *ThreadGroupMemberClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
 	// User is the client for interacting with the User builders.
@@ -372,7 +380,11 @@ func (tx *Tx) init() {
 	tx.SkillVersion = NewSkillVersionClient(tx.config)
 	tx.SubscriptionTemplate = NewSubscriptionTemplateClient(tx.config)
 	tx.Template = NewTemplateClient(tx.config)
+	tx.TestIdentityDelegation = NewTestIdentityDelegationClient(tx.config)
+	tx.TestIdentityLoginCode = NewTestIdentityLoginCodeClient(tx.config)
 	tx.TestInfraMarker = NewTestInfraMarkerClient(tx.config)
+	tx.ThreadGroup = NewThreadGroupClient(tx.config)
+	tx.ThreadGroupMember = NewThreadGroupMemberClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)

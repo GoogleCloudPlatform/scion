@@ -62,7 +62,7 @@ func validateFederatedUser(u *store.User) error {
 		return fmt.Errorf("%w: a federated account's email is assigned by the store", store.ErrInvalidInput)
 	}
 	if u.ExpiresAt != nil || u.IssuedBy != nil || u.Purpose != nil || u.IssuanceID != nil ||
-		u.IssuerCredentialID != nil || u.InvitedBy != nil || u.InviteNote != nil {
+		u.IssuerCredentialID != nil || u.IssuerDelegationID != nil || u.InvitedBy != nil || u.InviteNote != nil {
 		return fmt.Errorf("%w: test identity and invite fields are not set on a federated account", store.ErrInvalidInput)
 	}
 	if u.HomeIssuer == nil || store.NormalizeFederatedIssuer(*u.HomeIssuer) == "" {
@@ -101,7 +101,7 @@ func (c *CompositeStore) CreateFederatedUser(ctx context.Context, u *store.User)
 		return err
 	}
 	u.Email = email
-	return c.UserStore.createUser(ctx, u, func(create *ent.UserCreate) {
+	return c.createUser(ctx, u, func(create *ent.UserCreate) {
 		create.SetKind(user.KindFederated).
 			SetHomeIssuer(*u.HomeIssuer).
 			SetFederatedEmail(*u.FederatedEmail)
@@ -131,6 +131,11 @@ func (c *CompositeStore) GetFederatedUserByEmail(ctx context.Context, homeIssuer
 
 // LinkFederatedIdentity links (issuer, subject) to the federated account
 // userID (see store.Store.LinkFederatedIdentity).
+//
+// The reads below give clear errors for the common cases. The partial
+// unique index externalidentity_user_id_federation is what holds "one
+// federation link per account" when two links of one account run
+// concurrently: the later insert fails and returns ErrAlreadyExists.
 func (c *CompositeStore) LinkFederatedIdentity(ctx context.Context, userID, issuer, subject, email string) (*store.ExternalIdentityBinding, error) {
 	issuer = store.NormalizeFederatedIssuer(issuer)
 	if issuer == "" || strings.TrimSpace(subject) == "" {
@@ -174,10 +179,7 @@ func (c *CompositeStore) LinkFederatedIdentity(ctx context.Context, userID, issu
 			UserID:   u.ID,
 			Email:    store.NormalizeFederatedEmail(email),
 		}
-		if err := txc.CreateExternalIdentity(ctx, binding); err != nil {
-			if ent.IsConstraintError(err) {
-				return store.ErrAlreadyExists
-			}
+		if err := txc.insertFederationBinding(ctx, binding); err != nil {
 			return err
 		}
 		created, err = txc.GetExternalIdentity(ctx, store.FederationIdentityProvider, issuer, subject)
@@ -187,6 +189,19 @@ func (c *CompositeStore) LinkFederatedIdentity(ctx context.Context, userID, issu
 		return nil, err
 	}
 	return created, nil
+}
+
+// insertFederationBinding writes a federation binding. A unique violation,
+// either on (provider, issuer, subject) or on the account's single
+// federation binding, returns ErrAlreadyExists.
+func (c *CompositeStore) insertFederationBinding(ctx context.Context, binding *store.ExternalIdentityBinding) error {
+	if err := c.CreateExternalIdentity(ctx, binding); err != nil {
+		if isUniqueViolation(err) {
+			return store.ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
 }
 
 // GetFederatedUserBySubject resolves (issuer, subject) to its federated

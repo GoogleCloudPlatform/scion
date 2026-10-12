@@ -67,6 +67,14 @@ type ProjectService interface {
 	// UpdateSettings updates project settings.
 	UpdateSettings(ctx context.Context, projectID string, settings *ProjectSettings) (*ProjectSettings, error)
 
+	// GetResolvedSettings retrieves the per-setting report of project
+	// annotations and hub defaults (GET /settings/resolved).
+	GetResolvedSettings(ctx context.Context, projectID string) (*ResolvedProjectSettings, error)
+
+	// UpdateGCPIdentityDefaults writes only the default GCP identity fields
+	// of the project settings; every other setting keeps its stored value.
+	UpdateGCPIdentityDefaults(ctx context.Context, projectID string, update *ProjectGCPIdentityDefaultsUpdate) (*ProjectSettings, error)
+
 	// RefreshCache triggers a cache refresh for a linked project.
 	// The hub pulls the workspace from a connected provider broker.
 	RefreshCache(ctx context.Context, projectID string) (*ProjectCacheRefreshResponse, error)
@@ -391,6 +399,31 @@ func (s *projectService) GetSettings(ctx context.Context, projectID string) (*Pr
 // cannot be reset to inherit.
 func (s *projectService) UpdateSettings(ctx context.Context, projectID string, settings *ProjectSettings) (*ProjectSettings, error) {
 	resp, err := s.c.put(ctx, "/api/v1/projects/"+projectID+"/settings", settings, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ProjectSettings](resp)
+}
+
+// GetResolvedSettings retrieves the per-setting report of project
+// annotations and hub defaults. It reports which layers carry a value; it
+// does not say which one wins.
+func (s *projectService) GetResolvedSettings(ctx context.Context, projectID string) (*ResolvedProjectSettings, error) {
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID+"/settings/resolved", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ResolvedProjectSettings](resp)
+}
+
+// UpdateGCPIdentityDefaults sends a settings PUT whose body carries only the
+// fields set in update. The server merges the PUT field by field, so every
+// field the body leaves out, identity or not, keeps its stored value.
+func (s *projectService) UpdateGCPIdentityDefaults(ctx context.Context, projectID string, update *ProjectGCPIdentityDefaultsUpdate) (*ProjectSettings, error) {
+	if update == nil {
+		update = &ProjectGCPIdentityDefaultsUpdate{}
+	}
+	resp, err := s.c.put(ctx, "/api/v1/projects/"+projectID+"/settings", update, nil)
 	if err != nil {
 		return nil, err
 	}

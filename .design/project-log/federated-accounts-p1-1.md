@@ -26,7 +26,7 @@
   (`CreateRoleBinding`, `AddGroupMember` including hub-members,
   `CreateUserAccessToken`) and at the hub (CanDelegate grantee check,
   project member set, ownership transfer, broker email-resolved senders).
-  The JWT row block refuses a hub-issued token whose subject is a federated
+  The JWT row block refuses a hub-issued JWT whose subject is a federated
   row.
 - **Identity.** `VisitorIdentity` (ID = local account ID, Type "visitor",
   carries issuer, subject, federated email) implements `UserIdentity` and
@@ -35,12 +35,19 @@
   nothing.
 - **Auth middleware.** After federation verification, when the experiment
   `federation.project_visitors` (server layer, default off) is on and the
-  token's (issuer, subject) links to an active federated row, the identity
+  federation credential's (issuer, subject) links to an active federated row, the identity
   becomes `VisitorIdentity`. Every other case keeps `FederatedUserIdentity`.
   A lookup error answers 503.
 - **Interim route guard.** `routeGuard` refuses every request whose identity
   is a `VisitorIdentity` with one 403, until per-route visitor admission
   (item 4) replaces the check.
+- **One federation link per account.** A partial unique index on
+  `external_identities(user_id)` where `provider = 'federation'` holds "one
+  federation link per account" in the database, so the later of two
+  concurrent links returns `ErrAlreadyExists` (the read before the insert
+  stays, for a clear error). `UpdateUser` refuses invite fields on a
+  federated row, matching `CreateFederatedUser`. Additive: the provider is
+  new, so no existing rows can conflict with the index.
 
 ## Notes for later items
 
@@ -53,3 +60,20 @@
   still holds: that identity's ID is `<issuer>:<sub>`, never a local UUID.
 - Display code must show `federated_email` with the issuer, never the
   synthetic address (not needed yet: visitors are refused everywhere).
+
+## Merge-forward (2026-10-12)
+
+- Merged upstream main (4cefb876a) into the branch. Conflicts were limited
+  to `pkg/experiments/registry.go` and `registry_test.go` (both experiments
+  kept) and `pkg/ent/mutation.go` (regenerated with `go generate ./pkg/ent`;
+  `make ent-check` clean). Upstream's removal of committed hub test shard
+  tags carried over; the test files this branch adds carry none.
+- Second merge-forward: merged upstream main (d1bd29925, then d01cdee82;
+  the latter merged cleanly). Upstream added a
+  user `issuer_delegation_id` column and index and a workload issuer field
+  in `AuthConfig`; each conflict was two adjacent additions, so both sides
+  were kept (`pkg/ent/schema/user.go`, `pkg/store/models.go`,
+  `pkg/hub/auth.go`, `pkg/hub/server.go`) and the generated ent code was
+  regenerated (`make ent-check` clean). `CreateFederatedUser` now also
+  refuses the new `IssuerDelegationID` field, like every other test identity
+  field. No test file this branch adds or changes carries a shard tag.

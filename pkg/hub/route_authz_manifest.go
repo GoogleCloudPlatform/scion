@@ -288,12 +288,16 @@ var routeAuthzManifest = map[string]string{
 	"POST /api/v1/github-app/sync-permissions":       "authenticated", // GitHub App permission sync
 
 	// ── Hub test identities (test_identity.issue; 404 unless enabled) ──
-	"POST /api/v1/test-identities":                  "authenticated", // Issue a test identity
-	"GET /api/v1/test-identities":                   "authenticated", // List test identities
-	"POST /api/v1/test-identities/{id}/token":       "authenticated", // Re-issue a test identity token
-	"DELETE /api/v1/test-identities/{id}":           "authenticated", // Delete a test identity
-	"POST /api/v1/test-identities/admin":            "authenticated", // Issue an admin-kind test identity
-	"POST /api/v1/test-identities/admin/revoke-all": "authenticated", // Revoke every admin-kind test identity
+	"POST /api/v1/test-identities":                     "authenticated", // Issue a test identity
+	"GET /api/v1/test-identities":                      "authenticated", // List test identities
+	"POST /api/v1/test-identities/{id}/token":          "authenticated", // Re-issue a test identity token
+	"POST /api/v1/test-identities/{id}/web-login-code": "authenticated", // Mint a test identity web-login code
+	"DELETE /api/v1/test-identities/{id}":              "authenticated", // Delete a test identity
+	"POST /api/v1/test-identities/admin":               "authenticated", // Issue an admin-kind test identity
+	"POST /api/v1/test-identities/admin/revoke-all":    "authenticated", // Revoke every admin-kind test identity
+	"POST /api/v1/test-identity-delegations":           "authenticated", // Create a workload issuer delegation (session only)
+	"GET /api/v1/test-identity-delegations":            "authenticated", // List workload issuer delegations (session only)
+	"DELETE /api/v1/test-identity-delegations/{id}":    "authenticated", // Revoke a workload issuer delegation (session only)
 
 	// ── Platform account linking ───────────────────────────────────────
 	"/api/v1/telegram/link":        "authenticated", // Telegram account linking

@@ -37,7 +37,7 @@ const (
 // ErrFederatedAccountRefused is returned when a path other than the
 // federated account path tries to create a federated account or an address
 // of its synthetic shape, or when a general path tries to give a federated
-// account a role binding, a group membership or a user access token. It
+// account a role binding, a group membership or a user access credential. It
 // wraps ErrInvalidInput.
 var ErrFederatedAccountRefused = fmt.Errorf("%w: federated accounts are managed only by the federated account path", ErrInvalidInput)
 

@@ -160,6 +160,11 @@ type AuthConfig struct {
 	// experiment is off. An error answers 503. Nil keeps every verified
 	// identity.
 	ResolveFederatedVisitor func(ctx context.Context, identity FederatedIdentity) (*VisitorIdentity, error)
+	// WorkloadIssuer is the workload-bound issuer delegation arm's startup
+	// state (test_identity_workload_issuer.go). Nil when no workload issuer
+	// is configured: a request that names a delegation is then refused.
+	// The arm accepts a request only while TestIdentitiesEnabled is true.
+	WorkloadIssuer *workloadIssuerAuthenticator
 }
 
 // tokenType represents the type of authentication token.
@@ -297,6 +302,18 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					log.Debug("Skipping auth for unauthenticated endpoint", "path", logging.RequestPath(r))
 				}
 				serveAfterAuth(w, next, r)
+				return
+			}
+
+			// Step 0: Workload-bound issuer delegation (test identities,
+			// ptone/scion#4240). A request that names a delegation, or whose
+			// bearer carries the hub's issuer audience, is handled only by
+			// this arm and never falls through: it runs before every other
+			// arm, so a workload token never reaches the agent, federation,
+			// external-bearer (serveExternalBearer) or proxy paths, and it is
+			// accepted only on the test identity issuance routes.
+			if isWorkloadDelegationRequest(r, cfg.WorkloadIssuer) {
+				serveWorkloadDelegation(w, r, next, cfg, log)
 				return
 			}
 
@@ -803,6 +820,29 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 	}
 }
 
+// serveWorkloadDelegation is UnifiedAuthMiddleware's workload-bound issuer
+// delegation arm (test_identity_workload_issuer.go, isWorkloadDelegationRequest).
+// It never falls through to another arm: a request it handles is served as
+// the delegation's grantor, within the delegation's scope, or refused.
+func serveWorkloadDelegation(w http.ResponseWriter, r *http.Request, next http.Handler, cfg AuthConfig, log *slog.Logger) {
+	ctx := r.Context()
+	auth, refusal := cfg.WorkloadIssuer.authenticate(ctx, r, cfg.TestIdentitiesEnabled)
+	if refusal != nil {
+		log.Warn("workload delegation refused",
+			slog.String("auth_type", AuthTypeWorkloadDelegation),
+			slog.String("reason", refusal.reason),
+			slog.Int("status", refusal.status))
+		writeWorkloadDelegationRefusal(w, refusal)
+		return
+	}
+	ctx = context.WithValue(ctx, userContextKey{}, auth.identity)
+	ctx = contextWithIdentity(ctx, auth.identity)
+	ctx = contextWithCredentialContext(ctx, auth.credential)
+	ctx = contextWithAuthType(ctx, AuthTypeWorkloadDelegation)
+	ctx = contextWithWorkloadDelegationState(ctx, auth.state)
+	serveAfterAuth(w, next, r.WithContext(ctx))
+}
+
 // logUATRejection logs a single "credential rejected" line for a UAT that
 // failed ValidateToken (plan §3.1(3)). It classifies the reason from the
 // returned error's *UATRejection, when present. Any other error shape means
@@ -936,7 +976,7 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/api/v1/settings/public": // Public settings (no auth required)
 		return true
-	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (three bools)
+	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (four bools and the issuer audience)
 		return true
 	}
 	return false

@@ -466,8 +466,12 @@ func requireLocalUserPrincipal(principal PrincipalContext) error {
 // kernel uses (evaluateActivation via CandidateBinding). evaluateActivation
 // fails closed when Now is zero and the binding carries a time condition.
 // isBindingActive delegates here, and the bounds go through
-// candidateActivationBounds, so pkg/hub has one activation rule.
+// candidateActivationBounds, so pkg/hub has one activation rule. A nil
+// binding is never active.
 func bindingActivationOK(b *store.RoleBinding, now time.Time) bool {
+	if b == nil {
+		return false
+	}
 	cb := &CandidateBinding{BindingID: b.ID}
 	cb.NotBefore, cb.ExpiresAt = candidateActivationBounds(b)
 	return evaluateActivation(cb, now).Active

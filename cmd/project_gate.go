@@ -34,7 +34,9 @@ var hubUserLevelCommands = map[string]bool{
 // register or sync a local project, even when --project names one. One
 // command per line.
 var hubOnlyCommands = map[string]bool{
-	"tunnel": true,
+	"tunnel":     true,
+	"ssh":        true,
+	"ssh-config": true,
 }
 
 // brokerMachineLevelCommands are "scion runtime-broker" subcommands that act
@@ -86,6 +88,11 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	case "scion":
 		// Root command itself doesn't require project
 		return false
+	case "use":
+		// Top-level 'use' (alias of 'project use') acts on user state.
+		if isTopLevel(cmd) {
+			return false
+		}
 	}
 	// Hub login and connection commands (ptone/scion#3317).
 	if parentName == "auth" && commandInSubtree(cmd, "hub") {

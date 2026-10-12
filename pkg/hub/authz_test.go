@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 package hub
 
@@ -1408,7 +1408,7 @@ func TestResolveAdminUsers_GetGroupMembersFailure_FailsClosed(t *testing.T) {
 	}
 	preview := &PreviewService{store: errStore}
 
-	_, err = preview.resolveAdminUsers(ctx, ScopeTypeSystem, "")
+	_, err = preview.resolveAdminUsers(ctx, time.Now(), ScopeTypeSystem, "")
 
 	// Must fail closed: error propagates instead of continuing with empty members.
 	assert.Error(t, err, "resolveAdminUsers must propagate GetGroupMembers error")
@@ -1451,7 +1451,7 @@ func TestResolveAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *testing.T) {
 	}
 	preview := &PreviewService{store: errStore}
 
-	_, err = preview.resolveAdminUsers(ctx, ScopeTypeSystem, "")
+	_, err = preview.resolveAdminUsers(ctx, time.Now(), ScopeTypeSystem, "")
 
 	// Must fail closed: error propagates instead of setting groupIDs = nil.
 	assert.Error(t, err, "resolveAdminUsers must propagate GetEffectiveGroups error")
@@ -1546,5 +1546,38 @@ func TestEvaluate_StoredBindingWindowMatchesIsBindingActive(t *testing.T) {
 			assert.Equal(t, isBindingActive(b, tc.now), d.Allowed,
 				"kernel decision must agree with isBindingActive")
 		})
+	}
+}
+
+// Evaluation times for the nil binding tests, including the zero time,
+// the setZeroBound instant itself and an instant before year 1.
+func nilBindingEvalTimes() []time.Time {
+	ref := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	return []time.Time{
+		ref,
+		time.Time{},
+		setZeroBound,
+		time.Date(-1, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+	}
+}
+
+// A nil role binding is never active.
+func TestBindingActivationOK_NilBindingInactive(t *testing.T) {
+	for _, now := range nilBindingEvalTimes() {
+		assert.False(t, bindingActivationOK(nil, now), "bindingActivationOK(nil, %v)", now)
+		assert.False(t, isBindingActive(nil, now), "isBindingActive(nil, %v)", now)
+	}
+}
+
+// candidateActivationBounds gives a nil binding bounds the kernel never
+// treats as active. Zero bounds would read as unbounded.
+func TestCandidateActivationBounds_NilBindingNeverActive(t *testing.T) {
+	notBefore, expiresAt := candidateActivationBounds(nil)
+	assert.False(t, notBefore.IsZero(), "nil binding NotBefore must be set")
+	assert.False(t, expiresAt.IsZero(), "nil binding ExpiresAt must be set")
+	cb := &CandidateBinding{NotBefore: notBefore, ExpiresAt: expiresAt}
+	for _, now := range nilBindingEvalTimes() {
+		assert.False(t, evaluateActivation(cb, now).Active, "evaluateActivation at %v", now)
 	}
 }

@@ -119,6 +119,9 @@ type idFixtures struct {
 	// testIdentityDel is a disposable live test identity for the delete
 	// entry, so the re-issue entry keeps testIdentity.
 	testIdentityDel string
+	// testIdentityDelegation is a live workload issuer delegation
+	// (handlers_test_identity_delegations.go) for the revoke entry.
+	testIdentityDelegation string
 	// inbox holds the caller's own messaging records (seedInboxRecords):
 	// the dev user's here, the matrix super-admin's in the bearer
 	// disposition matrix.
@@ -524,11 +527,18 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// super-admin (newBearerMatrixFixture), so that user's hub token may
 	// re-issue for it; the dev user reaches it as an admin session.
 	enableTestIdentitiesForTest(srv)
+	enableTestIdentityWebSessionsForTest(srv)
 	// Admin-kind test identity routes (admin tier A1): turn the test admin
 	// gate on, so they answer past their 404 gate.
 	srv.testAdminGate = testAdminGate{hubAdmin: true}
 	f.testIdentity = tiStoreFixture(t, s, tid("bdm-super-admin"), now.Add(time.Hour)).ID
 	f.testIdentityDel = tiStoreFixture(t, s, tid("bdm-super-admin"), now.Add(time.Hour)).ID
+	delegation := &store.TestIdentityDelegation{
+		GrantorID: tid("bdm-super-admin"), WorkloadSub: "100000000000000000099", Scope: testIdentityDelegationScope,
+		MemberCap: testIdentityPerIssuerCap, Created: now, ExpiresAt: now.Add(time.Hour),
+	}
+	require.NoError(t, s.CreateTestIdentityDelegation(ctx, delegation))
+	f.testIdentityDelegation = delegation.ID
 
 	return f
 }
@@ -605,7 +615,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/artifacts/{id}/versions/{seq}/files/{path}": {"id": f.artifact, "seq": "1", "path": "live.md"},
 
 		// --- test identity family ---
-		"/api/v1/test-identities/{id}/token": {"id": f.testIdentity},
+		"/api/v1/test-identities/{id}/token":          {"id": f.testIdentity},
+		"/api/v1/test-identities/{id}/web-login-code": {"id": f.testIdentity},
+		"/api/v1/test-identity-delegations/{id}":      {"id": f.testIdentityDelegation},
 
 		// --- agent family ---
 		"/api/v1/agents/{id}":                                       {"id": f.agent},

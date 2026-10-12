@@ -48,8 +48,11 @@ func NewRoleStore(client *ent.Client) *RoleStore {
 // pkg/hub/authz_kernel.go): an unset bound is unbounded, NotBefore is
 // inclusive (active when now >= NotBefore) and ExpiresAt is exclusive
 // (active when now < ExpiresAt). A zero now with any bound set is
-// inactive, as in the kernel.
+// inactive, as in the kernel. A nil binding is never active.
 func roleBindingActiveAt(rb *ent.RoleBinding, now time.Time) bool {
+	if rb == nil {
+		return false
+	}
 	if rb.NotBefore == nil && rb.ExpiresAt == nil {
 		return true
 	}
@@ -66,9 +69,15 @@ func roleBindingActiveAt(rb *ent.RoleBinding, now time.Time) bool {
 }
 
 // activeRoleBindings returns the bindings in rbs whose activation window
-// contains the store clock's current time.
+// contains the store clock's current time. A RoleStore built without
+// NewRoleStore has no clock set and uses time.Now. The result is a new
+// slice; rbs is not modified.
 func (r *RoleStore) activeRoleBindings(rbs []*ent.RoleBinding) []*ent.RoleBinding {
-	now := r.now()
+	nowFn := r.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	now := nowFn()
 	active := rbs[:0:0]
 	for _, rb := range rbs {
 		if roleBindingActiveAt(rb, now) {
