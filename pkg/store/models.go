@@ -1468,6 +1468,10 @@ type User struct {
 	// Never bound from a request body (json:"-").
 	FederatedEmail *string `json:"-"`
 	HomeIssuer     *string `json:"-"`
+	// IssuerDelegationID is set only on a test-fixture row issued through
+	// a workload-bound issuer delegation (TestIdentityDelegation), at
+	// create, and never changes. Nil for session and PAT issuance.
+	IssuerDelegationID *string `json:"-"`
 
 	// Timestamps
 	Created   time.Time `json:"created"`
@@ -1686,6 +1690,32 @@ func TestIdentityEmailKind(email string) string {
 // the hub-issued JWT, refuses such an email.
 func IsReservedTestIdentityEmail(email string) bool {
 	return TestIdentityEmailKind(email) != ""
+}
+
+// TestIdentityDelegation is a workload-bound issuer delegation
+// (ptone/scion#4240, phase X2): a human grantor delegates test identity
+// issuance with one scope to one workload identity, pinned by its Google
+// subject. It holds no secret. Only the dedicated delegation store methods
+// write it; every field except RevokedAt and RevokedBy is immutable.
+type TestIdentityDelegation struct {
+	ID          string
+	GrantorID   string
+	WorkloadSub string
+	// Scope is the single delegated scope (test_identity:issue).
+	Scope string
+	// MemberCap is the number of live test identities the delegation may
+	// hold at once.
+	MemberCap int
+	Label     string
+	Created   time.Time
+	ExpiresAt time.Time
+	RevokedAt *time.Time
+	RevokedBy *string
+}
+
+// LiveAt reports whether d is neither revoked nor expired at now.
+func (d *TestIdentityDelegation) LiveAt(now time.Time) bool {
+	return d != nil && d.RevokedAt == nil && now.Before(d.ExpiresAt)
 }
 
 // TestFixtureEmailDomain is the reserved email domain of hub-issued test
@@ -3837,7 +3867,10 @@ type DelegationEdgeDeactivateGuard struct {
 	// Recorded requires provenance version 1 and a bounded or principal
 	// ceiling.
 	Recorded bool
-	// UpdatedAt, when non-nil, requires the row's updated time to equal it.
+	// UpdatedAt, when non-nil, requires the row's updated time to be the
+	// same instant (time.Time.Equal), whatever form the database stores it
+	// in. The store guards the write with the exact stored value it read,
+	// so a change after that read makes the deactivation affect no row.
 	UpdatedAt *time.Time
 }
 

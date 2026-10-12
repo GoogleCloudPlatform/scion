@@ -148,6 +148,15 @@ func (User) Fields() []ent.Field {
 			Nillable().
 			Immutable().
 			Comment("Canonical issuer URL of a federated user"),
+		// issuer_delegation_id is set only on a test_fixture row issued
+		// through a workload-bound issuer delegation
+		// (test_identity_delegations), at create, and never changes. The
+		// per-delegation cap and management scope key on it.
+		field.String("issuer_delegation_id").
+			Optional().
+			Nillable().
+			Immutable().
+			Comment("ID of the issuer delegation a test_fixture user was issued through; empty for session and PAT issuance"),
 	}
 }
 
@@ -185,6 +194,8 @@ func (User) Indexes() []ent.Index {
 		index.Fields("home_issuer", "federated_email").
 			Unique().
 			Annotations(entsql.IndexWhere("kind = 'federated'")),
+		// Supports the live per-delegation count behind the delegation cap.
+		index.Fields("kind", "issuer_delegation_id"),
 	}
 }
 

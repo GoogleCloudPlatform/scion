@@ -106,6 +106,7 @@ func entUserToStore(u *ent.User) *store.User {
 		HomeIssuer:         u.HomeIssuer,
 		Created:            u.Created,
 	}
+	su.IssuerDelegationID = u.IssuerDelegationID
 	if u.LastLogin != nil {
 		su.LastLogin = *u.LastLogin
 	}
@@ -127,7 +128,7 @@ func (s *UserStore) CreateUser(ctx context.Context, u *store.User) error {
 		return store.ErrFederatedAccountRefused
 	}
 	if (u.Kind != "" && u.Kind != store.UserKindHuman) || u.ExpiresAt != nil || u.IssuedBy != nil || u.Purpose != nil ||
-		u.IssuanceID != nil || u.IssuerCredentialID != nil || store.IsReservedTestIdentityEmail(u.Email) {
+		u.IssuanceID != nil || u.IssuerCredentialID != nil || u.IssuerDelegationID != nil || store.IsReservedTestIdentityEmail(u.Email) {
 		return store.ErrTestFixtureKindRefused
 	}
 	return s.createUser(ctx, u, nil)
@@ -154,12 +155,18 @@ func (s *UserStore) CreateTestFixtureUser(ctx context.Context, u *store.User) er
 	if u.Role != store.UserRoleMember && u.Role != store.UserRoleViewer {
 		return fmt.Errorf("%w: a test fixture user must have the member or viewer role", store.ErrInvalidInput)
 	}
+	if u.IssuerDelegationID != nil && strings.TrimSpace(*u.IssuerDelegationID) == "" {
+		return fmt.Errorf("%w: an issuer delegation ID must not be empty", store.ErrInvalidInput)
+	}
 	return s.createUser(ctx, u, func(create *ent.UserCreate) {
 		create.SetKind(user.KindTestFixture).
 			SetExpiresAt(*u.ExpiresAt).
 			SetIssuedBy(*u.IssuedBy)
 		if u.Purpose != nil {
 			create.SetPurpose(*u.Purpose)
+		}
+		if u.IssuerDelegationID != nil {
+			create.SetIssuerDelegationID(*u.IssuerDelegationID)
 		}
 	})
 }
@@ -194,6 +201,10 @@ func validateTestAdminUser(u *store.User) error {
 	}
 	if u.IssuerCredentialID != nil && strings.TrimSpace(*u.IssuerCredentialID) == "" {
 		return fmt.Errorf("%w: an empty issuer credential ID must be omitted", store.ErrInvalidInput)
+	}
+	if u.IssuerDelegationID != nil {
+		// Workload issuer delegations cover the member tier only (phase X2).
+		return fmt.Errorf("%w: an admin-kind test identity is never issued through a workload delegation", store.ErrInvalidInput)
 	}
 	if store.TestIdentityEmailKind(u.Email) != u.Kind {
 		return fmt.Errorf("%w: a %s user requires an email in %s", store.ErrInvalidInput, u.Kind, store.TestAdminEmailDomain(u.Kind))

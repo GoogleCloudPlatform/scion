@@ -56,6 +56,8 @@ const (
 	FieldFederatedEmail = "federated_email"
 	// FieldHomeIssuer holds the string denoting the home_issuer field in the database.
 	FieldHomeIssuer = "home_issuer"
+	// FieldIssuerDelegationID holds the string denoting the issuer_delegation_id field in the database.
+	FieldIssuerDelegationID = "issuer_delegation_id"
 	// EdgeOwnedGroups holds the string denoting the owned_groups edge name in mutations.
 	EdgeOwnedGroups = "owned_groups"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -137,6 +139,7 @@ var Columns = []string{
 	FieldIssuerCredentialID,
 	FieldFederatedEmail,
 	FieldHomeIssuer,
+	FieldIssuerDelegationID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -345,6 +348,11 @@ func ByFederatedEmail(opts ...sql.OrderTermOption) OrderOption {
 // ByHomeIssuer orders the results by the home_issuer field.
 func ByHomeIssuer(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldHomeIssuer, opts...).ToFunc()
+}
+
+// ByIssuerDelegationID orders the results by the issuer_delegation_id field.
+func ByIssuerDelegationID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuerDelegationID, opts...).ToFunc()
 }
 
 // ByOwnedGroupsCount orders the results by owned_groups count.
