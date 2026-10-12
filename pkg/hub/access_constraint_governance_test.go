@@ -2298,6 +2298,21 @@ func (s replaceTxStore) GetEffectiveGroups(ctx context.Context, userID string) (
 	return s.Store.GetEffectiveGroups(ctx, userID)
 }
 
+func (s replaceTxStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	s.read()
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s replaceTxStore) ListConstraintsForScope(ctx context.Context, scopeType, scopeID string) ([]*store.AccessConstraint, error) {
+	s.read()
+	return s.Store.ListConstraintsForScope(ctx, scopeType, scopeID)
+}
+
+func (s replaceTxStore) GetRoleDefinitionByName(ctx context.Context, name, scopeType string) (*store.RoleDefinition, error) {
+	s.read()
+	return s.Store.GetRoleDefinitionByName(ctx, name, scopeType)
+}
+
 func (s replaceTxStore) LockRoleDefinitionForAdminGuard(ctx context.Context, id string) error {
 	if s.inTx {
 		*s.txLocks++
