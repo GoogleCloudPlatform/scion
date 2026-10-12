@@ -615,11 +615,23 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// The template env layer (ptone/scion#4524): recomputed from the live
 	// template chain on every start, never read from scion-agent.json, and
-	// applied as the final fill below (applyTemplateEnvFill). An
-	// unresolvable template has no template env.
-	templateEnv := templateChainEnv(templateChain)
-	if templateUnresolvable {
-		templateEnv = nil
+	// handed to the runtime as RunConfig.FallbackEnv below. An unresolvable
+	// template has no template env.
+	//
+	// For an agent with a Hub template, a start or restart leaves
+	// opts.Template unset (so image and harness-config resolution are
+	// unchanged); the broker hydrates the template and passes its path in
+	// opts.TemplateEnvSource for the template env only.
+	envChain := templateChain
+	if envChain == nil && opts.TemplateEnvSource != "" {
+		if chain, err := config.GetTemplateChainInProject(opts.TemplateEnvSource, opts.ProjectPath); err == nil {
+			envChain = chain
+		} else {
+			util.Debugf("template env: source %q could not be resolved: %v", opts.TemplateEnvSource, err)
+		}
+	}
+	templateEnv := templateChainEnv(envChain)
+	if envChain == nil && (templateUnresolvable || opts.TemplateEnvSource != "") {
 		if label := templateDisplayName(templateName, provenance, finalScionCfg); label != "" {
 			warnings = append(warnings, fmt.Sprintf("Warning: template %s not found; its env fallback is not applied", label))
 		}
@@ -2213,15 +2225,14 @@ authDone:
 	// request or template env is replaced.
 	agentEnv = withLaunchIDEnv(agentEnv, runID)
 
-	// System decisions read from the env before the template fill, so the
-	// template env layer never takes part in them.
-	metadataInterception := hasMetadataInterception(agentEnv)
-
-	// The template env layer is the final fill: applied here, at the single
-	// point where the container env is finalized, after every other source
-	// (config, request, telemetry, hub default env, broker-injected vars).
-	agentEnv, templateEnvFillWarnings := applyTemplateEnvFill(agentEnv, templateEnv, opts.BrokerMode, opts.Name)
-	warnings = append(warnings, templateEnvFillWarnings...)
+	// The template env layer is never part of agentEnv: it travels as
+	// RunConfig.FallbackEnv, which every runtime applies as the LAST step
+	// of its own env assembly, after auth env, harness env, telemetry env
+	// and env-type secrets too. The harness-config's auth-candidate keys
+	// are suppressed, so a template never takes part in auth.
+	templateFallbackEnv, templateEnvFallbackWarnings := templateEnvFallback(templateEnv, opts.BrokerMode, opts.Name)
+	warnings = append(warnings, templateEnvFallbackWarnings...)
+	suppressedFallbackKeys := sortedKeys(configAuthEnvKeySet(authMeta))
 
 	// Write the full task to the agent home, and pass a short pointer to
 	// it instead when the task is too large to pass inline.
@@ -2305,6 +2316,9 @@ authDone:
 		}(),
 		Env:             agentEnv,
 		ResolvedSecrets: opts.ResolvedSecrets,
+
+		FallbackEnv:            templateFallbackEnv,
+		SuppressedFallbackKeys: suppressedFallbackKeys,
 		Volumes: func() []api.VolumeMount {
 			var volumes []api.VolumeMount
 			if finalScionCfg != nil {
@@ -2427,7 +2441,7 @@ authDone:
 		}(),
 		Debug:                util.DebugEnabled(),
 		Resume:               opts.Resume,
-		MetadataInterception: metadataInterception,
+		MetadataInterception: hasMetadataInterception(agentEnv),
 		ExtraHosts:           mergeExtraHosts(opts.ExtraHosts, runtime.BridgeExtraHosts(m.Runtime.Name(), agentEnv)),
 		NetworkMode:          networkMode,
 		Labels: func() map[string]string {

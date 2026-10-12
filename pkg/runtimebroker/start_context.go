@@ -1015,6 +1015,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Template env source on start and restart (ptone/scion#4524) ---
+	if in.Operation != opCreate && opts.Template == "" {
+		s.applyStartTemplateEnvSource(ctx, in, &opts, hubConn, templateSlug)
+	}
+
 	// --- Shared workspace mode (git-workspace hybrid) ---
 	// Deprecated: SCION_SHARED_WORKSPACE — superseded by SCION_WORKSPACE_MODE +
 	// SCION_WORKSPACE_GIT. Kept for compatibility during the transition period.
@@ -2298,6 +2303,32 @@ func isLoopbackEndpointURL(endpoint string) bool {
 		return false
 	}
 	return isLoopbackHost(u.Hostname())
+}
+
+// applyStartTemplateEnvSource resolves the agent's Hub template on a start or
+// restart that leaves opts.Template unset (the agent's state survived), and
+// passes its local path in opts.TemplateEnvSource, which the agent manager
+// uses only to compute the template env fallback (ptone/scion#4524). It goes
+// through the template cache like create: a cache hit is local, a miss
+// hydrates. opts.Template is never set here, so image, harness-config and
+// agent config resolution are unchanged. A hydration failure is logged and
+// the start goes on without template env (the agent manager warns that the
+// env fallback is not applied); it never fails the start.
+func (s *Server) applyStartTemplateEnvSource(ctx context.Context, in startContextInputs, opts *api.StartOptions, hubConn *HubConnection, templateSlug string) {
+	if (in.TemplateID == "" && in.TemplateHash == "") || hubConn == nil {
+		return
+	}
+	templatePath, err := s.hydrateTemplate(ctx, &CreateAgentConfig{
+		Template:     templateSlug,
+		TemplateID:   in.TemplateID,
+		TemplateHash: in.TemplateHash,
+	}, hubConn)
+	if err != nil {
+		s.agentLifecycleLog.Warn("Start: could not resolve the agent's Hub template; its env fallback is not applied",
+			"agent_id", in.AgentID, "template", templateSlug, "error", err)
+		return
+	}
+	opts.TemplateEnvSource = templatePath
 }
 
 // applyStartTemplateIdentity applies the agent's template identity on a start

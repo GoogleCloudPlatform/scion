@@ -40,14 +40,16 @@ import (
 //   - A template's other env is for the job's own tools. It is its own
 //     layer, never merged into the agent config and never persisted:
 //     templateJobConfig drops it, Start recomputes it from the live template
-//     chain on every start (templateChainEnv), and applyTemplateEnvFill
-//     applies it as the final fill at the single point where the container
-//     env is finalized. A key is set only when no other source set it to a
-//     non-empty value, and values are literal: no expansion against the
-//     broker host environment and no host passthrough for empty values, so
-//     a template can never copy broker-host secrets into a container. Being
-//     applied last, after auth resolution and env-gather, template env never
-//     counts toward either.
+//     chain on every start (templateChainEnv) and hands it to the runtime as
+//     RunConfig.FallbackEnv (templateEnvFallback), which every runtime
+//     applies as the last step of its own env assembly
+//     (runtime.FallbackEnvEntries): a key is set only when no other source
+//     emitted it, and never for the harness-config's auth-candidate keys
+//     (RunConfig.SuppressedFallbackKeys). Values are literal: no expansion
+//     against the broker host environment and no host passthrough for empty
+//     values, so a template can never copy broker-host secrets into a
+//     container. Template env is never in the request env or agent config,
+//     so it never counts toward auth detection or env-gather.
 
 // templateEnvWarnings collects the start warnings for ignored template
 // environment keys. Start installs one in ctx around GetAgent and appends
@@ -153,75 +155,50 @@ func templateChainEnv(chain []*config.Template) map[string]string {
 	return env
 }
 
-// applyTemplateEnvFill applies the template env layer tplEnv to the
-// finalized container env as its last step, and returns the env plus start
-// warnings. A template key is set only when env has no non-empty value for
-// it; an overridden key is logged at debug level only (the intended
-// fallback). Values are literal: an empty value is skipped with a warning
-// (never a host passthrough), and a value containing "${" is used as is
-// with a warning that it is not expanded. A hub-only key is skipped for a
-// broker-mode start (skipBrokerLocalEnvKey: the template env is a
-// broker-local layer). env is not modified.
-func applyTemplateEnvFill(env []string, tplEnv map[string]string, brokerMode bool, agentName string) ([]string, []string) {
+// templateEnvFallback returns the template env layer tplEnv as the
+// RunConfig.FallbackEnv every runtime applies as the last step of its env
+// assembly (runtime.FallbackEnvEntries: a key is set only when no other
+// source emitted it), plus start warnings. Values are literal: an empty
+// value is skipped with a warning (never a host passthrough), and a value
+// containing "${" is kept as is with a warning that it is not expanded. A
+// hub-only key is skipped for a broker-mode start (skipBrokerLocalEnvKey:
+// the template env is a broker-local layer).
+func templateEnvFallback(tplEnv map[string]string, brokerMode bool, agentName string) (map[string]string, []string) {
 	if len(tplEnv) == 0 {
-		return env, nil
+		return nil, nil
 	}
-	set := make(map[string]bool, len(env))
-	emptyEntry := map[string]bool{}
-	for _, kv := range env {
-		if k, v, ok := strings.Cut(kv, "="); ok {
-			if v != "" {
-				set[k] = true
-			} else {
-				emptyEntry[k] = true
-			}
-		}
-	}
-	keys := make([]string, 0, len(tplEnv))
-	for k := range tplEnv {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := env
+	var out map[string]string
 	var warnings []string
-	for _, k := range keys {
+	for _, k := range sortedKeys(tplEnv) {
 		v := tplEnv[k]
 		switch {
 		case k == "" || strings.Contains(k, "="):
 			continue
 		case skipBrokerLocalEnvKey(brokerMode, k):
 			util.Debugf("template env: %s skipped for agent %s (hub-only key)", k, agentName)
-		case set[k]:
-			util.Debugf("template env: %s for agent %s is set by another source; template value not applied", k, agentName)
 		case v == "":
 			warnings = append(warnings, fmt.Sprintf("Warning: template env %s has an empty value; skipped (template env values are literal, never taken from the host)", k))
 		default:
 			if strings.Contains(v, "${") {
 				warnings = append(warnings, fmt.Sprintf("Warning: template env %s value contains ${...}; used literally, not expanded", k))
 			}
-			out = withEnvEntry(out, env, k, v, emptyEntry[k])
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[k] = v
 		}
 	}
 	return out, warnings
 }
 
-// withEnvEntry returns out with k=v appended, dropping an existing empty
-// "k=" entry when dropEmpty is set. It never writes through orig (the
-// caller's slice): out is copied first while it still aliases orig.
-func withEnvEntry(out, orig []string, k, v string, dropEmpty bool) []string {
-	if len(out) > 0 && len(orig) > 0 && &out[0] == &orig[0] {
-		out = append(make([]string, 0, len(orig)+1), orig...)
+// sortedKeys returns the keys of m, sorted.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	if dropEmpty {
-		kept := out[:0]
-		for _, kv := range out {
-			if kv != k+"=" {
-				kept = append(kept, kv)
-			}
-		}
-		out = kept
-	}
-	return append(out, k+"="+v)
+	sort.Strings(keys)
+	return keys
 }
 
 // demoteLegacyTemplateEnv returns cfg for this start's env assembly with
