@@ -111,8 +111,13 @@ type leakGuardResult struct {
 // reuses a goroutine ID within a process, so an excluded ID can only ever
 // refer to the goroutine it was taken from.
 func scanLeakedGoroutines(exclude map[string]bool) leakGuardResult {
+	return scanStacks(allGoroutineStacks(), exclude)
+}
+
+// scanStacks is scanLeakedGoroutines over a given runtime.Stack dump.
+func scanStacks(stacks []byte, exclude map[string]bool) leakGuardResult {
 	res := leakGuardResult{counts: map[string]int{}, ids: map[string]bool{}}
-	for _, block := range strings.Split(string(allGoroutineStacks()), "\n\n") {
+	for _, block := range strings.Split(string(stacks), "\n\n") {
 		block = strings.TrimSpace(block)
 		id := goroutineID(block)
 		if id != "" && exclude[id] {

@@ -385,3 +385,22 @@ func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 		t.Errorf("leak guard still fails after the store was closed:\n%s", out.String())
 	}
 }
+
+// TestLeakGuardScanNeverExcludesUnparsedID checks that a stack block
+// without a parsable "goroutine N" header is never recorded as a baseline
+// ID, so it cannot cause a later unparsed block to be skipped.
+func TestLeakGuardScanNeverExcludesUnparsedID(t *testing.T) {
+	const sig = "database/sql.(*DB).connectionOpener"
+	first := "garbled header\n" + sig + "(...)"
+	second := "another garbled header\n" + sig + "(...)"
+	parsed := "goroutine 7 [select]:\n" + sig + "(...)"
+
+	base := scanStacks([]byte(first+"\n\n"+parsed), nil)
+	if base.total != 2 || len(base.ids) != 1 || !base.ids["7"] {
+		t.Fatalf("baseline scan: total=%d ids=%v, want total=2 ids={7}", base.total, base.ids)
+	}
+	got := scanStacks([]byte(first+"\n\n"+second+"\n\n"+parsed), base.ids)
+	if got.total != 2 {
+		t.Fatalf("scan with baseline excluded: total=%d, want 2 (both unparsed blocks counted, goroutine 7 excluded)", got.total)
+	}
+}
