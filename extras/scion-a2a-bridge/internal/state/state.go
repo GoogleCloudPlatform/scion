@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // Task represents an A2A task mapped to a Scion agent interaction.
@@ -67,9 +67,22 @@ type SQLiteStore struct {
 // Compile-time check that SQLiteStore implements Store.
 var _ Store = (*SQLiteStore)(nil)
 
+// sqliteDSNOptions are the connection options appended to the database path.
+// They use the pure-Go driver's form: each _pragma runs on every new
+// connection, and _time_format=sqlite writes time.Time values as
+// "2006-01-02 15:04:05.999999999-07:00", the format earlier releases stored,
+// so existing database files keep comparing and sorting the same way.
+// Options the driver does not recognize are silently ignored, so
+// TestSQLiteConnectionOptions checks that each one takes effect.
+const sqliteDSNOptions = "?_pragma=busy_timeout(5000)" +
+	"&_pragma=journal_mode(WAL)" +
+	"&_pragma=foreign_keys(1)" +
+	"&_pragma=synchronous(NORMAL)" +
+	"&_time_format=sqlite"
+
 // NewSQLite opens (or creates) the SQLite database at dbPath and runs schema migrations.
 func NewSQLite(dbPath string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on&_synchronous=NORMAL")
+	db, err := sql.Open("sqlite", dbPath+sqliteDSNOptions)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

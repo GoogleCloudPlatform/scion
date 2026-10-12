@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -276,7 +276,7 @@ func newStoreWithOldSchema(dbPath string) (*Store, error) {
 
 // openDB opens a SQLite database without running migrations.
 func openDB(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath+sqliteDSNOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -429,5 +429,21 @@ func TestDeleteThreadDefaultsForSpace(t *testing.T) {
 	got3, _ := s.GetThreadDefault("space-2", "thread-3", "google_chat")
 	if got3 != "agent-c" {
 		t.Errorf("space-2 thread-3 should be unaffected, got %q", got3)
+	}
+}
+
+// TestNew_ConnectionOptions verifies that the busy timeout in the data source
+// name takes effect. The driver silently ignores options it does not
+// recognize, so an option in another driver's syntax would leave the default
+// of no timeout.
+func TestNew_ConnectionOptions(t *testing.T) {
+	s := newTestStore(t)
+
+	var got int
+	if err := s.db.QueryRow("PRAGMA busy_timeout").Scan(&got); err != nil {
+		t.Fatalf("PRAGMA busy_timeout: %v", err)
+	}
+	if got != 5000 {
+		t.Errorf("PRAGMA busy_timeout = %d, want 5000", got)
 	}
 }
