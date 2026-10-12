@@ -38,17 +38,17 @@ cd "$(dirname "$0")/.."
 # Go's version order: MAJOR.MINOR.STAGE.N, where STAGE is 0 for a bare X.Y
 # language version, 1 for betaN, 2 for rcN and 3 for a release X.Y.N. With
 # FLOATING=1, a bare X.Y is an image tag that tracks the latest X.Y release
-# and sorts after every X.Y.N. Prints nothing when VERSION does not start
-# with a Go version.
+# and sorts after every X.Y.N. Prints nothing when VERSION is not exactly
+# one of those forms.
 version_key() {
   local v="$1" floating="$2"
-  if [[ "$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+  if [[ "$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
     echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.3.${BASH_REMATCH[3]}"
-  elif [[ "$v" =~ ^([0-9]+)\.([0-9]+)(beta|rc)([0-9]+) ]]; then
+  elif [[ "$v" =~ ^([0-9]+)\.([0-9]+)(beta|rc)([0-9]+)$ ]]; then
     local stage=1
     [[ "${BASH_REMATCH[3]}" == "rc" ]] && stage=2
     echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${stage}.${BASH_REMATCH[4]}"
-  elif [[ "$v" =~ ^([0-9]+)\.([0-9]+)([^0-9.]|$) ]]; then
+  elif [[ "$v" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
     if [[ "$floating" == 1 ]]; then
       echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.4.0"
     else
@@ -67,8 +67,10 @@ module_go_version() {
   awk '$1 == "go" { print $2; exit }' "$1"
 }
 
-# golang_from_lines DOCKERFILE: prints each FROM instruction that names a
-# golang image, with backslash continuations joined into one line.
+# golang_from_lines DOCKERFILE: prints each FROM instruction that mentions
+# golang, with backslash continuations joined into one line. This is a coarse
+# filter: it also matches a stage alias named golang, which scan() drops by
+# checking the image reference itself.
 golang_from_lines() {
   awk '{
     s = $0
@@ -93,9 +95,13 @@ scan() {
     gomod="$dir/go.mod"
     rel="${dockerfile#"$root"/}"
     while IFS= read -r line; do
-      checked=$((checked + 1))
       # Image reference: the first FROM argument that is not a flag.
       ref="$(awk '{ for (i = 2; i <= NF; i++) if ($i !~ /^--/) { print $i; exit } }' <<<"$line")"
+      # Only the image itself counts, not a stage alias (FROM x AS golang).
+      if [[ ! "$ref" =~ (^|/)golang([:@]|$) ]]; then
+        continue
+      fi
+      checked=$((checked + 1))
       # The tag follows "golang:"; a ref without one (golang, golang@sha256:...)
       # has no tag and so no version.
       tag=""
@@ -184,6 +190,11 @@ self_test() {
     "no-go-directive|-|FROM golang:1.26.1 AS builder|1"
     "not-golang|1.26.1|FROM debian:bookworm-slim|0"
     "golang-lookalike|1.26.1|FROM golangci/golangci-lint:v2 AS lint|0"
+    "alias-named-golang|1.26.1|FROM debian:bookworm AS golang|0"
+    "alias-of-golang-stage|1.26.1|FROM golang:1.26.1 AS b<NL>FROM b AS golang|0"
+    "minor-with-suffix-junk|1.26.1|FROM golang:1.26foo AS builder|1"
+    "beta-without-number|1.26.1|FROM golang:1.26beta AS builder|1"
+    "patch-with-junk|1.26.1|FROM golang:1.26.1foo AS builder|1"
   )
   local c name go from want got failed=0
   for c in "${cases[@]}"; do
