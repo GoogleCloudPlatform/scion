@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -328,7 +329,9 @@ func TestAgentInfoKnownKeySet(t *testing.T) {
 	if len(want) == 0 {
 		t.Fatal("api.AgentInfo has no JSON fields")
 	}
-	for _, k := range append(want, "phase", "activity", "runId", "deletedAt") {
+	// Mixed-case spellings are known too: json.Unmarshal matches field
+	// names case-insensitively, so it already read them into the struct.
+	for _, k := range append(want, "phase", "activity", "runId", "deletedAt", "RUNID", "Phase") {
 		if !isKnownAgentInfoKey(k) {
 			t.Errorf("isKnownAgentInfoKey(%q) = false, want true", k)
 		}
@@ -338,7 +341,11 @@ func TestAgentInfoKnownKeySet(t *testing.T) {
 			t.Errorf("isKnownAgentInfoKey(%q) = true, want false", k)
 		}
 	}
-	if got := jsonFieldNames(typ); len(got) != len(want) {
-		t.Errorf("jsonFieldNames(api.AgentInfo) has %d names, want %d:\ngot  %v\nwant %v", len(got), len(want), got, want)
+	got := slices.Clone(jsonFieldNames(typ))
+	slices.Sort(got)
+	wantSorted := slices.Clone(want)
+	slices.Sort(wantSorted)
+	if !slices.Equal(got, wantSorted) {
+		t.Errorf("jsonFieldNames(api.AgentInfo) has %d names, want %d:\ngot  %v\nwant %v", len(got), len(wantSorted), got, wantSorted)
 	}
 }
