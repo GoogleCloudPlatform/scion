@@ -79,8 +79,10 @@ AUTH = scion_harness.AuthSpec(
         ),
         scion_harness.env_method(
             "vertex-ai",
-            any_of=["GOOGLE_CLOUD_PROJECT"],
-            hint="set GOOGLE_CLOUD_PROJECT (with ADC or GCP service account) for Vertex AI",
+            all_of=["GOOGLE_CLOUD_PROJECT"],
+            any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION"],
+            hint="set GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION/GOOGLE_CLOUD_REGION/CLOUD_ML_REGION "
+                 "(with ADC or GCP service account) for Vertex AI",
         ),
     ],
 )
