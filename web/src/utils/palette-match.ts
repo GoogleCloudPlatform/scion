@@ -91,7 +91,13 @@ function codesMatch(q: number, f: number): boolean {
 }
 
 /** True when `query[qStart, qEnd)` matches `field` starting at `at`. Compares char codes, so it allocates nothing. */
-function matchesAt(field: string, at: number, query: string, qStart: number, qEnd: number): boolean {
+function matchesAt(
+  field: string,
+  at: number,
+  query: string,
+  qStart: number,
+  qEnd: number
+): boolean {
   if (at + (qEnd - qStart) > field.length) return false;
   for (let k = 0; k < qEnd - qStart; k++) {
     if (!codesMatch(query.charCodeAt(qStart + k), field.charCodeAt(at + k))) return false;
