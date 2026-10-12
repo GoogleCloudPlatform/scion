@@ -121,7 +121,6 @@ type exportPlan struct {
 	kinds      map[string]aliasKind
 	helperCall map[string]string // func key -> receiver of the t.Helper call it makes ("" = none)
 	fieldSites []fieldSite       // staying selectors rewritten for field exports
-	curFile    *ast.File         // file being scanned by findFieldSites
 	notes      []string          // review notes
 	targetSrc  map[string][]byte // target file base name -> content
 	changed    map[string][]byte // source package file -> new content (nil = delete)
@@ -617,9 +616,12 @@ func structHasField(d *declInfo, typeName, field string) bool {
 }
 
 // findFieldSites finds staying selectors x.f that need the field export:
-// those whose x is a call of a moved func that returns T or *T. Other
-// selectors named f are left alone (and listed in the notes); the
-// compiler rejects any missed access to an unexported field of T.
+// those whose x is a call of a moved func that returns T or *T, or a
+// single-assignment local declared from such a call (see operandType).
+// Only selectors are handled; composite-literal keys of T in staying code
+// are not rewritten. Other selectors named f are left alone (and listed in
+// the notes); the compiler rejects any missed access to an unexported
+// field of T.
 func (ep *exportPlan) findFieldSites() error {
 	if len(ep.spec.fields) == 0 {
 		return nil
@@ -645,7 +647,6 @@ func (ep *exportPlan) findFieldSites() error {
 		}
 	}
 	for _, f := range ep.p.files {
-		ep.curFile = f.ast
 		movedSpans := ep.movedSpans(f)
 		ast.Inspect(f.ast, func(n ast.Node) bool {
 			se, ok := n.(*ast.SelectorExpr)
@@ -659,7 +660,7 @@ func (ep *exportPlan) findFieldSites() error {
 				}
 			}
 			pos := ep.p.fset.Position(se.Sel.Pos())
-			if t := ep.operandType(se.X, returns); t != "" {
+			if t := ep.operandType(f.ast, se.X, returns); t != "" {
 				if nn, ok := ep.spec.fields[t][se.Sel.Name]; ok {
 					ep.fieldSites = append(ep.fieldSites, fieldSite{file: f.name, offset: off, old: se.Sel.Name, new: nn, line: pos.Line})
 					return true
@@ -682,16 +683,19 @@ func (ep *exportPlan) findFieldSites() error {
 // The analysis follows the parser's object resolution only, so anything
 // else (a field, a parameter, a reassigned or multi-value variable) is
 // left alone and reported; the compiler rejects any missed access.
-func (ep *exportPlan) operandType(x ast.Expr, returns map[string]string) string {
+func (ep *exportPlan) operandType(f *ast.File, x ast.Expr, returns map[string]string) string {
 	switch e := x.(type) {
 	case *ast.ParenExpr:
-		return ep.operandType(e.X, returns)
+		return ep.operandType(f, e.X, returns)
 	case *ast.CallExpr:
-		if id, ok := e.Fun.(*ast.Ident); ok {
+		// The callee must be the package-level func: unresolved in this file
+		// (declared in another file) or a file-scope object. A local that
+		// shadows a moved func's name is not it.
+		if id, ok := e.Fun.(*ast.Ident); ok && (id.Obj == nil || f.Scope.Lookup(id.Name) == id.Obj) {
 			return returns[id.Name]
 		}
 	case *ast.Ident:
-		if e.Obj == nil || e.Obj.Kind != ast.Var || ep.curFile == nil || reassigned(ep.curFile, e.Obj) {
+		if e.Obj == nil || e.Obj.Kind != ast.Var || reassigned(f, e.Obj) {
 			return ""
 		}
 		switch d := e.Obj.Decl.(type) {
@@ -699,14 +703,14 @@ func (ep *exportPlan) operandType(x ast.Expr, returns map[string]string) string 
 			if d.Tok == token.DEFINE && len(d.Lhs) == 1 && len(d.Rhs) == 1 {
 				if lid, ok := d.Lhs[0].(*ast.Ident); ok && lid.Name == e.Name {
 					if call, ok := d.Rhs[0].(*ast.CallExpr); ok {
-						return ep.operandType(call, returns)
+						return ep.operandType(f, call, returns)
 					}
 				}
 			}
 		case *ast.ValueSpec:
 			if len(d.Names) == 1 && len(d.Values) == 1 && d.Type == nil {
 				if call, ok := d.Values[0].(*ast.CallExpr); ok {
-					return ep.operandType(call, returns)
+					return ep.operandType(f, call, returns)
 				}
 			}
 		}

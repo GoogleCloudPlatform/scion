@@ -221,13 +221,19 @@ func runVerifyExport(args []string) error {
 	fs := flag.NewFlagSet("verify-export", flag.ExitOnError)
 	before := fs.String("before", "", "source package directory before the export")
 	after := fs.String("after", "", "source package directory after the export")
-	to := fs.String("to", "pkg/hub/internal/hubtestutil", "target package directory")
-	imp := fs.String("import", "", "target import path (default: module path + -to)")
+	to := fs.String("to", "", "target package directory (default: -after's internal/hubtestutil, so archive trees need no extra flags)")
+	imp := fs.String("import", "", "target import path (default: the hubtestutil import path when -to is defaulted, else module path + -to)")
 	alias := fs.String("alias", defaultAliasFile, "alias file in -after")
 	famPath := fs.String("family", "", "export family file")
 	_ = fs.Parse(args)
 	if *before == "" || *after == "" || *famPath == "" {
 		return fmt.Errorf("-before, -after and -family are required")
+	}
+	if *to == "" {
+		*to = filepath.Join(*after, "internal", "hubtestutil")
+		if *imp == "" {
+			*imp = modulePath + "/pkg/hub/internal/hubtestutil"
+		}
 	}
 	if *imp == "" {
 		*imp = defaultImportPath(*to)

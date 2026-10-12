@@ -172,6 +172,10 @@ mkdir /tmp/hub-before && git archive HEAD pkg/hub | tar -x -C /tmp/hub-before
     -family hack/hubshard/extract/families/hubtestutil-wave1.txt
 ```
 
+`verify-export` finds the target as `-after`'s `internal/hubtestutil` by
+default, so it works unchanged on a `git archive` of a commit
+(`-after /tmp/gen/pkg/hub`); pass `-to`/`-import` for another target.
+
 The family file lists the names to move, plus optional `rename old=New`
 (export name; the default upper-cases the first letter) and
 `field T.f=F` (export a field of a moved struct) lines.
@@ -209,8 +213,11 @@ What `export` does:
   syntactically has the type: a call of a moved func that returns it, or a
   local declared as `x := F(...)` / `var x = F(...)` from such a call and
   never written again (no reassignment, `++`, range assignment or `&x`).
-  Shadowed locals resolve to their own declaration. Other selectors with
-  the same name are listed as INFO; the compiler rejects any missed access.
+  Shadowed locals resolve to their own declaration, and a call only counts
+  if it names the package-level func (not a local shadowing it). Other
+  selectors with the same name are listed as INFO; the compiler rejects any
+  missed access. Only selectors are handled: composite-literal keys of the
+  type in staying code (`T{f: ...}`) are not rewritten.
 - Deletes helper files left without declarations, and drops unused
   imports.
 - Lists review notes: source-scanning test files (moved code leaves their

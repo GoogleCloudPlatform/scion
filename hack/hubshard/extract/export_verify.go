@@ -102,7 +102,7 @@ func verifyExport(before, after *pkgInfo, targetDir, importPath string, spec exp
 		}
 		seen[d.node] = true
 		r.moved++
-		key := d.key
+		var key string
 		if d.recv != "" {
 			key = renamed(renames, d.recv) + "." + d.key[len(d.recv)+1:]
 		} else {

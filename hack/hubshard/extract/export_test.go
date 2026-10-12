@@ -593,6 +593,11 @@ func use() {
 	_ = &pp
 	_ = pp.total
 }
+
+func shadow() {
+	scan := func() other { return other{} }
+	_ = scan().total
+}
 `,
 	})
 	target := filepath.Join(t.TempDir(), "support")
@@ -604,9 +609,10 @@ func use() {
 			t.Errorf("not rewritten: want %q in\n%s", want, got)
 		}
 	}
-	// Reassigned, shadowed, typed-declaration and address-taken locals are
-	// left alone (the compiler checks them).
-	for _, want := range []string{"_ = re.total", "_ = sh.total", "_ = typed.total", "_ = pp.total"} {
+	// Reassigned, shadowed, typed-declaration and address-taken locals, and
+	// a call of a local shadowing the moved func, are left alone (the
+	// compiler checks them).
+	for _, want := range []string{"_ = re.total", "_ = sh.total", "_ = typed.total", "_ = pp.total", "_ = scan().total"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("must not be rewritten: want %q in\n%s", want, got)
 		}
@@ -620,10 +626,36 @@ func use() {
 			infos++
 		}
 	}
-	if infos != 4 {
-		t.Errorf("INFO notes for unrewritten .total = %d, want 4: %v", infos, ep.notes)
+	if infos != 5 {
+		t.Errorf("INFO notes for unrewritten .total = %d, want 5: %v", infos, ep.notes)
 	}
 	if tgt := readFile(t, filepath.Join(target, "a.go")); !strings.Contains(tgt, "return Res{Total: 1, IDs: map[string]bool{}}") {
 		t.Errorf("moved code not renamed:\n%s", tgt)
+	}
+}
+
+func TestVerifyExportDefaultsTargetFromAfter(t *testing.T) {
+	dir := exportFixture(t)
+	before := copyDir(t, dir)
+	target := filepath.Join(dir, "internal", "hubtestutil")
+	p, err := loadPackage(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := exportSpecOf(allExportNames...)
+	ep, err := planExport(p, spec, target, modulePath+"/pkg/hub/internal/hubtestutil", defaultAliasFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ep.write(target); err != nil {
+		t.Fatal(err)
+	}
+	fam := filepath.Join(t.TempDir(), "fam.txt")
+	if err := os.WriteFile(fam, []byte("rename tid=TID\nfield res.total=Total\n"+strings.Join(allExportNames, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No -to / -import: the target is found under -after.
+	if err := runVerifyExport([]string{"-before", before, "-after", dir, "-family", fam}); err != nil {
+		t.Fatalf("verify-export with defaulted -to/-import: %v", err)
 	}
 }
