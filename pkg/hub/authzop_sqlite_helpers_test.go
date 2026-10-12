@@ -512,10 +512,10 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 
-	// hub.conduit and hub.agent_delegation on too, so their
-	// experiment-gated routes are live: the registry above with both also
-	// defaulting on (no operational
-	// settings, which the other entries rely on, are replaced).
+	// hub.conduit, hub.agent_delegation and hub.chat_thread_groups on
+	// too, so their experiment-gated routes are live: the registry above
+	// with all three also defaulting on (no operational settings, which
+	// the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
 		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups {
