@@ -69,6 +69,18 @@ func federationTokenUser(t *testing.T, s store.Store, kind, status string) *stor
 // credential context, as the auth middleware would set them.
 func callFederationToken(t *testing.T, srv *Server, identity Identity, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
+	var cred *CredentialContext
+	if identity != nil {
+		c := credentialContextForIdentity(identity)
+		cred = &c
+	}
+	return callFederationTokenAs(t, srv, identity, cred, body)
+}
+
+// callFederationTokenAs calls the handler directly with identity and the
+// given credential context (none when cred is nil).
+func callFederationTokenAs(t *testing.T, srv *Server, identity Identity, cred *CredentialContext, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
 	raw, err := json.Marshal(body)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, federationTokenPath, bytes.NewReader(raw))
@@ -76,7 +88,9 @@ func callFederationToken(t *testing.T, srv *Server, identity Identity, body inte
 	ctx := req.Context()
 	if identity != nil {
 		ctx = contextWithIdentity(ctx, identity)
-		ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
+	}
+	if cred != nil {
+		ctx = contextWithCredentialContext(ctx, *cred)
 	}
 	w := httptest.NewRecorder()
 	srv.handleFederationToken(w, req.WithContext(ctx))
@@ -153,6 +167,41 @@ func TestFederationToken_RefusedCallers(t *testing.T) {
 		w := callFederationToken(t, srv, nil, federationTokenBody(federationTokenAudience))
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
 	})
+}
+
+// TestFederationToken_RefusedCredentialKinds pins the credential kind
+// check on its own: the identity is an active local human user that would
+// otherwise be admitted, but the request's credential is neither an
+// interactive session nor a user access token.
+func TestFederationToken_RefusedCredentialKinds(t *testing.T) {
+	srv, s := federationTokenServer(t)
+	alice := federationTokenUser(t, s, store.UserKindHuman, store.UserStatusActive)
+	session := sessionIdentityFor(alice)
+	scoped := selfToken(t, alice.ID, hubBoundary(), "federation_token:mint")
+
+	// Control: both identities are admitted with their own credential.
+	require.Equal(t, http.StatusOK, callFederationToken(t, srv, session, federationTokenBody(federationTokenAudience)).Code)
+	require.Equal(t, http.StatusOK, callFederationToken(t, srv, scoped, federationTokenBody(federationTokenAudience)).Code)
+
+	cases := []struct {
+		name     string
+		identity Identity
+		kind     CredentialKind
+	}{
+		{"session identity, broker credential", session, CredentialKindBroker},
+		{"session identity, dev credential", session, CredentialKindDev},
+		{"session identity, federation credential", session, CredentialKindFederation},
+		{"session identity, agent credential", session, CredentialKindAgentJWT},
+		{"scoped identity, workload delegation credential", scoped, CredentialKindWorkloadDelegation},
+		{"session identity, no credential kind", session, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := callFederationTokenAs(t, srv, tc.identity, &CredentialContext{Kind: tc.kind}, federationTokenBody(federationTokenAudience))
+			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+			assert.Equal(t, federationTokenRefusalMessage, errorMessage(t, w))
+		})
+	}
 }
 
 // TestFederationToken_UserAccessTokenNeedsMintScope drives real requests:
