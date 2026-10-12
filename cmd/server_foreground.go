@@ -1155,11 +1155,11 @@ func applyServerListenHosts(cfg *config.GlobalConfig, hosted, hostSet bool, host
 // brokerHostExplicit reports whether the loaded settings set the broker host
 // to something other than the built-in default. The loaded config does not
 // record which keys came from a file or the environment, so a value equal to
-// the default (0.0.0.0) cannot be told apart from an unset one and counts as
-// not explicit.
+// the default (config.DefaultBrokerHost) cannot be told apart from an unset
+// one and counts as not explicit.
 func brokerHostExplicit(cfg *config.GlobalConfig) bool {
 	h := cfg.RuntimeBroker.Host
-	return h != "" && h != config.DefaultGlobalConfig().RuntimeBroker.Host
+	return h != "" && h != config.DefaultBrokerHost
 }
 
 // validateHubWorkspaceStorage fails hub startup when server.workspace_storage
