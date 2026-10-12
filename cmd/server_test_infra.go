@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/testinfra"
 	"github.com/spf13/cobra"
@@ -44,6 +45,12 @@ var (
 	testInfraMarkOperator    string
 	testInfraMarkConfigPath  string
 	testInfraMarkDBURL       string
+
+	testInfraUnmarkHubID       string
+	testInfraUnmarkAcknowledge bool
+	testInfraUnmarkOperator    string
+	testInfraUnmarkConfigPath  string
+	testInfraUnmarkDBURL       string
 )
 
 // serverTestInfraCmd groups the offline test-infrastructure commands.
@@ -70,8 +77,12 @@ unless the marker is present and names the hub's own hub id.
 The command:
   - opens the configured database directly (no running server is needed)
   - writes one marker row (hub id, class "test", time, host, attested JSON)
+  - generates the hub-local test-identity web session key (64 random bytes)
+    and stores it in the marker row; it is never printed
   - writes a test_infra_mark mutation audit row in the same transaction
-  - refuses if a marker is already present
+  - refuses if a marker is already present (run "unmark" first; marking
+    again generates a new web session key, which ends every test-identity
+    browser session)
 
 --attested records operator-declared substrate facts as a JSON object, for
 example the storage bucket, secret-backend project and broker ids. They are
@@ -85,9 +96,39 @@ Example:
 	RunE: runTestInfraMark,
 }
 
+// serverTestInfraUnmarkCmd deletes the test infrastructure marker and, with
+// it, the test-identity web session key.
+var serverTestInfraUnmarkCmd = &cobra.Command{
+	Use:   "unmark",
+	Short: "Remove this hub database's test infrastructure designation",
+	Long: `Delete the test infrastructure marker from the configured hub database.
+
+The command:
+  - opens the configured database directly (no running server is needed)
+  - deletes the marker row, and with it the hub-local test-identity web
+    session key, so every test-identity browser session cookie stops working
+  - writes a test_infra_unmark mutation audit row in the same transaction
+  - fails if no marker is present
+
+Restart the hub afterwards: it reads the marker only at startup.
+
+Example:
+  scion server test-infra unmark --hub-id <hub-id> --` + testInfraMarkAcknowledgeFlag,
+	Args: testInfraUnmarkArgs,
+	RunE: runTestInfraUnmark,
+}
+
 func init() {
 	serverCmd.AddCommand(serverTestInfraCmd)
 	serverTestInfraCmd.AddCommand(serverTestInfraMarkCmd)
+	serverTestInfraCmd.AddCommand(serverTestInfraUnmarkCmd)
+
+	uf := serverTestInfraUnmarkCmd.Flags()
+	uf.StringVar(&testInfraUnmarkHubID, "hub-id", "", "Hub id the marker must name (the hub's resolved hub id)")
+	uf.BoolVar(&testInfraUnmarkAcknowledge, testInfraMarkAcknowledgeFlag, false, "Required acknowledgement")
+	uf.StringVar(&testInfraUnmarkOperator, "operator", "", "Operator identity for the audit record (defaults to $USER@hostname)")
+	uf.StringVar(&testInfraUnmarkConfigPath, "config", "", "Path to server configuration file")
+	uf.StringVar(&testInfraUnmarkDBURL, "db", "", "Database URL/path (overrides config)")
 
 	f := serverTestInfraMarkCmd.Flags()
 	f.StringVar(&testInfraMarkHubID, "hub-id", "", "Hub id the database is designated for (the hub's resolved hub id)")
@@ -138,29 +179,87 @@ func runTestInfraMark(cmd *cobra.Command, _ []string) error {
 	defer cancel()
 	out := cmd.OutOrStdout()
 
-	cfg, err := config.LoadGlobalConfig(testInfraMarkConfigPath)
+	cfg, client, err := openTestInfraDatabase(ctx, testInfraMarkConfigPath, testInfraMarkDBURL)
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
-	}
-	if testInfraMarkDBURL != "" {
-		if strings.HasPrefix(testInfraMarkDBURL, "postgres://") || strings.HasPrefix(testInfraMarkDBURL, "postgresql://") || strings.Contains(testInfraMarkDBURL, "host=") {
-			cfg.Database.Driver = "postgres"
-		} else {
-			cfg.Database.Driver = "sqlite"
-		}
-		cfg.Database.URL = testInfraMarkDBURL
-	}
-	if cfg.Database.URL == "" {
-		return errors.New("no database URL configured; provide --db or a server configuration")
-	}
-
-	client, err := openTestInfraClient(ctx, cfg)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return err
 	}
 	defer func() { _ = client.Close() }()
 
 	return markTestInfra(ctx, client, cfg, out)
+}
+
+// openTestInfraDatabase loads the server configuration, applies a --db
+// override, and opens (and migrates) the configured database.
+func openTestInfraDatabase(ctx context.Context, configPath, dbURL string) (*config.GlobalConfig, *ent.Client, error) {
+	cfg, err := config.LoadGlobalConfig(configPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load configuration: %w", err)
+	}
+	if dbURL != "" {
+		if strings.HasPrefix(dbURL, "postgres://") || strings.HasPrefix(dbURL, "postgresql://") || strings.Contains(dbURL, "host=") {
+			cfg.Database.Driver = "postgres"
+		} else {
+			cfg.Database.Driver = "sqlite"
+		}
+		cfg.Database.URL = dbURL
+	}
+	if cfg.Database.URL == "" {
+		return nil, nil, errors.New("no database URL configured; provide --db or a server configuration")
+	}
+	client, err := openTestInfraClient(ctx, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	return cfg, client, nil
+}
+
+// testInfraUnmarkArgs validates the unmark flags before anything is opened.
+func testInfraUnmarkArgs(_ *cobra.Command, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(args, " "))
+	}
+	if testInfraUnmarkHubID == "" {
+		return errors.New("--hub-id is required")
+	}
+	if !testInfraUnmarkAcknowledge {
+		return fmt.Errorf("--%s is required", testInfraMarkAcknowledgeFlag)
+	}
+	return nil
+}
+
+func runTestInfraUnmark(cmd *cobra.Command, _ []string) error {
+	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
+	defer cancel()
+
+	_, client, err := openTestInfraDatabase(ctx, testInfraUnmarkConfigPath, testInfraUnmarkDBURL)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+
+	return unmarkTestInfra(ctx, client, cmd.OutOrStdout())
+}
+
+// unmarkTestInfra deletes the marker through pkg/testinfra after checking
+// that it names --hub-id, and reports it.
+func unmarkTestInfra(ctx context.Context, client *ent.Client, out io.Writer) error {
+	m, err := testinfra.Read(ctx, client)
+	if err != nil {
+		return err
+	}
+	if m.HubID != testInfraUnmarkHubID {
+		return fmt.Errorf("the test infrastructure marker names hub id %q, not --hub-id %q; nothing was changed", m.HubID, testInfraUnmarkHubID)
+	}
+	operator := testInfraUnmarkOperator
+	if operator == "" {
+		operator = resolveOperatorIdentity()
+	}
+	host, _ := os.Hostname()
+	if _, err := testinfra.Unmark(ctx, client, testinfra.UnmarkInput{Operator: operator, Host: host, Now: time.Now()}); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(out, "Test infrastructure marker deleted: hub_id=%s. The test-identity web session key is destroyed; restart the hub.\n", m.HubID)
+	return nil
 }
 
 // markTestInfra writes the marker through pkg/testinfra and reports it.
@@ -207,6 +306,7 @@ func markTestInfra(ctx context.Context, client *ent.Client, cfg *config.GlobalCo
 	}
 	_, _ = fmt.Fprintf(out, "Test infrastructure marker written: hub_id=%s class=%s created_at=%s host=%s\n",
 		m.HubID, m.Class, m.CreatedAt.UTC().Format(time.RFC3339), m.CreatedByHost)
+	_, _ = fmt.Fprintln(out, "A new test-identity web session key was generated and stored with the marker (not shown).")
 	_, _ = fmt.Fprintln(out, "If this hub predates hub-id signing-key scoping, delete or rotate its hub signing keys before the first start with --enable-test-admin-identities.")
 	return nil
 }
@@ -243,4 +343,36 @@ func openTestInfraClient(ctx context.Context, cfg *config.GlobalConfig) (*ent.Cl
 		return nil, fmt.Errorf("failed to run database migration: %w", err)
 	}
 	return client, nil
+}
+
+// loadTestIdentityWebSessionKey reads the hub-local test identity web
+// session key from the test infrastructure marker at startup (WS1, DEC-8).
+// It never fails startup: with test identities off, no database, or a
+// missing, mismatched or malformed key, it returns no key and the reason,
+// and test identity web sessions are unavailable. It never falls back to a
+// key derived from the shared session secret, and never logs the key.
+func loadTestIdentityWebSessionKey(ctx context.Context, client *ent.Client, hubID string, enabled bool) hub.TestIdentityWebSessionKey {
+	if !enabled {
+		return hub.TestIdentityWebSessionKey{Unavailable: "test_identities_disabled"}
+	}
+	if client == nil {
+		return hub.TestIdentityWebSessionKey{Unavailable: "no_database"}
+	}
+	key, err := testinfra.ReadWebSessionKey(ctx, client, hubID)
+	switch {
+	case err == nil:
+		return hub.TestIdentityWebSessionKey{Key: key}
+	case errors.Is(err, testinfra.ErrMarkerAbsent):
+		return hub.TestIdentityWebSessionKey{Unavailable: "marker_absent"}
+	case errors.Is(err, testinfra.ErrWebSessionKeyHubMismatch):
+		return hub.TestIdentityWebSessionKey{Unavailable: "marker_hub_mismatch"}
+	case errors.Is(err, testinfra.ErrWebSessionKeyClass):
+		return hub.TestIdentityWebSessionKey{Unavailable: "marker_class_not_test"}
+	case errors.Is(err, testinfra.ErrWebSessionKeyMissing):
+		return hub.TestIdentityWebSessionKey{Unavailable: "key_missing"}
+	case errors.Is(err, testinfra.ErrWebSessionKeyInvalid):
+		return hub.TestIdentityWebSessionKey{Unavailable: "key_invalid"}
+	default:
+		return hub.TestIdentityWebSessionKey{Unavailable: "marker_unreadable"}
+	}
 }

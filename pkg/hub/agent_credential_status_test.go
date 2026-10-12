@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 // This file tests the rule that agent-token authentication requires a
 // successful credential-status evaluation: any credential-store error other
