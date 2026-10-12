@@ -610,6 +610,9 @@ func TestDisplayAgentsStartingPhase(t *testing.T) {
 				t.Fatalf("expected header + 1 agent row, got %d lines: %s", len(lines), buf.String())
 			}
 			header, row := strings.Fields(lines[0]), strings.Fields(lines[1])
+			// col maps header words to row fields by position: every column
+			// up to CONTAINER is one non-empty word; LAST ACTIVITY is
+			// multi-word and must stay last.
 			col := func(name string) string {
 				for i, h := range header {
 					if h == name && i < len(row) {

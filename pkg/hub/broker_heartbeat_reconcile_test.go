@@ -757,7 +757,10 @@ func TestHeartbeat_NoListingMarksOfflineBrokerOnline(t *testing.T) {
 // not stop, error or drop the agent, and the missing-agent reconcile does
 // not treat it as missing. A provisioning row moves to starting, a starting
 // row stays starting, and a running row stays running through the
-// heartbeat's active-phase regression guard (intentional). An omitted
+// heartbeat's active-phase regression guard (intentional). A stopped or
+// error row stays terminal: the heartbeat's terminal guard keeps a phase an
+// explicit lifecycle write set (telling a crash-left start from a stale
+// report is left to ptone/scion#4757 / ptone/scion#4759). An omitted
 // running agent in the same inventory gets a missing clock, which shows the
 // reconcile ran.
 func TestHeartbeat_StartingPhase(t *testing.T) {
@@ -765,8 +768,10 @@ func TestHeartbeat_StartingPhase(t *testing.T) {
 	provisioning := f.addAgent("provisioning", string(state.PhaseProvisioning), "")
 	starting := f.addAgent("starting", string(state.PhaseStarting), "")
 	running := f.addAgent("running", string(state.PhaseRunning), "working")
+	stopped := f.addAgent("stopped", string(state.PhaseStopped), "")
+	errored := f.addAgent("errored", string(state.PhaseError), "")
 	omitted := f.addAgent("omitted", string(state.PhaseRunning), "working")
-	reported := []*store.Agent{provisioning, starting, running}
+	reported := []*store.Agent{provisioning, starting, running, stopped, errored}
 
 	send := func() {
 		hbAgents := make([]brokerAgentHeartbeat, 0, len(reported))
@@ -791,6 +796,8 @@ func TestHeartbeat_StartingPhase(t *testing.T) {
 			provisioning.ID: string(state.PhaseStarting),
 			starting.ID:     string(state.PhaseStarting),
 			running.ID:      string(state.PhaseRunning),
+			stopped.ID:      string(state.PhaseStopped),
+			errored.ID:      string(state.PhaseError),
 		}
 		for _, a := range reported {
 			got := f.get(a.ID)
