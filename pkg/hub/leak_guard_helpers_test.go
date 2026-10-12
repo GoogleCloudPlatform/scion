@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hubtestutil
+package hub
 
 import (
 	"bytes"
@@ -26,7 +26,7 @@ import (
 )
 
 // The package-exit leak guard (ptone/scion#3641) catches the class of leak
-// that used to surface only when the memory guard (mem_guard.go)
+// that used to surface only when the memory guard (mem_guard_helpers_test.go)
 // hit its cap: test stores that are never closed, and servers built with
 // New() that are never shut down. Each unclosed *sql.DB keeps a
 // database/sql.(*DB).connectionOpener goroutine (and about 3 MiB of
@@ -34,8 +34,8 @@ import (
 // never shut down keeps its background loops, and through them the whole
 // server graph, reachable.
 //
-// At package exit, CheckPackageLeaks counts the goroutines whose stack
-// contains one of LeakGuardSignatures and fails the run when the total is
+// At package exit, checkPackageLeaks counts the goroutines whose stack
+// contains one of leakGuardSignatures and fails the run when the total is
 // above leakGuardMaxGoroutines, printing every offending stack so the
 // creating test helper is easy to find (run with
 // GODEBUG=tracebackancestors=20 to also see the full creation chain).
@@ -52,7 +52,7 @@ import (
 // shows up as one goroutine per test run of the leaking test.
 const (
 	// leakGuardMaxGoroutines is the largest tolerated number of goroutines
-	// matching LeakGuardSignatures at package exit. Measured after the fix:
+	// matching leakGuardSignatures at package exit. Measured after the fix:
 	// 0 at the end of every shard (and of the full package). The margin of
 	// 5 absorbs stragglers; do not raise it to hide a leak.
 	//
@@ -63,10 +63,10 @@ const (
 	// flaking on stragglers, not per-store sensitivity.
 	leakGuardMaxGoroutines = 5
 
-	// LeakGuardSettle is how long the guard waits for goroutines that are
+	// leakGuardSettle is how long the guard waits for goroutines that are
 	// already shutting down (an async Close, a cleanup loop seeing its
 	// stop channel) before it counts.
-	LeakGuardSettle = 3 * time.Second
+	leakGuardSettle = 3 * time.Second
 
 	// leakGuardReportEnv, when set to a non-empty value, makes the guard
 	// always print its counts, even when they are under the threshold.
@@ -77,9 +77,9 @@ const (
 	leakGuardDisableEnv = "SCION_HUB_TEST_LEAK_GUARD_OFF"
 )
 
-// LeakGuardSignatures are the stack substrings that identify a leaked
+// leakGuardSignatures are the stack substrings that identify a leaked
 // store or server background goroutine.
-var LeakGuardSignatures = []string{
+var leakGuardSignatures = []string{
 	// One per open *sql.DB: an unclosed test store.
 	"database/sql.(*DB).connectionOpener",
 	// Background loops started by New() and stopped by Server.Shutdown.
@@ -91,35 +91,66 @@ var LeakGuardSignatures = []string{
 	"hub.(*OIDCKeyManager).Start",
 }
 
-// LeakGuardStoreSignature is the LeakGuardSignatures entry for an unclosed
+// leakGuardStoreSignature is the leakGuardSignatures entry for an unclosed
 // store; every other entry is a server background loop.
-const LeakGuardStoreSignature = "database/sql.(*DB).connectionOpener"
+const leakGuardStoreSignature = "database/sql.(*DB).connectionOpener"
 
-// LeakGuardResult is what CheckPackageLeaks found.
-type LeakGuardResult struct {
+// leakGuardResult is what checkPackageLeaks found.
+type leakGuardResult struct {
 	counts map[string]int
-	Total  int
+	total  int
 	stacks []string
+	// ids holds the goroutine ID of every counted goroutine.
+	ids map[string]bool
 }
 
-// ScanLeakedGoroutines returns the live goroutines that match
-// LeakGuardSignatures. A goroutine counts once, under the first signature
-// it matches.
-func ScanLeakedGoroutines() LeakGuardResult {
-	res := LeakGuardResult{counts: map[string]int{}}
-	for _, block := range strings.Split(string(allGoroutineStacks()), "\n\n") {
+// scanLeakedGoroutines returns the live goroutines that match
+// leakGuardSignatures. A goroutine counts once, under the first signature
+// it matches. Goroutines whose ID is in exclude are skipped (a block
+// whose ID cannot be parsed is never excluded or recorded); Go never
+// reuses a goroutine ID within a process, so an excluded ID can only ever
+// refer to the goroutine it was taken from.
+func scanLeakedGoroutines(exclude map[string]bool) leakGuardResult {
+	return scanStacks(allGoroutineStacks(), exclude)
+}
+
+// scanStacks is scanLeakedGoroutines over a given runtime.Stack dump.
+func scanStacks(stacks []byte, exclude map[string]bool) leakGuardResult {
+	res := leakGuardResult{counts: map[string]int{}, ids: map[string]bool{}}
+	for _, block := range strings.Split(string(stacks), "\n\n") {
 		block = strings.TrimSpace(block)
-		for _, sig := range LeakGuardSignatures {
+		id := goroutineID(block)
+		if id != "" && exclude[id] {
+			continue
+		}
+		for _, sig := range leakGuardSignatures {
 			if strings.Contains(block, sig) {
 				res.counts[sig]++
-				res.Total++
+				res.total++
 				res.stacks = append(res.stacks, block)
+				if id != "" {
+					res.ids[id] = true
+				}
 				break
 			}
 		}
 	}
 	sort.Strings(res.stacks)
 	return res
+}
+
+// goroutineID returns the ID from a stack block's "goroutine N [...]:"
+// header, or "" if the block has no such header.
+func goroutineID(block string) string {
+	rest, ok := strings.CutPrefix(block, "goroutine ")
+	if !ok {
+		return ""
+	}
+	id, _, ok := strings.Cut(rest, " ")
+	if !ok {
+		return ""
+	}
+	return id
 }
 
 func allGoroutineStacks() []byte {
@@ -133,26 +164,32 @@ func allGoroutineStacks() []byte {
 	}
 }
 
-// CheckPackageLeaks waits up to settle for leaked goroutines to drop to the
+// checkPackageLeaks waits up to settle for leaked goroutines to drop to the
 // threshold, then reports to w. It returns false when the count is still
 // above max.
-func CheckPackageLeaks(w io.Writer, max int, settle time.Duration, alwaysReport bool) bool {
+func checkPackageLeaks(w io.Writer, max int, settle time.Duration, alwaysReport bool) bool {
+	return checkLeaksExcluding(w, max, settle, alwaysReport, nil)
+}
+
+// checkLeaksExcluding is checkPackageLeaks, ignoring the goroutines whose
+// IDs are in exclude (see scanLeakedGoroutines).
+func checkLeaksExcluding(w io.Writer, max int, settle time.Duration, alwaysReport bool, exclude map[string]bool) bool {
 	deadline := time.Now().Add(settle)
-	res := ScanLeakedGoroutines()
-	for res.Total > max && time.Now().Before(deadline) {
+	res := scanLeakedGoroutines(exclude)
+	for res.total > max && time.Now().Before(deadline) {
 		time.Sleep(50 * time.Millisecond)
-		res = ScanLeakedGoroutines()
+		res = scanLeakedGoroutines(exclude)
 	}
-	if alwaysReport || res.Total > max {
+	if alwaysReport || res.total > max {
 		var b bytes.Buffer
 		fmt.Fprintf(&b, "leak guard: %d leaked store/server goroutines at package exit (threshold %d, total goroutines %d)\n",
-			res.Total, max, runtime.NumGoroutine())
-		for _, sig := range LeakGuardSignatures {
+			res.total, max, runtime.NumGoroutine())
+		for _, sig := range leakGuardSignatures {
 			fmt.Fprintf(&b, "  %-40s %d\n", sig, res.counts[sig])
 		}
 		_, _ = w.Write(b.Bytes())
 	}
-	if res.Total <= max {
+	if res.total <= max {
 		return true
 	}
 	_, _ = fmt.Fprintf(w, "FAIL: leak guard: a test leaks an unclosed store (connectionOpener) or a server that is never shut down.\n"+
@@ -161,18 +198,18 @@ func CheckPackageLeaks(w io.Writer, max int, settle time.Duration, alwaysReport 
 	return false
 }
 
-// RunLeakGuard is called by TestMain after m.Run. It returns the exit code
+// runLeakGuard is called by TestMain after m.Run. It returns the exit code
 // to use: code unchanged when the guard passes or is disabled, 1 when it
 // fails a run that otherwise passed.
-func RunLeakGuard(code int) int {
+func runLeakGuard(code int) int {
 	report := os.Getenv(leakGuardReportEnv) != ""
 	if os.Getenv(leakGuardDisableEnv) != "" {
 		if report {
-			CheckPackageLeaks(os.Stderr, int(^uint(0)>>1), 0, true)
+			checkPackageLeaks(os.Stderr, int(^uint(0)>>1), 0, true)
 		}
 		return code
 	}
-	if !CheckPackageLeaks(os.Stderr, leakGuardMaxGoroutines, LeakGuardSettle, report) && code == 0 {
+	if !checkPackageLeaks(os.Stderr, leakGuardMaxGoroutines, leakGuardSettle, report) && code == 0 {
 		return 1
 	}
 	return code

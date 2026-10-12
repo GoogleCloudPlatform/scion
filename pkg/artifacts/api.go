@@ -153,6 +153,10 @@ type ArtifactInfo struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 	CreatedAt time.Time  `json:"createdAt"`
 	UpdatedAt time.Time  `json:"updatedAt"`
+	// OwnerDeleted is true when the hub found the artifact's owner gone
+	// (a deleted agent or user; see the owner liveness reconciler). The
+	// artifact is otherwise unchanged.
+	OwnerDeleted bool `json:"ownerDeleted,omitempty"`
 }
 
 // VersionInfo describes one version and its files.
@@ -190,6 +194,7 @@ func artifactInfo(a *Artifact) ArtifactInfo {
 		ID: a.ID, Ref: FormatRef(a.ID, 0), ScopeKind: a.ScopeKind, ScopeRef: a.ScopeRef,
 		OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef, Key: a.Key, Title: a.Title,
 		CurrentSeq: a.CurrentSeq, ExpiresAt: a.ExpiresAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
+		OwnerDeleted: a.OrphanedAt != nil,
 	}
 }
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hubtestutil
+package hub
 
 import (
 	"context"
@@ -22,16 +22,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 )
 
-// MigrateTestStore runs s.Migrate while holding testMigrateMu.
-func MigrateTestStore(ctx context.Context, s TestMigrator) error {
+// migrateTestStore runs s.Migrate while holding testMigrateMu.
+func migrateTestStore(ctx context.Context, s testMigrator) error {
 	testMigrateMu.Lock()
 	defer testMigrateMu.Unlock()
 	return s.Migrate(ctx)
 }
 
-// AutoMigrateTestClient runs entc.AutoMigrate on client while holding
+// autoMigrateTestClient runs entc.AutoMigrate on client while holding
 // testMigrateMu, for tests that migrate a raw ent client.
-func AutoMigrateTestClient(ctx context.Context, client *ent.Client) error {
+func autoMigrateTestClient(ctx context.Context, client *ent.Client) error {
 	testMigrateMu.Lock()
 	defer testMigrateMu.Unlock()
 	return entc.AutoMigrate(ctx, client)
@@ -43,10 +43,10 @@ func AutoMigrateTestClient(ctx context.Context, client *ent.Client) error {
 // store at the same time crash the whole test process ("fatal error:
 // concurrent map writes"). Production migrates once per process, so only
 // tests need this. Every Migrate or AutoMigrate call in pkg/hub tests goes
-// through MigrateTestStore or AutoMigrateTestClient.
+// through migrateTestStore or autoMigrateTestClient.
 var testMigrateMu sync.Mutex
 
-// TestMigrator is the part of a store that MigrateTestStore needs.
-type TestMigrator interface {
+// testMigrator is the part of a store that migrateTestStore needs.
+type testMigrator interface {
 	Migrate(ctx context.Context) error
 }

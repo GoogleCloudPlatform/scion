@@ -14,6 +14,39 @@
 
 package hub
 
+import (
+	"testing"
+
+	"github.com/google/uuid"
+)
+
+// tid deterministically maps a human-readable test identifier (e.g. "user-1")
+// to a stable UUID string. The Ent-backed store uses UUID primary keys, so test
+// fixtures cannot use arbitrary strings as IDs; wrapping a readable name in tid
+// preserves test legibility and cross-reference consistency (tid("user-1")
+// always returns the same UUID) while satisfying the UUID requirement.
+func tid(name string) string {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String()
+}
+
+// tidSlugSafe returns a lowercase, slug-safe fragment derived from a test
+// name (which may contain "/" from subtests).
+func tidSlugSafe(name string) string {
+	out := make([]byte, 0, len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			out = append(out, c)
+		case c >= 'A' && c <= 'Z':
+			out = append(out, c-'A'+'a')
+		default:
+			out = append(out, '-')
+		}
+	}
+	return string(out)
+}
+
 func agentIDs(resp ListAgentsResponse) []string {
 	ids := make([]string, len(resp.Agents))
 	for i, a := range resp.Agents {
@@ -36,4 +69,11 @@ func extractProjectIDs(projects []ProjectWithCapabilities) []string {
 		ids[i] = p.ID
 	}
 	return ids
+}
+
+func requireUUID(t *testing.T, what, s string) {
+	t.Helper()
+	if _, err := uuid.Parse(s); err != nil {
+		t.Fatalf("%s = %q, want a UUID: %v", what, s, err)
+	}
 }

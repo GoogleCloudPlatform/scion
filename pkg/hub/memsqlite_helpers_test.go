@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hubtestutil
+package hub
 
 import (
 	"database/sql"
 	"testing"
 )
 
-// OpenTestMemorySQLite opens a private in-memory SQLite database on the given
+// openTestMemorySQLite opens a private in-memory SQLite database on the given
 // registered driver ("sqlite3" for mattn/go-sqlite3, "sqlite" for
 // modernc.org/sqlite) and closes it in t.Cleanup. Callers may still close it
 // themselves; closing twice is harmless.
@@ -42,7 +42,7 @@ import (
 // The cost of one connection: code that holds a *sql.Rows or *sql.Tx and
 // issues a second query on the same *sql.DB blocks forever. Production SQLite
 // has the same constraint, so such a hang is a real bug, not a test artifact.
-func OpenTestMemorySQLite(t testing.TB, driver string) *sql.DB {
+func openTestMemorySQLite(t testing.TB, driver string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open(driver, ":memory:")
 	if err != nil {

@@ -30,7 +30,7 @@ import (
 // ent test database setup — Go allows only one TestMain per package per
 // build, so the two are kept behind mutually exclusive build tags.
 //
-// It also starts the memory guard (internal/hubtestutil/mem_guard.go), which aborts
+// It also starts the memory guard (mem_guard_helpers_test.go), which aborts
 // the binary with goroutine stacks if process memory runs away, and clears
 // the ambient GCP project env (clearAmbientGCPProjectEnv) so New() never
 // builds real Cloud Logging clients from it (ptone/scion#3188), and replaces
@@ -40,7 +40,7 @@ import (
 // git checkout runner so the tarball-failure fallback never execs a real
 // `git fetch` (installHermeticGitSparseCheckout, ptone/scion#3750).
 //
-// After the tests, the leak guard (internal/hubtestutil/leak_guard.go) fails the
+// After the tests, the leak guard (leak_guard_helpers_test.go) fails the
 // package if unclosed test stores or never-shut-down servers are still
 // running (ptone/scion#3641).
 func TestMain(m *testing.M) {

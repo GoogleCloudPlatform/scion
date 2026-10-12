@@ -204,6 +204,8 @@ var (
 		{Name: "run_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "previous_run_ids", Type: field.TypeJSON, Nullable: true},
 		{Name: "run_id_updated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "ssh_host_key", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "ssh_host_key_run_id", Type: field.TypeString, Nullable: true},
 		{Name: "launch_state", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_end_reason", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_kind", Type: field.TypeString, Nullable: true, Default: ""},
@@ -246,7 +248,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[86]},
+				Columns:    []*schema.Column{AgentsColumns[88]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -265,22 +267,22 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[86]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[88]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[86], AgentsColumns[8]},
+				Columns: []*schema.Column{AgentsColumns[88], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[86], AgentsColumns[7]},
+				Columns: []*schema.Column{AgentsColumns[88], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[57]},
+				Columns: []*schema.Column{AgentsColumns[59]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -293,12 +295,12 @@ var (
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[72]},
+				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[74]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[77], AgentsColumns[81]},
+				Columns: []*schema.Column{AgentsColumns[79], AgentsColumns[83]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -2837,10 +2839,12 @@ var (
 		{Name: "last_login", Type: field.TypeTime, Nullable: true},
 		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
 		{Name: "session_generation", Type: field.TypeInt64, Default: 0},
-		{Name: "kind", Type: field.TypeEnum, Enums: []string{"human", "test_fixture"}, Default: "human"},
+		{Name: "kind", Type: field.TypeEnum, Enums: []string{"human", "test_fixture", "test_hub_admin", "test_super_admin"}, Default: "human"},
 		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "issued_by", Type: field.TypeString, Nullable: true},
 		{Name: "purpose", Type: field.TypeString, Nullable: true},
+		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
+		{Name: "issuer_credential_id", Type: field.TypeString, Nullable: true},
 	}
 	// UsersTable holds the schema information for the "users" table.
 	UsersTable = &schema.Table{
@@ -3223,6 +3227,7 @@ func init() {
 		Table: "users",
 	}
 	UsersTable.Annotation.Checks = map[string]string{
+		"users_test_admin_expiry_check":   "(kind NOT IN ('test_hub_admin', 'test_super_admin') OR expires_at IS NOT NULL)",
 		"users_test_fixture_expiry_check": "(kind <> 'test_fixture' OR expires_at IS NOT NULL)",
 	}
 	UserAccessTokensTable.Annotation = &entsql.Annotation{

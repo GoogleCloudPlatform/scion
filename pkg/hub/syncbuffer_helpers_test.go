@@ -12,27 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hubtestutil
+package hub
 
 import (
 	"bytes"
 	"sync"
 )
 
-// SyncBuffer is a bytes.Buffer safe for a background writer. It lives in
+// syncBuffer is a bytes.Buffer safe for a background writer. It lives in
 // an untagged file so both the default and the no_sqlite test builds see it.
-type SyncBuffer struct {
+type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
 }
 
-func (b *SyncBuffer) Write(p []byte) (int, error) {
+func (b *syncBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.Write(p)
 }
 
-func (b *SyncBuffer) String() string {
+func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()

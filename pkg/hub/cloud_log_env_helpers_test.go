@@ -15,10 +15,33 @@
 package hub
 
 import (
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
+
+// ambientGCPProjectEnvKeys are the env vars logging.ResolveProjectID reads.
+// When either is set, New() builds real Cloud Logging clients unless
+// ServerConfig.DisableCloudLogQuery is set (ptone/scion#3188).
+var ambientGCPProjectEnvKeys = []string{logging.EnvGCPProjectID, logging.EnvGoogleCloudProject}
+
+// clearAmbientGCPProjectEnv unsets the GCP project env vars for the whole
+// test binary, so servers built by helpers that call New() directly (not
+// through testServer, which sets DisableCloudLogQuery) do not open outbound
+// Cloud Logging connections because of the environment the tests happen to
+// run in. Call it once from TestMain, before m.Run(): unlike t.Setenv in a
+// shared helper it cannot panic for parallel tests. Tests that need a
+// project ID set it themselves with t.Setenv.
+func clearAmbientGCPProjectEnv() {
+	for _, k := range ambientGCPProjectEnvKeys {
+		if err := os.Unsetenv(k); err != nil {
+			fmt.Fprintf(os.Stderr, "clearAmbientGCPProjectEnv: unsetting %s: %v\n", k, err)
+			os.Exit(1)
+		}
+	}
+}
 
 // TestCloudLogQueryProjectID pins the gate New() uses to decide whether to
 // build the Cloud Logging query service (ptone/scion#3188), without building

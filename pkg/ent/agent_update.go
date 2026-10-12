@@ -939,6 +939,46 @@ func (_u *AgentUpdate) ClearRunIDUpdatedAt() *AgentUpdate {
 	return _u
 }
 
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (_u *AgentUpdate) SetSSHHostKey(v string) *AgentUpdate {
+	_u.mutation.SetSSHHostKey(v)
+	return _u
+}
+
+// SetNillableSSHHostKey sets the "ssh_host_key" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableSSHHostKey(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetSSHHostKey(*v)
+	}
+	return _u
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (_u *AgentUpdate) ClearSSHHostKey() *AgentUpdate {
+	_u.mutation.ClearSSHHostKey()
+	return _u
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (_u *AgentUpdate) SetSSHHostKeyRunID(v string) *AgentUpdate {
+	_u.mutation.SetSSHHostKeyRunID(v)
+	return _u
+}
+
+// SetNillableSSHHostKeyRunID sets the "ssh_host_key_run_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableSSHHostKeyRunID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetSSHHostKeyRunID(*v)
+	}
+	return _u
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (_u *AgentUpdate) ClearSSHHostKeyRunID() *AgentUpdate {
+	_u.mutation.ClearSSHHostKeyRunID()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdate) SetLaunchState(v string) *AgentUpdate {
 	_u.mutation.SetLaunchState(v)
@@ -2102,6 +2142,18 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.RunIDUpdatedAtCleared() {
 		_spec.ClearField(agent.FieldRunIDUpdatedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.SSHHostKey(); ok {
+		_spec.SetField(agent.FieldSSHHostKey, field.TypeString, value)
+	}
+	if _u.mutation.SSHHostKeyCleared() {
+		_spec.ClearField(agent.FieldSSHHostKey, field.TypeString)
+	}
+	if value, ok := _u.mutation.SSHHostKeyRunID(); ok {
+		_spec.SetField(agent.FieldSSHHostKeyRunID, field.TypeString, value)
+	}
+	if _u.mutation.SSHHostKeyRunIDCleared() {
+		_spec.ClearField(agent.FieldSSHHostKeyRunID, field.TypeString)
 	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
@@ -3427,6 +3479,46 @@ func (_u *AgentUpdateOne) ClearRunIDUpdatedAt() *AgentUpdateOne {
 	return _u
 }
 
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (_u *AgentUpdateOne) SetSSHHostKey(v string) *AgentUpdateOne {
+	_u.mutation.SetSSHHostKey(v)
+	return _u
+}
+
+// SetNillableSSHHostKey sets the "ssh_host_key" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableSSHHostKey(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetSSHHostKey(*v)
+	}
+	return _u
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (_u *AgentUpdateOne) ClearSSHHostKey() *AgentUpdateOne {
+	_u.mutation.ClearSSHHostKey()
+	return _u
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (_u *AgentUpdateOne) SetSSHHostKeyRunID(v string) *AgentUpdateOne {
+	_u.mutation.SetSSHHostKeyRunID(v)
+	return _u
+}
+
+// SetNillableSSHHostKeyRunID sets the "ssh_host_key_run_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableSSHHostKeyRunID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetSSHHostKeyRunID(*v)
+	}
+	return _u
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (_u *AgentUpdateOne) ClearSSHHostKeyRunID() *AgentUpdateOne {
+	_u.mutation.ClearSSHHostKeyRunID()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdateOne) SetLaunchState(v string) *AgentUpdateOne {
 	_u.mutation.SetLaunchState(v)
@@ -4620,6 +4712,18 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.RunIDUpdatedAtCleared() {
 		_spec.ClearField(agent.FieldRunIDUpdatedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.SSHHostKey(); ok {
+		_spec.SetField(agent.FieldSSHHostKey, field.TypeString, value)
+	}
+	if _u.mutation.SSHHostKeyCleared() {
+		_spec.ClearField(agent.FieldSSHHostKey, field.TypeString)
+	}
+	if value, ok := _u.mutation.SSHHostKeyRunID(); ok {
+		_spec.SetField(agent.FieldSSHHostKeyRunID, field.TypeString, value)
+	}
+	if _u.mutation.SSHHostKeyRunIDCleared() {
+		_spec.ClearField(agent.FieldSSHHostKeyRunID, field.TypeString)
 	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)

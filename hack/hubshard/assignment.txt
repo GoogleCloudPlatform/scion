@@ -68,6 +68,7 @@
 1 agent_delegation_chain_test.go
 1 agent_delegation_test.go
 4 agent_delete_engine_deferred_test.go
+3 agent_delete_engine_finalizing_test.go
 4 agent_delete_engine_routed_test.go
 6 agent_delete_engine_t1_test.go
 3 agent_delete_engine_test.go
@@ -123,6 +124,7 @@
 3 agent_sorted_project_list_test.go
 1 agent_sorted_project_list_validation_test.go
 0 agent_sqlite_helpers_test.go
+3 agent_ssh_host_key_test.go
 4 agent_standing_test.go
 1 agent_target_authz_test.go
 5 agent_token_mint_ceiling_test.go
@@ -154,6 +156,7 @@
 6 artifacts_integration_test.go
 3 artifacts_links_test.go
 4 artifacts_list_test.go
+4 artifacts_orphans_test.go
 6 artifacts_permits_test.go
 6 artifacts_review_grant_test.go
 4 artifacts_review_test.go
@@ -582,6 +585,7 @@
 3 ge_exchange_test.go
 0 ge_helpers_test.go
 0 ge_sqlite_helpers_test.go
+0 git_lsremote_helpers_test.go
 6 github_failure_cache_test.go
 1 github_resolution_store_test.go
 3 google_credential_cache_test.go
@@ -782,6 +786,7 @@
 5 handlers_stopall_test.go
 6 handlers_teams_manifest_test.go
 1 handlers_test.go
+1 handlers_test_admin_identities_test.go
 6 handlers_test_identities_clamp_test.go
 6 handlers_test_identities_delete_test.go
 5 handlers_test_identities_governance_test.go
@@ -878,6 +883,7 @@
 3 identity_typed_nil_test.go
 3 inbox_token_test.go
 6 inflight_probe_test.go
+3 initializing_gates_test.go
 1 invite_flow_auth_test.go
 0 invite_helpers_test.go
 1 json_key_match_test.go
@@ -902,6 +908,7 @@
 3 layer1_apply_coverage_test.go
 2 layer1_live_apply_test.go
 4 layer1_snapshot_file_test.go
+0 leak_guard_helpers_test.go
 3 lifecycle_hook_evaluator_test.go
 3 lifecycle_hook_executor_test.go
 6 lifecycle_hook_integration_test.go
@@ -928,6 +935,7 @@
 0 material_test_helpers_test.go
 4 material_user_scope_test.go
 5 material_value_audit_test.go
+0 mem_guard_helpers_test.go
 1 mem_guard_test.go
 1 members_group_principal_guard_test.go
 1 membership_create_root_test.go
@@ -937,6 +945,7 @@
 4 membership_loss_triggers_test.go
 5 membership_material_chain_test.go
 0 membership_sqlite_helpers_test.go
+0 memsqlite_helpers_test.go
 6 memsqlite_test.go
 1 mention_pair_limiter_test.go
 5 mention_translate_test.go
@@ -1301,6 +1310,7 @@
 3 suspended_page_browser_test.go
 5 suspended_page_test.go
 4 sweep_test.go
+0 syncbuffer_helpers_test.go
 4 system_handlers_db_test.go
 4 system_handlers_test.go
 0 system_sqlite_helpers_test.go
@@ -1325,8 +1335,10 @@
 6 template_scope_authz_test.go
 3 template_scope_validation_test.go
 0 template_sqlite_helpers_test.go
+1 test_admin_census_test.go
 2 test_admin_gate_test.go
 3 test_server_cleanup_test.go
+0 testmigrate_helpers_test.go
 1 testmigrate_parallel_test.go
 0 teststore_sqlite_helpers_test.go
 3 teststore_template_test.go
@@ -1390,5 +1402,4 @@
 2 workspace_storage_bucket_test.go
 4 workspace_storage_test.go
 4 workspace_upload_gcs_only_test.go
-0 zz_alias_hubtestutil_test.go
 1 zz_alias_principal_test.go
