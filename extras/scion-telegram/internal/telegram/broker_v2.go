@@ -70,11 +70,6 @@ type TelegramBrokerV2 struct {
 	brokerID   string
 	pluginName string
 	httpClient *http.Client
-	// baseTransport is the transport Configure wraps with transport auth.
-	// Each Configure builds httpClient from it, so the wrapping is applied
-	// once however often the broker is reconfigured. Nil means
-	// http.DefaultTransport.
-	baseTransport http.RoundTripper
 
 	store Store
 
@@ -85,6 +80,10 @@ type TelegramBrokerV2 struct {
 	// retiring tracks the goroutines that shut down resources of earlier
 	// configurations.
 	retiring sync.WaitGroup
+	// lastRetired is closed when the most recent retirement has finished.
+	// Each retirement waits for the one before it, so a configuration's
+	// resources outlive the handlers of every older configuration.
+	lastRetired chan struct{}
 
 	commands     *CommandHandler
 	callbacks    *CallbackHandler
@@ -117,6 +116,11 @@ type TelegramBrokerV2 struct {
 	// registration made by RegisterWebhook (standalone HA lock holder), so
 	// a reconfigure registers the new webhook settings too.
 	webhookRegistered bool
+	// webhookMu serialises Configure, RegisterWebhook and DeregisterWebhook,
+	// so the registration always carries the current webhook settings. It
+	// is taken before b.mu, and RegisterWebhook makes its network call
+	// without holding b.mu.
+	webhookMu sync.Mutex
 
 	InboundHandler func(topic string, msg *messages.StructuredMessage)
 
@@ -166,12 +170,52 @@ type retiredConfig struct {
 	gen           *configGen
 	sendQueue     *SendQueue
 	store         Store
+	// prev is closed when the previous retirement has finished; done is
+	// closed when this one has.
+	prev <-chan struct{}
+	done chan struct{}
 }
 
-// shutdown stops the replaced webhook server, waits for the handlers of the
-// replaced configuration to finish, then closes its send queue (messages
-// still queued are sent first) and its store.
+// handlerWaitWarnAfter is how long a wait for running handlers lasts before
+// it logs a warning (and again each time this period passes).
+var handlerWaitWarnAfter = 30 * time.Second
+
+// waitForHandlers waits for the handlers counted in g to finish, logging a
+// warning while they take longer than handlerWaitWarnAfter. It does not give
+// up: closing the store or send queue under a running handler is the failure
+// this wait exists to prevent. Handlers are bounded by their HTTP client and
+// context timeouts.
+func waitForHandlers(g *configGen, log *slog.Logger, what string) {
+	finished := make(chan struct{})
+	go func() {
+		g.active.Wait()
+		close(finished)
+	}()
+	start := time.Now()
+	for {
+		select {
+		case <-finished:
+			return
+		case <-time.After(handlerWaitWarnAfter):
+			log.Warn("Still waiting for running handlers before closing "+what,
+				"waited", time.Since(start).Round(time.Second))
+		}
+	}
+}
+
+// shutdown stops the replaced webhook server, waits for the previous
+// retirement and for the handlers of the replaced configuration to finish,
+// then closes its send queue (messages still queued are sent first) and its
+// store.
+//
+// Handlers read the broker's current store and handlers at each use, so a
+// handler of an older configuration may be using this configuration's store.
+// Waiting for the previous retirement, which itself waited for the older
+// handlers, keeps this store open until those handlers have finished too.
 func (r *retiredConfig) shutdown(log *slog.Logger) {
+	if r.done != nil {
+		defer close(r.done)
+	}
 	if r.webhookServer != nil {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		if err := r.webhookServer.Stop(stopCtx); err != nil {
@@ -179,8 +223,11 @@ func (r *retiredConfig) shutdown(log *slog.Logger) {
 		}
 		stopCancel()
 	}
+	if r.prev != nil {
+		<-r.prev
+	}
 	if r.gen != nil {
-		r.gen.active.Wait()
+		waitForHandlers(r.gen, log, "the previous store and send queue")
 	}
 	if r.sendQueue != nil {
 		r.sendQueue.Close()
@@ -248,7 +295,12 @@ func (b *TelegramBrokerV2) SetHostCallbacks(hc plugin.HostCallbacks) {
 // A successful reconfigure shuts down the resources it replaced (store, send
 // queue, webhook server) in the background, after the handlers that started
 // under the previous configuration have finished.
+//
+// Configure returns an error once the broker is closed.
 func (b *TelegramBrokerV2) Configure(config map[string]string) error {
+	b.webhookMu.Lock()
+	defer b.webhookMu.Unlock()
+
 	b.mu.Lock()
 	retired, err := b.configureLocked(config)
 	if retired != nil {
@@ -268,6 +320,13 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 // configureLocked applies config with b.mu held. On success it returns the
 // resources of the previous configuration for the caller to shut down.
 func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredConfig, error) {
+	// Close has shut down (or is shutting down) the current resources; a
+	// configuration committed now would retire them a second time and
+	// leave its own resources open.
+	if b.closed {
+		return nil, fmt.Errorf("telegram v2 broker is closed")
+	}
+
 	botToken := config["bot_token"]
 	if botToken == "" {
 		return nil, fmt.Errorf("bot_token is required")
@@ -401,7 +460,11 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 
 	// Commit. The previous store, send queue and generation are retired;
 	// the webhook server is added below if it is replaced or no longer used.
-	retired := &retiredConfig{gen: b.gen, sendQueue: b.sendQueue, store: b.store}
+	retired := &retiredConfig{
+		gen: b.gen, sendQueue: b.sendQueue, store: b.store,
+		prev: b.lastRetired, done: make(chan struct{}),
+	}
+	b.lastRetired = retired.done
 	b.gen = &configGen{}
 
 	b.api = api
@@ -445,7 +508,7 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 	b.registerBotCommands(ctx)
 
 	// Switch the webhook server: serve the listener bound above in place of
-	// the old server, or keep the running server with the new secret. In
+	// the old server, or keep the running server with the new credential. In
 	// poll mode a running webhook server is no longer used. A replaced
 	// server is stopped after b.mu is released.
 	if inboundMode == "webhook" {
@@ -472,10 +535,11 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 	if tErr != nil {
 		b.log.Warn("Failed to resolve transport auth, continuing without IAP tokens", "error", tErr)
 	}
-	// Wrap the unwrapped transport in a new client, so the transport is
-	// wrapped once however often the broker is reconfigured, and handlers
-	// of the previous configuration keep the client they started with.
-	transport := b.baseTransport
+	// Build a new client from the default transport (nil) each time, so
+	// transport auth wraps it once however often the broker is
+	// reconfigured, and handlers of the previous configuration keep the
+	// client they started with.
+	var transport http.RoundTripper
 	if src != nil {
 		transport = transportauth.Wrap(transport, src, mode)
 		b.log.Info("Transport auth configured for Telegram v2 broker",
@@ -568,31 +632,43 @@ func (b *TelegramBrokerV2) handleWebhookUpdate(update Update) {
 // only the lock holder should call this. Until DeregisterWebhook, each
 // reconfigure registers its webhook settings as well.
 //
-// b.mu is held across the call so a concurrent reconfigure cannot leave
-// Telegram registered with settings older than the current ones.
+// webhookMu keeps a concurrent reconfigure from changing the settings while
+// they are registered; b.mu is not held during the call, so handlers keep
+// running.
 func (b *TelegramBrokerV2) RegisterWebhook() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.webhookMu.Lock()
+	defer b.webhookMu.Unlock()
 
-	if b.api == nil {
+	b.mu.RLock()
+	api, mode := b.api, b.inboundMode
+	webhookURL, webhookSecret := b.webhookURL, b.webhookSecret
+	b.mu.RUnlock()
+
+	if api == nil {
 		return fmt.Errorf("broker not configured")
 	}
-	if b.inboundMode != "webhook" {
+	if mode != "webhook" {
 		return fmt.Errorf("broker is not in webhook mode")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := b.api.SetWebhook(ctx, b.webhookURL, b.webhookSecret); err != nil {
+	if err := api.SetWebhook(ctx, webhookURL, webhookSecret); err != nil {
 		return err
 	}
+
+	b.mu.Lock()
 	b.webhookRegistered = true
+	b.mu.Unlock()
 	return nil
 }
 
 // DeregisterWebhook calls the Telegram deleteWebhook API to remove the
 // webhook registration. Called when the lock holder loses the lock.
 func (b *TelegramBrokerV2) DeregisterWebhook() error {
+	b.webhookMu.Lock()
+	defer b.webhookMu.Unlock()
+
 	b.mu.Lock()
 	api := b.api
 	b.webhookRegistered = false
@@ -1757,6 +1833,11 @@ func (b *TelegramBrokerV2) Unsubscribe(pattern string) error {
 	return nil
 }
 
+// Close shuts the broker down: it waits for earlier configurations to finish
+// retiring, stops inbound delivery, waits for running handlers, then closes
+// the send queue and the store. The waits for handlers have no deadline (a
+// warning is logged while they run long); handlers are bounded by their HTTP
+// client and context timeouts. Configure fails once Close has started.
 func (b *TelegramBrokerV2) Close() error {
 	b.mu.Lock()
 	if b.closed {
@@ -1800,7 +1881,7 @@ func (b *TelegramBrokerV2) Close() error {
 
 	// Handlers still running must finish before the store is closed.
 	if gen != nil {
-		gen.active.Wait()
+		waitForHandlers(gen, b.log, "the store and send queue")
 	}
 
 	if sendQueue != nil {

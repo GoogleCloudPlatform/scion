@@ -16,15 +16,20 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -232,6 +237,7 @@ func TestV2_RegisterWebhook_UsesCurrentSettings(t *testing.T) {
 	tgSrv.failSetWebhook = false
 	tgSrv.mu.Unlock()
 	assert.Equal(t, "rotated-secret", b.webhookSecret)
+	assert.True(t, b.webhookRegistered, "a failed reconfigure must keep the registration")
 	status, err := postWebhookUpdate(t, b.webhookServer.actualAddr, "rotated-secret")
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, status, "a failed reconfigure must keep the registered credential")
@@ -277,4 +283,295 @@ func TestSendQueue_CloseSendsQueuedMessages(t *testing.T) {
 	tgSrv.mu.Lock()
 	assert.Len(t, tgSrv.sentMessages, 3)
 	tgSrv.mu.Unlock()
+}
+
+// countingStore counts Close calls on the store it wraps.
+type countingStore struct {
+	Store
+	closes atomic.Int32
+}
+
+func (c *countingStore) Close() error {
+	c.closes.Add(1)
+	return c.Store.Close()
+}
+
+// captureCountedStores wraps the SQLite stores Configure opens from now until
+// the test ends, so their Close calls can be counted. Stores are appended by
+// Configure; read the slice only when no Configure is running.
+func captureCountedStores(t *testing.T) *[]*countingStore {
+	t.Helper()
+	var opened []*countingStore
+	orig := openSQLiteStore
+	openSQLiteStore = func(dbPath string) (Store, error) {
+		s, err := orig(dbPath)
+		if err != nil {
+			return nil, err
+		}
+		c := &countingStore{Store: s}
+		opened = append(opened, c)
+		return c, nil
+	}
+	t.Cleanup(func() { openSQLiteStore = orig })
+	return &opened
+}
+
+// Configure after Close fails without opening anything, and the store Close
+// closed is not closed again.
+func TestV2_Configure_AfterCloseFails(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	stores := captureCountedStores(t)
+	b := NewV2(slog.Default())
+
+	require.NoError(t, b.Configure(validPollConfig(t, tgSrv)))
+	require.Len(t, *stores, 1)
+	require.NoError(t, b.Close())
+
+	require.ErrorContains(t, b.Configure(validPollConfig(t, tgSrv)), "closed")
+	b.retiring.Wait()
+	assert.Len(t, *stores, 1, "Configure after Close must not open a store")
+	assert.Equal(t, int32(1), (*stores)[0].closes.Load(), "the store must be closed exactly once")
+}
+
+// A Configure racing Close either commits before Close (and Close closes its
+// store) or fails; every store is closed exactly once.
+func TestV2_Configure_RacingCloseClosesEachStoreOnce(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	stores := captureCountedStores(t)
+	for i := 0; i < 20; i++ {
+		b := NewV2(slog.Default())
+		require.NoError(t, b.Configure(validPollConfig(t, tgSrv)))
+		cfg := validPollConfig(t, tgSrv)
+
+		configured := make(chan struct{})
+		go func() {
+			defer close(configured)
+			_ = b.Configure(cfg) // an error is expected when Close wins
+		}()
+		require.NoError(t, b.Close())
+		<-configured
+		b.retiring.Wait()
+	}
+	for i, s := range *stores {
+		assert.Equal(t, int32(1), s.closes.Load(), "store %d must be closed exactly once", i)
+	}
+}
+
+// Two reconfigures while one handler of the first configuration runs: the
+// handler reads the broker's current store, so neither the first nor the
+// second configuration's store may close until it finishes.
+func TestV2_Reconfigure_TwiceDuringOneHandler(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	require.NoError(t, b.Configure(validPollConfig(t, tgSrv)))
+	firstStore := b.store
+
+	var once sync.Once
+	acquired := b.acquireGen()
+	release := func() { once.Do(acquired) }
+	defer release()
+
+	require.NoError(t, b.Configure(validPollConfig(t, tgSrv)))
+	secondStore := b.store
+	require.NoError(t, b.Configure(validPollConfig(t, tgSrv)))
+
+	assert.Never(t, func() bool { return storeClosed(firstStore) || storeClosed(secondStore) },
+		300*time.Millisecond, 10*time.Millisecond,
+		"no store the running handler may read can close while it runs")
+
+	release()
+	b.retiring.Wait()
+	assert.True(t, storeClosed(firstStore), "the first store must be closed once the handler finishes")
+	assert.True(t, storeClosed(secondStore), "the second store must be closed once the handler finishes")
+	assert.False(t, storeClosed(b.store), "the current store must stay open")
+}
+
+// gatedTelegram forwards to a fake Telegram API, except that it holds the
+// first sendMessage call after arm until unblock, and hands a pending update
+// to the next getUpdates call.
+type gatedTelegram struct {
+	srv         *httptest.Server
+	armed       atomic.Bool
+	entered     chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+	pending     atomic.Pointer[Update]
+}
+
+func newGatedTelegram(t *testing.T, tgSrv *fakeTGServerV2) *gatedTelegram {
+	t.Helper()
+	target, err := url.Parse(tgSrv.srv.URL)
+	require.NoError(t, err)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+
+	g := &gatedTelegram{entered: make(chan struct{}), release: make(chan struct{})}
+	g.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sendMessage") && g.armed.CompareAndSwap(true, false):
+			close(g.entered)
+			select {
+			case <-g.release:
+			case <-r.Context().Done():
+				return
+			}
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			updates := []Update{}
+			if u := g.pending.Swap(nil); u != nil {
+				updates = append(updates, *u)
+			} else {
+				select {
+				case <-time.After(20 * time.Millisecond):
+				case <-r.Context().Done():
+					return
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, updates)})
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		g.unblock()
+		g.srv.Close()
+	})
+	return g
+}
+
+// unblock releases a held sendMessage call; it may be called more than once.
+func (g *gatedTelegram) unblock() { g.releaseOnce.Do(func() { close(g.release) }) }
+
+// waitHeld waits until a sendMessage call is being held.
+func (g *gatedTelegram) waitHeld(t *testing.T) {
+	t.Helper()
+	select {
+	case <-g.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no sendMessage call reached the gate")
+	}
+}
+
+// dmUpdate is a direct message, which the broker answers with sendMessage.
+func dmUpdate() Update {
+	return Update{UpdateID: 7, Message: &TGMessage{
+		MessageID: 1,
+		From:      &TGUser{ID: 42, FirstName: "Alice"},
+		Chat:      TGChat{ID: 42, Type: "private"},
+		Text:      "hello",
+	}}
+}
+
+// assertKeptUntilReleased checks that the store and send queue stay open
+// while the gated call is held and close after it is released and finish
+// has returned.
+func assertKeptUntilReleased(t *testing.T, g *gatedTelegram, store Store, sq *SendQueue, finish func()) {
+	t.Helper()
+	assert.Never(t, func() bool { return storeClosed(store) || sendQueueClosed(sq) },
+		300*time.Millisecond, 10*time.Millisecond,
+		"the previous store and send queue must stay open while the handler runs")
+	g.unblock()
+	finish()
+	assert.Eventually(t, func() bool { return storeClosed(store) && sendQueueClosed(sq) },
+		5*time.Second, 10*time.Millisecond,
+		"the previous store and send queue must close once the handler finishes")
+}
+
+// A webhook update being handled during a reconfigure keeps the previous
+// store and send queue open until it finishes.
+func TestV2_Reconfigure_WaitsForWebhookHandler(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	g := newGatedTelegram(t, tgSrv)
+	b := NewV2(slog.Default())
+	defer b.Close()
+	defer g.unblock()
+
+	cfg := validWebhookConfig(t, tgSrv)
+	cfg["api_base_url"] = g.srv.URL
+	require.NoError(t, b.Configure(cfg))
+	oldStore, oldQueue := b.store, b.sendQueue
+	addr := b.webhookServer.actualAddr
+
+	body, err := json.Marshal(dmUpdate())
+	require.NoError(t, err)
+	g.armed.Store(true)
+	posted := make(chan struct{})
+	go func() {
+		defer close(posted)
+		req, err := http.NewRequest(http.MethodPost, "http://"+addr+webhookPath, strings.NewReader(string(body)))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(secretTokenHeader, "test-secret")
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	g.waitHeld(t)
+
+	require.NoError(t, b.Configure(cfg)) // same listen address: the server is kept
+	assertKeptUntilReleased(t, g, oldStore, oldQueue, func() { <-posted })
+}
+
+// A polled update being handled during a reconfigure keeps the previous
+// store and send queue open until it finishes.
+func TestV2_Reconfigure_WaitsForPolledHandler(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	g := newGatedTelegram(t, tgSrv)
+	b := NewV2(slog.Default())
+	defer b.Close()
+	defer g.unblock()
+
+	cfg := validPollConfig(t, tgSrv)
+	cfg["api_base_url"] = g.srv.URL
+	require.NoError(t, b.Configure(cfg))
+	oldStore, oldQueue := b.store, b.sendQueue
+
+	u := dmUpdate()
+	g.pending.Store(&u)
+	g.armed.Store(true)
+	require.NoError(t, b.Subscribe("scion.project.proj-1.>"))
+	g.waitHeld(t)
+
+	require.NoError(t, b.Configure(cfg))
+	assertKeptUntilReleased(t, g, oldStore, oldQueue, func() {})
+}
+
+// A Publish in progress during a reconfigure keeps the previous store and
+// send queue open until it finishes, and its message is sent.
+func TestV2_Reconfigure_WaitsForPublish(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	g := newGatedTelegram(t, tgSrv)
+	b := NewV2(slog.Default())
+	defer b.Close()
+	defer g.unblock()
+
+	cfg := validPollConfig(t, tgSrv)
+	cfg["api_base_url"] = g.srv.URL
+	require.NoError(t, b.Configure(cfg))
+	oldStore, oldQueue := b.store, b.sendQueue
+
+	msg := messages.NewInstruction("user:alice", "agent:coder", "hello from hub")
+	msg.Metadata = map[string]string{"telegram_chat_id": "-300"}
+	g.armed.Store(true)
+	published := make(chan error, 1)
+	go func() {
+		published <- b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", msg)
+	}()
+	g.waitHeld(t)
+
+	require.NoError(t, b.Configure(cfg))
+	assertKeptUntilReleased(t, g, oldStore, oldQueue, func() {
+		select {
+		case err := <-published:
+			assert.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Error("Publish did not return after the gate was released")
+		}
+	})
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Contains(t, sent[0].Text, "hello from hub")
 }
