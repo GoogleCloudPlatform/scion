@@ -53,4 +53,15 @@ cleanup, the spec writes `async-create-evidence.json` (DOM timeline, SSE
 launch payloads, request log, cleanup result; no cookies or tokens) under
 `web/test-results/async-create/`.
 
+Cleanup evidence: `cleanup.agents` gives each agent's DELETE answers,
+`brokerDeleteFailed` (any 5xx, forced or not), whether it was gone before
+the project delete, and `cleanAgentDelete`; `cleanup.final` re-reads every
+agent, the project, the template and the identity after all deletes. A
+row removed only by the project delete is gone in `final` but not a clean
+agent delete. `forcedDeletes` lists every force fallback next to
+`launchCapable`.
+
+`E2E_KEEP_HUB_STATE=1` keeps the local hub's temp dir (database, private
+HOME) at teardown and prints its path.
+
 Selectors and state names live in `selectors.ts` only.

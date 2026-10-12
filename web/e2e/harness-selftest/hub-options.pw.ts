@@ -37,7 +37,7 @@ import * as path from 'node:path';
 
 import { expect, test } from '@playwright/test';
 
-import { isHarnessOwnedEnv, startHub, stopHub } from '../harness/hub.js';
+import { isHarnessOwnedEnv, keepHubState, startHub, stopHub } from '../harness/hub.js';
 
 interface Invocation {
   argv: string[];
@@ -209,4 +209,37 @@ test('runtimeBroker needs testIdentities', async () => {
     'startHub: runtimeBroker needs testIdentities'
   );
   expect(invocations(), 'nothing ran').toEqual([]);
+});
+
+test('E2E_KEEP_HUB_STATE=1 keeps the hub temp dir at stop; unset removes it', async () => {
+  const previous = process.env.E2E_KEEP_HUB_STATE;
+  try {
+    process.env.E2E_KEEP_HUB_STATE = '1';
+    expect(keepHubState()).toBe(true);
+    const kept = await startHub({
+      testLogin: false,
+      testIdentities: true,
+      build: false,
+      binary,
+      stateFile,
+    });
+    stopHub(stateFile);
+    expect(fs.existsSync(kept.dbDir), 'kept with E2E_KEEP_HUB_STATE=1').toBe(true);
+    fs.rmSync(kept.dbDir, { recursive: true, force: true });
+
+    delete process.env.E2E_KEEP_HUB_STATE;
+    expect(keepHubState()).toBe(false);
+    const removed = await startHub({
+      testLogin: false,
+      testIdentities: true,
+      build: false,
+      binary,
+      stateFile,
+    });
+    stopHub(stateFile);
+    expect(fs.existsSync(removed.dbDir), 'removed by default').toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.E2E_KEEP_HUB_STATE;
+    else process.env.E2E_KEEP_HUB_STATE = previous;
+  }
 });

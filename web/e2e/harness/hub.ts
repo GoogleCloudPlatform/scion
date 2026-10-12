@@ -477,7 +477,16 @@ export function readHubState(stateFile: string = STATE_FILE): HubState | null {
   }
 }
 
-/** Stop the hub process and clean up temp files. */
+/**
+ * Whether stopHub keeps the hub's temp dir (E2E_KEEP_HUB_STATE=1). Off by
+ * default. The kept dir holds the database and the private HOME; remove
+ * it by hand when done.
+ */
+export function keepHubState(): boolean {
+  return process.env.E2E_KEEP_HUB_STATE === '1';
+}
+
+/** Stop the hub process and clean up temp files (see keepHubState). */
 export function stopHub(stateFile: string = STATE_FILE): void {
   const state = readHubState(stateFile);
   if (!state) {
@@ -497,11 +506,16 @@ export function stopHub(stateFile: string = STATE_FILE): void {
     }
   }
 
-  // Clean up temp database
-  try {
-    fs.rmSync(state.dbDir, { recursive: true, force: true });
-  } catch {
-    // Best-effort cleanup
+  // Clean up temp database, unless E2E_KEEP_HUB_STATE=1 asks to keep it
+  // (database, private HOME and hub files) for inspection after a run.
+  if (keepHubState()) {
+    console.info(`[hub] E2E_KEEP_HUB_STATE=1: kept the hub state at ${state.dbDir}`);
+  } else {
+    try {
+      fs.rmSync(state.dbDir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup
+    }
   }
 
   // Clean up state file

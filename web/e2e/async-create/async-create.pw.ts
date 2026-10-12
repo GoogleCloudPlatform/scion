@@ -168,8 +168,10 @@ const journey: {
   a1Submit?: SubmitResult;
   /** A2's running agent; A4 asserts the same harness config and a different image. */
   a2Running?: { image: string; harnessConfig: string };
+  /** Every DELETE status per agent id (panel and cleanup), and whether a force was used. */
+  agentDeletes: Record<string, { statuses: number[]; forced: boolean }>;
   evidence: Record<string, unknown>;
-} = { projectCreated: false, agents: [], evidence: {} };
+} = { projectCreated: false, agents: [], agentDeletes: {}, evidence: {} };
 
 function suffix(): string {
   return crypto.randomBytes(3).toString('hex');
@@ -498,7 +500,11 @@ function expectNoAuth(applied: AppliedConfigView | undefined): void {
 }
 
 /** Deletes the agent from the failed-create panel and checks it is gone. */
-async function deleteFromPanel(page: Page, agentId: string): Promise<{ forced: boolean }> {
+async function deleteFromPanel(
+  tracked: TrackedPage,
+  agentId: string
+): Promise<{ forced: boolean }> {
+  const { page } = tracked;
   await incompleteDeleteButton(page).click();
   await confirmDialogButton(page).click();
   // When the broker cannot remove the agent (e.g. no container runtime),
@@ -519,7 +525,19 @@ async function deleteFromPanel(page: Page, agentId: string): Promise<{ forced: b
       { message: 'the agent is gone after Delete', timeout: 120_000 }
     )
     .toBe(true);
+  // The page's own DELETE answers for this agent (a 5xx = broker delete failed).
+  const statuses = tracked.requests
+    .filter((r) => r.method === 'DELETE' && r.path.endsWith(`/api/v1/agents/${agentId}`))
+    .map((r) => r.status ?? 0);
+  noteAgentDelete(agentId, statuses, forced);
   return { forced };
+}
+
+/** Records DELETE answers for an agent (see journey.agentDeletes). */
+function noteAgentDelete(agentId: string, statuses: number[], forced: boolean): void {
+  const entry = (journey.agentDeletes[agentId] ??= { statuses: [], forced: false });
+  entry.statuses.push(...statuses);
+  entry.forced ||= forced;
 }
 
 /** The bad image fixture template: seeded on a local hub, given on a remote one. */
@@ -586,20 +604,23 @@ async function cleanUpAgentsAndProject(
   cleanup: Record<string, unknown>,
   residue: string[]
 ): Promise<void> {
+  const agentResults: Record<string, unknown> = {};
+  cleanup.agents = agentResults;
   for (const agent of journey.context ? journey.agents : []) {
     try {
       if (!(await agentGone(member(), agent.id))) {
         const res = await member().delete(`/api/v1/agents/${agent.id}`);
-        let outcome = `DELETE ${res.status()}`;
+        noteAgentDelete(agent.id, [res.status()], false);
         if (res.status() === 502 || res.status() === 503) {
           // The broker cannot remove it (e.g. no container runtime): the
           // same force delete the web UI falls back to.
           const forced = await member().delete(`/api/v1/agents/${agent.id}?force=true`);
-          outcome += `, force DELETE ${forced.status()}`;
+          noteAgentDelete(agent.id, [forced.status()], true);
           recordForcedDelete(`A5 cleanup (agent ${agent.check})`, true);
         }
-        cleanup[`agent ${agent.check}`] = outcome;
       }
+      // Gone here means gone by its own delete, before the project delete
+      // (which can remove agent rows itself).
       const gone = await expect
         .poll(() => agentGone(member(), agent.id), { timeout: 120_000 })
         .toBe(true)
@@ -607,7 +628,19 @@ async function cleanUpAgentsAndProject(
           () => true,
           () => false
         );
-      cleanup[`agent ${agent.check} state`] = await agentReadState(member(), agent.id);
+      const deletes = journey.agentDeletes[agent.id] ?? { statuses: [], forced: false };
+      const brokerDeleteFailed = deletes.statuses.some((st) => st >= 500);
+      agentResults[agent.check] = {
+        id: agent.id,
+        deleteStatuses: deletes.statuses,
+        forced: deletes.forced,
+        // Reported apart from "gone": a 5xx means the broker did not remove
+        // the agent, even when its row is gone later.
+        brokerDeleteFailed,
+        goneBeforeProjectDelete: gone,
+        stateBeforeProjectDelete: await agentReadState(member(), agent.id),
+        cleanAgentDelete: gone && !brokerDeleteFailed,
+      };
       if (!gone) residue.push(`agent ${agent.id} (${agent.check})`);
     } catch (err) {
       residue.push(`cleanup error (agent ${agent.id}): ${firstLine(err)}`);
@@ -644,6 +677,54 @@ function recordForcedDelete(where: string, forced: boolean): void {
       description: `${where}: Delete needed the force fallback (hub answered 502/503)`,
     });
   }
+}
+
+/**
+ * Reads every resource of the run again after all deletes: as the local
+ * hub's admin (the member session ended with the identity), or as the
+ * member on a remote target (whose identity the runner deletes later).
+ */
+async function finalCleanupState(): Promise<{ readAt: string; states: Record<string, string> }> {
+  const hub = journey.target?.hub;
+  const read = async (urlPath: string, key: string): Promise<string> => {
+    if (hub) {
+      const res = await adminRequest(hub, 'GET', urlPath);
+      return classifyRead(res.status, res.body, key);
+    }
+    if (!journey.context) return 'unknown';
+    const res = await member().get(urlPath);
+    return classifyRead(res.status(), await res.json().catch(() => null), key);
+  };
+  const states: Record<string, string> = {};
+  for (const agent of journey.agents) {
+    const key = `agent ${agent.check} (${agent.id})`;
+    states[key] = await read(`/api/v1/agents/${agent.id}`, 'agent');
+  }
+  if (journey.projectCreated && journey.projectId) {
+    states[`project ${journey.projectId}`] = await read(
+      `/api/v1/projects/${journey.projectId}`,
+      'project'
+    );
+  }
+  if (hub && journey.template) {
+    states[`template ${journey.template.name}`] = await read(
+      `/api/v1/templates/${journey.template.id}`,
+      'template'
+    );
+  }
+  if (hub && journey.identityId) {
+    const listed = runScionCLI(hub, [
+      'hub',
+      'test-identity',
+      'list',
+      '--include-expired',
+      '--json',
+    ]);
+    states[`test identity ${journey.identityId}`] = listed.includes(journey.identityId)
+      ? 'present'
+      : 'absent';
+  }
+  return { readAt: new Date().toISOString(), states };
 }
 
 /** First line of a thrown value's message. */
@@ -941,7 +1022,7 @@ test.describe.serial('async agent create from the web form', () => {
       sse: await sseRecords(tracked.page, submit.agentId),
       requests: requestsSinceSubmit(tracked, submit),
     };
-    const deletion = await deleteFromPanel(tracked.page, submit.agentId);
+    const deletion = await deleteFromPanel(tracked, submit.agentId);
     recordForcedDelete('failure-panel-no-runtime (panel Delete)', deletion.forced);
     Object.assign(journey.evidence.failurePanelNoRuntime as Record<string, unknown>, {
       deleteForced: deletion.forced,
@@ -1013,7 +1094,7 @@ test.describe.serial('async agent create from the web form', () => {
       sse: await sseRecords(tracked.page, submit.agentId),
       requests: requestsSinceSubmit(tracked, submit),
     };
-    const deletion = await deleteFromPanel(tracked.page, submit.agentId);
+    const deletion = await deleteFromPanel(tracked, submit.agentId);
     recordForcedDelete('A4 (panel Delete)', deletion.forced);
     Object.assign(journey.evidence.a4 as Record<string, unknown>, {
       deleteForced: deletion.forced,
@@ -1106,6 +1187,23 @@ test.describe.serial('async agent create from the web form', () => {
       cleanup.identity =
         'remote target: NOT verified here; the runner deletes the identity out of band, ' +
         'and this evidence is written before that';
+    }
+
+    // FINAL state, after every delete (agents, project, template, identity):
+    // each resource read again directly. A row that vanished through the
+    // project delete shows as gone here but keeps its own delete result in
+    // cleanup.agents.
+    try {
+      cleanup.final = await finalCleanupState();
+    } catch (err) {
+      residue.push(`cleanup error (final state): ${firstLine(err)}`);
+    }
+    for (const [what, state] of Object.entries(
+      ((cleanup.final ?? {}) as { states?: Record<string, string> }).states ?? {}
+    )) {
+      if (state !== 'not_found' && state !== 'soft_deleted' && state !== 'absent') {
+        residue.push(`final: ${what} is ${state}`);
+      }
     }
 
     await journey.context?.close();
