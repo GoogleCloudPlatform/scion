@@ -52,6 +52,10 @@ const (
 	FieldIssuanceID = "issuance_id"
 	// FieldIssuerCredentialID holds the string denoting the issuer_credential_id field in the database.
 	FieldIssuerCredentialID = "issuer_credential_id"
+	// FieldFederatedEmail holds the string denoting the federated_email field in the database.
+	FieldFederatedEmail = "federated_email"
+	// FieldHomeIssuer holds the string denoting the home_issuer field in the database.
+	FieldHomeIssuer = "home_issuer"
 	// EdgeOwnedGroups holds the string denoting the owned_groups edge name in mutations.
 	EdgeOwnedGroups = "owned_groups"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -122,6 +126,8 @@ var Columns = []string{
 	FieldPurpose,
 	FieldIssuanceID,
 	FieldIssuerCredentialID,
+	FieldFederatedEmail,
+	FieldHomeIssuer,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -183,6 +189,7 @@ const (
 	StatusActive    Status = "active"
 	StatusSuspended Status = "suspended"
 	StatusInvited   Status = "invited"
+	StatusPending   Status = "pending"
 )
 
 func (s Status) String() string {
@@ -192,7 +199,7 @@ func (s Status) String() string {
 // StatusValidator is a validator for the "status" field enum values. It is called by the builders before save.
 func StatusValidator(s Status) error {
 	switch s {
-	case StatusActive, StatusSuspended, StatusInvited:
+	case StatusActive, StatusSuspended, StatusInvited, StatusPending:
 		return nil
 	default:
 		return fmt.Errorf("user: invalid enum value for status field: %q", s)
@@ -211,6 +218,7 @@ const (
 	KindTestFixture    Kind = "test_fixture"
 	KindTestHubAdmin   Kind = "test_hub_admin"
 	KindTestSuperAdmin Kind = "test_super_admin"
+	KindFederated      Kind = "federated"
 )
 
 func (k Kind) String() string {
@@ -220,7 +228,7 @@ func (k Kind) String() string {
 // KindValidator is a validator for the "kind" field enum values. It is called by the builders before save.
 func KindValidator(k Kind) error {
 	switch k {
-	case KindHuman, KindTestFixture, KindTestHubAdmin, KindTestSuperAdmin:
+	case KindHuman, KindTestFixture, KindTestHubAdmin, KindTestSuperAdmin, KindFederated:
 		return nil
 	default:
 		return fmt.Errorf("user: invalid enum value for kind field: %q", k)
@@ -318,6 +326,16 @@ func ByIssuanceID(opts ...sql.OrderTermOption) OrderOption {
 // ByIssuerCredentialID orders the results by the issuer_credential_id field.
 func ByIssuerCredentialID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldIssuerCredentialID, opts...).ToFunc()
+}
+
+// ByFederatedEmail orders the results by the federated_email field.
+func ByFederatedEmail(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFederatedEmail, opts...).ToFunc()
+}
+
+// ByHomeIssuer orders the results by the home_issuer field.
+func ByHomeIssuer(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHomeIssuer, opts...).ToFunc()
 }
 
 // ByOwnedGroupsCount orders the results by owned_groups count.

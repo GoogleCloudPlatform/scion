@@ -84555,6 +84555,8 @@ type UserMutation struct {
 	purpose                    *string
 	issuance_id                *string
 	issuer_credential_id       *string
+	federated_email            *string
+	home_issuer                *string
 	clearedFields              map[string]struct{}
 	owned_groups               map[uuid.UUID]struct{}
 	removedowned_groups        map[uuid.UUID]struct{}
@@ -85490,6 +85492,104 @@ func (m *UserMutation) ResetIssuerCredentialID() {
 	delete(m.clearedFields, user.FieldIssuerCredentialID)
 }
 
+// SetFederatedEmail sets the "federated_email" field.
+func (m *UserMutation) SetFederatedEmail(s string) {
+	m.federated_email = &s
+}
+
+// FederatedEmail returns the value of the "federated_email" field in the mutation.
+func (m *UserMutation) FederatedEmail() (r string, exists bool) {
+	v := m.federated_email
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFederatedEmail returns the old "federated_email" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldFederatedEmail(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFederatedEmail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFederatedEmail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFederatedEmail: %w", err)
+	}
+	return oldValue.FederatedEmail, nil
+}
+
+// ClearFederatedEmail clears the value of the "federated_email" field.
+func (m *UserMutation) ClearFederatedEmail() {
+	m.federated_email = nil
+	m.clearedFields[user.FieldFederatedEmail] = struct{}{}
+}
+
+// FederatedEmailCleared returns if the "federated_email" field was cleared in this mutation.
+func (m *UserMutation) FederatedEmailCleared() bool {
+	_, ok := m.clearedFields[user.FieldFederatedEmail]
+	return ok
+}
+
+// ResetFederatedEmail resets all changes to the "federated_email" field.
+func (m *UserMutation) ResetFederatedEmail() {
+	m.federated_email = nil
+	delete(m.clearedFields, user.FieldFederatedEmail)
+}
+
+// SetHomeIssuer sets the "home_issuer" field.
+func (m *UserMutation) SetHomeIssuer(s string) {
+	m.home_issuer = &s
+}
+
+// HomeIssuer returns the value of the "home_issuer" field in the mutation.
+func (m *UserMutation) HomeIssuer() (r string, exists bool) {
+	v := m.home_issuer
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHomeIssuer returns the old "home_issuer" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldHomeIssuer(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHomeIssuer is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHomeIssuer requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHomeIssuer: %w", err)
+	}
+	return oldValue.HomeIssuer, nil
+}
+
+// ClearHomeIssuer clears the value of the "home_issuer" field.
+func (m *UserMutation) ClearHomeIssuer() {
+	m.home_issuer = nil
+	m.clearedFields[user.FieldHomeIssuer] = struct{}{}
+}
+
+// HomeIssuerCleared returns if the "home_issuer" field was cleared in this mutation.
+func (m *UserMutation) HomeIssuerCleared() bool {
+	_, ok := m.clearedFields[user.FieldHomeIssuer]
+	return ok
+}
+
+// ResetHomeIssuer resets all changes to the "home_issuer" field.
+func (m *UserMutation) ResetHomeIssuer() {
+	m.home_issuer = nil
+	delete(m.clearedFields, user.FieldHomeIssuer)
+}
+
 // AddOwnedGroupIDs adds the "owned_groups" edge to the Group entity by ids.
 func (m *UserMutation) AddOwnedGroupIDs(ids ...uuid.UUID) {
 	if m.owned_groups == nil {
@@ -85779,7 +85879,7 @@ func (m *UserMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserMutation) Fields() []string {
-	fields := make([]string, 0, 18)
+	fields := make([]string, 0, 20)
 	if m.email != nil {
 		fields = append(fields, user.FieldEmail)
 	}
@@ -85834,6 +85934,12 @@ func (m *UserMutation) Fields() []string {
 	if m.issuer_credential_id != nil {
 		fields = append(fields, user.FieldIssuerCredentialID)
 	}
+	if m.federated_email != nil {
+		fields = append(fields, user.FieldFederatedEmail)
+	}
+	if m.home_issuer != nil {
+		fields = append(fields, user.FieldHomeIssuer)
+	}
 	return fields
 }
 
@@ -85878,6 +85984,10 @@ func (m *UserMutation) Field(name string) (ent.Value, bool) {
 		return m.IssuanceID()
 	case user.FieldIssuerCredentialID:
 		return m.IssuerCredentialID()
+	case user.FieldFederatedEmail:
+		return m.FederatedEmail()
+	case user.FieldHomeIssuer:
+		return m.HomeIssuer()
 	}
 	return nil, false
 }
@@ -85923,6 +86033,10 @@ func (m *UserMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldIssuanceID(ctx)
 	case user.FieldIssuerCredentialID:
 		return m.OldIssuerCredentialID(ctx)
+	case user.FieldFederatedEmail:
+		return m.OldFederatedEmail(ctx)
+	case user.FieldHomeIssuer:
+		return m.OldHomeIssuer(ctx)
 	}
 	return nil, fmt.Errorf("unknown User field %s", name)
 }
@@ -86058,6 +86172,20 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetIssuerCredentialID(v)
 		return nil
+	case user.FieldFederatedEmail:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFederatedEmail(v)
+		return nil
+	case user.FieldHomeIssuer:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHomeIssuer(v)
+		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)
 }
@@ -86136,6 +86264,12 @@ func (m *UserMutation) ClearedFields() []string {
 	if m.FieldCleared(user.FieldIssuerCredentialID) {
 		fields = append(fields, user.FieldIssuerCredentialID)
 	}
+	if m.FieldCleared(user.FieldFederatedEmail) {
+		fields = append(fields, user.FieldFederatedEmail)
+	}
+	if m.FieldCleared(user.FieldHomeIssuer) {
+		fields = append(fields, user.FieldHomeIssuer)
+	}
 	return fields
 }
 
@@ -86182,6 +86316,12 @@ func (m *UserMutation) ClearField(name string) error {
 		return nil
 	case user.FieldIssuerCredentialID:
 		m.ClearIssuerCredentialID()
+		return nil
+	case user.FieldFederatedEmail:
+		m.ClearFederatedEmail()
+		return nil
+	case user.FieldHomeIssuer:
+		m.ClearHomeIssuer()
 		return nil
 	}
 	return fmt.Errorf("unknown User nullable field %s", name)
@@ -86244,6 +86384,12 @@ func (m *UserMutation) ResetField(name string) error {
 		return nil
 	case user.FieldIssuerCredentialID:
 		m.ResetIssuerCredentialID()
+		return nil
+	case user.FieldFederatedEmail:
+		m.ResetFederatedEmail()
+		return nil
+	case user.FieldHomeIssuer:
+		m.ResetHomeIssuer()
 		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)
