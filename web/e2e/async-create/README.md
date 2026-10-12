@@ -22,6 +22,11 @@ are skipped with the reason, and the no-runtime failure panel check runs
 instead. `E2E_LAUNCH_CAPABLE=1|0` overrides the detection.
 `E2E_LAUNCH_TIMEOUT_MS` (default 300000) bounds each launch.
 
+The bad image fixture template points at a tag that does not exist in
+the agent image repo of that registry (`E2E_BAD_IMAGE_REPO`, default
+`scion-claude`), so the launch fails on the image pull. `E2E_BAD_IMAGE`
+gives the full image reference instead.
+
 Existing non-IAP hub: set `E2E_TARGET_URL`, `E2E_TEST_IDENTITY_CODE_FILE`
 and `E2E_TEST_IDENTITY_EMAIL` for a member test identity issued out of
 band (`scion hub test-identity issue` / `web-code --out`), plus

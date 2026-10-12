@@ -366,6 +366,17 @@ async function deleteFromPanel(page: Page, agentId: string): Promise<void> {
     .toBe(true);
 }
 
+/**
+ * The image of the bad image fixture: E2E_BAD_IMAGE, else a tag that does
+ * not exist in the agent image repo of the hub's registry (so the failure
+ * is an image pull error, not an auth or registry error).
+ */
+function badImageRef(t: JourneyTarget): string {
+  if (process.env.E2E_BAD_IMAGE) return process.env.E2E_BAD_IMAGE;
+  const repo = process.env.E2E_BAD_IMAGE_REPO || 'scion-claude';
+  return `${t.imageRegistry ?? ''}/${repo}:e2e-no-such-tag-${suffix()}`;
+}
+
 /** The bad image fixture template: seeded on a local hub, given on a remote one. */
 async function badImageTemplate(): Promise<string> {
   const t = target();
@@ -383,7 +394,7 @@ async function badImageTemplate(): Promise<string> {
     [
       'schema_version: "1"',
       'description: "e2e fixture: an image tag that does not exist"',
-      `image: "${t.imageRegistry}/scion-e2e-missing:no-such-tag-${suffix()}"`,
+      `image: "${badImageRef(t)}"`,
       '',
     ].join('\n')
   );
