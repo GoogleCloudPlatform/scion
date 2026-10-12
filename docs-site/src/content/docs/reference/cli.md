@@ -155,17 +155,23 @@ and its status is not readable with this credential's scope, and exits 0 like a
 timeout (1 with `--attach`); the launch continues on the Hub. When the Hub has
 already finished the start and you wait with `--attach`, there is no retry: an
 agent launcher's 404 gives the same not-readable report at once, and exits 1.
-The agent is reported as deleted only on a 404 after its status was read that
-persists through a 5-second retry (or until the wait ends, if that is sooner),
-or, for a user's login, on a 404 before that: after the 5-second retry while
-the Hub is still launching the agent, and at once otherwise. If the agent's
-create did not complete (for example the image could not be pulled), the error
-shows the stored template and task. Delete the agent and create it again
+An agent launcher's 404 after the status was read is retried for 5 seconds (or
+until the wait ends, if that is sooner). If it lasts, `start` reports that the
+status is no longer readable and that the agent may have been deleted or the
+Hub refused the read: the Hub answers an agent with 404 both for an agent that
+is gone and for a read it refuses, so a launcher cannot tell the two apart.
+This exits 0 when the Hub accepted the launch, and 1 with `--attach` or when
+it did not. The agent is reported as deleted only for a user's login: on a 404
+after its status was read that persists through the 5-second retry (or until
+the wait ends, if that is sooner), or on a 404 before that, after the 5-second
+retry while the Hub is still launching the agent, and at once otherwise. If the
+agent's create did not complete (for example the image could not be pulled), the
+error shows the stored template and task. Delete the agent and create it again
 (`scion delete <agent-name>`, then `scion start` with the same template and
 task). If soft-delete retention is enabled on the Hub, the name stays reserved
 until the agent is deleted with force=true or purged; until then, use a new
-name. With `--format json`, `--attach` after a workspace upload attaches
-without printing the JSON result.
+name. With `--format json`, `--attach` after a workspace upload attaches without
+printing the JSON result.
 
 #### Long tasks and task files
 
