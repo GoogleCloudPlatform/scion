@@ -1362,3 +1362,55 @@ func TestWorkloadDelegation_PurgeScopedToDelegation(t *testing.T) {
 	assert.Equal(t, 1, fpPurgeReport(t, rec).Deleted.Groups)
 	assert.False(t, groupExists(gone2Group))
 }
+
+// rev-9: a workload delegation never reaches an admin-kind identity (A1),
+// even one its own grantor issued. Token re-issue and delete answer 404
+// (never the admin-kind 409 or a 200), nothing is minted and nothing is
+// deleted; the grantor's own session does reach the admin-kind 409 branch.
+func TestWorkloadDelegation_AdminKindIdentityUnreachable(t *testing.T) {
+	e := newX2Env(t, true)
+	ctx := context.Background()
+	grantor := e.grantor(t, "x2-adminkind-grantor")
+	d := e.delegate(t, grantor, nil)
+
+	rd, err := e.s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	exp := time.Now().Add(30 * time.Minute)
+	issuer := grantor.ID
+	issuance := generateID()
+	admin := &store.User{
+		ID:          generateID(),
+		Email:       "test-admin-" + generateID()[:8] + "@" + store.TestHubAdminEmailDomain,
+		DisplayName: "x2 admin kind",
+		Role:        store.TestAdminRole(store.UserKindTestHubAdmin),
+		Status:      store.UserStatusActive,
+		Kind:        store.UserKindTestHubAdmin,
+		ExpiresAt:   &exp,
+		IssuedBy:    &issuer,
+		IssuanceID:  &issuance,
+	}
+	_, err = e.s.CreateTestAdminUser(ctx, admin, rd.ID)
+	require.NoError(t, err)
+
+	tokenIssues := func() int {
+		audits, _, err := e.s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: testIdentityTokenIssueMutation, TargetID: admin.ID})
+		require.NoError(t, err)
+		return len(audits)
+	}
+	before := tokenIssues()
+
+	rec := e.workload(t, http.MethodPost, "/api/v1/test-identities/"+admin.ID+"/token", x2Token(t, x2TokenOpts{}), d.ID, nil, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "accessToken")
+	rec = e.workload(t, http.MethodDelete, "/api/v1/test-identities/"+admin.ID, x2Token(t, x2TokenOpts{}), d.ID, nil, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Equal(t, before, tokenIssues(), "nothing minted")
+	_, err = e.s.GetUser(ctx, admin.ID)
+	require.NoError(t, err, "nothing deleted")
+
+	// Positive control: the grantor's own session reaches the admin-kind
+	// branch (the identity is its own), which refuses re-issue with 409.
+	rec = doRequestAsUser(t, e.srv, grantor, http.MethodPost, "/api/v1/test-identities/"+admin.ID+"/token", nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, before, tokenIssues())
+}

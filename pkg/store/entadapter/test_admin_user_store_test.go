@@ -166,17 +166,12 @@ func TestCreateTestAdminUser_Validation(t *testing.T) {
 		mutate(u)
 		_, err := cs.CreateTestAdminUser(ctx, u, rd.ID)
 		assert.ErrorIs(t, err, store.ErrInvalidInput, name)
+		// Nothing is written for any refused shape, including an
+		// admin-kind row carrying a workload delegation stamp (workload
+		// delegations issue the member tier only).
+		_, err = cs.GetUser(ctx, u.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound, name)
 	}
-	// An admin-kind row carrying a workload delegation stamp is refused and
-	// nothing is written: workload delegations issue the member tier only.
-	stamped := newTestAdminUser(store.UserKindTestHubAdmin, uuid.NewString(), exp)
-	delegationID := uuid.NewString()
-	stamped.IssuerDelegationID = &delegationID
-	_, err := cs.CreateTestAdminUser(ctx, stamped, rd.ID)
-	require.ErrorIs(t, err, store.ErrInvalidInput)
-	_, err = cs.GetUser(ctx, stamped.ID)
-	require.ErrorIs(t, err, store.ErrNotFound)
-
 	// A project-scoped role is refused, and nothing is written.
 	prd, err := cs.CreateRoleDefinition(ctx, &store.RoleDefinition{
 		ID: uuid.NewString(), Name: "proj-" + uuid.NewString()[:8], ScopeType: store.RoleScopeProject, Permissions: []string{"project.read"},
