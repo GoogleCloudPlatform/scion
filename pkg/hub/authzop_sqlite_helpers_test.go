@@ -424,7 +424,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// including the bogus control method — hits the same pre-dispatch 503.
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok, "store does not expose DB() *sql.DB; cannot wire a WebChatStore")
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 

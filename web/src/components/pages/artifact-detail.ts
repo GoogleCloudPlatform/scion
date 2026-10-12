@@ -29,7 +29,8 @@
  * the current version is a review the page shows it as pending, and a
  * review's preview can show its marks, the text with every mark rejected
  * (Clean) or accepted (Accepted). Edit, Review and Upload new version are
- * shown only when the hub reports canPublish. Share is shown for canManage;
+ * shown only when the hub reports canPublish; for a caller with canReview
+ * (a review grant, ptone/scion#4538) only Review is shown. Share is shown for canManage;
  * Grant review access (the Share dialog limited to giving a user review
  * access) for canGrantReview without canManage.
  * Route: /projects/{projectId}/artifacts/{artifactId}[/v/{seq}]
@@ -686,6 +687,15 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   /**
+   * The caller may publish reviews only (GET's canReview: a review grant,
+   * ptone/scion#4538). It is offered Review, and not Edit or Upload new
+   * version.
+   */
+  private get canReviewOnly(): boolean {
+    return !this.canPublish && !!this.data?.canReview;
+  }
+
+  /**
    * The caller may give a user review access but not manage the artifact
    * (GET's canGrantReview; design D24, ptone/scion#4014): the page offers
    * Grant review access, the Share dialog limited to that, instead of Share.
@@ -694,16 +704,29 @@ export class ScionPageArtifactDetail extends LitElement {
     return !this.data?.canManage && !!this.data?.canGrantReview;
   }
 
-  private get canEdit(): boolean {
+  /** The entry of the current version is text the page can edit in place. */
+  private get entryEditable(): boolean {
     const f = this.entry;
-    if (!this.canPublish || !f || !this.showsCurrent || this.text === null) return false;
+    if (!f || !this.showsCurrent || this.text === null) return false;
     const kind = rendererFor(f.mediaType);
     return (kind === 'markdown' || kind === 'text') && f.size <= MAX_INLINE_TEXT_BYTES;
   }
 
-  /** Review is offered for a markdown entry of the current version. */
+  private get canEdit(): boolean {
+    return this.canPublish && this.entryEditable;
+  }
+
+  /**
+   * Review is offered for a markdown entry of the current version, to a
+   * caller that may publish or may review only.
+   */
   private get canReview(): boolean {
-    return this.canEdit && !!this.entry && rendererFor(this.entry.mediaType) === 'markdown';
+    return (
+      (this.canPublish || this.canReviewOnly) &&
+      this.entryEditable &&
+      !!this.entry &&
+      rendererFor(this.entry.mediaType) === 'markdown'
+    );
   }
 
   /** The artifact's current version is a review (whichever version is shown). */
@@ -840,7 +863,7 @@ export class ScionPageArtifactDetail extends LitElement {
     if (this.error || this.notFound) {
       return 'Your review was not saved and the current version could not be loaded; your text is below.';
     }
-    if (!this.canPublish) {
+    if (!this.canPublish && !this.canReviewOnly) {
       return 'Your review was not saved: you can no longer publish versions of this artifact. Your text is below.';
     }
     return 'Your review was not saved: a newer version was published, and it cannot be reviewed here. Your text is below.';
@@ -1044,7 +1067,7 @@ export class ScionPageArtifactDetail extends LitElement {
     const hasActions =
       !this.editing &&
       !this.reviewing &&
-      (!!v || this.canEdit || !!this.data?.canManage || this.canGrantReview);
+      (!!v || this.canEdit || this.canReview || !!this.data?.canManage || this.canGrantReview);
     return html`
       <scion-detail-header heading=${a.title}>
         <scion-back-link slot="back" href=${`/projects/${encodeURIComponent(this.homeProject)}`}
