@@ -68,7 +68,8 @@
   kept) and `pkg/ent/mutation.go` (regenerated with `go generate ./pkg/ent`;
   `make ent-check` clean). Upstream's removal of committed hub test shard
   tags carried over; the test files this branch adds carry none.
-- Second merge-forward: merged upstream main (d1bd29925). Upstream added a
+- Second merge-forward: merged upstream main (d1bd29925, then d01cdee82;
+  the latter merged cleanly). Upstream added a
   user `issuer_delegation_id` column and index and a workload issuer field
   in `AuthConfig`; each conflict was two adjacent additions, so both sides
   were kept (`pkg/ent/schema/user.go`, `pkg/store/models.go`,
