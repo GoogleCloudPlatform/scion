@@ -110,6 +110,49 @@ func TestDialWithConfig_CancelEndsUnansweredHandshake(t *testing.T) {
 	require.Nil(t, r.conn)
 }
 
+// TestDialWithConfig_UnansweredTLSHandshake: over wss, a server that
+// accepts the TCP connection and never answers stalls the TLS handshake; a
+// cancelled context still ends the dial at once, and without cancellation
+// the dial fails at HandshakeTimeout.
+func TestDialWithConfig_UnansweredTLSHandshake(t *testing.T) {
+	t.Run("cancel", func(t *testing.T) {
+		addr, accepted := silentListener(t)
+		cfg := DefaultConnectionConfig()
+		cfg.HandshakeTimeout = time.Hour
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan dialResult, 1)
+		go func() {
+			c, _, err := DialWithConfig(ctx, "wss://"+addr+"/", nil, cfg)
+			done <- dialResult{c, err}
+		}()
+		select {
+		case <-accepted:
+		case <-time.After(dialGuard):
+			t.Fatal("the dial never reached the server")
+		}
+		cancel()
+		r := waitDial(t, done, "the wss dial to end after its context was cancelled")
+		require.ErrorIs(t, r.err, context.Canceled)
+		require.Nil(t, r.conn)
+	})
+	t.Run("handshake timeout", func(t *testing.T) {
+		addr, _ := silentListener(t)
+		cfg := DefaultConnectionConfig()
+		cfg.HandshakeTimeout = 200 * time.Millisecond
+		start := time.Now()
+		done := make(chan dialResult, 1)
+		go func() {
+			c, _, err := DialWithConfig(context.Background(), "wss://"+addr+"/", nil, cfg)
+			done <- dialResult{c, err}
+		}()
+		r := waitDial(t, done, "the wss handshake timeout")
+		require.Error(t, r.err)
+		require.Nil(t, r.conn)
+		require.GreaterOrEqual(t, time.Since(start), cfg.HandshakeTimeout, "the dial ended before its handshake timeout")
+	})
+}
+
 // TestDialWithConfig_UnansweredHandshakeEndsAtHandshakeTimeout: with no
 // cancellation, a handshake the server never answers fails at the
 // configured HandshakeTimeout, not before.
