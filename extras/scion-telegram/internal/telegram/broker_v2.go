@@ -92,6 +92,10 @@ type TelegramBrokerV2 struct {
 
 	subs map[string]bool
 
+	// pollCancel stops the running poll loop; nil when none runs. pollDone
+	// is closed when the most recent poll loop has exited. It is kept after
+	// that loop is stopped: the next loop waits for it before polling, so
+	// two loops never run at once.
 	pollCancel context.CancelFunc
 	pollDone   chan struct{}
 	lastOffset int64
@@ -170,6 +174,9 @@ type retiredConfig struct {
 	gen           *configGen
 	sendQueue     *SendQueue
 	store         Store
+	// pollDone is closed when the poll loop the reconfigure stopped has
+	// exited. Configure waits for it after releasing b.mu.
+	pollDone <-chan struct{}
 	// prev is closed when the previous retirement has finished; done is
 	// closed when this one has.
 	prev <-chan struct{}
@@ -308,6 +315,10 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	}
 	b.mu.Unlock()
 
+	// The poll loop's handlers take b.mu, so wait for it only now.
+	if retired != nil && retired.pollDone != nil {
+		<-retired.pollDone
+	}
 	if retired != nil {
 		go func() {
 			defer b.retiring.Done()
@@ -445,6 +456,15 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 		}
 	}
 
+	// Leaving webhook mode: remove the webhook registration, or getUpdates
+	// fails with a conflict and polling cannot start.
+	if inboundMode != "webhook" && b.inboundMode == "webhook" {
+		if err := api.DeleteWebhook(ctx); err != nil {
+			store.Close()
+			return nil, fmt.Errorf("failed to delete webhook: %w", err)
+		}
+	}
+
 	if v, ok := config["hub_url"]; ok {
 		b.hubURL = v
 	}
@@ -525,6 +545,15 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 	} else if b.webhookServer != nil {
 		retired.webhookServer = b.webhookServer
 		b.webhookServer = nil
+	}
+
+	// Switch inbound delivery: webhook mode stops the poll loop, and poll
+	// mode starts one for the existing subscriptions (startPolling does
+	// nothing if a loop already runs).
+	if inboundMode == "webhook" {
+		retired.pollDone = b.stopPollingLocked()
+	} else if len(b.subs) > 0 {
+		b.startPolling()
 	}
 
 	// Resolve transport auth for IAP-protected hub endpoints.
@@ -1857,7 +1886,8 @@ func (b *TelegramBrokerV2) Close() error {
 	// Let earlier configurations finish shutting down first.
 	b.retiring.Wait()
 
-	// Shut down inbound transport.
+	// Shut down inbound transport. The poll loop is stopped in either mode.
+	b.stopPolling()
 	if inboundMode == "webhook" {
 		// Remove the webhook registration from Telegram.
 		if api != nil {
@@ -1875,8 +1905,6 @@ func (b *TelegramBrokerV2) Close() error {
 			}
 			stopCancel()
 		}
-	} else {
-		b.stopPolling()
 	}
 
 	// Handlers still running must finish before the store is closed.
@@ -1941,6 +1969,8 @@ func (b *TelegramBrokerV2) HealthCheck() (*plugin.HealthStatus, error) {
 
 // --- Long polling ---
 
+// startPolling starts the poll loop unless one runs or the broker is in
+// webhook mode. Must be called with b.mu held.
 func (b *TelegramBrokerV2) startPolling() {
 	if b.inboundMode == "webhook" {
 		return // webhook mode handles inbound via HTTP
@@ -1950,36 +1980,46 @@ func (b *TelegramBrokerV2) startPolling() {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	prev := b.pollDone
+	done := make(chan struct{})
 	b.pollCancel = cancel
-	b.pollDone = make(chan struct{})
+	b.pollDone = done
 
-	go b.pollLoop(ctx)
+	go b.pollLoop(ctx, prev, done)
 	b.log.Info("Telegram v2 polling started")
 }
 
-func (b *TelegramBrokerV2) stopPolling() {
-	b.mu.RLock()
-	cancel := b.pollCancel
-	done := b.pollDone
-	b.mu.RUnlock()
-
-	if cancel == nil {
-		return
+// stopPollingLocked cancels the running poll loop, if any, and returns a
+// channel that is closed once the most recent loop has exited (nil if none
+// was ever started). Must be called with b.mu held; the caller waits on the
+// channel after releasing b.mu, because the loop's handlers take b.mu.
+func (b *TelegramBrokerV2) stopPollingLocked() <-chan struct{} {
+	if b.pollCancel != nil {
+		b.pollCancel()
+		b.pollCancel = nil
 	}
+	return b.pollDone
+}
 
-	cancel()
+// stopPolling stops the poll loop and waits for it to exit. Callers must not
+// hold b.mu.
+func (b *TelegramBrokerV2) stopPolling() {
+	b.mu.Lock()
+	done := b.stopPollingLocked()
+	b.mu.Unlock()
+
 	if done != nil {
 		<-done
 	}
-
-	b.mu.Lock()
-	b.pollCancel = nil
-	b.pollDone = nil
-	b.mu.Unlock()
 }
 
-func (b *TelegramBrokerV2) pollLoop(ctx context.Context) {
-	defer close(b.pollDone)
+// pollLoop long-polls Telegram until ctx is cancelled, then closes done. It
+// first waits for the previous loop (prev) to exit.
+func (b *TelegramBrokerV2) pollLoop(ctx context.Context, prev <-chan struct{}, done chan struct{}) {
+	defer close(done)
+	if prev != nil {
+		<-prev
+	}
 
 	for {
 		select {
