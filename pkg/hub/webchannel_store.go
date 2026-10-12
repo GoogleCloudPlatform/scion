@@ -1516,7 +1516,7 @@ SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode,
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: list user prefs pending thread group migration: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []WebChatUserPrefs
 	for rows.Next() {
 		var p WebChatUserPrefs

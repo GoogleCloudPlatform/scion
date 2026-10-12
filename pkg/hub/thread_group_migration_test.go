@@ -234,7 +234,7 @@ func groupsDoc(t *testing.T, byProject map[string][]personalThreadGroup) string 
 	doc := map[string][]wire{}
 	for p, gs := range byProject {
 		for _, g := range gs {
-			doc[p] = append(doc[p], wire{ID: g.ID, Name: g.Name, ThreadIDs: g.ThreadIDs})
+			doc[p] = append(doc[p], wire(g))
 		}
 	}
 	b, err := json.Marshal(doc)
@@ -1250,4 +1250,24 @@ func TestThreadGroupMigration_EventsPublishedWhenProjectFailsMidway(t *testing.T
 	assert.Equal(t, "Beta", events[0].group.Name)
 	assert.Equal(t, ThreadGroupEventUpdated, events[0].action)
 	assert.Equal(t, []string{f.conv(t2)}, tgmMembers(f.group(f.proj.ID, "Beta")))
+}
+
+// The batched event payloads (threadGroupResponses) equal what the shared
+// single-group builder (threadGroupResponse) returns for the same group.
+func TestThreadGroupMigration_EventPayloadMatchesSingleGroupBuilder(t *testing.T) {
+	f := newTGMFixture(t)
+	t1, t2 := f.topic(f.proj.ID, "t1"), f.topic(f.proj.ID, "t2")
+	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("a1", "Alpha", t1, t2), tgmPG("a2", "Beta", t2)}}), "")
+	f.spy.take()
+	f.pass()
+
+	events := f.spy.take()
+	require.NotEmpty(t, events)
+	for _, e := range events {
+		g, err := f.s.GetThreadGroup(context.Background(), e.group.ID)
+		require.NoError(t, err)
+		want, err := f.srv.threadGroupResponse(context.Background(), g)
+		require.NoError(t, err)
+		assert.Equal(t, want, e.group, "group %s", e.group.Name)
+	}
 }
