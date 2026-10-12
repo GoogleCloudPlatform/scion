@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -20,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,7 +29,7 @@ import (
 // includes a messages table (Ent-managed in production, manually created here).
 func newPromoteTestStore(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Create the Ent messages table manually — in production it's managed by Ent.
 	_, err := db.Exec(`
@@ -50,7 +51,7 @@ CREATE TABLE IF NOT EXISTS messages (
 `)
 	require.NoError(t, err)
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init())
 
 	return store, db

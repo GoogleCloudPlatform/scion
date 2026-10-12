@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -21,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -31,9 +32,9 @@ import (
 // for testing. The caller should close the returned *sql.DB when done.
 func newTestWebChatStore(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init())
 
 	return store, db
@@ -60,7 +61,7 @@ func TestWebChatStore_Init_Idempotent(t *testing.T) {
 	defer db.Close() //nolint:errcheck
 
 	// Init again should not fail.
-	store2 := NewWebChatStore(db, "sqlite3")
+	store2 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store2.Init())
 }
 

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -23,17 +25,17 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
 )
 
 // TestGitHubResolutionStore_GetPut tests basic cache operations.
 func TestGitHubResolutionStore_GetPut(t *testing.T) {
-	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
+	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	defer client.Close() //nolint:errcheck
 
@@ -82,7 +84,7 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 // against SQLite — see TestGitHubResolutionStore_Put_ConflictTargetInSQL for
 // the generated-SQL assertion that would catch it on a dialect that doesn't).
 func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
-	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
+	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	defer client.Close() //nolint:errcheck
 
@@ -142,7 +144,7 @@ func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
 // on every dialect, SQLite included.
 func TestGitHubResolutionStore_Put_ConflictTargetInSQL(t *testing.T) {
 	var captured []string
-	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1",
+	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{},
 		ent.Log(func(args ...any) { captured = append(captured, fmt.Sprint(args...)) }),
 		ent.Debug())
 	require.NoError(t, err)
@@ -184,7 +186,7 @@ func TestGitHubResolutionStore_Put_ConflictTargetInSQL(t *testing.T) {
 
 // TestGitHubResolutionStore_Expiration tests TTL expiration.
 func TestGitHubResolutionStore_Expiration(t *testing.T) {
-	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
+	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	defer client.Close() //nolint:errcheck
 
@@ -216,7 +218,7 @@ func TestGitHubResolutionStore_Expiration(t *testing.T) {
 
 // TestGitHubResolutionStore_PurgeExpired tests TTL eviction.
 func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
-	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
+	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	defer client.Close() //nolint:errcheck
 
@@ -278,7 +280,7 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 // row past MaxResolutionStaleAge confirms PurgeExpired still deletes rows
 // that are genuinely beyond anyone's stale horizon.
 func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testing.T) {
-	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
+	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	defer client.Close() //nolint:errcheck
 
@@ -344,7 +346,7 @@ func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testi
 // minute gap between MaxJitteredTTL(30m) and the unjittered 30m is what the
 // one-minute margins below are sized to land on either side of.
 func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {
-	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
+	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	defer client.Close() //nolint:errcheck
 	ctx := context.Background()

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -21,12 +23,11 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 )
 
 // newTestChatLinkStore creates a ChatLinkStore backed by an in-memory SQLite DB
@@ -34,7 +35,7 @@ import (
 func newTestChatLinkStore(t *testing.T) *ChatLinkStore {
 	t.Helper()
 
-	client, err := ent.Open("sqlite3", fmt.Sprintf("file:%s?mode=memory&cache=shared&_fk=1", t.Name()))
+	client, err := entc.OpenSQLite(fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name()), entc.PoolConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Close() }) //nolint:errcheck
 

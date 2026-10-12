@@ -35,7 +35,7 @@ import (
 //
 // The guard measures process memory, not just the Go heap. On Linux it reads
 // resident set size from /proc/self/statm, which includes goroutine stacks,
-// cgo allocations (mattn/go-sqlite3) and race-detector shadow memory. It also
+// cgo allocations and race-detector shadow memory. It also
 // reads the runtime's mapped-and-not-released total, which is the only
 // signal on other platforms. Whichever is larger is compared with the cap.
 const (

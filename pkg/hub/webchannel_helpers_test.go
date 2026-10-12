@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -47,13 +49,13 @@ CREATE TABLE IF NOT EXISTS conversations (
 // hasConversationsTable() to return true.
 func newTestWebChatStoreWithConversations(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Create the conversations table BEFORE Init so migrations can see it.
 	_, err := db.Exec(conversationsTableDDL)
 	require.NoError(t, err)
 
-	s := NewWebChatStore(db, "sqlite3")
+	s := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s.Init())
 
 	return s, db
@@ -63,7 +65,7 @@ func newTestWebChatStoreWithConversations(t *testing.T) (WebChatStore, *sql.DB) 
 // SQLite DB that includes both the messages table AND the conversations table.
 func newPromoteTestStoreWithConversations(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Create the Ent messages table manually.
 	_, err := db.Exec(`
@@ -89,7 +91,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	_, err = db.Exec(conversationsTableDDL)
 	require.NoError(t, err)
 
-	s := NewWebChatStore(db, "sqlite3")
+	s := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s.Init())
 
 	return s, db
@@ -123,9 +125,9 @@ func getTopicConvID(t *testing.T, db *sql.DB, topicID string) string {
 // for testing wave-2 features. The caller should close the returned *sql.DB.
 func newTestWebChatStoreV2(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init())
 
 	return store, db

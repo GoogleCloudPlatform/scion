@@ -20,8 +20,8 @@ import (
 )
 
 // openTestMemorySQLite opens a private in-memory SQLite database on the given
-// registered driver ("sqlite3" for mattn/go-sqlite3, "sqlite" for
-// modernc.org/sqlite) and closes it in t.Cleanup. Callers may still close it
+// registered driver ("sqlite" for modernc.org/sqlite, the production driver,
+// or a test driver that wraps it) and closes it in t.Cleanup. Callers may still close it
 // themselves; closing twice is harmless.
 //
 // Every pkg/hub test that wants a raw *sql.DB on ":memory:" must use this
