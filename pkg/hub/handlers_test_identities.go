@@ -833,7 +833,7 @@ func (s *Server) handleListTestIdentities(w http.ResponseWriter, r *http.Request
 // besides test_identity.issue (checked by testIdentityCaller), holds
 // user.delete on u.
 func (s *Server) canDeleteTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
-	if s.canManageTestIdentity(r.Context(), caller, u) {
+	if s.canManageTestIdentity(ctx, caller, u) {
 		return true
 	}
 	return s.authzService.Decide(ctx, AuthzRequest{
