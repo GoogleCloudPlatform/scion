@@ -219,11 +219,11 @@ func TestQuotaAdminToken_ProjectBoundaryDenied(t *testing.T) {
 	// by the boundary, before the ceiling: the hub-scoped quota target is
 	// outside every project boundary.
 	ceiling := bearerCeiling(t, "quota:read")
-	eval := srv.authzService.EvaluateBearerCeiling(context.Background(), activeUserPrincipal(super), projectBoundary(project), ceiling, "quota.read", hubScopedResource("quota", "hub"), BearerOptions{})
+	superUser := NewAuthenticatedUser(super, super+"@test.com", "Super", "admin", string(ClientTypeAPI))
+	eval := srv.authzService.EvaluateBearerCeiling(context.Background(), principalContextForIdentity(superUser), projectBoundary(project), ceiling, "quota.read", hubScopedResource("quota", "hub"), BearerOptions{})
 	assert.False(t, eval.Decision.Allowed)
 	assert.Equal(t, BearerStageOutsideBoundary, eval.Stage, eval.Decision.Reason)
-	scoped := NewScopedUserIdentityWithBoundary(NewAuthenticatedUser(super, super+"@test.com", "Super", "admin", string(ClientTypeAPI)),
-		projectBoundary(project), []string{"quota:read"}, "qat-pb-scoped", ceiling)
+	scoped := NewScopedUserIdentityWithBoundary(superUser, projectBoundary(project), []string{"quota:read"}, "qat-pb-scoped", ceiling)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/limits", nil).WithContext(contextWithIdentity(context.Background(), scoped))
 	boundaryRec := httptest.NewRecorder()
 	srv.guarded("/api/v1/admin/limits", srv.handleAdminLimits)(boundaryRec, req)
