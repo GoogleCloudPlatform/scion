@@ -19,7 +19,6 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -366,11 +365,18 @@ func identCalls(fn *ast.FuncDecl) map[string]int {
 }
 
 // walkPkgHubFuncs calls visit for every function declaration in the
-// non-test files of pkg/hub (this directory only).
+// non-test files of pkg/hub and of its existing guardScanSubdirs (files there
+// are named by their relative path); other subdirectories are not walked.
 func walkPkgHubFuncs(t *testing.T, visit func(file string, fn *ast.FuncDecl, fset *token.FileSet)) {
 	t.Helper()
 	fset := token.NewFileSet()
-	entries, err := os.ReadDir(".")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards test-admin authority census sites.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards test-admin authority census sites.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards test-admin authority census sites.
+	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	for _, e := range entries {
 		name := e.Name()

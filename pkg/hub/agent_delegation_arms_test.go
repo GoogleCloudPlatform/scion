@@ -23,7 +23,6 @@ import (
 	"go/token"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -378,9 +377,13 @@ func TestAgentDelegation_ChainCodesForRowShapesHandlersNeverWrite(t *testing.T) 
 // or canViewAgentEnv, so the delegated arm in those two helpers covers
 // every site.
 func TestAgentEnvVisibility_DecidedOnlyByTheHelpers(t *testing.T) {
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards ResponseView and redactAppliedConfigEnvForResponse call sites, which identity.go and identity_credential.go do not contain.
-	files, err := filepath.Glob("*.go")
+	// scanned through guardScanSubdirs; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	sites := 0

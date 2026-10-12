@@ -808,10 +808,16 @@ func findDeleteProjectCallSites(t *testing.T) []callSite {
 	for _, dir := range dirs {
 		fullDir := filepath.Join(repoRoot(t), dir)
 		// pkgmove:scan-covers pkg/hub/apierr
-		// unaffected: guards DeleteProject call sites, which errors.go and json_response.go do not contain.
+		// scanned through guardScanSubdirs; guards DeleteProject call sites (pkg/hub only; pkg/store/entadapter is read alone).
 		// pkgmove:scan-covers pkg/hub/internal/principal
-		// unaffected: guards DeleteProject call sites, which identity.go and identity_credential.go do not contain.
-		entries, err := os.ReadDir(fullDir)
+		// scanned through guardScanSubdirs; guards DeleteProject call sites (pkg/hub only; pkg/store/entadapter is read alone).
+		// pkgmove:scan-covers pkg/hub/maintenance
+		// scanned through guardScanSubdirs once it exists; guards DeleteProject call sites (pkg/hub only; pkg/store/entadapter is read alone).
+		read := os.ReadDir
+		if dir == "pkg/hub/" {
+			read = readGuardScanDirs
+		}
+		entries, err := read(fullDir)
 		if err != nil {
 			continue
 		}
