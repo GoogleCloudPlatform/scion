@@ -344,8 +344,8 @@ func TestSubstrateServeCommand_Integration_SIGTERMNotForwarded(t *testing.T) {
 		t.Skip("skipping integration test: SCION_INTEGRATION_TEST not set")
 	}
 
-	// Clear Hub env vars so the subprocess cannot talk to a real Hub — the
-	// same testutil.ScrubHubEnv used by TestInitCommand_Integration.
+	// Clear Hub env vars (the keys in testutil.HubEnvKeys) so the subprocess
+	// cannot talk to a real Hub.
 	testutil.ScrubHubEnv(t)
 
 	// substrate-serve's synchronous /bootstrap precondition
