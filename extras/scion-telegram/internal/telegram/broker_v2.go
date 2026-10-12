@@ -177,7 +177,7 @@ type retiredConfig struct {
 }
 
 // handlerWaitWarnAfter is how long a wait for running handlers lasts before
-// it logs a warning (and again each time this period passes).
+// it logs a warning (and again each time this period passes). Tests shorten it.
 var handlerWaitWarnAfter = 30 * time.Second
 
 // waitForHandlers waits for the handlers counted in g to finish, logging a

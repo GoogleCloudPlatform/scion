@@ -15,6 +15,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -45,6 +46,22 @@ func validPollConfig(t *testing.T, tgSrv *fakeTGServerV2) map[string]string {
 		"api_base_url": tgSrv.srv.URL,
 		"hub_url":      "http://hub.test",
 		"db_path":      filepath.Join(t.TempDir(), "test.db"),
+	}
+}
+
+// waitRetired waits until the broker's background retirements have finished,
+// failing the test rather than hanging if they do not finish in time.
+func waitRetired(t *testing.T, b *TelegramBrokerV2) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		b.retiring.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		assert.Fail(t, "retirements did not finish within 10s")
 	}
 }
 
@@ -112,7 +129,7 @@ func TestV2_Reconfigure_WaitsForPreviousHandlers(t *testing.T) {
 	tgSrv.mu.Unlock()
 
 	release()
-	b.retiring.Wait()
+	waitRetired(t, b)
 	assert.True(t, storeClosed(oldStore), "the previous store must be closed once its handlers finish")
 	assert.True(t, sendQueueClosed(oldQueue), "the previous send queue must be closed once its handlers finish")
 }
@@ -328,7 +345,7 @@ func TestV2_Configure_AfterCloseFails(t *testing.T) {
 	require.NoError(t, b.Close())
 
 	require.ErrorContains(t, b.Configure(validPollConfig(t, tgSrv)), "closed")
-	b.retiring.Wait()
+	waitRetired(t, b)
 	assert.Len(t, *stores, 1, "Configure after Close must not open a store")
 	assert.Equal(t, int32(1), (*stores)[0].closes.Load(), "the store must be closed exactly once")
 }
@@ -350,7 +367,7 @@ func TestV2_Configure_RacingCloseClosesEachStoreOnce(t *testing.T) {
 		}()
 		require.NoError(t, b.Close())
 		<-configured
-		b.retiring.Wait()
+		waitRetired(t, b)
 	}
 	for i, s := range *stores {
 		assert.Equal(t, int32(1), s.closes.Load(), "store %d must be closed exactly once", i)
@@ -382,7 +399,7 @@ func TestV2_Reconfigure_TwiceDuringOneHandler(t *testing.T) {
 		"no store the running handler may read can close while it runs")
 
 	release()
-	b.retiring.Wait()
+	waitRetired(t, b)
 	assert.True(t, storeClosed(firstStore), "the first store must be closed once the handler finishes")
 	assert.True(t, storeClosed(secondStore), "the second store must be closed once the handler finishes")
 	assert.False(t, storeClosed(b.store), "the current store must stay open")
@@ -574,4 +591,53 @@ func TestV2_Reconfigure_WaitsForPublish(t *testing.T) {
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
 	assert.Contains(t, sent[0].Text, "hello from hub")
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent writes and reads.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// A retirement that waits for a long-running handler logs a warning and
+// keeps waiting; it closes nothing until the handler finishes.
+func TestV2_Reconfigure_WarnsWhileWaitingForHandlers(t *testing.T) {
+	orig := handlerWaitWarnAfter
+	handlerWaitWarnAfter = 20 * time.Millisecond
+	t.Cleanup(func() { handlerWaitWarnAfter = orig })
+
+	logs := &syncBuffer{}
+	tgSrv := newFakeTGServerV2(t)
+	b := NewV2(slog.New(slog.NewTextHandler(logs, nil)))
+	defer b.Close()
+
+	require.NoError(t, b.Configure(validPollConfig(t, tgSrv)))
+	oldStore := b.store
+
+	var once sync.Once
+	acquired := b.acquireGen()
+	release := func() { once.Do(acquired) }
+	defer release()
+
+	require.NoError(t, b.Configure(validPollConfig(t, tgSrv)))
+	assert.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "Still waiting for running handlers")
+	}, 5*time.Second, 10*time.Millisecond, "a long wait for handlers must log a warning")
+	assert.False(t, storeClosed(oldStore), "the wait must not close the store early")
+
+	release()
+	waitRetired(t, b)
+	assert.True(t, storeClosed(oldStore))
 }

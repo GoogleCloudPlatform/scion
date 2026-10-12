@@ -2520,7 +2520,7 @@ func TestV2_Reconfigure_NewListenAddressSwitchesServer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, status)
 
-	b.retiring.Wait() // the old server is stopped in the background
+	waitRetired(t, b) // the old server is stopped in the background
 	_, err = postWebhookUpdate(t, oldAddr, "test-secret")
 	assert.Error(t, err, "the old webhook server must be stopped")
 }
