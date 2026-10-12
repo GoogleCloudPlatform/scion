@@ -1416,8 +1416,7 @@ export class ScionPageAgentDetail extends LitElement {
           <sl-spinner></sl-spinner>
           <div class="launch-content">
             <div class="launch-title">Launching</div>
-            ${stepEl}
-            ${messageEl}
+            ${stepEl} ${messageEl}
           </div>
         </div>
       `;
