@@ -300,8 +300,13 @@ func TestResumeFallback_RuntimeSelection(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildPod(nfs=%v): %v", nfs, err)
 		}
-		c := pod.Spec.Containers[0]
-		return strings.Join(append(append([]string{}, c.Command...), c.Args...), " ")
+		// The pod's command is a start gate; the harness line is in the
+		// SCION_START_CMD env var it runs.
+		start := podEnv(pod)["SCION_START_CMD"]
+		if start == "" {
+			t.Fatalf("buildPod(nfs=%v): no SCION_START_CMD", nfs)
+		}
+		return start
 	}
 	if got := podCmd(false); !strings.Contains(got, "scion_rc") {
 		t.Errorf("pod-local home pod command has no resume fallback: %q", got)
