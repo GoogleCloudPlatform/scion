@@ -272,6 +272,7 @@
       "fields": [
         "testHubAdmin:boolean",
         "testIdentities:boolean",
+        "testIssuerAudience:string",
         "testSuperAdmin:boolean"
       ]
     },

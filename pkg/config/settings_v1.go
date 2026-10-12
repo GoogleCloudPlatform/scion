@@ -3416,7 +3416,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.TestIdentities != nil {
 			ti := &TestIdentitiesConfig{}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
-				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer{Sub: e.Sub, MaxTier: e.MaxTier})
+				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
 			}
 			gc.Hub.TestIdentities = ti
 		}
@@ -3855,7 +3855,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.TestIdentities != nil {
 		ti := &V1TestIdentitiesConfig{}
 		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
-			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer{Sub: e.Sub, MaxTier: e.MaxTier})
+			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
 		}
 		v1Hub.TestIdentities = ti
 	}
