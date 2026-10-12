@@ -152,7 +152,30 @@ type Version struct {
 	CreatedByRef  string
 	CreatedAt     time.Time
 	State         string
+	// FailReason is why a failed version stopped being pending (one of the
+	// FailReason constants), or "" for a version that is not failed or was
+	// failed before reasons were recorded.
+	FailReason string
 }
+
+// Reasons a version stopped being pending without becoming ready
+// (ptone/scion#4577). They are fixed codes, shown as they are in the API.
+const (
+	// FailReasonUnmarkedChanges: a review changed text outside its marks.
+	FailReasonUnmarkedChanges = "unmarked_changes"
+	// FailReasonStaleReview: the version a review was started from was no
+	// longer the latest.
+	FailReasonStaleReview = "stale_review"
+	// FailReasonNewerPublishPending: a newer publish was in progress when
+	// the review was finalized.
+	FailReasonNewerPublishPending = "newer_publish_pending"
+	// FailReasonExpired: the upload was abandoned and reaped after
+	// PendingVersionTTL.
+	FailReasonExpired = "expired"
+	// FailReasonDiscarded is reported for a failed version recorded before
+	// reasons were stored.
+	FailReasonDiscarded = "discarded"
+)
 
 // File origins.
 const (
@@ -280,14 +303,21 @@ type Store interface {
 	// version, if the version still holds the given claim. The artifact's
 	// current version does not change. It returns ErrConflict when the
 	// claim no longer holds.
-	DiscardFinalize(ctx context.Context, artifactID string, seq int, claim time.Time) error
+	// reason (a FailReason constant) is recorded on the version.
+	DiscardFinalize(ctx context.Context, artifactID string, seq int, claim time.Time, reason string) error
 
 	// ListVersions returns up to limit ready versions of an artifact,
 	// newest first, with a seq below before (0 = from the newest).
 	ListVersions(ctx context.Context, artifactID string, before, limit int) ([]Version, error)
 
+	// ListVersionHistory returns up to limit versions of an artifact that
+	// are no longer pending (ready and failed), newest first, with a seq
+	// below before (0 = from the newest). A failed version carries its
+	// FailReason.
+	ListVersionHistory(ctx context.Context, artifactID string, before, limit int) ([]Version, error)
+
 	// ReapPending marks every version still pending or finalizing that was
-	// created before cutoff as failed and drops its manifest, so its blobs are no
+	// created before cutoff as failed (reason FailReasonExpired) and drops its manifest, so its blobs are no
 	// longer referenced. An artifact left with neither a ready nor a
 	// pending version is soft-deleted, which frees its key. It handles at
 	// most limit versions per call and returns how many it reaped.

@@ -523,34 +523,80 @@ func TestStoreFinalizeBaseAndDiscard(t *testing.T) {
 		if _, err := st.FinalizeVersion(ctx, a.ID, low.Seq, claimOf(a.ID, low.Seq), nil, later.Seq); !errors.Is(err, ErrStaleBase) {
 			t.Fatalf("current base above the review: %v, want ErrStaleBase", err)
 		}
-		if err := st.DiscardFinalize(ctx, a.ID, low.Seq, claimOf(a.ID, low.Seq)); err != nil {
+		if err := st.DiscardFinalize(ctx, a.ID, low.Seq, claimOf(a.ID, low.Seq), FailReasonStaleReview); err != nil {
 			t.Fatal(err)
+		}
+		if got, _ := st.GetVersion(ctx, a.ID, low.Seq); got.State != VersionStateFailed || got.FailReason != FailReasonStaleReview {
+			t.Fatalf("discarded stale review: state %q, reason %q", got.State, got.FailReason)
 		}
 		r2 = later
 		// A publish version between the base and the review that is still
 		// pending refuses the review.
-		pendingVersion(VersionKindPublish)
+		abandoned := pendingVersion(VersionKindPublish)
 		late := review()
 		if _, err := st.FinalizeVersion(ctx, a.ID, late.Seq, claimOf(a.ID, late.Seq), nil, r2.Seq); !errors.Is(err, ErrPendingNewer) {
 			t.Fatalf("pending publish between base and review: %v, want ErrPendingNewer", err)
 		}
-		if err := st.DiscardFinalize(ctx, a.ID, late.Seq, claimOf(a.ID, late.Seq)); err != nil {
+		if err := st.DiscardFinalize(ctx, a.ID, late.Seq, claimOf(a.ID, late.Seq), FailReasonNewerPublishPending); err != nil {
 			t.Fatal(err)
+		}
+		if got, _ := st.GetVersion(ctx, a.ID, late.Seq); got.FailReason != FailReasonNewerPublishPending {
+			t.Fatalf("discarded review behind a pending publish: reason %q", got.FailReason)
 		}
 		if _, err := st.ReapPending(ctx, time.Now().Add(time.Hour), 10); err != nil {
 			t.Fatal(err)
 		}
+		if got, _ := st.GetVersion(ctx, a.ID, abandoned.Seq); got.State != VersionStateFailed || got.FailReason != FailReasonExpired {
+			t.Fatalf("reaped upload: state %q, reason %q", got.State, got.FailReason)
+		}
 		// Discard: under another claim it conflicts; under its claim it
 		// fails the version and drops the manifest.
 		r3 := review()
-		if err := st.DiscardFinalize(ctx, a.ID, r3.Seq, time.Now().Add(-time.Hour)); !errors.Is(err, ErrConflict) {
+		if err := st.DiscardFinalize(ctx, a.ID, r3.Seq, time.Now().Add(-time.Hour), FailReasonStaleReview); !errors.Is(err, ErrConflict) {
 			t.Fatalf("discard with a wrong claim: %v, want ErrConflict", err)
 		}
-		if err := st.DiscardFinalize(ctx, a.ID, r3.Seq, claimOf(a.ID, r3.Seq)); err != nil {
+		if err := st.DiscardFinalize(ctx, a.ID, r3.Seq, claimOf(a.ID, r3.Seq), FailReasonUnmarkedChanges); err != nil {
 			t.Fatal(err)
 		}
-		if got, _ := st.GetVersion(ctx, a.ID, r3.Seq); got.State != VersionStateFailed {
-			t.Fatalf("state after discard: %q", got.State)
+		if got, _ := st.GetVersion(ctx, a.ID, r3.Seq); got.State != VersionStateFailed || got.FailReason != FailReasonUnmarkedChanges {
+			t.Fatalf("after discard: state %q, reason %q", got.State, got.FailReason)
+		}
+		// The history lists ready and failed versions, newest first, with
+		// their reasons; ListVersions still lists only ready ones.
+		hist, err := st.ListVersionHistory(ctx, a.ID, 0, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reasons := map[int]string{}
+		for i, v := range hist {
+			if i > 0 && v.Seq >= hist[i-1].Seq {
+				t.Fatalf("history not newest first: %+v", hist)
+			}
+			if v.State != VersionStateReady && v.State != VersionStateFailed {
+				t.Fatalf("history lists a %s version: %+v", v.State, v)
+			}
+			if v.State == VersionStateFailed {
+				reasons[v.Seq] = v.FailReason
+			}
+		}
+		want := map[int]string{low.Seq: FailReasonStaleReview, late.Seq: FailReasonNewerPublishPending,
+			abandoned.Seq: FailReasonExpired, r3.Seq: FailReasonUnmarkedChanges}
+		for seq, reason := range want {
+			if reasons[seq] != reason {
+				t.Errorf("history reason of %d = %q, want %q (all failed: %v)", seq, reasons[seq], reason, reasons)
+			}
+		}
+		if page, err := st.ListVersionHistory(ctx, a.ID, r3.Seq, 2); err != nil || len(page) != 2 || page[0].Seq >= r3.Seq {
+			t.Errorf("history page below %d = %+v, %v", r3.Seq, page, err)
+		}
+		ready, err := st.ListVersions(ctx, a.ID, 0, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range ready {
+			if v.State != VersionStateReady {
+				t.Errorf("ListVersions lists a %s version", v.State)
+			}
 		}
 		if files, err := st.ListFiles(ctx, r3.ID); err != nil || len(files) != 0 {
 			t.Fatalf("manifest after discard: %v, %v", files, err)
@@ -558,7 +604,7 @@ func TestStoreFinalizeBaseAndDiscard(t *testing.T) {
 		if got, _ := st.GetArtifact(ctx, a.ID); got.CurrentSeq != r2.Seq || got.DeletedAt != nil {
 			t.Fatalf("artifact after discard: %+v", got)
 		}
-		if err := st.DiscardFinalize(ctx, a.ID, r3.Seq, claimOf(a.ID, r3.Seq)); !errors.Is(err, ErrConflict) {
+		if err := st.DiscardFinalize(ctx, a.ID, r3.Seq, claimOf(a.ID, r3.Seq), FailReasonUnmarkedChanges); !errors.Is(err, ErrConflict) {
 			t.Fatalf("second discard: %v, want ErrConflict", err)
 		}
 	})
