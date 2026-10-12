@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -70,7 +71,9 @@ func (ws *WebhookServer) Start() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ws.Serve()
+	if err := ws.Serve(); err != nil {
+		return "", err
+	}
 	return addr, nil
 }
 
@@ -88,7 +91,12 @@ func (ws *WebhookServer) Listen() (string, error) {
 }
 
 // Serve serves the listener bound by Listen in a background goroutine.
-func (ws *WebhookServer) Serve() {
+// It returns an error if Listen has not bound a listener.
+func (ws *WebhookServer) Serve() error {
+	if ws.listener == nil {
+		return errors.New("webhook server: Serve called before Listen")
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(webhookPath, ws.handleWebhook)
 
@@ -105,6 +113,7 @@ func (ws *WebhookServer) Serve() {
 	}()
 
 	ws.log.Info("Webhook server started", "addr", ws.actualAddr)
+	return nil
 }
 
 // SetSecretToken replaces the secret token that inbound requests must carry.

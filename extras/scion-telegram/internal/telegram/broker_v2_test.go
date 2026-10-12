@@ -161,6 +161,8 @@ type fakeTGServerV2 struct {
 	chatMemberDelay       time.Duration
 	chatMemberInFlight    int
 	chatMemberMaxInFlight int
+	// failSetWebhook makes setWebhook fail with a Telegram error.
+	failSetWebhook bool
 }
 
 // chatMemberStats returns the getChatMember call count and peak concurrency.
@@ -282,8 +284,15 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 				return
 			}
 			f.mu.Lock()
-			f.webhookURL = req.URL
+			fail := f.failSetWebhook
+			if !fail {
+				f.webhookURL = req.URL
+			}
 			f.mu.Unlock()
+			if fail {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 400, Description: "Bad Request: bad webhook"})
+				return
+			}
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
 		case "/bottest-token/deleteWebhook":
@@ -2340,7 +2349,7 @@ func validWebhookConfig(t *testing.T, tgSrv *fakeTGServerV2) map[string]string {
 		"db_path":        filepath.Join(t.TempDir(), "test.db"),
 		"inbound_mode":   "webhook",
 		"webhook_url":    "https://example.com/telegram/webhook",
-		"webhook_listen": ":0",
+		"webhook_listen": "127.0.0.1:0",
 		"webhook_secret": "test-secret",
 	}
 }
@@ -2350,28 +2359,39 @@ func validWebhookConfig(t *testing.T, tgSrv *fakeTGServerV2) map[string]string {
 // against the store, which stays open, and Telegram's webhook registration
 // is not changed. A store the failed reconfigure opened is closed again.
 func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
-	type env struct{ rejectingURL, busyAddr string }
+	type env struct {
+		tgSrv                            *fakeTGServerV2
+		rejectingURL, busyAddr, freeAddr string
+	}
 	for _, tc := range []struct {
 		name       string
 		mutate     func(cfg map[string]string, e env)
 		wantErr    string
 		opensStore bool
+		// releasesAddr: the reconfigure bound e.freeAddr and must release it.
+		releasesAddr bool
 	}{
 		{"missing webhook secret", func(cfg map[string]string, _ env) {
 			delete(cfg, "webhook_secret")
-		}, "webhook_secret is required", false},
+		}, "webhook_secret is required", false, false},
 		{"missing webhook url", func(cfg map[string]string, _ env) {
 			cfg["webhook_url"] = ""
-		}, "webhook_url is required", false},
+		}, "webhook_url is required", false, false},
 		{"invalid inbound mode", func(cfg map[string]string, _ env) {
 			cfg["inbound_mode"] = "push"
-		}, "invalid inbound_mode", false},
+		}, "invalid inbound_mode", false, false},
 		{"bot token rejected", func(cfg map[string]string, e env) {
 			cfg["api_base_url"] = e.rejectingURL
-		}, "failed to validate bot token", true},
+		}, "failed to validate bot token", true, false},
 		{"webhook listen address in use", func(cfg map[string]string, e env) {
 			cfg["webhook_listen"] = e.busyAddr
-		}, "failed to start webhook server", true},
+		}, "failed to start webhook server", true, false},
+		{"setWebhook rejected", func(cfg map[string]string, e env) {
+			cfg["webhook_listen"] = e.freeAddr
+			e.tgSrv.mu.Lock()
+			e.tgSrv.failSetWebhook = true
+			e.tgSrv.mu.Unlock()
+		}, "failed to set webhook", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tgSrv := newFakeTGServerV2(t)
@@ -2379,6 +2399,11 @@ func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
 			busy, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
 			defer busy.Close()
+			// freeAddr is an address that was free a moment ago.
+			free, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			freeAddr := free.Addr().String()
+			require.NoError(t, free.Close())
 
 			b := NewV2(slog.Default())
 			defer b.Close()
@@ -2394,7 +2419,7 @@ func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
 			}
 			bad["hub_url"] = "http://other-hub.test"
 			bad["webhook_url"] = "https://example.com/telegram/other-webhook"
-			tc.mutate(bad, env{rejectingURL: rejecting.URL, busyAddr: busy.Addr().String()})
+			tc.mutate(bad, env{tgSrv: tgSrv, rejectingURL: rejecting.URL, busyAddr: busy.Addr().String(), freeAddr: freeAddr})
 
 			opened := captureOpenedStores(t)
 			err = b.Configure(bad)
@@ -2424,6 +2449,13 @@ func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
 					"a failed reconfigure must close the store it opened")
 			} else {
 				assert.Empty(t, *opened, "an invalid config must not open a store")
+			}
+
+			// A listener the failed reconfigure bound is released again.
+			if tc.releasesAddr {
+				ln, err := net.Listen("tcp", freeAddr)
+				require.NoError(t, err, "a failed reconfigure must release the listener it bound")
+				require.NoError(t, ln.Close())
 			}
 
 			// The earlier webhook server still accepts updates.
@@ -2469,7 +2501,7 @@ func TestV2_Reconfigure_NewListenAddressSwitchesServer(t *testing.T) {
 	require.NoError(t, b.Configure(cfg))
 	oldAddr := b.webhookServer.actualAddr
 
-	cfg["webhook_listen"] = "127.0.0.1:0"
+	cfg["webhook_listen"] = "localhost:0"
 	require.NoError(t, b.Configure(cfg))
 	newAddr := b.webhookServer.actualAddr
 	assert.NotEqual(t, oldAddr, newAddr)

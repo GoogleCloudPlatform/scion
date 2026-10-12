@@ -344,7 +344,10 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 				_ = b.webhookServer.Stop(stopCtx)
 				stopCancel()
 			}
-			newWebhookServer.Serve()
+			// Listen succeeded above, so Serve cannot fail here.
+			if err := newWebhookServer.Serve(); err != nil {
+				b.log.Error("Failed to serve webhook listener", "error", err)
+			}
 			b.webhookServer = newWebhookServer
 		} else {
 			b.webhookServer.SetSecretToken(webhookSecret)
