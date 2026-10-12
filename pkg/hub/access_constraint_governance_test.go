@@ -2396,6 +2396,191 @@ func TestConstraintAdminLockout_ReplaceDeleteFailureRollsBack(t *testing.T) {
 	}
 }
 
+// requireReplaceOutcome checks a ReplaceRoleBinding result. An allowed
+// replace deletes old and keeps the created binding. A refused replace
+// fails with ErrCodeConstraintAdminLockout, keeps old, and writes no
+// binding for newBinding's role and principal at newBinding's scope.
+func requireReplaceOutcome(t *testing.T, s store.Store, err error, created, old, newBinding *store.RoleBinding, allowed bool) {
+	t.Helper()
+	if allowed {
+		require.NoError(t, err)
+		requireBindingExists(t, s, old.ID, false)
+		requireBindingExists(t, s, created.ID, true)
+		return
+	}
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge)
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+	requireBindingExists(t, s, old.ID, true)
+	scope, lerr := s.ListRoleBindingsForScope(context.Background(), newBinding.ScopeType, newBinding.ScopeID)
+	require.NoError(t, lerr)
+	for _, b := range scope {
+		if b.ID == old.ID {
+			continue
+		}
+		assert.False(t, b.RoleDefinitionID == newBinding.RoleDefinitionID &&
+			b.PrincipalType == newBinding.PrincipalType &&
+			b.PrincipalID == newBinding.PrincipalID,
+			"the replacement binding is not kept")
+	}
+}
+
+// replaceMoved returns a binding with b's role at the given principal and
+// project scope.
+func replaceMoved(b *store.RoleBinding, principalType, principalID, projectID string) *store.RoleBinding {
+	return &store.RoleBinding{
+		RoleDefinitionID: b.RoleDefinitionID,
+		PrincipalType:    principalType,
+		PrincipalID:      principalID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	}
+}
+
+// A replace that hands the admin role to another principal at the same
+// scope is judged like a binding delete at that scope: with no other
+// active admin it is refused, and the new binding does not count as a
+// remaining admin. Control: another active admin at the scope.
+func TestConstraintAdminLockout_ReplaceMovesAdminToOtherPrincipal(t *testing.T) {
+	for _, others := range []int{0, 1} {
+		t.Run(fmt.Sprintf("other-admins-%d", others), func(t *testing.T) {
+			gs, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			name := fmt.Sprintf("replace-move-principal-%d", others)
+			projectID, _, bindings := lockoutProjectAdmins(t, s, name, 1+others)
+			target := pvSeedUser(t, s, name+"-target")
+			newBinding := replaceMoved(bindings[0], "user", target, projectID)
+
+			created, err := gs.ReplaceRoleBinding(ctx, bindings[0].ID, newBinding, "")
+			requireReplaceOutcome(t, s, err, created, bindings[0], newBinding, others > 0)
+		})
+	}
+}
+
+// A replace that moves the admin role to another scope is judged at the
+// original scope: with no other active admin there it is refused.
+// Control: another active admin at the original scope.
+func TestConstraintAdminLockout_ReplaceMovesAdminToOtherScope(t *testing.T) {
+	for _, others := range []int{0, 1} {
+		t.Run(fmt.Sprintf("other-admins-%d", others), func(t *testing.T) {
+			gs, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			name := fmt.Sprintf("replace-move-scope-%d", others)
+			_, users, bindings := lockoutProjectAdmins(t, s, name, 1+others)
+			otherProjectID := pvSeedProject(t, s, name+"-other")
+			newBinding := replaceMoved(bindings[0], "user", users[0], otherProjectID)
+
+			created, err := gs.ReplaceRoleBinding(ctx, bindings[0].ID, newBinding, "")
+			requireReplaceOutcome(t, s, err, created, bindings[0], newBinding, others > 0)
+		})
+	}
+}
+
+// A replace that keeps an admin role for the same principal at the same
+// scope, over a window that covers the old one, removes no admin, so the
+// sole admin may make it.
+func TestConstraintAdminLockout_ReplaceSamePrincipalAdminRoleAllowed(t *testing.T) {
+	gs, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	projectID, users, bindings := lockoutProjectAdmins(t, s, "replace-same-admin", 1)
+	otherAdmin := createTestRoleDefinition(t, s, "replace-same-admin-other-role",
+		store.RoleScopeProject, []string{PermissionConstraintAdmin, "agent.list"})
+	newBinding := replaceMoved(bindings[0], "user", users[0], projectID)
+	newBinding.RoleDefinitionID = otherAdmin.ID
+
+	created, err := gs.ReplaceRoleBinding(ctx, bindings[0].ID, newBinding, "")
+	requireReplaceOutcome(t, s, err, created, bindings[0], newBinding, true)
+}
+
+// replaceReadErrStore is a lockoutReadErrStore whose WithTx hands the
+// callback a transaction handle with the same read errors.
+type replaceReadErrStore struct {
+	lockoutReadErrStore
+}
+
+func (s replaceReadErrStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.lockoutReadErrStore.Store.WithTx(ctx, func(tx store.Store) error {
+		inner := s
+		inner.lockoutReadErrStore.Store = tx
+		return fn(inner)
+	})
+}
+
+// A replace that moves an admin binding refuses when the scope bindings
+// cannot be read in the transaction. Control: the same replace with the
+// reads succeeding is allowed, as another active admin remains.
+func TestConstraintAdminLockout_ReplaceMoveReadFailureRefuses(t *testing.T) {
+	for _, move := range []string{"principal", "scope"} {
+		for _, readErr := range []error{nil, errors.New("read failed")} {
+			t.Run(fmt.Sprintf("%s-err-%t", move, readErr != nil), func(t *testing.T) {
+				_, _, authz, s := govTestSetup(t)
+				ctx := context.Background()
+				name := fmt.Sprintf("replace-move-readerr-%s-%t", move, readErr != nil)
+				projectID, users, bindings := lockoutProjectAdmins(t, s, name, 2)
+				newBinding := replaceMoved(bindings[0], "user", pvSeedUser(t, s, name+"-target"), projectID)
+				if move == "scope" {
+					newBinding = replaceMoved(bindings[0], "user", users[0], pvSeedProject(t, s, name+"-other"))
+				}
+				gs := replaceGovernance(t, replaceReadErrStore{lockoutReadErrStore{Store: s, scopeErr: readErr}}, authz)
+
+				created, err := gs.ReplaceRoleBinding(ctx, bindings[0].ID, newBinding, "")
+				requireReplaceOutcome(t, s, err, created, bindings[0], newBinding, readErr == nil)
+			})
+		}
+	}
+}
+
+// A replace that keeps the admin role for the same principal at the same
+// scope but narrows the validity window removes admin authority for the
+// time the new window leaves out, so the sole admin's replace is refused.
+// Control: another active admin at the scope. A widened window removes
+// nothing and is allowed for the sole admin.
+func TestConstraintAdminLockout_ReplaceNarrowedWindow(t *testing.T) {
+	now := time.Now()
+	later, sooner := now.Add(24*time.Hour), now.Add(time.Hour)
+	for _, tc := range []struct {
+		name          string
+		oldNB, oldExp *time.Time
+		newNB, newExp *time.Time
+		others        int
+		allowed       bool
+	}{
+		{name: "expiry-added", newExp: &sooner},
+		{name: "expiry-added-other-admin", newExp: &sooner, others: 1, allowed: true},
+		{name: "expiry-earlier", oldExp: &later, newExp: &sooner},
+		{name: "not-before-later", newNB: &sooner},
+		{name: "not-before-later-other-admin", newNB: &sooner, others: 1, allowed: true},
+		{name: "expiry-removed", oldExp: &later, allowed: true},
+		{name: "expiry-later", oldExp: &sooner, newExp: &later, allowed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gs, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			name := "replace-window-" + tc.name
+			projectID, _, _ := lockoutProjectAdmins(t, s, name, tc.others)
+			user := pvSeedUser(t, s, name+"-user")
+			old, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: createTestRoleDefinition(t, s, name+"-role",
+					store.RoleScopeProject, []string{PermissionConstraintAdmin}).ID,
+				PrincipalType: "user",
+				PrincipalID:   user,
+				ScopeType:     store.RoleScopeProject,
+				ScopeID:       projectID,
+				NotBefore:     tc.oldNB,
+				ExpiresAt:     tc.oldExp,
+				CreatedBy:     "test",
+			})
+			require.NoError(t, err)
+			newBinding := replaceMoved(old, "user", user, projectID)
+			newBinding.NotBefore, newBinding.ExpiresAt = tc.newNB, tc.newExp
+
+			created, err := gs.ReplaceRoleBinding(ctx, old.ID, newBinding, "")
+			requireReplaceOutcome(t, s, err, created, old, newBinding, tc.allowed)
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Nested groups: effective (transitive) membership
 // ---------------------------------------------------------------------------
