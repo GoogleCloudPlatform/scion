@@ -875,6 +875,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.seq = 0;
     this.versions = [];
     this.discarded = [];
+    this.expandedGaps = new Set();
     this.versionsNext = 0;
     this.clearPreviewTimer();
     await this.load();
@@ -1015,6 +1016,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.tab = 'preview';
     this.versions = [];
     this.discarded = [];
+    this.expandedGaps = new Set();
     this.versionsNext = 0;
     void this.load();
   }

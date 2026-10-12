@@ -690,6 +690,80 @@ describe('artifact page', () => {
     expect(rows[2].textContent).toContain('v6');
   });
 
+  describe('expanded discarded-version groups', () => {
+    const gapVersions = (): ArtifactVersion[] =>
+      [4, 1].map((seq) => ({
+        seq,
+        ref: `scion://artifact/${ID}@${seq}`,
+        kind: 'publish',
+        entryPath: 'design.md',
+        totalBytes: 5,
+        fileCount: 1,
+        createdAt: '2026-10-05T12:00:00Z',
+        state: 'ready',
+        files: [],
+      }));
+    const gapDiscarded: DiscardedVersion[] = [
+      { seq: 3, state: 'failed', reason: 'stale_review', createdAt: '2026-10-05T12:00:00Z' },
+      { seq: 2, state: 'failed', reason: 'stale_review', createdAt: '2026-10-05T12:00:00Z' },
+    ];
+    const gapMeta = (): ArtifactResponse => {
+      const meta = artifact('design.md', 'text/markdown');
+      meta.artifact.currentSeq = 4;
+      meta.version = { ...meta.version!, seq: 4, ref: `scion://artifact/${ID}@4` };
+      return meta;
+    };
+    const settle = async (el: ScionPageArtifactDetail): Promise<void> => {
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+    };
+    const expanded = (el: ScionPageArtifactDetail): number =>
+      el.shadowRoot!.querySelectorAll('sl-tab-panel[name="history"] tr.discarded-version').length;
+    const expand = async (el: ScionPageArtifactDetail): Promise<void> => {
+      const group = el.shadowRoot!.querySelector(
+        'sl-tab-panel[name="history"] tr.discarded-group'
+      )!;
+      (group.querySelector('sl-button') as HTMLElement).click();
+      await el.updateComplete;
+    };
+
+    it('collapses them when the page reloads itself after a publish', async () => {
+      window.history.replaceState({}, '', `/projects/p-1/artifacts/${ID}`);
+      mockFetch(gapMeta(), '# Doc', { versions: gapVersions(), discarded: gapDiscarded });
+      const el = await mount(true);
+      await expand(el);
+      expect(expanded(el)).toBe(2);
+      (el as unknown as { showCurrentVersion(): void }).showCurrentVersion();
+      await settle(el);
+      expect(el.shadowRoot!.querySelector('tr.discarded-group')).not.toBeNull();
+      expect(expanded(el)).toBe(0);
+    });
+
+    it('collapses them when the page reloads for a stale review', async () => {
+      mockFetch(gapMeta(), '# Doc', { versions: gapVersions(), discarded: gapDiscarded });
+      const el = await mount(true);
+      await expand(el);
+      expect(expanded(el)).toBe(2);
+      await (el as unknown as { reloadForReview(t: string): Promise<void> }).reloadForReview('x');
+      await settle(el);
+      expect(el.shadowRoot!.querySelector('tr.discarded-group')).not.toBeNull();
+      expect(expanded(el)).toBe(0);
+    });
+
+    it('starts collapsed when the router mounts the page again for a navigation', async () => {
+      mockFetch(gapMeta(), '# Doc', { versions: gapVersions(), discarded: gapDiscarded });
+      const a = await mount(true);
+      await expand(a);
+      expect(expanded(a)).toBe(2);
+      document.body.innerHTML = '';
+      const b = await mount(true);
+      expect(b.shadowRoot!.querySelector('tr.discarded-group')).not.toBeNull();
+      expect(expanded(b)).toBe(0);
+    });
+  });
+
   it('names the reason of a single discarded version in its row', async () => {
     const versions: ArtifactVersion[] = [3, 1].map((seq) => ({
       seq,
