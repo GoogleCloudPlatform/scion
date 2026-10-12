@@ -912,6 +912,12 @@ func TestUseLoginOffer_TransportOnlyTheHubsOwn(t *testing.T) {
 	}
 	assert.Equal(t, []string{""}, login(), "a hub the lookup picked: no environment transport")
 
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.Hubs["staging"].Transport = &config.HubTransportConfig{Mode: "iap", Audience: "staging-aud"}
+		return nil
+	}))
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, login(), "a hub the lookup picked: exactly its entry's own transport")
+
 	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+staging.URL()+"\n")
 	assert.Equal(t, []string{envTransportHeader}, login(), "the effective hub: environment transport as for 'hub auth login'")
 }
@@ -927,4 +933,20 @@ func TestUseMultiHub_LoneCandidateNotEffectiveIsNotContacted(t *testing.T) {
 			"Log in with: scion hub auth login --hub prod", "%v", args)
 	}
 	assert.Zero(t, prod.calls())
+}
+
+// In a search across hubs the rule is decided per hub: the effective hub
+// gets the full credential chain (here SCION_HUB_TOKEN), every other hub
+// only its own login.
+func TestUseMultiHub_SearchDecidesFullChainPerHub(t *testing.T) {
+	prod, staging := setupTwoHubsNoLogins(t)
+	storeTestLogin(t, staging.URL())
+	staging.setProjects()
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+
+	stdout, _, err := runScion(t, "use", "foo", "--refresh")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+	assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders(), "the effective hub: full chain")
+	assert.Equal(t, []string{"Bearer tok"}, staging.authHeaders(), "another hub: only its own login")
 }
