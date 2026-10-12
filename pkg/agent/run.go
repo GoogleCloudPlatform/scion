@@ -528,23 +528,25 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	}
 
-	// Hub default telemetry tier (ptone/scion#4218). It sits in base
-	// position: broker settings telemetry < hub default < the agent's own
-	// config telemetry (requester inline telemetry from older hubs, and the
-	// stored config). Templates contribute no telemetry once environment
-	// keys are ignored in templates (ptone/scion#4524). It is merged here
-	// first so the settings merge below lands underneath it.
-	// The context value is deep-copied so it is never aliased into the
-	// agent config, and agentCfgBeforeHubTelemetry lets the
-	// scion-agent.json rewrites below persist the config without it: a
-	// baked-in hub default would rank as agent config on the next start,
-	// and later hub changes would never reach the agent.
-	agentCfgBeforeHubTelemetry := finalScionCfg
-	hubTelemetryApplied := false
+	// Telemetry tiers applied per start: broker settings telemetry < hub
+	// default (ptone/scion#4218) < the agent's own config telemetry
+	// (requester inline telemetry from older hubs, and the stored config).
+	// Templates contribute no telemetry (ptone/scion#4524). Both lower
+	// tiers are merged here in base position, the hub default first so the
+	// settings merge below lands underneath it. The hub context value is
+	// deep-copied so it is never aliased into the agent config.
+	// agentOwnTelemetry is the agent's
+	// telemetry before either merge; the scion-agent.json rewrites below
+	// persist it instead of the merged result (ptone/scion#4241): a baked-in
+	// settings or hub value would rank as agent config on the next start,
+	// and later settings or hub changes would never reach the agent.
+	var agentOwnTelemetry *api.TelemetryConfig
+	if finalScionCfg != nil {
+		agentOwnTelemetry = cloneTelemetryConfig(finalScionCfg.Telemetry)
+	}
 	if hubTelemetry := cloneTelemetryConfig(api.HubAgentDefaultsFromContext(ctx).TelemetryDefault()); hubTelemetry != nil {
 		util.Debugf("Start: merging hub default telemetry config in base position")
 		finalScionCfg = config.MergeScionConfig(&api.ScionConfig{Telemetry: hubTelemetry}, finalScionCfg)
-		hubTelemetryApplied = true
 	}
 
 	if settings != nil {
@@ -553,8 +555,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 		// Merge settings-level telemetry config into finalScionCfg so that
 		// cloud export configuration (endpoint, protocol, batch, etc.) and
-		// the TelemetryEnabled flag are available at start time. This mirrors
-		// the merge in ProvisionAgent.
+		// the TelemetryEnabled flag are available at start time. This is the
+		// only place settings telemetry is applied: ProvisionAgent does not
+		// bake it into scion-agent.json (ptone/scion#4241).
 		if settings.Telemetry != nil {
 			util.Debugf("Start: merging settings telemetry config (cloud=%v, endpoint=%q)",
 				settings.Telemetry.Cloud != nil, func() string {
@@ -567,9 +570,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				Telemetry: config.ConvertV1TelemetryToAPI(settings.Telemetry),
 			}
 			finalScionCfg = config.MergeScionConfig(settingsCfg, finalScionCfg)
-			if hubTelemetryApplied {
-				agentCfgBeforeHubTelemetry = config.MergeScionConfig(settingsCfg, agentCfgBeforeHubTelemetry)
-			}
 		} else {
 			util.Debugf("Start: settings.Telemetry is nil, skipping telemetry merge")
 		}
@@ -1432,7 +1432,7 @@ authDone:
 			finalScionCfg = &api.ScionConfig{}
 		}
 		finalScionCfg.AuthSelectedType = opts.HarnessAuth
-		cfgData, marshalErr := json.MarshalIndent(persistableAgentConfig(finalScionCfg, agentCfgBeforeHubTelemetry, hubTelemetryApplied), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
 		}
@@ -1443,7 +1443,7 @@ authDone:
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
 		// Active corruption repair: clear the corrupted value and rewrite.
 		finalScionCfg.AuthSelectedType = ""
-		cfgData, marshalErr := json.MarshalIndent(persistableAgentConfig(finalScionCfg, agentCfgBeforeHubTelemetry, hubTelemetryApplied), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal repaired agent config: %w", marshalErr)
 		}
@@ -3412,18 +3412,16 @@ func cloneTelemetryConfig(t *api.TelemetryConfig) *api.TelemetryConfig {
 }
 
 // persistableAgentConfig returns the config Start writes back to
-// scion-agent.json. The hub default telemetry tier is applied per start and
-// must not be persisted (ptone/scion#4218), so when it was applied the
-// written config carries the telemetry it had before that merge.
-func persistableAgentConfig(cfg, beforeHubTelemetry *api.ScionConfig, hubTelemetryApplied bool) *api.ScionConfig {
-	if !hubTelemetryApplied || cfg == nil {
-		return cfg
+// scion-agent.json. The settings telemetry and hub default telemetry tiers
+// are applied per start and must not be persisted (ptone/scion#4218,
+// ptone/scion#4241), so the written config carries agentTelemetry, the
+// agent's own telemetry from before those merges.
+func persistableAgentConfig(cfg *api.ScionConfig, agentTelemetry *api.TelemetryConfig) *api.ScionConfig {
+	if cfg == nil {
+		return nil
 	}
 	out := *cfg
-	out.Telemetry = nil
-	if beforeHubTelemetry != nil {
-		out.Telemetry = beforeHubTelemetry.Telemetry
-	}
+	out.Telemetry = cloneTelemetryConfig(agentTelemetry)
 	return &out
 }
 

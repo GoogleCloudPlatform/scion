@@ -141,8 +141,9 @@ func assertEnv(t *testing.T, env map[string]string, key, want string) {
 
 // Acceptance 1: agent-config fields win per field; hub fields fill the rest; and
 // the hub default sits above the broker settings telemetry applied at Start.
-// (Settings telemetry that ProvisionAgent folds into scion-agent.json on
-// create ranks as agent config instead; that bake is TS-2c, not this test.)
+// (ProvisionAgent does not bake settings telemetry into scion-agent.json,
+// ptone/scion#4241; the provision-then-start path is covered in
+// settings_telemetry_not_persisted_test.go.)
 func TestStart_HubTelemetryDefault_AgentConfigWinsPerField(t *testing.T) {
 	project := hubTelemetryFixture(t, hubTierSettingsTelemetry)
 	writeHubTelemetryAgent(t, project, "agent-block", `{
