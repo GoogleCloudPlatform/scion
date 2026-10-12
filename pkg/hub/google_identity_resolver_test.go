@@ -115,3 +115,74 @@ func TestGoogleIdentityResolver_Resolve_PlatformAuthSA_Unconfigured_Inert(t *tes
 		t.Fatalf("expected a provisioned user for person@gmail.com, got %+v", user)
 	}
 }
+
+// emailLookupErrUserStore wraps fakeUserStore so that GetUserByEmail returns
+// a fixed store error that is not store.ErrNotFound.
+type emailLookupErrUserStore struct {
+	*fakeUserStore
+	err error
+}
+
+func (s *emailLookupErrUserStore) GetUserByEmail(context.Context, string) (*store.User, error) {
+	return nil, s.err
+}
+
+// TestGoogleIdentityResolver_Resolve_EmailLookupStoreError_ReturnsError checks
+// that a store error other than store.ErrNotFound from the email lookup is
+// returned by Resolve, the same as for the binding lookup, and that no user
+// or binding is created.
+func TestGoogleIdentityResolver_Resolve_EmailLookupStoreError_ReturnsError(t *testing.T) {
+	storeErr := errors.New("database is locked")
+	inner := newFakeUserStore()
+	userStore := &emailLookupErrUserStore{fakeUserStore: inner, err: storeErr}
+	extStore := newMemExtIDStore()
+	resolver := newTestResolver(userStore, extStore, alwaysAuthorized, nil)
+
+	user, err := resolver.Resolve(context.Background(), validGmailIdentity(), ResolvePolicy{})
+	if !errors.Is(err, storeErr) {
+		t.Fatalf("expected Resolve to return the email lookup store error, got user=%+v err=%v", user, err)
+	}
+	if user != nil {
+		t.Fatalf("expected no user on email lookup store error, got %+v", user)
+	}
+	inner.mu.Lock()
+	userCount := len(inner.users)
+	inner.mu.Unlock()
+	if userCount != 0 {
+		t.Fatalf("expected no user to be created, store has %d", userCount)
+	}
+	extStore.mu.Lock()
+	bindingCount := len(extStore.bindings)
+	extStore.mu.Unlock()
+	if bindingCount != 0 {
+		t.Fatalf("expected no binding to be created, store has %d", bindingCount)
+	}
+}
+
+// TestGoogleIdentityResolver_Resolve_EmailNotFound_Provisions checks that
+// store.ErrNotFound from the email lookup continues into new-user
+// provisioning and creates one user and one binding.
+func TestGoogleIdentityResolver_Resolve_EmailNotFound_Provisions(t *testing.T) {
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := newTestResolver(userStore, extStore, alwaysAuthorized, nil)
+	identity := validGmailIdentity()
+
+	user, err := resolver.Resolve(context.Background(), identity, ResolvePolicy{})
+	if err != nil {
+		t.Fatalf("unexpected error when no user has this email: %v", err)
+	}
+	if user == nil || user.Email != identity.Email {
+		t.Fatalf("expected a provisioned user for %s, got %+v", identity.Email, user)
+	}
+	if _, lookupErr := userStore.GetUser(context.Background(), user.ID); lookupErr != nil {
+		t.Fatalf("expected provisioned user %s in the store: %v", user.ID, lookupErr)
+	}
+	binding, bindErr := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, identity.Subject)
+	if bindErr != nil {
+		t.Fatalf("expected a binding for the provisioned user: %v", bindErr)
+	}
+	if binding.UserID != user.ID {
+		t.Fatalf("expected binding for user %s, got %s", user.ID, binding.UserID)
+	}
+}
