@@ -68,3 +68,11 @@
   kept) and `pkg/ent/mutation.go` (regenerated with `go generate ./pkg/ent`;
   `make ent-check` clean). Upstream's removal of committed hub test shard
   tags carried over; the test files this branch adds carry none.
+- Second merge-forward: merged upstream main (d1bd29925). Upstream added a
+  user `issuer_delegation_id` column and index and a workload issuer field
+  in `AuthConfig`; each conflict was two adjacent additions, so both sides
+  were kept (`pkg/ent/schema/user.go`, `pkg/store/models.go`,
+  `pkg/hub/auth.go`, `pkg/hub/server.go`) and the generated ent code was
+  regenerated (`make ent-check` clean). `CreateFederatedUser` now also
+  refuses the new `IssuerDelegationID` field, like every other test identity
+  field. No test file this branch adds or changes carries a shard tag.
