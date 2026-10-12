@@ -246,9 +246,9 @@ type launchFuncManager struct {
 }
 
 func (m *launchFuncManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
-	m.asyncManager.mu.Lock()
-	m.asyncManager.startCalls++
-	m.asyncManager.mu.Unlock()
+	m.mu.Lock()
+	m.startCalls++
+	m.mu.Unlock()
 	return m.start(ctx, opts)
 }
 
