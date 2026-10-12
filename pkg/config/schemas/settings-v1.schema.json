@@ -2333,7 +2333,7 @@
         "user_token_lifetime": {
           "type": ["string", "integer"],
           "pattern": "^([-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$",
-          "description": "Validity of an issued user access credential for a peer hub, as a Go duration (\"15m\", the default; at most \"1h\") or integer nanoseconds."
+          "description": "Validity of an issued user access credential for a peer hub, as a Go duration (\"15m\", the default; a whole number of seconds, at most \"1h\") or integer nanoseconds."
         }
       },
       "additionalProperties": false
