@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
@@ -80,6 +81,33 @@ type AuthService interface {
 
 	// PollDeviceToken polls for the device authorization result.
 	PollDeviceToken(ctx context.Context, deviceCode, provider string) (*DeviceTokenPollResponse, error)
+
+	// FederationToken obtains a short-lived user access credential for the
+	// authenticated user, for one peer hub audience
+	// (POST /api/v1/auth/federation-token). It is never retried.
+	FederationToken(ctx context.Context, req *FederationTokenRequest) (*FederationTokenResponse, error)
+}
+
+// FederationTokenRequest is the request for a federation user token.
+type FederationTokenRequest struct {
+	// Audience is the peer hub's issuer URL.
+	Audience string `json:"audience"`
+}
+
+// FederationTokenResponse is a federation user token and its expiry.
+type FederationTokenResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// FederationToken obtains a federation user token. Issuance is not
+// idempotent, so the request is never retried.
+func (s *authService) FederationToken(ctx context.Context, req *FederationTokenRequest) (*FederationTokenResponse, error) {
+	resp, err := s.c.postNoRetry(ctx, "/api/v1/auth/federation-token", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[FederationTokenResponse](resp)
 }
 
 // authService is the implementation of AuthService.

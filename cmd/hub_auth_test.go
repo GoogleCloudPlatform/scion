@@ -31,6 +31,9 @@ type mockHubAuthService struct {
 	pollDeviceTokenFunc   func(ctx context.Context, deviceCode, provider string) (*hubclient.DeviceTokenPollResponse, error)
 	requestedProviders    []string
 	polledProviders       []string
+	federationTokenResp   *hubclient.FederationTokenResponse
+	federationTokenErr    error
+	federationTokenReqs   []hubclient.FederationTokenRequest
 }
 
 type mockHubAuthNotImplementedError struct{}
@@ -47,6 +50,13 @@ func (m *mockHubAuthService) Logout(ctx context.Context) error {
 }
 func (m *mockHubAuthService) Refresh(ctx context.Context, refreshToken string) (*hubclient.TokenResponse, error) {
 	return nil, mockHubAuthNotImplementedError{}
+}
+func (m *mockHubAuthService) FederationToken(ctx context.Context, req *hubclient.FederationTokenRequest) (*hubclient.FederationTokenResponse, error) {
+	m.federationTokenReqs = append(m.federationTokenReqs, *req)
+	if m.federationTokenResp == nil && m.federationTokenErr == nil {
+		return nil, mockHubAuthNotImplementedError{}
+	}
+	return m.federationTokenResp, m.federationTokenErr
 }
 func (m *mockHubAuthService) Me(ctx context.Context) (*hubclient.User, error) {
 	return nil, mockHubAuthNotImplementedError{}
