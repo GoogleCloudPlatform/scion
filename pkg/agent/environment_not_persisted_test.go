@@ -317,8 +317,10 @@ func TestProvision_RequesterEnvironmentValuesPersisted(t *testing.T) {
 
 // An agent provisioned before ptone/scion#4561 has the settings values of
 // that time baked into scion-agent.json. After a settings change it mounts
-// the current settings volume once (never the stale one, never both), and
-// the current profile resources apply over default ones as before.
+// the current settings volume once (never the stale one, never both) and
+// uses the current settings image and pull policy. Its baked resources, by
+// contrast, read back as the agent's own tier, so they stay frozen: they
+// still outrank the current profile resources, as they did before.
 func TestStart_LegacyBakedEnvironmentValues(t *testing.T) {
 	project, settingsPath := envFixture(t, envSettingsV1)
 	startEnv(t, project, nil)
@@ -328,6 +330,7 @@ func TestStart_LegacyBakedEnvironmentValues(t *testing.T) {
 	cfg, _ := persistedEnvAgentConfig(t, project)
 	cfg.Image = "settings-image:v1"
 	cfg.Kubernetes = &api.KubernetesConfig{ImagePullPolicy: "Always"}
+	cfg.Resources = &api.ResourceSpec{Limits: api.ResourceList{Memory: "2Gi", CPU: "2"}}
 	cfg.Volumes = append(cfg.Volumes,
 		api.VolumeMount{Source: "/host/settings-a", Target: "/mnt/settings"},
 		api.VolumeMount{Source: "/host/file", Target: "/mnt/file"},
@@ -350,6 +353,9 @@ func TestStart_LegacyBakedEnvironmentValues(t *testing.T) {
 	}
 	if got := pullPolicyOf(rc); got != "Never" {
 		t.Errorf("pull policy = %q, want the current settings one", got)
+	}
+	if rc.Resources == nil || rc.Resources.Limits.Memory != "2Gi" {
+		t.Errorf("resources = %+v, want the baked limits.memory 2Gi to stay frozen over the current profile 3Gi", rc.Resources)
 	}
 }
 
