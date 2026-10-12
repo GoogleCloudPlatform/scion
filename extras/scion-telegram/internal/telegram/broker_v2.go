@@ -70,8 +70,21 @@ type TelegramBrokerV2 struct {
 	brokerID   string
 	pluginName string
 	httpClient *http.Client
+	// baseTransport is the transport Configure wraps with transport auth.
+	// Each Configure builds httpClient from it, so the wrapping is applied
+	// once however often the broker is reconfigured. Nil means
+	// http.DefaultTransport.
+	baseTransport http.RoundTripper
 
 	store Store
+
+	// gen counts the handlers that may still use the store and send queue
+	// of the current configuration. A reconfigure closes the previous
+	// store and send queue once the previous generation's handlers finish.
+	gen *configGen
+	// retiring tracks the goroutines that shut down resources of earlier
+	// configurations.
+	retiring sync.WaitGroup
 
 	commands     *CommandHandler
 	callbacks    *CallbackHandler
@@ -96,6 +109,14 @@ type TelegramBrokerV2 struct {
 	// Webhook mode fields.
 	inboundMode   string // "poll" (default) or "webhook"
 	webhookServer *WebhookServer
+	// webhookURL and webhookSecret are the webhook settings of the current
+	// configuration. RegisterWebhook registers them.
+	webhookURL    string
+	webhookSecret string
+	// webhookRegistered is set while this instance holds the webhook
+	// registration made by RegisterWebhook (standalone HA lock holder), so
+	// a reconfigure registers the new webhook settings too.
+	webhookRegistered bool
 
 	InboundHandler func(topic string, msg *messages.StructuredMessage)
 
@@ -112,6 +133,63 @@ type TelegramBrokerV2 struct {
 	userProjects      map[string]userProjectsEntry
 	userProjectsMu    sync.Mutex
 	userProjectsGroup singleflight.Group
+}
+
+// configGen is one successful configuration. Handlers hold the generation
+// that was current when they started until they finish.
+type configGen struct {
+	active sync.WaitGroup
+}
+
+// acquireGen registers a handler with the current configuration and returns
+// the function that releases it. Callers must not hold b.mu.
+func (b *TelegramBrokerV2) acquireGen() (release func()) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.acquireGenLocked()
+}
+
+// acquireGenLocked is acquireGen for callers that hold b.mu.
+func (b *TelegramBrokerV2) acquireGenLocked() (release func()) {
+	g := b.gen
+	if g == nil {
+		return func() {}
+	}
+	g.active.Add(1)
+	return g.active.Done
+}
+
+// retiredConfig holds the resources a reconfigure replaced. Nil fields are
+// skipped.
+type retiredConfig struct {
+	webhookServer *WebhookServer
+	gen           *configGen
+	sendQueue     *SendQueue
+	store         Store
+}
+
+// shutdown stops the replaced webhook server, waits for the handlers of the
+// replaced configuration to finish, then closes its send queue (messages
+// still queued are sent first) and its store.
+func (r *retiredConfig) shutdown(log *slog.Logger) {
+	if r.webhookServer != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if err := r.webhookServer.Stop(stopCtx); err != nil {
+			log.Warn("Failed to stop the previous webhook server", "error", err)
+		}
+		stopCancel()
+	}
+	if r.gen != nil {
+		r.gen.active.Wait()
+	}
+	if r.sendQueue != nil {
+		r.sendQueue.Close()
+	}
+	if r.store != nil {
+		if err := r.store.Close(); err != nil {
+			log.Warn("Failed to close the previous store", "error", err)
+		}
+	}
 }
 
 type userProjectsEntry struct {
@@ -166,13 +244,33 @@ func (b *TelegramBrokerV2) SetHostCallbacks(hc plugin.HostCallbacks) {
 // misconfigured plugin fails fast. Every error return happens before the
 // broker is changed, so a failed reconfigure leaves the running store, API
 // client, settings and webhook server in place.
+//
+// A successful reconfigure shuts down the resources it replaced (store, send
+// queue, webhook server) in the background, after the handlers that started
+// under the previous configuration have finished.
 func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	retired, err := b.configureLocked(config)
+	if retired != nil {
+		b.retiring.Add(1)
+	}
+	b.mu.Unlock()
 
+	if retired != nil {
+		go func() {
+			defer b.retiring.Done()
+			retired.shutdown(b.log)
+		}()
+	}
+	return err
+}
+
+// configureLocked applies config with b.mu held. On success it returns the
+// resources of the previous configuration for the caller to shut down.
+func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredConfig, error) {
 	botToken := config["bot_token"]
 	if botToken == "" {
-		return fmt.Errorf("bot_token is required")
+		return nil, fmt.Errorf("bot_token is required")
 	}
 
 	// Parse optional agent cache TTL.
@@ -180,7 +278,7 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	if v, ok := config["agent_cache_ttl"]; ok && v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return fmt.Errorf("invalid agent_cache_ttl: %w", err)
+			return nil, fmt.Errorf("invalid agent_cache_ttl: %w", err)
 		}
 		if d < 0 {
 			b.log.Warn("agent_cache_ttl is negative; using the default",
@@ -202,7 +300,7 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		case "poll", "webhook":
 			inboundMode = v
 		default:
-			return fmt.Errorf("invalid inbound_mode %q: must be \"poll\" or \"webhook\"", v)
+			return nil, fmt.Errorf("invalid inbound_mode %q: must be \"poll\" or \"webhook\"", v)
 		}
 	}
 
@@ -210,13 +308,13 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	webhookSecret := config["webhook_secret"]
 	if inboundMode == "webhook" {
 		if webhookURL == "" {
-			return fmt.Errorf("webhook_url is required when inbound_mode is \"webhook\"")
+			return nil, fmt.Errorf("webhook_url is required when inbound_mode is \"webhook\"")
 		}
 		// The webhook listener verifies every inbound request against this
 		// secret, so it is required in webhook mode, including standalone HA
 		// mode (skip_set_webhook=true).
 		if webhookSecret == "" {
-			return fmt.Errorf("webhook_secret is required when inbound_mode is \"webhook\"")
+			return nil, fmt.Errorf("webhook_secret is required when inbound_mode is \"webhook\"")
 		}
 	}
 
@@ -229,7 +327,7 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	if databaseURL, ok := config["database_url"]; ok && databaseURL != "" {
 		s, err := NewPostgresStore(databaseURL)
 		if err != nil {
-			return fmt.Errorf("init postgres store: %w", err)
+			return nil, fmt.Errorf("init postgres store: %w", err)
 		}
 		store = s
 	} else {
@@ -239,7 +337,7 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		}
 		s, err := openSQLiteStore(dbPath)
 		if err != nil {
-			return fmt.Errorf("init store: %w", err)
+			return nil, fmt.Errorf("init store: %w", err)
 		}
 		store = s
 	}
@@ -251,7 +349,7 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	bot, err := api.GetMe(ctx)
 	if err != nil {
 		store.Close()
-		return fmt.Errorf("failed to validate bot token: %w", err)
+		return nil, fmt.Errorf("failed to validate bot token: %w", err)
 	}
 
 	// Bind a new webhook listener before setWebhook and before changing the
@@ -269,21 +367,22 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 			newWebhookServer = NewWebhookServer(webhookListen, webhookSecret, b.handleWebhookUpdate, b.log)
 			if _, err := newWebhookServer.Listen(); err != nil {
 				store.Close()
-				return fmt.Errorf("failed to start webhook server: %w", err)
+				return nil, fmt.Errorf("failed to start webhook server: %w", err)
 			}
 		}
 	}
 
 	// In standalone HA mode, skip_set_webhook=true means this instance
 	// should start the HTTP listener but NOT call setWebhook. Only the
-	// lock holder calls RegisterWebhook() separately.
-	if inboundMode == "webhook" && config["skip_set_webhook"] != "true" {
+	// lock holder calls RegisterWebhook() separately; once it has, a
+	// reconfigure registers the new webhook settings here.
+	if inboundMode == "webhook" && (config["skip_set_webhook"] != "true" || b.webhookRegistered) {
 		if err := api.SetWebhook(ctx, webhookURL, webhookSecret); err != nil {
 			if newWebhookServer != nil {
 				_ = newWebhookServer.Stop(ctx)
 			}
 			store.Close()
-			return fmt.Errorf("failed to set webhook: %w", err)
+			return nil, fmt.Errorf("failed to set webhook: %w", err)
 		}
 	}
 
@@ -300,11 +399,21 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		b.pluginName = v
 	}
 
+	// Commit. The previous store, send queue and generation are retired;
+	// the webhook server is added below if it is replaced or no longer used.
+	retired := &retiredConfig{gen: b.gen, sendQueue: b.sendQueue, store: b.store}
+	b.gen = &configGen{}
+
 	b.api = api
 	b.store = store
 	b.botInfo = bot
 	b.agentCacheTTL = agentCacheTTL
 	b.inboundMode = inboundMode
+	b.webhookURL = webhookURL
+	b.webhookSecret = webhookSecret
+	if inboundMode != "webhook" {
+		b.webhookRegistered = false
+	}
 
 	// Initialize send queue with rate limiting.
 	sqSize := 0
@@ -336,14 +445,12 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	b.registerBotCommands(ctx)
 
 	// Switch the webhook server: serve the listener bound above in place of
-	// the old server, or keep the running server with the new secret.
+	// the old server, or keep the running server with the new secret. In
+	// poll mode a running webhook server is no longer used. A replaced
+	// server is stopped after b.mu is released.
 	if inboundMode == "webhook" {
 		if newWebhookServer != nil {
-			if b.webhookServer != nil {
-				stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
-				_ = b.webhookServer.Stop(stopCtx)
-				stopCancel()
-			}
+			retired.webhookServer = b.webhookServer
 			// Listen succeeded above, so Serve cannot fail here.
 			if err := newWebhookServer.Serve(); err != nil {
 				b.log.Error("Failed to serve webhook listener", "error", err)
@@ -352,24 +459,29 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		} else {
 			b.webhookServer.SetSecretToken(webhookSecret)
 		}
+	} else if b.webhookServer != nil {
+		retired.webhookServer = b.webhookServer
+		b.webhookServer = nil
 	}
 
 	// Resolve transport auth for IAP-protected hub endpoints.
 	// Uses the same ResolveBrokerTransport pattern as the runtime broker.
 	transportMode := config["transport_mode"]
 	transportAudience := config["transport_audience"]
-	src, mode, tErr := transportauth.ResolveBrokerTransport(transportMode, transportAudience, nil)
+	src, mode, tErr := resolveBrokerTransport(transportMode, transportAudience, nil)
 	if tErr != nil {
 		b.log.Warn("Failed to resolve transport auth, continuing without IAP tokens", "error", tErr)
 	}
+	// Wrap the unwrapped transport in a new client, so the transport is
+	// wrapped once however often the broker is reconfigured, and handlers
+	// of the previous configuration keep the client they started with.
+	transport := b.baseTransport
 	if src != nil {
-		if b.httpClient == nil {
-			b.httpClient = &http.Client{Timeout: 10 * time.Second}
-		}
-		b.httpClient.Transport = transportauth.Wrap(b.httpClient.Transport, src, mode)
+		transport = transportauth.Wrap(transport, src, mode)
 		b.log.Info("Transport auth configured for Telegram v2 broker",
 			"mode", transportMode, "audience", transportAudience)
 	}
+	b.httpClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
 	// Create hub client, sharing the broker's (possibly wrapped) httpClient.
 	b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID, b.httpClient)
@@ -427,15 +539,20 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		"store_backend", storeBackend,
 		"inbound_mode", b.inboundMode,
 	)
-	return nil
+	return retired, nil
 }
 
 // openSQLiteStore opens the SQLite store in Configure. Tests replace it to
 // observe the store a Configure call opens.
 var openSQLiteStore = NewSQLiteStore
 
+// resolveBrokerTransport resolves transport auth in Configure. Tests replace
+// it to supply a token source.
+var resolveBrokerTransport = transportauth.ResolveBrokerTransport
+
 // handleWebhookUpdate dispatches an update received by the webhook server.
 func (b *TelegramBrokerV2) handleWebhookUpdate(update Update) {
+	defer b.acquireGen()()
 	if update.CallbackQuery != nil {
 		cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cbCancel()
@@ -446,28 +563,40 @@ func (b *TelegramBrokerV2) handleWebhookUpdate(update Update) {
 	}
 }
 
-// RegisterWebhook calls the Telegram setWebhook API to register this instance's
-// webhook URL. In standalone HA mode, only the lock holder should call this.
-func (b *TelegramBrokerV2) RegisterWebhook(webhookURL, webhookSecret string) error {
-	b.mu.RLock()
-	api := b.api
-	b.mu.RUnlock()
+// RegisterWebhook calls the Telegram setWebhook API to register the webhook
+// URL and credential of the current configuration. In standalone HA mode,
+// only the lock holder should call this. Until DeregisterWebhook, each
+// reconfigure registers its webhook settings as well.
+//
+// b.mu is held across the call so a concurrent reconfigure cannot leave
+// Telegram registered with settings older than the current ones.
+func (b *TelegramBrokerV2) RegisterWebhook() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-	if api == nil {
+	if b.api == nil {
 		return fmt.Errorf("broker not configured")
+	}
+	if b.inboundMode != "webhook" {
+		return fmt.Errorf("broker is not in webhook mode")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return api.SetWebhook(ctx, webhookURL, webhookSecret)
+	if err := b.api.SetWebhook(ctx, b.webhookURL, b.webhookSecret); err != nil {
+		return err
+	}
+	b.webhookRegistered = true
+	return nil
 }
 
 // DeregisterWebhook calls the Telegram deleteWebhook API to remove the
 // webhook registration. Called when the lock holder loses the lock.
 func (b *TelegramBrokerV2) DeregisterWebhook() error {
-	b.mu.RLock()
+	b.mu.Lock()
 	api := b.api
-	b.mu.RUnlock()
+	b.webhookRegistered = false
+	b.mu.Unlock()
 
 	if api == nil {
 		return nil
@@ -678,7 +807,9 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	api := b.api
 	store := b.store
 	sq := b.sendQueue
+	release := b.acquireGenLocked()
 	b.mu.RUnlock()
+	defer release()
 
 	if api == nil {
 		return fmt.Errorf("telegram v2 broker not configured")
@@ -1639,7 +1770,11 @@ func (b *TelegramBrokerV2) Close() error {
 	webhookSrv := b.webhookServer
 	inboundMode := b.inboundMode
 	sendQueue := b.sendQueue
+	gen := b.gen
 	b.mu.Unlock()
+
+	// Let earlier configurations finish shutting down first.
+	b.retiring.Wait()
 
 	// Shut down inbound transport.
 	if inboundMode == "webhook" {
@@ -1661,6 +1796,11 @@ func (b *TelegramBrokerV2) Close() error {
 		}
 	} else {
 		b.stopPolling()
+	}
+
+	// Handlers still running must finish before the store is closed.
+	if gen != nil {
+		gen.active.Wait()
 	}
 
 	if sendQueue != nil {
@@ -1783,13 +1923,19 @@ func (b *TelegramBrokerV2) pollLoop(ctx context.Context) {
 
 		for _, update := range updates {
 			b.lastOffset = update.UpdateID
-			if update.CallbackQuery != nil {
-				b.handleCallbackQuery(ctx, update.CallbackQuery)
-			}
-			if update.Message != nil {
-				b.handleIncomingMessageV2(update.Message)
-			}
+			b.handlePolledUpdate(ctx, update)
 		}
+	}
+}
+
+// handlePolledUpdate dispatches an update received by long polling.
+func (b *TelegramBrokerV2) handlePolledUpdate(ctx context.Context, update Update) {
+	defer b.acquireGen()()
+	if update.CallbackQuery != nil {
+		b.handleCallbackQuery(ctx, update.CallbackQuery)
+	}
+	if update.Message != nil {
+		b.handleIncomingMessageV2(update.Message)
 	}
 }
 

@@ -146,6 +146,7 @@ type fakeTGServerV2 struct {
 	answeredCallbacks []answerCallbackQueryRequest
 	nextSendMessageID int64
 	webhookURL        string
+	webhookSecret     string
 	// chatMembers maps chatID → userID → member status for getChatMember.
 	chatMembers map[int64]map[int64]string
 	// failChatMember makes getChatMember fail with a server error for
@@ -287,6 +288,7 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 			fail := f.failSetWebhook
 			if !fail {
 				f.webhookURL = req.URL
+				f.webhookSecret = req.SecretToken
 			}
 			f.mu.Unlock()
 			if fail {
@@ -298,6 +300,7 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 		case "/bottest-token/deleteWebhook":
 			f.mu.Lock()
 			f.webhookURL = ""
+			f.webhookSecret = ""
 			f.mu.Unlock()
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
@@ -2517,6 +2520,7 @@ func TestV2_Reconfigure_NewListenAddressSwitchesServer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, status)
 
+	b.retiring.Wait() // the old server is stopped in the background
 	_, err = postWebhookUpdate(t, oldAddr, "test-secret")
 	assert.Error(t, err, "the old webhook server must be stopped")
 }
