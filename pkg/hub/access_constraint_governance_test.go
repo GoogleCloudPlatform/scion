@@ -1687,6 +1687,59 @@ func TestConstraintAdminLockout_OtherScopeAdminNotCounted(t *testing.T) {
 	assert.NoError(t, checkRoleBindingRemovalAdminLockout(ctx, s, now, binding))
 }
 
+// Only admin bindings active at the check time count as keeping the user
+// an admin at the removed binding's scope. A binding that is not yet
+// valid or has expired keeps no admin.
+func TestConstraintAdminLockout_InactiveSameScopeAdminNotCounted(t *testing.T) {
+	now := time.Now()
+	future := now.Add(24 * time.Hour)
+	past := now.Add(-24 * time.Hour)
+	tests := []struct {
+		name      string
+		notBefore *time.Time
+		expiresAt *time.Time
+		refused   bool
+	}{
+		{name: "scheduled", notBefore: &future, refused: true},
+		{name: "expired", expiresAt: &past, refused: true},
+		{name: "active", notBefore: &past, expiresAt: &future, refused: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			prefix := "lockout-inactive-" + tc.name
+			projectID := pvSeedProject(t, s, prefix+"-project")
+			rd := createTestRoleDefinition(t, s, prefix+"-admin-role",
+				store.RoleScopeProject, []string{PermissionConstraintAdmin})
+			otherRD := createTestRoleDefinition(t, s, prefix+"-other-role",
+				store.RoleScopeProject, []string{PermissionConstraintAdmin})
+			user := pvSeedUser(t, s, prefix+"-user")
+			binding := lockoutProjectBinding(t, s, rd.ID, "user", user, projectID)
+			_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: otherRD.ID,
+				PrincipalType:    "user",
+				PrincipalID:      user,
+				ScopeType:        store.RoleScopeProject,
+				ScopeID:          projectID,
+				NotBefore:        tc.notBefore,
+				ExpiresAt:        tc.expiresAt,
+				CreatedBy:        "test",
+			})
+			require.NoError(t, err)
+
+			err = checkRoleBindingRemovalAdminLockout(ctx, s, now, binding)
+			if !tc.refused {
+				assert.NoError(t, err)
+				return
+			}
+			var ge *GovernanceError
+			require.ErrorAs(t, err, &ge)
+			assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+		})
+	}
+}
+
 // DELETE /projects/{id}/members/principals/group/{groupID}.
 func TestConstraintAdminLockout_ProjectMemberGroupPrincipalDelete(t *testing.T) {
 	srv, s := testServer(t)
