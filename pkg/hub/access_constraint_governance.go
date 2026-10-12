@@ -29,7 +29,7 @@ import (
 // GovernanceService — transactional boundary mutation governance
 // ---------------------------------------------------------------------------
 
-// GovernanceService wraps B3's PreviewService with transactional commit.
+// GovernanceService wraps PreviewService with transactional commit.
 // Every boundary create/update/delete and every adjacent-domain change that
 // could relax a boundary must go through this service to enforce:
 //   - Preview token validation (single-use, actor/draft/state-bound)
