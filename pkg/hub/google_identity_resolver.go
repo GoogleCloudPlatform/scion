@@ -381,6 +381,15 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 		return existingUser, nil
 	}
 
+	// As with the binding lookup above, only store.ErrNotFound means "no
+	// user with this email exists". Any other store error is returned, so
+	// sign-in does not continue into new-user provisioning.
+	if !errors.Is(err, store.ErrNotFound) {
+		r.log.Error("google identity resolver: user lookup by email failed",
+			"sub", identity.Subject, "error", err)
+		return nil, fmt.Errorf("look up user by email: %w", err)
+	}
+
 	// No existing user by email — provision a new user through the normal path.
 	// This requires the same authorization checks as regular login, unless
 	// policy.PreAuthorized (service accounts admitted by allowed_gcp_projects).
