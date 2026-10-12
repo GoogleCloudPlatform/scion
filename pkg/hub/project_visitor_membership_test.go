@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -334,4 +335,72 @@ func TestReconcileBuiltInRoles_LeavesCustomRoleWithVisitorName(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, got.ConfersProjectMembership(), "a custom role keeps conferring membership")
 	assert.ElementsMatch(t, []string{"project.read", "agent.list"}, got.Permissions, "its permissions are unchanged")
+}
+
+// A project-visitor binding does not make the project a member scope for
+// artifact listing. The identity switch in MemberScopes admits no visitor
+// identity today; the identity is built directly to test the filter.
+func TestProjectVisitor_NotMember_ArtifactMemberScopes(t *testing.T) {
+	f := newVisitorMembershipFixture(t)
+	ctx := context.Background()
+	host := newArtifactHost(f.srv)
+
+	visitor := NewAuthenticatedUser(f.visitor.ID, "visitor@corp.example", f.visitor.DisplayName, f.visitor.Role, "web")
+	got, err := host.MemberScopes(contextWithIdentity(ctx, visitor))
+	require.NoError(t, err)
+	assert.Empty(t, got, "a project-visitor binding is not a member scope")
+
+	member := NewAuthenticatedUser(f.member.ID, f.member.Email, f.member.DisplayName, f.member.Role, "web")
+	got, err = host.MemberScopes(contextWithIdentity(ctx, member))
+	require.NoError(t, err)
+	assert.Equal(t, []string{f.projectID}, got)
+}
+
+// While federation.project_visitors is off, the role definition API does
+// not show the project-visitor role; while it is on, it does.
+func TestProjectVisitor_RoleDefinitionsHiddenWhileExperimentOff(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	rd, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleVisitor, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	setExperiment := func(on bool) {
+		t.Helper()
+		var active []experiments.Experiment
+		for _, e := range experiments.Default().All() {
+			if e.Name == experiments.FederationProjectVisitors {
+				e.Default = on
+			}
+			active = append(active, e)
+		}
+		reg, err := experiments.NewRegistry(active, nil)
+		require.NoError(t, err)
+		srv.experiments = reg
+	}
+	listed := func() (names []string, total int) {
+		t.Helper()
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp listRoleDefinitionsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		for _, d := range resp.Items {
+			names = append(names, d.Name)
+		}
+		return names, resp.TotalCount
+	}
+
+	setExperiment(false)
+	names, total := listed()
+	assert.NotContains(t, names, store.ProjectRoleVisitor)
+	assert.Contains(t, names, store.ProjectRoleMember)
+	assert.Equal(t, len(names), total)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/"+rd.ID, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+	setExperiment(true)
+	names, total = listed()
+	assert.Contains(t, names, store.ProjectRoleVisitor)
+	assert.Equal(t, len(names), total)
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/"+rd.ID, nil)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
