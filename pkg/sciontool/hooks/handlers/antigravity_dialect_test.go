@@ -16,6 +16,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -29,9 +30,7 @@ import (
 func loadAntigravityFixture(t *testing.T) (*dialects.MappingDialect, []*hooks.Event) {
 	t.Helper()
 
-	_, file, _, _ := runtime.Caller(0)
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	specPath := filepath.Join(root, "harnesses", "antigravity", "dialect.yaml")
+	specPath := testutil.HarnessDialectPath(t, "antigravity")
 	md, err := dialects.LoadMappingDialect(specPath)
 	if err != nil {
 		t.Fatalf("LoadMappingDialect(%s): %v", specPath, err)
@@ -40,6 +39,8 @@ func loadAntigravityFixture(t *testing.T) (*dialects.MappingDialect, []*hooks.Ev
 		t.Fatalf("dialect name = %q, want antigravity", md.Name())
 	}
 
+	_, file, _, _ := runtime.Caller(0)
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
 	fixturePath := filepath.Join(root, "pkg", "sciontool", "hooks", "dialects",
 		"testdata", "antigravity", "hook-payloads-1.2.12.jsonl")
 	f, err := os.Open(fixturePath)
@@ -130,6 +131,7 @@ func TestAntigravityFixture_EventSequence(t *testing.T) {
 // scion.usage.tokens must have no data points at all: there is nothing to
 // report, and nothing must synthesize a value.
 func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	// Pin the full label set metricAttrs()/recordEndMetrics stamp on
 	// gen_ai.api.calls (design §3.2): agent_id, project_id and harness from
@@ -290,6 +292,7 @@ func TestAntigravityFixture_ModelFromPayload(t *testing.T) {
 // first so the PostInvocation pairs with it and the duration histogram is
 // recorded (the unpaired path records calls only).
 func TestAntigravityDialect_ModelLabelFallsBackToUnknown(t *testing.T) {
+	scrubTelemetryEnv(t)
 	md, _ := loadAntigravityFixture(t)
 	for _, tc := range []struct{ envModel, want string }{
 		{"configured-model", "configured-model"},
@@ -345,6 +348,7 @@ func TestAntigravityDialect_ModelLabelFallsBackToUnknown(t *testing.T) {
 // unaffected either way (design D4, narrow): the one real tool call still
 // shows up.
 func TestAntigravityFixture_UsageSourceUnsetPublishesNothing(t *testing.T) {
+	scrubTelemetryEnv(t)
 	// Explicitly unset, not just left alone: the antigravity provision.py sets
 	// SCION_USAGE_SOURCE=hooks in every antigravity agent, so a bare `go
 	// test` run inside one would otherwise see it ambiently set and fail
@@ -395,9 +399,7 @@ func TestAntigravityFixture_UsageSourceUnsetPublishesNothing(t *testing.T) {
 // and friends) and is simply ignored rather than panicking or coercing
 // garbage into a number.
 func TestAntigravityDialect_MalformedTokenFieldsAreIgnored(t *testing.T) {
-	_, file, _, _ := runtime.Caller(0)
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	specPath := filepath.Join(root, "harnesses", "antigravity", "dialect.yaml")
+	specPath := testutil.HarnessDialectPath(t, "antigravity")
 	md, err := dialects.LoadMappingDialect(specPath)
 	if err != nil {
 		t.Fatalf("LoadMappingDialect(%s): %v", specPath, err)
