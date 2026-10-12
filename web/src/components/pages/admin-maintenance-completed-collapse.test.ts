@@ -46,6 +46,7 @@ type Page = HTMLElement & {
 };
 
 let current: Migration[] = [];
+let delayMs = 0;
 let fetchMock: ReturnType<typeof vi.fn>;
 
 function handler(input: string | URL | Request): Promise<Response> {
@@ -57,12 +58,13 @@ function handler(input: string | URL | Request): Promise<Response> {
       : path === '/api/v1/admin/maintenance/operations'
         ? { migrations: current, operations: [] }
         : {};
-  return Promise.resolve(
-    new Response(JSON.stringify(body), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    })
-  );
+  const response = new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  return delayMs > 0
+    ? new Promise((resolve) => setTimeout(() => resolve(response), delayMs))
+    : Promise.resolve(response);
 }
 
 beforeAll(async () => {
@@ -71,6 +73,7 @@ beforeAll(async () => {
 
 let el: Page | null = null;
 afterEach(() => {
+  delayMs = 0;
   el?.remove();
   el = null;
   vi.unstubAllGlobals();
@@ -90,6 +93,18 @@ async function mount(migrations: Migration[]): Promise<Page> {
   document.body.appendChild(e);
   await settle(e);
   return e;
+}
+
+// Runs a non-polling reload with a delayed response, checks that the loading
+// spinner replaced the element meanwhile, then waits for the reload to finish.
+async function reloadThroughSpinner(e: Page): Promise<void> {
+  delayMs = 50;
+  const done = e.loadData();
+  await e.updateComplete;
+  expect(details(e)).toBeNull();
+  await done;
+  delayMs = 0;
+  await settle(e);
 }
 
 function details(e: Page): HTMLElement | null {
@@ -192,6 +207,39 @@ describe('admin maintenance completed migrations', () => {
     expect(after.open).toBe(true);
     expect(after.getAttribute('summary')).toBe('Completed migrations (3)');
     expect(titles(after)).toEqual(['Title a', 'Title c', 'Title e']);
+  });
+
+  it('keeps the open or closed state across a reload that re-creates the element', async () => {
+    el = await mount(mixed);
+    const first = details(el) as HTMLElement & { open?: boolean };
+    first.setAttribute('open', '');
+    first.dispatchEvent(new CustomEvent('sl-show', { bubbles: true, composed: true }));
+    await el.updateComplete;
+
+    // A non-polling reload shows the loading spinner, which removes the element.
+    await reloadThroughSpinner(el);
+
+    const second = details(el);
+    expect(second).not.toBeNull();
+    expect(second).not.toBe(first);
+    expect(second?.hasAttribute('open')).toBe(true);
+
+    second?.removeAttribute('open');
+    second?.dispatchEvent(new CustomEvent('sl-hide', { bubbles: true, composed: true }));
+    await el.updateComplete;
+    await reloadThroughSpinner(el);
+
+    expect(details(el)?.hasAttribute('open')).toBe(false);
+  });
+
+  it('ignores sl-show from elements inside the cards', async () => {
+    el = await mount(mixed);
+    const card = details(el)?.querySelector('.card') as HTMLElement;
+    card.dispatchEvent(new CustomEvent('sl-show', { bubbles: true, composed: true }));
+    await el.updateComplete;
+    await reloadThroughSpinner(el);
+
+    expect(details(el)?.hasAttribute('open')).toBe(false);
   });
 
   it('keeps the run action working on cards outside the element', async () => {
