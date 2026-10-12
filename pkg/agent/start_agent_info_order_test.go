@@ -27,12 +27,15 @@ import (
 )
 
 // Some runtimes do not let the host write files in the container, so Start
-// writes agent-info.json (running phase, runtime, profile) before the
-// container starts and never while it runs (ptone/scion#4766). The fake
-// runtime snapshots the file when the container starts; any later host
-// write replaces it (writeAgentInfoFile renames a temp file over it), which
-// the comparison after Start detects.
-func TestStart_NoAgentInfoWriteWhileContainerRuns(t *testing.T) {
+// writes the running phase, runtime and profile to agent-info.json before
+// the container starts, not after it (ptone/scion#4766). This covers the
+// path where the pre-start runtime List succeeds; when it fails, Start still
+// records the run ID after the create (recordAfterCreate), which moves out
+// of agent-info.json in ptone/scion#4771. The fake runtime snapshots the
+// file when the container starts; any later host write replaces it
+// (writeAgentInfoFile renames a temp file over it), which the comparison
+// after Start detects.
+func TestStart_ListOK_NoAgentInfoWriteWhileContainerRuns(t *testing.T) {
 	for _, fresh := range []bool{false, true} {
 		name := "provisioned"
 		if fresh {

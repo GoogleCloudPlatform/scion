@@ -2502,11 +2502,13 @@ authDone:
 		_ = dropCheckedSharedDirs(agentDir, sharedDirRecord, passed, opts.Name)
 	}
 	// Record the running phase, runtime and profile before the container
-	// starts: the host must not write agent-info.json while the container
-	// runs, since some runtimes do not let the host write files in the
-	// container. Once up, the container reports its own phase (sciontool
-	// init writes "running"); a failed launch below overwrites this with
-	// "error".
+	// starts rather than after it: some runtimes do not let the host write
+	// files in the container (ptone/scion#4766). Once up, the container
+	// reports its own phase (sciontool init writes "running"). This covers
+	// only the running-phase write: the "error" write on a failed launch
+	// below, and the run ID record after the create when the pre-start
+	// List failed (recordAfterCreate, moving in ptone/scion#4771), still
+	// write agent-info.json after Run.
 	//
 	// Phase is always "running" here, for both a fresh start and a resume:
 	// state.Phase has no "resumed" value, and a non-standard phase string
@@ -2531,6 +2533,8 @@ authDone:
 	}
 	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
 		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
+	// This write runs while the container may be up; it moves out of
+	// agent-info.json in ptone/scion#4771.
 	if recordAfterCreate {
 		if err := SetSavedRunID(opts.Name, opts.ProjectPath, runID); err != nil {
 			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",

@@ -161,7 +161,8 @@ func TestDeleteAgent_RuntimeRunMismatch_RunCheckedStopLeavesNewRun(t *testing.T)
 	assertUntouched(t, scionB, "dev", infoB)
 }
 
-// A soft delete that loses the race writes no soft-delete mark: the
+// A soft delete that loses the race writes no soft-delete mark (this test
+// replaces markAgentSoftDeleted, so it must not call t.Parallel): the
 // runtime reports a run mismatch, nothing was deleted, and the newer run's
 // agent-info.json keeps its phase and earlier deletedAt.
 func TestDeleteAgent_RuntimeRunMismatch_NoSoftDeleteMark(t *testing.T) {
@@ -176,9 +177,16 @@ func TestDeleteAgent_RuntimeRunMismatch_NoSoftDeleteMark(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	marks := countSoftDeleteMarks(t)
+
 	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Zero calls, not only the final state: a mark written and then
+	// undone would leave the same file.
+	if n := marks(); n != 0 {
+		t.Errorf("soft-delete mark written %d times on a run mismatch", n)
 	}
 	if phase, deletedAt := readDeleteMark(t, scionB, "dev"); phase != "running" || !deletedAt.Equal(prior) {
 		t.Errorf("soft-delete mark written on a run mismatch: phase %q deletedAt %v, want running and %v", phase, deletedAt, prior)
@@ -287,7 +295,8 @@ func TestClassifyStartError_RunConflict(t *testing.T) {
 
 // A runtime delete failure (nothing confirmed deleted, the container may
 // still run) writes no soft-delete mark; the delete answers with a runtime
-// error.
+// error. This test replaces markAgentSoftDeleted, so it must not call
+// t.Parallel.
 func TestDeleteAgent_RuntimeFailure_NoSoftDeleteMark(t *testing.T) {
 	rt := newNameHeldRuntime("run-old")
 	rt.DeleteFunc = func(context.Context, runtime.RunRef) error { return fmt.Errorf("apiserver unavailable") }
@@ -296,12 +305,19 @@ func TestDeleteAgent_RuntimeFailure_NoSoftDeleteMark(t *testing.T) {
 	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
 	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
 
+	marks := countSoftDeleteMarks(t)
+
 	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
 	if rec.Code < 500 {
 		t.Fatalf("expected a 5xx, got %d: %s", rec.Code, rec.Body.String())
 	}
+	// Zero calls, not only the final state: a mark written and then
+	// undone would leave the same file.
+	if n := marks(); n != 0 {
+		t.Errorf("soft-delete mark written %d times although the runtime delete failed", n)
+	}
 	if phase, deletedAt := readDeleteMark(t, scionB, "dev"); phase != "running" || !deletedAt.IsZero() {
-		t.Errorf("soft-delete mark written although the runtime delete failed: phase %q deletedAt %v", phase, deletedAt)
+		t.Errorf("soft-delete mark left although the runtime delete failed: phase %q deletedAt %v", phase, deletedAt)
 	}
 }
 
@@ -386,6 +402,8 @@ func (m *filesFailManager) DeleteTarget(ctx context.Context, agentName string, r
 
 // Regression (P2 review round 3, B1): when the runtime delete succeeded and
 // only file cleanup failed, the soft-delete mark is written: the pod is gone.
+// This guards existing behaviour (main keeps the mark here too): it fails
+// if the post-delete mark stops accepting agent.ErrAgentFilesDelete.
 func TestDeleteAgent_FilesFailureAfterRuntimeDelete_KeepsMark(t *testing.T) {
 	rt := newNameHeldRuntime("run-old")
 	mgr := &filesFailManager{k8sStyleManager{real: agent.NewManager(rt)}}

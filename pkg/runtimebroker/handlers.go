@@ -2637,15 +2637,13 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 				deletedAt = t
 			}
 		}
+		// After the runtime delete the mark is advisory: the hub's agent
+		// row records the soft delete, and the mark only feeds local
+		// display. A failed mark (unparseable agent-info.json, a read-only
+		// home, a full disk) would not clear on a retry, so it is logged
+		// and the delete goes on.
 		if markErr := markAgentSoftDeleted(target.name, projectPath, deletedAt); markErr != nil {
 			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", markErr)
-			if err == nil {
-				// Answer with an error so the hub retries the delete; the
-				// retry finds the files only (the container is gone) and
-				// writes the mark then.
-				s.writeRuntimeOpError(w, ctx, "delete agent", fmt.Errorf("mark agent soft-deleted: %w", markErr), "agent_id", id, "project_id", projectID)
-				return
-			}
 		}
 	}
 	if errors.Is(err, scionrt.ErrRunMismatch) {
@@ -7159,7 +7157,7 @@ func otherRunContainerID(cands []agentCandidate, runID string) string {
 }
 
 // markAgentSoftDeleted writes the soft-delete mark to agent-info.json; a
-// variable so tests can observe the write or make it fail. Tests that
+// variable so tests can observe the write. Tests that
 // replace it must not call t.Parallel, since every Server shares it.
 var markAgentSoftDeleted = agent.MarkAgentSoftDeleted
 

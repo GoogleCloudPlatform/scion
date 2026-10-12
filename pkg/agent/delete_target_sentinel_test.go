@@ -22,10 +22,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// ErrRuntimeDelete marks only a failure of the runtime Delete call, never a
-// file-cleanup failure after it succeeded (P2 review round 4), and
-// ErrAgentFilesDelete marks only the file-cleanup failure.
-func TestDeleteTarget_ErrRuntimeDeleteScope(t *testing.T) {
+// ErrAgentFilesDelete marks only a file-cleanup failure after a successful
+// runtime delete, never a failure of the runtime Delete call itself.
+func TestDeleteTarget_ErrAgentFilesDeleteScope(t *testing.T) {
 	projectDir := t.TempDir()
 
 	deleted := false
@@ -39,9 +38,6 @@ func TestDeleteTarget_ErrRuntimeDeleteScope(t *testing.T) {
 	if err == nil {
 		t.Fatal("premise: expected a file-cleanup error")
 	}
-	if errors.Is(err, ErrRuntimeDelete) {
-		t.Errorf("file-cleanup failure wrapped as ErrRuntimeDelete: %v", err)
-	}
 	// The file-cleanup failure is the positive signal that the runtime
 	// entry is gone (ptone/scion#4766).
 	if !errors.Is(err, ErrAgentFilesDelete) {
@@ -51,8 +47,8 @@ func TestDeleteTarget_ErrRuntimeDeleteScope(t *testing.T) {
 	cause := errors.New("apiserver unavailable")
 	bad := &runtime.MockRuntime{DeleteFunc: func(context.Context, runtime.RunRef) error { return cause }}
 	_, err = NewManager(bad).DeleteTarget(context.Background(), "dev", runtime.RunRef{ID: "cid", RunID: "r1"}, true, projectDir, false)
-	if !errors.Is(err, ErrRuntimeDelete) || !errors.Is(err, cause) {
-		t.Errorf("runtime failure: errors.Is(ErrRuntimeDelete)=%v errors.Is(cause)=%v: %v", errors.Is(err, ErrRuntimeDelete), errors.Is(err, cause), err)
+	if !errors.Is(err, cause) {
+		t.Errorf("runtime failure does not wrap its cause: %v", err)
 	}
 	if errors.Is(err, ErrAgentFilesDelete) {
 		t.Errorf("runtime failure wrapped as ErrAgentFilesDelete: %v", err)

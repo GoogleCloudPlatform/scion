@@ -15,15 +15,21 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -101,42 +107,40 @@ func TestDeleteAgent_SoftDeleteMarkAfterContainerStopped(t *testing.T) {
 	}
 }
 
-// When the mark cannot be written after a successful runtime delete, the
-// broker answers 500 so the hub retries. The retry finds the files only (the
-// container is gone) and writes the mark.
-func TestDeleteAgent_SoftDeleteMarkFailure_RetryWritesMark(t *testing.T) {
+// After a successful runtime delete the mark is advisory (the hub's agent
+// row records the soft delete), so a mark that cannot be written, here
+// because agent-info.json is not valid JSON, is logged as a warning and the
+// delete still answers 204.
+func TestDeleteAgent_SoftDeleteMarkFailure_Warns204(t *testing.T) {
 	rt := newNameHeldRuntime("run-old")
 	mgr := &k8sStyleManager{real: agent.NewManager(rt)}
 	srv, home := newCleanupTestServer(t, mgr)
+	var logs bytes.Buffer
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logs, nil))
 	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
 	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
+	infoPath := filepath.Join(config.GetAgentHomePath(scionB, "dev"), "agent-info.json")
+	const corrupt = `{"name":"dev","phase":"running"`
+	if err := os.WriteFile(infoPath, []byte(corrupt), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	orig := markAgentSoftDeleted
-	t.Cleanup(func() { markAgentSoftDeleted = orig })
-	markAgentSoftDeleted = func(string, string, time.Time) error { return errors.New("agent home not writable") }
-
-	query := "projectId=" + scopeProjB + "&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z"
-	rec := doDelete(t, srv, "dev", query)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 when the mark fails, got %d: %s", rec.Code, rec.Body.String())
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 	if rt.stillPresent() {
 		t.Fatal("runtime entry not deleted; the test premise does not hold")
 	}
-	if phase, _ := readDeleteMark(t, scionB, "dev"); phase != "running" {
-		t.Fatalf("phase %q after the failed mark, want running", phase)
+	data, err := os.ReadFile(infoPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// The hub retries the same soft delete; the container is gone now.
-	markAgentSoftDeleted = orig
-	mgr.agents = nil
-	rec = doDelete(t, srv, "dev", query)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("retry: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	if string(data) != corrupt {
+		t.Errorf("agent-info.json changed although the mark failed: %s", data)
 	}
-	phase, deletedAt := readDeleteMark(t, scionB, "dev")
-	if phase != "deleted" || !deletedAt.Equal(time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)) {
-		t.Errorf("after the retry: phase %q deletedAt %v, want deleted and 2026-10-03", phase, deletedAt)
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "Failed to mark agent as deleted in agent-info.json") {
+		t.Errorf("no warning logged for the failed mark; logs:\n%s", logs.String())
 	}
 }
 
@@ -158,18 +162,25 @@ func TestDeleteAgent_NonSentinelDeleteError_NoSoftDeleteMark(t *testing.T) {
 	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
 	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
 
+	marks := countSoftDeleteMarks(t)
+
 	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
 	if rec.Code < 500 {
 		t.Fatalf("expected a 5xx, got %d: %s", rec.Code, rec.Body.String())
 	}
+	if n := marks(); n != 0 {
+		t.Errorf("soft-delete mark written %d times after a non-sentinel delete error", n)
+	}
 	if phase, deletedAt := readDeleteMark(t, scionB, "dev"); phase != "running" || !deletedAt.IsZero() {
-		t.Errorf("soft-delete mark written after a non-sentinel delete error: phase %q deletedAt %v", phase, deletedAt)
+		t.Errorf("soft-delete mark left after a non-sentinel delete error: phase %q deletedAt %v", phase, deletedAt)
 	}
 }
 
 // When the files are another run's, a soft delete of the requested run's
 // container deletes the container and writes no mark on the post-delete
-// path either.
+// path either. This guards existing behaviour (main skips the mark here
+// too): it fails if the !filesOfOtherRun condition is dropped from the
+// post-delete mark.
 func TestDeleteAgent_FilesOfOtherRun_SoftDeleteWritesNoMark(t *testing.T) {
 	rt := newNameHeldRuntime("run-old")
 	mgr := &k8sStyleManager{real: agent.NewManager(rt)}
@@ -178,13 +189,7 @@ func TestDeleteAgent_FilesOfOtherRun_SoftDeleteWritesNoMark(t *testing.T) {
 	recordRun(t, scionB, "dev", "run-new")
 	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
 
-	orig := markAgentSoftDeleted
-	t.Cleanup(func() { markAgentSoftDeleted = orig })
-	marks := 0
-	markAgentSoftDeleted = func(name, projectPath string, deletedAt time.Time) error {
-		marks++
-		return orig(name, projectPath, deletedAt)
-	}
+	marks := countSoftDeleteMarks(t)
 
 	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
 	if rec.Code != http.StatusNoContent {
@@ -193,10 +198,31 @@ func TestDeleteAgent_FilesOfOtherRun_SoftDeleteWritesNoMark(t *testing.T) {
 	if rt.stillPresent() {
 		t.Fatal("the requested run's container was not deleted; the test premise does not hold")
 	}
-	if marks != 0 {
-		t.Errorf("soft-delete mark written %d times on files owned by another run", marks)
+	if n := marks(); n != 0 {
+		t.Errorf("soft-delete mark written %d times on files owned by another run", n)
 	}
 	if phase, deletedAt := readDeleteMark(t, scionB, "dev"); phase != "running" || !deletedAt.IsZero() {
 		t.Errorf("another run's agent-info.json was marked: phase %q deletedAt %v", phase, deletedAt)
+	}
+}
+
+// countSoftDeleteMarks wraps markAgentSoftDeleted to count its calls, and
+// restores it when the test ends. The returned func reads the count.
+func countSoftDeleteMarks(t *testing.T) func() int {
+	t.Helper()
+	orig := markAgentSoftDeleted
+	t.Cleanup(func() { markAgentSoftDeleted = orig })
+	var mu sync.Mutex
+	n := 0
+	markAgentSoftDeleted = func(name, projectPath string, deletedAt time.Time) error {
+		mu.Lock()
+		n++
+		mu.Unlock()
+		return orig(name, projectPath, deletedAt)
+	}
+	return func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
 	}
 }
