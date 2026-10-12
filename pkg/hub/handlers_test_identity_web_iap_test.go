@@ -1155,31 +1155,31 @@ func TestTIWebIAP_BearerRuleTruthTable(t *testing.T) {
 		extra     map[string]string
 		cleared   bool
 	}{
-		"no test identity session":           {tiDriverEmail, b.valid, nil, nil},
+		"no test identity session":           {tiDriverEmail, b.valid, nil, nil, false},
 		"assertion of another driver":        {tiDriver2Email, b.googleToken(tiDriver2Email, nil), b.jar, nil, true},
 		"no assertion":                       {"", b.valid, b.jar, nil, true},
-		"token email is not the assertion's": {tiDriverEmail, b.googleToken(tiDriver2Email, nil), b.jar, nil},
-		"token email is not a driver":        {tiDriverEmail, b.googleToken("worker@ti-test.iam.gserviceaccount.com", nil), b.jar, nil},
+		"token email is not the assertion's": {tiDriverEmail, b.googleToken(tiDriver2Email, nil), b.jar, nil, false},
+		"token email is not a driver":        {tiDriverEmail, b.googleToken("worker@ti-test.iam.gserviceaccount.com", nil), b.jar, nil, false},
 		"audience mismatch": {tiDriverEmail, b.googleToken(tiDriverEmail, func(c map[string]interface{}) {
 			c["aud"] = "another-client.apps.googleusercontent.com"
-		}), b.jar, nil},
+		}), b.jar, nil, false},
 		"audience list with another entry": {tiDriverEmail, b.googleToken(tiDriverEmail, func(c map[string]interface{}) {
 			c["aud"] = []string{tiDriverTokenAudience, "another-client.apps.googleusercontent.com"}
-		}), b.jar, nil},
+		}), b.jar, nil, false},
 		"bad signature": {tiDriverEmail, signIDToken(otherKP, func() map[string]interface{} {
 			c := serviceAccountIDTokenClaims(tiDriverEmail)
 			c["aud"] = tiDriverTokenAudience
 			return c
-		}()), b.jar, nil},
+		}()), b.jar, nil, false},
 		"expired token": {tiDriverEmail, b.googleToken(tiDriverEmail, func(c map[string]interface{}) {
 			c["exp"] = time.Now().Add(-time.Hour).Unix()
 			c["iat"] = time.Now().Add(-2 * time.Hour).Unix()
-		}), b.jar, nil},
+		}), b.jar, nil, false},
 		"unverified email": {tiDriverEmail, b.googleToken(tiDriverEmail, func(c map[string]interface{}) {
 			c["email_verified"] = false
-		}), b.jar, nil},
-		"not a JWT":                     {tiDriverEmail, "opaque-driver-token", b.jar, nil},
-		"another credential header too": {tiDriverEmail, b.valid, b.jar, map[string]string{"X-Scion-Agent-Token": "x"}},
+		}), b.jar, nil, false},
+		"not a JWT":                     {tiDriverEmail, "opaque-driver-token", b.jar, nil, false},
+		"another credential header too": {tiDriverEmail, b.valid, b.jar, map[string]string{"X-Scion-Agent-Token": "x"}, false},
 	}
 	for name, c := range unchanged {
 		rec, seen := b.call(c.assertion, c.bearer, c.jar, c.extra)
