@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
@@ -189,5 +191,110 @@ func TestFlatAsyncCreate_AcceptedLaunchKeepsOwnershipMirror(t *testing.T) {
 		return len(f.srv.launchRegistry.records) == 0
 	}) {
 		t.Fatal("the launch did not finish")
+	}
+}
+
+// acceptFlatAsyncCreate gives the flat instance a hub connection whose
+// launch reports answer with claim, then makes an async create of name that
+// must be accepted (201). The launch then runs in the background.
+func acceptFlatAsyncCreate(t *testing.T, f *flatInstanceFixture, name string, claim func(*hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error)) {
+	t.Helper()
+	rtb := &mockRuntimeBrokerService{launchReportFunc: claim}
+	f.srv.hubMu.Lock()
+	f.srv.hubConnections["hub-a"] = &HubConnection{Name: "hub-a", BrokerID: f.identity.RuntimeBrokerID, HubClient: &stubBrokerHubClient{brokers: rtb}}
+	f.srv.hubMu.Unlock()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(flatAsyncCreateBody(f, name, nil)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Hub-Connection", "hub-a")
+	w := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", w.Code, w.Body.String())
+	}
+}
+
+// launchEnded reports whether no launch is registered any more.
+func launchEnded(f *flatInstanceFixture) bool {
+	f.srv.launchRegistry.mu.Lock()
+	defer f.srv.launchRegistry.mu.Unlock()
+	return len(f.srv.launchRegistry.records) == 0
+}
+
+// TestFlatAsyncLaunch_LocalCancelDuringClaimReleasesOwnershipMirror: an
+// accepted launch stopped locally while its claim is in flight ends before
+// Start, and its ownership mirror is released.
+func TestFlatAsyncLaunch_LocalCancelDuringClaimReleasesOwnershipMirror(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	block := make(chan struct{})
+	defer close(block)
+	acceptFlatAsyncCreate(t, f, "launch-cancel", func(*hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		<-block
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	})
+	if n := ownedStartCount(f.srv); n != 1 {
+		t.Fatalf("%d ownership mirror(s) after the 201, want 1 held for the launch", n)
+	}
+
+	f.srv.launchRegistry.CancelLocal(launchKey{ProjectID: flatTestProjectID, Slug: "launch-cancel"})
+	// runLaunch releases the mirror after its other deferred steps (the
+	// registry's Finish among them), so wait for both.
+	if !waitUntil(t, 5*time.Second, func() bool { return launchEnded(f) && ownedStartCount(f.srv) == 0 }) {
+		t.Fatalf("after the local cancel: launch ended = %v, ownership mirrors = %d; want the launch ended with no mirror left",
+			launchEnded(f), ownedStartCount(f.srv))
+	}
+	if n := f.mgr.StartCalls(); n != 0 {
+		t.Fatalf("Start calls = %d, want 0", n)
+	}
+}
+
+// TestFlatAsyncLaunch_GateAbortReleasesOwnershipMirror: an accepted launch
+// whose claim is answered 409 superseded ends before Start, and its
+// ownership mirror is released.
+func TestFlatAsyncLaunch_GateAbortReleasesOwnershipMirror(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	acceptFlatAsyncCreate(t, f, "launch-abort", func(*hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Reason: hubclient.AgentLaunchReportReasonSuperseded}, nil
+	})
+
+	// runLaunch releases the mirror after its other deferred steps (the
+	// registry's Finish among them), so wait for both.
+	if !waitUntil(t, 5*time.Second, func() bool { return launchEnded(f) && ownedStartCount(f.srv) == 0 }) {
+		t.Fatalf("after the gate abort: launch ended = %v, ownership mirrors = %d; want the launch ended with no mirror left",
+			launchEnded(f), ownedStartCount(f.srv))
+	}
+	if n := f.mgr.StartCalls(); n != 0 {
+		t.Fatalf("Start calls = %d, want 0", n)
+	}
+}
+
+// TestFlatOwnedStart_ReleaseAfterCompleteIsNoOp: releasing a mirror that
+// Start's completion already consumed, or releasing it twice, changes
+// nothing, and in particular leaves another run's mirror in place.
+func TestFlatOwnedStart_ReleaseAfterCompleteIsNoOp(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	optsX := api.StartOptions{RunID: "run-x"}
+	optsY := api.StartOptions{RunID: "run-y"}
+	f.srv.installOwnedStart(&optsX, flatTestProjectID, "agent-x")
+	f.srv.installOwnedStart(&optsY, flatTestProjectID, "agent-y")
+	if n := ownedStartCount(f.srv); n != 2 {
+		t.Fatalf("%d ownership mirrors installed, want 2", n)
+	}
+
+	startErr := errors.New("start failed")
+	if err := f.srv.completeOwnedStart(context.Background(), f.mgr, "run-x", startErr, false); !errors.Is(err, startErr) {
+		t.Fatalf("completeOwnedStart = %v, want the start error", err)
+	}
+	f.srv.releaseOwnedStart("run-x")
+	f.srv.releaseOwnedStart("run-x")
+	f.srv.releaseOwnedStart("")
+	if n := ownedStartCount(f.srv); n != 1 {
+		t.Fatalf("%d ownership mirror(s) after releasing a consumed run twice, want 1 (run-y)", n)
+	}
+	if got := f.srv.ownedRunKeyFor("run-y"); got.runID != "run-y" {
+		t.Fatalf("run-y's mirror = %+v, want it still in place", got)
+	}
+	f.srv.releaseOwnedStart("run-y")
+	if n := ownedStartCount(f.srv); n != 0 {
+		t.Fatalf("%d ownership mirror(s) after releasing run-y, want 0", n)
 	}
 }

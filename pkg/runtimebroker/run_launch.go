@@ -151,6 +151,14 @@ type launchCtx struct {
 // receivedAt + LaunchTimeoutSeconds - 20s), built by the caller
 // (beginAsyncLaunch) before this goroutine starts.
 func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx) {
+	// A flat instance's ownership mirror, handed over when the launch was
+	// accepted, is released when the launch ends: runLaunch returns early on
+	// several paths before Start (claim errors, gate and keepalive aborts,
+	// marker and download failures). Start's own completion consumes the
+	// mirror first (completeOwnedStart), which makes this a no-op, and every
+	// path that started Start waits for it to return before runLaunch does.
+	// Deferred first so it runs after every other deferred step.
+	defer s.releaseOwnedStart(lc.opts.RunID)
 	defer rec.cancel() // ctx' must not outlive runLaunch on any path
 	defer s.launchRegistry.Finish(lc.key, rec)
 	defer removeLaunchMarkerIfMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID)

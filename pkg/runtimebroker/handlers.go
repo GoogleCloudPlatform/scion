@@ -2991,12 +2991,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 
 	// A flat instance's ownership mirror installed by buildStartContext is
-	// released when this request ends unless Start consumed it or the async
-	// launch took it over (ptone/scion#3274).
+	// released when this request ends unless Start consumed it
+	// (ptone/scion#3274).
 	var sc *startContext
-	ownedHandoff := false
 	defer func() {
-		if sc != nil && !ownedHandoff {
+		if sc != nil {
 			s.releaseOwnedStart(sc.Opts.RunID)
 		}
 	}()
@@ -4052,12 +4051,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	}
 
 	// A flat instance's ownership mirror installed by buildStartContext is
-	// released when this request ends unless Start consumed it or the async
-	// launch took it over (ptone/scion#3274).
+	// released when this request ends unless Start consumed it
+	// (ptone/scion#3274).
 	var sc *startContext
-	ownedHandoff := false
 	defer func() {
-		if sc != nil && !ownedHandoff {
+		if sc != nil {
 			s.releaseOwnedStart(sc.Opts.RunID)
 		}
 	}()
