@@ -1456,3 +1456,170 @@ func TestGovernanceError_Interface(t *testing.T) {
 	var e error = err
 	assert.NotNil(t, e)
 }
+
+// ---------------------------------------------------------------------------
+// 11c. Constraint-admin lockout on role-binding delete paths
+// ---------------------------------------------------------------------------
+
+func requireBindingExists(t *testing.T, s store.Store, bindingID string, want bool) {
+	t.Helper()
+	_, err := s.GetRoleBinding(context.Background(), bindingID)
+	if want {
+		assert.NoError(t, err, "binding %s should be kept", bindingID)
+	} else {
+		assert.ErrorIs(t, err, store.ErrNotFound, "binding %s should be deleted", bindingID)
+	}
+}
+
+func requireLockoutRefusal(t *testing.T, code int, body []byte) {
+	t.Helper()
+	require.Equal(t, http.StatusConflict, code, string(body))
+	assert.Equal(t, ErrCodeConstraintAdminLockout, decodeErrorCode(t, body))
+}
+
+// lockoutSystemBinding creates a system-scoped binding of the named
+// built-in role for a new active user.
+func lockoutSystemBinding(t *testing.T, s store.Store, roleName, name string) *store.RoleBinding {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
+	require.NoError(t, err)
+	b, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      pvSeedUser(t, s, name),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+	return b
+}
+
+// lockoutSuspendDevUser keeps the dev user's own super-admin binding out of
+// the system-scope admin count. The request still runs as the dev user.
+func lockoutSuspendDevUser(t *testing.T, srv *Server, s store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	dev := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, dev.ID)
+	dev.Status = store.UserStatusSuspended
+	require.NoError(t, s.UpdateUser(ctx, dev))
+}
+
+// DELETE /admin/role-bindings/{id}, system scope, non-super-admin role.
+func TestConstraintAdminLockout_RoleBindingDeleteSystem(t *testing.T) {
+	srv, s := testServer(t)
+	lockoutSuspendDevUser(t, srv, s)
+	a := lockoutSystemBinding(t, s, store.SystemRoleHubAdmin, "lockout-rb-sys-a")
+	b := lockoutSystemBinding(t, s, store.SystemRoleHubAdmin, "lockout-rb-sys-b")
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+a.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, a.ID, false)
+
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+b.ID, nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	assert.Contains(t, rec.Body.String(), "removing this role binding")
+	requireBindingExists(t, s, b.ID, true)
+}
+
+// DELETE /admin/role-bindings/{id}, system super-admin binding. The
+// last-super-admin guard passes; the remaining super-admin is restricted
+// by a scheduled constraint, so the lockout check refuses.
+func TestConstraintAdminLockout_RoleBindingDeleteSuperAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	lockoutSuspendDevUser(t, srv, s)
+	a := lockoutSystemBinding(t, s, store.SystemRoleSuperAdmin, "lockout-rb-sa-a")
+	b := lockoutSystemBinding(t, s, store.SystemRoleSuperAdmin, "lockout-rb-sa-b")
+	future := time.Now().Add(24 * time.Hour)
+	_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "lockout-rb-sa-scheduled",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   pvStrPtr(b.PrincipalID),
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"agent.read"},
+		NotBefore:            &future,
+		Purpose:              "scheduled restriction",
+		CreatedBy:            "test",
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+a.ID, nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	assert.Contains(t, rec.Body.String(), "when scheduled constraints activate")
+	requireBindingExists(t, s, a.ID, true)
+
+	// With an unrestricted super-admin remaining, the delete succeeds.
+	lockoutSystemBinding(t, s, store.SystemRoleSuperAdmin, "lockout-rb-sa-c")
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+a.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, a.ID, false)
+}
+
+// DELETE /admin/role-bindings/{id}, project scope (membership service).
+func TestConstraintAdminLockout_RoleBindingDeleteProject(t *testing.T) {
+	srv, s := testServer(t)
+	_, _, bindings := lockoutProjectAdmins(t, s, "lockout-rb-proj", 2)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+bindings[0].ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, bindings[0].ID, false)
+
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+bindings[1].ID, nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	assert.Contains(t, rec.Body.String(), "removing this role binding")
+	requireBindingExists(t, s, bindings[1].ID, true)
+}
+
+// DELETE /projects/{id}/members/{bindingID}.
+func TestConstraintAdminLockout_ProjectMemberDelete(t *testing.T) {
+	srv, s := testServer(t)
+	projectID, _, bindings := lockoutProjectAdmins(t, s, "lockout-member-del", 2)
+	path := "/api/v1/projects/" + projectID + "/members/"
+
+	rec := doRequest(t, srv, http.MethodDelete, path+bindings[0].ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, bindings[0].ID, false)
+
+	rec = doRequest(t, srv, http.MethodDelete, path+bindings[1].ID, nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	requireBindingExists(t, s, bindings[1].ID, true)
+}
+
+// DELETE /projects/{id}/members/principals/user/{userID}.
+func TestConstraintAdminLockout_ProjectMemberPrincipalDelete(t *testing.T) {
+	srv, s := testServer(t)
+	projectID, users, bindings := lockoutProjectAdmins(t, s, "lockout-principal-del", 2)
+	path := "/api/v1/projects/" + projectID + "/members/principals/user/"
+
+	rec := doRequest(t, srv, http.MethodDelete, path+users[0], nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, bindings[0].ID, false)
+
+	rec = doRequest(t, srv, http.MethodDelete, path+users[1], nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	assert.Contains(t, rec.Body.String(), "constraint-admin role")
+	requireBindingExists(t, s, bindings[1].ID, true)
+}
+
+// PUT /projects/{id}/members/principals/user/{userID} with a role set that
+// no longer carries access_constraint.admin.
+func TestConstraintAdminLockout_ProjectMemberPrincipalPut(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID, users, bindings := lockoutProjectAdmins(t, s, "lockout-principal-put", 2)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	path := "/api/v1/projects/" + projectID + "/members/principals/user/"
+	body := setMemberRolesRequestBody{RoleDefinitionIDs: []string{memberRD.ID}}
+
+	rec := doRequest(t, srv, http.MethodPut, path+users[0], body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, bindings[0].ID, false)
+
+	rec = doRequest(t, srv, http.MethodPut, path+users[1], body)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	requireBindingExists(t, s, bindings[1].ID, true)
+}

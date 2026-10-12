@@ -1348,6 +1348,13 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 	// R4 O-1: re-evaluate actor authority and re-fetch target inside the lock.
 	// R2-1: hub authority is re-evaluated inside the tx to close the TOCTOU window.
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// Removing a constraint-admin binding takes the admin-guard lock
+		// before the project lock, the order user delete uses.
+		if roleHasConstraintAdmin(roleDef) {
+			if err := lockConstraintAdminGuard(ctx, tx); err != nil {
+				return err
+			}
+		}
 		// Acquire project-scoped membership lock.
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
@@ -1417,6 +1424,11 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 			}
 		}
 
+		// Constraint-admin lockout guard, shared with user suspend and
+		// delete.
+		if err := checkRoleBindingRemovalAdminLockout(ctx, tx, now, binding); err != nil {
+			return err
+		}
 		if err := tx.DeleteRoleBinding(ctx, req.BindingID); err != nil {
 			return err
 		}
@@ -1452,6 +1464,9 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		var gdErr *governanceDenialError
 		if errors.As(txErr, &gdErr) {
 			return nil, &gdErr.decision
+		}
+		if d := constraintAdminLockoutDecision(txErr); d != nil {
+			return nil, d
 		}
 		if txErr == store.ErrNotFound {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "binding not found", HTTPStatus: 404}
@@ -1929,6 +1944,23 @@ func lastOwnerDenial() *MembershipDecision {
 		DenialCode: ErrCodeLastOwner,
 		Reason:     "cannot remove or demote the last project owner — at least one usable (active, existing) owner must remain",
 		HTTPStatus: 409,
+	}
+}
+
+// constraintAdminLockoutDecision converts a constraint-admin lockout
+// refusal into a MembershipDecision with the code and status the user
+// suspend and delete paths return. It returns nil for any other error.
+func constraintAdminLockoutDecision(err error) *MembershipDecision {
+	var ge *GovernanceError
+	if !errors.As(err, &ge) || ge.Code != ErrCodeConstraintAdminLockout {
+		return nil
+	}
+	return &MembershipDecision{
+		Allowed:    false,
+		DenialCode: ge.Code,
+		Reason:     ge.Message,
+		HTTPStatus: governanceErrorStatus(ge.Code),
+		Details:    ge.Details,
 	}
 }
 

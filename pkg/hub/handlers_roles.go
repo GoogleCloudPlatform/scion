@@ -1599,6 +1599,9 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 
 	// The deletion and its audit record commit or roll back together.
 	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := checkRoleBindingRemovalAdminLockout(ctx, tx, time.Now(), binding); err != nil {
+			return err
+		}
 		if err := tx.DeleteRoleBinding(ctx, id); err != nil {
 			return err
 		}
@@ -1612,6 +1615,9 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 	}); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Role Binding")
+			return
+		}
+		if writeConstraintAdminLockoutError(w, err) {
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -1709,6 +1715,11 @@ func (s *Server) deleteSystemSuperAdminBinding(
 		if err := s.checkLastSuperAdminTx(ctx, tx, binding.PrincipalID, rd); err != nil {
 			return err
 		}
+		// Constraint-admin lockout guard, shared with user suspend and
+		// delete.
+		if err := checkRoleBindingRemovalAdminLockout(ctx, tx, time.Now(), binding); err != nil {
+			return err
+		}
 
 		// Delete the binding.
 		if err := tx.DeleteRoleBinding(ctx, binding.ID); err != nil {
@@ -1736,6 +1747,9 @@ func (s *Server) deleteSystemSuperAdminBinding(
 		if errors.Is(txErr, errLastSuperAdmin) {
 			writeError(w, http.StatusConflict, "last_admin",
 				txErr.Error(), nil)
+			return
+		}
+		if writeConstraintAdminLockoutError(w, txErr) {
 			return
 		}
 		writeErrorFromErr(w, txErr, "")

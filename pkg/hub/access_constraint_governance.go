@@ -970,15 +970,22 @@ type userRemovalAction int
 const (
 	userRemovalSuspend userRemovalAction = iota
 	userRemovalDelete
+	// userRemovalProjectMember removes the user's constraint-admin roles
+	// on one project (project member principal PUT or DELETE).
+	userRemovalProjectMember
 )
 
 // lockoutMessage returns the refusal message, naming the action.
 func (rm adminRemoval) lockoutMessage(suffix string) string {
 	action := "removing this role binding"
 	if rm.userID != "" {
-		action = "suspending this user"
-		if rm.userAction == userRemovalDelete {
+		switch rm.userAction {
+		case userRemovalDelete:
 			action = "deleting this user"
+		case userRemovalProjectMember:
+			action = "removing this member's constraint-admin role"
+		default:
+			action = "suspending this user"
 		}
 	}
 	return action + " would leave zero constraint admins" + suffix
@@ -1067,6 +1074,26 @@ func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.
 		}
 	}
 	return nil
+}
+
+// checkRoleBindingRemovalAdminLockout runs checkConstraintAdminLockout
+// for a role binding about to be deleted. It is a no-op when the binding's
+// role does not carry access_constraint.admin. Otherwise it first takes
+// the admin-guard lock (lockConstraintAdminGuard) so the check serializes
+// with user suspend and delete. The role-binding delete paths call it
+// inside their transaction, before the delete; st must be that handle.
+func checkRoleBindingRemovalAdminLockout(ctx context.Context, st store.Store, now time.Time, b *store.RoleBinding) error {
+	rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+	if err != nil {
+		return fmt.Errorf("resolve role for constraint-admin lockout check: %w", err)
+	}
+	if !roleHasConstraintAdmin(rd) {
+		return nil
+	}
+	if err := lockConstraintAdminGuard(ctx, st); err != nil {
+		return err
+	}
+	return checkConstraintAdminLockout(ctx, st, now, b.ScopeType, b.ScopeID, adminRemoval{binding: b})
 }
 
 // ---------------------------------------------------------------------------
