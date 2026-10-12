@@ -68,10 +68,9 @@ func realCommand(t *testing.T, path string) *cobra.Command {
 func TestHubProfileGate_UnlistedCommandsRefused(t *testing.T) {
 	profileGateEnv(t, "t1")
 	refused := []string{
-		"list", "whoami", "start", "create", "delete", "look", "logs", "message", "stop",
+		"whoami", "message", "resume", "suspend", "reincarnate", "attach", "keys", "schedule.create",
 		"hub.enable", "hub.link", "hub.secret", "hub.auth.login", "hub.token", "hub.env",
 		"hub.test-identity.delegate.create", "hub.test-identity.delegate.list", "hub.test-identity.delegate.revoke",
-		"hub.test-identity.web-code",
 		"artifact.share", "templates.import", "server", "clean", "sync", "config.set", "project.list",
 	}
 	for _, p := range refused {
@@ -82,9 +81,10 @@ func TestHubProfileGate_UnlistedCommandsRefused(t *testing.T) {
 	allowed := []string{
 		"hub.status", "hub.profile.add", "hub.profile.list", "hub.profile.show", "hub.profile.remove",
 		"hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list",
-		"hub.test-identity.delete", "hub.test-identity.teardown",
+		"hub.test-identity.delete", "hub.test-identity.teardown", "hub.test-identity.web-code",
 		"hub.projects", "hub.projects.info", "hub.projects.create", "hub.projects.delete",
 		"artifact.publish", "artifact.get", "artifact.versions", "artifact.delete",
+		"create", "start", "list", "stop", "delete", "look", "logs",
 	}
 	for _, p := range allowed {
 		assert.NoError(t, checkHubProfileGate(realCommand(t, p), ModeHuman), p)
@@ -113,7 +113,8 @@ func TestHubProfileGate_AsAndRunNeedAProfile(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--run needs a hub profile")
 
-	// The flags belong to the hub and artifact trees only (N2).
+	// The flags belong to the hub and artifact trees and the agent
+	// commands that run with a profile (N2, X3b).
 	assert.Nil(t, rootCmd.PersistentFlags().Lookup("as"))
 	assert.Nil(t, rootCmd.PersistentFlags().Lookup("run"))
 	assert.NotNil(t, hubCmd.PersistentFlags().Lookup("as"))
@@ -126,8 +127,14 @@ func TestHubProfileGate_AsAndRunNeedAProfile(t *testing.T) {
 	assert.Contains(t, err.Error(), "--run needs a hub profile")
 	_, err = runProfileRoot(t, "list", "--as", "x")
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--as needs a hub profile")
+	_, err = runProfileRoot(t, "start", "a1", "--run", "r1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--run needs a hub profile")
+	_, err = runProfileRoot(t, "whoami", "--as", "x")
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown flag: --as")
-	_, err = runProfileRoot(t, "start", "--run", "r1")
+	_, err = runProfileRoot(t, "message", "a1", "hi", "--run", "r1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown flag: --run")
 }
@@ -141,7 +148,7 @@ func TestHubProfileGate_AgentModeRule(t *testing.T) {
 	profileGateEnv(t, "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	runtime := []string{"hub.status", "hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list", "hub.test-identity.delete", "hub.test-identity.teardown"}
+	runtime := []string{"hub.status", "hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list", "hub.test-identity.delete", "hub.test-identity.teardown", "hub.test-identity.web-code"}
 
 	t.Run("no profile", func(t *testing.T) {
 		for _, p := range runtime {
@@ -207,7 +214,7 @@ func runProfileRoot(t *testing.T, args ...string) (profileRun, error) {
 	restoreAllSilenceUsage(t)
 	resetRootProjectFlag(t)
 	saveCLIModeState(t)
-	for _, name := range []string{"hub-profile", "hub", "no-hub", "format"} {
+	for _, name := range []string{"hub-profile", "hub", "no-hub", "format", "global"} {
 		f := rootCmd.PersistentFlags().Lookup(name)
 		require.NotNil(t, f, name)
 		require.NoError(t, f.Value.Set(f.DefValue))
@@ -228,7 +235,8 @@ func runProfileRoot(t *testing.T, args ...string) (profileRun, error) {
 			walk(s)
 		}
 	}
-	for _, p := range []string{"hub.status", "hub.profile", "hub.test-identity", "hub.projects", "artifact"} {
+	for _, p := range []string{"hub.status", "hub.profile", "hub.test-identity", "hub.projects", "artifact",
+		"create", "start", "list", "stop", "delete", "look", "logs"} {
 		walk(realCommand(t, p))
 	}
 	hubOutputJSON, outputFormat, projectPath = false, "", ""
@@ -380,7 +388,7 @@ func TestHubProfile_EndToEnd_GoldenNoFallbackNoLeakNoLocalState(t *testing.T) {
 	assert.Equal(t, 1, target.TokenHits())
 
 	// An unlisted command under the profile is refused and touches nothing.
-	_, err = run("list")
+	_, err = run("resume", "a1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "is not available with a hub profile")
 	_, err = run("whoami")

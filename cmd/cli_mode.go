@@ -161,6 +161,7 @@ var agentAllowed = map[string]bool{
 	"hub.test-identity.list":     true,
 	"hub.test-identity.delete":   true,
 	"hub.test-identity.teardown": true,
+	"hub.test-identity.web-code": true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

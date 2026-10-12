@@ -90,9 +90,16 @@ refuses unless --force is given.`,
 			args[i] = api.Slugify(a)
 		}
 
-		projectDir, _ := config.GetResolvedProjectDir(projectPath)
-		if preserveBranch && !util.IsGitRepoDir(projectDir) {
-			statusln("Warning: --preserve-branch used outside a git repository; this flag has no effect.")
+		// A target-hub profile refuses the flags that need local state,
+		// and reads no local project (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
+			return err
+		}
+		if !hubProfileSelected() {
+			projectDir, _ := config.GetResolvedProjectDir(projectPath)
+			if preserveBranch && !util.IsGitRepoDir(projectDir) {
+				statusln("Warning: --preserve-branch used outside a git repository; this flag has no effect.")
+			}
 		}
 
 		if deleteCleanupOnly {
@@ -322,6 +329,10 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 // local files is not an error. Calls must not overlap: they run git
 // worktree operations.
 func cleanupAfterHubDelete(hubCtx *HubContext, agentName string, removeBranch bool) (branchDeleted bool, err error) {
+	// A target-hub profile has no local agent files or sync state.
+	if hubCtx.profileLocalOnly() {
+		return false, nil
+	}
 	// The Hub dispatches container cleanup to the runtime broker, but local
 	// filesystem artifacts must be removed by the CLI to avoid orphaned agents.
 	branchDeleted, err = agent.DeleteAgentFiles(agentName, projectPath, removeBranch)
@@ -542,6 +553,15 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 	// Also clean up local agent files (worktree, agent directory).
 	// The Hub dispatches container cleanup to the runtime broker, but local
 	// filesystem artifacts must be removed by the CLI to avoid orphaned agents.
+	// A target-hub profile has none (ptone/scion#4240).
+	if hubCtx.profileLocalOnly() {
+		if isJSONOutput() {
+			job.result = map[string]interface{}{"agent": agentName, "status": "success"}
+		} else {
+			job.lines = append(job.lines, fmt.Sprintf("Agent '%s' deleted via Hub.", agentName))
+		}
+		return
+	}
 	branchDeleted, err := cleanupAfterHubDelete(hubCtx, agentName, !preserveBranch)
 	if err != nil {
 		job.lines = append(job.lines,
