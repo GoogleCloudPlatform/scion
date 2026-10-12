@@ -22,7 +22,11 @@
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { ArtifactResponse, ArtifactVersion, DiscardedVersion } from '../../client/artifacts.js';
+import type {
+  ArtifactResponse,
+  ArtifactVersion,
+  DiscardedVersion,
+} from '../../client/artifacts.js';
 import type { ScionPageArtifactDetail } from './artifact-detail.js';
 import { resetPrincipalNames } from '../../client/principal-names.js';
 import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
