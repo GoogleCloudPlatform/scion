@@ -26,7 +26,7 @@
   (`CreateRoleBinding`, `AddGroupMember` including hub-members,
   `CreateUserAccessToken`) and at the hub (CanDelegate grantee check,
   project member set, ownership transfer, broker email-resolved senders).
-  The JWT row block refuses a hub-issued token whose subject is a federated
+  The JWT row block refuses a hub-issued JWT whose subject is a federated
   row.
 - **Identity.** `VisitorIdentity` (ID = local account ID, Type "visitor",
   carries issuer, subject, federated email) implements `UserIdentity` and
@@ -35,12 +35,19 @@
   nothing.
 - **Auth middleware.** After federation verification, when the experiment
   `federation.project_visitors` (server layer, default off) is on and the
-  token's (issuer, subject) links to an active federated row, the identity
+  federation credential's (issuer, subject) links to an active federated row, the identity
   becomes `VisitorIdentity`. Every other case keeps `FederatedUserIdentity`.
   A lookup error answers 503.
 - **Interim route guard.** `routeGuard` refuses every request whose identity
   is a `VisitorIdentity` with one 403, until per-route visitor admission
   (item 4) replaces the check.
+- **One federation link per account.** A partial unique index on
+  `external_identities(user_id)` where `provider = 'federation'` holds "one
+  federation link per account" in the database, so the later of two
+  concurrent links returns `ErrAlreadyExists` (the read before the insert
+  stays, for a clear error). `UpdateUser` refuses invite fields on a
+  federated row, matching `CreateFederatedUser`. Additive: the provider is
+  new, so no existing rows can conflict with the index.
 
 ## Notes for later items
 

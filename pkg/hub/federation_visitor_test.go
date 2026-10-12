@@ -166,7 +166,7 @@ func TestFederatedVisitor_LinkedActiveAccountBecomesVisitor(t *testing.T) {
 	assert.Equal(t, "alice@corp.com", v.Email(), "the account's federated email, never the synthetic address")
 	assert.Equal(t, "viewer", v.Role())
 
-	assert.Equal(t, CredentialKindFederation, credential.Kind, "never a session or access token credential")
+	assert.Equal(t, CredentialKindFederation, credential.Kind, "never a session or user access credential")
 	assert.Equal(t, PrincipalKindVisitor, principalContextForIdentity(v).Kind)
 	assert.Equal(t, store.RoleBindingPrincipalUser, NormalizePrincipalType(string(PrincipalKindVisitor)))
 	assert.False(t, sessionCredentialAllowed(contextWithCredentialContext(contextWithIdentity(context.Background(), v), credential)))
@@ -212,7 +212,7 @@ type visitorLookupErrStore struct {
 }
 
 func (s *visitorLookupErrStore) GetFederatedUserBySubject(context.Context, string, string) (*store.User, error) {
-	return nil, errors.New("injected lookup failure")
+	return nil, errors.New("lookup failure for test")
 }
 
 func TestFederatedVisitor_LookupErrorAnswers503(t *testing.T) {
