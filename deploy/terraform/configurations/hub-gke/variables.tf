@@ -107,13 +107,15 @@ variable "enable_http_redirect" {
 }
 
 variable "nfs_uid" {
-  type    = number
-  default = 1000
+  description = "uid that owns this hub's NFS export (agent-runtime-k8s chowns it) and that the hub process runs as (hub-gke's hub_run_as_uid). One variable for both, because the hub writes workspaces that agents later read."
+  type        = number
+  default     = 1000
 }
 
 variable "nfs_gid" {
-  type    = number
-  default = 1000
+  description = "gid that owns this hub's NFS export (agent-runtime-k8s chowns it) and that the hub process runs as (hub-gke's hub_run_as_gid). One variable for both, because the hub writes workspaces that agents later read."
+  type        = number
+  default     = 1000
 }
 
 variable "nfs_subpath_root" {

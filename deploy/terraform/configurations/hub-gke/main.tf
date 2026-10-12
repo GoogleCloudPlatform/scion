@@ -208,6 +208,22 @@ module "hub_gke" {
   db_password_rotation = var.db_password_rotation
   sql_connection_name  = module.shared_lookup.shared.sql.connection_name
 
+  # The same NFS share and claim agent_runtime_k8s sets up. The chart mounts
+  # this export in the hub pod at <mount_root>/<hub_name> and renders
+  # server.workspace_storage from the same values; the nfs_workspace output
+  # (outputs.tf) checks they agree with agent_runtime_k8s.
+  nfs = {
+    server  = module.shared_lookup.shared.nfs.server
+    export  = module.agent_runtime_k8s.nfs_export
+    pv_name = module.agent_runtime_k8s.pv_name
+  }
+  nfs_subpath_root = var.nfs_subpath_root
+
+  # The hub runs as the uid/gid agent_runtime_k8s chowns the export to, from
+  # the same two variables, because the hub writes workspaces agents read.
+  hub_run_as_uid = var.nfs_uid
+  hub_run_as_gid = var.nfs_gid
+
   # Real resource attributes only (see hub-gke's variable). The hub pod
   # reaches Secret Manager, Cloud SQL and GCS as the hub GSA through
   # Workload Identity, so the release waits for those grants to exist.

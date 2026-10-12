@@ -221,6 +221,11 @@ run "fresh_gke_hub_plans_clean" {
   }
 
   assert {
+    condition     = output.chart_values.cloudsql.privateIp == true
+    error_message = "chart_values.cloudsql.privateIp must be true: the Cloud SQL instance has no public IP, so the proxy must connect over the private IP."
+  }
+
+  assert {
     condition = (
       output.chart_values.serviceAccount.name == "scion-hub" &&
       output.chart_values.runtime.namespace == "tfha-gke-h3" &&
@@ -228,6 +233,46 @@ run "fresh_gke_hub_plans_clean" {
       output.chart_values.agents.imageRegistry == "us-central1-docker.pkg.dev/tfha-test-project/tfha-scion"
     )
     error_message = "KSA, namespaces and agent image registry are not as designed."
+  }
+
+  # Workspace share: the hub mounts and advertises exactly the share
+  # agent_runtime_k8s built.
+  assert {
+    condition = (
+      output.chart_values.workspaceStorage.nfs.enabled &&
+      output.chart_values.workspaceStorage.nfs.shareId == var.hub_name &&
+      output.chart_values.workspaceStorage.nfs.export == module.agent_runtime_k8s.nfs_export &&
+      output.chart_values.workspaceStorage.nfs.export == "/scion/tfha-gke-h3" &&
+      output.chart_values.workspaceStorage.nfs.server == "10.0.0.2" &&
+      output.chart_values.workspaceStorage.nfs.pvName == module.agent_runtime_k8s.pvc_name &&
+      output.chart_values.workspaceStorage.nfs.subpathRoot == "projects"
+    )
+    error_message = "workspaceStorage.nfs must use shareId = hub_name, the agent-runtime export and claim, and the shared Filestore server."
+  }
+
+  assert {
+    condition     = try(output.chart_values.config.extra.server.workspace_storage, null) == null
+    error_message = "config.extra must not carry server.workspace_storage."
+  }
+
+  assert {
+    condition = output.nfs_workspace == {
+      share_id   = "tfha-gke-h3"
+      export     = "/scion/tfha-gke-h3"
+      pv_name    = "tfha-gke-h3-nfs"
+      mount_path = "/mnt/scion-nfs/tfha-gke-h3"
+    }
+    error_message = "nfs_workspace must report shareId = hub_name, the agent-runtime export and claim, and mount_path <mount_root>/<share_id>."
+  }
+
+  assert {
+    condition = (
+      module.agent_runtime_k8s.nfs_owner.uid == 1000 &&
+      module.agent_runtime_k8s.nfs_owner.gid == 1000 &&
+      output.chart_values.hub.securityContext.runAsUser == 1000 &&
+      output.chart_values.hub.securityContext.runAsGroup == 1000
+    )
+    error_message = "by default the export owner and the hub's runAsUser/runAsGroup must both be 1000:1000."
   }
 
   # RBAC is owned by the chart, not agent-runtime-k8s.
@@ -401,6 +446,110 @@ run "newer_gke_minor_passes" {
     condition     = output.neg_zones == tolist(["us-central1-a"])
     error_message = "a newer control plane must plan cleanly."
   }
+}
+
+# nfs_uid/nfs_gid reach both the export owner (agent_runtime_k8s) and the
+# hub's runAsUser/runAsGroup (hub_gke).
+run "nfs_ids_reach_both_modules" {
+  command = plan
+
+  variables {
+    nfs_uid = 2001
+    nfs_gid = 2002
+  }
+
+  assert {
+    condition = (
+      module.agent_runtime_k8s.nfs_owner.uid == 2001 &&
+      module.agent_runtime_k8s.nfs_owner.gid == 2002 &&
+      output.chart_values.hub.securityContext.runAsUser == 2001 &&
+      output.chart_values.hub.securityContext.runAsGroup == 2002
+    )
+    error_message = "nfs_uid/nfs_gid must set both agent_runtime_k8s's export owner and hub_gke's runAsUser/runAsGroup."
+  }
+}
+
+# The agent-runtime outputs stand in for a wiring that went wrong; the real
+# module derives all of them from hub_name and share_path. An empty server or
+# a relative export never reaches these preconditions: hub-gke's nfs variable
+# validations refuse them first, and modules/hub-gke/tests covers those.
+run "share_id_not_agent_namespace_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-other"
+      pv_name          = "tfha-gke-h3-nfs"
+      pvc_name         = "tfha-gke-h3-nfs"
+      nfs_export       = "/scion/tfha-gke-h3"
+      nfs_init_job_id  = "tfha-other/tfha-other-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [output.nfs_workspace]
+}
+
+run "share_id_not_export_segment_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-gke-h3"
+      pv_name          = "tfha-gke-h3-nfs"
+      pvc_name         = "tfha-gke-h3-nfs"
+      nfs_export       = "/scion/tfha-other"
+      nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [output.nfs_workspace]
+}
+
+run "claim_not_share_id_derived_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-gke-h3"
+      pv_name          = "tfha-other-nfs"
+      pvc_name         = "tfha-other-nfs"
+      nfs_export       = "/scion/tfha-gke-h3"
+      nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [output.nfs_workspace]
+}
+
+# The claim agent pods mount (pv_name, which hub-gke renders as pvName) is not
+# the claim agent_runtime_k8s created (pvc_name), though pvc_name itself is
+# "<shareId>-nfs".
+run "pv_name_not_claim_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-gke-h3"
+      pv_name          = "tfha-other-nfs"
+      pvc_name         = "tfha-gke-h3-nfs"
+      nfs_export       = "/scion/tfha-gke-h3"
+      nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [output.nfs_workspace]
 }
 
 # --- Test-runner identities (modules/hub-test-runner) ---
