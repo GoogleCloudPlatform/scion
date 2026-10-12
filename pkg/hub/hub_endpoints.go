@@ -76,7 +76,8 @@ const (
 type hubEndpointKind int
 
 const (
-	// hubEndpointOperator is the operator endpoint.
+	// hubEndpointOperator is the operator endpoint. It is the zero value,
+	// so a use missing from hubEndpointUses gets the operator endpoint.
 	hubEndpointOperator hubEndpointKind = iota
 	// hubEndpointPublic is the public endpoint.
 	hubEndpointPublic
@@ -124,12 +125,14 @@ type HubEndpoints struct {
 	PublicSource string
 }
 
-// For returns the endpoint the hub hands out for use.
+// For returns the endpoint the hub hands out for use: the operator endpoint
+// for a use the table maps to it (or does not list), and when no public
+// endpoint was resolved; otherwise the public endpoint.
 func (e HubEndpoints) For(use HubEndpointUse) string {
-	if hubEndpointUses[use] == hubEndpointPublic && e.Public != "" {
-		return e.Public
+	if hubEndpointUses[use] == hubEndpointOperator || e.Public == "" {
+		return e.Operator
 	}
-	return e.Operator
+	return e.Public
 }
 
 // hubEndpointsFromConfig returns cfg.HubEndpoints, or, when the caller did
