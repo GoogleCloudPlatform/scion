@@ -230,6 +230,34 @@ func (_c *UserCreate) SetNillablePurpose(v *string) *UserCreate {
 	return _c
 }
 
+// SetIssuanceID sets the "issuance_id" field.
+func (_c *UserCreate) SetIssuanceID(v string) *UserCreate {
+	_c.mutation.SetIssuanceID(v)
+	return _c
+}
+
+// SetNillableIssuanceID sets the "issuance_id" field if the given value is not nil.
+func (_c *UserCreate) SetNillableIssuanceID(v *string) *UserCreate {
+	if v != nil {
+		_c.SetIssuanceID(*v)
+	}
+	return _c
+}
+
+// SetIssuerCredentialID sets the "issuer_credential_id" field.
+func (_c *UserCreate) SetIssuerCredentialID(v string) *UserCreate {
+	_c.mutation.SetIssuerCredentialID(v)
+	return _c
+}
+
+// SetNillableIssuerCredentialID sets the "issuer_credential_id" field if the given value is not nil.
+func (_c *UserCreate) SetNillableIssuerCredentialID(v *string) *UserCreate {
+	if v != nil {
+		_c.SetIssuerCredentialID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *UserCreate) SetID(v uuid.UUID) *UserCreate {
 	_c.mutation.SetID(v)
@@ -526,6 +554,14 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Purpose(); ok {
 		_spec.SetField(user.FieldPurpose, field.TypeString, value)
 		_node.Purpose = &value
+	}
+	if value, ok := _c.mutation.IssuanceID(); ok {
+		_spec.SetField(user.FieldIssuanceID, field.TypeString, value)
+		_node.IssuanceID = &value
+	}
+	if value, ok := _c.mutation.IssuerCredentialID(); ok {
+		_spec.SetField(user.FieldIssuerCredentialID, field.TypeString, value)
+		_node.IssuerCredentialID = &value
 	}
 	if nodes := _c.mutation.OwnedGroupsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -864,6 +900,12 @@ func (u *UserUpsertOne) UpdateNewValues() *UserUpsertOne {
 		}
 		if _, exists := u.create.mutation.Purpose(); exists {
 			s.SetIgnore(user.FieldPurpose)
+		}
+		if _, exists := u.create.mutation.IssuanceID(); exists {
+			s.SetIgnore(user.FieldIssuanceID)
+		}
+		if _, exists := u.create.mutation.IssuerCredentialID(); exists {
+			s.SetIgnore(user.FieldIssuerCredentialID)
 		}
 	}))
 	return u
@@ -1296,6 +1338,12 @@ func (u *UserUpsertBulk) UpdateNewValues() *UserUpsertBulk {
 			}
 			if _, exists := b.mutation.Purpose(); exists {
 				s.SetIgnore(user.FieldPurpose)
+			}
+			if _, exists := b.mutation.IssuanceID(); exists {
+				s.SetIgnore(user.FieldIssuanceID)
+			}
+			if _, exists := b.mutation.IssuerCredentialID(); exists {
+				s.SetIgnore(user.FieldIssuerCredentialID)
 			}
 		}
 	}))

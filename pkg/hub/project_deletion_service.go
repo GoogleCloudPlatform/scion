@@ -511,6 +511,15 @@ func (svc *ProjectDeletionService) checkDeletionGovernanceFromStore(ctx context.
 			HTTPStatus: 500,
 		}
 	}
+	// Unclamped read (the tx store): apply the test identity clamps.
+	if bindings, err = clampBindingsForUser(ctx, tx, svc.authz, actorID, bindings); err != nil {
+		return ProjectDeleteDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeProjectDeleteForbidden,
+			Reason:     "authority lookup failed under lock",
+			HTTPStatus: 500,
+		}
+	}
 
 	for _, b := range bindings {
 		if b.ScopeType != store.RoleScopeProject || b.ScopeID != req.ProjectID {

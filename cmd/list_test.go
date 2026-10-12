@@ -70,6 +70,8 @@ func TestFormatLastActivity(t *testing.T) {
 		{"clock skew: activity minutes ahead", "", now.Add(5 * time.Minute), "just now"},
 		{"activity with zero time", "running", time.Time{}, "running"},
 		{"empty status with zero time", "", time.Time{}, "-"},
+		{"initializing shown as starting", "initializing", now.Add(-30 * time.Second), "starting, just now"},
+		{"initializing with zero time", "initializing", time.Time{}, "starting"},
 	}
 
 	for _, tt := range tests {

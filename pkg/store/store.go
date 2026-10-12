@@ -186,6 +186,19 @@ type Store interface {
 	// cascade spans several sub-stores.
 	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
 
+	// CreateTestAdminUser creates an admin-kind test identity and its one
+	// system role binding, in one transaction (the caller's, when called
+	// inside WithTx). It is the only store path that writes
+	// UserKindTestHubAdmin or UserKindTestSuperAdmin. It requires an admin
+	// Kind, the kind's role (TestAdminRole), an email in the kind's domain
+	// (TestAdminEmailDomain), a non-nil ExpiresAt, a non-empty IssuedBy and
+	// IssuanceID, and a system-scoped roleDefinitionID; it returns
+	// ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
+	// to the identity's expiry and CreatedBy TestIdentityIssuanceCreatedBy,
+	// so it never outlives the identity. It is a Store method because it
+	// spans the user and role-binding sub-stores.
+	CreateTestAdminUser(ctx context.Context, user *User, roleDefinitionID string) (*RoleBinding, error)
+
 	// ListFixtureRootedResources returns the agents (soft-deleted ones
 	// included), schedules, groups and projects whose creation-time
 	// provenance stamp has fixture_root_id == rootID (ptone/scion#4240,
@@ -466,6 +479,14 @@ type AgentStore interface {
 	// run-ID write, with RunID set to runID: either both are recorded or
 	// neither is.
 	SetAgentRunID(ctx context.Context, agentID, runID string, cred *AgentCredential) (previous string, err error)
+
+	// SetAgentSSHHostKey records publicKey (an authorized_keys line) as the
+	// SSH host key of the agent's run runID. The reported host key is bound
+	// to the reporting agent's current run: the write applies only while
+	// the stored run_id equals runID (non-empty) and no delete holds the
+	// row, checked in the same statement. The first host key reported for
+	// a run is kept; a repeat of the same key succeeds (unchanged).
+	SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (SSHHostKeyResult, error)
 
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
 	// it currently equals expectedRunID, and reports whether it did. A
@@ -1114,6 +1135,23 @@ type ContainerMissingPrecondition struct {
 	RunID string
 }
 
+// SSHHostKeyResult is the outcome of SetAgentSSHHostKey.
+type SSHHostKeyResult int
+
+const (
+	// SSHHostKeyWritten: the key was recorded for the run.
+	SSHHostKeyWritten SSHHostKeyResult = iota + 1
+	// SSHHostKeyUnchanged: the same key was already recorded for the run.
+	SSHHostKeyUnchanged
+	// SSHHostKeyNotCurrentRun: the run is not current, or nothing was
+	// recorded for it (for example a missing or deleted agent, or a delete
+	// holding the row); nothing written.
+	SSHHostKeyNotCurrentRun
+	// SSHHostKeyAlreadySet: a different key is already recorded for the
+	// run; it is kept and nothing is written.
+	SSHHostKeyAlreadySet
+)
+
 // AgentStatusUpdate contains fields for status-only updates.
 type AgentStatusUpdate struct {
 	Phase           string            `json:"phase,omitempty"`
@@ -1718,7 +1756,8 @@ type UserStore interface {
 	// Kind=UserKindTestFixture, a non-nil ExpiresAt, a non-empty IssuedBy,
 	// an email in TestFixtureEmailDomain and the member or viewer role, and
 	// returns ErrInvalidInput otherwise. CreateUser refuses all of these
-	// rows with ErrTestFixtureKindRefused.
+	// rows, every admin kind and every email in a test identity domain
+	// (IsReservedTestIdentityEmail) with ErrTestFixtureKindRefused.
 	CreateTestFixtureUser(ctx context.Context, user *User) error
 
 	// CountLiveTestFixtureUsers counts test fixture users whose expiry is
@@ -1746,6 +1785,17 @@ type UserStore interface {
 	// lock LockTestIdentityIssuance; on SQLite, which serializes writers,
 	// it is a no-op. Must be called inside WithTx.
 	LockTestFixtureIssuance(ctx context.Context) error
+
+	// CountLiveTestAdminUsers counts admin-kind test identities (the
+	// kinds UserKindTestHubAdmin and UserKindTestSuperAdmin) whose expiry
+	// is after now. A non-empty kind restricts the count to that admin
+	// kind; a non-empty issuedBy to that issuer. A kind that is not an
+	// admin kind returns ErrInvalidInput.
+	CountLiveTestAdminUsers(ctx context.Context, kind, issuedBy string, now time.Time) (int, error)
+
+	// ListTestAdminUsers returns every admin-kind test identity, live or
+	// not, oldest first.
+	ListTestAdminUsers(ctx context.Context) ([]User, error)
 }
 
 // UserFilter defines criteria for filtering users.

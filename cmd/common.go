@@ -731,6 +731,9 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	if err := validateLaunchWaitFlags(); err != nil {
 		return asUsageError(err)
 	}
+	if err := validateWaitReadyFlags(); err != nil {
+		return asUsageError(err)
+	}
 
 	// Validate --template-scope here with the other flag checks, so a bad
 	// value is reported as a usage error before any hub work.
@@ -971,23 +974,47 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		displayStatus = "resumed"
 	}
 
+	var readyErr error
+	if startWaitReady {
+		var progress io.Writer
+		if !isJSONOutput() {
+			progress = os.Stderr
+		}
+		_, readyErr = waitForAgentAcceptsInput(context.Background(), waitReadyOptions{
+			AgentName: agentName,
+			Get:       localReadyProbe(mgr, agentName),
+			Timeout:   remainingWaitReadyTimeout(time.Now()),
+			Progress:  progress,
+		})
+	}
+
 	if isJSONOutput() {
-		return outputJSON(ActionResult{
+		details := map[string]interface{}{
+			"id":       info.ID,
+			"detached": info.Detached,
+		}
+		if startWaitReady {
+			details["ready"] = readyErr == nil
+		}
+		if err := outputJSON(ActionResult{
 			Status:   "success",
 			Command:  cmd.Name(),
 			Agent:    agentName,
 			Message:  fmt.Sprintf("Agent '%s' %s successfully.", agentName, displayStatus),
 			Warnings: info.Warnings,
-			Details: map[string]interface{}{
-				"id":       info.ID,
-				"detached": info.Detached,
-			},
-		})
+			Details:  details,
+		}); err != nil {
+			return err
+		}
+		return markWaitReadyReported(readyErr)
 	}
 
 	statusf("Agent '%s' %s successfully (ID: %s)\n", agentName, displayStatus, info.ID)
+	if startWaitReady && readyErr == nil {
+		statusf("Agent '%s' is ready.\n", agentName)
+	}
 
-	return nil
+	return readyErr
 }
 
 // waitForTmuxSession polls the container until the tmux session "scion" is
@@ -1583,6 +1610,11 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	if startNoWait && !attach {
 		needWait = false
 	}
+	// --wait-ready needs the agent running first.
+	if startWaitReady {
+		needWait = true
+	}
+	waitStart := time.Now()
 
 	finalAgent := resp.Agent
 	// notFollowed is set when the Hub accepted the launch but the wait could
@@ -1651,6 +1683,42 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		}
 	}
 
+	// --wait-ready: once running, wait until the harness accepts input. A
+	// launch the wait could not follow to running is not ready either.
+	var readyErr error
+	if startWaitReady {
+		if notFollowed != "" {
+			p := readyProbe{}
+			if finalAgent != nil {
+				p = hubReadyProbe(finalAgent)
+			}
+			readyErr = &waitReadyTimeoutError{Agent: agentName, Timeout: remainingWaitReadyTimeout(waitStart), Phase: p.Phase, Activity: p.Activity}
+		} else {
+			var progress io.Writer
+			if !isJSONOutput() {
+				progress = os.Stderr
+			}
+			var last *hubclient.Agent
+			_, readyErr = waitForAgentAcceptsInput(context.Background(), waitReadyOptions{
+				AgentName: agentName,
+				Get: func(ctx context.Context) (readyProbe, error) {
+					a, err := hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
+					if err != nil || a == nil {
+						return readyProbe{}, fmt.Errorf("fetching agent: %w", err)
+					}
+					last = a
+					return hubReadyProbe(a), nil
+				},
+				Timeout:  remainingWaitReadyTimeout(waitStart),
+				Progress: progress,
+			})
+			if last != nil {
+				finalAgent = last
+				statusRead = true
+			}
+		}
+	}
+
 	// A status that was never read leaves only the create answer, whose
 	// phase predates the launch.
 	phaseKnown := statusRead
@@ -1712,6 +1780,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			if notFollowed != "" {
 				result.Details["launchNote"] = notFollowed
 			}
+			if startWaitReady {
+				result.Details["ready"] = readyErr == nil
+			}
 			if launching && launchReportable && finalAgent.Launch != nil {
 				result.Details["launchId"] = finalAgent.Launch.ID
 				if finalAgent.Launch.Deadline != nil {
@@ -1719,7 +1790,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 				}
 			}
 		}
-		return outputJSON(result)
+		if err := outputJSON(result); err != nil {
+			return err
+		}
+		return markWaitReadyReported(readyErr)
 	}
 
 	statusf("%s\n", message)
@@ -1739,6 +1813,12 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	}
 	for _, w := range textWarnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+	}
+	if startWaitReady {
+		if readyErr != nil {
+			return readyErr
+		}
+		statusf("Agent '%s' is ready.\n", agentName)
 	}
 
 	if !attach {

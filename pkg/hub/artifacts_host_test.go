@@ -343,7 +343,8 @@ func TestArtifactRoutesServedWhileExperimentOn(t *testing.T) {
 		{http.MethodPut, "/api/v1/artifacts", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/api/v1/artifacts", http.StatusBadRequest},
 		{http.MethodGet, "/api/v1/artifacts?mine=1", http.StatusServiceUnavailable},
-		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
+		{http.MethodPut, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusServiceUnavailable},
 		{http.MethodGet, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusServiceUnavailable},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, nil)

@@ -159,6 +159,12 @@ type StatusUpdate struct {
 
 	// Exit tracking
 	ExitCode *int `json:"exitCode,omitempty"`
+
+	// SSHHostKey is the public key (authorized_keys line) of the agent's
+	// conduit SSH server host key. The hub records it with the conduit
+	// experiment on; the reported host key is bound to the reporting
+	// agent's current run.
+	SSHHostKey string `json:"sshHostKey,omitempty"`
 }
 
 // Client is a Hub API client for sciontool.
@@ -337,6 +343,12 @@ func (c *Client) UpdateStatus(ctx context.Context, status StatusUpdate) error {
 		return fmt.Errorf("failed to marshal status: %w", err)
 	}
 	return c.postJSONWithRetry(ctx, endpoint, body)
+}
+
+// ReportSSHHostKey sends the conduit SSH server's public host key
+// (authorized_keys line) in a status update carrying nothing else.
+func (c *Client) ReportSSHHostKey(ctx context.Context, publicKey string) error {
+	return c.UpdateStatus(ctx, StatusUpdate{SSHHostKey: publicKey})
 }
 
 func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []byte) error {
