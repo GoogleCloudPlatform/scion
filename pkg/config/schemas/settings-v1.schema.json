@@ -2324,6 +2324,16 @@
           "type": ["string", "integer"],
           "pattern": "^([-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$",
           "description": "Validity of issued identity tokens as a Go duration (e.g. \"15m\", the default) or integer nanoseconds."
+        },
+        "user_token_audiences": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Peer hub issuer URLs for which this hub issues user access credentials to its own users (POST /api/v1/auth/federation-token). Empty, the default, means none are issued. Read at startup; a change needs a restart."
+        },
+        "user_token_lifetime": {
+          "type": ["string", "integer"],
+          "pattern": "^([-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$",
+          "description": "Validity of an issued user access credential for a peer hub, as a Go duration (\"15m\", the default; at most \"1h\") or integer nanoseconds."
         }
       },
       "additionalProperties": false

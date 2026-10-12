@@ -172,6 +172,7 @@ func TestHandleOIDCDiscovery(t *testing.T) {
 				expectedClaims := []string{
 					"iss", "sub", "aud", "iat", "exp", "nbf", "jti",
 					"project_id", "agent_name", "ancestry", "root_user",
+					"email", "email_verified", "name", "scion_token_kind",
 				}
 				assert.Equal(t, expectedClaims, doc.ClaimsSupported)
 			}
@@ -509,6 +510,7 @@ func TestHandleAgentIdentityToken(t *testing.T) {
 				assert.Equal(t, "test-agent", tokenClaims.AgentName, "agent_name should be the agent slug")
 				assert.Equal(t, claims.Ancestry, tokenClaims.Ancestry, "ancestry should match")
 				assert.Equal(t, claims.Ancestry[0], tokenClaims.RootUser, "root_user should be ancestry[0]")
+				assert.Equal(t, "agent", tokenClaims.TokenKind, "scion_token_kind should be agent")
 
 				// Verify exp = now + token_lifetime (within 5 second tolerance)
 				expectedExpiry := time.Now().Add(15 * time.Minute)

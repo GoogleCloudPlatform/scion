@@ -252,6 +252,14 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'federation_token:mint',
+    label: 'federation_token:mint',
+    description:
+      'Obtain a short-lived user access credential for yourself to present to a peer hub',
+    resource: 'federation_token',
+    isAlias: false,
+  },
+  {
     value: 'gcp_service_account:assign',
     label: 'gcp_service_account:assign',
     description: 'Assign GCP service accounts to agents',

@@ -182,6 +182,7 @@ var ProjectTargetApplicability = map[string]bool{
 	// records, never an existing project, so no project role binding or
 	// system authority proof admits them.
 	"inbox.read": false, "inbox.write": false, "user_skill_injection.update": false,
+	"federation_token.mint": false,
 }
 
 // AppliesToExistingProjectTarget reports the reviewed disposition for
@@ -245,6 +246,9 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// skills reach agents in every project.
 	"inbox.read": {BoundaryKindProject, BoundaryKindHub}, "inbox.write": {BoundaryKindProject, BoundaryKindHub},
 	"user_skill_injection.update": {BoundaryKindHub},
+	// federation_token.mint is hub-only: the credential it yields names the
+	// holder, not a project.
+	"federation_token.mint": {BoundaryKindHub},
 
 	// hub.* configuration permissions act on the hub itself, so their
 	// selectors are hub-only.
@@ -426,6 +430,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// Self-scoped permissions.
 	"inbox.read": {TargetClassKindSelf}, "inbox.write": {TargetClassKindSelf},
 	"user_skill_injection.update": {TargetClassKindSelf},
+	"federation_token.mint":       {TargetClassKindSelf},
 
 	// hub.* configuration permissions target the hub instance.
 	"hub.config.read": {TargetClassKindHubResource}, "hub.config.update": {TargetClassKindHubResource},

@@ -58,6 +58,7 @@ var expectedSelectorRegistry = map[string][]string{
 	"broker:create":                   {"broker.create"},
 	"broker:list":                     {"broker.list"},
 	"broker:read":                     {"broker.read"},
+	"federation_token:mint":           {"federation_token.mint"},
 	"gcp_service_account:assign":      {"gcp_service_account.assign"},
 	"gcp_service_account:list":        {"gcp_service_account.list"},
 	"gcp_service_account:read":        {"gcp_service_account.read"},

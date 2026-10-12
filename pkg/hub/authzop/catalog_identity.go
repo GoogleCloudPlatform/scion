@@ -425,6 +425,40 @@ var identityOperations = []OperationSpec{
 		}},
 		Bearer: SessionOnly(ReasonCredentialManagement),
 	},
+	{
+		ID:          "federation.token.mint",
+		Domain:      "federation",
+		Description: "Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/federation-token", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		BasePermission:   "federation_token.mint",
+		Effects:          []SecurityEffect{EffectMintCredential},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "A user obtains a credential for themselves only, for an audience the hub admin allows, with a lifetime capped at one hour; it carries no project or agent claims",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "federation_token_issued",
+			ContextFields: []string{"actor_id", "credential_kind"},
+			AfterFields:   []string{"audience", "jti", "expires_at"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestFederationToken_RefusedCallers"},
+			{Package: "pkg/hub", Function: "TestFederationToken_UserAccessTokenNeedsMintScope"},
+			{Package: "pkg/hub", Function: "TestFederationToken_AudienceAllowList"},
+			{Package: "pkg/hub", Function: "TestFederationToken_AuditWritten"},
+		},
+		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryHub),
+	},
 
 	// =====================================================================
 	// Domain: user.admin — user administration

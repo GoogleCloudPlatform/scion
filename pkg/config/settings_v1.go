@@ -4087,7 +4087,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	// OIDC Identity Provider config
-	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" {
+	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" || len(gc.OIDC.UserTokenAudiences) > 0 || gc.OIDC.UserTokenLifetime != 0 {
 		oidc := gc.OIDC
 		v1.OIDC = &oidc
 	}

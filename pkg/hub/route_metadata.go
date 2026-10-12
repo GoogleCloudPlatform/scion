@@ -201,6 +201,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/scopes", RouteID: "auth.scopes",
 		Classification: RouteAuthenticated,
 	},
+	// Federation user token for a peer hub: the handler admits an
+	// interactive session or a hub-boundary user access token carrying
+	// federation_token:mint (handlers_federation_token.go).
+	"POST /api/v1/auth/federation-token": {
+		Pattern: "POST /api/v1/auth/federation-token", RouteID: "auth.federationToken",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/metrics/session/": {
 		Pattern: "/api/v1/metrics/session/", RouteID: "metrics.session",
 		Classification: RouteAuthenticated,

@@ -500,13 +500,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 
-	// hub.conduit and hub.agent_delegation on too, so their
-	// experiment-gated routes are live: the registry above with both also
-	// defaulting on (no operational
+	// hub.conduit, hub.agent_delegation and federation.project_visitors on
+	// too, so their experiment-gated routes are live: the registry above
+	// with all three also defaulting on (no operational
 	// settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -517,6 +517,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(conduitExperiment))
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
+	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)

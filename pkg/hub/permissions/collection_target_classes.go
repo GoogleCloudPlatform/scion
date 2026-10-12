@@ -260,6 +260,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// Self-scoped permissions — always the holder's own existing records,
 	// never a collection-level target.
 	"inbox.read": {}, "inbox.write": {}, "user_skill_injection.update": {},
+	"federation_token.mint": {},
 }
 
 // CollectionTargetClassesFor returns the reviewed classes for permissionID

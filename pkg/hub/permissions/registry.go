@@ -61,6 +61,10 @@ const (
 	// target that a role binding could authorize. See TargetClassKindSelf.
 	ResourceInbox              = "inbox"
 	ResourceUserSkillInjection = "user_skill_injection"
+	// ResourceFederationToken is the self-scoped resource of a user access
+	// credential for a peer hub that the holder obtains for themselves
+	// (POST /api/v1/auth/federation-token).
+	ResourceFederationToken = "federation_token"
 
 	ActionCreate         = "create"
 	ActionRead           = "read"
@@ -398,6 +402,7 @@ var Registry = []Permission{
 	{ID: "inbox.read", Resource: ResourceInbox, Action: ActionRead, UATScope: "inbox:read", Description: "Read your own inbox, notifications and direct messages", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_messages.go", "pkg/hub/handlers_conversations.go", "pkg/hub/handlers_conversation_resolve.go", "pkg/hub/handlers_notifications.go"}},
 	{ID: "inbox.write", Resource: ResourceInbox, Action: ActionWrite, UATScope: "inbox:write", Description: "Send, change and remove your own inbox items and direct messages", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_messages.go", "pkg/hub/handlers_conversations.go", "pkg/hub/handlers_notifications.go"}},
 	{ID: "user_skill_injection.update", Resource: ResourceUserSkillInjection, Action: ActionUpdate, UATScope: "user_skill_injection:update", Description: "Change the skills injected into your own agents", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_skills_injection.go"}},
+	{ID: "federation_token.mint", Resource: ResourceFederationToken, Action: ActionMint, UATScope: "federation_token:mint", Description: "Obtain a short-lived user access credential for yourself to present to a peer hub", Enforcement: []string{"pkg/hub/authorize.go:selfScopedDecision", "pkg/hub/handlers_federation_token.go:handleFederationToken"}},
 }
 
 // IsReserved reports whether p is a reserved row (see Permission.Reserved).

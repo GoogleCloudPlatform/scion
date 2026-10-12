@@ -56,6 +56,7 @@ func (s *Server) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 		ClaimsSupported: []string{
 			"iss", "sub", "aud", "iat", "exp", "nbf", "jti",
 			"project_id", "agent_name", "ancestry", "root_user",
+			"email", "email_verified", "name", "scion_token_kind",
 		},
 		ScopesSupported: []string{"openid"},
 	}
@@ -106,6 +107,10 @@ type OIDCIdentityTokenClaims struct {
 	AgentName string   `json:"agent_name"`
 	Ancestry  []string `json:"ancestry"`
 	RootUser  string   `json:"root_user"`
+	// TokenKind is always "agent" on an agent identity token, so a
+	// receiving hub tells it from a federation user token ("user") by an
+	// explicit claim.
+	TokenKind string `json:"scion_token_kind"`
 }
 
 // handleAgentIdentityToken handles POST /api/v1/agent/identity-token.
@@ -182,6 +187,7 @@ func (s *Server) handleAgentIdentityToken(w http.ResponseWriter, r *http.Request
 		AgentName: agentName,
 		Ancestry:  agent.Ancestry,
 		RootUser:  rootUser,
+		TokenKind: tokenKindAgent,
 	}
 
 	// 7. Sign with RS256.
