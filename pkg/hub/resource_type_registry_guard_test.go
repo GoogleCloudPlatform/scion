@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_5
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -79,6 +77,8 @@ func parseGoDir(t *testing.T, fset *token.FileSet, dir string) map[string]*ast.F
 	t.Helper()
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards Resource type literals, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards Resource type literals (no Resource literal resolves through the moved AuthType string constants), which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	files := map[string]*ast.File{}

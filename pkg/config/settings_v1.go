@@ -1728,8 +1728,9 @@ type V1DatabaseConfig struct {
 	MaxIdleConns    int    `json:"max_idle_conns,omitempty" yaml:"max_idle_conns,omitempty" koanf:"max_idle_conns"`
 	ConnMaxLifetime string `json:"conn_max_lifetime,omitempty" yaml:"conn_max_lifetime,omitempty" koanf:"conn_max_lifetime"`
 	ConnMaxIdleTime string `json:"conn_max_idle_time,omitempty" yaml:"conn_max_idle_time,omitempty" koanf:"conn_max_idle_time"`
-	// AllowShadowedSchema lets the hub start on PostgreSQL when its startup
-	// migration would create a new table set that hides existing hub tables
+	// AllowShadowedSchema lets the hub start (and the maintenance commands
+	// that migrate its database run) on PostgreSQL when the migration would
+	// create a new table set that hides existing hub tables
 	// later on the search_path. See DatabaseConfig.AllowShadowedSchema.
 	AllowShadowedSchema bool `json:"allow_shadowed_schema,omitempty" yaml:"allow_shadowed_schema,omitempty" koanf:"allow_shadowed_schema"`
 }
@@ -4527,7 +4528,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 //     internally by LoadVersionedSettings/LoadSettingsKoanf/
 //     detectHierarchyFormat, treats WHATEVER path it is given as if it
 //     might be a project directory: if ~/.scion itself contains a
-//     project-id or grove-id file (plausible — a broker's ~/.scion can
+//     project-id file (plausible — a broker's ~/.scion can
 //     double as its own hub-side project identity), it resolves to
 //     GetProjectConfigDir(globalDir), i.e.
 //     ~/.scion/project-configs/<slug>__<id>/.scion — a completely
@@ -4623,7 +4624,7 @@ func GlobalSettingsMentions(substr string) bool {
 // did. Round 6 addendum (hy-aud-6): detectHierarchyFormat(globalDir) is NOT
 // actually global-only — it calls resolveEffectiveProjectPath(globalDir)
 // internally, which treats the global directory as if it might itself be a
-// project directory and, if ~/.scion contains a project-id or grove-id
+// project directory and, if ~/.scion contains a project-id
 // file, resolves to a completely unrelated project's split-storage
 // settings.yaml under ~/.scion/project-configs/<slug>__<id>/.scion and
 // merges its format in too. detectDirSettingsFormat never calls

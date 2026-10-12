@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_2
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +19,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -134,9 +133,11 @@ func exprTypeName(expr ast.Expr) string {
 	}
 }
 
-// scanIdentitySource parses every non-test *.go file in the current
-// directory (package hub's own directory, since tests run with that as the
-// working directory) and extracts method and embedded-field information.
+// scanIdentitySource parses every non-test *.go file under pkg/hub,
+// recursively (tests run with package hub's own directory as the working
+// directory), and extracts method and embedded-field information. The walk
+// is recursive so that types declared in pkg/hub/internal/principal, where
+// the principal types live, stay in the inventory.
 //
 // This is an AST-level scan, not a go/types-based one: it never resolves
 // imports or type-checks, so it detects an Identity implementer only through
@@ -155,9 +156,24 @@ func exprTypeName(expr ast.Expr) string {
 func scanIdentitySource(t *testing.T) identitySourceInventory {
 	t.Helper()
 
-	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards Identity receiver methods and embeddings, which errors.go and json_response.go do not contain.
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of pkg/hub (non-test files): covers every directory below it, including pkg/hub/apierr and pkg/hub/internal/principal.
+	var files []string
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != "." && (d.Name() == "testdata" || strings.HasPrefix(d.Name(), ".") || strings.HasPrefix(d.Name(), "_")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".go") {
+			files = append(files, path)
+		}
+		return nil
+	})
 	require.NoError(t, err)
 
 	inv := identitySourceInventory{
@@ -240,6 +256,17 @@ func (inv identitySourceInventory) hasMarker(typeName string) bool {
 	return inv.methods[typeName]["localAncestryProvenance"]
 }
 
+// attestedBySwitch reports whether typeName is one of the pointer types
+// AncestryIsHubAttested lists explicitly (ancestryAttestedPrincipalTypes).
+func attestedBySwitch(typeName string) bool {
+	for _, name := range ancestryAttestedPrincipalTypes {
+		if name == "*"+typeName {
+			return true
+		}
+	}
+	return false
+}
+
 func (inv identitySourceInventory) isFederated(typeName string) bool {
 	return inv.methods[typeName]["IssuerURL"]
 }
@@ -290,10 +317,11 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 			}
 			federated := inv.isFederated(name)
 			marker := inv.hasMarker(name)
-			gotAttested := marker && !federated
+			listed := attestedBySwitch(name)
+			gotAttested := (marker || listed) && !federated
 			assert.Equalf(t, wantAttested, gotAttested,
-				"%s: AncestryIsHubAttested outcome must match the inventory (marker=%v, federated=%v)",
-				name, marker, federated)
+				"%s: AncestryIsHubAttested outcome must match the inventory (marker=%v, switch case=%v, federated=%v)",
+				name, marker, listed, federated)
 			if federated {
 				assert.Falsef(t, marker, "%s: a FederatedIdentity type must never carry localAncestryProvenance", name)
 			}

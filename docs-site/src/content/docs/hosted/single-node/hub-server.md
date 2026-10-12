@@ -12,7 +12,7 @@ The **Scion Hub** is the central brain of a hosted Scion architecture. It mainta
 - **Central Registry**: Maintains a record of all Projects (projects), Runtime Brokers, and Templates.
 - **Identity Provider**: Manages user authentication (OAuth) and issues scoped JWTs for Agents and Brokers.
 - **State Store**: Tracks the lifecycle, status, and metadata of all agents.
-- **Task Dispatcher**: Routes agent commands from the CLI or Dashboard to the correct Runtime Broker via persistent WebSocket tunnels.
+- **Task Dispatcher**: Routes agent commands from the CLI or Dashboard to the correct Runtime Broker via persistent WebSocket connections.
 
 ## Running the Hub
 

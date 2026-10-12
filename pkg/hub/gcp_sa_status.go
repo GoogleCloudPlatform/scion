@@ -24,7 +24,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -42,33 +41,15 @@ import (
 // that existing clients decode as-is. The status read also costs broker and
 // agent queries the plain GET should not pay.
 
-// Mapping states for one Kubernetes broker profile. "not_mapped" is shown
-// only on an authoritative report (gcpSAReportUnknownReason); an account
-// a non-authoritative report does not map is "unknown".
+// Mapping states for one Kubernetes broker profile: the shared decision's
+// states (profileSAMappingDecision), plus "not_reported" for a profile
+// with no report at all. A profile whose decision is not_required is not
+// listed.
 const (
-	GCPSAMappingMapped      = "mapped"
-	GCPSAMappingNotMapped   = "not_mapped"
-	GCPSAMappingUnknown     = "unknown"
+	GCPSAMappingMapped      = SAMappingStateMapped
+	GCPSAMappingNotMapped   = SAMappingStateNotMapped
+	GCPSAMappingUnknown     = SAMappingStateUnknown
 	GCPSAMappingNotReported = "not_reported"
-)
-
-// Reasons a mapping state is "unknown": the profile's report cannot show
-// that an account is absent. The shared vocabulary of the dispatch precheck
-// (ptone/scion#3329).
-const (
-	// GCPSAUnknownReportMissing: there is no stored report to judge (the
-	// embedded broker's live settings alone).
-	GCPSAUnknownReportMissing = "report_missing"
-	// GCPSAUnknownReportIncomplete: the broker said the report may not list
-	// every account (IncompleteReason says why).
-	GCPSAUnknownReportIncomplete = "report_incomplete"
-	// GCPSAUnknownReportOldVersion: the report is older than
-	// api.BrokerSAReportVersion, from a broker whose report may not match
-	// what dispatch would use.
-	GCPSAUnknownReportOldVersion = "report_old_version"
-	// GCPSAUnknownReportStale: the report is older than
-	// profileSAReportFreshFor.
-	GCPSAUnknownReportStale = "report_stale"
 )
 
 // Workload Identity binding states. Only "unknown" is produced today: the hub
@@ -155,11 +136,12 @@ type GCPServiceAccountProfileMapping struct {
 	IncompleteReason string `json:"incompleteReason,omitempty"`
 	// Ambiguous is true when more than one ServiceAccount in the namespace
 	// is annotated with the account and none is mapped explicitly; the
-	// broker refuses it at dispatch, so State is not "mapped".
+	// broker refuses it at dispatch. State is then "unknown" with
+	// UnknownReason ambiguous_mapping.
 	Ambiguous bool `json:"ambiguous,omitempty"`
-	// UnknownReason says why State is "unknown": GCPSAUnknownReportMissing,
-	// GCPSAUnknownReportIncomplete, GCPSAUnknownReportOldVersion or
-	// GCPSAUnknownReportStale.
+	// UnknownReason says why State is "unknown": the shared decision's
+	// reason (SAMappingReason*), for example report_stale or
+	// ambiguous_mapping.
 	UnknownReason string `json:"unknownReason,omitempty"`
 }
 
@@ -298,66 +280,34 @@ func gcpSAVerificationOf(sa *store.GCPServiceAccount) GCPServiceAccountVerificat
 	return v
 }
 
-// gcpSAReportUnknownReason returns why a reported profile's report is not
-// authoritative for an account it does not map at now, or "" when it is.
-// The conditions are the dispatch precheck's (kubernetesIdentityNotMapped):
-// a stored report that is complete, at api.BrokerSAReportVersion or later,
-// and at most profileSAReportFreshFor old. Only then is "not mapped" shown.
-//
-// The shared decision helper of ptone/scion#3329 phase 4c replaces this
-// (ptone/scion#4360).
-func gcpSAReportUnknownReason(p kubernetesProfileMappings, now time.Time) string {
-	switch {
-	case !p.storedReport:
-		return GCPSAUnknownReportMissing
-	case !p.complete && p.incompleteReason != "":
-		return GCPSAUnknownReportIncomplete
-	case p.version < api.BrokerSAReportVersion:
-		// Includes a broker that predates completeness reporting: never
-		// complete and no reason.
-		return GCPSAUnknownReportOldVersion
-	case !p.complete:
-		return GCPSAUnknownReportIncomplete
-	case p.reportedAt == nil || now.Sub(*p.reportedAt) > profileSAReportFreshFor:
-		return GCPSAUnknownReportStale
-	}
-	return ""
-}
-
 // gcpSAProfileMappings maps each Kubernetes profile to a state for email,
-// sorted by broker then profile name.
+// sorted by broker then profile name. The state is the shared decision's
+// (kubernetesProfileMappings.decision, the dispatch refusal's rule), so the
+// view, the warnings and the refusal agree. A profile with no report at all
+// is "not_reported"; one whose decision is not_required is left out.
 func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings, now time.Time) []GCPServiceAccountProfileMapping {
 	out := make([]GCPServiceAccountProfileMapping, 0, len(profiles))
 	key := strings.ToLower(email)
 	for _, p := range profiles {
-		state, unknownReason := GCPSAMappingNotReported, ""
-		if p.reported {
-			switch {
-			case p.gsas[key]:
-				state = GCPSAMappingMapped
-			default:
-				state = GCPSAMappingNotMapped
-				if unknownReason = gcpSAReportUnknownReason(p, now); unknownReason != "" {
-					state = GCPSAMappingUnknown
-				}
-			}
-		}
 		m := GCPServiceAccountProfileMapping{
-			BrokerID: p.brokerID, BrokerName: p.brokerName, Profile: p.profile, State: state,
-			UnknownReason: unknownReason,
+			BrokerID: p.brokerID, BrokerName: p.brokerName, Profile: p.profile, State: GCPSAMappingNotReported,
 		}
 		if p.reported {
-			if state == GCPSAMappingMapped {
+			d := p.decision(email, now)
+			if d.State == SAMappingStateNotRequired {
+				continue
+			}
+			m.State, m.UnknownReason = d.State, d.Reason
+			if m.State == GCPSAMappingMapped {
 				e := p.entries[key]
 				m.KubernetesServiceAccount, m.Namespace, m.Source = e.KSA, e.Namespace, e.Source
 			}
-			m.ReportedAt = p.reportedAt
-			m.Incomplete = p.incompleteReason != ""
-			m.IncompleteReason = p.incompleteReason
-			// A mapped account is not refused as ambiguous: an explicit
-			// mapping wins over discovery, so a stored ambiguous flag for
-			// it predates the mapping.
-			m.Ambiguous = state != GCPSAMappingMapped && p.ambiguous[key]
+			m.ReportedAt = p.report.MappingsReportedAt
+			if p.report.MappingsReported && !p.report.MappingsComplete {
+				m.IncompleteReason = p.report.MappingsIncompleteReason
+			}
+			m.Incomplete = m.IncompleteReason != ""
+			m.Ambiguous = d.Reason == SAMappingReasonAmbiguousMapping
 		}
 		out = append(out, m)
 	}
@@ -370,19 +320,27 @@ func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings, no
 	return out
 }
 
-// gcpSAMappedCount returns how many profiles map email and how many reported.
-func gcpSAMappedCount(email string, profiles []kubernetesProfileMappings) (mapped, reported int) {
-	key := strings.ToLower(email)
+// gcpSAMappedCount counts, with the shared decision at now
+// (kubernetesProfileMappings.decision), the profiles whose decision for
+// email is mapped and the profiles that reported. A profile whose decision
+// is not_required is counted in neither (the status view does not list it);
+// notRequired counts those so the summary can leave them out of the
+// unreported count too.
+func gcpSAMappedCount(email string, profiles []kubernetesProfileMappings, now time.Time) (mapped, reported, notRequired int) {
 	for _, p := range profiles {
 		if !p.reported {
 			continue
 		}
-		reported++
-		if p.gsas[key] {
+		switch p.decision(email, now).State {
+		case SAMappingStateNotRequired:
+			notRequired++
+			continue
+		case SAMappingStateMapped:
 			mapped++
 		}
+		reported++
 	}
-	return mapped, reported
+	return mapped, reported, notRequired
 }
 
 // gcpSADefaultsFor lists the defaults that name saID: the project default
@@ -416,7 +374,9 @@ func (s *Server) gcpSADefaultsFor(project *store.Project, saID string) []GCPServ
 // Then mapping: a profile whose project default is this account but which
 // does not map it, or else, when Kubernetes profiles reported and none maps
 // it, the first of them. A profile that did not report, or whose state is
-// unknown (its report is not authoritative), is not a known missing link.
+// unknown, is not a known missing link, except an ambiguous mapping on a
+// current, complete report (the broker refuses it, and an operator can fix
+// it).
 // The Workload Identity binding is not checked, so it never produces a step.
 func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, defaults []GCPServiceAccountDefault) GCPServiceAccountNextStep {
 	if !verified {
@@ -439,7 +399,10 @@ func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, de
 		switch m.State {
 		case GCPSAMappingMapped:
 			anyMapped = true
-		case GCPSAMappingNotMapped:
+		case GCPSAMappingNotMapped, GCPSAMappingUnknown:
+			if m.State == GCPSAMappingUnknown && !m.Ambiguous {
+				continue
+			}
 			if defaultProfiles[m.Profile] {
 				return gcpSANotMappedStep(m)
 			}
@@ -521,8 +484,10 @@ func (s *Server) gcpServiceAccountAgents(ctx context.Context, projectID, saID st
 }
 
 // GCPServiceAccountMappingSummary counts, for one account, the Kubernetes
-// broker profiles of a project that map it (MappedProfiles), that reported
-// their mappings (ReportedProfiles) and that did not (UnreportedProfiles).
+// broker profiles of a project whose shared mapping decision is mapped
+// (MappedProfiles, the status view's "mapped"), that reported their
+// mappings (ReportedProfiles) and that did not (UnreportedProfiles). A
+// profile whose runtime needs no mapping is not counted.
 type GCPServiceAccountMappingSummary struct {
 	MappedProfiles     int `json:"mappedProfiles"`
 	ReportedProfiles   int `json:"reportedProfiles"`
@@ -531,12 +496,13 @@ type GCPServiceAccountMappingSummary struct {
 
 // annotateGCPSAMappings sets the mapping summary on every listed account.
 func annotateGCPSAMappings(items []GCPServiceAccountWithCapabilities, profiles []kubernetesProfileMappings) {
+	now := time.Now()
 	for i := range items {
-		mapped, reported := gcpSAMappedCount(items[i].Email, profiles)
+		mapped, reported, notRequired := gcpSAMappedCount(items[i].Email, profiles, now)
 		items[i].Mapping = &GCPServiceAccountMappingSummary{
 			MappedProfiles:     mapped,
 			ReportedProfiles:   reported,
-			UnreportedProfiles: len(profiles) - reported,
+			UnreportedProfiles: len(profiles) - reported - notRequired,
 		}
 	}
 }

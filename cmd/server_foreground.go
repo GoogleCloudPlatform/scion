@@ -312,7 +312,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// `server start` invocation regardless of which components it enables.
 	// On-disk layout migration is expected to run at this same hook point.
 	config.WarnRemovedLegacyEnvOnce(os.Getenv, config.NewSlogReporter())
-	// Per-project migration (config.ReadProjectID, as projects load) reports
+	// Legacy settings and marker key migration (as projects load) reports
 	// through slog here too. This is already the default, but set it
 	// explicitly so all three boot hooks (CLI, hub, broker) are visible at
 	// their call sites.
@@ -2282,6 +2282,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetConduitStreamAuthzMetrics(authzRec)
 	}
 
+	if refreshRec, err := hub.NewOTelConduitAgentRefreshMetrics(mp); err != nil {
+		log.Printf("WARNING: hub conduit agent refresh metrics disabled: %v", err)
+	} else {
+		hubSrv.SetConduitAgentRefreshMetrics(refreshRec)
+	}
+
 	if portProxyRec, err := hub.NewOTelPortProxyMetrics(mp); err != nil {
 		log.Printf("WARNING: hub port proxy metrics disabled: %v", err)
 	} else {
@@ -2421,6 +2427,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	}
 	hubCfg.TestAdminGate = testAdminGate
 
+	// Test identity web sessions (WS1): the hub-local key from the test
+	// infrastructure marker. A missing or unusable key only leaves web
+	// sessions unavailable; it never stops startup.
+	hubCfg.TestIdentityWebSessionKey = loadTestIdentityWebSessionKey(ctx, entClient, hubCfg.HubID, hubCfg.EnableTestIdentities)
+
 	hubSrv, err := hub.New(hubCfg, s)
 	if err != nil {
 		return nil, fmt.Errorf("hub server initialization failed: %w", err)
@@ -2432,18 +2443,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		hubSrv.SetMessageLogger(messageLogger)
 	}
 
-	// Load notification channels from versioned settings
+	// Load notification channels from versioned settings. With operational
+	// settings (any DB driver), ApplySnapshot rebuilds the registry from the
+	// notifications section at startup and on every change.
 	if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil && len(vs.Server.NotificationChannels) > 0 {
-		channelConfigs := make([]hub.ChannelConfig, len(vs.Server.NotificationChannels))
-		for i, c := range vs.Server.NotificationChannels {
-			channelConfigs[i] = hub.ChannelConfig{
-				Type:             c.Type,
-				Params:           c.Params,
-				FilterTypes:      c.FilterTypes,
-				FilterUrgentOnly: c.FilterUrgentOnly,
-			}
-		}
-		registry := hub.NewChannelRegistry(channelConfigs, logging.Subsystem("hub.notification-channels"))
+		registry := hub.NewChannelRegistryFromSettings(vs.Server.NotificationChannels)
 		hubSrv.SetChannelRegistry(registry)
 		log.Printf("Notification channels configured: %d channel(s) registered", registry.Len())
 	}
@@ -3093,6 +3097,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webSrv.SetMaintenanceState(hubSrv.GetMaintenanceState())
 		webSrv.SetDemotionSafe(hubSrv.GetDemotionSafe())
 		webSrv.SetAuthzService(hubSrv.GetAuthzService())
+		webSrv.SetTestIdentityWebSessions(hubSrv)
 		webSrv.MountHubAPI(hubSrv.Handler(), hubSrv.CleanupBackgroundResources)
 
 		localHubSrv := hubSrv
