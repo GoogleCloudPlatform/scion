@@ -36,7 +36,7 @@ var AmbientGCPProjectEnvKeys = []string{logging.EnvGCPProjectID, logging.EnvGoog
 func ClearAmbientGCPProjectEnv() {
 	for _, k := range AmbientGCPProjectEnvKeys {
 		if err := os.Unsetenv(k); err != nil {
-			fmt.Fprintf(os.Stderr, "clearAmbientGCPProjectEnv: unsetting %s: %v\n", k, err)
+			fmt.Fprintf(os.Stderr, "ClearAmbientGCPProjectEnv: unsetting %s: %v\n", k, err)
 			os.Exit(1)
 		}
 	}
