@@ -307,7 +307,7 @@ describe('scion-chat-file-preview artifact target', () => {
     expect(frame.hasAttribute('srcdoc')).toBe(false);
     expect(frame.getAttribute('title')).toBe('Site (sandboxed)');
     const bar = (q(el, '.untrusted-bar')?.textContent ?? '').replace(/\s+/g, ' ').trim();
-    expect(bar).toBe('Content published by agent-1 · runs sandboxed, isolated from Scion');
+    expect(bar).toBe('Content published by agent-1 (agent) · runs sandboxed, isolated from Scion');
     expect(q(el, 'sl-alert')).toBeNull();
     expect(q(el, '.version-badge')?.textContent?.trim()).toBe('v3 · current');
     expect(buttons(el)).toEqual(['Copy link', 'Open in artifact viewer']);
@@ -335,7 +335,7 @@ describe('scion-chat-file-preview artifact target', () => {
     );
     const el = await open();
     const bar = (q(el, '.untrusted-bar')?.textContent ?? '').replace(/\s+/g, ' ').trim();
-    expect(bar).toBe('Content published by agent-1 · runs sandboxed, isolated from Scion');
+    expect(bar).toBe('Content published by agent-1 (agent) · runs sandboxed, isolated from Scion');
     expect(q(el, 'iframe')?.getAttribute('src')).toBe(VIEW_URL);
   });
 
