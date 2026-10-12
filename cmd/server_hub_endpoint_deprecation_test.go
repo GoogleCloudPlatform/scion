@@ -149,8 +149,8 @@ func TestSameServerHubEndpoint(t *testing.T) {
 	}
 }
 
-// writeGlobalSettings writes a v1 settings file into globalDir.
-func writeGlobalSettings(t *testing.T, globalDir, body string) string {
+// writeServerHubEndpointTestSettings writes a v1 settings file into globalDir; it returns the path.
+func writeServerHubEndpointTestSettings(t *testing.T, globalDir, body string) string {
 	t.Helper()
 	path := filepath.Join(globalDir, "settings.yaml")
 	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\n"+body), 0644))
@@ -231,7 +231,7 @@ func TestWarnDeprecatedServerHubEndpoint_Sources(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			globalDir := isolateServerHubEndpointEnv(t)
 			if tt.settings != "" {
-				writeGlobalSettings(t, globalDir, tt.settings)
+				writeServerHubEndpointTestSettings(t, globalDir, tt.settings)
 			}
 			for k, v := range tt.env {
 				t.Setenv(k, v)

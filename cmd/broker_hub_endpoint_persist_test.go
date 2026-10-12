@@ -55,7 +55,7 @@ func hubEndpointIn(tree map[string]any) (string, bool) {
 
 func TestPersistBrokerHubSettings_WritesServerBrokerHubEndpoint(t *testing.T) {
 	globalDir := isolateServerHubEndpointEnv(t)
-	path := writeGlobalSettings(t, globalDir, "")
+	path := writeServerHubEndpointTestSettings(t, globalDir, "")
 
 	var w bytes.Buffer
 	persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", persistTestBrokerID, "hub-example-com")
@@ -81,7 +81,7 @@ func TestPersistBrokerHubSettings_WritesServerBrokerHubEndpoint(t *testing.T) {
 
 func TestPersistBrokerHubSettings_KeepsExistingServerBrokerHubEndpoint(t *testing.T) {
 	globalDir := isolateServerHubEndpointEnv(t)
-	path := writeGlobalSettings(t, globalDir, "server:\n  broker:\n    hub_endpoint: https://first.example.com\n")
+	path := writeServerHubEndpointTestSettings(t, globalDir, "server:\n  broker:\n    hub_endpoint: https://first.example.com\n")
 
 	var w bytes.Buffer
 	persistBrokerHubSettings(&w, globalDir, "https://second.example.com", persistTestBrokerID, "second-example-com")
@@ -96,7 +96,7 @@ func TestPersistBrokerHubSettings_KeepsExistingServerBrokerHubEndpoint(t *testin
 
 func TestPersistBrokerHubSettings_CoLocatedWorkstationHubSkipsWrite(t *testing.T) {
 	globalDir := isolateServerHubEndpointEnv(t)
-	path := writeGlobalSettings(t, globalDir, "")
+	path := writeServerHubEndpointTestSettings(t, globalDir, "")
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "dev-token"), []byte("scion_dev_persist_test_token\n"), 0600))
 
 	var w bytes.Buffer
@@ -119,7 +119,7 @@ func TestPersistBrokerHubSettings_CoLocatedWorkstationHubSkipsWrite(t *testing.T
 // change is the intended broker keys.
 func TestPersistBrokerHubSettings_LeavesHubEndpointAlone(t *testing.T) {
 	globalDir := isolateServerHubEndpointEnv(t)
-	path := writeGlobalSettings(t, globalDir, "hub:\n  endpoint: https://cli.example.com\n")
+	path := writeServerHubEndpointTestSettings(t, globalDir, "hub:\n  endpoint: https://cli.example.com\n")
 
 	var w bytes.Buffer
 	persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", persistTestBrokerID, "hub-example-com")

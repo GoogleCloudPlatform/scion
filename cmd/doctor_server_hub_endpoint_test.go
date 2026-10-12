@@ -91,12 +91,12 @@ func TestDetectDoctorServerHost(t *testing.T) {
 	})
 	t.Run("CLI-only settings", func(t *testing.T) {
 		globalDir := isolateServerHubEndpointEnv(t)
-		writeGlobalSettings(t, globalDir, "hub:\n  endpoint: https://hub.example.com\n")
+		writeServerHubEndpointTestSettings(t, globalDir, "hub:\n  endpoint: https://hub.example.com\n")
 		assert.Equal(t, doctorServerHost{}, detectDoctorServerHost(globalDir))
 	})
 	t.Run("server block", func(t *testing.T) {
 		globalDir := isolateServerHubEndpointEnv(t)
-		writeGlobalSettings(t, globalDir, "server:\n  mode: hosted\n")
+		writeServerHubEndpointTestSettings(t, globalDir, "server:\n  mode: hosted\n")
 		assert.Equal(t, doctorServerHost{configured: true}, detectDoctorServerHost(globalDir))
 	})
 }
@@ -107,7 +107,7 @@ func TestDetectDoctorServerHost(t *testing.T) {
 func TestCheckDoctorServerHubEndpointHere(t *testing.T) {
 	t.Run("server host", func(t *testing.T) {
 		globalDir := isolateServerHubEndpointEnv(t)
-		writeGlobalSettings(t, globalDir, "server:\n  mode: hosted\n")
+		writeServerHubEndpointTestSettings(t, globalDir, "server:\n  mode: hosted\n")
 		t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
 		res, ok := checkDoctorServerHubEndpointHere()
 		require.True(t, ok)
@@ -124,7 +124,7 @@ func TestCheckDoctorServerHubEndpointHere(t *testing.T) {
 	// nothing to report.
 	t.Run("server host, cwd project pins a remote hub.endpoint", func(t *testing.T) {
 		globalDir := isolateServerHubEndpointEnv(t)
-		writeGlobalSettings(t, globalDir, "server:\n  mode: hosted\n")
+		writeServerHubEndpointTestSettings(t, globalDir, "server:\n  mode: hosted\n")
 		repo := t.TempDir()
 		projectDir := filepath.Join(repo, ".scion")
 		require.NoError(t, os.MkdirAll(projectDir, 0755))
