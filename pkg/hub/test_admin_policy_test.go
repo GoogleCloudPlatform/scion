@@ -639,11 +639,12 @@ func TestTestAdminSink_NoTokenInSinkOrLogs(t *testing.T) {
 // --- Last human super-admin ----------------------------------------------------
 
 // What a test super-admin can do to the last human super-admin: it cannot
-// delete, suspend or demote it, nor remove its super-admin binding (the
-// last-admin and constraint-admin guards do not count test identities); it
-// can revoke its web sessions (the human signs in again). With a second
-// human admin it can remove the first human's super-admin binding, and the
-// admin_emails reconcile at restart restores it.
+// delete or suspend it (the last-admin and constraint-admin guards do not
+// count test identities), demote it (user.promote is deny) or remove any
+// super-admin binding (CanDelegate's test-admin policy check: the role
+// holds deny-classified permissions); it can revoke its web sessions (the
+// human signs in again). A super-admin binding a human admin removes is
+// restored by the admin_emails reconcile at restart.
 func TestTestSuperAdmin_LastHumanAdmin(t *testing.T) {
 	srv, s, _ := tsaServer(t)
 	ctx := context.Background()
@@ -704,20 +705,28 @@ func TestTestSuperAdmin_LastHumanAdmin(t *testing.T) {
 	require.NotNil(t, b)
 	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/admin/role-bindings/"+b.ID, nil)
 	t.Logf("remove last human super-admin binding: %d %s", rec.Code, rec.Body.String())
-	assert.Equal(t, http.StatusConflict, rec.Code)
-	assert.Equal(t, "last_admin", tsaErrCode(t, rec))
+	// Removing a super-admin binding runs CanDelegate over the super-admin
+	// role, which holds deny-classified permissions: the test-admin policy
+	// refuses it before the last-admin guard is reached.
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, ErrCodeForbidden, tsaErrCode(t, rec))
+	assert.Contains(t, rec.Body.String(), "test-admin policy")
 	stillAdmin("binding removal")
 	rec = doRequestWithToken(t, srv, tok, http.MethodPost, "/api/v1/users/"+lastHuman.ID+"/revoke-sessions", nil)
 	t.Logf("revoke last human super-admin sessions: %d %s", rec.Code, rec.Body.String())
 	assert.Equal(t, http.StatusOK, rec.Code, "web session revocation is allowed (users.sessions.revoke)")
 
-	// With a second human admin, the first human's binding can go; the
+	// With a second human admin, the test super-admin still cannot remove
+	// a human's super-admin binding. If a human admin removes it, the
 	// admin_emails reconcile at restart restores it.
 	second := taUser(t, s, "tsa-second-human", store.SystemRoleSuperAdmin)
 	require.NotNil(t, bindingOf(second.ID))
 	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/admin/role-bindings/"+b.ID, nil)
-	t.Logf("remove a non-last human super-admin binding: %d %s", rec.Code, rec.Body.String())
-	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	t.Logf("test super-admin removes a non-last human super-admin binding: %d %s", rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	stillAdmin("non-last binding removal by the test super-admin")
+	rec = doRequestAsUser(t, srv, second, http.MethodDelete, "/api/v1/admin/role-bindings/"+b.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, "a human admin removes it: %s", rec.Body.String())
 	assert.Nil(t, bindingOf(lastHuman.ID))
 	_, err = ReconcileSuperAdminBindings(ctx, s, []string{lastHuman.Email, second.Email}, "member")
 	require.NoError(t, err)
@@ -968,6 +977,7 @@ func TestTestAdminPolicy_DelegationOfDeniedPermissionsRefused(t *testing.T) {
 // comment.)
 func TestTestAdminPolicy_SecretValueReadsDenied(t *testing.T) {
 	srv, s, _ := tsaServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	issuer := taUser(t, s, "tsa-sec-iss", store.SystemRoleSuperAdmin)
 	issuer2 := taUser(t, s, "tsa-sec-iss2", store.SystemRoleSuperAdmin)
 	superKind := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
@@ -1199,7 +1209,8 @@ func TestTestAdminPolicy_DispatchSecretsClamp(t *testing.T) {
 		case store.ScopeUser:
 			scopeID = root
 		}
-		require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{ID: generateID(), Key: name, Value: "v-" + name, Scope: scope, ScopeID: scopeID}))
+		require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{ID: generateID(), Key: name, Value: "v-" + name, Scope: scope, ScopeID: scopeID,
+			InjectionMode: store.InjectionModeAlways}))
 	}
 	env, _, err := d.resolveEnvFromStorage(ctx, agentFor(root, otherProject))
 	require.NoError(t, err)
