@@ -532,7 +532,7 @@ func TestStorePutGrantReview(t *testing.T) {
 		}
 		for _, bad := range []*Grant{
 			{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "agent:x", Permission: GrantReview},
-			{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: home, Permission: GrantReview},
+			{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: home.SubjectRef, Permission: GrantReview},
 			{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: "project-9", Permission: GrantReview},
 			{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:x", Permission: "reviewer"},
 		} {
