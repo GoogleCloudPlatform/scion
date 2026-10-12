@@ -24,6 +24,7 @@ import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { render, nothing, type TemplateResult } from 'lit';
 
 import type { Agent, AgentLaunch } from '../../shared/types.js';
+import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import type { ScionPageAgentDetail } from './agent-detail.js';
 
 // chat-thread (imported by agent-detail) pulls in the app entry point,
@@ -129,6 +130,22 @@ describe('agent page test ids for UAT', () => {
     );
 
     expect(byId(host, 'agent-phase')?.getAttribute('status')).toBe('provisioning');
+  });
+
+  it('puts agent-phase only on the Status tab badge, not on the header badge', () => {
+    const host = renderPart(makeAgent({ phase: 'provisioning', launch: inFlight }), 'renderHeader');
+
+    expect(host.querySelector('scion-status-badge')).not.toBeNull();
+    expect(byId(host, 'agent-phase')).toBeNull();
+  });
+
+  it('adds no data-testid to a status badge without a testId', () => {
+    const host = document.createElement('div');
+    render(agentStatusBadge(makeAgent({ phase: 'running' })), host);
+
+    const badge = host.querySelector('scion-status-badge');
+    expect(badge).not.toBeNull();
+    expect(badge!.hasAttribute('data-testid')).toBe(false);
   });
 
   it('marks the header Start and Resume (best effort) buttons', () => {
