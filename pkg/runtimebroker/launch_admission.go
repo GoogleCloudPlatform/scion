@@ -45,14 +45,16 @@ const minAsyncLaunchTimeoutSeconds = 20
 // It reports whether it accepted the launch. Every refusal writes its error
 // response and returns false; only the path that starts runLaunch returns
 // true. A flat instance's caller releases its ownership mirror unless the
-// launch was accepted, because only then does runLaunch own the mirror.
+// launch was accepted, because only then does runLaunch own the mirror;
+// owned is that mirror (nil on a legacy Runtime Broker), which runLaunch
+// releases when it ends.
 //
 // Nothing captured in the launchCtx passed to runLaunch, nor runLaunch
 // itself, retains r or any value derived from *http.Request: everything it
 // needs (the resolved hub connection name, opts, the request body already
 // decoded into req) is plain data copied out here, in this synchronous
 // handler goroutine, before go runLaunch starts (design §7 P1b-1 B-6).
-func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx context.Context, req CreateAgentRequest, opts api.StartOptions, mgr agent.Manager, attempt *dispatchAttempt, markAttemptFailed func(int, string), span trace.Span, receivedAt time.Time) (accepted bool) {
+func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx context.Context, req CreateAgentRequest, opts api.StartOptions, mgr agent.Manager, owned *ownedStart, attempt *dispatchAttempt, markAttemptFailed func(int, string), span trace.Span, receivedAt time.Time) bool {
 	// The GCS download itself runs in runLaunch (design §3.1), but its
 	// directory check only reads the filesystem, so an invalid workspace
 	// directory is answered here with the same 400 the synchronous path
@@ -155,6 +157,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		key:             key,
 		sharedWorkspace: opts.SharedWorkspace,
 		supersededDone:  supersededDone,
+		owned:           owned,
 	}
 	go s.runLaunch(runCtx, rec, lc)
 	return true

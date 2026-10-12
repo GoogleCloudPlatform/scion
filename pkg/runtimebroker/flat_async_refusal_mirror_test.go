@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -103,6 +105,21 @@ func TestFlatAsyncCreate_PreflightRuntimeErrorReleasesOwnershipMirror(t *testing
 	}
 	f.mgr.preflightErr = nil
 	assertMirrorReleasedAndSlugReusable(t, f, "async-500")
+}
+
+// TestFlatAsyncCreate_HarnessPolicyRefusalReleasesOwnershipMirror: a
+// Preflight refused by the harness-config policy refuses the async create
+// with 403.
+func TestFlatAsyncCreate_HarnessPolicyRefusalReleasesOwnershipMirror(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.mgr.preflightErr = fmt.Errorf("resolve harness-config: %w", agent.ErrHarnessConfigPolicy)
+
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents", flatAsyncCreateBody(f, "async-403", nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", w.Code, w.Body.String())
+	}
+	f.mgr.preflightErr = nil
+	assertMirrorReleasedAndSlugReusable(t, f, "async-403")
 }
 
 // TestFlatAsyncCreate_InvalidWorkspaceDirReleasesOwnershipMirror: a GCS
@@ -296,5 +313,32 @@ func TestFlatOwnedStart_ReleaseAfterCompleteIsNoOp(t *testing.T) {
 	f.srv.releaseOwnedStart("run-y")
 	if n := ownedStartCount(f.srv); n != 0 {
 		t.Fatalf("%d ownership mirror(s) after releasing run-y, want 0", n)
+	}
+}
+
+// TestFlatOwnedStart_ReleaseKeepsALaterMirrorOfTheSameRun: when a later
+// start installed its own mirror under the same run ID, releasing the
+// earlier start's mirror leaves the later one in place.
+func TestFlatOwnedStart_ReleaseKeepsALaterMirrorOfTheSameRun(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	first := api.StartOptions{RunID: "run-same"}
+	second := api.StartOptions{RunID: "run-same"}
+	o1 := f.srv.installOwnedStart(&first, flatTestProjectID, "agent-same")
+	o2 := f.srv.installOwnedStart(&second, flatTestProjectID, "agent-same")
+	if o1 == nil || o2 == nil || o1 == o2 {
+		t.Fatalf("installOwnedStart returned %p and %p, want two distinct mirrors", o1, o2)
+	}
+
+	f.srv.releaseOwnedMirror("run-same", o1)
+	if v, ok := f.srv.ownedStarts.Load("run-same"); !ok || v.(*ownedStart) != o2 {
+		t.Fatalf("after releasing the earlier mirror: present = %v, want the later mirror kept", ok)
+	}
+	f.srv.releaseOwnedMirror("run-same", nil)
+	if n := ownedStartCount(f.srv); n != 1 {
+		t.Fatalf("%d ownership mirror(s) after a nil release, want 1", n)
+	}
+	f.srv.releaseOwnedMirror("run-same", o2)
+	if n := ownedStartCount(f.srv); n != 0 {
+		t.Fatalf("%d ownership mirror(s) after releasing the later mirror, want 0", n)
 	}
 }
