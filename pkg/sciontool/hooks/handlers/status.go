@@ -214,6 +214,40 @@ func (h *StatusHandler) UpdatePhase(phase state.Phase, activity state.Activity, 
 	return h.writeAgentInfoLocked(info)
 }
 
+// ReplaceActivityIf sets the activity to `to` only when the current activity
+// is `from`, and reports whether it did. The phase is left unchanged. It
+// lets `sciontool init` end the initializing activity without overwriting an
+// activity a hook has already written. Hooks run in other processes, so the
+// check and the write are not atomic across processes; the window is a
+// single read-modify-write of a small local file.
+func (h *StatusHandler) ReplaceActivityIf(from, to state.Activity) (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	info := h.readAgentInfoMap()
+	current, _ := info["activity"].(string)
+	if current != string(from) {
+		return false, nil
+	}
+	info["activity"] = string(to)
+	delete(info, "toolName")
+	delete(info, "status")
+	delete(info, "sessionStatus")
+	if err := h.writeAgentInfoLocked(info); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CurrentActivity returns the activity recorded in agent-info.json, or ""
+// when the file is missing or unreadable.
+func (h *StatusHandler) CurrentActivity() state.Activity {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	current, _ := h.readAgentInfoMap()["activity"].(string)
+	return state.Activity(current)
+}
+
 // SetMessage writes a message to the agent-info.json detail section.
 // This is used to persist error messages so the broker heartbeat can
 // relay them to the hub even after the container exits.
@@ -403,7 +437,11 @@ func eventToPhaseActivity(event *hooks.Event) *eventResult {
 		return &eventResult{phase: state.PhaseStarting, isPhase: true}
 
 	case hooks.EventPostStart:
-		return &eventResult{phase: state.PhaseRunning, activity: state.ActivityWorking, isPhase: true}
+		// The harness process is up but not yet known to read input;
+		// `sciontool init` replaces initializing with working once the
+		// harness is ready (or at state.ReadyDeadline). Any hook event
+		// replaces it too, since initializing is not sticky.
+		return &eventResult{phase: state.PhaseRunning, activity: state.ActivityInitializing, isPhase: true}
 
 	case hooks.EventSessionStart:
 		// session-start clears sticky — treated as activity-only (working)

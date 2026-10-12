@@ -31,9 +31,9 @@ import (
 // Default harness-readiness wait timings. See waitHarnessReady.
 const (
 	defaultReadyPollInterval  = 500 * time.Millisecond
-	defaultReadyDeadline      = 90 * time.Second
+	defaultReadyDeadline      = state.ReadyDeadline
 	defaultReadySettle        = 1500 * time.Millisecond
-	defaultReadySettleSession = 8 * time.Second
+	defaultReadySettleSession = state.ReadySettleSession
 	readyProbeExecTimeout     = 5 * time.Second
 )
 

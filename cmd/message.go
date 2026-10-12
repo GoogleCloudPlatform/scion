@@ -974,6 +974,9 @@ func printBroadcastAccepted(resp *hubclient.BroadcastResponse) {
 	} else {
 		fmt.Printf("Broadcast accepted (%d running agents targeted).\n", resp.Targeted)
 	}
+	if resp.Starting > 0 {
+		fmt.Printf("%d targeted agent(s) still starting; the message is held until they are ready.\n", resp.Starting)
+	}
 }
 
 func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message string, urgent bool) error {

@@ -369,9 +369,9 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		code, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName)
 		// message is fixed text for the client (ptone/scion#3113); the
 		// full error reaches only the broker's own log.
-		s.agentLifecycleLog.Error("runLaunch: agent start failed",
+		s.agentLifecycleLog.Error("runLaunch: agent start failed", append([]any{
 			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
-			"launch_id", rec.ID, "error_code", code, "error", sr.err)
+			"launch_id", rec.ID, "error_code", code, "error", sr.err}, runtimeFailureLogAttrs(sr.err)...)...)
 		if sender.CheckpointUnreachable() {
 			// A pre-create checkpoint blocked until ctx' expired with no
 			// definitive Hub answer (design §3.8.2: failed{hub_unreachable}).

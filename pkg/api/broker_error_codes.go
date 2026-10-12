@@ -49,6 +49,31 @@ const (
 	BrokerErrCodeIdentityKSAMismatch = "identity_ksa_mismatch"
 )
 
+// Values of details.cause on a broker runtime_error answer to a create
+// whose runtime start failed with a Kubernetes API status the operator can
+// act on (ptone/scion#4555). Each is a fixed code: the broker never puts the
+// API server message or any namespace, ServiceAccount or object name in the
+// body. The hub relays details.cause only when it is one of these.
+const (
+	// BrokerRuntimeCauseForbidden: the runtime's credentials may not
+	// perform a call the start needs (for example, the namespace
+	// ServiceAccount may not get or list pods).
+	BrokerRuntimeCauseForbidden = "runtime_forbidden"
+	// BrokerRuntimeCauseUnauthorized: the runtime's own credentials were
+	// refused (expired or invalid).
+	BrokerRuntimeCauseUnauthorized = "runtime_unauthorized"
+)
+
+// IsBrokerRuntimeCause reports whether code is one of the
+// BrokerRuntimeCause values.
+func IsBrokerRuntimeCause(code string) bool {
+	switch code {
+	case BrokerRuntimeCauseForbidden, BrokerRuntimeCauseUnauthorized:
+		return true
+	}
+	return false
+}
+
 // Detail keys of a broker identity_not_mapped or identity_ksa_mismatch
 // error. The broker writes them and the hub reads them to build its own
 // message.

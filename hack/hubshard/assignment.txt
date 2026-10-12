@@ -68,6 +68,7 @@
 1 agent_delegation_chain_test.go
 1 agent_delegation_test.go
 4 agent_delete_engine_deferred_test.go
+3 agent_delete_engine_finalizing_test.go
 4 agent_delete_engine_routed_test.go
 6 agent_delete_engine_t1_test.go
 3 agent_delete_engine_test.go
@@ -123,6 +124,7 @@
 3 agent_sorted_project_list_test.go
 1 agent_sorted_project_list_validation_test.go
 0 agent_sqlite_helpers_test.go
+3 agent_ssh_host_key_test.go
 4 agent_standing_test.go
 1 agent_target_authz_test.go
 5 agent_token_mint_ceiling_test.go
@@ -879,6 +881,7 @@
 3 identity_typed_nil_test.go
 3 inbox_token_test.go
 6 inflight_probe_test.go
+3 initializing_gates_test.go
 1 invite_flow_auth_test.go
 0 invite_helpers_test.go
 1 json_key_match_test.go

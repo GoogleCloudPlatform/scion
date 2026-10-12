@@ -9,6 +9,7 @@ import (
 
 	slackapi "github.com/slack-go/slack"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
@@ -199,7 +200,7 @@ func handleAgents(ctx context.Context, client *slackapi.Client, store Store, hub
 	for _, agent := range agents {
 		label := agent.Slug
 		if agent.Activity != "" {
-			label += " — " + agent.Activity
+			label += " — " + state.Activity(agent.Activity).DisplayLabel()
 		}
 		if agent.Slug == link.DefaultAgent {
 			label += " (default)"
@@ -242,7 +243,7 @@ func handleStatus(ctx context.Context, client *slackapi.Client, store Store, hub
 
 	for _, agent := range agents {
 		if agent.Slug == agentSlug {
-			activity := agent.Activity
+			activity := state.Activity(agent.Activity).DisplayLabel()
 			if activity == "" {
 				activity = "unknown"
 			}

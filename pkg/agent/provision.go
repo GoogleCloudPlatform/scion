@@ -2194,9 +2194,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if hConfig.AuthSelectedType != "" {
 				settingsCfg.AuthSelectedType = hConfig.AuthSelectedType
 			}
-			if settings.Telemetry != nil {
-				settingsCfg.Telemetry = config.ConvertV1TelemetryToAPI(settings.Telemetry)
-			}
+			// settings.Telemetry is deliberately NOT merged here
+			// (ptone/scion#4241). finalScionCfg is persisted to
+			// scion-agent.json below, where a baked settings value would
+			// rank as agent config at Start, above the hub default
+			// telemetry tier, and later settings changes would never reach
+			// the agent. Start applies settings telemetry in its own tier
+			// on every start.
+			//
 			// Template has highest priority IN THIS MERGE, so it overrides
 			// settings here. We construct a config with ONLY the settings env,
 			// then merge finalScionCfg over it.
