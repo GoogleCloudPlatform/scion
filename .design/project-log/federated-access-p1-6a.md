@@ -43,8 +43,7 @@
   the credential (hubclient `AuthService.FederationToken`, never retried).
   Human mode only: `hub.auth` is not in `agentAllowed`. The design text says
   `scion auth federation-token`; there is no top-level `auth` group, so the
-  command sits beside `hub auth login/logout` (approved by the
-  engineering manager; moving it is small if wanted).
+  command sits beside `hub auth login/logout`.
 
 ## Notes for later items
 
