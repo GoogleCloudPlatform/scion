@@ -104,6 +104,12 @@ const (
 	// testIdentityReasonBusy answers a transient store conflict on
 	// issuance and on delete (shared; the value predates delete).
 	testIdentityReasonBusy = "issuance_busy"
+	// testIdentityReasonPurgeIncomplete answers a purge that left work for
+	// a later run.
+	testIdentityReasonPurgeIncomplete = "purge_incomplete"
+	// testIdentityReasonFixtureBroker refuses broker creation by a test
+	// identity.
+	testIdentityReasonFixtureBroker = "test_identity_cannot_create_broker"
 )
 
 // isTransientIssuanceConflict reports whether err is a store conflict that
@@ -155,9 +161,12 @@ type testIdentityHooks struct {
 // testIdentityState is the server-side state of the feature.
 type testIdentityState struct {
 	enabled bool
-	limiter *GCPTokenRateLimiter
-	hooks   testIdentityHooks
-	now     func() time.Time
+	// reaperCursor is the expiry reaper's purge cursor
+	// (test_identity_reaper.go).
+	reaperCursor *testIdentityReaperCursor
+	limiter      *GCPTokenRateLimiter
+	hooks        testIdentityHooks
+	now          func() time.Time
 }
 
 // clock returns the current time from the state's clock, or time.Now for a
@@ -171,8 +180,9 @@ func (t *testIdentityState) clock() time.Time {
 
 func newTestIdentityState(enabled bool) testIdentityState {
 	return testIdentityState{
-		enabled: enabled,
-		limiter: NewGCPTokenRateLimiter(testIdentityRatePerSecond, testIdentityRateBurst),
+		enabled:      enabled,
+		reaperCursor: &testIdentityReaperCursor{},
+		limiter:      NewGCPTokenRateLimiter(testIdentityRatePerSecond, testIdentityRateBurst),
 		hooks: testIdentityHooks{
 			syncGrants: syncHubRoleGrants,
 			writeAudit: func(ctx context.Context, tx store.Store, record *store.MutationAuditRecord) error {
@@ -183,14 +193,15 @@ func newTestIdentityState(enabled bool) testIdentityState {
 	}
 }
 
-// isReservedTestIdentityEmail reports whether email is in the reserved
-// test-fixture domain. Every path that resolves or creates a user by email
+// isReservedTestIdentityEmail reports whether email is in a reserved test
+// identity domain: the member fixture domain or either admin kind's domain
+// (store.IsReservedTestIdentityEmail). Every path that resolves or creates a user by email
 // refuses such an email, except the issuance endpoint (which creates it)
 // and the hub-issued JWT path (where the fixture's own token is checked by
 // testFixtureRejection instead). It is deliberately separate from
 // isReservedPlatformIdentity, which also guards the JWT path.
 func isReservedTestIdentityEmail(email string) bool {
-	return store.IsTestFixtureEmail(email)
+	return store.IsReservedTestIdentityEmail(email)
 }
 
 // emailResolvedPrincipalRefused reports whether a path that resolves a user
@@ -206,7 +217,7 @@ func emailResolvedPrincipalRefused(email string, u *store.User) bool {
 	if isReservedTestIdentityEmail(email) {
 		return true
 	}
-	return u != nil && (u.IsTestFixture() || isReservedTestIdentityEmail(u.Email))
+	return u != nil && (!u.IsHumanKind() || isReservedTestIdentityEmail(u.Email))
 }
 
 // testFixtureRejection returns a non-empty reason when u must not
@@ -219,6 +230,11 @@ func testFixtureRejection(u *store.User, enabled bool, now time.Time) string {
 		return ""
 	}
 	if !u.IsTestFixture() {
+		// An admin-kind row is checked by testAdminRowRejection, which
+		// runs next in the same row block.
+		if u.IsTestAdmin() {
+			return ""
+		}
 		if isReservedTestIdentityEmail(u.Email) {
 			return "reserved_test_identity_domain"
 		}
@@ -405,14 +421,15 @@ func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (Use
 		writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
 		return nil, false
 	}
-	// A test fixture never issues test identities, whatever grant it may
-	// have been given.
-	if caller, err := s.store.GetUser(ctx, user.ID()); err == nil && caller.IsTestFixture() {
-		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "test fixture cannot issue test identities")
+	// A test identity of any kind never issues test identities, whatever
+	// grant it may have been given. The kind is read through
+	// kindForPrincipal; a read error or an unrecognized kind fails closed.
+	if k, err := s.kindForPrincipal(ctx, user.ID()); err == nil && k.isTestIdentity() {
+		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "test identity cannot issue test identities")
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "a test identity cannot issue test identities",
 			map[string]interface{}{"reason": testIdentityReasonFixtureCall})
 		return nil, false
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+	} else if err != nil {
 		InternalError(w)
 		return nil, false
 	}
@@ -671,6 +688,13 @@ func (s *Server) handleIssueTestIdentityToken(w http.ResponseWriter, r *http.Req
 
 	id := r.PathValue("id")
 	u, err := s.store.GetUser(ctx, id)
+	// An admin-kind identity gets exactly one token, at issuance: no
+	// re-issue (409), for its issuer or an unscoped platform admin.
+	if err == nil && u.IsTestAdmin() && canManageTestIdentity(caller, u) {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "an admin-kind test identity's token is never re-issued",
+			map[string]interface{}{"reason": testAdminReasonAdminKindTokens})
+		return
+	}
 	// One answer for a missing user, a non-fixture user, and a fixture the
 	// caller did not issue, so the route is no user-existence oracle.
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !canManageTestIdentity(caller, u))) {
@@ -863,6 +887,15 @@ func (s *Server) handleDeleteTestIdentity(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	switch r.URL.Query().Get("purge") {
+	case "true":
+		s.handlePurgeTestIdentity(w, r, caller)
+		return
+	case "", "false":
+	default:
+		BadRequest(w, `invalid purge: must be "true" or "false"`)
+		return
+	}
 
 	id := r.PathValue("id")
 	u, err := s.store.GetUser(ctx, id)
@@ -914,4 +947,133 @@ func (s *Server) handleDeleteTestIdentity(w http.ResponseWriter, r *http.Request
 	s.afterUserDeleted(ctx, u.ID)
 	slog.InfoContext(ctx, "test identity deleted", "test_identity_id", u.ID, "deleted_by", caller.ID())
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePurgeTestIdentity handles DELETE /api/v1/test-identities/{id}?purge=true
+// (Phase 3b; fixture_purge.go). The identity ID in the path is the only
+// input: any other query parameter, or a request body, is refused with 400,
+// so a caller can never name what is removed. The targets are the resources
+// whose provenance stamp names the identity.
+//
+// The caller must be allowed to delete the identity (canDeleteTestIdentity).
+// When the identity row is already gone, its stamped leftovers are removed
+// for the issuer recorded on them, or an unscoped platform admin session.
+// Every other case (an ID that is no test identity, a human user, a test
+// identity the caller may not delete, an identity with nothing left) gets
+// the same 200 with an empty report, so the route reveals nothing about
+// which IDs exist.
+//
+// A complete run answers 200 with the report. An incomplete one (a delete
+// left in_doubt or not finished, a broker not reachable, agents without
+// the stamp that keep the identity) answers 409 purge_incomplete with the
+// report in details; running it again continues.
+func (s *Server) handlePurgeTestIdentity(w http.ResponseWriter, r *http.Request, caller UserIdentity) {
+	ctx := r.Context()
+	for key := range r.URL.Query() {
+		if key != "purge" {
+			BadRequest(w, fmt.Sprintf("invalid query parameter %q: a purge takes only the identity ID", key))
+			return
+		}
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, testIdentityMaxBodyBytes+1))
+	if err != nil {
+		BadRequest(w, "failed to read request body")
+		return
+	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		BadRequest(w, "a purge takes no request body: the identity ID is its only input")
+		return
+	}
+
+	id := r.PathValue("id")
+	run := fixturePurgeRun{
+		rootID:      id,
+		trigger:     testIdentityPurgeMutation,
+		executor:    fixturePurgeExecutorRequest,
+		requestedBy: caller.ID(),
+		actor:       s.buildAuditActorFromContext(ctx),
+	}
+	u, err := s.store.GetUser(ctx, id)
+	switch {
+	case err == nil:
+		if !u.IsTestFixture() || !s.canDeleteTestIdentity(ctx, caller, u) {
+			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
+			return
+		}
+		run.user = u
+		if u.IssuedBy != nil {
+			run.issuerID = *u.IssuedBy
+		}
+	case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
+		issuer, ok, lerr := s.fixtureLeftoverIssuer(ctx, id)
+		if lerr != nil {
+			slog.ErrorContext(ctx, "test identity purge: reading leftovers failed", "test_identity_id", id, "error", lerr)
+			InternalError(w)
+			return
+		}
+		if !ok || (!testIdentityCallerSeesAll(caller) && issuer != caller.ID()) {
+			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
+			return
+		}
+		run.issuerID = issuer
+	default:
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	report, err := s.purgeTestIdentity(ctx, run)
+	if err != nil {
+		slog.ErrorContext(ctx, "test identity purge failed", "test_identity_id", id, "error", err)
+		if isTransientIssuanceConflict(err) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "test identity purge is busy; retry shortly",
+				map[string]interface{}{"reason": testIdentityReasonBusy, "report": report})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "test identity purge failed; run it again",
+			map[string]interface{}{"reason": testIdentityReasonPurgeIncomplete, "report": report})
+		return
+	}
+	slog.InfoContext(ctx, "test identity purge", "test_identity_id", id, "purged_by", caller.ID(),
+		"complete", report.Complete, "agents", report.Deleted.Agents, "projects", report.Deleted.Projects)
+	if !report.Complete {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "test identity purge did not complete; run it again",
+			map[string]interface{}{"reason": testIdentityReasonPurgeIncomplete, "report": report})
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+// fixtureLeftoverIssuer returns the issuer recorded on the resources still
+// stamped with rootID, for an identity whose row is gone; ok is false when
+// none are left (or rootID is not a valid ID).
+func (s *Server) fixtureLeftoverIssuer(ctx context.Context, rootID string) (string, bool, error) {
+	set, err := s.store.ListFixtureRootedResources(ctx, rootID, 1)
+	if errors.Is(err, store.ErrInvalidInput) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	for _, stamps := range [][]store.FixtureProvenance{
+		fixtureStamps(set.Agents, func(a store.Agent) store.FixtureProvenance { return a.Fixture }),
+		fixtureStamps(set.Schedules, func(sc store.Schedule) store.FixtureProvenance { return sc.Fixture }),
+		fixtureStamps(set.Groups, func(g store.Group) store.FixtureProvenance { return g.Fixture }),
+		fixtureStamps(set.Projects, func(p store.Project) store.FixtureProvenance { return p.Fixture }),
+	} {
+		for _, st := range stamps {
+			if st.RootID == rootID && st.IssuerID != "" {
+				return st.IssuerID, true, nil
+			}
+		}
+	}
+	return "", false, nil
+}
+
+func fixtureStamps[T any](items []T, get func(T) store.FixtureProvenance) []store.FixtureProvenance {
+	out := make([]store.FixtureProvenance, 0, len(items))
+	for _, it := range items {
+		out = append(out, get(it))
+	}
+	return out
 }

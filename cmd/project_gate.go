@@ -29,6 +29,16 @@ var hubUserLevelCommands = map[string]bool{
 	"disable": true,
 }
 
+// hubOnlyCommands are top-level commands that need only the hub endpoint,
+// the credential and an agent reference: they never resolve, create,
+// register or sync a local project, even when --project names one. One
+// command per line.
+var hubOnlyCommands = map[string]bool{
+	"tunnel":     true,
+	"ssh":        true,
+	"ssh-config": true,
+}
+
 // brokerMachineLevelCommands are "scion runtime-broker" subcommands that act
 // on this machine's broker process or its hub registration (join only sends
 // a join token and adds the broker to no project). "provide" and
@@ -98,6 +108,9 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	if commandInSubtree(cmd, "admin") {
 		return false
 	}
+	if hubOnlyCommands[topLevelName(cmd)] {
+		return false
+	}
 	// Project subcommands operate on all projects, not just the current one
 	if parentName == "project" {
 		return false
@@ -115,6 +128,17 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 // would make rootCmd's initializer refer back to itself.)
 func isTopLevel(c *cobra.Command) bool {
 	return c != nil && c.Parent() != nil && c.Parent().Parent() == nil
+}
+
+// topLevelName returns the name of the top-level command cmd belongs to
+// ("" for the root).
+func topLevelName(cmd *cobra.Command) string {
+	for c := cmd; c != nil; c = c.Parent() {
+		if isTopLevel(c) {
+			return c.Name()
+		}
+	}
+	return ""
 }
 
 // subcommandGlobalFlagSet reports whether cmd is a config subcommand whose

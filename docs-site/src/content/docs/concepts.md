@@ -70,7 +70,7 @@ Agent state uses a **layered model** with three dimensions:
   with two off-the-happy-path destinations: `suspended` (paused for later resume) and `error` (the agent crashed).
 
 - **Activity** — What the agent is doing within the `running` phase:
-  `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`
+  `initializing` (shown as "starting"), `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`
   (the `crashed` value exists in the enum, but a real crash now surfaces as the `error` *phase* — see below — rather than as an activity)
 
 - **Detail** — Freeform context about the current activity (tool name, message, task summary).

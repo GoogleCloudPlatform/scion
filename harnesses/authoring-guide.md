@@ -352,6 +352,17 @@ auth:
 Conventional type names — `api-key`, `oauth-token`, `auth-file`, `vertex-ai` —
 line up with the `capabilities.auth` matrix; use them.
 
+Declare every method your provisioner accepts, with the same name and the
+same credentials. On a broker start, Scion rejects the start before any
+container is created when the selected auth type is env-only (it declares
+`required_env` but no `required_files`) and none of its keys are staged. It
+does the same when no type is selected, the harness has no `no_auth`, and no
+declared type is satisfied. Types that declare `required_files`, and keys
+named `SCION_*`, are never rejected. A method your `provision.py` accepts but
+this block does not declare, or declares as env-only while the provisioner
+also accepts a file, can therefore be rejected on the broker even though the
+provisioner would accept it.
+
 ### no_auth
 
 ```yaml
