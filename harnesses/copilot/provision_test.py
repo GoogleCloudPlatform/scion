@@ -20,12 +20,13 @@ Run with:  python3 -m unittest provision_test -v
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import re
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 
 PROVISION_PATH = os.path.join(os.path.dirname(__file__), "provision.py")
 SPEC = importlib.util.spec_from_file_location("copilot_provision", PROVISION_PATH)
@@ -382,8 +383,16 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         raw = ('{"placeholder_sign_in": {"login": "example-user"}, "n": '
                + "[" * 100000 + "]" * 100000 + "}").encode()
         self.assertFalse(provision._validate_staged_config(raw.decode(), "/staged/COPILOT_CONFIG"))
-        self._stage_config_secret(raw)
-        resolved = self._provision_staged()
+        secret = self._stage_config_secret(raw)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            resolved = self._provision_staged()
+        # ctx.info writes the note to stderr; it names the file, no content.
+        note = (f"copilot provision: COPILOT_CONFIG secret file {secret} is nested "
+                "too deeply to check; copying it unchanged")
+        self.assertIn(note, stderr.getvalue().splitlines())
+        self.assertNotIn("example-user", stderr.getvalue())
+        self.assertNotIn("placeholder_sign_in", stderr.getvalue())
         self.assertEqual(resolved["method"], "auth-file")
         self.assertTrue(resolved.get("config_file_written"))
         self.assertEqual(self._read_raw(), raw)
