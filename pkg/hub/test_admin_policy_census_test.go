@@ -400,3 +400,15 @@ func TestTestAdminPolicy_CanDelegateChecksPolicyFirst(t *testing.T) {
 		assert.Less(t, refusePos, p, "the policy check runs before the type-specific checks")
 	}
 }
+
+// Review RN3: the agent-delegation exclusion in CanDelegate relies on no
+// deny-classified permission other than secret.use being an agent scope.
+// Giving another deny-classified permission AgentScopes fails here and
+// forces a re-review of that exclusion.
+func TestTestAdminPolicy_DenyPermissionsHaveNoAgentScopes(t *testing.T) {
+	for _, p := range permissions.Registry {
+		if testAdminPermissionDenied(p.ID) && p.ID != "secret.use" {
+			assert.Empty(t, p.AgentScopes, "deny-classified %s has AgentScopes; re-review the CanDelegate agent-delegation exclusion", p.ID)
+		}
+	}
+}

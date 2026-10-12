@@ -182,10 +182,25 @@ const (
 // allow (testAdminPermissionDenied). The permission set is the bound
 // role's permissions for a role binding, the defined permissions for a
 // custom role, and every role permission held by the group closure for a
-// group membership. Agent delegations are bounded by the agent role
-// ceiling and the delegator's own decisions (decide step 0c) and are not
-// checked here. A kind or permission read error denies. Each refusal is
-// written to the test admin audit sink (class delegation).
+// group membership. A kind or permission read error denies. Each refusal
+// is written to the test admin audit sink (class delegation).
+//
+// Agent delegations are not checked here, and neither decide step 0c (it
+// never fires on an agent principal) nor the delegation-time ceiling
+// (canDelegateAgent uses the global ceiling; actorHoldsAllPermissions
+// reads raw permissions) applies the cage to them. The containment of an
+// agent's secret material is instead: the material precheck admits only
+// when the secret's provenance root (Ancestry[0], set by the hub, not by
+// the caller) is an admitted project member (material_runtime.go check 5);
+// SystemAuthorityProof refuses an admin-kind root for a deny-classified
+// permission such as secret.use, so system authority does not stand in for
+// membership; a test admin cannot be added as a project member
+// (refuseTestAdminMemberGrantee, refuseTestAdminGrantee); and the test hub
+// gate. Re-review if any secret or material path is not gated by
+// provenance-root membership, if any route lets a test admin gain
+// membership or secret.use, or if Ancestry[0] can be set to another user.
+// (A3: clamp a test admin's agent delegation scopes to the policy
+// allow-set by construction.)
 func (a *AuthzService) refuseTestAdminDeniedGrant(ctx context.Context, actor Identity, grant GrantDescriptor) *Decision {
 	user, ok := actor.(UserIdentity)
 	if !ok || isNilIdentity(user) || grant.Type == GrantTypeAgentDelegation {

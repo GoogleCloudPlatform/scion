@@ -29,9 +29,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1006,4 +1008,97 @@ func TestTestAdminPolicy_CageWithoutKindCache(t *testing.T) {
 	dd := svc.CanDelegate(ctx, tsaIdentity(t, s, superKind.Identity.ID), GrantDescriptor{Type: GrantTypeCustomRole,
 		CustomRolePermissions: []string{"hub.config.update"}, ScopeType: store.RoleScopeSystem})
 	assert.Equal(t, DeniedByTestAdminPolicy, dd.DeniedBy, dd.Reason)
+}
+
+// Review RN2: adding a deny-classified permission to a custom role that
+// is already bound to a human (PUT /api/v1/admin/roles/{id}) is refused to
+// both admin kinds; a human super-admin may.
+func TestTestAdminPolicy_RoleUpdateAddingDeniedPermissionRefused(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	superKind := tsaIssue(t, srv, taUser(t, s, "tsa-ru-iss", store.SystemRoleSuperAdmin), testAdminRoleSuperAdmin)
+	hubKind := tsaIssue(t, srv, taUser(t, s, "tsa-ru-iss2", store.SystemRoleSuperAdmin), testAdminRoleHubAdmin)
+	humanTok := taTokenFor(t, srv, taUser(t, s, "tsa-ru-human", store.SystemRoleSuperAdmin))
+	grantee := taUser(t, s, "tsa-ru-grantee", store.SystemRoleHubMember)
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{ID: generateID(), Name: "tsa-ru-" + generateID()[:6],
+		ScopeType: store.RoleScopeSystem, Permissions: []string{"user.read"}})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: grantee.ID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
+	require.NoError(t, err)
+	body := map[string]any{"name": rd.Name, "description": "x", "permissions": []string{"user.read", "hub.config.update"}}
+	for who, tok := range map[string]string{"test_super_admin": superKind.AccessToken, "test_hub_admin": hubKind.AccessToken} {
+		rec := doRequestWithToken(t, srv, tok, http.MethodPut, "/api/v1/admin/roles/"+rd.ID, body)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", who, rec.Body.String())
+	}
+	got, err := s.GetRoleDefinition(ctx, rd.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"user.read"}, got.Permissions, "the role is unchanged")
+	rec := doRequestWithToken(t, srv, humanTok, http.MethodPut, "/api/v1/admin/roles/"+rd.ID, body)
+	assert.Less(t, rec.Code, 300, "human super-admin: %s", rec.Body.String())
+}
+
+// Review RN1 (option b): an agent rooted at a test super-admin reads
+// project secret values only in a project where its root holds a project
+// membership. System authority (the super-admin role's secret.use) does
+// not admit an admin-kind root. Creating a project makes the test
+// super-admin its owner (the owner binding is written for the creator), so
+// its agents read that project's secrets: the accepted residual.
+func TestTestAdminPolicy_AgentSecretsOnlyInRootMemberProject(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-as-iss", store.SystemRoleSuperAdmin)
+	superKind := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	rootID := superKind.Identity.ID
+
+	// A project the test super-admin does not belong to (owned by a human).
+	other := tid("tsa-as-other")
+	taProject(t, s, other, issuer.ID)
+	// A project the test super-admin creates through the API.
+	rec := doRequestWithToken(t, srv, superKind.AccessToken, http.MethodPost, "/api/v1/projects", map[string]any{"name": "tsa-as-own-" + generateID()[:6]})
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	var created struct {
+		ID      string `json:"id"`
+		Project struct {
+			ID string `json:"id"`
+		} `json:"project"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	own := created.ID
+	if own == "" {
+		own = created.Project.ID
+	}
+	require.NotEmpty(t, own, rec.Body.String())
+	m := srv.CheckEffectiveMembership(ctx, rootID, own)
+	require.NoError(t, m.Err)
+	t.Logf("test super-admin membership in its own project: %v", m.IsMember)
+	require.True(t, m.IsMember, "creating a project makes the test super-admin a member (owner)")
+
+	fetch := func(projectID string) *httptest.ResponseRecorder {
+		agentID := generateID()
+		require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "tsa-as-" + agentID[:6], Name: "tsa as",
+			ProjectID: projectID, Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{rootID},
+			Created: time.Now(), Updated: time.Now()}))
+		seedSecret(t, srv.secretBackend, "TSA_SECRET", "tsa-value", "", "", projectID)
+		tok, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{rootID})
+		require.NoError(t, err)
+		return doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agent/secrets", secretFetchRequest{Keys: []string{"TSA_SECRET"}}, tok)
+	}
+	rec = fetch(other)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "not a member: no secret values: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "tsa-value")
+	rec = fetch(own)
+	assert.Equal(t, http.StatusOK, rec.Code, "owned project: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "tsa-value")
+
+	// SystemAuthorityProof itself: no system-authority admission for an
+	// admin kind on secret.use; a human super-admin keeps it.
+	class := ProjectTargetClass{ResourceType: permissions.ResourceSecret, ScopeKind: store.ScopeProject}
+	ok, err := srv.authzService.SystemAuthorityProof(ctx, PrincipalContext{Kind: PrincipalKindUser, ID: rootID}, other, "secret.use", class)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	ok, err = srv.authzService.SystemAuthorityProof(ctx, PrincipalContext{Kind: PrincipalKindUser, ID: issuer.ID}, other, "secret.use", class)
+	require.NoError(t, err)
+	assert.True(t, ok)
 }

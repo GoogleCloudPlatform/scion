@@ -1132,6 +1132,22 @@ func (a *AuthzService) SystemAuthorityProof(ctx context.Context, principal Princ
 	if applies, reviewed := permissions.AppliesToExistingProjectTarget(permissionID); !reviewed || !applies {
 		return false, nil
 	}
+	// Test-admin policy: system authority never admits an admin-kind test
+	// identity for a deny-classified permission (for example secret.use in
+	// the agent material precheck and agent standing: an agent rooted at a
+	// test super-admin is admitted only where its root holds a project
+	// membership). The kind is read through kindForPrincipal; a read error
+	// fails closed.
+	if principal.Kind == PrincipalKindUser && testAdminPermissionDenied(permissionID) {
+		caged, err := a.principalIsCagedTestAdmin(ctx, principal.ID)
+		if err != nil {
+			return false, projectAccessLookupFault(fmt.Errorf("%w: principal kind lookup failed: %v", ErrProjectAccessDenied, err))
+		}
+		if caged {
+			a.reportTestAdminPolicyDenial(ctx, principal.ID, "permission", permissionID+" (system authority)")
+			return false, nil
+		}
+	}
 	if err := validateRealProjectClass(permissionID, class); err != nil {
 		return false, err
 	}
