@@ -47,9 +47,28 @@ const (
 func federationTokenServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
 	srv := testOIDCServer(t)
+	federationTokenConfigure(t, srv)
+	return srv, srv.store
+}
+
+// federationTokenServerWithStoreFault is federationTokenServer with a
+// switch-gated store wrapper installed right after the server is built (see
+// installStoreFault). It returns the unwrapped store for setup.
+func federationTokenServerWithStoreFault[W store.Store](t *testing.T, wrap func(inner store.Store, fault *storeFaultSwitch) W) (*Server, store.Store, *storeFaultSwitch) {
+	t.Helper()
+	srv := testOIDCServer(t)
+	s := srv.store
+	_, fault := installStoreFault(t, srv, wrap)
+	federationTokenConfigure(t, srv)
+	return srv, s, fault
+}
+
+// federationTokenConfigure turns federation.project_visitors on and allows
+// federationTokenAudience.
+func federationTokenConfigure(t *testing.T, srv *Server) {
+	t.Helper()
 	visitorSetExperiment(t, srv, true)
 	srv.config.OIDCConfig.UserTokenAudiences = []string{federationTokenAudience}
-	return srv, srv.store
 }
 
 // federationTokenUser stores a user of the given kind (human or empty) and
@@ -121,7 +140,12 @@ func federationTokenErrorMessage(t *testing.T, w *httptest.ResponseRecorder) str
 // active local human user with a session or a scoped token: each gets the
 // same 403 and message, and no token.
 func TestFederationToken_RefusedCallers(t *testing.T) {
-	srv, s := federationTokenServer(t)
+	// Rows the store's CreateUser does not write (test identity and
+	// federated kinds, the pending status) come from a stub GetUser.
+	stubUsers := map[string]*store.User{}
+	srv, _, fault := federationTokenServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *federationTokenUserStub {
+		return &federationTokenUserStub{Store: inner, users: stubUsers, fault: f}
+	})
 
 	identities := map[string]Identity{
 		"dev":             NewDevUser(DevUserConfig{}),
@@ -131,13 +155,10 @@ func TestFederationToken_RefusedCallers(t *testing.T) {
 		"visitor":         NewVisitorIdentity(uuid.New().String(), "https://idp.example.com", "sub-2", "v@example.com", "V"),
 		"broker":          NewBrokerIdentity("broker-1"),
 	}
-	// Rows the store's CreateUser does not write (test identity and
-	// federated kinds, the pending status) come from a stub GetUser.
-	stub := federationTokenUserStub{Store: s, users: map[string]*store.User{}}
 	stubUser := func(kind, status string) *store.User {
 		id := uuid.New().String()
 		u := &store.User{ID: id, Email: "ft-" + id[:8] + "@example.com", DisplayName: "FT", Role: "member", Status: status, Kind: kind}
-		stub.users[id] = u
+		stubUsers[id] = u
 		return u
 	}
 	for _, kind := range []string{store.UserKindTestFixture, store.UserKindTestHubAdmin, store.UserKindTestSuperAdmin, store.UserKindFederated} {
@@ -151,7 +172,7 @@ func TestFederationToken_RefusedCallers(t *testing.T) {
 		u.Email = email
 		identities[name] = NewAuthenticatedUser(u.ID, "session@example.com", u.DisplayName, u.Role, string(ClientTypeWeb))
 	}
-	srv.store = stub
+	fault.Arm()
 	identities["no stored user"] = NewAuthenticatedUser(uuid.New().String(), "ghost@example.com", "Ghost", "member", string(ClientTypeWeb))
 
 	names := make([]string, 0, len(identities))
@@ -179,7 +200,14 @@ func TestFederationToken_RefusedCallers(t *testing.T) {
 // otherwise be admitted, but the request's credential is neither an
 // interactive session nor a user access token.
 func TestFederationToken_RefusedCredentialKinds(t *testing.T) {
-	srv, s := federationTokenServer(t)
+	// The stub row for the dev identity subtest below; the stub answers from
+	// it only once that subtest arms the switch.
+	devUsers := map[string]*store.User{
+		DevUserID: {ID: DevUserID, Email: "dev@example.com", DisplayName: "Dev", Role: "admin", Status: store.UserStatusActive, Kind: store.UserKindHuman},
+	}
+	srv, s, fault := federationTokenServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *federationTokenUserStub {
+		return &federationTokenUserStub{Store: inner, users: devUsers, fault: f}
+	})
 	alice := federationTokenUser(t, s, store.UserKindHuman, store.UserStatusActive)
 	session := sessionIdentityFor(alice)
 	scoped := selfToken(t, alice.ID, hubBoundary(), "federation_token:mint")
@@ -212,11 +240,8 @@ func TestFederationToken_RefusedCredentialKinds(t *testing.T) {
 	// interactive credential and a stored active human row; the identity type
 	// check alone refuses it.
 	t.Run("dev identity, interactive credential, stored active human", func(t *testing.T) {
-		stub := federationTokenUserStub{Store: s, users: map[string]*store.User{
-			DevUserID: {ID: DevUserID, Email: "dev@example.com", DisplayName: "Dev", Role: "admin", Status: store.UserStatusActive, Kind: store.UserKindHuman},
-		}}
-		srv.store = stub
-		t.Cleanup(func() { srv.store = s })
+		// Last step of the test: the switch stays armed.
+		fault.Arm()
 		w := callFederationTokenAs(t, srv, NewDevUser(DevUserConfig{}), &CredentialContext{Kind: CredentialKindInteractive}, federationTokenBody(federationTokenAudience))
 		require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 		assert.Equal(t, federationTokenRefusalMessage, federationTokenErrorMessage(t, w))
@@ -433,32 +458,43 @@ func TestFederationToken_AuditWritten(t *testing.T) {
 	assert.Len(t, records, 1)
 }
 
-// federationTokenUserStub answers GetUser from users first.
+// federationTokenUserStub answers GetUser from users first once its switch
+// is armed, and delegates to the inner store before that.
 type federationTokenUserStub struct {
 	store.Store
 	users map[string]*store.User
+	fault *storeFaultSwitch
 }
 
-func (s federationTokenUserStub) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if u, ok := s.users[id]; ok {
-		return u, nil
+func (s *federationTokenUserStub) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.fault.Active() {
+		if u, ok := s.users[id]; ok {
+			return u, nil
+		}
 	}
 	return s.Store.GetUser(ctx, id)
 }
 
-// federationAuditFailStore fails every mutation audit write.
+// federationAuditFailStore fails every mutation audit write once its switch
+// is armed.
 type federationAuditFailStore struct {
 	store.Store
+	fault *storeFaultSwitch
 }
 
-func (federationAuditFailStore) CreateMutationAudit(context.Context, *store.MutationAuditRecord) error {
+func (f *federationAuditFailStore) CreateMutationAudit(ctx context.Context, rec *store.MutationAuditRecord) error {
+	if !f.fault.Active() {
+		return f.Store.CreateMutationAudit(ctx, rec)
+	}
 	return errors.New("audit backend down")
 }
 
 func TestFederationToken_AuditFailureIssuesNothing(t *testing.T) {
-	srv, s := federationTokenServer(t)
+	srv, s, fault := federationTokenServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *federationAuditFailStore {
+		return &federationAuditFailStore{Store: inner, fault: f}
+	})
 	u := federationTokenUser(t, s, store.UserKindHuman, store.UserStatusActive)
-	srv.store = federationAuditFailStore{Store: s}
+	fault.Arm()
 
 	w := callFederationToken(t, srv, sessionIdentityFor(u), federationTokenBody(federationTokenAudience))
 	assert.Equal(t, http.StatusInternalServerError, w.Code)

@@ -56,3 +56,13 @@
   require every Layer-1 section key to be edited and sent by the page.
 - The per-user rate limit reuses the OIDC identity token limiter, keyed
   `user:<id>`.
+
+## Merge of item 1's test fix (2026-10-12)
+
+- Merged scion/mmr-fed-p1-1 forward (attestation list adds VisitorIdentity,
+  visitor test uses installStoreFault). `hack/check-hub-store-reassign.sh`
+  then flagged four direct `srv.store` assignments in
+  `handlers_federation_token_test.go`. They now use
+  `federationTokenServerWithStoreFault` (installStoreFault right after the
+  server is built) and `Arm()` where the store used to be swapped; the user
+  stub and the audit-failing store delegate until armed.
