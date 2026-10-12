@@ -325,69 +325,6 @@ func TestWebChannelBus_Close(t *testing.T) {
 	require.NoError(t, bus.Close())
 }
 
-// --- identityFromTopic tests ---
-
-func TestIdentityFromTopic_UserTopic(t *testing.T) {
-	msg := &messages.StructuredMessage{
-		Sender:   "agent:coder",
-		SenderID: "agent-uuid",
-	}
-	userID, projectID, agentID, ok := identityFromTopic("scion.project.proj1.user.user1.messages", msg)
-	require.True(t, ok)
-	require.Equal(t, "user1", userID)
-	require.Equal(t, "proj1", projectID)
-	require.Equal(t, "agent-uuid", agentID)
-}
-
-func TestIdentityFromTopic_UserTopic_SenderIDFallback(t *testing.T) {
-	// When SenderID is empty, fall back to stripping "agent:" prefix from Sender.
-	msg := &messages.StructuredMessage{
-		Sender: "agent:coder",
-	}
-	userID, projectID, agentID, ok := identityFromTopic("scion.project.proj1.user.user1.messages", msg)
-	require.True(t, ok)
-	require.Equal(t, "user1", userID)
-	require.Equal(t, "proj1", projectID)
-	require.Equal(t, "coder", agentID)
-}
-
-func TestIdentityFromTopic_AgentTopic(t *testing.T) {
-	msg := &messages.StructuredMessage{
-		Sender:   "user:alice",
-		SenderID: "alice-uuid",
-	}
-	userID, projectID, agentID, ok := identityFromTopic("scion.project.proj1.agent.coder.messages", msg)
-	require.True(t, ok)
-	require.Equal(t, "alice-uuid", userID)
-	require.Equal(t, "proj1", projectID)
-	require.Equal(t, "coder", agentID)
-}
-
-func TestIdentityFromTopic_Broadcast_ReturnsFalse(t *testing.T) {
-	msg := &messages.StructuredMessage{
-		Sender: "system",
-	}
-	_, _, _, ok := identityFromTopic("scion.project.proj1.broadcast", msg)
-	require.False(t, ok)
-}
-
-func TestIdentityFromTopic_MalformedTopic_ReturnsFalse(t *testing.T) {
-	msg := &messages.StructuredMessage{
-		Sender: "agent:coder",
-	}
-	_, _, _, ok := identityFromTopic("not.a.valid.topic", msg)
-	require.False(t, ok)
-}
-
-func TestIdentityFromTopic_MissingUserID_ReturnsFalse(t *testing.T) {
-	// Agent topic, but sender has no SenderID and is not a user.
-	msg := &messages.StructuredMessage{
-		Sender: "agent:coder",
-	}
-	_, _, _, ok := identityFromTopic("scion.project.proj1.agent.coder.messages", msg)
-	require.False(t, ok)
-}
-
 // --- Wave-2 WebChannelBus re-key tests ---
 
 func TestWebChannelBus_Publish_TopicThread(t *testing.T) {

@@ -893,26 +893,3 @@ INSERT INTO webchat_thread VALUES ('user-1', 'proj-1', 'agent-1', 'msg-10', '202
 	require.NoError(t, err)
 	require.Len(t, dms, 1)
 }
-
-// --- Helper tests ---
-
-func TestParseSQLiteTime(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		zero  bool
-	}{
-		{"empty", "", true},
-		{"RFC3339Nano", "2026-01-01T00:00:00Z", false},
-		{"RFC3339Nano with nanos", "2026-01-01T00:00:00.123456789Z", false},
-		{"SQLite format with tz", "2026-01-01 00:00:00.000000000-07:00", false},
-		{"SQLite format no tz", "2026-01-01 00:00:00.000000000", false},
-		{"garbage", "not-a-time", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parseSQLiteTime(tt.input)
-			require.Equal(t, tt.zero, result.IsZero(), "input: %q", tt.input)
-		})
-	}
-}

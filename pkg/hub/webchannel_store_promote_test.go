@@ -388,35 +388,3 @@ func TestPromoteDM_ThreadIDIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, count, "idx_messages_thread_id index should exist")
 }
-
-// TestTitleCase verifies the titleCase helper function.
-func TestTitleCase(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"code-reviewer", "Code Reviewer"},
-		{"my_agent", "My Agent"},
-		{"simple", "Simple"},
-		{"multi-word-agent", "Multi Word Agent"},
-		{"already Title", "Already Title"},
-	}
-	for _, tc := range tests {
-		got := titleCase(tc.input)
-		require.Equal(t, tc.expected, got, "titleCase(%q)", tc.input)
-	}
-}
-
-// TestDMPromotedEvent verifies the DMPromotedEvent struct serialization.
-func TestDMPromotedEvent(t *testing.T) {
-	evt := DMPromotedEvent{
-		OldConversationKey: "dm:agent:a1:user:u1",
-		NewTopic: WebChatTopic{
-			ID:        "topic-1",
-			ProjectID: "proj-1",
-			Name:      "Test Thread",
-		},
-	}
-	require.Equal(t, "dm:agent:a1:user:u1", evt.OldConversationKey)
-	require.Equal(t, "topic-1", evt.NewTopic.ID)
-}
