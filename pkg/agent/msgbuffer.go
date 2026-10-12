@@ -485,7 +485,7 @@ func (mb *MessageBuffer) waitInflight(done <-chan struct{}, deadline time.Time, 
 		}
 	}
 	if !first {
-		util.Debugf("msgbuffer: repeated Close returned at the first Close's deadline with deliveries still in flight")
+		util.Debugf("msgbuffer: repeated Close returned; the first Close deadline has passed with deliveries still in flight")
 		return
 	}
 	slog.Warn("msgbuffer: Close timed out waiting for in-flight message deliveries",
