@@ -532,7 +532,7 @@ func TestStoreFinalizeBaseAndDiscard(t *testing.T) {
 		r2 = later
 		// A publish version between the base and the review that is still
 		// pending refuses the review.
-		abandoned := pendingVersion(VersionKindPublish)
+		abandonedPublish := pendingVersion(VersionKindPublish)
 		late := review()
 		if _, err := st.FinalizeVersion(ctx, a.ID, late.Seq, claimOf(a.ID, late.Seq), nil, r2.Seq); !errors.Is(err, ErrPendingNewer) {
 			t.Fatalf("pending publish between base and review: %v, want ErrPendingNewer", err)
@@ -546,7 +546,7 @@ func TestStoreFinalizeBaseAndDiscard(t *testing.T) {
 		if _, err := st.ReapPending(ctx, time.Now().Add(time.Hour), 10); err != nil {
 			t.Fatal(err)
 		}
-		if got, _ := st.GetVersion(ctx, a.ID, abandoned.Seq); got.State != VersionStateFailed || got.FailReason != FailReasonExpired {
+		if got, _ := st.GetVersion(ctx, a.ID, abandonedPublish.Seq); got.State != VersionStateFailed || got.FailReason != FailReasonExpired {
 			t.Fatalf("reaped upload: state %q, reason %q", got.State, got.FailReason)
 		}
 		// Discard: under another claim it conflicts; under its claim it
@@ -580,7 +580,7 @@ func TestStoreFinalizeBaseAndDiscard(t *testing.T) {
 			}
 		}
 		want := map[int]string{low.Seq: FailReasonStaleReview, late.Seq: FailReasonNewerPublishPending,
-			abandoned.Seq: FailReasonExpired, r3.Seq: FailReasonUnmarkedChanges}
+			abandonedPublish.Seq: FailReasonExpired, r3.Seq: FailReasonUnmarkedChanges}
 		for seq, reason := range want {
 			if reasons[seq] != reason {
 				t.Errorf("history reason of %d = %q, want %q (all failed: %v)", seq, reasons[seq], reason, reasons)
