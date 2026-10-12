@@ -32,8 +32,9 @@ import (
 )
 
 // Admin tier A1 census guards (ptone/scion#4240). They walk every non-test
-// file of pkg/hub (this directory only: the census is pkg/hub-scoped; other
-// packages do not decide hub authority) with go/ast, like TestBypassCensus
+// file of pkg/hub and of the packages moved out of it (guardScanSubdirs:
+// code that decided hub authority before a move still does; other packages
+// do not decide hub authority) with go/ast, like TestBypassCensus
 // and TestSigningKeySource_EveryKeySourceClassified: every site that reads
 // authority outside the authorization service's clamped store must be
 // classified, decision sites must apply the test identity clamps and the
@@ -292,8 +293,9 @@ var testAdminAdminEmailsCensus = map[string]string{
 }
 
 // The legacy admin fast path itself (IsUnscopedLocalPlatformAdmin) lives in
-// pkg/hub/internal/principal since ptone/scion#3316 (outside this
-// pkg/hub-scoped census); TestBypassCensus tracks its pkg/hub callers.
+// pkg/hub/internal/principal since ptone/scion#3316. The census scans that
+// directory too (guardScanSubdirs), so its role check is classified below;
+// TestBypassCensus tracks its pkg/hub callers.
 //
 // testAdminRoleAdminCensus classifies every function that compares a
 // user's role (stored or claim) with admin, keyed "file:function". A
@@ -323,6 +325,7 @@ var testAdminRoleAdminCensus = map[string]string{
 	"handlers_users_core.go:updateUser":                           "mutation: requested new role; test identity targets are refused",
 	"seed.go:ReconcileSuperAdminBindings":                         censusExcludesTestIdentities,
 	"seed.go:backfillUserRoleBindings":                            "startup: a super-admin backfill on an admin-kind row is refused by the store (system bindings on admin kinds are issuance-only)",
+	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin": "role gate: admin only (the legacy unscoped admin fast path); a test identity's stored role is never admin and the JWT row block refuses a mismatched role claim",
 }
 
 // censusFuncSite is one parsed function of pkg/hub.

@@ -20,6 +20,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -349,12 +350,6 @@ func TestResourceTypeLiterals_AllInRegistry(t *testing.T) {
 	hubFiles := parseGoDir(t, fset, dir, true)
 	permFiles := parseGoDir(t, fset, filepath.Join(dir, "permissions"), false)
 
-	localConsts := map[string]string{}
-	for _, f := range hubFiles {
-		for k, v := range stringConsts(f) {
-			localConsts[k] = v
-		}
-	}
 	permConsts := map[string]string{}
 	for _, f := range permFiles {
 		for k, v := range stringConsts(f) {
@@ -362,7 +357,35 @@ func TestResourceTypeLiterals_AllInRegistry(t *testing.T) {
 		}
 	}
 
-	found, unresolved := collectResourceTypeLiterals(fset, hubFiles, localConsts, permConsts)
+	// Group the files by package directory ("." for pkg/hub, or the
+	// guardScanSubdirs entry a file is in), so each file's identifiers
+	// resolve only against the string constants of its own package.
+	byPkg := map[string]map[string]*ast.File{}
+	for name, f := range hubFiles {
+		pkg := path.Dir(name)
+		if byPkg[pkg] == nil {
+			byPkg[pkg] = map[string]*ast.File{}
+		}
+		byPkg[pkg][name] = f
+	}
+	pkgs := make([]string, 0, len(byPkg))
+	for pkg := range byPkg {
+		pkgs = append(pkgs, pkg)
+	}
+	sort.Strings(pkgs)
+	var found []resourceTypeLiteral
+	var unresolved []string
+	for _, pkg := range pkgs {
+		localConsts := map[string]string{}
+		for _, f := range byPkg[pkg] {
+			for k, v := range stringConsts(f) {
+				localConsts[k] = v
+			}
+		}
+		pkgFound, pkgUnresolved := collectResourceTypeLiterals(fset, byPkg[pkg], localConsts, permConsts)
+		found = append(found, pkgFound...)
+		unresolved = append(unresolved, pkgUnresolved...)
+	}
 	require.NotEmpty(t, found, "scanner found no Resource{Type: ...} literals; the matcher is broken")
 
 	// Scanner self-check: brokerResource's own "broker" literal must be seen.

@@ -819,6 +819,9 @@ func findDeleteProjectCallSites(t *testing.T) []callSite {
 		}
 		entries, err := read(fullDir)
 		if err != nil {
+			if dir == "pkg/hub/" {
+				t.Fatalf("reading %s: %v", fullDir, err)
+			}
 			continue
 		}
 		for _, entry := range entries {

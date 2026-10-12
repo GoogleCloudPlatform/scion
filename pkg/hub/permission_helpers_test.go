@@ -65,6 +65,12 @@ func loadReferenceConstants(t *testing.T) referenceConstants {
 		{"permissions", "permissions."},
 		{filepath.Join("..", "store"), "store."},
 	}
+	// pkgmove:scan-covers pkg/hub/apierr
+	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks, once the directory exists.
 	for _, rel := range mustGuardScanDirs(t, ".") {
 		if rel == "." {
 			continue
@@ -115,12 +121,6 @@ var pendingNonRouteRows = map[string]string{
 
 // parseNonTestGoFiles parses the non-test Go files in dir.
 func parseNonTestGoFiles(dir string) ([]*ast.File, error) {
-	// pkgmove:scan-covers pkg/hub/apierr
-	// scanned through guardScanSubdirs; guards permission ID references: loadReferenceConstants also reads each subdirectory's constants under its package prefix.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// scanned through guardScanSubdirs; guards permission ID references: loadReferenceConstants also reads each subdirectory's constants under its package prefix.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// scanned through guardScanSubdirs once it exists; guards permission ID references: loadReferenceConstants also reads each subdirectory's constants under its package prefix.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", dir, err)

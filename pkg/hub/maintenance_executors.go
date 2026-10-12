@@ -418,7 +418,8 @@ type RebuildWebExecutor struct {
 	repoBranch string // git branch to checkout before building (empty = stay on current)
 }
 
-// RebuildWebOptions configures a RebuildWebExecutor.
+// RebuildWebOptions configures a RebuildWebExecutor. Zero values are kept
+// as-is; Run applies its own checks.
 type RebuildWebOptions struct {
 	RepoPath   string // path to scion source checkout
 	RepoBranch string // git branch to checkout before building (empty = stay on current)
