@@ -722,6 +722,9 @@ test.describe.serial('async agent create from the web form', () => {
       harnessConfig: applied?.harnessConfig ?? '',
     };
     expectNoAuth(applied);
+    // A4 compares against these; both must be known.
+    expect(applied?.image ?? '', 'A2 appliedConfig.image is set').not.toBe('');
+    expect(applied?.harnessConfig ?? '', 'A2 appliedConfig.harnessConfig is set').not.toBe('');
 
     // A1b over the whole launch, and no reload.
     await expectNoStartNoReload(tracked, submit);
