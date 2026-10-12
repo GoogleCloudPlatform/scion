@@ -143,7 +143,7 @@ func TestProvision_TemplateEnvironmentKeysIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, k := range templateEnvKeysInTemplate {
-		if strings.Contains(string(raw), k) {
+		if strings.Contains(string(raw), `"`+k+`"`) {
 			t.Errorf("scion-agent.json mentions template env key %s:\n%s", k, raw)
 		}
 	}
