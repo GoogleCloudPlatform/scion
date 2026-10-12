@@ -79,6 +79,8 @@ interface MockOptions {
     string,
     { versions: ArtifactVersion[]; discarded: DiscardedVersion[]; nextBefore?: number }
   >;
+  /** Version list pages held back until their promise resolves, by before= value. */
+  versionPageGates?: Record<string, Promise<void>>;
   /** expiresAt of a minted view (default: far in the future). */
   viewExpiresAt?: string;
   /** Answers POST/PUT requests other than the view mint. */
@@ -131,7 +133,8 @@ function mockFetch(
         if (opts.versionPages) {
           const before = /[?&]before=(\d+)/.exec(url)?.[1] ?? '';
           const page = opts.versionPages[before] ?? { versions: [], discarded: [] };
-          return Promise.resolve(new Response(JSON.stringify(page), { status: 200 }));
+          const gate = opts.versionPageGates?.[before] ?? Promise.resolve();
+          return gate.then(() => new Response(JSON.stringify(page), { status: 200 }));
         }
         const discarded = opts.discarded ?? [];
         return Promise.resolve(
@@ -594,6 +597,97 @@ describe('artifact page', () => {
     expect(rows).toHaveLength(2);
     expect((rows[0].textContent ?? '').replace(/\s+/g, ' ')).toContain('v2–v5 · discarded');
     expect(rows[1].textContent).toContain('v1');
+  });
+
+  it('stops after a few extra pages of only discarded versions and keeps Load more', async () => {
+    const gone = (seq: number): DiscardedVersion => ({
+      seq,
+      state: 'failed',
+      reason: 'expired',
+      createdAt: '2026-10-05T12:00:00Z',
+    });
+    const pages: NonNullable<MockOptions['versionPages']> = {};
+    // Seven pages of two discarded versions each: 16-15, 14-13, ... 4-3.
+    for (let i = 0, top = 16; i < 7; i++, top -= 2) {
+      pages[i === 0 ? '' : String(top + 1)] = {
+        versions: [],
+        discarded: [gone(top), gone(top - 1)],
+        nextBefore: top - 1,
+      };
+    }
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 1;
+    const urls = mockFetch(meta, '# Doc', { versionPages: pages });
+    const el = await mount(true);
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    const listed = urls.filter((u) => /\/versions(\?|$)/.test(u));
+    expect(listed).toHaveLength(6);
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    expect(panel.querySelector('.more sl-button')?.textContent).toContain('Load more');
+  });
+
+  it('ignores Load more while version pages are still being read', async () => {
+    const ready = (seq: number): ArtifactVersion => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    });
+    const gone = (seq: number): DiscardedVersion => ({
+      seq,
+      state: 'failed',
+      reason: 'expired',
+      createdAt: '2026-10-05T12:00:00Z',
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 9;
+    meta.version = { ...meta.version!, seq: 9, ref: `scion://artifact/${ID}@9` };
+    const urls = mockFetch(meta, '# Doc', {
+      versionPages: {
+        '': { versions: [ready(9)], discarded: [], nextBefore: 9 },
+        '9': { versions: [], discarded: [gone(8), gone(7)], nextBefore: 7 },
+        '7': { versions: [ready(6)], discarded: [], nextBefore: 0 },
+      },
+      versionPageGates: { '7': held },
+    });
+    const el = await mount(true);
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    const more = (): HTMLElement => panel.querySelector('.more sl-button') as HTMLElement;
+    more().click();
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    // The second page held only discarded versions; the third is held back.
+    expect(more().hasAttribute('disabled')).toBe(true);
+    more().click();
+    more().click();
+    release();
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    expect(urls.filter((u) => /\/versions(\?|$)/.test(u))).toEqual([
+      `/api/v1/artifacts/${ID}/versions`,
+      `/api/v1/artifacts/${ID}/versions?before=9`,
+      `/api/v1/artifacts/${ID}/versions?before=7`,
+    ]);
+    const rows = Array.from(panel.querySelectorAll('tbody tr'));
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain('v9');
+    expect(rows[2].textContent).toContain('v6');
   });
 
   it('names the reason of a single discarded version in its row', async () => {

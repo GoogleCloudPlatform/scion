@@ -171,6 +171,10 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Discarded-version groups shown expanded, by their newest seq. */
   @state() private expandedGaps = new Set<number>();
   @state() private versionsNext = 0;
+  /** A loadVersions call is reading pages; Load more waits for it. */
+  @state() private versionsLoading = false;
+  /** The load generation of the loadVersions call in flight. */
+  private versionsLoadingGen = -1;
   @state() private versionsError: string | null = null;
   @state() private view: ViewResponse | null = null;
   @state() private viewError: string | null = null;
@@ -614,6 +618,11 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   private async loadVersions(before = 0, gen = this.loadGen): Promise<void> {
+    // One call at a time per load: a Load more while pages are still being
+    // read would fetch and append the same pages twice.
+    if (this.versionsLoading && this.versionsLoadingGen === gen) return;
+    this.versionsLoading = true;
+    this.versionsLoadingGen = gen;
     try {
       // A page walks ready and discarded versions together, so after a long
       // run of discarded versions it can hold no ready one. Keep reading
@@ -641,6 +650,8 @@ export class ScionPageArtifactDetail extends LitElement {
     } catch (err) {
       if (gen !== this.loadGen) return;
       this.versionsError = err instanceof Error ? err.message : 'Could not load versions';
+    } finally {
+      if (this.versionsLoadingGen === gen) this.versionsLoading = false;
     }
   }
 
@@ -1557,7 +1568,10 @@ export class ScionPageArtifactDetail extends LitElement {
         : nothing}
       ${this.versionsNext > 0
         ? html`<div class="more">
-            <sl-button size="small" @click=${(): void => void this.loadVersions(this.versionsNext)}
+            <sl-button
+              size="small"
+              ?disabled=${this.versionsLoading}
+              @click=${(): void => void this.loadVersions(this.versionsNext)}
               >Load more</sl-button
             >
           </div>`

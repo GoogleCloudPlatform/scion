@@ -319,9 +319,9 @@ type Store interface {
 	// ReapPending marks every version still pending or finalizing that was
 	// created before cutoff as failed (reason FailReasonExpired) and drops
 	// its manifest, so its blobs are no longer referenced. An artifact left
-	// with neither a ready nor a
-	// pending version is soft-deleted, which frees its key. It handles at
-	// most limit versions per call and returns how many it reaped.
+	// with neither a ready nor a pending version is soft-deleted, which
+	// frees its key. It handles at most limit versions per call and returns
+	// how many it reaped.
 	ReapPending(ctx context.Context, cutoff time.Time, limit int) (int, error)
 
 	// GetArtifact returns the artifact with id unless it is absent or
