@@ -920,6 +920,15 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		}
 	}
 	canDelegateReasons := make(map[string]string, len(plan0.Create))
+	// An admin-kind test identity receives no project role (the grantee
+	// refusal CanDelegate applies on the other grant paths). Removing
+	// roles stays allowed. The refusal runs whether or not an
+	// authorization service is wired (refuseTestAdminMemberGrantee).
+	if len(plan0.Create) > 0 {
+		if denied := svc.refuseTestAdminMemberGrantee(ctx, req.PrincipalType, req.PrincipalID); denied != nil {
+			return nil, denied
+		}
+	}
 	if svc.authz != nil {
 		for _, d := range plan0.Create {
 			needsCanDelegate := true
@@ -1305,4 +1314,26 @@ func (svc *ProjectMembershipService) principalExistsDecision(ctx context.Context
 		}
 	}
 	return &MembershipDecision{Allowed: false, DenialCode: ErrCodeInternalError, Reason: err.Error(), HTTPStatus: 500}
+}
+
+// refuseTestAdminMemberGrantee refuses (403) a project role for an
+// admin-kind test identity, through the shared check
+// testAdminGranteeRefusal: with an authorization service via
+// refuseTestAdminGrantee (its store and clamp cache), without one through
+// svc.store, uncached. Either way it fails closed: a read error (other
+// than a missing user, which the principal-exists check answers) or an
+// unrecognized kind refuses.
+func (svc *ProjectMembershipService) refuseTestAdminMemberGrantee(ctx context.Context, principalType, principalID string) *MembershipDecision {
+	var reason string
+	if svc.authz != nil {
+		if denied := svc.authz.refuseTestAdminGrantee(ctx, GrantDescriptor{GranteeType: principalType, GranteeID: principalID}); denied != nil {
+			reason = denied.Reason
+		}
+	} else {
+		reason = testAdminGranteeRefusal(ctx, svc.store, nil, principalType, principalID)
+	}
+	if reason == "" {
+		return nil
+	}
+	return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: reason, HTTPStatus: 403}
 }

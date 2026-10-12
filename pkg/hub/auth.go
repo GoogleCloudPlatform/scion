@@ -28,7 +28,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
-	"github.com/google/uuid"
 )
 
 // AuthConfig holds authentication configuration.
@@ -137,6 +136,15 @@ type AuthConfig struct {
 	// Now is the clock for the test-fixture expiry check. Nil means
 	// time.Now.
 	Now func() time.Time
+	// KindForPrincipal reads a user principal's stored kind
+	// (Server.kindForPrincipal). The JWT arm's row block uses it for the
+	// admin-kind checks (testAdminRejection). Nil reads the kind from the
+	// row the block loaded, through the same classification.
+	KindForPrincipal func(ctx context.Context, userID string) (principalKind, error)
+	// TestAdminTierEnabled reports whether an admin test identity kind is
+	// enabled (the immutable startup gate). Nil means every admin kind is
+	// off, so the row block refuses every admin-kind row.
+	TestAdminTierEnabled func(kind string) bool
 	// DelegatedAgentAuth authenticates an agent delegated credential
 	// (Authorization: Bearer scion_adt_...) and returns its request state
 	// (the delegated identity and the rows loaded for it). It returns
@@ -288,88 +296,13 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			if token := extractAgentToken(r); token != "" {
 				if cfg.AgentTokenSvc != nil {
 					if claims, err := cfg.AgentTokenSvc.ValidateAgentToken(token); err == nil {
-						// Step 1a: Agent-token authentication requires a successful
-						// credential-status evaluation (Phase 1H). See
-						// evaluateAgentCredentialStatus for the possible outcomes.
-						var credState agentTokenCredentialState
-						if cfg.CredentialStore != nil && claims.ID != "" {
-							cred, isLegacy, credErr := evaluateAgentCredentialStatus(ctx, cfg.CredentialStore, claims.ID)
-							credState.evaluated = true
-							switch {
-							case errors.Is(credErr, errAgentCredentialRevoked):
-								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-									"token has been revoked", nil)
-								return
-							case credErr != nil:
-								// Any store error other than "not found" must not fall
-								// back to authenticating the request: it means the
-								// credential's status could not actually be determined,
-								// so treat it as a retryable failure.
-								log.Error("Agent credential status lookup failed",
-									"agent_id", claims.Subject, "error", credErr)
-								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-									"unable to verify credential status", nil)
-								return
-							case isLegacy:
-								// Legacy compatibility path: tokens issued before the
-								// credential table existed have no credential record.
-								// Retained pending a product decision; do not close or
-								// widen this branch.
-								log.Warn("Agent token not found in credential store (legacy/pre-table token)",
-									"agent_id", claims.Subject, "jti_hash", hashJTI(claims.ID)[:8])
-								ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
-							default:
-								// Credential found and active.
-								credState.cred = cred
-								ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
-								// Update last_seen_at (fire-and-forget)
-								go func() {
-									_ = cfg.CredentialStore.UpdateAgentCredentialLastSeen(
-										context.Background(), cred.ID, time.Now())
-								}()
-							}
-						}
-
-						// Step 1b: a held agent's token is refused on every
-						// request, including tokens on the legacy path above
-						// (ptone/scion#3433). Same response as a revoked
-						// credential; a lookup fault is the same 503.
-						if cfg.HoldStore != nil {
-							// A subject that is not an agent UUID names no agent:
-							// an authentication failure, refused before the hold
-							// lookup.
-							if _, perr := uuid.Parse(claims.Subject); perr != nil {
-								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-									"invalid agent token", nil)
-								return
-							}
-							held, holdErr := cfg.HoldStore.HasActiveAgentHold(ctx, claims.Subject)
-							if holdErr != nil {
-								log.Error("Agent hold lookup failed",
-									"agent_id", claims.Subject, "error", holdErr)
-								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-									"unable to verify credential status", nil)
-								return
-							}
-							if held {
-								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-									"token has been revoked", nil)
-								return
-							}
-						}
-
-						// Step 1c: the token's run, only when
-						// server.auth.agent_run_scope is not off.
-						if rs := cfg.AgentRunScope; rs != nil {
-							switch rs.check(ctx, claims, credState, runScopeRequestFrom(r), runScopeSourceHTTP) {
-							case runScopeDeny:
-								writeAgentTokenRefused(w)
-								return
-							case runScopeUnavailable:
-								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-									"unable to verify credential status", nil)
-								return
-							}
+						// Steps 1a-1c: credential status, hold and token run
+						// (verifyAgentTokenCredential).
+						var refusal agentTokenRefusal
+						ctx, refusal = verifyAgentTokenCredential(ctx, cfg, log, claims, runScopeRequestFrom(r), runScopeSourceHTTP)
+						if refusal != agentTokenAccepted {
+							writeAgentTokenRefusal(w, refusal)
+							return
 						}
 
 						ctx = context.WithValue(ctx, agentContextKey{}, claims)
@@ -768,6 +701,31 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
 							"invalid access token: no active user record for this token", nil)
 						return
+					}
+					// Admin test identities: the same row block refuses an
+					// admin-kind row whose kind is off, whose expiry is
+					// missing or past, or whose token's role claim is not
+					// the kind's role. The kind is read through
+					// kindForPrincipal; a read error fails closed.
+					if uErr == nil {
+						kind, reason, kErr := testAdminRowRejection(ctx, cfg.KindForPrincipal, cfg.TestAdminTierEnabled, u, claims.Role, now)
+						if kErr != nil {
+							log.Error("JWT auth: user kind lookup failed",
+								"user_id", claims.UserID, "error", kErr)
+							writeError(w, http.StatusServiceUnavailable, "store_error",
+								"unable to verify user status", nil)
+							return
+						}
+						if reason != "" {
+							log.Warn("JWT auth rejected: test admin identity not admitted",
+								"user_id", claims.UserID, "reason", reason)
+							writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
+								"invalid access token: no active user record for this token", nil)
+							return
+						}
+						if kind.isTestAdmin() {
+							ctx = contextWithTestAdminActor(ctx, u)
+						}
 					}
 				}
 				user := NewAuthenticatedUser(

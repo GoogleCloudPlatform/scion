@@ -15,13 +15,16 @@
 package agent
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
+	harnessesEmbed "github.com/GoogleCloudPlatform/scion/harnesses"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
 // hostCredTestSetup returns a home dir holding an OAuth login file and an
@@ -198,5 +201,78 @@ func TestInjectHostCredentialFiles_TemplateConfigCannotNameArbitraryFiles(t *tes
 	opts := &api.StartOptions{BrokerMode: true, HostCredentialFiles: true}
 	if injected := injectHostCredentialFiles(opts, meta, home); injected != nil || opts.ResolvedSecrets != nil {
 		t.Fatalf("expected nothing injected, got %v / %+v", injected, opts.ResolvedSecrets)
+	}
+}
+
+// shippedCopilotAuthMeta returns the auth metadata of the copilot harness
+// config embedded in the scion binary.
+func shippedCopilotAuthMeta(t *testing.T) *config.HarnessAuthMetadata {
+	t.Helper()
+	data, err := fs.ReadFile(harnessesEmbed.FS, "copilot/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := config.ParseHarnessConfigYAML(data)
+	if err != nil || entry.Auth == nil {
+		t.Fatalf("parse copilot config: %v", err)
+	}
+	return entry.Auth
+}
+
+// TestInjectHostCredentialFiles_CopilotConfigSignIn: on the co-located host
+// path, copilot's ~/.copilot/config.json is file-based sign-in only when it
+// holds sign-in data. A settings-only file (a user who signs in through the
+// OS keychain) is not injected, so file-based sign-in is not selected and
+// stays not configured; a file with a token is injected and selected.
+func TestInjectHostCredentialFiles_CopilotConfigSignIn(t *testing.T) {
+	meta := shippedCopilotAuthMeta(t)
+	for _, tc := range []struct {
+		name       string
+		content    string
+		wantInject bool
+	}{
+		{"keychain user settings-only file", `{"trusted_folders": ["/src"], "logged_in_users": [{"host": "https://github.com", "login": "octo"}], "last_logged_in_user": {"host": "https://github.com", "login": "octo"}, "banner": "never"}`, false},
+		{"file with sign-in token", `{"logged_in_users": [{"host": "https://github.com", "login": "octo"}], "copilot_tokens": {"https://github.com:octo": "placeholder-token"}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			p := filepath.Join(home, ".copilot", "config.json")
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := &api.StartOptions{BrokerMode: true, HostCredentialFiles: true}
+			injected := injectHostCredentialFiles(opts, meta, home)
+
+			// The steps Start runs next in broker mode.
+			var auth api.AuthConfig
+			harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets, meta)
+			autoDetectAuthSelectedType(&auth, meta, opts)
+
+			if !tc.wantInject {
+				if injected != nil || opts.ResolvedSecrets != nil {
+					t.Fatalf("expected nothing injected, got %v / %+v", injected, opts.ResolvedSecrets)
+				}
+				if auth.SelectedType == "auth-file" || auth.Files["CopilotConfigFile"] != "" {
+					t.Fatalf("file-based sign-in configured from a settings-only file: %+v", auth)
+				}
+				return
+			}
+			want := []api.ResolvedSecret{{
+				Name:   "COPILOT_CONFIG",
+				Type:   "file",
+				Target: "~/.copilot/config.json",
+				Value:  tc.content,
+				Source: "runtime_broker",
+			}}
+			if !reflect.DeepEqual(injected, []string{"COPILOT_CONFIG"}) || !reflect.DeepEqual(opts.ResolvedSecrets, want) {
+				t.Fatalf("injected = %v, ResolvedSecrets = %+v", injected, opts.ResolvedSecrets)
+			}
+			if auth.SelectedType != "auth-file" || auth.Files["CopilotConfigFile"] != "~/.copilot/config.json" {
+				t.Fatalf("file-based sign-in not configured: %+v", auth)
+			}
+		})
 	}
 }
