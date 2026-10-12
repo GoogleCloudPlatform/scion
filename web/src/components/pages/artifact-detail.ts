@@ -989,7 +989,7 @@ export class ScionPageArtifactDetail extends LitElement {
       ></scion-artifact-publish-dialog>
       ${this.data?.canManage || this.canGrantReview
         ? html`<scion-artifact-share-dialog
-            .artifact=${this.data!.artifact}
+            .artifact=${this.data.artifact}
             .currentUserId=${this.pageData?.user?.id ?? ''}
             .mode=${this.data?.canManage ? 'share' : 'review'}
             ?open=${this.shareOpen}
