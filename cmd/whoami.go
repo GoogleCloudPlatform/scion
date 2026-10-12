@@ -59,6 +59,15 @@ type WhoamiResult struct {
 	// the token itself (only with --full). They show whether, for example,
 	// the artifact scopes were issued (ptone/scion#4569).
 	Scopes []string `json:"scopes,omitempty"`
+
+	// Experiments are the hub experiments that are on now, read live from
+	// GET /api/v1/experiments (only with --full; absent when the hub could
+	// not be asked, an empty list when none is on). That endpoint reports
+	// the experiments with a web layer, which include server-checked ones
+	// such as hub.artifacts. SCION_HUB_EXPERIMENTS, by contrast, lists only
+	// the experiments dispatched to the agent, fixed at start
+	// (ptone/scion#4573).
+	Experiments *[]string `json:"experiments,omitempty"`
 }
 
 // whoamiFull controls whether the --full flag was set.
@@ -199,6 +208,13 @@ func enrichFromHub(cmd *cobra.Command, result *WhoamiResult) {
 	result.Annotations = self.Annotations
 	result.Ancestry = self.Ancestry
 	result.TaskSummary = self.TaskSummary
+
+	enabled, err := client.GetExperiments(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Hub experiments query failed: %v; experiments omitted\n", err)
+		return
+	}
+	result.Experiments = &enabled
 }
 
 // printFullPlainText prints a human-readable multi-line summary of all available fields.
@@ -241,6 +257,13 @@ func printFullPlainText(r WhoamiResult) {
 	if len(r.Scopes) > 0 {
 		fmt.Printf("Scopes:   %s\n", strings.Join(r.Scopes, ", "))
 	}
+	if r.Experiments != nil {
+		list := strings.Join(*r.Experiments, ", ")
+		if list == "" {
+			list = "(none)"
+		}
+		fmt.Printf("Experiments: %s\n", list)
+	}
 }
 
 func runSystemWhoami() error {
@@ -257,5 +280,5 @@ func runSystemWhoami() error {
 func init() {
 	rootCmd.AddCommand(whoamiCmd)
 	whoamiCmd.Flags().BoolVar(&whoamiFull, "full", false,
-		"Include the token's scopes and enriched fields from the Hub (phase, activity, labels, ancestry)")
+		"Include the token's scopes and enriched fields from the Hub (phase, activity, labels, ancestry, enabled experiments)")
 }

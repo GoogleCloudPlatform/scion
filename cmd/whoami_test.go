@@ -258,8 +258,14 @@ func TestWhoamiFull(t *testing.T) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodGet, r.Method)
-		assert.Contains(t, r.URL.Path, "/api/v1/agents/agent-full-id")
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/experiments" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"experiments": map[string]bool{"hub.conduit": false, "hub.artifacts": true, "agent.edit": true},
+			})
+			return
+		}
+		assert.Contains(t, r.URL.Path, "/api/v1/agents/agent-full-id")
 		_ = json.NewEncoder(w).Encode(agentResp)
 	}))
 	defer srv.Close()
@@ -308,6 +314,10 @@ func TestWhoamiFull(t *testing.T) {
 	assert.Equal(t, map[string]string{"note": "test annotation"}, result.Annotations)
 	assert.Equal(t, []string{"user-root", "parent-agent"}, result.Ancestry)
 	assert.Equal(t, "Implementing feature X", result.TaskSummary)
+
+	// The enabled experiments, read live from the hub (ptone/scion#4573).
+	require.NotNil(t, result.Experiments)
+	assert.Equal(t, []string{"agent.edit", "hub.artifacts"}, *result.Experiments)
 }
 
 func TestWhoamiFullNoHub(t *testing.T) {
@@ -503,4 +513,70 @@ func TestTokenScopes(t *testing.T) {
 	assert.Nil(t, tokenScopes("dev-token-without-dots"))
 	assert.Nil(t, tokenScopes("a.!!!.c"))
 	assert.Nil(t, tokenScopes("a."+base64.RawURLEncoding.EncodeToString([]byte("not json"))+".c"))
+}
+
+// TestWhoamiFullExperiments: the plain text lists the enabled experiments
+// read from the hub, says "(none)" when none is on, and a failed
+// experiments query only omits them, with a warning.
+func TestWhoamiFullExperiments(t *testing.T) {
+	t.Setenv("SCION_AGENT_SLUG", "exp-agent")
+	t.Setenv("SCION_AGENT_NAME", "Exp Agent")
+	t.Setenv("SCION_AGENT_ID", "agent-exp-id")
+	withWhoamiToken(t, "")
+	experiments := map[string]bool{"hub.artifacts": true}
+	failExperiments := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/experiments" {
+			if failExperiments {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"experiments": experiments})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"phase": "running"})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+	cleanup := sciontoolhub.SetHubTestSandboxed()
+	t.Cleanup(cleanup)
+	origFactory := newHubClient
+	newHubClient = func() *sciontoolhub.Client {
+		return sciontoolhub.NewClientWithConfig(srv.URL, "test-token", "agent-exp-id")
+	}
+	t.Cleanup(func() { newHubClient = origFactory })
+	oldFull := whoamiFull
+	whoamiFull = true
+	t.Cleanup(func() { whoamiFull = oldFull })
+
+	run := func(opts cliutil.RootOptions) (string, string) {
+		withRootOptions(t, whoamiCmd, opts)
+		var stderr string
+		out := captureStdout(t, func() {
+			stderr = captureStderr(t, func() {
+				require.NoError(t, whoamiCmd.RunE(whoamiCmd, nil))
+			})
+		})
+		return out, stderr
+	}
+
+	out, _ := run(cliutil.RootOptions{})
+	assert.Contains(t, out, "Experiments: hub.artifacts")
+
+	experiments = map[string]bool{"hub.artifacts": false}
+	out, _ = run(cliutil.RootOptions{})
+	assert.Contains(t, out, "Experiments: (none)")
+	jsonOut, _ := run(cliutil.RootOptions{OutputFormat: "json"})
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &raw))
+	assert.Equal(t, []any{}, raw["experiments"], "none on is an empty list, not an absent key")
+
+	failExperiments = true
+	out, stderr := run(cliutil.RootOptions{OutputFormat: "json"})
+	assert.Contains(t, stderr, "experiments omitted")
+	raw = nil
+	require.NoError(t, json.Unmarshal([]byte(out), &raw))
+	assert.NotContains(t, raw, "experiments")
+	assert.Equal(t, "running", raw["phase"], "the other hub fields are kept")
 }
