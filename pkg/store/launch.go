@@ -65,11 +65,7 @@ const (
 
 // LaunchReport is the store-level input to ApplyLaunchReport. It carries the
 // fields ApplyLaunchReport needs to evaluate design §3.7's rule list and, on
-// a successful terminal, the subset of agent info a P1a caller has already
-// resolved from the broker's payload. Fuller broker-response application
-// (the complete RemoteAgentInfo echo: exposed ports, applied config, etc.)
-// is P1b-1 wire-plumbing territory; P1a's ApplyLaunchReport applies only the
-// fields on this struct.
+// a successful terminal, the agent info the broker resolved for the launch.
 type LaunchReport struct {
 	LaunchID   string
 	InstanceID string
@@ -80,11 +76,16 @@ type LaunchReport struct {
 	Message    string
 	ErrorCode  string // set when State == failed
 
-	// Runtime and RuntimeState are applied verbatim on a succeeded terminal
+	// AgentConfig is applied on a succeeded terminal with
+	// ApplyBrokerAgentConfig, the same rules a synchronous dispatch uses
 	// (design §3.7 step 6 "apply Agent as applyBrokerResponse does" / step 5
-	// "apply agent info without changing the phase"). Left empty, they leave
-	// the stored value unchanged.
-	Runtime      string
+	// "apply agent info without changing the phase"; ptone/scion#4818). It
+	// is written in the same transaction as the launch's end, so a report
+	// the launch fencing rejects writes none of it. Empty values leave the
+	// stored value unchanged.
+	AgentConfig BrokerAgentConfig
+	// RuntimeState is applied verbatim on a succeeded terminal. Left empty,
+	// it leaves the stored value unchanged.
 	RuntimeState string
 }
 

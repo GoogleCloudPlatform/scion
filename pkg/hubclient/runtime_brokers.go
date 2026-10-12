@@ -103,12 +103,11 @@ const (
 )
 
 // AgentLaunchReportInfo is the succeeded report's agent echo (design §3.2's
-// AgentLaunchReport.Agent, a RemoteAgentInfo on the Hub side). Fuller
-// broker-response application (the complete echo) is explicitly P1b-1's
-// wire-plumbing job (pkg/store.LaunchReport's doc comment); the Hub's P1a-ii
-// ApplyLaunchReport applies only Runtime and RuntimeState from it today
-// (store.LaunchReport's two documented fields) and ignores the rest, so
-// sending the full shape now is forward-compatible and costs nothing.
+// AgentLaunchReport.Agent, a RemoteAgentInfo on the Hub side). The Hub
+// applies the resolved config (template, harness config and auth, harness
+// config source, image, profile, runtime) as it does for a synchronous
+// create (ptone/scion#4818), plus RunID and WorkspacePlacement; it ignores
+// the rest.
 type AgentLaunchReportInfo struct {
 	ID              string `json:"id,omitempty"`
 	Slug            string `json:"slug,omitempty"`
@@ -124,6 +123,9 @@ type AgentLaunchReportInfo struct {
 	Phase           string `json:"phase,omitempty"`
 	Activity        string `json:"activity,omitempty"`
 	ContainerStatus string `json:"containerStatus,omitempty"`
+	// HarnessConfigSource is which harness-config source the start resolved
+	// (wire key matches RemoteAgentInfo.HarnessConfigSource).
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 	// RunID is the run the launched entry is labelled with
 	// (ptone/scion#3176), so the hub can settle exactly that run.
 	RunID string `json:"runId,omitempty"`

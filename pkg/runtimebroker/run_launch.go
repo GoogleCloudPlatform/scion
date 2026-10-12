@@ -405,7 +405,8 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			ContainerStatus: sr.info.ContainerStatus,
 			RunID:           sr.info.RunID,
 
-			WorkspacePlacement: sr.info.WorkspacePlacement,
+			HarnessConfigSource: sr.info.HarnessConfigSource,
+			WorkspacePlacement:  sr.info.WorkspacePlacement,
 		}
 	}
 	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", info)

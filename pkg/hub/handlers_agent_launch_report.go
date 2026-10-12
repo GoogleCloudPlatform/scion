@@ -28,10 +28,11 @@ import (
 // /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/launch. `claim` and
 // `checkpoint` are sent synchronously and gate the launch (§3.8.2); `progress`
 // covers step changes and the keepalive. Agent is present only on a
-// `succeeded` report; of its fields the hub applies only Runtime (through
-// store.LaunchReport), WorkspacePlacement and RunID (see
-// handleAgentLaunchReport). The rest of the echo (exposed ports, applied
-// config, etc.) is not applied.
+// `succeeded` report; of its fields the hub applies the broker-resolved
+// config (template, harness config and auth, image, profile, runtime: see
+// store.ApplyBrokerAgentConfig), WorkspacePlacement and RunID (see
+// handleAgentLaunchReport). The rest of the echo (phase, activity, container
+// status, etc.) is not applied.
 type AgentLaunchReport struct {
 	LaunchID   string           `json:"launchId"`
 	InstanceID string           `json:"instanceId"`
@@ -134,7 +135,11 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		ErrorCode:  sanitizeFailureReason(req.ErrorCode),
 	}
 	if req.Agent != nil {
-		sr.Runtime = req.Agent.Runtime
+		// The broker-resolved config is applied in the store's launch
+		// transaction with the same rules (and the same conversion) as a
+		// synchronous dispatch (ptone/scion#4818), so a report the launch
+		// fencing rejects writes none of it.
+		sr.AgentConfig = brokerAgentConfigOf(req.Agent)
 	}
 
 	answer, updated, err := s.store.ApplyLaunchReport(ctx, agentID, brokerID, sr)

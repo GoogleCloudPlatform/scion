@@ -1456,40 +1456,29 @@ func validWorkspacePlacementReport(placement string) bool {
 }
 
 // applyBrokerAgentConfig copies the non-status fields of a broker's agent
-// answer (template, harness, image, profile, runtime) onto agent.
+// answer (template, harness, image, profile, runtime) onto agent. The rules
+// live in store.ApplyBrokerAgentConfig, which an async launch's succeeded
+// report also uses (ptone/scion#4818).
 func applyBrokerAgentConfig(agent *store.Agent, info *RemoteAgentInfo) {
-	if info.Template != "" {
-		agent.Template = info.Template
+	store.ApplyBrokerAgentConfig(agent, brokerAgentConfigOf(info))
+}
+
+// brokerAgentConfigOf extracts the broker-resolved agent config from a
+// broker's agent answer. A synchronous dispatch and an async launch's
+// succeeded report both convert with it. A nil info yields the zero value,
+// which changes nothing.
+func brokerAgentConfigOf(info *RemoteAgentInfo) store.BrokerAgentConfig {
+	if info == nil {
+		return store.BrokerAgentConfig{}
 	}
-	if agent.AppliedConfig != nil {
-		if info.HarnessConfig != "" {
-			agent.AppliedConfig.HarnessConfig = info.HarnessConfig
-		}
-		if info.HarnessAuth != "" {
-			agent.AppliedConfig.HarnessAuth = info.HarnessAuth
-		}
-		// Empty only from an older broker (a current broker reports
-		// "unresolved" when no harness-config dir resolved), so keep the
-		// recorded value in that case.
-		if info.HarnessConfigSource != "" {
-			agent.AppliedConfig.HarnessConfigSource = info.HarnessConfigSource
-		}
-		// AppliedConfig.Image records what the broker actually resolved,
-		// for display. It never feeds a later dispatch's top-tier image
-		// (explicitDispatchImage reads the explicit inputs instead), so
-		// recording it here no longer freezes the image across restarts
-		// (ptone/scion#1799).
-		if info.Image != "" {
-			agent.AppliedConfig.Image = info.Image
-		}
-		// No Runtime Broker-reported profile is written onto a pinned (flat)
-		// agent.
-		if info.Profile != "" && !agent.IsPinned() {
-			agent.AppliedConfig.Profile = info.Profile
-		}
-	}
-	if info.Runtime != "" {
-		agent.Runtime = info.Runtime
+	return store.BrokerAgentConfig{
+		Template:            info.Template,
+		HarnessConfig:       info.HarnessConfig,
+		HarnessAuth:         info.HarnessAuth,
+		HarnessConfigSource: info.HarnessConfigSource,
+		Image:               info.Image,
+		Profile:             info.Profile,
+		Runtime:             info.Runtime,
 	}
 }
 
