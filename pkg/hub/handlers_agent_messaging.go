@@ -1499,9 +1499,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 				"Failed to persist message", nil)
 			return
 		}
-		s.mu.RLock()
-		cr := s.channelRegistry
-		s.mu.RUnlock()
+		cr := s.currentChannelRegistry()
 		delete(structuredMsg.Metadata, attachmentsMetadataKey) // strip internal transport key
 		if cr != nil && cr.Len() > 0 {
 			cr.Dispatch(ctx, structuredMsg)
@@ -3632,6 +3630,16 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	}
 	runningAgents = authorizedAgents
 
+	// Running agents that are still initializing are targeted like any
+	// other running agent: the broker buffers the message until the harness
+	// is ready. They are counted separately for the caller's information.
+	starting := 0
+	for i := range runningAgents {
+		if agentStillInitializing(&runningAgents[i]) {
+			starting++
+		}
+	}
+
 	// Log the broadcast
 	logAttrs := []any{"project_id", projectID}
 	logAttrs = append(logAttrs, req.StructuredMessage.LogAttrs()...)
@@ -3658,7 +3666,7 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	s.writeBroadcastResponse(w, targeted+skipped, targeted, skipped, skippedBreakdown)
+	s.writeBroadcastResponse(w, targeted+skipped, targeted, skipped, skippedBreakdown, starting)
 }
 
 // BroadcastAcceptedResponse is the JSON response for a broadcast message.
@@ -3668,14 +3676,19 @@ type BroadcastAcceptedResponse struct {
 	Targeted         int            `json:"targeted"`
 	Skipped          int            `json:"skipped"`
 	SkippedBreakdown map[string]int `json:"skipped_breakdown,omitempty"`
+	// Starting counts the targeted agents that are still initializing: the
+	// message is delivered to them and held by the broker until their
+	// harness is ready. Included in Targeted.
+	Starting int `json:"starting,omitempty"`
 }
 
-func (s *Server) writeBroadcastResponse(w http.ResponseWriter, total, targeted, skipped int, skippedBreakdown map[string]int) {
+func (s *Server) writeBroadcastResponse(w http.ResponseWriter, total, targeted, skipped int, skippedBreakdown map[string]int, starting int) {
 	resp := BroadcastAcceptedResponse{
 		Status:   "accepted",
 		Total:    total,
 		Targeted: targeted,
 		Skipped:  skipped,
+		Starting: starting,
 	}
 	if len(skippedBreakdown) > 0 {
 		resp.SkippedBreakdown = skippedBreakdown

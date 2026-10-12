@@ -268,14 +268,3 @@ func clampTestFixtureBindings(ctx context.Context, st store.Store, principals []
 	c := &testFixtureGrantClamp{Store: st, cache: &testFixtureClampCache{}}
 	return c.clamp(ctx, principals, bindings)
 }
-
-// isTestFixtureUser reports whether userID is a hub test identity, reading
-// through st. It is for code outside the authorization service that counts
-// or targets privileged holders (lockout and last-admin guards, admin
-// recipients): such code must not count a test identity, which can never
-// hold system-scoped authority beyond member. A missing user is not a test
-// identity; a read error is returned so the caller fails closed.
-func isTestFixtureUser(ctx context.Context, st store.UserStore, userID string) (bool, error) {
-	isFx, _, err := lookupUserKind(ctx, st, userID)
-	return isFx, err
-}

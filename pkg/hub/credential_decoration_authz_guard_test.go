@@ -73,22 +73,22 @@ import (
 // reference.
 var decorationGuardAllowed = map[string]bool{
 	// Type-declaration carriage points.
-	"identity_credential.go:CredentialContext.Decoration": true,
-	"identity.go:ScopedUserIdentity.decoration":           true,
-	"identity_credential.go:type CredentialDecoration":    true,
+	"internal/principal/identity_credential.go:CredentialContext.Decoration": true,
+	"internal/principal/identity.go:ScopedUserIdentity.decoration":           true,
+	"internal/principal/identity_credential.go:type CredentialDecoration":    true,
 
 	// Function/method-level carriage and rendering points.
-	"identity.go:NewScopedUserIdentityWithDecoration":            true,
-	"identity.go:NewScopedUserIdentityWithCeilingAndDecoration":  true,
-	"identity.go:NewScopedUserIdentityWithBoundaryAndDecoration": true,
-	"identity.go:newScopedUserIdentity":                          true,
-	"identity.go:(*ScopedUserIdentity).Decoration":               true,
-	"useraccesstoken.go:(*UserAccessTokenService).ValidateToken": true,
-	"authz.go:credentialContextForIdentity":                      true,
-	"identity_credential.go:(CredentialDecoration).IsZero":       true,
-	"identity_credential.go:(CredentialDecoration).LogValue":     true,
-	"identity_credential.go:(CredentialDecoration).clone":        true,
-	"credential_decoration.go:CredentialDecorationFromContext":   true,
+	"internal/principal/identity.go:NewScopedUserIdentityWithDecoration":            true,
+	"internal/principal/identity.go:NewScopedUserIdentityWithCeilingAndDecoration":  true,
+	"internal/principal/identity.go:NewScopedUserIdentityWithBoundaryAndDecoration": true,
+	"internal/principal/identity.go:newScopedUserIdentity":                          true,
+	"internal/principal/identity.go:(*ScopedUserIdentity).Decoration":               true,
+	"useraccesstoken.go:(*UserAccessTokenService).ValidateToken":                    true,
+	"authz.go:credentialContextForIdentity":                                         true,
+	"internal/principal/identity_credential.go:(CredentialDecoration).IsZero":       true,
+	"internal/principal/identity_credential.go:(CredentialDecoration).LogValue":     true,
+	"internal/principal/identity_credential.go:(CredentialDecoration).Clone":        true,
+	"credential_decoration.go:CredentialDecorationFromContext":                      true,
 
 	// E.2a (ptone/scion#2127, plan §3.1-§3.3): these are rendering/audit
 	// builders, not authorization decisions — they read decoration to log or
@@ -107,6 +107,13 @@ var decorationGuardAllowed = map[string]bool{
 	// this renders a bounded, sanitized snapshot of decoration for the
 	// initiator_credential_snapshot column, it never decides anything.
 	"scheduled_initiator.go:initiatorCredentialSnapshotJSON": true,
+
+	// The alias declarations hack/pkgmove left in pkg/hub when the principal
+	// types moved to pkg/hub/internal/principal (ptone/scion#4265).
+	"zz_alias_principal.go:type CredentialDecoration":                          true,
+	"zz_alias_principal.go:var NewScopedUserIdentityWithDecoration":            true,
+	"zz_alias_principal.go:var NewScopedUserIdentityWithCeilingAndDecoration":  true,
+	"zz_alias_principal.go:var NewScopedUserIdentityWithBoundaryAndDecoration": true,
 }
 
 // decorationHit is one reference to credential decoration found by
@@ -324,8 +331,27 @@ func recvTypeString(expr ast.Expr) string {
 // so a same-named method on an unrelated receiver is a distinct, unallowed
 // key rather than colliding with the allowed one. Free functions are
 // unqualified, as before.
+//
+// A reference in a package-level var or const declaration is keyed by the
+// declared name, e.g. "var NewScopedUserIdentityWithDecoration" for the
+// alias a pkgmove alias file declares, so each one is allowed individually
+// rather than through a catch-all "<unknown>" key.
 func enclosingDeclName(f *ast.File, pos token.Pos) string {
 	for _, decl := range f.Decls {
+		if gd, ok := decl.(*ast.GenDecl); ok && (gd.Tok == token.VAR || gd.Tok == token.CONST) {
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || pos < vs.Pos() || pos > vs.End() {
+					continue
+				}
+				names := make([]string, 0, len(vs.Names))
+				for _, n := range vs.Names {
+					names = append(names, n.Name)
+				}
+				return gd.Tok.String() + " " + strings.Join(names, ",")
+			}
+			continue
+		}
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok {
 			continue
@@ -355,6 +381,8 @@ func scanDirForDecorationReferences(dir string) ([]decorationHit, error) {
 	var hits []decorationHit
 	// pkgmove:scan-covers pkg/hub/apierr
 	// recursive walk already includes pkg/hub/apierr.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// recursive walk already includes pkg/hub/internal/principal; decorationGuardAllowed lists the carriage points at their new paths.
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

@@ -722,6 +722,34 @@ func (_c *AgentCreate) SetNillableRunIDUpdatedAt(v *time.Time) *AgentCreate {
 	return _c
 }
 
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (_c *AgentCreate) SetSSHHostKey(v string) *AgentCreate {
+	_c.mutation.SetSSHHostKey(v)
+	return _c
+}
+
+// SetNillableSSHHostKey sets the "ssh_host_key" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSSHHostKey(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetSSHHostKey(*v)
+	}
+	return _c
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (_c *AgentCreate) SetSSHHostKeyRunID(v string) *AgentCreate {
+	_c.mutation.SetSSHHostKeyRunID(v)
+	return _c
+}
+
+// SetNillableSSHHostKeyRunID sets the "ssh_host_key_run_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSSHHostKeyRunID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetSSHHostKeyRunID(*v)
+	}
+	return _c
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_c *AgentCreate) SetLaunchState(v string) *AgentCreate {
 	_c.mutation.SetLaunchState(v)
@@ -1753,6 +1781,14 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.RunIDUpdatedAt(); ok {
 		_spec.SetField(agent.FieldRunIDUpdatedAt, field.TypeTime, value)
 		_node.RunIDUpdatedAt = &value
+	}
+	if value, ok := _c.mutation.SSHHostKey(); ok {
+		_spec.SetField(agent.FieldSSHHostKey, field.TypeString, value)
+		_node.SSHHostKey = value
+	}
+	if value, ok := _c.mutation.SSHHostKeyRunID(); ok {
+		_spec.SetField(agent.FieldSSHHostKeyRunID, field.TypeString, value)
+		_node.SSHHostKeyRunID = value
 	}
 	if value, ok := _c.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
@@ -2840,6 +2876,42 @@ func (u *AgentUpsert) UpdateRunIDUpdatedAt() *AgentUpsert {
 // ClearRunIDUpdatedAt clears the value of the "run_id_updated_at" field.
 func (u *AgentUpsert) ClearRunIDUpdatedAt() *AgentUpsert {
 	u.SetNull(agent.FieldRunIDUpdatedAt)
+	return u
+}
+
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (u *AgentUpsert) SetSSHHostKey(v string) *AgentUpsert {
+	u.Set(agent.FieldSSHHostKey, v)
+	return u
+}
+
+// UpdateSSHHostKey sets the "ssh_host_key" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSSHHostKey() *AgentUpsert {
+	u.SetExcluded(agent.FieldSSHHostKey)
+	return u
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (u *AgentUpsert) ClearSSHHostKey() *AgentUpsert {
+	u.SetNull(agent.FieldSSHHostKey)
+	return u
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (u *AgentUpsert) SetSSHHostKeyRunID(v string) *AgentUpsert {
+	u.Set(agent.FieldSSHHostKeyRunID, v)
+	return u
+}
+
+// UpdateSSHHostKeyRunID sets the "ssh_host_key_run_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSSHHostKeyRunID() *AgentUpsert {
+	u.SetExcluded(agent.FieldSSHHostKeyRunID)
+	return u
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (u *AgentUpsert) ClearSSHHostKeyRunID() *AgentUpsert {
+	u.SetNull(agent.FieldSSHHostKeyRunID)
 	return u
 }
 
@@ -4445,6 +4517,48 @@ func (u *AgentUpsertOne) UpdateRunIDUpdatedAt() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearRunIDUpdatedAt() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRunIDUpdatedAt()
+	})
+}
+
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (u *AgentUpsertOne) SetSSHHostKey(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKey(v)
+	})
+}
+
+// UpdateSSHHostKey sets the "ssh_host_key" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSSHHostKey() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKey()
+	})
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (u *AgentUpsertOne) ClearSSHHostKey() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKey()
+	})
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (u *AgentUpsertOne) SetSSHHostKeyRunID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKeyRunID(v)
+	})
+}
+
+// UpdateSSHHostKeyRunID sets the "ssh_host_key_run_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSSHHostKeyRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKeyRunID()
+	})
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (u *AgentUpsertOne) ClearSSHHostKeyRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKeyRunID()
 	})
 }
 
@@ -6313,6 +6427,48 @@ func (u *AgentUpsertBulk) UpdateRunIDUpdatedAt() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearRunIDUpdatedAt() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRunIDUpdatedAt()
+	})
+}
+
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (u *AgentUpsertBulk) SetSSHHostKey(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKey(v)
+	})
+}
+
+// UpdateSSHHostKey sets the "ssh_host_key" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSSHHostKey() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKey()
+	})
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (u *AgentUpsertBulk) ClearSSHHostKey() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKey()
+	})
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (u *AgentUpsertBulk) SetSSHHostKeyRunID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKeyRunID(v)
+	})
+}
+
+// UpdateSSHHostKeyRunID sets the "ssh_host_key_run_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSSHHostKeyRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKeyRunID()
+	})
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (u *AgentUpsertBulk) ClearSSHHostKeyRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKeyRunID()
 	})
 }
 

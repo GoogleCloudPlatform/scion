@@ -122,9 +122,11 @@ jobs:
           #     imports among them.
           #   - web/src/shared/harness-utils.test.ts compares against the
           #     harnesses/ directory (harnesses/*/config.yaml).
+          #   - web/src/components/pages/admin-server-config-env-keys.test.ts
+          #     reads pkg/config/schemas/settings-v1.schema.json.
           # Keep this regex in sync when web/ starts reading anything else
           # outside web/.
-          if grep -qE '^(web/|harnesses/|pkg/(.+/)?testdata/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
+          if grep -qE '^(web/|harnesses/|pkg/(.+/)?testdata/|pkg/config/schemas/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
             echo "web_checks=true" >> "$GITHUB_OUTPUT"
           else
             echo "web_checks=false" >> "$GITHUB_OUTPUT"
@@ -874,6 +876,12 @@ jobs:
               # commands on PATH, which have none either), so the *.sh find
               # above never sees them.
               echo './scripts/single-node-vm/tests/lib/gcloud'
+              echo './scripts/starter-hub/tests/lib-tls/caddy'
+              echo './scripts/starter-hub/tests/lib-tls/certbot'
+              echo './scripts/starter-hub/tests/lib-tls/id'
+              echo './scripts/starter-hub/tests/lib-tls/openssl'
+              echo './scripts/starter-hub/tests/lib-tls/runuser'
+              echo './scripts/starter-hub/tests/lib-tls/systemctl'
               echo './scripts/starter-hub/tests/lib/curl'
               echo './scripts/starter-hub/tests/lib/gcloud'
               echo './scripts/starter-hub/tests/lib/sleep'
@@ -1021,8 +1029,10 @@ jobs:
           persist-credentials: false
 
       # Never contacts GCP or the network: stub gcloud, curl and sleep in
-      # scripts/starter-hub/tests/lib shadow any real ones on PATH. Needs
-      # only bash, which ubuntu-latest ships.
+      # scripts/starter-hub/tests/lib, and stub systemctl, certbot, caddy,
+      # runuser, id and openssl s_client in tests/lib-tls, shadow any real
+      # ones on PATH. Needs
+      # only bash and openssl, which ubuntu-latest ships.
       - name: Run scripts/starter-hub/tests/run.sh
         run: ./scripts/starter-hub/tests/run.sh
 

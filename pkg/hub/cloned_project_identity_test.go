@@ -661,6 +661,8 @@ func TestHandleProjectCacheNotify_KeepsHubWorkspaceIdentity(t *testing.T) {
 func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards SyncFromGCS and hub workspace downloader uses, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards SyncFromGCS and hub workspace downloader uses, which identity.go and identity_credential.go do not contain.
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
