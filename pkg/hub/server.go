@@ -6417,7 +6417,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/auth/scopes", s.guarded("/api/v1/auth/scopes", s.handleAuthScopes))
 	// Federation user tokens: 404 while federation.project_visitors is off
 	// or the OIDC provider is not enabled (handlers_federation_token.go).
-	s.mux.HandleFunc("POST /api/v1/auth/federation-token", s.guarded("POST /api/v1/auth/federation-token", s.handleFederationToken))
+	s.mux.HandleFunc("POST /api/v1/auth/federation-token", s.guarded("POST /api/v1/auth/federation-token", s.federationTokenHandler()))
 	s.mux.HandleFunc("/api/v1/auth/providers", s.guarded("/api/v1/auth/providers", s.handleCLIAuthProviders))
 
 	// GE Google credential exchange endpoint (unauthenticated — authentication endpoint itself)

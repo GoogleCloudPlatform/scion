@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -80,19 +81,28 @@ type FederationUserTokenClaims struct {
 	TokenKind     string `json:"scion_token_kind"`
 }
 
-// handleFederationToken handles POST /api/v1/auth/federation-token. It
-// issues a federation user token for the calling user and the requested
-// audience. The caller must be a local human user with status active,
-// authenticated by an interactive session or by a hub-boundary user access
-// token carrying federation_token:mint; every other caller gets the same
-// 403. The audience must be listed in server.oidc.user_token_audiences.
-// While federation.project_visitors is off the route answers 404.
-func (s *Server) handleFederationToken(w http.ResponseWriter, r *http.Request) {
-	s.requireExperiment(experiments.FederationProjectVisitors, s.serveFederationToken)(w, r)
+// federationTokenHandler returns the handler for POST
+// /api/v1/auth/federation-token, built once at route registration: the
+// route answers 404 while federation.project_visitors is off.
+func (s *Server) federationTokenHandler() http.HandlerFunc {
+	return s.requireExperiment(experiments.FederationProjectVisitors, s.handleFederationToken)
 }
 
-func (s *Server) serveFederationToken(w http.ResponseWriter, r *http.Request) {
+// handleFederationToken handles POST /api/v1/auth/federation-token. It
+// issues a federation user token for the calling user and the requested
+// audience. The caller must be a local human user with status active and a
+// stored email, authenticated by an interactive session or by a
+// hub-boundary user access token carrying federation_token:mint; every
+// other caller gets the same 403. The audience must be listed in
+// server.oidc.user_token_audiences. While the OIDC provider is not enabled
+// the route answers 404 for every caller.
+func (s *Server) handleFederationToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	if s.oidcKeyManager == nil {
+		NotFound(w, "route")
+		return
+	}
 
 	user, ok := s.federationTokenCaller(w, r)
 	if !ok {
@@ -115,16 +125,16 @@ func (s *Server) serveFederationToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, federationTokenAudienceRefusalMessage, nil)
 		return
 	}
-	if s.oidcKeyManager == nil {
-		NotFound(w, "route")
-		return
-	}
 	if s.oidcTokenRateLimiter != nil && !s.oidcTokenRateLimiter.Allow("user:"+user.ID) {
 		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "rate limit exceeded for federation token requests", nil)
 		return
 	}
 
-	now := time.Now()
+	// JWT times are whole seconds; truncating here keeps iat, nbf, exp, the
+	// response expires_at and the audit expires_at equal. The audit record
+	// keeps the untruncated time.
+	issuedAt := time.Now()
+	now := issuedAt.Truncate(time.Second)
 	expiresAt := now.Add(oidcCfg.EffectiveUserTokenLifetime())
 	jtiBytes := make([]byte, 16)
 	if _, err := rand.Read(jtiBytes); err != nil {
@@ -171,7 +181,7 @@ func (s *Server) serveFederationToken(w http.ResponseWriter, r *http.Request) {
 		TargetType:   "user",
 		TargetID:     user.ID,
 		AfterSummary: string(summary),
-		Timestamp:    now,
+		Timestamp:    issuedAt,
 	}
 	s.buildAuditActorFromContext(ctx).ApplyActor(record)
 	if err := s.store.CreateMutationAudit(ctx, record); err != nil {
@@ -186,15 +196,17 @@ func (s *Server) serveFederationToken(w http.ResponseWriter, r *http.Request) {
 		"jti", jti,
 		"expires_at", expiresAt.UTC().Format(time.RFC3339),
 	)
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, federationTokenResponse{Token: token, ExpiresAt: expiresAt})
 }
 
 // federationTokenCaller returns the stored user of a caller who may obtain
 // a federation user token: an interactive session, or a user access token
 // whose ceiling allows federation_token.mint on a hub boundary, of a user
-// whose stored kind is human and whose status is active. Every other caller
-// (dev, federation, agent, broker, delegated, test fixture, a suspended or
-// unknown user) gets the same 403; no identity gets 401. It writes the
+// whose stored kind is human, whose status is active and whose stored email
+// is not empty. Every other caller (dev, federation, agent, broker,
+// delegated, test fixture, a suspended or unknown user, a user with no
+// stored email) gets the same 403; no identity gets 401. It writes the
 // response and returns false on refusal.
 func (s *Server) federationTokenCaller(w http.ResponseWriter, r *http.Request) (*store.User, bool) {
 	ctx := r.Context()
@@ -237,6 +249,9 @@ func (s *Server) federationTokenCaller(w http.ResponseWriter, r *http.Request) (
 	}
 	if u.Status != store.UserStatusActive {
 		return refuse("stored user is not active")
+	}
+	if strings.TrimSpace(u.Email) == "" {
+		return refuse("stored user has no email")
 	}
 	return u, true
 }

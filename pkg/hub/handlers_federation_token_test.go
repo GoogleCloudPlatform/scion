@@ -93,7 +93,7 @@ func callFederationTokenAs(t *testing.T, srv *Server, identity Identity, cred *C
 		ctx = contextWithCredentialContext(ctx, *cred)
 	}
 	w := httptest.NewRecorder()
-	srv.handleFederationToken(w, req.WithContext(ctx))
+	srv.federationTokenHandler()(w, req.WithContext(ctx))
 	return w
 }
 
@@ -145,6 +145,11 @@ func TestFederationToken_RefusedCallers(t *testing.T) {
 	}
 	for _, status := range []string{store.UserStatusSuspended, store.UserStatusInvited, store.UserStatusPending} {
 		identities["status "+status] = sessionIdentityFor(stubUser(store.UserKindHuman, status))
+	}
+	for name, email := range map[string]string{"empty stored email": "", "blank stored email": "  "} {
+		u := stubUser(store.UserKindHuman, store.UserStatusActive)
+		u.Email = email
+		identities[name] = NewAuthenticatedUser(u.ID, "session@example.com", u.DisplayName, u.Role, string(ClientTypeWeb))
 	}
 	srv.store = stub
 	identities["no stored user"] = NewAuthenticatedUser(uuid.New().String(), "ghost@example.com", "Ghost", "member", string(ClientTypeWeb))
@@ -202,6 +207,20 @@ func TestFederationToken_RefusedCredentialKinds(t *testing.T) {
 			assert.Equal(t, federationTokenRefusalMessage, federationTokenErrorMessage(t, w))
 		})
 	}
+
+	// A dev identity passes the credential kind and self-scope checks with an
+	// interactive credential and a stored active human row; the identity type
+	// check alone refuses it.
+	t.Run("dev identity, interactive credential, stored active human", func(t *testing.T) {
+		stub := federationTokenUserStub{Store: s, users: map[string]*store.User{
+			DevUserID: {ID: DevUserID, Email: "dev@example.com", DisplayName: "Dev", Role: "admin", Status: store.UserStatusActive, Kind: store.UserKindHuman},
+		}}
+		srv.store = stub
+		t.Cleanup(func() { srv.store = s })
+		w := callFederationTokenAs(t, srv, NewDevUser(DevUserConfig{}), &CredentialContext{Kind: CredentialKindInteractive}, federationTokenBody(federationTokenAudience))
+		require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+		assert.Equal(t, federationTokenRefusalMessage, federationTokenErrorMessage(t, w))
+	})
 }
 
 // TestFederationToken_UserAccessTokenNeedsMintScope drives real requests:
@@ -252,6 +271,16 @@ func TestFederationToken_NoOIDCProvider(t *testing.T) {
 	alice := federationTokenUser(t, s, store.UserKindHuman, store.UserStatusActive)
 	w := callFederationToken(t, srv, sessionIdentityFor(alice), federationTokenBody(federationTokenAudience))
 	assert.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+
+	// Without the OIDC provider every caller gets 404, before any caller,
+	// body or audience check.
+	refused := NewFederatedUserIdentity("https://idp.example.com", "sub-1", "fed@example.com", "Fed", "viewer", nil)
+	w = callFederationToken(t, srv, refused, federationTokenBody(federationTokenAudience))
+	assert.Equal(t, http.StatusNotFound, w.Code, "refused caller: %s", w.Body.String())
+	w = callFederationToken(t, srv, sessionIdentityFor(alice), map[string]string{})
+	assert.Equal(t, http.StatusNotFound, w.Code, "missing audience: %s", w.Body.String())
+	w = callFederationToken(t, srv, sessionIdentityFor(alice), federationTokenBody("https://other-hub.example.com"))
+	assert.Equal(t, http.StatusNotFound, w.Code, "unlisted audience: %s", w.Body.String())
 }
 
 func TestFederationToken_AudienceAllowList(t *testing.T) {
@@ -296,7 +325,8 @@ func verifiedFederationClaims(t *testing.T, srv *Server, w *httptest.ResponseRec
 	assert.Equal(t, jwks.Keys[0].KeyID, parsed.Headers[0].KeyID)
 	var claims FederationUserTokenClaims
 	require.NoError(t, parsed.Claims(jwks.Keys[0].Key, &claims))
-	assert.True(t, resp.ExpiresAt.Equal(claims.Expiry.Time()), "expires_at matches exp")
+	assert.Zero(t, resp.ExpiresAt.Nanosecond(), "expires_at is whole seconds")
+	assert.Truef(t, resp.ExpiresAt.Equal(claims.Expiry.Time()), "expires_at %s equals exp %s", resp.ExpiresAt, claims.Expiry.Time())
 	return claims
 }
 
@@ -309,6 +339,7 @@ func TestFederationToken_ClaimsExact(t *testing.T) {
 	before := time.Now().Truncate(time.Second)
 	w := callFederationToken(t, srv, sessionIdentityFor(u), federationTokenBody(federationTokenAudience))
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 	claims := verifiedFederationClaims(t, srv, w)
 
 	require.NoError(t, claims.Validate(jwt.Expected{Issuer: testOIDCIssuerURL, AnyAudience: jwt.Audience{federationTokenAudience}, Time: time.Now()}))
