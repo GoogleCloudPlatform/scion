@@ -319,7 +319,7 @@ func TestGetThreadDefault_ReturnsEmptyWhenNotSet(t *testing.T) {
 func TestSetThreadDefault_InsertAndRetrieve(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "my-agent", "test@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "my-agent", "user@example.com"); err != nil {
 		t.Fatalf("set thread default: %v", err)
 	}
 
@@ -335,10 +335,10 @@ func TestSetThreadDefault_InsertAndRetrieve(t *testing.T) {
 func TestSetThreadDefault_ReplaceExisting(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-a", "test@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-a", "user@example.com"); err != nil {
 		t.Fatalf("set initial: %v", err)
 	}
-	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-b", "test@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-b", "user@example.com"); err != nil {
 		t.Fatalf("set replacement: %v", err)
 	}
 
@@ -354,10 +354,10 @@ func TestSetThreadDefault_ReplaceExisting(t *testing.T) {
 func TestSetThreadDefault_IsolatedPerThread(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-a", "test@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-a", "user@example.com"); err != nil {
 		t.Fatalf("set thread-1: %v", err)
 	}
-	if err := s.SetThreadDefault("space-1", "thread-2", "google_chat", "agent-b", "test@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-2", "google_chat", "agent-b", "user@example.com"); err != nil {
 		t.Fatalf("set thread-2: %v", err)
 	}
 
@@ -375,7 +375,7 @@ func TestSetThreadDefault_IsolatedPerThread(t *testing.T) {
 func TestDeleteThreadDefault(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "my-agent", "test@example.com"); err != nil {
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "my-agent", "user@example.com"); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	if err := s.DeleteThreadDefault("space-1", "thread-1", "google_chat"); err != nil {
