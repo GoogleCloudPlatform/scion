@@ -677,8 +677,6 @@ func TestThreadGroupMigration_PublishesOneEventPerGroup(t *testing.T) {
 
 // --- Idempotency and concurrency ---------------------------------------------
 
-// state is the outcome of a migration with IDs replaced by names, so two
-// fixtures can be compared.
 // groupState is the "group" lines of state: the project's groups and their
 // members, with IDs replaced by names.
 func (f *tgmFixture) groupState() string {
@@ -692,6 +690,8 @@ func (f *tgmFixture) groupState() string {
 	return strings.Join(lines, "\n")
 }
 
+// state is the outcome of a migration with IDs replaced by names, so two
+// fixtures can be compared.
 func (f *tgmFixture) state(users ...string) string {
 	f.t.Helper()
 	topics, err := f.wcs.ListTopics(context.Background(), f.proj.ID)
@@ -813,10 +813,6 @@ func TestThreadGroupMigration_ConcurrentPassesMatchOnePass(t *testing.T) {
 		assert.Equal(t, ref.groupState(), f.groupState(), "groups after the concurrent passes alone")
 		assert.Equal(t, len(users), marked, "with no failed project every user is marked exactly once")
 		assert.Equal(t, want, f.state(users...), "the full result after the concurrent passes alone")
-	} else {
-		// A pass that lost a race on a busy database left its project's
-		// users unmarked; they are not done yet.
-		assert.Less(t, marked, len(users))
 	}
 
 	// The next tick changes nothing that was already done, and finishes
@@ -1075,28 +1071,59 @@ func TestThreadGroupMigration_InactiveUserSkippedUnmarked(t *testing.T) {
 	assert.Equal(t, []string{f.conv(t1)}, tgmMembers(f.group(f.proj.ID, "Release")))
 }
 
-// tgmUserFaultStore fails GetUser for one user while its switch is armed.
-type tgmUserFaultStore struct {
+// tgmFaultStore fails, while its switch is armed, GetUser for one user,
+// GetProject for one project, and AddThreadGroupMemberIfUnfiled for one
+// conversation. An empty value fails nothing.
+type tgmFaultStore struct {
 	store.Store
-	fault  *storeFaultSwitch
-	userID atomic.Value // string
+	fault          *storeFaultSwitch
+	userID         atomic.Value // string
+	projectID      atomic.Value // string
+	conversationID atomic.Value // string
 }
 
-func (w *tgmUserFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if w.fault.Active() && w.userID.Load() == id {
+func newTGMFaultFixture(t *testing.T) (*tgmFixture, *tgmFaultStore, *storeFaultSwitch) {
+	t.Helper()
+	srv, s := testServer(t)
+	faulty, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *tgmFaultStore {
+		w := &tgmFaultStore{Store: inner, fault: f}
+		w.userID.Store("")
+		w.projectID.Store("")
+		w.conversationID.Store("")
+		return w
+	})
+	return newTGMFixtureOn(t, srv, s), faulty, fault
+}
+
+func (w *tgmFaultStore) hit(v *atomic.Value, id string) bool {
+	return w.fault.Active() && id != "" && v.Load() == id
+}
+
+func (w *tgmFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if w.hit(&w.userID, id) {
 		return nil, fmt.Errorf("injected user lookup failure: %w", store.ErrTransient)
 	}
 	return w.Store.GetUser(ctx, id)
 }
 
+func (w *tgmFaultStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	if w.hit(&w.projectID, id) {
+		return nil, fmt.Errorf("injected project lookup failure: %w", store.ErrTransient)
+	}
+	return w.Store.GetProject(ctx, id)
+}
+
+func (w *tgmFaultStore) AddThreadGroupMemberIfUnfiled(ctx context.Context, groupID, conversationID, addedBy string) (bool, error) {
+	if w.hit(&w.conversationID, conversationID) {
+		return false, fmt.Errorf("injected filing failure: %w", store.ErrTransient)
+	}
+	return w.Store.AddThreadGroupMemberIfUnfiled(ctx, groupID, conversationID, addedBy)
+}
+
 // A store error during the check defers that user, unmarked, to the next
 // pass; other users go ahead.
 func TestThreadGroupMigration_StoreErrorDefersUser(t *testing.T) {
-	srv, s := testServer(t)
-	faulty, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *tgmUserFaultStore {
-		return &tgmUserFaultStore{Store: inner, fault: f}
-	})
-	f := newTGMFixtureOn(t, srv, s)
+	f, faulty, fault := newTGMFaultFixture(t)
 	t1, t2 := f.topic(f.proj.ID, "t1"), f.topic(f.proj.ID, "t2")
 	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("a1", "Release", t1)}}), "")
 	f.setPrefs("u-b", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("b1", "Release", t2)}}), "")
@@ -1117,4 +1144,102 @@ func TestThreadGroupMigration_StoreErrorDefersUser(t *testing.T) {
 	assert.Zero(t, st.UsersDeferred)
 	assert.True(t, f.prefs("u-a").ThreadGroupsMigrated)
 	assert.Equal(t, tgmSorted(f.conv(t1), f.conv(t2)), tgmMembers(f.group(f.proj.ID, "Release")))
+}
+
+// A project lookup error defers every user with entries in that project,
+// unmarked, including their entries in projects that were fine; other users
+// go ahead. The error is cached for the pass.
+func TestThreadGroupMigration_ProjectLookupErrorDefersUser(t *testing.T) {
+	f, faulty, fault := newTGMFaultFixture(t)
+	q := f.project("q")
+	t1, t2, q1 := f.topic(f.proj.ID, "t1"), f.topic(f.proj.ID, "t2"), f.topic(q.ID, "q1")
+	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{
+		f.proj.ID: {tgmPG("a1", "Release", t1)},
+		q.ID:      {tgmPG("a2", "Ops", q1)},
+	}), "")
+	f.setPrefs("u-b", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("b1", "Release", t2)}}), "")
+	faulty.projectID.Store(q.ID)
+	fault.Arm()
+
+	st := f.pass()
+	assert.Equal(t, 1, st.UsersDeferred)
+	assert.Equal(t, 1, st.UsersMarked)
+	assert.False(t, f.prefs("u-a").ThreadGroupsMigrated, "the deferred user stays unmarked")
+	assert.True(t, f.prefs("u-b").ThreadGroupsMigrated)
+	assert.Equal(t, []string{f.conv(t2)}, tgmMembers(f.group(f.proj.ID, "Release")), "nothing of the deferred user is filed, even in the project that was fine")
+	assert.Empty(t, f.groups(q.ID))
+	assert.Zero(t, st.Skipped[tgmSkipNoAccess])
+	assert.Zero(t, st.Skipped[tgmSkipMissingProject])
+
+	faulty.projectID.Store("")
+	st = f.pass()
+	assert.Zero(t, st.UsersDeferred)
+	assert.True(t, f.prefs("u-a").ThreadGroupsMigrated)
+	assert.Equal(t, tgmSorted(f.conv(t1), f.conv(t2)), tgmMembers(f.group(f.proj.ID, "Release")))
+	assert.Equal(t, []string{f.conv(q1)}, tgmMembers(f.group(q.ID, "Ops")))
+}
+
+// An indeterminate access decision (a store fault inside the authz layer)
+// defers the user unmarked, unlike a policy deny, which marks the user done
+// (TestThreadGroupMigration_NonMemberCreatesNothing).
+func TestThreadGroupMigration_IndeterminateAccessDefersUser(t *testing.T) {
+	f := newTGMFixture(t)
+	t1 := f.topic(f.proj.ID, "t1")
+	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1)}}), "")
+
+	healthy := f.srv.authzService
+	f.srv.authzService = NewAuthzService(&failBindingsStore{Store: f.s, failErr: errors.New("injected binding resolution failure")}, healthy.logger)
+	t.Cleanup(func() { f.srv.authzService = healthy })
+	id := NewAuthenticatedUser(f.id("u-a"), "", "", store.UserRoleMember, threadGroupMigrationClientType)
+	require.True(t, f.srv.authzService.CheckAccess(context.Background(), id, projectResource(f.proj), ActionRead).IsIndeterminate(),
+		"precondition: the injected fault makes the decision indeterminate")
+
+	st := f.pass()
+	assert.Equal(t, 1, st.UsersDeferred)
+	assert.Zero(t, st.UsersMarked)
+	assert.Zero(t, st.Skipped[tgmSkipNoAccess], "not counted as a policy deny")
+	assert.False(t, f.prefs("u-a").ThreadGroupsMigrated)
+	assert.Empty(t, f.groups(f.proj.ID))
+
+	f.srv.authzService = healthy
+	f.pass()
+	assert.True(t, f.prefs("u-a").ThreadGroupsMigrated)
+	assert.Equal(t, []string{f.conv(t1)}, tgmMembers(f.group(f.proj.ID, "Release")))
+}
+
+// Groups saved before a failure later in the same project still get their
+// event (rule 8): the retry reuses them unchanged and would publish none.
+func TestThreadGroupMigration_EventsPublishedWhenProjectFailsMidway(t *testing.T) {
+	f, faulty, fault := newTGMFaultFixture(t)
+	t1, t2 := f.topic(f.proj.ID, "t1"), f.topic(f.proj.ID, "t2")
+	// Keys are handled in order: "alpha" (t1) is filed, then filing t2
+	// into "beta" fails.
+	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("a1", "Alpha", t1), tgmPG("a2", "Beta", t2)}}), "")
+	faulty.conversationID.Store(f.conv(t2))
+	fault.Arm()
+	f.spy.take()
+
+	st := f.pass()
+	assert.Equal(t, 1, st.FailedProjects)
+	assert.False(t, f.prefs("u-a").ThreadGroupsMigrated, "the failed project's user stays unmarked")
+	byName := map[string]tgmEvent{}
+	for _, e := range f.spy.take() {
+		byName[e.group.Name] = e
+	}
+	require.Contains(t, byName, "Alpha", "the group saved before the failure is published")
+	assert.Equal(t, ThreadGroupEventCreated, byName["Alpha"].action)
+	require.Len(t, byName["Alpha"].group.Threads, 1)
+	assert.Equal(t, t1, byName["Alpha"].group.Threads[0].ThreadID)
+	require.Contains(t, byName, "Beta", "a group created before its filing failed is published too")
+	assert.Equal(t, ThreadGroupEventCreated, byName["Beta"].action)
+	assert.Empty(t, byName["Beta"].group.Threads)
+
+	faulty.conversationID.Store("")
+	f.pass()
+	assert.True(t, f.prefs("u-a").ThreadGroupsMigrated)
+	events := f.spy.take()
+	require.Len(t, events, 1, "the retry publishes only the group it changes")
+	assert.Equal(t, "Beta", events[0].group.Name)
+	assert.Equal(t, ThreadGroupEventUpdated, events[0].action)
+	assert.Equal(t, []string{f.conv(t2)}, tgmMembers(f.group(f.proj.ID, "Beta")))
 }

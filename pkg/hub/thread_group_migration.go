@@ -424,8 +424,9 @@ type tgmProjectLookup struct {
 
 // tgmAllowedGroups applies rule 0 to one user. It returns the user's
 // personal groups for the projects the user may read, and the user's
-// outcome: a missing or inactive user is skipped, and a store error defers
-// the whole user. Entries for a missing project (rule 1) or a project the
+// outcome: a missing or inactive user is skipped, and a store error or an
+// indeterminate access decision (Decision.IsIndeterminate) defers the whole
+// user. Entries for a missing project (rule 1) or a project the
 // user may not read are dropped and counted; the user can still be marked.
 func (s *Server) tgmAllowedGroups(ctx context.Context, userID string, groups map[string][]personalThreadGroup,
 	lookupProject func(string) tgmProjectLookup, st *threadGroupMigrationStats) (map[string][]personalThreadGroup, tgmUserAccess) {
@@ -475,11 +476,22 @@ func (s *Server) tgmAllowedGroups(ctx context.Context, userID string, groups map
 			missing[projectKey] = threads
 			continue
 		}
-		if !s.authzService.CheckAccess(ctx, identity, projectResource(pl.project), ActionRead).Allowed {
+		d := s.authzService.CheckAccess(ctx, identity, projectResource(pl.project), ActionRead)
+		switch {
+		case d.Allowed:
+			out[projectKey] = list
+		case d.IsIndeterminate():
+			// The check could not be decided (a store or resolution fault
+			// in the authz layer): defer the whole user, unmarked, as for a
+			// store error here, so a fault never marks the user done.
+			slog.WarnContext(ctx, "thread group migration: access check was indeterminate; the user is retried next pass",
+				"stage", "check_access", "error_class", "indeterminate")
+			return nil, tgmUserDeferred
+		default:
+			// A policy deny: skip this project's entries; the user can
+			// still be marked done.
 			denied[projectKey] = len(list)
-			continue
 		}
-		out[projectKey] = list
 	}
 	// Counted only once the user is known not to be deferred, so a retried
 	// user is not counted twice.
@@ -624,6 +636,10 @@ func (s *Server) migrateProjectThreadGroups(ctx context.Context, wcs WebChatStor
 	result := map[string]string{}
 	createdHere := 0
 	changedGroups := map[string]string{} // group ID -> event action
+	// Rule 8: one event per group created or changed, built in one batch.
+	// Deferred, so groups saved before a failure later in this project still
+	// get their event: a retry reuses them unchanged and would publish none.
+	defer func() { s.publishMigratedThreadGroups(ctx, projectID, changedGroups) }()
 	for _, k := range sortedKeys {
 		convs := toFile[k]
 		g, reused := byKey[k]
@@ -663,13 +679,13 @@ func (s *Server) migrateProjectThreadGroups(ctx context.Context, wcs WebChatStor
 		if created {
 			createdHere++
 			st.GroupsCreated++
+			changedGroups[g.ID] = ThreadGroupEventCreated
 		} else {
 			st.GroupsReused++
 		}
 		result[k] = g.ID
 
 		sort.Strings(convs)
-		changed := false
 		for _, convID := range convs {
 			addedBy := firstVoter(keys[k].voters[convID])
 			ok, err := s.store.AddThreadGroupMemberIfUnfiled(ctx, g.ID, convID, addedBy)
@@ -677,22 +693,15 @@ func (s *Server) migrateProjectThreadGroups(ctx context.Context, wcs WebChatStor
 				return nil, tgmErr("file_thread", err)
 			}
 			if ok {
-				changed = true
+				if _, seen := changedGroups[g.ID]; !seen {
+					changedGroups[g.ID] = ThreadGroupEventUpdated
+				}
 				st.ThreadsFiled++
 			} else {
 				st.skip(tgmSkipAlreadyFiled, 1)
 			}
 		}
-
-		if created {
-			changedGroups[g.ID] = ThreadGroupEventCreated
-		} else if changed {
-			changedGroups[g.ID] = ThreadGroupEventUpdated
-		}
 	}
-
-	// Rule 8: one event per group created or changed, built in one batch.
-	s.publishMigratedThreadGroups(ctx, projectID, changedGroups)
 
 	// Rule 5: over the limit is a warning, not a truncation.
 	if n := len(existing) + createdHere; n > store.MaxThreadGroupsPerProject {
