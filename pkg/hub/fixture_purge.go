@@ -161,11 +161,13 @@ type TestIdentityPurgeReport struct {
 	// UnprovenTruncated is true when more unproven agents exist than
 	// Unproven lists.
 	UnprovenTruncated bool `json:"unprovenTruncated,omitempty"`
-	// FilesRetained lists agents this run removed whose delete finished
-	// under an earlier request that kept their broker files or branch
-	// (Status removed; Reason files_retained, branch_retained or
-	// files_and_branch_retained). They count as deleted and do not make
-	// the purge incomplete.
+	// FilesRetained lists agents this run removed whose broker files or
+	// branch may still exist (Status removed). Reason files_retained,
+	// branch_retained or files_and_branch_retained: the delete finished
+	// under an earlier request that kept them. Reason retention_unknown:
+	// the agent was already soft-deleted, or its earlier request is no
+	// longer recorded, so the hub cannot tell what that delete kept. They
+	// count as deleted and do not make the purge incomplete.
 	FilesRetained []TestIdentityPurgeItem `json:"filesRetained,omitempty"`
 	// KeptProjects lists stamped projects kept because of another owner or
 	// other resources.
@@ -349,7 +351,7 @@ func (s *Server) purgeFixtureAgent(ctx context.Context, listed *store.Agent, req
 	if !a.DeletedAt.IsZero() {
 		// Soft-deleted: remove the row, only while it is still
 		// soft-deleted (a restore in between wins).
-		return s.purgeFixtureTombstone(ctx, a.ID, notDone)
+		return s.purgeFixtureTombstoneUnknown(ctx, a, filesRetained, notDone)
 	}
 
 	if deletionActive(a) {
@@ -377,7 +379,7 @@ func (s *Server) purgeFixtureAgent(ctx context.Context, listed *store.Agent, req
 			return false, nil
 		}
 		if gerr == nil && !row.DeletedAt.IsZero() {
-			return s.purgeFixtureTombstone(ctx, a.ID, notDone)
+			return s.purgeFixtureTombstoneUnknown(ctx, a, filesRetained, notDone)
 		}
 		return notDone("deleting", "")
 	}
@@ -395,7 +397,7 @@ func (s *Server) purgeFixtureAgent(ctx context.Context, listed *store.Agent, req
 			// as removed only once its row is gone.
 			deleted, item := s.purgeFixtureLeftover(ctx, listed, notDone)
 			if deleted && plan.skipDispatch {
-				if kept := fixturePurgeFilesRetained(listed, plan.req); kept != nil {
+				if kept := fixturePurgeFilesRetained(listed, plan); kept != nil {
 					*filesRetained = append(*filesRetained, *kept)
 				}
 			}
@@ -415,9 +417,9 @@ func (s *Server) purgeFixtureAgent(ctx context.Context, listed *store.Agent, req
 }
 
 // purgeFixtureLeftover re-reads a stamped agent after its delete engine
-// reported deleted and reports whether its row is gone. A soft tombstone still stamped with the same root is
-// hard-finalized in this run; a row that is live again (restored) is not
-// done.
+// reported deleted and reports whether its row is gone. A soft tombstone
+// still stamped with the same root is hard-finalized in this run; a row
+// that is live again (restored) is not done.
 func (s *Server) purgeFixtureLeftover(ctx context.Context, listed *store.Agent, notDone func(status, reason string) (bool, *TestIdentityPurgeItem)) (bool, *TestIdentityPurgeItem) {
 	row, err := s.store.GetAgent(ctx, listed.ID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -455,13 +457,38 @@ func (s *Server) purgeFixtureTombstone(ctx context.Context, agentID string, notD
 	return true, nil
 }
 
+// purgeFixtureTombstoneUnknown removes a soft tombstone that this run's
+// delete did not make (purgeFixtureTombstone) and, when removed, lists it
+// as retention_unknown: the soft finish cleared the stored request, so
+// what that delete kept is no longer recorded.
+func (s *Server) purgeFixtureTombstoneUnknown(ctx context.Context, a *store.Agent, filesRetained *[]TestIdentityPurgeItem, notDone func(status, reason string) (bool, *TestIdentityPurgeItem)) (bool, *TestIdentityPurgeItem) {
+	deleted, item := s.purgeFixtureTombstone(ctx, a.ID, notDone)
+	if deleted {
+		*filesRetained = append(*filesRetained, fixturePurgeRetainedItem(a, fixturePurgeRetentionUnknown))
+	}
+	return deleted, item
+}
+
+// fixturePurgeRetentionUnknown is the filesRetained reason when the hub
+// cannot tell what an earlier delete of the agent kept.
+const fixturePurgeRetentionUnknown = "retention_unknown"
+
+func fixturePurgeRetainedItem(a *store.Agent, reason string) TestIdentityPurgeItem {
+	return TestIdentityPurgeItem{Type: "agent", ID: a.ID, ProjectID: a.ProjectID, Status: "removed", Reason: reason}
+}
+
 // fixturePurgeFilesRetained returns the report item for a removed agent
 // whose delete finished under an earlier request (a finalizing re-claim
 // skips the dispatch) that did not delete its broker files or remove its
-// branch, and nil when that request removed both.
-func fixturePurgeFilesRetained(a *store.Agent, req store.DeletionRequestInfo) *TestIdentityPurgeItem {
+// branch, and nil when that request removed both. A request derived
+// because none was stored (plan.fallback) says nothing about what the
+// earlier teardown kept: retention_unknown.
+func fixturePurgeFilesRetained(a *store.Agent, plan *agentDeletionPlan) *TestIdentityPurgeItem {
+	req := plan.req
 	var reason string
 	switch {
+	case plan.fallback:
+		reason = fixturePurgeRetentionUnknown
 	case !req.DeleteFiles && !req.RemoveBranch:
 		reason = "files_and_branch_retained"
 	case !req.DeleteFiles:
@@ -471,7 +498,8 @@ func fixturePurgeFilesRetained(a *store.Agent, req store.DeletionRequestInfo) *T
 	default:
 		return nil
 	}
-	return &TestIdentityPurgeItem{Type: "agent", ID: a.ID, ProjectID: a.ProjectID, Status: "removed", Reason: reason}
+	item := fixturePurgeRetainedItem(a, reason)
+	return &item
 }
 
 // purgeFixtureSchedule removes one stamped schedule with its audit row.

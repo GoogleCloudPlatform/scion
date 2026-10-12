@@ -556,6 +556,9 @@ func TestFixturePurge_SoftDeletedAgentRemoved(t *testing.T) {
 	r := fpPurgeReport(t, rec)
 	assert.True(t, r.Complete)
 	assert.Equal(t, 1, r.Deleted.Agents)
+	assert.Equal(t, []TestIdentityPurgeItem{{
+		Type: "agent", ID: agent, ProjectID: e.project, Status: "removed", Reason: fixturePurgeRetentionUnknown,
+	}}, r.FilesRetained, "the soft delete's request is no longer recorded")
 	assert.False(t, fpAgentExists(t, e.store, agent))
 	fpRequireBasis(t, e.store, mutationTypeAgentHardDelete, agent, fxID, e.issuerID)
 }
@@ -1141,4 +1144,62 @@ func TestFixturePurge_FinalizingSoftRequestRestoreWins(t *testing.T) {
 	assert.True(t, fpUserExists(t, e.store, fxID))
 	got := fpAgent(t, e.store, agent)
 	assert.True(t, got.DeletedAt.IsZero(), "the restored agent stays live")
+}
+
+// A finalizing row with no usable stored request: the claim derives a hard
+// request (the purge's hard), so the row goes, but what the earlier
+// teardown kept is unknown and is reported as retention_unknown, not as
+// files_and_branch_retained.
+func TestFixturePurge_FinalizingWithoutStoredRequestRetentionUnknown(t *testing.T) {
+	e := newFPEnv(t, "fpp-finnoreq")
+	fxID := e.fx.Identity.ID
+	agent := fpFinalizingSoftAgent(t, e, "fpp-finnoreq-agent")
+	got := fpAgent(t, e.store, agent)
+	claim := got.DeletionClaim
+	empty := ""
+	n, err := e.store.UpdateAgentDeletion(context.Background(), agent,
+		store.DeletionPredicate{Claim: &claim, States: []string{store.DeletionStateFinalizing}},
+		store.DeletionFields{Request: &empty})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r := fpPurgeReport(t, rec)
+	assert.True(t, r.Complete)
+	assert.Equal(t, 1, r.Deleted.Agents)
+	assert.Equal(t, []TestIdentityPurgeItem{{
+		Type: "agent", ID: agent, ProjectID: e.project, Status: "removed", Reason: fixturePurgeRetentionUnknown,
+	}}, r.FilesRetained)
+	assert.False(t, fpAgentExists(t, e.store, agent))
+	assert.False(t, fpUserExists(t, e.store, fxID))
+}
+
+// fixturePurgeFilesRetained maps the request a finalizing re-claim finished
+// under to a filesRetained reason.
+func TestFixturePurgeFilesRetained_Reasons(t *testing.T) {
+	a := &store.Agent{ID: "agent-1", ProjectID: "project-1"}
+	cases := []struct {
+		name string
+		plan agentDeletionPlan
+		want string // "" for no item
+	}{
+		{"both removed", agentDeletionPlan{req: store.DeletionRequestInfo{DeleteFiles: true, RemoveBranch: true}}, ""},
+		{"files kept", agentDeletionPlan{req: store.DeletionRequestInfo{RemoveBranch: true}}, "files_retained"},
+		{"branch kept", agentDeletionPlan{req: store.DeletionRequestInfo{DeleteFiles: true}}, "branch_retained"},
+		{"both kept", agentDeletionPlan{req: store.DeletionRequestInfo{Soft: true}}, "files_and_branch_retained"},
+		{"derived request", agentDeletionPlan{fallback: true, req: store.DeletionRequestInfo{}}, fixturePurgeRetentionUnknown},
+		{"derived request with flags", agentDeletionPlan{fallback: true, req: store.DeletionRequestInfo{DeleteFiles: true, RemoveBranch: true}}, fixturePurgeRetentionUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fixturePurgeFilesRetained(a, &tc.plan)
+			if tc.want == "" {
+				assert.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, TestIdentityPurgeItem{Type: "agent", ID: "agent-1", ProjectID: "project-1", Status: "removed", Reason: tc.want}, *got)
+		})
+	}
 }

@@ -129,6 +129,9 @@ type agentDeletionPlan struct {
 	// skipDispatch: a re-claim of a lease-expired finalizing row. Teardown
 	// already ran, so the engine goes straight to finalize.
 	skipDispatch bool
+	// fallback: req was derived because the finalizing row had no usable
+	// stored request, so what its teardown kept is unknown.
+	fallback bool
 }
 
 // agentDeleteParams are the caller's request parameters.
@@ -309,6 +312,7 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 			req:          req,
 			prior:        row.ParseDeletionPrior(),
 			skipDispatch: oldState == store.DeletionStateFinalizing,
+			fallback:     fallback,
 		}, nil
 	}
 	return nil, nil
