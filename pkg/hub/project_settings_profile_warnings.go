@@ -102,10 +102,14 @@ func (s *Server) profileDefaultSAWarnings(ctx context.Context, projectID string,
 		if !c.warns() {
 			continue
 		}
+		// c.context() lists the profiles that decided not_mapped and counts
+		// the ones that could not be checked, as the other mapping warnings
+		// do, so a warning over a partly unknown set does not read as
+		// definitive.
 		out = append(out, fmt.Sprintf(
-			"defaultGCPIdentityServiceAccountIDByProfile[%s]: GCP service account %s is not mapped to a Kubernetes ServiceAccount on profile %q (checked: %s); "+
+			"defaultGCPIdentityServiceAccountIDByProfile[%s]: GCP service account %s is not mapped to a Kubernetes ServiceAccount on profile %q%s; "+
 				"agents that get this default on that profile fail to start until a broker operator adds it to kubernetes_service_account_mappings",
-			profile, strings.ToLower(sa.Email), profile, strings.Join(c.notMapped, ", ")))
+			profile, strings.ToLower(sa.Email), profile, c.context()))
 	}
 	return out
 }

@@ -259,18 +259,12 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
-		if !s.validateDefaultGCPIdentity(w, ctx, project, merged, present) {
+		// changedProfileDefaults holds the per-profile entries this request
+		// adds or changes: the entries that were validated, and the only
+		// ones warned about after the save.
+		changedProfileDefaults, ok := s.validateDefaultGCPIdentity(w, ctx, project, merged, present)
+		if !ok {
 			return
-		}
-
-		// The per-profile entries this request adds or changes, taken
-		// before the annotations are overwritten. Only these are warned
-		// about, as only these were validated.
-		var changedProfileDefaults map[string]string
-		if present[projectSettingsFieldGCPIdentitySAIDByProfile] {
-			changedProfileDefaults = changedProfileDefaultSAIDs(
-				profileDefaultSAIDsFromAnnotations(project.Annotations),
-				merged.DefaultGCPIdentityServiceAccountIDByProfile)
 		}
 
 		applyProjectSettingsToAnnotations(project, merged)
@@ -293,7 +287,10 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 
 // validateDefaultGCPIdentity rejects a default GCP identity that agent creation
 // would later refuse to apply. It writes the error response itself and returns
-// false when the caller must stop.
+// ok false when the caller must stop. changedProfileDefaults holds the
+// per-profile default entries the request adds or changes, which are the
+// ones it validated (validateProfileDefaultSAIDs); it is empty when the
+// request does not carry the per-profile map.
 //
 // Without this, the PUT stored the service account ID unvalidated and returned
 // 200, while createAgentInProject silently fell back to metadataMode=block for
@@ -306,7 +303,7 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 // default back into the silent-block path. That residue is deliberately not
 // handled here — it is tracked separately against the consumption site, because
 // no amount of write-time validation can subsume it.
-func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, project *store.Project, merged *hubclient.ProjectSettings, present map[string]bool) bool {
+func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, project *store.Project, merged *hubclient.ProjectSettings, present map[string]bool) (changedProfileDefaults map[string]string, ok bool) {
 	// block is not offered as a NEW selection for a Kubernetes-bound project:
 	// the broker rejects it at dispatch anyway, so saving it here would
 	// reproduce the same silent-defect shape the assign/no-SA check below
@@ -327,21 +324,22 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 		k8sBound, err := s.projectIsKubernetesBound(ctx, project.ID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
-			return false
+			return nil, false
 		}
 		if k8sBound {
 			// Text unchanged; the stable code is ptone/scion#4019's.
 			writeError(w, http.StatusBadRequest, ErrCodeIdentityModeUnsupported,
 				"default GCP identity mode 'block' is not available for a Kubernetes-bound project; choose 'passthrough' or 'assign' instead", nil)
-			return false
+			return nil, false
 		}
 	}
 
 	// The per-profile map is validated only when the request replaces it;
 	// a kept map was validated when it was saved.
 	if present[projectSettingsFieldGCPIdentitySAIDByProfile] {
-		if !s.validateProfileDefaultSAIDs(w, ctx, project, merged.DefaultGCPIdentityServiceAccountIDByProfile) {
-			return false
+		changedProfileDefaults, ok = s.validateProfileDefaultSAIDs(w, ctx, project, merged.DefaultGCPIdentityServiceAccountIDByProfile)
+		if !ok {
+			return nil, false
 		}
 	}
 
@@ -352,20 +350,20 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	// checked against the stored mode. A request that touches neither
 	// leaves the stored pair as it is and does not re-validate it.
 	if !present[projectSettingsFieldGCPIdentityMode] && !present[projectSettingsFieldGCPIdentitySAID] {
-		return true
+		return changedProfileDefaults, true
 	}
 
 	// mode=assign with no service account is the same defect wearing different
 	// clothes: the consumption path falls straight through to block.
 	if merged.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && merged.DefaultGCPIdentityServiceAccountID == "" {
 		BadRequest(w, "default GCP identity mode 'assign' requires a service account; set defaultGCPIdentityServiceAccountID or choose another mode")
-		return false
+		return nil, false
 	}
 
 	// Empty means clear. Clearing must always be permitted — it is the
 	// operator's only escape from a value that has since gone bad.
 	if merged.DefaultGCPIdentityServiceAccountID == "" {
-		return true
+		return changedProfileDefaults, true
 	}
 
 	// The service account itself is checked only when this request sets
@@ -375,7 +373,7 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	// block that escape either.
 	if !present[projectSettingsFieldGCPIdentitySAID] &&
 		merged.DefaultGCPIdentityMode != store.GCPMetadataModeAssign {
-		return true
+		return changedProfileDefaults, true
 	}
 
 	// Deliberately identical to the not-reachable message below. Distinguishing
@@ -385,7 +383,10 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	//
 	// The check itself lives in validateProjectDefaultSAID, shared with the
 	// per-profile map.
-	return s.validateProjectDefaultSAID(w, ctx, project, merged.DefaultGCPIdentityServiceAccountID, "the project default")
+	if !s.validateProjectDefaultSAID(w, ctx, project, merged.DefaultGCPIdentityServiceAccountID, "the project default") {
+		return nil, false
+	}
+	return changedProfileDefaults, true
 }
 
 // validateProjectDefaultSAID checks that saID names a service account that
@@ -453,7 +454,9 @@ var profileDefaultNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,
 // maxProfileDefaultSAEntries entries, and for each added or changed entry a
 // profile name matching profileDefaultNamePattern and a service account
 // that passes validateProjectDefaultSAID. A nil or empty map is always
-// accepted (nil keeps the stored map, empty clears it).
+// accepted (nil keeps the stored map, empty clears it). It returns the
+// added or changed entries, and ok false when it wrote an error response
+// and the caller must stop.
 //
 // Only added or changed entries are checked (changedProfileDefaultSAIDs).
 // The map is replaced as a whole, so a request that sets or removes one
@@ -462,27 +465,40 @@ var profileDefaultNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,
 // stale (its account deleted or un-verified) block an unrelated change. For
 // the same reason removing an entry is always allowed: it is the operator's
 // escape from an entry that has gone bad, as clearing the project default is.
-func (s *Server) validateProfileDefaultSAIDs(w http.ResponseWriter, ctx context.Context, project *store.Project, byProfile map[string]string) bool {
+func (s *Server) validateProfileDefaultSAIDs(w http.ResponseWriter, ctx context.Context, project *store.Project, byProfile map[string]string) (changed map[string]string, ok bool) {
 	stored := profileDefaultSAIDsFromAnnotations(project.Annotations)
-	// A request that does not grow the map passes the bound even when the
-	// stored map exceeds it, so entries can still be removed.
-	if len(byProfile) > maxProfileDefaultSAEntries && len(byProfile) > len(stored) {
+	// A map over the bound is accepted only when it adds no profile to the
+	// stored map (its profiles are a subset of the stored ones), so a
+	// stored map already over the bound, written directly or saved before
+	// the bound was lowered, can still shrink or have entries changed but
+	// never gain a profile.
+	if len(byProfile) > maxProfileDefaultSAEntries && !profileKeysSubset(byProfile, stored) {
 		BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile: at most %d entries are allowed", maxProfileDefaultSAEntries))
-		return false
+		return nil, false
 	}
-	changed := changedProfileDefaultSAIDs(stored, byProfile)
+	changed = changedProfileDefaultSAIDs(stored, byProfile)
 	// Sorted so the first reported error is deterministic.
 	for _, profile := range slices.Sorted(maps.Keys(changed)) {
 		saID := changed[profile]
 		if !profileDefaultNamePattern.MatchString(profile) {
 			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile: profile name %q is invalid; use 1-%d letters, digits, '-' or '_', starting with a letter or digit", profile, maxProfileDefaultNameLen))
-			return false
+			return nil, false
 		}
 		if saID == "" {
 			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile[%s]: a service account ID is required; remove the entry to clear it", profile))
-			return false
+			return nil, false
 		}
 		if !s.validateProjectDefaultSAID(w, ctx, project, saID, fmt.Sprintf("the default for profile %q", profile)) {
+			return nil, false
+		}
+	}
+	return changed, true
+}
+
+// profileKeysSubset reports whether every profile in next is also in stored.
+func profileKeysSubset(next, stored map[string]string) bool {
+	for profile := range next {
+		if _, ok := stored[profile]; !ok {
 			return false
 		}
 	}

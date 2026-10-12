@@ -19,6 +19,7 @@ package hub
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -38,20 +39,19 @@ type profileDefaultsPutResponse struct {
 }
 
 // putProfileDefaults PUTs byProfile as the project's per-profile default
-// map and returns the recorder.
-func putProfileDefaults(t *testing.T, srv *Server, projectID string, byProfile map[string]string) *http.Response {
+// map and returns the response recorder.
+func putProfileDefaults(t *testing.T, srv *Server, projectID string, byProfile map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+projectID+"/settings",
+	return doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+projectID+"/settings",
 		map[string]any{"defaultGCPIdentityServiceAccountIDByProfile": byProfile})
-	return rec.Result()
 }
 
-// putProfileDefaultsOK PUTs byProfile, requires a 200 and decodes the body.
-// The raw body is returned too, for checks on the absence of a field.
+// putProfileDefaultsOK is putProfileDefaults that requires a 200 and decodes
+// the body. The raw body is returned too, for checks on the absence of a
+// field.
 func putProfileDefaultsOK(t *testing.T, srv *Server, projectID string, byProfile map[string]string) (profileDefaultsPutResponse, string) {
 	t.Helper()
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+projectID+"/settings",
-		map[string]any{"defaultGCPIdentityServiceAccountIDByProfile": byProfile})
+	rec := putProfileDefaults(t, srv, projectID, byProfile)
 	require.Equal(t, http.StatusOK, rec.Code, "warnings must never fail the save: %s", rec.Body.String())
 	var resp profileDefaultsPutResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -103,6 +103,21 @@ func TestProjectSettings_ProfileDefaultSA_WarnsOnUnmappedAccount(t *testing.T) {
 	assert.Contains(t, resp.Warnings[0], "checked: b/k8s")
 	assert.Equal(t, map[string]string{"k8s": sa.ID},
 		getProjectSettings(t, srv, project.ID).DefaultGCPIdentityServiceAccountIDByProfile)
+}
+
+// A not-mapped warning over a set where another provider's profile of the
+// same name could not be checked says so, so it does not read as definitive.
+func TestProjectSettings_ProfileDefaultSA_UnmappedWarningCountsUnchecked(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+	sa := newSettingsTestSA(t, s, project.ID, "sa-partly-unknown")
+	addProviderBroker(t, s, project.ID, "b1", authoritativeProfile("k8s", mappedGSA))
+	addProviderBroker(t, s, project.ID, "b2", k8sProfile("k8s", false))
+
+	resp, _ := putProfileDefaultsOK(t, srv, project.ID, map[string]string{"k8s": sa.ID})
+	require.Len(t, resp.Warnings, 1)
+	assert.Contains(t, resp.Warnings[0], "profiles checked: b1/k8s")
+	assert.Contains(t, resp.Warnings[0], "1 other Kubernetes profile(s) could not be checked")
 }
 
 // One provider maps the account on the profile: no warning, even though
@@ -190,8 +205,8 @@ func TestProjectSettings_ProfileDefaultSA_StaleOtherEntryDoesNotBlock(t *testing
 	assert.Equal(t, map[string]string{"stale": "deleted-sa-id"}, resp.DefaultGCPIdentityServiceAccountIDByProfile)
 
 	// Changing the stale entry itself to another bad value is still refused.
-	res := putProfileDefaults(t, srv, project.ID, map[string]string{"stale": "another-missing-sa"})
-	assert.Equal(t, http.StatusBadRequest, res.StatusCode)
+	rec := putProfileDefaults(t, srv, project.ID, map[string]string{"stale": "another-missing-sa"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Equal(t, map[string]string{"stale": "deleted-sa-id"},
 		getProjectSettings(t, srv, project.ID).DefaultGCPIdentityServiceAccountIDByProfile,
 		"a rejected change must not be persisted")
@@ -230,9 +245,36 @@ func TestProjectSettings_ProfileDefaultSA_OverBoundMapCanShrink(t *testing.T) {
 	resp, _ := putProfileDefaultsOK(t, srv, project.ID, smaller)
 	assert.Len(t, resp.DefaultGCPIdentityServiceAccountIDByProfile, maxProfileDefaultSAEntries+1)
 
+	// Changing an entry of the over-bound map, without adding a profile,
+	// is accepted.
+	other := newSettingsTestSA(t, s, project.ID, "sa-bound-other")
+	changed := manyProfileEntries(maxProfileDefaultSAEntries+1, sa.ID)
+	changed["p0"] = other.ID
+	resp, _ = putProfileDefaultsOK(t, srv, project.ID, changed)
+	assert.Equal(t, other.ID, resp.DefaultGCPIdentityServiceAccountIDByProfile["p0"])
+
 	// Growing past the bound is still refused.
-	res := putProfileDefaults(t, srv, project.ID, manyProfileEntries(maxProfileDefaultSAEntries+3, sa.ID))
-	assert.Equal(t, http.StatusBadRequest, res.StatusCode)
+	rec := putProfileDefaults(t, srv, project.ID, manyProfileEntries(maxProfileDefaultSAEntries+3, sa.ID))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// So is a map of the same size that swaps a stored profile for a new
+	// one: over the bound, no profile may be added.
+	swapped := manyProfileEntries(maxProfileDefaultSAEntries+1, sa.ID)
+	delete(swapped, "p0")
+	swapped["new-profile"] = sa.ID
+	rec = putProfileDefaults(t, srv, project.ID, swapped)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "at most 64 entries")
+	assert.Equal(t, other.ID, getProjectSettings(t, srv, project.ID).DefaultGCPIdentityServiceAccountIDByProfile["p0"],
+		"a refused map must not be persisted")
+}
+
+func TestProfileKeysSubset(t *testing.T) {
+	stored := map[string]string{"a": "x", "b": "y"}
+	assert.True(t, profileKeysSubset(map[string]string{"a": "changed"}, stored))
+	assert.True(t, profileKeysSubset(map[string]string{}, stored))
+	assert.False(t, profileKeysSubset(map[string]string{"a": "x", "c": "z"}, stored))
+	assert.False(t, profileKeysSubset(map[string]string{"a": "x"}, nil))
 }
 
 func TestChangedProfileDefaultSAIDs(t *testing.T) {
