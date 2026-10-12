@@ -409,9 +409,8 @@ var directUserOnlyRoles = map[string]struct{}{
 // that precision, so the stored binding never outlives the stored
 // identity on either backend. It is nil for any other binding.
 //
-// The issuance binding's role must be the kind's role (test_hub_admin:
-// hub-admin, test_super_admin: super-admin), and a super-admin binding with
-// the issuance CreatedBy is admitted for no other principal.
+// A super-admin binding with the issuance CreatedBy is admitted for a
+// test_super_admin row only (never a human or a test_hub_admin).
 func checkTestAdminSystemBinding(u *ent.User, rb *store.RoleBinding, roleName string) (*time.Time, error) {
 	if roleName == store.SystemRoleSuperAdmin && rb.CreatedBy == store.TestIdentityIssuanceCreatedBy &&
 		string(u.Kind) != store.UserKindTestSuperAdmin {
@@ -419,9 +418,6 @@ func checkTestAdminSystemBinding(u *ent.User, rb *store.RoleBinding, roleName st
 	}
 	if rb.ScopeType != store.RoleScopeSystem || !store.IsTestAdminKind(string(u.Kind)) {
 		return nil, nil
-	}
-	if rb.CreatedBy == store.TestIdentityIssuanceCreatedBy && roleName != testAdminKindSystemRole(string(u.Kind)) {
-		return nil, fmt.Errorf("%w: a %s test identity's issuance binding must hold the %s role", store.ErrInvalidInput, u.Kind, testAdminKindSystemRole(string(u.Kind)))
 	}
 	if rb.CreatedBy != store.TestIdentityIssuanceCreatedBy {
 		return nil, fmt.Errorf("%w: an admin-kind test identity holds only its issuance binding at system scope", store.ErrInvalidInput)
@@ -434,15 +430,6 @@ func checkTestAdminSystemBinding(u *ent.User, rb *store.RoleBinding, roleName st
 		return nil, fmt.Errorf("%w: an admin-kind test identity's system binding must expire no later than the identity", store.ErrInvalidInput)
 	}
 	return &exp, nil
-}
-
-// testAdminKindSystemRole is the system role an admin-kind test identity's
-// issuance binding holds.
-func testAdminKindSystemRole(kind string) string {
-	if kind == store.UserKindTestSuperAdmin {
-		return store.SystemRoleSuperAdmin
-	}
-	return store.SystemRoleHubAdmin
 }
 
 // testAdminExpiry is t at the precision timestamps are stored at (the

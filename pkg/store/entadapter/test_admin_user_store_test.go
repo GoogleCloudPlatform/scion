@@ -179,8 +179,7 @@ func TestCreateTestAdminUser_Validation(t *testing.T) {
 // guard until the admin tier's policy phase; the row rolls back with it.
 // Admin tier A2: a test_super_admin row gets its expiring super-admin
 // issuance binding. The issuance CreatedBy admits a super-admin binding for
-// no other principal (a human or a test_hub_admin), and an issuance binding
-// must hold its kind's role.
+// no other principal (a human or a test_hub_admin).
 func TestCreateTestAdminUser_SuperAdminBinding(t *testing.T) {
 	cs := newFixtureTestStore(t)
 	ctx := context.Background()
@@ -194,7 +193,7 @@ func TestCreateTestAdminUser_SuperAdminBinding(t *testing.T) {
 		}
 		return rd.ID
 	}
-	superRole, hubAdminRole := roleID(store.SystemRoleSuperAdmin), roleID(store.SystemRoleHubAdmin)
+	superRole := roleID(store.SystemRoleSuperAdmin)
 
 	u := newTestAdminUser(store.UserKindTestSuperAdmin, uuid.NewString(), time.Now().Add(30*time.Minute))
 	rb, err := cs.CreateTestAdminUser(ctx, u, superRole)
@@ -203,12 +202,8 @@ func TestCreateTestAdminUser_SuperAdminBinding(t *testing.T) {
 	require.NotNil(t, rb.ExpiresAt)
 	assert.False(t, rb.ExpiresAt.After(*u.ExpiresAt), "the binding never outlives the identity")
 
-	// The wrong role for the kind is refused, and the row rolls back.
-	wrong := newTestAdminUser(store.UserKindTestSuperAdmin, uuid.NewString(), time.Now().Add(30*time.Minute))
-	_, err = cs.CreateTestAdminUser(ctx, wrong, hubAdminRole)
-	require.ErrorIs(t, err, store.ErrInvalidInput)
-	_, err = cs.GetUser(ctx, wrong.ID)
-	require.ErrorIs(t, err, store.ErrNotFound, "the row rolls back with the refused binding")
+	// A test_hub_admin row never gets the super-admin role, and the row
+	// rolls back with the refused binding.
 	hubKind := newTestAdminUser(store.UserKindTestHubAdmin, uuid.NewString(), time.Now().Add(30*time.Minute))
 	_, err = cs.CreateTestAdminUser(ctx, hubKind, superRole)
 	require.ErrorIs(t, err, store.ErrSuperAdminBindingRestricted)
