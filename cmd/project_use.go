@@ -525,8 +525,9 @@ func runUseSelect(ctx context.Context, out, stderr io.Writer, ref string) error 
 			Project: useProjectJSON{ID: project.ID, Slug: slug, Name: project.Name, Source: useSourceContext},
 		})
 	}
-	// Only 'scion use --hub <URL>' announces the new entry; a hub that
-	// came from elsewhere was saved by 'scion use' before hub nicknames.
+	// Announce a new entry only for a URL given with --hub. An endpoint
+	// from the environment or settings gets its entry silently, as before
+	// there were hub nicknames.
 	if registered && hubFlagEndpoint() != "" {
 		printRegisteredHub(out, hubName, endpoint)
 	}
