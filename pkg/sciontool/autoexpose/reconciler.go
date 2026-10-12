@@ -232,7 +232,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	fail := func(op string, port int, err error, rejected map[int]int) bool {
 		if !isLoopFailure(err) {
 			if _, seen := rejected[port]; !seen {
-				logError("auto-expose: hub refused to %s port %d: %v; retrying that port in %s", op, port, err, rejectedPortRetry)
+				logError("auto-expose: hub refused to %s port %d: %v; retrying that port in about %s", op, port, err, rejectedPortRetry)
 			} else {
 				log.Debug("auto-expose: hub refused to %s port %d again: %v", op, port, err)
 			}
