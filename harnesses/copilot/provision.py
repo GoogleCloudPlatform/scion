@@ -501,11 +501,11 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
             except ValueError:
                 # Not cleanly readable: not JSON, not UTF-8, an integer too
                 # long to convert, NaN or Infinity, or a number beyond float
-                # range. Rewriting it could
-                # only write back a lossy copy, so a file that may hold
-                # sign-in (the host's rule) is left untouched and any other
-                # file is replaced. The sign-in parse may itself hit the
-                # nesting limit past the defect: keep that file too.
+                # range. Rewriting it could only write back a lossy copy, so
+                # a file that may hold sign-in (the host's rule) is left
+                # untouched and any other file is replaced. The sign-in parse
+                # may itself hit the nesting limit past the defect: keep that
+                # file too.
                 try:
                     may_hold_sign_in = _config_holds_sign_in_or_too_deep(raw)
                 except RecursionError:
