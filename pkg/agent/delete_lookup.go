@@ -15,41 +15,45 @@
 package agent
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// LocalAgentDirExists reports whether agentName has an agent directory that a
-// local delete (DeleteAgentFiles) would remove, in any of the layouts an
-// agent's state directory can use:
+// LocalAgentDirExists reports whether agentName has an agent directory that
+// a local delete (DeleteAgentFiles) removes, in either layout an agent's
+// state directory can use in the project projectPath resolves to:
 //
-//   - the project's own agents root, <project>/agents/<name> (this is also
-//     where a hub-native project keeps its agents);
+//   - the project's own agents root, <project>/agents/<name> (for the global
+//     project this is the global agents root, and a hub-native project keeps
+//     its agents here too);
 //   - the project's external agents root
 //     (config.GetGitProjectExternalAgentsDir), where a shared-workspace
-//     agent of a project with a project-id marker keeps its state;
-//   - the global agents root.
+//     agent of a project with a project-id marker keeps its state.
+//
+// The global agents root is not checked for any other project:
+// DeleteAgentFiles never removes from it then, so a directory found only
+// there would be reported deleted while left in place.
 //
 // A directory counts whether or not it holds a scion-agent.json, so a
 // directory kept by stale-directory cleanup is found too. It only reads the
-// filesystem. An agentName that is not a single path element is an error.
+// filesystem. agentName must pass the same single-path-element check
+// DeleteAgentFiles applies, or an error is returned.
 func LocalAgentDirExists(agentName, projectPath string) (bool, error) {
-	if agentName == "" || agentName == "." || agentName == ".." || filepath.Base(agentName) != agentName || filepath.Clean(agentName) != agentName {
-		return false, fmt.Errorf("agent %q is not a single path element", agentName)
+	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
+		return false, err
 	}
 
-	var roots []string
-	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
-		roots = append(roots, filepath.Join(projectDir, "agents"))
-		if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
-			roots = append(roots, extDir)
-		}
+	// A project path that resolves to no project has no agent directory
+	// DeleteAgentFiles would remove (it reports ErrAgentProjectUnresolved).
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return false, nil
 	}
-	if globalDir, err := config.GetGlobalAgentsDir(); err == nil {
-		roots = append(roots, globalDir)
+	roots := []string{filepath.Join(projectDir, "agents")}
+	if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
+		roots = append(roots, extDir)
 	}
 
 	for _, root := range roots {

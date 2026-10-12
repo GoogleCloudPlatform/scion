@@ -91,6 +91,9 @@ func TestDeleteFindsKeptAgentDir(t *testing.T) {
 	}
 	for _, tc := range layouts {
 		t.Run(tc.name, func(t *testing.T) {
+			// Run the host-side delete path even when the test itself
+			// runs inside an agent container (SCION_HOST_UID set skips
+			// worktree pruning there).
 			t.Setenv("SCION_HOST_UID", "")
 			home := t.TempDir()
 			t.Setenv("HOME", home)
@@ -137,6 +140,54 @@ func TestDeleteFindsKeptAgentDir(t *testing.T) {
 				t.Errorf("after delete: LocalAgentDirExists = %v, %v; want false, nil", found, err)
 			}
 		})
+	}
+}
+
+// TestLocalAgentDirExistsIgnoresGlobalRootForOtherProject checks that a
+// directory found only in the global agents root does not count for an
+// ordinary project: DeleteAgentFiles leaves it in place for that project, so
+// counting it would let scion delete report an agent deleted that is still on
+// disk. For the global project itself the global agents root is the
+// project's own agents root (the "global" case of TestDeleteFindsKeptAgentDir).
+func TestLocalAgentDirExistsIgnoresGlobalRootForOtherProject(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	oldWd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(home); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	const agentName = "global-only"
+	scionDir := filepath.Join(home, "project", ".scion")
+	mustMkdirAll(t, filepath.Join(scionDir, "agents"))
+	globalAgentsDir, err := config.GetGlobalAgentsDir()
+	if err != nil {
+		t.Fatalf("GetGlobalAgentsDir: %v", err)
+	}
+	globalAgentDir := filepath.Join(globalAgentsDir, agentName)
+	mustMkdirAll(t, filepath.Join(globalAgentDir, "home"))
+
+	if found, err := LocalAgentDirExists(agentName, scionDir); err != nil || found {
+		t.Fatalf("LocalAgentDirExists = %v, %v; want false, nil", found, err)
+	}
+
+	// Why it must not count: deleting in the ordinary project leaves the
+	// global agent directory untouched.
+	if _, err := DeleteAgentFiles(agentName, scionDir, false); err != nil {
+		t.Fatalf("DeleteAgentFiles: %v", err)
+	}
+	if _, err := os.Stat(globalAgentDir); err != nil {
+		t.Fatalf("global agent dir should be left in place by a delete in another project: %v", err)
+	}
+
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatalf("GetGlobalDir: %v", err)
+	}
+	if found, err := LocalAgentDirExists(agentName, globalDir); err != nil || !found {
+		t.Errorf("for the global project: LocalAgentDirExists = %v, %v; want true, nil", found, err)
 	}
 }
 
