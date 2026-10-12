@@ -424,12 +424,14 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
     settings: dict[str, Any] = {}
     if os.path.isfile(settings_path):
         try:
-            loaded = scion_harness.load_json(settings_path)
+            with open(settings_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f, parse_constant=_reject_json_constant)
             if isinstance(loaded, dict):
                 settings = loaded
         except (OSError, ValueError, RecursionError):
             # Unreadable, not UTF-8, not JSON, an integer too long to
-            # convert, or nested too deeply: rewritten with the defaults.
+            # convert, NaN or Infinity, or nested too deeply: rewritten with
+            # the defaults, so non-standard JSON is never written back.
             pass
 
     defaults = {"autoUpdate": False, "banner": "never"}

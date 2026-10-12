@@ -459,6 +459,14 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         self._provision_must_succeed()
         self._assert_settings_defaults()
 
+    def test_nan_and_infinity_settings_is_replaced_with_defaults(self) -> None:
+        # Kept, they would be written back as non-standard JSON.
+        for const in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(const):
+                self._write_settings_raw(('{"theme": ' + const + '}').encode())
+                self._provision_must_succeed()
+                self._assert_settings_defaults()
+
     def test_unparseable_settings_is_replaced_with_defaults(self) -> None:
         self._write_settings_raw(b'{"theme": ')
         self._provision_must_succeed()
