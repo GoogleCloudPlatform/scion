@@ -426,3 +426,49 @@ func TestWriteInitRunFile_RemovalFailureLoggedAtWarn(t *testing.T) {
 	// A missing init-run file is not reported.
 	assert.NotContains(t, string(data), "removing stale "+initRunFilePath)
 }
+
+// The hook writes the event's local activity before the ready marker, so a
+// reader that sees the marker (init's readiness watcher) finds the activity
+// already final and its single compare-and-swap from initializing cannot
+// overwrite it (ptone/scion#4482).
+func TestProcessHookData_LocalActivityWrittenBeforeReadyMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	scrubScionEnv(t)
+	setTestLogPath(t, filepath.Join(tmpDir, "agent.log"))
+	origDialect := hookDialect
+	hookDialect = "claude"
+	t.Cleanup(func() { hookDialect = origDialect })
+
+	initRun, ready := useReadinessPaths(t, t.TempDir())
+	nonce := "0123456789abcdef"
+	require.NoError(t, os.WriteFile(initRun, []byte(state.FormatInitRun(nonce, state.ReadyModeHook)), 0o644))
+
+	// Init's post-start leaves the local activity initializing.
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	require.NoError(t, os.WriteFile(statusPath, []byte(`{"phase":"running","activity":"initializing"}`), 0o644))
+
+	var atMarker []string
+	orig := markHarnessReadyFn
+	markHarnessReadyFn = func(ev *hooks.Event) {
+		var info struct {
+			Activity string `json:"activity"`
+		}
+		if data, err := os.ReadFile(statusPath); err == nil {
+			_ = json.Unmarshal(data, &info)
+		}
+		atMarker = append(atMarker, info.Activity)
+		orig(ev)
+	}
+	t.Cleanup(func() { markHarnessReadyFn = orig })
+
+	payload, _ := json.Marshal(map[string]interface{}{"hook_event_name": "SessionStart", "source": "startup"})
+	require.NoError(t, processHookData(payload))
+
+	require.Equal(t, []string{"working"}, atMarker, "local activity must be written before the marker")
+	data, err := os.ReadFile(ready)
+	require.NoError(t, err, "the ready marker is still written")
+	got, ok := state.ParseReadyMarker(string(data))
+	require.True(t, ok)
+	assert.Equal(t, nonce, got)
+}

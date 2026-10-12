@@ -74,3 +74,7 @@ func (m *mockUserStore) ReplaceTestIdentityLoginCode(context.Context, *store.Tes
 func (m *mockUserStore) ConsumeTestIdentityLoginCode(context.Context, string, time.Time) (*store.TestIdentityLoginCode, error) {
 	return nil, store.ErrNotFound
 }
+func (m *mockUserStore) CountLiveTestAdminUsers(context.Context, string, string, time.Time) (int, error) {
+	return 0, nil
+}
+func (m *mockUserStore) ListTestAdminUsers(context.Context) ([]store.User, error) { return nil, nil }

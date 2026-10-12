@@ -411,6 +411,7 @@ export interface AgentMessageabilityDetail extends AgentMessageability {
  * Agent runtime activity (only meaningful when phase=running)
  */
 export type AgentActivity =
+  | 'initializing'
   | 'working'
   | 'thinking'
   | 'executing'

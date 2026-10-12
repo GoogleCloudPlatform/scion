@@ -124,6 +124,10 @@ const (
 	FieldPreviousRunIds = "previous_run_ids"
 	// FieldRunIDUpdatedAt holds the string denoting the run_id_updated_at field in the database.
 	FieldRunIDUpdatedAt = "run_id_updated_at"
+	// FieldSSHHostKey holds the string denoting the ssh_host_key field in the database.
+	FieldSSHHostKey = "ssh_host_key"
+	// FieldSSHHostKeyRunID holds the string denoting the ssh_host_key_run_id field in the database.
+	FieldSSHHostKeyRunID = "ssh_host_key_run_id"
 	// FieldLaunchState holds the string denoting the launch_state field in the database.
 	FieldLaunchState = "launch_state"
 	// FieldLaunchEndReason holds the string denoting the launch_end_reason field in the database.
@@ -294,6 +298,8 @@ var Columns = []string{
 	FieldRunID,
 	FieldPreviousRunIds,
 	FieldRunIDUpdatedAt,
+	FieldSSHHostKey,
+	FieldSSHHostKeyRunID,
 	FieldLaunchState,
 	FieldLaunchEndReason,
 	FieldLaunchKind,
@@ -728,6 +734,16 @@ func ByRunID(opts ...sql.OrderTermOption) OrderOption {
 // ByRunIDUpdatedAt orders the results by the run_id_updated_at field.
 func ByRunIDUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRunIDUpdatedAt, opts...).ToFunc()
+}
+
+// BySSHHostKey orders the results by the ssh_host_key field.
+func BySSHHostKey(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSSHHostKey, opts...).ToFunc()
+}
+
+// BySSHHostKeyRunID orders the results by the ssh_host_key_run_id field.
+func BySSHHostKeyRunID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSSHHostKeyRunID, opts...).ToFunc()
 }
 
 // ByLaunchState orders the results by the launch_state field.
