@@ -480,6 +480,9 @@ exit 0`, release))
 // S0e: a stale reconcile never removes a newer entry, and never hangs.
 // Mutant S0e-cas: the reconcile removal is not a compare-and-set.
 // Mutant S0e-mu: the removal is made inside the store-mutex section.
+// A removal that mismatches returns before casUpdate takes the store
+// mutex, so a second stopped entry, left unchanged, must be removed: that
+// removal takes the store mutex and would deadlock under S0e-mu.
 // -----------------------------------------------------------------------
 
 func TestSandboxReconcile_StaleSnapshotKeepsNewerEntry(t *testing.T) {
@@ -487,8 +490,11 @@ func TestSandboxReconcile_StaleSnapshotKeepsNewerEntry(t *testing.T) {
 	stoppedA := runEntry("dev", "run-a")
 	stoppedA.Stopped = true
 	newSandboxStateStore(path).add(stoppedA)
+	stoppedOther := runEntry("other", "run-o")
+	stoppedOther.Stopped = true
+	newSandboxStateStore(path).add(stoppedOther)
 
-	z := newSandboxStateStore(path) // snapshot holds the stopped A
+	z := newSandboxStateStore(path) // snapshot holds the stopped A and other
 	prev := sandboxReconcileBeforeRemoveHook
 	t.Cleanup(func() { sandboxReconcileBeforeRemoveHook = prev })
 	sandboxReconcileBeforeRemoveHook = func(name string) {
@@ -512,9 +518,12 @@ func TestSandboxReconcile_StaleSnapshotKeepsNewerEntry(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("reconcile did not return within 5s (deadlock)")
 	}
-	e := readStateForTest(t, path)["dev"]
-	if e == nil || e.Labels[api.LabelRunID] != "run-b" || e.Stopped {
+	file := readStateForTest(t, path)
+	if e := file["dev"]; e == nil || e.Labels[api.LabelRunID] != "run-b" || e.Stopped {
 		t.Errorf("file entry = %+v, want run B's live entry", e)
+	}
+	if e := file["other"]; e != nil {
+		t.Errorf("unchanged stopped entry other = %+v, want removed", e)
 	}
 }
 
