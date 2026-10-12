@@ -15,19 +15,20 @@
  */
 
 /**
- * Phase 2 of ptone/scion#2328: the project default GCP identity picker
- * disables (does not remove) "Block" when every runtime broker linked to
- * this project is reliably known to be Kubernetes-only — the same brokers
- * list already loaded for the Brokers tab. A project with no linked broker,
- * or a mix of runtime types across its linked brokers, is not reliably known
- * and leaves Block enabled: the write is later checked server-side.
+ * The project default GCP identity picker and Kubernetes-bound projects.
+ * ptone/scion#4077 reverses Phase 2 of ptone/scion#2328: the hub accepts a
+ * Block project default on a Kubernetes-bound project, so Block is offered
+ * there, and the help text says what Block means on Kubernetes.
  *
- * Disable (not remove) so a project that already has a stored "block" value
- * keeps displaying it without the select silently losing its selection.
+ * A project is Kubernetes-bound when every runtime broker linked to it (the
+ * same brokers list already loaded for the Brokers tab) is reliably known to
+ * be Kubernetes-only. A project with no linked broker, or a mix of runtime
+ * types across its linked brokers, is not, and gets no Kubernetes hint.
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import type { ScionPageProjectSettings } from './project-settings.js';
+import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
 
 const PROJECT_RESPONSE = {
   id: 'proj-1',
@@ -69,9 +70,22 @@ function createFetchHandler(opts?: {
   settings?: Record<string, unknown>;
   resolvedSettings?: Record<string, unknown>;
   serviceAccounts?: Array<Record<string, unknown>>;
+  /** Receives the body of every PUT to the project settings. */
+  settingsPuts?: Array<Record<string, unknown>>;
 }) {
-  return (url: string | URL | Request): Promise<Response> => {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+
+    if (init?.method === 'PUT' && path.endsWith('/settings') && typeof init.body === 'string') {
+      const body = JSON.parse(init.body) as Record<string, unknown>;
+      opts?.settingsPuts?.push(body);
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    }
 
     if (path.includes('/runtime-brokers')) {
       return Promise.resolve(
@@ -189,6 +203,13 @@ function inheritOption(el: HTMLElement): Element | null {
   return field?.querySelector('sl-option[value="inherit"]') ?? null;
 }
 
+/** The page's private save state, exposed via a loose cast (TS privacy is compile-time only). */
+interface ProjectSettingsInternals {
+  handleSaveConfig: () => Promise<void>;
+  settingsError: string | null;
+  updateComplete: Promise<unknown>;
+}
+
 describe('project-settings: GCP identity Block option and Kubernetes-bound projects', () => {
   let element: HTMLElement | null = null;
 
@@ -203,7 +224,7 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     vi.restoreAllMocks();
   });
 
-  it('disables Block when every linked broker is kubernetes-only', async () => {
+  it('offers Block with the Kubernetes Block hint when every linked broker is kubernetes-only', async () => {
     element = await createComponent(
       createFetchHandler({
         brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
@@ -212,9 +233,32 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
 
     const option = blockOption(element);
     expect(option).not.toBeNull();
-    expect(option!.hasAttribute('disabled')).toBe(true);
+    expect(option!.hasAttribute('disabled')).toBe(false);
     const helpText = gcpIdentitySelect(element)!.querySelector('[slot="help-text"]');
-    expect(helpText?.textContent).toContain('Kubernetes');
+    expect(helpText?.textContent).toBe(KUBERNETES_BLOCK_HINT);
+  });
+
+  it('saves a Block project default for a Kubernetes-bound project', async () => {
+    const settingsPuts: Array<Record<string, unknown>> = [];
+    element = await createComponent(
+      createFetchHandler({
+        brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
+        settingsPuts,
+      })
+    );
+    const page = element as unknown as ProjectSettingsInternals;
+
+    const select = gcpIdentitySelect(element) as HTMLElement & { value: string };
+    select.value = 'block';
+    select.dispatchEvent(new Event('sl-change', { bubbles: true, composed: true }));
+    await page.updateComplete;
+
+    await page.handleSaveConfig();
+
+    expect(page.settingsError).toBeNull();
+    expect(settingsPuts).toHaveLength(1);
+    expect(settingsPuts[0].defaultGCPIdentityMode).toBe('block');
+    expect(settingsPuts[0].defaultGCPIdentityServiceAccountID).toBe('');
   });
 
   it('leaves Block enabled when linked brokers mix runtime types', async () => {
@@ -284,7 +328,7 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
   });
 
   it.each(['k8s', 'remote'])(
-    'disables Block for a kubernetes-only broker using the accepted spelling "%s"',
+    'offers Block with the Kubernetes Block hint for a broker using the accepted spelling "%s"',
     async (type) => {
       element = await createComponent(
         createFetchHandler({
@@ -292,8 +336,9 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
         })
       );
 
-      const option = blockOption(element);
-      expect(option!.hasAttribute('disabled')).toBe(true);
+      expect(blockOption(element)!.hasAttribute('disabled')).toBe(false);
+      const helpText = gcpIdentitySelect(element)!.querySelector('[slot="help-text"]');
+      expect(helpText?.textContent).toBe(KUBERNETES_BLOCK_HINT);
     }
   );
 
@@ -302,22 +347,21 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
   // Shoelace's shadow root, which a host attribute cannot reach across the
   // shadow boundary. The explanation must be slotted into the select's
   // help-text slot instead, which Shoelace wires to that combobox internally.
-  it('gives the disabled Block option a tooltip and slots the explanation into the select help-text', async () => {
+  it('slots the Kubernetes Block hint into the select help-text, with no tooltip on Block', async () => {
     element = await createComponent(
       createFetchHandler({
         brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
       })
     );
 
-    const option = blockOption(element);
-    expect(option!.getAttribute('title')).toBeTruthy();
-    expect(option!.getAttribute('title')).toContain('Kubernetes');
+    expect(blockOption(element)!.hasAttribute('title')).toBe(false);
 
     const select = gcpIdentitySelect(element);
     expect(select!.hasAttribute('aria-describedby')).toBe(false);
     const helpText = select!.querySelector('[slot="help-text"]');
     expect(helpText).not.toBeNull();
-    expect(helpText!.textContent).toContain('Kubernetes');
+    expect(helpText!.textContent).toBe(KUBERNETES_BLOCK_HINT);
+    expect(helpText!.textContent!.toLowerCase()).not.toContain('metadata');
   });
 
   it('does not add a tooltip or a help-text slot when the project is not reliably Kubernetes-bound', async () => {
@@ -354,9 +398,7 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     expect(inheritOption(element)!.textContent).toContain('block');
   });
 
-  it('still shows a stored "block" value as selected and disabled for a Kubernetes-bound project', async () => {
-    // Stored block defaults are not migrated or rewritten: disable-not-remove
-    // exists precisely so this keeps displaying correctly.
+  it('shows a stored "block" value as selected and enabled for a Kubernetes-bound project', async () => {
     element = await createComponent(
       createFetchHandler({
         brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
@@ -367,10 +409,12 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     const select = gcpIdentitySelect(element);
     expect(select!.getAttribute('value')).toBe('block');
     const option = blockOption(element);
-    expect(option!.hasAttribute('disabled')).toBe(true);
+    expect(option!.hasAttribute('disabled')).toBe(false);
   });
 
-  it('flags an inherited hub default of block for a Kubernetes-bound project', async () => {
+  // A hub default of Block is accepted on Kubernetes: no rejection warning,
+  // only the Kubernetes Block hint in the select's help text.
+  it('does not flag an inherited hub default of block for a Kubernetes-bound project', async () => {
     element = await createComponent(
       createFetchHandler({
         brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
@@ -385,8 +429,10 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
       })
     );
 
-    expect(fieldHelpText(element)).toContain('hub default is "Block"');
-    expect(fieldHelpText(element)).toContain('Kubernetes');
+    expect(fieldHelpText(element)).not.toContain('hub default is "Block"');
+    expect(fieldHelpText(element)).not.toContain('rejects');
+    const helpText = gcpIdentitySelect(element)!.querySelector('[slot="help-text"]');
+    expect(helpText?.textContent).toBe(KUBERNETES_BLOCK_HINT);
   });
 
   // A hub default of "passthrough" only takes effect on the hub's own
@@ -437,7 +483,9 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
   });
 
   // A hub default of "assign" with no service account configured falls
-  // through to "Block" the same way an unverified one does.
+  // through to "Block" the same way an unverified one does; Block is
+  // accepted on Kubernetes, so the hint names the fallback without a
+  // rejection warning.
   it('extends the inherited hub-assign hint when no service account is configured, for a Kubernetes-bound project', async () => {
     element = await createComponent(
       createFetchHandler({
@@ -461,7 +509,8 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
 
     const text = fieldHelpText(element);
     expect(text).toContain('no service account is configured');
-    expect(text).toContain('rejected at dispatch');
+    expect(text).toContain('falls back to "Block"');
+    expect(text).not.toContain('rejected at dispatch');
   });
 
   // Pins the `!saID &&` condition the other way — with a configured,

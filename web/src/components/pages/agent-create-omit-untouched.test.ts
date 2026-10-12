@@ -24,6 +24,7 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import { createInternals, formField, formRoot } from './__fixtures__/agent-create-internals.js';
+import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
 
 interface ProfileFixture {
   name: string;
@@ -320,7 +321,7 @@ async function submit(c: CreatePrivate): Promise<Record<string, unknown>> {
 }
 
 describe('Create Agent: gcp_identity is sent only when the user chose it', () => {
-  for (const projectDefault of ['', 'passthrough', 'assign']) {
+  for (const projectDefault of ['', 'block', 'passthrough', 'assign']) {
     for (const t of targets) {
       it(`omits gcp_identity when untouched, on ${t.label} (project default: ${projectDefault || 'none'})`, async () => {
         projectDefaultMode = projectDefault;
@@ -332,21 +333,6 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
         expect(body).not.toHaveProperty('gcp_identity');
       });
     }
-  }
-
-  // A block project default is left out of the matrix above on
-  // Kubernetes-only targets, where blockDefaultNeedsExplicitChoice stops
-  // submit until the user picks a mode.
-  for (const t of targets.filter((x) => !x.kubernetesOnly)) {
-    it(`omits gcp_identity when untouched, on ${t.label} (project default: block)`, async () => {
-      projectDefaultMode = 'block';
-      const c = await mount();
-      await selectTarget(c, t);
-      expect(c.gcpIdentityUserSet).toBe(false);
-
-      const body = await submit(c);
-      expect(body).not.toHaveProperty('gcp_identity');
-    });
   }
 
   it('does not count an applied project default as a user choice', async () => {
@@ -379,7 +365,6 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
   const noModeHint =
     "No mode chosen: the server applies this project's per-profile or project default, " +
     'then the hub-wide default, then the runtime default.';
-  const blockUnavailable = 'Block is not available for a Kubernetes runtime target.';
   const profilePrecedence =
     'A per-profile default for the chosen profile, if set, takes precedence.';
 
@@ -387,9 +372,9 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
     it(`shows the same no-mode hint with no project default, on ${t.label}`, async () => {
       const c = await mount();
       await selectTarget(c, t);
-      // Kubernetes-only targets append only that Block is not offered.
+      // Kubernetes-only targets append only what Block means there.
       expect(gcpIdentityHint(c)).toBe(
-        t.kubernetesOnly ? `${noModeHint} ${blockUnavailable}` : noModeHint
+        t.kubernetesOnly ? `${noModeHint} ${KUBERNETES_BLOCK_HINT}` : noModeHint
       );
     });
   }
@@ -439,8 +424,8 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
 
   // Kubernetes-only broker, no profile chosen, applied passthrough default:
   // the hint is the docker hint for the same state (mode text plus the
-  // precedence note) followed only by the Block note.
-  it('notes per-profile precedence then only the Block note on a kubernetes broker with no profile chosen', async () => {
+  // precedence note) followed only by the Kubernetes Block hint.
+  it('notes per-profile precedence then only the Kubernetes Block hint on a kubernetes broker with no profile chosen', async () => {
     projectDefaultMode = 'passthrough';
     projectProfileDefaults = { large: 'sa-a' };
     const c = await mount();
@@ -450,23 +435,24 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
 
     await selectTarget(c, twoProfileTarget('kubernetes', ''));
     expect(gcpIdentitySelect(c).value).toBe('passthrough');
-    expect(gcpIdentityHint(c)).toBe(`${dockerHint} ${blockUnavailable}`);
+    expect(gcpIdentityHint(c)).toBe(`${dockerHint} ${KUBERNETES_BLOCK_HINT}`);
   });
 
-  // Kubernetes-only broker, no profile chosen, block default: submit is held
-  // for an explicit choice, so the precedence note is not shown.
-  it('omits the precedence note while a block default holds submit on a kubernetes broker with no profile chosen', async () => {
+  // Kubernetes-only broker, no profile chosen, block default: Block is a
+  // valid outcome on Kubernetes (ptone/scion#4077), so the picker shows it
+  // with the precedence note, and submit omits gcp_identity.
+  it('shows a block default with the precedence note on a kubernetes broker with no profile chosen', async () => {
     projectDefaultMode = 'block';
     projectProfileDefaults = { large: 'sa-a' };
     serviceAccounts = [];
     const c = await mount();
     await selectTarget(c, twoProfileTarget('kubernetes', ''));
-    expect(gcpIdentitySelect(c).value).toBe('');
+    expect(gcpIdentitySelect(c).value).toBe('block');
     expect(gcpIdentityHint(c)).toBe(
-      "No GCP identity is selected yet. This project's default GCP identity is Block, which " +
-        'the Kubernetes runtime rejects at dispatch; creating this agent is blocked until you ' +
-        'explicitly choose Passthrough.'
+      'Prevents the agent from accessing any GCP identity. Token requests are denied. ' +
+        `${profilePrecedence} ${KUBERNETES_BLOCK_HINT}`
     );
+    expect(await submit(c)).not.toHaveProperty('gcp_identity');
   });
 
   // An outranked assign default leaves the internal mode on assign; the
@@ -497,16 +483,15 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
     expect(gcpIdentityHint(c)).not.toContain(profilePrecedence);
   });
 
-  // The Kubernetes Block-default guard follows the same rule: with a
-  // per-profile default outranking the block project default, submit is
-  // allowed and omits gcp_identity.
-  it('does not require a pick for a block project default outranked by the chosen profile on a kubernetes target', async () => {
+  // With a per-profile default outranking the block project default, the
+  // picker is blank and submit omits gcp_identity.
+  it('renders the picker blank for a block project default outranked by the chosen profile on a kubernetes target', async () => {
     projectDefaultMode = 'block';
     projectProfileDefaults = { k8s: 'sa-a' };
     const c = await mount();
     await selectTarget(c, mixedTarget('k8s'));
     expect(gcpIdentitySelect(c).value).toBe('');
-    expect(gcpIdentityHint(c)).toBe(`${noModeHint} ${blockUnavailable}`);
+    expect(gcpIdentityHint(c)).toBe(`${noModeHint} ${KUBERNETES_BLOCK_HINT}`);
 
     expect(await submit(c)).not.toHaveProperty('gcp_identity');
   });
@@ -528,10 +513,22 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
     expect(body.gcp_identity).toEqual({ metadata_mode: 'block' });
   });
 
+  it('sends Block when the user picks it with no project default on a kubernetes broker', async () => {
+    const c = await mount();
+    await selectTarget(c, k8sTarget);
+    expect(gcpIdentitySelect(c).value).toBe('');
+
+    await chooseIdentity(c, 'block');
+    expect(c.gcpIdentityUserSet).toBe(true);
+    expect(gcpIdentitySelect(c).value).toBe('block');
+
+    const body = await submit(c);
+    expect(body.gcp_identity).toEqual({ metadata_mode: 'block' });
+  });
+
   it('sends Passthrough when the user picks it with no project default on a kubernetes broker', async () => {
     const c = await mount();
     await selectTarget(c, k8sTarget);
-    expect(c.gcpMetadataMode).toBe('passthrough');
     expect(gcpIdentitySelect(c).value).toBe('');
 
     await chooseIdentity(c, 'passthrough');
@@ -575,16 +572,19 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
     });
   }
 
-  it('sends the chosen mode on a kubernetes broker once the user changes it', async () => {
-    projectDefaultMode = 'block';
-    const c = await mount();
-    await selectTarget(c, k8sTarget);
+  for (const mode of ['block', 'passthrough']) {
+    it(`sends the chosen mode (${mode}) on a kubernetes broker once the user changes it`, async () => {
+      // Start from a different default so the pick is a real change.
+      projectDefaultMode = mode === 'block' ? 'passthrough' : 'block';
+      const c = await mount();
+      await selectTarget(c, k8sTarget);
 
-    await chooseIdentity(c, 'passthrough');
+      await chooseIdentity(c, mode);
 
-    const body = await submit(c);
-    expect(body.gcp_identity).toEqual({ metadata_mode: 'passthrough' });
-  });
+      const body = await submit(c);
+      expect(body.gcp_identity).toEqual({ metadata_mode: mode });
+    });
+  }
 });
 
 describe('Create Agent: config.telemetry is sent only when the user picked it', () => {

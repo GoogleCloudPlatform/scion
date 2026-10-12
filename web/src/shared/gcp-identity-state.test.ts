@@ -15,84 +15,17 @@
  */
 
 /**
- * normalizeGcpModeForTarget, the single implementation of the Kubernetes
- * Block rule for the create and configure pages (ptone/scion#3974), and the
- * GcpIdentityState picker rules.
+ * The GcpIdentityState picker rules shared by the create and configure pages
+ * (ptone/scion#3974), including Block on Kubernetes targets (ptone/scion#4077).
  */
 
 import { describe, it, expect } from 'vitest';
 
 import {
   GcpIdentityState,
+  KUBERNETES_BLOCK_HINT,
   NO_IDENTITY_MODE_HINT,
-  normalizeGcpModeForTarget,
-  type GcpModeFields,
 } from './gcp-identity-state.js';
-
-function fields(over: Partial<GcpModeFields> = {}): GcpModeFields {
-  return {
-    gcpMetadataMode: 'block',
-    gcpServiceAccountId: '',
-    gcpIdentityUserSet: false,
-    gcpUserBlockSuspended: false,
-    defaultGcpMetadataMode: 'block',
-    defaultGcpServiceAccountId: '',
-    ...over,
-  };
-}
-
-describe('normalizeGcpModeForTarget', () => {
-  it('never rewrites a stored value (edit mode)', () => {
-    const s = fields({ gcpMetadataMode: 'block' });
-    expect(normalizeGcpModeForTarget(s, true, true)).toBe(false);
-    expect(s).toEqual(fields({ gcpMetadataMode: 'block' }));
-  });
-
-  it('shows a Block default as Passthrough on a Kubernetes target, without making it a choice', () => {
-    const s = fields();
-    expect(normalizeGcpModeForTarget(s, true)).toBe(true);
-    expect(s.gcpMetadataMode).toBe('passthrough');
-    expect(s.gcpIdentityUserSet).toBe(false);
-  });
-
-  it('suspends an explicit Block on a Kubernetes target and reinstates it after', () => {
-    const s = fields({ gcpIdentityUserSet: true });
-    normalizeGcpModeForTarget(s, true);
-    expect(s).toMatchObject({
-      gcpMetadataMode: 'passthrough',
-      gcpIdentityUserSet: false,
-      gcpUserBlockSuspended: true,
-    });
-    normalizeGcpModeForTarget(s, false);
-    expect(s).toMatchObject({
-      gcpMetadataMode: 'block',
-      gcpIdentityUserSet: true,
-      gcpUserBlockSuspended: false,
-    });
-  });
-
-  it('leaves an explicit non-Block choice alone', () => {
-    const s = fields({ gcpMetadataMode: 'passthrough', gcpIdentityUserSet: true });
-    expect(normalizeGcpModeForTarget(s, true)).toBe(false);
-    expect(s.gcpMetadataMode).toBe('passthrough');
-  });
-
-  it('keeps the account in step with an Assign default', () => {
-    const s = fields({
-      gcpMetadataMode: 'passthrough',
-      defaultGcpMetadataMode: 'assign',
-      defaultGcpServiceAccountId: 'sa-1',
-    });
-    normalizeGcpModeForTarget(s, false);
-    expect(s).toMatchObject({ gcpMetadataMode: 'assign', gcpServiceAccountId: 'sa-1' });
-  });
-
-  it('is idempotent', () => {
-    const s = fields();
-    normalizeGcpModeForTarget(s, true);
-    expect(normalizeGcpModeForTarget(s, true)).toBe(false);
-  });
-});
 
 describe('GcpIdentityState', () => {
   it('starts blank with the no-mode hint on every target, and nothing chosen is submittable', () => {
@@ -121,14 +54,44 @@ describe('GcpIdentityState', () => {
     expect(g.defaultGcpMetadataMode).toBe('passthrough');
   });
 
-  it('blocks submit for a Block project default on a Kubernetes target until a pick', () => {
+  it('offers and sends Block on a Kubernetes target, with the Kubernetes Block hint', () => {
+    const g = new GcpIdentityState();
+    g.setTarget(true, '');
+    g.pickMode('block');
+    expect(g.gcpMetadataMode).toBe('block');
+    expect(g.validate()).toBeNull();
+    expect(g.toRequest()).toEqual({ metadata_mode: 'block' });
+    expect(g.hint).toContain(KUBERNETES_BLOCK_HINT);
+    // A later target change does not touch the pick.
+    g.setTarget(false, '');
+    expect(g.toRequest()).toEqual({ metadata_mode: 'block' });
+    expect(g.hint).not.toContain(KUBERNETES_BLOCK_HINT);
+  });
+
+  it('shows a Block project default as Block on a Kubernetes target, submittable untouched', () => {
     const g = new GcpIdentityState();
     g.setTarget(true, '');
     g.applyProjectDefaults({ defaultGCPIdentityMode: 'block' });
-    expect(g.blockDefaultNeedsExplicitChoice).toBe(true);
-    expect(g.validate()).toContain('Choose Passthrough');
-    g.pickMode('passthrough');
+    expect(g.pickerBlank).toBe(false);
+    expect(g.gcpMetadataMode).toBe('block');
     expect(g.validate()).toBeNull();
+    expect(g.toRequest()).toBeUndefined();
+  });
+
+  it('describes Block on Kubernetes without naming the metadata endpoint', () => {
+    expect(KUBERNETES_BLOCK_HINT).toContain('block service account');
+    expect(KUBERNETES_BLOCK_HINT).toContain("namespace's default service account");
+    expect(KUBERNETES_BLOCK_HINT).toContain('no GCP credentials');
+    expect(KUBERNETES_BLOCK_HINT.toLowerCase()).not.toContain('metadata');
+  });
+
+  it('shows an untouched Assign default with its account', () => {
+    const g = new GcpIdentityState();
+    g.defaultGcpMetadataMode = 'assign';
+    g.defaultGcpServiceAccountId = 'sa-1';
+    expect(g.normalize()).toBe(true);
+    expect(g).toMatchObject({ gcpMetadataMode: 'assign', gcpServiceAccountId: 'sa-1' });
+    expect(g.normalize()).toBe(false);
   });
 
   it('notifies subscribers on change, until unsubscribed', () => {

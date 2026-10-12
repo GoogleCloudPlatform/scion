@@ -120,8 +120,9 @@ export class ScionPageAgentCreate extends LitElement {
 
   /**
    * Whether the currently selected broker/profile combination is reliably
-   * known to resolve to a Kubernetes runtime. Block is not offered in that
-   * case. This deliberately does not guess: with no broker selected, no
+   * known to resolve to a Kubernetes runtime. The GCP identity hint then says
+   * what Block means there, and the service accounts' mapping state is asked
+   * for that target. This deliberately does not guess: with no broker selected, no
    * matching profile, or (with no profile chosen) a broker whose available
    * profiles mix runtime types, this is false.
    */
@@ -389,11 +390,10 @@ export class ScionPageAgentCreate extends LitElement {
 
   override willUpdate(changedProperties: Map<string, unknown>): void {
     super.willUpdate(changedProperties);
-    // Block is not offered for a Kubernetes runtime target. Hand the GCP
-    // identity state the current target whenever the broker/profile
-    // selection or the broker list changes; it corrects the displayed mode
-    // (normalizeGcpModeForTarget) in the same update cycle. Whether an
-    // explicit identity is sent is gated separately by gcpIdentityUserSet.
+    // Hand the GCP identity state the current target whenever the
+    // broker/profile selection or the broker list changes: its hint
+    // describes Block on a Kubernetes target. Whether an explicit identity
+    // is sent is gated separately by gcpIdentityUserSet.
     if (
       changedProperties.has('brokerId') ||
       changedProperties.has('profile') ||

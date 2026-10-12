@@ -39,6 +39,7 @@ import type {
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
 import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
+import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
 import { projectServiceAccountListUrl } from '../../shared/gcp-sa-assign-status.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
@@ -1387,16 +1388,10 @@ export class ScionPageProjectSettings extends LitElement {
     return this.brokers.every((b) => isBrokerKubernetesOnly(b));
   }
 
-  /** Explanation text shared by the help-text slot and the disabled option's tooltip. */
-  private static readonly gcpIdentityK8sHintText =
-    'Block is not supported on the Kubernetes runtime: this project’s runtime brokers are ' +
-    'Kubernetes. Choose Passthrough or Assign Service Account instead.';
-
   /**
    * Short explanation rendered into the GCP identity select's `help-text`
    * slot when this project's linked brokers are reliably Kubernetes-only:
-   * block is disabled in that case (existing stored "block" values still
-   * display; the server rejects saving a new one).
+   * what a Block default means there (ptone/scion#4077).
    *
    * Rendered as a slotted child of the `<sl-select>` (not a sibling
    * `aria-describedby` reference) because the element that receives focus is
@@ -1407,7 +1402,7 @@ export class ScionPageProjectSettings extends LitElement {
    */
   private renderKubernetesBlockHint(): TemplateResult | typeof nothing {
     if (!this.projectIsKubernetesOnly) return nothing;
-    return html`<div slot="help-text">${ScionPageProjectSettings.gcpIdentityK8sHintText}</div>`;
+    return html`<div slot="help-text">${KUBERNETES_BLOCK_HINT}</div>`;
   }
 
   /**
@@ -1431,13 +1426,12 @@ export class ScionPageProjectSettings extends LitElement {
           ? String(saEntry.hubValue)
           : '';
       // No service account configured: the consumption-side ladder falls
-      // through to "Block" the same way an unverified one does, which this
-      // project's Kubernetes runtime rejects at dispatch.
+      // through to "Block" the same way an unverified one does; the
+      // help-text slot says what Block means on Kubernetes.
       if (!saID && this.projectIsKubernetesOnly) {
         return html`<span class="field-help"
           >Inherited from hub: the hub default is "Assign", but no service account is configured, so
-          it falls back to "Block" — rejected at dispatch for this project's Kubernetes runtime. Set
-          a project-level default of Passthrough or Assign Service Account.</span
+          it falls back to "Block".</span
         >`;
       }
       const sa = this.gcpServiceAccounts.find((s) => s.id === saID);
@@ -1469,13 +1463,6 @@ export class ScionPageProjectSettings extends LitElement {
       return html`<span class="field-help"
         >Inherited from hub: passthrough applies only to agents on the hub's embedded broker; agents
         on other brokers get "Block".</span
-      >`;
-    }
-    if (mode.hubValue === 'block' && this.projectIsKubernetesOnly) {
-      return html`<span class="field-help"
-        >Inherited from hub: the hub default is "Block", but this project's runtime brokers are
-        Kubernetes, which rejects it at dispatch. Set a project-level default of Passthrough or
-        Assign Service Account.</span
       >`;
     }
     return nothing;
@@ -2491,14 +2478,7 @@ export class ScionPageProjectSettings extends LitElement {
                         : 'None (default to block)'
                     )}</sl-option
                   >
-                  <sl-option
-                    value="block"
-                    ?disabled=${this.projectIsKubernetesOnly}
-                    title=${this.projectIsKubernetesOnly
-                      ? ScionPageProjectSettings.gcpIdentityK8sHintText
-                      : nothing}
-                    >Block</sl-option
-                  >
+                  <sl-option value="block">Block</sl-option>
                   <sl-option value="passthrough">Passthrough</sl-option>
                   <sl-option value="assign">Assign Service Account</sl-option>
                   ${this.renderKubernetesBlockHint()}

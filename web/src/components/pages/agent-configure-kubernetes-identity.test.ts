@@ -15,19 +15,20 @@
  */
 
 /**
- * Phase 2 of ptone/scion#2328: block is not offered as a NEW GCP identity
- * choice for a Kubernetes runtime target on the agent Configure page.
+ * The GCP identity picker on the agent Configure page for Kubernetes
+ * runtime targets. ptone/scion#4077 reverses Phase 2 of ptone/scion#2328:
+ * brokers accept Block on Kubernetes, so Block is offered there and the help
+ * text says what it means.
  *
  * The target is reliably known from the agent's own runtimeBrokerId and
  * appliedConfig.profile, loaded via GET /api/v1/runtime-brokers/{id} — the
  * shared runtime-kind helpers classify it, same as agent-create.ts.
  *
  * Unlike agent-create (a pure create flow), this page edits an EXISTING
- * agent that may already have a real stored identity. This file pins two
- * rules:
- *  - A stored value (including a stored "block") is never migrated: the
- *    Block option is disabled for a NEW selection, not removed, and a Save
- *    of an untouched stored value must not rewrite it.
+ * agent that may already have a real stored identity. This file pins:
+ *  - Block is enabled on every target, and an explicit Block is sent.
+ *  - A stored value is never migrated, and a Save of an untouched stored
+ *    value must not rewrite it.
  *  - Nothing is sent at all (gcp_identity omitted from the PATCH) unless the
  *    user explicitly changed the picker — omitting it is a true no-op on the
  *    server, and sending an explicit "passthrough" instead would route the
@@ -39,6 +40,7 @@
 let ScionPageAgentConfigure: any;
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
 
 interface BrokerProfileFixture {
   name: string;
@@ -232,7 +234,7 @@ interface AgentConfigureInternals {
   updateComplete: Promise<unknown>;
 }
 
-describe('agent-configure: block is not a NEW choice for a Kubernetes target', () => {
+describe('agent-configure: GCP identity on a Kubernetes target (Block offered)', () => {
   let element: HTMLElement | null = null;
 
   beforeAll(async () => {
@@ -248,7 +250,7 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     vi.restoreAllMocks();
   });
 
-  it('disables (does not remove) Block for a kubernetes-only broker when nothing is stored', async () => {
+  it('offers Block with the Kubernetes Block hint for a kubernetes-only broker', async () => {
     element = await createComponent(
       createFetchHandler({
         brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
@@ -257,8 +259,9 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
 
     const option = blockOption(element);
     expect(option).not.toBeNull();
-    expect(option!.hasAttribute('disabled')).toBe(true);
-    expect(gcpIdentityHelpTextSlot(element)).toContain('not supported on the Kubernetes runtime');
+    expect(option!.hasAttribute('disabled')).toBe(false);
+    expect(option!.hasAttribute('title')).toBe(false);
+    expect(gcpIdentityHelpTextSlot(element)).toContain(KUBERNETES_BLOCK_HINT);
   });
 
   it('keeps Block enabled for a docker broker', async () => {
@@ -271,11 +274,11 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     const option = blockOption(element);
     expect(option).not.toBeNull();
     expect(option!.hasAttribute('disabled')).toBe(false);
+    expect(gcpIdentityHelpTextSlot(element)).toBe('');
   });
 
-  // A stored "block" must display exactly as stored on a known-Kubernetes
-  // target — disabled for a NEW selection, but never auto-corrected away.
-  it('keeps a stored "block" selected, not auto-corrected, on a known-Kubernetes target', async () => {
+  // A stored "block" displays exactly as stored on a known-Kubernetes target.
+  it('keeps a stored "block" selected on a known-Kubernetes target', async () => {
     element = await createComponent(
       createFetchHandler({
         agent: makeAgent({
@@ -287,8 +290,7 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
 
     const page = element as unknown as AgentConfigureInternals;
     expect(page.gcpMetadataMode).toBe('block');
-    const option = blockOption(element);
-    expect(option!.hasAttribute('disabled')).toBe(true);
+    expect(gcpIdentityHelpTextSlot(element)).toContain('current identity is "Block"');
   });
 
   it('resaves a stored "block" unchanged without sending gcp_identity at all', async () => {
@@ -308,41 +310,40 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     expect(patchBodies[0]).not.toHaveProperty('gcp_identity');
   });
 
-  it('rejects Save when the user explicitly attempts a new block selection on a known-Kubernetes target', async () => {
+  it('sends an explicit Block on Save once the user picks it for a known-Kubernetes target', async () => {
     const { handler, patchBodies } = createFetchHandlerCapturingPatch({
+      agent: makeAgent({
+        appliedConfig: { profile: '', gcpIdentity: { metadataMode: 'passthrough' } },
+      }),
       brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
     });
     element = await createComponent(handler);
     const page = element as unknown as AgentConfigureInternals;
 
-    // The UI itself prevents clicking into "block" once disabled; this
-    // simulates the only way the guard could still be reached, and checks it
-    // is transition-based (fires on an explicit new choice of block, not on
-    // an untouched value) — see the resave test above for the other half.
-    page.gcpIdentityUserSet = true;
-    page.gcpMetadataMode = 'block';
+    await chooseSelect(page, gcpIdentitySelect(element)!, 'block');
+    expect(page.gcpIdentityUserSet).toBe(true);
 
     await page.handleSave();
 
-    expect(page.error).toContain('not available for a Kubernetes runtime target');
-    expect(patchBodies).toHaveLength(0);
+    expect(page.error).toBeNull();
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
   });
 
-  // The Start guard must reject under the same condition as the Save guard.
-  it('rejects Start under the same condition, without sending a PATCH', async () => {
+  it('sends an explicit Block on Start too, for a known-Kubernetes target', async () => {
     const { handler, patchBodies } = createFetchHandlerCapturingPatch({
       brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
     });
     element = await createComponent(handler);
     const page = element as unknown as AgentConfigureInternals;
 
-    page.gcpIdentityUserSet = true;
-    page.gcpMetadataMode = 'block';
+    await chooseSelect(page, gcpIdentitySelect(element)!, 'block');
 
     await page.handleStart();
 
-    expect(page.error).toContain('not available for a Kubernetes runtime target');
-    expect(patchBodies).toHaveLength(0);
+    expect(page.error).toBeNull();
+    expect(patchBodies.length).toBeGreaterThanOrEqual(1);
+    expect(patchBodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
   });
 
   // The page must use appliedConfig.profile (not an empty string) to resolve
@@ -358,11 +359,11 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
       })
     );
 
-    const option = blockOption(element);
-    expect(option!.hasAttribute('disabled')).toBe(true);
+    expect(blockOption(element)!.hasAttribute('disabled')).toBe(false);
+    expect(gcpIdentityHelpTextSlot(element)).toContain(KUBERNETES_BLOCK_HINT);
   });
 
-  it('does not disable Block on a mixed-profile broker when the chosen profile is not Kubernetes', async () => {
+  it('shows no Kubernetes Block hint on a mixed-profile broker when the chosen profile is not Kubernetes', async () => {
     element = await createComponent(
       createFetchHandler({
         agent: makeAgent({ appliedConfig: { profile: 'docker-profile' } }),
@@ -373,8 +374,8 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
       })
     );
 
-    const option = blockOption(element);
-    expect(option!.hasAttribute('disabled')).toBe(false);
+    expect(blockOption(element)!.hasAttribute('disabled')).toBe(false);
+    expect(gcpIdentityHelpTextSlot(element)).toBe('');
   });
 
   it('omits gcp_identity on Save when nothing is stored and nothing was chosen, for a known-Kubernetes target', async () => {
@@ -385,7 +386,8 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     const page = element as unknown as AgentConfigureInternals;
 
     expect(page.gcpIdentityUserSet).toBe(false);
-    expect(page.gcpMetadataMode).toBe('passthrough'); // display-only correction
+    // Display only: the broker's Kubernetes runtime default, not a choice.
+    expect(page.gcpMetadataMode).toBe('passthrough');
 
     await page.handleSave();
 
@@ -553,14 +555,14 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
       const text = gcpIdentityHelpTextSlot(element);
       expect(text).not.toContain("broker's own Kubernetes default applies automatically");
       expect(text).not.toContain('current identity is');
+      expect(text).toBe(KUBERNETES_BLOCK_HINT);
     });
   });
 
   // The target broker loads asynchronously, so a user can pick "Block" while
-  // it is still unknown (Block is enabled until targetRuntimeIsKubernetesOnly
-  // is confirmed). That explicit pick must not survive as an auto-substituted
-  // explicit "passthrough" once the broker resolves as Kubernetes-only.
-  it('clears gcpIdentityUserSet when the broker resolves as Kubernetes-only after an explicit "block" pick', async () => {
+  // it is still unknown. Block is valid on Kubernetes, so that explicit pick
+  // stands once the broker resolves as Kubernetes-only.
+  it('keeps an explicit "block" pick when the broker resolves as Kubernetes-only afterwards', async () => {
     let resolveBroker: ((value: Response) => void) | null = null;
     const brokerPromise = new Promise<Response>((resolve) => {
       resolveBroker = resolve;
@@ -594,8 +596,7 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     await (element as unknown as AgentConfigureInternals).updateComplete;
 
     const page = element as unknown as AgentConfigureInternals;
-    // The broker fetch is still pending: the target is unknown, so Block is
-    // enabled and pickable.
+    // The broker fetch is still pending: the target is unknown.
     const select = gcpIdentitySelect(element);
     expect(select!.hasAttribute('disabled')).toBe(false);
     await chooseSelect(page, select!, 'block');
@@ -616,7 +617,8 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     await new Promise((resolve) => setTimeout(resolve, 50));
     await page.updateComplete;
 
-    expect(page.gcpIdentityUserSet).toBe(false);
-    expect(page.gcpMetadataMode).toBe('passthrough');
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('block');
+    expect(gcpIdentityHelpTextSlot(element)).toBe(KUBERNETES_BLOCK_HINT);
   });
 }, 15_000);

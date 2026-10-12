@@ -27,7 +27,6 @@ const GCP_FIELDS = new Set<string>([
   'gcpMetadataMode',
   'gcpServiceAccountId',
   'gcpIdentityUserSet',
-  'gcpUserBlockSuspended',
   'defaultGcpMetadataMode',
   'defaultGcpServiceAccountId',
   'gcpServiceAccounts',
@@ -40,7 +39,7 @@ const GCP_FIELDS = new Set<string>([
  * A view of the page in which the GCP identity fields read and write the
  * page's GcpIdentityState, and everything else reads and writes the page
  * (TS privacy is compile-time only). Setting a GCP field re-applies the
- * Kubernetes rule, as a change of the page's own state used to.
+ * default (GcpIdentityState.normalize), as a change of the page's own state used to.
  */
 export function createInternals<T>(el: HTMLElement): T {
   const page = el as unknown as Record<string, unknown> & { gcp: GcpIdentityState };

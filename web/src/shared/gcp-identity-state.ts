@@ -20,8 +20,8 @@
  *
  * GcpIdentityState is plain state, owned by the page and rendered by the
  * form, so the page can validate and build its request from it before and
- * after the form exists. normalizeGcpModeForTarget is the single
- * implementation of the Kubernetes Block rule for both pages.
+ * after the form exists. KUBERNETES_BLOCK_HINT is the Kubernetes meaning of
+ * Block, shown by the create, configure and project settings pages.
  */
 
 import { orderByAssignStatus } from './gcp-sa-assign-status.js';
@@ -38,74 +38,16 @@ export const NO_IDENTITY_MODE_HINT =
 export const PROFILE_DEFAULT_PRECEDENCE_HINT =
   'A per-profile default for the chosen profile, if set, takes precedence.';
 
-/** The fields normalizeGcpModeForTarget reads and corrects. */
-export interface GcpModeFields {
-  gcpMetadataMode: GcpMetadataMode;
-  gcpServiceAccountId: string;
-  /** The user explicitly picked a mode or account this session. */
-  gcpIdentityUserSet: boolean;
-  /** An explicit Block pick suspended by the Kubernetes rule; see below. */
-  gcpUserBlockSuspended: boolean;
-  /** The mode that applies with no explicit pick: a default, before substitution. */
-  defaultGcpMetadataMode: GcpMetadataMode;
-  /** The account that goes with defaultGcpMetadataMode === 'assign'. */
-  defaultGcpServiceAccountId: string;
-}
-
 /**
- * Keeps the *displayed* mode correct for the target. Block is never valid to
- * send on a known-Kubernetes target (the dispatch rejects it).
- *
- * With fromStorage (an existing agent's stored decision, configure page),
- * the mode is never rewritten: a stored value is not migrated. Without it
- * (create semantics):
- * - an explicit Block pick on a Kubernetes target is suspended, not
- *   discarded, and gcpIdentityUserSet is cleared, so the substituted display
- *   value is not sent as if the user chose it;
- * - the suspended Block is reinstated as soon as the target stops being
- *   Kubernetes-only;
- * - with no explicit pick standing, the mode is recomputed from the default,
- *   with a default of Block shown as Passthrough on a Kubernetes target, and
- *   the account kept in step with an Assign default.
- *
- * Recomputing from the default on every call, instead of remembering "the
- * current value is a substitution", means there is nothing to go stale.
- * Idempotent; returns true when it changed anything.
+ * What Block means on a Kubernetes target (ptone/scion#4077). The broker
+ * accepts Block there: the pod runs as the runtime profile's block service
+ * account, or the namespace's default service account when the profile names
+ * none, and no GCP credentials are mounted.
  */
-export function normalizeGcpModeForTarget(
-  s: GcpModeFields,
-  targetKubernetesOnly: boolean,
-  fromStorage = false
-): boolean {
-  if (fromStorage) return false;
-  const before = JSON.stringify(s);
-  if (s.gcpUserBlockSuspended && !targetKubernetesOnly) {
-    s.gcpMetadataMode = 'block';
-    s.gcpServiceAccountId = '';
-    s.gcpIdentityUserSet = true;
-    s.gcpUserBlockSuspended = false;
-    return true;
-  }
-  if (s.gcpIdentityUserSet) {
-    if (s.gcpMetadataMode === 'block' && targetKubernetesOnly) {
-      s.gcpIdentityUserSet = false;
-      s.gcpUserBlockSuspended = true;
-    } else {
-      return false;
-    }
-  }
-  const effective: GcpMetadataMode =
-    targetKubernetesOnly && s.defaultGcpMetadataMode === 'block'
-      ? 'passthrough'
-      : s.defaultGcpMetadataMode;
-  s.gcpMetadataMode = effective;
-  if (effective === 'assign') {
-    s.gcpServiceAccountId = s.defaultGcpServiceAccountId;
-  } else {
-    s.gcpServiceAccountId = '';
-  }
-  return JSON.stringify(s) !== before;
-}
+export const KUBERNETES_BLOCK_HINT =
+  "On Kubernetes, Block runs the agent as the runtime profile's block service account, or " +
+  "the namespace's default service account if none is configured, with no GCP credentials " +
+  'mounted.';
 
 /** The project's GCP identity defaults, from its settings. */
 export interface GcpProjectDefaults {
@@ -121,20 +63,20 @@ export interface GcpProjectDefaults {
  * records picks. Every mutation notifies the subscribers so both can
  * re-render.
  */
-export class GcpIdentityState implements GcpModeFields {
+export class GcpIdentityState {
   gcpMetadataMode: GcpMetadataMode = 'block';
   gcpServiceAccountId = '';
   /**
    * True once the user has explicitly picked in the GCP Identity picker
    * (either select) this session. Cleared when defaults are recomputed
-   * (reset, e.g. on a project change) and when normalizeGcpModeForTarget
-   * suspends an explicit Block. Gates whether gcp_identity is sent at all:
+   * (reset, e.g. on a project change). Gates whether gcp_identity is sent at all:
    * with no explicit choice the request omits it, so the server resolves the
    * identity from its own precedence.
    */
   gcpIdentityUserSet = false;
-  gcpUserBlockSuspended = false;
+  /** The mode that applies with no explicit pick: the project default, else Block. */
   defaultGcpMetadataMode: GcpMetadataMode = 'block';
+  /** The account that goes with defaultGcpMetadataMode === 'assign'. */
   defaultGcpServiceAccountId = '';
   gcpServiceAccounts: GCPServiceAccount[] = [];
   /** The project's own default mode, or '' when it has none. */
@@ -183,24 +125,35 @@ export class GcpIdentityState implements GcpModeFields {
     return this.gcpServiceAccounts.find((sa) => sa.id === this.gcpServiceAccountId)?.assignStatus;
   }
 
-  /** Applies the target and re-normalizes the displayed mode. */
+  /**
+   * Applies the target. Every mode, Block included, is valid on every
+   * target, so the displayed mode is not touched.
+   */
   setTarget(targetKubernetesOnly: boolean, profile: string): void {
-    const targetChanged =
-      this.targetKubernetesOnly !== targetKubernetesOnly || this.profile !== profile;
+    if (this.targetKubernetesOnly === targetKubernetesOnly && this.profile === profile) return;
     this.targetKubernetesOnly = targetKubernetesOnly;
     this.profile = profile;
-    if (this.normalize() || targetChanged) this.notify();
+    this.notify();
   }
 
-  /** Re-applies normalizeGcpModeForTarget; returns true when it changed anything. */
+  /**
+   * With no explicit pick standing, shows the default (keeping the account in
+   * step with an Assign default). Idempotent; returns true when it changed
+   * anything.
+   */
   normalize(): boolean {
-    return normalizeGcpModeForTarget(this, this.targetKubernetesOnly);
+    if (this.gcpIdentityUserSet) return false;
+    const mode = this.defaultGcpMetadataMode;
+    const account = mode === 'assign' ? this.defaultGcpServiceAccountId : '';
+    if (this.gcpMetadataMode === mode && this.gcpServiceAccountId === account) return false;
+    this.gcpMetadataMode = mode;
+    this.gcpServiceAccountId = account;
+    return true;
   }
 
   /**
    * Recomputes from scratch, before a project's accounts and defaults load:
-   * whatever is applied afterwards is a default, not a user choice, and a
-   * suspended Block pick belonged to the previous project.
+   * whatever is applied afterwards is a default, not a user choice.
    */
   reset(): void {
     this.gcpServiceAccounts = [];
@@ -209,7 +162,6 @@ export class GcpIdentityState implements GcpModeFields {
     this.defaultGcpMetadataMode = 'block';
     this.defaultGcpServiceAccountId = '';
     this.gcpIdentityUserSet = false;
-    this.gcpUserBlockSuspended = false;
     this.projectGCPIdentityDefaultMode = '';
     this.projectGCPIdentityDefaultApplied = false;
     this.projectGCPIdentityProfileDefaults = {};
@@ -266,9 +218,7 @@ export class GcpIdentityState implements GcpModeFields {
   pickMode(mode: GcpMetadataMode): void {
     this.gcpMetadataMode = mode;
     this.gcpIdentityUserSet = true;
-    this.gcpUserBlockSuspended = false;
     if (mode !== 'assign') this.gcpServiceAccountId = '';
-    this.normalize();
     this.notify();
   }
 
@@ -276,7 +226,6 @@ export class GcpIdentityState implements GcpModeFields {
   pickServiceAccount(id: string): void {
     this.gcpServiceAccountId = id;
     this.gcpIdentityUserSet = true;
-    this.gcpUserBlockSuspended = false;
     this.notify();
   }
 
@@ -291,20 +240,6 @@ export class GcpIdentityState implements GcpModeFields {
   }
 
   /**
-   * Omitting gcp_identity would resolve to the project's own default of
-   * "block" on a known-Kubernetes target, which the dispatch rejects: the
-   * picker shows no value and submit waits for an explicit pick.
-   */
-  get blockDefaultNeedsExplicitChoice(): boolean {
-    return (
-      this.targetKubernetesOnly &&
-      this.projectGCPIdentityDefaultMode === 'block' &&
-      !this.selectedProfileHasPerProfileDefault &&
-      !this.gcpIdentityUserSet
-    );
-  }
-
-  /**
    * Nothing chosen and no applied project default is the outcome, on any
    * target: the picker renders blank (so any pick is a real change) with
    * NO_IDENTITY_MODE_HINT. Submitting with nothing chosen is allowed.
@@ -315,19 +250,7 @@ export class GcpIdentityState implements GcpModeFields {
 
   /** The picker shows no value. */
   get pickerBlank(): boolean {
-    return this.blockDefaultNeedsExplicitChoice || this.noIdentityModeChosen;
-  }
-
-  /** The Kubernetes-specific portion of the hint. */
-  get kubernetesIdentityHintSuffix(): string {
-    if (this.blockDefaultNeedsExplicitChoice) {
-      return (
-        "This project's default GCP identity is Block, which the Kubernetes runtime rejects at " +
-        'dispatch; creating this agent is blocked until you explicitly choose Passthrough' +
-        (this.verifiedGCPServiceAccounts.length > 0 ? ' or Assign Service Account.' : '.')
-      );
-    }
-    return 'Block is not available for a Kubernetes runtime target.';
+    return this.noIdentityModeChosen;
   }
 
   /** The hint should note that a per-profile default outranks the applied project default. */
@@ -336,49 +259,34 @@ export class GcpIdentityState implements GcpModeFields {
       !this.gcpIdentityUserSet &&
       this.projectDefaultIsOutcome &&
       !this.profile &&
-      Object.keys(this.projectGCPIdentityProfileDefaults).length > 0 &&
-      !this.blockDefaultNeedsExplicitChoice
+      Object.keys(this.projectGCPIdentityProfileDefaults).length > 0
     );
   }
 
   /** The picker's hint text. */
   get hint(): string {
-    const base = this.blockDefaultNeedsExplicitChoice
-      ? 'No GCP identity is selected yet.'
-      : this.noIdentityModeChosen
-        ? NO_IDENTITY_MODE_HINT
-        : this.gcpMetadataMode === 'block'
-          ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-          : this.gcpMetadataMode === 'assign'
-            ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-            : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership.";
+    const base = this.noIdentityModeChosen
+      ? NO_IDENTITY_MODE_HINT
+      : this.gcpMetadataMode === 'block'
+        ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+        : this.gcpMetadataMode === 'assign'
+          ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+          : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership.";
     const precedence = this.showProfileDefaultPrecedence
       ? ` ${PROFILE_DEFAULT_PRECEDENCE_HINT}`
       : '';
-    const k8s = this.targetKubernetesOnly ? ` ${this.kubernetesIdentityHintSuffix}` : '';
+    const k8s = this.targetKubernetesOnly ? ` ${KUBERNETES_BLOCK_HINT}` : '';
     return base + precedence + k8s;
   }
 
   /**
-   * A validation error that blocks submit, or null. Nothing chosen is still
-   * submittable (the request omits gcp_identity) unless the project's Block
-   * default would be rejected on a Kubernetes target. The Block check also
-   * guards a displayed Block that normalization has not corrected yet.
+   * A validation error that blocks submit, or null. Nothing chosen is
+   * submittable (the request omits gcp_identity), and every mode is valid on
+   * every target.
    */
   validate(): string | null {
     if (this.gcpMetadataMode === 'assign' && !this.gcpServiceAccountId) {
       return 'Please select a service account for GCP identity assignment.';
-    }
-    if (this.gcpMetadataMode === 'block' && this.targetKubernetesOnly) {
-      return 'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
-    }
-    if (this.blockDefaultNeedsExplicitChoice) {
-      return (
-        "This project's default GCP identity is Block, which the Kubernetes runtime rejects at " +
-        'dispatch. Choose Passthrough' +
-        (this.verifiedGCPServiceAccounts.length > 0 ? ' or Assign Service Account' : '') +
-        ' before creating this agent.'
-      );
     }
     return null;
   }

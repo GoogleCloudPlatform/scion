@@ -1387,7 +1387,7 @@ export class ScionAgentConfigForm extends LitElement {
             this.emitChange();
           }}
         >
-          ${g.targetKubernetesOnly ? '' : html`<sl-option value="block">Block</sl-option>`}
+          <sl-option value="block">Block</sl-option>
           ${g.gcpServiceAccounts.length > 0
             ? html`<sl-option value="assign">Assign Service Account</sl-option>`
             : ''}
