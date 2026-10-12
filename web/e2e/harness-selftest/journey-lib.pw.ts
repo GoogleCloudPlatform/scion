@@ -15,7 +15,8 @@
 /**
  * Unit checks of the async create journey's pure helpers (no hub, no
  * browser): timeout parsing, the absence predicate used by its cleanup,
- * the launch error code parser and the credential guard.
+ * the evidence path redaction, the launch error code parser and the
+ * credential guard.
  */
 
 import { expect, test } from '@playwright/test';
@@ -24,7 +25,12 @@ import {
   assertNoHarnessCredentialEnv,
   harnessCredentialEnvNames,
 } from '../async-create/credential-guard.js';
-import { classifyRead, isGone, parseTimeoutMs } from '../async-create/journey-lib.js';
+import {
+  classifyRead,
+  isGone,
+  parseTimeoutMs,
+  redactPath,
+} from '../async-create/journey-lib.js';
 import { launchErrorCodeOf } from '../async-create/selectors.js';
 
 test('parseTimeoutMs takes a positive number and refuses anything else', () => {
@@ -85,4 +91,22 @@ test('the credential guard refuses a set credential variable, naming it but not 
   expect(message).not.toContain(marker);
   // An empty value counts as unset.
   expect(() => assertNoHarnessCredentialEnv({ ANTHROPIC_API_KEY: '' })).not.toThrow();
+});
+
+test('redactPath keeps ordinary paths and redacts secret-like segments', () => {
+  const id = '3f2c1a9e-7b4d-4c1e-9a2b-0c1d2e3f4a5b';
+  for (const keep of [
+    '/api/v1/agents',
+    `/api/v1/agents/${id}`,
+    `/api/v1/agents/${id}/start`,
+    '/assets/main-BisI-P2R.js',
+    '/auth/test-identity/redeem',
+    '/events',
+  ]) {
+    expect(redactPath(keep), keep).toBe(keep);
+  }
+  expect(redactPath('/invite/tiwc_abc')).toBe('/invite/<redacted>');
+  expect(redactPath('/x/scion_dev_0123abcd/y')).toBe('/x/<redacted>/y');
+  expect(redactPath(`/x/${'a1B2'.repeat(10)}`)).toBe('/x/<redacted>');
+  expect(redactPath('/x/eyJhbGciOiJIUzI1NiJ9')).toBe('/x/<redacted>');
 });

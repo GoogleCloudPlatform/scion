@@ -54,3 +54,44 @@ export function classifyRead(status: number, body: unknown, wrapperKey?: string)
 export function isGone(state: ReadState): boolean {
   return state === 'not_found' || state === 'soft_deleted';
 }
+
+/** Token prefixes that must never reach the evidence. */
+const SECRET_PREFIXES = [
+  'tiwc_',
+  'scion_dev_',
+  'scion_',
+  'ghp_',
+  'gho_',
+  'github_pat_',
+  'sk-',
+  'ya29.',
+  'eyJ',
+];
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A URL path for the evidence: each segment that could carry a secret is
+ * replaced by "<redacted>": a known token prefix, or a long opaque string
+ * (40+ token characters) that is not a UUID. No route the journey uses
+ * puts a secret in the path (codes and tokens travel in bodies or
+ * headers); this is a guard against one appearing.
+ */
+export function redactPath(pathname: string): string {
+  return pathname
+    .split('/')
+    .map((segment) => {
+      let decoded = segment;
+      try {
+        decoded = decodeURIComponent(segment);
+      } catch {
+        // Keep the raw segment.
+      }
+      if (UUID.test(decoded)) return segment;
+      const secretLike =
+        SECRET_PREFIXES.some((prefix) => decoded.startsWith(prefix)) ||
+        (decoded.length >= 40 && /^[A-Za-z0-9_\-.~+=]+$/.test(decoded));
+      return secretLike ? '<redacted>' : segment;
+    })
+    .join('/');
+}
