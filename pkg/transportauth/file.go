@@ -15,7 +15,9 @@
 package transportauth
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,8 +76,7 @@ func DefaultTransportTokenFilePath() string {
 // elevated privileges should supply a stricter reader (sciontool uses its
 // fd-relative, no-follow reader from the root directory).
 func ReadTransportTokenFile(path string) (string, error) {
-	home, _ := os.UserHomeDir()
-	base, rel, err := splitUnderHome(home, path)
+	base, rel, err := splitUnderHome(os.Getenv("HOME"), path)
 	if err != nil {
 		return "", err
 	}
@@ -104,7 +105,9 @@ func ReadTransportTokenFile(path string) (string, error) {
 
 // splitUnderHome splits path into a trusted base directory and the
 // relative path below it that ReadTransportTokenFile walks without
-// following links. When path (cleaned and made absolute) lies strictly
+// following links. path is made absolute and cleaned lexically, so a ".."
+// in it is resolved by name, not through any link it follows (stricter
+// than the kernel's resolution). When the cleaned path lies strictly
 // below home, on a path-separator boundary, base is home; otherwise base
 // is path's own parent directory and rel is its final component.
 func splitUnderHome(home, path string) (base, rel string, err error) {
@@ -263,7 +266,7 @@ func (s *FileSource) Status() FileSourceStatus {
 		FileExpiry:  s.fileExpiry,
 		FileModTime: s.fileModTime,
 	}
-	if s.fileErr != nil && !os.IsNotExist(s.fileErr) {
+	if s.fileErr != nil && !errors.Is(s.fileErr, fs.ErrNotExist) {
 		st.FileError = s.fileErr
 	}
 	return st

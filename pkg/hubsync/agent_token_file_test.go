@@ -15,7 +15,6 @@
 package hubsync
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,10 +28,7 @@ import (
 // hanging it. It returns the token and any warning text.
 func readAgentTokenFileBounded(t *testing.T) (string, string) {
 	t.Helper()
-	var warnings bytes.Buffer
-	orig := agentTokenFileWarnings
-	agentTokenFileWarnings = &warnings
-	t.Cleanup(func() { agentTokenFileWarnings = orig })
+	warnings := captureWarnings(t)
 
 	done := make(chan string, 1)
 	go func() { done <- ReadAgentTokenFile() }()
@@ -149,8 +145,27 @@ func TestReadAgentTokenFile_RefusesLinkedScionDir(t *testing.T) {
 	if err := os.Symlink(other, filepath.Join(home, ".scion")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	if got, _ := readAgentTokenFileBounded(t); got != "" {
+	got, warn := readAgentTokenFileBounded(t)
+	if got != "" {
 		t.Errorf("got %q through a linked .scion directory, want empty", got)
+	}
+	if !strings.Contains(warn, "ignoring agent token file") {
+		t.Errorf("warning %q: a refused token file behind a linked .scion must be reported", warn)
+	}
+}
+
+// TestReadAgentTokenFile_LinkedScionDirWithoutTokenIsQuiet covers a host
+// whose ~/.scion is a link (dotfile manager, moved to another disk) and
+// which has no agent token file: the CLI must stay silent, as before.
+func TestReadAgentTokenFile_LinkedScionDirWithoutTokenIsQuiet(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.Symlink(t.TempDir(), filepath.Join(home, ".scion")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	got, warn := readAgentTokenFileBounded(t)
+	if got != "" || warn != "" {
+		t.Errorf("got %q, warning %q; want both empty", got, warn)
 	}
 }
 

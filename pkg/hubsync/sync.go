@@ -1720,19 +1720,16 @@ func getEndpoint(settings *config.Settings) string {
 // agentTokenFileRel is the agent token file's path relative to $HOME.
 var agentTokenFileRel = filepath.Join(".scion", sciontoolhub.TokenFile)
 
-// agentTokenFileWarnings receives a warning when an agent token file exists
-// but is refused; nil means os.Stderr at the time of the warning. A package
-// var so tests can capture it.
-var agentTokenFileWarnings io.Writer
-
 // ReadAgentTokenFile reads the canonical agent token from
 // $HOME/.scion/scion-token through the shared agent token file reader, the
 // same implementation the agent-side hub client uses. The home directory
 // itself is trusted (it may be reached through a linked prefix); below it,
 // a symbolic link, special file, multi-link file or oversized file is
 // refused. It returns "" when HOME is unset, the file is absent, or the
-// file is refused; a refusal also prints a warning, so a credential file
-// that is present but unusable is not silently ignored.
+// file is refused. A refusal prints a warning (warnf) only when something
+// exists at the token path, so a credential file that is present but
+// unusable is not silently ignored, while a host with no token file (even
+// one whose ~/.scion is a link) stays silent.
 func ReadAgentTokenFile() string {
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -1745,13 +1742,17 @@ func ReadAgentTokenFile() string {
 	// following links.
 	token, err := sciontoolhub.ReadTokenFileUnder(home, agentTokenFileRel)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			w := agentTokenFileWarnings
-			if w == nil {
-				w = os.Stderr
-			}
-			_, _ = fmt.Fprintf(w, "Warning: ignoring agent token file: %v\n", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return ""
 		}
+		// A refusal on the way to the file (for example ~/.scion being a
+		// link) reports ELOOP or ENOTDIR rather than ErrNotExist. Only warn
+		// when something actually exists at the token path; Lstat reads
+		// metadata only and cannot block on a special file.
+		if _, serr := os.Lstat(filepath.Join(home, agentTokenFileRel)); errors.Is(serr, fs.ErrNotExist) {
+			return ""
+		}
+		warnf("ignoring agent token file: %v", err)
 		return ""
 	}
 	return token

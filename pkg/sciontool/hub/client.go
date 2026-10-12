@@ -2140,11 +2140,11 @@ var warnTokenFile = log.Warn
 // to one) and have root read that file's contents back and forward them to
 // the Hub as if they were the agent's bearer token.
 func ReadTokenFile() string {
-	path := TokenFilePath()
-	token, err := readTokenFileGuarded(path)
+	token, err := readTokenFileGuarded(TokenFilePath())
 	if err != nil {
 		if errors.Is(err, dirfd.ErrTooLarge) {
-			warnTokenFile("Ignoring token file %s: %v", path, err)
+			// err already names the path.
+			warnTokenFile("Ignoring token file: %v", err)
 		}
 		return ""
 	}

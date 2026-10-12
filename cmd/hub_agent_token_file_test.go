@@ -73,8 +73,9 @@ func TestReadAgentTokenFile_RefusesLinkAndFIFO(t *testing.T) {
 		require.NoError(t, os.Symlink(other, filepath.Join(home, ".scion", "scion-token")))
 
 		var token string
-		_ = captureStderr(t, func() { token = readAgentTokenFile() })
+		stderr := captureStderr(t, func() { token = readAgentTokenFile() })
 		assert.Equal(t, "", token)
+		assert.Contains(t, stderr, "Warning: ignoring agent token file")
 	})
 
 	t.Run("FIFO", func(t *testing.T) {
@@ -82,14 +83,50 @@ func TestReadAgentTokenFile_RefusesLinkAndFIFO(t *testing.T) {
 		if err := syscall.Mkfifo(filepath.Join(home, ".scion", "scion-token"), 0o600); err != nil {
 			t.Skipf("mkfifo unavailable: %v", err)
 		}
-		done := make(chan string, 1)
-		go func() { done <- readAgentTokenFile() }()
-		select {
-		case token := <-done:
-			assert.Equal(t, "", token)
-		case <-time.After(5 * time.Second):
-			t.Fatal("readAgentTokenFile blocked on a FIFO")
-		}
+		var token string
+		blocked := false
+		stderr := captureStderr(t, func() {
+			done := make(chan string, 1)
+			go func() { done <- readAgentTokenFile() }()
+			select {
+			case token = <-done:
+			case <-time.After(5 * time.Second):
+				blocked = true
+			}
+		})
+		require.False(t, blocked, "readAgentTokenFile blocked on a FIFO")
+		assert.Equal(t, "", token)
+		assert.Contains(t, stderr, "Warning: ignoring agent token file")
+	})
+}
+
+// TestReadAgentTokenFile_LinkedScionDir: with ~/.scion a link, a missing
+// token file stays silent, and a present one is refused with a warning.
+func TestReadAgentTokenFile_LinkedScionDir(t *testing.T) {
+	t.Run("no token file is silent", func(t *testing.T) {
+		home := t.TempDir()
+		clearAgentAuthEnv(t)
+		t.Setenv("HOME", home)
+		require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(home, ".scion")))
+
+		var token string
+		stderr := captureStderr(t, func() { token = readAgentTokenFile() })
+		assert.Equal(t, "", token)
+		assert.Equal(t, "", stderr)
+	})
+
+	t.Run("token file is refused with a warning", func(t *testing.T) {
+		home := t.TempDir()
+		clearAgentAuthEnv(t)
+		t.Setenv("HOME", home)
+		other := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(other, "scion-token"), []byte("other-token"), 0o600))
+		require.NoError(t, os.Symlink(other, filepath.Join(home, ".scion")))
+
+		var token string
+		stderr := captureStderr(t, func() { token = readAgentTokenFile() })
+		assert.Equal(t, "", token)
+		assert.Contains(t, stderr, "Warning: ignoring agent token file")
 	})
 }
 
