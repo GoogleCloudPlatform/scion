@@ -62,11 +62,13 @@ The wizard runs diagnostics against your environment and shows each result as **
 Scion detects the runtimes available on your machine and preselects the best one. Pick from **Docker**, **Podman**, or **Container (Apple Virtualization)**; runtimes that were not detected are shown but disabled.
 
 :::caution[Apple Container needs DNS setup]
-If you select **Container** (Apple Virtualization), the wizard attempts to configure container DNS, which requires `sudo`. If it cannot do so automatically, it shows the exact command to run manually, for example:
+If you select **Container** (Apple Virtualization), agents need a container DNS rule to reach the Hub. The wizard shows the command; run it yourself (it needs `sudo`), and again after each reboot:
 
 ```bash
-sudo container system dns create <hostname> --localhost <ip>
+sudo container system dns create host.containers.internal --localhost 203.0.113.1
 ```
+
+To avoid re-running it, install it as a LaunchDaemon; see [Apple Container DNS](/scion/local/apple-container/#automating-after-reboot).
 :::
 
 ### 4. Image registry

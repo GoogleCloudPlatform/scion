@@ -32,9 +32,9 @@ If the browser does not open (over SSH, or with `SCION_NO_BROWSER` set), open th
 
 :::caution[macOS with Apple container]
 On macOS, Scion picks the Apple `container` runtime first when it is installed (then Podman, then
-Docker). With Apple container, agents can reach the hub only after a one-time container DNS entry
-is created with `sudo`. The wizard's runtime step offers to do it, or shows the command. See
-[Apple Container DNS](/scion/local/apple-container/). Choosing Podman or Docker in the wizard
+Docker). With Apple container, agents can reach the hub only through a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon). The wizard's
+runtime step shows the command; run it yourself. See
+[Apple Container DNS](/scion/local/apple-container/), including how to automate it after reboots. Choosing Podman or Docker in the wizard
 avoids this step.
 :::
 
@@ -86,7 +86,7 @@ same way, or store it on the hub:
 ```bash
 export GITHUB_TOKEN="ghp_..."
 # or
-scion hub secret set --project my-repo GITHUB_TOKEN=ghp_...
+scion hub secret set --project=my-repo GITHUB_TOKEN ghp_...
 ```
 
 ## 4. Start an agent

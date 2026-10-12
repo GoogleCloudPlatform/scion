@@ -79,7 +79,7 @@ Follow the [Installation Guide](https://googlecloudplatform.github.io/scion/gett
 
 ### Initialize your machine and a project
 
-> **Tip:** If you used `scion server start` above, the onboarding wizard handles machine initialization (`scion init --machine`) automatically; you still run `scion init` in each repository. Without the wizard, run `scion server start` after these steps: agents always run through a hub.
+> **Tip:** If you used `scion server start` above, the onboarding wizard handles machine initialization (`scion init --machine`) automatically; you still run `scion init` in each repository. If you set up the machine by hand, still run `scion server start`: agents always run through a hub.
 
 Navigate to your project and create a Scion project (the `.scion` directory that holds agent config):
 

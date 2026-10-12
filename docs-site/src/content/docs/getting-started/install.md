@@ -93,8 +93,8 @@ Scion requires a container runtime to manage agents. You can use Docker, Podman,
 - Ensure the `container` command executes.
 - Start the system services `container system start`.
 - Agents reach the hub from inside their containers. With Docker and Podman this works
-  automatically. With Apple container it needs a one-time container DNS entry, created with
-  `sudo`; the onboarding wizard offers to do it. See [Apple Container DNS](/scion/local/apple-container/).
+  automatically. With Apple container it needs a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon); the onboarding wizard's runtime
+  step shows the command. See [Apple Container DNS](/scion/local/apple-container/).
   Auto-detection picks Apple container first on macOS; if you also have Podman or Docker, you can
   select one of them in the wizard (or in settings, see [Select Runtime](#5-select-runtime)) to skip
   the DNS step.

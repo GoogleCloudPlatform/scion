@@ -5,19 +5,19 @@ description: Set up a GitHub repository as a Hub-managed project and dispatch ag
 
 **What you will learn**: How to create a project from a GitHub repository, configure authentication with a GitHub App or Personal Access Token, and start agents that clone and work on your code — all without a local checkout.
 
-## Local Worktrees vs. Hub Clones
+## Per-agent Clones vs. Worktree-per-agent
 
-Before diving in, it's important to understand the two workspace models Scion offers for git repositories:
+Every agent runs through a Hub, so every git project is a Hub project. The project's workspace sharing mode decides how agents get the code:
 
-| | Local Worktrees | Hub Clones (Git Projects) |
+| | Per-agent clone (default) | Worktree-per-agent (chosen at project creation) |
 | :--- | :--- | :--- |
-| **Where code lives** | On your machine, as a git worktree | Inside the agent container, cloned at startup |
-| **Git credentials** | Uses your local git/SSH config | Requires a GitHub App or `GITHUB_TOKEN` secret on the Hub |
-| **Isolation** | Worktree per agent, shared `.git` | Full clone per agent, completely independent |
-| **Network** | No network needed (local files) | HTTPS clone from GitHub on each start |
-| **Merging work** | Merge worktree branches locally | Agent pushes to remote; merge via Pull Request |
-| **Hub required** | No | Yes |
-| **Best for** | Solo development, fast iteration | Team workflows, remote brokers, CI-like dispatch |
+| **Where code lives** | Inside the agent container, cloned at startup | On the Runtime Broker's host, a worktree per agent over one shared base clone |
+| **Git credentials** | Requires a GitHub App or `GITHUB_TOKEN` (private repositories) | The broker fetches the base clone from the project's clone URL; see [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/) |
+| **Isolation** | Full clone per agent, completely independent | Worktree per agent, shared `.git` in the base clone |
+| **Merging work** | Agent pushes to remote; merge via Pull Request | Agent pushes to remote; merge via Pull Request |
+| **Applies to** | Projects created from a URL, and repositories linked from your machine | Projects created on the Hub with `--workspace-mode worktree-per-agent` (git 2.48+ on the broker) |
+
+Neither mode makes a worktree of your own checkout. Agents imported from a release that ran them without a Hub are the exception; see [Linked git projects](/scion/local/workspace/#linked-git-projects).
 
 **Key takeaway**: When a project is managed by the Hub — whether created from a URL or linked from a local directory — agents use **HTTPS clone-based provisioning** by default. The Hub enforces a consistent workspace strategy across all brokers and users, rather than depending on what a given broker machine happens to have checked out. A project can instead select worktree-per-agent mode, which gives agents a git worktree each over a host-side shared clone (not your own checkout), gated on the broker's git version being 2.48 or later. On a workstation this also applies to the repository you work in; see [Linked git projects](/scion/local/workspace/#linked-git-projects).
 
@@ -135,7 +135,7 @@ If you are using the Personal Access Token method, store your PAT as a project-s
 Store the GitHub PAT as a project-scoped secret so that all agents in this project can authenticate:
 
 ```bash
-scion hub secret set --project acme-backend GITHUB_TOKEN github_pat_xxxxxxxx
+scion hub secret set --project=acme-backend GITHUB_TOKEN github_pat_xxxxxxxx
 ```
 
 Secrets are **write-only** — the value is encrypted and can never be read back via the CLI or API. It is only decrypted at runtime and injected into the agent container as an environment variable.

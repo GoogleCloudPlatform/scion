@@ -13,8 +13,8 @@ When you start an agent, Scion determines its workspace based on the following p
 1.  **Explicit Workspace** (`--workspace` flag):
     If you provide a path via `--workspace`, Scion mounts that directory directly. This works in both Git and non-Git environments.
 
-2.  **Git Worktree** (Git repositories):
-    If you are in a Git repository and do not provide an explicit workspace, Scion uses [Git Worktrees](https://git-scm.com/docs/git-worktree) to give the agent its own isolated working directory and branch. Exception: in a git repository linked to a Hub, new agents get a clone instead; see [Linked git projects](#linked-git-projects).
+2.  **Per-agent clone** (Git repositories with a remote):
+    A repository you use with Scion is linked to a Hub on its first command. Each new agent then clones the repository's remote inside its container, on its own branch; see [Linked git projects](#linked-git-projects). [Git worktrees](https://git-scm.com/docs/git-worktree) are used only for agents imported from before the link and for projects created with the `worktree-per-agent` mode (section 2).
 
 3.  **Project Root / CWD** (Non-Git environments):
     If you are not in a Git repository, Scion mounts the project root (or current directory for global agents) directly.
@@ -61,9 +61,9 @@ scion start my-agent "fix web bugs" --workspace packages/web
 
 ---
 
-## 2. Git Worktrees (Automatic Isolation)
+## 2. Git Worktrees
 
-When working inside a Git repository without an explicit `--workspace`, Scion automatically manages **Git Worktrees** (for a repository linked to a Hub, see [Linked git projects](#linked-git-projects) first). This ensures that each agent has its own isolated checkout of the code, allowing them to work on different branches simultaneously without interfering with your main working directory.
+New agents in a linked repository get a per-agent clone, not a worktree (see [Linked git projects](#linked-git-projects)). Git worktrees are used in two cases: agents imported from a release that ran them without a Hub keep their worktrees at `../.scion_worktrees/<project>/<agent>`, and projects created on the Hub with the `worktree-per-agent` mode get a worktree per agent over a shared base clone on the Runtime Broker. In both cases each agent has its own isolated checkout and branch, so agents can work on different branches at the same time. The rules below describe how those worktrees are set up.
 
 ### Prerequisites
 - Git **2.48.0** or newer is required (for relative path support).
@@ -193,7 +193,7 @@ This is intentional: the Hub enforces a consistent, unambiguous workspace strate
 - **SSH credentials are not used** for workspace provisioning. Even if your machine has SSH keys configured for the repo, agents always clone via HTTPS using `GITHUB_TOKEN`.
 - **A `GITHUB_TOKEN` is required.** Set it as a project or user secret on the Hub, or ensure it is present in your local environment (the env-gather flow will collect it):
   ```bash
-  scion hub secret set --project my-project GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+  scion hub secret set --project=my-project GITHUB_TOKEN ghp_xxxxxxxxxxxx
   ```
 - **The CLI will tell you** when this mode is in effect. When starting an agent via a Hub-linked git project, you will see:
   ```

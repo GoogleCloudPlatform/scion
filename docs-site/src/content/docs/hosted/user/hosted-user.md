@@ -90,7 +90,7 @@ Once a git project is linked to a Hub, agents started via the Hub use **HTTPS cl
 For clone-based provisioning, this means:
 - A `GITHUB_TOKEN` with at least **Contents: Read** access is required. Set it as a secret or ensure it is in your local environment:
   ```bash
-  scion hub secret set --project my-project GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+  scion hub secret set --project=my-project GITHUB_TOKEN ghp_xxxxxxxxxxxx
   ```
 - SSH credentials are not used for workspace provisioning.
 - The CLI will confirm the clone path when starting agents:
@@ -158,7 +158,7 @@ scion hub project create https://github.com/org/my-project.git \
 For private repositories, set a `GITHUB_TOKEN` secret on the project. The token needs at minimum **Contents: Read** permission.
 
 ```bash
-scion hub secret set --project my-project GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+scion hub secret set --project=my-project GITHUB_TOKEN ghp_xxxxxxxxxxxx
 ```
 
 #### Starting Agents Remotely
@@ -178,7 +178,7 @@ The agent's container will clone the repository at startup, create a `scion/<age
 scion hub project create https://github.com/acme/backend.git --name "Acme Backend"
 
 # 2. Set the GitHub token for private repo access
-scion hub secret set --project acme-backend GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+scion hub secret set --project=acme-backend GITHUB_TOKEN ghp_xxxxxxxxxxxx
 
 # 3. Start an agent remotely on the project
 scion start my-agent --project acme-backend "add user authentication"

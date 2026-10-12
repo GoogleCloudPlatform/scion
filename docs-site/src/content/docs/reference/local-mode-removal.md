@@ -43,7 +43,7 @@ agents keep their worktrees.
 | `scion hub disable` | Removed. To stop the local hub, run `scion server stop`. The hidden command fails with guidance. |
 | `hub.enabled`, `hub.local_only` settings | Deprecated and ignored. They are still accepted so existing settings files validate. `scion hub status` notes it when a settings file still sets them. |
 | `scion hub link` before using a repository with the local hub | Not needed. A repository links itself to the local workstation hub on its first command, without a prompt. A remote hub still asks before linking. |
-| `scion delete --no-hub <name>` to finish a failed local cleanup | `scion delete --cleanup-only <name>` (add `--preserve-branch` to keep the branch). |
+| `scion --no-hub delete <name>` to finish a failed local cleanup | `scion delete --cleanup-only <name>` (add `--preserve-branch` to keep the branch). |
 | Hint "To use local-only mode, run: scion hub disable" after hub errors | For the local hub: start it with `scion server start` (check with `scion server status`). For a remote hub: check it with `scion hub status`. |
 | `templates show/delete/clone` silently falling back to the filesystem when the hub fails | The hub error is shown. `--local` is the explicit filesystem view, now also on `scion templates list --local`. |
 | `scion hub unlink` putting a project into local-only mode | `scion hub unlink` now only records that the project is unlinked. Agent commands in that project then refuse with a pointer to `scion hub link`. Agents that already exist keep running on the broker; manage them with `--project <hub-slug>`. |
@@ -93,6 +93,7 @@ command.
    + docs (imported as created, not started)
    + refactor (imported as created, not started; its exited container was removed)
    Running agents were adopted in place by the broker. Other agents were imported as created, not started; start them with 'scion start <name>' (a suspended agent's harness session is not resumed).
+   See https://googlecloudplatform.github.io/scion/reference/local-mode-removal/ for details.
    ```
 
 If you point the CLI at a remote hub instead, the repository is not linked silently: the existing
@@ -161,8 +162,8 @@ Run `scion server restart` after setting the registry; the broker does not start
 
 Agents reach the hub from inside their containers. Docker and Podman are handled automatically.
 On macOS, runtime auto-detection picks Apple `container` first when it is installed (then Podman,
-then Docker). With Apple container, container-to-host DNS needs a one-time `sudo` step; the
-onboarding wizard offers it, or you can choose Podman or Docker instead. See
+then Docker). With Apple container, container-to-host DNS needs a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon); the onboarding
+wizard's runtime step shows the command. You can choose Podman or Docker instead. See
 [Apple Container DNS](/scion/local/apple-container/).
 
 ## Rolling back

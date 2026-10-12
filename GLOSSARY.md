@@ -98,7 +98,7 @@ A workspace sharing mode where one workspace directory is mounted into every age
 _Avoid_: shared mount, plain workspace
 
 **Worktree-per-agent**:
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported on linked git projects (a repository on your machine, linked to a hub) and on Hub-managed git projects; on Kubernetes it requires NFS workspace storage.
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported on Hub-managed git projects created with `worktree-per-agent` (not available for a linked repository, whose new agents get a clone; see "Linked git projects" in the docs); on Kubernetes it requires NFS workspace storage.
 _Avoid_: worktree mode, shared checkout
 
 **Clone-per-agent**:

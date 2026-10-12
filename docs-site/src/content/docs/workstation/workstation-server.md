@@ -34,6 +34,8 @@ When the server is up, `scion server start` asks the Hub whether onboarding is c
 
 **No image registry yet.** The Runtime Broker needs `image_registry` to pull agent images. If it is not set, the Hub and Web Dashboard still start, so the wizard (which sets the registry) is reachable, and the Runtime Broker is skipped with a warning. Set the registry in the wizard or with `scion config set --global image_registry <registry>`, then run `scion server restart` to start the Runtime Broker. (A hosted server still refuses to start without it.)
 
+**No dev-auth banner.** The CLI reaches this server with its development token, by design. The `WARNING: Development authentication enabled` banner is therefore not shown for the local workstation Hub on loopback; every other Hub that uses dev auth still shows it.
+
 **Harness logins from your home directory.** Agents run by the co-located Runtime Broker can use the harness login files you already have in your home directory (for example a Claude or Codex login). Only files declared by the harness configs built into Scion are copied, and only when they resolve to a regular file inside your home directory. A Hub secret with the same name or target always wins. Turn it off with `use_host_credentials: false`; see [Host credential files on a workstation](/scion/local/agent-credentials/#host-credential-files-on-a-workstation).
 
 Because it runs as a background daemon, you can manage its lifecycle using:
@@ -76,7 +78,7 @@ If you are using **Podman** or **Docker** as your container runtime, Scion autom
 
 ### Apple container (macOS)
 
-On macOS, Scion picks the Apple `container` runtime first when it is installed (then Podman, then Docker). Apple container needs a one-time container DNS entry, created with `sudo`, before agents can reach the Hub; the onboarding wizard offers it. See [Apple Container DNS](/scion/local/apple-container/), or choose Podman or Docker instead.
+On macOS, Scion picks the Apple `container` runtime first when it is installed (then Podman, then Docker). Apple container needs a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon) before agents can reach the Hub; the onboarding wizard's runtime step shows the command. See [Apple Container DNS](/scion/local/apple-container/), or choose Podman or Docker instead.
 
 ### Manual Configuration
 

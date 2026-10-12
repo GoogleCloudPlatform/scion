@@ -75,7 +75,7 @@ How a project's workspace is provisioned across its agents. There are four canon
 A workspace sharing mode where one workspace directory is mounted into every agent with no per-agent isolation — the model used for plain (non-git) projects.
 
 ### Worktree-per-agent
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported on linked git projects (a repository on your machine, linked to a hub) and on Hub-managed git projects; requires git 2.48 or later on the broker, and on Kubernetes it requires NFS workspace storage.
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported on Hub-managed git projects created with `worktree-per-agent` (not available for a linked repository; see [Linked git projects](/scion/local/workspace/#linked-git-projects)); requires git 2.48 or later on the broker, and on Kubernetes it requires NFS workspace storage.
 
 ### Clone-per-agent
 A workspace sharing mode where each agent gets its own full git clone of the repository. It is also what a Hub git project resolves to when it has no workspace mode set: only `shared` selects the shared checkout.
