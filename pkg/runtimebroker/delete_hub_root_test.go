@@ -123,6 +123,13 @@ func TestCleanupAbortedLaunch_RemovesStateDirOfHubProjectID(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stateDir, "scion-agent.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	extAgents, err := config.GetGitProjectExternalAgentsDir(dotScion)
+	if err != nil || extAgents == "" {
+		t.Fatalf("GetGitProjectExternalAgentsDir: dir=%q err=%v", extAgents, err)
+	}
+	if markerDir := filepath.Join(extAgents, agentName); markerDir == stateDir {
+		t.Fatalf("test setup: the Hub-ID dir and the marker-root dir are the same: %s", stateDir)
+	}
 	if err := writeLaunchMarker(dotScion, false, agentName, "L1"); err != nil {
 		t.Fatal(err)
 	}
