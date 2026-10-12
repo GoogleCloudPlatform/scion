@@ -110,7 +110,7 @@ func (e *serverNotReadyError) Error() string {
 // mode with the broker enabled.
 func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string, registryCheck func() error) []serverReadyTarget {
 	fs := pflag.NewFlagSet("server-start-ready", pflag.ContinueOnError)
-	fs.ParseErrorsWhitelist.UnknownFlags = true
+	fs.ParseErrorsAllowlist.UnknownFlags = true
 	fs.SetOutput(io.Discard)
 	hosted := fs.Bool("hosted", false, "")
 	production := fs.Bool("production", false, "")
