@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -254,5 +256,89 @@ func TestAgentInfoMissingOrEmptyBehaviorUnchanged(t *testing.T) {
 	}
 	if data, err := os.ReadFile(path); err != nil || len(data) != 0 {
 		t.Errorf("empty file changed: %q, err = %v", data, err)
+	}
+}
+
+func TestMarshalAgentInfoKeepUnknown(t *testing.T) {
+	info := &api.AgentInfo{Name: "a", Phase: "stopped"}
+	plain, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("not a JSON object yields the plain encoding", func(t *testing.T) {
+		for _, orig := range []string{"", "null", "{", "[1]", `"s"`, "{}"} {
+			got, err := marshalAgentInfoKeepUnknown([]byte(orig), info)
+			if err != nil {
+				t.Fatalf("orig %q: error = %v", orig, err)
+			}
+			if !bytes.Equal(got, plain) {
+				t.Errorf("orig %q: got\n%s\nwant\n%s", orig, got, plain)
+			}
+		}
+	})
+
+	t.Run("known keys, any case, are not carried over", func(t *testing.T) {
+		got, err := marshalAgentInfoKeepUnknown([]byte(`{"activity":"x","Activity":"y","RUNID":"r"}`), info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, plain) {
+			t.Errorf("got\n%s\nwant\n%s", got, plain)
+		}
+	})
+
+	t.Run("unknown keys follow the known ones, sorted, values unescaped", func(t *testing.T) {
+		got, err := marshalAgentInfoKeepUnknown([]byte(`{"zeta":"<&>","toolName":"Bash","phase":"running"}`), info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// plain ends with "\n}"; the unknown keys are appended after its
+		// last field, in sorted order.
+		want := string(plain[:len(plain)-2]) + ",\n  \"toolName\": \"Bash\",\n  \"zeta\": \"<&>\"\n}"
+		if string(got) != want {
+			t.Errorf("got\n%s\nwant\n%s", got, want)
+		}
+	})
+}
+
+// TestAgentInfoKnownKeySet pins which agent-info.json keys
+// marshalAgentInfoKeepUnknown treats as known: the JSON name of every
+// exported api.AgentInfo field. A "-" tagged field (VanishedPodReport) and
+// the sciontool-only keys toolName and activitySource are unknown, so they
+// are carried over.
+func TestAgentInfoKnownKeySet(t *testing.T) {
+	typ := reflect.TypeOf(api.AgentInfo{})
+	var want []string
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		tag := f.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		name, _, _ := strings.Cut(tag, ",")
+		if name == "" {
+			name = f.Name
+		}
+		want = append(want, name)
+	}
+	if len(want) == 0 {
+		t.Fatal("api.AgentInfo has no JSON fields")
+	}
+	for _, k := range append(want, "phase", "activity", "runId", "deletedAt") {
+		if !isKnownAgentInfoKey(k) {
+			t.Errorf("isKnownAgentInfoKey(%q) = false, want true", k)
+		}
+	}
+	for _, k := range []string{"VanishedPodReport", "vanishedPodReport", "toolName", "activitySource"} {
+		if isKnownAgentInfoKey(k) {
+			t.Errorf("isKnownAgentInfoKey(%q) = true, want false", k)
+		}
+	}
+	if got := jsonFieldNames(typ); len(got) != len(want) {
+		t.Errorf("jsonFieldNames(api.AgentInfo) has %d names, want %d:\ngot  %v\nwant %v", len(got), len(want), got, want)
 	}
 }
