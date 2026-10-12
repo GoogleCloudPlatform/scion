@@ -514,18 +514,18 @@ func requestedPatchFields(req *hubclient.ReincarnateAgentRequest) []string {
 
 // patchNeedsUpdateError explains a 403 from the hub's patch-flag gate
 // (decision D4): the flags need agent update permission on top of
-// lifecycle. A user access token (UAT, sent as SCION_HUB_TOKEN) can never
-// carry that permission, so only a UAT caller is told to sign in instead;
-// any other caller is told it needs agent.update on the agent. Returns nil
-// for any other error.
+// lifecycle. A user access token (UAT, sent as SCION_HUB_TOKEN) carries
+// that permission only with the agent:update scope, so a UAT caller is told
+// to use a token with that scope or to sign in; any other caller is told it
+// needs agent.update on the agent. Returns nil for any other error.
 func patchNeedsUpdateError(err error, wantPatched []string, cred hubsync.CredentialKind) error {
 	if len(wantPatched) == 0 || !apiclient.IsForbiddenError(err) || !strings.Contains(err.Error(), "agent.update") {
 		return nil
 	}
 	if cred == hubsync.CredentialKindHubToken {
 		return fmt.Errorf("reincarnate patch flags need permission to update the agent, not just to reincarnate it. "+
-			"A user access token (UAT) cannot use patch flags: sign in with 'scion hub auth login' and retry, "+
-			"or reincarnate without the flags: %w", err)
+			"A user access token (UAT) needs the agent:update scope to use patch flags: use a token with that scope, "+
+			"sign in with 'scion hub auth login' and retry, or reincarnate without the flags: %w", err)
 	}
 	return fmt.Errorf("reincarnate patch flags need permission to update the agent (agent.update), not just to reincarnate it. "+
 		"Ask a project admin to grant you agent.update on this agent, or reincarnate without the flags: %w", err)

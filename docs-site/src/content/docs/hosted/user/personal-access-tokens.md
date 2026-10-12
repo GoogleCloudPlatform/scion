@@ -44,8 +44,11 @@ permissions). Available scopes:
 | `agent:delete` | Delete agents |
 | `agent:message` | Send messages to agents |
 | `agent:attach` | Attach to agent sessions (terminal, exec, env, reset-auth) — your own agents and their descendants |
-| `agent:port_access` | Access agent forwarded ports — your own agents and their descendants, plus agents in projects where your role grants `agent.port_access` (project owners and admins) |
-| `agent:manage` | All agent scopes except `agent:attach` and `agent:port_access` (convenience alias) |
+| `agent:port_access` | Access agent forwarded ports and register, delete or clear an agent's exposed ports — your own agents and their descendants, plus agents in projects where your role grants `agent.port_access` (project owners and admins) |
+| `agent:update` | Update an agent's metadata and configuration, report its status, and sync its workspace |
+| `agent:stop_all` | Stop all agents of a project (any boundary that contains it), or of the whole hub (hub-bound tokens only) |
+| `agent:set_message_mode` | Change an agent's message mode, under the same owner rules as a signed-in session |
+| `agent:manage` | All agent scopes except `agent:attach`, `agent:port_access`, `agent:update`, `agent:stop_all` and `agent:set_message_mode` (convenience alias) |
 
 In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
 

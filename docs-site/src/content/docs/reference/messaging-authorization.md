@@ -627,7 +627,7 @@ For more on the permission model, see the
 | Action | `set_message_mode` |
 | Capability Kind | Resource (per-agent) |
 | Description | Change agent message mode |
-| UAT Scope | _(none)_ |
+| UAT Scope | `agent:set_message_mode` |
 | Agent Scopes | `project:agent:set_message_mode` |
 | Default Role | Project owner only (explicitly excluded from project admin) |
 
@@ -636,7 +636,11 @@ This permission is intentionally restricted:
 - **Agent scope** (`project:agent:set_message_mode`) is granted to full-role
   agents only. Full-role agents can change message mode for any agent within
   the same project. Agents with lesser roles cannot hold this scope.
-- **No UAT scope** because bearer tokens cannot unseal agents.
+- **UAT scope** (`agent:set_message_mode`): a user access token changes message
+  mode only with this scope selected, only for an agent inside the token's
+  boundary, and only when its holder may change the mode with a session: the
+  project-admin exclusion and the lineage-owner rule apply to the token too.
+  The scope is not part of `agent:manage`.
 - **Excluded from project admin** because folding mode changes into the admin
   role would let admins unseal `none`-mode agents, breaking the quarantine
   boundary.

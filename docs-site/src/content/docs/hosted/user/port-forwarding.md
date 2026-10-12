@@ -259,8 +259,10 @@ Certain infrastructure and internal control-plane ports are reserved for system 
 ### 3. Authentication & Authorization
 Access to the proxy and port registration APIs requires authentication, verified under the unified permission policy:
 
-* **Managing Ports (Register/Delete)**:
-  * Only the agent container itself (authenticating with its token containing `ScopeAgentPortForward`) or a global **Hub Admin** user is authorized to register or delete exposed ports.
+* **Managing Ports (Register/Delete/Clear)**:
+  * The agent container itself (authenticating with its token containing `ScopeAgentPortForward`) may register or delete its own exposed ports.
+  * A user may register, delete or clear an agent's exposed ports when they hold `agent.port_access` on that agent (the same check as accessing its proxied ports). A [user access token](/scion/hosted/user/personal-access-tokens/) needs the `agent:port_access` scope and a boundary that contains the agent's project.
+  * Only the agent itself opens its port tunnel (`/api/v1/agents/{id}/ports/tunnel`); every user is refused.
 * **Accessing Proxied Ports**:
   * An agent can only access its own port registrations.
   * A user must be authenticated and must hold the **`ActionPortAccess`** (or `ActionRead`) permission for that specific agent. Unauthorized users are blocked with an HTTP `403 Forbidden` response.
