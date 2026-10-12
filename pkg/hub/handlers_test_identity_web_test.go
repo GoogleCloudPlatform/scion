@@ -1074,7 +1074,7 @@ func TestTestIdentityWeb_DeathWithRow(t *testing.T) {
 	t.Run("open event stream closes within one heartbeat", func(t *testing.T) {
 		e := newTIWebEnv(t)
 		e.ws.events = NewChannelEventPublisher()
-		e.ws.sseHeartbeat = 100 * time.Millisecond
+		e.ws.config.SSEHeartbeatInterval = 100 * time.Millisecond
 		fx := e.issue()
 		jar := e.login(fx.Identity.ID)
 		server := httptest.NewServer(e.ws.Handler())
