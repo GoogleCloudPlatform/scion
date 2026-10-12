@@ -39,8 +39,6 @@ import (
 //     create request plus explicit edits), never from the stored
 //     InlineConfig, which older hubs filled with a hub-default copy.
 //
-// How they travel depends on the broker's templateTiers capability:
-//
 // Requester telemetry is on/off only, for every broker: its other fields
 // are dropped with a create warning (warnRequesterTelemetryDropped). Only the
 // delivery channel depends on the broker's templateTiers capability:

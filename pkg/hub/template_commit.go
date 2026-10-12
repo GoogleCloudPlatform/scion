@@ -551,12 +551,18 @@ func templateHasAgentConfigFile(tmpl *store.Template) bool {
 // ensureTemplateAgentConfig returns tmpl.AgentConfig. When the row has no
 // snapshot but its manifest lists an agent config file, it derives the
 // snapshot the way a commit does (deriveTemplateIndex), sets it on tmpl, and
-// persists it with store.SetTemplateAgentConfig, which writes only that
-// column, only while the row still has no snapshot and the content hash and
-// layout read, and leaves Updated as it was; a concurrent commit or metadata
-// edit is never reverted. A file that cannot be read
-// or does not parse yields nil and writes nothing. Calling it again on a row
-// that has its snapshot is a no-op, so it is idempotent.
+// persists it with store.SetTemplateAgentConfig. That writes only the
+// snapshot column, only while the row still has no snapshot and the content
+// hash and layout read, so a concurrent commit is never reverted and no
+// metadata column is touched. It re-sets Updated to the value it read, so a
+// metadata edit landing between that read and the write can see its Updated
+// time (only) rolled back; tightening that is a follow-up.
+//
+// A file that cannot be read or does not parse yields nil and writes
+// nothing. A parse failure or a missing object is remembered and not read
+// again until the content hash changes; a transient read error (cancelled
+// request, timeout, storage error) is retried on the next call. Calling it
+// again on a row that has its snapshot is a no-op, so it is idempotent.
 func (s *Server) ensureTemplateAgentConfig(ctx context.Context, tmpl *store.Template) *api.ScionConfig {
 	if tmpl == nil {
 		return nil
