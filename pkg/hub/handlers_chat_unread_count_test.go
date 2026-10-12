@@ -99,7 +99,7 @@ func TestChatUnreadCount_CallerScopedAndReadGated(t *testing.T) {
 	ctx := context.Background()
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
@@ -156,7 +156,7 @@ func TestChatUnreadCount_NonMemberMentionedByEmail(t *testing.T) {
 	srv, s, alice, bob, proj := setupDemoPolicyTest(t)
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
@@ -213,7 +213,7 @@ func TestChatUnreadCount_DMReadErrorFails(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, proj))
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}

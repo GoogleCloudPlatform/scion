@@ -1839,7 +1839,7 @@ func newTwoServerSQLite(t *testing.T, n int) *twoServerSQLite {
 	// No shared cache and a busy timeout on both files: the two servers
 	// write concurrently through separate connections.
 	hubDSN := "file:" + dir + "/hub.db?_pragma=busy_timeout(10000)"
-	webchatDSN := "file:" + dir + "/webchat.db?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)"
+	webchatDSN := "file:" + dir + "/webchat.db?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_timezone=UTC"
 	newReplica := func() twoServerReplica {
 		st, err := newTestStoreAt(t, hubDSN)
 		require.NoError(t, err)

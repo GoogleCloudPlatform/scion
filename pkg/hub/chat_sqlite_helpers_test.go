@@ -476,7 +476,7 @@ func newTestScheduledRow(key, sender string, fireAt time.Time) *ScheduledChatMes
 func openScheduledStorePair(t *testing.T) ([2]ScheduledMessageStore, string) {
 	t.Helper()
 	path := t.TempDir() + "/webchat.db"
-	dsn := "file:" + path + "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)"
+	dsn := "file:" + path + "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_timezone=UTC"
 	var out [2]ScheduledMessageStore
 	for i := range out {
 		db, err := sql.Open("sqlite", dsn)

@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"fmt"
 	"go/ast"
 	"go/build/constraint"
 	"go/parser"
@@ -226,12 +227,23 @@ func good() {
 	}
 }
 
-// mattnDriverAllowed lists the functions, by file, that may keep using the
-// mattn/go-sqlite3 driver in a file excluded from no_sqlite builds.
+// mattnImportKey is the mattnDriverAllowed key that allows a file to import
+// github.com/mattn/go-sqlite3. "import" is a Go keyword, so it never collides
+// with a function name.
+const mattnImportKey = "import"
+
+// mattnDriverAllowed lists, by file, the functions that may keep opening
+// the mattn/go-sqlite3 driver ("sqlite3") in a file that no_sqlite builds
+// exclude, and (mattnImportKey) the files that may import the package.
+// TestSQLiteOnlyTestsUseProductionDriver fails on an entry that no longer
+// matches any use, so the list cannot go stale.
 var mattnDriverAllowed = map[string]map[string]bool{
 	// The fault injection needs an authorizer hook, which modernc.org/sqlite
 	// does not expose.
-	"webchannel_store_schema_test.go": {"TestSQLiteWebChatStore_TableExistsError_Surfaces": true},
+	"webchannel_store_schema_test.go": {
+		mattnImportKey: true,
+		"TestSQLiteWebChatStore_TableExistsError_Surfaces": true,
+	},
 }
 
 // excludedFromNoSQLite reports whether src carries a //go:build constraint
@@ -288,25 +300,73 @@ func collectConstraintTags(expr constraint.Expr, seen map[string]bool, tags *[]s
 	}
 }
 
+// sqliteOpenPackages maps the import paths whose Open function takes a
+// database/sql driver name as its first argument to their default package
+// names.
+var sqliteOpenPackages = map[string]string{
+	"database/sql":                                 "sql",
+	"entgo.io/ent/dialect/sql":                     "sql",
+	"github.com/GoogleCloudPlatform/scion/pkg/ent": "ent",
+}
+
 // mattnDriverUses returns every use of the mattn/go-sqlite3 driver in files
-// that no_sqlite builds exclude: a blank import of the package, or an
-// openTestMemorySQLite, sql.Open or ent.Open call whose driver argument is
-// the string literal "sqlite3". Files built under no_sqlite are skipped:
-// there modernc.org/sqlite is not linked and mattn is the only driver.
-func mattnDriverUses(files map[string][]byte) ([]string, error) {
+// that no_sqlite builds exclude: an import of the package (blank, named or
+// plain), or an openTestMemorySQLite call or an Open call of database/sql,
+// entgo.io/ent/dialect/sql or pkg/ent (under any import name) whose driver
+// argument is "sqlite3", spelled as a literal or as a string const or var
+// declared in the package or in the enclosing function. Files built under
+// no_sqlite are skipped: there modernc.org/sqlite is not linked and mattn is
+// the only driver. Uses that allowed lists are skipped, and an allowed entry
+// that matches no use is reported as stale.
+//
+// Known blind spot: a driver name computed at run time is not evaluated.
+func mattnDriverUses(files map[string][]byte, allowed map[string]map[string]bool) ([]string, error) {
 	fset := token.NewFileSet()
-	var offenders []string
+	type parsedFile struct {
+		name string
+		file *ast.File
+	}
+	var scoped []parsedFile
+	pkgStrings := map[string]string{} // package-level string consts and vars
 	for name, src := range files {
-		if !excludedFromNoSQLite(src) {
-			continue
-		}
 		f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
 		if err != nil {
 			return nil, err
 		}
+		for _, decl := range f.Decls {
+			collectStringDecls(decl, pkgStrings)
+		}
+		if excludedFromNoSQLite(src) {
+			scoped = append(scoped, parsedFile{name, f})
+		}
+	}
+	used := map[string]map[string]bool{}
+	allow := func(name, key string) bool {
+		base := filepath.Base(name)
+		if !allowed[base][key] {
+			return false
+		}
+		if used[base] == nil {
+			used[base] = map[string]bool{}
+		}
+		used[base][key] = true
+		return true
+	}
+	var offenders []string
+	for _, pf := range scoped {
+		name, f := pf.name, pf.file
+		openPkgs := map[string]bool{} // local names of the sqliteOpenPackages
 		for _, imp := range f.Imports {
-			if imp.Name != nil && imp.Name.Name == "_" && imp.Path.Value == `"github.com/mattn/go-sqlite3"` {
-				offenders = append(offenders, fset.Position(imp.Pos()).String()+": blank import of github.com/mattn/go-sqlite3")
+			path, _ := strconv.Unquote(imp.Path.Value)
+			if path == "github.com/mattn/go-sqlite3" && !allow(name, mattnImportKey) {
+				offenders = append(offenders, fset.Position(imp.Pos()).String()+": import of github.com/mattn/go-sqlite3")
+			}
+			if def, ok := sqliteOpenPackages[path]; ok {
+				local := def
+				if imp.Name != nil {
+					local = imp.Name.Name
+				}
+				openPkgs[local] = true
 			}
 		}
 		for _, decl := range f.Decls {
@@ -314,10 +374,25 @@ func mattnDriverUses(files map[string][]byte) ([]string, error) {
 			if fn, ok := decl.(*ast.FuncDecl); ok {
 				fnName = fn.Name.Name
 			}
-			if mattnDriverAllowed[filepath.Base(name)][fnName] {
-				continue
-			}
+			local := map[string]string{}
+			var hits []string
 			ast.Inspect(decl, func(n ast.Node) bool {
+				switch s := n.(type) {
+				case *ast.DeclStmt:
+					collectStringDecls(s.Decl, local)
+				case *ast.AssignStmt:
+					if s.Tok == token.DEFINE && len(s.Lhs) == len(s.Rhs) {
+						for i, lhs := range s.Lhs {
+							id, ok := lhs.(*ast.Ident)
+							lit, ok2 := s.Rhs[i].(*ast.BasicLit)
+							if ok && ok2 && lit.Kind == token.STRING {
+								if v, err := strconv.Unquote(lit.Value); err == nil {
+									local[id.Name] = v
+								}
+							}
+						}
+					}
+				}
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
@@ -332,7 +407,7 @@ func mattnDriverUses(files map[string][]byte) ([]string, error) {
 					callee, driverArg = fun.Name, 1
 				case *ast.SelectorExpr:
 					pkg, ok := fun.X.(*ast.Ident)
-					if !ok || fun.Sel.Name != "Open" || (pkg.Name != "sql" && pkg.Name != "ent") {
+					if !ok || fun.Sel.Name != "Open" || !openPkgs[pkg.Name] {
 						return true
 					}
 					callee = pkg.Name + ".Open"
@@ -342,17 +417,65 @@ func mattnDriverUses(files map[string][]byte) ([]string, error) {
 				if len(call.Args) <= driverArg {
 					return true
 				}
-				lit, ok := call.Args[driverArg].(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING || lit.Value != `"sqlite3"` {
-					return true
+				var driver string
+				switch a := call.Args[driverArg].(type) {
+				case *ast.BasicLit:
+					if a.Kind == token.STRING {
+						driver, _ = strconv.Unquote(a.Value)
+					}
+				case *ast.Ident:
+					if v, ok := local[a.Name]; ok {
+						driver = v
+					} else {
+						driver = pkgStrings[a.Name]
+					}
 				}
-				offenders = append(offenders, fset.Position(call.Pos()).String()+": "+callee+` with driver "sqlite3"`)
+				if driver == "sqlite3" {
+					hits = append(hits, fset.Position(call.Pos()).String()+": "+callee+` with driver "sqlite3"`)
+				}
 				return true
 			})
+			if len(hits) > 0 && !allow(name, fnName) {
+				offenders = append(offenders, hits...)
+			}
+		}
+	}
+	for file, keys := range allowed {
+		for key := range keys {
+			if !used[file][key] {
+				offenders = append(offenders, fmt.Sprintf("stale mattnDriverAllowed entry %s: %q matches no mattn use; remove it", file, key))
+			}
 		}
 	}
 	sort.Strings(offenders)
 	return offenders, nil
+}
+
+// collectStringDecls records the string-literal constants and variables
+// declared by decl. Constants follow collectStringConsts (including the
+// implicit repetition in const blocks); variables need an explicit value.
+func collectStringDecls(decl ast.Decl, into map[string]string) {
+	collectStringConsts(decl, into)
+	gd, ok := decl.(*ast.GenDecl)
+	if !ok || gd.Tok != token.VAR {
+		return
+	}
+	for _, spec := range gd.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for i, n := range vs.Names {
+			if i >= len(vs.Values) {
+				break
+			}
+			if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				if v, err := strconv.Unquote(lit.Value); err == nil {
+					into[n.Name] = v
+				}
+			}
+		}
+	}
 }
 
 // TestSQLiteOnlyTestsUseProductionDriver keeps pkg/hub test files that
@@ -374,7 +497,7 @@ func TestSQLiteOnlyTestsUseProductionDriver(t *testing.T) {
 		}
 		files[f] = data
 	}
-	offenders, err := mattnDriverUses(files)
+	offenders, err := mattnDriverUses(files, mattnDriverAllowed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,8 +518,15 @@ func TestMattnDriverUsesDetector(t *testing.T) {
 import (
 	"database/sql"
 
+	entsql "entgo.io/ent/dialect/sql"
 	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 )
+
+const mattnDriver = "sqlite3"
+
+var mattnVar = "sqlite3"
 
 func bad(t *testing.T) {
 	_ = openTestMemorySQLite(t, "sqlite3")
@@ -405,18 +535,38 @@ func bad(t *testing.T) {
 		"sqlite3",
 		"file:x.db",
 	)
+	_, _ = entsql.Open("sqlite3", "file:x.db")
+	_, _ = sql.Open(mattnDriver, "file:x.db")
+	_ = openTestMemorySQLite(t, mattnVar)
+	const localDriver = "sqlite3"
+	_, _ = sql.Open(localDriver, "file:x.db")
+	short := "sqlite3"
+	_, _ = sql.Open(short, "file:x.db")
 }
 
 func good(t *testing.T) {
 	// _ = openTestMemorySQLite(t, "sqlite3")
 	_ = openTestMemorySQLite(t, "sqlite")
 	_, _ = sql.Open("sqlite", "file:x.db")
+	_, _ = entsql.Open("sqlite", "file:x.db")
 	_ = NewWebChatStore(nil, "sqlite3")
+	_, _ = other.Open("sqlite3", "file:x.db")
 }
 `
-	const allowed = sqliteOnly + `package hub
+	// A named and a plain import are caught like a blank one.
+	const namedImport = sqliteOnly + `package hub
 
-func TestSQLiteWebChatStore_TableExistsError_Surfaces(t *testing.T) {
+import sqlite3 "github.com/mattn/go-sqlite3"
+`
+	const plainImport = sqliteOnly + `package hub
+
+import "github.com/mattn/go-sqlite3"
+`
+	const allowedFile = sqliteOnly + `package hub
+
+import sqlite3 "github.com/mattn/go-sqlite3"
+
+func allowedFn(t *testing.T) {
 	_ = openTestMemorySQLite(t, "sqlite3")
 }
 
@@ -424,22 +574,49 @@ func other(t *testing.T) {
 	_ = openTestMemorySQLite(t, "sqlite3")
 }
 `
+	allowed := map[string]map[string]bool{
+		"allowed_test.go": {mattnImportKey: true, "allowedFn": true},
+		"stale_test.go":   {"gone": true},
+	}
 	got, err := mattnDriverUses(map[string][]byte{
-		"sqlite_only_test.go":             []byte(sqliteOnly + body),
-		"untagged_test.go":                []byte(body),
-		"shard_only_test.go":              []byte("//go:build !hubshard || hubshard_1\n\n" + body),
-		"webchannel_store_schema_test.go": []byte(allowed),
-	})
+		"sqlite_only_test.go":  []byte(sqliteOnly + body),
+		"named_import_test.go": []byte(namedImport),
+		"plain_import_test.go": []byte(plainImport),
+		"untagged_test.go":     []byte(body),
+		"shard_only_test.go":   []byte("//go:build !hubshard || hubshard_1\n\n" + body),
+		"allowed_test.go":      []byte(allowedFile),
+	}, allowed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 5 {
-		t.Fatalf("want 5 offenders (blank import, helper, sql.Open, multi-line ent.Open in sqlite_only_test.go; other() in the allowlisted file), got %d:\n  %s",
-			len(got), strings.Join(got, "\n  "))
+	want := map[string]int{
+		// import, literal helper, sql.Open, multi-line ent.Open, entsql.Open,
+		// package const, package var, local const, short var decl.
+		"sqlite_only_test.go:":                         9,
+		"named_import_test.go:":                        1,
+		"plain_import_test.go:":                        1,
+		"allowed_test.go:":                             1, // other(); the import and allowedFn are allowed
+		"stale mattnDriverAllowed entry stale_test.go": 1,
 	}
+	gotBy := map[string]int{}
 	for _, o := range got {
-		if !strings.HasPrefix(o, "sqlite_only_test.go:") && !strings.HasPrefix(o, "webchannel_store_schema_test.go:") {
-			t.Errorf("unexpected offender outside the no_sqlite-excluded files: %s", o)
+		matched := false
+		for prefix := range want {
+			if strings.HasPrefix(o, prefix) {
+				gotBy[prefix]++
+				matched = true
+			}
 		}
+		if !matched {
+			t.Errorf("unexpected offender: %s", o)
+		}
+	}
+	for prefix, n := range want {
+		if gotBy[prefix] != n {
+			t.Errorf("%s: want %d offenders, got %d", prefix, n, gotBy[prefix])
+		}
+	}
+	if t.Failed() {
+		t.Logf("offenders:\n  %s", strings.Join(got, "\n  "))
 	}
 }

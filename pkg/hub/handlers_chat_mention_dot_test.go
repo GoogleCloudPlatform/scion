@@ -48,7 +48,7 @@ func setupMentionDotTest(t *testing.T) (*Server, store.Store, WebChatStore, *sto
 		t.Fatal("store does not expose DB()")
 	}
 	db := dbProvider.DB()
-	wcs := NewWebChatStore(db, "sqlite3")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestListThreads_HasUnreadMention_InvisibleProject(t *testing.T) {
 	if !ok {
 		t.Fatal("store does not expose DB()")
 	}
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatal(err)
 	}

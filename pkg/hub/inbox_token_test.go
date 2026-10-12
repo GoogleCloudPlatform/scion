@@ -483,7 +483,7 @@ func wireInboxWebChat(t *testing.T, f *inboxFixture) {
 	t.Helper()
 	dbProvider, ok := f.s.(interface{ DB() *sql.DB })
 	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	f.srv.SetWebChatStore(wcs)
 }
