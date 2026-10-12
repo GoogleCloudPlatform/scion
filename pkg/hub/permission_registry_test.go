@@ -291,7 +291,10 @@ func TestCheckRowsEnforcedOrReserved_NonRouteUseIsNotEvidence(t *testing.T) {
 // selector in pkg/hub, or the permission ID as a string literal in either
 // package. The constant declarations themselves do not count, nor do the
 // role tables in pkg/hub/seed.go (BuiltInRoles and the *PermissionIDs
-// functions): a role listing a permission is a grant, not a check, and
+// functions), nor the test-admin policy classification table
+// (testAdminPermissionPolicy, test_admin_policy.go): a role listing a
+// permission is a grant, and a classification lists every permission,
+// neither is a check, and
 // TestPermissionRegistryRowsEnforcedOrReserved fails any role holding a
 // reserved one. The rest of seed.go is scanned. The registry and
 // applicability tables live in pkg/hub/permissions, which is not scanned.
@@ -352,6 +355,12 @@ func artifactPermissionUses(t *testing.T, constants map[string]string, skipHubFu
 				return false
 			}
 			if vs, ok := n.(*ast.ValueSpec); ok {
+				// The test-admin policy classification lists every
+				// permission ID; a classification is not a check.
+				if !inArtifacts && fileName == "test_admin_policy.go" && len(vs.Names) == 1 && vs.Names[0].Name == "testAdminPermissionPolicy" {
+					skip[vs] = true
+					return false
+				}
 				for i, name := range vs.Names {
 					if _, isConst := constants[name.Name]; isConst && inArtifacts {
 						skip[name] = true
