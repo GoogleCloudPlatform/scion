@@ -353,7 +353,7 @@ A new agent's mode is set once, at creation: the `--message-mode` flag of `scion
 To see modes:
 
 - `scion whoami --full` shows the calling agent's own mode (`messageMode` in `--format json`).
-- `scion conversation get` and `scion conversation participants` show a **MSG MODE** column for each agent participant (`messageMode` in JSON). It shows `-` for users and for agents in another project.
+- `scion conversation get` and `scion conversation participants` show a **MSG MODE** column for agent participants in the conversation's project; for a DM, in the calling agent's project (`messageMode` in JSON). It shows `-` for users, for agents outside that project, and for agents in a DM read by a user.
 - When a send is denied, the CLI error names the reason and both modes, for example `message_denied: Message delivery denied [reason: ..., sender mode: branch, recipient mode: project] (status: 403)`.
 
 ### Piercing

@@ -106,8 +106,8 @@ type ConversationParticipantDetail struct {
 	store.ConversationParticipant
 	// MessageMode is the participant agent's message mode (none, lineage,
 	// branch, project, hub). The hub sets it only for agents in the
-	// conversation's own project; it is empty for users and for agents in
-	// other projects (ptone/scion#4411).
+	// conversation's project (for a DM, the calling agent's project); it is
+	// empty for users and for agents outside that project (ptone/scion#4411).
 	MessageMode string `json:"messageMode,omitempty"`
 }
 

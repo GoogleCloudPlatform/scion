@@ -52,8 +52,8 @@ func (e *APIError) Error() string {
 
 // messageDeniedSuffix returns the server's denial reason and the two
 // message modes for a message_denied error, e.g.
-// " [reason: sender_mode_incompatible, sender mode: branch, recipient
-// mode: project]". The Hub sends these as details on every message_denied
+// " [reason: mode_branch_no_edge, sender mode: branch, recipient mode:
+// branch]". The reason is the Hub's API-safe denial code. The Hub sends these as details on every message_denied
 // response; without them the CLI could only say "Message delivery denied"
 // (ptone/scion#4411). It returns "" for any other error, or when the
 // details carry none of the fields.

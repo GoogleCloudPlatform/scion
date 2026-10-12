@@ -32,14 +32,14 @@ func TestAPIError_MessageDeniedReason(t *testing.T) {
 		{
 			name: "message_denied with full details",
 			err: &APIError{StatusCode: 403, Code: ErrCodeMessageDenied, Message: "Message delivery denied",
-				Details: map[string]interface{}{"reason": "branch_not_parent_child", "senderMode": "branch", "recipientMode": "branch"}},
-			want: "message_denied: Message delivery denied [reason: branch_not_parent_child, sender mode: branch, recipient mode: branch] (status: 403)",
+				Details: map[string]interface{}{"reason": "mode_branch_no_edge", "senderMode": "branch", "recipientMode": "branch"}},
+			want: "message_denied: Message delivery denied [reason: mode_branch_no_edge, sender mode: branch, recipient mode: branch] (status: 403)",
 		},
 		{
 			name: "message_denied with request ID and partial details",
 			err: &APIError{StatusCode: 403, Code: ErrCodeMessageDenied, Message: "Message delivery denied", RequestID: "req-1",
-				Details: map[string]interface{}{"reason": "target_mode_none", "senderMode": ""}},
-			want: "message_denied: Message delivery denied [reason: target_mode_none] (status: 403, request: req-1)",
+				Details: map[string]interface{}{"reason": "mode_none", "senderMode": ""}},
+			want: "message_denied: Message delivery denied [reason: mode_none] (status: 403, request: req-1)",
 		},
 		{
 			name: "message_denied without details",
@@ -75,10 +75,10 @@ func TestParseErrorResponse_MessageDeniedReason(t *testing.T) {
 	rec.Header().Set("Content-Type", "application/json")
 	rec.WriteHeader(http.StatusForbidden)
 	_, _ = rec.WriteString(`{"error":{"code":"message_denied","message":"Message delivery denied",` +
-		`"details":{"reason":"sender_mode_none","senderMode":"none","recipientMode":"project"}}}`)
+		`"details":{"reason":"mode_none_sender","senderMode":"none","recipientMode":"project"}}}`)
 
 	apiErr := ParseErrorResponse(rec.Result())
-	want := "message_denied: Message delivery denied [reason: sender_mode_none, sender mode: none, recipient mode: project] (status: 403)"
+	want := "message_denied: Message delivery denied [reason: mode_none_sender, sender mode: none, recipient mode: project] (status: 403)"
 	if got := apiErr.Error(); got != want {
 		t.Errorf("Error() = %q\nwant      %q", got, want)
 	}

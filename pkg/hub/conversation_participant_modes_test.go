@@ -102,8 +102,8 @@ func TestGetConversation_ParticipantMessageModes(t *testing.T) {
 }
 
 // TestConversationParticipantViews_DirectConversations covers conversations
-// without a project (DMs), where the scope comes from the caller or the
-// agents' shared project.
+// without a project (DMs), where only an agent caller's own project is in
+// scope.
 func TestConversationParticipantViews_DirectConversations(t *testing.T) {
 	srv, s := testServer(t)
 	projA := createModeTestProject(t, s, "proj-a")
@@ -142,15 +142,17 @@ func TestConversationParticipantViews_DirectConversations(t *testing.T) {
 		assert.Equal(t, store.MessageModeLineage, got[agentA2.ID])
 	})
 
-	t.Run("user caller, single agent shown", func(t *testing.T) {
+	t.Run("user caller, DM agent mode hidden", func(t *testing.T) {
+		// A non-agent caller of a projectless conversation gets no
+		// modes: it may not be able to read the agent's project.
 		got := modes(srv.conversationParticipantViews(context.Background(), dm, []store.ConversationParticipant{
 			part("user", "user-1"), part("agent", agentB.ID),
 		}))
-		assert.Equal(t, store.MessageModeProject, got[agentB.ID])
+		assert.Empty(t, got[agentB.ID])
 		assert.Empty(t, got["user-1"])
 	})
 
-	t.Run("no shared project, nothing shown", func(t *testing.T) {
+	t.Run("user caller, agents in two projects, nothing shown", func(t *testing.T) {
 		got := modes(srv.conversationParticipantViews(context.Background(), dm, []store.ConversationParticipant{
 			part("agent", agentA.ID), part("agent", agentB.ID),
 		}))

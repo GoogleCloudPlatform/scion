@@ -28,15 +28,16 @@ import (
 type conversationParticipantView struct {
 	store.ConversationParticipant
 	// MessageMode is set only for an agent participant in the
-	// conversation's own project (see conversationModeProject). It is
-	// empty for users, for agents in other projects, and when the agent
-	// could not be looked up.
+	// conversation's project (for a DM, the calling agent's project; see
+	// conversationModeProject). It is empty for users, for agents in other
+	// projects, and when the agent could not be looked up.
 	MessageMode string `json:"messageMode,omitempty"`
 }
 
 // conversationGetResponse is the body of GET /api/v1/conversations/{id}.
 // It matches conversationResponse on the wire, with participants carrying
-// the message mode of in-project agents.
+// the message mode of agents in the conversation's project (for a DM, the
+// calling agent's project).
 type conversationGetResponse struct {
 	store.Conversation
 	Participants []conversationParticipantView `json:"participants,omitempty"`
@@ -46,28 +47,15 @@ type conversationGetResponse struct {
 // the conversation GET may show, or "" to show none. It is the
 // conversation's project when it has one. A direct (or legacy projectless)
 // conversation has none, so it is the calling agent's project for an agent
-// caller, and otherwise the one project all agent participants share.
-// Agents outside that project never have their mode shown, so the response
-// discloses nothing new about other projects.
-func conversationModeProject(conv *store.Conversation, callerAgentProjectID string, agents map[string]*store.Agent) string {
+// caller, and "" for any other caller: a user is not shown modes from a
+// project it may not be able to read. Agents outside the returned project
+// never have their mode shown, so the response discloses nothing new about
+// other projects.
+func conversationModeProject(conv *store.Conversation, callerAgentProjectID string) string {
 	if conv.ProjectID != nil && *conv.ProjectID != "" {
 		return *conv.ProjectID
 	}
-	if callerAgentProjectID != "" {
-		return callerAgentProjectID
-	}
-	shared := ""
-	for _, a := range agents {
-		if a.ProjectID == "" {
-			return ""
-		}
-		if shared == "" {
-			shared = a.ProjectID
-		} else if shared != a.ProjectID {
-			return ""
-		}
-	}
-	return shared
+	return callerAgentProjectID
 }
 
 // conversationParticipantViews attaches message modes to participants
@@ -86,19 +74,19 @@ func (s *Server) conversationParticipantViews(ctx context.Context, conv *store.C
 		return views
 	}
 
-	agents, err := s.store.GetAgentsByIDs(ctx, agentIDs)
-	if err != nil {
-		slog.DebugContext(ctx, "conversation get: participant message mode lookup failed",
-			"conversation_id", conv.ID, "error", err)
-		return views
-	}
-
 	callerProject := ""
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		callerProject = agentIdent.ProjectID()
 	}
-	project := conversationModeProject(conv, callerProject, agents)
+	project := conversationModeProject(conv, callerProject)
 	if project == "" {
+		return views
+	}
+
+	agents, err := s.store.GetAgentsByIDs(ctx, agentIDs)
+	if err != nil {
+		slog.DebugContext(ctx, "conversation get: participant message mode lookup failed",
+			"conversation_id", conv.ID, "error", err)
 		return views
 	}
 
