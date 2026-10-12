@@ -3958,8 +3958,8 @@ export class ScionPageAdminServerConfig extends LitElement {
                     Passthrough set here applies only to agents on the hub's embedded broker; agents
                     on any other broker get the runtime default: Block, or Passthrough on the
                     Kubernetes runtime. Block set here applies on every runtime, Kubernetes
-                    included. Assign requires a verified
-                    hub-scoped service account and gcpIamCheckMode=enforce.</span
+                    included. Assign requires a verified hub-scoped service account and
+                    gcpIamCheckMode=enforce.</span
                   >
                   ${this.renderFieldValue(
                     'default_gcp_identity_mode',
