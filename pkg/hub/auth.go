@@ -127,10 +127,6 @@ type AuthConfig struct {
 	// AgentRunScope checks the run an agent token was issued for. Nil when
 	// server.auth.agent_run_scope is off: the check is then not run.
 	AgentRunScope *agentRunScopeChecker
-	// LastSeenThrottle limits the credential last_seen_at write of agent
-	// token verification to once per credential per interval. Nil writes
-	// on every verified request.
-	LastSeenThrottle *agentCredentialLastSeenThrottle
 	// TestIdentitiesEnabled mirrors --enable-test-identities. The JWT arm's
 	// per-request user-row block refuses every test-fixture row while it is
 	// false, and an expired one while it is true (testFixtureRejection).

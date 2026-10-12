@@ -19,7 +19,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -79,8 +81,9 @@ func verifyAgentTokenCredential(ctx context.Context, cfg AuthConfig, log *slog.L
 			// Credential found and active.
 			credState.cred = cred
 			ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
-			// Update last_seen_at (fire-and-forget, throttled).
-			cfg.LastSeenThrottle.touch(cfg.CredentialStore, cred.ID)
+			// Update last_seen_at (fire-and-forget, at most once per
+			// agentCredentialLastSeenInterval).
+			touchAgentCredentialLastSeen(ctx, cfg.CredentialStore, cred, time.Now())
 		}
 	}
 
@@ -135,4 +138,39 @@ func writeAgentTokenRefusal(w http.ResponseWriter, refusal agentTokenRefusal) {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"unable to verify credential status", nil)
 	}
+}
+
+// agentCredentialLastSeenDue reports whether a credential last seen at
+// lastSeen (nil: never) is due a last_seen_at write at now.
+func agentCredentialLastSeenDue(lastSeen *time.Time, now time.Time) bool {
+	return lastSeen == nil || now.Sub(*lastSeen) >= agentCredentialLastSeenInterval
+}
+
+// agentCredentialLastSeenSpawnKey is a test seam: a func(func()) under
+// this request context key runs the last_seen_at write instead of a new
+// goroutine, so a test can tell deterministically whether a write was
+// made.
+type agentCredentialLastSeenSpawnKey struct{}
+
+// touchAgentCredentialLastSeen writes cred's last_seen_at in the
+// background when the row read for this request shows it older than the
+// interval. The write is best effort (5s timeout, error ignored) and never
+// affects the request; a failed write leaves the row old, so the next
+// request writes again. Concurrent requests at the interval boundary may
+// each write; that is acceptable.
+func touchAgentCredentialLastSeen(ctx context.Context, creds store.AgentCredentialStore, cred *store.AgentCredential, now time.Time) {
+	if !agentCredentialLastSeenDue(cred.LastSeenAt, now) {
+		return
+	}
+	credID := cred.ID
+	write := func() {
+		bg, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = creds.UpdateAgentCredentialLastSeen(bg, credID, now)
+	}
+	if spawn, ok := ctx.Value(agentCredentialLastSeenSpawnKey{}).(func(func())); ok {
+		spawn(write)
+		return
+	}
+	go write()
 }

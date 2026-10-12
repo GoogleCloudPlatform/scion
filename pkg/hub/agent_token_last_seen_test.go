@@ -21,22 +21,69 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// credLastSeenRecorder records last_seen_at writes and answers them with
+// err; with no err it forwards them to the wrapped store.
+type credLastSeenRecorder struct {
+	store.AgentCredentialStore
+	mu  sync.Mutex
+	err error
+	got []time.Time
+}
+
+func (r *credLastSeenRecorder) UpdateAgentCredentialLastSeen(ctx context.Context, id string, at time.Time) error {
+	r.mu.Lock()
+	r.got = append(r.got, at)
+	err := r.err
+	r.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return r.AgentCredentialStore.UpdateAgentCredentialLastSeen(ctx, id, at)
+}
+
+func (r *credLastSeenRecorder) setErr(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.err = err
+}
+
+func (r *credLastSeenRecorder) writes() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.got)
+}
+
+// TestAgentCredentialLastSeenDue pins the interval on a fixed clock: a
+// credential never seen, or seen at least the interval ago, is due; one
+// seen more recently is not.
+func TestAgentCredentialLastSeenDue(t *testing.T) {
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	at := func(ago time.Duration) *time.Time { v := now.Add(-ago); return &v }
+	assert.True(t, agentCredentialLastSeenDue(nil, now), "never seen")
+	assert.False(t, agentCredentialLastSeenDue(at(0), now), "just seen")
+	assert.False(t, agentCredentialLastSeenDue(at(agentCredentialLastSeenInterval-time.Nanosecond), now), "within the interval")
+	assert.True(t, agentCredentialLastSeenDue(at(agentCredentialLastSeenInterval), now), "the interval has passed")
+	assert.True(t, agentCredentialLastSeenDue(at(time.Hour), now), "long ago")
+}
+
 // lastSeenVerifyFixture is a credential test server whose agent-token
-// verification writes last_seen_at through a recorder, throttled on a
-// fake clock.
+// verification writes last_seen_at through a recorder. Requests carry the
+// spawn seam, so a write runs inline before the response.
 type lastSeenVerifyFixture struct {
-	srv   *Server
-	rec   *credLastSeenRecorder
-	clk   *credLastSeenClock
-	token string
-	jti   string
+	srv    *Server
+	store  store.Store
+	rec    *credLastSeenRecorder
+	token  string
+	credID string
 }
 
 func newLastSeenVerifyFixture(t *testing.T, name string) *lastSeenVerifyFixture {
@@ -48,59 +95,86 @@ func newLastSeenVerifyFixture(t *testing.T, name string) *lastSeenVerifyFixture 
 	require.NoError(t, err)
 	claims, err := srv.agentTokenService.ValidateAgentToken(token)
 	require.NoError(t, err)
-	require.NotNil(t, srv.authConfig.LastSeenThrottle, "the server throttles last_seen_at")
+	cred, err := s.GetAgentCredentialByJTIHash(context.Background(), hashJTI(claims.ID))
+	require.NoError(t, err)
 	rec := &credLastSeenRecorder{AgentCredentialStore: s}
 	srv.authConfig.CredentialStore = rec
-	th, clk := testCredLastSeenThrottle(agentCredentialLastSeenMax)
-	srv.authConfig.LastSeenThrottle = th
-	return &lastSeenVerifyFixture{srv: srv, rec: rec, clk: clk, token: token, jti: claims.ID}
+	return &lastSeenVerifyFixture{srv: srv, store: s, rec: rec, token: token, credID: cred.ID}
 }
 
-// verify sends one agent-token request and requires it authenticated
-// (neither the revoked 401 nor the unevaluated 503).
-func (f *lastSeenVerifyFixture) verify(t *testing.T) {
+// verify sends one agent-token request and returns its status code, which
+// must be neither the revoked 401 nor the unevaluated 503.
+func (f *lastSeenVerifyFixture) verify(t *testing.T) int {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+tid("agent-last-seen-target"), nil)
+	ctx := context.WithValue(context.Background(), agentCredentialLastSeenSpawnKey{}, func(write func()) { write() })
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+tid("agent-last-seen-target"), nil).WithContext(ctx)
 	req.Header.Set("X-Scion-Agent-Token", f.token)
 	rec := httptest.NewRecorder()
 	f.srv.Handler().ServeHTTP(rec, req)
 	require.NotEqual(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
 	require.NotEqual(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	return rec.Code
 }
 
-// TestAgentTokenVerify_LastSeenThrottled: the first verify of a token
-// writes last_seen_at; a second within the interval does not; one after
-// the interval does.
-func TestAgentTokenVerify_LastSeenThrottled(t *testing.T) {
-	f := newLastSeenVerifyFixture(t, "throttled")
-	t0 := f.clk.now()
-
-	f.verify(t)
-	writes := f.rec.writes()
-	require.Len(t, writes, 1)
-	assert.Equal(t, t0, writes[0].at)
-	cred, err := f.srv.store.GetAgentCredentialByJTIHash(context.Background(), hashJTI(f.jti))
+// lastSeen reads the credential row's last_seen_at.
+func (f *lastSeenVerifyFixture) lastSeen(t *testing.T) *time.Time {
+	t.Helper()
+	cred, err := f.store.GetAgentCredentialByID(context.Background(), f.credID)
 	require.NoError(t, err)
-	assert.Equal(t, cred.ID, writes[0].id)
-	require.NotNil(t, cred.LastSeenAt, "the write reached the store")
-	assert.WithinDuration(t, t0, *cred.LastSeenAt, time.Second)
-
-	f.clk.advance(agentCredentialLastSeenInterval / 2)
-	f.verify(t)
-	assert.Len(t, f.rec.writes(), 1, "no write within the interval")
-
-	f.clk.advance(agentCredentialLastSeenInterval / 2)
-	f.verify(t)
-	writes = f.rec.writes()
-	require.Len(t, writes, 2, "a write after the interval")
-	assert.Equal(t, t0.Add(agentCredentialLastSeenInterval), writes[1].at)
+	return cred.LastSeenAt
 }
 
-// TestAgentTokenVerify_LastSeenWriteErrorDoesNotFail: a failed
-// last_seen_at write does not fail the request.
-func TestAgentTokenVerify_LastSeenWriteErrorDoesNotFail(t *testing.T) {
-	f := newLastSeenVerifyFixture(t, "write-error")
-	f.rec.err = errors.New("last_seen write failed for testing")
+// age sets the row's last_seen_at to ago before now, as if that much
+// time had passed since the last write.
+func (f *lastSeenVerifyFixture) age(t *testing.T, ago time.Duration) {
+	t.Helper()
+	require.NoError(t, f.store.UpdateAgentCredentialLastSeen(context.Background(), f.credID, time.Now().Add(-ago)))
+}
+
+// TestAgentTokenVerify_LastSeenOncePerInterval: the first verify writes
+// last_seen_at; a second, with the row seen within the interval, does
+// not; once the row is older than the interval, the next verify writes.
+func TestAgentTokenVerify_LastSeenOncePerInterval(t *testing.T) {
+	f := newLastSeenVerifyFixture(t, "interval")
+	require.Nil(t, f.lastSeen(t), "a new credential was never seen")
+
 	f.verify(t)
-	assert.Len(t, f.rec.writes(), 1, "the write was attempted")
+	require.Equal(t, 1, f.rec.writes(), "the first verify writes")
+	first := f.lastSeen(t)
+	require.NotNil(t, first)
+
+	f.verify(t)
+	assert.Equal(t, 1, f.rec.writes(), "no write within the interval")
+
+	f.age(t, agentCredentialLastSeenInterval/2)
+	f.verify(t)
+	assert.Equal(t, 1, f.rec.writes(), "no write while the row is younger than the interval")
+
+	f.age(t, 2*agentCredentialLastSeenInterval)
+	before := f.lastSeen(t)
+	f.verify(t)
+	assert.Equal(t, 2, f.rec.writes(), "one write once the interval has passed")
+	after := f.lastSeen(t)
+	require.NotNil(t, after)
+	assert.True(t, after.After(*before), "last_seen_at moved forward: %v -> %v", *before, *after)
+}
+
+// TestAgentTokenVerify_LastSeenWriteFailureRetried: a failed write gives
+// the same response, and leaves the row unwritten, so the next request
+// writes again.
+func TestAgentTokenVerify_LastSeenWriteFailureRetried(t *testing.T) {
+	f := newLastSeenVerifyFixture(t, "write-failure")
+	f.rec.setErr(errors.New("last_seen write failed for testing"))
+	failedCode := f.verify(t)
+	require.Equal(t, 1, f.rec.writes(), "the write was attempted")
+	assert.Nil(t, f.lastSeen(t), "the failed write left the row unwritten")
+
+	f.rec.setErr(nil)
+	okCode := f.verify(t)
+	assert.Equal(t, okCode, failedCode, "a failed write does not change the response")
+	assert.Equal(t, 2, f.rec.writes(), "the next request retries the write")
+	assert.NotNil(t, f.lastSeen(t))
+
+	f.verify(t)
+	assert.Equal(t, 2, f.rec.writes(), "no write within the interval after the retry")
 }
