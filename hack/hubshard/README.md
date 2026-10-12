@@ -189,13 +189,27 @@ exists only in that file's shard binary. Under `-tags hubshard,hubshard_K`,
 pass it only to that shard; the other shards' binaries reject it as an
 unknown flag. The default build has every flag.
 
-## Current numbers (N=6)
+## Current numbers (N=6, as of commit 90546a309)
 
-1395 test files, 625,330 lines as the generator counts them. The common set
-is 186 files, 49,569 lines (7.9%), with 119 test functions. Each shard gets
-about 96.0k lines of its own (193-209 files). The default build has 13,714
-tests; the shards run 2,115-2,456 each (shard 1 includes the common
-files' tests).
+1395 test files, 625,431 lines as the generator counts them. The common set
+is 186 files, 49,581 lines (7.9%), with 119 test functions. Each shard gets
+about 96.0k lines of its own (194-207 files). The default build has 13,715
+tests, and each runs exactly once:
+
+| Shard | Own files | Own lines | Tests compiled | Tests run |
+|---|---|---|---|---|
+| 1 | 207 | 95,992 | 2,358 | 2,358 (includes the 119 common) |
+| 2 | 206 | 95,958 | 2,444 | 2,325 |
+| 3 | 201 | 95,958 | 2,203 | 2,084 |
+| 4 | 195 | 95,993 | 2,679 | 2,560 |
+| 5 | 206 | 95,958 | 2,247 | 2,128 |
+| 6 | 194 | 95,991 | 2,379 | 2,260 |
+
+Shards 2-6 compile the common files' 119 tests and skip them. The shard 1
+overlay compile measured 5.86 GiB peak RSS (same 16G form as below, warm
+dependency cache, 415 s at 2 CPUs).
+`go run ./hack/hubshard` and `make hubshard-parity` print the current
+figures.
 
 Measured at N=6 with an earlier assignment (16G form: `ulimit -v 16000000`,
 `GOMAXPROCS=2`, `GOMEMLIMIT=6GiB`, `GOGC=40`, `-p 1`,

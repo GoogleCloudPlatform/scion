@@ -908,6 +908,9 @@ func breakage(an *analysis, files map[string]*fileInfo, assign map[string]int, s
 	for _, n := range names {
 		from := files[n].diskShard
 		for _, to := range sortedKeys(an.uses[n]) {
+			if files[to] == nil {
+				continue // -parity reports a file missing from the overlay
+			}
 			k := files[to].diskShard
 			if k == 0 || k == from {
 				continue

@@ -273,6 +273,16 @@ func (s *sharding) writeOverlay(out string, w io.Writer) error {
 // test file the two module-wide vets covered. It prints a per-shard table.
 func (s *sharding) parity(w io.Writer) error {
 	var problems []string
+	for _, name := range sortedNames(s.files) {
+		if s.genFiles[name] == nil {
+			problems = append(problems, fmt.Sprintf("%s: in the tree but missing from the overlay build", name))
+		}
+	}
+	for _, name := range sortedNames(s.genFiles) {
+		if s.files[name] == nil {
+			problems = append(problems, fmt.Sprintf("%s: in the overlay build but not in the tree", name))
+		}
+	}
 	problems = append(problems, breakage(s.an, s.genFiles, s.assign, s.n)...)
 	problems = append(problems, importBreakage(s.genFiles, s.genImports, s.pkg)...)
 	var b bytes.Buffer
@@ -352,6 +362,9 @@ func (s *sharding) parity(w io.Writer) error {
 			continue
 		}
 		vetted++
+		if s.genFiles[name] == nil {
+			continue // reported above
+		}
 		now := false
 		for k := 1; k <= s.n && !now; k++ {
 			if now, err = vettedBy(name, s.genFiles[name].src, []int{k}); err != nil {
@@ -407,6 +420,9 @@ func (s *sharding) tagPlacement() ([]string, error) {
 	var problems []string
 	for _, name := range sortedNames(s.genFiles) {
 		g := s.genFiles[name]
+		if s.files[name] == nil {
+			continue // reported by parity
+		}
 		for _, cfg := range parityConfigs {
 			ok, err := matchSrc(name, s.files[name].src, cfg.tags)
 			if err != nil {

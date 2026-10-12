@@ -15,10 +15,11 @@
 # Full Test Suite (reporting only), moved out of ci.yml (ptone/scion#2845).
 #
 # It no longer runs on pull_request. It is reporting-only (continue-on-error)
-# and duplicates Build & Test's `make test-fast` plus the pkg/hub SQLite Tests
-# job, yet it accounted for about a third of billed CI minutes when it ran on
-# every PR push. It now runs post-merge on push to main, nightly, and on
-# demand via workflow_dispatch.
+# and duplicates Build & Test's `make test-fast-ci` plus the SQLite Tests
+# (non-hub) job and the pkg/hub shard jobs (which the pkg/hub SQLite Tests
+# check aggregates), yet it accounted for about a third of billed CI
+# minutes when it ran on every PR push. It now runs post-merge on push to
+# main, nightly, and on demand via workflow_dispatch.
 #
 # It lives in its own file, rather than in ci.yml behind
 # `if: github.event_name != 'pull_request'`, so that the nightly schedule

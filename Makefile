@@ -78,17 +78,18 @@ test-fast-ci:
 	@pkgs=$$($(call non_hub_pkgs,no_sqlite)) || exit 1; \
 	go test -tags no_sqlite $$pkgs
 
-# HUB_TEST_GOGC is prefixed to the go test commands that build the pkg/hub
-# test package: the test-hub-sqlite prebuild (go test -c, build only) and
-# the T1 Postgres targets below. In the T1 targets the go test command both
-# builds and runs the tests, so GOGC=25 also applies to the test process
-# there (those selected tests are short). With the default GOGC the pkg/hub
-# test-package compile peaks at about 15 GB RSS
-# (15.4 GB with -tags integration) on a 16 GB GitHub-hosted runner, fills its
-# 3 GB swap, and the runner is shut down mid-step (exit 143,
-# ptone/scion#4083). GOGC=25 cut the peak to about 12 GB with no swap, for
-# about 5% more compile time (3:59 to 4:12 in one measurement). A non-empty
-# GOGC in the environment wins.
+# HUB_TEST_GOGC is prefixed to go test commands that compile large test
+# packages: the test-sqlite-nonhub prebuild (go test -c, build only) and the
+# cmd run in test-store-postgres (there the go test command also runs the
+# tests, so GOGC=25 applies to them too; they are short). The pkg/hub
+# package itself compiles only in shards, through hack/hubshard/shard.sh,
+# which applies the same default (GOGC=25 for its compiles, unless GOGC is
+# set). History: with the default GOGC the whole pkg/hub test-package
+# compile peaked at about 15 GB RSS (15.4 GB with -tags integration) on a
+# 16 GB GitHub-hosted runner, filled its 3 GB swap, and the runner was shut
+# down mid-step (exit 143, ptone/scion#4083); GOGC=25 cut that to about
+# 12 GB for about 5% more compile time. A non-empty GOGC in the environment
+# wins.
 HUB_TEST_GOGC = GOGC=$${GOGC:-25}
 
 # HUB_PKG is the pkg/hub package itself. Its tests are split into build-tag
@@ -195,7 +196,7 @@ vet-hub-shard:
 # internal/fixturegen's tests carry `//go:build !no_sqlite`, so
 # "make test-fast" never compiles them and a schema change that skips the
 # fixture went red only in the non-blocking full suite (ptone/scion#625,
-# ptone/scion#1931). CI runs this in the pkg/hub SQLite Tests job.
+# ptone/scion#1931). CI runs this in the SQLite Tests (non-hub) job.
 test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
 	@go test -count=1 ./internal/fixturegen/...

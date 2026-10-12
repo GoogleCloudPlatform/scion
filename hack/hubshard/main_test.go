@@ -246,15 +246,101 @@ func fixtureSharding(t *testing.T, n int) *sharding {
 	return s
 }
 
+// otherInShard returns a sharded fixture file other than name in name's
+// shard.
+func otherInShard(t *testing.T, s *sharding, name string) string {
+	t.Helper()
+	for _, n := range sortedNames(s.files) {
+		if n != name && !s.an.common[n] && s.assign[n] == s.assign[name] && len(s.files[n].tests) > 0 {
+			return n
+		}
+	}
+	t.Fatalf("fixture: no other file with tests in %s's shard %d", name, s.assign[name])
+	return ""
+}
+
+// inShard returns a fixture file with tests in shard k.
+func inShard(t *testing.T, s *sharding, k int) string {
+	t.Helper()
+	for _, n := range sortedNames(s.files) {
+		if !s.an.common[n] && s.assign[n] == k && len(s.files[n].tests) > 0 {
+			return n
+		}
+	}
+	t.Fatalf("fixture: no file with tests in shard %d", k)
+	return ""
+}
+
+// wantParityErrors runs -parity on the doctored sharding and checks that
+// the error carries every one of want.
+func wantParityErrors(t *testing.T, s *sharding, want ...string) {
+	t.Helper()
+	err := s.parity(io.Discard)
+	if err == nil {
+		t.Fatalf("parity passed, want errors containing %q", want)
+	}
+	for _, w := range want {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("parity error lacks %q:\n%v", w, err)
+		}
+	}
+}
+
 func TestParityCatchesIgnoredClause(t *testing.T) {
 	// A sharded file whose clause go/build does not see compiles in every
-	// shard. Simulate it with the untagged source.
+	// shard. Simulate it with the untagged source: its test then runs in
+	// both shards, and the shard that does not own it runs it without
+	// -skip covering it.
 	s := fixtureSharding(t, 2)
 	s.genFiles["a_test.go"] = s.files["a_test.go"]
-	err := s.parity(io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "a_test.go: assigned to shard") {
-		t.Fatalf("want a tag placement problem for a_test.go, got %v", err)
+	wantParityErrors(t, s,
+		"a_test.go: assigned to shard",
+		"default: TestA (a_test.go) runs in 2 shards, want exactly 1",
+		"-skip pattern skipped=false for TestA (a_test.go)")
+}
+
+func TestParityCatchesDuplicateDeclaration(t *testing.T) {
+	// Two files of one shard declaring the same test would not compile.
+	s := fixtureSharding(t, 2)
+	other := otherInShard(t, s, "a_test.go")
+	g, err := parseFile(other, append(append([]byte(nil), s.genFiles[other].src...), "\nfunc TestA(t *testing.T) {}\n"...))
+	if err != nil {
+		t.Fatal(err)
 	}
+	s.genFiles[other] = g
+	wantParityErrors(t, s, fmt.Sprintf("default: shard %d declares TestA in ", s.assign["a_test.go"]))
+}
+
+func TestParityCatchesTestRunZeroTimes(t *testing.T) {
+	// Marked common without being untagged: -skip drops its test from
+	// every shard but 1, and shard 1 does not compile it.
+	s := fixtureSharding(t, 2)
+	name := inShard(t, s, 2)
+	test := s.files[name].tests[0]
+	s.an.common[name] = true
+	wantParityErrors(t, s,
+		fmt.Sprintf("default: %s (%s) runs in 0 shards, want exactly 1", test, name),
+		name+": common file compiles in shards [2], want all 2")
+}
+
+func TestParityCatchesDroppedFile(t *testing.T) {
+	// A test file missing from the overlay build: its tests run nowhere.
+	s := fixtureSharding(t, 2)
+	delete(s.genFiles, "a_test.go")
+	wantParityErrors(t, s,
+		"a_test.go: in the tree but missing from the overlay build",
+		"default: TestA (a_test.go) runs in 0 shards, want exactly 1")
+}
+
+func TestParityCatchesVetGap(t *testing.T) {
+	// A file the module-wide vets covered that no shard's vet compiles.
+	s := fixtureSharding(t, 2)
+	g, err := parseFile("e_test.go", append([]byte("//go:build never_set\n\n"), s.files["e_test.go"].src...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.genFiles["e_test.go"] = g
+	wantParityErrors(t, s, "vet: e_test.go was vetted by go vet -tags no_sqlite or -tags 'integration volume_test tzcontract', and no shard's vet covers it")
 }
 
 func TestParityCatchesCrossShardUse(t *testing.T) {

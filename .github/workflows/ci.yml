@@ -1248,8 +1248,9 @@ jobs:
   # graph): DOM element count and long-task count at 100 seeded agents,
   # against mocked API responses recorded from the hub's own fixture
   # (web/e2e-perf/budgets; baselines and margins are in budgets.pw.ts). The
-  # hub-side counter budgets (store calls, decisions, response bytes) run in
-  # pkg/hub SQLite Tests (TestPerfBudget_AgentEndpoints). Chromium only, one
+  # hub-side counter budgets (store calls, decisions, response bytes,
+  # TestPerfBudget_AgentEndpoints) run in the pkg/hub shard jobs, which the
+  # pkg/hub SQLite Tests check aggregates. Chromium only, one
   # worker, no Go build. Path-gated on web/ like the chat-mobile suite.
   perf-budgets-web:
     name: Web perf budgets
