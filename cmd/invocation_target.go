@@ -165,7 +165,7 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
 	}
 	ctx, err := config.LoadCLIContext()
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: ignoring the current context: %v\n", err)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: ignoring the current context: %v\n", err)
 		contextWarned = true
 		return
 	}
