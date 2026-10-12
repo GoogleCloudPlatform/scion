@@ -355,8 +355,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 			var secretErr *secretResolutionError
 			if errors.As(err, &secretErr) {
-				// The agent's secrets could not be resolved; nothing was
-				// sent to the broker. Only the fixed message is returned.
+				// The agent's secrets could not be resolved, or its stored
+				// env settings could not be read; nothing was sent to the
+				// broker. Only the fixed message is returned.
 				return nil, &AgentDMError{
 					Code:       ErrCodeUnavailable,
 					Message:    secretErr.Error(),

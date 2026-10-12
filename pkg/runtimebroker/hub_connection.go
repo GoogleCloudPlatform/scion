@@ -105,6 +105,22 @@ type HubConnection struct {
 	// the same set again. Guarded by hc.mu.
 	reinitFailed bool
 
+	// Retry backoff for a credential set whose reinitialize keeps failing
+	// (see retryFailedReinitialize). All guarded by hc.mu.
+	//
+	// reinitFailures counts consecutive failed reinitializes of the
+	// latest requested set, and reinitNextRetry is the earliest time
+	// retryFailedReinitialize requests another retry. Both are reset when
+	// a reinitialize succeeds and when requestReinitialize records a set.
+	// reinitLastErr is the error text of the latest failure.
+	reinitFailures  int
+	reinitNextRetry time.Time
+	reinitLastErr   string
+
+	// now, for tests only, replaces time.Now as the clock for the retry
+	// backoff. nil means time.Now. Set before the connection is used.
+	now func() time.Time
+
 	// closed is set by close, the final stop used when the connection is
 	// removed or the server shuts down. Once set, start and
 	// applyRequestedReinitialize do nothing, so a Start or reinitialize
@@ -368,6 +384,24 @@ func (hc *HubConnection) requestReinitialize(creds *brokercredentials.BrokerCred
 	defer hc.mu.Unlock()
 	hc.reinitCreds = creds
 	hc.reinitGen++
+	// A newly requested set is applied at once, and its failures back
+	// off from the start.
+	hc.resetReinitBackoffLocked()
+}
+
+// resetReinitBackoffLocked clears the retry backoff. The caller holds hc.mu.
+func (hc *HubConnection) resetReinitBackoffLocked() {
+	hc.reinitFailures = 0
+	hc.reinitNextRetry = time.Time{}
+	hc.reinitLastErr = ""
+}
+
+// clock returns the current time from hc.now, or time.Now when it is nil.
+func (hc *HubConnection) clock() time.Time {
+	if hc.now != nil {
+		return hc.now()
+	}
+	return time.Now()
 }
 
 // latestCredentials returns the most recently requested credential set, or
@@ -397,8 +431,9 @@ func (hc *HubConnection) applyRequestedReinitialize(ctx context.Context, server 
 		return false, nil
 	}
 	creds := hc.reinitCreds
-	pending := creds != nil && hc.reinitGen != hc.reinitAppliedGen
-	hc.reinitAppliedGen = hc.reinitGen
+	gen := hc.reinitGen
+	pending := creds != nil && gen != hc.reinitAppliedGen
+	hc.reinitAppliedGen = gen
 	if pending {
 		// Taken up: an earlier failure no longer applies, so a watcher
 		// tick while this reinitialize runs does not queue a retry.
@@ -411,18 +446,101 @@ func (hc *HubConnection) applyRequestedReinitialize(ctx context.Context, server 
 	err = hc.reinitialize(ctx, server, creds)
 	hc.mu.Lock()
 	hc.reinitFailed = err != nil
+	// A set requested while this reinitialize ran reset the backoff and
+	// is applied next, so this result does not count towards it; a
+	// failure is still logged at Error.
+	report := reinitFailureReport{level: slog.LevelError}
+	if hc.reinitGen == gen {
+		report = hc.recordReinitResultLocked(err, hc.clock())
+	}
 	hc.mu.Unlock()
+	report.log(hc.Name, err)
 	return true, err
 }
 
+// reinitFailureReport says how to log a failed reinitialize; see
+// recordReinitResultLocked.
+type reinitFailureReport struct {
+	level    slog.Level
+	failures int
+	retryIn  time.Duration
+	skip     bool // nothing to log
+}
+
+// recordReinitResultLocked updates the retry backoff with the result of
+// a reinitialize of the latest requested set, at time now, and returns
+// how to log it. The caller holds hc.mu.
+//
+// After the n-th consecutive failure the next retry is due
+// reinitRetryDelay(n) later: the credential watcher interval, doubling
+// per failure up to reinitRetryMaxDelay. The first failure of a set is
+// logged at Error, as is a failure whose error differs from the one
+// before. An identical repeat is logged at Debug.
+func (hc *HubConnection) recordReinitResultLocked(err error, now time.Time) reinitFailureReport {
+	if err == nil {
+		hc.resetReinitBackoffLocked()
+		return reinitFailureReport{skip: true}
+	}
+	hc.reinitFailures++
+	delay := reinitRetryDelay(hc.reinitFailures)
+	// The watcher only looks at reinitNextRetry once per tick, and ticks
+	// are not aligned with failures. Making a retry due half a tick
+	// early means it is taken at the nearer tick, so retries are spaced
+	// delay apart rather than one tick more.
+	hc.reinitNextRetry = now.Add(delay - credentialWatchInterval/2)
+
+	report := reinitFailureReport{level: slog.LevelDebug, failures: hc.reinitFailures, retryIn: delay}
+	msg := err.Error()
+	if hc.reinitFailures == 1 || msg != hc.reinitLastErr {
+		report.level = slog.LevelError
+	}
+	hc.reinitLastErr = msg
+	return report
+}
+
+// log writes the report for the reinitialize of connection name that
+// returned err.
+func (r reinitFailureReport) log(name string, err error) {
+	if r.skip || err == nil {
+		return
+	}
+	msg := "Failed to reinitialize hub connection; will retry"
+	if r.level == slog.LevelDebug {
+		msg = "Reinitialize of hub connection failed again; will retry"
+	}
+	attrs := []any{"name", name, "error", err}
+	if r.failures > 0 {
+		attrs = append(attrs, "consecutiveFailures", r.failures, "retryIn", r.retryIn)
+	}
+	slog.Log(context.Background(), r.level, msg, attrs...)
+}
+
+// reinitRetryDelay returns the delay before retrying after the n-th
+// consecutive failed reinitialize (n >= 1): the credential watcher
+// interval, doubled per further failure, at most reinitRetryMaxDelay.
+func reinitRetryDelay(n int) time.Duration {
+	d := credentialWatchInterval
+	for i := 1; i < n && d < reinitRetryMaxDelay; i++ {
+		d *= 2
+	}
+	if d > reinitRetryMaxDelay {
+		d = reinitRetryMaxDelay
+	}
+	return d
+}
+
 // retryFailedReinitialize requests the latest credential set again when
-// its reinitialize failed and no newer set has been requested since, so
-// that a following applyRequestedReinitialize retries it. It reports
-// whether it requested a retry.
+// its reinitialize failed, no newer set has been requested since, and
+// the retry backoff has passed (see recordReinitResultLocked), so that a
+// following applyRequestedReinitialize retries it. It reports whether it
+// requested a retry.
 func (hc *HubConnection) retryFailedReinitialize() bool {
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
 	if hc.closed || !hc.reinitFailed || hc.reinitCreds == nil || hc.reinitGen != hc.reinitAppliedGen {
+		return false
+	}
+	if hc.clock().Before(hc.reinitNextRetry) {
 		return false
 	}
 	hc.reinitGen++

@@ -17,6 +17,7 @@ package schema
 import (
 	"entgo.io/ent"
 	"entgo.io/ent/schema/field"
+	"entgo.io/ent/schema/index"
 	"entgo.io/ent/schema/mixin"
 	"github.com/google/uuid"
 )
@@ -53,5 +54,27 @@ func (FixtureProvenanceMixin) Fields() []ent.Field {
 			Nillable().
 			Immutable().
 			Comment("issued_by of the root test identity; set once at create"),
+	}
+}
+
+// Indexes of the FixtureProvenanceMixin. The test identity purge and the
+// expiry reaper select rows by fixture_root_id (ptone/scion#4240, Phase 3b);
+// fixture_issuer_id is indexed for the per-issuer cleanup that follows.
+func (FixtureProvenanceMixin) Indexes() []ent.Index {
+	return []ent.Index{
+		index.Fields("fixture_root_id"),
+		index.Fields("fixture_issuer_id"),
+	}
+}
+
+// fixtureStampCheck returns the CHECK constraint each stamped table carries:
+// fixture_root_id and fixture_issuer_id are both set or both NULL, so a row
+// never holds a partial stamp. The store refuses a partial stamp before the
+// insert (entadapter.fixtureStampColumns); this is the database backstop.
+// The expression is wrapped in parentheses because Atlas inserts it verbatim
+// (see UserAccessToken.Annotations).
+func fixtureStampCheck(table string) map[string]string {
+	return map[string]string{
+		table + "_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
 	}
 }

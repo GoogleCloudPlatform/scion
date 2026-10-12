@@ -430,8 +430,8 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 		// Design §3.4 Amendment A2.2(b): report capabilities on every heartbeat so the hub's
 		// `scion reincarnate` gate is never stuck on a stale join-time
 		// snapshot for an already-registered broker. The same static set is
-		// sent at registration (StaticCapabilities).
-		Capabilities: StaticCapabilities(defaultRuntime),
+		// sent at registration (StaticCapabilities), plus TemplateTiers below.
+		Capabilities: heartbeatCapabilities(defaultRuntime),
 	}
 	if s.workspaceStorage != nil {
 		heartbeat.WorkspaceStorage = s.workspaceStorage()
@@ -892,4 +892,15 @@ func heartbeatAgentProfile(ag api.AgentInfo, flat bool) string {
 // This can be used when significant state changes occur.
 func (s *HeartbeatService) ForceHeartbeat(ctx context.Context) error {
 	return s.sendHeartbeat(ctx)
+}
+
+// heartbeatCapabilities is the capability set a heartbeat reports: the
+// static set (StaticCapabilities, also sent at registration) plus
+// TemplateTiers, which only the heartbeat and the info endpoint report.
+func heartbeatCapabilities(rt scionrt.Runtime) *hubclient.BrokerCapabilities {
+	c := StaticCapabilities(rt)
+	// This broker applies hub telemetry defaults and policy as separate
+	// tiers (ptone/scion#4218).
+	c.TemplateTiers = true
+	return c
 }

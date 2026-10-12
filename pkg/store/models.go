@@ -1456,6 +1456,37 @@ func (u *User) IsTestFixture() bool {
 	return u != nil && u.Kind == UserKindTestFixture
 }
 
+// ExpiredTestFixtureQuery selects test fixture users by expiry for
+// Store.ListExpiredTestFixtureUsers. A fixture row always has an expiry
+// (the users_test_fixture_expiry_check CHECK), so every selected row has
+// one.
+type ExpiredTestFixtureQuery struct {
+	// ExpiredAtOrBefore keeps rows with expires_at <= ExpiredAtOrBefore.
+	// Required.
+	ExpiredAtOrBefore time.Time
+	// ExpiredAfter, when non-zero, keeps rows with expires_at >
+	// ExpiredAfter.
+	ExpiredAfter time.Time
+	// AfterID, when non-empty, is a keyset cursor: only rows strictly after
+	// (AfterExpiresAt, AfterID) in (expires_at, id) order are returned.
+	AfterExpiresAt time.Time
+	AfterID        string
+	// Limit caps the rows returned when positive.
+	Limit int
+}
+
+// FixtureRootedResources is what Store.ListFixtureRootedResources found for
+// one fixture root: every resource whose stamp names it.
+type FixtureRootedResources struct {
+	// Agents includes soft-deleted agents.
+	Agents    []Agent
+	Schedules []Schedule
+	Groups    []Group
+	Projects  []Project
+	// Truncated is true when a kind had more rows than the limit.
+	Truncated bool
+}
+
 // FixtureProvenance is the creation-time test-identity provenance stamp of
 // an agent, project, schedule or group: the hub test identity at the root
 // of the principal chain that created the row (RootID) and that identity's
@@ -3849,6 +3880,10 @@ const (
 	MembershipLossTriggerSystemScopeChange     MembershipLossTrigger = "system_scope_change"
 	MembershipLossTriggerRestoreCheck          MembershipLossTrigger = "restore_check"
 	MembershipLossTriggerReconcile             MembershipLossTrigger = "reconcile"
+	// MembershipLossTriggerTestIdentityExpiry: a hub test identity
+	// (ptone/scion#4240) passed its expiry, so it is no longer admitted
+	// anywhere and its agents are held until the expiry reaper purges them.
+	MembershipLossTriggerTestIdentityExpiry MembershipLossTrigger = "test_identity_expiry"
 )
 
 // ValidMembershipLossTrigger reports whether t is a recognised trigger.
@@ -3863,7 +3898,8 @@ func ValidMembershipLossTrigger(t MembershipLossTrigger) bool {
 		MembershipLossTriggerBindingExpiry,
 		MembershipLossTriggerSystemScopeChange,
 		MembershipLossTriggerRestoreCheck,
-		MembershipLossTriggerReconcile:
+		MembershipLossTriggerReconcile,
+		MembershipLossTriggerTestIdentityExpiry:
 		return true
 	}
 	return false
