@@ -130,6 +130,13 @@ func mustWrite(t *testing.T, path, content string) {
 // config handed to the runtime.
 func startEnv(t *testing.T, projectScionDir string, mutate func(*api.StartOptions)) runtime.RunConfig {
 	t.Helper()
+	return startEnvCtx(t, context.Background(), projectScionDir, mutate)
+}
+
+// startEnvCtx is startEnv with the given request context (for example one
+// carrying hub agent_defaults).
+func startEnvCtx(t *testing.T, ctx context.Context, projectScionDir string, mutate func(*api.StartOptions)) runtime.RunConfig {
+	t.Helper()
 	var captured runtime.RunConfig
 	mockRT := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
@@ -149,7 +156,7 @@ func startEnv(t *testing.T, projectScionDir string, mutate func(*api.StartOption
 	if mutate != nil {
 		mutate(&opts)
 	}
-	if _, err := NewManager(mockRT).Start(context.Background(), opts); err != nil {
+	if _, err := NewManager(mockRT).Start(ctx, opts); err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
 	return captured
@@ -383,4 +390,44 @@ func TestMergeEnvironmentVolumes(t *testing.T) {
 			t.Errorf("volume %d = %+v, want %+v", i, got[i], want[i])
 		}
 	}
+}
+
+// Hub agent_defaults.resources are not persisted either: the hub sends them
+// on start and restart as well as create (ptone/scion#4561), and Start
+// applies them on every start. A restart whose context carries only the
+// start-wire hub defaults still gets them, a changed hub value applies on
+// the next restart, and broker profile resources still outrank them.
+func TestStart_HubResourcesAppliedPerStart(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+	hubCtx := func(cpu, mem, disk string) context.Context {
+		// The start/restart wire shape: resources only, no limits.
+		return api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{
+			Resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: cpu, Memory: mem}, Disk: disk},
+		})
+	}
+	check := func(label string, rc runtime.RunConfig, wantCPU, wantDisk string) {
+		t.Helper()
+		if rc.Resources == nil {
+			t.Fatalf("%s: resources = nil", label)
+		}
+		if rc.Resources.Limits.CPU != wantCPU {
+			t.Errorf("%s: limits.cpu = %q, want %q from the hub default", label, rc.Resources.Limits.CPU, wantCPU)
+		}
+		if rc.Resources.Disk != wantDisk {
+			t.Errorf("%s: disk = %q, want %q from the hub default", label, rc.Resources.Disk, wantDisk)
+		}
+		if rc.Resources.Limits.Memory != envSettingsV1.profileMemLimit {
+			t.Errorf("%s: limits.memory = %q, want the profile's %q over the hub default", label, rc.Resources.Limits.Memory, envSettingsV1.profileMemLimit)
+		}
+	}
+
+	// Create: the hub defaults ride the provisioning context.
+	check("first start", startEnvCtx(t, hubCtx("7", "8Gi", "20Gi"), project, nil), "7", "20Gi")
+	cfg, raw := persistedEnvAgentConfig(t, project)
+	if cfg.Resources != nil {
+		t.Errorf("hub resources were persisted: %s", raw)
+	}
+
+	check("restart", startEnvCtx(t, hubCtx("7", "8Gi", "20Gi"), project, nil), "7", "20Gi")
+	check("restart after hub change", startEnvCtx(t, hubCtx("5", "8Gi", "30Gi"), project, nil), "5", "30Gi")
 }
