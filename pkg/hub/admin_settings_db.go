@@ -1165,17 +1165,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			// Validate duration strings before conversion (which silently
 			// falls back to zero for invalid values). Invalid durations like
 			// "1hour" would fail at time.ParseDuration during ApplySnapshot.
+			// A value sent in the body was checked by validateDurationSettings;
+			// this catches one carried over from the stored row by the merge.
 			if fedSettings.RefreshInterval != "" {
 				if _, err := time.ParseDuration(fedSettings.RefreshInterval); err != nil {
 					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid refresh_interval %q: %v", fedSettings.RefreshInterval, err), nil)
+						fmt.Sprintf("invalid refresh_interval %q: %v", fedSettings.RefreshInterval, err),
+						map[string]interface{}{"field": "server.federation.refresh_interval"})
 					return
 				}
 			}
 			if fedSettings.DebounceInterval != "" {
 				if _, err := time.ParseDuration(fedSettings.DebounceInterval); err != nil {
 					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid debounce_interval %q: %v", fedSettings.DebounceInterval, err), nil)
+						fmt.Sprintf("invalid debounce_interval %q: %v", fedSettings.DebounceInterval, err),
+						map[string]interface{}{"field": "server.federation.debounce_interval"})
 					return
 				}
 			}
