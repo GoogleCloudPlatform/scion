@@ -232,6 +232,15 @@ func TestApplyServerListenHosts(t *testing.T) {
 			wantBroker: "192.168.1.10",
 		},
 		{
+			name:       "workstation broker host 0.0.0.0 counts as unset",
+			brokerHost: "0.0.0.0",
+			hostSet:    true,
+			host:       "0.0.0.0",
+			hubEnabled: true,
+			wantHub:    "0.0.0.0",
+			wantBroker: "127.0.0.1",
+		},
+		{
 			name:       "workstation without --host keeps explicit broker host",
 			brokerHost: "192.168.1.10",
 			hubEnabled: true,
@@ -253,6 +262,13 @@ func TestApplyServerListenHosts(t *testing.T) {
 			hubEnabled: true,
 			wantHub:    "10.0.0.5",
 			wantBroker: "0.0.0.0",
+		},
+		{
+			name:       "hosted standalone broker without --host uses loopback",
+			hosted:     true,
+			brokerHost: "10.0.0.7",
+			wantHub:    "0.0.0.0",
+			wantBroker: "127.0.0.1",
 		},
 		{
 			name:       "hosted keeps configured broker host",
