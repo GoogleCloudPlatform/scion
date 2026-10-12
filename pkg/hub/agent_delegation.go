@@ -98,7 +98,7 @@ func (s *Server) wireAgentDelegation() {
 		enabled:  func() bool { return s.experimentEnabled(experiments.AgentDelegation) },
 		audience: s.agentDelegationAudience,
 		reservedIdentity: func(email string) bool {
-			return isReservedPlatformIdentity(email, s.platformAuthSA)
+			return s.isTransportIdentity(email)
 		},
 		standing: s.agentStanding,
 		now:      time.Now,
@@ -202,7 +202,7 @@ func (s *Server) authenticateDelegatedAgentCredential(ctx context.Context, token
 	if state.issuer != nil {
 		// A grant whose issuer is a reserved platform identity is refused
 		// and revoked; a failed revocation still refuses.
-		if isReservedPlatformIdentity(state.issuer.Email, s.platformAuthSA) {
+		if s.isTransportIdentity(state.issuer.Email) {
 			s.revokeAgentDelegationGrantBySystem(ctx, grant, revokeReasonReservedIdentity)
 			return nil, errDelegatedCredentialRefused
 		}

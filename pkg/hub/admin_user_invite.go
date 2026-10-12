@@ -80,6 +80,10 @@ func (s *Server) handleAdminUserInvite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "valid email is required", nil)
 		return
 	}
+	if s.proxyDrivers.contains(email) {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, proxyDriverPrincipalUserMessage, nil)
+		return
+	}
 
 	invitedBy := user.ID()
 	var note *string
@@ -188,8 +192,8 @@ func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Reques
 
 	for _, e := range emails {
 		email, err := NormalizeInviteEmail(e.Email)
-		if err != nil {
-			continue // skip invalid emails
+		if err != nil || s.proxyDrivers.contains(email) {
+			continue // skip invalid emails and proxy driver principals
 		}
 
 		// Check if user already exists

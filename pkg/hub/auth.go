@@ -577,7 +577,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// See isReservedPlatformIdentity: every credential-acceptance
 				// point checks this too, including a PAT issued under a
 				// reserved-identity user row.
-				if isReservedPlatformIdentity(scopedUser.Email(), cfg.PlatformAuthSA) {
+				if cfg.isTransportIdentity(scopedUser.Email()) {
 					logCredentialRejected(log, ctx, "reserved_identity", true, scopedUser.CredentialID())
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token", nil)
@@ -673,7 +673,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// identity. Agent, federation, and broker credentials never
 				// reach this arm (see UnifiedAuthMiddleware's earlier steps),
 				// so this cannot deny an agent or broker token.
-				if isReservedPlatformIdentity(claims.Email, cfg.PlatformAuthSA) {
+				if cfg.isTransportIdentity(claims.Email) {
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token", nil)
 					return

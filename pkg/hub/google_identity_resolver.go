@@ -235,11 +235,9 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 	// mints/re-mints a hub token checks this. See SetPlatformAuthSA for how
 	// the two callers of Resolve differ in whether this duplicates an
 	// existing rejection or is the applicable check.
-	if isReservedPlatformIdentity(identity.Email, r.platformAuthSA) {
-		return nil, ErrAccessDenied
-	}
-	// A proxy driver principal never becomes a user (WS2).
-	if r.driverPrincipals.contains(identity.Email) {
+	// The platform service account and the proxy driver principals (WS2)
+	// are transport identities, never users.
+	if r.isTransportIdentity(identity.Email) {
 		return nil, ErrAccessDenied
 	}
 	// The reserved test-identity domain is never provisioned or resolved

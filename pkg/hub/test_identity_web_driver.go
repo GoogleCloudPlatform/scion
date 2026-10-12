@@ -33,7 +33,7 @@ import (
 //     403 driver_principal_has_no_session; a Google identity is refused by
 //     GoogleIdentityResolver.Resolve (ErrAccessDenied, a plain 403), which
 //     both Google paths use (the external-bearer path and the GE exchange).
-//     TestTIWebIAP_DriverRefusalSitesAreTheOnlyIngress keeps it that way;
+//     TestTIWebIAP_TransportIdentityInvariant keeps it that way;
 //   - it may redeem a web-login code (handleTestIdentityRedeem verifies
 //     the assertion itself and records its email as the session's driver,
 //     tiDriver);
@@ -78,6 +78,10 @@ const (
 	// hub with test identities on and no driver principals.
 	testIdentityWebNoDriversLogLine = "test-identity web sessions unavailable: proxy auth mode with no driverPrincipals"
 
+	// proxyDriverPrincipalUserMessage is the message of an admin request
+	// that would create a user for a proxy driver principal.
+	proxyDriverPrincipalUserMessage = "this email is a proxy driver principal (auth.proxy.driverPrincipals) and cannot be a hub user"
+
 	// testIdentityRedeemEmailKeyPrefix starts the redeem rate-limit key of
 	// a verified proxy assertion email, keeping it apart from source IP
 	// keys in the same limiter.
@@ -116,6 +120,35 @@ func (s driverPrincipalSet) contains(email string) bool {
 
 // empty reports whether the set has no entries.
 func (s driverPrincipalSet) empty() bool { return len(s) == 0 }
+
+// Transport identities: the hub's configured platform/transport service
+// account (isReservedPlatformIdentity) and its proxy driver principals.
+// Neither ever becomes, signs in as, or is served as a hub user. Every
+// place that would provision a user, mint or honour a user credential, or
+// keep a user session checks the one predicate of its layer
+// (Server.isTransportIdentity, WebServer.isTransportIdentity,
+// AuthConfig.isTransportIdentity, GoogleIdentityResolver.isTransportIdentity);
+// TestTIWebIAP_TransportIdentityInvariant keeps it that way.
+
+// isTransportIdentity reports whether email is a transport identity of s.
+func (s *Server) isTransportIdentity(email string) bool {
+	return isReservedPlatformIdentity(email, s.platformAuthSA) || s.proxyDrivers.contains(email)
+}
+
+// isTransportIdentity reports whether email is a transport identity of ws.
+func (ws *WebServer) isTransportIdentity(email string) bool {
+	return isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) || ws.proxyDrivers.contains(email)
+}
+
+// isTransportIdentity reports whether email is a transport identity of cfg.
+func (cfg AuthConfig) isTransportIdentity(email string) bool {
+	return isReservedPlatformIdentity(email, cfg.PlatformAuthSA) || cfg.DriverPrincipals.contains(email)
+}
+
+// isTransportIdentity reports whether email is a transport identity of r.
+func (r *GoogleIdentityResolver) isTransportIdentity(email string) bool {
+	return isReservedPlatformIdentity(email, r.platformAuthSA) || r.driverPrincipals.contains(email)
+}
 
 // writeDriverPrincipalRefusal answers a driver principal request that has no
 // test identity web session to carry: 403 driver_principal_has_no_session.

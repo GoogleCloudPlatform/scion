@@ -572,6 +572,91 @@ func TestTIWebIAP_RedeemClientIPThroughTrustedProxy(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, send("203.0.113.1", "limit-1@example.com"))
 	assert.Equal(t, http.StatusTooManyRequests, send("203.0.113.1", "limit-2@example.com"), "same client again")
 	assert.Equal(t, http.StatusForbidden, send("203.0.113.2", "limit-3@example.com"), "another client through the same proxy")
+
+	// N7: IPv6 clients are grouped by /64, as off the proxy.
+	assert.Equal(t, http.StatusForbidden, send("2001:db8:1:2::10", "limit-4@example.com"))
+	assert.Equal(t, http.StatusTooManyRequests, send("2001:db8:1:2::99", "limit-5@example.com"), "same /64")
+	assert.Equal(t, http.StatusForbidden, send("2001:db8:1:3::10", "limit-6@example.com"), "another /64")
+}
+
+// With no trusted proxies (the deployed default: no setting configures
+// them yet), the redeem client IP is the connection's address and
+// X-Forwarded-For is ignored, even from a peer that would otherwise be a
+// proxy.
+func TestTIWebIAP_RedeemClientIPWithoutTrustedProxies(t *testing.T) {
+	e := newTIIAPEnv(t, []string{tiDriverEmail})
+	require.Empty(t, e.srv.config.TrustedProxies)
+	r := e.withAssertion("forwarded@example.com", tiRedeemReq("scion_tiwc_x"))
+	r.headers["X-Forwarded-For"] = "203.0.113.7"
+	r.headers["X-Real-IP"] = "203.0.113.8"
+	assert.Equal(t, http.StatusForbidden, e.doFrom("192.0.2.10:5555", r).Code)
+	a := tiAuditFor(t, e.st, "driver_principal_required")
+	assert.Contains(t, a.AfterSummary, `"client_ip":"192.0.2.10"`)
+	assert.NotContains(t, a.AfterSummary, "203.0.113.")
+}
+
+// R1 (C3 everywhere): a driver principal is a transport identity on every
+// path that refuses the platform service account: it cannot sign in through
+// the login flows, an ordinary session or hub-issued credential it already
+// held stops working, and admins cannot create a user for it.
+func TestTIWebIAP_DriverIsNeverAUserOnOtherPaths(t *testing.T) {
+	const userDriver = "browser-driver@example.com"
+	e := newTIIAPEnv(t, []string{tiDriverEmail, userDriver})
+	ctx := context.Background()
+
+	t.Run("CLI/OAuth login", func(t *testing.T) {
+		for _, email := range []string{userDriver, tiDriverEmail} {
+			rec := httptest.NewRecorder()
+			e.srv.completeOAuthLogin(rec, httptest.NewRequest(http.MethodPost, "/api/v1/auth/cli/token", nil),
+				&OAuthUserInfo{Email: email, DisplayName: "Driver", Provider: "google"})
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", email, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "accessToken", email)
+			tiNoUserRow(t, e.st, email)
+		}
+		rec := httptest.NewRecorder()
+		e.srv.completeOAuthLogin(rec, httptest.NewRequest(http.MethodPost, "/api/v1/auth/cli/token", nil),
+			&OAuthUserInfo{Email: "someone-else@example.com", DisplayName: "Someone", Provider: "google"})
+		assert.Equal(t, http.StatusOK, rec.Code, "another user still signs in: %s", rec.Body.String())
+	})
+
+	// A row and credentials from before the email was listed.
+	pre := &store.User{ID: generateID(), Email: userDriver, Role: "member", Status: "active", Created: time.Now()}
+	require.NoError(t, e.st.CreateUser(ctx, pre))
+
+	t.Run("existing ordinary session", func(t *testing.T) {
+		jar := loginSession(t, e.ws, pre.ID, pre.Email, pre.Role)
+		rec := e.do(tiReq{path: "/projects", cookies: jar, browser: true})
+		assert.NotEqual(t, http.StatusOK, rec.Code, "page: %s", rec.Body.String())
+		assert.True(t, tiWebCleared(rec, webSessionName), "proxyAuth clears the session")
+		rec = e.do(tiReq{path: "/api/v1/auth/me", cookies: jar})
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.True(t, tiWebCleared(rec, webSessionName), "sessionToBearer clears the session")
+		assert.NotContains(t, rec.Body.String(), userDriver)
+	})
+
+	t.Run("hub-issued tokens", func(t *testing.T) {
+		access, refresh, _, err := e.srv.userTokenService.GenerateTokenPair(pre.ID, pre.Email, pre.DisplayName, pre.Role, ClientTypeWeb)
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+		req.Header.Set("Authorization", "Bearer "+access)
+		rec := httptest.NewRecorder()
+		e.srv.Handler().ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "access token: %s", rec.Body.String())
+		rec = doRequestNoAuth(t, e.srv, http.MethodPost, "/api/v1/auth/refresh", AuthRefreshRequest{RefreshToken: refresh})
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "refresh: %s", rec.Body.String())
+	})
+
+	t.Run("admin-initiated creation", func(t *testing.T) {
+		const another = "second-browser-driver@example.com"
+		e2 := newTIIAPEnv(t, []string{another})
+		rec := doRequest(t, e2.srv, http.MethodPost, "/api/v1/admin/allow-list", AllowListAddRequest{Email: another})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "proxy driver principal")
+		rec = doRequest(t, e2.srv, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{Email: another})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "proxy driver principal")
+		tiNoUserRow(t, e2.st, another)
+	})
 }
 
 // --- A4: the driver binding, per consumer ---------------------------------------

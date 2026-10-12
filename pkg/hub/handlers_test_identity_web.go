@@ -864,14 +864,12 @@ func (ws *WebServer) redeemClientIP(r *http.Request) string {
 	return host
 }
 
-// redeemRateKey is the per-IP rate-limit key of a redeem request: the
-// client address of redeemClientIP behind proxy auth, the connection's
-// source address otherwise.
-func (ws *WebServer) redeemRateKey(r *http.Request) string {
-	if ws.proxyMode() && ws.testIdentityHub != nil {
-		return ws.redeemClientIP(r)
-	}
-	return testLoginRateKey(r.RemoteAddr)
+// redeemRateKey is the per-IP rate-limit key of a redeem request whose
+// client address (redeemClientIP) is clientIP: the IP for IPv4 and the /64
+// prefix for IPv6 (testLoginRateKey), so a client cannot spread requests
+// over the addresses of its /64.
+func redeemRateKey(clientIP string) string {
+	return testLoginRateKey(clientIP)
 }
 
 // redeemOriginAllowed reports whether the request's Origin is absent or the
@@ -903,9 +901,9 @@ func (ws *WebServer) redeemOriginAllowed(r *http.Request) bool {
 // redeem: the reason, the code hash prefix (never the code), the client
 // address, and in proxy mode the verified proxy assertion email ("" when
 // there is none). A write failure is logged and does not change the answer.
-func (ws *WebServer) auditTestIdentityRedeemRefusal(r *http.Request, reason, hashPrefix, userID, assertionEmail string) {
+func (ws *WebServer) auditTestIdentityRedeemRefusal(r *http.Request, clientIP, reason, hashPrefix, userID, assertionEmail string) {
 	slog.WarnContext(r.Context(), "test identity web session redeem refused", "reason", reason,
-		"code_hash_prefix", hashPrefix, "client_ip", ws.redeemClientIP(r), "assertion_email", assertionEmail)
+		"code_hash_prefix", hashPrefix, "client_ip", clientIP, "assertion_email", assertionEmail)
 	if ws.store == nil {
 		return
 	}
@@ -919,7 +917,7 @@ func (ws *WebServer) auditTestIdentityRedeemRefusal(r *http.Request, reason, has
 		UserID         string `json:"user_id,omitempty"`
 		ClientIP       string `json:"client_ip"`
 		AssertionEmail string `json:"assertion_email"`
-	}{reason, hashPrefix, userID, ws.redeemClientIP(r), assertionEmail})
+	}{reason, hashPrefix, userID, clientIP, assertionEmail})
 	record := &store.MutationAuditRecord{
 		MutationType:        testIdentityWebSessionRefuseMutation,
 		ActorPrincipalKind:  "system",
@@ -944,6 +942,9 @@ func writeRedeemInvalid(w http.ResponseWriter) {
 // handleTestIdentityRedeem handles POST /auth/test-identity/redeem: it
 // redeems a web-login code for a fresh test identity web session.
 func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Request) {
+	// The client address, read once (behind proxy auth through the hub's
+	// trusted proxies), for the per-IP limit and every audit row.
+	clientIP := ws.redeemClientIP(r)
 	ok, cause := ws.testIdentityWebGate()
 	if !ok {
 		if testIdentityWebProxyCause(cause) && ws.testIdentitiesEnabled() {
@@ -953,7 +954,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 			// identity session this browser carries. The rate limit
 			// runs first, so refusals cannot drive unbounded audit
 			// writes.
-			if !ws.testIdentityRedeemLimiter.Allow(ws.redeemRateKey(r)) {
+			if !ws.testIdentityRedeemLimiter.Allow(redeemRateKey(clientIP)) {
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many redeem requests", nil)
 				return
@@ -966,7 +967,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 				ws.expireTestIdentityMarker(w)
 			}
 			email, _ := ws.verifiedProxyAssertion(r)
-			ws.auditTestIdentityRedeemRefusal(r, cause, "", "", email)
+			ws.auditTestIdentityRedeemRefusal(r, clientIP, cause, "", "", email)
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "test identity web sessions are not available behind proxy auth on this hub",
 				map[string]interface{}{"reason": testIdentityWebReasonUnavailable, "cause": cause})
 			return
@@ -978,7 +979,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
-	if !ws.testIdentityRedeemLimiter.Allow(ws.redeemRateKey(r)) {
+	if !ws.testIdentityRedeemLimiter.Allow(redeemRateKey(clientIP)) {
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many redeem requests", nil)
 		return
@@ -994,7 +995,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 	if ws.proxyMode() {
 		email, problem := ws.verifiedProxyAssertion(r)
 		if problem != "" {
-			ws.auditTestIdentityRedeemRefusal(r, problem, "", "", "")
+			ws.auditTestIdentityRedeemRefusal(r, clientIP, problem, "", "", "")
 			status, code := http.StatusForbidden, ErrCodeForbidden
 			if problem == "driver_assertion_invalid" {
 				status, code = http.StatusUnauthorized, ErrCodeUnauthorized
@@ -1011,7 +1012,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if !ws.proxyDrivers.contains(email) {
-			ws.auditTestIdentityRedeemRefusal(r, "driver_principal_required", "", "", email)
+			ws.auditTestIdentityRedeemRefusal(r, clientIP, "driver_principal_required", "", "", email)
 			w.Header().Set("Cache-Control", "no-store")
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "redeem behind proxy auth needs a driver principal",
 				map[string]interface{}{"reason": "driver_principal_required"})
@@ -1020,7 +1021,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		assertionEmail = email
 	}
 	if !ws.redeemOriginAllowed(r) {
-		ws.auditTestIdentityRedeemRefusal(r, "origin_refused", "", "", assertionEmail)
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "origin_refused", "", "", assertionEmail)
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "cross-origin redeem is not allowed", nil)
 		return
 	}
@@ -1039,7 +1040,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if req.Code == "" {
-		ws.auditTestIdentityRedeemRefusal(r, "malformed_request", "", "", assertionEmail)
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "malformed_request", "", "", assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	}
@@ -1052,15 +1053,15 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 	code, err := ws.store.ConsumeTestIdentityLoginCode(ctx, hash, now)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		ws.auditTestIdentityRedeemRefusal(r, "unknown_code", prefix, "", assertionEmail)
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "unknown_code", prefix, "", assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	case errors.Is(err, store.ErrTestIdentityLoginCodeConsumed):
-		ws.auditTestIdentityRedeemRefusal(r, "code_already_used", prefix, "", assertionEmail)
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "code_already_used", prefix, "", assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	case errors.Is(err, store.ErrTestIdentityLoginCodeExpired):
-		ws.auditTestIdentityRedeemRefusal(r, "code_expired", prefix, "", assertionEmail)
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "code_expired", prefix, "", assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	case err != nil:
@@ -1079,7 +1080,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 	}
 	if err != nil || !testIdentityWebKindAdmitted(row) || row.Status != store.UserStatusActive ||
 		testFixtureRejection(row, ws.testIdentitiesEnabled(), now) != "" {
-		ws.auditTestIdentityRedeemRefusal(r, "identity_not_admitted", prefix, code.UserID, assertionEmail)
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "identity_not_admitted", prefix, code.UserID, assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	}
@@ -1087,7 +1088,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 	remaining := expiry.Sub(now)
 	maxAge := int((remaining + time.Second - 1) / time.Second)
 	if maxAge < 1 {
-		ws.auditTestIdentityRedeemRefusal(r, "identity_not_admitted", prefix, code.UserID, assertionEmail)
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "identity_not_admitted", prefix, code.UserID, assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	}
@@ -1107,7 +1108,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		DriverPrincipal  string `json:"driver_principal"`
 		SessionExpiresAt string `json:"session_expires_at"`
 		ClientIP         string `json:"client_ip"`
-	}{row.ID, code.ID, prefix, driverPrincipalOrNone(assertionEmail), expiry.UTC().Format(time.RFC3339), ws.redeemClientIP(r)})
+	}{row.ID, code.ID, prefix, driverPrincipalOrNone(assertionEmail), expiry.UTC().Format(time.RFC3339), clientIP})
 	record := &store.MutationAuditRecord{
 		MutationType:        testIdentityWebSessionCreateMutation,
 		ActorPrincipalKind:  "system",

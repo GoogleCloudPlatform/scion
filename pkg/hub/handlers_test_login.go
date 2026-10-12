@@ -128,7 +128,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	// or write, so it refuses creating such a user as well as signing in
 	// as an existing one. Other domains, including the one test-login
 	// callers use for their own synthetic users, are unaffected.
-	if isReservedTestIdentityEmail(req.Email) {
+	if isReservedTestIdentityEmail(req.Email) || ws.isTransportIdentity(req.Email) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "test-login cannot sign in as this user", nil)
 		return
 	}

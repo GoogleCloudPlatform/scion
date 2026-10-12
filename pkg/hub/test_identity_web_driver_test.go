@@ -273,6 +273,13 @@ func tiCensus(t *testing.T) (map[string]map[string][]tiCall, *token.FileSet) {
 				if !ok {
 					return true
 				}
+				if id, ok := call.Fun.(*ast.Ident); ok {
+					if out[id.Name] == nil {
+						out[id.Name] = map[string][]tiCall{}
+					}
+					out[id.Name]["-"] = append(out[id.Name]["-"], tiCall{fn: fd.Name.Name, pos: call.Pos()})
+					return true
+				}
 				sel, ok := call.Fun.(*ast.SelectorExpr)
 				if !ok {
 					return true
@@ -302,23 +309,6 @@ func tiExprText(e ast.Expr) string {
 	}
 }
 
-func tiFuncs(calls map[string][]tiCall, recvSuffix string) []string {
-	set := map[string]bool{}
-	for recv, cs := range calls {
-		if strings.HasSuffix(recv, recvSuffix) {
-			for _, c := range cs {
-				set[c.fn] = true
-			}
-		}
-	}
-	out := make([]string, 0, len(set))
-	for f := range set {
-		out = append(out, f)
-	}
-	sort.Strings(out)
-	return out
-}
-
 func tiFirst(calls map[string][]tiCall, recvSuffix, fn string) token.Pos {
 	var first token.Pos
 	for recv, cs := range calls {
@@ -334,56 +324,189 @@ func tiFirst(calls map[string][]tiCall, recvSuffix, fn string) token.Pos {
 	return first
 }
 
-// Advisor recommendation (C3 by construction): the driver refusal sites are
-// the only places in the package where a verified proxy assertion or an
-// external Google identity becomes a user, and each refusal comes before
-// the user lookup or provisioning in its function. A new ingress path makes
-// this test fail until it is given the same refusal and listed here.
-func TestTIWebIAP_DriverRefusalSitesAreTheOnlyIngress(t *testing.T) {
-	census, fset := tiCensus(t)
+// tiPairs returns every call of method name in the package as sorted
+// "function receiver" pairs, whatever the receiver expression.
+func tiPairs(census map[string]map[string][]tiCall, name string) []string {
+	var out []string
+	for recv, cs := range census[name] {
+		for _, c := range cs {
+			out = append(out, c.fn+" "+recv)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
-	// Proxy assertions: verified only at API Step 3a, on the web
-	// fresh-identity path, and by the driver binding / redeem helper,
-	// which never creates a user.
-	assert.Equal(t, []string{"UnifiedAuthMiddleware", "proxyAuthMiddleware", "verifiedProxyAssertion"},
-		tiFuncs(census["Authenticate"], "ProxyAuthenticator"), "every ProxyAuthenticator.Authenticate caller")
-	assert.Equal(t, []string{"handleTestIdentityRedeem", "testIdentityDriverBinding"},
-		tiFuncs(census["verifiedProxyAssertion"], "ws"), "verifiedProxyAssertion feeds only the binding and redeem")
-	// Step 3a: the driver refusal comes after the assertion and before the
-	// provisioner, which nothing else calls.
-	assert.Equal(t, []string{"UnifiedAuthMiddleware"}, tiFuncs(census["ProxyUserProvisioner"], "cfg"), "ProxyUserProvisioner callers")
-	auth, refuse3a, prov := tiFirst(census["Authenticate"], "ProxyAuthenticator", "UnifiedAuthMiddleware"),
-		tiFirst(census["contains"], "cfg.DriverPrincipals", "UnifiedAuthMiddleware"),
-		tiFirst(census["ProxyUserProvisioner"], "cfg", "UnifiedAuthMiddleware")
-	require.NotEqual(t, token.NoPos, refuse3a, "Step 3a has a driver refusal")
-	assert.True(t, auth < refuse3a && refuse3a < prov, "Step 3a: assertion %v, refusal %v, provisioner %v", fset.Position(auth), fset.Position(refuse3a), fset.Position(prov))
-	// Web fresh path: the refusal comes after the assertion and before the
-	// find-or-create.
-	wauth, wrefuse := tiFirst(census["Authenticate"], "ProxyAuthenticator", "proxyAuthMiddleware"),
-		tiFirst(census["contains"], "ws.proxyDrivers", "proxyAuthMiddleware")
-	wlookup := tiFirst(census["GetUserByEmail"], "ws.store", "proxyAuthMiddleware")
-	wcreate := tiFirst(census["CreateUser"], "ws.store", "proxyAuthMiddleware")
-	require.NotEqual(t, token.NoPos, wrefuse, "the web fresh path has a driver refusal")
-	assert.True(t, wauth < wrefuse && wrefuse < wlookup && wrefuse < wcreate, "web fresh path: assertion %v, refusal %v, lookup %v, create %v",
-		fset.Position(wauth), fset.Position(wrefuse), fset.Position(wlookup), fset.Position(wcreate))
-
-	// External Google identities: resolved to a user only through
-	// GoogleIdentityResolver.Resolve, from the external-bearer path and the
-	// GE exchange, and Resolve refuses a driver before anything else.
-	resolveCallers := map[string]bool{}
-	for recv, cs := range census["Resolve"] {
-		if strings.HasSuffix(recv, "GoogleResolver") || strings.HasSuffix(recv, "s.resolver") {
+// tiTransportCheck returns the position of the first transport identity
+// check in fn: a call of an isTransportIdentity predicate or a driver set's
+// contains.
+func tiTransportCheck(census map[string]map[string][]tiCall, fn string) token.Pos {
+	first := token.NoPos
+	consider := func(c tiCall) {
+		if c.fn == fn && (first == token.NoPos || c.pos < first) {
+			first = c.pos
+		}
+	}
+	for _, cs := range census["isTransportIdentity"] {
+		for _, c := range cs {
+			consider(c)
+		}
+	}
+	for recv, cs := range census["contains"] {
+		if strings.HasSuffix(recv, "proxyDrivers") || strings.HasSuffix(recv, "DriverPrincipals") || strings.HasSuffix(recv, "driverPrincipals") {
 			for _, c := range cs {
-				resolveCallers[c.fn] = true
+				consider(c)
 			}
 		}
 	}
-	assert.Equal(t, map[string]bool{"authenticateExternalBearer": true, "Exchange": true}, resolveCallers, "GoogleIdentityResolver.Resolve callers")
-	assert.Equal(t, []string{"Exchange", "ValidateIDToken", "authenticateExternalBearer", "fixtureSessionBearer", "verifyWorkloadToken"},
-		tiFuncs(census["ValidateIDToken"], ""), "every Google ID token verification site (the caching decorator, the driver token and workload delegation never create a user)")
-	rrefuse := tiFirst(census["contains"], "r.driverPrincipals", "Resolve")
+	return first
+}
+
+// The transport identity invariant (WS2 C3, advisor addenda): a transport
+// identity (the platform service account or a proxy driver principal)
+// never becomes, signs in as, or is served as a hub user. The census is
+// anchored on two enumerable syntactic sets of the package, matched on the
+// method name whatever the receiver, so a new site under any name fails
+// this test until it is handled and listed:
+//   - every isReservedPlatformIdentity call is inside one of the unified
+//     isTransportIdentity predicates, so every site that refuses the
+//     platform service account refuses driver principals too;
+//   - every CreateUser call is in a function that runs a transport check
+//     before it, or in a helper whose every caller does, or is the one
+//     listed exemption.
+//
+// It also keeps the ingress lists explicit: proxy assertions are verified
+// only at API Step 3a, on the web fresh path and by the binding/redeem
+// helper; GoogleIdentityResolver.Resolve is the only place an external
+// Google identity becomes a user; each refusal comes before the lookup or
+// provisioning of its function.
+func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
+	census, fset := tiCensus(t)
+
+	// 1. isReservedPlatformIdentity is called only by the predicates.
+	assert.Equal(t, []string{"isTransportIdentity -", "isTransportIdentity -", "isTransportIdentity -", "isTransportIdentity -"},
+		tiPairs(census, "isReservedPlatformIdentity"), "isReservedPlatformIdentity callers")
+
+	// 2. Every CreateUser call site.
+	exempt := map[string]string{
+		"seedDevUser": "seeds the config-fixed dev pseudo-user (DevUserID); no request input reaches it",
+	}
+	// Helpers whose callers carry the check, with every caller listed.
+	helperCallers := map[string][]string{
+		"createPendingUserTx": {"handleAdminUserInvite", "handleProvisionUser"},
+		"provisionNewUser":    {"Resolve"},
+	}
+	creators := map[string]bool{}
+	for _, pair := range tiPairs(census, "CreateUser") {
+		creators[strings.Fields(pair)[0]] = true
+	}
+	assert.Equal(t, map[string]bool{
+		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true, "handleAdminUserInviteBulk": true,
+		"createPendingUserTx": true, "provisionNewUser": true, "provisionUser": true, "handleTestLogin": true,
+		"seedDevUser": true, "proxyAuthMiddleware": true, "handleOAuthCallback": true,
+	}, creators, "every function that calls CreateUser")
+	for fn := range creators {
+		if reason, ok := exempt[fn]; ok {
+			t.Logf("exempt: %s (%s)", fn, reason)
+			continue
+		}
+		create := token.NoPos
+		for _, cs := range census["CreateUser"] {
+			for _, c := range cs {
+				if c.fn == fn && (create == token.NoPos || c.pos < create) {
+					create = c.pos
+				}
+			}
+		}
+		if callers, ok := helperCallers[fn]; ok {
+			got := map[string]bool{}
+			for _, pair := range append(tiPairs(census, fn), tiFuncCalls(census, fn)...) {
+				got[strings.Fields(pair)[0]] = true
+			}
+			want := map[string]bool{}
+			for _, c := range callers {
+				want[c] = true
+			}
+			assert.Equal(t, want, got, "callers of helper %s", fn)
+			for _, caller := range callers {
+				check, call := tiTransportCheck(census, caller), tiFirstCallOf(census, fn, caller)
+				assert.True(t, check != token.NoPos && check < call, "%s checks a transport identity (%v) before calling %s (%v)", caller, fset.Position(check), fn, fset.Position(call))
+			}
+			continue
+		}
+		check := tiTransportCheck(census, fn)
+		assert.True(t, check != token.NoPos && check < create, "%s checks a transport identity (%v) before CreateUser (%v)", fn, fset.Position(check), fset.Position(create))
+	}
+
+	// 3. Proxy assertions.
+	assert.Equal(t, []string{
+		"UnifiedAuthMiddleware cfg.ProxyAuthenticator",
+		"UnifiedAuthMiddleware fedAuth",
+		"proxyAuthMiddleware ws.config.ProxyAuthenticator",
+		"verifiedProxyAssertion ws.config.ProxyAuthenticator",
+	}, tiPairs(census, "Authenticate"), "every Authenticate call")
+	assert.Equal(t, []string{"handleTestIdentityRedeem ws", "handleTestIdentityRedeem ws", "testIdentityDriverBinding ws"},
+		tiPairs(census, "verifiedProxyAssertion"), "verifiedProxyAssertion feeds only the binding and redeem")
+	assert.Equal(t, []string{"UnifiedAuthMiddleware cfg"}, tiPairs(census, "ProxyUserProvisioner"), "ProxyUserProvisioner callers")
+	auth, refuse3a, prov := tiFirst(census["Authenticate"], "cfg.ProxyAuthenticator", "UnifiedAuthMiddleware"),
+		tiFirst(census["contains"], "cfg.DriverPrincipals", "UnifiedAuthMiddleware"),
+		tiFirst(census["ProxyUserProvisioner"], "cfg", "UnifiedAuthMiddleware")
+	assert.True(t, refuse3a != token.NoPos && auth < refuse3a && refuse3a < prov, "Step 3a: assertion %v, refusal %v, provisioner %v",
+		fset.Position(auth), fset.Position(refuse3a), fset.Position(prov))
+	wauth, wrefuse := tiFirst(census["Authenticate"], "ws.config.ProxyAuthenticator", "proxyAuthMiddleware"),
+		tiFirst(census["contains"], "ws.proxyDrivers", "proxyAuthMiddleware")
+	wlookup := tiFirst(census["GetUserByEmail"], "ws.store", "proxyAuthMiddleware")
+	assert.True(t, wrefuse != token.NoPos && wauth < wrefuse && wrefuse < wlookup, "web fresh path: assertion %v, refusal %v, lookup %v",
+		fset.Position(wauth), fset.Position(wrefuse), fset.Position(wlookup))
+
+	// 4. External Google identities: Resolve is the only provisioning
+	// ingress (every .Resolve call in the package is listed; only the two
+	// GoogleIdentityResolver calls resolve users), and it refuses a
+	// transport identity before its first lookup.
+	assert.Equal(t, []string{
+		"Exchange s.resolver",
+		"agentPTYPath rt.router",
+		"authenticateExternalBearer cfg.GoogleResolver",
+		"brokerPTYPath rt.router",
+		"cleanupNFSSharedDirTree runtime.NewNFSBackend()",
+		"resolveAsNeededForKeys d.secretBackend",
+		"resolveNFSSharedDirPath runtime.NewNFSBackend()",
+		"resolveOutboundRouting messaging",
+		"resolveSecrets d.secretBackend",
+	}, tiPairs(census, "Resolve"), "every Resolve call (the GoogleIdentityResolver ones: Exchange, authenticateExternalBearer)")
+	assert.Equal(t, []string{
+		"Exchange s.validator",
+		"ValidateIDToken c.base",
+		"authenticateExternalBearer cfg.GoogleValidator",
+		"fixtureSessionBearer ws.driverTokenValidator",
+		"verifyWorkloadToken a.validator",
+	}, tiPairs(census, "ValidateIDToken"), "every Google ID token verification (the cache decorator, the driver token and workload delegation never create a user)")
+	rrefuse := tiFirst(census["isTransportIdentity"], "r", "Resolve")
 	rfirst := tiFirst(census["GetExternalIdentity"], "r.extIDs", "Resolve")
-	require.NotEqual(t, token.NoPos, rrefuse, "Resolve has a driver refusal")
-	require.NotEqual(t, token.NoPos, rfirst)
-	assert.True(t, rrefuse < rfirst, "Resolve refuses a driver (%v) before its first lookup (%v)", fset.Position(rrefuse), fset.Position(rfirst))
+	assert.True(t, rrefuse != token.NoPos && rfirst != token.NoPos && rrefuse < rfirst, "Resolve refuses a transport identity (%v) before its first lookup (%v)",
+		fset.Position(rrefuse), fset.Position(rfirst))
+}
+
+// tiFuncCalls returns the plain (non-selector) calls of fn as "caller -"
+// pairs.
+func tiFuncCalls(census map[string]map[string][]tiCall, fn string) []string {
+	var out []string
+	for _, c := range census[fn]["-"] {
+		out = append(out, c.fn+" -")
+	}
+	return out
+}
+
+// tiFirstCallOf returns the first call of fn (any receiver, or a plain
+// call) inside caller.
+func tiFirstCallOf(census map[string]map[string][]tiCall, fn, caller string) token.Pos {
+	first := token.NoPos
+	for _, cs := range census[fn] {
+		for _, c := range cs {
+			if c.fn == caller && (first == token.NoPos || c.pos < first) {
+				first = c.pos
+			}
+		}
+	}
+	return first
 }

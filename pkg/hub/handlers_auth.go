@@ -511,7 +511,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	// See isReservedPlatformIdentity: every path that provisions a user or
 	// mints/re-mints a hub token checks this, including an already-issued
 	// refresh token for the configured service account.
-	if isReservedPlatformIdentity(claims.Email, s.platformAuthSA) {
+	if s.isTransportIdentity(claims.Email) {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 			"invalid refresh token", nil)
 		return
@@ -639,7 +639,7 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 	// See isReservedPlatformIdentity: a token for the reserved identity must
 	// not be reported valid, matching the same token's rejection at the
 	// UnifiedAuthMiddleware choke point.
-	if isReservedPlatformIdentity(claims.Email, s.platformAuthSA) {
+	if s.isTransportIdentity(claims.Email) {
 		writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 		return
 	}
@@ -1570,11 +1570,12 @@ var ErrUserSuspended = errors.New("user account is suspended")
 // authorized, or ErrUserSuspended when the user is suspended.
 // On success it also ensures hub-members group membership.
 func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*store.User, error) {
-	// The hub does not create or authenticate user accounts for its
-	// configured transport service account. Checked before authorization and
+	// The hub does not create or authenticate user accounts for a transport
+	// identity (its configured transport service account or a proxy driver
+	// principal). Checked before authorization and
 	// before find-or-create so this covers both a brand-new identity and an
 	// already-existing user row for that email.
-	if isReservedPlatformIdentity(info.Email, s.platformAuthSA) {
+	if s.isTransportIdentity(info.Email) {
 		return nil, ErrAccessDenied
 	}
 	// The reserved test-identity domain is created only by the issuance

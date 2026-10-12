@@ -222,7 +222,7 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 		refuse(http.StatusForbidden, errCodeCredentialNotAdmitted, "agent delegation requires an interactive user session", nil)
 		return
 	}
-	if isReservedPlatformIdentity(issuer.Email(), s.platformAuthSA) {
+	if s.isTransportIdentity(issuer.Email()) {
 		refuse(http.StatusForbidden, errCodeReservedIdentity, "this identity may not issue agent delegations", nil)
 		return
 	}
@@ -581,7 +581,7 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 		refuseWithReason(http.StatusForbidden, errCodeIssuerInvalid, agentDelegationCodeIssuerSuspended, "the grant issuer is not valid")
 		return
 	}
-	if isReservedPlatformIdentity(issuerRow.Email, s.platformAuthSA) {
+	if s.isTransportIdentity(issuerRow.Email) {
 		s.revokeAgentDelegationGrantBySystem(ctx, grant, revokeReasonReservedIdentity)
 		refuseWithReason(http.StatusForbidden, errCodeIssuerInvalid, agentDelegationCodeReservedIdentity, "the grant issuer is not valid")
 		return

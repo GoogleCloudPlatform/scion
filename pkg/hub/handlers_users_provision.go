@@ -74,6 +74,9 @@ const (
 	// provisionReasonReservedTestIdentity refuses an email in the reserved
 	// test-identity domain.
 	provisionReasonReservedTestIdentity = "reserved_test_identity_domain"
+	// provisionReasonProxyDriverPrincipal: the email is a proxy driver
+	// principal (auth.proxy.driverPrincipals), which never becomes a user.
+	provisionReasonProxyDriverPrincipal = "proxy_driver_principal"
 )
 
 // Advisory warnings (design §5.3). They never fail the request.
@@ -314,7 +317,7 @@ func decodeProvisionRequest(r *http.Request) (PendingUserSpec, *provisionRequest
 // paths that evaluate checkUserAuthorized will treat the email.
 func (s *Server) provisionWarnings(email string) []string {
 	var warnings []string
-	if isReservedPlatformIdentity(email, s.platformAuthSA) {
+	if s.isTransportIdentity(email) {
 		warnings = append(warnings, provisionWarningReservedIdentity)
 	}
 	// The admin-email and domain checks mirror checkUserAuthorized, so a
@@ -437,6 +440,12 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec.InvitedBy = actor.ID()
+	if s.proxyDrivers.contains(spec.Email) {
+		(&provisionRequestError{status: http.StatusUnprocessableEntity, code: ErrCodeUnprocessable,
+			message: proxyDriverPrincipalUserMessage,
+			details: map[string]interface{}{"field": "email", "reason": provisionReasonProxyDriverPrincipal}}).write(w)
+		return
+	}
 
 	warnings := s.provisionWarnings(spec.Email)
 	auditActor := s.buildAuditActorFromContext(ctx)

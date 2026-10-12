@@ -100,14 +100,14 @@ A proxy hub with test identities on and **no** driver principals still starts. W
 
 ### Driver principals have no hub account
 
-A verified assertion for a driver principal never signs in or creates a user, so a run whose session has ended fails loudly instead of acting as the service account:
+A driver principal is treated like the hub's transport service account everywhere: it cannot sign in through any login flow, an admin cannot create or invite a user for it, and a session or hub token it held before it was listed stops working. A verified assertion for a driver principal never signs in or creates a user, so a run whose session has ended fails loudly instead of acting as the service account:
 
 - page navigations, and `/api/v1/` requests that carry only the assertion, get `403` with `details.reason: driver_principal_has_no_session`;
 - `/api/v1/` requests that carry the driver's ID token in `Authorization` (as the Playwright hook sends them) get `401`, or a plain `403` where the hub trusts Google tokens. They never act as the driver.
 
 ### Redeeming behind IAP
 
-Redeem the code from Node (Playwright's `context.request`) with the driver's ID token in `Proxy-Authorization`, which IAP consumes. The hub checks IAP's assertion itself and requires a driver principal. It records the driver in the new session. A redeem without a valid assertion, or from a principal that is not a driver, is refused (`401` or `403`) before the code is read, so the code stays usable. Each refusal is audited with the reason, the first 8 hex digits of the code's hash (never the code), the client IP and the assertion email. Redeem is rate-limited per client IP and per assertion email. Behind the proxy the connection comes from the proxy itself: the hub reads the client IP from `X-Forwarded-For` only when the connecting peer is one of its trusted proxies, and otherwise records and limits the proxy's address, which leaves the per-email limit as the effective one.
+Redeem the code from Node (Playwright's `context.request`) with the driver's ID token in `Proxy-Authorization`, which IAP consumes. The hub checks IAP's assertion itself and requires a driver principal. It records the driver in the new session. A redeem without a valid assertion, or from a principal that is not a driver, is refused (`401` or `403`) before the code is read, so the code stays usable. Each refusal is audited with the reason, the first 8 hex digits of the code's hash (never the code), the client IP and the assertion email. Redeem is rate-limited per client IP and per assertion email. Behind the proxy the connection comes from the proxy itself: the hub reads the client IP from `X-Forwarded-For` only when the connecting peer is one of its trusted proxies, and otherwise records and limits the connecting address. There is no setting for the hub's trusted proxies yet, so behind IAP `client_ip` and the per-IP limit are the proxy's address: the per-IP limit is coarse there, and the per-email limit is the effective one.
 
 On hubs without proxy auth nothing changes: redeem needs no assertion and ignores one.
 
