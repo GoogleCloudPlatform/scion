@@ -70,7 +70,7 @@ Unchanged, because the broker depends on them:
 - `pkg/runtime` and container labels;
 - `.scion` project resolution and template seeding;
 - agent homes under `<project>/.scion/agents/<name>`;
-- worktrees under `../.scion_worktrees/<project>/<agent>`.
+- worktrees at `<repo>/.scion/agents/<agent>/workspace` (corrected; an earlier version of this design said `../.scion_worktrees`).
 
 A linked project keeps its directory layout. The co-located broker uses the same paths.
 
@@ -566,7 +566,7 @@ Phase 5. It lands in the same release as phase 3. Pages are from the findings' d
 | reference/ (new page) local-mode-removal.md | The migration page that the CLI messages link to: what changed, first-run behaviour, import, running containers (per phase V), opt-outs, rollback. Modelled on reference/grove-removal.md. |
 | contributing/architecture.md "Solo Mode" (257-~293) and 14, 25, 64, 91, 613 | Rewrite: one CLI architecture, with the broker as the only executor. |
 | Minor mentions (messaging-authorization, orchestrator-settings, api, times-and-timezones, workstation/git-projects, hosted/ha/runtime-broker) | Sweep. |
-| AGENTS.md:48-60 "Solo/Local Architecture" | Replace with "Workstation architecture": local server, auto-start, worktrees still at `../.scion_worktrees`. Keep the agent status notes, re-pointed. |
+| AGENTS.md:48-60 "Solo/Local Architecture" | Replace with "Workstation architecture": local server, auto-start, worktrees still at `<repo>/.scion/agents/<agent>/workspace`. Keep the agent status notes, re-pointed. |
 | GLOSSARY.md:366-377, README.md:94,137 | Retire "Local mode" as a canonical term (mark it historical); update the README quickstart. |
 | .design/ hosted/hosted-architecture.md §7.1, hosted/sync-design.md, workspace-sync.md, project-skills.md, hosted/hosted-templates.md, scion-plugins.md, workstation-server.md, workstation-onboarding.md | Add a one-line "local-only mode removed; see <this design>" note where local mode is described as current. Archived designs are not touched. This design is filed as `.design/local-mode-removal.md` once approved. |
 
@@ -707,7 +707,7 @@ Compared with local mode, a new agent in a linked repo:
 - needs a token for private repos;
 - does not see local unpushed commits or uncommitted state;
 - puts its branch in a clone rather than in the user's repo;
-- does not appear under `../.scion_worktrees`, so `cdw` and local review of agent branches no longer work the same way.
+- does not appear under `<repo>/.scion/agents/<agent>/workspace`, so `cdw` and local review of agent branches no longer work the same way.
 
 Neither the findings nor this design caught this. It materialises with phase 3, the flip.
 

@@ -63,7 +63,7 @@ scion start my-agent "fix web bugs" --workspace packages/web
 
 ## 2. Git Worktrees
 
-New agents in a linked repository get a per-agent clone, not a worktree (see [Linked git projects](#linked-git-projects)). Git worktrees are used in two cases: agents imported from a release that ran them without a Hub keep their worktrees at `../.scion_worktrees/<project>/<agent>`, and projects created on the Hub with the `worktree-per-agent` mode get a worktree per agent over a shared base clone on the Runtime Broker. In both cases each agent has its own isolated checkout and branch, so agents can work on different branches at the same time. The rules below describe how those worktrees are set up.
+New agents in a linked repository get a per-agent clone, not a worktree (see [Linked git projects](#linked-git-projects)). Git worktrees are used in two cases: agents imported from a release that ran them without a Hub keep their worktrees at `.scion/agents/<agent>/workspace` in the repository, and projects created on the Hub with the `worktree-per-agent` mode get a worktree per agent over a shared base clone on the Runtime Broker. In both cases each agent has its own isolated checkout and branch, so agents can work on different branches at the same time. The rules below describe how those worktrees are set up.
 
 ### Prerequisites
 - Git **2.48.0** or newer is required (for relative path support).
@@ -169,7 +169,7 @@ remote over HTTPS inside its container, on branch `scion/<agent-name>`.
 - The agent's work is in its own clone, not in a worktree of your checkout. Push the agent's
   branch and merge it (or open a pull request) to bring the work back.
 - Agents that already existed in the repository before it was linked, and were imported, keep
-  their git worktrees under `../.scion_worktrees/<project>/<agent>`.
+  their git worktrees at `.scion/agents/<agent>/workspace` in the repository.
 
 :::caution[Known gap: no local worktrees for new agents]
 Releases that ran agents without a Hub gave every new agent a git worktree of your checkout. On a

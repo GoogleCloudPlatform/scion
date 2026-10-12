@@ -126,7 +126,7 @@ A **Workspace** is the working directory mounted into a single agent's container
 - The Runtime Broker keeps one shared base clone of the repository on its host and creates a worktree per agent in that clone's `worktrees` directory, on a dedicated branch, mounted into the agent's container as `/workspace`.
 - Agents operate on the same repository history but have independent working directories.
 - Work reaches your own checkout by pushing the agent's branch and merging it there (or through a pull request); the base clone is not your checkout.
-- Agents imported from a release that ran them without a Hub keep their old worktrees next to your checkout, at `../.scion_worktrees/<project>/<agent>`. See [Linked git projects](/scion/local/workspace/#linked-git-projects).
+- Agents imported from a release that ran them without a Hub keep their worktrees in the repository, at `.scion/agents/<agent>/workspace`. See [Linked git projects](/scion/local/workspace/#linked-git-projects).
 
 **Clone-per-agent (Hub-managed git projects):**
 When a Hub manages a git-based project and worktree-per-agent mode is not selected, agents are provisioned with an independent clone via a robust `git init` + `git fetch` strategy rather than a shared worktree.

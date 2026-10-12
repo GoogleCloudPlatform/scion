@@ -54,7 +54,7 @@ Subdirectories contain domain-specific agent instructions for their respective a
   - **Filesystem**: Dedicated home directory (`/home/gemini`) containing unique config and history.
   - **Workspace**: Mounted git worktree at `/workspace`.
 - **Workspace Strategy**:
-  - In a linked git project with a remote, a new agent clones the remote inside its container (HTTPS, `GITHUB_TOKEN` for private repos) on branch `scion/<agent>`; projects with the `worktree-per-agent` workspace mode get a worktree per agent over a host-side shared clone (not the user's checkout), and agents imported from before the link keep their worktrees at `../.scion_worktrees/<project>/<agent>`. This is a known gap versus the removed hub-less CLI mode; see "Linked git projects" in `docs-site/src/content/docs/local/workspace.md`.
+  - In a linked git project with a remote, a new agent clones the remote inside its container (HTTPS, `GITHUB_TOKEN` for private repos) on branch `scion/<agent>`; projects with the `worktree-per-agent` workspace mode get a worktree per agent over a host-side shared clone (not the user's checkout), and agents imported from before the link keep their worktrees at `<repo>/.scion/agents/<agent>/workspace`. This is a known gap versus the removed hub-less CLI mode; see "Linked git projects" in `docs-site/src/content/docs/local/workspace.md`.
 - **Observability & Interactivity**:
   - **Status**: Agents write state to `/home/gemini/.gemini-status.json` (STARTING, THINKING, EXECUTING, WAITING_FOR_INPUT, COMPLETED, ERROR).
   - **Intervention**: When `WAITING_FOR_INPUT`, users can `scion attach <agent>` to provide input or confirmations.

@@ -16,8 +16,8 @@ imported, and how to roll back.
 ## What did not change
 
 - **Projects keep their layout.** The `.scion` directory, agent homes under
-  `.scion/agents/<name>`, and the git worktrees of existing agents under
-  `../.scion_worktrees/<project>/<agent>` stay where they are. The Runtime Broker inside the
+  `.scion/agents/<name>`, and the git worktrees of existing agents at
+  `.scion/agents/<name>/workspace` stay where they are. The Runtime Broker inside the
   workstation server reuses existing agent directories.
 - **Machine and project setup are the same:** `scion init --machine` once per machine (or the
   [onboarding wizard](/scion/getting-started/onboarding/)), `scion init` once per repository.
