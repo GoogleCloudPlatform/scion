@@ -52,7 +52,7 @@ func newChatV2WebChatStore(t *testing.T, srv *Server, s store.Store) WebChatStor
 	}
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	return wcs
