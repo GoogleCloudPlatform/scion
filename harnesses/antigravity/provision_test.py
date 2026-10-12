@@ -182,6 +182,51 @@ class AntigravityProvisionTest(unittest.TestCase):
         self.assertEqual(env["SCION_USAGE_SOURCE"], "hooks")
 
 
+class ExplicitOAuthTokenTest(unittest.TestCase):
+    # config.yaml declares oauth-token as the AGY_TOKEN file; the provisioner
+    # also takes AGY_TOKEN from the env. An explicit oauth-token must be
+    # accepted either way (ptone/scion#4623).
+    TOKEN = json.dumps({"refresh_token": "r"})
+    CLEAR = {"AGY_TOKEN": "", "GOOGLE_CLOUD_PROJECT": "", "GOOGLE_CLOUD_LOCATION": "", "GOOGLE_CLOUD_REGION": ""}
+
+    def _resolved_method(self, home: str) -> str:
+        with open(os.path.join(home, ".scion", "harness", "outputs", "resolved-auth.json"), encoding="utf-8") as f:
+            return json.load(f)["method"]
+
+    def test_file_only_explicit_oauth_token_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            token_dir = os.path.join(tmp, ".gemini", "antigravity-cli")
+            os.makedirs(token_dir)
+            with open(os.path.join(token_dir, "antigravity-oauth-token"), "w", encoding="utf-8") as f:
+                f.write(self.TOKEN)
+            with unittest.mock.patch.dict(os.environ, self.CLEAR):
+                _invoke(tmp, env_vars=[], explicit_type="oauth-token")
+            self.assertEqual(self._resolved_method(tmp), "oauth-token")
+
+    def test_env_only_explicit_oauth_token_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(self.CLEAR, AGY_TOKEN=self.TOKEN)
+            with unittest.mock.patch.dict(os.environ, env):
+                _invoke(tmp, env_vars=["AGY_TOKEN"], explicit_type="oauth-token")
+            self.assertEqual(self._resolved_method(tmp), "oauth-token")
+
+    def test_explicit_oauth_token_with_nothing_present_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch.dict(os.environ, self.CLEAR):
+                with self.assertRaises(scion_harness.ProvisionError):
+                    _invoke(tmp, env_vars=[], explicit_type="oauth-token")
+
+    def test_explicit_api_key_is_not_rescued_by_the_token_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            token_dir = os.path.join(tmp, ".gemini", "antigravity-cli")
+            os.makedirs(token_dir)
+            with open(os.path.join(token_dir, "antigravity-oauth-token"), "w", encoding="utf-8") as f:
+                f.write(self.TOKEN)
+            with unittest.mock.patch.dict(os.environ, dict(self.CLEAR, GEMINI_API_KEY="", GOOGLE_API_KEY="")):
+                with self.assertRaises(scion_harness.ProvisionError):
+                    _invoke(tmp, env_vars=[], explicit_type="api-key")
+
+
 class ModelResolutionTest(unittest.TestCase):
     """Covers ptone/scion#2453: provision.py used to read harness_config.model
     raw (never resolving a tier like "medium" through config.yaml's

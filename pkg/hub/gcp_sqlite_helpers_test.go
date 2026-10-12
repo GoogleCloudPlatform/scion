@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -54,6 +55,17 @@ func k8sProfile(name string, reported bool, gsas ...string) store.BrokerProfile 
 	for _, g := range gsas {
 		p.ServiceAccountMappings = append(p.ServiceAccountMappings, store.BrokerProfileSAMapping{GSA: g})
 	}
+	return p
+}
+
+// authoritativeProfile is a reported Kubernetes profile whose report is
+// complete and fresh, so an account it does not map shows as not mapped.
+func authoritativeProfile(name string, gsas ...string) store.BrokerProfile {
+	p := k8sProfile(name, true, gsas...)
+	p.MappingsComplete = true
+	p.MappingsReportVersion = api.BrokerSAReportVersion
+	at := time.Now().Add(-time.Minute)
+	p.MappingsReportedAt = &at
 	return p
 }
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 package hub
 
@@ -68,7 +68,7 @@ func TestTestIdentity_ConstraintLockoutIgnoresTestIdentities(t *testing.T) {
 		}
 	}
 
-	admins, err := ps.resolveAdminUsers(ctx, store.RoleScopeSystem, "")
+	admins, err := ps.resolveAdminUsers(ctx, time.Now(), store.RoleScopeSystem, "")
 	require.NoError(t, err)
 	for _, a := range admins {
 		assert.NotEqual(t, fixture.ID, a.userID, "a test identity is never a resolved constraint admin")
@@ -89,8 +89,9 @@ func TestTestIdentity_ConstraintLockoutIgnoresTestIdentities(t *testing.T) {
 	assert.True(t, *res.Lockout.Safe, "control: an untargeted real admin survives")
 }
 
-// isConstraintAdmin (suspension review) does not treat a test identity in
-// an admin-granting group as a constraint admin; a real member does.
+// isConstraintAdmin and the user-removal lockout check do not treat a
+// test identity in an admin-granting group as a constraint admin; a real
+// member does.
 func TestTestIdentity_NotAConstraintAdminForGovernance(t *testing.T) {
 	gs, _, _, s := govTestSetup(t)
 	ctx := context.Background()
@@ -101,9 +102,8 @@ func TestTestIdentity_NotAConstraintAdminForGovernance(t *testing.T) {
 	isAdmin, err := gs.isConstraintAdmin(ctx, fixture.ID)
 	require.NoError(t, err)
 	assert.False(t, isAdmin)
-	check, err := gs.CheckUserSuspension(ctx, fixture.ID)
-	require.NoError(t, err)
-	assert.False(t, check.ReviewRequired)
+	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), fixture.ID, userRemovalSuspend),
+		"a test identity is not counted as a constraint admin being removed")
 
 	isAdmin, err = gs.isConstraintAdmin(ctx, human)
 	require.NoError(t, err)
@@ -116,7 +116,7 @@ func TestTestIdentity_ConstraintAdminResolutionFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	tiConstraintAdminSetup(t, s, "ti-failclosed-gov")
 	ps := NewPreviewServiceWithKey(kindErrStore{Store: s}, authz, slog.Default(), []byte("test-preview-hmac-key-32-bytes!!"))
-	_, err := ps.resolveAdminUsers(ctx, store.RoleScopeSystem, "")
+	_, err := ps.resolveAdminUsers(ctx, time.Now(), store.RoleScopeSystem, "")
 	assert.Error(t, err, "an unreadable kind must not let a user count as an admin")
 }
 
@@ -198,14 +198,15 @@ func (groupsErrStore) GetEffectiveGroups(context.Context, string) ([]string, err
 	return nil, errors.New("groups unavailable")
 }
 
-// isConstraintAdmin returns a group-resolution error instead of judging
-// the user on direct bindings alone.
+// isConstraintAdmin and the user-removal lockout check return a
+// group-resolution error instead of judging the user on direct bindings
+// alone.
 func TestTestIdentity_ConstraintAdminGroupErrorReturned(t *testing.T) {
 	_, ps, authz, s := govTestSetup(t)
 	human := pvSeedUser(t, s, "ti-gov-grouperr")
 	gs := NewGovernanceService(groupsErrStore{Store: s}, ps, authz, slog.Default())
 	_, err := gs.isConstraintAdmin(context.Background(), human)
 	assert.Error(t, err)
-	_, err = gs.CheckUserSuspension(context.Background(), human)
+	err = checkUserRemovalAdminLockout(context.Background(), groupsErrStore{Store: s}, time.Now(), human, userRemovalSuspend)
 	assert.Error(t, err)
 }

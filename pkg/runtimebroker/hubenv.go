@@ -238,13 +238,17 @@ func hubEndpointFromResolvedEnv(resolvedEnv map[string]string) string {
 	return ""
 }
 
+// hubEndpointFromProjectSettings returns the hub endpoint from the project's
+// settings file. It does not look at hub.enabled: the broker is
+// authoritative about hub connectivity, so a project that set
+// hub.enabled=false on this host still gets its endpoint.
 func hubEndpointFromProjectSettings(projectPath string) string {
 	if projectPath == "" {
 		return ""
 	}
 	settingsDir := resolveProjectSettingsDir(projectPath)
 	projectSettings, err := config.LoadSettingsFromDir(settingsDir)
-	if err != nil || projectSettings.IsHubExplicitlyDisabled() {
+	if err != nil {
 		return ""
 	}
 	return projectSettings.GetHubEndpoint()

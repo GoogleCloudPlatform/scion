@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -42,12 +43,17 @@ type NotificationDispatcher struct {
 	getDispatcher    func() AgentDispatcher // lazy getter; dispatcher may be set after startup
 	log              *slog.Logger
 	messageLog       *slog.Logger        // dedicated message audit logger (nil = disabled)
-	channelRegistry  *ChannelRegistry    // external notification channels (nil = disabled)
 	brokerProxy      *MessageBrokerProxy // broker plugin proxy (nil = no broker, use ChannelRegistry)
 	writeDenyEnabled func() bool         // G2 write-deny switch callback (nil = OFF)
 	stopCh           chan struct{}
 	stopOnce         sync.Once
 	wg               sync.WaitGroup
+
+	// channelRegistryFn returns the external notification channel registry
+	// in use (nil fn or nil registry = disabled). The Server sets it so a
+	// registry rebuilt from saved settings is used without restarting the
+	// dispatcher (ptone/scion#3904).
+	channelRegistryFn func() *ChannelRegistry
 }
 
 // NewNotificationDispatcher creates a new NotificationDispatcher.
@@ -464,7 +470,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()
 
-	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
+	if err := dispatchWithBrokerRetry(retryCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
 		nd.log.Error("Failed to dispatch notification to agent",
 			"subscriberID", sub.SubscriberID, "error", err)
 	} else {
@@ -477,8 +483,10 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 				"agent_name", subscriber.Name,
 				"project_id", subscriber.ProjectID,
 				"notification_id", notif.ID,
+				// The record was written before dispatch; this outcome
+				// line carries no record fields or content.
+				logging.AttrLogKind, logging.LogKindEvent,
 			}
-			logAttrs = append(logAttrs, structuredMsg.LogAttrs()...)
 			nd.messageLog.Debug("notification message dispatched", logAttrs...)
 		}
 	}
@@ -501,7 +509,8 @@ func notificationMessageType(status string) string {
 // channels. This is fire-and-forget; errors are logged but do not affect the
 // notification pipeline.
 func (nd *NotificationDispatcher) dispatchToChannels(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, watchedAgentID, watchedSlug string) {
-	if nd.channelRegistry == nil || nd.channelRegistry.Len() == 0 {
+	cr := nd.currentChannelRegistry()
+	if cr == nil || cr.Len() == 0 {
 		return
 	}
 
@@ -516,7 +525,16 @@ func (nd *NotificationDispatcher) dispatchToChannels(ctx context.Context, sub *s
 	structuredMsg.RecipientID = sub.SubscriberID
 	structuredMsg.Status = strings.ToUpper(notif.Status)
 
-	nd.channelRegistry.Dispatch(ctx, structuredMsg)
+	cr.Dispatch(ctx, structuredMsg)
+}
+
+// currentChannelRegistry returns the notification channel registry to
+// dispatch to, or nil.
+func (nd *NotificationDispatcher) currentChannelRegistry() *ChannelRegistry {
+	if nd.channelRegistryFn == nil {
+		return nil
+	}
+	return nd.channelRegistryFn()
 }
 
 // persistsViaInbox reports whether the notifier itself must write the inbox

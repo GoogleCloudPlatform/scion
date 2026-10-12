@@ -83,6 +83,61 @@ async function mount(spaces: ChatSpace[], dms: ChatDMListEntry[]): Promise<any> 
   return el;
 }
 
+interface CssBlock {
+  prelude: string;
+  body: string;
+}
+
+/** Split CSS text into its blocks at one nesting level: `prelude { body }`. */
+function cssBlocks(css: string): CssBlock[] {
+  const blocks: CssBlock[] = [];
+  const text = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  let start = 0;
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== '{') {
+      i++;
+      continue;
+    }
+    let depth = 1;
+    let j = i + 1;
+    while (j < text.length && depth > 0) {
+      if (text[j] === '{') depth++;
+      else if (text[j] === '}') depth--;
+      j++;
+    }
+    blocks.push({
+      prelude: text.slice(start, i).replace(/\s+/g, ' ').trim(),
+      body: text.slice(i + 1, j - 1),
+    });
+    start = i = j;
+  }
+  return blocks;
+}
+
+/**
+ * The declarations of every rule among `blocks` whose selector list
+ * includes `selector`, merged in source order (later ones win).
+ */
+function declarationsFor(blocks: CssBlock[], selector: string): Map<string, string> {
+  const decls = new Map<string, string>();
+  for (const block of blocks) {
+    if (!block.prelude.split(',').some((sel) => sel.trim() === selector)) continue;
+    for (const decl of block.body.split(';')) {
+      const colon = decl.indexOf(':');
+      if (colon < 0) continue;
+      decls.set(
+        decl.slice(0, colon).trim(),
+        decl
+          .slice(colon + 1)
+          .replace(/\s+/g, ' ')
+          .trim()
+      );
+    }
+  }
+  return decls;
+}
+
 function dmRows(el: any): HTMLElement[] {
   return Array.from(el.shadowRoot.querySelectorAll('.dm-item'));
 }
@@ -122,6 +177,88 @@ describe('chat-space-rail Unread DMs section', () => {
       el.shadowRoot.querySelectorAll('.space-section:not(.dm-section) .unread-badge')
     ).reduce((n: number, b) => n + Number((b as HTMLElement).textContent), 0);
     expect(spaceBadges).toBe(SPACE.unreadCount);
+  });
+
+  it('holds a hidden copy of the menu button after the DM heading badge', async () => {
+    const el = await mount([SPACE], DMS);
+    el.spaceFilter = 'unread';
+    await el.updateComplete;
+    const dmActions = el.shadowRoot.querySelector('.dm-header .space-actions') as HTMLElement;
+    // The badge comes first, then a spacer standing in for the menu button.
+    const spacer = dmActions.lastElementChild as HTMLElement;
+    expect(spacer.classList.contains('menu-spacer')).toBe(true);
+    expect(spacer.previousElementSibling?.classList.contains('unread-badge')).toBe(true);
+    // The spacer is decoration only: hidden from assistive tech, inert, and
+    // its copy of the button is out of the tab order.
+    expect(spacer.getAttribute('aria-hidden')).toBe('true');
+    expect(spacer.hasAttribute('inert')).toBe(true);
+    expect(spacer.textContent?.trim()).toBe('');
+
+    // Its width comes from a copy of the real menu button: the same element
+    // and icon, inside .space-actions, so the same rules size it.
+    const spaceActions = el.shadowRoot.querySelector(
+      '.space-section:not(.dm-section) .space-actions'
+    ) as HTMLElement;
+    const menuButton = spaceActions.querySelector('sl-dropdown sl-icon-button') as HTMLElement;
+    const copy = spacer.querySelector('sl-icon-button') as HTMLElement;
+    expect(spacer.childElementCount).toBe(1);
+    expect(copy.getAttribute('name')).toBe(menuButton.getAttribute('name'));
+    expect(copy.getAttribute('tabindex')).toBe('-1');
+    expect(copy.hasAttribute('label')).toBe(false);
+
+    // A space heading is unchanged: badge, then the menu, and no spacer.
+    expect(spaceActions.querySelector('.menu-spacer')).toBeNull();
+    expect(Array.from(spaceActions.children).map((c) => c.localName)).toEqual([
+      'span',
+      'sl-dropdown',
+    ]);
+    expect(spaceActions.firstElementChild?.classList.contains('unread-badge')).toBe(true);
+  });
+
+  it('keeps the space menu button sized as before the DM spacer existed', () => {
+    // The menu button keeps its own size: its natural width on desktop and
+    // the 44px touch target on mobile. The spacer follows it, not the
+    // other way round.
+    const Rail = customElements.get('scion-chat-space-rail') as unknown as {
+      styles: { cssText: string } | { cssText: string }[];
+    };
+    const css = [Rail.styles]
+      .flat()
+      .map((s) => s.cssText)
+      .join('\n');
+    expect(css).not.toContain('--space-menu-width');
+    const topLevel = cssBlocks(css);
+    const iconButton = declarationsFor(topLevel, '.space-actions sl-icon-button::part(base)');
+    expect(Object.fromEntries(iconButton)).toEqual({
+      'font-size': 'var(--chat-fs-base)',
+      padding: '0.125rem',
+    });
+    const mobile = topLevel
+      .filter((b) => /^@media\s*\(\s*max-width\s*:\s*768px\s*\)$/.test(b.prelude))
+      .flatMap((b) => cssBlocks(b.body));
+    const mobileButton = declarationsFor(mobile, '.space-actions sl-icon-button::part(base)');
+    expect(Object.fromEntries(mobileButton)).toEqual({ width: '44px', height: '44px' });
+
+    // The spacer keeps its button's width (overflow: hidden would otherwise
+    // let it shrink to nothing), takes no height, and is never painted.
+    const spacerRule = declarationsFor(topLevel, '.space-actions .menu-spacer');
+    expect(spacerRule.get('flex')).toBe('0 0 auto');
+    expect(spacerRule.get('height')).toBe('0');
+    expect(spacerRule.get('visibility')).toBe('hidden');
+    expect(spacerRule.get('overflow')).toBe('hidden');
+  });
+
+  it('keeps the spacer when the DM heading has no badge', async () => {
+    const el = await mount([SPACE], [DMS[4]]);
+    el.selectedKey = 'dm:read';
+    el.spaceFilter = 'unread';
+    await el.updateComplete;
+    expect(dmRows(el).map((r) => r.dataset.dmKey)).toEqual(['dm:read']);
+    const dmActions = el.shadowRoot.querySelector('.dm-header .space-actions') as HTMLElement;
+    expect(dmActions.querySelector('.unread-badge')).toBeNull();
+    const spacer = dmActions.querySelector('.menu-spacer');
+    expect(spacer?.getAttribute('aria-hidden')).toBe('true');
+    expect(spacer?.querySelector('sl-icon-button')).not.toBeNull();
   });
 
   it('shows unread DMs when no space has unread', async () => {
