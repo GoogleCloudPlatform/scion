@@ -94,11 +94,14 @@ const (
 	SubjectLink = "link"
 )
 
-// Grant permissions, weakest first.
+// Grant permissions. Read, write and admin are each stronger than the one
+// before. Review (ptone/scion#4538) gives read and the right to append
+// versions of kind review only: more than read, less than write.
 const (
-	GrantRead  = "read"
-	GrantWrite = "write"
-	GrantAdmin = "admin"
+	GrantRead   = "read"
+	GrantReview = "review"
+	GrantWrite  = "write"
+	GrantAdmin  = "admin"
 )
 
 // PrincipalRef is the subject ref of a principal grant.
@@ -347,12 +350,12 @@ type Store interface {
 	// deleted.
 	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool) (created bool, err error)
 
-	// PutReviewGrant is PutGrant for a review grant: g must be a write
-	// grant to a user principal. Under the artifact's lock it also refuses,
-	// with ErrReviewGrantRefused and writing nothing, when the artifact is
-	// no longer homed in home or not owned by an agent, or when the user
-	// already holds a grant other than read or write on it (an admin grant
-	// is never lowered this way).
+	// PutReviewGrant is PutGrant for a review grant (design D24): g must
+	// be a review grant to a user principal. Under the artifact's lock it
+	// also refuses, with ErrReviewGrantRefused and writing nothing, when
+	// the artifact is no longer homed in home or not owned by an agent, or
+	// when the user already holds a grant other than read or review on it
+	// (a write or admin grant is never lowered this way).
 	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string) (created bool, err error)
 
 	// DeleteGrant deletes principal or scope grant grantID of artifact

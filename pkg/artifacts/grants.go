@@ -33,7 +33,8 @@ import (
 
 // Grants (design §5.2, D7, D16). A grant gives a principal (a user or an
 // agent) or a scope (a project's members) read, write or admin on one
-// artifact. Grants are read at request time by the same read check every
+// artifact, or gives a user review (read, and versions of kind review
+// only; ptone/scion#4538). Grants are read at request time by the same read check every
 // route uses (canReadWith), so a grant never reaches past what the
 // caller's credential permits (Host.Permits, for agents including the live
 // delegation chain).
@@ -45,8 +46,8 @@ import (
 //
 // All of them need canAdminister, with one exception (design D24): on an
 // artifact owned by an agent, the agent's delegating user and an admin of
-// the home project may also POST a write grant to a user, the access a
-// human reviewer needs (putReviewGrant). The home project's read grant (the
+// the home project may also POST a review grant to a user who can already
+// read the artifact, the access a human reviewer needs (putReviewGrant). The home project's read grant (the
 // scope grant naming the current home scope) is listed with home set; its
 // permission may be read or write, and it cannot be removed. A scope grant
 // to any other project needs the host to allow sharing across projects
@@ -81,7 +82,8 @@ type GrantRequest struct {
 	// SubjectRef is "user:<id>" or "agent:<id>" for a principal and a
 	// project id for a scope.
 	SubjectRef string `json:"subjectRef"`
-	// Permission is "read", "write" or "admin".
+	// Permission is "read", "review", "write" or "admin". Review is for a
+	// user principal only.
 	Permission string `json:"permission"`
 }
 
@@ -270,8 +272,12 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 			`subjectKind must be "principal" (subjectRef "user:<id>" or "agent:<id>") or "scope" (subjectRef a project id)`)
 		return
 	}
-	if req.Permission != GrantRead && req.Permission != GrantWrite && req.Permission != GrantAdmin {
-		writeError(w, http.StatusBadRequest, "bad_request", `permission must be "read", "write" or "admin"`)
+	if !validGrantPermission(req.Permission) {
+		writeError(w, http.StatusBadRequest, "bad_request", `permission must be "read", "review", "write" or "admin"`)
+		return
+	}
+	if !reviewSubjectOK(req.Permission, req.SubjectKind, req.SubjectRef) {
+		writeError(w, http.StatusBadRequest, "bad_request", `permission "review" may only be given to a user`)
 		return
 	}
 	home := req.SubjectKind == SubjectScope && req.SubjectRef == a.ScopeRef
@@ -323,15 +329,17 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 // putReviewGrant implements POST /{id}/grants for a caller that may read
 // artifact a but not administer it (design D24, ptone/scion#4014). For an
 // artifact owned by an agent, the agent's delegating user and an admin of
-// the home project may give a user a write grant, the access a reviewer
-// needs, and nothing else: no read or admin grant, no grant to an agent
-// or a scope. The owning agent itself, like every agent, is refused
-// (sharing is user-only). The caller's credential must permit
+// the home project may give a user a review grant (ptone/scion#4538), the
+// access a reviewer needs, and nothing else: no read, write or admin grant,
+// no grant to an agent or a scope. The user must already be able to read
+// the artifact without the new grant (reviewSubjectCanRead), so review
+// never widens who can read it. The owning agent itself, like every agent,
+// is refused (sharing is user-only). The caller's credential must permit
 // artifact.manage in the home scope, as for an administrator. Every
-// refusal, a malformed body included, is the 403 a non-administrator gets
-// today, so the request says nothing about why. The store re-checks the
-// home and owner under the artifact's lock and never lowers an existing
-// admin grant.
+// refusal, a malformed body and a subject that cannot read included, is
+// the 403 a non-administrator gets today, so the request says nothing
+// about why. The store re-checks the home and owner under the artifact's
+// lock and never lowers an existing write or admin grant.
 func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) {
 	ctx := r.Context()
 	subject, ok := s.reviewGrantSubject(r, a)
@@ -339,10 +347,20 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 		writeAdminForbidden(w)
 		return
 	}
+	readable, err := s.reviewSubjectCanRead(ctx, b, a, subject)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: review grant: subject read check failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
+		return
+	}
+	if !readable {
+		writeAdminForbidden(w)
+		return
+	}
 	kind, ref, _, _ := s.host.Principal(ctx)
 	g := &Grant{
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: subject,
-		Permission: GrantWrite, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: time.Now().UTC(),
+		Permission: GrantReview, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: time.Now().UTC(),
 	}
 	created, err := b.store.PutReviewGrant(ctx, g, MaxGrantsPerArtifact, a.ScopeRef)
 	switch {
@@ -403,12 +421,12 @@ func (s *Service) mayGrantReview(ctx context.Context, a *Artifact) bool {
 }
 
 // reviewGrantSubject decides putReviewGrant's request: it returns the user
-// principal ref to give a write grant when every condition holds, cheapest
-// first and the host's authority last, and ok=false otherwise:
+// principal ref to give a review grant when every condition holds,
+// cheapest first and the host's authority last, and ok=false otherwise:
 //   - the caller passes reviewGrantCaller (a is owned by an agent; the
 //     caller is a user whose credential permits artifact.manage in a's
 //     home scope);
-//   - the body is exactly a principal write grant to a user;
+//   - the body is exactly a principal review grant to a user;
 //   - the caller passes reviewGrantAuthorized.
 //
 // Without the body checks this is mayGrantReview.
@@ -427,7 +445,7 @@ func (s *Service) reviewGrantSubject(r *http.Request, a *Artifact) (string, bool
 	if err := dec.Decode(&req); err != nil || dec.More() {
 		return "", false
 	}
-	if req.SubjectKind != SubjectPrincipal || req.Permission != GrantWrite {
+	if req.SubjectKind != SubjectPrincipal || req.Permission != GrantReview {
 		return "", false
 	}
 	pk, id, found := strings.Cut(req.SubjectRef, ":")

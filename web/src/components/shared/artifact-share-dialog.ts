@@ -26,7 +26,9 @@
  * hub reports canGrantReview for (the delegating user of the agent that
  * owns the artifact, the project owners and admins of its home project,
  * and super-admins; design D24, ptone/scion#4014): only the people search,
- * offering users, with the permission fixed to write. It loads neither the
+ * offering users, with the permission fixed to review (ptone/scion#4538: a
+ * user who can already read the artifact may then publish reviews of it,
+ * and nothing else; the grant gives no read access). It loads neither the
  * grants nor the share links (both admin-only) and shows the grants it
  * made, not a grant list.
  */
@@ -41,6 +43,7 @@ import {
   DEFAULT_LINK_HOURS,
   LINK_LIFETIMES,
   PERMISSION_LABELS,
+  SELECTABLE_PERMISSIONS,
   createLink,
   deleteGrant,
   expiryImpact,
@@ -350,7 +353,7 @@ export class ScionArtifactShareDialog extends LitElement {
     this.query = '';
     this.suggestions = [];
     this.subject = null;
-    this.permission = this.reviewOnly ? 'write' : 'read';
+    this.permission = this.reviewOnly ? 'review' : 'read';
     this.retention = this.artifact?.expiresAt ? 'current' : 'never';
     this.reviewers = [];
     if (this.reviewOnly) {
@@ -525,7 +528,7 @@ export class ScionArtifactShareDialog extends LitElement {
     }
   }
 
-  /** Review mode's Add: a write grant to the picked user, and nothing else. */
+  /** Review mode's Add: a review grant to the picked user, and nothing else. */
   private async grantReview(): Promise<void> {
     const a = this.artifact;
     const s = this.subject;
@@ -534,7 +537,7 @@ export class ScionArtifactShareDialog extends LitElement {
     this.adding = true;
     this.error = null;
     try {
-      await putGrant(a.id, 'principal', s.subjectRef, 'write');
+      await putGrant(a.id, 'principal', s.subjectRef, 'review');
       this.reviewers = [...this.reviewers.filter((r) => r !== s.label), s.label];
       this.subject = null;
       this.query = '';
@@ -806,14 +809,14 @@ export class ScionArtifactShareDialog extends LitElement {
     return html`
       <section aria-labelledby="review-heading">
         <p class="hint" id="review-heading">
-          Give a person review access to “${a.title}”. They will be able to read it and publish new
-          versions, including reviews.
+          Give a person who can already read “${a.title}” review access. They will be able to
+          publish reviews of it, and nothing else.
         </p>
         ${this.reviewers.map(
           (r) =>
             html`<sl-alert class="granted" variant="success" open>
               <sl-icon slot="icon" name="check-circle-fill"></sl-icon>
-              <strong>${r}</strong> can now edit and review.
+              <strong>${r}</strong> can now review.
             </sl-alert>`
         )}
         <div class="row">
@@ -841,7 +844,7 @@ export class ScionArtifactShareDialog extends LitElement {
                 </ul>`
               : nothing}
           </div>
-          <span class="muted permission">Permission: ${PERMISSION_LABELS.write}</span>
+          <span class="muted permission">Permission: ${PERMISSION_LABELS.review}</span>
           <sl-button
             size="small"
             ?disabled=${!this.subject}
@@ -867,7 +870,7 @@ export class ScionArtifactShareDialog extends LitElement {
       @sl-change=${(e: Event): void =>
         onChange((e.target as HTMLInputElement).value as GrantPermission)}
     >
-      ${(Object.keys(PERMISSION_LABELS) as GrantPermission[]).map(
+      ${SELECTABLE_PERMISSIONS.map(
         (p) => html`<sl-option value=${p}>${PERMISSION_LABELS[p]}</sl-option>`
       )}
     </sl-select>`;
@@ -897,9 +900,11 @@ export class ScionArtifactShareDialog extends LitElement {
           ? html`<small>Cross-project sharing is on for this hub</small>`
           : nothing}
       </span>
-      ${this.renderPermissionSelect(g.permission, !!this.busyId, (p) => {
-        void this.changePermission(g, p);
-      })}
+      ${g.permission === 'review'
+        ? html`<span class="muted">${PERMISSION_LABELS.review}</span>`
+        : this.renderPermissionSelect(g.permission, !!this.busyId, (p) => {
+            void this.changePermission(g, p);
+          })}
       <sl-button
         size="small"
         variant="text"

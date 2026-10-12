@@ -50,19 +50,35 @@ func (s *sqlStore) PutGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 // PutReviewGrant implements Store.
 func (s *sqlStore) PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string) (bool, error) {
 	if g == nil || g.SubjectKind != SubjectPrincipal || !strings.HasPrefix(g.SubjectRef, PrincipalKindUser+":") ||
-		g.Permission != GrantWrite || home == "" {
-		return false, errors.New("artifacts: PutReviewGrant needs a user principal grant with write permission and a home scope")
+		g.Permission != GrantReview || home == "" {
+		return false, errors.New("artifacts: PutReviewGrant needs a user principal grant with review permission and a home scope")
 	}
 	return s.putGrant(ctx, g, maxGrants, false, home)
 }
 
+// validGrantPermission reports whether p is a permission a principal or
+// scope grant may carry.
+func validGrantPermission(p string) bool {
+	switch p {
+	case GrantRead, GrantReview, GrantWrite, GrantAdmin:
+		return true
+	}
+	return false
+}
+
+// reviewSubjectOK reports whether a grant of permission p may name the
+// subject (kind, ref): a review grant names a user principal only.
+func reviewSubjectOK(p, kind, ref string) bool {
+	return p != GrantReview || (kind == SubjectPrincipal && strings.HasPrefix(ref, PrincipalKindUser+":"))
+}
+
 // putGrant is PutGrant and, with reviewHome set, PutReviewGrant: then the
 // artifact must still be owned by an agent and homed in reviewHome, and an
-// existing admin grant for the subject is never lowered.
+// existing write or admin grant for the subject is never lowered.
 func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, reviewHome string) (bool, error) {
 	if g == nil || (g.SubjectKind != SubjectPrincipal && g.SubjectKind != SubjectScope) || g.SubjectRef == "" ||
-		(g.Permission != GrantRead && g.Permission != GrantWrite && g.Permission != GrantAdmin) {
-		return false, errors.New("artifacts: PutGrant needs a principal or scope grant with a permission")
+		!validGrantPermission(g.Permission) || !reviewSubjectOK(g.Permission, g.SubjectKind, g.SubjectRef) {
+		return false, errors.New("artifacts: PutGrant needs a principal or scope grant with a permission (review: a user principal only)")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -102,7 +118,7 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &created)
 	switch {
 	case err == nil:
-		if reviewHome != "" && perm != GrantRead && perm != GrantWrite {
+		if reviewHome != "" && perm != GrantRead && perm != GrantReview {
 			return false, ErrReviewGrantRefused
 		}
 		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_grant SET permission = ? WHERE id = ?`), g.Permission, id); err != nil {
