@@ -480,6 +480,9 @@ func (s *launchSender) Checkpoint(ctx context.Context, step string) error {
 	}
 	s.mu.Lock()
 	s.lastStep = step
+	// The checkpoint is the newer step: drop a coalesced progress step not
+	// yet posted, so the poster never moves the Hub's step back to it.
+	s.pendingStep, s.pendingMessage, s.postedStep = step, "", step
 	s.mu.Unlock()
 	report := &hubclient.AgentLaunchReport{
 		LaunchID:   s.rec.ID,
@@ -704,11 +707,14 @@ func (s *launchSender) LastStep() string {
 // most once per progressInterval and only when that step differs from the
 // last one posted: steps recorded between two posts are coalesced and only
 // the latest is sent. A post is one attempt; when it gets no answer the step
-// stays pending and is tried again one interval later, with whatever step is
-// latest then. Answers are classified like a keepalive's (design §3.8.2's
+// stays pending and is tried again once at least an interval has passed
+// since the previous attempt started, with whatever step is latest then. A
+// post answered duplicate (a keepalive took its seq first, so the Hub did
+// not apply the step) is posted again the same way, with a fresh seq. Answers are classified like a keepalive's (design §3.8.2's
 // gate-answer table): an abort answer (e.g. 409 stopped or superseded) is
 // recorded and wakes KeepaliveAborted. The poster exits once a terminal send
-// starts, the keepalive is stopped, an abort is recorded, or ctx is done.
+// starts, the keepalive is stopped, an abort is recorded, or ctx is done; a
+// post still in flight then is cancelled.
 func (s *launchSender) StartProgress(ctx context.Context) {
 	s.progressWG.Add(1)
 	go func() {
@@ -778,7 +784,20 @@ func (s *launchSender) postProgressOnce(ctx context.Context) {
 	}
 	s.mu.Unlock()
 
-	result, err := s.sendOnce(ctx, report, progressAttemptTimeout)
+	// A stop, terminal start or abort cancels a post still in flight, so the
+	// poster (and WaitProgressStopped) never outlives the launch by an
+	// attempt timeout; its answer would be dropped anyway.
+	postCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-s.stopKeepalive:
+		case <-s.abortCh:
+		case <-postCtx.Done():
+		}
+		cancel()
+	}()
+	result, err := s.sendOnce(postCtx, report, progressAttemptTimeout)
 	if err != nil {
 		// No answer: try again one interval later with whatever step is
 		// latest then.
@@ -792,6 +811,17 @@ func (s *launchSender) postProgressOnce(ctx context.Context) {
 	}
 	switch action := classifyGateAnswer(result); action {
 	case gateContinue:
+		if result.Result == hubclient.AgentLaunchReportResultDuplicate {
+			// Progress never repeats a seq, so another report (a keepalive
+			// sent with the current seq while this post was in flight)
+			// reached the Hub first and this step was not applied. The Hub
+			// is alive, but the step must be posted again with a new seq.
+			s.mu.Lock()
+			s.lastLandedAt = time.Now()
+			s.mu.Unlock()
+			s.signalProgress()
+			return
+		}
 		s.markProgressLanded(step)
 	case gateCompleted:
 		s.markProgressLanded(step)

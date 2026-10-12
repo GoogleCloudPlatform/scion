@@ -853,7 +853,7 @@ func TestReport_BrokerProgressSequenceUpdatesLaunchStep(t *testing.T) {
 		return answer, updated
 	}
 
-	report(1, store.LaunchReportStateClaim, "", "")
+	_, claimed := report(1, store.LaunchReportStateClaim, "", "")
 	_, updated := report(2, store.LaunchReportStateCheckpoint, "pod_create", "")
 	assert.Equal(t, "pod_create", updated.LaunchStep)
 
@@ -862,6 +862,8 @@ func TestReport_BrokerProgressSequenceUpdatesLaunchStep(t *testing.T) {
 	assert.True(t, answer.Changed, "a progress report with a new step must report Changed, or the hub does not publish it")
 	assert.Equal(t, "container_create", updated.LaunchStep)
 	assert.Equal(t, "preparing the container (image pull, volume mounts)", updated.Message)
+	assert.Equal(t, claimed.Phase, updated.Phase, "a progress report must not move the phase")
+	assert.Equal(t, store.LaunchStateActive, updated.LaunchState, "a progress report must not end the launch")
 
 	// The keepalive reuses the current seq.
 	answer, _ = report(3, store.LaunchReportStateProgress, "", "")

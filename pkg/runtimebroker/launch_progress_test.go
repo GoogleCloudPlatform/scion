@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -80,6 +82,7 @@ func TestLaunchSenderProgress_ReturnsWhilePosterStuck(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s.StartProgress(ctx)
+	defer s.WaitProgressStopped()
 	defer s.StopKeepalive()
 	defer close(release)
 
@@ -117,6 +120,7 @@ func TestLaunchSenderProgress_CoalescesLatestWins(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s.StartProgress(ctx)
+	defer s.WaitProgressStopped()
 	defer s.StopKeepalive()
 
 	s.Progress(api.LaunchStepScheduling, "waiting to be scheduled")
@@ -158,6 +162,7 @@ func TestLaunchSenderProgress_SameStepNotReposted(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s.StartProgress(ctx)
+	defer s.WaitProgressStopped()
 	defer s.StopKeepalive()
 
 	s.Progress(api.LaunchStepScheduling, "")
@@ -196,6 +201,7 @@ func TestLaunchSenderProgress_ConflictAnswerAborts(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			s.StartProgress(ctx)
+			defer s.WaitProgressStopped()
 			defer s.StopKeepalive()
 
 			s.Progress(api.LaunchStepScheduling, "")
@@ -221,6 +227,8 @@ func TestLaunchSenderProgress_LandedPostResetsKeepalive(t *testing.T) {
 	start := time.Now()
 	s.StartKeepalive(ctx)
 	s.StartProgress(ctx)
+	defer s.WaitKeepaliveStopped()
+	defer s.WaitProgressStopped()
 	defer s.StopKeepalive()
 
 	time.Sleep(250 * time.Millisecond)
@@ -236,6 +244,212 @@ func TestLaunchSenderProgress_LandedPostResetsKeepalive(t *testing.T) {
 	}
 	if !waitUntil(t, 2*time.Second, func() bool { return len(keepaliveReports(rtb)) >= 1 }) {
 		t.Fatal("the keepalive never resumed after the progress post")
+	}
+}
+
+// startTestPoster starts s's progress poster with interval and registers
+// its stop and wait as test cleanup.
+func startTestPoster(t *testing.T, s *launchSender, interval time.Duration) {
+	t.Helper()
+	s.timings.progressInterval = interval
+	ctx, cancel := context.WithCancel(context.Background())
+	s.StartProgress(ctx)
+	t.Cleanup(func() {
+		s.StopKeepalive()
+		s.WaitProgressStopped()
+		cancel()
+	})
+}
+
+// TestLaunchSenderProgress_DuplicateAnswerReposts: a progress post answered
+// duplicate (a keepalive sent with the current seq reached the Hub first, so
+// the step was not applied) is posted again with a higher seq.
+func TestLaunchSenderProgress_DuplicateAnswerReposts(t *testing.T) {
+	var mu sync.Mutex
+	stepPosts := 0
+	rtb := &mockRuntimeBrokerService{launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if req.Step != "" {
+			stepPosts++
+			if stepPosts == 1 {
+				return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultDuplicate}, nil
+			}
+		}
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}}
+	s := newTestLaunchSender(t, rtb, time.Hour)
+	startTestPoster(t, s, 20*time.Millisecond)
+
+	s.Progress(api.LaunchStepContainerCreate, "")
+	if !waitUntil(t, 2*time.Second, func() bool { return len(stepReports(rtb)) >= 2 }) {
+		t.Fatalf("a step answered duplicate was not posted again (posts: %d)", len(stepReports(rtb)))
+	}
+	time.Sleep(100 * time.Millisecond) // the applied repost is final
+	got := stepReports(rtb)
+	if len(got) != 2 || got[1].Step != api.LaunchStepContainerCreate || got[1].Seq <= got[0].Seq {
+		t.Fatalf("posts = %+v, want container_create twice with a higher second seq", got)
+	}
+}
+
+// TestLaunchSenderProgress_GateAnswers covers the rest of the gate table for
+// a progress post's answer: 403 and 404 agent_launch_unknown end the launch
+// with cleanup, 400 is logged and the launch continues, completed stops
+// further posts, and no answer leaves the step to be posted again.
+func TestLaunchSenderProgress_GateAnswers(t *testing.T) {
+	answerOnce := func(first *hubclient.AgentLaunchReportResult, firstErr error) func(*hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		var mu sync.Mutex
+		n := 0
+		return func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if req.Step != "" {
+				n++
+				if n == 1 {
+					return first, firstErr
+				}
+			}
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+	}
+	for _, c := range []struct {
+		name   string
+		result *hubclient.AgentLaunchReportResult
+	}{
+		{"403", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusForbidden}},
+		{"404 unknown launch", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusNotFound, Code: hubclient.AgentLaunchReportCodeUnknownLaunch}},
+	} {
+		t.Run(c.name+" aborts with cleanup", func(t *testing.T) {
+			rtb := &mockRuntimeBrokerService{launchReportFunc: answerOnce(c.result, nil)}
+			s := newTestLaunchSender(t, rtb, time.Hour)
+			startTestPoster(t, s, time.Millisecond)
+			s.Progress(api.LaunchStepScheduling, "")
+			if !waitUntil(t, 2*time.Second, s.IsAborted) {
+				t.Fatalf("a %s answer to a progress post did not end the launch", c.name)
+			}
+			if out := s.LastAbortOutcome(); out == nil || out.action != gateAbortCleanup {
+				t.Fatalf("abort outcome = %+v, want gateAbortCleanup", out)
+			}
+		})
+	}
+
+	t.Run("400 continues", func(t *testing.T) {
+		rtb := &mockRuntimeBrokerService{launchReportFunc: answerOnce(&hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusBadRequest}, nil)}
+		s := newTestLaunchSender(t, rtb, time.Hour)
+		startTestPoster(t, s, time.Millisecond)
+		s.Progress(api.LaunchStepScheduling, "")
+		if !waitUntil(t, 2*time.Second, func() bool { return len(stepReports(rtb)) == 1 }) {
+			t.Fatal("expected the step to be posted")
+		}
+		s.Progress(api.LaunchStepContainerCreate, "")
+		if !waitUntil(t, 2*time.Second, func() bool { return len(stepReports(rtb)) == 2 }) {
+			t.Fatal("the poster stopped posting after a 400 answer")
+		}
+		if s.IsAborted() || s.IsCompleted() {
+			t.Fatalf("a 400 answer ended the launch (aborted %v, completed %v)", s.IsAborted(), s.IsCompleted())
+		}
+	})
+
+	t.Run("completed stops posting", func(t *testing.T) {
+		rtb := &mockRuntimeBrokerService{launchReportFunc: answerOnce(&hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultCompleted}, nil)}
+		s := newTestLaunchSender(t, rtb, time.Hour)
+		startTestPoster(t, s, time.Millisecond)
+		s.Progress(api.LaunchStepScheduling, "")
+		if !waitUntil(t, 2*time.Second, s.IsCompleted) {
+			t.Fatal("a completed answer to a progress post was not recorded")
+		}
+		s.Progress(api.LaunchStepContainerCreate, "")
+		time.Sleep(100 * time.Millisecond)
+		if n := len(stepReports(rtb)); n != 1 {
+			t.Fatalf("got %d progress posts, want 1: nothing is posted once the launch completed", n)
+		}
+		if s.IsAborted() {
+			t.Fatal("a completed answer must not end the launch as aborted")
+		}
+	})
+
+	t.Run("no answer is posted again", func(t *testing.T) {
+		rtb := &mockRuntimeBrokerService{launchReportFunc: answerOnce(nil, errors.New("hub unreachable"))}
+		s := newTestLaunchSender(t, rtb, time.Hour)
+		startTestPoster(t, s, 20*time.Millisecond)
+		s.Progress(api.LaunchStepScheduling, "")
+		if !waitUntil(t, 2*time.Second, func() bool { return len(stepReports(rtb)) >= 2 }) {
+			t.Fatalf("a step whose post got no answer was not posted again (posts: %d)", len(stepReports(rtb)))
+		}
+		got := stepReports(rtb)
+		if got[1].Step != api.LaunchStepScheduling || got[1].Seq <= got[0].Seq {
+			t.Fatalf("repost = %+v, want scheduling with a higher seq", got[1])
+		}
+	})
+}
+
+// TestLaunchSenderProgress_CheckpointSupersedesPendingStep: a checkpoint is
+// a newer step than a coalesced progress step still waiting for its post, so
+// that progress step is dropped instead of moving the Hub's step back.
+func TestLaunchSenderProgress_CheckpointSupersedesPendingStep(t *testing.T) {
+	rtb := &mockRuntimeBrokerService{}
+	s := newTestLaunchSender(t, rtb, time.Hour)
+	startTestPoster(t, s, 300*time.Millisecond)
+
+	s.Progress(api.LaunchStepScheduling, "")
+	if !waitUntil(t, 2*time.Second, func() bool { return len(stepReports(rtb)) == 1 }) {
+		t.Fatal("expected the first step to be posted")
+	}
+	s.Progress(api.LaunchStepContainerCreate, "") // waits out the interval
+	if err := s.Checkpoint(context.Background(), api.LaunchStepPodCreate); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	time.Sleep(600 * time.Millisecond)
+	for _, r := range stepReports(rtb)[1:] {
+		t.Fatalf("progress step %q was posted after the newer pod_create checkpoint", r.Step)
+	}
+	if got := s.LastStep(); got != api.LaunchStepPodCreate {
+		t.Fatalf("LastStep() = %q, want pod_create", got)
+	}
+}
+
+// TestRunLaunch_ProgressPosterStoppedBeforeReturn: runLaunch stops the
+// progress poster, cancels a post still in flight, and waits for the poster
+// to exit before it returns.
+func TestRunLaunch_ProgressPosterStoppedBeforeReturn(t *testing.T) {
+	var posterExited atomic.Bool
+	postBlocked := make(chan struct{})
+	start := time.Now()
+	rtb, _ := runTestLaunch(t, "poster-stopped", func(ctx context.Context, opts api.StartOptions, env *launchTestEnv) (*api.AgentInfo, error) {
+		var once sync.Once
+		env.rtb.mu.Lock()
+		env.rtb.ctxHook = func(postCtx context.Context) {
+			reps := env.rtb.getLaunchReports()
+			if last := reps[len(reps)-1].Report; last.State != hubclient.AgentLaunchReportStateProgress || last.Step == "" {
+				return
+			}
+			once.Do(func() { close(postBlocked) })
+			// The step post stays in flight until it is cancelled, and then
+			// a little longer, so a runLaunch that does not wait for the
+			// poster returns first.
+			<-postCtx.Done()
+			time.Sleep(300 * time.Millisecond)
+			posterExited.Store(true)
+		}
+		env.rtb.mu.Unlock()
+		opts.Progress(api.LaunchStepContainerCreate, "")
+		select {
+		case <-postBlocked:
+		case <-time.After(2 * time.Second):
+			return nil, errors.New("the progress post never started")
+		}
+		return &api.AgentInfo{ID: "c1", Name: opts.Name, Phase: "running"}, nil
+	}, nil, nil)
+	elapsed := time.Since(start)
+
+	if term := terminalReport(rtb); term == nil || term.State != hubclient.AgentLaunchReportStateSucceeded {
+		t.Fatalf("terminal = %+v, want succeeded", term)
+	}
+	if !posterExited.Load() {
+		t.Fatal("runLaunch returned while its progress poster was still in a post")
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("runLaunch took %v: a progress post in flight was not cancelled when the launch ended", elapsed)
 	}
 }
 
