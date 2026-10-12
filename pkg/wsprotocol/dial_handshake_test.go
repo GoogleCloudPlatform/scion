@@ -16,6 +16,7 @@ package wsprotocol
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -115,6 +116,8 @@ func TestDialWithConfig_CancelEndsUnansweredHandshake(t *testing.T) {
 	// TestDialWithConfig_CancelBeforeDialerDeadlineEndsDial.
 	var opErr *net.OpError
 	require.ErrorAs(t, r.err, &opErr, "the transport error stays reachable")
+	require.True(t, errors.Is(r.err, net.ErrClosed) || opErr.Op == "dial",
+		"the transport error is the closed connection or the cancelled dial, got %v", r.err)
 	require.Nil(t, r.conn)
 }
 
