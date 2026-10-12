@@ -78,7 +78,7 @@ normal for the SSE stream when its page closes. `cleanup.agents[*]` and
 
 A2 records the agent's `appliedConfig.image` but does not require it: on
 an async create the hub does not yet record the image the broker
-resolved (product defect D1, ptone/scion#2153), so
+resolved (product defect D1, ptone/scion#4818 (part of #2153)), so
 `a2AppliedConfig.a2AppliedConfigImageMissing` is true and the test carries
 a D1 annotation. A4 then pins the failure cause
 with the exact bad image ref, which the local hub always knows (remote:

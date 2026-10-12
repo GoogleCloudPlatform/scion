@@ -1049,14 +1049,16 @@ test.describe.serial('async agent create from the web form', () => {
     journey.a2Running = { image: observedImage, harnessConfig: applied?.harnessConfig ?? '' };
     expectNoAuth(applied);
     expect(applied?.harnessConfig ?? '', 'A2 appliedConfig.harnessConfig is set').not.toBe('');
-    // TODO(ptone/scion#2153, D1): restore the hard assertion that
-    // appliedConfig.image is set once the hub applies the succeeded launch
+    // TODO(D1, ptone/scion#4818 (part of #2153)): restore the hard
+    // assertion that appliedConfig.image is set once the hub applies the succeeded launch
     // report's agent info on async creates. Today it drops it (image
     // included) while the sync path records it, so the image is recorded
     // and an empty one is annotated and flagged, never silently passed.
     if (observedImage === '') {
       test.info().annotations.push({
-        type: 'D1: async create did not record the resolved image (ptone/scion#2153)',
+        type:
+          'D1: async create did not record the resolved image, ' +
+          'ptone/scion#4818 (part of #2153)',
         description:
           'appliedConfig.image is empty after an async create that used the harness default ' +
           'image: the hub does not apply the succeeded launch report agent info',
