@@ -340,6 +340,12 @@ func (c *ControlChannelClient) connectWithBackoff() error {
 		}
 
 		if err := c.doConnect(); err != nil {
+			// A connect that failed because the client was closed is the
+			// ordinary end of the loop, not a connection failure.
+			if c.ctx.Err() != nil {
+				c.log.Debug("Control channel connect ended by Close", "error", err)
+				return c.ctx.Err()
+			}
 			c.log.Error("Control channel connection failed", "error", err, "retry_in", backoff)
 
 			select {
