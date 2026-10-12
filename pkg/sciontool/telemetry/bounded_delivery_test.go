@@ -773,6 +773,8 @@ func TestCloudDestinationRejectsContradictoryOrIgnoredTLSOptions(t *testing.T) {
 	}{
 		{"plaintext plus skip", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, SkipTLSVerify: true}},
 		{"plaintext plus CA", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, CAFile: "ca.pem"}},
+		{"plaintext plus client certificate", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, CertFile: "client.pem", KeyFile: "client-key.pem"}},
+		{"GCP client certificate override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", CertFile: "client.pem", KeyFile: "client-key.pem"}},
 		{"GCP plaintext override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", Insecure: true}},
 		{"GCP skip verify override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", SkipTLSVerify: true}},
 	} {

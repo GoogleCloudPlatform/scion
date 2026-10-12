@@ -93,11 +93,19 @@ Environment variables override any settings file value and are the most convenie
 | `SCION_TELEMETRY_CLOUD_ENABLED` | `telemetry.cloud.enabled` | `true` | Enable forwarding to cloud backend |
 | `SCION_OTEL_ENDPOINT` | `telemetry.cloud.endpoint` | (required) | Cloud OTLP endpoint URL |
 | `SCION_OTEL_PROTOCOL` | `telemetry.cloud.protocol` | `grpc` | Protocol: `grpc` or `http` |
-| `SCION_OTEL_INSECURE` | `telemetry.cloud.tls.insecure_skip_verify` | `false` | Skip TLS verification (dev only) |
+| `SCION_OTEL_INSECURE` | `telemetry.cloud.tls.enabled` (inverted) | `false` | Use plaintext transport instead of TLS (dev only) |
+| `SCION_OTEL_SKIP_TLS_VERIFY` | `telemetry.cloud.tls.insecure_skip_verify` | `false` | Keep TLS but skip certificate verification (dev only) |
+| `SCION_OTEL_CA_FILE` | `telemetry.cloud.tls.ca_file` | — | Path to a PEM CA bundle used to verify the OTLP endpoint |
+| `SCION_OTEL_CERT_FILE` | `telemetry.cloud.tls.cert_file` | — | Path to a PEM client certificate for mTLS; set together with `SCION_OTEL_KEY_FILE` |
+| `SCION_OTEL_KEY_FILE` | `telemetry.cloud.tls.key_file` | — | Path to the PEM private key for the client certificate |
 | `SCION_TELEMETRY_HUB_ENABLED` | `telemetry.hub.enabled` | `true` | Enable Hub reporting |
 | `SCION_GCP_PROJECT_ID` | — | (auto) | GCP project ID for Google Cloud backends |
 | `SCION_OTEL_GCP_CREDENTIALS` | — | (auto) | Path to a GCP service account key JSON file; set automatically by the broker from the `scion-telemetry-gcp-credentials` secret |
 | `SCION_TELEMETRY_CLOUD_PROVIDER` | — | (auto) | Cloud backend: `gcp` for GCP-native export; auto-detected when credentials file is present |
+
+#### Client certificates (mTLS)
+
+For a generic OTLP gRPC endpoint that requires client certificate authentication, set `telemetry.cloud.tls.cert_file` and `telemetry.cloud.tls.key_file` (or `SCION_OTEL_CERT_FILE` and `SCION_OTEL_KEY_FILE`). The paths are read inside the agent container, so the files must be mounted there, for example through a file secret or a template. Set both or neither. `sciontool` fails at startup, naming the path, if only one is set or a file cannot be read. Client certificates cannot be combined with plaintext transport (`tls.enabled: false`) or with GCP-native export. When neither is set, behavior is unchanged.
 
 ### Local Receiver Settings (For Agents)
 

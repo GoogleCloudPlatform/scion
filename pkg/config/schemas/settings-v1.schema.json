@@ -2038,6 +2038,18 @@
           "description": "Path to a PEM-encoded CA bundle used to verify the OTLP endpoint certificate.",
           "x-env-var": "SCION_OTEL_CA_FILE",
           "x-since": "1"
+        },
+        "cert_file": {
+          "type": "string",
+          "description": "Path, inside the agent container, to a PEM-encoded client certificate for OTLP mTLS. Must be set together with key_file. Cannot be set when tls.enabled is false.",
+          "x-env-var": "SCION_OTEL_CERT_FILE",
+          "x-since": "1"
+        },
+        "key_file": {
+          "type": "string",
+          "description": "Path, inside the agent container, to the PEM-encoded private key for cert_file. Must be set together with cert_file.",
+          "x-env-var": "SCION_OTEL_KEY_FILE",
+          "x-since": "1"
         }
       },
       "additionalProperties": false
