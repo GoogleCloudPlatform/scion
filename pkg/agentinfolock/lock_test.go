@@ -9,6 +9,7 @@ package agentinfolock
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,7 @@ func TestUpdateTimeoutLogsAndRunsUnlocked(t *testing.T) {
 
 func TestUpdateSkipsNonRegularLockAndLogs(t *testing.T) {
 	cases := []struct {
+		name  string
 		kind  string
 		plant func(t *testing.T, lockPath string)
 		check func(t *testing.T, lockPath string)
@@ -104,6 +106,7 @@ func TestUpdateSkipsNonRegularLockAndLogs(t *testing.T) {
 		{
 			// The symlink points at an existing regular file, so code that
 			// followed it would open and lock that file instead of warning.
+			name: "symlink",
 			kind: "symlink",
 			plant: func(t *testing.T, lockPath string) {
 				target := filepath.Join(t.TempDir(), "elsewhere")
@@ -126,6 +129,7 @@ func TestUpdateSkipsNonRegularLockAndLogs(t *testing.T) {
 			},
 		},
 		{
+			name: "fifo",
 			kind: "fifo",
 			plant: func(t *testing.T, lockPath string) {
 				if err := unix.Mkfifo(lockPath, 0o644); err != nil {
@@ -134,6 +138,7 @@ func TestUpdateSkipsNonRegularLockAndLogs(t *testing.T) {
 			},
 		},
 		{
+			name: "directory",
 			kind: "directory",
 			plant: func(t *testing.T, lockPath string) {
 				if err := os.Mkdir(lockPath, 0o755); err != nil {
@@ -142,7 +147,9 @@ func TestUpdateSkipsNonRegularLockAndLogs(t *testing.T) {
 			},
 		},
 		{
-			// A regular file with a second link is refused too.
+			// A regular file with a second link is refused too. This goes
+			// through the fstat after a successful open.
+			name: "hardlink",
 			kind: "other",
 			plant: func(t *testing.T, lockPath string) {
 				if err := os.WriteFile(lockPath, nil, 0o666); err != nil {
@@ -153,22 +160,54 @@ func TestUpdateSkipsNonRegularLockAndLogs(t *testing.T) {
 				}
 			},
 		},
+		{
+			// A unix socket fails the open (ENXIO), so this goes through
+			// the lstat after a failed open.
+			name: "socket",
+			kind: "other",
+			plant: func(t *testing.T, lockPath string) {
+				l, err := net.Listen("unix", lockPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = l.Close() })
+			},
+		},
 	}
+	// The "cannot be locked" warning (flock failing with an error other
+	// than EWOULDBLOCK or EINTR) is not covered: a unit test has no
+	// portable way to make flock fail on a file it can open.
 	for _, tc := range cases {
-		t.Run(tc.kind, func(t *testing.T) {
-			info := filepath.Join(t.TempDir(), "agent-info.json")
+		t.Run(tc.name, func(t *testing.T) {
+			// A short directory keeps the socket path under the
+			// sun_path limit.
+			dir, err := os.MkdirTemp("", "ailk")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			info := filepath.Join(dir, "agent-info.json")
 			tc.plant(t, LockPath(info))
 			var debug, warn logSink
 			ran := false
 			if err := Update(info, Options{Logf: debug.logf, Warnf: warn.logf}, func() error { ran = true; return nil }); err != nil {
 				t.Fatal(err)
 			}
-			want := "agent-info lock file is not a regular file (" + tc.kind + "), writing without lock: " + LockPath(info)
+			want := "agent-info lock file is not a single-link regular file, writing without lock (" + tc.kind + "): " + LockPath(info)
 			if !ran || warn.joined() != want {
 				t.Fatalf("ran=%v warn=%q, want %q", ran, warn.joined(), want)
 			}
 			if got := debug.joined(); got != "" {
 				t.Fatalf("unexpected debug log: %q", got)
+			}
+
+			// A second update of the same path logs at debug, not Warn.
+			ran = false
+			if err := Update(info, Options{Logf: debug.logf, Warnf: warn.logf}, func() error { ran = true; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if !ran || warn.joined() != want || debug.joined() != want {
+				t.Fatalf("second update: ran=%v warn=%q debug=%q, want warn once and debug %q", ran, warn.joined(), debug.joined(), want)
 			}
 			if tc.check != nil {
 				tc.check(t, LockPath(info))
@@ -184,7 +223,7 @@ func TestUpdateMissingDirRunsUnlocked(t *testing.T) {
 	if err := Update(info, Options{Logf: func(string, ...any) {}, Warnf: warn.logf}, func() error { ran = true; return nil }); err != nil || !ran {
 		t.Fatalf("err=%v ran=%v", err, ran)
 	}
-	if got := warn.joined(); !strings.HasPrefix(got, "agent-info lock file cannot be opened, writing without lock: "+LockPath(info)) {
+	if got := warn.joined(); !strings.HasPrefix(got, "agent-info lock file cannot be opened, writing without lock: "+LockPath(info)+": ") {
 		t.Fatalf("warn = %q", got)
 	}
 }

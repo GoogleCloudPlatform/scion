@@ -183,6 +183,9 @@ func TestStatusHandlerSkipsNonRegularLockFile(t *testing.T) {
 			tc.plant(t, path+".lock")
 			logPath := filepath.Join(t.TempDir(), "agent.log")
 			log.SetLogPath(logPath)
+			// Put back the unset default so later tests do not log to
+			// this subtest's deleted temp file.
+			t.Cleanup(func() { log.SetLogPath("") })
 
 			start := time.Now()
 			require.NoError(t, h.SetMessage("skipped"))
@@ -200,7 +203,7 @@ func TestStatusHandlerSkipsNonRegularLockFile(t *testing.T) {
 
 			logData, err := os.ReadFile(logPath)
 			require.NoError(t, err)
-			assert.Contains(t, string(logData), "[WARN] agent-info lock file is not a regular file ("+tc.kind+"), writing without lock: "+path+".lock")
+			assert.Contains(t, string(logData), "[WARN] agent-info lock file is not a single-link regular file, writing without lock ("+tc.kind+"): "+path+".lock")
 		})
 	}
 }

@@ -22,9 +22,9 @@ func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
 	if err != nil {
 		var nr *notRegularError
 		if errors.As(err, &nr) {
-			opts.warnf("agent-info lock file is not a regular file (%s), writing without lock: %s", nr.kind, lockPath)
+			opts.warnUnusable(msgNotRegular, nr.kind, lockPath, nil)
 		} else {
-			opts.warnf("agent-info lock file cannot be opened, writing without lock: %s: %v", lockPath, err)
+			opts.warnUnusable(msgCannotOpen, "", lockPath, err)
 		}
 		return nil, false
 	}
@@ -38,7 +38,7 @@ func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
 			_ = f.Close()
-			opts.warnf("agent-info lock file cannot be locked, writing without lock: %s: %v", lockPath, err)
+			opts.warnUnusable(msgCannotLock, "", lockPath, err)
 			return nil, false
 		}
 		if !time.Now().Before(deadline) {

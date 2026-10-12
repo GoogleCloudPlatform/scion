@@ -19,10 +19,12 @@ Copyright 2026 The Scion Authors.
 //
 // The lock is best effort and never blocks or fails an update: hooks and the
 // broker's agent list must stay non-blocking. When the lock file is not a
-// regular file (the workload owns the agent home and can put anything there)
-// or cannot be opened, the update runs without the lock and a warning naming
-// the file type and path is logged. When another holder keeps the lock longer
-// than the wait, the update also runs without it (logged at debug). The unlocked path calls the same rmw func, so the
+// single-link regular file (the workload owns the agent home and can put
+// anything there), or cannot be opened or locked, the update runs without
+// the lock. A warning naming the file type and path is logged the first time
+// for each lock path in a process, and at debug after that. When another
+// holder keeps the lock longer than the wait, the update also runs without
+// it (logged at debug). The unlocked path calls the same rmw func, so the
 // read and write are the same either way.
 //
 // flock is advisory and per open file description, which covers processes on
@@ -36,6 +38,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -56,7 +59,8 @@ const (
 	maxPoll = time.Millisecond
 )
 
-// Options tunes Update. The zero value uses DefaultWait and slog.Debug.
+// Options tunes Update. The zero value uses DefaultWait, slog.Debug and
+// slog.Warn.
 type Options struct {
 	// Wait bounds how long to wait for the lock. Zero means DefaultWait, or
 	// in test binaries only, TestWaitEnv when it is set. A non-zero Wait
@@ -64,8 +68,10 @@ type Options struct {
 	Wait time.Duration
 	// Logf receives the timeout message. Nil means slog.Debug.
 	Logf func(format string, args ...any)
-	// Warnf receives the message for a lock file that is not a regular
-	// file or cannot be opened or locked. Nil means slog.Warn.
+	// Warnf receives the first message for a lock file that is not a
+	// single-link regular file or cannot be opened or locked; repeats for
+	// the same lock path go to Logf. Nil means slog.Warn (and slog.Debug
+	// for repeats), with kind, path and error as attributes.
 	Warnf func(format string, args ...any)
 }
 
@@ -97,12 +103,51 @@ func (o Options) logf(format string, args ...any) {
 	slog.Debug("agent-info lock", "detail", fmt.Sprintf(format, args...))
 }
 
-func (o Options) warnf(format string, args ...any) {
-	if o.Warnf != nil {
-		o.Warnf(format, args...)
+// Fixed messages for an unusable lock file, so a structured backend can
+// match them; the kind, path and error go in attributes.
+const (
+	msgNotRegular = "agent-info lock file is not a single-link regular file, writing without lock"
+	msgCannotOpen = "agent-info lock file cannot be opened, writing without lock"
+	msgCannotLock = "agent-info lock file cannot be locked, writing without lock"
+)
+
+// warned records the lock paths already reported at Warn in this process.
+// It grows by one entry per unusable lock path, at most one per agent.
+var warned sync.Map
+
+// warnUnusable reports an unusable lock file: at Warn the first time for
+// lockPath in this process, at debug after that, so a lock file that stays
+// unusable does not log a warning on every hook or update. kind (a file
+// type word) and err may be empty.
+func (o Options) warnUnusable(msg, kind, lockPath string, err error) {
+	_, repeat := warned.LoadOrStore(lockPath, struct{}{})
+	if o.Warnf != nil || (repeat && o.Logf != nil) {
+		text := msg + ": " + lockPath
+		if kind != "" {
+			text = fmt.Sprintf("%s (%s): %s", msg, kind, lockPath)
+		}
+		if err != nil {
+			text += ": " + err.Error()
+		}
+		if repeat {
+			o.logf("%s", text)
+		} else {
+			o.Warnf("%s", text)
+		}
 		return
 	}
-	slog.Warn(fmt.Sprintf(format, args...))
+	attrs := []any{"path", lockPath}
+	if kind != "" {
+		attrs = append(attrs, "kind", kind)
+	}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+	}
+	if repeat {
+		slog.Debug(msg, attrs...)
+	} else {
+		slog.Warn(msg, attrs...)
+	}
 }
 
 // LockPath returns the lock file path for an agent-info.json path.
