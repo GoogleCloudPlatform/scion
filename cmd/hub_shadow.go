@@ -187,7 +187,7 @@ func runHubShadow(cmd *cobra.Command, args []string) error {
 		WorkspacePath: wd,
 		Hub: &config.V1HubClientConfig{
 			Enabled:   &hubEnabled,
-			Endpoint:  shadowPinnedEndpoint(endpoint),
+			Endpoint:  endpoint,
 			ProjectID: project.ID,
 		},
 	}
@@ -260,15 +260,4 @@ func runHubUnshadow(cmd *cobra.Command, args []string) error {
 	fmt.Println("The project and its agents remain on the Hub.")
 
 	return nil
-}
-
-// shadowPinnedEndpoint returns the endpoint hub shadow writes into the
-// shadow's settings. A hub selected with 'scion use' is not written: the
-// context's hub never reaches a settings file, and the shadow directory
-// then resolves to the current hub.
-func shadowPinnedEndpoint(endpoint string) string {
-	if hubSource == targetSourceContext {
-		return ""
-	}
-	return endpoint
 }

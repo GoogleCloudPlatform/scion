@@ -375,6 +375,9 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		// A project from the current context names a project on a
 		// specific hub, so the hub.enabled gate does not apply.
 		ExplicitHub: isContextProject(projectPath),
+		// The hub selected with 'scion use' never links or registers a
+		// project that is already linked to a hub.
+		HubFromContext: hubSource == targetSourceContext,
 		// On the local workstation hub, link an unregistered project
 		// without prompting; a remote hub keeps the prompt.
 		AutoLinkLocal: true,

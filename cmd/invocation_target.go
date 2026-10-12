@@ -126,6 +126,14 @@ var contextSkippedSubtrees = map[string]bool{
 	"runtime-broker": true,
 }
 
+// contextIgnoredCommands are commands, by command path, that resolve their
+// hub exactly as without a current context: they would save the resolved
+// endpoint into settings, and the context's hub never reaches a settings
+// file. 'hub shadow' pins its endpoint in the shadow's settings.
+var contextIgnoredCommands = map[string]bool{
+	"scion hub shadow": true,
+}
+
 // resolveInvocationTarget fills the hub endpoint and the project of this
 // invocation from the current context ('scion use') where nothing more
 // specific chose them. It only fills empty values and never overrides a
@@ -147,7 +155,7 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
 	projectSource = ""
 	contextProjectID = ""
 	contextWarned = false
-	if contextDisabled(mode) || contextSkippedSubtrees[topLevelName(cmd)] {
+	if contextDisabled(mode) || contextSkippedSubtrees[topLevelName(cmd)] || contextIgnoredCommands[cmd.CommandPath()] {
 		return
 	}
 	// --no-hub turns the hub off, and a context project is a hub project.
