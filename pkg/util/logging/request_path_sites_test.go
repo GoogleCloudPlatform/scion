@@ -133,6 +133,8 @@ var requestPathSites = []requestPathSite{
 	{"template_blobs.go", "Server.generateTemplateUploadURLs", "URL(bare)", 3, "not a request URL: a signed storage URL field"},
 	{"template_blobs.go", "rewriteLocalTemplateDownloadURLs", "URL(bare)", 2, "not a request URL: a signed storage URL field"},
 	{"template_handlers.go", "Server.handleTemplateByIDV2", "URL.Path", 1, "routing: extracts ids and sub-routes"},
+	{"test_identity_workload_issuer.go", "isTestIdentityIssuanceRoute", "URL.Path", 1, "comparison: confines a workload delegation token to the test identity issuance routes (not logged)"},
+	{"test_identity_workload_issuer.go", "isTestIdentityIssuanceRoute", "URL.RawPath", 1, "comparison: refuses an escaped path for the workload delegation route check (not logged)"},
 	{"web.go", "WebServer.handleOAuthCallback", "URL.Path", 1, "routing: extracts the OAuth provider"},
 	{"web.go", "WebServer.handleOAuthLogin", "URL.Path", 1, "routing: extracts the OAuth provider"},
 	{"web.go", "WebServer.prefetchPageData", "URL.Path", 2, "routing: maps an SPA page path to its API prefetch"},

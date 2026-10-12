@@ -347,7 +347,7 @@
     "runtime": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["listAllNamespaces"],
+      "required": ["listAllNamespaces", "gke"],
       "properties": {
         "namespace": {
           "type": "string",
@@ -355,6 +355,10 @@
         },
         "listAllNamespaces": {
           "type": "boolean"
+        },
+        "gke": {
+          "type": "boolean",
+          "description": "Rendered as runtimes.kubernetes.gke. Default true. config.extra may not override it; false is refused alongside config.existingSecret."
         }
       }
     },
@@ -563,6 +567,49 @@
         "bucket": {
           "type": "string",
           "description": "GCS bucket name, no gs:// prefix. Required when database.driver is postgres."
+        }
+      }
+    },
+    "workspaceStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The shared workspace share agent pods mount, rendered as server.workspace_storage. Not the hub's blob store (storage).",
+      "properties": {
+        "nfs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "description": "One value for both the settings block and the hub pod's mount, so the two cannot drift. The hub mounts the export at <mountRoot>/<shareId>, the path its /readyz checks.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Renders server.workspace_storage (backend nfs) and the hub pod's inline nfs volume. Refused with config.existingSecret and with config.extra.server.workspace_storage."
+            },
+            "server": {
+              "type": "string",
+              "description": "NFS server address. Required when enabled. Rendered as shares[0].server and the volume's server."
+            },
+            "export": {
+              "type": "string",
+              "description": "Export path on the server. Required when enabled. Rendered as shares[0].export and the volume's path."
+            },
+            "mountRoot": {
+              "type": "string",
+              "description": "Absolute mount root. Rendered as mount_root."
+            },
+            "shareId": {
+              "type": "string",
+              "description": "Share ID, one path segment. Required when enabled. Rendered as shares[0].id and the last segment of the hub's mount path."
+            },
+            "pvName": {
+              "type": "string",
+              "description": "PersistentVolumeClaim agent pods mount the share through. Required when enabled. Rendered as shares[0].pv_name."
+            },
+            "subpathRoot": {
+              "type": "string",
+              "description": "Relative directory for project trees on the share. Rendered as subpath_root."
+            }
+          }
         }
       }
     },

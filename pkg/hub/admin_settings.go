@@ -433,10 +433,12 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	if vs.Server != nil && vs.Server.Federation != nil {
 		resp.Federation = vs.Server.Federation
 	}
-	// server.hub.class is never API-writable, so it is not shown either:
-	// a client that echoes this body back must not send it.
+	// server.hub.class and server.hub.test_identities are never
+	// API-writable, so they are not shown either: a client that echoes
+	// this body back must not send them.
 	if resp.Server != nil && resp.Server.Hub != nil {
 		resp.Server.Hub.HubClass = ""
+		resp.Server.Hub.TestIdentities = nil
 	}
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
