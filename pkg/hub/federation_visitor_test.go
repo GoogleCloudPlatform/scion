@@ -206,19 +206,27 @@ func TestFederatedVisitor_OtherCasesKeepFederatedUserIdentity(t *testing.T) {
 	})
 }
 
-// visitorLookupErrStore fails the federated subject lookup.
+// visitorLookupErrStore fails the federated subject lookup once its fault
+// switch is armed.
 type visitorLookupErrStore struct {
 	store.Store
+	fault *storeFaultSwitch
 }
 
-func (s *visitorLookupErrStore) GetFederatedUserBySubject(context.Context, string, string) (*store.User, error) {
+func (s *visitorLookupErrStore) GetFederatedUserBySubject(ctx context.Context, issuerURL, subject string) (*store.User, error) {
+	if !s.fault.Active() {
+		return s.Store.GetFederatedUserBySubject(ctx, issuerURL, subject)
+	}
 	return nil, errors.New("lookup failure for test")
 }
 
 func TestFederatedVisitor_LookupErrorAnswers503(t *testing.T) {
 	f := newVisitorFixture(t)
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, fault *storeFaultSwitch) *visitorLookupErrStore {
+		return &visitorLookupErrStore{Store: inner, fault: fault}
+	})
 	visitorSetExperiment(t, f.srv, true)
-	f.srv.store = &visitorLookupErrStore{Store: f.st}
+	fault.Arm()
 
 	identity, _, code := f.identityThroughMiddleware(t, f.userToken(t, "sub-alice", "alice@corp.com"))
 	assert.Equal(t, http.StatusServiceUnavailable, code)
