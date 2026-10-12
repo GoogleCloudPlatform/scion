@@ -309,6 +309,7 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
+	tunnelSSHHostKeyHint(cmd, tunnelSSH, endpoint, project, args[0])
 	var ts *transportauth.TransportSettings
 	if settings != nil && settings.Hub != nil && settings.Hub.Transport != nil {
 		ts = &transportauth.TransportSettings{Mode: settings.Hub.Transport.Mode, Audience: settings.Hub.Transport.Audience}

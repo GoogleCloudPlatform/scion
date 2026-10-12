@@ -54,6 +54,12 @@ func writeFileAtomic(targetPath string, data []byte) error {
 	if info, err := os.Lstat(targetPath); err == nil && info.Mode().IsRegular() {
 		mode = info.Mode().Perm()
 	}
+	return writeFileAtomicMode(targetPath, data, mode)
+}
+
+// writeFileAtomicMode is writeFileAtomic with the mode of the new file given
+// by the caller instead of taken from the existing file.
+func writeFileAtomicMode(targetPath string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(targetPath)
 	tmp, err := createTempFile(dir, "."+filepath.Base(targetPath)+".tmp-*")
 	if err != nil {

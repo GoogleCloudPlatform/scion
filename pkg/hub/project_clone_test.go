@@ -1,4 +1,4 @@
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 package hub
 

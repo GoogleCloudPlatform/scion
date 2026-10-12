@@ -264,10 +264,11 @@ func (s *Service) manageable(w http.ResponseWriter, r *http.Request, b backend, 
 }
 
 // capabilities fills the caller's rights on a, an artifact it can read
-// (readableArtifact checked it), into resp: CanManage from canAdminister and
-// CanPublish from canWriteErr, the decisions the management and write routes
-// make for the same request. A failed grants read answers 500 and returns
-// false.
+// (readableArtifact checked it), into resp: CanManage from canAdminister,
+// CanPublish from canWriteErr and CanGrantReview from mayGrantReview (only
+// when CanManage is false), the decisions the management, write and grant
+// routes make for the same request. A failed grants read answers 500 and
+// returns false.
 func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, resp *ArtifactResponse) bool {
 	var ok bool
 	if resp.CanManage, ok = s.manageable(w, r, b, a); !ok {
@@ -279,6 +280,7 @@ func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend
 		return false
 	}
 	resp.CanPublish = canPublish
+	resp.CanGrantReview = !resp.CanManage && s.mayGrantReview(r.Context(), a)
 	return true
 }
 

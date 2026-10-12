@@ -410,7 +410,7 @@ func persistAgentInfoState(path, phase, activity string) error {
 	info.Phase = phase
 	info.Activity = activity
 
-	updated, err := json.MarshalIndent(info, "", "  ")
+	updated, err := marshalAgentInfoKeepUnknown(data, &info)
 	if err != nil {
 		return err
 	}
