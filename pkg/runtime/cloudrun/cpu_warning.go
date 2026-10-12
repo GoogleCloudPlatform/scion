@@ -64,5 +64,5 @@ func cpuAllocationWarningWanted(getenv func(string) string, brokerEnabled bool) 
 	// Same spellings as the server's other boolean env vars (util.ParseBool).
 	// An unrecognized value asserts nothing, so the warning stays.
 	v, ok := util.ParseBool(getenv(CPUAlwaysAllocatedEnv))
-	return !(ok && v)
+	return !ok || !v
 }
