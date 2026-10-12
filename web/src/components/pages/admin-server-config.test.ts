@@ -901,8 +901,30 @@ describe('scion-page-admin-server-config', () => {
       element = await createComponent(createFetchHandler(config));
       const field = brokerHostField(element);
       expect(field.querySelector('sl-input')).toBeNull();
-      expect(field.querySelector('.read-only-badge')?.textContent).toContain('environment variable');
-      expect(field.querySelector('.read-only-value')?.textContent).not.toContain('127.0.0.1');
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'environment variable'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('—');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an env-pinned runtime broker host shows the loaded value', async () => {
+      const config = withBrokerHost('10.0.0.5', {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('10.0.0.5');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 0.0.0.0 on a file-backed hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost(undefined, {})));
+      const field = brokerHostField(element);
+      expect(field.querySelector('.read-only-badge')).toBeNull();
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
       expect(field.querySelector('.broker-host-effective')).toBeNull();
     });
 
@@ -911,6 +933,9 @@ describe('scion-page-admin-server-config', () => {
       element = await createComponent(createFetchHandler(config));
       const field = brokerHostField(element);
       expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'deployment configuration'
+      );
       expect(field.querySelector('.read-only-value')?.textContent).toContain('0.0.0.0');
       expect(field.querySelector('.broker-host-effective')).toBeNull();
     });
