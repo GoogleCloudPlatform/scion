@@ -562,11 +562,11 @@ func TestWhoamiFullExperiments(t *testing.T) {
 	}
 
 	out, _ := run(cliutil.RootOptions{})
-	assert.Contains(t, out, "Exps:     hub.artifacts")
+	assert.Contains(t, out, "Experiments: hub.artifacts")
 
 	experiments = map[string]bool{"hub.artifacts": false}
 	out, _ = run(cliutil.RootOptions{})
-	assert.Contains(t, out, "Exps:     (none)")
+	assert.Contains(t, out, "Experiments: (none)")
 	jsonOut, _ := run(cliutil.RootOptions{OutputFormat: "json"})
 	var raw map[string]any
 	require.NoError(t, json.Unmarshal([]byte(jsonOut), &raw))

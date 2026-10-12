@@ -1327,7 +1327,7 @@ The command populates a structured JSON schema divided into two latency tiers:
 - `annotations`: System key-value pairs attached to the agent.
 - `ancestry`: A lineage array representing the agent's parent/child spawn relationships.
 - `taskSummary`: A brief summary of active task execution.
-- `experiments`: The hub experiments that are on now, read live from `GET /api/v1/experiments` (shown as `Exps:` in plain text, `(none)` when none is on). It includes server-checked experiments that also have a web layer, such as `hub.artifacts`, so an agent can tell whether artifacts are available. The key is absent when the Hub could not be asked. The agent environment variable `SCION_HUB_EXPERIMENTS` lists only the experiments dispatched to agents, fixed when the agent starts, so it is not the full list.
+- `experiments`: The hub experiments that are on now, read live from `GET /api/v1/experiments` (shown as `Experiments:` in plain text, `(none)` when none is on). It includes server-checked experiments that also have a web layer, such as `hub.artifacts`, so an agent can tell whether artifacts are available. The key is absent when the Hub could not be asked. The agent environment variable `SCION_HUB_EXPERIMENTS` lists only the experiments dispatched to agents, fixed when the agent starts, so it is not the full list.
 
 ##### Token scopes (requires `--full`; read locally, no Hub connectivity needed)
 - `scopes`: The scopes of the agent's current Hub token, decoded from the token itself (shown as `Scopes:` in plain text). For example, an agent without `project:artifact:write` cannot publish artifacts; see [Artifacts](/scion/reference/artifacts/).
