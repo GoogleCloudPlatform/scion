@@ -31,7 +31,7 @@ const copilotConfigFixturesFile = "testdata/copilot_config_signin.json"
 
 // minCopilotConfigFixtures is a floor on the fixture count, so a truncated or
 // emptied fixture file cannot pass silently.
-const minCopilotConfigFixtures = 32
+const minCopilotConfigFixtures = 34
 
 type copilotConfigFixture struct {
 	Name   string `json:"name"`

@@ -329,6 +329,107 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         })
         self.assertEqual(resolved["method"], "api-key")
 
+    # --- config.json that is not cleanly readable (ptone/scion#4624) -------
+    # A file that cannot be decoded or converted is handled like unparseable
+    # JSON: replaced, unless the host's rule says it may hold sign-in, in
+    # which case it is left byte-for-byte untouched. Provisioning continues.
+
+    LONG_INT = "1" * 5000  # beyond Python's 4300-digit int conversion limit
+
+    def _write_raw(self, raw: bytes) -> None:
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        with open(self.config_path, "wb") as f:
+            f.write(raw)
+
+    def _read_raw(self) -> bytes:
+        with open(self.config_path, "rb") as f:
+            return f.read()
+
+    def _provision_must_succeed(self) -> dict:
+        # A formerly escaping exception is reported as a test failure.
+        try:
+            return self._provision({})
+        except Exception as exc:  # noqa: BLE001
+            self.fail(f"provisioning raised {type(exc).__name__}: {exc}")
+
+    def _assert_replaced(self) -> None:
+        with open(self.config_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f),
+                             {"trustedFolders": [os.path.join(self.home, "workspace")]})
+
+    def test_non_utf8_config_is_replaced(self) -> None:
+        self._write_raw(b'{"theme": "dark"}\xff\n')
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self._assert_replaced()
+
+    def test_non_utf8_in_settings_string_is_replaced(self) -> None:
+        # Never rewritten with U+FFFD: not sign-in, so replaced.
+        self._write_raw(b'{"theme": "dark\xff"}')
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self._assert_replaced()
+
+    def test_non_utf8_in_sign_in_file_is_untouched(self) -> None:
+        raw = b'{"copilot_hmac_key": "placeholder-hmac", "theme": "dark\xff"}'
+        self._write_raw(raw)
+        self.assertEqual(self._provision_must_succeed()["method"], "auth-file")
+        self.assertEqual(self._read_raw(), raw)
+
+    def test_long_int_config_is_replaced(self) -> None:
+        self._write_raw(('{"theme": ' + self.LONG_INT + '}').encode())
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self._assert_replaced()
+
+    def test_long_int_in_sign_in_file_is_untouched(self) -> None:
+        raw = ('{"copilot_hmac_key": "placeholder-hmac", "theme": '
+               + self.LONG_INT + '}').encode()
+        self._write_raw(raw)
+        self.assertEqual(self._provision_must_succeed()["method"], "auth-file")
+        self.assertEqual(self._read_raw(), raw)
+
+    def test_long_int_unknown_key_is_untouched(self) -> None:
+        # An unknown key counts as possible sign-in on the host (fail open).
+        raw = ('{"placeholder_key": ' + self.LONG_INT + '}').encode()
+        self._write_raw(raw)
+        self.assertEqual(self._provision_must_succeed()["method"], "auth-file")
+        self.assertEqual(self._read_raw(), raw)
+
+    def test_nan_and_infinity_config_is_replaced(self) -> None:
+        # Copilot's JSON parser rejects these and the host reads the file as
+        # not a JSON object, so it is replaced rather than kept.
+        for const in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(const):
+                self._write_raw(('{"theme": ' + const + '}').encode())
+                self.assertEqual(self._provision_must_succeed()["method"], "none")
+                self._assert_replaced()
+
+    def test_nan_with_credential_is_replaced(self) -> None:
+        raw = b'{"copilot_hmac_key": "placeholder-hmac", "theme": NaN}'
+        self._write_raw(raw)
+        # NaN makes the content unparseable on the host too: not sign-in.
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self._assert_replaced()
+
+    def test_unparseable_config_is_still_replaced(self) -> None:
+        self._write_raw(b'{"theme": ')
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self._assert_replaced()
+
+    def test_clean_config_is_kept_unchanged(self) -> None:
+        ws = os.path.join(self.home, "workspace")
+        self._write_raw(json.dumps({"theme": "dark", "trustedFolders": [ws]}).encode())
+        before = self._read_raw()
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        self.assertEqual(self._read_raw(), before)
+
+    def test_clean_config_gains_workspace(self) -> None:
+        self._write_raw(b'// comment line\n{"theme": "dark", "trustedFolders": ["/src"]}')
+        self.assertEqual(self._provision_must_succeed()["method"], "none")
+        with open(self.config_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {
+                "theme": "dark",
+                "trustedFolders": ["/src", os.path.join(self.home, "workspace")],
+            })
+
 
 class ConfigFileMayHoldCredentialTest(unittest.TestCase):
     """The content rule behind the auth-file present_check.
@@ -397,6 +498,20 @@ class ConfigFileMayHoldCredentialTest(unittest.TestCase):
         self.assertTrue(self._check(b'{"placeholder_key": "\xff"}'))
         self.assertFalse(self._check(b'{"trustedFolders": []}\xff'))
 
+    def test_long_int_follows_keys(self) -> None:
+        # The host never converts numbers (json.RawMessage), so an integer
+        # past Python's 4300-digit limit does not make content unparseable.
+        big = "1" * 5000
+        self.assertFalse(self._check('{"theme": ' + big + '}'))
+        self.assertFalse(self._check('{"copilot_tokens": {"placeholder": ' + big + '}}'))
+        self.assertTrue(self._check('{"placeholder_key": ' + big + '}'))
+        self.assertTrue(self._check('{"copilot_hmac_key": "placeholder-hmac", "theme": -' + big + '}'))
+
+    def test_nan_and_infinity_are_not_sign_in(self) -> None:
+        for const in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(const):
+                self.assertFalse(self._check('{"placeholder_key": ' + const + '}'))
+
     def test_deep_nesting_is_not_sign_in(self) -> None:
         # Too deep for Python's decoder, so unparseable here. Go's limit is
         # 10000 levels; which shallower depths still differ from the host
@@ -416,7 +531,7 @@ HOST_FIXTURES = os.path.join(REPO_ROOT, "pkg", "harness", "testdata", "copilot_c
 
 # Floors pinned so that a moved, emptied or refactored host file cannot make
 # the cross-checks below pass vacuously. Raise them when the host lists grow.
-MIN_HOST_FIXTURES = 32
+MIN_HOST_FIXTURES = 34
 HOST_SETTINGS_KEY_COUNT = 12
 HOST_CREDENTIAL_KEY_COUNT = 3
 

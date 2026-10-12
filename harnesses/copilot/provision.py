@@ -97,6 +97,15 @@ def _reject_json_constant(name: str) -> Any:
     raise ValueError(f"invalid JSON constant {name}")
 
 
+def _json_int_unconverted(literal: str) -> int:
+    # The host decodes config.json into json.RawMessage values and never
+    # converts numbers, so an integer literal beyond Python's int conversion
+    # limit (4300 digits) must not make the content unparseable here. The
+    # predicate below only tests values for being non-empty strings, so a
+    # placeholder number is enough.
+    return 0
+
+
 def _config_holds_sign_in(raw: bytes) -> bool:
     """Report whether config.json content may hold sign-in data.
 
@@ -117,14 +126,20 @@ def _config_holds_sign_in(raw: bytes) -> bool:
         future copilot version may keep a credential under a new key.
       - Content that is not a JSON object (unparseable, an array, null, or
         empty) is not sign-in: copilot cannot read sign-in from it, and
-        _ensure_settings replaces unparseable JSON.
+        _ensure_settings replaces unparseable JSON. Invalid UTF-8 outside a
+        string and NaN or Infinity make content unparseable, as on the host;
+        invalid UTF-8 inside a string and integers of any length do not.
 
     Values are only tested for emptiness; they are never logged or returned.
     """
     text = raw.decode("utf-8", errors="replace")
     kept = [ln for ln in text.split("\n") if not ln.lstrip(_GO_SPACE).startswith("//")]
     try:
-        top = json.loads("\n".join(kept), parse_constant=_reject_json_constant)
+        top = json.loads(
+            "\n".join(kept),
+            parse_constant=_reject_json_constant,
+            parse_int=_json_int_unconverted,
+        )
     except (ValueError, RecursionError):
         return False
     if not isinstance(top, dict):
@@ -381,6 +396,20 @@ def _write_hooks(home: str) -> None:
         )
 
 
+def _load_config_strictly(raw: bytes) -> Any:
+    """Parse config.json content that is safe to rewrite.
+
+    Lines that start with "//" are dropped, as copilot allows. Raises
+    ValueError (UnicodeDecodeError and json.JSONDecodeError included) or
+    RecursionError when the content is not strict UTF-8, not JSON, holds an
+    integer too long to convert, or holds NaN or Infinity, which copilot's
+    own JSON parser rejects.
+    """
+    text = raw.decode("utf-8")
+    lines = [ln for ln in text.splitlines() if not ln.strip().startswith("//")]
+    return json.loads("\n".join(lines), parse_constant=_reject_json_constant)
+
+
 def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
     """Ensure ~/.copilot/settings.json and config.json have sane defaults."""
     config_dir = os.path.join(ctx.home, ".copilot")
@@ -409,11 +438,28 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
     config: dict[str, Any] = {}
     if os.path.isfile(config_path):
         try:
-            loaded = scion_harness.read_json_skipping_comment_lines(config_path)
-            if isinstance(loaded, dict):
-                config = loaded
-        except (OSError, json.JSONDecodeError):
-            pass
+            with open(config_path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            raw = None
+        if raw is not None:
+            try:
+                loaded = _load_config_strictly(raw)
+                if isinstance(loaded, dict):
+                    config = loaded
+            except (ValueError, RecursionError):
+                # Not cleanly readable: not JSON, not UTF-8, an integer too
+                # long to convert, NaN or Infinity, or nested too deeply.
+                # Rewriting it could only write back a lossy copy, so a file
+                # that may hold sign-in (the host's rule) is left untouched
+                # and any other file is replaced.
+                if _config_holds_sign_in(raw):
+                    ctx.info(
+                        "~/.copilot/config.json is not clean JSON but may hold "
+                        "sign-in; leaving it unchanged (workspace not added to "
+                        "trustedFolders)"
+                    )
+                    return
 
     folders = config.get("trustedFolders")
     if not isinstance(folders, list):
