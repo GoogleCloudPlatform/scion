@@ -105,7 +105,12 @@ Environment variables override any settings file value and are the most convenie
 
 #### Client certificates (mTLS)
 
-For a generic OTLP gRPC endpoint that requires client certificate authentication, set `telemetry.cloud.tls.cert_file` and `telemetry.cloud.tls.key_file` (or `SCION_OTEL_CERT_FILE` and `SCION_OTEL_KEY_FILE`). The paths are read inside the agent container, so the files must be mounted there, for example through a file secret or a template. Set both or neither. If only one is set, or a file cannot be read, `sciontool` logs an error naming the path and runs without its telemetry pipeline (no local receiver and no cloud export); the agent itself still runs. Client certificates cannot be combined with plaintext transport (`tls.enabled: false`) or with GCP-native export. When neither is set, behavior is unchanged.
+For a generic OTLP gRPC endpoint that requires client certificate authentication, set `telemetry.cloud.tls.cert_file` and `telemetry.cloud.tls.key_file` (or `SCION_OTEL_CERT_FILE` and `SCION_OTEL_KEY_FILE`). The paths are read inside the agent container, so the files must be mounted there, for example through a file secret or a template. Set both or neither. Where a half pair is caught depends on where it comes from:
+
+- In settings files or the host environment, a half pair (or a client certificate together with `tls.enabled: false`) fails settings load, so `scion` commands that load settings fail with that error, on the host or inside the agent.
+- A half pair that reaches the agent only through a template or the agent environment is caught by `sciontool` at startup. The same happens when a file cannot be read, or when a client certificate is combined with plaintext transport or GCP-native export. `sciontool` logs an error naming the path and runs without its telemetry pipeline (no local receiver and no cloud export); the agent itself still runs.
+
+The key pair is read once, when the exporter starts, so rotated certificate files take effect after the agent restarts. When neither path is set, behavior is unchanged.
 
 ### Local Receiver Settings (For Agents)
 
