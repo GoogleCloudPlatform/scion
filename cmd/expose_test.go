@@ -230,6 +230,38 @@ func TestExpose_ArgumentsCheckedBeforeClient(t *testing.T) {
 	require.EqualError(t, err, `invalid port "abc"`)
 }
 
+// Ports outside 1-65535 are refused by both commands before any Hub call.
+func TestExpose_PortOutOfRange(t *testing.T) {
+	resetExposeFlags(t)
+	orig := newExposeHubClient
+	newExposeHubClient = func() *sciontoolhub.Client {
+		t.Error("the hub client must not be built for an out-of-range port")
+		return nil
+	}
+	t.Cleanup(func() { newExposeHubClient = orig })
+
+	for _, arg := range []string{"0", "65536", "-1"} {
+		want := "invalid port " + arg + ": must be between 1 and 65535"
+		_, err := runExposeTest(t, runExpose, arg)
+		require.EqualError(t, err, want, "expose %s", arg)
+		_, err = runExposeTest(t, runUnexpose, arg)
+		require.EqualError(t, err, want, "unexpose %s", arg)
+	}
+}
+
+// The range bounds themselves are accepted.
+func TestExpose_PortRangeBounds(t *testing.T) {
+	for _, arg := range []string{"1", "65535"} {
+		hub := &exposeTestHub{}
+		useExposeHub(t, hub.start(t))
+		_, err := runExposeTest(t, runExpose, arg)
+		require.NoError(t, err, "expose %s", arg)
+		_, err = runExposeTest(t, runUnexpose, arg)
+		require.NoError(t, err, "unexpose %s", arg)
+		assert.Equal(t, "/api/v1/agents/"+exposeTestAgentID+"/ports/"+arg, hub.lastDeletePath)
+	}
+}
+
 func TestUnexpose_DeletesPort(t *testing.T) {
 	hub := &exposeTestHub{}
 	useExposeHub(t, hub.start(t))

@@ -91,6 +91,19 @@ func exposeClient() (*sciontoolhub.Client, error) {
 	return client, nil
 }
 
+// parseExposePort parses a port argument and checks it is in the TCP port
+// range, so an out-of-range value is reported before any Hub call.
+func parseExposePort(arg string) (int, error) {
+	port, err := strconv.Atoi(arg)
+	if err != nil {
+		return 0, fmt.Errorf("invalid port %q", arg)
+	}
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid port %d: must be between 1 and 65535", port)
+	}
+	return port, nil
+}
+
 func runExpose(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	// Arguments are checked before the client, as in unexpose.
@@ -99,9 +112,9 @@ func runExpose(cmd *cobra.Command, args []string) error {
 		if len(args) != 1 {
 			return fmt.Errorf("port is required")
 		}
-		p, err := strconv.Atoi(args[0])
+		p, err := parseExposePort(args[0])
 		if err != nil {
-			return fmt.Errorf("invalid port %q", args[0])
+			return err
 		}
 		port = p
 	}
@@ -165,9 +178,9 @@ func runExpose(cmd *cobra.Command, args []string) error {
 
 func runUnexpose(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
-	port, err := strconv.Atoi(args[0])
+	port, err := parseExposePort(args[0])
 	if err != nil {
-		return fmt.Errorf("invalid port %q", args[0])
+		return err
 	}
 	client, err := exposeClient()
 	if err != nil {
