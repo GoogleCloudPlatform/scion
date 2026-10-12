@@ -458,18 +458,18 @@ func refreshKnownProjects(ctx context.Context, stderr io.Writer, c *config.CLICo
 		skipped  bool
 	}
 	results := make([]result, len(names))
-	// Hubs get only a credential bound to each, unless the one hub refreshed
-	// is the one given with --hub or the effective hub (hubGetsFullChain).
-	fanOut := len(names) != 1 || !hubGetsFullChain(settings, c.Hubs[names[0]].Endpoint, onlyHub != "")
 	var wg sync.WaitGroup
 	for i, name := range names {
 		endpoint := c.Hubs[name].Endpoint
+		// A hub gets only a credential bound to it unless it was given with
+		// --hub or is the effective hub (hubGetsFullChain).
+		fanOut := !hubGetsFullChain(settings, endpoint, onlyHub != "")
 		if !hubUsable(settings, endpoint, fanOut) {
 			results[i].skipped = true
 			continue
 		}
 		wg.Add(1)
-		go func(i int, endpoint string) {
+		go func(i int, endpoint string, fanOut bool) {
 			defer wg.Done()
 			client, err := hubClientFor(settings, endpoint, fanOut)
 			if err != nil {
@@ -479,7 +479,7 @@ func refreshKnownProjects(ctx context.Context, stderr io.Writer, c *config.CLICo
 			ctx, cancel := context.WithTimeout(ctx, projectListRefreshTimeout)
 			defer cancel()
 			results[i].projects, results[i].err = listAllHubProjects(ctx, client)
-		}(i, endpoint)
+		}(i, endpoint, fanOut)
 	}
 	wg.Wait()
 	if err := ctx.Err(); err != nil {

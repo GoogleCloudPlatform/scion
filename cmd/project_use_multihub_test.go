@@ -15,7 +15,9 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -47,6 +49,9 @@ type fakeProjectHub struct {
 	projects []hubclient.Project
 	// authz are the Authorization headers of the project requests.
 	authz []string
+	// proxyAuthz are the Proxy-Authorization headers of all requests
+	// (the transport token in IAP mode).
+	proxyAuthz []string
 }
 
 func newFakeProjectHub(t *testing.T, projects ...hubclient.Project) *fakeProjectHub {
@@ -71,6 +76,7 @@ func (h *fakeProjectHub) serve(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/v1/projects") {
 		h.authz = append(h.authz, r.Header.Get("Authorization"))
 	}
+	h.proxyAuthz = append(h.proxyAuthz, r.Header.Get("Proxy-Authorization"))
 	h.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	q := r.URL.Query()
@@ -122,6 +128,23 @@ func (h *fakeProjectHub) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *fakeProjectHub) calls() int32 { return h.gets.Load() + h.lists.Load() }
+
+// takeProxyHeaders returns the distinct Proxy-Authorization headers the hub
+// received since the last call ("" for none), and forgets them.
+func (h *fakeProjectHub) takeProxyHeaders() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range h.proxyAuthz {
+		if !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	h.proxyAuthz = nil
+	return out
+}
 
 // authHeaders returns the distinct Authorization headers the hub received.
 func (h *fakeProjectHub) authHeaders() []string {
@@ -784,4 +807,124 @@ func TestFanOutTransport_OnlyTheHubEntrysOwn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"entry-audience"}, audiences)
 	assert.Equal(t, transportauth.ModeFromString("iap"), mode)
+}
+
+// staticTransportSource is a transport token source with a fixed token.
+type staticTransportSource struct{ token string }
+
+func (s staticTransportSource) Token() (string, error)     { return s.token, nil }
+func (s staticTransportSource) SetToken(string, time.Time) {}
+func (s staticTransportSource) Expiry() time.Time          { return time.Time{} }
+
+// withEnvTransport sets an IAP transport token in the environment, and
+// makes a hub entry's own transport build a source with the token
+// "<audience>-token" (not on GCE).
+func withEnvTransport(t *testing.T) {
+	t.Helper()
+	t.Setenv("SCION_TRANSPORT_TOKEN", "env-transport-token")
+	t.Setenv("SCION_TRANSPORT_MODE", "iap")
+	origGCE, origADC := transportauth.IsOnGCEFunc, fanOutADCSource
+	t.Cleanup(func() { transportauth.IsOnGCEFunc, fanOutADCSource = origGCE, origADC })
+	transportauth.IsOnGCEFunc = func() bool { return false }
+	fanOutADCSource = func(audience string) (transportauth.TokenSource, error) {
+		return staticTransportSource{token: audience + "-token"}, nil
+	}
+}
+
+const envTransportHeader = "Bearer env-transport-token"
+
+// The environment's transport token goes only to the chosen or effective
+// hub. Any other hub contacted by 'use' (lookup and the check of a known
+// project), 'project list --refresh' or 'hub list --check' gets only the
+// transport of its own hub entry, or none.
+func TestFanOut_EnvironmentTransportOnlyForChosenOrEffectiveHub(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	withEnvTransport(t)
+	prod.setProjects(prodFoo, hubclient.Project{ID: "p-bar", Slug: "bar", Name: "Bar"})
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.Hubs["staging"].Transport = &config.HubTransportConfig{Mode: "iap", Audience: "staging-aud"}
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-bar", Slug: "bar"}})
+		return nil
+	}))
+
+	// Lookup across both hubs (the result is ambiguous; the calls are made).
+	_, _, err := runScion(t, "use", "foo")
+	require.Error(t, err)
+	assert.Equal(t, []string{""}, prod.takeProxyHeaders(), "lookup: no transport for a hub without entry transport")
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, staging.takeProxyHeaders(), "lookup: the entry's own transport")
+
+	_, _, err = runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Equal(t, []string{""}, prod.takeProxyHeaders(), "refresh")
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, staging.takeProxyHeaders(), "refresh")
+
+	_, _, err = runScion(t, "hub", "list", "--check")
+	require.NoError(t, err)
+	assert.Equal(t, []string{""}, prod.takeProxyHeaders(), "hub list --check")
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, staging.takeProxyHeaders(), "hub list --check")
+
+	// The check of a project known on prod. Selecting it makes prod the
+	// current hub, and so the effective hub of the runs that follow.
+	_, _, err = runScion(t, "use", "bar")
+	require.NoError(t, err)
+	assert.Equal(t, []string{""}, prod.takeProxyHeaders(), "check of a known project")
+	require.Equal(t, "prod", readTestContext(t).CurrentHub)
+
+	// prod is the effective hub now: it gets the environment's transport,
+	// staging still only its own.
+	_, _, err = runScion(t, "use", "bar")
+	require.NoError(t, err)
+	assert.Equal(t, []string{envTransportHeader}, prod.takeProxyHeaders(), "check on the effective hub")
+	_, _, err = runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Equal(t, []string{envTransportHeader}, prod.takeProxyHeaders(), "refresh of the effective hub")
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, staging.takeProxyHeaders())
+	_, _, err = runScion(t, "hub", "list", "--check")
+	require.NoError(t, err)
+	assert.Equal(t, []string{envTransportHeader}, prod.takeProxyHeaders(), "hub list --check of the effective hub")
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, staging.takeProxyHeaders())
+}
+
+// The login offer's OAuth client gets the environment's transport only for
+// the effective hub; for a hub the lookup picked, only its entry's own.
+func TestUseLoginOffer_TransportOnlyTheHubsOwn(t *testing.T) {
+	setupRegistryTest(t)
+	writeHomeGlobalSettings(t, "")
+	withEnvTransport(t)
+	staging := newFakeProjectHub(t)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("staging", staging.URL())
+	}))
+	origNoBrowser := hubAuthNoBrowser
+	t.Cleanup(func() { hubAuthNoBrowser = origNoBrowser })
+	hubAuthNoBrowser = true // the device flow: its first request fails on the fake hub
+
+	login := func() []string {
+		t.Helper()
+		c := &cobra.Command{}
+		c.SetContext(context.Background())
+		c.SetOut(io.Discard)
+		c.SetErr(io.Discard)
+		require.Error(t, useLoginToHub(c, staging.URL()), "the fake hub has no login endpoints")
+		headers := staging.takeProxyHeaders()
+		require.NotEmpty(t, headers, "the login flow contacted the hub")
+		return headers
+	}
+	assert.Equal(t, []string{""}, login(), "a hub the lookup picked: no environment transport")
+
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+staging.URL()+"\n")
+	assert.Equal(t, []string{envTransportHeader}, login(), "the effective hub: environment transport as for 'hub auth login'")
+}
+
+// The lone registered hub, neither chosen nor effective, is searched only
+// with a credential bound to it: with only unbound tokens, 'use' makes no
+// call and reports it as not logged in.
+func TestUseMultiHub_LoneCandidateNotEffectiveIsNotContacted(t *testing.T) {
+	prod := setupOneHubNoLogin(t)
+	for _, args := range [][]string{{"use", "foo"}, {"use", "foo", "--refresh"}} {
+		_, _, err := runScion(t, args...)
+		require.EqualError(t, err, "project 'foo' could not be looked up (prod: not logged in)\n\n"+
+			"Log in with: scion hub auth login --hub prod", "%v", args)
+	}
+	assert.Zero(t, prod.calls())
 }

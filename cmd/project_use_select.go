@@ -51,15 +51,40 @@ var useConfirm = hubsync.ConfirmAction
 
 // useLoginToHub logs in to the hub at endpoint in place, for the login
 // offer of 'scion use <project>'. It stores the credential and nothing
-// else: no settings are written. It is a variable so tests can substitute
-// it.
+// else: no settings are written. The hub was picked by the lookup, so
+// unless it is the effective hub its login client gets only the transport
+// of its own hub list entry (see fanOutTransport). It is a variable so
+// tests can substitute it.
 var useLoginToHub = func(cmd *cobra.Command, endpoint string) error {
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticating with Hub at %s\n", endpoint)
-	tokenResp, err := hubAuthLoginFlow(cmd, endpoint, "")
+	opts, err := useLoginClientOptions(endpoint)
+	if err != nil {
+		return err
+	}
+	tokenResp, err := hubAuthLoginFlow(cmd, endpoint, "", opts...)
 	if err != nil {
 		return err
 	}
 	return storeTokenAndPrintResult(endpoint, tokenResp)
+}
+
+// useLoginClientOptions returns the client options of the login offer's
+// OAuth client: none for the effective hub (transport auth from the
+// environment applies, as for 'hub auth login'), else only the transport of
+// the hub's own entry.
+func useLoginClientOptions(endpoint string) ([]hubclient.Option, error) {
+	settings, err := config.LoadSettings(useSettingsPath())
+	if err != nil {
+		settings = &config.Settings{}
+	}
+	if hubGetsFullChain(settings, endpoint, false) {
+		return nil, nil
+	}
+	src, mode, err := fanOutTransport(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return []hubclient.Option{hubclient.WithTransportAuth(src, mode)}, nil
 }
 
 // useInteractive reports whether 'scion use' may ask the user to choose:
@@ -168,11 +193,10 @@ func useCandidateHubs(c *config.CLIContext, settings *config.Settings) (hubs []u
 	return hubs, false, nil
 }
 
-// fanOut reports whether hubs must get only credentials bound to each:
-// always for several hubs, and for one hub unless the user chose it or it
-// is the effective hub (see hubGetsFullChain).
-func (l *useLookup) fanOut(hubs []useHub) bool {
-	return len(hubs) != 1 || !hubGetsFullChain(l.settings, hubs[0].Endpoint, l.explicit)
+// fanOut reports whether hub must get only credentials bound to it: unless
+// the user chose it or it is the effective hub (see hubGetsFullChain).
+func (l *useLookup) fanOut(hub useHub) bool {
+	return !hubGetsFullChain(l.settings, hub.Endpoint, l.explicit)
 }
 
 // remember records projects seen on hub for the known-project list.
@@ -207,7 +231,7 @@ func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
 	notLoggedIn := fmt.Sprintf("Not logged in to hub '%s'. Run: scion hub auth login --hub %s", m.Hub.label(), m.Hub.label())
 	// The hub comes from the known list, not from the user: the full
 	// credential chain only for the chosen or effective hub.
-	fanOut := l.fanOut([]useHub{m.Hub})
+	fanOut := l.fanOut(m.Hub)
 	if !hubUsable(l.settings, m.Hub.Endpoint, fanOut) {
 		return useUnchecked, notLoggedIn
 	}
@@ -266,10 +290,10 @@ func (l *useLookup) lookupOn(hub useHub, fanOut bool) ([]hubclient.Project, erro
 
 // search looks the reference up on hubs in parallel, each within
 // useHubTimeout. Hubs without a usable credential are skipped and not
-// contacted; in a fan-out (see useLookup.fanOut), that is every hub without
-// a credential bound to it. It returns the matches in the order of hubs.
+// contacted; for a hub that is neither chosen nor effective (see
+// useLookup.fanOut), that is a hub without a credential bound to it. It
+// returns the matches in the order of hubs.
 func (l *useLookup) search(hubs []useHub) []useMatch {
-	fanOut := l.fanOut(hubs)
 	type result struct {
 		projects []hubclient.Project
 		err      error
@@ -278,15 +302,16 @@ func (l *useLookup) search(hubs []useHub) []useMatch {
 	results := make([]result, len(hubs))
 	var wg sync.WaitGroup
 	for i, h := range hubs {
+		fanOut := l.fanOut(h)
 		if !hubUsable(l.settings, h.Endpoint, fanOut) {
 			results[i].skipped = true
 			continue
 		}
 		wg.Add(1)
-		go func(i int, h useHub) {
+		go func(i int, h useHub, fanOut bool) {
 			defer wg.Done()
 			results[i].projects, results[i].err = l.lookupOn(h, fanOut)
-		}(i, h)
+		}(i, h, fanOut)
 	}
 	wg.Wait()
 

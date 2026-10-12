@@ -157,10 +157,12 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 
 // hubAuthLoginFlow runs the OAuth login to the hub at hubURL: the browser
 // flow, or the device flow with --no-browser or in a headless environment.
-// It returns the token and stores nothing.
-func hubAuthLoginFlow(cmd *cobra.Command, hubURL, provider string) (*hubclient.CLITokenResponse, error) {
+// It returns the token and stores nothing. extra adds client options, such
+// as the transport auth for a hub the CLI picked itself.
+func hubAuthLoginFlow(cmd *cobra.Command, hubURL, provider string, extra ...hubclient.Option) (*hubclient.CLITokenResponse, error) {
 	// Create hub client (unauthenticated for initial OAuth)
-	client, err := hubclient.New(hubURL, hubclient.WithTimeout(30*time.Second))
+	opts := append([]hubclient.Option{hubclient.WithTimeout(30 * time.Second)}, extra...)
+	client, err := hubclient.New(hubURL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Hub client: %w", err)
 	}
