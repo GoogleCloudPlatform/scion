@@ -66,6 +66,7 @@
 6 agent_credential_status_test.go
 1 agent_delegation_arms_test.go
 1 agent_delegation_chain_test.go
+1 agent_delegation_manage_test.go
 1 agent_delegation_test.go
 4 agent_delete_engine_deferred_test.go
 4 agent_delete_engine_routed_test.go
@@ -685,7 +686,7 @@
 1 handlers_conversations_topic_test.go
 1 handlers_def127_128_test.go
 2 handlers_diagnostics_test.go
-2 handlers_env_hub_read_test.go
+1 handlers_env_hub_read_test.go
 6 handlers_env_secret_merge_test.go
 5 handlers_env_secrets_test.go
 6 handlers_envsecret_authz_test.go
