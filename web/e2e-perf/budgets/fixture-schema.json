@@ -273,6 +273,7 @@
       "fields": [
         "testHubAdmin:boolean",
         "testIdentities:boolean",
+        "testIdentityWebSessions:boolean",
         "testSuperAdmin:boolean"
       ]
     },
