@@ -61,11 +61,13 @@ func claudeToolFailureDialect(t *testing.T) string {
 	for _, group := range settings.Hooks["PostToolUseFailure"] {
 		for _, h := range group.Hooks {
 			if rest, ok := strings.CutPrefix(h.Command, "sciontool hook --dialect="); ok {
-				return strings.Fields(rest)[0]
+				if fields := strings.Fields(rest); len(fields) > 0 {
+					return fields[0]
+				}
 			}
 		}
 	}
-	t.Fatal("bundled claude settings register no sciontool hook for PostToolUseFailure")
+	t.Fatal("bundled claude settings register no sciontool hook with a --dialect value for PostToolUseFailure")
 	return ""
 }
 
