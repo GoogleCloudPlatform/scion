@@ -1306,11 +1306,83 @@ This command modifies the database directly. Use it only when normal admin acces
 
 ### `scion doctor`
 
-Runs host-side diagnostics: checks Git, tmux, the active container runtime, and runtime-specific
-health (Docker/Podman daemon, or Kubernetes cluster/namespace/RBAC/CSI access). Supports
-`--format json`.
+Checks this machine and, when a Hub is configured, the Hub and the platform it manages. It is for
+people checking that Scion is set up and healthy, or troubleshooting agents, from their own
+machine. It is not a self-check for ordinary agents (see `sciontool doctor` below), and it is not
+available inside agent containers.
 
 **Usage:** `scion doctor [flags]`
+
+**Flags:**
+
+- `--verbose`: Add the per-runtime-broker and per-Hub-instance tables, agent counts by phase,
+  and integration details to the Platform Health section. Text output only: JSON output carries
+  the full summary under `healthSummary` instead.
+- `--format json`: Print one JSON object and nothing else on stdout (see below).
+
+**Sections:**
+
+- **General**: Git and tmux on this machine.
+- **Hub Health**: Hub reachability (`/healthz`), authentication, unmapped GCP service accounts of
+  the linked project, and checks of this machine's settings (NFS mounts, Kubernetes profiles,
+  the deprecated server hub endpoint source on hosts configured as a server, telemetry, container
+  images, broker credentials).
+- **Platform Health**: The Hub's health summary (`GET /api/v1/admin/health/summary`), the same
+  data as the [health dashboard](/scion/workstation/dashboard/). It shows the overall status, then
+  every "Needs attention" item in the Hub's order (critical items as failures, warnings as
+  warnings), then one line each for the Hub fleet, runtime brokers, agents, dispatch and
+  integrations, the service account check when it cannot run, and the test identity settings when
+  any is on. Doctor shows the summary as the Hub computed it and does not recompute the status.
+  - Reading the summary needs the `hub.health.read` permission (hub admins). Without it, the
+    section shows `requires hub.health.read`, and Hub Health checks runtime brokers and agents
+    from the lists you can see instead. That agent check uses the same rule as the dashboard:
+    agents in error, crashed or offline count (stopped agents are ignored), and stalled agents do
+    not.
+  - The summary is read whenever the Hub answers, even if its `/healthz` reports it unhealthy.
+    Text that comes from the Hub, such as runtime broker names and integration reasons, is shown
+    with control characters removed.
+  - If the Hub instance cannot read its database, the section shows "Health data not available
+    (database unreachable from this hub instance)" and the list-based checks run.
+- **Runtime**: The active container runtime: the Docker or Podman daemon, the Apple container CLI,
+  or for Kubernetes and Cloud Run the runtime's own diagnostics (cluster connectivity, namespace
+  access, RBAC permissions, CSI drivers).
+
+**Exit status:** non-zero when the Hub is unreachable or `/healthz` reports it unhealthy, when the
+health summary status is `unhealthy`, or when a runtime diagnostic check fails. A `degraded`
+summary is a warning and exits zero, as does a summary you are not allowed to read.
+
+**JSON output:** `--format json` prints a single object for every runtime:
+
+```json
+{
+  "status": "warn",
+  "general": [{"name": "git", "status": "pass", "message": "git version 2.43.0"}],
+  "hubChecks": [{"name": "hub-connectivity", "status": "pass", "message": "..."}],
+  "platformHealth": [{"name": "health-summary", "status": "warn", "message": "Platform is degraded (1 item(s) need attention)"}],
+  "healthSummary": {"status": "degraded", "attention": [], "...": "..."},
+  "runtime": "docker",
+  "checks": [{"name": "runtime", "status": "pass", "message": "Active runtime: docker"}]
+}
+```
+
+`status` is `fail` when the command exits non-zero, `warn` when any check warned or failed, and
+`pass` otherwise. `healthSummary` is the Hub's summary response unchanged, and is omitted when it
+could not be read. `runtime` is omitted when no project was found.
+
+**Platform Health for an assistant agent:** an assistant agent that a hub admin has authorized
+to monitor the platform runs `scion doctor` from an environment a person owns, not from inside an
+agent container (agent containers do not offer the command, and the Hub accepts the health
+summary only from user credentials). A hub admin mints a hub-boundary token and the environment
+uses it with no stored login:
+
+```bash
+scion hub token create --boundary hub --name health-check \
+  --scopes hub_health:read,broker:read,agent:list --expires 30d
+SCION_HUB_TOKEN=scion_pat_... scion doctor --format json
+```
+
+`broker:read` and `agent:list` are for the list-based checks; add `hub_integrations:read` to see
+integration names.
 
 :::note[In-container diagnostics]
 A separate **`sciontool doctor`** command runs *inside* an agent container and diagnoses the
