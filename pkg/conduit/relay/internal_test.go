@@ -764,7 +764,7 @@ func TestBridgeCancelDuringOpening4499BothLegs(t *testing.T) {
 		_, err := p.remote().OpenStream(ctx, &conduitv1.StreamOpen{Kind: conduitv1.StreamKind_STREAM_KIND_PTY})
 		errc <- err
 	}()
-	hctx := relaytest.Wait(t, handlerCtx, "target StreamOpen")
+	hctx := relaytest.Wait(t, handlerCtx, "target handler ctx")
 	ps := relaytest.Wait(t, pending, "target StreamOpen")
 	cancel()
 	if err := relaytest.Wait(t, errc, "caller OpenStream"); !errors.Is(err, context.Canceled) {
