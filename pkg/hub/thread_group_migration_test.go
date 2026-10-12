@@ -18,6 +18,8 @@ package hub
 
 import (
 	"context"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -81,26 +83,120 @@ func tgmSetExperiment(t *testing.T, srv *Server, enabled bool) {
 type tgmFixture struct {
 	t    *testing.T
 	srv  *Server
-	s    store.Store
+	s    store.Store // the raw store, for setup
 	wcs  WebChatStore
 	proj *store.Project
 	spy  *tgmEventSpy
+	// projects are the fixture's projects; members are the users that are
+	// members of every one of them (rule 0), outsiders the users of none.
+	projects  []string
+	members   map[string]bool
+	outsiders map[string]bool
 }
 
 func newTGMFixture(t *testing.T) *tgmFixture {
 	t.Helper()
-	srv, s, wcs, proj := setupSharedChatTest(t)
+	srv, s := testServer(t)
+	return newTGMFixtureOn(t, srv, s)
+}
+
+// newTGMFixtureOn is setupSharedChatTest plus the migration fixture, on a
+// server the caller built (so it can install a store fault first).
+func newTGMFixtureOn(t *testing.T, srv *Server, s store.Store) *tgmFixture {
+	t.Helper()
+	proj := &store.Project{ID: api.NewUUID(), Name: "member-test", Slug: "member-test", Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(context.Background(), proj))
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok, "store does not expose DB()")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
 	spy := &tgmEventSpy{}
 	srv.SetEventPublisher(spy)
 	tgmSetExperiment(t, srv, true)
-	return &tgmFixture{t: t, srv: srv, s: s, wcs: wcs, proj: proj, spy: spy}
+	return &tgmFixture{t: t, srv: srv, s: s, wcs: wcs, proj: proj, spy: spy,
+		projects: []string{proj.ID}, members: map[string]bool{}, outsiders: map[string]bool{}}
 }
 
-// project creates another project.
+// tgmUID maps a short test user name ("u-a") to a user ID that sorts like
+// the name, so "the first user by user ID" reads naturally in tests.
+func tgmUID(name string) string {
+	h := hex.EncodeToString([]byte(name))
+	return "00000000-0000-4000-8000-" + strings.Repeat("0", 12-len(h)) + h
+}
+
+func (f *tgmFixture) createUser(id, status string) {
+	f.t.Helper()
+	ctx := context.Background()
+	if _, err := f.s.GetUser(ctx, id); err == nil {
+		return
+	}
+	require.NoError(f.t, f.s.CreateUser(ctx, &store.User{
+		ID: id, Email: id + "@example.test", DisplayName: id,
+		Role: store.UserRoleMember, Status: status, Created: time.Now(),
+	}))
+	ensureHubMembership(ctx, f.s, id)
+}
+
+// id returns the user ID for a test user name, making the user an active
+// member of every fixture project on first use. A name that is not a short
+// test name (such as DevUserID) is used as the ID.
+func (f *tgmFixture) id(name string) string {
+	f.t.Helper()
+	id := name
+	if strings.HasPrefix(name, "u-") {
+		id = tgmUID(name)
+	}
+	if f.members[id] || f.outsiders[id] {
+		return id
+	}
+	f.createUser(id, store.UserStatusActive)
+	for _, p := range f.projects {
+		f.bindMember(p, id)
+	}
+	f.members[id] = true
+	return id
+}
+
+// bindMember is bindProjectMember, tolerating an existing binding (the dev
+// user may already have one).
+func (f *tgmFixture) bindMember(projectID, userID string) {
+	f.t.Helper()
+	ctx := context.Background()
+	rd, err := f.s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(f.t, err)
+	_, err = f.s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	if !errors.Is(err, store.ErrAlreadyExists) {
+		require.NoError(f.t, err)
+	}
+}
+
+// outsider makes name an active user who is a member of no fixture project.
+func (f *tgmFixture) outsider(name string) string {
+	f.t.Helper()
+	id := tgmUID(name)
+	require.False(f.t, f.members[id], "already a member")
+	f.createUser(id, store.UserStatusActive)
+	f.outsiders[id] = true
+	return id
+}
+
+// project creates another project; every member user joins it.
 func (f *tgmFixture) project(slug string) *store.Project {
 	f.t.Helper()
 	p := &store.Project{ID: api.NewUUID(), Name: slug, Slug: slug, Created: time.Now(), Updated: time.Now()}
 	require.NoError(f.t, f.s.CreateProject(context.Background(), p))
+	f.projects = append(f.projects, p.ID)
+	for id := range f.members {
+		f.bindMember(p.ID, id)
+	}
 	return p
 }
 
@@ -146,17 +242,17 @@ func groupsDoc(t *testing.T, byProject map[string][]personalThreadGroup) string 
 	return string(b)
 }
 
-func (f *tgmFixture) setPrefs(userID, threadGroups, threadOrder string) {
+func (f *tgmFixture) setPrefs(user, threadGroups, threadOrder string) {
 	f.t.Helper()
-	require.NoError(f.t, f.wcs.SetUserPrefs(context.Background(), userID, WebChatUserPrefs{
+	require.NoError(f.t, f.wcs.SetUserPrefs(context.Background(), f.id(user), WebChatUserPrefs{
 		SpaceSortMode: "activity", ThreadSortMode: "custom",
 		ThreadGroups: threadGroups, ThreadOrder: threadOrder,
 	}))
 }
 
-func (f *tgmFixture) prefs(userID string) *WebChatUserPrefs {
+func (f *tgmFixture) prefs(user string) *WebChatUserPrefs {
 	f.t.Helper()
-	return getPrefs(f.t, f.wcs, userID)
+	return getPrefs(f.t, f.wcs, f.id(user))
 }
 
 func (f *tgmFixture) pass() threadGroupMigrationStats {
@@ -236,9 +332,10 @@ func TestThreadGroupMigration_SweeperStartsWhenFlagTurnsOn(t *testing.T) {
 	prev := threadGroupMigrationTick
 	threadGroupMigrationTick = 20 * time.Millisecond
 	t.Cleanup(func() { threadGroupMigrationTick = prev })
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	f.srv.startThreadGroupMigrationSweeper(ctx)
+	// Registered after the restore, so it runs first: the sweeper is
+	// stopped and joined before the tick is written back.
+	t.Cleanup(f.srv.stopThreadGroupMigrationSweeper)
+	f.srv.startThreadGroupMigrationSweeper(context.Background())
 
 	time.Sleep(100 * time.Millisecond)
 	assert.Empty(t, f.groups(f.proj.ID), "nothing happens while the flag is off")
@@ -258,10 +355,39 @@ func TestThreadGroupMigration_SweeperRunsAPassAtStart(t *testing.T) {
 	prev := threadGroupMigrationTick
 	threadGroupMigrationTick = time.Hour
 	t.Cleanup(func() { threadGroupMigrationTick = prev })
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	f.srv.startThreadGroupMigrationSweeper(ctx)
+	t.Cleanup(f.srv.stopThreadGroupMigrationSweeper)
+	f.srv.startThreadGroupMigrationSweeper(context.Background())
 	require.Eventually(t, func() bool { return f.prefs("u-a").ThreadGroupsMigrated }, 5*time.Second, 10*time.Millisecond)
+}
+
+// Stopping the sweeper joins it, is idempotent, and a stopped sweeper
+// cannot be started again.
+func TestThreadGroupMigration_SweeperStopJoins(t *testing.T) {
+	f := newTGMFixture(t)
+	prev := threadGroupMigrationTick
+	threadGroupMigrationTick = time.Millisecond
+	t.Cleanup(func() { threadGroupMigrationTick = prev })
+	f.srv.startThreadGroupMigrationSweeper(context.Background())
+	time.Sleep(20 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		f.srv.stopThreadGroupMigrationSweeper()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopThreadGroupMigrationSweeper did not return")
+	}
+	f.srv.stopThreadGroupMigrationSweeper() // idempotent
+
+	t1 := f.topic(f.proj.ID, "t1")
+	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1)}}), "")
+	f.srv.startThreadGroupMigrationSweeper(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	f.srv.threadGroupMigration.running.Wait()
+	assert.False(t, f.prefs("u-a").ThreadGroupsMigrated, "a stopped sweeper does not start again")
 }
 
 // --- Copy rules ---------------------------------------------------------------
@@ -289,10 +415,10 @@ func TestThreadGroupMigration_CopiesEveryUsersGroups(t *testing.T) {
 	rel := f.group(f.proj.ID, "Release")
 	require.NotNil(t, rel)
 	assert.Equal(t, "Release", rel.Name)
-	assert.Equal(t, "u-a", rel.CreatedBy)
+	assert.Equal(t, f.id("u-a"), rel.CreatedBy)
 	assert.Equal(t, store.ThreadGroupCreatorUser, rel.CreatedByKind)
 	assert.Equal(t, []string{f.conv(t1)}, tgmMembers(rel))
-	assert.Equal(t, "u-a", rel.Members[0].AddedBy)
+	assert.Equal(t, f.id("u-a"), rel.Members[0].AddedBy)
 	assert.Equal(t, []string{f.conv(t2)}, tgmMembers(f.group(f.proj.ID, "Design")))
 	assert.Equal(t, []string{f.conv(t3)}, tgmMembers(f.group(other.ID, "Ops")))
 
@@ -326,7 +452,7 @@ func TestThreadGroupMigration_SameNamedGroupsMerge(t *testing.T) {
 	rel := f.group(f.proj.ID, "release")
 	require.NotNil(t, rel)
 	assert.Equal(t, "Release", rel.Name, "named by the first user by user ID")
-	assert.Equal(t, "u-a", rel.CreatedBy)
+	assert.Equal(t, f.id("u-a"), rel.CreatedBy)
 	assert.Equal(t, tgmSorted(f.conv(t1), f.conv(t2)), tgmMembers(rel))
 
 	des := f.group(f.proj.ID, "design")
@@ -383,7 +509,7 @@ func TestThreadGroupMigration_VoteTieAndAlreadyFiled(t *testing.T) {
 	assert.Equal(t, []string{f.conv(t1)}, tgmMembers(f.group(f.proj.ID, "beta")), "most votes wins")
 	assert.Equal(t, []string{f.conv(t3)}, tgmMembers(f.group(f.proj.ID, "manual")), "an already filed thread is never moved")
 	b := f.group(f.proj.ID, "beta")
-	assert.Equal(t, "u-b", b.Members[0].AddedBy, "added by the first user by ID who put it there")
+	assert.Equal(t, f.id("u-b"), b.Members[0].AddedBy, "added by the first user by ID who put it there")
 }
 
 // Rule 1 and 4: deleted, unknown, foreign-project and #general threads and
@@ -553,6 +679,19 @@ func TestThreadGroupMigration_PublishesOneEventPerGroup(t *testing.T) {
 
 // state is the outcome of a migration with IDs replaced by names, so two
 // fixtures can be compared.
+// groupState is the "group" lines of state: the project's groups and their
+// members, with IDs replaced by names.
+func (f *tgmFixture) groupState() string {
+	f.t.Helper()
+	var lines []string
+	for _, l := range strings.Split(f.state(), "\n") {
+		if strings.HasPrefix(l, "group ") {
+			lines = append(lines, l)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (f *tgmFixture) state(users ...string) string {
 	f.t.Helper()
 	topics, err := f.wcs.ListTopics(context.Background(), f.proj.ID)
@@ -650,18 +789,40 @@ func TestThreadGroupMigration_ConcurrentPassesMatchOnePass(t *testing.T) {
 
 	f := newTGMFixture(t)
 	seedScenario(t, f)
+	const passes = 4
+	stats := make([]threadGroupMigrationStats, passes)
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
+	for i := 0; i < passes; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			f.srv.migrateThreadGroupsPass(context.Background())
-		}()
+			stats[i] = f.srv.migrateThreadGroupsPass(context.Background())
+		}(i)
 	}
 	wg.Wait()
-	// A pass that lost a race on a busy database leaves its users for the
-	// next pass; let it run, as the next tick would.
-	f.pass()
+
+	marked, failed := 0, 0
+	for _, st := range stats {
+		marked += st.UsersMarked
+		failed += st.FailedProjects
+	}
+	assert.LessOrEqual(t, marked, len(users), "no user is marked twice")
+	if failed == 0 {
+		// Groups and memberships are never repaired by a later pass
+		// (nothing is moved), so they must already match one pass.
+		assert.Equal(t, ref.groupState(), f.groupState(), "groups after the concurrent passes alone")
+		assert.Equal(t, len(users), marked, "with no failed project every user is marked exactly once")
+		assert.Equal(t, want, f.state(users...), "the full result after the concurrent passes alone")
+	} else {
+		// A pass that lost a race on a busy database left its project's
+		// users unmarked; they are not done yet.
+		assert.Less(t, marked, len(users))
+	}
+
+	// The next tick changes nothing that was already done, and finishes
+	// any user a failed project held back.
+	st := f.pass()
+	assert.Equal(t, len(users), marked+st.UsersMarked, "every user is marked exactly once overall")
 	assert.Equal(t, want, f.state(users...))
 	filed := map[string]int{}
 	for _, g := range f.groups(f.proj.ID) {
@@ -681,6 +842,7 @@ func TestThreadGroupMigration_ConcurrentPassesMatchOnePass(t *testing.T) {
 // only then.
 func TestThreadGroupMigration_UserPrefsPutResetsMarker(t *testing.T) {
 	f := newTGMFixture(t)
+	f.id(DevUserID) // the PUT runs as the dev user, who must be able to read the project
 	t1 := f.topic(f.proj.ID, "t1")
 	doc := groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1)}})
 	put := func(threadGroups, threadOrder string) {
@@ -831,4 +993,128 @@ func TestInsertProjectGroupsInThreadOrder(t *testing.T) {
 	for _, in := range []string{``, `{ "q" : ["a"] }`, `not json`, `{"p":"x"}`, `{"p":["z"]}`} {
 		assert.Equal(t, in, insertProjectGroupsInThreadOrder(in, personal, ids), in)
 	}
+}
+
+// --- Rule 0: per-user project read check ----------------------------------------
+
+// A user who cannot read the project creates and files nothing there, the
+// skip is counted, and the user is marked done (a policy outcome).
+func TestThreadGroupMigration_NonMemberCreatesNothing(t *testing.T) {
+	f := newTGMFixture(t)
+	t1 := f.topic(f.proj.ID, "t1")
+	f.outsider("u-x")
+	f.setPrefs("u-x", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1)}}), "")
+	f.spy.take()
+
+	st := f.pass()
+	assert.Equal(t, 1, st.Skipped[tgmSkipNoAccess])
+	assert.Zero(t, st.GroupsCreated)
+	assert.Zero(t, st.ThreadsFiled)
+	assert.Empty(t, f.groups(f.proj.ID))
+	assert.Empty(t, f.spy.take())
+	assert.True(t, f.prefs("u-x").ThreadGroupsMigrated, "a denied user is still marked done")
+}
+
+// With a member and a non-member using the same group name, only the
+// member's threads are filed, the member is created_by, and the
+// non-member's entries cast no votes and never enter its thread order.
+func TestThreadGroupMigration_MemberAndNonMemberSameName(t *testing.T) {
+	f := newTGMFixture(t)
+	t1, t2, t3 := f.topic(f.proj.ID, "t1"), f.topic(f.proj.ID, "t2"), f.topic(f.proj.ID, "t3")
+	// u-a sorts first, but is not a member.
+	f.outsider("u-a")
+	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("a1", "Release", t1, t3), tgmPG("a2", "Beta", t2)}}),
+		fmt.Sprintf(`{%q:["a1"]}`, f.proj.ID))
+	f.setPrefs("u-b", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("b1", "release", t2), tgmPG("b2", "Alpha", t3)}}), "")
+
+	st := f.pass()
+	assert.Equal(t, 2, st.Skipped[tgmSkipNoAccess])
+	gs := f.groups(f.proj.ID)
+	require.Len(t, gs, 2, "Release and Alpha; no Beta")
+	rel := f.group(f.proj.ID, "release")
+	require.NotNil(t, rel)
+	assert.Equal(t, "release", rel.Name, "named by the member, not the non-member")
+	assert.Equal(t, f.id("u-b"), rel.CreatedBy)
+	assert.Equal(t, []string{f.conv(t2)}, tgmMembers(rel), "only the member's threads")
+	assert.Equal(t, []string{f.conv(t3)}, tgmMembers(f.group(f.proj.ID, "alpha")), "the non-member's vote for t3 does not count")
+	assert.Nil(t, f.group(f.proj.ID, "beta"))
+
+	pa := f.prefs("u-a")
+	assert.True(t, pa.ThreadGroupsMigrated)
+	assert.Equal(t, fmt.Sprintf(`{%q:["a1"]}`, f.proj.ID), pa.ThreadOrder, "no project group ID enters a non-member's order")
+}
+
+// An inactive or missing user is skipped and left unmarked, so the groups
+// migrate if the user comes back.
+func TestThreadGroupMigration_InactiveUserSkippedUnmarked(t *testing.T) {
+	f := newTGMFixture(t)
+	ctx := context.Background()
+	t1 := f.topic(f.proj.ID, "t1")
+	doc := groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1)}})
+	f.setPrefs("u-a", doc, "")
+	u, err := f.s.GetUser(ctx, f.id("u-a"))
+	require.NoError(t, err)
+	u.Status = store.UserStatusSuspended
+	require.NoError(t, f.s.UpdateUser(ctx, u))
+	// A prefs row for a user that does not exist.
+	missing := tgmUID("u-gone")
+	require.NoError(t, f.wcs.SetUserPrefs(ctx, missing, WebChatUserPrefs{SpaceSortMode: "activity", ThreadSortMode: "activity", ThreadGroups: doc}))
+
+	st := f.pass()
+	assert.Equal(t, 2, st.UsersSkipped)
+	assert.Equal(t, 2, st.Skipped[tgmSkipInactiveUser])
+	assert.Zero(t, st.UsersMarked)
+	assert.Empty(t, f.groups(f.proj.ID))
+	assert.False(t, f.prefs("u-a").ThreadGroupsMigrated)
+	assert.False(t, getPrefs(t, f.wcs, missing).ThreadGroupsMigrated)
+
+	u.Status = store.UserStatusActive
+	require.NoError(t, f.s.UpdateUser(ctx, u))
+	f.pass()
+	assert.True(t, f.prefs("u-a").ThreadGroupsMigrated, "migrated once the user is active again")
+	assert.Equal(t, []string{f.conv(t1)}, tgmMembers(f.group(f.proj.ID, "Release")))
+}
+
+// tgmUserFaultStore fails GetUser for one user while its switch is armed.
+type tgmUserFaultStore struct {
+	store.Store
+	fault  *storeFaultSwitch
+	userID atomic.Value // string
+}
+
+func (w *tgmUserFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if w.fault.Active() && w.userID.Load() == id {
+		return nil, fmt.Errorf("injected user lookup failure: %w", store.ErrTransient)
+	}
+	return w.Store.GetUser(ctx, id)
+}
+
+// A store error during the check defers that user, unmarked, to the next
+// pass; other users go ahead.
+func TestThreadGroupMigration_StoreErrorDefersUser(t *testing.T) {
+	srv, s := testServer(t)
+	faulty, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *tgmUserFaultStore {
+		return &tgmUserFaultStore{Store: inner, fault: f}
+	})
+	f := newTGMFixtureOn(t, srv, s)
+	t1, t2 := f.topic(f.proj.ID, "t1"), f.topic(f.proj.ID, "t2")
+	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("a1", "Release", t1)}}), "")
+	f.setPrefs("u-b", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("b1", "Release", t2)}}), "")
+	faulty.userID.Store(f.id("u-a"))
+	fault.Arm()
+
+	st := f.pass()
+	assert.Equal(t, 1, st.UsersDeferred)
+	assert.Equal(t, 1, st.UsersMarked)
+	assert.False(t, f.prefs("u-a").ThreadGroupsMigrated, "the deferred user stays unmarked")
+	assert.True(t, f.prefs("u-b").ThreadGroupsMigrated)
+	rel := f.group(f.proj.ID, "Release")
+	require.NotNil(t, rel)
+	assert.Equal(t, []string{f.conv(t2)}, tgmMembers(rel), "only the other user's thread so far")
+
+	faulty.userID.Store("")
+	st = f.pass()
+	assert.Zero(t, st.UsersDeferred)
+	assert.True(t, f.prefs("u-a").ThreadGroupsMigrated)
+	assert.Equal(t, tgmSorted(f.conv(t1), f.conv(t2)), tgmMembers(f.group(f.proj.ID, "Release")))
 }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -36,7 +37,9 @@ import (
 // background sweeper copies them into project thread groups while the
 // hub.chat_thread_groups experiment is on. A pass reads every row whose
 // thread_groups is non-empty and whose thread_groups_migrated_at is NULL,
-// handles the rows one project at a time, then marks each user done.
+// handles the rows one project at a time, then marks each user done. A
+// user's entries for a project count only if the user may read that project
+// now (rule 0, design section 3).
 //
 // Every pass is deterministic and idempotent, so several hubs may run passes
 // at once: groups are matched on the unique (project_id, name_key) index,
@@ -57,7 +60,14 @@ const (
 	tgmSkipDeadConversation = "dead_conversation" // the topic's conversation is missing, deleted, not a group or in another project
 	tgmSkipAlreadyFiled     = "already_filed"     // already in a project group; never moved
 	tgmSkipNothingToFile    = "nothing_to_file"   // a group with no thread left to file is not created
+	tgmSkipNoAccess         = "no_access"         // the user may not read the project (rule 0); counted per group
+	tgmSkipInactiveUser     = "inactive_user"     // the user is missing or inactive (rule 0); counted per group
 )
+
+// threadGroupMigrationClientType is the client type of the identity the
+// migration checks a user's project access with (rule 0), next to
+// scheduledSendClientType.
+const threadGroupMigrationClientType = "thread-group-migration"
 
 // personalThreadGroup is one personal group as the web stores it.
 type personalThreadGroup struct {
@@ -116,6 +126,8 @@ func parsePersonalThreadGroups(doc string) (map[string][]personalThreadGroup, er
 type threadGroupMigrationStats struct {
 	Users          int
 	UsersMarked    int
+	UsersSkipped   int // missing or inactive users, left unmarked (rule 0)
+	UsersDeferred  int // a store error during the access check; retried next pass
 	GroupsCreated  int
 	GroupsReused   int
 	ThreadsFiled   int
@@ -141,28 +153,112 @@ type tgmUserGroup struct {
 	nameKey string
 }
 
+// tgmStageError is a pass error tagged with the step that failed, so the
+// warning can name the step and the error class without logging the error
+// text, which may carry IDs (design 5a, Observability).
+type tgmStageError struct {
+	stage string
+	err   error
+}
+
+func (e *tgmStageError) Error() string { return e.stage + ": " + e.err.Error() }
+func (e *tgmStageError) Unwrap() error { return e.err }
+
+func tgmErr(stage string, err error) error { return &tgmStageError{stage: stage, err: err} }
+
+// tgmLogAttrs returns the stage and error class of err for a warning: no
+// error text, names or IDs.
+func tgmLogAttrs(err error) []any {
+	stage := "unknown"
+	var se *tgmStageError
+	if errors.As(err, &se) {
+		stage = se.stage
+	}
+	class := "other"
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		class = "canceled"
+	case errors.Is(err, store.ErrTransient):
+		class = "transient"
+	case errors.Is(err, store.ErrNotFound):
+		class = "not_found"
+	case errors.Is(err, store.ErrAlreadyExists):
+		class = "already_exists"
+	case errors.Is(err, store.ErrInvalidInput):
+		class = "invalid_input"
+	}
+	return []any{"stage", stage, "error_class", class}
+}
+
+// threadGroupMigrationRuntime tracks the sweeper goroutine so that stopping
+// the hub waits for a pass in progress.
+type threadGroupMigrationRuntime struct {
+	mu      sync.Mutex
+	stopped bool
+	cancel  context.CancelFunc
+	running sync.WaitGroup
+}
+
 // startThreadGroupMigrationSweeper starts the migration sweeper: a pass at
-// once, then one every threadGroupMigrationTick, until ctx is cancelled.
-// Each pass checks the experiment, so turning it on starts the migration
-// within one tick with no restart.
+// once, then one every threadGroupMigrationTick, until ctx is cancelled or
+// stopThreadGroupMigrationSweeper runs. Each pass checks the experiment, so
+// turning it on starts the migration within one tick with no restart.
 func (s *Server) startThreadGroupMigrationSweeper(ctx context.Context) {
 	if !s.nativeChatEnabled() {
 		return
 	}
+	rt := &s.threadGroupMigration
+	tick := threadGroupMigrationTick // read once, before the goroutine starts
+	loopCtx, cancel := context.WithCancel(ctx)
+	rt.mu.Lock()
+	if rt.stopped || rt.cancel != nil {
+		rt.mu.Unlock()
+		cancel()
+		return
+	}
+	rt.cancel = cancel
+	rt.running.Add(1)
+	rt.mu.Unlock()
 	go func() {
-		s.migrateThreadGroupsPass(ctx)
-		ticker := time.NewTicker(threadGroupMigrationTick)
+		defer rt.running.Done()
+		s.migrateThreadGroupsPass(loopCtx)
+		ticker := time.NewTicker(tick)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-loopCtx.Done():
 				return
 			case <-ticker.C:
-				s.migrateThreadGroupsPass(ctx)
+				s.migrateThreadGroupsPass(loopCtx)
 			}
 		}
 	}()
 }
+
+// stopThreadGroupMigrationSweeper stops the sweeper and waits for a pass in
+// progress to return; its store calls see the cancelled context. It is safe
+// to call more than once, or without a start, and the sweeper cannot be
+// started again afterwards.
+func (s *Server) stopThreadGroupMigrationSweeper() {
+	rt := &s.threadGroupMigration
+	rt.mu.Lock()
+	rt.stopped = true
+	cancel := rt.cancel
+	rt.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	rt.running.Wait()
+}
+
+// tgmUserAccess is the rule 0 outcome for one user in one pass.
+type tgmUserAccess int
+
+const (
+	tgmUserOK       tgmUserAccess = iota
+	tgmUserSkipped                // missing or inactive: entries skipped, left unmarked
+	tgmUserDeferred               // a store error: entries skipped, left unmarked, retried
+)
 
 // migrateThreadGroupsPass runs one migration pass and returns its counts. It
 // does nothing while hub.chat_thread_groups is off.
@@ -179,7 +275,7 @@ func (s *Server) migrateThreadGroupsPass(ctx context.Context) threadGroupMigrati
 	}
 	rows, err := wcs.ListUserPrefsPendingThreadGroupMigration(ctx)
 	if err != nil {
-		slog.WarnContext(ctx, "thread group migration: listing pending users failed", "error", err)
+		slog.WarnContext(ctx, "thread group migration: listing pending users failed", tgmLogAttrs(tgmErr("list_pending", err))...)
 		return st
 	}
 	if len(rows) == 0 {
@@ -187,18 +283,53 @@ func (s *Server) migrateThreadGroupsPass(ctx context.Context) threadGroupMigrati
 	}
 	st.Users = len(rows)
 
-	// Group every user's personal groups by project. Users are in user ID
-	// order (the store sorts them), and each user's groups keep their order.
+	// Rule 0: a user's entries for a project are copied only if the user
+	// could read the project through the API now (design section 3). The
+	// identity is rebuilt from the current user record, and the check is the
+	// one the scheduled-send sweeper makes (checkScheduledTopicFire), not
+	// canReadProject, which would turn a store error into a denial and mark
+	// the user done. Projects and decisions are cached for the pass.
+	projects := map[string]tgmProjectLookup{}
+	lookupProject := func(projectKey string) tgmProjectLookup {
+		if pl, ok := projects[projectKey]; ok {
+			return pl
+		}
+		var pl tgmProjectLookup
+		if _, perr := uuid.Parse(projectKey); perr == nil {
+			p, err := s.store.GetProject(ctx, projectKey)
+			switch {
+			case err == nil:
+				pl.project = p
+			case !errors.Is(err, store.ErrNotFound):
+				pl.err = tgmErr("get_project", err)
+			}
+		}
+		projects[projectKey] = pl
+		return pl
+	}
+
+	// allowed[i] holds row i's personal groups for the projects its user may
+	// read; nil when the row is not marked this pass.
+	allowed := make([]map[string][]personalThreadGroup, len(rows))
 	byProject := map[string][]tgmUserGroup{}
-	parsed := make([]map[string][]personalThreadGroup, len(rows))
 	for i, row := range rows {
 		groups, err := parsePersonalThreadGroups(row.ThreadGroups)
 		if err != nil {
 			st.skip(tgmSkipInvalidPrefs, 1)
+			allowed[i] = map[string][]personalThreadGroup{}
 			continue
 		}
-		parsed[i] = groups
-		for projectKey, list := range groups {
+		mine, access := s.tgmAllowedGroups(ctx, row.UserID, groups, lookupProject, &st)
+		switch access {
+		case tgmUserSkipped:
+			st.UsersSkipped++
+			continue
+		case tgmUserDeferred:
+			st.UsersDeferred++
+			continue
+		}
+		allowed[i] = mine
+		for projectKey, list := range mine {
 			for _, g := range list {
 				name := store.SanitizeThreadGroupName(g.Name)
 				byProject[projectKey] = append(byProject[projectKey], tgmUserGroup{
@@ -211,6 +342,9 @@ func (s *Server) migrateThreadGroupsPass(ctx context.Context) threadGroupMigrati
 		}
 	}
 
+	// One batch per project, in sorted order. Rows are in user ID order (the
+	// store sorts them) and each user's groups keep their order, so the
+	// batch is deterministic.
 	projectKeys := make([]string, 0, len(byProject))
 	for k := range byProject {
 		projectKeys = append(projectKeys, k)
@@ -226,15 +360,19 @@ func (s *Server) migrateThreadGroupsPass(ctx context.Context) threadGroupMigrati
 		if err != nil {
 			failed[projectKey] = true
 			st.FailedProjects++
-			slog.WarnContext(ctx, "thread group migration: a project failed; its users are retried next pass", "error", err)
+			slog.WarnContext(ctx, "thread group migration: a project failed; its users are retried next pass", tgmLogAttrs(err)...)
 			continue
 		}
 		groupIDs[projectKey] = ids
 	}
 
 	for i, row := range rows {
+		mine := allowed[i]
+		if mine == nil {
+			continue // skipped or deferred user: left unmarked
+		}
 		retry := false
-		for projectKey := range parsed[i] {
+		for projectKey := range mine {
 			if failed[projectKey] {
 				retry = true
 				break
@@ -243,10 +381,12 @@ func (s *Server) migrateThreadGroupsPass(ctx context.Context) threadGroupMigrati
 		if retry {
 			continue
 		}
-		newOrder := insertProjectGroupsInThreadOrder(row.ThreadOrder, parsed[i], groupIDs)
+		// Rule 6 uses only the projects the user may read, so a denied
+		// project's group IDs never enter the user's order.
+		newOrder := insertProjectGroupsInThreadOrder(row.ThreadOrder, mine, groupIDs)
 		ok, err := wcs.MarkUserPrefsThreadGroupsMigrated(ctx, row.UserID, row.ThreadGroups, row.ThreadOrder, newOrder)
 		if err != nil {
-			slog.WarnContext(ctx, "thread group migration: marking a user done failed", "error", err)
+			slog.WarnContext(ctx, "thread group migration: marking a user done failed", tgmLogAttrs(tgmErr("mark_user", err))...)
 			continue
 		}
 		if ok {
@@ -257,6 +397,8 @@ func (s *Server) migrateThreadGroupsPass(ctx context.Context) threadGroupMigrati
 	attrs := []any{
 		"users", st.Users,
 		"users_marked", st.UsersMarked,
+		"users_skipped", st.UsersSkipped,
+		"users_deferred", st.UsersDeferred,
 		"groups_created", st.GroupsCreated,
 		"groups_reused", st.GroupsReused,
 		"threads_filed", st.ThreadsFiled,
@@ -274,35 +416,98 @@ func (s *Server) migrateThreadGroupsPass(ctx context.Context) threadGroupMigrati
 	return st
 }
 
+// tgmProjectLookup is a project read once per pass for rule 0.
+type tgmProjectLookup struct {
+	project *store.Project // nil: the project does not exist (or the key is not a UUID)
+	err     error          // a store error; the user is deferred
+}
+
+// tgmAllowedGroups applies rule 0 to one user. It returns the user's
+// personal groups for the projects the user may read, and the user's
+// outcome: a missing or inactive user is skipped, and a store error defers
+// the whole user. Entries for a missing project (rule 1) or a project the
+// user may not read are dropped and counted; the user can still be marked.
+func (s *Server) tgmAllowedGroups(ctx context.Context, userID string, groups map[string][]personalThreadGroup,
+	lookupProject func(string) tgmProjectLookup, st *threadGroupMigrationStats) (map[string][]personalThreadGroup, tgmUserAccess) {
+	if len(groups) == 0 {
+		return map[string][]personalThreadGroup{}, tgmUserOK
+	}
+
+	u, err := s.store.GetUser(ctx, userID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		for _, list := range groups {
+			st.skip(tgmSkipInactiveUser, len(list))
+		}
+		return nil, tgmUserSkipped
+	case err != nil:
+		slog.WarnContext(ctx, "thread group migration: user lookup failed; the user is retried next pass", tgmLogAttrs(tgmErr("get_user", err))...)
+		return nil, tgmUserDeferred
+	case u.Status != store.UserStatusActive:
+		for _, list := range groups {
+			st.skip(tgmSkipInactiveUser, len(list))
+		}
+		return nil, tgmUserSkipped
+	}
+	identity := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, threadGroupMigrationClientType)
+
+	// Sorted, so the outcome does not depend on map order.
+	keys := make([]string, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make(map[string][]personalThreadGroup, len(groups))
+	denied := map[string]int{}
+	missing := map[string]int{}
+	for _, projectKey := range keys {
+		list := groups[projectKey]
+		pl := lookupProject(projectKey)
+		if pl.err != nil {
+			slog.WarnContext(ctx, "thread group migration: project lookup failed; the user is retried next pass", tgmLogAttrs(pl.err)...)
+			return nil, tgmUserDeferred
+		}
+		if pl.project == nil {
+			threads := 0
+			for _, g := range list {
+				threads += len(g.ThreadIDs)
+			}
+			missing[projectKey] = threads
+			continue
+		}
+		if !s.authzService.CheckAccess(ctx, identity, projectResource(pl.project), ActionRead).Allowed {
+			denied[projectKey] = len(list)
+			continue
+		}
+		out[projectKey] = list
+	}
+	// Counted only once the user is known not to be deferred, so a retried
+	// user is not counted twice.
+	for _, n := range missing {
+		st.skip(tgmSkipMissingProject, n)
+	}
+	for _, n := range denied {
+		st.skip(tgmSkipNoAccess, n)
+	}
+	return out, tgmUserOK
+}
+
 // migrateProjectThreadGroups copies one project's personal groups into
 // project groups (design 5a, rules 1-5 and 8) and returns, for every name
 // key in the batch that has a project group afterwards, that group's ID. An
 // error means the project should be retried on the next pass.
 func (s *Server) migrateProjectThreadGroups(ctx context.Context, wcs WebChatStore, projectID string, entries []tgmUserGroup, st *threadGroupMigrationStats) (map[string]string, error) {
-	totalThreads := 0
-	for _, e := range entries {
-		totalThreads += len(e.group.ThreadIDs)
-	}
+	// The project exists and every entry's user may read it (rule 0).
 
-	// Rule 1: a project that no longer exists is skipped as a whole.
-	if _, err := uuid.Parse(projectID); err != nil {
-		st.skip(tgmSkipMissingProject, totalThreads)
-		return map[string]string{}, nil
-	}
-	if _, err := s.store.GetProject(ctx, projectID); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			st.skip(tgmSkipMissingProject, totalThreads)
-			return map[string]string{}, nil
-		}
-		return nil, fmt.Errorf("get project: %w", err)
-	}
-
-	// Rule 1: resolve topic IDs within this project only. ListTopics returns
-	// the project's live topics, the same rows GetTopicConversationIDInProject
-	// resolves, in one query, and also tells #general apart.
+	// Rule 1: resolve topic IDs within this project only. This is the batched
+	// equivalent of calling GetTopicConversationIDInProject per entry, as
+	// design 5a rule 1 names: ListTopics(projectID) returns exactly the rows
+	// that lookup resolves (this project, deleted_at IS NULL), in one query
+	// per project, and also tells #general apart, which that lookup cannot.
+	// The unscoped lookups are never used.
 	topics, err := wcs.ListTopics(ctx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("list topics: %w", err)
+		return nil, tgmErr("list_topics", err)
 	}
 	topicByID := make(map[string]WebChatTopic, len(topics))
 	for _, t := range topics {
@@ -324,7 +529,7 @@ func (s *Server) migrateProjectThreadGroups(ctx context.Context, wcs WebChatStor
 			case errors.Is(err, store.ErrNotFound):
 				live = false
 			case err != nil:
-				return "", "", fmt.Errorf("get conversation: %w", err)
+				return "", "", tgmErr("get_conversation", err)
 			default:
 				live = conv.DeletedAt == nil && conv.Kind == "group" &&
 					conv.ProjectID != nil && *conv.ProjectID == projectID
@@ -376,7 +581,7 @@ func (s *Server) migrateProjectThreadGroups(ctx context.Context, wcs WebChatStor
 
 	existing, err := s.store.ListThreadGroups(ctx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("list thread groups: %w", err)
+		return nil, tgmErr("list_thread_groups", err)
 	}
 	byKey := make(map[string]store.ThreadGroup, len(existing))
 	filed := map[string]bool{}
@@ -418,6 +623,7 @@ func (s *Server) migrateProjectThreadGroups(ctx context.Context, wcs WebChatStor
 
 	result := map[string]string{}
 	createdHere := 0
+	changedGroups := map[string]string{} // group ID -> event action
 	for _, k := range sortedKeys {
 		convs := toFile[k]
 		g, reused := byKey[k]
@@ -451,7 +657,7 @@ func (s *Server) migrateProjectThreadGroups(ctx context.Context, wcs WebChatStor
 				}
 				g = found
 			default:
-				return nil, fmt.Errorf("create thread group: %w", err)
+				return nil, tgmErr("create_thread_group", err)
 			}
 		}
 		if created {
@@ -468,7 +674,7 @@ func (s *Server) migrateProjectThreadGroups(ctx context.Context, wcs WebChatStor
 			addedBy := firstVoter(keys[k].voters[convID])
 			ok, err := s.store.AddThreadGroupMemberIfUnfiled(ctx, g.ID, convID, addedBy)
 			if err != nil {
-				return nil, fmt.Errorf("file thread: %w", err)
+				return nil, tgmErr("file_thread", err)
 			}
 			if ok {
 				changed = true
@@ -478,15 +684,15 @@ func (s *Server) migrateProjectThreadGroups(ctx context.Context, wcs WebChatStor
 			}
 		}
 
-		// Rule 8: one event per group created or changed.
-		if created || changed {
-			action := ThreadGroupEventUpdated
-			if created {
-				action = ThreadGroupEventCreated
-			}
-			s.publishMigratedThreadGroup(ctx, g.ID, action)
+		if created {
+			changedGroups[g.ID] = ThreadGroupEventCreated
+		} else if changed {
+			changedGroups[g.ID] = ThreadGroupEventUpdated
 		}
 	}
+
+	// Rule 8: one event per group created or changed, built in one batch.
+	s.publishMigratedThreadGroups(ctx, projectID, changedGroups)
 
 	// Rule 5: over the limit is a warning, not a truncation.
 	if n := len(existing) + createdHere; n > store.MaxThreadGroupsPerProject {
@@ -500,28 +706,39 @@ func (s *Server) migrateProjectThreadGroups(ctx context.Context, wcs WebChatStor
 func (s *Server) findThreadGroupByKey(ctx context.Context, projectID, k string) (store.ThreadGroup, error) {
 	groups, err := s.store.ListThreadGroups(ctx, projectID)
 	if err != nil {
-		return store.ThreadGroup{}, fmt.Errorf("list thread groups: %w", err)
+		return store.ThreadGroup{}, tgmErr("list_thread_groups", err)
 	}
 	for _, g := range groups {
 		if g.NameKey == k {
 			return g, nil
 		}
 	}
-	return store.ThreadGroup{}, fmt.Errorf("thread group vanished after a name conflict: %w", store.ErrNotFound)
+	return store.ThreadGroup{}, tgmErr("reuse_thread_group", fmt.Errorf("thread group vanished after a name conflict: %w", store.ErrNotFound))
 }
 
-// publishMigratedThreadGroup publishes the chat.thread_group event for a
-// group the migration created or changed. A failure is logged; the group
-// itself is already saved.
-func (s *Server) publishMigratedThreadGroup(ctx context.Context, groupID, action string) {
-	g, err := s.store.GetThreadGroup(ctx, groupID)
-	if err != nil {
-		slog.WarnContext(ctx, "thread group migration: reading a group for its event failed", "error", err)
+// publishMigratedThreadGroups publishes the chat.thread_group events for
+// the groups of one project that the migration created or changed (rule 8),
+// with one group read and one payload build (so one topic listing in
+// threadGroupResponses) for the whole batch, not one per group. Failures
+// are logged; the groups themselves are already saved.
+func (s *Server) publishMigratedThreadGroups(ctx context.Context, projectID string, actions map[string]string) {
+	if len(actions) == 0 {
 		return
 	}
-	resp, err := s.threadGroupResponse(ctx, g)
+	all, err := s.store.ListThreadGroups(ctx, projectID)
 	if err != nil {
-		slog.WarnContext(ctx, "thread group migration: building a group event failed", "error", err)
+		slog.WarnContext(ctx, "thread group migration: reading groups for events failed", tgmLogAttrs(tgmErr("event_read", err))...)
+		return
+	}
+	changed := make([]store.ThreadGroup, 0, len(actions))
+	for _, g := range all {
+		if _, ok := actions[g.ID]; ok {
+			changed = append(changed, g)
+		}
+	}
+	resps, err := s.threadGroupResponses(ctx, projectID, changed)
+	if err != nil {
+		slog.WarnContext(ctx, "thread group migration: building group events failed", tgmLogAttrs(tgmErr("event_build", err))...)
 		return
 	}
 	// Read under s.mu: the sweeper runs in the background and may race a
@@ -529,7 +746,9 @@ func (s *Server) publishMigratedThreadGroup(ctx context.Context, groupID, action
 	s.mu.RLock()
 	events := s.events
 	s.mu.RUnlock()
-	events.PublishChatThreadGroupEvent(ctx, g.ProjectID, action, resp)
+	for _, r := range resps {
+		events.PublishChatThreadGroupEvent(ctx, projectID, actions[r.ID], r)
+	}
 }
 
 // firstVoter returns the smallest user ID in voters.
