@@ -271,10 +271,11 @@ func unverifiedJWTPayload(token string) (*unverifiedJWTClaims, []string) {
 // so such a token can never reach the external-bearer path.
 //
 // Cost model: UnifiedAuthMiddleware calls this for every request outside
-// the unauthenticated endpoints. When no workload issuer is configured (a is nil, as on every
-// hub without server.hub.test_identities.workload_issuers) it does one
-// header lookup and nothing else: no bearer is read or decoded. Only on a
-// hub with workload issuers does a JWT-shaped bearer get one base64 decode
+// the unauthenticated endpoints. When no workload issuer is configured
+// (a is nil, as on every hub without
+// server.hub.test_identities.workload_issuers) it does one header lookup
+// and nothing else: no bearer is read or decoded. Only on a hub with
+// workload issuers does a JWT-shaped bearer get one base64 decode
 // and one small JSON decode of its unverified payload, bounded by the
 // header size and cheaper than the verification the request runs next.
 // The audience check deliberately runs on every route, not only the
