@@ -2524,12 +2524,14 @@ func (a *AuthzService) hasActiveSystemRole(ctx context.Context, userID, roleName
 }
 
 // isBindingActive checks whether a store RoleBinding is currently active
-// based on its notBefore/expiresAt fields. R-2 fix.
+// based on its notBefore/expiresAt fields. R-2 fix. The boundaries follow
+// the kernel (evaluateActivation): an unset bound is unbounded, notBefore
+// is inclusive and expiresAt is exclusive.
 func isBindingActive(b *store.RoleBinding, now time.Time) bool {
 	if b.NotBefore != nil && now.Before(*b.NotBefore) {
 		return false
 	}
-	if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+	if b.ExpiresAt != nil && !now.Before(*b.ExpiresAt) {
 		return false
 	}
 	return true

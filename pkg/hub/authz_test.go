@@ -1457,3 +1457,31 @@ func TestResolveAdminUsers_GetEffectiveGroupsFailure_FailsClosed(t *testing.T) {
 	assert.Error(t, err, "resolveAdminUsers must propagate GetEffectiveGroups error")
 	assert.ErrorIs(t, err, injectedErr, "original error must be wrapped")
 }
+
+// isBindingActive uses the kernel's activation boundaries
+// (evaluateActivation): notBefore is inclusive, expiresAt is exclusive.
+func TestIsBindingActive_BoundariesMatchKernel(t *testing.T) {
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { v := now.Add(d); return &v }
+	cases := []struct {
+		name      string
+		notBefore *time.Time
+		expiresAt *time.Time
+		want      bool
+	}{
+		{"unbounded", nil, nil, true},
+		{"now equals notBefore", at(0), nil, true},
+		{"now before notBefore", at(time.Nanosecond), nil, false},
+		{"now equals expiresAt", nil, at(0), false},
+		{"now before expiresAt", nil, at(time.Nanosecond), true},
+		{"now after expiresAt", nil, at(-time.Nanosecond), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &store.RoleBinding{ID: "rb", NotBefore: tc.notBefore, ExpiresAt: tc.expiresAt}
+			assert.Equal(t, tc.want, isBindingActive(b, now))
+			assert.Equal(t, bindingActivationOK(b, now), isBindingActive(b, now),
+				"isBindingActive must agree with the kernel's evaluateActivation")
+		})
+	}
+}
