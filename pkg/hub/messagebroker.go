@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 )
 
@@ -656,6 +657,19 @@ func canPersistUserDM(recipientID string, writeDeny bool) bool {
 // deliverToUser handles a broker message addressed to a human user by persisting
 // it to the message store and publishing a user.message SSE event.
 func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic string, msg *messages.StructuredMessage) {
+	// One message record per message: the success path below writes it;
+	// an early return (conversation or persist failure) writes it here so
+	// the message still appears once.
+	recorded := false
+	defer func() {
+		if recorded || p.messageLog == nil {
+			return
+		}
+		attrs := []any{"project_id", projectID, "topic", topic, "source", "broker", "persisted", false}
+		attrs = append(attrs, msg.LogAttrs()...)
+		p.messageLog.Info("user message handed to delivery", attrs...)
+	}()
+
 	// Persist to message store (write-through; non-fatal if store fails).
 	// AgentID is the sender's agent ID when an agent sends to a user.
 	agentID := ""
@@ -904,6 +918,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		logAttrs = append(logAttrs, msg.LogAttrs()...)
 		p.messageLog.Info("user message delivered via broker", logAttrs...)
 	}
+	recorded = true
 }
 
 // subscribeGlobalBroadcast creates a broker subscription for global broadcasts.
@@ -1158,6 +1173,15 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		})
 	}
 
+	// The hub's message record, written before the gate and the dispatch
+	// outcome (see logMessageRecord). It is logged from a copy so the
+	// dispatched message is unchanged.
+	recordMsg := *msg
+	if storeMsg.ConversationID != "" {
+		recordMsg.ConversationID = storeMsg.ConversationID
+	}
+	logMessageRecord(p.messageLog, agent, &recordMsg)
+
 	// Migration gate: the message is persisted above (visible on catch-up)
 	// but must not be dispatched while the recipient is mid-migration — the
 	// old container may already be gone and the new one may not exist yet.
@@ -1165,7 +1189,8 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		if p.messageLog != nil {
 			p.messageLog.Info("broker message deferred: recipient is reincarnating",
 				"agent_id", agent.ID, "agent_name", agent.Name, "project_id", agent.ProjectID,
-				"message_id", storeMsg.ID, "source", "broker")
+				"message_id", storeMsg.ID, "source", "broker",
+				logging.AttrLogKind, logging.LogKindEvent)
 		}
 		// O2 (p2a-r1 review, accepted in part): tell an agent sender their
 		// message was deferred, mirroring publishDeliveryFailed — §3.7's
@@ -1177,7 +1202,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 
 	// The 30s brokerCallbackTimeout is shared with pre-dispatch work above
 	// (agent lookup, persistence), so retries get slightly less than 30s.
-	if err := dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), dispatcher, agent, msg.Msg, msg.Urgent, msg); err != nil {
+	if err := dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), nil, dispatcher, agent, msg.Msg, msg.Urgent, msg); err != nil {
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)
 		if markErr := markMessageFailed(ctx, p.store, storeMsg.ID, err.Error()); markErr != nil {
@@ -1194,6 +1219,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 			"agent_name", agent.Name,
 			"project_id", agent.ProjectID,
 			"source", "broker",
+			logging.AttrLogKind, logging.LogKindEvent,
 		}
 		if storeMsg.ConversationID != "" {
 			msg.ConversationID = storeMsg.ConversationID
@@ -1333,6 +1359,7 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 	if dispatcher == nil {
 		return
 	}
+	logMessageRecord(p.messageLog, senderAgent, structuredMsg)
 	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, failMsg, false, structuredMsg); err != nil {
 		p.log.Warn("Failed to dispatch DELIVERY_FAILED notification",
 			"senderID", msg.SenderID, "error", err)
@@ -1378,6 +1405,7 @@ func (p *MessageBrokerProxy) publishDeliveryDeferred(ctx context.Context, agentS
 	if dispatcher == nil {
 		return
 	}
+	logMessageRecord(p.messageLog, senderAgent, structuredMsg)
 	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, deferredMsg, false, structuredMsg); err != nil {
 		p.log.Warn("Failed to dispatch DELIVERY_DEFERRED notification",
 			"senderID", msg.SenderID, "error", err)

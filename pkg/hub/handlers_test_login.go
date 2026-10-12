@@ -264,6 +264,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		session, _ = ws.sessionStore.New(r, webSessionName)
 	}
 
+	ws.dropTestIdentityValues(w, session)
 	session.Values[sessKeyUserID] = user.ID
 	session.Values[sessKeyUserEmail] = user.Email
 	session.Values[sessKeyUserName] = user.DisplayName
@@ -327,5 +328,5 @@ func testLoginAuditRecord(user *store.User, oldRole string, created bool, at tim
 // domain is refused earlier, on the requested email, so creates are refused
 // too.)
 func testLoginRefusesUser(u *store.User) bool {
-	return u.IsTestFixture()
+	return !u.IsHumanKind()
 }

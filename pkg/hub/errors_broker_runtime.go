@@ -21,6 +21,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // MissingEnvVars writes a 422 Unprocessable Entity response when required
@@ -88,6 +90,27 @@ const restartStopFailedRetryAfter = "30"
 
 // brokerCodePattern bounds a broker error code copied into a hub response.
 var brokerCodePattern = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+
+// brokerRuntimeCauseDetails returns {"cause": code} when err is a broker
+// runtime_error answer whose details.cause is one of the known codes
+// (api.IsBrokerRuntimeCause) and well-formed (brokerCodePattern), else nil.
+// Only the fixed code is copied, never the broker's message or any other
+// detail (ptone/scion#4555).
+func brokerRuntimeCauseDetails(err error) map[string]interface{} {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.brokerErrorCode() != ErrCodeRuntimeError {
+		return nil
+	}
+	code, _ := se.brokerErrorDetails()["cause"].(string)
+	// The api.IsBrokerRuntimeCause allowlist is the real filter: only its
+	// fixed codes may reach the client. The brokerCodePattern check cannot
+	// reject a code the allowlist accepts today; it is an extra safeguard,
+	// not a replacement, so keep the allowlist.
+	if !api.IsBrokerRuntimeCause(code) || !brokerCodePattern.MatchString(code) {
+		return nil
+	}
+	return map[string]interface{}{"cause": code}
+}
 
 // writeRestartStopFailed writes the retryable 503 for a restart aborted
 // because its stop leg failed and the start leg was not dispatched. The

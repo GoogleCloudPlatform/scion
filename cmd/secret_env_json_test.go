@@ -445,7 +445,7 @@ func TestRunAgentSecretGet_NoContent(t *testing.T) {
 			agentSecretGetCmd.SetContext(t.Context())
 			outputFormat = mode.format
 			// Outside an agent, so a connectivity failure would get the
-			// local-only hint; an empty response must not.
+			// hub-check hint; an empty response must not.
 			t.Setenv("SCION_AGENT_ID", "")
 
 			var runErr error
@@ -455,11 +455,11 @@ func TestRunAgentSecretGet_NoContent(t *testing.T) {
 			require.Error(t, runErr)
 			assert.Contains(t, runErr.Error(), `no content for "GONE"`)
 			// This command passes the error through wrapHubError, so a 204
-			// shows the empty-response note and not the local-only hint.
+			// shows the empty-response note and not the hub-check hint.
 			assert.Equal(t,
 				`failed to get secret: hub returned no content for "GONE"`+emptyResponseNote,
 				runErr.Error())
-			assert.NotContains(t, runErr.Error(), localOnlyHint)
+			assert.NotContains(t, runErr.Error(), testHubCheckHint)
 			assert.NotContains(t, out, "null")
 			assert.Empty(t, out)
 		})

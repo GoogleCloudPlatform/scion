@@ -136,6 +136,15 @@ type AuthConfig struct {
 	// Now is the clock for the test-fixture expiry check. Nil means
 	// time.Now.
 	Now func() time.Time
+	// KindForPrincipal reads a user principal's stored kind
+	// (Server.kindForPrincipal). The JWT arm's row block uses it for the
+	// admin-kind checks (testAdminRejection). Nil reads the kind from the
+	// row the block loaded, through the same classification.
+	KindForPrincipal func(ctx context.Context, userID string) (principalKind, error)
+	// TestAdminTierEnabled reports whether an admin test identity kind is
+	// enabled (the immutable startup gate). Nil means every admin kind is
+	// off, so the row block refuses every admin-kind row.
+	TestAdminTierEnabled func(kind string) bool
 	// DelegatedAgentAuth authenticates an agent delegated credential
 	// (Authorization: Bearer scion_adt_...) and returns its request state
 	// (the delegated identity and the rows loaded for it). It returns
@@ -693,6 +702,31 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							"invalid access token: no active user record for this token", nil)
 						return
 					}
+					// Admin test identities: the same row block refuses an
+					// admin-kind row whose kind is off, whose expiry is
+					// missing or past, or whose token's role claim is not
+					// the kind's role. The kind is read through
+					// kindForPrincipal; a read error fails closed.
+					if uErr == nil {
+						kind, reason, kErr := testAdminRowRejection(ctx, cfg.KindForPrincipal, cfg.TestAdminTierEnabled, u, claims.Role, now)
+						if kErr != nil {
+							log.Error("JWT auth: user kind lookup failed",
+								"user_id", claims.UserID, "error", kErr)
+							writeError(w, http.StatusServiceUnavailable, "store_error",
+								"unable to verify user status", nil)
+							return
+						}
+						if reason != "" {
+							log.Warn("JWT auth rejected: test admin identity not admitted",
+								"user_id", claims.UserID, "reason", reason)
+							writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
+								"invalid access token: no active user record for this token", nil)
+							return
+						}
+						if kind.isTestAdmin() {
+							ctx = contextWithTestAdminActor(ctx, u)
+						}
+					}
 				}
 				user := NewAuthenticatedUser(
 					claims.UserID,
@@ -868,7 +902,7 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/api/v1/settings/public": // Public settings (no auth required)
 		return true
-	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (three bools)
+	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (four bools)
 		return true
 	}
 	return false

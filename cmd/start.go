@@ -98,13 +98,15 @@ func init() {
 
 	// Agent message mode flag
 	startCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
-		"Agent message mode: none, lineage, branch, project\n"+
+		"Agent message mode: none, lineage, branch, project, hub\n"+
 			"Controls which agents and users this agent can message.\n"+
-			"Default: inherited from template, parent, or 'project'.")
+			"Default: the template's mode, else the parent agent's, else 'project'.")
 
 	// Hub launch wait flags
 	startCmd.Flags().BoolVar(&startNoWait, "no-wait", false, "Hub mode: return once the Hub accepts the agent, without waiting for it to be running")
 	startCmd.Flags().DurationVar(&startWaitTimeout, "wait-timeout", 0, "Hub mode: how long to wait for the agent to be running (default: the Hub's remaining launch time plus 30s, or 5m when the Hub does not report it)")
+	startCmd.Flags().BoolVar(&startWaitReady, "wait-ready", false, "After the agent is running, also wait until its harness accepts input (shown as \"starting\" until then). "+
+		"--wait-timeout, if set, bounds the whole wait; otherwise the readiness wait is limited to 2m. Exits 3 if the agent is not ready in time (it is left running)")
 
 	// GCP service account assignment flag
 	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name (requires Hub mode)")

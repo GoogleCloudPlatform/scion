@@ -4179,3 +4179,28 @@ func TestGetAgent_ResolutionFailureLeavesNothingBehind(t *testing.T) {
 		})
 	}
 }
+
+func TestPlatformSkillsHubEnabled(t *testing.T) {
+	enabled, disabled := true, false
+	brokerCtx := api.ContextWithBrokerMode(context.Background())
+	tests := []struct {
+		name     string
+		ctx      context.Context
+		settings *config.VersionedSettings
+		want     bool
+	}{
+		{name: "broker mode, no settings", ctx: brokerCtx, settings: nil, want: true},
+		{name: "broker mode, hub.enabled=false", ctx: brokerCtx, settings: &config.VersionedSettings{Hub: &config.V1HubClientConfig{Enabled: &disabled}}, want: true},
+		{name: "local, endpoint configured", ctx: context.Background(), settings: &config.VersionedSettings{Hub: &config.V1HubClientConfig{Endpoint: "http://127.0.0.1:8080"}}, want: true},
+		{name: "local, endpoint with hub.enabled=false", ctx: context.Background(), settings: &config.VersionedSettings{Hub: &config.V1HubClientConfig{Endpoint: "http://127.0.0.1:8080", Enabled: &disabled}}, want: true},
+		{name: "local, hub.enabled=true without endpoint", ctx: context.Background(), settings: &config.VersionedSettings{Hub: &config.V1HubClientConfig{Enabled: &enabled}}, want: false},
+		{name: "local, no settings", ctx: context.Background(), settings: nil, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := platformSkillsHubEnabled(tc.ctx, tc.settings); got != tc.want {
+				t.Errorf("platformSkillsHubEnabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
