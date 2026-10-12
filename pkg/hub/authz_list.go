@@ -381,7 +381,15 @@ var setZeroBound = time.Time{}.Add(time.Nanosecond)
 // already expired, and any set bound fails closed on a zero evaluation
 // time. Every conversion from store.RoleBinding to CandidateBinding uses
 // this, so all activation checks in pkg/hub apply one rule.
+//
+// A nil binding gets bounds that no evaluation time satisfies (NotBefore
+// and ExpiresAt both setZeroBound: active would need now >= setZeroBound
+// and now < setZeroBound), so it is never active. Zero bounds would read
+// as unbounded, which is active.
 func candidateActivationBounds(b *store.RoleBinding) (notBefore, expiresAt time.Time) {
+	if b == nil {
+		return setZeroBound, setZeroBound
+	}
 	if b.NotBefore != nil {
 		notBefore = *b.NotBefore
 		if notBefore.IsZero() {
