@@ -7,8 +7,10 @@ Copyright 2026 The Scion Authors.
 package agentinfolock
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -193,7 +195,7 @@ func TestUpdateSkipsNonRegularLockAndLogs(t *testing.T) {
 			if err := Update(info, Options{Logf: debug.logf, Warnf: warn.logf}, func() error { ran = true; return nil }); err != nil {
 				t.Fatal(err)
 			}
-			want := "agent-info lock file is not a single-link regular file, writing without lock (" + tc.kind + "): " + LockPath(info)
+			want := "agent-info lock file is not a single-link regular file (" + tc.kind + "), writing without lock: " + LockPath(info)
 			if !ran || warn.joined() != want {
 				t.Fatalf("ran=%v warn=%q, want %q", ran, warn.joined(), want)
 			}
@@ -225,5 +227,127 @@ func TestUpdateMissingDirRunsUnlocked(t *testing.T) {
 	}
 	if got := warn.joined(); !strings.HasPrefix(got, "agent-info lock file cannot be opened, writing without lock: "+LockPath(info)+": ") {
 		t.Fatalf("warn = %q", got)
+	}
+}
+
+// TestUpdateWarnRearmsAfterRecovery checks the once-only record: each
+// problem warns once per lock path, and taking the lock re-arms the Warn.
+func TestUpdateWarnRearmsAfterRecovery(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "home")
+	info := filepath.Join(dir, "agent-info.json")
+	lock := LockPath(info)
+	var debug, warn logSink
+	opts := Options{Logf: debug.logf, Warnf: warn.logf}
+	update := func() {
+		t.Helper()
+		if err := Update(info, opts, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lines := func(l *logSink) []string {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return append([]string(nil), l.msgs...)
+	}
+	notRegular := "agent-info lock file is not a single-link regular file (fifo), writing without lock: " + lock
+
+	// 1. The directory is missing: "cannot be opened" warns.
+	update()
+	if w := lines(&warn); len(w) != 1 || !strings.HasPrefix(w[0], "agent-info lock file cannot be opened, writing without lock: "+lock+": ") {
+		t.Fatalf("step 1 warn = %q", w)
+	}
+	// 2. A fifo is a different problem on the same path: it warns too.
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(lock, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	update()
+	if w := lines(&warn); len(w) != 2 || w[1] != notRegular {
+		t.Fatalf("step 2 warn = %q", w)
+	}
+	// 3. The same problem again: debug only.
+	update()
+	if w, d := lines(&warn), lines(&debug); len(w) != 2 || len(d) != 1 || d[0] != notRegular {
+		t.Fatalf("step 3 warn = %q debug = %q", w, d)
+	}
+	// 4. The fifo is gone: the lock is taken, nothing is logged.
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	update()
+	if w, d := lines(&warn), lines(&debug); len(w) != 2 || len(d) != 1 {
+		t.Fatalf("step 4 warn = %q debug = %q", w, d)
+	}
+	// 5. The lock file breaks again: the Warn is re-armed.
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(lock, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	update()
+	if w := lines(&warn); len(w) != 3 || w[2] != notRegular {
+		t.Fatalf("step 5 warn = %q", w)
+	}
+}
+
+// recordingHandler keeps every slog record it is given.
+type recordingHandler struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.recs = append(h.recs, r.Clone())
+	return nil
+}
+
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestUpdateDefaultSlogBranch covers the zero Options the host uses: a
+// structured slog.Warn with path and kind, then a slog.Debug repeat.
+func TestUpdateDefaultSlogBranch(t *testing.T) {
+	rec := &recordingHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(rec))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	info := filepath.Join(t.TempDir(), "agent-info.json")
+	lock := LockPath(info)
+	if err := unix.Mkfifo(lock, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := Update(info, Options{}, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const msg = "agent-info lock file is not a single-link regular file, writing without lock"
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var got []string
+	for _, r := range rec.recs {
+		attrs := map[string]string{}
+		r.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.String()
+			return true
+		})
+		got = append(got, fmt.Sprintf("%s|%s|path=%s|kind=%s|n=%d", r.Level, r.Message, attrs["path"], attrs["kind"], len(attrs)))
+	}
+	want := []string{
+		fmt.Sprintf("WARN|%s|path=%s|kind=fifo|n=2", msg, lock),
+		fmt.Sprintf("DEBUG|%s|path=%s|kind=fifo|n=2", msg, lock),
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("slog records:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }

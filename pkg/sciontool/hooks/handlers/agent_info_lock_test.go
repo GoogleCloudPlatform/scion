@@ -203,7 +203,7 @@ func TestStatusHandlerSkipsNonRegularLockFile(t *testing.T) {
 
 			logData, err := os.ReadFile(logPath)
 			require.NoError(t, err)
-			assert.Contains(t, string(logData), "[WARN] agent-info lock file is not a single-link regular file, writing without lock ("+tc.kind+"): "+path+".lock")
+			assert.Contains(t, string(logData), "[WARN] agent-info lock file is not a single-link regular file ("+tc.kind+"), writing without lock: "+path+".lock")
 		})
 	}
 }

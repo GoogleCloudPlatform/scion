@@ -22,7 +22,8 @@ Copyright 2026 The Scion Authors.
 // single-link regular file (the workload owns the agent home and can put
 // anything there), or cannot be opened or locked, the update runs without
 // the lock. A warning naming the file type and path is logged the first time
-// for each lock path in a process, and at debug after that. When another
+// a problem is seen for a lock path in a process, and at debug after that
+// until the lock on that path is taken again. When another
 // holder keeps the lock longer than the wait, the update also runs without
 // it (logged at debug). The unlocked path calls the same rmw func, so the
 // read and write are the same either way.
@@ -103,37 +104,72 @@ func (o Options) logf(format string, args ...any) {
 	slog.Debug("agent-info lock", "detail", fmt.Sprintf(format, args...))
 }
 
-// Fixed messages for an unusable lock file, so a structured backend can
-// match them; the kind, path and error go in attributes.
+// What is wrong with an unusable lock file. Each is the start of a fixed
+// message (see unusableMsg), so a structured backend can match it; the kind,
+// path and error go in attributes.
 const (
-	msgNotRegular = "agent-info lock file is not a single-link regular file, writing without lock"
-	msgCannotOpen = "agent-info lock file cannot be opened, writing without lock"
-	msgCannotLock = "agent-info lock file cannot be locked, writing without lock"
+	problemNotRegular = "agent-info lock file is not a single-link regular file"
+	problemCannotOpen = "agent-info lock file cannot be opened"
+	problemCannotLock = "agent-info lock file cannot be locked"
 )
 
-// warned records the lock paths already reported at Warn in this process.
-// It grows by one entry per unusable lock path, at most one per agent.
+var problems = [...]string{problemNotRegular, problemCannotOpen, problemCannotLock}
+
+// unusableMsg is the fixed slog message for problem.
+func unusableMsg(problem string) string {
+	return problem + ", writing without lock"
+}
+
+// warned records which (lock path, problem) pairs were already reported at
+// Warn in this process. clearWarned drops a path's entries once its lock is
+// taken, so the Warn re-arms if the lock file breaks again later. It holds
+// at most one entry per problem per lock path that is unusable right now.
 var warned sync.Map
 
-// warnUnusable reports an unusable lock file: at Warn the first time for
-// lockPath in this process, at debug after that, so a lock file that stays
-// unusable does not log a warning on every hook or update. kind (a file
-// type word) and err may be empty.
-func (o Options) warnUnusable(msg, kind, lockPath string, err error) {
-	_, repeat := warned.LoadOrStore(lockPath, struct{}{})
-	if o.Warnf != nil || (repeat && o.Logf != nil) {
-		text := msg + ": " + lockPath
-		if kind != "" {
-			text = fmt.Sprintf("%s (%s): %s", msg, kind, lockPath)
-		}
-		if err != nil {
-			text += ": " + err.Error()
-		}
-		if repeat {
-			o.logf("%s", text)
-		} else {
-			o.Warnf("%s", text)
-		}
+func warnedKey(lockPath, problem string) string {
+	return lockPath + "\x00" + problem
+}
+
+// clearWarned forgets the problems recorded for lockPath. Update calls it
+// after taking the lock on lockPath.
+func clearWarned(lockPath string) {
+	for _, p := range problems {
+		warned.Delete(warnedKey(lockPath, p))
+	}
+}
+
+// warnUnusable reports an unusable lock file. The first report of a
+// problem for lockPath in a process is at Warn, repeats are at debug, so a
+// long-lived process (the broker, sciontool init) does not log a warning on
+// every update while a lock file stays unusable. Short-lived processes, such
+// as each `sciontool hook` invocation, start with an empty record and still
+// warn each time. kind (a file type word) and err may be empty.
+func (o Options) warnUnusable(problem, kind, lockPath string, err error) {
+	_, repeat := warned.LoadOrStore(warnedKey(lockPath, problem), struct{}{})
+	if o.Warnf != nil {
+		o.emitText(repeat, problem, kind, lockPath, err)
+		return
+	}
+	o.emitAttrs(repeat, problem, kind, lockPath, err)
+}
+
+// emitText reports through the printf-style Warnf, or Logf for a repeat:
+// "<problem> (<kind>), writing without lock: <path>[: <err>]".
+func (o Options) emitText(repeat bool, problem, kind, lockPath string, err error) {
+	text := unusableText(problem, kind, lockPath, err)
+	if repeat {
+		o.logf("%s", text)
+		return
+	}
+	o.Warnf("%s", text)
+}
+
+// emitAttrs reports through slog with the fixed message and path, kind and
+// error attributes: slog.Warn first, slog.Debug for a repeat (or Logf, as
+// text, when it is set).
+func (o Options) emitAttrs(repeat bool, problem, kind, lockPath string, err error) {
+	if repeat && o.Logf != nil {
+		o.Logf("%s", unusableText(problem, kind, lockPath, err))
 		return
 	}
 	attrs := []any{"path", lockPath}
@@ -144,10 +180,22 @@ func (o Options) warnUnusable(msg, kind, lockPath string, err error) {
 		attrs = append(attrs, "error", err)
 	}
 	if repeat {
-		slog.Debug(msg, attrs...)
-	} else {
-		slog.Warn(msg, attrs...)
+		slog.Debug(unusableMsg(problem), attrs...)
+		return
 	}
+	slog.Warn(unusableMsg(problem), attrs...)
+}
+
+func unusableText(problem, kind, lockPath string, err error) string {
+	text := problem
+	if kind != "" {
+		text += " (" + kind + ")"
+	}
+	text += ", writing without lock: " + lockPath
+	if err != nil {
+		text += ": " + err.Error()
+	}
+	return text
 }
 
 // LockPath returns the lock file path for an agent-info.json path.

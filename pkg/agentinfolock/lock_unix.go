@@ -22,9 +22,9 @@ func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
 	if err != nil {
 		var nr *notRegularError
 		if errors.As(err, &nr) {
-			opts.warnUnusable(msgNotRegular, nr.kind, lockPath, nil)
+			opts.warnUnusable(problemNotRegular, nr.kind, lockPath, nil)
 		} else {
-			opts.warnUnusable(msgCannotOpen, "", lockPath, err)
+			opts.warnUnusable(problemCannotOpen, "", lockPath, err)
 		}
 		return nil, false
 	}
@@ -38,7 +38,7 @@ func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
 			_ = f.Close()
-			opts.warnUnusable(msgCannotLock, "", lockPath, err)
+			opts.warnUnusable(problemCannotLock, "", lockPath, err)
 			return nil, false
 		}
 		if !time.Now().Before(deadline) {
@@ -51,6 +51,7 @@ func acquire(lockPath string, opts Options) (unlock func(), ok bool) {
 			poll = min(2*poll, maxPoll)
 		}
 	}
+	clearWarned(lockPath)
 	return func() {
 		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		_ = f.Close()
