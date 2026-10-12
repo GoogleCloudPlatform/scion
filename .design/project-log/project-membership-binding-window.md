@@ -49,11 +49,15 @@ methods.
   kernel, which evaluates the window itself.
 - Group membership has no activation window.
 
-## Follow-up noted
+## Hub helper aligned
 
-- `isBindingActive` in `pkg/hub/authz.go` treats `now == ExpiresAt` as
-  active (`now.After`), while the kernel treats it as inactive. Aligning it
-  is a separate change.
+`isBindingActive` in `pkg/hub/authz.go` treated `now == ExpiresAt` as active
+(`now.After`), while the kernel treats it as inactive. It now uses
+`!now.Before(ExpiresAt)`; its NotBefore side already matched. Its zero-now
+behaviour is unchanged (the kernel fails closed on a zero evaluation time;
+every isBindingActive caller passes `time.Now()` or a service clock).
+The test identity expiry check (`now.Before(ExpiresAt)`) already used the
+exclusive rule, so the clamp and the binding check now agree at the instant.
 
 ## Tests
 
@@ -61,3 +65,5 @@ methods.
 future bindings are not membership; unbounded and in-window bindings are;
 an expired owner row beside an active member binding resolves to member;
 boundary instants match the kernel; unit table for `roleBindingActiveAt`.
+`pkg/hub/authz_test.go` `TestIsBindingActive_BoundariesMatchKernel`
+checks `isBindingActive` against `bindingActivationOK` (the kernel rule).
