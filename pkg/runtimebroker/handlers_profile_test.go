@@ -270,7 +270,7 @@ runtimes:
 // silently: it must log a warning identifying the project directory and the
 // error, then fall back to the broker's default manager. A malformed
 // settings.yaml (not the SCION_AUTO_EXPOSE_PORTS collision, which the
-// mapper fix above avoids entirely) is used to force a real decode error
+// mapper fix above avoids entirely) is used to force a real load error
 // deterministically.
 func TestResolveManagerForOpts_SettingsDecodeErrorIsLogged(t *testing.T) {
 	clearSCIONEnv(t)
@@ -281,10 +281,11 @@ func TestResolveManagerForOpts_SettingsDecodeErrorIsLogged(t *testing.T) {
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// profiles is declared as a scalar here instead of a map, forcing
-	// VersionedSettings' Unmarshal to fail.
+	// The file is not valid YAML, so the load fails. A wrong-typed value
+	// (profiles as a scalar, say) no longer does: the settings loader falls
+	// back to the default for that key and the load succeeds.
 	malformedYAML := `schema_version: "1"
-profiles: "not-a-map"
+profiles: [not valid yaml
 `
 	if err := os.WriteFile(filepath.Join(projectPath, "settings.yaml"), []byte(malformedYAML), 0644); err != nil {
 		t.Fatal(err)
