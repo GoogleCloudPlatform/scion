@@ -16,13 +16,14 @@ package transportauth
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 )
 
 const (
@@ -62,35 +63,69 @@ func DefaultTransportTokenFilePath() string {
 	return filepath.Join(home, ".scion", TransportTokenFileName)
 }
 
-// ReadTransportTokenFile is the default FileReadFunc. It refuses symlinks
-// and anything that is not a regular file, and bounds the read size.
-// Callers running with elevated privileges should supply a stricter reader
-// (sciontool uses its fd-relative, no-follow reader).
+// ReadTransportTokenFile is the default FileReadFunc. For a path under the
+// current user's home directory, the home directory is trusted and opened
+// normally (it may be reached through a linked prefix such as
+// /home -> /var/home) and every component below it is opened without
+// following a symbolic link. For any other path, its parent directory is
+// trusted and the file itself is opened without following a link. Either
+// way the file must be a single-link regular file no larger than the size
+// limit; anything else is refused with an error. Callers running with
+// elevated privileges should supply a stricter reader (sciontool uses its
+// fd-relative, no-follow reader from the root directory).
 func ReadTransportTokenFile(path string) (string, error) {
-	// O_NOFOLLOW refuses a symlink at the leaf atomically with the open;
+	home, _ := os.UserHomeDir()
+	base, rel, err := splitUnderHome(home, path)
+	if err != nil {
+		return "", err
+	}
+	// O_NOFOLLOW (below base) refuses a symlink atomically with each open;
 	// O_NONBLOCK keeps a FIFO planted at the path from blocking the open.
-	// The regular-file check then runs on the opened descriptor, so there
-	// is no window between the check and the read.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	// The regular-file and link-count checks then run on the opened
+	// descriptor, so there is no window between the check and the read.
+	//
+	// Trusts HOME as set by the launching environment (the user on a host,
+	// the launcher in an agent). The directories above HOME must not be
+	// writable by this user or any less-trusted user, so HOME itself cannot be
+	// replaced; HOME may be writable. Entries below HOME are opened without
+	// following links. For a path outside HOME, its parent directory is
+	// trusted the same way.
+	dirFd, leaf, err := dirfd.OpenParentNoFollowUnder(base, rel)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("transport token file %s: %w", path, err)
 	}
-	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
+	defer func() { _ = syscall.Close(dirFd) }()
+	data, err := dirfd.ReadAtNoFollow(dirFd, leaf, transportTokenFileMaxBytes)
 	if err != nil {
-		return "", err
-	}
-	if !fi.Mode().IsRegular() {
-		return "", fmt.Errorf("transport token file %s is not a regular file", path)
-	}
-	data, err := io.ReadAll(io.LimitReader(f, transportTokenFileMaxBytes+1))
-	if err != nil {
-		return "", err
-	}
-	if len(data) > transportTokenFileMaxBytes {
-		return "", fmt.Errorf("transport token file %s is too large", path)
+		return "", fmt.Errorf("transport token file %s: %w", path, err)
 	}
 	return string(data), nil
+}
+
+// splitUnderHome splits path into a trusted base directory and the
+// relative path below it that ReadTransportTokenFile walks without
+// following links. When path (cleaned and made absolute) lies strictly
+// below home, on a path-separator boundary, base is home; otherwise base
+// is path's own parent directory and rel is its final component.
+func splitUnderHome(home, path string) (base, rel string, err error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", "", fmt.Errorf("transport token file %s: %w", path, err)
+	}
+	abs = filepath.Clean(abs)
+	if home != "" {
+		if h, herr := filepath.Abs(home); herr == nil {
+			h = filepath.Clean(h)
+			prefix := h
+			if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+				prefix += string(filepath.Separator)
+			}
+			if strings.HasPrefix(abs, prefix) && len(abs) > len(prefix) {
+				return h, abs[len(prefix):], nil
+			}
+		}
+	}
+	return filepath.Dir(abs), filepath.Base(abs), nil
 }
 
 // FileSource is a TokenSource backed by the transport token file that the

@@ -2119,12 +2119,19 @@ func ChownTokenFile(uid, gid int) error {
 }
 
 // tokenFileMaxBytes bounds readTokenFileGuarded's read: the agent token is
-// a compact JWT-style string, so anything this long already isn't a token
-// this process (or the host-side agent manager) wrote.
+// a compact JWT-style string, so anything longer already isn't a token
+// this process (or the host-side agent manager) wrote. A longer file is
+// refused, not truncated.
 const tokenFileMaxBytes = 8192
 
+// warnTokenFile reports a token file that exists but was refused (for
+// example because it exceeds tokenFileMaxBytes), so a refusal is visible
+// rather than a silent empty token. A package var so tests can observe it.
+var warnTokenFile = log.Warn
+
 // ReadTokenFile reads the agent token from the canonical token file.
-// Returns empty string if the file doesn't exist or can't be read.
+// Returns empty string if the file doesn't exist or can't be read; a file
+// that exceeds the size limit is also refused, with a warning.
 //
 // This runs inside sciontool init, which is root for its whole life, so
 // the read goes through the same symlink-safe path WriteFileNoFollowChown
@@ -2133,8 +2140,12 @@ const tokenFileMaxBytes = 8192
 // to one) and have root read that file's contents back and forward them to
 // the Hub as if they were the agent's bearer token.
 func ReadTokenFile() string {
-	token, err := readTokenFileGuarded(TokenFilePath())
+	path := TokenFilePath()
+	token, err := readTokenFileGuarded(path)
 	if err != nil {
+		if errors.Is(err, dirfd.ErrTooLarge) {
+			warnTokenFile("Ignoring token file %s: %v", path, err)
+		}
 		return ""
 	}
 	token = strings.TrimSpace(token)
@@ -2142,6 +2153,32 @@ func ReadTokenFile() string {
 		return ""
 	}
 	return token
+}
+
+// ReadTokenFileUnder reads an agent token file at base/rel, for a caller
+// (the scion CLI) that resolves the file from its own home directory
+// rather than from TokenFilePath. base is trusted and opened normally, so
+// a home directory reached through a linked prefix still works; every
+// component of rel is opened without following a symbolic link. The file
+// itself gets exactly the checks ReadTokenFile applies (single-link regular
+// file, size limit, and the optional owner check), through the same
+// implementation.
+//
+// It returns the trimmed token, or an error: fs.ErrNotExist (wrapped) when
+// the file or a directory on the way to it does not exist, and
+// dirfd.ErrTooLarge or dirfd.ErrNotSingleLinkRegular (wrapped) when the
+// file is refused.
+func ReadTokenFileUnder(base, rel string) (string, error) {
+	dirFd, leaf, err := dirfd.OpenParentNoFollowUnder(base, rel)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+	token, err := readTokenAt(dirFd, leaf, filepath.Join(base, rel))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(token), nil
 }
 
 // readTokenFileGuarded resolves path through the dirfd parent-directory
@@ -2164,32 +2201,23 @@ func readTokenFileGuarded(path string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
+	return readTokenAt(dirFd, leaf, path)
+}
 
+// readTokenAt applies the token-file checks to leaf, relative to the
+// already-resolved parent directory dirFd; path is used only in errors.
+func readTokenAt(dirFd int, leaf, path string) (string, error) {
 	var dirSt syscall.Stat_t
 	if err := syscall.Fstat(dirFd, &dirSt); err != nil {
 		return "", fmt.Errorf("failed to stat parent directory of %s: %w", path, err)
 	}
 
-	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	data, st, err := dirfd.ReadAtNoFollowStat(dirFd, leaf, tokenFileMaxBytes)
 	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
-
-	var st syscall.Stat_t
-	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
-		return "", fmt.Errorf("failed to stat %s: %w", path, err)
-	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
-		return "", fmt.Errorf("refusing to read %s: not a single-link regular file", path)
+		return "", fmt.Errorf("%s: %w", path, err)
 	}
 	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
 		return "", fmt.Errorf("refusing to read %s: unexpected owner", path)
-	}
-
-	data, err := io.ReadAll(io.LimitReader(f, tokenFileMaxBytes))
-	if err != nil {
-		return "", fmt.Errorf("failed to read %s: %w", path, err)
 	}
 	return string(data), nil
 }

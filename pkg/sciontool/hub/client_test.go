@@ -19,6 +19,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +33,7 @@ import (
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1115,18 +1118,98 @@ func TestReadTokenFile_Hardening(t *testing.T) {
 		assert.Equal(t, "do-not-leak", string(data))
 	})
 
-	t.Run("bounds the read on an oversized file", func(t *testing.T) {
+	t.Run("refuses an oversized file with a warning", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		var warnings []string
+		origWarn := warnTokenFile
+		warnTokenFile = func(format string, args ...interface{}) {
+			warnings = append(warnings, fmt.Sprintf(format, args...))
+		}
+		defer func() { warnTokenFile = origWarn }()
+
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0700))
+		oversized := strings.Repeat("a", tokenFileMaxBytes+1)
+		require.NoError(t, os.WriteFile(filepath.Join(scionDir, TokenFile), []byte(oversized), 0600))
+
+		assert.Equal(t, "", ReadTokenFile(), "an oversized token file must be refused, not truncated")
+		require.Len(t, warnings, 1, "refusing an oversized token file must log a warning")
+		assert.Contains(t, warnings[0], TokenFile)
+
+		_, err := readTokenFileGuarded(filepath.Join(scionDir, TokenFile))
+		assert.ErrorIs(t, err, dirfd.ErrTooLarge)
+	})
+
+	t.Run("reads a file exactly at the size limit", func(t *testing.T) {
 		home := t.TempDir()
 		cleanup := SetTokenHome(home)
 		defer cleanup()
 
 		scionDir := filepath.Join(home, ".scion")
 		require.NoError(t, os.MkdirAll(scionDir, 0700))
-		oversized := strings.Repeat("a", tokenFileMaxBytes*4)
-		require.NoError(t, os.WriteFile(filepath.Join(scionDir, TokenFile), []byte(oversized), 0600))
+		atLimit := strings.Repeat("a", tokenFileMaxBytes)
+		require.NoError(t, os.WriteFile(filepath.Join(scionDir, TokenFile), []byte(atLimit), 0600))
 
-		got := ReadTokenFile()
-		assert.Len(t, got, tokenFileMaxBytes, "the read should be bounded to tokenFileMaxBytes")
+		assert.Equal(t, atLimit, ReadTokenFile())
+	})
+}
+
+// TestReadTokenFileUnder covers the base-relative entry point the scion
+// CLI uses: the base (a home directory) is trusted and opened normally,
+// and everything below it gets ReadTokenFile's checks.
+func TestReadTokenFileUnder(t *testing.T) {
+	rel := filepath.Join(".scion", TokenFile)
+
+	t.Run("reads a regular token file", func(t *testing.T) {
+		home := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(home, rel), []byte(" cli-token\n"), 0600))
+
+		got, err := ReadTokenFileUnder(home, rel)
+		require.NoError(t, err)
+		assert.Equal(t, "cli-token", got)
+	})
+
+	t.Run("reads through a home reached via a linked prefix", func(t *testing.T) {
+		root := t.TempDir()
+		realHome := filepath.Join(root, "var", "home", "user")
+		require.NoError(t, os.MkdirAll(filepath.Join(realHome, ".scion"), 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(realHome, rel), []byte("linked-home-token"), 0600))
+		require.NoError(t, os.Symlink(filepath.Join(root, "var", "home"), filepath.Join(root, "home")))
+
+		got, err := ReadTokenFileUnder(filepath.Join(root, "home", "user"), rel)
+		require.NoError(t, err)
+		assert.Equal(t, "linked-home-token", got)
+	})
+
+	t.Run("absent file reports not-exist", func(t *testing.T) {
+		got, err := ReadTokenFileUnder(t.TempDir(), rel)
+		assert.ErrorIs(t, err, fs.ErrNotExist)
+		assert.Equal(t, "", got)
+	})
+
+	t.Run("refuses a linked .scion directory", func(t *testing.T) {
+		home := t.TempDir()
+		other := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(other, TokenFile), []byte("other-token"), 0600))
+		require.NoError(t, os.Symlink(other, filepath.Join(home, ".scion")))
+
+		got, err := ReadTokenFileUnder(home, rel)
+		assert.Error(t, err)
+		assert.Equal(t, "", got)
+	})
+
+	t.Run("refuses an oversized file", func(t *testing.T) {
+		home := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(home, rel), []byte(strings.Repeat("a", tokenFileMaxBytes+1)), 0600))
+
+		got, err := ReadTokenFileUnder(home, rel)
+		assert.ErrorIs(t, err, dirfd.ErrTooLarge)
+		assert.Equal(t, "", got)
 	})
 }
 
