@@ -172,7 +172,8 @@ type projectListRowJSON struct {
 // buildProjectListRows merges the known-project list with the project
 // directories on this machine. The key is the normalised hub endpoint and
 // the hub project ID: a directory linked to a known project adds its local
-// path to that row. A linked directory whose hub project is not known gets
+// path to that row. A directory whose endpoint matches no row joins the row
+// of a project ID known on exactly one hub. A linked directory whose hub project is not known gets
 // a row of its own, and so does a directory not linked to a hub (with no
 // hub). Known entries on a hub that has no hub entry are left out.
 func buildProjectListRows(c *config.CLIContext, dirs []config.ProjectInfo) []projectListRow {
@@ -220,13 +221,13 @@ func buildProjectListRows(c *config.CLIContext, dirs []config.ProjectInfo) []pro
 		local := projectListLocalPath(d)
 		if d.HubProjectID != "" {
 			i := -1
-			if d.HubEndpoint != "" {
-				if j, ok := index[[2]string{d.HubEndpoint, d.HubProjectID}]; ok {
-					i = j
-				}
+			if j, ok := index[[2]string{d.HubEndpoint, d.HubProjectID}]; ok && d.HubEndpoint != "" {
+				i = j
 			} else if l := byID[d.HubProjectID]; len(l) == 1 {
-				// Linked without an endpoint in its settings: a project ID
-				// known on exactly one hub is that project.
+				// No endpoint in its settings, or one that names no known
+				// row (SCION_HUB_ENDPOINT overrides the settings endpoint
+				// in this shell): a project ID known on exactly one hub is
+				// that project.
 				i = l[0]
 			}
 			if i >= 0 {
@@ -313,7 +314,7 @@ func runProjectListHubs(cmd *cobra.Command) error {
 	}
 	if projectListRefresh {
 		if filter != "" && filterName == "" {
-			return fmt.Errorf("hub %s is not in the hub list; add it with 'scion hub add <name> <url>' to refresh its projects", filter)
+			return fmt.Errorf("hub %s is not in the hub list; add it with 'scion hub add <name> %s' to refresh its projects", filter, filter)
 		}
 		ctx := cmd.Context()
 		if ctx == nil {
@@ -456,17 +457,19 @@ func refreshKnownProjects(ctx context.Context, stderr io.Writer, c *config.CLICo
 		skipped  bool
 	}
 	results := make([]result, len(names))
+	// Several hubs get only a credential bound to each (see hubUsable).
+	fanOut := len(names) > 1
 	var wg sync.WaitGroup
 	for i, name := range names {
 		endpoint := c.Hubs[name].Endpoint
-		if getAuthInfo(settings, endpoint).MethodType == "none" {
+		if !hubUsable(settings, endpoint, fanOut) {
 			results[i].skipped = true
 			continue
 		}
 		wg.Add(1)
 		go func(i int, endpoint string) {
 			defer wg.Done()
-			client, err := hubClientForEndpoint(settings, endpoint)
+			client, err := hubClientFor(settings, endpoint, fanOut)
 			if err != nil {
 				results[i].err = err
 				return

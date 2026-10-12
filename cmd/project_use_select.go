@@ -54,6 +54,7 @@ var useConfirm = hubsync.ConfirmAction
 // else: no settings are written. It is a variable so tests can substitute
 // it.
 var useLoginToHub = func(cmd *cobra.Command, endpoint string) error {
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticating with Hub at %s\n", endpoint)
 	tokenResp, err := hubAuthLoginFlow(cmd, endpoint, "")
 	if err != nil {
 		return err
@@ -165,11 +166,6 @@ func useCandidateHubs(c *config.CLIContext, settings *config.Settings) ([]useHub
 	return hubs, nil
 }
 
-// loggedIn reports whether the CLI has a usable credential for endpoint.
-func (l *useLookup) loggedIn(endpoint string) bool {
-	return getAuthInfo(l.settings, endpoint).MethodType != "none"
-}
-
 // remember records projects seen on hub for the known-project list.
 func (l *useLookup) remember(hub useHub, projects ...hubclient.Project) {
 	if hub.Name == "" {
@@ -200,10 +196,11 @@ const (
 // fills in the hub's current slug and name.
 func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
 	notLoggedIn := fmt.Sprintf("Not logged in to hub '%s'. Run: scion hub auth login --hub %s", m.Hub.label(), m.Hub.label())
-	if !l.loggedIn(m.Hub.Endpoint) {
+	// One named hub: the full credential chain, as for --hub.
+	if !hubUsable(l.settings, m.Hub.Endpoint, false) {
 		return useUnchecked, notLoggedIn
 	}
-	client, err := hubClientForEndpoint(l.settings, m.Hub.Endpoint)
+	client, err := hubClientFor(l.settings, m.Hub.Endpoint, false)
 	if err != nil {
 		return useUnchecked, fmt.Sprintf("Warning: could not check project '%s' on hub '%s': %v", m.shown(), m.Hub.label(), err)
 	}
@@ -226,9 +223,10 @@ func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
 }
 
 // lookupOn looks the reference up on one hub. A reference that matches
-// nothing is no error; several projects with the name are all returned.
-func (l *useLookup) lookupOn(hub useHub) ([]hubclient.Project, error) {
-	client, err := hubClientForEndpoint(l.settings, hub.Endpoint)
+// nothing is no error; several projects with the name are all returned. In
+// a fan-out the hub gets only a credential bound to it (see hubClientFor).
+func (l *useLookup) lookupOn(hub useHub, fanOut bool) ([]hubclient.Project, error) {
+	client, err := hubClientFor(l.settings, hub.Endpoint, fanOut)
 	if err != nil {
 		return nil, err
 	}
@@ -256,9 +254,11 @@ func (l *useLookup) lookupOn(hub useHub) ([]hubclient.Project, error) {
 }
 
 // search looks the reference up on hubs in parallel, each within
-// useHubTimeout. Hubs without a usable credential are skipped. It returns
-// the matches in the order of hubs.
+// useHubTimeout. Hubs without a usable credential are skipped and not
+// contacted; with several hubs, that is every hub without a credential
+// bound to it (see hubUsable). It returns the matches in the order of hubs.
 func (l *useLookup) search(hubs []useHub) []useMatch {
+	fanOut := len(hubs) > 1
 	type result struct {
 		projects []hubclient.Project
 		err      error
@@ -267,14 +267,14 @@ func (l *useLookup) search(hubs []useHub) []useMatch {
 	results := make([]result, len(hubs))
 	var wg sync.WaitGroup
 	for i, h := range hubs {
-		if !l.loggedIn(h.Endpoint) {
+		if !hubUsable(l.settings, h.Endpoint, fanOut) {
 			results[i].skipped = true
 			continue
 		}
 		wg.Add(1)
 		go func(i int, h useHub) {
 			defer wg.Done()
-			results[i].projects, results[i].err = l.lookupOn(h)
+			results[i].projects, results[i].err = l.lookupOn(h, fanOut)
 		}(i, h)
 	}
 	wg.Wait()
@@ -427,7 +427,9 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 		}
 		if len(candidates) == 0 && len(l.notLoggedIn) == 1 && useInteractive() && !isJSONOutput() {
 			h := l.notLoggedIn[0]
-			if useConfirm(fmt.Sprintf("Log in to %s now?", h.label()), true, autoConfirm) {
+			// --yes does not start a login: opening a browser is never
+			// implied.
+			if useConfirm(fmt.Sprintf("Log in to %s now?", h.label()), true, false) {
 				if err := useLoginToHub(cmd, h.Endpoint); err != nil {
 					return err
 				}

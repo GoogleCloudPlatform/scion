@@ -199,8 +199,8 @@ func TestUseSelectProject_Ambiguous(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(stdout), &got))
 	assert.Equal(t, "ambiguous", got["error"])
 	assert.Equal(t, []interface{}{
-		map[string]interface{}{"endpoint": srv.URL, "id": "id-1", "slug": "dupe-1"},
-		map[string]interface{}{"endpoint": srv.URL, "id": "id-2", "slug": "dupe-2"},
+		map[string]interface{}{"hub": "", "endpoint": srv.URL, "id": "id-1", "slug": "dupe-1"},
+		map[string]interface{}{"hub": "", "endpoint": srv.URL, "id": "id-2", "slug": "dupe-2"},
 	}, got["candidates"])
 	_, statErr := os.Stat(filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml"))
 	assert.True(t, os.IsNotExist(statErr))

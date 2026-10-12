@@ -279,7 +279,7 @@ func TestProjectList_RefreshOneHubAndNotLoggedIn(t *testing.T) {
 	assert.Zero(t, other.calls())
 
 	_, _, err = runScion(t, "project", "list", "--refresh", "--hub", "https://unknown.example.com")
-	require.EqualError(t, err, "hub https://unknown.example.com is not in the hub list; add it with 'scion hub add <name> <url>' to refresh its projects")
+	require.EqualError(t, err, "hub https://unknown.example.com is not in the hub list; add it with 'scion hub add <name> https://unknown.example.com' to refresh its projects")
 }
 
 func TestProjectList_LocalFlagConflicts(t *testing.T) {
@@ -288,4 +288,19 @@ func TestProjectList_LocalFlagConflicts(t *testing.T) {
 	require.EqualError(t, err, "--local cannot be combined with --refresh")
 	_, _, err = runScion(t, "project", "list", "--local", "--hub", "prod")
 	require.EqualError(t, err, "--local cannot be combined with --hub")
+}
+
+// With SCION_HUB_ENDPOINT set, the merged settings of a linked directory
+// name the environment's hub; the directory still joins its project's row
+// by the hub project ID.
+func TestProjectList_EnvEndpointKeepsLinkedRow(t *testing.T) {
+	setupProjectListTest(t)
+	t.Setenv("SCION_HUB_ENDPOINT", "https://other.example.com")
+	stdout, _, err := runScion(t, "project", "list", "--format", "json")
+	require.NoError(t, err)
+	var got []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &got), stdout)
+	require.Len(t, got, 4, stdout)
+	assert.Equal(t, "p-foo", got[0]["id"])
+	assert.Equal(t, filepath.Join(os.Getenv("HOME"), "src", "foo"), got[0]["local_path"])
 }

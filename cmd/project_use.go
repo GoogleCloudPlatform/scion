@@ -456,7 +456,7 @@ type useSelectJSON struct {
 
 // useCandidateJSON is one candidate of an ambiguous 'scion use <project>'.
 type useCandidateJSON struct {
-	Hub      string `json:"hub,omitempty"`
+	Hub      string `json:"hub"`
 	Endpoint string `json:"endpoint"`
 	ID       string `json:"id"`
 	Slug     string `json:"slug"`

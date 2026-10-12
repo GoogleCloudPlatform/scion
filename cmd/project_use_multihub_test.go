@@ -44,6 +44,8 @@ type fakeProjectHub struct {
 
 	mu       sync.Mutex
 	projects []hubclient.Project
+	// authz are the Authorization headers of the project requests.
+	authz []string
 }
 
 func newFakeProjectHub(t *testing.T, projects ...hubclient.Project) *fakeProjectHub {
@@ -65,6 +67,9 @@ func (h *fakeProjectHub) setProjects(projects ...hubclient.Project) {
 func (h *fakeProjectHub) serve(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	projects := append([]hubclient.Project(nil), h.projects...)
+	if strings.HasPrefix(r.URL.Path, "/api/v1/projects") {
+		h.authz = append(h.authz, r.Header.Get("Authorization"))
+	}
 	h.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	q := r.URL.Query()
@@ -116,6 +121,21 @@ func (h *fakeProjectHub) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *fakeProjectHub) calls() int32 { return h.gets.Load() + h.lists.Load() }
+
+// authHeaders returns the distinct Authorization headers the hub received.
+func (h *fakeProjectHub) authHeaders() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range h.authz {
+		if !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	return out
+}
 
 // Projects named "foo" on two hubs.
 var (
@@ -415,6 +435,7 @@ func TestUseMultiHub_LoginOffer(t *testing.T) {
 	var asked []string
 	useConfirm = func(prompt string, defaultYes, auto bool) bool {
 		asked = append(asked, prompt)
+		assert.False(t, auto, "--yes never starts a login by itself")
 		return true
 	}
 	var loggedIn []string
@@ -424,7 +445,7 @@ func TestUseMultiHub_LoginOffer(t *testing.T) {
 		return nil
 	}
 
-	stdout, _, err := runScion(t, "use", "foo")
+	stdout, _, err := runScion(t, "--yes", "use", "foo")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"Log in to staging now?"}, asked)
 	assert.Equal(t, []string{staging.URL()}, loggedIn)
@@ -477,4 +498,158 @@ func TestUseMultiHub_KnownAmbiguityNeedsNoLookup(t *testing.T) {
 
 func TestUseMultiHub_HubTimeoutIsFiveSeconds(t *testing.T) {
 	assert.Equal(t, 5*time.Second, useHubTimeout)
+}
+
+// withFanOutLocalHub decides whether the fake hubs count as local
+// workstation hubs, where dev auth applies in a fan-out.
+func withFanOutLocalHub(t *testing.T, local bool) {
+	t.Helper()
+	orig := fanOutLocalHub
+	t.Cleanup(func() { fanOutLocalHub = orig })
+	fanOutLocalHub = func(string) bool { return local }
+}
+
+// setupTwoHubsNoLogins is setupTwoHubs without the OAuth logins, with
+// SCION_HUB_TOKEN and SCION_DEV_TOKEN set, and the fake hubs treated as
+// remote hubs.
+func setupTwoHubsNoLogins(t *testing.T) (prod, staging *fakeProjectHub) {
+	t.Helper()
+	setupRegistryTest(t)
+	writeHomeGlobalSettings(t, "")
+	prod = newFakeProjectHub(t, prodFoo)
+	staging = newFakeProjectHub(t, stagingFoo)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		if err := c.AddHub("prod", prod.URL()); err != nil {
+			return err
+		}
+		return c.AddHub("staging", staging.URL())
+	}))
+	t.Setenv("SCION_HUB_TOKEN", "scoped-token")
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	withFanOutLocalHub(t, false)
+	return prod, staging
+}
+
+// A lookup across hubs never sends a token that is not tied to a hub
+// (SCION_HUB_TOKEN, the dev token of a remote hub): with no hub login, no
+// hub is contacted and both are reported as not logged in.
+func TestUseMultiHub_FanOutNeverSendsUnboundTokens(t *testing.T) {
+	prod, staging := setupTwoHubsNoLogins(t)
+
+	_, _, err := runScion(t, "use", "foo")
+	require.EqualError(t, err, "project 'foo' could not be looked up (prod: not logged in; staging: not logged in)\n\n"+
+		"Log in with: scion hub auth login --hub prod\n"+
+		"Log in with: scion hub auth login --hub staging")
+	assert.Zero(t, prod.calls())
+	assert.Zero(t, staging.calls())
+
+	_, stderr, err := runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Warning: not refreshed: prod: not logged in; staging: not logged in")
+	assert.Zero(t, prod.calls())
+	assert.Zero(t, staging.calls())
+}
+
+// A single hub chosen with --hub keeps the full credential chain, so
+// SCION_HUB_TOKEN is used there, for the lookup and for the refresh.
+func TestUseMultiHub_ExplicitHubUsesFullCredentialChain(t *testing.T) {
+	prod, staging := setupTwoHubsNoLogins(t)
+
+	stdout, _, err := runScion(t, "use", "foo", "--hub", "staging")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'staging' ("+staging.URL()+").\n", stdout)
+	assert.Equal(t, []string{"Bearer scoped-token"}, staging.authHeaders())
+	assert.Zero(t, prod.calls())
+
+	_, _, err = runScion(t, "project", "list", "--refresh", "--hub", "prod")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders())
+}
+
+// With an OAuth login on one hub only, a fan-out queries that hub, with
+// its login, and skips the other.
+func TestUseMultiHub_FanOutUsesOnlyHubLogins(t *testing.T) {
+	prod, staging := setupTwoHubsNoLogins(t)
+	storeTestLogin(t, prod.URL())
+
+	stdout, stderr, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+	assert.Contains(t, stderr, "Warning: skipped hubs: staging: not logged in")
+	assert.Equal(t, []string{"Bearer tok"}, prod.authHeaders())
+	assert.Zero(t, staging.calls())
+
+	_, stderr, err = runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Warning: not refreshed: staging: not logged in")
+	assert.Equal(t, []string{"Bearer tok"}, prod.authHeaders())
+	assert.Zero(t, staging.calls())
+}
+
+// Dev auth counts in a fan-out only for a local workstation hub.
+func TestUseMultiHub_FanOutDevAuthOnlyForLocalHubs(t *testing.T) {
+	prod, staging := setupTwoHubsNoLogins(t)
+	staging.setProjects()
+	withFanOutLocalHub(t, true)
+
+	_, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Bearer scion_dev_test"}, prod.authHeaders())
+	assert.Equal(t, []string{"Bearer scion_dev_test"}, staging.authHeaders())
+}
+
+// SCION_HUB_ENDPOINT restricts the lookup to that hub, even with other
+// hubs registered.
+func TestUseMultiHub_EnvHubRestrictsCandidates(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	t.Setenv("SCION_HUB_ENDPOINT", staging.URL())
+	stdout, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'staging' ("+staging.URL()+").\n", stdout)
+	assert.Zero(t, prod.calls())
+}
+
+// The hub in the settings joins the registered hubs when it has no entry.
+func TestUseMultiHub_SettingsHubJoinsRegisteredHubs(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.setProjects()
+	staging.setProjects()
+	other := newFakeProjectHub(t, hubclient.Project{ID: "o-foo", Slug: "foo", Name: "Foo"})
+	storeTestLogin(t, other.URL())
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+other.URL()+"\n")
+
+	stdout, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'local' ("+other.URL()+").\n", stdout)
+	assert.Positive(t, prod.lists.Load(), "the registered hubs are searched too")
+	assert.Positive(t, staging.lists.Load(), "the registered hubs are searched too")
+	c := readTestContext(t)
+	require.NotNil(t, c.Hubs["local"])
+	assert.Equal(t, other.URL(), c.Hubs["local"].Endpoint)
+}
+
+// Each hub's lookup has its own timeout: a hub that never answers is
+// reported unreachable, and the other hub's result is used.
+func TestUseMultiHub_HangingHubTimesOut(t *testing.T) {
+	prod, _ := setupTwoHubs(t)
+	orig := useHubTimeout
+	t.Cleanup(func() { useHubTimeout = orig })
+	useHubTimeout = 100 * time.Millisecond
+
+	hanging := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(hanging.Close)
+	storeTestLogin(t, hanging.URL)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.Hubs["staging"].Endpoint = hanging.URL
+		return nil
+	}))
+
+	start := time.Now()
+	stdout, stderr, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 5*time.Second)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+	assert.Contains(t, stderr, "Warning: skipped hubs: staging: unreachable: ")
 }
