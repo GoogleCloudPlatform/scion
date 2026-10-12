@@ -102,8 +102,8 @@ func quickstartWebPath(status onboardingStatusResult, statusErr error, settingsM
 // image_registry is configured (see workstationBrokerRegistryDegrade). It
 // uses the server's own registry predicate (localCheck: the check as the
 // daemon child runs it, daemonRegistryCheck), which covers every source the
-// server checks. When the hub answered and reports an embedded broker, the broker
-// is running and there is nothing to report.
+// server checks. When the hub answered and reports an embedded broker, the
+// broker is running and there is nothing to report.
 func brokerSkippedForRegistry(brokerEnabled bool, status onboardingStatusResult, statusErr error, localCheck func() error) bool {
 	if !brokerEnabled {
 		return false

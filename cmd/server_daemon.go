@@ -904,7 +904,7 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	client := &http.Client{Timeout: 2 * time.Second}
 	// Probe the ports the server was started with (its saved start args and
 	// config), not the defaults.
-	webBase, hubBase, brokerBase := serverStatusBaseURLs(globalDir)
+	webBase, hubBase, brokerBase := serverStatusBaseURLs(globalDir, running)
 	probed := probeServerStatus(client, webBase, hubBase, brokerBase)
 	status.HubRunning = probed.HubRunning
 	status.BrokerRunning = probed.BrokerRunning
@@ -938,6 +938,33 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// serverStatusBaseURLs returns the base URLs (no trailing slash) 'server
+// status' probes: the web port, the standalone hub port and the runtime
+// broker port of the server, with their hosts, resolved by
+// serverListenersFromArgs as the start wait does. While the daemon runs they
+// come from its saved start args and the config those args name. Otherwise
+// the saved args are ignored: they outlive 'server stop' (restart reads
+// them) and a foreground server saves none, so the ports come from the
+// config and the defaults, as a foreground server's do.
+func serverStatusBaseURLs(globalDir string, daemonRunning bool) (webBase, hubBase, brokerBase string) {
+	var saved []string
+	if daemonRunning {
+		if args, err := daemon.LoadArgs(serverDaemonComponent, globalDir); err == nil {
+			saved = args
+		}
+	}
+	cfg, err := config.LoadGlobalConfig(serverConfigPathFromArgs(saved))
+	if err != nil {
+		cfg = nil
+	}
+	// The registry check only decides whether the broker runs, not where it
+	// listens; status probes every component.
+	noRegistryCheck := func() error { return nil }
+	l := serverListenersFromArgs(saved, cfg, config.LoadServerMode(), noRegistryCheck)
+	base := func(host string, port int) string { return strings.TrimSuffix(healthzURL(host, port), "/healthz") }
+	return base(l.HubHost, l.WebPort), base(l.HubHost, l.HubPort), base(l.BrokerHost, l.BrokerPort)
 }
 
 // formatServerStatusComponents renders the "Components:" lines of

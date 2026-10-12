@@ -217,29 +217,6 @@ func serverListenersFromArgs(args []string, cfg *config.GlobalConfig, fallbackMo
 	}
 }
 
-// serverStatusBaseURLs returns the base URLs (no trailing slash) 'server
-// status' probes: the web port, the standalone hub port and the runtime
-// broker port of the server, with their hosts. They come from the server's
-// saved start args (none for a foreground server) and the config those args
-// name, resolved as waitForDaemonServerReady does, so a server started on
-// other ports than the defaults is found there.
-func serverStatusBaseURLs(globalDir string) (webBase, hubBase, brokerBase string) {
-	saved, err := daemon.LoadArgs(serverDaemonComponent, globalDir)
-	if err != nil {
-		saved = nil
-	}
-	cfg, err := config.LoadGlobalConfig(serverConfigPathFromArgs(saved))
-	if err != nil {
-		cfg = nil
-	}
-	// The registry check only decides whether the broker runs, not where it
-	// listens; status probes every component.
-	noRegistryCheck := func() error { return nil }
-	l := serverListenersFromArgs(saved, cfg, config.LoadServerMode(), noRegistryCheck)
-	base := func(host string, port int) string { return strings.TrimSuffix(healthzURL(host, port), "/healthz") }
-	return base(l.HubHost, l.WebPort), base(l.HubHost, l.HubPort), base(l.BrokerHost, l.BrokerPort)
-}
-
 // healthzURL builds the /healthz URL for a listener bound to host:port. A
 // wildcard or empty bind address is probed on loopback.
 func healthzURL(host string, port int) string {
