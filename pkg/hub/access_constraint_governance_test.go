@@ -2534,30 +2534,40 @@ func TestConstraintAdminLockout_ReplaceMoveReadFailureRefuses(t *testing.T) {
 // A replace that keeps the admin role for the same principal at the same
 // scope but narrows the validity window removes admin authority for the
 // time the new window leaves out, so the sole admin's replace is refused.
-// Control: another active admin at the scope. A widened window removes
-// nothing and is allowed for the sole admin.
+// Control: another active admin at the scope. A widened or equal window
+// removes nothing and is allowed for the sole admin.
 func TestConstraintAdminLockout_ReplaceNarrowedWindow(t *testing.T) {
-	now := time.Now()
-	later, sooner := now.Add(24*time.Hour), now.Add(time.Hour)
+	const later, sooner, earlier = 24 * time.Hour, time.Hour, -time.Hour
+	// Window bounds are offsets from the pinned gs.nowFunc(); zero leaves
+	// the bound unset.
 	for _, tc := range []struct {
 		name          string
-		oldNB, oldExp *time.Time
-		newNB, newExp *time.Time
+		oldNB, oldExp time.Duration
+		newNB, newExp time.Duration
 		others        int
 		allowed       bool
 	}{
-		{name: "expiry-added", newExp: &sooner},
-		{name: "expiry-added-other-admin", newExp: &sooner, others: 1, allowed: true},
-		{name: "expiry-earlier", oldExp: &later, newExp: &sooner},
-		{name: "not-before-later", newNB: &sooner},
-		{name: "not-before-later-other-admin", newNB: &sooner, others: 1, allowed: true},
-		{name: "expiry-removed", oldExp: &later, allowed: true},
-		{name: "expiry-later", oldExp: &sooner, newExp: &later, allowed: true},
+		{name: "expiry-added", newExp: sooner},
+		{name: "expiry-added-other-admin", newExp: sooner, others: 1, allowed: true},
+		{name: "expiry-earlier", oldExp: later, newExp: sooner},
+		{name: "not-before-later", newNB: sooner},
+		{name: "not-before-later-other-admin", newNB: sooner, others: 1, allowed: true},
+		{name: "expiry-removed", oldExp: later, allowed: true},
+		{name: "expiry-later", oldExp: sooner, newExp: later, allowed: true},
+		{name: "window-equal", oldNB: earlier, oldExp: later, newNB: earlier, newExp: later, allowed: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gs, _, _, s := govTestSetup(t)
 			ctx := context.Background()
 			name := "replace-window-" + tc.name
+			now := gs.nowFunc()
+			at := func(d time.Duration) *time.Time {
+				if d == 0 {
+					return nil
+				}
+				v := now.Add(d)
+				return &v
+			}
 			projectID, _, _ := lockoutProjectAdmins(t, s, name, tc.others)
 			user := pvSeedUser(t, s, name+"-user")
 			old, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
@@ -2567,13 +2577,13 @@ func TestConstraintAdminLockout_ReplaceNarrowedWindow(t *testing.T) {
 				PrincipalID:   user,
 				ScopeType:     store.RoleScopeProject,
 				ScopeID:       projectID,
-				NotBefore:     tc.oldNB,
-				ExpiresAt:     tc.oldExp,
+				NotBefore:     at(tc.oldNB),
+				ExpiresAt:     at(tc.oldExp),
 				CreatedBy:     "test",
 			})
 			require.NoError(t, err)
 			newBinding := replaceMoved(old, "user", user, projectID)
-			newBinding.NotBefore, newBinding.ExpiresAt = tc.newNB, tc.newExp
+			newBinding.NotBefore, newBinding.ExpiresAt = at(tc.newNB), at(tc.newExp)
 
 			created, err := gs.ReplaceRoleBinding(ctx, old.ID, newBinding, "")
 			requireReplaceOutcome(t, s, err, created, old, newBinding, tc.allowed)
