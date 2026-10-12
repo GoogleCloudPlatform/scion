@@ -820,6 +820,13 @@ Manages the Scion workspace (Project).
     - `remove <id>` (aliases `rm`, `delete`): Remove a service account registration. The account is not deleted in GCP, and a minted account is kept there. If a project or per-profile default points at the account, the Hub refuses. The command then prints what references the account (defaults, agents, broker profiles that map it) and exits non-zero. If the hub default points at it, a hub admin must change that default first. Agents that reference the account do not block removal; they fail at their next start. On success the command prints the defaults it cleared and the cleanup the Hub cannot do: the broker mapping, the Kubernetes ServiceAccount, the IAM bindings, and for a minted account the account in GCP. The report names only agents and projects you can see; others appear as counts. A default in a project you cannot change also blocks removal until an admin of that project changes it. `--json` prints the Hub's result or report instead.
         - Flags: `--force` (clear the project and per-profile defaults you may change that point at the account, then remove it; a cleared `assign` default becomes `block`; the hub default is never cleared).
     - `add`, `mint`, `verify` and `list` print the Hub's warnings to stderr, for example a service account that no Kubernetes broker profile of the project maps (see [early warning for unmapped service accounts](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping)). Warnings never change the exit status. With `--json`, `add`, `mint` and `verify` also include the warnings in the JSON document as `warnings`; `list --json` prints only the account list.
+- `scion project identity default`: Show or change the default GCP identity the Hub gives a new agent when the create request names none. Not available in agent mode.
+    - `show`: Print the ladder the Hub walks, in order, with where each rung is set: the request (`--service-account` at create), the per-profile defaults (one line per broker profile), the project default, the hub default (`set`, `not set`, or `unknown` when the Hub cannot tell), and the broker's runtime default (`block`, or `passthrough` on Kubernetes). Accounts are shown by id, with the display name when visible. Flags: `--json`.
+    - `set <id|email|name|passthrough|block>`: Set the project default. An account sets the mode to `assign`; `passthrough` or `block` sets that mode and clears the stored account. A bare `assign` is refused, because it needs an account. To name an account whose display name is `passthrough`, `block` or `assign`, use its id or email.
+        - Flags: `--profile <name>` (set the default account for agents running under that broker profile instead; the value must be an account, and other profiles' entries are kept). Per-profile writes read the stored map and write it back whole, and the Hub has no conditional write, so two people changing per-profile defaults at the same time are last-writer-wins.
+    - `unset`: Clear the project default (mode and account), so new agents fall through to the hub default.
+        - Flags: `--profile <name>` (remove only that profile's default account).
+    - An account may be named by id, email or display name. The Hub resolves it as for `scion create --service-account`, and the command stores the account id, so the default keeps working after a rename. A reference that matches more than one account (the error lists the candidate ids and scopes) or none is refused before anything is written. Each write sends only the identity fields it changes, so every other project setting keeps its stored value. The Hub checks the account as for any project default: it must be available in the project and verified. Changing a default needs the `project.update` permission (the `project-owner` and `project-admin` roles); on a 403 the command prints the Hub's message and the role needed. `set` and `unset` print the stored identity defaults after the write (`--json` for JSON).
 - `scion project reconnect <new-workspace-path>`: Reconnect a moved workspace to its externalized project configuration. This fixes projects that show as "orphaned" after being relocated.
 - `scion project skills`: Manage auto-injected skills for the project.
     - `list [project]` (alias `ls`): List auto-injected skills configured for the current project (or a specified project).
@@ -1071,6 +1078,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
             - `--purpose <text>`: Short label recorded on the identity and in the audit log (at most 200 characters).
             - `--json`: Print `identity`, `tokenFile` and `tokenExpiresAt` as JSON (never the token).
     - `token <id> --out <file>`: Issue a new token for a live test identity you issued (an admin sign-in may do it for any), for runs longer than one token. Flags: `--out <file>` (required), `--ttl <duration>`, `--json`.
+    - `web-code <id> --out <file>`: Mint a single-use web-login code for a live test identity you issued, for a browser session as the identity (see [Browser Sessions as Test Identities](/scion/contributing/test-identity-browser-sessions/)). The code is valid for 5 minutes and can be redeemed once at `POST /auth/test-identity/redeem`; a new code replaces an unredeemed earlier one. The Hub must run with `--enable-test-identities` and carry the test infrastructure marker (`scion server test-infra mark`); otherwise the Hub answers `404`. `--out` must not exist yet: an existing file, a symlink, or a path under a symlinked directory is refused before any request is sent. The file is created with mode `0600` and holds only the code, which is never printed. Flags: `--out <file>` (required), `--json` (prints `identityId`, `codeId`, `expiresAt` and `codeFile`, never the code).
     - `list`: List the test identities you issued (every identity for an admin sign-in). Only live identities are listed unless `--include-expired` is set. Flags: `--limit <n>` (default: the Hub's, 100; at most 500), `--include-expired`, `--json`.
     - `delete <id>`: Delete a test identity. Its role bindings and group memberships go with it, and its tokens stop working at once. The delete is refused while the identity still owns agents, or is the last owner of a project; the command lists them, and you delete them first. Deleting an identity that does not exist (for example, deleted already) succeeds with a notice on standard error, so a teardown step can run twice.
         - `--purge`: Also remove what the identity created: its agents (with their files on the broker), schedules, groups and projects. Only resources the Hub recorded as created under the identity are removed. A project that has another owner, or resources someone else created, is kept, and the identity's access to it is removed. Agents the identity owns without that record are listed as unproven and never removed. The command prints what it removed and kept. If the purge cannot finish (for example a broker is offline) it lists what is left and exits non-zero; run it again to finish.
@@ -1133,6 +1141,25 @@ scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my
 ```
 
 - `scion tunnel status [--json]`: Show the open tunnels of your running `scion tunnel` processes: the Hub endpoint, the credential identity (kind, subject and scope, never the secret), the session IDs and the open tunnels. With `--hub`, only tunnels to that Hub are shown. Reads local state only and never prompts.
+
+### `scion expose` / `scion unexpose`
+
+Register or remove an agent-local HTTP port with the Hub's port forwarding proxy. Run these inside an agent container: they act as the calling agent, using its own Hub identity, and fail with `must be run inside an agent container with a hub connection` anywhere else. Available in agent mode. They need no local project. See [Manual Port Management](/scion/hosted/user/port-forwarding/#manual-port-management).
+
+**Usage:** `scion expose <port> [--label <text>] [--host <addr>]`, `scion expose --list`, `scion unexpose <port>`
+
+- **Flags (`expose`):**
+    - `--label <string>`: Optional label to identify the service.
+    - `--host <string>`: Local host to forward to. Default: `127.0.0.1`.
+    - `--list`: List the agent's exposed ports (port, label, proxy URL) and the auto-expose status instead of exposing one.
+
+Both commands are idempotent: exposing a port that is already exposed, or unexposing one that is not, succeeds. They replace `sciontool expose` and `sciontool unexpose`, which now print a message naming the `scion` command and exit `1`.
+
+```bash
+scion expose 8080 --label my-web-app
+scion expose --list
+scion unexpose 8080
+```
 
 ## Artifacts
 

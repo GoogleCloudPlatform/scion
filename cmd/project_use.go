@@ -39,11 +39,14 @@ var (
 const projectUseLong = `Show or select the current project: a project on a hub that commands
 target when they run outside a scion project directory.
 
-  scion project use             show the effective hub and project and why
-  scion project use <project>   select <project> on the effective hub
-  scion project use --clear     forget the current project (the hub stays current)
+  scion project use              show the effective hub and project and why
+  scion project use <project>    select <project> on the effective hub
+  scion project use --hub <hub>  make <hub> the current hub (a nickname or URL)
+  scion project use --clear      forget the current project (the hub stays current)
 
-<project> is a slug, name, UUID or git URL, as for --project.
+<project> is a slug, name, UUID or git URL, as for --project. A hub URL
+that is not registered yet is added to the hub list ('scion hub list') with
+a nickname derived from its host.
 
 The selection is saved per user in ~/.scion/context.yaml. Flags, environment
 variables and the project of the current directory take precedence over it:
@@ -84,12 +87,8 @@ func init() {
 }
 
 // noHubSelectedMessage is printed by bare 'scion use' when no hub is
-// configured. Name 'scion hub add' here once the hub registry exists.
-const noHubSelectedMessage = "No hub selected. Start a local hub with 'scion server start', or log in to a hub with 'scion hub auth login --hub-url <url>' and run 'scion use <project>'."
-
-// noHubSelectedError is the error 'scion use <project>' returns when no hub
-// is configured: noHubSelectedMessage in Go error style.
-const noHubSelectedError = "no hub selected; start a local hub with 'scion server start', or log in to a hub with 'scion hub auth login --hub-url <url>' and run 'scion use <project>'"
+// configured.
+const noHubSelectedMessage = "No hub selected. Add one with 'scion hub add <name> <url>' or start a local hub with 'scion server start'."
 
 func runProjectUse(cmd *cobra.Command, args []string) error {
 	if contextDisabled(resolveMode()) {
@@ -107,6 +106,9 @@ func runProjectUse(cmd *cobra.Command, args []string) error {
 			ctx = context.Background()
 		}
 		return runUseSelect(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0])
+	}
+	if hubFlagEndpoint() != "" {
+		return runUseSwitch(cmd.OutOrStdout(), cmd.ErrOrStderr())
 	}
 	return runUseShow(cmd.OutOrStdout(), cmd.ErrOrStderr())
 }
@@ -321,11 +323,20 @@ func useAuthUser(info authInfo) string {
 	return ""
 }
 
+// hubLoginCommand is the command that logs in to the hub with endpoint:
+// by its nickname when it has a hub entry, else by its URL.
+func hubLoginCommand(c *config.CLIContext, endpoint string) string {
+	if name, _ := c.HubByEndpoint(endpoint); name != "" {
+		return "scion hub auth login --hub " + name
+	}
+	return "scion hub auth login --hub " + endpoint
+}
+
 // useAuthLine is the human "Auth:" text.
-func useAuthLine(info authInfo, endpoint string) string {
+func useAuthLine(info authInfo, loginCmd string) string {
 	switch info.MethodType {
 	case "none":
-		return fmt.Sprintf("not logged in; run 'scion hub auth login --hub-url %s'", endpoint)
+		return fmt.Sprintf("not logged in; run '%s'", loginCmd)
 	case "oauth":
 		if u := useAuthUser(info); u != "" {
 			return fmt.Sprintf("logged in as %s (OAuth)", u)
@@ -402,7 +413,10 @@ func runUseShow(out, stderr io.Writer) error {
 		_, _ = fmt.Fprintf(w, "Hub:\t%s\t%s\t(%s)\n", shownHub, t.HubEndpoint, t.HubLabel)
 		_, _ = fmt.Fprintf(w, "Project:\t%s\t%s\t(%s)\n", shownProject, projectValue, t.ProjectLabel)
 		_ = w.Flush()
-		_, _ = fmt.Fprintf(out, "Auth:     %s\n", useAuthLine(info, t.HubEndpoint))
+		_, _ = fmt.Fprintf(out, "Auth:     %s\n", useAuthLine(info, hubLoginCommand(c, t.HubEndpoint)))
+	}
+	if t.HubSource == useSourceContext {
+		warnHubTokenForContextHub(stderr, hubName)
 	}
 	if overridden {
 		project := "-"
@@ -462,10 +476,18 @@ func runUseSelect(ctx context.Context, out, stderr io.Writer, ref string) error 
 	}
 	endpoint := GetHubEndpoint(settings)
 	if endpoint == "" {
-		return errors.New(noHubSelectedError)
+		return errHubNotConfigured
+	}
+	c, _ := config.LoadCLIContext()
+	// The selection adds a hub entry for an endpoint that has none, so it
+	// must be a valid hub URL (no user info, query or fragment).
+	if _, h := c.HubByEndpoint(endpoint); h == nil {
+		if err := config.ValidateHubURL(endpoint); err != nil {
+			return err
+		}
 	}
 	if getAuthInfo(settings, endpoint).MethodType == "none" {
-		return fmt.Errorf("not logged in to the hub at %s\n\nLog in with: scion hub auth login --hub-url %s", endpoint, endpoint)
+		return fmt.Errorf("not logged in to the hub at %s\n\nLog in with: %s", endpoint, hubLoginCommand(c, endpoint))
 	}
 	client, err := getHubClient(settings)
 	if err != nil {
@@ -491,8 +513,9 @@ func runUseSelect(ctx context.Context, out, stderr io.Writer, ref string) error 
 
 	slug := project.Slug
 	var hubName string
+	var registered bool
 	err = updateUseContext(func(c *config.CLIContext) error {
-		hubName, _ = c.EnsureHub(endpoint, useHubBaseName(endpoint))
+		hubName, registered = c.EnsureHub(endpoint, useHubBaseName(endpoint))
 		return c.SelectProject(hubName, config.KnownProject{ID: project.ID, Slug: slug, Name: project.Name}, time.Now())
 	})
 	if err != nil {
@@ -509,7 +532,16 @@ func runUseSelect(ctx context.Context, out, stderr io.Writer, ref string) error 
 			Project: useProjectJSON{ID: project.ID, Slug: slug, Name: project.Name, Source: useSourceContext},
 		})
 	}
+	// Announce a new entry only for a URL given with --hub. An endpoint
+	// from the environment or settings gets its entry silently, as before
+	// there were hub nicknames.
+	if registered && hubFlagEndpoint() != "" {
+		printRegisteredHub(out, hubName, endpoint)
+	}
 	_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s).\n", shown, hubName, endpoint)
+	if hubSource == targetSourceContext {
+		warnHubTokenForContextHub(stderr, hubName)
+	}
 	if dir, ok := walkedProject(); ok && projectPath == "" && !globalMode {
 		dirHub := mergedHubEndpoint(dir)
 		c, _ := config.LoadCLIContext()
@@ -591,6 +623,97 @@ func runUseClear(out io.Writer) error {
 			shown = cleared.ID
 		}
 		_, _ = fmt.Fprintf(out, "Cleared the current project '%s' on hub '%s'.\n", shown, hubName)
+	}
+	return nil
+}
+
+// printRegisteredHub announces a hub entry that was added for a URL.
+func printRegisteredHub(out io.Writer, name, endpoint string) {
+	_, _ = fmt.Fprintf(out, "Registered hub '%s' (%s); rename with 'scion hub rename'.\n", name, endpoint)
+}
+
+// warnHubTokenForContextHub warns that SCION_HUB_TOKEN, which is not tied
+// to a hub, goes to the hub the current context selected. Callers call it
+// only when the hub came from the context, not from --hub or the
+// environment.
+func warnHubTokenForContextHub(stderr io.Writer, hubName string) {
+	if os.Getenv("SCION_HUB_TOKEN") == "" {
+		return
+	}
+	if hubName == "" {
+		hubName = "-"
+	}
+	_, _ = fmt.Fprintf(stderr, "Warning: SCION_HUB_TOKEN is set and will be sent to hub '%s'\n", hubName)
+}
+
+// useSwitchJSON is the JSON result of 'scion use --hub <hub>'.
+type useSwitchJSON struct {
+	Hub        useHubJSON         `json:"hub"`
+	Project    *config.ProjectRef `json:"project"`
+	Registered bool               `json:"registered"`
+}
+
+// runUseSwitch is 'scion use --hub <hub>': it makes the hub current, adding
+// an entry for a URL that is not registered yet, and reports the project
+// remembered for that hub. It makes no network calls.
+func runUseSwitch(out, stderr io.Writer) error {
+	endpoint := hubFlagEndpoint()
+	var name string
+	var registered bool
+	var project *config.ProjectRef
+	err := updateUseContext(func(c *config.CLIContext) error {
+		n, h := c.LookupHub(endpoint)
+		if h == nil {
+			if err := config.ValidateHubURL(endpoint); err != nil {
+				return err
+			}
+			n, registered = c.EnsureHub(endpoint, useHubBaseName(endpoint))
+			h = c.Hubs[n]
+		}
+		name = n
+		endpoint = h.Endpoint
+		c.CurrentHub = n
+		if h.CurrentProject != nil && h.CurrentProject.ID != "" {
+			p := *h.CurrentProject
+			project = &p
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	if isJSONOutput() {
+		return outputJSON(useSwitchJSON{
+			Hub:        useHubJSON{Name: name, Endpoint: endpoint, Source: useSourceContext},
+			Project:    project,
+			Registered: registered,
+		})
+	}
+	if registered {
+		printRegisteredHub(out, name, endpoint)
+	}
+	if project != nil {
+		shown := project.Slug
+		if shown == "" {
+			shown = project.ID
+		}
+		_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s).\n", shown, name, endpoint)
+	} else {
+		_, _ = fmt.Fprintf(out, "Now using hub '%s' (%s).\n", name, endpoint)
+		// Name 'scion project list --hub' here once project list can
+		// filter by hub.
+		_, _ = fmt.Fprintf(out, "No project selected on hub '%s'; run 'scion use <project>'.\n", name)
+	}
+	settings, err := config.LoadSettings(useSettingsPath())
+	if err != nil {
+		settings = &config.Settings{}
+	}
+	if getAuthInfo(settings, endpoint).MethodType == "none" {
+		_, _ = fmt.Fprintf(out, "Not logged in to hub '%s'. Run: scion hub auth login --hub %s\n", name, name)
+	}
+	if envHub, envName := envHubEndpoint(); envHub != "" && !sameHubURL(envHub, endpoint) {
+		_, _ = fmt.Fprintf(stderr, "Note: %s is set and overrides the current hub in this shell.\n", envName)
 	}
 	return nil
 }

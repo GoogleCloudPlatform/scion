@@ -27,13 +27,15 @@ import (
 const (
 	imageTierHarnessConfigFile = "harness-config file"
 	imageTierSettings          = "settings harness_configs"
-	imageTierTemplate          = "template"
-	imageTierTemplateSnapshot  = "recorded template snapshot"
-	imageTierInline            = "inline config"
-	imageTierProfileOverride   = "profile harness_overrides"
-	imageTierRequest           = "explicit --image / request image"
-	imageTierRecordedRequest   = "recorded explicit request image"
-	imageTierProvisioned       = "provisioned config"
+	// imageTierTemplateSnapshot is a legacy tier: a template image recorded
+	// before ptone/scion#4524, replayed only when the template can no
+	// longer be resolved. A template supplies no live image tier.
+	imageTierTemplateSnapshot = "recorded template snapshot"
+	imageTierInline           = "inline config"
+	imageTierProfileOverride  = "profile harness_overrides"
+	imageTierRequest          = "explicit --image / request image"
+	imageTierRecordedRequest  = "recorded explicit request image"
+	imageTierProvisioned      = "provisioned config"
 )
 
 // imageCandidate is one tier's contribution to the container image (or to
@@ -82,25 +84,6 @@ func pickImageField(logger *slog.Logger, agentName, field string, candidates []i
 		util.Debugf("image resolution: %s from %s: %s", field, source, value)
 	}
 	return value, source
-}
-
-// templateChainImage returns the template chain's own image and
-// kubernetes.imagePullPolicy (a later template in the chain wins), with no
-// other source folded in. Templates whose config cannot be loaded are skipped.
-func templateChainImage(chain []*config.Template) (image, pullPolicy string) {
-	for _, tpl := range chain {
-		tplCfg, err := tpl.LoadConfig()
-		if err != nil || tplCfg == nil {
-			continue
-		}
-		if tplCfg.Image != "" {
-			image = tplCfg.Image
-		}
-		if tplCfg.Kubernetes != nil && tplCfg.Kubernetes.ImagePullPolicy != "" {
-			pullPolicy = tplCfg.Kubernetes.ImagePullPolicy
-		}
-	}
-	return image, pullPolicy
 }
 
 // withProvisionedImage returns cfg with Image set to the image Start will

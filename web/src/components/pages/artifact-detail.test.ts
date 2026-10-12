@@ -441,6 +441,27 @@ describe('artifact page', () => {
     }
   });
 
+  it('offers a review-only caller Review, and not Edit or Upload new version', async () => {
+    const meta = { ...artifact('design.md', 'text/markdown'), canPublish: false, canReview: true };
+    mockFetch(meta, '# Doc');
+    const el = await mount(true);
+    expect(button(el, '.header-actions sl-button', 'Review')).toBeDefined();
+    expect(button(el, '.header-actions sl-button', 'Edit')).toBeUndefined();
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    expect((panel.textContent ?? '').includes('Upload new version')).toBe(false);
+    // Review opens Review mode with its Save review action.
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    expect(button(el, '.edit-footer sl-button', 'Save review')).toBeDefined();
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    // A text entry cannot be reviewed, so a review-only caller gets neither.
+    mockFetch({ ...artifact('notes.txt', 'text/plain'), canPublish: false, canReview: true }, 'hi');
+    const txt = await mount(true);
+    expect(button(txt, '.header-actions sl-button', 'Review')).toBeUndefined();
+    expect(button(txt, '.header-actions sl-button', 'Edit')).toBeUndefined();
+  });
+
   it('offers Upload new version below a longer history only to a publisher', async () => {
     const versions: ArtifactVersion[] = [2, 1].map((seq) => ({
       seq,

@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -1509,6 +1510,19 @@ type V1PluginEntry struct {
 	AuthAudience string `json:"auth_audience,omitempty" yaml:"auth_audience,omitempty" koanf:"auth_audience"`
 }
 
+// V1TestIdentitiesConfig is server.hub.test_identities in the versioned
+// settings layout.
+type V1TestIdentitiesConfig struct {
+	WorkloadIssuers []V1TestIdentityWorkloadIssuer `json:"workload_issuers,omitempty" yaml:"workload_issuers,omitempty" koanf:"workload_issuers"`
+}
+
+// V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
+// entry.
+type V1TestIdentityWorkloadIssuer struct {
+	Sub     string `json:"sub" yaml:"sub" koanf:"sub"`
+	MaxTier string `json:"max_tier" yaml:"max_tier" koanf:"max_tier"`
+}
+
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).
 type V1ServerHubConfig struct {
 	Port      int    `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
@@ -1519,6 +1533,10 @@ type V1ServerHubConfig struct {
 	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
 	// file/env only: the server-config API refuses it in every mode.
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
+	// TestIdentities is server.hub.test_identities (see
+	// HubServerConfig.TestIdentities). It is file/env only: the
+	// server-config API refuses it in every mode.
+	TestIdentities *V1TestIdentitiesConfig `json:"test_identities,omitempty" yaml:"test_identities,omitempty" koanf:"test_identities"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -1712,12 +1730,23 @@ type V1RuntimeBrokerInstanceConfig struct {
 }
 
 // V1RuntimeTargetConfig declares a flat Runtime Broker's runtime target.
-// Context and Namespace are Kubernetes-only (defined, not implemented).
+// Context, Namespace and Kubeconfig are Kubernetes-only. Kubeconfig is an
+// optional absolute path to this instance's own kubeconfig file; it stays
+// local (never sent to the Hub, never identity).
 type V1RuntimeTargetConfig struct {
 	Type        string `json:"type" yaml:"type" koanf:"type"`
 	DisplayName string `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
 	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
 	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
+	Kubeconfig  string `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty" koanf:"kubeconfig"`
+	// KubernetesBlockServiceAccount and KubernetesServiceAccountMappings are
+	// this Kubernetes instance's own GCP identity policy (the "block"
+	// ServiceAccount and the "assign" GSA-to-KSA mapping), the flat
+	// counterparts of the runtime entry settings of the same name. They are
+	// local operator policy: never part of the Hub's runtime target
+	// descriptor or the persisted target identity. Kubernetes only.
+	KubernetesBlockServiceAccount    string            `json:"kubernetes_block_service_account,omitempty" yaml:"kubernetes_block_service_account,omitempty" koanf:"kubernetes_block_service_account"`
+	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
 }
 
 // V1DatabaseConfig holds database settings.
@@ -2950,9 +2979,14 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	// 4. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
 		// An exported but empty variable is treated as unset, so it never
-		// blanks a value from the settings files. This also keeps an empty
-		// SCION_OTEL_INSECURE from being mapped onto tls.enabled.
+		// blanks a value from the settings files.
 		if value == "" {
+			return "", nil
+		}
+		// SCION_OTEL_INSECURE is applied below, inverted. Mapped here as
+		// is, a value that is not a bool would stay on tls.enabled and
+		// replace the configured value.
+		if key == "SCION_OTEL_INSECURE" {
 			return "", nil
 		}
 		return versionedEnvKeyMapper(key), value
@@ -2961,11 +2995,12 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
 	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
-		plaintext, err := strconv.ParseBool(raw)
-		if err != nil {
-			return nil, fmt.Errorf("SCION_OTEL_INSECURE: %w", err)
+		if plaintext, err := strconv.ParseBool(raw); err != nil {
+			warnUnparseableSettingOnce("SCION_OTEL_INSECURE",
+				"settings: value does not parse; ignoring SCION_OTEL_INSECURE and using the configured telemetry.cloud.tls.enabled")
+		} else {
+			_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
 		}
-		_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
 	}
 
 	// For git projects, the project_id is stored in a project-id file inside the
@@ -3007,6 +3042,8 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 // koanf decoder is weakly typed and would turn clone_depth: true into "1";
 // normalizing first gives the settings loader the same value the schema
 // validator and the template loader see (true stays "true", 5.0 is "5").
+// A clone_depth value that cannot be normalized (a list, for example) is
+// dropped with a warning, so the profile falls back to the default depth.
 func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) error {
 	normalized := map[string]interface{}{}
 	for _, key := range k.Keys() {
@@ -3016,7 +3053,9 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 		}
 		cd, err := api.CloneDepthFromValue(k.Get(key))
 		if err != nil {
-			return fmt.Errorf("%s: %w", key, err)
+			warnUnparseableSetting(key)
+			k.Delete(key)
+			continue
 		}
 		normalized[key] = string(cd)
 	}
@@ -3025,7 +3064,120 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 			return err
 		}
 	}
-	return k.Unmarshal("", settings)
+	if err := k.Unmarshal("", settings); err == nil {
+		return nil
+	}
+	return unmarshalSkippingBadSettings(k, settings)
+}
+
+// unmarshalSkippingBadSettings handles a decode failure in
+// unmarshalVersionedSettings. One value that does not parse (for example
+// SCION_SERVER_BROKER_PORT=abc) must not discard the whole settings struct:
+// callers skip the entire section on error, which silently turns off hub
+// features. Each key whose value does not decode on its own is reset to its
+// embedded default, or dropped when there is none, with a warning that names
+// the key. The value is never logged, since it may be a secret. The rest of
+// the settings then decode as usual.
+func unmarshalSkippingBadSettings(k *koanf.Koanf, settings *VersionedSettings) error {
+	bad := undecodableSettingsKeys(k)
+	if len(bad) == 0 {
+		// The failure is not tied to a single key. The decoder's error
+		// quotes the offending value, so it is not returned as is.
+		return errSettingsDoNotDecode
+	}
+
+	defaults := koanf.New(".")
+	if data, err := GetDefaultSettingsDataYAML(); err == nil {
+		_ = defaults.Load(rawbytes.Provider(data), yaml.Parser())
+	}
+	for _, key := range bad {
+		warnUnparseableSetting(key)
+		// Delete resolves key through koanf's own key parts, so it removes
+		// exactly the entry the probe found. Set splits key on ".", which
+		// is safe here: the embedded defaults have no map keys with a dot,
+		// so a key with a dot inside one part never exists in defaults.
+		k.Delete(key)
+		if defaults.Exists(key) {
+			if err := k.Set(key, defaults.Get(key)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// The failed attempt may have partly filled settings. Decode again into
+	// the same empty maps both callers start from.
+	*settings = VersionedSettings{
+		Runtimes:       make(map[string]V1RuntimeConfig),
+		HarnessConfigs: make(map[string]HarnessConfigEntry),
+		Profiles:       make(map[string]V1ProfileConfig),
+	}
+	if err := k.Unmarshal("", settings); err != nil {
+		return errSettingsDoNotDecode
+	}
+	return nil
+}
+
+// errSettingsDoNotDecode reports a decode failure that no single setting
+// explains. It names no values, since callers log it.
+var errSettingsDoNotDecode = errors.New("settings: values do not decode into the settings structure")
+
+// warnedUnparseableSettings records the settings keys already warned about
+// in this process. Settings are loaded several times per CLI invocation and
+// hub startup, so one bad value would otherwise be reported once per load.
+var warnedUnparseableSettings sync.Map
+
+// resetWarnedUnparseableSettingsCache clears the unparseable-setting warning
+// dedup cache. Tests that assert whether this warning fires must call this
+// first, so that an earlier test in the same process cannot suppress it.
+func resetWarnedUnparseableSettingsCache() {
+	warnedUnparseableSettings.Clear()
+}
+
+// warnUnparseableSetting logs, once per process, that the setting named by
+// key has a value that does not parse and is ignored, so the field falls
+// back to its embedded default or to unset. The value itself is never
+// logged, since it may be a secret.
+func warnUnparseableSetting(key string) {
+	warnUnparseableSettingOnce(key, "settings: value does not parse; ignoring it and using the default for this setting")
+}
+
+// warnUnparseableSettingOnce logs msg with key the first time key is
+// reported in this process.
+func warnUnparseableSettingOnce(key, msg string) {
+	if _, seen := warnedUnparseableSettings.LoadOrStore(key, struct{}{}); seen {
+		return
+	}
+	slog.Warn(msg, "key", key)
+}
+
+// undecodableSettingsKeys returns the keys of k whose value fails to decode
+// into VersionedSettings when decoded alone. Each probe is built from
+// koanf's own key parts, not by splitting the flat key on ".", so a map
+// entry whose key contains a dot (a service account email, for example)
+// keeps its real shape.
+func undecodableSettingsKeys(k *koanf.Koanf) []string {
+	keyMap := k.KeyMap()
+	var bad []string
+	for _, key := range k.Keys() {
+		parts, ok := keyMap[key]
+		if !ok || len(parts) == 0 {
+			continue // Every key from k.Keys() is in KeyMap; never re-split on ".".
+		}
+		nested := map[string]interface{}{parts[len(parts)-1]: k.Get(key)}
+		for i := len(parts) - 2; i >= 0; i-- {
+			nested = map[string]interface{}{parts[i]: nested}
+		}
+		probe := koanf.New(".")
+		// An empty delimiter loads nested as is, with no unflattening.
+		if err := probe.Load(confmap.Provider(nested, ""), nil); err != nil {
+			bad = append(bad, key)
+			continue
+		}
+		if err := probe.Unmarshal("", &VersionedSettings{}); err != nil {
+			bad = append(bad, key)
+		}
+	}
+	return bad
 }
 
 // settingsExcludedEnvVars lists SCION_* variables that are never settings
@@ -3396,6 +3548,13 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Hub.HubClass != "" {
 			gc.Hub.HubClass = v1.Hub.HubClass
+		}
+		if v1.Hub.TestIdentities != nil {
+			ti := &TestIdentitiesConfig{}
+			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
+				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
+			}
+			gc.Hub.TestIdentities = ti
 		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
@@ -3828,6 +3987,13 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			AllowedHeaders: gc.Hub.CORSAllowedHeaders,
 			MaxAge:         gc.Hub.CORSMaxAge,
 		},
+	}
+	if gc.Hub.TestIdentities != nil {
+		ti := &V1TestIdentitiesConfig{}
+		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
+			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
+		}
+		v1Hub.TestIdentities = ti
 	}
 	if gc.Hub.SoftDeleteRetention > 0 {
 		v1Hub.SoftDeleteRetention = gc.Hub.SoftDeleteRetention.String()
