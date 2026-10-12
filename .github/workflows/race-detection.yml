@@ -62,7 +62,10 @@ jobs:
     name: Race Detection — pkg/hub tagged (reporting only)
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 60
+    # The pkg/hub package runs as its six test shards, one after another
+    # (hack/hubshard/README.md), so no step compiles the whole package's
+    # test binary; then the pkg/hub subpackages.
+    timeout-minutes: 180
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -74,9 +77,19 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
       - name: Run pkg/hub tests with race detector (tagged)
+        env:
+          HUB_SHARD_TIMEOUT: 45m
         run: |
           set -o pipefail
-          go test -race -tags no_sqlite -count=1 -timeout 45m ./pkg/hub/... 2>&1 | tee race-detection-hub-output.txt
+          {
+            rc=0
+            for k in 1 2 3 4 5 6; do
+              make test-hub-shard SHARD="$k" NOSQLITE=1 RACE=1 || rc=1
+            done
+            go test -race -tags no_sqlite -count=1 -timeout 45m \
+              $(go list ./pkg/hub/... | grep -vx 'github.com/GoogleCloudPlatform/scion/pkg/hub') || rc=1
+            exit "$rc"
+          } 2>&1 | tee race-detection-hub-output.txt
       - name: Summarize race findings
         if: always()
         run: |

@@ -48,6 +48,7 @@ jobs:
     name: Full Test Suite (reporting only)
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 180
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -60,10 +61,21 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      # Every package but pkg/hub in one go test, then pkg/hub as its six
+      # test shards (hack/hubshard/README.md): no step compiles the whole
+      # pkg/hub test binary.
       - name: Run full test suite (with SQLite)
         run: |
           set -o pipefail
-          go test -count=1 -timeout 60m ./... 2>&1 | tee test-full-suite-output.txt
+          {
+            rc=0
+            go test -count=1 -timeout 60m \
+              $(go list ./... | grep -vx 'github.com/GoogleCloudPlatform/scion/pkg/hub') || rc=1
+            for k in 1 2 3 4 5 6; do
+              make test-hub-shard SHARD="$k" || rc=1
+            done
+            exit "$rc"
+          } 2>&1 | tee test-full-suite-output.txt
 
       - name: Upload test results
         if: always()
