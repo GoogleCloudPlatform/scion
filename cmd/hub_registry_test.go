@@ -500,9 +500,9 @@ func TestUse_AfterGlobalImport(t *testing.T) {
 	assert.Equal(t, "local", readTestContext(t).CurrentHub, "an explicit selection sets the current hub")
 }
 
-// Phase acceptance: an existing user's global hub.endpoint shows up in
-// 'hub list' with no other command run, named "local" for the local
-// workstation hub, and not marked current.
+// An existing user's global hub.endpoint shows up in 'hub list' with no
+// other command run, named "local" for the local workstation hub, and not
+// marked current.
 func TestHubList_ShowsImportedGlobalEndpoint(t *testing.T) {
 	srv, _ := setupUseTest(t)
 	enableGlobalHubImport(t)
@@ -514,8 +514,8 @@ func TestHubList_ShowsImportedGlobalEndpoint(t *testing.T) {
 		"         local  "+padRight(srv.URL, w)+"  dev\n", stdout)
 }
 
-// Phase acceptance: hub add, use --hub, hub list marks it current, and a
-// rename keeps the login working.
+// The registry end to end: hub add, use --hub, hub list marks it current,
+// and a rename keeps the login working.
 func TestHubRegistry_AddUseListRename(t *testing.T) {
 	setupRegistryTest(t)
 	srv := healthOnlyHub(t)
@@ -814,7 +814,8 @@ func TestSameHubURL_Normalised(t *testing.T) {
 	assert.NotContains(t, stdout+stderr, "overrides the current hub")
 }
 
-// The AUTH column uses only the four labels of the design.
+// The AUTH column uses only four labels: oauth or oauth (<user>), dev,
+// env token and none.
 func TestHubAuthLabel(t *testing.T) {
 	tests := []struct {
 		info authInfo
