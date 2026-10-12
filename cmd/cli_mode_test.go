@@ -304,7 +304,7 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"create", "delete",
 		"harness-config", "harness-config.install", "harness-config.list",
 		"help",
-		// hub and hub status stay for target-hub profiles (DEC-7); the
+		// hub and hub status stay for target-hub profiles (ptone/scion#4240); the
 		// command refuses at run time without a target profile.
 		"hub", "hub.status",
 		"list", "logs", "look",
@@ -435,7 +435,7 @@ func TestAgentAllowedList(t *testing.T) {
 		"create", "delete", "list", "start", "stop", "suspend", "look", "logs",
 		"message", "keys",
 		"resume", "version",
-		// Target-hub profiles and test identities (DEC-7): allowed, but
+		// Target-hub profiles and test identities (ptone/scion#4240): allowed, but
 		// they refuse at run time without a target profile.
 		"hub", "hub.status", "hub.profile", "hub.profile.add", "hub.profile.list",
 		"hub.profile.show", "hub.profile.remove", "hub.test-identity",

@@ -196,7 +196,7 @@ func Open(opts Options, deps Deps) (*Session, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !sameEndpoint(e.Endpoint, endpoint) {
+		if !sameEndpointExact(e.Endpoint, endpoint) {
 			return nil, fmt.Errorf("cached identity %q was issued on another hub (%s), not %s", opts.Alias, e.Endpoint, endpoint)
 		}
 		s.entry = e

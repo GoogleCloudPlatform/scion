@@ -405,7 +405,7 @@ func TestHubTestIdentityPurge(t *testing.T) {
 	assert.Empty(t, stdout.String())
 }
 
-// CLI mode (DEC-7): scion hub test-identity's issue, token, list, delete
+// CLI mode (ptone/scion#4240): scion hub test-identity's issue, token, list, delete
 // and teardown, hub status and hub profile stay in agent mode (they refuse
 // at run time without a target-hub profile; see hub_profile_test.go), while
 // delegate, the human consent step, and every other hub child are removed.

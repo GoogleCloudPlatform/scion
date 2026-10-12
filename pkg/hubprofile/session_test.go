@@ -210,17 +210,33 @@ func TestSession_RefusesUnexpectedIssuerAudience(t *testing.T) {
 				p.Transport = TransportIAP
 				p.IAPAudience = tc.iap
 				p.UATServiceAccount = testUATSA
-				h.target.AudienceOverride = &aud
 			}
 			s := h.mustOpen(p, "", "")
 			_, err := s.IssuerAudience(context.Background())
 			require.Error(t, err)
-			for _, tok := range h.gcp.MintedTokens() {
-				c, _ := transportauth.DecodeIDTokenClaims(tok)
-				assert.NotEqual(t, testIssuerSA, c.Email, "no issuer token was minted")
-			}
+			assert.ErrorContains(t, err, "refusing to mint")
 		})
 	}
+
+	// Driven through a client request: the request fails, the target sees
+	// only the public status read, and no issuer token is ever minted.
+	h := newHarness(t, false)
+	aud := "https://storage.googleapis.com"
+	h.target.AudienceOverride = &aud
+	s := h.mustOpen(testProfile(h.target, TransportNone), "", "")
+	client, err := s.Client()
+	require.NoError(t, err)
+	_, err = client.TestIdentities().List(context.Background(), nil)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "refusing to mint")
+	reqs := h.target.Recorded()
+	require.Len(t, reqs, 1)
+	assert.Equal(t, "/api/v1/test-infra/status", reqs[0].Path)
+	for _, tok := range h.gcp.MintedTokens() {
+		c, _ := transportauth.DecodeIDTokenClaims(tok)
+		assert.NotEqual(t, testIssuerSA, c.Email, "no issuer token was minted")
+	}
+	assert.EqualValues(t, 0, h.gcp.IAMCalls.Load(), "IAM Credentials was not called")
 }
 
 // Profile credentials go only to the target host, never to another URL
@@ -286,6 +302,40 @@ func TestSession_IssueCachesAndAliasUsesFixtureToken(t *testing.T) {
 	assert.Equal(t, "Bearer "+e.Token, last.Header.Get("Authorization"))
 	assert.Empty(t, last.Header.Get("X-Scion-Issuer-Delegation"))
 	assert.Equal(t, "profile:owner", as.BearerSource())
+}
+
+// N9: a cached identity is bound to the exact canonical host and effective
+// port it was issued on; the broad own-hub rule (loopback and bridge hosts
+// as one host, 80/443 as one port) does not apply here.
+func TestSession_CacheEntryBoundToExactEndpoint(t *testing.T) {
+	h := newHarness(t, false)
+	now := h.clk.Now()
+	write := func(alias, endpoint string) {
+		res, err := ReserveEntry(h.home, "t1", "r1", alias)
+		require.NoError(t, err)
+		require.NoError(t, res.Fill(&CacheEntry{Alias: alias, Run: "r1", Profile: "t1", Endpoint: endpoint, IdentityID: "fx-" + alias, Email: "e@scion-fixture.invalid", Kind: KindTestFixture, Role: "member", ExpiresAt: now.Add(time.Hour), TokenExpiresAt: now.Add(30 * time.Minute), Token: "T-" + alias}))
+	}
+	write("a", "https://localhost:8443")
+	write("b", "http://localhost")
+	write("c", "https://T1.Example.com.:443/")
+
+	profileAt := func(endpoint string) *Profile {
+		return &Profile{Name: "t1", Endpoint: endpoint, Transport: TransportNone, IssuerServiceAccount: testIssuerSA, IssuerDelegations: map[string]string{TierMember: testDelegation}}
+	}
+	for _, tc := range []struct{ alias, endpoint string }{
+		{"a", "https://host.docker.internal:8443"}, // bridge host vs loopback
+		{"a", "https://127.0.0.1:8443"},            // another loopback name
+		{"b", "https://localhost"},                 // 80 vs 443
+	} {
+		_, err := h.open(profileAt(tc.endpoint), tc.alias, "r1")
+		require.Error(t, err, "%s at %s", tc.alias, tc.endpoint)
+		assert.Contains(t, err.Error(), "was issued on another hub")
+	}
+	// The same canonical host and effective port is accepted.
+	_, err := h.open(profileAt("https://t1.example.com"), "c", "r1")
+	require.NoError(t, err)
+	_, err = h.open(profileAt("https://localhost:8443/"), "a", "r1")
+	require.NoError(t, err)
 }
 
 // Admin tiers are out of scope: refused with a clear message.

@@ -28,7 +28,7 @@ Used inside agent containers. Agents can orchestrate sibling agents within their
 |---------|--------|
 | `server` (all subcommands) | Infrastructure administration — not relevant inside a container |
 | `broker` (all subcommands) | Runtime broker administration — not relevant inside a container |
-| `hub` (all subcommands except the target-hub profile commands below) | Hub interaction — agents communicate via the messaging and notification systems, not direct Hub commands. Exception (DEC-7, ptone/scion#4240): `hub status`, `hub profile` and `hub test-identity` issue/token/list/delete/teardown are agent-allowed, and refuse at run time unless a target-hub profile names a hub other than the agent's own |
+| `hub` (all subcommands except the target-hub profile commands below) | Hub interaction — agents communicate via the messaging and notification systems, not direct Hub commands. Exception (ptone/scion#4240): `hub status`, `hub profile` and `hub test-identity` issue/token/list/delete/teardown are agent-allowed, and refuse at run time unless a target-hub profile names a hub other than the agent's own |
 | `init` | Grove initialization — infrastructure concern |
 | `grove` (all subcommands) | Grove administration — infrastructure concern |
 | `templates` (all subcommands) | Template management — managed by the operator |
@@ -173,9 +173,9 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `grove service-accounts` (all except `show`) | Y | - |
 | `project service-accounts show` | Y | Y |
 | `harness-config` (all) | Y | - |
-| `hub status` | Y | Y (runtime: only with a target-hub profile for another hub; DEC-7) |
+| `hub status` | Y | Y (runtime: only with a target-hub profile for another hub, ptone/scion#4240) |
 | `hub profile` (`add`, `list`, `show`, `remove`) | Y | Y (`add`/`show`/`remove` refuse a profile for the agent's own hub) |
-| `hub test-identity` `issue`, `token`, `list`, `delete`, `teardown` | Y | Y (runtime: only with a target-hub profile for another hub; DEC-7) |
+| `hub test-identity` `issue`, `token`, `list`, `delete`, `teardown` | Y | Y (runtime: only with a target-hub profile for another hub, ptone/scion#4240) |
 | `hub test-identity delegate` (all) | Y | - (human consent step) |
 | `hub groves` (all) | Y | - |
 | `hub brokers` (all) | Y | - |

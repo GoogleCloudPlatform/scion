@@ -111,9 +111,27 @@ func TestHubProfileGate_AsAndRunNeedAProfile(t *testing.T) {
 	_, err = runProfileRoot(t, "hub", "status", "--run", "r1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--run needs a hub profile")
+
+	// The flags belong to the hub and artifact trees only (N2).
+	assert.Nil(t, rootCmd.PersistentFlags().Lookup("as"))
+	assert.Nil(t, rootCmd.PersistentFlags().Lookup("run"))
+	assert.NotNil(t, hubCmd.PersistentFlags().Lookup("as"))
+	assert.NotNil(t, artifactCmd.PersistentFlags().Lookup("run"))
+	_, err = runProfileRoot(t, "artifact", "get", "x", "--as", "owner")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--as needs a hub profile")
+	_, err = runProfileRoot(t, "artifact", "versions", "x", "--run", "r1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--run needs a hub profile")
+	_, err = runProfileRoot(t, "list", "--as", "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown flag: --as")
+	_, err = runProfileRoot(t, "start", "--run", "r1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown flag: --run")
 }
 
-// DEC-7: in agent mode, hub status and the test-identity commands refuse
+// Agent mode (ptone/scion#4240): hub status and the test-identity commands refuse
 // without a target profile, and with a profile whose endpoint is the
 // agent's own hub; they pass the gate with a profile for another hub.
 // Delegation create is not agent-allowed at all (see

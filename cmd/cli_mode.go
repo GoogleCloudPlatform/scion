@@ -142,7 +142,7 @@ var agentAllowed = map[string]bool{
 	"artifact.versions":             true,
 	// artifact share and artifact delete are human-only and deliberately
 	// absent (ptone/scion#4529): agents may not share or delete artifacts.
-	// Target-hub profiles and test identities (DEC-7, ptone/scion#4240).
+	// Target-hub profiles and test identities (ptone/scion#4240).
 	// These run in agent mode only against a target-hub profile whose
 	// endpoint is not the agent's own hub; the run-time refusal is in
 	// checkHubProfileGate and the profile commands (hub_profile.go).

@@ -99,7 +99,7 @@ var hubProfileNoSession = map[string]bool{
 
 // hubProfileAgentRuntime are the agent-mode commands (agentAllowed) that
 // run only against a target-hub profile whose endpoint is not the agent's
-// own hub (DEC-7). hub.profile.list is not here: it reads only the local
+// own hub (ptone/scion#4240). hub.profile.list is not here: it reads only the local
 // profile directory and contacts no hub.
 var hubProfileAgentRuntime = map[string]bool{
 	"hub.status":                 true,
@@ -372,7 +372,7 @@ func init() {
 	hubProfileRemoveCmd.Flags().BoolVar(&hubProfileRemoveCache, "remove-cache", false, "Also delete the profile's cached runs")
 }
 
-// agentModeProfileCheck applies the DEC-7 rule to the profile commands
+// agentModeProfileCheck applies the agent-mode target-profile rule to the profile commands
 // that name their profile positionally: in agent mode the profile must
 // name another hub.
 func agentModeProfileCheck(endpoint string) error {

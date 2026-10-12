@@ -349,12 +349,21 @@ func sameHub(a, b hubAddr) bool {
 	return a.port == b.port || (isDefault(a.port) && isDefault(b.port))
 }
 
-// sameEndpoint reports whether two endpoint strings name one hub; false
-// when either does not parse.
-func sameEndpoint(a, b string) bool {
+// sameAddr reports whether two parsed endpoints have the same canonical
+// host and the same effective port, with no loopback, bridge or
+// default-port collapsing. It binds a cached identity to the endpoint it
+// was issued on; the broad sameHub rule is for CheckNotOwnHub only.
+func sameAddr(a, b hubAddr) bool {
+	return a.host == b.host && a.port == b.port
+}
+
+// sameEndpointExact reports whether two endpoint strings have the same
+// canonical host and effective port (sameAddr); false when either does
+// not parse.
+func sameEndpointExact(a, b string) bool {
 	pa, errA := parseHubAddr(a)
 	pb, errB := parseHubAddr(b)
-	return errA == nil && errB == nil && sameHub(pa, pb)
+	return errA == nil && errB == nil && sameAddr(pa, pb)
 }
 
 // Dir returns ~/.scion/hub-profiles for home.

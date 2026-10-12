@@ -176,6 +176,11 @@ func TestAssignModeMetadataBaseURL(t *testing.T) {
 		{"hub.localhost", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "hub.localhost:18380"}, "", "loopback"},
 		{"unspecified", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "0.0.0.0:18380"}, "", "loopback"},
 		{"mapped loopback", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "[::ffff:127.0.0.1]:18380"}, "http://[::ffff:127.0.0.1]:18380", ""},
+		{"loopback-looking dotted name", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "127.0.0.1.evil:18380"}, "", "loopback"},
+		{"long-form ipv6 loopback", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "[0:0:0:0:0:0:0:1]:18380"}, "http://[0:0:0:0:0:0:0:1]:18380", ""},
+		{"ipv6 loopback without a port", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "[::1]"}, "http://[::1]", ""},
+		{"ipv6 zone", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "[::1%25lo]:18380"}, "", "loopback"},
+		{"uppercase localhost", map[string]string{EnvMetadataMode: "assign", EnvGCEMetadataHost: "LOCALHOST:18380"}, "", "loopback"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

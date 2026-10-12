@@ -39,7 +39,7 @@ import (
 // and are human only. With a target-hub profile (hub_profile.go) they act
 // as the profile's issuer delegation, keep issued identities in the run
 // cache, and also run in agent mode, but only against a target whose
-// endpoint is not the agent's own hub (DEC-7). delegate is the human
+// endpoint is not the agent's own hub. delegate is the human
 // consent step on the target: human mode only, never with a profile.
 //
 // A token is a secret. Without a profile it is written only to the file
