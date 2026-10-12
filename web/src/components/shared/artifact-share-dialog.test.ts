@@ -92,6 +92,8 @@ interface Server {
   clamped: boolean;
   /** When set, POST /grants answers the 403 of a refused request. */
   refuseGrant?: boolean;
+  /** When set, POST /grants answers the 409 of an artifact at its grant limit. */
+  grantsFull?: boolean;
   /** When set, link creation waits until the test calls release(). */
   holdCreate?: boolean;
   release?: () => void;
@@ -148,6 +150,17 @@ function mockServer(init: Partial<Server> = {}): Server {
         return json({ grants: s.grants, crossProjectSharing: s.cross });
       }
       if (url === `${BASE}/grants` && method === 'POST') {
+        if (s.grantsFull) {
+          return json(
+            {
+              error: {
+                code: 'too_many_grants',
+                message: 'the artifact already has 100 grants; remove one first',
+              },
+            },
+            409
+          );
+        }
         if (s.refuseGrant) {
           return json(
             {
@@ -602,6 +615,22 @@ describe('share dialog', () => {
         'You can view this artifact but not share it'
       );
       expect($$(el, '.granted')).toEqual([]);
+    });
+
+    it('shows the grant limit inline when the artifact has too many grants', async () => {
+      const s = mockServer({ grantsFull: true });
+      const el = await mount(agentOwned(), 'review');
+      await searchFor(el, 're');
+      $$(el, '.suggestions button')[0].click();
+      await settle(el);
+      button(el, 'Add').click();
+      await settle(el);
+      expect(s.calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+      expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
+        'the artifact already has 100 grants; remove one first'
+      );
+      expect($$(el, '.granted')).toEqual([]);
+      expect(button(el, 'Add').hasAttribute('disabled')).toBe(false);
     });
   });
 });

@@ -845,6 +845,7 @@ describe('artifact page', () => {
       document.body.innerHTML = '';
     }
   });
+
   /** A review version (current) of a markdown artifact owned by an agent. */
   function reviewMeta(): ArtifactResponse {
     const meta = artifact('plan.md', 'text/markdown');
