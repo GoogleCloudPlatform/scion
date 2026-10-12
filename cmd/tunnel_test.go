@@ -205,10 +205,12 @@ func TestTunnelPlainErrorCommands(t *testing.T) {
 	assert.False(t, plainErrorCommands["attach"])
 }
 
-// The credential lookup is exact by design: it receives the endpoint as
-// given, so a credential stored under one spelling is found only under
-// that spelling.
-func TestTunnelCredentialLookupIsExact(t *testing.T) {
+// A stored login is found under any spelling of the same hub URL (letter
+// case in the scheme or host, a trailing slash, an explicit default port),
+// but is never offered to a different origin or path: another scheme, host,
+// non-default port or path prefix does not find it, and SCION_HUB_TOKEN
+// applies there instead.
+func TestTunnelCredentialLookupIsNormalised(t *testing.T) {
 	isolateRootHook(t)
 	for _, k := range []string{"SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE"} {
 		t.Setenv(k, "")
@@ -218,19 +220,43 @@ func TestTunnelCredentialLookupIsExact(t *testing.T) {
 	credentials.SetCredentialsPath(func() string { return credPath })
 	t.Cleanup(func() { credentials.SetCredentialsPath(restore) })
 
-	stored := "https://Hub.example.com/"
-	require.NoError(t, credentials.Store(stored, &credentials.TokenResponse{AccessToken: "stored-token", ExpiresIn: time.Hour}))
+	require.NoError(t, credentials.Store("https://Hub.example.com/hub/", &credentials.TokenResponse{AccessToken: "stored-token", ExpiresIn: time.Hour}))
+	require.NoError(t, credentials.Store("http://plain.example.com", &credentials.TokenResponse{AccessToken: "plain-token", ExpiresIn: time.Hour}))
+	stored := tunnelclient.Credential{Token: "stored-token", Kind: tunnelclient.CredentialOAuth}
 
-	got := tunnelCredential(stored)
-	assert.Equal(t, tunnelclient.CredentialOAuth, got.Kind)
-	assert.Equal(t, "stored-token", got.Token)
+	for _, spelled := range []string{
+		"https://Hub.example.com/hub/",
+		"https://hub.example.com/hub",
+		"HTTPS://HUB.EXAMPLE.COM/hub",
+		"https://hub.example.com:443/hub/",
+	} {
+		t.Run("same hub "+spelled, func(t *testing.T) {
+			assert.Equal(t, stored, tunnelCredential(spelled))
+		})
+	}
+	t.Run("same hub http default port", func(t *testing.T) {
+		assert.Equal(t, tunnelclient.Credential{Token: "plain-token", Kind: tunnelclient.CredentialOAuth}, tunnelCredential("http://plain.example.com:80/"))
+	})
 
-	other := tunnelCredential("https://hub.example.com")
-	assert.NotEqual(t, "stored-token", other.Token, "a different spelling must not find the stored login")
+	for _, other := range []struct{ name, url string }{
+		{"different scheme", "http://hub.example.com/hub"},
+		{"different scheme, https to http login", "https://plain.example.com"},
+		{"different host", "https://hub2.example.com/hub"},
+		{"different port", "https://hub.example.com:8443/hub"},
+		{"different path", "https://hub.example.com/other"},
+		{"path case differs", "https://hub.example.com/HUB"},
+		{"no path", "https://hub.example.com"},
+	} {
+		t.Run(other.name, func(t *testing.T) {
+			t.Setenv("SCION_HUB_TOKEN", "")
+			got := tunnelCredential(other.url)
+			assert.NotEqual(t, "stored-token", got.Token, "a stored login must not be offered to %s", other.url)
+			assert.NotEqual(t, "plain-token", got.Token, "a stored login must not be offered to %s", other.url)
 
-	t.Setenv("SCION_HUB_TOKEN", "env-token")
-	env := tunnelCredential("https://hub.example.com")
-	assert.Equal(t, tunnelclient.Credential{Token: "env-token", Kind: tunnelclient.CredentialToken}, env)
+			t.Setenv("SCION_HUB_TOKEN", "env-token")
+			assert.Equal(t, tunnelclient.Credential{Token: "env-token", Kind: tunnelclient.CredentialToken}, tunnelCredential(other.url))
+		})
+	}
 }
 
 // A settings load that fails must not reach GetHubEndpoint as a typed nil.
