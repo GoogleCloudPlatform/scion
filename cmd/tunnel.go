@@ -277,6 +277,15 @@ func tunnelSignalError(sig os.Signal) error {
 	return tunnelclient.Errorf(tunnelclient.SignalExit(sig), "%s", word)
 }
 
+// tunnelStateStore is the store of status records.
+func tunnelStateStore() (tunnelclient.StateStore, error) {
+	scionDir, err := config.GetGlobalDir()
+	if err != nil {
+		return nil, err
+	}
+	return tunnelclient.FileStore{Dir: tunnelclient.StateDir(os.Getenv("XDG_RUNTIME_DIR"), scionDir)}, nil
+}
+
 func runTunnel(cmd *cobra.Command, args []string) error {
 	settings := tunnelSettings()
 	endpoint := tunnelEndpoint(settings)
@@ -300,6 +309,7 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
+	tunnelSSHHostKeyHint(cmd, tunnelSSH, endpoint, project, args[0])
 	var ts *transportauth.TransportSettings
 	if settings != nil && settings.Hub != nil && settings.Hub.Transport != nil {
 		ts = &transportauth.TransportSettings{Mode: settings.Hub.Transport.Mode, Audience: settings.Hub.Transport.Audience}
@@ -320,6 +330,9 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 		ApplyTransport:    apply,
 		ClientVersion:     version.Short(),
 		Stderr:            cmd.ErrOrStderr(),
+	}
+	if store, err := tunnelStateStore(); err == nil {
+		cfg.State = store
 	}
 	ctx, signalled, stop := tunnelSignalContext(cmd.Context())
 	defer stop()

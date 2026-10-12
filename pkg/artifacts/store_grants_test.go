@@ -70,10 +70,10 @@ func TestStorePutGrant(t *testing.T) {
 		if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("t"), time.Now().Add(time.Hour)), 5, time.Now()); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.DeleteGrant(ctx, a.ID, g.ID); err != nil {
+		if err := st.DeleteGrant(ctx, a.ID, g.ID, testActor); err != nil {
 			t.Fatalf("DeleteGrant: %v", err)
 		}
-		if err := st.DeleteGrant(ctx, a.ID, g.ID); !errors.Is(err, ErrNotFound) {
+		if err := st.DeleteGrant(ctx, a.ID, g.ID, testActor); !errors.Is(err, ErrNotFound) {
 			t.Errorf("delete twice: %v", err)
 		}
 		if _, err := st.PutGrant(ctx, scopeGrant(a.ID, "p3", GrantRead), 3, true); err != nil {
@@ -85,10 +85,10 @@ func TestStorePutGrant(t *testing.T) {
 			t.Fatal("link missing")
 		}
 		_, linkRow, _ := st.ResolveLink(ctx, LinkTokenHash("t"), time.Now())
-		if err := st.DeleteGrant(ctx, a.ID, linkRow.ID); !errors.Is(err, ErrNotFound) {
+		if err := st.DeleteGrant(ctx, a.ID, linkRow.ID, testActor); !errors.Is(err, ErrNotFound) {
 			t.Errorf("DeleteGrant on a link: %v", err)
 		}
-		if err := st.DeleteGrant(ctx, uuid.NewString(), home.ID); !errors.Is(err, ErrNotFound) {
+		if err := st.DeleteGrant(ctx, uuid.NewString(), home.ID, testActor); !errors.Is(err, ErrNotFound) {
 			t.Errorf("delete via another artifact: %v", err)
 		}
 		// Malformed grants.
@@ -143,18 +143,18 @@ func TestStoreExpiryAndRehome(t *testing.T) {
 		ctx := context.Background()
 		a, _, _, _ := seedArtifact(t, st, "k")
 		exp := time.Now().Add(time.Hour)
-		got, err := st.SetExpiry(ctx, a.ID, &exp)
+		got, err := st.SetExpiry(ctx, a.ID, &exp, testActor)
 		if err != nil || got.ExpiresAt == nil || !got.ExpiresAt.Equal(dbRounded(exp)) {
 			t.Fatalf("SetExpiry: %+v %v", got, err)
 		}
-		if got, err = st.SetExpiry(ctx, a.ID, nil); err != nil || got.ExpiresAt != nil {
+		if got, err = st.SetExpiry(ctx, a.ID, nil, testActor); err != nil || got.ExpiresAt != nil {
 			t.Fatalf("clear: %+v %v", got, err)
 		}
-		if _, err := st.SetExpiry(ctx, uuid.NewString(), nil); !errors.Is(err, ErrNotFound) {
+		if _, err := st.SetExpiry(ctx, uuid.NewString(), nil, testActor); !errors.Is(err, ErrNotFound) {
 			t.Errorf("SetExpiry missing: %v", err)
 		}
 		move := func(id, scope string, max int) (*Artifact, error) {
-			return st.UpdateArtifact(ctx, id, ArtifactUpdate{HomeGrant: scopeGrant(id, scope, GrantRead), MaxGrants: max})
+			return st.UpdateArtifact(ctx, id, ArtifactUpdate{HomeGrant: scopeGrant(id, scope, GrantRead), MaxGrants: max, Actor: testActor})
 		}
 		scopes := func(id string) map[string]bool {
 			grants, err := st.ListGrants(ctx, id)
@@ -171,7 +171,7 @@ func TestStoreExpiryAndRehome(t *testing.T) {
 		}
 		// Move and set the expiry in one call.
 		moved, err := st.UpdateArtifact(ctx, a.ID, ArtifactUpdate{HomeGrant: scopeGrant(a.ID, "project-2", GrantRead),
-			MaxGrants: 10, SetExpiry: true, ExpiresAt: &exp})
+			MaxGrants: 10, SetExpiry: true, ExpiresAt: &exp, Actor: testActor})
 		if err != nil || moved.ScopeRef != "project-2" || moved.ExpiresAt == nil {
 			t.Fatalf("move with expiry: %+v %v", moved, err)
 		}
@@ -216,7 +216,7 @@ func TestStoreExpiryAndRehome(t *testing.T) {
 		if _, err := move(c.ID, "project-8", 10); err != nil {
 			t.Errorf("no clash: %v", err)
 		}
-		if _, err := st.UpdateArtifact(ctx, uuid.NewString(), ArtifactUpdate{HomeGrant: scopeGrant("x", "p", GrantRead), MaxGrants: 1}); err == nil {
+		if _, err := st.UpdateArtifact(ctx, uuid.NewString(), ArtifactUpdate{HomeGrant: scopeGrant("x", "p", GrantRead), MaxGrants: 1, Actor: testActor}); err == nil {
 			t.Errorf("a move with a grant of another artifact accepted")
 		}
 		if _, err := st.UpdateArtifact(ctx, c.ID, ArtifactUpdate{HomeGrant: scopeGrant(c.ID, "p", GrantRead)}); err == nil {
@@ -230,7 +230,7 @@ func TestStoreExpiryAndRehome(t *testing.T) {
 				home = g.ID
 			}
 		}
-		if err := st.DeleteGrant(ctx, c.ID, home); !errors.Is(err, ErrConflict) {
+		if err := st.DeleteGrant(ctx, c.ID, home, testActor); !errors.Is(err, ErrConflict) {
 			t.Errorf("delete the home grant: %v", err)
 		}
 	})
@@ -246,10 +246,10 @@ func TestStoreSweepExpired(t *testing.T) {
 		keep, _, _, _ := seedArtifact(t, st, "")
 		forever, _, _, _ := seedArtifact(t, st, "")
 		past, future := now.Add(-time.Minute), now.Add(time.Hour)
-		if _, err := st.SetExpiry(ctx, expired.ID, &past); err != nil {
+		if _, err := st.SetExpiry(ctx, expired.ID, &past, testActor); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.SetExpiry(ctx, keep.ID, &future); err != nil {
+		if _, err := st.SetExpiry(ctx, keep.ID, &future, testActor); err != nil {
 			t.Fatal(err)
 		}
 		if err := st.CreateLink(ctx, linkGrant(expired.ID, LinkTokenHash("e"), future), 5, now.Add(-2*time.Minute)); err != nil {
@@ -276,7 +276,7 @@ func TestStoreSweepExpired(t *testing.T) {
 		// The limit bounds one pass.
 		for range 3 {
 			x, _, _, _ := seedArtifact(t, st, "")
-			if _, err := st.SetExpiry(ctx, x.ID, &past); err != nil {
+			if _, err := st.SetExpiry(ctx, x.ID, &past, testActor); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -312,13 +312,13 @@ func TestStoreSweepRechecksExpiry(t *testing.T) {
 		ctx := context.Background()
 		a, _, _, _ := seedArtifact(t, st, "")
 		future := time.Now().Add(time.Hour)
-		if _, err := st.SetExpiry(ctx, a.ID, &future); err != nil {
+		if _, err := st.SetExpiry(ctx, a.ID, &future, testActor); err != nil {
 			t.Fatal(err)
 		}
-		s := st.(*sqlStore)
-		ok, err := s.sweepOne(ctx, a.ID, s.timeArg(time.Now()))
-		if err != nil || ok {
-			t.Fatalf("sweepOne on an unexpired artifact: %v %v", ok, err)
+		// The sweep's delete re-checks the expiry in its own transaction.
+		now := time.Now()
+		if _, err := st.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: &retentionActor, ExpiredAt: &now, Now: now}); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("the sweep's delete of an unexpired artifact: %v", err)
 		}
 		if _, err := st.GetArtifact(ctx, a.ID); err != nil {
 			t.Errorf("unexpired artifact deleted: %v", err)
@@ -349,7 +349,7 @@ func TestStoreGrantHomeRules(t *testing.T) {
 		if _, err := st.PutGrant(ctx, scopeGrant(a.ID, "project-2", GrantAdmin), 10, true); err != nil {
 			t.Fatal(err)
 		}
-		_, err := st.UpdateArtifact(ctx, a.ID, ArtifactUpdate{HomeGrant: scopeGrant(a.ID, "project-2", GrantRead), MaxGrants: 10})
+		_, err := st.UpdateArtifact(ctx, a.ID, ArtifactUpdate{HomeGrant: scopeGrant(a.ID, "project-2", GrantRead), MaxGrants: 10, Actor: testActor})
 		if !errors.Is(err, ErrHomeGrantAdmin) {
 			t.Errorf("move onto an admin grant: %v", err)
 		}

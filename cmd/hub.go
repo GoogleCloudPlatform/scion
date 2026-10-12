@@ -693,7 +693,7 @@ func getHubEnabledScope(resolvedPath string, isGlobal bool, mergedSettings *conf
 type hubEndpointScope struct {
 	// Endpoint is the resolved value.
 	Endpoint string
-	// Source is "flag", "project", "global", "env", or "none".
+	// Source is "flag", "context", "project", "global", "env", or "none".
 	Source string
 	// Inherited is true when a project-scoped invocation uses a global or env setting.
 	Inherited bool
@@ -701,6 +701,11 @@ type hubEndpointScope struct {
 
 // getHubEndpointScope determines where the hub endpoint comes from.
 func getHubEndpointScope(resolvedPath string, isGlobal bool, settings *config.Settings) hubEndpointScope {
+	// The hub selected with 'scion use' is in hubEndpoint too, but it is not
+	// a --hub flag.
+	if hubSource == targetSourceContext {
+		return hubEndpointScope{Endpoint: hubEndpoint, Source: "context"}
+	}
 	// --hub flag takes top priority
 	if hubEndpoint != "" {
 		return hubEndpointScope{Endpoint: hubEndpoint, Source: "flag"}
@@ -733,6 +738,20 @@ func getHubEndpointScope(resolvedPath string, isGlobal bool, settings *config.Se
 	}
 
 	return hubEndpointScope{Source: "none"}
+}
+
+// endpointSourceNote returns the line hub status prints under the endpoint
+// to say where it came from, or "" when nothing is printed.
+func endpointSourceNote(s hubEndpointScope) string {
+	switch {
+	case s.Source == "context":
+		return "            (current context)"
+	case s.Inherited:
+		return fmt.Sprintf("            (inherited from %s)", s.Source)
+	case s.Source == "flag":
+		return "            (from --hub flag)"
+	}
+	return ""
 }
 
 func runHubStatus(cmd *cobra.Command, args []string) error {
@@ -857,10 +876,8 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("            (inherited from global settings)\n")
 	}
 	fmt.Printf("Endpoint:   %s\n", valueOrNone(endpoint))
-	if endpointScope.Inherited {
-		fmt.Printf("            (inherited from %s)\n", endpointScope.Source)
-	} else if endpointScope.Source == "flag" {
-		fmt.Printf("            (from --hub flag)\n")
+	if note := endpointSourceNote(endpointScope); note != "" {
+		fmt.Println(note)
 	}
 	fmt.Printf("Configured: %v\n", settings.IsHubConfigured())
 
@@ -2266,10 +2283,8 @@ func runHubEnable(cmd *cobra.Command, args []string) error {
 	}
 
 	// If the endpoint was provided via --hub flag, persist it to settings
-	if hubEndpoint != "" {
-		if err := config.UpdateSetting(resolvedPath, "hub.endpoint", hubEndpoint, isGlobal); err != nil {
-			return fmt.Errorf("failed to save endpoint: %w", err)
-		}
+	if err := persistHubFlagEndpoint(resolvedPath, isGlobal); err != nil {
+		return err
 	}
 
 	scopeLabel := "global"
@@ -2615,10 +2630,8 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	}
 
 	// Save endpoint if provided via flag
-	if hubEndpoint != "" {
-		if err := config.UpdateSetting(resolvedPath, "hub.endpoint", hubEndpoint, isGlobal); err != nil {
-			return fmt.Errorf("failed to save endpoint: %w", err)
-		}
+	if err := persistHubFlagEndpoint(resolvedPath, isGlobal); err != nil {
+		return err
 	}
 
 	if isJSONOutput() {
@@ -2771,11 +2784,20 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	// Check if project is currently linked
-	if !settings.IsHubEnabled() {
+	// Check if project is currently linked: hub.linked is true in the
+	// project's own settings, or it is unset and hub mode is on (a project
+	// registered before the link was recorded). An explicit false means the
+	// project is already unlinked.
+	ownLinked := hubsync.ProjectLinkedSetting(resolvedPath, isGlobal)
+	if !unlinkGateOpen(ownLinked, settings.IsHubEnabled()) {
 		fmt.Println("This project is not linked to the Hub.")
 		return nil
 	}
+	// Whether a hub project for this directory is known to exist, so the
+	// output does not claim agents remain on the Hub when nothing was ever
+	// registered there.
+	onHub := (ownLinked != nil && *ownLinked) || settings.GetHubProjectID() != "" ||
+		hubHasProjectForUnlink(settings)
 
 	// Get project name for display
 	var projectName string
@@ -2795,22 +2817,26 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unlinking cancelled")
 	}
 
-	// Disable Hub integration, clear linked state and hub project ID
-	if err := config.UpdateSetting(resolvedPath, "hub.enabled", "false", isGlobal); err != nil {
-		return fmt.Errorf("failed to disable hub: %w", err)
-	}
+	// Mark the project unlinked and clear the hub project ID. hub.enabled is
+	// left alone: agent commands in this project refuse with a pointer to
+	// 'scion hub link' while hub.linked is false.
 	if err := config.UpdateSetting(resolvedPath, "hub.linked", "false", isGlobal); err != nil {
-		util.Debugf("Failed to clear hub.linked: %v", err)
+		return fmt.Errorf("failed to save linked state: %w", err)
 	}
 	if err := config.UpdateSetting(resolvedPath, "hub.projectId", "", isGlobal); err != nil {
 		util.Debugf("Failed to clear hub.projectId: %v", err)
+	}
+
+	message := fmt.Sprintf("Project '%s' has been unlinked from the Hub.", projectName)
+	if !onHub {
+		message = fmt.Sprintf("Project '%s' marked as unlinked; agent commands here will refuse until 'scion hub link'.", projectName)
 	}
 
 	if isJSONOutput() {
 		return outputJSON(ActionResult{
 			Status:  "success",
 			Command: "hub unlink",
-			Message: fmt.Sprintf("Project '%s' has been unlinked from the Hub.", projectName),
+			Message: message,
 			Details: map[string]interface{}{
 				"project": projectName,
 			},
@@ -2818,12 +2844,47 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println()
-	fmt.Printf("Project '%s' has been unlinked from the Hub.\n", projectName)
-	fmt.Println("The project and its agents remain on the Hub for other brokers.")
-	fmt.Println("Use 'scion hub link' to re-link this local project to the hub's.")
-	fmt.Printf("Use \"scion hub projects delete '%s'\" to remove project from hub entirely.", projectName)
+	fmt.Println(message)
+	if onHub {
+		fmt.Println("The project and its agents remain on the Hub for other brokers.")
+		fmt.Println("Agents on this machine for this project keep running on the broker; manage them with '--project <hub-slug>' or re-link.")
+		fmt.Println("Agent commands in this project refuse until you re-link with 'scion hub link'.")
+	}
+	fmt.Println("To use local-only mode for this project instead, run 'scion hub disable'.")
+	if onHub {
+		fmt.Printf("Use \"scion hub projects delete '%s'\" to remove project from hub entirely.\n", projectName)
+	}
 
 	return nil
+}
+
+// unlinkGateOpen reports whether 'scion hub unlink' has a link to remove.
+// ownLinked is hub.linked from the project's own settings (nil when unset).
+// A recorded link (true) counts; so does an unset value with hub mode on,
+// which covers projects registered before registration recorded the link.
+// An explicit false means the project is already unlinked.
+func unlinkGateOpen(ownLinked *bool, hubEnabled bool) bool {
+	if ownLinked != nil {
+		return *ownLinked
+	}
+	return hubEnabled
+}
+
+// hubHasProjectForUnlink is a best-effort check that the hub has a project
+// with this directory's project ID, used only to word the unlink output. Any
+// failure (no endpoint, unreachable hub, not found) returns false.
+func hubHasProjectForUnlink(settings *config.Settings) bool {
+	if settings == nil || settings.ProjectID == "" || GetHubEndpoint(settings) == "" {
+		return false
+	}
+	client, err := getHubClient(settings)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	project, err := getLinkedProject(ctx, client, settings.ProjectID)
+	return err == nil && project != nil
 }
 
 // DefaultBrokerPort is the default port for the local broker server.

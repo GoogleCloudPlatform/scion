@@ -317,6 +317,9 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	if !ok {
 		return
 	}
+	if !s.resolveRepairAssignment(w, r, agent, auth, targetRole != storedRole, patch) {
+		return
+	}
 
 	// A target broker other than the agent's current one is a move. The
 	// target is resolved without writing anything (no provider link).
@@ -548,6 +551,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
+	addAuthorityToPlan(&plan, auth)
 	targetGeneration := agent.Generation + 1
 
 	if req.DryRun {
@@ -575,7 +579,8 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 // move is non-nil for a cross-broker move. patch is the validated request
 // patch (nil when none); a --service-account patch records the requester as
 // the source of the new service-account assignment, in the claim
-// transaction.
+// transaction, and so does a same-role repair whose requester passed the
+// assignment gate (auth.Assignment).
 func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agent *store.Agent, auth *reincarnateAuthority, patch *reincarnatePatch, fresh *store.AgentAppliedConfig, plan ReincarnationPlan, targetGeneration int, handoff string, admittedDeletionClaim int64, sourceBrokerID, targetBrokerID string, move *reincarnationMove) {
 	ctx := r.Context()
 
@@ -598,6 +603,10 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 			return
 		}
 		saAssignment = newSAAssignment(&next, store.SAAssignmentOriginReincarnate, ceiling, prov)
+	} else if auth != nil && auth.Assignment != nil {
+		// A same-role repair re-records the assignment from the requester
+		// (resolveRepairAssignment).
+		saAssignment = auth.Assignment
 	}
 
 	// The claim is guarded by the agent row's own optimistic lock
@@ -803,6 +812,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
+	addAuthorityToPlan(&plan, auth)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
 	// The access probes judge the config the next generation runs with: a
 	// --service-account patch replaces a passthrough identity, so the

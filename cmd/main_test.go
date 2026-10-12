@@ -31,8 +31,16 @@ import (
 func TestMain(m *testing.M) {
 	pinProcessUTC = func() {}
 	clearAmbientScionEnv()
-	os.Exit(m.Run())
+	teardown := integrationTestSetup()
+	code := m.Run()
+	teardown()
+	os.Exit(code)
 }
+
+// integrationTestSetup runs before the cmd tests and returns their teardown.
+// It does nothing by default; main_integration_test.go replaces it under
+// -tags integration to provision the enttest PostgreSQL database.
+var integrationTestSetup = func() (teardown func()) { return func() {} }
 
 // clearAmbientScionEnv unsets every SCION_* variable inherited from the
 // environment before any cmd test runs. Inside an agent container these

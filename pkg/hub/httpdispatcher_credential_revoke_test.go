@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 // This file covers ptone/scion#1956: the Hub must revoke the agent
 // credential it minted for a create or launch dispatch that then fails,

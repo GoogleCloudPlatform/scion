@@ -86,21 +86,23 @@ func entPrefsToStore(p *entschema.UserPreferences) *store.UserPreferences {
 // entUserToStore converts an Ent User entity to a store.User model.
 func entUserToStore(u *ent.User) *store.User {
 	su := &store.User{
-		ID:                u.ID.String(),
-		Email:             u.Email,
-		DisplayName:       u.DisplayName,
-		AvatarURL:         u.AvatarURL,
-		Role:              string(u.Role),
-		Status:            string(u.Status),
-		InvitedBy:         u.InvitedBy,
-		InviteNote:        u.InviteNote,
-		Preferences:       entPrefsToStore(u.Preferences),
-		SessionGeneration: u.SessionGeneration,
-		Kind:              string(u.Kind),
-		ExpiresAt:         u.ExpiresAt,
-		IssuedBy:          u.IssuedBy,
-		Purpose:           u.Purpose,
-		Created:           u.Created,
+		ID:                 u.ID.String(),
+		Email:              u.Email,
+		DisplayName:        u.DisplayName,
+		AvatarURL:          u.AvatarURL,
+		Role:               string(u.Role),
+		Status:             string(u.Status),
+		InvitedBy:          u.InvitedBy,
+		InviteNote:         u.InviteNote,
+		Preferences:        entPrefsToStore(u.Preferences),
+		SessionGeneration:  u.SessionGeneration,
+		Kind:               string(u.Kind),
+		ExpiresAt:          u.ExpiresAt,
+		IssuedBy:           u.IssuedBy,
+		Purpose:            u.Purpose,
+		IssuanceID:         u.IssuanceID,
+		IssuerCredentialID: u.IssuerCredentialID,
+		Created:            u.Created,
 	}
 	if u.LastLogin != nil {
 		su.LastLogin = *u.LastLogin
@@ -111,11 +113,12 @@ func entUserToStore(u *ent.User) *store.User {
 	return su
 }
 
-// CreateUser creates a new user record. It refuses a test-fixture row and
-// any email in the reserved test-fixture domain: only
-// CreateTestFixtureUser writes those.
+// CreateUser creates a new user record. It refuses every test identity
+// kind and any email in a reserved test identity domain: only
+// CreateTestFixtureUser and CreateTestAdminUser write those.
 func (s *UserStore) CreateUser(ctx context.Context, u *store.User) error {
-	if (u.Kind != "" && u.Kind != store.UserKindHuman) || u.ExpiresAt != nil || u.IssuedBy != nil || u.Purpose != nil || store.IsTestFixtureEmail(u.Email) {
+	if (u.Kind != "" && u.Kind != store.UserKindHuman) || u.ExpiresAt != nil || u.IssuedBy != nil || u.Purpose != nil ||
+		u.IssuanceID != nil || u.IssuerCredentialID != nil || store.IsReservedTestIdentityEmail(u.Email) {
 		return store.ErrTestFixtureKindRefused
 	}
 	return s.createUser(ctx, u, nil)
@@ -133,8 +136,11 @@ func (s *UserStore) CreateTestFixtureUser(ctx context.Context, u *store.User) er
 	if u.IssuedBy == nil || strings.TrimSpace(*u.IssuedBy) == "" {
 		return fmt.Errorf("%w: a test fixture user requires an issuer", store.ErrInvalidInput)
 	}
-	if !store.IsTestFixtureEmail(u.Email) {
+	if store.TestIdentityEmailKind(u.Email) != store.UserKindTestFixture {
 		return fmt.Errorf("%w: a test fixture user requires an email in %s", store.ErrInvalidInput, store.TestFixtureEmailDomain)
+	}
+	if u.IssuanceID != nil || u.IssuerCredentialID != nil {
+		return fmt.Errorf("%w: issuance and issuer credential IDs are for admin-kind test identities", store.ErrInvalidInput)
 	}
 	if u.Role != store.UserRoleMember && u.Role != store.UserRoleViewer {
 		return fmt.Errorf("%w: a test fixture user must have the member or viewer role", store.ErrInvalidInput)
@@ -161,6 +167,92 @@ func (s *UserStore) CountLiveTestFixtureUsers(ctx context.Context, issuedBy stri
 		return 0, mapError(err)
 	}
 	return n, nil
+}
+
+// validateTestAdminUser checks the fields CreateTestAdminUser requires.
+func validateTestAdminUser(u *store.User) error {
+	if !store.IsTestAdminKind(u.Kind) {
+		return fmt.Errorf("%w: kind must be %s or %s", store.ErrInvalidInput, store.UserKindTestHubAdmin, store.UserKindTestSuperAdmin)
+	}
+	if u.ExpiresAt == nil || u.ExpiresAt.IsZero() {
+		return fmt.Errorf("%w: an admin-kind test identity requires an expiry", store.ErrInvalidInput)
+	}
+	if u.IssuedBy == nil || strings.TrimSpace(*u.IssuedBy) == "" {
+		return fmt.Errorf("%w: an admin-kind test identity requires an issuer", store.ErrInvalidInput)
+	}
+	if u.IssuanceID == nil || strings.TrimSpace(*u.IssuanceID) == "" {
+		return fmt.Errorf("%w: an admin-kind test identity requires an issuance ID", store.ErrInvalidInput)
+	}
+	if u.IssuerCredentialID != nil && strings.TrimSpace(*u.IssuerCredentialID) == "" {
+		return fmt.Errorf("%w: an empty issuer credential ID must be omitted", store.ErrInvalidInput)
+	}
+	if store.TestIdentityEmailKind(u.Email) != u.Kind {
+		return fmt.Errorf("%w: a %s user requires an email in %s", store.ErrInvalidInput, u.Kind, store.TestAdminEmailDomain(u.Kind))
+	}
+	if u.Role != store.TestAdminRole(u.Kind) {
+		return fmt.Errorf("%w: a %s user must have the %s role", store.ErrInvalidInput, u.Kind, store.TestAdminRole(u.Kind))
+	}
+	return nil
+}
+
+// createTestAdminRow writes the user row of CreateTestAdminUser. The
+// caller validated u (validateTestAdminUser) and runs it inside the
+// transaction that also creates the identity's binding.
+func (s *UserStore) createTestAdminRow(ctx context.Context, u *store.User) error {
+	return s.createUser(ctx, u, func(create *ent.UserCreate) {
+		create.SetKind(user.Kind(u.Kind)).
+			SetExpiresAt(testAdminExpiry(*u.ExpiresAt)).
+			SetIssuedBy(*u.IssuedBy).
+			SetIssuanceID(*u.IssuanceID)
+		if u.Purpose != nil {
+			create.SetPurpose(*u.Purpose)
+		}
+		if u.IssuerCredentialID != nil {
+			create.SetIssuerCredentialID(*u.IssuerCredentialID)
+		}
+	})
+}
+
+// testAdminKinds are the ent values of the admin test identity kinds.
+var testAdminKinds = []user.Kind{user.KindTestHubAdmin, user.KindTestSuperAdmin}
+
+// CountLiveTestAdminUsers counts admin-kind test identities that expire
+// after now: of one kind when kind is non-empty, of one issuer when
+// issuedBy is non-empty.
+func (s *UserStore) CountLiveTestAdminUsers(ctx context.Context, kind, issuedBy string, now time.Time) (int, error) {
+	q := s.client.User.Query().Where(user.ExpiresAtGT(now))
+	switch {
+	case kind == "":
+		q = q.Where(user.KindIn(testAdminKinds...))
+	case store.IsTestAdminKind(kind):
+		q = q.Where(user.KindEQ(user.Kind(kind)))
+	default:
+		return 0, fmt.Errorf("%w: %q is not an admin test identity kind", store.ErrInvalidInput, kind)
+	}
+	if issuedBy != "" {
+		q = q.Where(user.IssuedByEQ(issuedBy))
+	}
+	n, err := q.Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// ListTestAdminUsers returns every admin-kind test identity, oldest first.
+func (s *UserStore) ListTestAdminUsers(ctx context.Context) ([]store.User, error) {
+	rows, err := s.client.User.Query().
+		Where(user.KindIn(testAdminKinds...)).
+		Order(user.ByCreated(sql.OrderAsc()), user.ByID()).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.User, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, *entUserToStore(r))
+	}
+	return out, nil
 }
 
 // ListTestFixtureUsers returns test fixture users, newest first: for one
@@ -298,13 +390,18 @@ func (s *UserStore) UpdateUser(ctx context.Context, u *store.User) error {
 	u.Email = normalizeEmail(u.Email)
 
 	// kind is Immutable, so no update can change it. The email must also
-	// stay on the right side of the reserved test-fixture domain: a human
-	// row cannot move into it and a test-fixture row cannot leave it.
+	// stay in the reserved domain of the row's kind: a human row cannot
+	// move into any test identity domain, and a test identity row cannot
+	// leave its own.
 	current, err := s.client.User.Query().Where(user.IDEQ(uid)).Select(user.FieldKind).Only(ctx)
 	if err != nil {
 		return mapError(err)
 	}
-	if (current.Kind == user.KindTestFixture) != store.IsTestFixtureEmail(u.Email) {
+	wantKind := string(current.Kind)
+	if current.Kind == user.KindHuman {
+		wantKind = ""
+	}
+	if store.TestIdentityEmailKind(u.Email) != wantKind {
 		return store.ErrTestFixtureKindRefused
 	}
 
@@ -474,7 +571,11 @@ func (s *UserStore) ListUsers(ctx context.Context, filter store.UserFilter, opts
 			order = user.ByDisplayName(sql.OrderAsc())
 		}
 	case "lastSeen":
-		order = user.ByLastSeen(sortOpt(opts.SortDir))
+		// Never-seen users (last_seen IS NULL) sort last in both directions.
+		// Postgres would otherwise put NULLs first under DESC (SQLite puts
+		// them last), so "most recently seen first" could list only users
+		// who have never signed in.
+		order = user.ByLastSeen(sortOpt(opts.SortDir), sql.OrderNullsLast())
 	default: // "created" and unspecified
 		order = user.ByCreated(sortOpt(opts.SortDir))
 	}

@@ -1,0 +1,194 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	hubpkg "github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
+)
+
+// Host-key rotation, tunnel side: after the agent is recreated, the check
+// prints the recreated hint and lets ssh report the mismatch.
+func TestCheckSSHHostKeyPin_MismatchPrintsRecreatedHint(t *testing.T) {
+	home := t.TempDir()
+	hub := twoProjectHub(t, "tok")
+	env, _, errb := newSSHTestEnv(t, home, hub)
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+
+	var stderr bytes.Buffer
+	require.NoError(t, checkSSHHostKeyPin(context.Background(), &stderr, home, hub.srv.URL, "tok", "a-b", "c"))
+	assert.Empty(t, stderr.String(), "matching key: no output")
+
+	hub.rotateKey(t, "ag-c")
+	require.NoError(t, checkSSHHostKeyPin(context.Background(), &stderr, home, hub.srv.URL, "tok", "a-b", "c"))
+	assert.Equal(t, sshRecreatedHint+"\n", stderr.String())
+}
+
+// No pin (ssh-config never written for this hub) is not a mismatch.
+func TestCheckSSHHostKeyPin_NoPinNoOutput(t *testing.T) {
+	hub := twoProjectHub(t, "tok")
+	stubSSHTransport(t)
+	var stderr bytes.Buffer
+	require.NoError(t, checkSSHHostKeyPin(context.Background(), &stderr, t.TempDir(), hub.srv.URL, "tok", "a-b", "c"))
+	assert.Empty(t, stderr.String())
+}
+
+// The ProxyCommand path for a deleted agent exits 4
+// promptly (well within 5s) with one line.
+func TestCheckSSHHostKeyPin_DeletedAgentExitsAgentNotFoundPromptly(t *testing.T) {
+	home := t.TempDir()
+	hub := twoProjectHub(t, "tok")
+	env, _, errb := newSSHTestEnv(t, home, hub)
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	hub.deleteAgent("ag-c")
+
+	var stderr bytes.Buffer
+	start := time.Now()
+	err := checkSSHHostKeyPin(context.Background(), &stderr, home, hub.srv.URL, "tok", "a-b", "c")
+	assert.Less(t, time.Since(start), 5*time.Second)
+	require.Error(t, err)
+	assert.Equal(t, tunnelclient.ExitAgentNotFound, tunnelclient.CodeOf(err))
+	assert.NotContains(t, err.Error(), "\n")
+}
+
+// Credential rows on the host-key accessor: a refused token is 3.
+func TestAgentSSHHostKey_RefusedCredential(t *testing.T) {
+	hub := twoProjectHub(t, "tok")
+	stubSSHTransport(t)
+	conn, err := newSSHHubConn(hub.srv.URL, "wrong")
+	require.NoError(t, err)
+	_, err = conn.agentSSHHostKey(context.Background(), "", "ag-c")
+	assert.Equal(t, tunnelclient.ExitCredential, tunnelclient.CodeOf(err))
+}
+
+// The accessor sends the user bearer token and reads sshHostKey.
+func TestAgentSSHHostKey_ReadsField(t *testing.T) {
+	hub := twoProjectHub(t, "tok")
+	stubSSHTransport(t)
+	conn, err := newSSHHubConn(hub.srv.URL, "tok")
+	require.NoError(t, err)
+	key, err := conn.agentSSHHostKey(context.Background(), "", "ag-c")
+	require.NoError(t, err)
+	assert.Equal(t, hub.agents[0].HostKey, key)
+	key, err = conn.agentSSHHostKey(context.Background(), "p-ab", "c")
+	require.NoError(t, err)
+	assert.Equal(t, hub.agents[0].HostKey, key)
+}
+
+func TestClassifySSHHubError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"401", &apiclient.APIError{StatusCode: http.StatusUnauthorized}, tunnelclient.ExitCredential},
+		{"403", &apiclient.APIError{StatusCode: http.StatusForbidden}, tunnelclient.ExitForbidden},
+		{"502", &apiclient.APIError{StatusCode: http.StatusBadGateway}, tunnelclient.ExitHubUnavailable},
+		{"503", &apiclient.APIError{StatusCode: http.StatusServiceUnavailable}, tunnelclient.ExitHubUnavailable},
+		{"504", &apiclient.APIError{StatusCode: http.StatusGatewayTimeout}, tunnelclient.ExitHubUnavailable},
+		{"500", &apiclient.APIError{StatusCode: http.StatusInternalServerError}, tunnelclient.ExitError},
+		{"dial", fmt.Errorf("request failed: %w", &url.Error{Op: "Get", URL: "x", Err: errors.New("refused")}), tunnelclient.ExitHubUnavailable},
+		{"deadline", context.DeadlineExceeded, tunnelclient.ExitHubUnavailable},
+		{"marked", tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "gone"), tunnelclient.ExitAgentNotFound},
+		{"other", errors.New("boom"), tunnelclient.ExitError},
+	}
+	for _, c := range cases {
+		got := classifySSHHubError("https://hub.example", c.err)
+		assert.Equal(t, c.want, got.Code, c.name)
+		assert.NotContains(t, got.Msg, "\n", c.name)
+	}
+}
+
+// The accessor reads the field the hub serves on GET agent: a hub agent
+// response with a host key gives that key, and one without (the field is
+// omitted) gives none. A rename on either side fails this test.
+func TestAgentSSHHostKey_HubResponseContract(t *testing.T) {
+	key := testSSHPublicKey(t)
+	withKey, err := json.Marshal(hubpkg.AgentWithCapabilities{Agent: store.Agent{ID: "ag-1", Slug: "a"}, SSHHostKey: key})
+	require.NoError(t, err)
+	withoutKey, err := json.Marshal(hubpkg.AgentWithCapabilities{Agent: store.Agent{ID: "ag-2", Slug: "b"}})
+	require.NoError(t, err)
+	assert.NotContains(t, string(withoutKey), "sshHostKey", "an agent without a key omits the field")
+
+	var decoded sshAgentHostKeyResponse
+	require.NoError(t, json.Unmarshal(withKey, &decoded))
+	assert.Equal(t, key, decoded.SSHHostKey)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/agents/ag-1":
+			_, _ = w.Write(withKey)
+		case "/api/v1/agents/ag-2":
+			_, _ = w.Write(withoutKey)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	stubSSHTransport(t)
+	conn, err := newSSHHubConn(srv.URL, "tok")
+	require.NoError(t, err)
+	got, err := conn.agentSSHHostKey(context.Background(), "", "ag-1")
+	require.NoError(t, err)
+	assert.Equal(t, key, got)
+	got, err = conn.agentSSHHostKey(context.Background(), "", "ag-2")
+	require.NoError(t, err)
+	assert.Equal(t, "", got, "an absent field means no key")
+}
+
+// checkSSHHostKeyPin refuses an endpoint that is not a plain origin as given,
+// before normalising it, and sends no request.
+func TestCheckSSHHostKeyPin_RefusesRawEndpointBeforeNormalizing(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	stubSSHTransport(t)
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	for _, bad := range []string{
+		"http://user:pw@" + u.Host,
+		srv.URL + "/?x=1",
+		srv.URL + "/#frag",
+		srv.URL + " ",
+		"not a url",
+	} {
+		var stderr bytes.Buffer
+		err := checkSSHHostKeyPin(context.Background(), &stderr, t.TempDir(), bad, "tok", "p", "a")
+		assert.Equal(t, tunnelclient.ExitUsage, tunnelclient.CodeOf(err), bad)
+		assert.Empty(t, stderr.String(), bad)
+	}
+	assert.Equal(t, int32(0), requests.Load(), "no hub request for a refused endpoint")
+}
