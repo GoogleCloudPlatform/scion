@@ -17,83 +17,15 @@
 package hub
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// runBroker is a broker that tracks the runtime entries it holds by run ID:
-// a create adds its run's entry when it lands, and a delete removes the
-// entry for the run it names (a delete for a run with no entry is the
-// broker's 404, which the hub treats as success). A delete naming no run
-// matches by name, so it removes every entry.
-type runBroker struct {
-	*raceAsyncClient
-	mu      sync.Mutex
-	entries map[string]bool
-	deletes []string
-}
-
-func (b *runBroker) DeleteAgent(ctx context.Context, brokerID, endpoint, agentID, projectID string, opts DeleteAgentOptions) error {
-	b.mu.Lock()
-	b.deletes = append(b.deletes, opts.RunID)
-	if opts.RunID == "" {
-		// A delete naming no run resolves by name: every entry goes.
-		b.entries = map[string]bool{}
-	}
-	delete(b.entries, opts.RunID)
-	b.mu.Unlock()
-	return b.raceAsyncClient.DeleteAgent(ctx, brokerID, endpoint, agentID, projectID, opts)
-}
-
-func (b *runBroker) land(runID string) {
-	b.mu.Lock()
-	b.entries[runID] = true
-	b.mu.Unlock()
-}
-
-func (b *runBroker) live() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.entries)
-}
-
-// newRunBrokerServer is newRaceSyncCreateServer over a runBroker.
-func newRunBrokerServer(t *testing.T) (*Server, store.Store, *store.Project, *raceAsyncClient, *runBroker) {
-	t.Helper()
-	srv, s, project, client := newRaceSyncCreateServer(t)
-	broker := &runBroker{raceAsyncClient: client, entries: map[string]bool{}}
-	d := NewHTTPAgentDispatcherWithClient(s, broker, false, srv.agentLifecycleLog)
-	d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings { return AsyncLaunchSettings{} })
-	srv.SetDispatcher(d)
-	return srv, s, project, client, broker
-}
-
-func (b *runBroker) has(runID string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.entries[runID]
-}
-
-func (b *runBroker) deleteCount(runID string) int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	n := 0
-	for _, r := range b.deletes {
-		if r == runID {
-			n++
-		}
-	}
-	return n
-}
 
 // A synchronous create's broker create lands after the delete engine's
 // broker delete for the same run already returned (the broker had no entry

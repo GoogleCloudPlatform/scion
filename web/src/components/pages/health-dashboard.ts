@@ -22,14 +22,18 @@
  * - Header: overall status pill, "as of" time, the serving hub instance,
  *   and the operator's monitoring dashboard link when one is configured
  * - Needs attention (health-attention.ts), full width and first
- * - Hub (health-hub-card.ts, the service account check diagnostic folded
- *   in) | Dispatch (health-dispatch-card.ts)
+ * - Hub (health-hub-card.ts: the fleet status, "N of M instances healthy"
+ *   and the failing checks with their instance labels; the service account
+ *   check diagnostic folded in) | Dispatch (health-dispatch-card.ts)
  * - Hub instances (health-hub-instances.ts, with each instance's failing
  *   checks and database pool; hidden when the summary has no hub_instances
  *   field, i.e. an older hub replica served it)
  * - Runtime brokers (compact table, health-broker-table.ts)
  * - Integrations (chat plugins, health-integrations.ts)
  * - Agents (phase counts and problem groups, health-agents-card.ts)
+ *
+ * A 503 means the serving hub instance cannot read the database; the page
+ * shows HEALTH_SUMMARY_UNAVAILABLE (over the last data, if any).
  *
  * Auto-refreshes every 30 seconds via polling.
  */
@@ -44,8 +48,7 @@ import type { HealthAttentionItem } from './health-attention.js';
 import './health-attention.js';
 import type { HealthSummaryHub, HealthSummaryServiceAccountCheck } from './health-hub-card.js';
 import './health-hub-card.js';
-import type { HealthSummaryHubInstances } from './health-hub-instances.js';
-import './health-hub-instances.js';
+import { hubInstanceLabels, type HealthSummaryHubInstances } from './health-hub-instances.js';
 import type { HealthSummaryBrokerList } from './health-broker-table.js';
 import './health-broker-table.js';
 import type { HealthSummaryAgents } from './health-agents-card.js';
@@ -98,6 +101,10 @@ export interface HealthSummary {
   /** Operator-configured links; absent when none is configured. */
   links?: HealthSummaryLinks;
 }
+
+/** Shown when the summary is a 503: the serving hub cannot read the database. */
+export const HEALTH_SUMMARY_UNAVAILABLE =
+  'Health data not available (database unreachable from this hub instance)';
 
 export interface HealthSummaryLinks {
   /** server.hub.monitoring_dashboard_url; absent when unset. */
@@ -157,6 +164,12 @@ export class ScionPageHealthDashboard extends LitElement {
   private async fetchData(): Promise<void> {
     try {
       const res = await apiFetch('/api/v1/admin/health/summary');
+      if (res.status === 503) {
+        // The serving hub instance cannot read the database. The summary
+        // is a database read only, so there is no partial data to show.
+        this.error = HEALTH_SUMMARY_UNAVAILABLE;
+        return;
+      }
       if (!res.ok) {
         this.error = await extractApiError(res, 'Failed to fetch health summary');
         return;
@@ -356,6 +369,7 @@ export class ScionPageHealthDashboard extends LitElement {
               .integrations=${d.integrations ?? []}
               .detail=${d.integrations_detail === true}
               .counts=${d.integration_counts ?? null}
+              .instanceLabels=${hubInstanceLabels(d.hub_instances)}
             ></scion-health-integrations>
           </div>`
         : nothing}

@@ -35,6 +35,7 @@ type backstopPinResult struct {
 	backstopHomes   []string
 	backstopSawMark bool
 	backstopOutcome exitOutcome
+	heldHomes       []string
 	order           []string
 }
 
@@ -118,6 +119,27 @@ func pinBackstopCallSites(t *testing.T, child string, setup func(t *testing.T, o
 	}
 	t.Cleanup(func() { runReportOpenSessionAtShutdown = origBackstop })
 
+	// The held-report sender: its stop must come before the backstop (the
+	// backstop reclaims reports the sender left claimed, which is only safe
+	// once the sender has stopped). Only the first stop call is recorded;
+	// RunInit also defers one, which must then be a no-op.
+	origStartHeld := runStartHeldReportSender
+	runStartHeldReportSender = func(home string, _ map[string]string, newClient func() *hub.Client) func() {
+		r.heldHomes = append(r.heldHomes, home)
+		if newClient == nil {
+			t.Error("held-report sender got a nil client factory")
+		}
+		r.order = append(r.order, "held sender start")
+		stopped := false
+		return func() {
+			if !stopped {
+				stopped = true
+				r.order = append(r.order, "held sender stop")
+			}
+		}
+	}
+	t.Cleanup(func() { runStartHeldReportSender = origStartHeld })
+
 	if setup != nil {
 		setup(t, &r.order)
 	}
@@ -136,6 +158,20 @@ func pinBackstopCallSites(t *testing.T, child string, setup func(t *testing.T, o
 	if !r.backstopSawMark {
 		t.Error("backstop ran before the child ran")
 	}
+	if len(r.heldHomes) != 1 || r.heldHomes[0] != agentHome {
+		t.Errorf("held-report sender starts = %q, want one with %q", r.heldHomes, agentHome)
+	}
+	pos := func(step string) int {
+		for i, s := range r.order {
+			if s == step {
+				return i
+			}
+		}
+		return -1
+	}
+	if c, s, p, b := pos("clear"), pos("held sender start"), pos("held sender stop"), pos("backstop"); c < 0 || s < c || p < s || b < p {
+		t.Errorf("order = %q, want clear, then held sender start, then held sender stop before backstop", r.order)
+	}
 	return r
 }
 
@@ -144,6 +180,9 @@ func pinBackstopCallSites(t *testing.T, child string, setup func(t *testing.T, o
 // limits-exceeded code, and a limit signalled through the trigger file:
 //   - the tombstone clear runs once, with agentHome, before the harness
 //     starts (the child has not created its marker yet);
+//   - the held-report sender starts once, with agentHome, after the clear,
+//     and is stopped before the backstop (pinBackstopCallSites checks this
+//     for every caller);
 //   - the shutdown backstop runs once, with agentHome, after the child has
 //     exited, with the classified exit outcome, and before the stopping
 //     report, the sidecar shutdown and the lifecycle session-end hooks (and,
@@ -190,7 +229,7 @@ func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 				t.Cleanup(func() { runReportHookLimitsExceeded = origReport })
 			},
 			want:      exitOutcome{exitCode: handlers.ExitCodeLimitsExceeded, limitsExceeded: true},
-			wantOrder: []string{"clear", "limits report", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"},
+			wantOrder: []string{"clear", "held sender start", "limits report", "held sender stop", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -202,7 +241,7 @@ func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 			// can use up the runtime's stop window.
 			wantOrder := tc.wantOrder
 			if wantOrder == nil {
-				wantOrder = []string{"clear", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"}
+				wantOrder = []string{"clear", "held sender start", "held sender stop", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"}
 			}
 			if !reflect.DeepEqual(r.order, wantOrder) {
 				t.Errorf("call order = %q, want %q", r.order, wantOrder)

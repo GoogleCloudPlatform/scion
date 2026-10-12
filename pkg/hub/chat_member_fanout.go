@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -58,9 +59,9 @@ func (l chatMemberFanoutLimits) withDefaults() chatMemberFanoutLimits {
 // snapshotThreadMessage copies msg and attachments for a background job:
 // callers keep updating their copy (for example its dispatch state) after
 // publishing it.
-func snapshotThreadMessage(msg *store.Message, attachments []AttachmentRef) (*store.Message, []AttachmentRef) {
+func snapshotThreadMessage(msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) (*store.Message, []AttachmentRef, []artifacts.MessageRef) {
 	snapshot := *msg
-	return &snapshot, append([]AttachmentRef(nil), attachments...)
+	return &snapshot, append([]AttachmentRef(nil), attachments...), append([]artifacts.MessageRef(nil), artifactRefs...)
 }
 
 // fanOutThreadMessageToMembersAsync runs fanOutThreadMessageToMembers in the
@@ -69,12 +70,12 @@ func snapshotThreadMessage(msg *store.Message, attachments []AttachmentRef) (*st
 // published; it never blocks or fails them. Paths that also record thread
 // membership for the message use recordThreadMembersThenFanOutAsync, or
 // record membership before publishing, so new members are recipients.
-func (s *Server) fanOutThreadMessageToMembersAsync(ctx context.Context, msg *store.Message, attachments []AttachmentRef) {
+func (s *Server) fanOutThreadMessageToMembersAsync(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) {
 	if !isWebThreadMessage(msg) {
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
-	msg, attachments = snapshotThreadMessage(msg, attachments)
+	msg, attachments, artifactRefs = snapshotThreadMessage(msg, attachments, artifactRefs)
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -84,7 +85,7 @@ func (s *Server) fanOutThreadMessageToMembersAsync(ctx context.Context, msg *sto
 		}()
 		ctx, cancel := context.WithTimeout(ctx, s.chatMemberFanout.withDefaults().timeout)
 		defer cancel()
-		s.fanOutThreadMessageToMembers(ctx, msg, attachments)
+		s.fanOutThreadMessageToMembers(ctx, msg, attachments, artifactRefs)
 	}()
 }
 
@@ -95,7 +96,7 @@ func (s *Server) fanOutThreadMessageToMembersAsync(ctx context.Context, msg *sto
 // who is not watching the project, that copy is the real-time signal that
 // replaced the MENTION notification. The job keeps ctx's values but not
 // its cancellation.
-func (s *Server) recordThreadMembersThenFanOutAsync(ctx context.Context, m threadMembership, msg *store.Message, attachments []AttachmentRef) {
+func (s *Server) recordThreadMembersThenFanOutAsync(ctx context.Context, m threadMembership, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) {
 	record := m.writable()
 	fanOut := isWebThreadMessage(msg)
 	if !record && !fanOut {
@@ -103,7 +104,7 @@ func (s *Server) recordThreadMembersThenFanOutAsync(ctx context.Context, m threa
 	}
 	ctx = context.WithoutCancel(ctx)
 	if fanOut {
-		msg, attachments = snapshotThreadMessage(msg, attachments)
+		msg, attachments, artifactRefs = snapshotThreadMessage(msg, attachments, artifactRefs)
 	}
 	go func() {
 		defer func() {
@@ -120,7 +121,7 @@ func (s *Server) recordThreadMembersThenFanOutAsync(ctx context.Context, m threa
 		if fanOut {
 			ctx, cancel := context.WithTimeout(ctx, s.chatMemberFanout.withDefaults().timeout)
 			defer cancel()
-			s.fanOutThreadMessageToMembers(ctx, msg, attachments)
+			s.fanOutThreadMessageToMembers(ctx, msg, attachments, artifactRefs)
 		}
 	}()
 }
@@ -144,7 +145,7 @@ func isWebThreadMessage(msg *store.Message) bool {
 // rows are a listing index, not authorization, so each recipient must also
 // be an active (not suspended) user who can read the project now. A user
 // who left the thread, or lost project access, gets nothing here.
-func (s *Server) fanOutThreadMessageToMembers(ctx context.Context, msg *store.Message, attachments []AttachmentRef) {
+func (s *Server) fanOutThreadMessageToMembers(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) {
 	if !isWebThreadMessage(msg) {
 		return
 	}
@@ -232,5 +233,5 @@ func (s *Server) fanOutThreadMessageToMembers(ctx context.Context, msg *store.Me
 	if len(recipients) == 0 {
 		return
 	}
-	s.events.PublishChatMemberMessage(ctx, msg, attachments, recipients)
+	s.events.PublishChatMemberMessage(ctx, msg, attachments, artifactRefs, recipients)
 }

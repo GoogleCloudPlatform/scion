@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -69,6 +70,14 @@ type GrantDescriptor struct {
 	// Scope of the grant.
 	ScopeType string // "system", "project"
 	ScopeID   string
+
+	// GranteeType and GranteeID name the principal that receives the
+	// grant, when the caller knows it ("user", "group" or "agent"; the ID
+	// may be a user's email on the membership paths). CanDelegate refuses
+	// any grant to an admin-kind test identity (test_hub_admin,
+	// test_super_admin): its authority is fixed at issuance.
+	GranteeType string
+	GranteeID   string
 }
 
 // CanDelegate checks whether the actor has sufficient authority to create
@@ -89,6 +98,20 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 	// scopes.
 	if _, ok := actor.(*hubDeliveryIdentity); ok {
 		return Decision{Allowed: false, Reason: "delivery credential cannot delegate"}
+	}
+	// An agent delegated credential delegates nothing onward: no v1
+	// operation passes delegated authority on (.design/agent-delegation.md
+	// §12.3).
+	if _, ok := actor.(*DelegatedAgentIdentity); ok {
+		return Decision{Allowed: false, Reason: "delegated credential cannot delegate"}
+	}
+
+	// An admin-kind test identity holds exactly its issuance binding: no
+	// actor, not even a super-admin, adds authority to it afterwards. The
+	// check runs before the super-admin shortcut below, and reads the
+	// grantee's kind through kindForPrincipal; a read error denies.
+	if denied := a.refuseTestAdminGrantee(ctx, grant); denied != nil {
+		return *denied
 	}
 
 	// Scoped credentials (UAT) can only delegate within their credential scope.
@@ -121,6 +144,73 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 	default:
 		return Decision{Allowed: false, Reason: "unknown grant type: " + string(grant.Type)}
 	}
+}
+
+// refuseTestAdminGrantee denies a grant whose grantee is an admin-kind
+// test identity: a user ID whose stored kind is an admin kind
+// (kindForPrincipal), or a user email in an admin kind's reserved domain.
+// A kind read error or unrecognized kind denies. Other grantees, and a
+// grant that names none, pass.
+func (a *AuthzService) refuseTestAdminGrantee(ctx context.Context, grant GrantDescriptor) *Decision {
+	if reason := testAdminGranteeRefusal(ctx, a.store, a.kindCache(), grant.GranteeType, grant.GranteeID); reason != "" {
+		return &Decision{Allowed: false, Reason: reason}
+	}
+	return nil
+}
+
+// Reasons of testAdminGranteeRefusal.
+const (
+	testAdminGranteeReasonRefused    = "an admin-kind test identity cannot receive grants"
+	testAdminGranteeReasonUnverified = "cannot verify the grantee's kind"
+)
+
+// testAdminGranteeRefusal is the one admin-kind grantee check behind
+// CanDelegate (refuseTestAdminGrantee) and the project member PUT
+// (refuseTestAdminMemberGrantee). It returns a non-empty reason when the
+// grantee is an admin-kind test identity: a user email in an admin kind's
+// reserved domain, or a user ID whose stored kind
+// (kindForPrincipalVia through users, with cache when non-nil) is an admin
+// kind. It fails closed: a kind read error or an unrecognized kind refuses.
+// Non-user grantees and an empty ID pass.
+func testAdminGranteeRefusal(ctx context.Context, users store.UserStore, cache *testFixtureClampCache, principalType, principalID string) string {
+	if principalType != store.RoleBindingPrincipalUser || principalID == "" {
+		return ""
+	}
+	if store.IsTestAdminKind(store.TestIdentityEmailKind(principalID)) {
+		return testAdminGranteeReasonRefused
+	}
+	if users == nil {
+		return testAdminGranteeReasonUnverified
+	}
+	k, err := kindForPrincipalVia(ctx, users, cache, principalID)
+	if err != nil {
+		return testAdminGranteeReasonUnverified
+	}
+	if k.isTestAdmin() {
+		return testAdminGranteeReasonRefused
+	}
+	return ""
+}
+
+// kindForPrincipal reads a user principal's stored kind through the
+// service's store and clamp cache (kindForPrincipalVia).
+func (a *AuthzService) kindForPrincipal(ctx context.Context, userID string) (principalKind, error) {
+	if a.store == nil {
+		return principalKind{}, errors.New("kind lookup: no store")
+	}
+	return kindForPrincipalVia(ctx, a.store, a.kindCache(), userID)
+}
+
+// kindCache returns the clamp's per-user kind cache of the service's store,
+// or nil (uncached reads) when the store is not the clamped store.
+func (a *AuthzService) kindCache() *testFixtureClampCache {
+	if a == nil {
+		return nil
+	}
+	if c, ok := a.store.(*testFixtureGrantClamp); ok {
+		return c.cache
+	}
+	return nil
 }
 
 // enforceUATDelegation checks that a scoped UAT credential only delegates
@@ -539,6 +629,9 @@ func (a *AuthzService) intersectCredentialCaveats(actor Identity, perms []string
 	var restriction *Restriction
 
 	switch v := actor.(type) {
+	case *DelegatedAgentIdentity:
+		// Nothing is delegable onward from an agent delegated credential.
+		return []string{}
 	case *ScopedUserIdentity:
 		if v != nil {
 			// Always apply the ceiling restriction, even when it has no

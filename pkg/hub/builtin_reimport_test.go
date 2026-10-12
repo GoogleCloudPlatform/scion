@@ -178,7 +178,7 @@ func markReimportRowStale(t *testing.T, s store.Store, kind storage.ResourceKind
 		require.NoError(t, err)
 		require.NotNil(t, tpl, "GetTemplate(%q) returned no template and no error", id)
 		tpl.ContentHash = "stale"
-		require.NoError(t, s.UpdateTemplate(ctx, tpl))
+		require.NoError(t, setTemplateContentForTest(ctx, s, tpl))
 		return
 	}
 	hc, err := s.GetHarnessConfig(ctx, id)

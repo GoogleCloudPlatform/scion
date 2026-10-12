@@ -77,6 +77,13 @@ export interface ArtifactResponse {
   canManage?: boolean;
   /** On a GET: the caller may publish new versions (edit, upload, review). */
   canPublish?: boolean;
+  /**
+   * On a GET: the caller may not manage the artifact but may give a user
+   * review access (a write grant): the delegating user of the agent that
+   * owns it, the project owners and admins of its home project, and
+   * super-admins. Never set with canManage.
+   */
+  canGrantReview?: boolean;
 }
 
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
@@ -562,6 +569,11 @@ export interface ArtifactListFilters {
   ownedOnly?: boolean;
   /** Only artifacts a grant shares with the caller. */
   sharedOnly?: boolean;
+  /**
+   * Only artifacts homed in this project, plus those shared with it when
+   * the caller may read there (the list endpoint's scope filter).
+   */
+  scope?: string;
 }
 
 /**
@@ -575,6 +587,7 @@ export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): 
   if (filters.reviewPending) params.set('review_pending', '1');
   if (filters.ownedOnly) params.set('owner', 'me');
   if (filters.sharedOnly) params.set('shared', '1');
+  if (filters.scope) params.set('scope', filters.scope);
   if (cursor) params.set('cursor', cursor);
   return `/api/v1/artifacts?${params.toString()}`;
 }

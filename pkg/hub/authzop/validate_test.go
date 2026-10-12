@@ -370,13 +370,17 @@ func TestValidate_AllValidCredentialKinds(t *testing.T) {
 	kinds := []CredentialKind{
 		CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT,
 		CredentialBrokerToken, CredentialServiceAccount,
-		CredentialSystemInternal, CredentialIdentityToken,
+		CredentialSystemInternal, CredentialIdentityToken, CredentialDelegatedAgent,
 	}
 	for _, k := range kinds {
 		s := validSpec()
 		s.Credentials = []CredentialKind{k}
 		if k == CredentialScopedUAT {
 			s.Bearer = AdmitOn(BearerTargetProjectPath, BearerBoundaryProject)
+		}
+		if k == CredentialDelegatedAgent {
+			// Admitted only together with its principal kind.
+			s.Principals = append(s.Principals, PrincipalAgentDelegated)
 		}
 		if err := s.Validate(); err != nil {
 			t.Errorf("valid credential %q caused error: %v", k, err)
@@ -869,6 +873,10 @@ func TestValidate_AllValidPrincipalKinds(t *testing.T) {
 	for k := range validPrincipalKinds {
 		s := validSpec()
 		s.Principals = []PrincipalKind{k}
+		if k == PrincipalAgentDelegated {
+			// Admitted only together with its credential kind.
+			s.Credentials = append(s.Credentials, CredentialDelegatedAgent)
+		}
 		if err := s.Validate(); err != nil {
 			t.Errorf("valid principal kind %q caused error: %v", k, err)
 		}
@@ -1254,5 +1262,26 @@ func makeExternalPolicy() *ExternalEffectPolicy {
 		IdempotencyKey: "dispatch ID",
 		RetryPolicy:    "no retry",
 		AuthBeforeEmit: true,
+	}
+}
+
+// TestValidate_AgentDelegatedPairing: the agent delegated principal and
+// credential are admitted together or not at all.
+func TestValidate_AgentDelegatedPairing(t *testing.T) {
+	s := validSpec()
+	s.Principals = append(s.Principals, PrincipalAgentDelegated)
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "admitted together") {
+		t.Errorf("principal without credential: err = %v, want a pairing error", err)
+	}
+	s = validSpec()
+	s.Credentials = append(s.Credentials, CredentialDelegatedAgent)
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "admitted together") {
+		t.Errorf("credential without principal: err = %v, want a pairing error", err)
+	}
+	s = validSpec()
+	s.Principals = append(s.Principals, PrincipalAgentDelegated)
+	s.Credentials = append(s.Credentials, CredentialDelegatedAgent)
+	if err := s.Validate(); err != nil {
+		t.Errorf("paired kinds: unexpected error %v", err)
 	}
 }

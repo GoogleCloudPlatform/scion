@@ -100,10 +100,6 @@ func (f *chatWakeFixture) memberWithoutLifecycle(t *testing.T) *store.User {
 	return u
 }
 
-func userIdentityFor(u *store.User) UserIdentity {
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))
-}
-
 func (f *chatWakeFixture) path() string {
 	return "/api/v1/chat/conversations/" + f.topic + "/messages"
 }
@@ -269,21 +265,6 @@ func TestChatV2Wake_OfferWake_NoMessagePermission_Denied(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "canWake")
 	assert.Empty(t, f.disp.getStartCalls())
 	assert.Equal(t, 0, f.countThreadMessages(t))
-}
-
-// deadlineRecorder is a ResponseRecorder that supports SetWriteDeadline,
-// as a real connection does, and records every deadline set.
-type deadlineRecorder struct {
-	*httptest.ResponseRecorder
-	mu        sync.Mutex
-	deadlines []time.Time
-}
-
-func (r *deadlineRecorder) SetWriteDeadline(t time.Time) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.deadlines = append(r.deadlines, t)
-	return nil
 }
 
 // ctxDeadlineDispatcher records the deadline of the resume dispatch ctx.
@@ -792,4 +773,38 @@ func TestChatV2Wake_StalledStoreAfterWake_EndsAtDeadline(t *testing.T) {
 
 	_, begin := f.srv.chatIdempotency.Begin(DevUserID, "key-stall")
 	assert.Equal(t, IdempotencyNew, begin, "the key must be released after the failed send")
+}
+
+// A chat send with wake and interrupt to a suspended agent that is still
+// initializing when the wake wait ends is delivered as an ordinary
+// (buffered) message; an agent that reports working keeps the interrupt.
+func TestChatV2Interrupt_WakeInitializingIsBuffered(t *testing.T) {
+	orig := wakeReadyTimeout
+	wakeReadyTimeout = 1500 * time.Millisecond
+	t.Cleanup(func() { wakeReadyTimeout = orig })
+
+	for _, tc := range []struct {
+		activity      string
+		wantInterrupt bool
+	}{
+		{"initializing", false},
+		{"working", true},
+	} {
+		t.Run(tc.activity, func(t *testing.T) {
+			f := chatWakeSetup(t, string(state.PhaseSuspended))
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				_ = f.s.UpdateAgentStatus(context.Background(), f.agent.ID, store.AgentStatusUpdate{
+					Phase: string(state.PhaseRunning), Activity: tc.activity,
+				})
+			}()
+			rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+				map[string]any{"content": "stop and look", "wake": true, "interrupt": true})
+			require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+			msgs := f.disp.getMessageCalls()
+			require.Len(t, msgs, 1, "the message is delivered")
+			assert.Equal(t, tc.wantInterrupt, msgs[0].Interrupt)
+		})
+	}
 }

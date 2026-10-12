@@ -20,12 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -33,76 +30,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// lifecycleTestDispatcher captures which lifecycle op was called and with
-// what args, so we can verify executeDispatch routes correctly.
-type lifecycleTestDispatcher struct {
-	startCalled       atomic.Int32
-	stopCalled        atomic.Int32
-	restartCalled     atomic.Int32
-	deleteCalled      atomic.Int32
-	checkPromptCalled atomic.Int32
-	finalizeEnvCalled atomic.Int32
-	createCalled      atomic.Int32
-	lastTask          string
-	checkPromptResult bool
-	lastDeleteFiles   bool
-	lastFinalizeEnv   map[string]string
-}
-
-func (d *lifecycleTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) (*CreateDispatchResult, error) {
-	return nil, nil
-}
-func (d *lifecycleTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
-	return nil
-}
-
-func (d *lifecycleTestDispatcher) DispatchAgentReprovision(context.Context, *store.Agent) error {
-	return nil
-}
-func (d *lifecycleTestDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, task string, _ bool) error {
-	d.startCalled.Add(1)
-	d.lastTask = task
-	return nil
-}
-func (d *lifecycleTestDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
-	d.stopCalled.Add(1)
-	return nil
-}
-func (d *lifecycleTestDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
-	d.restartCalled.Add(1)
-	return nil
-}
-func (d *lifecycleTestDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *lifecycleTestDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, deleteFiles, _, _ bool, _ time.Time) error {
-	d.deleteCalled.Add(1)
-	d.lastDeleteFiles = deleteFiles
-	return nil
-}
-func (d *lifecycleTestDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent, _ string, _ bool, _ *messages.StructuredMessage) error {
-	return nil
-}
-func (d *lifecycleTestDispatcher) DispatchAgentLogs(context.Context, *store.Agent, int) (string, error) {
-	return "", nil
-}
-func (d *lifecycleTestDispatcher) DispatchAgentExec(context.Context, *store.Agent, []string, int) (string, int, error) {
-	return "", 0, nil
-}
-func (d *lifecycleTestDispatcher) DispatchCheckAgentPrompt(context.Context, *store.Agent) (bool, error) {
-	d.checkPromptCalled.Add(1)
-	return d.checkPromptResult, nil
-}
-func (d *lifecycleTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*CreateDispatchResult, error) {
-	d.createCalled.Add(1)
-	return nil, nil
-}
-func (d *lifecycleTestDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
-	d.finalizeEnvCalled.Add(1)
-	d.lastFinalizeEnv = env
-	return nil, nil
-}
 
 func newLifecycleTestServer(t *testing.T) (*Server, *lifecycleTestDispatcher, store.Store) {
 	t.Helper()
@@ -127,34 +54,6 @@ func newLifecycleTestServer(t *testing.T) (*Server, *lifecycleTestDispatcher, st
 // The broker has no endpoint (simulates a NAT'd control-channel-only broker).
 func seedAgent(t *testing.T, cs store.Store) *store.Agent {
 	return seedAgentWithBrokerID(t, cs, uuid.NewString())
-}
-
-func seedAgentWithBrokerID(t *testing.T, cs store.Store, brokerID string) *store.Agent {
-	t.Helper()
-	ctx := context.Background()
-	proj := &store.Project{
-		ID:      uuid.NewString(),
-		Name:    "test-proj",
-		Slug:    "tp-" + uuid.NewString()[:8],
-		OwnerID: uuid.NewString(),
-	}
-	require.NoError(t, cs.CreateProject(ctx, proj))
-	broker := &store.RuntimeBroker{
-		ID:     brokerID,
-		Name:   "test-broker",
-		Slug:   "tb-" + uuid.NewString()[:8],
-		Status: "online",
-	}
-	require.NoError(t, cs.CreateRuntimeBroker(ctx, broker))
-	agent := &store.Agent{
-		ID:              uuid.NewString(),
-		Name:            "test-agent",
-		Slug:            "ta-" + uuid.NewString()[:8],
-		ProjectID:       proj.ID,
-		RuntimeBrokerID: brokerID,
-	}
-	require.NoError(t, cs.CreateAgent(ctx, agent))
-	return agent
 }
 
 func TestExecuteDispatch_Start(t *testing.T) {
@@ -252,36 +151,6 @@ func TestExecuteDispatch_MissingAgent(t *testing.T) {
 // =========================================================================
 // Deferred lifecycle integration test (originator side)
 // =========================================================================
-
-// deferredTestClient is a RuntimeBrokerClient that returns ErrLifecycleDeferred
-// for Start/Stop/Restart when the broker is "remote", and succeeds for "local".
-type deferredTestClient struct {
-	fakeHTTPClient
-	localBroker string
-	startCalled atomic.Int32
-}
-
-func (c *deferredTestClient) StartAgent(_ context.Context, brokerID, _, _, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _, _ bool, _ StartExtras) (*RemoteAgentResponse, error) {
-	c.startCalled.Add(1)
-	if brokerID != c.localBroker {
-		return nil, ErrLifecycleDeferred
-	}
-	return &RemoteAgentResponse{}, nil
-}
-
-func (c *deferredTestClient) StopAgent(_ context.Context, brokerID, _, _, _, _ string) error {
-	if brokerID != c.localBroker {
-		return ErrLifecycleDeferred
-	}
-	return nil
-}
-
-func (c *deferredTestClient) RestartAgent(_ context.Context, brokerID, _, _, _ string, _ map[string]string, _ StartExtras) (*RemoteAgentResponse, error) {
-	if brokerID != c.localBroker {
-		return nil, ErrLifecycleDeferred
-	}
-	return nil, nil
-}
 
 func TestDeferredStart_WritesIntentAndWaits(t *testing.T) {
 	ctx := context.Background()
@@ -684,32 +553,4 @@ func TestDeferredCheckPrompt_ReturnsResult(t *testing.T) {
 	hasPrompt, err := dispatcher.DispatchCheckAgentPrompt(ctx, agent)
 	require.NoError(t, err, "deferred check_prompt should succeed")
 	assert.True(t, hasPrompt, "should return true from result row")
-}
-
-// deferredDataOpTestClient returns ErrLifecycleDeferred for data ops when the
-// broker is not "local", simulating a cross-node dispatch.
-type deferredDataOpTestClient struct {
-	fakeHTTPClient
-	localBroker string
-}
-
-func (c *deferredDataOpTestClient) DeleteAgent(_ context.Context, brokerID, _, _, _ string, _ DeleteAgentOptions) error {
-	if brokerID != c.localBroker {
-		return ErrLifecycleDeferred
-	}
-	return nil
-}
-
-func (c *deferredDataOpTestClient) CheckAgentPrompt(_ context.Context, brokerID, _, _, _ string) (bool, error) {
-	if brokerID != c.localBroker {
-		return false, ErrLifecycleDeferred
-	}
-	return false, nil
-}
-
-func (c *deferredDataOpTestClient) CreateAgentWithGather(_ context.Context, brokerID, _ string, _ *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-	if brokerID != c.localBroker {
-		return nil, nil, ErrLifecycleDeferred
-	}
-	return nil, nil, nil
 }

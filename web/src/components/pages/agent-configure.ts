@@ -40,6 +40,14 @@ import type {
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { isValidTimeZone } from '../../utils/time.js';
+import { normalizeGcpModeForTarget, type GcpModeFields } from '../../shared/gcp-identity-state.js';
+import { assignStatusTarget, orderByAssignStatus } from '../../shared/gcp-sa-assign-status.js';
+import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
+import {
+  assignStatusStyles,
+  renderAssignStatusHelp,
+  renderServiceAccountOption,
+} from '../shared/gcp-sa-picker-options.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import '../shared/env-editor.js';
@@ -232,6 +240,12 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private branch = '';
   @state() private containerUser = '';
   @state() private authMethod = '';
+  /**
+   * The auth method the page loaded. An unchanged value is not echoed back
+   * (ptone/scion#4013): a stored "none" that the harness's PATCH validation
+   * rejects would otherwise fail every save.
+   */
+  private loadedAuthMethod = '';
   @state() private harnessConfig = '';
   @state() private telemetryEnabled = false;
   @state() private autoExposePortsEnabled = false;
@@ -324,6 +338,8 @@ export class ScionPageAgentConfigure extends LitElement {
    * explicit "passthrough" through the Hub's passthrough ownership gate).
    */
   @state() private gcpIdentityUserSet = false;
+  /** An explicit Block pick suspended by the Kubernetes rule; see normalizeGcpModeForTarget. */
+  private gcpUserBlockSuspended = false;
 
   /** Explanation text shared by the help-text slot and the disabled option's tooltip. */
   private static readonly gcpIdentityK8sHintText =
@@ -338,6 +354,32 @@ export class ScionPageAgentConfigure extends LitElement {
   private get verifiedGCPServiceAccounts(): GCPServiceAccount[] {
     return this.gcpServiceAccounts.filter((sa) => sa.verified);
   }
+
+  /** The selected account's mapping state on this agent's profile, when the hub reported one. */
+  private get selectedAssignStatus(): GCPServiceAccount['assignStatus'] {
+    if (!this.gcpServiceAccountId) return undefined;
+    return this.gcpServiceAccounts.find((sa) => sa.id === this.gcpServiceAccountId)?.assignStatus;
+  }
+
+  /**
+   * Loads the project's accounts with their mapping state on this agent's
+   * Kubernetes target (its runtime broker and profile, ptone/scion#4391),
+   * with the same guard and fallback as the Create Agent picker. The target
+   * is known only once the broker has loaded, so the state is asked for then.
+   */
+  private readonly gcpAccounts = new GCPServiceAccountsLoader({
+    projectId: () => this.agent?.projectId ?? '',
+    target: () =>
+      assignStatusTarget(
+        this.targetRuntimeIsKubernetesOnly,
+        this.agent?.runtimeBrokerId ?? '',
+        this.agent?.appliedConfig?.profile ?? ''
+      ),
+    accounts: () => this.gcpServiceAccounts,
+    setAccounts: (accounts) => {
+      this.gcpServiceAccounts = accounts;
+    },
+  });
 
   /**
    * Whether this agent's runtime broker/profile is reliably known to be
@@ -393,19 +435,10 @@ export class ScionPageAgentConfigure extends LitElement {
     </div>`;
   }
 
-  private async loadGCPServiceAccounts(projectId: string): Promise<void> {
+  private async loadGCPServiceAccounts(): Promise<void> {
+    // Non-critical: a failed fetch just won't show the assign option.
     this.gcpServiceAccounts = [];
-    try {
-      const res = await apiFetch(
-        `/api/v1/projects/${projectId}/gcp-service-accounts?includeHubScoped=true`
-      );
-      if (res.ok) {
-        const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
-        this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
-      }
-    } catch {
-      // Non-critical — just won't show assign option
-    }
+    await this.gcpAccounts.load();
   }
 
   /** Loads this agent's own runtime broker, to classify its runtime kind for the GCP Identity picker. */
@@ -457,6 +490,7 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   static override styles = css`
+    ${assignStatusStyles}
     :host {
       display: block;
     }
@@ -732,6 +766,11 @@ export class ScionPageAgentConfigure extends LitElement {
     if (changedProperties.has('targetBroker') || changedProperties.has('gcpMetadataMode')) {
       this.normalizeGcpModeForTarget();
     }
+    // The accounts' mapping state is for this agent's broker and profile:
+    // ask for it once they are known (ptone/scion#4391).
+    if (changedProperties.has('targetBroker') || changedProperties.has('agent')) {
+      void this.gcpAccounts.targetChanged();
+    }
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -742,30 +781,37 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   /**
-   * Corrects the *displayed* gcpMetadataMode away from "block" when this
-   * agent's target is reliably known to be Kubernetes (see
-   * targetRuntimeIsKubernetesOnly) — but only when "block" is this page's own
-   * placeholder default (gcpMetadataModeFromStorage is false), never when it
-   * reflects a real stored decision.
-   *
-   * Also clears gcpIdentityUserSet when it rewrites the mode, for the same
-   * reason as agent-create.ts's normalizeGcpModeForTarget: the target broker
-   * loads asynchronously, so a user could explicitly pick "Block" while it is
-   * still unknown (Block is enabled until targetRuntimeIsKubernetesOnly is
-   * confirmed true) and then have the broker resolve as Kubernetes-only out
-   * from under that choice. Without clearing the flag, Save/Start would send
-   * the auto-substituted "passthrough" as if the user had picked it for this
-   * target, through the Hub's passthrough ownership gate.
+   * Keeps the *displayed* gcpMetadataMode correct for this agent's target,
+   * with the shared normalizeGcpModeForTarget (the create page's rules): a
+   * value that came from storage (gcpMetadataModeFromStorage) is never
+   * rewritten, while this page's own "nothing configured" placeholder of
+   * "block" is shown as Passthrough on a known-Kubernetes target, and an
+   * explicit Block picked before the target broker loaded is suspended
+   * (gcpIdentityUserSet cleared), so Save/Start never sends a substituted
+   * value as if the user had picked it.
    */
   private normalizeGcpModeForTarget(): void {
+    const s: GcpModeFields = {
+      gcpMetadataMode: this.gcpMetadataMode,
+      gcpServiceAccountId: this.gcpServiceAccountId,
+      gcpIdentityUserSet: this.gcpIdentityUserSet,
+      gcpUserBlockSuspended: this.gcpUserBlockSuspended,
+      defaultGcpMetadataMode: 'block',
+      defaultGcpServiceAccountId: '',
+    };
     if (
-      this.gcpMetadataMode === 'block' &&
-      !this.gcpMetadataModeFromStorage &&
-      this.targetRuntimeIsKubernetesOnly
+      !normalizeGcpModeForTarget(
+        s,
+        this.targetRuntimeIsKubernetesOnly,
+        this.gcpMetadataModeFromStorage
+      )
     ) {
-      this.gcpMetadataMode = 'passthrough';
-      this.gcpIdentityUserSet = false;
+      return;
     }
+    this.gcpMetadataMode = s.gcpMetadataMode;
+    this.gcpServiceAccountId = s.gcpServiceAccountId;
+    this.gcpIdentityUserSet = s.gcpIdentityUserSet;
+    this.gcpUserBlockSuspended = s.gcpUserBlockSuspended;
   }
 
   override connectedCallback(): void {
@@ -818,7 +864,7 @@ export class ScionPageAgentConfigure extends LitElement {
         return;
       }
 
-      void this.loadGCPServiceAccounts(this.agent.projectId);
+      void this.loadGCPServiceAccounts();
       if (this.agent.runtimeBrokerId) {
         void this.loadTargetBroker(this.agent.runtimeBrokerId);
       }
@@ -866,6 +912,7 @@ export class ScionPageAgentConfigure extends LitElement {
     this.branch = ac?.branch || ic?.branch || '';
     this.containerUser = ic?.user || '';
     this.authMethod = ac?.harnessAuth || ic?.auth_selectedType || '';
+    this.loadedAuthMethod = this.authMethod;
     this.harnessConfig = ac?.harnessConfig || ic?.harness_config || '';
     this.telemetryEnabled = ic?.telemetry?.enabled ?? this.globalTelemetryDefault;
     const autoExpose = effectiveAutoExposePorts(
@@ -1030,7 +1077,11 @@ export class ScionPageAgentConfigure extends LitElement {
     if (model) config.model = model;
     config.thinking_level = this.thinkingLevel;
     if (this.image) config.image = this.image;
-    if (this.authMethod && this.authMethodSupported(this.authMethod))
+    if (
+      this.authMethod &&
+      this.authMethod !== this.loadedAuthMethod &&
+      this.authMethodSupported(this.authMethod)
+    )
       config.auth_selectedType = this.authMethod;
     if (this.task) config.task = this.task;
 
@@ -1710,6 +1761,7 @@ export class ScionPageAgentConfigure extends LitElement {
               | 'passthrough'
               | 'assign';
             this.gcpIdentityUserSet = true;
+            this.gcpUserBlockSuspended = false;
             if (this.gcpMetadataMode !== 'assign') {
               this.gcpServiceAccountId = '';
             }
@@ -1753,17 +1805,13 @@ export class ScionPageAgentConfigure extends LitElement {
                           e.target as HTMLElement & { value: string }
                         ).value;
                         this.gcpIdentityUserSet = true;
+                        this.gcpUserBlockSuspended = false;
                       }}
                     >
-                      ${this.verifiedGCPServiceAccounts.map(
-                        (sa) =>
-                          html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
-                            'hub'
-                              ? ' (Hub)'
-                              : ''}
-                          </sl-option>`
+                      ${orderByAssignStatus(this.verifiedGCPServiceAccounts).map((sa) =>
+                        renderServiceAccountOption(sa)
                       )}
+                      ${renderAssignStatusHelp(this.selectedAssignStatus)}
                     </sl-select>
                   `
                 : html`

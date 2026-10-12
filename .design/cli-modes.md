@@ -170,7 +170,8 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `grove list` | Y | - |
 | `grove prune` | Y | - |
 | `grove reconnect` | Y | - |
-| `grove service-accounts` (all) | Y | - |
+| `grove service-accounts` (all except `show`) | Y | - |
+| `project service-accounts show` | Y | Y |
 | `harness-config` (all) | Y | - |
 | `hub status` | Y | - |
 | `hub groves` (all) | Y | - |
@@ -209,10 +210,14 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `shared-dir create` | Y | - |
 | `shared-dir remove` | Y | - |
 | `shared-dir info` | Y | Y |
+| `ssh` | Y | - |
+| `ssh-config` | Y | - |
 | `start` | Y | Y |
 | `stop` | Y | Y |
 | `sync` | Y | - |
 | `templates` (all) | Y | - |
+| `tunnel` | Y | - |
+| `tunnel status` | Y | - |
 | `version` | Y | Y |
 | `help` | Y | Y |
 | `completion` | Y | - |

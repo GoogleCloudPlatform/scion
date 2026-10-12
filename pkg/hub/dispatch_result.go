@@ -50,9 +50,14 @@ type dispatchBrokerError struct {
 //     chain (see dispatchHubSentinels), such as a delete holding the row;
 //   - AgentDeleted reports a queued start or restart refused because the
 //     agent is soft-deleted (errQueuedStartAgentDeleted, ptone/scion#4182);
-//     it is rebuilt alongside HubErrors.
+//     it is rebuilt alongside HubErrors;
+//   - SecretResolution reports a start, restart, create or finalize_env
+//     the executing node stopped because the agent's secrets could not be
+//     resolved, or its stored environment settings could not be read
+//     (*secretResolutionError); the verb is rebuilt from the op and the
+//     source from SecretResolutionSource.
 //
-// They are rebuilt in that order of precedence.
+// They are rebuilt in that order of precedence, after SecretResolution.
 type dispatchFailureEnvelope struct {
 	BrokerError     *dispatchBrokerError           `json:"brokerError,omitempty"`
 	EnvStillMissing *RemoteEnvRequirementsResponse `json:"envStillMissing,omitempty"`
@@ -64,6 +69,29 @@ type dispatchFailureEnvelope struct {
 	// AgentDeleted is set when errQueuedStartAgentDeleted is in the
 	// executing node's error chain.
 	AgentDeleted bool `json:"agentDeleted,omitempty"`
+	// IdentityNotMapped is the hub's identity_not_mapped refusal from the
+	// broker's service account report, raised by the executing node's
+	// dispatcher (ptone/scion#3329 phase 4b), rebuilt as the typed
+	// *identityNotMappedPrecheck on the requesting node.
+	IdentityNotMapped *dispatchIdentityNotMapped `json:"identityNotMapped,omitempty"`
+	// SecretResolution is set when a *secretResolutionError is in the
+	// executing node's error chain. Only the marker travels: the backend
+	// error stays in the executing node's log, and the requesting node
+	// rebuilds the fixed message from the row's op.
+	SecretResolution bool `json:"secretResolution,omitempty"`
+	// SecretResolutionSource is the error's Source when it is not the
+	// secret backend ("env_settings"); empty means secrets. A node that
+	// does not know the field rebuilds the secrets message.
+	SecretResolutionSource string `json:"secretResolutionSource,omitempty"`
+}
+
+// dispatchIdentityNotMapped is the wire form of an
+// *identityNotMappedPrecheck.
+type dispatchIdentityNotMapped struct {
+	Account   string `json:"account"`
+	Profile   string `json:"profile"`
+	Broker    string `json:"broker,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // dispatchRuntimeTargetRefusal is the wire form of a *RuntimeTargetRefusal.
@@ -131,8 +159,18 @@ func dispatchFailureResult(execErr error) string {
 	if errors.Is(execErr, errQueuedStartAgentDeleted) {
 		env.AgentDeleted = true
 	}
+	var precheck *identityNotMappedPrecheck
+	if errors.As(execErr, &precheck) && precheck != nil {
+		env.IdentityNotMapped = &dispatchIdentityNotMapped{
+			Account: precheck.Account, Profile: precheck.Profile, Broker: precheck.Broker, Namespace: precheck.Namespace,
+		}
+	}
+	if isSecretResolutionError(execErr) {
+		env.SecretResolution = true
+		env.SecretResolutionSource = string(secretResolutionSourceOf(execErr))
+	}
 	if env.BrokerError == nil && env.EnvStillMissing == nil && len(env.HubErrors) == 0 && env.RuntimeTargetRefusal == nil &&
-		!env.AgentDeleted {
+		!env.AgentDeleted && env.IdentityNotMapped == nil && !env.SecretResolution {
 		return ""
 	}
 	out, err := json.Marshal(env)
@@ -149,10 +187,22 @@ func dispatchFailureResult(execErr error) string {
 // the row's error text is returned, as before.
 func dispatchFailureError(d *store.BrokerDispatch) error {
 	env := decodeDispatchFailure(d.Result)
+	if env != nil && env.SecretResolution {
+		return fmt.Errorf("dispatch %s failed: %w", d.Op, &secretResolutionError{
+			Verb:   secretResolutionVerb(d.Op),
+			Source: resolutionSource(env.SecretResolutionSource),
+		})
+	}
 	if env != nil && env.RuntimeTargetRefusal != nil && env.RuntimeTargetRefusal.Code != "" {
 		r := env.RuntimeTargetRefusal
 		return fmt.Errorf("dispatch %s failed: %w", d.Op, &RuntimeTargetRefusal{
 			Code: r.Code, Status: r.Status, Message: r.Message, Details: r.Details,
+		})
+	}
+	if env != nil && env.IdentityNotMapped != nil && env.IdentityNotMapped.Account != "" {
+		r := env.IdentityNotMapped
+		return fmt.Errorf("dispatch %s failed: %w", d.Op, &identityNotMappedPrecheck{
+			Account: r.Account, Profile: r.Profile, Broker: r.Broker, Namespace: r.Namespace,
 		})
 	}
 	if se := brokerErrorFromEnvelope(env); se != nil {

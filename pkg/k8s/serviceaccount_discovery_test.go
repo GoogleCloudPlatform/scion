@@ -75,3 +75,33 @@ func TestFindServiceAccountsForGSA_ListError(t *testing.T) {
 		t.Errorf("err = %v, want the forbidden list error", err)
 	}
 }
+
+func TestServiceAccountsByGSA(t *testing.T) {
+	const gsa = "worker@proj.iam.gserviceaccount.com"
+	client := fake.NewClientset(
+		testKSA("agents", "b-ksa", gsa),
+		testKSA("agents", "a-ksa", " Worker@Proj.iam.gserviceaccount.com "),
+		testKSA("agents", "other", "other@proj.iam.gserviceaccount.com"),
+		testKSA("agents", "plain", ""),
+		testKSA("agents", "blank", "  "),
+		testKSA("elsewhere", "far-ksa", gsa),
+	)
+	got, err := ServiceAccountsByGSA(context.Background(), client, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		gsa:                                  {"a-ksa", "b-ksa"},
+		"other@proj.iam.gserviceaccount.com": {"other"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	client.PrependReactor("list", "serviceaccounts", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "serviceaccounts"}, "", errors.New("denied"))
+	})
+	if _, err := ServiceAccountsByGSA(context.Background(), client, "agents"); !apierrors.IsForbidden(err) {
+		t.Errorf("err = %v, want the forbidden list error", err)
+	}
+}

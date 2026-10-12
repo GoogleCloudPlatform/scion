@@ -104,8 +104,6 @@ type lifecycleFaultStore struct {
 	inTx        bool
 }
 
-var errInjectedLookup = errors.New("injected lookup fault")
-
 func (f *lifecycleFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
 	if !f.fault.Active() {
 		return f.Store.WithTx(ctx, fn)
@@ -567,24 +565,6 @@ func reincarnateByUser(t *testing.T, body ReincarnateAgentRequest, identity func
 	return srv, s, user, agent, old, edges[0], id
 }
 
-// assertReincarnateReplacedEdge asserts the reincarnation claim of agentID
-// deactivated exactly the edge oldID, with cause reincarnate_replaced, under
-// the operation ID its agent_reincarnate_claim audit records. It reads only.
-func assertReincarnateReplacedEdge(t *testing.T, s store.Store, agentID, oldID string) {
-	t.Helper()
-	sum := auditSummary(t, s, mutationTypeAgentReincarnateClaim, agentID)
-	opID, _ := sum["op_id"].(string)
-	require.NotEmpty(t, opID, "the claim audit records an operation ID")
-	replaced, err := s.GetDeactivatedDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, agentID,
-		store.EdgeDeactivationReincarnateReplaced, opID)
-	require.NoError(t, err)
-	ids := make([]string, 0, len(replaced))
-	for _, e := range replaced {
-		ids = append(ids, e.ID)
-	}
-	assert.Equal(t, []string{oldID}, ids, "the replaced edge is deactivated under the claim's operation ID")
-}
-
 // A reincarnation by a session user that changes the role re-records the
 // edge with the user as delegator, session provenance and a principal
 // ceiling.
@@ -624,41 +604,6 @@ func TestReincarnateByUserKeepsEdgeWithoutRoleChange(t *testing.T) {
 			assertEdgeKept(t, s, agent.ID, old, e)
 		})
 	}
-}
-
-// assertEdgeKept asserts the reincarnation of agentID kept the edge old
-// (got is the agent's single edge afterwards): same edge, delegator,
-// provenance and ceiling; no edge deactivated with cause
-// reincarnate_replaced; and the claim audit reports re_recorded=false and
-// edges_replaced=0, the self-reincarnate shape.
-func assertEdgeKept(t *testing.T, s store.Store, agentID string, old, got *store.DelegationEdge) {
-	t.Helper()
-	assert.Equal(t, old.ID, got.ID, "the edge is kept")
-	assert.True(t, got.Active)
-	assert.Equal(t, old.DelegatorType, got.DelegatorType)
-	assert.Equal(t, old.DelegatorID, got.DelegatorID)
-	assert.Equal(t, old.AuthorityProvenance, got.AuthorityProvenance)
-	assert.Equal(t, old.Kind, got.Kind, "ceiling kind")
-	sum := auditSummary(t, s, mutationTypeAgentReincarnateClaim, agentID)
-	assert.Equal(t, false, sum["re_recorded"])
-	assert.EqualValues(t, 0, sum["edges_replaced"])
-	opID, _ := sum["op_id"].(string)
-	require.NotEmpty(t, opID)
-	replaced, err := s.GetDeactivatedDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, agentID,
-		store.EdgeDeactivationReincarnateReplaced, opID)
-	require.NoError(t, err)
-	assert.Empty(t, replaced, "no edge is deactivated")
-}
-
-// assertCeilingFromSource asserts got is the ceiling sourceEffectCeiling
-// derives for the requester: kind, version and permission IDs.
-func assertCeilingFromSource(t *testing.T, srv *Server, requester Identity, got store.EffectCeiling) {
-	t.Helper()
-	want, _, err := srv.authzService.sourceEffectCeiling(context.Background(), requester)
-	require.NoError(t, err)
-	assert.Equal(t, want.Kind, got.Kind, "ceiling kind")
-	assert.Equal(t, want.Version, got.Version, "ceiling version")
-	assert.Equal(t, want.PermissionIDs, got.PermissionIDs, "ceiling permission IDs")
 }
 
 // --- project delete ---

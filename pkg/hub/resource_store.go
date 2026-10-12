@@ -18,10 +18,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -58,9 +61,12 @@ type ResourceRecord struct {
 	StorageURI    string
 	StorageBucket string
 	StoragePath   string
-	Files         []store.TemplateFile
-	Status        string
-	SourceURL     string
+	// Layout is the template storage layout (store.Template.Layout); empty
+	// for other kinds.
+	Layout    string
+	Files     []store.TemplateFile
+	Status    string
+	SourceURL string
 }
 
 // Resource lifecycle states. Templates and harness-configs use identical string
@@ -106,6 +112,38 @@ type resourcePersistence interface {
 // harness-configs (ptone/scion#4217).
 type preUploadChecker interface {
 	CheckDir(ctx context.Context, dir string, files []transfer.FileInfo) error
+}
+
+// resourceFileUploader is an optional resourcePersistence extension that
+// replaces the shared path upload (uploadResourceFiles). templatePersistence
+// implements it to write content-addressed blobs (ptone/scion#4221); a kind
+// that implements it also skips the shared reconcile, because its stale
+// objects are handled by garbage collection rather than a prefix sweep.
+// The store calls it where it would call uploadResourceFiles, in both the
+// create and the existing-row branches, before the persistence's Update
+// commits the manifest.
+type resourceFileUploader interface {
+	UploadFiles(ctx context.Context, stor storage.Storage, storagePath string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error)
+}
+
+// uploadFiles uploads a collected resource directory: through the
+// persistence's UploadFiles when it has one, otherwise one object per file
+// under storagePath.
+func (rs *ResourceStore) uploadFiles(ctx context.Context, stor storage.Storage, storagePath string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error) {
+	if u, ok := rs.pers.(resourceFileUploader); ok {
+		return u.UploadFiles(ctx, stor, storagePath, files)
+	}
+	return uploadResourceFiles(ctx, stor, storagePath, files, rs.pers.Label())
+}
+
+// reconcileStorage deletes objects under storagePath that the upload did
+// not write, except for kinds with their own UploadFiles (see
+// resourceFileUploader).
+func (rs *ResourceStore) reconcileStorage(ctx context.Context, stor storage.Storage, storagePath, name string, keep map[string]struct{}) {
+	if _, ok := rs.pers.(resourceFileUploader); ok {
+		return
+	}
+	reconcileResourceStorage(ctx, stor, storagePath, name, keep, rs.srv.resourceLog, rs.pers.Label())
 }
 
 // checkDir runs the persistence's optional pre-upload check.
@@ -204,7 +242,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 			return false, err
 		}
 
-		uploaded, _, err := uploadResourceFiles(ctx, stor, storagePath, files, p.Label())
+		uploaded, _, err := rs.uploadFiles(ctx, stor, rec.StoragePath, files)
 		if err != nil {
 			return false, err
 		}
@@ -233,15 +271,16 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		storagePath = storage.ResourceStoragePath(rs.hubID, kind, existing.Scope, existing.ScopeID, existing.Slug)
 	}
 
-	uploaded, written, err := uploadResourceFiles(ctx, stor, storagePath, files, p.Label())
+	uploaded, written, err := rs.uploadFiles(ctx, stor, storagePath, files)
 	if err != nil {
 		return false, err
 	}
 
 	// Reconcile storage: drop objects no longer in the manifest so removed files
-	// don't linger. (Templates already did this on sync; harness-configs gain it
-	// by routing through the shared path — a removed-file cleanup fix.)
-	reconcileResourceStorage(ctx, stor, storagePath, existing.Name, written, srv.resourceLog, p.Label())
+	// don't linger. (Harness-configs gain it by routing through the shared
+	// path — a removed-file cleanup fix. Templates store blobs, which the
+	// blob garbage collector removes instead.)
+	rs.reconcileStorage(ctx, stor, storagePath, existing.Name, written)
 
 	newHash := computeContentHash(uploaded)
 	changed := newHash != existing.ContentHash
@@ -272,6 +311,9 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 type templatePersistence struct {
 	s     *Server
 	model *store.Template
+	// written lists the blob objects UploadFiles wrote, which the commit in
+	// Update does not check again.
+	written map[string]bool
 }
 
 func (p *templatePersistence) Kind() storage.ResourceKind { return storage.ResourceKindTemplate }
@@ -298,11 +340,16 @@ func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, d
 		ScopeID:       rec.ScopeID,
 		ProjectID:     rec.ScopeID, // deprecated alias kept for compatibility
 		Status:        rec.Status,
-		StoragePath:   rec.StoragePath,
 		StorageBucket: rec.StorageBucket,
-		StorageURI:    rec.StorageURI,
 		SourceURL:     rec.SourceURL,
 	}
+	// New templates are created in the blob layout, with a row-unique
+	// storage path (ptone/scion#4221).
+	t.Layout = store.TemplateLayoutBlobs
+	t.StoragePath = p.s.templateBlobStoragePath(t)
+	t.StorageURI = storage.StorageURIForPath(rec.StorageBucket, t.StoragePath)
+	rec.StoragePath = t.StoragePath
+	rec.StorageURI = t.StorageURI
 	// For user-scoped templates imported via the resource pipeline, set
 	// OwnerID and CreatedBy from the scope ID (which IS the user ID for
 	// user scope). This mirrors handleCreateTemplate's behavior.
@@ -324,12 +371,32 @@ func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, d
 func (p *templatePersistence) Update(ctx context.Context, rec *ResourceRecord, dir string) error {
 	t := p.model
 	prevStatus, prevSourceURL, prevStoragePath := t.Status, t.SourceURL, t.StoragePath
-	t.Status = rec.Status
-	if rec.SourceURL != "" {
-		t.SourceURL = rec.SourceURL
+	apply := func(t *store.Template) {
+		t.Status = rec.Status
+		if rec.SourceURL != "" {
+			t.SourceURL = rec.SourceURL
+		}
+		p.ensureStoragePath(t)
 	}
-	p.ensureStoragePath(t)
-	if err := p.s.commitTemplateFiles(ctx, t, rec.Files, commitOpts{dir: dir}); err != nil {
+	apply(t)
+	err := p.s.commitTemplateFiles(ctx, t, rec.Files, commitOpts{dir: dir, written: p.written})
+	if errors.Is(err, store.ErrTemplateConflict) {
+		// Another commit changed the row since it was read: re-read it and
+		// commit the directory's files once more against the fresh row
+		// (ptone/scion#4221). Blobs are idempotent, so nothing is
+		// re-uploaded; a blob missing under the fresh row's path is written
+		// from dir.
+		var fresh *store.Template
+		fresh, err = p.rereadAfterConflict(ctx, t)
+		if err == nil {
+			apply(fresh)
+			if err = p.s.commitTemplateFiles(ctx, fresh, rec.Files, commitOpts{dir: dir, written: p.written}); err == nil {
+				p.model = fresh
+				t = fresh
+			}
+		}
+	}
+	if err != nil {
 		t.Status, t.SourceURL, t.StoragePath = prevStatus, prevSourceURL, prevStoragePath
 		return fmt.Errorf("%s: template %q not updated: %w", p.Label(), t.Name, err)
 	}
@@ -337,10 +404,23 @@ func (p *templatePersistence) Update(ctx context.Context, rec *ResourceRecord, d
 	return nil
 }
 
+// rereadAfterConflict reloads t after a commit lost its compare-and-swap,
+// logging the retry. The second conflict, if any, is returned to the caller,
+// which logs it and skips the resource.
+func (p *templatePersistence) rereadAfterConflict(ctx context.Context, t *store.Template) (*store.Template, error) {
+	p.s.templateLog.Warn(p.Label()+": template changed during commit; re-reading and retrying once",
+		"template", t.Name, "id", t.ID)
+	return p.s.store.GetTemplate(ctx, t.ID)
+}
+
 // OnHashMatch re-derives the template's index from dir when the content is
 // unchanged but the stored derived fields differ from what the files give
 // (a row written before a derived field existed, or before the derivation
-// changed). The re-derivation goes through commitTemplateFiles.
+// changed). The re-derivation goes through commitTemplateFiles. A commit
+// conflict is retried once against the re-read row while that row still has
+// the directory's content hash; when it no longer does, another writer has
+// replaced the content and there is nothing left to re-derive here, so the
+// resource is skipped.
 func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceRecord, dir string) (bool, error) {
 	t := p.model
 	idx := deriveTemplateIndexFromDir(dir, t.Name)
@@ -349,7 +429,25 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 	}
 	prevStoragePath := t.StoragePath
 	p.ensureStoragePath(t)
-	if err := p.s.commitTemplateFiles(ctx, t, t.Files, commitOpts{dir: dir}); err != nil {
+	err := p.s.commitTemplateFiles(ctx, t, t.Files, commitOpts{dir: dir})
+	if errors.Is(err, store.ErrTemplateConflict) {
+		var fresh *store.Template
+		fresh, err = p.rereadAfterConflict(ctx, t)
+		if err == nil {
+			if fresh.ContentHash != rec.ContentHash {
+				p.s.templateLog.Warn(p.Label()+": template content replaced by another commit; skipping re-derive",
+					"template", t.Name, "id", t.ID)
+				t.StoragePath = prevStoragePath
+				return false, nil
+			}
+			p.ensureStoragePath(fresh)
+			if err = p.s.commitTemplateFiles(ctx, fresh, fresh.Files, commitOpts{dir: dir}); err == nil {
+				p.model = fresh
+				t = fresh
+			}
+		}
+	}
+	if err != nil {
 		t.StoragePath = prevStoragePath
 		return false, fmt.Errorf("%s: failed to re-derive template %q: %w", p.Label(), t.Name, err)
 	}
@@ -357,6 +455,93 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 	p.s.templateLog.Info(p.Label()+": re-derived template index",
 		"template", t.Name, "harness", t.Harness, "defaultHarnessConfig", t.DefaultHarnessConfig)
 	return false, nil
+}
+
+// UploadFiles writes the directory's files as blobs under the template's
+// content base (its own path for a blob row, the path its commit migrates it
+// to for a legacy row). Blobs the row already references are skipped while
+// they are present; every other blob is written, which also refreshes one that was present but
+// unreferenced, so the garbage collector cannot remove it before the commit
+// (F5b). It never writes <StoragePath>/<path>, so a co-located broker's
+// direct read of a blob row keeps missing.
+func (p *templatePersistence) UploadFiles(ctx context.Context, stor storage.Storage, _ string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error) {
+	t := p.model
+	if t == nil {
+		return nil, nil, fmt.Errorf("%s: no template loaded for upload", p.Label())
+	}
+	base := p.s.templateContentBase(t)
+	referenced := make(map[string]bool)
+	if isBlobLayout(t) {
+		for _, f := range t.Files {
+			if hex, ok := templateBlobHex(f.Hash); ok {
+				referenced[hex] = true
+			}
+		}
+	}
+
+	type job struct {
+		fi       transfer.FileInfo
+		blobPath string
+	}
+	var jobs []job
+	seen := make(map[string]bool)
+	for _, fi := range files {
+		hex, ok := templateBlobHex(fi.Hash)
+		if !ok {
+			return nil, nil, fmt.Errorf("%s: file %s has no content hash", p.Label(), fi.Path)
+		}
+		blobPath := templateBlobPath(base, hex)
+		if seen[blobPath] {
+			continue
+		}
+		if referenced[hex] {
+			// A blob the row references is skipped only while it is
+			// present, so a forced sync or a storage repair restores a
+			// missing one.
+			exists, err := stor.Exists(ctx, blobPath)
+			if err != nil {
+				return nil, nil, fmt.Errorf("%s: failed to check blob of %s: %w", p.Label(), fi.Path, err)
+			}
+			if exists {
+				continue
+			}
+		}
+		seen[blobPath] = true
+		jobs = append(jobs, job{fi: fi, blobPath: blobPath})
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(fileUploadConcurrency)
+	for _, j := range jobs {
+		j := j
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+			data, err := os.ReadFile(j.fi.FullPath)
+			if err != nil {
+				return fmt.Errorf("%s: failed to open file %s: %w", p.Label(), j.fi.Path, err)
+			}
+			if transfer.HashBytes(data) != j.fi.Hash {
+				return fmt.Errorf("%s: file %s changed while it was uploaded", p.Label(), j.fi.Path)
+			}
+			if err := uploadTemplateBlob(gctx, stor, j.blobPath, j.fi.Hash, data); err != nil {
+				return fmt.Errorf("%s: failed to upload file %s: %w", p.Label(), j.fi.Path, err)
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, nil, err
+	}
+
+	p.written = make(map[string]bool, len(jobs))
+	written := make(map[string]struct{}, len(jobs))
+	for _, j := range jobs {
+		p.written[j.blobPath] = true
+		written[j.blobPath] = struct{}{}
+	}
+	return toResourceFiles(files), written, nil
 }
 
 // CheckDir refuses a template directory that bundles a harness-config with
@@ -415,6 +600,7 @@ func templateToRecord(t *store.Template) *ResourceRecord {
 		StorageURI:    t.StorageURI,
 		StorageBucket: t.StorageBucket,
 		StoragePath:   t.StoragePath,
+		Layout:        t.Layout,
 		Files:         t.Files,
 		Status:        t.Status,
 		SourceURL:     t.SourceURL,

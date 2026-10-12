@@ -369,65 +369,6 @@ func newHubDeliveryNoItemGrantIdentity(t *testing.T, f *goldenFixture, agentID s
 	return h
 }
 
-// newDeliverRoleDefinition creates a minimal system-scope custom role
-// naming only secret.deliver. The built-in super-admin role also holds it
-// (through allPermissionIDs), but super-admin is direct-user-only
-// (store/entadapter's directUserOnlyRoles) and cannot be bound to an agent
-// or a group, so a role binding onto agent:<C> or a group needs its own
-// role instead.
-func newDeliverRoleDefinition(t *testing.T, s store.Store) *store.RoleDefinition {
-	t.Helper()
-	rd, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
-		Name:        "hd-role-only-deliver-" + tid(t.Name())[:8],
-		Description: "holds secret.deliver only, for the role-does-not-substitute fixture",
-		ScopeType:   store.RoleScopeSystem,
-		Permissions: []string{"secret.deliver"},
-	})
-	require.NoError(t, err)
-	return rd
-}
-
-// bindDeliverRoleToAgent gives agentID a system-scope role binding,
-// naming only secret.deliver, directly.
-func bindDeliverRoleToAgent(t *testing.T, s store.Store, agentID string) {
-	t.Helper()
-	ctx := context.Background()
-	rd := newDeliverRoleDefinition(t, s)
-	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalAgent,
-		PrincipalID:      agentID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        store.SystemReconcileCreatedBy,
-	})
-	require.NoError(t, err)
-}
-
-// bindDeliverRoleToAgentGroup gives agentID the same role indirectly,
-// through membership in a group holding the system-scope role binding
-// (authorizationPrincipals adds GetEffectiveGroupsForAgent to the principal
-// closure, authz.go).
-func bindDeliverRoleToAgentGroup(t *testing.T, s store.Store, groupID, agentID string) {
-	t.Helper()
-	ctx := context.Background()
-	require.NoError(t, s.CreateGroup(ctx, &store.Group{
-		ID: groupID, Name: "hub delivery role-only group", Slug: "hd-role-only-" + groupID,
-		GroupType: store.GroupTypeExplicit,
-	}))
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID: groupID, MemberType: store.GroupMemberTypeAgent, MemberID: agentID, Role: store.GroupMemberRoleMember,
-	}))
-	rd := newDeliverRoleDefinition(t, s)
-	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalGroup,
-		PrincipalID:      groupID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        store.SystemReconcileCreatedBy,
-	})
-	require.NoError(t, err)
-}
-
 // TestHubDelivery_RoleGrantExcludedNonExplain pins the role-does-not-
 // substitute rule without Explain: a role binding naming secret.deliver is
 // excluded by Step 8b even when the caller never asks for the
@@ -718,6 +659,10 @@ func TestHubDelivery_PermissionSetMatchesDeliverRegistry(t *testing.T) {
 // comments, keyed by file base name.
 func hubPackageSyntax(t *testing.T) map[string]*ast.File {
 	t.Helper()
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards hubDeliveryIdentity construction, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards hubDeliveryIdentity construction and context setters in functions that handle it, which identity.go and identity_credential.go do not contain.
 	names, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	require.NotEmpty(t, names)

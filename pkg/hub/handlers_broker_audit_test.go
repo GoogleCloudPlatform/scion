@@ -36,22 +36,6 @@ import (
 // registration, operation=register or operation=reregister.
 // ============================================================================
 
-func installBrokerAuditCapture(srv *Server) *mockAuditLogger {
-	m := &mockAuditLogger{}
-	srv.SetAuditLogger(m)
-	return m
-}
-
-func brokerAuditEventsOfType(m *mockAuditLogger, eventType BrokerAuthEventType) []*BrokerAuthEvent {
-	var out []*BrokerAuthEvent
-	for _, e := range m.brokerEvents {
-		if e.EventType == eventType {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
 // assertNoSecretInDetails fails when any detail value contains one of the
 // given secret strings.
 func assertNoSecretInDetails(t *testing.T, details map[string]string, secrets ...string) {
@@ -69,6 +53,7 @@ func assertNoSecretInDetails(t *testing.T, details map[string]string, secrets ..
 }
 
 func TestBrokerAudit_HubTokenRegistrationRecordsCredential(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	audit := installBrokerAuditCapture(srv)
 	member := newHubMemberUser(t, s, "audit-hubtoken-member")
@@ -102,6 +87,7 @@ func TestBrokerAudit_HubTokenRegistrationRecordsCredential(t *testing.T) {
 }
 
 func TestBrokerAudit_SessionReregistrationRecordsCredential(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	audit := installBrokerAuditCapture(srv)
 	owner := newHubMemberUser(t, s, "audit-session-owner")
@@ -125,6 +111,7 @@ func TestBrokerAudit_SessionReregistrationRecordsCredential(t *testing.T) {
 }
 
 func TestBrokerAudit_DeniedRegistrationRecordsNoEvent(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	audit := installBrokerAuditCapture(srv)
 	owner := newHubMemberUser(t, s, "audit-denied-owner")
@@ -139,6 +126,7 @@ func TestBrokerAudit_DeniedRegistrationRecordsNoEvent(t *testing.T) {
 }
 
 func TestBrokerAudit_SessionRotationRecordsCredential(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	audit := installBrokerAuditCapture(srv)
 	owner := newHubMemberUser(t, s, "audit-rotate-owner")
@@ -160,6 +148,7 @@ func TestBrokerAudit_SessionRotationRecordsCredential(t *testing.T) {
 }
 
 func TestBrokerAudit_SelfRotationRecordsBrokerCredential(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	audit := installBrokerAuditCapture(srv)
 	broker, key := newOnboardingSigningBroker(t, s, "audit-self-rotate")
@@ -185,6 +174,7 @@ func TestBrokerAudit_SelfRotationRecordsBrokerCredential(t *testing.T) {
 // side of the association); the unlink uses a project token that
 // carries project:update. Each event records its own credential.
 func TestBrokerAudit_SessionLinkAndProjectTokenUnlinkRecordCredential(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	audit := installBrokerAuditCapture(srv)
@@ -237,10 +227,12 @@ func TestBrokerAudit_SessionLinkAndProjectTokenUnlinkRecordCredential(t *testing
 }
 
 func TestBrokerAuditCredentialDetails_NoCredential(t *testing.T) {
+	t.Parallel()
 	assert.Empty(t, brokerAuditCredentialDetails(context.Background()))
 }
 
 func TestMergeBrokerAuditDetails(t *testing.T) {
+	t.Parallel()
 	base := map[string]string{"credential_kind": "uat", "projectId": "caller-supplied"}
 	got := mergeBrokerAuditDetails(base, "projectId", "p-1", "operation", "register")
 	assert.Equal(t, map[string]string{"credential_kind": "uat", "projectId": "p-1", "operation": "register"}, got)
@@ -264,6 +256,7 @@ func assertSessionLinkEvent(t *testing.T, e *BrokerAuthEvent, brokerID, projectI
 }
 
 func TestBrokerAudit_ProjectRegisterLinkRecordsCredential(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "audit-link-on-register")
 	audit := installBrokerAuditCapture(f.srv)
 
@@ -282,6 +275,7 @@ func TestBrokerAudit_ProjectRegisterLinkRecordsCredential(t *testing.T) {
 }
 
 func TestBrokerAudit_ProjectRegisterDeniedLinkRecordsNoEvent(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "audit-link-on-register-denied")
 	audit := installBrokerAuditCapture(f.srv)
 
@@ -294,6 +288,7 @@ func TestBrokerAudit_ProjectRegisterDeniedLinkRecordsNoEvent(t *testing.T) {
 }
 
 func TestBrokerAudit_EmbeddedRegisterRecordsCredential(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		existing  bool
@@ -343,6 +338,7 @@ func TestBrokerAudit_EmbeddedRegisterRecordsCredential(t *testing.T) {
 }
 
 func TestBrokerAudit_AgentCreateLinkRecordsCredential(t *testing.T) {
+	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
 	audit := installBrokerAuditCapture(f.srv)
 
@@ -358,6 +354,7 @@ func TestBrokerAudit_AgentCreateLinkRecordsCredential(t *testing.T) {
 }
 
 func TestBrokerAudit_BrokerDeleteUnlinkRecordsCredential(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	audit := installBrokerAuditCapture(srv)

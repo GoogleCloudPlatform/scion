@@ -195,8 +195,9 @@ func buildTestTree() *cobra.Command {
 		project.AddCommand(&cobra.Command{Use: name})
 	}
 	projectSA := &cobra.Command{Use: "service-accounts"}
-	projectSA.AddCommand(&cobra.Command{Use: "add"})
-	projectSA.AddCommand(&cobra.Command{Use: "list"})
+	for _, name := range []string{"add", "list", "show", "mint", "verify", "remove"} {
+		projectSA.AddCommand(&cobra.Command{Use: name})
+	}
 	project.AddCommand(projectSA)
 	root.AddCommand(project)
 
@@ -310,9 +311,11 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"notifications.unsubscribe", "notifications.update",
 		// "project" itself stays allowed (mirrors the real agentAllowed map,
 		// which permits bare "project" so "project.skills" routes through
-		// it), even though none of its subcommands in this fake tree are
-		// agent-allowed and so are stripped below.
+		// it). Of its subcommands in this fake tree only the read-only
+		// project service-accounts show is agent-allowed.
 		"project",
+		// Only the read-only show subcommand of project service-accounts.
+		"project.service-accounts", "project.service-accounts.show",
 		"resume",
 		"schedule", "schedule.cancel", "schedule.create", "schedule.create-recurring",
 		"schedule.delete", "schedule.get", "schedule.history", "schedule.list",
@@ -337,10 +340,11 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"attach", "broadcast", "broker", "cdw", "clean", "completion", "config", "doctor",
 		"hub",
 		"init", "messages", "restore", "server", "sync",
-		// "project" itself remains (see expected list above), but none of
-		// its subcommands are agent-allowed.
+		// "project" itself remains (see expected list above), and of
+		// project service-accounts only show is agent-allowed.
 		"project.init", "project.list", "project.prune", "project.reconnect",
-		"project.service-accounts", "project.service-accounts.add", "project.service-accounts.list",
+		"project.service-accounts.add", "project.service-accounts.list", "project.service-accounts.mint",
+		"project.service-accounts.verify", "project.service-accounts.remove",
 	}
 	for _, cmd := range absent {
 		assert.NotContains(t, remaining, cmd, "agent mode should remove %s", cmd)
@@ -630,4 +634,43 @@ func TestAgentModeAllowsKeys(t *testing.T) {
 
 	assert.Equal(t, []string{"keys"}, collectCommandNames(root),
 		"agent mode must keep the keys command")
+}
+
+// TestSSHCommands_HumanOnly pins that ssh and ssh-config are absent in agent
+// mode: they are not in agentAllowed and are removed from the real tree.
+func TestSSHCommands_HumanOnly(t *testing.T) {
+	for _, name := range []string{"ssh", "ssh-config"} {
+		t.Run(name, func(t *testing.T) {
+			assert.False(t, agentAllowed[name], "agentAllowed must not contain %s", name)
+			real := resolveCommandPath(rootCmd, name)
+			require.NotNil(t, real, "%s must exist in the real command tree", name)
+
+			root := &cobra.Command{Use: "scion"}
+			root.AddCommand(cloneCommandShape(real))
+			t.Setenv("SCION_CLI_MODE", "agent")
+			applyModeRestrictions(root, resolveMode())
+			assert.Nil(t, resolveCommandPath(root, name), "%s must be removed in agent mode", name)
+
+			root = &cobra.Command{Use: "scion"}
+			root.AddCommand(cloneCommandShape(real))
+			t.Setenv("SCION_CLI_MODE", "human")
+			applyModeRestrictions(root, resolveMode())
+			assert.NotNil(t, resolveCommandPath(root, name), "%s stays in human mode", name)
+		})
+	}
+}
+
+// The tunnel commands are human-only: they are not in agentAllowed, and
+// agent-mode filtering over the real tunnel subtree removes all of it.
+func TestTunnelCommandsAbsentInAgentMode(t *testing.T) {
+	real := resolveCommandPath(rootCmd, "tunnel")
+	require.NotNil(t, real, "tunnel must exist in the real command tree in human mode")
+	for _, path := range []string{"tunnel", "tunnel.status"} {
+		assert.False(t, agentAllowed[path], "agentAllowed must not contain %s", path)
+	}
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := &cobra.Command{Use: "scion"}
+	root.AddCommand(cloneCommandShape(real))
+	applyModeRestrictions(root, resolveMode())
+	assert.Empty(t, collectCommandNames(root), "agent mode must remove every tunnel command")
 }

@@ -511,6 +511,15 @@ func (svc *ProjectDeletionService) checkDeletionGovernanceFromStore(ctx context.
 			HTTPStatus: 500,
 		}
 	}
+	// Unclamped read (the tx store): apply the test identity clamps.
+	if bindings, err = clampBindingsForUser(ctx, tx, svc.authz, actorID, bindings); err != nil {
+		return ProjectDeleteDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeProjectDeleteForbidden,
+			Reason:     "authority lookup failed under lock",
+			HTTPStatus: 500,
+		}
+	}
 
 	for _, b := range bindings {
 		if b.ScopeType != store.RoleScopeProject || b.ScopeID != req.ProjectID {
@@ -794,6 +803,11 @@ func deactivateProjectAgentEdges(ctx context.Context, tx store.Store, projectID 
 				return total, d.OpID, fmt.Errorf("deactivate edges delegated by agent %s: %w", a.ID, err)
 			}
 			total += n
+			// The agent's service-account assignment ends with it, under
+			// the same operation ID. It is not counted as an edge.
+			if _, err := tx.DeactivateAgentServiceAccountAssignments(ctx, a.ID, d); err != nil {
+				return total, d.OpID, fmt.Errorf("deactivate service-account assignments of agent %s: %w", a.ID, err)
+			}
 		}
 		if page.NextCursor == "" {
 			return total, d.OpID, nil

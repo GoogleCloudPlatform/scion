@@ -6,7 +6,10 @@ package dialects
 
 import "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 
-// CodexDialect parses Codex notify payloads.
+// CodexDialect parses Codex notify payloads and Codex hook payloads
+// (UserPromptSubmit, PreToolUse, PostToolUse, Stop, SubagentStop and the
+// session events), mapping them to the same normalized events as the staged
+// harnesses/codex/dialect.yaml.
 type CodexDialect struct{}
 
 func NewCodexDialect() *CodexDialect {
@@ -32,6 +35,7 @@ func (d *CodexDialect) Parse(data map[string]interface{}) (*hooks.Event, error) 
 		Dialect: "codex",
 		Data: hooks.EventData{
 			Message:   firstNonEmptyString(getString(data, "title"), getString(data, "message")),
+			Prompt:    getString(data, "prompt"),
 			ToolName:  getString(data, "tool_name"),
 			SessionID: getString(data, "session_id"),
 			Raw:       data,
@@ -71,6 +75,10 @@ func (d *CodexDialect) Parse(data map[string]interface{}) (*hooks.Event, error) 
 	return event, nil
 }
 
+// normalizeEventName maps a raw Codex event name to a normalized event name.
+// It must map every event harnesses/codex/dialect.yaml maps, to the same
+// normalized name, so status tracking works the same with or without the
+// staged dialect file; TestCodexDialect_MatchesStagedDialect enforces this.
 func (d *CodexDialect) normalizeEventName(name string) string {
 	switch name {
 	case "agent-turn-complete":
@@ -81,14 +89,20 @@ func (d *CodexDialect) normalizeEventName(name string) string {
 		return hooks.EventSessionStart
 	case "session-end", "SessionEnd":
 		return hooks.EventSessionEnd
-	case "tool-start", "BeforeTool":
+	case "UserPromptSubmit":
+		return hooks.EventPromptSubmit
+	case "tool-start", "BeforeTool", "PreToolUse":
 		return hooks.EventToolStart
-	case "tool-end", "AfterTool":
+	case "tool-end", "AfterTool", "PostToolUse":
 		return hooks.EventToolEnd
 	case "model-start", "BeforeModel":
 		return hooks.EventModelStart
 	case "model-end", "AfterModel":
 		return hooks.EventModelEnd
+	case "Stop":
+		return hooks.EventAgentEnd
+	case "SubagentStop":
+		return hooks.EventSubagentEnd
 	default:
 		return name
 	}

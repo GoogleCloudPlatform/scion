@@ -34,15 +34,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func artifactTestAgent(agentID, projectID string, scopes ...AgentTokenScope) *agentIdentityWrapper {
-	return &agentIdentityWrapper{AgentTokenClaims: &AgentTokenClaims{
-		Claims:      jwt.Claims{Subject: agentID, ID: "jti-" + agentID},
-		ProjectID:   projectID,
-		Scopes:      scopes,
-		ScopeSchema: CurrentAgentScopeSchema,
-	}}
-}
-
 func TestArtifactHostPrincipal(t *testing.T) {
 	host := newArtifactHost(&Server{})
 	tests := []struct {
@@ -352,7 +343,8 @@ func TestArtifactRoutesServedWhileExperimentOn(t *testing.T) {
 		{http.MethodPut, "/api/v1/artifacts", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/api/v1/artifacts", http.StatusBadRequest},
 		{http.MethodGet, "/api/v1/artifacts?mine=1", http.StatusServiceUnavailable},
-		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
+		{http.MethodPut, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusServiceUnavailable},
 		{http.MethodGet, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusServiceUnavailable},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, nil)
@@ -387,25 +379,6 @@ func TestArtifactsGuardViaRegisterRoutes(t *testing.T) {
 	mux := http.NewServeMux()
 	artifacts.NewService(newArtifactHost(srv)).RegisterRoutes(mux, srv.artifactsGuard)
 	serveArtifactRequests(t, mux, NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web"))
-}
-
-// addRecordedArtifactEdge records an active, principal-bounded delegation
-// edge with recorded provenance from user delegatorID to agentID in project.
-func addRecordedArtifactEdge(t *testing.T, s store.Store, delegatorID, agentID, project string) {
-	t.Helper()
-	edge := &store.DelegationEdge{
-		DelegatorType: store.DelegationPrincipalUser,
-		DelegatorID:   delegatorID,
-		DelegateType:  store.DelegationPrincipalAgent,
-		DelegateID:    agentID,
-		ScopeType:     store.RoleScopeProject,
-		ScopeID:       project,
-		Role:          string(AgentRoleFull),
-		Active:        true,
-	}
-	edge.EffectCeiling = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
-	edge.AuthorityProvenance = store.AuthorityProvenance{ProvenanceVersion: store.ProvenanceVersionV1, SourceCredentialKind: store.SourceCredentialSession}
-	require.NoError(t, s.CreateDelegationEdge(context.Background(), edge))
 }
 
 // TestArtifactHostNoEdgeAgentDeniedArtifacts: an agent with no delegation

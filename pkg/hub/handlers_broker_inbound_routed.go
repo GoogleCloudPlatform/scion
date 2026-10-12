@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // routedInboundRequest is the JSON body for POST /api/v1/broker/inbound/routed.
@@ -142,6 +143,13 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 
 	// --- Resolve sender identity ---
 	senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
+	// A hub test identity is reachable only through its own hub-issued
+	// token; this path resolves by email, so it refuses one outright.
+	if emailResolvedPrincipalRefused(senderEmail, nil) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"sender identity not eligible", map[string]interface{}{"sender": req.Message.Sender})
+		return
+	}
 	senderUser, err := s.store.GetUserByEmail(r.Context(), senderEmail)
 	if err != nil {
 		log.Warn("Could not resolve sender identity",
@@ -163,6 +171,12 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"sender identity is not active",
 			map[string]interface{}{"sender": req.Message.Sender, "status": senderUser.Status})
+		return
+	}
+	if emailResolvedPrincipalRefused(senderEmail, senderUser) {
+		log.Warn("routed inbound sender is a test identity", "sender", req.Message.Sender)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"sender identity not eligible", map[string]interface{}{"sender": req.Message.Sender})
 		return
 	}
 	req.Message.SenderID = senderUser.ID
@@ -562,7 +576,14 @@ func (s *Server) dispatchRoutedRecipient(
 	retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrBrokerTimeout) {
+	// The record is logged from a copy carrying the effective conversation,
+	// before dispatch, so the dispatched message is unchanged.
+	recordMsg := *msg
+	if effectiveConv != nil {
+		recordMsg.ConversationID = effectiveConv.ConversationID
+	}
+	logMessageRecord(s.recordLog(), agent, &recordMsg)
+	if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrBrokerTimeout) {
 		result.Status = "error"
 		result.Error = "broker unreachable after 30s deadline"
 		return result
@@ -602,7 +623,7 @@ func (s *Server) dispatchRoutedRecipient(
 		result.PersistenceWarning = "message dispatched but persistence failed: " + err.Error()
 	} else {
 		persisted = true
-		s.events.PublishUserMessage(ctx, storeMsg, nil)
+		s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 	}
 
 	// --- Reply affinity ---
@@ -629,6 +650,10 @@ func (s *Server) dispatchRoutedRecipient(
 			"message_id", msgID,
 			"source", "broker-inbound-routed",
 			"type", msg.Type,
+			// The record was written before dispatch; this is the outcome.
+			logging.AttrLogKind, logging.LogKindEvent,
+			logging.AttrSender, msg.Sender,
+			logging.AttrRecipient, msg.Recipient,
 		}
 		if storeMsg.ConversationID != "" {
 			logAttrs = append(logAttrs, "conversation_id", storeMsg.ConversationID)

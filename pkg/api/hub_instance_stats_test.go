@@ -50,10 +50,50 @@ func TestNormalizeHubInstanceStats_IntegrationsAllowListed(t *testing.T) {
 		// available is a check value, not an integration health: unknown.
 		{Name: "chat-app_2", Health: "unknown", Version: ""},
 		{Name: "slack", Health: "healthy", Version: ""},
-		{Name: "telegram", Health: "degraded", Connected: true, Version: "1.2.3"},
+		// A repeated name keeps its least healthy entry.
+		{Name: "telegram", Health: "unhealthy"},
 	}
 	if !reflect.DeepEqual(got.Integrations, want) {
 		t.Fatalf("integrations = %+v, want %+v", got.Integrations, want)
+	}
+}
+
+// A repeated integration name keeps the same entry whatever the input
+// order: the least healthy, then not connected, then the lowest version.
+func TestNormalizeHubInstanceStats_RepeatedNameIndependentOfOrder(t *testing.T) {
+	entries := []HubInstanceIntegration{
+		{Name: "chat", Health: "healthy", Connected: true, Version: "2.0"},
+		{Name: "chat", Health: "degraded", Connected: true, Version: "1.9"},
+		{Name: "chat", Health: "degraded", Connected: false, Version: "1.8"},
+		{Name: "chat", Health: "degraded", Connected: false, Version: "1.7"},
+		{Name: "chat", Health: "unknown"},
+		{Name: "alpha", Health: "healthy", Version: "b"},
+		{Name: "alpha", Health: "healthy", Version: "a"},
+	}
+	want := []HubInstanceIntegration{
+		{Name: "alpha", Health: "healthy", Version: "a"},
+		{Name: "chat", Health: "degraded", Connected: false, Version: "1.7"},
+	}
+	// Every rotation and the reverse of every rotation.
+	for shift := 0; shift < len(entries); shift++ {
+		rotated := append(append([]HubInstanceIntegration{}, entries[shift:]...), entries[:shift]...)
+		reversed := make([]HubInstanceIntegration, len(rotated))
+		for i := range rotated {
+			reversed[len(rotated)-1-i] = rotated[i]
+		}
+		for _, in := range [][]HubInstanceIntegration{rotated, reversed} {
+			got := NormalizeHubInstanceStats(HubInstanceStats{Integrations: in})
+			if !reflect.DeepEqual(got.Integrations, want) {
+				t.Fatalf("input %+v: integrations = %+v, want %+v", in, got.Integrations, want)
+			}
+		}
+	}
+	// unhealthy is less healthy than every other value.
+	got := NormalizeHubInstanceStats(HubInstanceStats{Integrations: []HubInstanceIntegration{
+		{Name: "x", Health: "unknown"}, {Name: "x", Health: "unhealthy", Connected: true}, {Name: "x", Health: "degraded"},
+	}})
+	if len(got.Integrations) != 1 || got.Integrations[0].Health != "unhealthy" {
+		t.Fatalf("integrations = %+v, want the unhealthy entry", got.Integrations)
 	}
 }
 

@@ -24,7 +24,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,53 +36,6 @@ import (
 // =============================================================================
 // Helpers
 // =============================================================================
-
-// setupInjectedSkillsTest creates a test server with a project owned by alice
-// and a second user bob who is NOT a project member. The dev user (from testServer)
-// is a hub admin. All three identities can be used via doRequest (dev/admin),
-// doRequestAsUser(alice), or doRequestAsUser(bob).
-func setupInjectedSkillsTest(t *testing.T) (*Server, store.Store, *store.Project, *store.User, *store.User) {
-	t.Helper()
-
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	alice := &store.User{
-		ID:          tid("si-user-alice"),
-		Email:       "alice@skills-test.com",
-		DisplayName: "Alice",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, alice))
-	ensureHubMembership(ctx, s, alice.ID)
-
-	bob := &store.User{
-		ID:          tid("si-user-bob"),
-		Email:       "bob@skills-test.com",
-		DisplayName: "Bob",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, bob))
-	ensureHubMembership(ctx, s, bob.ID)
-
-	project := &store.Project{
-		ID:        tid("si-project-alpha"),
-		Name:      "Alpha Project",
-		Slug:      "alpha-project",
-		OwnerID:   alice.ID,
-		CreatedBy: alice.ID,
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	// Create the project members group so authz works correctly.
-	// seedProjectCreatorMembership also adds alice (CreatedBy) as an owner.
-	srv.seedProjectCreatorMembership(ctx, project)
-
-	return srv, s, project, alice, bob
-}
 
 // =============================================================================
 // Project-scope: list

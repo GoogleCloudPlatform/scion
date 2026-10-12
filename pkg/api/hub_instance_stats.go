@@ -91,13 +91,15 @@ var hubInstanceIntegrationHealth = map[string]bool{
 // NormalizeHubInstanceStats returns a bounded copy of s:
 //
 //   - DB counters below zero become zero.
-//   - Integrations whose name fails [a-z0-9_-]{1,64} are dropped, as is a
-//     repeated name (the first is kept). The rest are sorted by name and
-//     cut to HubInstanceMaxIntegrations. Health is reduced to its leading
-//     fixed word (healthy, degraded, unhealthy or unknown; anything else
-//     becomes unknown). A version that is longer than
-//     HubInstanceMaxIntegrationVersionBytes or holds a byte outside
-//     printable ASCII becomes empty.
+//   - Integrations whose name fails [a-z0-9_-]{1,64} are dropped. Health
+//     is reduced to its leading fixed word (healthy, degraded, unhealthy or
+//     unknown; anything else becomes unknown). A version that is longer
+//     than HubInstanceMaxIntegrationVersionBytes or holds a byte outside
+//     printable ASCII becomes empty. The entries are then sorted (see
+//     lessHubInstanceIntegration) and a repeated name keeps only its first
+//     entry in that order, the least healthy one, so the result does not
+//     depend on the input order. The list is cut to
+//     HubInstanceMaxIntegrations.
 //   - IntegrationsTruncated is kept as given; CapHubInstanceStats sets it.
 func NormalizeHubInstanceStats(s HubInstanceStats) HubInstanceStats {
 	out := HubInstanceStats{IntegrationsTruncated: s.IntegrationsTruncated}
@@ -109,26 +111,29 @@ func NormalizeHubInstanceStats(s HubInstanceStats) HubInstanceStats {
 			WaitCount: max(s.DB.WaitCount, 0),
 		}
 	}
-	seen := make(map[string]bool, len(s.Integrations))
+	all := make([]HubInstanceIntegration, 0, len(s.Integrations))
 	for _, in := range s.Integrations {
-		if !validHubInstanceIntegrationName(in.Name) || seen[in.Name] {
+		if !validHubInstanceIntegrationName(in.Name) {
 			continue
 		}
-		seen[in.Name] = true
 		version := in.Version
 		if !printableASCII(version, HubInstanceMaxIntegrationVersionBytes) {
 			version = ""
 		}
-		out.Integrations = append(out.Integrations, HubInstanceIntegration{
+		all = append(all, HubInstanceIntegration{
 			Name:      in.Name,
 			Health:    leadingHealthWord(in.Health, hubInstanceIntegrationHealth),
 			Connected: in.Connected,
 			Version:   version,
 		})
 	}
-	sort.Slice(out.Integrations, func(i, j int) bool {
-		return out.Integrations[i].Name < out.Integrations[j].Name
-	})
+	sort.Slice(all, func(i, j int) bool { return lessHubInstanceIntegration(all[i], all[j]) })
+	for _, in := range all {
+		if n := len(out.Integrations); n > 0 && out.Integrations[n-1].Name == in.Name {
+			continue
+		}
+		out.Integrations = append(out.Integrations, in)
+	}
 	if len(out.Integrations) > HubInstanceMaxIntegrations {
 		out.Integrations = out.Integrations[:HubInstanceMaxIntegrations]
 	}
@@ -154,6 +159,31 @@ func CapHubInstanceStats(s HubInstanceStats, maxBytes int) (HubInstanceStats, js
 		b, _ = json.Marshal(s)
 	}
 	return s, b
+}
+
+// hubInstanceIntegrationHealthRank orders integration health from least
+// to most healthy, for picking one entry among repeated names.
+var hubInstanceIntegrationHealthRank = map[string]int{
+	BrokerHealthUnhealthy: 0,
+	BrokerHealthDegraded:  1,
+	BrokerHealthUnknown:   2,
+	BrokerHealthHealthy:   3,
+}
+
+// lessHubInstanceIntegration is a total order on normalised integrations:
+// by name, then least healthy first (unhealthy, degraded, unknown,
+// healthy), then not connected first, then by version.
+func lessHubInstanceIntegration(a, b HubInstanceIntegration) bool {
+	if a.Name != b.Name {
+		return a.Name < b.Name
+	}
+	if ra, rb := hubInstanceIntegrationHealthRank[a.Health], hubInstanceIntegrationHealthRank[b.Health]; ra != rb {
+		return ra < rb
+	}
+	if a.Connected != b.Connected {
+		return !a.Connected
+	}
+	return a.Version < b.Version
 }
 
 // validHubInstanceIntegrationName reports whether name matches

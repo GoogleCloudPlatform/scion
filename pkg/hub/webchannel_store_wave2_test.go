@@ -16,25 +16,12 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )
-
-// newTestWebChatStoreV2 creates a WebChatStore backed by an in-memory SQLite DB
-// for testing wave-2 features. The caller should close the returned *sql.DB.
-func newTestWebChatStoreV2(t *testing.T) (WebChatStore, *sql.DB) {
-	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite3")
-
-	store := NewWebChatStore(db, "sqlite3")
-	require.NoError(t, store.Init())
-
-	return store, db
-}
 
 // --- Init idempotency ---
 

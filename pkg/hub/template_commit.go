@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -139,27 +138,6 @@ type templateFileReader func(ctx context.Context, path string) ([]byte, error)
 // errTemplateFileTooLarge marks a file too large to parse for derivation.
 var errTemplateFileTooLarge = errors.New("file too large to parse")
 
-func storageFileReader(stor storage.Storage, storagePath string) templateFileReader {
-	return func(ctx context.Context, p string) ([]byte, error) {
-		reader, _, err := stor.Download(ctx, storagePath+"/"+p)
-		if err != nil {
-			return nil, err
-		}
-		if reader == nil {
-			return nil, storage.ErrNotFound
-		}
-		defer func() { _ = reader.Close() }()
-		data, err := io.ReadAll(io.LimitReader(reader, maxTemplateFileSize+1))
-		if err != nil {
-			return nil, err
-		}
-		if int64(len(data)) > maxTemplateFileSize {
-			return nil, errTemplateFileTooLarge
-		}
-		return data, nil
-	}
-}
-
 func dirFileReader(dir string) templateFileReader {
 	return func(_ context.Context, p string) ([]byte, error) {
 		fp := filepath.Join(dir, filepath.FromSlash(p))
@@ -274,11 +252,31 @@ func refuseUnusableBundledHarnessConfig(w http.ResponseWriter, p string, data []
 type commitOpts struct {
 	// dir, when set, is a local directory holding the same files as the new
 	// manifest (import, reimport, bootstrap). Derivation and the bundled
-	// harness-config check read from it instead of storage.
+	// harness-config check read from it instead of storage, and a blob the
+	// commit is missing is written from it.
 	dir string
 	// create persists the template with CreateTemplate instead of
-	// UpdateTemplate (template and project clone).
+	// UpdateTemplateContent (template and project clone).
 	create bool
+	// expectedContentHash, when set, is the content hash the commit
+	// requires the stored row to have. It overrides the default, which is
+	// tmpl.ContentHash as the caller read it. Finalize sets it from the
+	// client's expectedContentHash, so the compare-and-swap covers the
+	// client's whole diff, upload and finalize window (ptone/scion#4221).
+	expectedContentHash string
+	// copyFrom, when set, is the template a clone copies missing blobs
+	// from (its blobs, or its path objects for a legacy source).
+	copyFrom *store.Template
+	// fromStaging makes the commit move staged uploads into blobs
+	// (finalize). uploadID, when set, names the upload whose staging
+	// directory holds them; without it (older clients) any staged object
+	// for the path whose hash matches is used.
+	fromStaging bool
+	uploadID    string
+	// written lists blob object paths the caller has just written for this
+	// commit (the file APIs and the bootstrap upload), so they are not
+	// checked again.
+	written map[string]bool
 }
 
 // errTemplateStorageNotConfigured is returned when a commit has no storage.
@@ -286,27 +284,46 @@ var errTemplateStorageNotConfigured = errors.New("storage not configured")
 
 // commitTemplateFiles is the single commit path for a template's files. It:
 //
-//  1. verifies that every object in next exists in storage;
+//  1. makes every blob the new manifest introduces exist under the row's
+//     content base (ensureTemplateBlobs): staged uploads are hashed and
+//     moved, a legacy row's files are copied in, a clone's are copied from
+//     its source. Blobs the row as read already references are not touched,
+//     so a single-file edit costs the same on a 2-file and a 200-file
+//     template;
 //  2. computes ContentHash;
 //  3. derives Harness, DefaultHarnessConfig and AgentConfig (deriveTemplateIndex);
-//  4. validates bundled harness-configs/*/config.yaml (harness.CheckProvisionerUsable);
-//  5. writes the row once (UpdateTemplate, or CreateTemplate with opts.create);
-//  6. deletes the storage objects of paths in the old manifest but not in next
-//     (diff-based, never a prefix sweep).
+//  4. validates the bundled harness-configs/*/config.yaml the commit
+//     introduces (harness.CheckProvisionerUsable);
+//  5. writes the row once, in the blob layout: CreateTemplate with
+//     opts.create, otherwise UpdateTemplateContent, a compare-and-swap
+//     against the content hash and layout the caller read (or
+//     opts.expectedContentHash). A row changed by another commit since then
+//     fails with store.ErrTemplateConflict, which the HTTP handlers map to
+//     409 template_conflict (ptone/scion#4221);
+//  6. when the commit migrated a legacy row, removes the legacy tree unless
+//     another row shares that path.
 //
-// The removed-object delete runs after the row write so a refused or failed
-// commit never leaves the row pointing at deleted objects. On any error before
-// the write, tmpl is left unchanged. Other fields the caller set on tmpl
-// (Status, SourceURL, Config, ...) are persisted as they are.
+// Blobs are never deleted by a commit: files dropped from the manifest stay
+// for in-flight hydrations until the blob garbage collector removes them
+// after its grace period. On any error before the write, tmpl is left
+// unchanged. Other fields the caller set on tmpl (Status, SourceURL, Config,
+// ...) are persisted as they are.
 func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, next []store.TemplateFile, opts commitOpts) error {
 	stor := s.GetStorage()
 	if stor == nil {
 		return errTemplateStorageNotConfigured
 	}
 	next = append([]store.TemplateFile(nil), next...)
+	expected := templateCommitPrecondition(tmpl, opts)
 
-	// 1. Verify the objects exist (and the paths are canonical).
-	if _, err := verifyAndFinalizeFiles(ctx, stor, tmpl.StoragePath, next); err != nil {
+	if err := validateManifestFilePaths(next); err != nil {
+		return err
+	}
+
+	// 1. Make the introduced blobs exist under the content base.
+	base := s.templateContentBase(tmpl)
+	next, introduced, err := s.ensureTemplateBlobs(ctx, stor, tmpl, base, next, opts)
+	if err != nil {
 		return err
 	}
 
@@ -314,7 +331,7 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 	contentHash := computeContentHash(next)
 
 	// 3. Derive the index from the template's own agent config.
-	read := storageFileReader(stor, tmpl.StoragePath)
+	read := blobFileReader(stor, base, next)
 	if opts.dir != "" {
 		read = dirFileReader(opts.dir)
 	}
@@ -329,62 +346,65 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 		idx = deriveTemplateIndex(data, name, tmpl.Name)
 	}
 
-	// 4. Refuse a bundled harness-config that could never provision an agent.
-	if err := checkBundledHarnessConfigs(ctx, read, next); err != nil {
+	// 4. Refuse a bundled harness-config that could never provision an
+	// agent. Bundled configs the row already had were checked when they
+	// were committed.
+	if err := checkBundledHarnessConfigs(ctx, read, introduced); err != nil {
 		return err
 	}
 
-	// 5. One row write.
-	previous := tmpl.Files
+	// 5. One row write, in the blob layout.
 	prevState := *tmpl
+	migratedFrom := ""
+	if !isBlobLayout(tmpl) {
+		migratedFrom = tmpl.StoragePath
+	}
 	tmpl.Files = next
 	tmpl.ContentHash = contentHash
 	tmpl.Harness = idx.Harness
 	tmpl.DefaultHarnessConfig = idx.DefaultHarnessConfig
 	tmpl.AgentConfig = idx.AgentConfig
-	var err error
+	tmpl.Layout = store.TemplateLayoutBlobs
+	if tmpl.StoragePath != base {
+		tmpl.StoragePath = base
+		bucket := tmpl.StorageBucket
+		if bucket == "" {
+			bucket = stor.Bucket()
+		}
+		tmpl.StorageBucket = bucket
+		tmpl.StorageURI = storage.StorageURIForPath(bucket, base)
+	}
 	if opts.create {
 		err = s.store.CreateTemplate(ctx, tmpl)
 	} else {
-		err = s.store.UpdateTemplate(ctx, tmpl)
+		err = s.store.UpdateTemplateContent(ctx, tmpl, expected)
 	}
 	if err != nil {
 		*tmpl = prevState
 		return err
 	}
 
-	// 6. Delete objects dropped from the manifest.
-	s.deleteRemovedTemplateFiles(ctx, stor, tmpl, previous)
+	// 6. A migrated legacy row's old tree.
+	if migratedFrom != "" {
+		s.removeLegacyTemplateTree(ctx, stor, tmpl, migratedFrom)
+	}
 	return nil
 }
 
-// deleteRemovedTemplateFiles deletes the storage objects of files listed in
-// previous but no longer in tmpl.Files. Only those exact paths are deleted,
-// never a prefix: clones and renamed templates can share a storage prefix.
-// Non-canonical legacy paths are skipped. Failures are logged and do not fail
-// the commit, because the row is already written.
-func (s *Server) deleteRemovedTemplateFiles(ctx context.Context, stor storage.Storage, tmpl *store.Template, previous []store.TemplateFile) {
-	if tmpl.StoragePath == "" || len(previous) == 0 {
-		return
+// templateCommitPrecondition returns the stored state a commit of tmpl
+// requires: the content hash and layout the caller read, unless opts names
+// the content hash.
+//
+// The precondition is built from the row as read, and opts overrides only
+// the fields it names, so every field of TemplateContentPrecondition (the
+// layout included, ptone/scion#4221) is checked for every commit, including
+// a finalize that names its content hash.
+func templateCommitPrecondition(tmpl *store.Template, opts commitOpts) store.TemplateContentPrecondition {
+	p := store.TemplateContentPrecondition{ContentHash: tmpl.ContentHash, Layout: tmpl.Layout}
+	if opts.expectedContentHash != "" {
+		p.ContentHash = opts.expectedContentHash
 	}
-	current := make(map[string]struct{}, len(tmpl.Files))
-	for _, f := range tmpl.Files {
-		current[f.Path] = struct{}{}
-	}
-	for _, f := range previous {
-		if _, ok := current[f.Path]; ok {
-			continue
-		}
-		if !isCanonicalResourceFilePath(f.Path) {
-			s.templateLog.Warn("template commit: skipping delete of non-canonical removed path",
-				"template", tmpl.Name, "id", tmpl.ID)
-			continue
-		}
-		if err := stor.Delete(ctx, tmpl.StoragePath+"/"+f.Path); err != nil && !errors.Is(err, storage.ErrNotFound) {
-			s.templateLog.Warn("template commit: failed to delete removed file",
-				"template", tmpl.Name, "id", tmpl.ID, "path", f.Path, "error", err)
-		}
-	}
+	return p
 }
 
 // writeTemplateCommitError maps a commitTemplateFiles error to an HTTP
@@ -398,6 +418,16 @@ func writeTemplateCommitError(w http.ResponseWriter, err error) {
 		ValidationError(w, err.Error(), nil)
 		return
 	}
+	var mismatch *hashMismatchError
+	if errors.As(err, &mismatch) {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	var badHash *invalidFileHashError
+	if errors.As(err, &badHash) {
+		ValidationError(w, err.Error(), map[string]interface{}{"field": "manifest.files[].hash"})
+		return
+	}
 	var unusable *unusableBundledHarnessConfigError
 	if errors.As(err, &unusable) {
 		writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode, unusable.Error(), nil)
@@ -405,6 +435,11 @@ func writeTemplateCommitError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, errTemplateStorageNotConfigured) {
 		RuntimeError(w, "Storage not configured")
+		return
+	}
+	if errors.Is(err, store.ErrTemplateConflict) {
+		writeError(w, http.StatusConflict, ErrCodeTemplateConflict,
+			"template was changed by another commit; re-read it and retry", nil)
 		return
 	}
 	writeErrorFromErr(w, err, "")

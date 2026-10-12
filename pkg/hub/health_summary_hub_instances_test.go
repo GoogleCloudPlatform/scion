@@ -34,37 +34,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-var hubInstanceT0 = time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
-
-// fakeClockHubInstanceStore wraps a real store and serves ListHubInstances
-// from fixed rows and a fixed store clock.
-type fakeClockHubInstanceStore struct {
-	store.Store
-	rows   []store.HubInstance
-	now    time.Time
-	err    error
-	window time.Duration
-}
-
-func (f *fakeClockHubInstanceStore) ListHubInstances(_ context.Context, window time.Duration) ([]store.HubInstance, time.Time, error) {
-	f.window = window
-	if f.err != nil {
-		return nil, time.Time{}, f.err
-	}
-	return f.rows, f.now, nil
-}
-
-func getHubInstancesSummary(t *testing.T, srv *Server) (HealthSummaryResponse, map[string]json.RawMessage) {
-	t.Helper()
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
-	require.Equal(t, http.StatusOK, rr.Code)
-	var resp HealthSummaryResponse
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	var raw map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
-	return resp, raw
-}
-
 // The state rule against a fake store clock: no write for 44 s is live, 46 s
 // is stale (the threshold is 45 s, three ticks). A stopped row is stopped.
 func TestHubInstanceState_FakeClockBoundary(t *testing.T) {
@@ -176,7 +145,7 @@ func TestHandleHealthSummary_HubInstancesTwoInstances(t *testing.T) {
 	require.Len(t, got.Items, 2)
 
 	a, b := got.Items[0], got.Items[1]
-	assert.Equal(t, srv.InstanceID(), a.ID, "the serving instance is listed first")
+	assert.Equal(t, srv.InstanceID(), a.ID, "hub-a sorts before hub-b")
 	assert.True(t, a.Serving)
 	assert.Equal(t, "hub-a", a.Label)
 	assert.Equal(t, "v1.0.0", a.Version)
@@ -199,8 +168,22 @@ func TestHandleHealthSummary_HubInstancesTwoInstances(t *testing.T) {
 	// The pool is per instance only: there is no top-level database block.
 	assert.NotContains(t, raw, "database")
 
-	// The registry list does not change the overall status in this slice.
-	assert.NotContains(t, fmt.Sprint(resp.Attention), "hub-b")
+	// The fleet hub section comes from the same rows: one of two live
+	// instances is degraded, so the fleet is degraded, and its failing
+	// check is tagged with its instance.
+	assert.Equal(t, HealthStatusDegraded, resp.Hub.Status)
+	assert.Equal(t, HubVersionMixed, resp.Hub.Version)
+	require.NotNil(t, resp.Hub.Instances)
+	assert.Equal(t, HealthSummaryHubFleet{Live: 2, Healthy: 1, Degraded: 1}, *resp.Hub.Instances)
+	assert.Equal(t, []HealthSummaryHubCheck{
+		{InstanceID: "hub-b-0123", InstanceLabel: "hub-b", Name: "colocated_broker", Value: "unhealthy"},
+	}, resp.Hub.UnhealthyChecks)
+	assert.Contains(t, resp.Attention, HealthAttentionItem{
+		Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
+		Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "hub-b-0123", Name: "hub-b"},
+		Message: "Hub check colocated_broker is not healthy on instance hub-b",
+	})
+	assert.Contains(t, fmt.Sprint(resp.Attention), "1 of 2 hub instances healthy")
 }
 
 // A registry read failure reports hub_instances as null (not reported) and
@@ -241,6 +224,30 @@ func TestBuildHealthSummaryHubInstances_DatabaseNullWithoutPool(t *testing.T) {
 	b, err := json.Marshal(byID["hub-a"])
 	require.NoError(t, err)
 	assert.Contains(t, string(b), `"database":null`)
+	assert.Contains(t, string(b), `"integration_counts":{"total":0,`)
+	assert.NotContains(t, string(b), `"integrations"`)
+	assert.True(t, byID["hub-b"].IntegrationsTruncated)
+}
+
+// Each instance's integrations come from its own row: counts by health,
+// the list sorted and normalised again on read.
+func TestBuildHealthSummaryHubInstances_Integrations(t *testing.T) {
+	now := hubInstanceT0
+	got := buildHealthSummaryHubInstances([]store.HubInstance{
+		{ID: "hub-a", LastSeen: now, Stats: json.RawMessage(`{"integrations":[` +
+			`{"name":"slack","health":"unhealthy","connected":false,"version":"2"},` +
+			`{"name":"chat","health":"healthy","connected":true,"version":"1"},` +
+			`{"name":"BAD NAME","health":"healthy"},` +
+			`{"name":"mail","health":"weird"}]}`)},
+	}, now, "hub-a")
+	require.Len(t, got.Items, 1)
+	it := got.Items[0]
+	assert.Equal(t, HealthSummaryIntegrationCounts{Total: 3, Healthy: 1, Unhealthy: 1, Unknown: 1}, it.IntegrationCounts)
+	assert.Equal(t, []HealthHubInstanceIntegration{
+		{Name: "chat", Health: "healthy", Connected: true, Version: "1"},
+		{Name: "mail", Health: "unknown"},
+		{Name: "slack", Health: "unhealthy", Version: "2"},
+	}, it.Integrations)
 }
 
 // poolCountingStore wraps a real store and counts DB() calls: the only way
@@ -300,8 +307,10 @@ func TestBuildHealthSummaryHubInstances_OrderAndCap(t *testing.T) {
 		ids = append(ids, it.ID)
 		assert.NotNil(t, it.Checks, "checks is never null")
 	}
-	// Live first (serving first, then by label), then stale, then stopped.
-	assert.Equal(t, []string{"id-serving", "id-live-b", "id-live-c", "id-stale", "id-stopped"}, ids)
+	// Live first, then stale, then stopped, each by label. The serving
+	// instance is marked, not moved, so every replica lists the same
+	// order.
+	assert.Equal(t, []string{"id-live-b", "id-live-c", "id-serving", "id-stale", "id-stopped"}, ids)
 	assert.Equal(t, 3, got.Live)
 	assert.Equal(t, 5, got.Total)
 	assert.False(t, got.Truncated)

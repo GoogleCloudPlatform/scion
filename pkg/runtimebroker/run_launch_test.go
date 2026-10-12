@@ -537,6 +537,7 @@ func TestRunLaunch_LocalCancelDuringStart_SendsNoTerminal(t *testing.T) {
 func TestRunLaunch_AbortRecordedDuringDownload_NoStart(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
 
 	abortAnswered := make(chan struct{})
 	var abortAnsweredOnce sync.Once

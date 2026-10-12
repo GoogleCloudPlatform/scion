@@ -83,11 +83,15 @@ type PTYUser struct {
 }
 
 // streamKinds is the Hello's stream_kinds: tcp always, pty only when
-// this agent can spawn a tmux client.
+// this agent can spawn a tmux client, ssh only when the SSH server is
+// configured.
 func (a *Agent) streamKinds() []string {
 	kinds := []string{grant.StreamKindTCP}
 	if a.opts.SpawnPTY != nil {
 		kinds = append(kinds, grant.StreamKindPTY)
+	}
+	if a.opts.SSH != nil {
+		kinds = append(kinds, grant.StreamKindSSH)
 	}
 	return kinds
 }

@@ -15,7 +15,6 @@
 package runtimebroker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,7 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"sync"
 	"time"
@@ -32,10 +30,6 @@ import (
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/propagation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -141,7 +135,9 @@ const defaultMaxConcurrentDispatches = 20
 
 // ControlChannelClient manages the WebSocket connection to the Hub.
 type ControlChannelClient struct {
-	config         ControlChannelConfig
+	config ControlChannelConfig
+	// conn is written only by doConnect on the connect goroutine, under mu;
+	// readers on other goroutines must copy it under mu.
 	conn           *wsprotocol.Connection
 	handlers       http.Handler // Reuse existing HTTP handlers
 	agentLookup    AgentLookup  // For looking up agent container IDs
@@ -405,18 +401,22 @@ func (c *ControlChannelClient) doConnect() error {
 		return fmt.Errorf("websocket dial failed: %w", err)
 	}
 
+	// Close, SendStreamData and CloseStream read c.conn under c.mu from other
+	// goroutines.
+	c.mu.Lock()
 	c.conn = conn
+	c.mu.Unlock()
 
 	// Send connect message
 	connectMsg := wsprotocol.NewConnectMessage(c.config.BrokerID, c.config.Version, c.config.Projects)
 	if err := conn.WriteJSON(connectMsg); err != nil {
-		_ = c.conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("failed to send connect message: %w", err)
 	}
 
 	// Wait for connected response
 	if err := c.waitForConnected(); err != nil {
-		_ = c.conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("connection handshake failed: %w", err)
 	}
 
@@ -460,13 +460,22 @@ func (c *ControlChannelClient) buildWebSocketURL() (string, error) {
 
 // buildAuthHeaders creates the HMAC-signed headers for authentication.
 func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
+	return brokerUpgradeHeaders(c.config.HubEndpoint, "/api/v1/runtime-brokers/connect", c.config.BrokerID, c.config.SecretKey, c.config.TransportSource, c.config.TransportMode)
+}
+
+// brokerUpgradeHeaders returns the headers a broker presents on a WebSocket
+// upgrade to path on the hub: the HMAC signature for a GET of that path
+// (only the broker id when there is no secret, proxy-auth mode) and the
+// transport-layer OIDC credential, if any. The control channel and the
+// conduit dialer both use it.
+func brokerUpgradeHeaders(hubEndpoint, path, brokerID string, secretKey []byte, src transportauth.TokenSource, mode transportauth.HeaderMode) (http.Header, error) {
 	headers := http.Header{}
 
-	if len(c.config.SecretKey) == 0 {
-		headers.Set("X-Scion-Broker-ID", c.config.BrokerID)
+	if len(secretKey) == 0 {
+		headers.Set("X-Scion-Broker-ID", brokerID)
 		// Still apply transport auth even without HMAC (proxy-auth mode)
-		if c.config.TransportSource != nil {
-			if err := transportauth.ApplyHeaders(headers, c.config.TransportSource, c.config.TransportMode); err != nil {
+		if src != nil {
+			if err := transportauth.ApplyHeaders(headers, src, mode); err != nil {
 				return nil, fmt.Errorf("failed to apply transport auth headers: %w", err)
 			}
 		}
@@ -474,11 +483,11 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 	}
 
 	// Build a dummy request for signing
-	u, err := url.Parse(c.config.HubEndpoint)
+	u, err := url.Parse(hubEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid hub endpoint: %w", err)
 	}
-	u.Path = "/api/v1/runtime-brokers/connect"
+	u.Path = path
 
 	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
@@ -487,8 +496,8 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 
 	// Apply HMAC auth using the HMACAuth type
 	hmacAuth := &apiclient.HMACAuth{
-		BrokerID:  c.config.BrokerID,
-		SecretKey: c.config.SecretKey,
+		BrokerID:  brokerID,
+		SecretKey: secretKey,
 	}
 	if err := hmacAuth.ApplyAuth(req); err != nil {
 		return nil, fmt.Errorf("failed to apply HMAC auth: %w", err)
@@ -500,8 +509,8 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 	}
 
 	// Transport-layer OIDC for IAP-protected hubs
-	if c.config.TransportSource != nil {
-		if err := transportauth.ApplyHeaders(headers, c.config.TransportSource, c.config.TransportMode); err != nil {
+	if src != nil {
+		if err := transportauth.ApplyHeaders(headers, src, mode); err != nil {
 			return nil, fmt.Errorf("failed to apply transport auth headers: %w", err)
 		}
 	}
@@ -535,7 +544,10 @@ func (c *ControlChannelClient) waitForConnected() error {
 		return fmt.Errorf("failed to parse connected message: %w", err)
 	}
 
+	// SessionID() reads sessionID under c.mu from other goroutines.
+	c.mu.Lock()
 	c.sessionID = connected.SessionID
+	c.mu.Unlock()
 
 	// Update ping interval if specified by Hub
 	if connected.PingIntervalMs > 0 {
@@ -764,70 +776,9 @@ func (c *ControlChannelClient) runRequest(ctx context.Context, done func(), conn
 		return
 	}
 
-	// Extract trace context from request envelope headers for cross-component propagation.
-	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(req.Headers))
-	ctx, span := tracer.Start(ctx, "broker.controlchannel.dispatch")
-	defer span.End()
-	span.SetAttributes(
-		attribute.String("scion.request.method", req.Method),
-		attribute.String("scion.request.path", req.Path),
-	)
-
-	// Recover from panics (e.g. httptest.NewRequest on malformed URLs) to
-	// prevent crashing the broker process. Send a 400 error back instead.
-	defer func() {
-		if r := recover(); r != nil {
-			span.SetStatus(codes.Error, fmt.Sprintf("panic: %v", r))
-			c.log.Error("Panic in control channel request handler", "panic", r, "method", req.Method, "path", req.Path)
-			resp := wsprotocol.NewResponseEnvelope(req.RequestID, http.StatusBadRequest, nil, []byte(fmt.Sprintf(`{"error":"request caused panic: %v"}`, r)))
-			if writeErr := conn.WriteJSON(resp); writeErr != nil {
-				c.log.Error("Failed to send panic error response", "error", writeErr)
-			}
-		}
-	}()
-
-	// Build HTTP request
-	path := req.Path
-	if req.Query != "" {
-		path = path + "?" + req.Query
-	}
-
-	var body io.Reader
-	if len(req.Body) > 0 {
-		body = bytes.NewReader(req.Body)
-	}
-
-	httpReq := httptest.NewRequest(req.Method, path, body)
-	httpReq = httpReq.WithContext(ctx)
-	for key, value := range req.Headers {
-		httpReq.Header.Set(key, value)
-	}
-
-	// Inject connection name header so the server can route to the correct hydrator
-	if c.connectionName != "" {
-		httpReq.Header.Set("X-Scion-Hub-Connection", c.connectionName)
-	}
-
-	// Execute through existing handlers
-	w := httptest.NewRecorder()
-	c.handlers.ServeHTTP(w, httpReq)
-
-	// Build response envelope
-	result := w.Result()
-	respBody, _ := io.ReadAll(result.Body)
-	_ = result.Body.Close()
-
-	headers := make(map[string]string)
-	for key := range result.Header {
-		headers[key] = result.Header.Get(key)
-	}
-
-	resp := wsprotocol.NewResponseEnvelope(req.RequestID, result.StatusCode, headers, respBody)
-
-	if err := conn.WriteJSON(resp); err != nil {
-		span.SetStatus(codes.Error, "failed to send response: "+err.Error())
-		c.log.Error("Failed to send response", "error", err, "requestID", req.RequestID)
-	}
+	serveTunneledRequest(ctx, c.handlers, c.connectionName, "broker.controlchannel.dispatch", c.log, req, func(resp *wsprotocol.ResponseEnvelope) error {
+		return conn.WriteJSON(resp)
+	})
 }
 
 // logQueuedCancel records, at debug level, that req was cancelled by the Hub
@@ -1245,8 +1196,11 @@ func (c *ControlChannelClient) handlePTYStream(handler *StreamHandler, cols, row
 
 // SendStreamData sends data on a stream.
 func (c *ControlChannelClient) SendStreamData(streamID string, data []byte) error {
+	// PTY goroutines are not tracked by c.wg and can outlive a connection,
+	// so read c.conn under c.mu: a reconnect's doConnect may be writing it.
 	c.mu.RLock()
 	connected := c.connected
+	conn := c.conn
 	c.mu.RUnlock()
 
 	if !connected {
@@ -1254,7 +1208,7 @@ func (c *ControlChannelClient) SendStreamData(streamID string, data []byte) erro
 	}
 
 	frame := wsprotocol.NewStreamFrame(streamID, data)
-	return c.conn.WriteJSON(frame)
+	return conn.WriteJSON(frame)
 }
 
 // CloseStream closes a stream and reports code and reason to the Hub. If the
@@ -1275,8 +1229,13 @@ func (c *ControlChannelClient) CloseStream(streamID, reason string, code int) er
 		return nil
 	}
 
+	// See SendStreamData for why c.conn is read under c.mu.
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+
 	closeMsg := wsprotocol.NewStreamCloseMessage(streamID, reason, code)
-	return c.conn.WriteJSON(closeMsg)
+	return conn.WriteJSON(closeMsg)
 }
 
 // markDisconnected updates the connection state.
@@ -1313,8 +1272,13 @@ func (c *ControlChannelClient) Close() error {
 
 	c.wg.Wait()
 
-	if c.conn != nil {
-		return c.conn.Close()
+	// doConnect writes c.conn on the connect goroutine, which Close does not
+	// wait for, so read it under c.mu.
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }

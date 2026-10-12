@@ -19,7 +19,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"sync"
 	"testing"
@@ -27,7 +26,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
@@ -39,121 +37,6 @@ import (
 // not publish agent.created, on the synchronous dispatch path and on the
 // asynchronous launch path (ptone/scion#2153).
 
-// createdRecordingPublisher is deleteRecordingPublisher plus agent.created.
-type createdRecordingPublisher struct {
-	*deleteRecordingPublisher
-}
-
-func (p *createdRecordingPublisher) PublishAgentCreated(ctx context.Context, a *store.Agent) {
-	p.mu.Lock()
-	p.events = append(p.events, recordedAgentEvent{
-		kind: "created", phase: a.Phase, activity: a.Activity,
-		deletion: store.ComputeAgentDeletion(a, time.Now()),
-	})
-	p.mu.Unlock()
-	p.deleteRecordingPublisher.PublishAgentCreated(ctx, a)
-}
-
-// PublishAgentRestored is the other created publisher (see EventPublisher).
-func (p *createdRecordingPublisher) PublishAgentRestored(ctx context.Context, a *store.Agent, restoredAt time.Time) {
-	p.mu.Lock()
-	p.events = append(p.events, recordedAgentEvent{
-		kind: "created", phase: a.Phase, activity: a.Activity,
-		deletion: store.ComputeAgentDeletion(a, time.Now()),
-	})
-	p.mu.Unlock()
-	p.deleteRecordingPublisher.PublishAgentRestored(ctx, a, restoredAt)
-}
-
-func recordCreatedEvents(t *testing.T, srv *Server) *createdRecordingPublisher {
-	t.Helper()
-	bus := NewChannelEventPublisher()
-	t.Cleanup(bus.Close)
-	pub := &createdRecordingPublisher{newDeleteRecordingPublisher(bus)}
-	srv.events = pub
-	return pub
-}
-
-// kinds lists the recorded event kinds in order.
-func (p *createdRecordingPublisher) kinds() []string {
-	var out []string
-	for _, e := range p.snapshot() {
-		out = append(out, e.kind)
-	}
-	return out
-}
-
-// createRaceDispatcher runs hook inside DispatchAgentCreateWithGather, as a
-// DELETE that lands while the broker create is in flight would.
-type createRaceDispatcher struct {
-	engineStubDispatcher
-	hook func(a *store.Agent)
-}
-
-func (d *createRaceDispatcher) DispatchAgentCreateWithGather(ctx context.Context, a *store.Agent) (*CreateDispatchResult, error) {
-	if d.hook != nil {
-		d.hook(a)
-	}
-	return d.engineStubDispatcher.DispatchAgentCreateWithGather(ctx, a)
-}
-
-// raceAsyncClient is asyncLaunchClient whose broker delete can block.
-type raceAsyncClient struct {
-	*asyncLaunchClient
-	mu       sync.Mutex
-	deleteFn func(ctx context.Context) error
-}
-
-func (c *raceAsyncClient) DeleteAgent(ctx context.Context, _, _, _, _ string, _ DeleteAgentOptions) error {
-	c.mu.Lock()
-	fn := c.deleteFn
-	c.mu.Unlock()
-	if fn == nil {
-		return nil
-	}
-	return fn(ctx)
-}
-
-func (c *raceAsyncClient) setDeleteFn(fn func(ctx context.Context) error) {
-	c.mu.Lock()
-	c.deleteFn = fn
-	c.mu.Unlock()
-}
-
-// newRaceAsyncCreateServer is newAsyncCreateServer (flag on) with a
-// raceAsyncClient, so a test can interleave a DELETE with the accepted
-// launch.
-func newRaceAsyncCreateServer(t *testing.T) (*Server, store.Store, *store.Project, *raceAsyncClient) {
-	t.Helper()
-	ctx := context.Background()
-	srv, s, project := setupCreateAgentServer(t, &createAgentDispatcher{})
-	broker, err := s.GetRuntimeBroker(ctx, tid("broker-create"))
-	require.NoError(t, err)
-	broker.Endpoint = "http://localhost:9800"
-	broker.Capabilities = &store.BrokerCapabilities{AsyncLaunch: true}
-	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
-
-	client := &raceAsyncClient{asyncLaunchClient: &asyncLaunchClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}}
-	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
-	d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings {
-		return AsyncLaunchSettings{Enabled: true, Timeout: 5 * time.Minute, KeepaliveSeconds: 15}
-	})
-	srv.SetDispatcher(d)
-	return srv, s, project, client
-}
-
-// deleteMode is how far the racing DELETE gets before the create's dispatch
-// returns.
-type deleteMode string
-
-const (
-	// deleteClaimed: the DELETE has claimed the row and is blocked in its
-	// broker dispatch; it completes after the create answers.
-	deleteClaimed deleteMode = "claimed"
-	// deleteDone: the DELETE has finished (row gone or soft-deleted).
-	deleteDone deleteMode = "done"
-)
-
 var createDeleteRaceCases = []struct {
 	name      string
 	mode      deleteMode
@@ -163,28 +46,6 @@ var createDeleteRaceCases = []struct {
 	{"hard/done", deleteDone, 0},
 	{"soft/claimed", deleteClaimed, time.Hour},
 	{"soft/done", deleteDone, time.Hour},
-}
-
-// assertDeleteLanded checks the row is hard-deleted, or soft-deleted when
-// retention is on.
-func assertDeleteLanded(t *testing.T, s store.Store, agentID string, retention time.Duration) {
-	t.Helper()
-	if retention == 0 {
-		assert.True(t, agentGone(t, s, agentID), "hard delete removes the row")
-		return
-	}
-	got := mustGetAgent(t, s, agentID)
-	assert.False(t, got.DeletedAt.IsZero(), "soft delete keeps a tombstoned row")
-}
-
-// assertNoStoppedStatus checks the delete published no status with phase
-// stopped (design ptone/scion#2483 R1: claim status, then deleted).
-func assertNoStoppedStatus(t *testing.T, pub *createdRecordingPublisher) {
-	t.Helper()
-	for _, e := range pub.snapshot() {
-		assert.False(t, e.kind == "status" && e.phase == string(state.PhaseStopped),
-			"no stopped status: %+v", pub.snapshot())
-	}
 }
 
 // assertAsyncDeleteLanded checks the row is hard-deleted: a create whose
@@ -232,20 +93,6 @@ func (d *raceDelete) finish() {
 	close(d.release)
 	r := waitDelete(d.t, d.ch, 10*time.Second)
 	require.Equal(d.t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
-}
-
-// hookStorage is mockStorage whose first GenerateSignedURL runs hook: the
-// workspace-bootstrap create signs its upload URLs after the row is written
-// and before it publishes created.
-type hookStorage struct {
-	*mockStorage
-	once sync.Once
-	hook func()
-}
-
-func (h *hookStorage) GenerateSignedURL(ctx context.Context, objectPath string, opts storage.SignedURLOptions) (*storage.SignedURL, error) {
-	h.once.Do(h.hook)
-	return h.mockStorage.GenerateSignedURL(ctx, objectPath, opts)
 }
 
 // raceManagedBackend is a managed-agent backend whose CreateInteraction runs

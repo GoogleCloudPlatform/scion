@@ -93,6 +93,19 @@ func (s *AgentCredentialStore) GetAgentCredentialByJTIHash(ctx context.Context, 
 	return entAgentCredentialToStore(ac), nil
 }
 
+// GetAgentCredentialByID returns the credential with id.
+func (s *AgentCredentialStore) GetAgentCredentialByID(ctx context.Context, id string) (*store.AgentCredential, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return nil, err
+	}
+	ac, err := s.client.AgentCredential.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entAgentCredentialToStore(ac), nil
+}
+
 // RevokeAgentCredential marks a credential as revoked.
 func (s *AgentCredentialStore) RevokeAgentCredential(ctx context.Context, id string, revokedBy string, reason string) error {
 	uid, err := parseGetID(id)
@@ -142,6 +155,21 @@ func (s *AgentCredentialStore) UpdateAgentCredentialLastSeen(ctx context.Context
 		return mapError(err)
 	}
 	return nil
+}
+
+// HasAgentCredentialForRun implements
+// store.AgentCredentialStore.HasAgentCredentialForRun.
+func (s *AgentCredentialStore) HasAgentCredentialForRun(ctx context.Context, agentID, runID string) (bool, error) {
+	if agentID == "" || runID == "" {
+		return false, nil
+	}
+	ok, err := s.client.AgentCredential.Query().
+		Where(agentcredential.AgentIDEQ(agentID), agentcredential.RunIDEQ(runID)).
+		Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return ok, nil
 }
 
 // DeleteAgentCredentialsByProject permanently removes all agent credentials for a project.

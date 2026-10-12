@@ -705,7 +705,7 @@ export class ScionChatMessage extends LitElement {
 
   /**
    * True when the DM peer's read watermark has reached this message. Replaces
-   * the single-check "Delivered" indicator with a double-check "Seen".
+   * the single-check "Accepted" indicator with a double-check "Seen".
    */
   @property({ type: Boolean })
   seen = false;
@@ -747,6 +747,10 @@ export class ScionChatMessage extends LitElement {
   /** Sender's project slug for cross-project provenance display. */
   @property()
   senderProjectSlug = '';
+
+  /** The signed-in user's id; the artifact preview shows their artifacts' owner as "You". */
+  @property()
+  currentUserId = '';
 
   @state()
   private renderedHtml = '';
@@ -2301,6 +2305,10 @@ export class ScionChatMessage extends LitElement {
           </div>
         `;
       case 'dispatched':
+        // ptone/scion#4480: "dispatched" means the hub handed the message
+        // to the agent's runtime, which buffered it. It is not confirmation
+        // the agent read it, so it says "Accepted"; "Seen" needs the read
+        // watermark.
         return this.seen
           ? html`
               <div class="delivery-state seen">
@@ -2311,7 +2319,7 @@ export class ScionChatMessage extends LitElement {
           : html`
               <div class="delivery-state dispatched">
                 <sl-icon name="check2"></sl-icon>
-                Delivered
+                Accepted
               </div>
             `;
       case 'deferred':
@@ -2647,6 +2655,7 @@ export class ScionChatMessage extends LitElement {
     return html`
       <scion-chat-file-preview
         .target=${target}
+        .currentUserId=${this.currentUserId}
         @chat-file-preview-close=${() => {
           this.expandedTarget = null;
         }}

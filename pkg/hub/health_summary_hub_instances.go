@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"sort"
 	"time"
@@ -62,9 +61,10 @@ type HealthSummaryHubInstances struct {
 	// AsOf is the store clock the section was computed at (UTC). State,
 	// the display window and the dashboard's uptime and age all use it.
 	AsOf time.Time `json:"as_of"`
-	// Items lists live instances first (the serving one first), then
-	// stale, then stopped; each group ordered by label, then ID. Capped at
-	// healthSummaryHubInstanceLimit.
+	// Items lists live instances first, then stale, then stopped; each
+	// group ordered by label, then ID, so the order is the same whichever
+	// replica serves the request (the serving one is marked, not moved).
+	// Capped at healthSummaryHubInstanceLimit.
 	Items []HealthHubInstance `json:"items"`
 	// Live is the number of live instances, including any cut from Items.
 	Live int `json:"live"`
@@ -101,6 +101,27 @@ type HealthHubInstance struct {
 	// from its own sql.DB.Stats(). Null when the instance reported no pool
 	// (its store exposes no *sql.DB) or its stats could not be read.
 	Database *HealthHubInstanceDB `json:"database"`
+	// IntegrationCounts aggregates, by health, the integrations the
+	// instance last reported running. Not identifying, so it is returned
+	// to every caller.
+	IntegrationCounts HealthSummaryIntegrationCounts `json:"integration_counts"`
+	// IntegrationsTruncated is true when the instance cut its reported
+	// integrations to fit its row's size cap.
+	IntegrationsTruncated bool `json:"integrations_truncated,omitempty"`
+	// Integrations lists the integrations the instance last reported,
+	// sorted by name. Identifying: present only for a caller with
+	// hub.integrations.read (see omitHealthSummaryIntegrationDetail).
+	Integrations []HealthHubInstanceIntegration `json:"integrations,omitempty"`
+}
+
+// HealthHubInstanceIntegration is one integration as a hub instance
+// reported it in its registry row: allow-listed fields only.
+type HealthHubInstanceIntegration struct {
+	Name string `json:"name"`
+	// Health is healthy, degraded, unhealthy or unknown.
+	Health    string `json:"health"`
+	Connected bool   `json:"connected"`
+	Version   string `json:"version"`
 }
 
 // HealthHubInstanceDB is one hub instance's database connection pool.
@@ -116,15 +137,24 @@ type HealthHubInstanceDB struct {
 	PoolWaitCountTotal int64 `json:"pool_wait_count_total"`
 }
 
-// hubInstanceDatabase decodes a registry row's stats column and returns its
-// pool block, or nil when the row has none or its stats do not decode (the
-// row is still listed).
-func hubInstanceDatabase(raw json.RawMessage) *HealthHubInstanceDB {
+// decodeHubInstanceStats decodes a registry row's stats column and
+// normalises it again, since the row may have been written by another
+// version of the hub. ok is false when the column is empty or does not
+// decode; the row is then listed with no pool and no integrations.
+func decodeHubInstanceStats(raw json.RawMessage) (stats api.HubInstanceStats, ok bool) {
 	if len(raw) == 0 {
-		return nil
+		return api.HubInstanceStats{}, false
 	}
-	var stats api.HubInstanceStats
-	if err := json.Unmarshal(raw, &stats); err != nil || stats.DB == nil {
+	if err := json.Unmarshal(raw, &stats); err != nil {
+		return api.HubInstanceStats{}, false
+	}
+	return api.NormalizeHubInstanceStats(stats), true
+}
+
+// hubInstanceDatabase returns the pool block of decoded stats, or nil when
+// the row reported none.
+func hubInstanceDatabase(stats api.HubInstanceStats) *HealthHubInstanceDB {
+	if stats.DB == nil {
 		return nil
 	}
 	return &HealthHubInstanceDB{
@@ -133,6 +163,21 @@ func hubInstanceDatabase(raw json.RawMessage) *HealthHubInstanceDB {
 		PoolMax:            stats.DB.MaxOpen,
 		PoolWaitCountTotal: stats.DB.WaitCount,
 	}
+}
+
+// hubInstanceIntegrationItems converts reported integrations for the
+// response; nil when there are none.
+func hubInstanceIntegrationItems(list []api.HubInstanceIntegration) []HealthHubInstanceIntegration {
+	if len(list) == 0 {
+		return nil
+	}
+	out := make([]HealthHubInstanceIntegration, 0, len(list))
+	for _, in := range list {
+		out = append(out, HealthHubInstanceIntegration{
+			Name: in.Name, Health: in.Health, Connected: in.Connected, Version: in.Version,
+		})
+	}
+	return out
 }
 
 // hubInstanceState applies the state rule: stopped when stopped_at is set,
@@ -161,18 +206,6 @@ func hubInstanceStateRank(state string) int {
 	}
 }
 
-// healthSummaryHubInstances reads the hub_instances section. The store cuts
-// the list at its own clock minus hubInstanceDisplayWindow. It returns nil
-// and the error when the registry cannot be read; the summary then reports
-// the section as null ("not reported").
-func (s *Server) healthSummaryHubInstances(ctx context.Context) (*HealthSummaryHubInstances, error) {
-	rows, storeNow, err := s.store.ListHubInstances(ctx, hubInstanceDisplayWindow)
-	if err != nil {
-		return nil, err
-	}
-	return buildHealthSummaryHubInstances(rows, storeNow, s.InstanceID()), nil
-}
-
 // buildHealthSummaryHubInstances computes each row's state against the
 // store clock now, marks the serving instance, orders the items and applies
 // the cap. A pure function of its inputs.
@@ -193,8 +226,15 @@ func buildHealthSummaryHubInstances(rows []store.HubInstance, now time.Time, ser
 			LastSeen:  r.LastSeen,
 			StoppedAt: r.StoppedAt,
 			Status:    r.Status,
-			Checks:    r.Checks,
-			Database:  hubInstanceDatabase(r.Stats),
+			// Normalised again, like stats: the row may have been
+			// written by another version of the hub.
+			Checks: api.NormalizeHubInstanceChecks(r.Checks),
+		}
+		if stats, ok := decodeHubInstanceStats(r.Stats); ok {
+			item.Database = hubInstanceDatabase(stats)
+			item.IntegrationCounts = hubInstanceIntegrationCounts(stats.Integrations)
+			item.IntegrationsTruncated = stats.IntegrationsTruncated
+			item.Integrations = hubInstanceIntegrationItems(stats.Integrations)
 		}
 		if item.Checks == nil {
 			item.Checks = map[string]string{}
@@ -208,9 +248,6 @@ func buildHealthSummaryHubInstances(rows []store.HubInstance, now time.Time, ser
 		a, b := out.Items[i], out.Items[j]
 		if ra, rb := hubInstanceStateRank(a.State), hubInstanceStateRank(b.State); ra != rb {
 			return ra < rb
-		}
-		if a.Serving != b.Serving {
-			return a.Serving
 		}
 		if a.Label != b.Label {
 			return a.Label < b.Label

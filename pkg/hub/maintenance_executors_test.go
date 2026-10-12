@@ -35,9 +35,6 @@ func TestSecretMigrationExecutor_NoGCPBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create sqlite store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
 
 	// Use a local backend (not GCP) — migration should fail.
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")

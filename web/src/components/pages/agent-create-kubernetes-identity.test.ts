@@ -32,6 +32,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import { createInternals, formField } from './__fixtures__/agent-create-internals.js';
 
 interface BrokerProfileFixture {
   name: string;
@@ -233,32 +234,23 @@ async function mountAgentCreate(): Promise<MountedEl> {
 }
 
 function internals(el: MountedEl): AgentCreateInternals {
-  return el as unknown as AgentCreateInternals;
+  return createInternals<AgentCreateInternals>(el);
 }
 
 /** The GCP Identity <sl-select>, located by its field label. */
 function gcpIdentitySelect(el: MountedEl): Element | null {
-  const fields = Array.from(el.shadowRoot?.querySelectorAll('.form-field') ?? []);
-  const field = fields.find(
-    (f) => f.querySelector('label')?.textContent?.trim() === 'GCP Identity'
-  );
+  const field = formField(el, 'GCP Identity');
   return field?.querySelector('sl-select') ?? null;
 }
 
 function gcpIdentityHint(el: MountedEl): string {
-  const fields = Array.from(el.shadowRoot?.querySelectorAll('.form-field') ?? []);
-  const field = fields.find(
-    (f) => f.querySelector('label')?.textContent?.trim() === 'GCP Identity'
-  );
+  const field = formField(el, 'GCP Identity');
   return field?.querySelector('.hint')?.textContent?.trim() ?? '';
 }
 
 /** The Service Account <sl-select>, located by its field label (only rendered when mode is "assign"). */
 function gcpServiceAccountSelect(el: MountedEl): Element | null {
-  const fields = Array.from(el.shadowRoot?.querySelectorAll('.form-field') ?? []);
-  const field = fields.find(
-    (f) => f.querySelector('label')?.textContent?.trim() === 'Service Account'
-  );
+  const field = formField(el, 'Service Account');
   return field?.querySelector('sl-select') ?? null;
 }
 

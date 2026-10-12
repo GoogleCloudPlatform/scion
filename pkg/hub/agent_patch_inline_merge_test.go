@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"sort"
 	"strings"
 	"testing"
 
@@ -259,14 +258,4 @@ func TestApplyAgentUpdate_HarnessSwitchIsRefused(t *testing.T) {
 	inline := getAgentViaAPI(t, srv, agent.ID).AppliedConfig.InlineConfig
 	assert.Equal(t, "claude", inline.Harness)
 	assert.Equal(t, 4, inline.MaxTurns)
-}
-
-// sortedFieldKeys returns m's keys, sorted.
-func sortedFieldKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

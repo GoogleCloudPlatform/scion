@@ -142,6 +142,13 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		DeletionPrior:       a.DeletionPrior,
 		DeletionRequest:     a.DeletionRequest,
 	}
+	if a.RunIDUpdatedAt != nil {
+		t := *a.RunIDUpdatedAt
+		sa.RunIDUpdatedAt = &t
+	}
+	sa.SSHHostKey = a.SSHHostKey
+	sa.SSHHostKeyRunID = a.SSHHostKeyRunID
+	sa.Fixture = fixtureProvenanceFromColumns(a.FixtureRootID, a.FixtureIssuerID)
 	sa.PinnedRuntimeBrokerID = derefString(a.PinnedRuntimeBrokerID)
 	sa.PinnedRuntimeTargetID = derefString(a.PinnedRuntimeTargetID)
 	sa.PinnedRuntimeTargetType = a.PinnedRuntimeTargetType
@@ -279,8 +286,15 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	// caller's struct happened to carry (e.g. a zero value).
 	a.Generation = 1
 
+	fixtureRoot, fixtureIssuer, err := fixtureStampColumns(a.Fixture)
+	if err != nil {
+		return err
+	}
+
 	create := s.client.Agent.Create().
 		SetID(uid).
+		SetNillableFixtureRootID(fixtureRoot).
+		SetNillableFixtureIssuerID(fixtureIssuer).
 		SetSlug(a.Slug).
 		SetName(a.Name).
 		SetTemplate(a.Template).
@@ -1367,6 +1381,9 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 
 	if filter.HarnessConfig != "" {
 		preds = append(preds, agent.HarnessConfigEQ(filter.HarnessConfig))
+	}
+	if filter.GCPServiceAccountID != "" {
+		preds = append(preds, appliedGCPServiceAccountIDEQ(filter.GCPServiceAccountID))
 	}
 
 	// IDs: narrowing-only restriction to a specific agent ID set (e.g. a CLI
@@ -2632,6 +2649,9 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 		upd := c.Update().
 			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
 			SetRunID(runID)
+		if runID != row.RunID {
+			upd = upd.SetRunIDUpdatedAt(now.UTC())
+		}
 		if len(prevList) > 0 {
 			upd = upd.SetPreviousRunIds(prevList)
 		} else {
@@ -2709,6 +2729,47 @@ func runIDWritable(now time.Time) predicate.Agent {
 	)
 }
 
+// SetAgentSSHHostKey implements store.AgentStore.SetAgentSSHHostKey: one
+// conditional write, applied only while run_id equals runID, no delete
+// holds the row and no key is recorded for runID yet. When it writes
+// nothing, a read of the row tells the outcomes apart.
+func (s *AgentStore) SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (store.SSHHostKeyResult, error) {
+	if runID == "" || publicKey == "" {
+		return store.SSHHostKeyNotCurrentRun, nil
+	}
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.Agent.Update().
+		Where(
+			agent.IDEQ(uid), agent.RunIDEQ(runID), runIDWritable(time.Now()),
+			agent.Or(agent.SSHHostKeyRunIDIsNil(), agent.SSHHostKeyRunIDNEQ(runID)),
+		).
+		SetSSHHostKey(publicKey).
+		SetSSHHostKeyRunID(runID).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	if n > 0 {
+		return store.SSHHostKeyWritten, nil
+	}
+	row, err := s.client.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil()).Only(ctx)
+	switch {
+	case ent.IsNotFound(err):
+		return store.SSHHostKeyNotCurrentRun, nil
+	case err != nil:
+		return 0, mapError(err)
+	case row.RunID != runID || row.SSHHostKeyRunID != runID:
+		// Another run, or a delete holds the row.
+		return store.SSHHostKeyNotCurrentRun, nil
+	case row.SSHHostKey == publicKey:
+		return store.SSHHostKeyUnchanged, nil
+	}
+	return store.SSHHostKeyAlreadySet, nil
+}
+
 // CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.
 // The swap also clears previous_run_ids: the run has settled.
 func (s *AgentStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
@@ -2721,14 +2782,31 @@ func (s *AgentStore) RevertAgentRunID(ctx context.Context, agentID, mintedRunID,
 	return s.swapAgentRunID(ctx, agentID, mintedRunID, previousRunID, false)
 }
 
-func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool) (bool, error) {
+// AdoptAgentRunID implements store.AgentStore.AdoptAgentRunID: the
+// settling swap, refused while a delete holds the row or when run_id
+// changed after unchangedSince (run_id_updated_at is checked in the same
+// statement as the write).
+func (s *AgentStore) AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error) {
+	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true,
+		runIDWritable(time.Now()),
+		agent.RunIDUpdatedAtNotNil(),
+		agent.RunIDUpdatedAtLTE(unchangedSince.UTC()))
+}
+
+// swapAgentRunID swaps run_id from expectedRunID to newRunID, under any
+// extra predicates, and reports whether it did. A swap that changes the
+// value also sets run_id_updated_at; a same-value swap (a settle) leaves it.
+func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool, extra ...predicate.Agent) (bool, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return false, err
 	}
 	upd := s.client.Agent.Update().
-		Where(agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)).
+		Where(append([]predicate.Agent{agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)}, extra...)...).
 		SetRunID(newRunID)
+	if newRunID != expectedRunID {
+		upd = upd.SetRunIDUpdatedAt(time.Now().UTC())
+	}
 	if clearPrevious {
 		upd = upd.ClearPreviousRunIds()
 	}

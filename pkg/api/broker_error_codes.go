@@ -49,6 +49,31 @@ const (
 	BrokerErrCodeIdentityKSAMismatch = "identity_ksa_mismatch"
 )
 
+// Values of details.cause on a broker runtime_error answer to a create
+// whose runtime start failed with a Kubernetes API status the operator can
+// act on (ptone/scion#4555). Each is a fixed code: the broker never puts the
+// API server message or any namespace, ServiceAccount or object name in the
+// body. The hub relays details.cause only when it is one of these.
+const (
+	// BrokerRuntimeCauseForbidden: the runtime's credentials may not
+	// perform a call the start needs (for example, the namespace
+	// ServiceAccount may not get or list pods).
+	BrokerRuntimeCauseForbidden = "runtime_forbidden"
+	// BrokerRuntimeCauseUnauthorized: the runtime's own credentials were
+	// refused (expired or invalid).
+	BrokerRuntimeCauseUnauthorized = "runtime_unauthorized"
+)
+
+// IsBrokerRuntimeCause reports whether code is one of the
+// BrokerRuntimeCause values.
+func IsBrokerRuntimeCause(code string) bool {
+	switch code {
+	case BrokerRuntimeCauseForbidden, BrokerRuntimeCauseUnauthorized:
+		return true
+	}
+	return false
+}
+
 // Detail keys of a broker identity_not_mapped or identity_ksa_mismatch
 // error. The broker writes them and the hub reads them to build its own
 // message.
@@ -92,4 +117,20 @@ const (
 	// BrokerKSADiscoveryUnavailable: the lookup could not run, for example
 	// because the selected runtime has no Kubernetes client.
 	BrokerKSADiscoveryUnavailable = "unavailable"
+	// BrokerKSADiscoveryPending: no discovery result exists yet (the first
+	// lookup for the namespace has not finished). Used only as a heartbeat
+	// report's incomplete reason (hubclient.ProfileSAMappingsState).
+	BrokerKSADiscoveryPending = "pending"
+	// BrokerSAReportForceRuntime: the broker runs with ForceRuntime, so
+	// dispatch ignores the profile and its report may not apply. Used only
+	// as a heartbeat report's incomplete reason.
+	BrokerSAReportForceRuntime = "force_runtime"
 )
+
+// BrokerSAReportVersion is the version of a broker's per-profile service
+// account report (hubclient.ProfileSAMappingsState.ReportVersion). Version
+// 2 means the broker reports a profile incomplete whenever dispatch would
+// not use the profile's entries (BrokerSAReportForceRuntime). The Hub
+// refuses a dispatch from a report only at this version or later; a report
+// without it (an older broker) is unknown.
+const BrokerSAReportVersion = 2

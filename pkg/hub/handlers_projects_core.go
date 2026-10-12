@@ -474,6 +474,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 				"Failed to create project owner binding; project creation rolled back", nil)
 			return
 		}
+		if writeFixtureRootError(w, err) {
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -636,6 +639,7 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 			store.AnnotationProjectAgentsGroup: "true",
 		},
 	}
+	stampProjectGroup(projectGroup, project)
 	if err := s.store.CreateGroup(ctx, projectGroup); err != nil {
 		if !errors.Is(err, store.ErrAlreadyExists) {
 			s.projectsLogger().Warn("failed to create project group", "project_id", project.ID, "error", err.Error())
@@ -729,8 +733,17 @@ var errProjectOwnerBinding = errors.New("project owner binding")
 // project-owner role binding for ownerID and its audit record, in one
 // transaction. A failure of the binding or its audit record rolls back the
 // project row and is returned wrapping errProjectOwnerBinding.
+//
+// The project's creation-time provenance stamp is resolved from the
+// request's principal inside the same transaction and overwrites anything
+// the model carried (a clone copies its source's fields). A principal whose
+// provenance cannot be resolved fails the create with an error wrapping
+// errFixtureRootUnresolved.
 func (s *Server) createProjectWithOwner(ctx context.Context, project *store.Project, ownerID string) error {
 	return s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := stampProject(ctx, tx, project, fixturePrincipalFromContext(ctx)); err != nil {
+			return err
+		}
 		if err := tx.CreateProject(ctx, project); err != nil {
 			return err
 		}
@@ -939,6 +952,7 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 			store.AnnotationProjectMembersGroup: "true",
 		},
 	}
+	stampProjectGroup(membersGroup, project)
 	createErr := s.store.CreateGroup(ctx, membersGroup)
 	if createErr != nil {
 		if !errors.Is(createErr, store.ErrAlreadyExists) {
@@ -1412,27 +1426,32 @@ func (s *Server) resolveCloneToken(ctx context.Context, project *store.Project) 
 // syncWorkspaceOnStop triggers a best-effort workspace sync-back for hub-managed projects
 // on remote brokers before the agent is stopped. It uploads the workspace from the
 // broker to GCS via the control channel, then downloads from GCS to the Hub filesystem.
+//
+// The whole sync-back, upload and download together, is bounded by
+// stopSyncBackTimeout, its share of the stop's write budget
+// (ptone/scion#4210). A sync-back that runs out of time is handled like any
+// other sync-back failure: it is logged and the stop goes on. It also adds a
+// warning to the stop's response, since the hub workspace may then lack the
+// agent's latest changes, or hold part of them.
 func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	if agent.ProjectID == "" || agent.RuntimeBrokerID == "" {
 		return
 	}
+	warnCtx := ctx
+	ctx, cancel := context.WithTimeout(ctx, stopSyncBackTimeout())
+	defer cancel()
+	warnIfTimedOut := func(err error) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			addDispatchWarnings(warnCtx, stopSyncBackTimedOutWarning)
+		}
+	}
 
-	project, err := s.store.GetProject(ctx, agent.ProjectID)
-	if err != nil || !syncsHubProjectWorkspace(project) {
-		// Project not found, not hub-native/shared-workspace, or
-		// empty-per-agent: an empty-per-agent agent's directory is private
-		// and broker-local, and syncing it would overwrite the project's
-		// hub workspace (design #2703).
+	// Project not found, not hub-native/shared-workspace, empty-per-agent,
+	// or an embedded or colocated broker: no sync-back
+	// (hubWorkspaceNeedsSyncBack).
+	project, ok, _ := s.hubWorkspaceNeedsSyncBack(ctx, agent)
+	if !ok {
 		return
-	}
-
-	// Check if broker is co-located (embedded or has local path)
-	if s.isEmbeddedBroker(agent.RuntimeBrokerID) {
-		return // Embedded broker, no sync needed
-	}
-	provider, err := s.store.GetProjectProvider(ctx, project.ID, agent.RuntimeBrokerID)
-	if err == nil && provider.LocalPath != "" {
-		return // Colocated broker, no sync needed
 	}
 
 	stor := s.GetStorage()
@@ -1452,7 +1471,9 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	if err := tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: failed to upload workspace from broker",
 			"agent_id", agent.ID,
-			"agent", agent.Name, "project_id", project.ID, "error", err)
+			"agent", agent.Name, "project_id", project.ID, "error", err,
+			"timeout", stopSyncBackTimeout())
+		warnIfTimedOut(err)
 		return
 	}
 
@@ -1466,7 +1487,9 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: GCS download failed",
 			"agent_id", agent.ID,
-			"project_id", project.ID, "error", err)
+			"project_id", project.ID, "error", err,
+			"timeout", stopSyncBackTimeout())
+		warnIfTimedOut(err)
 	} else {
 		s.agentLifecycleLog.Info("syncWorkspaceOnStop: workspace synced back to Hub",
 			"agent_id", agent.ID,
@@ -1680,6 +1703,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		if !s.authorizeBrokerCreate(w, r) {
 			return
 		}
+		// Test admin tier: only the co-located broker may register.
+		if s.refuseTestAdminBrokerRegistration(w, req.Broker.ID) {
+			return
+		}
 
 		embeddedBrokerID := req.Broker.ID
 		var embeddedBrokerMatchedByID bool
@@ -1888,6 +1915,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 					"project_id", project.ID, "user_id", project.CreatedBy, "error", err)
 				writeError(w, http.StatusInternalServerError, "ROLE_BINDING_FAILED",
 					"Failed to create project owner binding; project creation rolled back", nil)
+				return
+			}
+			if writeFixtureRootError(w, err) {
 				return
 			}
 			writeErrorFromErr(w, err, "")
@@ -2730,29 +2760,12 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 
 	// Resolve caller identity for creator tracking (attribution only — the
 	// authorization decision is made above).
-	var createdBy string
-	var creatorName string
-	var ancestry []string
-	var notifySubscriberType, notifySubscriberID string
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		createdBy = agentIdent.ID()
-		if creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
-			creatorName = creatorAgent.Name
-			notifySubscriberType = store.SubscriberTypeAgent
-			notifySubscriberID = creatorAgent.Slug
-			// Build ancestry: creator's ancestry + creator's ID
-			ancestry = append(ancestry, creatorAgent.Ancestry...)
-			ancestry = append(ancestry, creatorAgent.ID)
-		}
-	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		createdBy = userIdent.ID()
-		creatorName = userIdent.Email()
-		notifySubscriberType = store.SubscriberTypeUser
-		notifySubscriberID = userIdent.ID()
-		// User-created agents: ancestry is [userID]
-		ancestry = []string{userIdent.ID()}
+	attr, err := s.resolveAgentCreateAttribution(ctx)
+	if err != nil {
+		writeAgentCreateAttributionError(ctx, w, err)
+		return
 	}
-	s.createAgentInProject(w, r, req, projectID, createdBy, creatorName, ancestry, notifySubscriberType, notifySubscriberID)
+	s.createAgentInProject(w, r, req, projectID, attr.CreatedBy, attr.CreatorName, attr.Ancestry, attr.NotifySubscriberType, attr.NotifySubscriberID)
 }
 
 // getProjectAgent gets an agent by ID within a specific project.
@@ -3671,9 +3684,10 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 	if stor == nil {
 		return
 	}
-	for _, tmpl := range templates {
+	for i := range templates {
+		tmpl := &templates[i]
 		if tmpl.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, storage.DirPrefix(tmpl.StoragePath)); err != nil {
+			if err := s.deleteTemplateStorage(ctx, stor, tmpl); err != nil {
 				s.projectsLogger().Warn("failed to delete template storage files",
 					"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
 			}
