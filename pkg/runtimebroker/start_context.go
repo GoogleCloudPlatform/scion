@@ -2308,17 +2308,24 @@ func isLoopbackEndpointURL(endpoint string) bool {
 // applyStartTemplateEnvSource resolves the agent's Hub template on a start or
 // restart that leaves opts.Template unset (the agent's state survived), and
 // passes its local path in opts.TemplateEnvSource, which the agent manager
-// uses only to compute the template env fallback (ptone/scion#4524). The
-// template cache is checked first by the Hub's TemplateHash (a hit needs no
-// Hub round trip); a miss hydrates as create does. opts.Template is never set here, so image, harness-config and
-// agent config resolution are unchanged. A hydration failure is logged and
-// the start goes on without template env (the agent manager warns that the
-// env fallback is not applied); it never fails the start.
+// uses only to compute the template env fallback (ptone/scion#4524).
+//
+// The template is resolved live, as create does (hydrateTemplate): the Hub's
+// current content, reused from the cache when unchanged, so the template env
+// follows template updates. The request's TemplateHash is the hash recorded
+// at create, so a cache lookup by it would pin create-time content and make
+// the result depend on cache state; it is not used to short-cut resolution.
+//
+// opts.Template is never set here, so image, harness-config and agent config
+// resolution are unchanged. A hydration failure is logged and the start goes
+// on without template env (the agent manager warns that the env fallback is
+// not applied); it never fails the start.
 //
 // An older Hub sends no template identity: the template hash recorded at
 // provision (broker-side provenance) is then looked up in the template cache,
-// read-only. A hit sets the env source; a miss leaves it unset (the agent
-// manager warns).
+// read-only, so such an agent gets the template version it was provisioned
+// from. A hit sets the env source; a miss leaves it unset (the agent manager
+// warns).
 func (s *Server) applyStartTemplateEnvSource(ctx context.Context, in startContextInputs, opts *api.StartOptions, hubConn *HubConnection, templateSlug string) {
 	if in.TemplateID == "" && in.TemplateHash == "" {
 		if s.cache == nil {
@@ -2332,14 +2339,6 @@ func (s *Server) applyStartTemplateEnvSource(ctx context.Context, in startContex
 			opts.TemplateEnvSource = path
 		}
 		return
-	}
-	// Cache first: the cache is content-addressed, so a hit for the hash the
-	// Hub sent is authoritative and needs no Hub round trip.
-	if in.TemplateHash != "" && s.cache != nil {
-		if path, ok := s.cache.Get(in.TemplateHash); ok {
-			opts.TemplateEnvSource = path
-			return
-		}
 	}
 	if hubConn == nil {
 		return

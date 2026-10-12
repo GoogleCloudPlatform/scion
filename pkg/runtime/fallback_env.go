@@ -33,10 +33,11 @@ import (
 // sorted by key, so the result is deterministic.
 //
 // The SCION_* skip keeps the fallback final even against env a runtime adds
-// after this step: the only such additions are broker-owned SCION_* keys
-// (Podman's SCION_KEEPID_UID and SCION_SUPPLEMENTAL_GIDS from
-// appendSharedDirGroupArgs, which envKeysOfArgs cannot see). The agent
-// manager already strips SCION_* from template env; this is the runtime-side
+// after this step: the only such additions are broker-owned SCION_* keys,
+// SCION_SUPPLEMENTAL_GIDS (appendSharedDirGroupArgs, called by the docker,
+// podman and apple runtimes after buildCommonRunArgs) and Podman's
+// SCION_KEEPID_UID, which envKeysOfArgs cannot see. The agent manager
+// already strips SCION_* from template env; this is the runtime-side
 // guarantee.
 //
 // Being applied last by every runtime makes the fallback final by

@@ -170,22 +170,25 @@ func recordTemplateHash(t *testing.T, f *templateIdentityFixture, hash string) {
 	require.NoError(t, os.WriteFile(filepath.Join(agentDir, config.ImageProvenanceFileName), []byte(body), 0o600))
 }
 
-// Cache first: when the template for the Hub's TemplateHash is already in
-// the broker's cache, the env source is set from it with no Hub round trip.
-func TestApplyStartTemplateEnvSource_CacheHitSkipsHydration(t *testing.T) {
+// Live semantics: the request's TemplateHash is the hash recorded at create,
+// so even when the broker's cache holds that (create-time) content, the env
+// source is resolved live through the Hub, as create resolves it; the cached
+// create-time copy is never used just because the hash matches.
+func TestApplyStartTemplateEnvSource_CacheHitStillResolvesLive(t *testing.T) {
 	f := newTemplateIdentityFixture(t, "kept-agent", true)
 	cache, err := templatecache.New(t.TempDir(), 0)
 	require.NoError(t, err)
-	const hash = "sha256-cached-template"
+	const hash = "sha256-create-time-template"
 	cachedDir, err := cache.Put(hash, map[string][]byte{"scion-agent.json": []byte(`{}`)})
 	require.NoError(t, err)
 	f.srv.cache = cache
-	conn, _ := templateConn(t, "web-dev", nil, func() {
-		t.Error("a cache hit must not ask the Hub for the template")
-	})
+	asked := 0
+	conn, liveDir := templateConn(t, "web-dev", nil, func() { asked++ })
 
 	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{TemplateID: "tpl-uuid", TemplateHash: hash}, &f.opts, conn, "web-dev")
-	assert.Equal(t, cachedDir, f.opts.TemplateEnvSource)
+	assert.Equal(t, liveDir, f.opts.TemplateEnvSource, "the template must be resolved live")
+	assert.NotEqual(t, cachedDir, f.opts.TemplateEnvSource, "the create-time cached copy must not be used")
+	assert.Positive(t, asked, "the Hub must be asked for the current template")
 	assert.Empty(t, f.opts.Template)
 }
 

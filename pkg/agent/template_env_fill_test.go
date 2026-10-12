@@ -488,10 +488,12 @@ func TestStart_TemplateEnvTravelsAsFallbackEnv(t *testing.T) {
 
 // FYI-5 ruling: ALL of the harness-config's auth-candidate keys are
 // suppressed for the fallback, so a template never supplies a credential,
-// even one nothing else set. The agent resolves to vertex-ai, so
-// ANTHROPIC_API_KEY belongs to an auth type it does NOT use: suppressing only
-// the selected type's keys would let it through (the vertex scenario: a
-// present API key can switch the in-container CLI off vertex).
+// even one nothing else set. The agent is configured for vertex-ai (the
+// harness-config's default_type and the request's HarnessAuth; NoAuth skips
+// credential resolution itself), so ANTHROPIC_API_KEY belongs to an auth type
+// it does NOT use: suppressing only the selected type's keys would let it
+// through (the vertex scenario: a present API key can switch the
+// in-container CLI off vertex).
 func TestStart_TemplateEnvAuthCandidateKeysSuppressed(t *testing.T) {
 	project := templateEnvStart{tplEnv: map[string]string{
 		"ANTHROPIC_API_KEY":    "template-key",
