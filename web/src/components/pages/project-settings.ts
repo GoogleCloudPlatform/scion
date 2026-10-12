@@ -39,6 +39,7 @@ import type {
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
 import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
+import { projectServiceAccountListUrl } from '../../shared/gcp-sa-assign-status.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
@@ -1497,7 +1498,9 @@ export class ScionPageProjectSettings extends LitElement {
   private async loadGCPServiceAccounts(): Promise<void> {
     try {
       const response = await apiFetch(
-        `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
+        // No assignStatus: the project default applies to every runtime
+        // profile, so there is no single target to report a mapping for.
+        projectServiceAccountListUrl(this.projectId, null)
       );
       if (response.ok) {
         const data = (await response.json()) as { items?: GCPServiceAccount[] };
@@ -2575,7 +2578,9 @@ export class ScionPageProjectSettings extends LitElement {
                       </div>
                       <span class="field-help"
                         >The GCP service account to assign to new agents by default. Only verified
-                        accounts are shown.</span
+                        accounts are shown. This default applies to any runtime profile that has no
+                        default of its own, so no mapping state is shown here; the agent create and
+                        configure pickers show it for the agent's Kubernetes profile.</span
                       >
                     </div>
                   `

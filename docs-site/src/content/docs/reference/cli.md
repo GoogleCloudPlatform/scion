@@ -356,10 +356,24 @@ Sends a message to a running agent or user.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
 - **Output:**
-  A successful send ends with a confirmation that names the message the Hub created, as a `(message <id>)` suffix, for example `Message delivered to agent 'reviewer' (message 0f3c…).` or `Message sent to user:alice@example.com via Hub (conversation 7b1e…, message 0f3c…).` A group send prints the ID on each recipient's line (`  Delivered: agent:a (message 0f3c…)`), because every recipient gets its own message. The ID is the one agents see as `message_id` in the delivered message. For a message recorded in a conversation, it is also the `<message-id>` that `scion conversation get-message conv:<conversation-id> <message-id>` takes; a message with no conversation (for example a broadcast) cannot be fetched that way. A Hub that does not report an ID gets the confirmation without the suffix. Local-mode sends and `scion broadcast` print no ID. With `--format json`, a single send's result has the ID in `message_id`, and a group send's `results` entries carry `message_id` for each delivered, deferred or `unknown` (ambiguous) recipient; a failed recipient has none.
+  A successful send ends with a confirmation that names the message the Hub created, as a `(message <id>)` suffix, for example `Message accepted for agent 'reviewer' (message 0f3c…).` or `Message sent to user:alice@example.com via Hub (conversation 7b1e…, message 0f3c…).` A group send prints the ID on each recipient's line (`  Accepted: agent:a (message 0f3c…)`), because every recipient gets its own message. The ID is the one agents see as `message_id` in the delivered message. For a message recorded in a conversation, it is also the `<message-id>` that `scion conversation get-message conv:<conversation-id> <message-id>` takes; a message with no conversation (for example a broadcast) cannot be fetched that way. A Hub that does not report an ID gets the confirmation without the suffix. Local-mode sends and `scion broadcast` print no ID. With `--format json`, a single send's result has the ID in `message_id`, and a group send's `results` entries carry `message_id` for each accepted (`delivered`), deferred or `unknown` (ambiguous) recipient; a failed recipient has none.
+
+- **What the confirmation means:**
+  The Hub reports a status for each agent send, and the CLI words its confirmation by what that status actually confirms. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it as input. It does not confirm that the agent has read or acted on it. No send status currently confirms that.
+
+  | Hub status | Meaning | CLI confirmation |
+  |---|---|---|
+  | `dispatched`, `delivered` | The runtime accepted and buffered the message. | `Message accepted for agent 'x' (message <id>).` |
+  | `delivered_not_persisted` | Accepted as above, but the Hub could not save it to history, so there is no message ID. | `Message accepted for agent 'x'.` |
+  | `ambiguous` (HTTP `202`) | The Hub could not tell whether the runtime took the message. Check before you resend. | `Message accepted for agent 'x' (delivery unconfirmed) (message <id>).` |
+  | `deduplicated` | An agent sent an `@mention` notification that repeats one the Hub sent moments earlier for the same message, so it was not sent again. The ID is the earlier message's. | `Message accepted for agent 'x' (duplicate of an earlier send) (message <id>).` |
+  | `deferred` (HTTP `202`) | The agent is reincarnating. The message was saved to history and not sent yet. The new generation sees it on catch-up. | `agent x is reincarnating; message saved to history and will be seen on catch-up (message <id>).` |
+  | failed (an error response) | The message was not sent. | An error, and no confirmation. |
+
+  `scion broadcast` words each Hub send the same way (`Message accepted for agent 'x' via Hub.`). A local-mode broadcast prints `Message sent to agent 'x'.` once the text has been typed into the agent's terminal. With `--format json`, the raw `status` value is in the output.
 
 - **Group sends and exit codes:**
-  A `group[...]` send delivers to at most six recipients at a time, and reports each recipient's outcome: `delivered`, `deferred` (saved while the agent reincarnates), `failed` (with the reason), or `unknown` (no definite answer, for example a timeout, a gateway error, or the Hub reporting delivery as `ambiguous`, so the message may have been delivered). When not every recipient was reached, the output lists the delivered and failed recipients and a recipient argument naming only the failed ones: the bare recipient (for example `agent:b`) when one failed, or `group[...]` when several did, since `group[...]` needs at least two recipients. With `--format json` the output is an object:
+  A `group[...]` send delivers to at most six recipients at a time, and reports each recipient's outcome: accepted (`delivered` in JSON), `deferred` (saved while the agent reincarnates), `failed` (with the reason), or `unknown` (no definite answer, for example a timeout, a gateway error, or the Hub reporting delivery as `ambiguous`, so the message may have been delivered). When not every recipient was reached, the output lists the accepted and failed recipients and a recipient argument naming only the failed ones: the bare recipient (for example `agent:b`) when one failed, or `group[...]` when several did, since `group[...]` needs at least two recipients. With `--format json` the output is an object:
   ```json
   {
     "group_id": "…",
@@ -373,7 +387,7 @@ Sends a message to a running agent or user.
   }
   ```
   Earlier versions printed only a bare array of results; that array is now the `results` field (`jq '.results[]'` instead of `jq '.[]'`).
-  `scion message` exits `0` when the message was sent (for a group, every recipient was delivered or deferred), `1` when it was not sent (for a group, no recipient received it, so the whole send can be retried), and `3` when a group send partly succeeded. On exit `3`, do not resend to the whole group: retry only `retry_recipient` (pass it back as the recipient argument), and check `unknown` recipients before you resend to them. An interrupt (Ctrl-C or `SIGTERM`) while the group sends are in progress cancels them and still prints the results: sends already in flight are `unknown`, sends not yet started are `failed` (not sent), and `@mention`/`--cc` notifications are skipped. Outside that window an interrupt exits immediately.
+  `scion message` exits `0` when the message was sent (for a group, every recipient was accepted or deferred), `1` when it was not sent (for a group, no recipient received it, so the whole send can be retried), and `3` when a group send partly succeeded. On exit `3`, do not resend to the whole group: retry only `retry_recipient` (pass it back as the recipient argument), and check `unknown` recipients before you resend to them. An interrupt (Ctrl-C or `SIGTERM`) while the group sends are in progress cancels them and still prints the results: sends already in flight are `unknown`, sends not yet started are `failed` (not sent), and `@mention`/`--cc` notifications are skipped. Outside that window an interrupt exits immediately.
 
 - **Message Body Formatting:**
   The command delivers the `<message>` argument **verbatim** — it performs no escape expansion, no markdown rendering, and no character substitution. Whatever bytes you pass are exactly what the recipient receives.
@@ -724,7 +738,11 @@ a user reincarnates an agent without changing its role, and the agent's own dele
 missing or has no recorded provenance, or an edge further up its chain has no recorded provenance
 and every edge between it and the agent is accepted on this hub, the user becomes the agent's
 recorded delegator. This clears the
-`ceiling_unrecorded` denial, which blocks service-account assignment among other actions. The
+`ceiling_unrecorded` denial, which blocks service-account assignment among other actions. If the
+agent has an assigned GCP service account, the same reincarnation also records the user as the source
+of that assignment, provided the user passes the same access checks as `scion create --service-account`
+for the account. If the user does not, the reincarnation repairs the delegation all the same, the agent
+keeps its existing assignment, and the plan carries a warning. The
 **Reincarnate** button in the web UI does the same. A reincarnation by the agent itself or by another
 agent keeps the edge, and so does a user's reincarnation of an agent whose chain is fully recorded,
 or whose first problem walking up from the agent is an edge this hub does not accept (for example
@@ -1053,13 +1071,14 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `token <id> --out <file>`: Issue a new token for a live test identity you issued (an admin sign-in may do it for any), for runs longer than one token. Flags: `--out <file>` (required), `--ttl <duration>`, `--json`.
     - `list`: List the test identities you issued (every identity for an admin sign-in). Only live identities are listed unless `--include-expired` is set. Flags: `--limit <n>` (default: the Hub's, 100; at most 500), `--include-expired`, `--json`.
     - `delete <id>`: Delete a test identity. Its role bindings and group memberships go with it, and its tokens stop working at once. The delete is refused while the identity still owns agents, or is the last owner of a project; the command lists them, and you delete them first. Deleting an identity that does not exist (for example, deleted already) succeeds with a notice on standard error, so a teardown step can run twice.
+        - `--purge`: Also remove what the identity created: its agents (with their files on the broker), schedules, groups and projects. Only resources the Hub recorded as created under the identity are removed. A project that has another owner, or resources someone else created, is kept, and the identity's access to it is removed. Agents the identity owns without that record are listed as unproven and never removed. The command prints what it removed and kept. If the purge cannot finish (for example a broker is offline) it lists what is left and exits non-zero; run it again to finish.
 
 ```bash
 # CI: issue a member identity, run tests with its token, then tear it down
 scion hub test-identity issue --role member --ttl 30m --purpose "e2e" --out ./fixture.token --json > fixture.json
 FIXTURE_ID=$(jq -r .identity.id fixture.json)
 ./run-e2e.sh --token-file ./fixture.token   # your test runner reads the token from the file
-scion hub test-identity delete "$FIXTURE_ID"
+scion hub test-identity delete "$FIXTURE_ID" --purge
 ```
 - `scion hub env`: Manage environment variables on the Hub.
     - `set <key>=<value>`: Set a variable.
