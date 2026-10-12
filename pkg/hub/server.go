@@ -1949,8 +1949,14 @@ type Server struct {
 	projectsLog       *slog.Logger
 	resourceLog       *slog.Logger
 	templateLog       *slog.Logger
-	workspaceLog      *slog.Logger
-	agentMetricsLog   *slog.Logger
+	// templateAgentConfigMisses records template rows, keyed by ID and
+	// content hash, whose agent config file could not be read or parsed
+	// when deriving a missing snapshot (ensureTemplateAgentConfig), so a
+	// broken file is read once per content, not on every create and
+	// dispatch. A new commit changes the content hash and retries.
+	templateAgentConfigMisses sync.Map
+	workspaceLog              *slog.Logger
+	agentMetricsLog           *slog.Logger
 	// perfTraceLog receives the per-request perf_trace lines. Set only when
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger

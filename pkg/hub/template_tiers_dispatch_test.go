@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -538,8 +539,10 @@ func tiersCommittedTemplate(t *testing.T, srv *Server, s store.Store, name strin
 }
 
 // TestTemplateAgentConfig_LazyDeriveAndBackfill: a row without a snapshot is
-// derived lazily on first read and persisted; the startup backfill derives
-// the rest, and a second backfill does nothing (idempotent).
+// derived lazily on first read and persisted; the startup sync
+// (SyncAllTemplatesFromStorage, which runs the backfill) derives the rest,
+// and a second backfill does nothing (idempotent). Neither write changes the
+// row's Updated time.
 func TestTemplateAgentConfig_LazyDeriveAndBackfill(t *testing.T) {
 	ctx := context.Background()
 	srv, s := newCommitTestServer(t, newCommitTestStorage(t))
@@ -556,20 +559,42 @@ func TestTemplateAgentConfig_LazyDeriveAndBackfill(t *testing.T) {
 	require.NotNil(t, row.AgentConfig, "the derived snapshot is persisted")
 	assert.Equal(t, "lazy-image:v1", row.AgentConfig.Image, "the stored snapshot stays a faithful parse")
 	assert.Equal(t, lazy.ContentHash, row.ContentHash, "content is unchanged")
+	assert.True(t, lazy.Updated.Equal(row.Updated), "the lazy write keeps Updated")
 
 	pending := tiersCommittedTemplate(t, srv, s, "backfill-tmpl", map[string]string{"scion-agent.yaml": "model: backfill-model\n"})
 	_ = seedCommittedTemplate(t, srv, "no-config-tmpl", store.TemplateScopeGlobal, "", map[string]string{"README.md": "hi"})
 
-	assert.Equal(t, 1, srv.BackfillTemplateAgentConfigs(ctx), "only the row without a snapshot is derived")
+	srv.SyncAllTemplatesFromStorage(ctx)
 	row, err = s.GetTemplate(ctx, pending.ID)
 	require.NoError(t, err)
-	require.NotNil(t, row.AgentConfig)
+	require.NotNil(t, row.AgentConfig, "the startup sync backfills a row without a snapshot")
 	assert.Equal(t, "backfill-model", row.AgentConfig.Model)
-	version := row.Updated
+	assert.True(t, pending.Updated.Equal(row.Updated), "the backfill keeps Updated")
+
 	assert.Equal(t, 0, srv.BackfillTemplateAgentConfigs(ctx), "a second backfill does nothing")
-	row, err = s.GetTemplate(ctx, pending.ID)
+	again, err := s.GetTemplate(ctx, pending.ID)
 	require.NoError(t, err)
-	assert.Equal(t, version, row.Updated, "a second backfill writes nothing")
+	assert.Equal(t, row.AgentConfig, again.AgentConfig)
+}
+
+// TestTemplateAgentConfig_UnreadableFileReadOnce: a row whose agent config
+// does not parse is read once per content hash, not on every call.
+func TestTemplateAgentConfig_UnreadableFileReadOnce(t *testing.T) {
+	ctx := context.Background()
+	srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+	broken := tiersCommittedTemplate(t, srv, s, "broken-tmpl", map[string]string{"scion-agent.yaml": "model: [unclosed\n"})
+	require.Nil(t, srv.templateJobConfigByID(ctx, broken.ID))
+
+	// Make the stored object parse now: a second read would derive it.
+	f, ok := templateFileByPath(broken.Files, "scion-agent.yaml")
+	require.True(t, ok)
+	_, err := srv.GetStorage().Upload(ctx, templateObjectPath(broken, f), strings.NewReader("model: fixed\n"), storage.UploadOptions{})
+	require.NoError(t, err)
+
+	assert.Nil(t, srv.templateJobConfigByID(ctx, broken.ID), "the failed read is not repeated for the same content")
+	row, err := s.GetTemplate(ctx, broken.ID)
+	require.NoError(t, err)
+	assert.Nil(t, row.AgentConfig)
 }
 
 // TestBrokerCapabilities_TemplateTiersIngested: the hub reads templateTiers
@@ -662,6 +687,11 @@ func TestTelemetryDispatch_Units(t *testing.T) {
 	env = map[string]string{envTelemetryEnabled: "false"}
 	capable.injectRequesterEnabled(env, &cls)
 	assert.Equal(t, "false", env[envTelemetryEnabled], "an explicit env flag is kept")
+
+	// A legacy broker with only a project policy gets {Enabled: policy}.
+	policyOnly := telemetryDispatch{policy: &off}.inlineTelemetry()
+	require.NotNil(t, policyOnly)
+	assert.Equal(t, &api.TelemetryConfig{Enabled: &off}, policyOnly)
 
 	assert.Nil(t, telemetryDispatch{}.inlineConfig(nil))
 	assert.Equal(t, []string{"cloud", "hub", "resource"}, requesterTelemetryDroppedFields(&api.TelemetryConfig{

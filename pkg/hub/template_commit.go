@@ -551,9 +551,10 @@ func templateHasAgentConfigFile(tmpl *store.Template) bool {
 // ensureTemplateAgentConfig returns tmpl.AgentConfig. When the row has no
 // snapshot but its manifest lists an agent config file, it derives the
 // snapshot the way a commit does (deriveTemplateIndex), sets it on tmpl, and
-// persists it with a compare-and-swap on the content hash and layout read,
-// so a concurrent commit always wins. Only AgentConfig is written; the
-// row's other derived fields are left as stored. A file that cannot be read
+// persists it with store.SetTemplateAgentConfig, which writes only that
+// column, only while the row still has no snapshot and the content hash and
+// layout read, and leaves Updated as it was; a concurrent commit or metadata
+// edit is never reverted. A file that cannot be read
 // or does not parse yields nil and writes nothing. Calling it again on a row
 // that has its snapshot is a no-op, so it is idempotent.
 func (s *Server) ensureTemplateAgentConfig(ctx context.Context, tmpl *store.Template) *api.ScionConfig {
@@ -562,6 +563,10 @@ func (s *Server) ensureTemplateAgentConfig(ctx context.Context, tmpl *store.Temp
 	}
 	if tmpl.AgentConfig != nil || !templateHasAgentConfigFile(tmpl) {
 		return tmpl.AgentConfig
+	}
+	missKey := tmpl.ID + "@" + tmpl.ContentHash
+	if _, missed := s.templateAgentConfigMisses.Load(missKey); missed {
+		return nil
 	}
 	stor := s.GetStorage()
 	if stor == nil {
@@ -578,82 +583,89 @@ func (s *Server) ensureTemplateAgentConfig(ctx context.Context, tmpl *store.Temp
 	if err != nil {
 		slog.WarnContext(ctx, "template agent config: cannot read the agent config to derive the snapshot",
 			"template", tmpl.Name, "template_id", tmpl.ID, "error", err)
+		s.templateAgentConfigMisses.Store(missKey, struct{}{})
 		return nil
 	}
 	idx := deriveTemplateIndex(data, name, tmpl.Name)
 	if idx.AgentConfig == nil {
+		s.templateAgentConfigMisses.Store(missKey, struct{}{})
 		return nil
 	}
 	tmpl.AgentConfig = idx.AgentConfig
-	s.persistTemplateAgentConfig(ctx, tmpl.ID, tmpl.ContentHash, tmpl.Layout, idx.AgentConfig)
+	s.persistTemplateAgentConfig(ctx, tmpl.ID, tmpl.Name, tmpl.ContentHash, tmpl.Layout, idx.AgentConfig)
 	return tmpl.AgentConfig
 }
 
-// persistTemplateAgentConfig writes cfg as the AgentConfig of template id,
-// only while the stored row still has no snapshot and the content hash and
-// layout it was derived from. Failures are logged; the caller already has
-// the derived value.
-func (s *Server) persistTemplateAgentConfig(ctx context.Context, id, contentHash, layout string, cfg *api.ScionConfig) {
-	row, err := s.store.GetTemplate(ctx, id)
-	if err != nil || row == nil {
-		return
-	}
-	if row.AgentConfig != nil || row.ContentHash != contentHash || row.Layout != layout {
-		return
-	}
-	row.AgentConfig = cfg
-	err = s.store.UpdateTemplateContent(ctx, row, store.TemplateContentPrecondition{ContentHash: contentHash, Layout: layout})
+// persistTemplateAgentConfig stores cfg as the AgentConfig of template id
+// through store.SetTemplateAgentConfig: only that column is written, and
+// only while the row still has no snapshot and the content hash and layout
+// it was derived from. Failures are logged; the caller already has the
+// derived value.
+func (s *Server) persistTemplateAgentConfig(ctx context.Context, id, name, contentHash, layout string, cfg *api.ScionConfig) {
+	written, err := s.store.SetTemplateAgentConfig(ctx, id, cfg, store.TemplateContentPrecondition{ContentHash: contentHash, Layout: layout})
 	switch {
-	case err == nil:
-		slog.InfoContext(ctx, "template agent config: derived and stored the missing snapshot",
-			"template", row.Name, "template_id", row.ID)
-	case errors.Is(err, store.ErrTemplateConflict), errors.Is(err, store.ErrNotFound):
-		// A concurrent commit or delete won; it owns the row now.
-	default:
+	case err != nil:
 		slog.WarnContext(ctx, "template agent config: cannot store the derived snapshot",
-			"template", row.Name, "template_id", row.ID, "error", err)
+			"template", name, "template_id", id, "error", err)
+	case written:
+		slog.InfoContext(ctx, "template agent config: derived and stored the missing snapshot",
+			"template", name, "template_id", id)
 	}
+	// Not written: a concurrent commit or delete owns the row now.
 }
 
-// templateAgentConfigBackfillLimit bounds one startup backfill pass.
-const templateAgentConfigBackfillLimit = 1000
+// templateAgentConfigBackfillPage and templateAgentConfigBackfillLimit bound
+// one startup backfill pass: rows are listed a page at a time, up to the
+// limit in total. Rows past the limit are derived lazily on first read.
+const (
+	templateAgentConfigBackfillPage  = 500
+	templateAgentConfigBackfillLimit = 10000
+)
 
 // BackfillTemplateAgentConfigs derives and stores the AgentConfig snapshot of
 // every active template row that lists an agent config file but has no
-// snapshot (ensureTemplateAgentConfig), at most
-// templateAgentConfigBackfillLimit rows per call, sequentially. It returns
-// the number of rows that gained a snapshot. Rows that already have one are
-// skipped, so a second call does nothing (idempotent).
+// snapshot (ensureTemplateAgentConfig), sequentially, paging through at most
+// templateAgentConfigBackfillLimit rows. It returns the number of rows that
+// gained a snapshot. Rows that already have one are skipped, so a second
+// call does nothing (idempotent).
 func (s *Server) BackfillTemplateAgentConfigs(ctx context.Context) int {
 	if s.GetStorage() == nil {
 		return 0
 	}
-	result, err := s.store.ListTemplates(ctx, store.TemplateFilter{
-		Status: store.TemplateStatusActive,
-	}, store.ListOptions{Limit: templateAgentConfigBackfillLimit})
-	if err != nil {
-		s.resourceLog.Warn("template agent config backfill: failed to list templates", "error", err)
-		return 0
-	}
-	if result == nil {
-		return 0
-	}
-	if len(result.Items) >= templateAgentConfigBackfillLimit {
-		s.resourceLog.Info("template agent config backfill: row cap reached; rows past it are derived lazily on first read",
-			"cap", templateAgentConfigBackfillLimit)
-	}
-	derived := 0
-	for i := range result.Items {
-		if ctx.Err() != nil {
+	derived, scanned := 0, 0
+	cursor := ""
+	for scanned < templateAgentConfigBackfillLimit && ctx.Err() == nil {
+		result, err := s.store.ListTemplates(ctx, store.TemplateFilter{
+			Status: store.TemplateStatusActive,
+		}, store.ListOptions{Limit: templateAgentConfigBackfillPage, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			s.resourceLog.Warn("template agent config backfill: failed to list templates", "error", err)
 			break
 		}
-		t := &result.Items[i]
-		if t.AgentConfig != nil || !templateHasAgentConfigFile(t) {
-			continue
+		if result == nil {
+			break
 		}
-		if s.ensureTemplateAgentConfig(ctx, t) != nil {
-			derived++
+		for i := range result.Items {
+			if ctx.Err() != nil {
+				break
+			}
+			scanned++
+			t := &result.Items[i]
+			if t.AgentConfig != nil || !templateHasAgentConfigFile(t) {
+				continue
+			}
+			if s.ensureTemplateAgentConfig(ctx, t) != nil {
+				derived++
+			}
 		}
+		cursor = result.NextCursor
+		if cursor == "" {
+			break
+		}
+	}
+	if cursor != "" && scanned >= templateAgentConfigBackfillLimit {
+		s.resourceLog.Info("template agent config backfill: row limit reached; rows past it are derived lazily on first read",
+			"limit", templateAgentConfigBackfillLimit)
 	}
 	if derived > 0 {
 		s.resourceLog.Info("template agent config backfill: derived missing snapshots", "count", derived)

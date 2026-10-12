@@ -59,10 +59,11 @@ import (
 //     today: its InlineConfig (explicit config-time env) or a Secret==false
 //     EnvVar in a reachable scope. The template's env is not a source: the
 //     hub no longer copies it into AppliedConfig.Env (ptone/scion#4222), so
-//     a template value found there is residue and is stripped too. This is an allowlist, not a denylist -- a key with no matching
-//     live source (for example, one whose originating secret has since been
-//     deleted) is stripped along with the rest, since this job cannot tell
-//     that case apart from a value that predates the write-path fix.
+//     a template value found there is residue and is stripped too. This is
+//     an allowlist, not a denylist -- a key with no matching live source
+//     (for example, one whose originating secret has since been deleted) is
+//     stripped along with the rest, since this job cannot tell that case
+//     apart from a value that predates the write-path fix.
 //
 // The auto-expose keys in autoExposeAllowlistExemptKeys are exempt from this
 // allowlist (the secret checks still apply): the hub derives
@@ -316,11 +317,12 @@ func (e *AppliedConfigEnvCleanupExecutor) keysToStrip(ctx context.Context, agent
 // resolvablePlainValues returns, for every key, the set of values a
 // currently live, non-secret source would produce for that key today: the
 // agent's InlineConfig (explicit config-time env) and any reachable
-// Secret==false EnvVar. The template's env is not one (ptone/scion#4222). A key/value pair
-// present here is provably still an intentional plain declaration as of this
-// run, not a residual value from before the write-path fix. This mirrors the
-// persistence allowlist in shouldPersistResolvedEnvKey (httpdispatcher.go),
-// applied after the fact to rows that were already written.
+// Secret==false EnvVar. The template's env is not one (ptone/scion#4222). A
+// key/value pair present here is provably still an intentional plain
+// declaration as of this run, not a residual value from before the
+// write-path fix. This mirrors the persistence allowlist in
+// shouldPersistResolvedEnvKey (httpdispatcher.go), applied after the fact to
+// rows that were already written.
 func (e *AppliedConfigEnvCleanupExecutor) resolvablePlainValues(ctx context.Context, cfg *store.AgentAppliedConfig, envVarsByKey map[string]store.EnvVar) map[string]map[string]bool {
 	values := make(map[string]map[string]bool)
 	add := func(k, v string) {
