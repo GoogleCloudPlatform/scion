@@ -29,8 +29,10 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -137,7 +139,7 @@ func TestBuildPod_NFSHomeInitContainersAndMounts(t *testing.T) {
 
 	// home-prepare: the agent uid, no capabilities, the home and the
 	// memory directory only.
-	if sc := prep.SecurityContext; sc == nil || *sc.RunAsUser != containerUID || !*sc.RunAsNonRoot ||
+	if sc := prep.SecurityContext; sc == nil || *sc.RunAsUser != K8sContainerUID || !*sc.RunAsNonRoot ||
 		len(sc.Capabilities.Add) != 0 || *sc.AllowPrivilegeEscalation {
 		t.Errorf("home-prepare security context = %+v", prep.SecurityContext)
 	}
@@ -578,6 +580,39 @@ func TestCleanupStalePod_RefusesWhenUnconfirmed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "previous_pod_unconfirmed") {
 		t.Errorf("error text = %q", err)
+	}
+}
+
+// TestCleanupStalePod_ForbiddenCauseReachable: an NFS-home start whose
+// read or delete of the previous pod is refused keeps the Kubernetes error
+// reachable through errors.Is/As (ptone/scion#4555), with the outcome and
+// the error text unchanged.
+func TestCleanupStalePod_ForbiddenCauseReachable(t *testing.T) {
+	forbidden := k8serrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "a", errors.New("permission denied"))
+	for _, verb := range []string{"get", "delete"} {
+		t.Run(verb, func(t *testing.T) {
+			rt, cs, _ := newTestK8sRuntime()
+			if _, err := cs.CoreV1().Pods("default").Create(context.Background(), runningNFSHomePod("a"), metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			cs.PrependReactor(verb, "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+				return true, nil, forbidden
+			})
+			err := rt.cleanupStalePod(context.Background(), "default", "a", true, nil)
+			if !errors.Is(err, errPreviousPodUnconfirmed) {
+				t.Fatalf("err = %v, want previous_pod_unconfirmed", err)
+			}
+			if !k8serrors.IsForbidden(err) {
+				t.Errorf("k8serrors.IsForbidden(%v) = false, want the Forbidden cause reachable", err)
+			}
+			want := "previous_pod_unconfirmed: cannot read the previous pod a: " + forbidden.Error()
+			if verb == "delete" {
+				want = "previous_pod_unconfirmed: failed to delete the previous pod a: " + forbidden.Error()
+			}
+			if err.Error() != want {
+				t.Errorf("error text = %q, want %q", err, want)
+			}
+		})
 	}
 }
 

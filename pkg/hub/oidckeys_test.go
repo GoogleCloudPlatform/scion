@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -1454,14 +1454,4 @@ func TestOIDCKeyManager_BackupIsEncrypted(t *testing.T) {
 				secret.EncryptedPrefix, keysetRaw[:min(len(keysetRaw), 30)])
 		}
 	}
-}
-
-// createOIDCTestStore creates an in-memory SQLite store for OIDC tests.
-func createOIDCTestStore(t *testing.T) store.Store {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	return s
 }

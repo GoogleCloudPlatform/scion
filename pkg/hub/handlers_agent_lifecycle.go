@@ -64,10 +64,20 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		}
 	}
 
-	var status store.AgentStatusUpdate
-	if err := readJSON(r, &status); err != nil {
+	// The body is a store.AgentStatusUpdate plus sshHostKey, which is
+	// recorded on its own (recordAgentSSHHostKey) and never reaches the
+	// status write.
+	var body struct {
+		store.AgentStatusUpdate
+		SSHHostKey string `json:"sshHostKey,omitempty"`
+	}
+	if err := readJSON(r, &body); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
+	}
+	status := body.AgentStatusUpdate
+	if body.SSHHostKey != "" {
+		s.recordAgentSSHHostKey(r, id, body.SSHHostKey)
 	}
 
 	// Validate ExitReason before passing to the store: only terminal
@@ -1015,6 +1025,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 		if writeAgentTokenIssueError(w, dispatchErr) {
+			return
+		}
+		if writeSecretResolutionError(w, dispatchErr) {
 			return
 		}
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {

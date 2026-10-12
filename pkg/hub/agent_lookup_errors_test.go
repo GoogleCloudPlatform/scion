@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -328,15 +328,6 @@ func TestConversationResolveLookup_MatchingRules(t *testing.T) {
 		require.False(t, resp.Exists)
 		require.Nil(t, resp.PeerAgent, "a soft-deleted agent must not resolve")
 	})
-}
-
-func markAgentSoftDeleted(t *testing.T, s store.Store, agentID string) {
-	t.Helper()
-	ctx := context.Background()
-	a, err := s.GetAgent(ctx, agentID)
-	require.NoError(t, err)
-	a.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, a))
 }
 
 // nilAgentLookupStore returns (nil, nil) from GetAgentBySlug for slugRef,

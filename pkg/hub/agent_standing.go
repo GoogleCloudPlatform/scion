@@ -306,7 +306,10 @@ func (s *Server) authzFor(st store.Store) *AuthzService {
 	if st == s.store || s.authzService == nil {
 		return s.authzService
 	}
-	return NewAuthzService(st, s.authzService.logger)
+	svc := NewAuthzService(st, s.authzService.logger)
+	// Share the test-identity clamp's caches (user kind is immutable).
+	shareTestFixtureClampCache(svc.store, s.authzService.store)
+	return svc
 }
 
 // userAdmittedToProjectOn reports whether user has live admission to
@@ -318,6 +321,13 @@ func (s *Server) userAdmittedToProjectOn(ctx context.Context, st store.Store, us
 
 // userAdmittedToProjectAs is userAdmittedToProjectOn for admission adm.
 func (s *Server) userAdmittedToProjectAs(ctx context.Context, st store.Store, user *store.User, projectID string, adm standingAdmission, memo *ProjectAdmissionCache) (bool, error) {
+	// A hub test identity that can no longer authenticate (expired, no
+	// expiry, or the feature off: testFixtureRejection, the auth path's own
+	// rule) is admitted nowhere, so the agents it roots are held
+	// (ptone/scion#4240, Phase 3b).
+	if testFixtureRejection(user, s.testIdentities.enabled, s.testIdentities.clock()) != "" {
+		return false, nil
+	}
 	authz := s.authzFor(st)
 	if authz == nil {
 		return false, errors.New("project admission: authz service not available")

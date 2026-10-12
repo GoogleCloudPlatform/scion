@@ -1,0 +1,21 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 6. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: exported method (may newly satisfy interfaces) ==
+  hub/move.go:26: job.handle -> Handle: check dynamic interface assertions that could now match; types in other packages that embed job are not checked for shadowing or newly promoted methods
+  hub/stay.go:8: handler.handle -> Handle: check dynamic interface assertions that could now match; types in other packages that embed handler are not checked for shadowing or newly promoted methods
+  hub/stay.go:15: stayJob.handle -> Handle: check dynamic interface assertions that could now match; types in other packages that embed stayJob are not checked for shadowing or newly promoted methods
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:32: example.com/fx/hub.Helper is now example.com/fx/hub/sub.Helper for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: go:generate directive ==
+  hub/move.go:28: //go:generate echo writeError (runs in the new directory)
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:20: hub.job becomes sub.Job for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)

@@ -397,7 +397,7 @@ func openMigrateNamesStore(ctx context.Context, cfg *config.GlobalConfig, dryRun
 			return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 		}
 		cs := entadapter.NewCompositeStore(ec)
-		if err := cs.Migrate(ctx); err != nil {
+		if err := migrateHubStore(ctx, cs, cfg.Database.AllowShadowedSchema); err != nil {
 			_ = cs.Close()
 			return nil, fmt.Errorf("failed to run database migration: %w", err)
 		}
@@ -419,7 +419,7 @@ func openMigrateNamesStore(ctx context.Context, cfg *config.GlobalConfig, dryRun
 			return nil, fmt.Errorf("failed to open postgres database: %w", err)
 		}
 		cs := entadapter.NewCompositeStore(ec)
-		if err := cs.Migrate(ctx); err != nil {
+		if err := migrateHubStore(ctx, cs, cfg.Database.AllowShadowedSchema); err != nil {
 			_ = cs.Close()
 			return nil, fmt.Errorf("failed to run database migration: %w", err)
 		}

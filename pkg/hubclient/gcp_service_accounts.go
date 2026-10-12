@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -60,8 +61,12 @@ type GCPServiceAccountService interface {
 	// the request.
 	Create(ctx context.Context, req *CreateGCPServiceAccountRequest) (*GCPServiceAccount, error)
 
-	// Delete removes a service account registration.
-	Delete(ctx context.Context, ref GCPServiceAccountRef) error
+	// Delete removes a service account registration. The Hub refuses (409,
+	// code sa_in_use) while a default points at the account; opts.Force asks
+	// it to clear project and per-profile defaults first (never the hub
+	// default). Use GCPServiceAccountImpactFromError on the refusal to read
+	// the impact report. opts may be nil.
+	Delete(ctx context.Context, ref GCPServiceAccountRef, opts *DeleteGCPServiceAccountOptions) (*DeleteGCPServiceAccountResult, error)
 
 	// Verify re-runs the Hub's impersonation check against the account.
 	Verify(ctx context.Context, ref GCPServiceAccountRef) (*GCPServiceAccount, error)
@@ -197,7 +202,8 @@ type GCPServiceAccountStatus struct {
 		Error      string     `json:"error,omitempty"`
 	} `json:"verification"`
 	// Mappings has one entry per Kubernetes broker profile of the project.
-	// State is "mapped", "not_mapped" or "not_reported".
+	// State is "mapped", "not_mapped" (on a complete, fresh report),
+	// "unknown" or "not_reported".
 	Mappings []GCPServiceAccountProfileMapping `json:"mappings"`
 	// WorkloadIdentityBinding.State is "bound", "not_bound" or "unknown".
 	WorkloadIdentityBinding struct {
@@ -226,15 +232,35 @@ type GCPServiceAccountStatus struct {
 }
 
 // GCPServiceAccountProfileMapping is one Kubernetes broker profile's mapping
-// state for an account. KubernetesServiceAccount and Namespace are empty
-// until brokers report them.
+// state for an account. The fields after State are empty when the broker
+// did not report them (an older broker).
 type GCPServiceAccountProfileMapping struct {
-	BrokerID                 string `json:"brokerId"`
-	BrokerName               string `json:"brokerName"`
-	Profile                  string `json:"profile"`
-	State                    string `json:"state"`
+	BrokerID   string `json:"brokerId"`
+	BrokerName string `json:"brokerName"`
+	Profile    string `json:"profile"`
+	State      string `json:"state"`
+	// KubernetesServiceAccount, Namespace and Source ("mapped" or
+	// "discovered") describe a mapped account.
 	KubernetesServiceAccount string `json:"kubernetesServiceAccount,omitempty"`
 	Namespace                string `json:"namespace,omitempty"`
+	Source                   string `json:"source,omitempty"`
+	// ReportedAt is when the hub last stored or confirmed the report.
+	ReportedAt *time.Time `json:"reportedAt,omitempty"`
+	// Incomplete is true when the report may not list every account the
+	// profile can serve, for IncompleteReason.
+	Incomplete       bool   `json:"incomplete,omitempty"`
+	IncompleteReason string `json:"incompleteReason,omitempty"`
+	// Ambiguous is true when more than one Kubernetes ServiceAccount is
+	// annotated with the account and none is mapped explicitly; the broker
+	// refuses it. State is then "unknown" with UnknownReason
+	// "ambiguous_mapping".
+	Ambiguous bool `json:"ambiguous,omitempty"`
+	// UnknownReason says why State is "unknown", in the hub's shared
+	// mapping-decision codes: "report_missing", "report_incomplete",
+	// "report_old_version", "report_stale", "runtime_unrecognized" (a
+	// runtime key the hub cannot tell is Kubernetes) or "ambiguous_mapping".
+	// Clients should show a newer code they do not know as-is.
+	UnknownReason string `json:"unknownReason,omitempty"`
 }
 
 // IsHubScoped reports whether the account belongs to the hub rather than to a
@@ -574,15 +600,28 @@ func (s *gcpServiceAccountService) Create(ctx context.Context, req *CreateGCPSer
 	return apiclient.DecodeRequired[GCPServiceAccount](resp)
 }
 
-func (s *gcpServiceAccountService) Delete(ctx context.Context, ref GCPServiceAccountRef) error {
-	resp, err := s.c.delete(ctx, ref.byIDPath(), nil)
-	if err != nil {
-		return err
+func (s *gcpServiceAccountService) Delete(ctx context.Context, ref GCPServiceAccountRef, opts *DeleteGCPServiceAccountOptions) (*DeleteGCPServiceAccountResult, error) {
+	path := ref.byIDPath()
+	if opts != nil && opts.Force {
+		path += "?force=true"
 	}
-	// The transport error is nil for a 403. Without this, a refused deletion of
-	// a credential binding returns success and the caller confirms a removal
+	resp, err := s.c.delete(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	// DecodeResponse turns every non-2xx into an error. The transport error is
+	// nil for a 403, so without that a refused deletion of a credential
+	// binding would return success and the caller would confirm a removal
 	// that did not happen. See #33.
-	return apiclient.CheckResponse(resp)
+	result, err := apiclient.DecodeResponse[DeleteGCPServiceAccountResult](resp)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		// 204 from a Hub that predates the impact report.
+		return &DeleteGCPServiceAccountResult{Deleted: true}, nil
+	}
+	return result, nil
 }
 
 func (s *gcpServiceAccountService) Verify(ctx context.Context, ref GCPServiceAccountRef) (*GCPServiceAccount, error) {
@@ -617,4 +656,88 @@ func (s *gcpServiceAccountService) Mint(ctx context.Context, projectID string, r
 		return nil, err
 	}
 	return apiclient.DecodeRequired[GCPServiceAccount](resp)
+}
+
+// ErrCodeGCPServiceAccountInUse is the Hub's error code for a delete refused
+// because defaults still point at the account.
+const ErrCodeGCPServiceAccountInUse = "sa_in_use"
+
+// DeleteGCPServiceAccountOptions are the options of a delete.
+type DeleteGCPServiceAccountOptions struct {
+	// Force clears project and per-profile defaults that point at the
+	// account, then deletes it. It never clears the hub default.
+	Force bool
+}
+
+// GCPServiceAccountImpactAgent is an agent whose applied identity references
+// the account.
+type GCPServiceAccountImpactAgent struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	ProjectID string `json:"projectId"`
+}
+
+// GCPServiceAccountImpactDefault is one default that points at the account.
+// Tier is "project", "profile" or "hub". Clearable reports whether Force,
+// sent by this caller, would clear it. Redacted marks a default in a project
+// the caller may not read; ProjectID and Profile are then empty.
+type GCPServiceAccountImpactDefault struct {
+	Tier      string `json:"tier"`
+	ProjectID string `json:"projectId,omitempty"`
+	Profile   string `json:"profile,omitempty"`
+	Clearable bool   `json:"clearable"`
+	Redacted  bool   `json:"redacted,omitempty"`
+}
+
+// GCPServiceAccountImpactMapping is a broker profile that maps the account.
+type GCPServiceAccountImpactMapping struct {
+	BrokerID   string `json:"brokerId"`
+	BrokerName string `json:"brokerName,omitempty"`
+	Profile    string `json:"profile"`
+}
+
+// GCPServiceAccountImpact is the Hub's impact report for removing an
+// account. Wire shape of pkg/hub.GCPServiceAccountImpact. Agents lists only
+// agents the caller may read (VisibleAgentCount in all); the others are
+// HiddenAgentCounts, one unnamed count per project. AgentCount is the total.
+type GCPServiceAccountImpact struct {
+	ServiceAccountID   string                           `json:"serviceAccountId"`
+	Agents             []GCPServiceAccountImpactAgent   `json:"agents"`
+	AgentCount         int                              `json:"agentCount"`
+	VisibleAgentCount  int                              `json:"visibleAgentCount"`
+	HiddenAgentCounts  []int                            `json:"hiddenAgentCounts"`
+	Defaults           []GCPServiceAccountImpactDefault `json:"defaults"`
+	HiddenDefaultCount int                              `json:"hiddenDefaultCount"`
+	BrokerMappings     []GCPServiceAccountImpactMapping `json:"brokerMappings"`
+	Managed            bool                             `json:"managed"`
+	ManualCleanup      []string                         `json:"manualCleanup"`
+}
+
+// DeleteGCPServiceAccountResult is the body of a successful delete.
+type DeleteGCPServiceAccountResult struct {
+	Deleted         bool                             `json:"deleted"`
+	ClearedDefaults []GCPServiceAccountImpactDefault `json:"clearedDefaults,omitempty"`
+	Impact          GCPServiceAccountImpact          `json:"impact"`
+}
+
+// GCPServiceAccountImpactFromError extracts the impact report from a delete
+// refused with sa_in_use. ok is false for any other error.
+func GCPServiceAccountImpactFromError(err error) (*GCPServiceAccountImpact, bool) {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != ErrCodeGCPServiceAccountInUse {
+		return nil, false
+	}
+	raw, ok := apiErr.Details["impact"]
+	if !ok {
+		return nil, false
+	}
+	b, mErr := json.Marshal(raw)
+	if mErr != nil {
+		return nil, false
+	}
+	var impact GCPServiceAccountImpact
+	if uErr := json.Unmarshal(b, &impact); uErr != nil {
+		return nil, false
+	}
+	return &impact, true
 }

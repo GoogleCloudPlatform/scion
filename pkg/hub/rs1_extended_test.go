@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -27,7 +26,6 @@ import (
 	"go/token"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,10 +117,15 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 		"seed.go":                         "bootstrap seeding: creates initial system/hub-level role bindings, not project membership",
 		"server.go":                       "server initialization: system-level bootstrap, not project membership",
 		"handlers_users_core.go":          "user admin role sync: creates/deletes system-scoped super-admin and hub-member bindings inside atomic role transitions, guarded by CanDelegate and per-field permission checks",
+		"project_fixture_purge.go":        "test identity purge (ptone/scion#4240): removes only the purged test identity's own bindings on a stamped project it keeps, inside the purge transaction under the project lock, right before the identity is deleted; not a membership mutation of any other principal",
 	}
 
 	// Scan all .go files in pkg/hub for direct CreateRoleBinding calls.
 	hubDir := filepath.Join(repoRoot, "pkg", "hub")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards Create/DeleteRoleBinding call sites, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards Create/DeleteRoleBinding call sites, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	require.NoError(t, err)
 
@@ -175,49 +178,6 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 // (b) Scoped UAT credential tests — R2-R3: mint real UATs through production
 // token path and exercise actual cross-project denial.
 // ---------------------------------------------------------------------------
-
-// doRequestWithUAT makes an HTTP request authenticated with a real scoped UAT.
-func doRequestWithUAT(t *testing.T, srv *Server, uatKey, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		require.NoError(t, err)
-	}
-
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Authorization", "Bearer "+uatKey)
-
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// rs4MintContext returns a context with the actor identity and credential
-// context required by the RS4 bounded UAT service for audit record creation.
-func rs4MintContext(userID string) context.Context {
-	identity := NewAuthenticatedUser(userID, userID+"@test.com", "Test User", "member", string(ClientTypeAPI))
-	ctx := contextWithIdentity(context.Background(), identity)
-	return contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
-}
-
-// mintScopedUAT mints a real scoped UAT through the production token service.
-// RS4: The issuer must have role bindings with the requested scopes in the
-// target project; the context must carry the actor identity for audit.
-func mintScopedUAT(t *testing.T, srv *Server, userID, projectID string, scopes []string) string {
-	t.Helper()
-	ctx := rs4MintContext(userID)
-	key, _, err := srv.uatService.CreateToken(
-		ctx, userID, "test-uat", projectID, scopes, nil,
-	)
-	require.NoError(t, err, "failed to mint scoped UAT")
-	return key
-}
 
 func TestRS1_ScopedUAT_SameProjectAllowed(t *testing.T) {
 	srv, s := testServer(t)
@@ -1488,12 +1448,6 @@ func TestRS1_D4_IndexInstallationFailClosed(t *testing.T) {
 		"RS1 R4-1: error must mention D4 membership index")
 }
 
-// noDBStore wraps a store.Store but does NOT expose DB(). This simulates
-// the case where the store doesn't support raw database access.
-type noDBStore struct {
-	store.Store
-}
-
 // TestRS1_D4_DDLFailurePath proves that a DDL execution failure during D4
 // index installation is properly fail-closed. This is R5-2: the test injects
 // a real DDL error by dropping the role_bindings table before the D4 DDL runs,
@@ -2609,22 +2563,6 @@ func TestRS1_StaleAuthorityForcedOverlap_Transfer(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-func findRS1RepoRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	require.NoError(t, err)
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("cannot find repo root (no go.mod found)")
-		}
-		dir = parent
-	}
-}
 
 // Suppress unused import warnings for packages used in specific tests.
 var _ = strings.Contains

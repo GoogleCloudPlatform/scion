@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -559,8 +559,10 @@ func TestAgentStalledDetectionHandler_AutoSuspendEnabled(t *testing.T) {
 	}
 
 	// AutoSuspendStalled is true — agent should be stalled AND then auto-suspended
+	// by the auto-suspend worker the tick hands it to.
 	handler := srv.agentStalledDetectionHandler()
 	handler(ctx)
+	srv.waitAutoSuspendIdle()
 
 	a, err := s.GetAgent(ctx, agent.ID)
 	if err != nil {

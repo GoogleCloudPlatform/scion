@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard hubshard-check build-hub-shard test-hub-shard vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -114,6 +114,34 @@ test-hub-sqlite:
 	if [ $$status -ne 0 ]; then exit $$status; fi
 	@go test -count=1 -timeout 60m $(HUB_SQLITE_PKGS)
 
+## hubshard: (Re)apply the pkg/hub test shard build tags (see hack/hubshard/README.md; ARGS=-rebalance etc.)
+# The default build (no tags) still compiles every test file. With
+# -tags hubshard,hubshard_K only the common test files plus shard K's
+# files compile, which lowers the pkg/hub test-compile peak per shard.
+hubshard:
+	@go run ./hack/hubshard $(ARGS)
+
+## hubshard-check: Fail if a pkg/hub test shard build would break (ARGS=-strict: also fail on unbalanced new files)
+# A new untagged test file that uses only untagged files passes (it
+# compiles in every shard until "make hubshard" assigns it), unless it
+# blank-imports a package, or a build condition, not yet in the generated
+# imports files (then run make hubshard).
+hubshard-check:
+	@go run ./hack/hubshard -check $(ARGS)
+
+# SHARD selects the pkg/hub test shard for build-hub-shard / test-hub-shard.
+SHARD ?= 1
+
+## build-hub-shard: Compile (go test -c, discarded) pkg/hub test shard SHARD=K
+build-hub-shard:
+	@dir=$$(mktemp -d) || exit 1; \
+	$(HUB_TEST_GOGC) go test -c -tags hubshard,hubshard_$(SHARD) -o "$$dir/" ./pkg/hub; \
+	status=$$?; rm -rf "$$dir"; exit $$status
+
+## test-hub-shard: Run pkg/hub test shard SHARD=K (common test files plus shard K)
+test-hub-shard:
+	@go test -count=1 -timeout 60m -tags hubshard,hubshard_$(SHARD) ./pkg/hub
+
 ## test-fixture-coverage: Run the hub fixture coverage gate (TestFixtureCoverage) with SQLite
 # internal/fixturegen's tests carry `//go:build !no_sqlite`, so
 # "make test-fast" never compiles them and a schema change that skips the
@@ -122,6 +150,11 @@ test-hub-sqlite:
 test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
 	@go test -count=1 ./internal/fixturegen/...
+
+# TEST_IDENTITY_POSTGRES_TESTS are the pkg/hub test identity purge
+# concurrency tests (ptone/scion#4240, Phase 3b) run by
+# test-launch-store-postgres.
+TEST_IDENTITY_POSTGRES_TESTS := TestFixturePurge_ConcurrentCoOwner_Postgres
 
 # MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
 # concurrency tests (ptone/scion#3433) run by test-launch-store-postgres.
@@ -249,6 +282,14 @@ space := $(empty) $(empty)
 # disturbs the shared database. Any skip fails the target first, then each
 # test must print its own PASS line.
 #
+# The cmd run covers the PostgreSQL search_path shadow guard in every
+# standalone command that migrates the hub database (server migrate,
+# server backfill, server migrate-dm-keys, server recover-authz,
+# server test-infra mark, hub secret migrate-names; ptone/scion#4432):
+# TestMaintenanceCommandsSchemaShadowGuard_Postgres. Each case uses its own
+# throwaway schemas. Any skip fails the target, and the test must print its
+# own PASS line.
+#
 # In the entadapter run, a test that is SQLite-only by design skips through
 # enttest.SkipOnPostgres, whose skip message is
 # "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
@@ -325,7 +366,24 @@ test-launch-store-postgres:
 	fi
 	@st=$$(mktemp) || exit 1; \
 	{ $(HUB_TEST_GOGC) go test -tags integration -count=1 -timeout 20m -v \
-		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS))))$$' \
+		-run '^TestMaintenanceCommandsSchemaShadowGuard_Postgres$$' \
+		./cmd/ 2>&1; echo $$? > "$$st"; } \
+		| tee /tmp/test-launch-store-postgres-cmd.log; \
+	status=$$(cat "$$st" 2>/dev/null); \
+	rm -f "$$st"; \
+	case "$$status" in ''|*[!0-9]*) status=1;; esac; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-cmd.log; then \
+		echo "ERROR: one or more cmd maintenance-command Postgres cases were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestMaintenanceCommandsSchemaShadowGuard_Postgres ' /tmp/test-launch-store-postgres-cmd.log; then \
+		echo "ERROR: the maintenance-command search_path guard Postgres test did not run." >&2; \
+		exit 1; \
+	fi
+	@st=$$(mktemp) || exit 1; \
+	{ $(HUB_TEST_GOGC) go test -tags integration -count=1 -timeout 20m -v \
+		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS) $(TEST_IDENTITY_POSTGRES_TESTS))))$$' \
 		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
 		| tee /tmp/test-launch-store-postgres-hub.log; \
 	status=$$(cat "$$st" 2>/dev/null); \
@@ -343,6 +401,12 @@ test-launch-store-postgres:
 	for t in $(MEMBERSHIP_LOSS_POSTGRES_TESTS); do \
 		if ! grep -qE "^[[:space:]]*--- PASS: $$t\b" /tmp/test-launch-store-postgres-hub.log; then \
 			echo "ERROR: the pkg/hub membership loss Postgres test $$t did not pass." >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	for t in $(TEST_IDENTITY_POSTGRES_TESTS); do \
+		if ! grep -qE "^[[:space:]]*--- PASS: $$t\b" /tmp/test-launch-store-postgres-hub.log; then \
+			echo "ERROR: the pkg/hub test identity Postgres test $$t did not pass." >&2; \
 			exit 1; \
 		fi; \
 	done; \
@@ -368,7 +432,9 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_PreExistingDB_Idempotent \
 	TestUnreadMentionKeys_Postgres \
 	TestScheduledStore_Postgres \
-	TestWebChatStore_Postgres_MessagesInOtherSchema
+	TestWebChatStore_Postgres_MessagesInOtherSchema \
+	TestWebChatStore_Postgres_ThreadMigrationsWaitForMessagesTable \
+	TestWebChatStore_Postgres_ThreadMigrationsRunOnce
 
 test-webchat-postgres:
 	@echo "Running web chat store tests against Postgres..."
@@ -602,7 +668,7 @@ check-debug-defaults:
 	@./hack/check-debug-defaults.sh
 
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults
+check-custom: hubshard-check compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults
 	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)

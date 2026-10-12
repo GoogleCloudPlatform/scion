@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -34,8 +36,9 @@ import (
 )
 
 var (
-	deleteStopped bool
-	deleteForce   bool
+	deleteStopped     bool
+	deleteForce       bool
+	deleteCleanupOnly bool
 )
 
 // deleteCmd represents the delete command
@@ -54,10 +57,20 @@ agent that is already soft-deleted.
 
 --force cannot be combined with --stopped; name the agents to
 force-delete. In local mode (no Hub), --force has no effect: local delete
-already removes the container.`,
+already removes the container.
+
+--cleanup-only removes only the agent's local files: its worktree, its
+agent directory and, unless --preserve-branch is given, its git branch. Use
+it when a delete went through on the Hub but the local cleanup failed. It
+refuses while the Hub still has the agent (run 'scion delete <agent>'
+instead). When the Hub cannot be checked (unreachable, or no Hub in use) it
+refuses unless --force is given.`,
 	ValidArgsFunction: getMultiAgentNames,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if deleteStopped {
+			if deleteCleanupOnly {
+				return fmt.Errorf("--cleanup-only cannot be combined with --stopped; name the agents to clean up")
+			}
 			if deleteForce {
 				return fmt.Errorf("--force cannot be combined with --stopped; name the agents to force-delete")
 			}
@@ -80,6 +93,11 @@ already removes the container.`,
 		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 		if preserveBranch && !util.IsGitRepoDir(projectDir) {
 			statusln("Warning: --preserve-branch used outside a git repository; this flag has no effect.")
+		}
+
+		if deleteCleanupOnly {
+			hubCtx, hubErr := CheckHubAvailabilityForAgents(projectPath, args, true)
+			return deleteAgentsCleanupOnly(hubCtx, hubErr, args)
 		}
 
 		// Check if Hub should be used, excluding all target agents from sync requirements.
@@ -199,12 +217,12 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 	//
 	// There is no SIGINT handler: interrupting the command while polls are
 	// still running leaves those agents (whose deletes the Hub may still
-	// finish) with their local worktree and sync entry; clean them up with
-	// 'scion --no-hub delete <name>'. Agents already confirmed by then have
-	// been cleaned up, and in text mode each one printed a "Cleaned up
-	// locally: <name>" progress line when that happened. Running
-	// 'scion --no-hub delete' on an agent that was already cleaned up is
-	// harmless: it only reports that the agent was not found.
+	// finish) with their local worktree and sync entry; once the Hub has
+	// finished, clean them up with 'scion delete --cleanup-only <name>'.
+	// Agents already confirmed by then have been cleaned up, and in text
+	// mode each one printed a "Cleaned up locally: <name>" progress line
+	// when that happened. Running 'scion delete --cleanup-only' on an agent
+	// that was already cleaned up is harmless.
 	// A name given twice is deleted once (first occurrence kept). Without
 	// this, both DELETEs would be in flight together and the agent could be
 	// polled, cleaned up and reported twice.
@@ -317,14 +335,149 @@ func cleanupAfterHubDelete(hubCtx *HubContext, agentName string, removeBranch bo
 	return branchDeleted, err
 }
 
-// noHubDeleteCommand is the command that retries an agent's local cleanup
-// without the Hub. keepBranch adds --preserve-branch, so the retry does not
-// delete a git branch the original command kept.
-func noHubDeleteCommand(agentName string, keepBranch bool) string {
+// cleanupOnlyCommand is the command that retries an agent's local cleanup
+// after the Hub has deleted it. keepBranch adds --preserve-branch, so the
+// retry does not delete a git branch the original command kept.
+func cleanupOnlyCommand(agentName string, keepBranch bool) string {
 	if keepBranch {
-		return "scion --no-hub delete --preserve-branch " + agentName
+		return "scion delete --cleanup-only --preserve-branch " + agentName
 	}
-	return "scion --no-hub delete " + agentName
+	return "scion delete --cleanup-only " + agentName
+}
+
+// cleanupOnlyForceHint is appended when --cleanup-only cannot check the Hub.
+const cleanupOnlyForceHint = "add --force to remove the local files without checking the Hub"
+
+// deleteAgentsCleanupOnly implements 'scion delete --cleanup-only': for each
+// agent it removes only the local files (cleanupAfterHubDelete), after
+// checking that the Hub no longer has the agent. hubCtx and hubErr are the
+// result of the Hub availability check. The rules:
+//   - the Hub still has the agent: refuse (run 'scion delete <agent>');
+//   - the Hub has no such agent, or only a soft-deleted one: remove the files;
+//   - the Hub cannot be checked (hubErr, no Hub in use, or the lookup
+//     fails): refuse unless --force.
+//
+// --preserve-branch is honoured.
+func deleteAgentsCleanupOnly(hubCtx *HubContext, hubErr error, agentNames []string) error {
+	agentNames = dedupeNames(agentNames)
+
+	if hubErr != nil || hubCtx == nil {
+		reason := "no Hub is in use"
+		if hubErr != nil {
+			reason = fmt.Sprintf("the Hub could not be checked: %v", hubErr)
+		}
+		if !deleteForce {
+			msg := fmt.Sprintf("--cleanup-only checks that the Hub no longer has the agent, but %s\n\nTo %s", reason, cleanupOnlyForceHint)
+			if hubErr == nil {
+				// Local-only mode: a plain delete removes the agent and its files.
+				msg += ", or delete the agent with 'scion delete <agent>'"
+			}
+			return errors.New(msg + ".")
+		}
+		statusf("Warning: %s; removing local files anyway because of --force.\n", reason)
+		hubCtx = nil
+	} else {
+		PrintUsingHub(hubCtx.Endpoint)
+	}
+
+	var errs []string
+	var results []map[string]interface{}
+	record := func(name, status, msg string) {
+		if status == "error" {
+			errs = append(errs, fmt.Sprintf("%s: %s", name, msg))
+		}
+		if isJSONOutput() {
+			entry := map[string]interface{}{"agent": name, "status": status}
+			if status == "error" {
+				entry["error"] = msg
+			} else if msg != "" {
+				entry["message"] = msg
+			}
+			results = append(results, entry)
+		} else if status != "error" && msg != "" {
+			statusln(msg)
+		}
+	}
+
+	for _, name := range agentNames {
+		// cleanupCtx is the hub context the local cleanup gets. It is nil
+		// whenever the hub could not be checked for this agent (forced
+		// cleanup), so the cleanup is purely local.
+		cleanupCtx := hubCtx
+		if hubCtx != nil {
+			onHub, err := agentStillOnHub(hubCtx, name)
+			if err != nil {
+				if !deleteForce {
+					record(name, "error", fmt.Sprintf("could not check the agent on the Hub: %v; %s", err, cleanupOnlyForceHint))
+					continue
+				}
+				statusf("Warning: could not check agent '%s' on the Hub (%v); removing local files anyway because of --force.\n", name, err)
+				cleanupCtx = nil
+			} else if onHub {
+				record(name, "error", fmt.Sprintf("agent still exists on the Hub; run 'scion delete %s'", name))
+				continue
+			}
+		}
+
+		branchDeleted, err := cleanupAfterHubDelete(cleanupCtx, name, !preserveBranch)
+		if err != nil {
+			record(name, "error", fmt.Sprintf("local cleanup failed: %v", err))
+			continue
+		}
+		if cleanupCtx == nil {
+			// Without a hub context cleanupAfterHubDelete does not touch the
+			// sync state; drop the agent's synced entry here, so a later
+			// agent with the same name is not taken for a stale one.
+			removeSyncedAgentForProject(name)
+		}
+		msg := fmt.Sprintf("Removed local files for agent '%s'.", name)
+		if branchDeleted {
+			msg += fmt.Sprintf(" Git branch associated with agent '%s' deleted.", name)
+		}
+		record(name, "success", msg)
+	}
+
+	if isJSONOutput() {
+		status := "success"
+		if len(errs) > 0 {
+			status = "partial"
+		}
+		return outputJSONResult(map[string]interface{}{
+			"status":  status,
+			"command": "delete",
+			"results": results,
+		}, len(errs) > 0, "failed to clean up some agents")
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to clean up some agents:\n  %s", strings.Join(errs, "\n  "))
+	}
+	return nil
+}
+
+// removeSyncedAgentForProject removes agentName from the synced-agent list
+// of the current project (projectPath, resolved). Resolution failures are
+// ignored: there is then no sync state to update.
+func removeSyncedAgentForProject(agentName string) {
+	resolved, _, err := config.ResolveProjectPath(projectPath)
+	if err != nil || resolved == "" {
+		return
+	}
+	hubsync.RemoveSyncedAgent(resolved, agentName)
+}
+
+// agentStillOnHub reports whether the Hub still has a live (not
+// soft-deleted) agent called name in the project. A 404 means it does not.
+func agentStillOnHub(hubCtx *HubContext, name string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ag, err := hubCtx.Client.ProjectAgents(hubCtx.ProjectID).Get(ctx, name)
+	if err != nil {
+		if apiclient.IsNotFoundError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return ag != nil && ag.DeletedAt.IsZero(), nil
 }
 
 // dedupeNames returns names without repeats, keeping the first occurrence
@@ -393,7 +546,7 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 	if err != nil {
 		job.lines = append(job.lines,
 			fmt.Sprintf("Warning: Hub record deleted but local cleanup failed for '%s': %v", agentName, err),
-			fmt.Sprintf("Run '%s' to retry targeted cleanup, or 'scion clean' to reset the project.", noHubDeleteCommand(agentName, preserveBranch)))
+			fmt.Sprintf("Run '%s' to retry targeted cleanup, or 'scion clean' to reset the project.", cleanupOnlyCommand(agentName, preserveBranch)))
 	}
 	if err == nil {
 		// Progress, printed now rather than in input order, so that after
@@ -595,5 +748,6 @@ func init() {
 	rootCmd.AddCommand(deleteCmd)
 	deleteCmd.Flags().BoolVarP(&preserveBranch, "preserve-branch", "b", false, "Preserve the git branch associated with the worktree")
 	deleteCmd.Flags().BoolVar(&deleteStopped, "stopped", false, "Delete all agents with stopped containers")
+	deleteCmd.Flags().BoolVar(&deleteCleanupOnly, "cleanup-only", false, "Only remove the agent's local files (worktree, agent directory, branch unless --preserve-branch); refuses while the Hub still has the agent")
 	deleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Delete from the Hub even if the broker is unreachable or cannot find the agent; permanent (no soft-delete)")
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -59,20 +59,6 @@ func newInDoubtFixtureQuery(t *testing.T, suffix, query string, setup func(f *de
 	claim := mustGetAgent(t, f.store, f.agent.ID).DeletionClaim
 	require.NotZero(t, claim)
 	return f, intents[0], claim
-}
-
-// drainOK runs the owning node's drain with the broker now answering the
-// delete directly.
-func (f *deferredDeleteFixture) drainOK(t *testing.T) {
-	t.Helper()
-	f.client.returnErr = nil
-	f.srv.drainBrokerDispatch(context.Background(), f.agent.RuntimeBrokerID, nil)
-}
-
-func (f *deferredDeleteFixture) revokes() int {
-	f.hooks.mu.Lock()
-	defer f.hooks.mu.Unlock()
-	return f.hooks.revokeCalls
 }
 
 func intentState(t *testing.T, s store.Store, id string) string {

@@ -276,6 +276,11 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
 		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
 
+		// Admin test identities: the super-admin kind's capability is
+		// checked by testAdminIssuer, whose issuance answers 404 until the
+		// admin tier's policy phase (A2) adds its operation.
+		"test_identity.issue_super_admin": "Reserved in the permission registry until admin tier phase A2 (ptone/scion#4240): test super-admin issuance is refused",
+
 		// Global catalog permissions — handler-enforced, not a standalone route.
 		"skill.create_global": "Handler-enforced via globalWriteAction in skill_handlers.go; catalog operation deferred to Phase 2 (ptone/scion#1713)",
 
@@ -1252,6 +1257,7 @@ var domainResourceCompatibility = map[string][]string{
 	"artifact":            {"ResourceArtifact"},
 	"inbox":               {"ResourceInbox"},
 	"user.skillinjection": {"ResourceUserSkillInjection"},
+	"testidentity":        {"ResourceTestIdentity"},
 }
 
 // TestCatalogBasePermissionSemanticsAssertive validates that each operation's

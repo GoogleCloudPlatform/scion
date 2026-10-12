@@ -93,8 +93,13 @@ name, as on agent create. A name that matches more than one account is
 refused with the candidate ids. Use the id or the email for a name
 that contains "/".
 
-Mappings are owned by the broker and shown read-only. The Workload
-Identity binding is not checked by the hub and shows as unknown.
+Mappings are owned by the broker and shown read-only. When the broker
+reports them, each mapping shows the Kubernetes service account, the
+namespace, the source (explicitly mapped or discovered by annotation),
+an ambiguous or incomplete-report marker, and the report's age. A
+profile shows "not mapped" only when its report is complete and recent;
+otherwise it shows "unknown" with the reason. The Workload Identity
+binding is not checked by the hub and shows as unknown.
 
 Examples:
   scion project service-accounts show <id>
@@ -111,10 +116,19 @@ var saRemoveCmd = &cobra.Command{
 	Long: `Remove a registered GCP service account from this project.
 
 This does not delete the service account in GCP — it only removes the
-registration from the Hub.
+registration from the Hub. A minted account is retained in GCP.
+
+The Hub refuses while a project or per-profile default points at the
+account and prints what references it. --force clears those defaults
+first; a cleared 'assign' default becomes 'block'. A hub default is never
+cleared by --force: a hub admin must change it. Agents that reference the
+account do not block removal; they fail at their next start until given
+another identity. On success the command lists the cleanup the Hub cannot
+do: the broker mapping, the Kubernetes ServiceAccount and the IAM bindings.
 
 Examples:
-  scion project service-accounts remove <id>`,
+  scion project service-accounts remove <id>
+  scion project service-accounts remove <id> --force`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSARemove,
 }
@@ -175,6 +189,8 @@ func init() {
 	saListCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
 	addSAAssignStatusFlags(saListCmd)
 	saShowCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
+
+	saRemoveCmd.Flags().BoolVar(&saRemoveForce, "force", false, saRemoveForceUsage)
 }
 
 // resolveProjectForSA is a variable so tests can point the service-account
@@ -356,7 +372,62 @@ func runSAShow(cmd *cobra.Command, args []string) error {
 var saMappingStateText = map[string]string{
 	"mapped":       "mapped",
 	"not_mapped":   "not mapped",
+	"unknown":      "unknown",
 	"not_reported": "not reported",
+}
+
+// saMappingText renders one profile's mapping line after its state: the
+// Kubernetes ServiceAccount, namespace and source when mapped, then the
+// reason a state is unknown, the ambiguous and incomplete markers, and the
+// report age.
+func saMappingText(m hubclient.GCPServiceAccountProfileMapping, state string) string {
+	if m.KubernetesServiceAccount != "" {
+		detail := "KSA " + m.KubernetesServiceAccount
+		if m.Namespace != "" {
+			detail += ", namespace " + m.Namespace
+		}
+		if m.Source != "" {
+			detail += ", " + m.Source
+		}
+		state += " (" + detail + ")"
+	}
+	var notes []string
+	switch m.UnknownReason {
+	case "":
+	case "report_stale":
+		notes = append(notes, "report stale")
+	case "report_incomplete":
+		// The incomplete note below covers a report that names its reason;
+		// one that does not still says it is incomplete.
+		if !m.Incomplete {
+			notes = append(notes, "report incomplete: unknown reason")
+		}
+	case "report_old_version":
+		notes = append(notes, "the broker's report is too old a version to tell")
+	case "report_missing":
+		notes = append(notes, "no stored report from the broker")
+	case "ambiguous_mapping":
+		// The ambiguous note below says it, once.
+	default:
+		notes = append(notes, strings.ReplaceAll(m.UnknownReason, "_", " "))
+	}
+	if m.Ambiguous {
+		notes = append(notes, "ambiguous: more than one Kubernetes service account is annotated with it")
+	}
+	if m.Incomplete {
+		reason := m.IncompleteReason
+		if reason == "" {
+			reason = "unknown reason"
+		}
+		notes = append(notes, "report incomplete: "+strings.ReplaceAll(reason, "_", " "))
+	}
+	if m.ReportedAt != nil && !m.ReportedAt.IsZero() {
+		notes = append(notes, "reported "+clitime.Ago(*m.ReportedAt))
+	}
+	if len(notes) > 0 {
+		state += "; " + strings.Join(notes, "; ")
+	}
+	return state
 }
 
 // printSAStatus writes the status view's sections.
@@ -392,10 +463,7 @@ func printSAStatus(w io.Writer, st *hubclient.GCPServiceAccountStatus) {
 		if state == "" {
 			state = m.State
 		}
-		if m.KubernetesServiceAccount != "" {
-			state += fmt.Sprintf(" (%s, %s)", m.KubernetesServiceAccount, m.Namespace)
-		}
-		p("  %-30s  %s\n", m.BrokerName+"/"+m.Profile, state)
+		p("  %-30s  %s\n", m.BrokerName+"/"+m.Profile, saMappingText(m, state))
 	}
 
 	p("\nWorkload Identity binding:\n")
@@ -445,12 +513,7 @@ func runSARemove(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	ref := hubclient.ProjectScopedRef(projectID, saID)
-	if err := client.GCPServiceAccounts().Delete(ctx, ref); err != nil {
-		return fmt.Errorf("failed to remove service account: %w", err)
-	}
-
-	fmt.Printf("Removed service account %s\n", saID)
-	return nil
+	return removeServiceAccount(ctx, client, ref, saID, saRemoveForce, isJSONOutput())
 }
 
 func runSAMint(cmd *cobra.Command, args []string) error {

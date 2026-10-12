@@ -83,11 +83,62 @@ type HubConnection struct {
 	Status ConnectionStatus
 	mu     sync.RWMutex
 
+	// lifecycleMu makes Start, Stop, close and Reinitialize on this connection run
+	// one at a time. It is held for the whole operation, including the
+	// blocking waits in Stop. Lock order: lifecycleMu, then hc.mu (a leaf
+	// lock). Nothing that holds lifecycleMu takes it again: the exported
+	// methods take it and call the unexported start/stop/reinitialize, which
+	// never take it. Callers must not hold s.hubMu while calling the
+	// exported methods, because Start takes s.hubMu (via the heartbeat's
+	// project filter).
+	lifecycleMu sync.Mutex
+
+	// reinitCreds is the latest credential set requested through
+	// requestReinitialize, reinitGen counts those requests, and
+	// reinitAppliedGen is the request most recently taken up by
+	// applyRequestedReinitialize. All three are guarded by hc.mu.
+	reinitCreds      *brokercredentials.BrokerCredentials
+	reinitGen        uint64
+	reinitAppliedGen uint64
+	// reinitFailed is set when the reinitialize for the request most
+	// recently taken up failed, so retryFailedReinitialize can request
+	// the same set again. Guarded by hc.mu.
+	reinitFailed bool
+
+	// Retry backoff for a credential set whose reinitialize keeps failing
+	// (see retryFailedReinitialize). All guarded by hc.mu.
+	//
+	// reinitFailures counts consecutive failed reinitializes of the
+	// latest requested set, and reinitNextRetry is the earliest time
+	// retryFailedReinitialize requests another retry. Both are reset when
+	// a reinitialize succeeds and when requestReinitialize records a set.
+	// reinitLastErr is the error text of the latest failure.
+	reinitFailures  int
+	reinitNextRetry time.Time
+	reinitLastErr   string
+
+	// now, for tests only, replaces time.Now as the clock for the retry
+	// backoff. nil means time.Now. Set before the connection is used.
+	now func() time.Time
+
+	// closed is set by close, the final stop used when the connection is
+	// removed or the server shuts down. Once set, start and
+	// applyRequestedReinitialize do nothing, so a Start or reinitialize
+	// that was queued on lifecycleMu behind close cannot restart services
+	// that nothing would stop again. Guarded by hc.mu; written only with
+	// lifecycleMu held.
+	closed bool
+
 	// ccWg tracks the control-channel Connect goroutine spawned in Start so
 	// that Stop / Reinitialize can wait for it to exit before replacing or
 	// clearing ControlChannel. Without this, Reinitialize can race with the
 	// previous Connect goroutine and leak goroutines across reconnects.
 	ccWg sync.WaitGroup
+	// ccCancel cancels the context the control channel's Connect runs
+	// under. Stop calls it before Close: Close alone does nothing when the
+	// Connect goroutine has not started yet, which would leave it
+	// retrying and Stop waiting on ccWg. Guarded by hc.mu.
+	ccCancel context.CancelFunc
 
 	// conduitCancel stops the conduit dialer started in Start, and
 	// conduitWg tracks its goroutine. The conduit session runs alongside
@@ -143,7 +194,29 @@ func (hc *HubConnection) setStatus(status ConnectionStatus) {
 }
 
 // Start starts the heartbeat and control channel services for this connection.
+// If services from an earlier Start are still running, they are stopped first.
 func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
+	hc.lifecycleMu.Lock()
+	defer hc.lifecycleMu.Unlock()
+	return hc.start(ctx, server)
+}
+
+// start is Start without lifecycleMu; the caller holds it.
+func (hc *HubConnection) start(ctx context.Context, server *Server) error {
+	if hc.isClosed() {
+		slog.Debug("Not starting closed hub connection", "name", hc.Name)
+		return nil
+	}
+
+	// Stop anything a previous start left running, so that its control
+	// channel, conduit and heartbeat are not overwritten and orphaned.
+	hc.mu.RLock()
+	running := hc.ControlChannel != nil || hc.ccCancel != nil || hc.Heartbeat != nil || hc.conduitCancel != nil
+	hc.mu.RUnlock()
+	if running {
+		hc.stop()
+	}
+
 	// A flat instance's heartbeat and control channel run only under its
 	// own persisted Runtime Broker ID.
 	if fi := server.flatInstance(); fi != nil && hc.BrokerID != fi.Identity.RuntimeBrokerID {
@@ -200,16 +273,18 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 			}
 
 			cc := NewControlChannelClient(ccConfig, server.Handler(), server, hc.Name, logging.Subsystem("broker.control-channel"))
+			ccCtx, ccCancel := context.WithCancel(ctx)
 			hc.mu.Lock()
 			hc.ControlChannel = cc
+			hc.ccCancel = ccCancel
 			hc.mu.Unlock()
 			// Capture cc locally so the goroutine doesn't race with Stop()
 			// nil-ing hc.ControlChannel out from under it.
 			hc.ccWg.Add(1)
 			go func() {
 				defer hc.ccWg.Done()
-				if err := cc.Connect(ctx); err != nil {
-					if ctx.Err() != nil {
+				if err := cc.Connect(ccCtx); err != nil {
+					if ccCtx.Err() != nil {
 						slog.Info("Control channel stopped", "name", hc.Name)
 					} else {
 						slog.Error("Control channel error", "name", hc.Name, "error", err)
@@ -230,13 +305,44 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 // before clearing ControlChannel so that a subsequent Start / Reinitialize
 // cannot race with the previous incarnation.
 func (hc *HubConnection) Stop() {
+	hc.lifecycleMu.Lock()
+	defer hc.lifecycleMu.Unlock()
+	hc.stop()
+}
+
+// close stops the connection's services for good: it is the final stop,
+// used when the connection is removed or the server shuts down. A Start
+// or reinitialize that runs after close does nothing.
+func (hc *HubConnection) close() {
+	hc.lifecycleMu.Lock()
+	defer hc.lifecycleMu.Unlock()
+	hc.mu.Lock()
+	hc.closed = true
+	hc.mu.Unlock()
+	hc.stop()
+}
+
+// isClosed reports whether close has run.
+func (hc *HubConnection) isClosed() bool {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	return hc.closed
+}
+
+// stop is Stop without lifecycleMu; the caller holds it.
+func (hc *HubConnection) stop() {
 	hc.mu.Lock()
 	cc := hc.ControlChannel
 	hc.ControlChannel = nil
+	ccCancel := hc.ccCancel
+	hc.ccCancel = nil
 	hb := hc.Heartbeat
 	hc.Heartbeat = nil
 	hc.mu.Unlock()
 
+	if ccCancel != nil {
+		ccCancel()
+	}
 	if cc != nil {
 		slog.Info("Stopping control channel for connection", "name", hc.Name)
 		_ = cc.Close()
@@ -259,9 +365,192 @@ func (hc *HubConnection) Stop() {
 // and the credential watcher read them from other goroutines (via snapshot).
 // hc.mu is a leaf lock: it is never held across Stop, Start or any other
 // blocking call.
+//
+// Reinitialize does not update the requested-credential generation
+// (reinitCreds/reinitGen). Production code must go through
+// requestReinitialize and applyRequestedReinitialize, as the credential
+// watcher does, so the latest requested set wins; today only tests call
+// Reinitialize directly.
 func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds *brokercredentials.BrokerCredentials) error {
-	// Stop existing services. Stop takes hc.mu itself.
-	hc.Stop()
+	hc.lifecycleMu.Lock()
+	defer hc.lifecycleMu.Unlock()
+	return hc.reinitialize(ctx, server, creds)
+}
+
+// requestReinitialize records creds as the latest credential set for this
+// connection. A following applyRequestedReinitialize applies it.
+func (hc *HubConnection) requestReinitialize(creds *brokercredentials.BrokerCredentials) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	hc.reinitCreds = creds
+	hc.reinitGen++
+	// A newly requested set is applied at once, and its failures back
+	// off from the start.
+	hc.resetReinitBackoffLocked()
+}
+
+// resetReinitBackoffLocked clears the retry backoff. The caller holds hc.mu.
+func (hc *HubConnection) resetReinitBackoffLocked() {
+	hc.reinitFailures = 0
+	hc.reinitNextRetry = time.Time{}
+	hc.reinitLastErr = ""
+}
+
+// clock returns the current time from hc.now, or time.Now when it is nil.
+func (hc *HubConnection) clock() time.Time {
+	if hc.now != nil {
+		return hc.now()
+	}
+	return time.Now()
+}
+
+// latestCredentials returns the most recently requested credential set, or
+// the current Credentials when none has been requested.
+func (hc *HubConnection) latestCredentials() *brokercredentials.BrokerCredentials {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	if hc.reinitCreds != nil {
+		return hc.reinitCreds
+	}
+	return hc.Credentials
+}
+
+// applyRequestedReinitialize reinitializes the connection with the latest
+// credential set recorded by requestReinitialize. Calls queue on
+// lifecycleMu in no particular order, so each one applies whatever is
+// latest when it gets the lock, and does nothing (applied=false) when an
+// earlier call already took up that request. The latest request is
+// therefore always applied, whatever order the calls run in.
+func (hc *HubConnection) applyRequestedReinitialize(ctx context.Context, server *Server) (applied bool, err error) {
+	hc.lifecycleMu.Lock()
+	defer hc.lifecycleMu.Unlock()
+
+	hc.mu.Lock()
+	if hc.closed {
+		hc.mu.Unlock()
+		return false, nil
+	}
+	creds := hc.reinitCreds
+	gen := hc.reinitGen
+	pending := creds != nil && gen != hc.reinitAppliedGen
+	hc.reinitAppliedGen = gen
+	if pending {
+		// Taken up: an earlier failure no longer applies, so a watcher
+		// tick while this reinitialize runs does not queue a retry.
+		hc.reinitFailed = false
+	}
+	hc.mu.Unlock()
+	if !pending {
+		return false, nil
+	}
+	err = hc.reinitialize(ctx, server, creds)
+	hc.mu.Lock()
+	hc.reinitFailed = err != nil
+	// A set requested while this reinitialize ran reset the backoff and
+	// is applied next, so this result does not count towards it; a
+	// failure is still logged at Error.
+	report := reinitFailureReport{level: slog.LevelError}
+	if hc.reinitGen == gen {
+		report = hc.recordReinitResultLocked(err, hc.clock())
+	}
+	hc.mu.Unlock()
+	report.log(hc.Name, err)
+	return true, err
+}
+
+// reinitFailureReport says how to log a failed reinitialize; see
+// recordReinitResultLocked.
+type reinitFailureReport struct {
+	level    slog.Level
+	failures int
+	retryIn  time.Duration
+	skip     bool // nothing to log
+}
+
+// recordReinitResultLocked updates the retry backoff with the result of
+// a reinitialize of the latest requested set, at time now, and returns
+// how to log it. The caller holds hc.mu.
+//
+// After the n-th consecutive failure the next retry is due
+// reinitRetryDelay(n) later: the credential watcher interval, doubling
+// per failure up to reinitRetryMaxDelay. The first failure of a set is
+// logged at Error, as is a failure whose error differs from the one
+// before. An identical repeat is logged at Debug.
+func (hc *HubConnection) recordReinitResultLocked(err error, now time.Time) reinitFailureReport {
+	if err == nil {
+		hc.resetReinitBackoffLocked()
+		return reinitFailureReport{skip: true}
+	}
+	hc.reinitFailures++
+	delay := reinitRetryDelay(hc.reinitFailures)
+	// The watcher only looks at reinitNextRetry once per tick, and ticks
+	// are not aligned with failures. Making a retry due half a tick
+	// early means it is taken at the nearer tick, so retries are spaced
+	// delay apart rather than one tick more.
+	hc.reinitNextRetry = now.Add(delay - credentialWatchInterval/2)
+
+	report := reinitFailureReport{level: slog.LevelDebug, failures: hc.reinitFailures, retryIn: delay}
+	msg := err.Error()
+	if hc.reinitFailures == 1 || msg != hc.reinitLastErr {
+		report.level = slog.LevelError
+	}
+	hc.reinitLastErr = msg
+	return report
+}
+
+// log writes the report for the reinitialize of connection name that
+// returned err.
+func (r reinitFailureReport) log(name string, err error) {
+	if r.skip || err == nil {
+		return
+	}
+	msg := "Failed to reinitialize hub connection; will retry"
+	if r.level == slog.LevelDebug {
+		msg = "Reinitialize of hub connection failed again; will retry"
+	}
+	attrs := []any{"name", name, "error", err}
+	if r.failures > 0 {
+		attrs = append(attrs, "consecutiveFailures", r.failures, "retryIn", r.retryIn)
+	}
+	slog.Log(context.Background(), r.level, msg, attrs...)
+}
+
+// reinitRetryDelay returns the delay before retrying after the n-th
+// consecutive failed reinitialize (n >= 1): the credential watcher
+// interval, doubled per further failure, at most reinitRetryMaxDelay.
+func reinitRetryDelay(n int) time.Duration {
+	d := credentialWatchInterval
+	for i := 1; i < n && d < reinitRetryMaxDelay; i++ {
+		d *= 2
+	}
+	if d > reinitRetryMaxDelay {
+		d = reinitRetryMaxDelay
+	}
+	return d
+}
+
+// retryFailedReinitialize requests the latest credential set again when
+// its reinitialize failed, no newer set has been requested since, and
+// the retry backoff has passed (see recordReinitResultLocked), so that a
+// following applyRequestedReinitialize retries it. It reports whether it
+// requested a retry.
+func (hc *HubConnection) retryFailedReinitialize() bool {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	if hc.closed || !hc.reinitFailed || hc.reinitCreds == nil || hc.reinitGen != hc.reinitAppliedGen {
+		return false
+	}
+	if hc.clock().Before(hc.reinitNextRetry) {
+		return false
+	}
+	hc.reinitGen++
+	return true
+}
+
+// reinitialize is Reinitialize without lifecycleMu; the caller holds it.
+func (hc *HubConnection) reinitialize(ctx context.Context, server *Server, creds *brokercredentials.BrokerCredentials) error {
+	// Stop existing services. stop takes hc.mu itself.
+	hc.stop()
 
 	// Update credentials
 	hc.mu.Lock()
@@ -326,7 +615,7 @@ func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds
 	slog.Info("Hub connection reinitialized", "name", hc.Name, "brokerID", creds.BrokerID)
 
 	// Restart services
-	return hc.Start(ctx, server)
+	return hc.start(ctx, server)
 }
 
 // buildHubClientOpts creates hub client options from credentials.

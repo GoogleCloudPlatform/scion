@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_6
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,7 +25,6 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -36,26 +37,6 @@ import (
 // tests pin the exact bytes: recording must never change the exchange
 // response.
 // ---------------------------------------------------------------------------
-
-// fakeGEExchangeMetrics records every RecordGEExchangeRequest call.
-type fakeGEExchangeMetrics struct {
-	mu       sync.Mutex
-	outcomes []GEExchangeOutcome
-}
-
-func (f *fakeGEExchangeMetrics) RecordGEExchangeRequest(outcome GEExchangeOutcome) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.outcomes = append(f.outcomes, outcome)
-}
-
-func (f *fakeGEExchangeMetrics) all() []GEExchangeOutcome {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]GEExchangeOutcome, len(f.outcomes))
-	copy(out, f.outcomes)
-	return out
-}
 
 func wantOneOutcome(t *testing.T, fake *fakeGEExchangeMetrics, want GEExchangeOutcome) {
 	t.Helper()

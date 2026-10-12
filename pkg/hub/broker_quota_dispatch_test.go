@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 // ptone/scion#2014: a start-type dispatch holds its broker reservation for
 // the whole dispatch leg (beginStartDispatch), and a heartbeat that reports

@@ -167,8 +167,11 @@ type Event struct {
 
 // AgentDetail provides freeform context about the current activity in SSE events.
 type AgentDetail struct {
-	ToolName    string `json:"toolName,omitempty"`
-	Message     string `json:"message,omitempty"`
+	ToolName string `json:"toolName,omitempty"`
+	// Message has no omitempty (ptone/scion#4415): an explicit "" tells the
+	// web's delta merge that the status message was cleared, the same way
+	// Deletion (null) and ProvisionedOnly (false) clear merged values.
+	Message     string `json:"message"`
 	TaskSummary string `json:"taskSummary,omitempty"`
 
 	// Limits tracking — included so the frontend can update counters in real-time.
@@ -183,7 +186,7 @@ type AgentStatusEvent struct {
 	ProjectID         string             `json:"projectId"`
 	Phase             string             `json:"phase,omitempty"`
 	Activity          string             `json:"activity,omitempty"`
-	Detail            *AgentDetail       `json:"detail,omitempty"`
+	Detail            *AgentDetail       `json:"detail"` // always sent, so a cleared Message reaches the web as "" (ptone/scion#4415)
 	ContainerStatus   string             `json:"containerStatus,omitempty"`
 	LastActivityEvent string             `json:"lastActivityEvent,omitempty"`
 	Launch            *store.AgentLaunch `json:"launch,omitempty"` // design §3.2; a snapshot taken at publish time
@@ -542,9 +545,9 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 	if !agent.StartedAt.IsZero() {
 		detail.StartedAt = agent.StartedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
-	if detail != (AgentDetail{}) {
-		evt.Detail = &detail
-	}
+	// Always set, even when every field is zero (for example before
+	// StartedAt during provisioning), so a cleared message is sent as "".
+	evt.Detail = &detail
 	p.sink("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {
 		p.sink("project."+agent.ProjectID+".agent.status", evt)

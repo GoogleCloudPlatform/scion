@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -25,10 +25,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// workspaceSecret is planted in a victim project's workspace. No response to a
-// non-member may contain it.
-const workspaceSecret = "PRIVATE-WORKSPACE-BYTES-do-not-serve-this"
 
 // newVictimWorkspace creates a project with a populated workspace and returns
 // the project plus its on-disk path.
