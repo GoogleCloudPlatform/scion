@@ -209,6 +209,20 @@ type RunConfig struct {
 	// manager has already set to the block ServiceAccount or cleared.
 	// Ignored by other runtimes.
 	KubernetesBlockIdentity bool
+
+	// FallbackEnv is the template env layer (ptone/scion#4524): every
+	// runtime applies it with FallbackEnvEntries as the LAST step of its
+	// container env assembly, so a key is set only when no other source
+	// emitted it. Values are literal. Consumers: buildCommonRunArgs
+	// (docker/podman/apple), the kubernetes buildPod, buildCloudRunInstance,
+	// the Cloud Run sandbox runtime and the substrate bootstrap env. A new
+	// runtime must call it too (forgetting drops template env, never lets
+	// it win).
+	FallbackEnv map[string]string
+	// SuppressedFallbackKeys are keys FallbackEnv may never set (the
+	// harness-config's auth-candidate keys), even when nothing else set
+	// them.
+	SuppressedFallbackKeys []string
 }
 
 // Checkpoint step names a runtime passes to RunConfig.Checkpoint (design

@@ -1021,6 +1021,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Template env source on start and restart (ptone/scion#4524) ---
+	if in.Operation != opCreate && opts.Template == "" {
+		s.applyStartTemplateEnvSource(ctx, in, &opts, hubConn, templateSlug)
+	}
+
 	// --- Shared workspace mode (git-workspace hybrid) ---
 	// Deprecated: SCION_SHARED_WORKSPACE — superseded by SCION_WORKSPACE_MODE +
 	// SCION_WORKSPACE_GIT. Kept for compatibility during the transition period.
@@ -2304,6 +2309,57 @@ func isLoopbackEndpointURL(endpoint string) bool {
 		return false
 	}
 	return isLoopbackHost(u.Hostname())
+}
+
+// applyStartTemplateEnvSource resolves the agent's Hub template on a start or
+// restart that leaves opts.Template unset (the agent's state survived), and
+// passes its local path in opts.TemplateEnvSource, which the agent manager
+// uses only to compute the template env fallback (ptone/scion#4524).
+//
+// The template is resolved live, as create does (hydrateTemplate): the Hub's
+// current content, reused from the cache when unchanged, so the template env
+// follows template updates. The request's TemplateHash is the hash recorded
+// at create, so a cache lookup by it would pin create-time content and make
+// the result depend on cache state; it is not used to short-cut resolution.
+//
+// opts.Template is never set here, so image, harness-config and agent config
+// resolution are unchanged. A hydration failure is logged and the start goes
+// on without template env (the agent manager warns that the env fallback is
+// not applied); it never fails the start.
+//
+// An older Hub sends no template identity: the template hash recorded at
+// provision (broker-side provenance) is then looked up in the template cache,
+// read-only, so such an agent gets the template version it was provisioned
+// from. A hit sets the env source; a miss leaves it unset (the agent manager
+// warns).
+func (s *Server) applyStartTemplateEnvSource(ctx context.Context, in startContextInputs, opts *api.StartOptions, hubConn *HubConnection, templateSlug string) {
+	if in.TemplateID == "" && in.TemplateHash == "" {
+		if s.cache == nil {
+			return
+		}
+		hash := agent.ProvisionedTemplateHash(opts.ProjectPath, opts.Name, opts.SharedWorkspace, opts.HubProjectID)
+		if hash == "" {
+			return
+		}
+		if path, ok := s.cache.Get(hash); ok {
+			opts.TemplateEnvSource = path
+		}
+		return
+	}
+	if hubConn == nil {
+		return
+	}
+	templatePath, err := s.hydrateTemplate(ctx, &CreateAgentConfig{
+		Template:     templateSlug,
+		TemplateID:   in.TemplateID,
+		TemplateHash: in.TemplateHash,
+	}, hubConn)
+	if err != nil {
+		s.agentLifecycleLog.Warn("Start: could not resolve the agent's Hub template; its env fallback is not applied",
+			"agent_id", in.AgentID, "template", templateSlug, "error", err)
+		return
+	}
+	opts.TemplateEnvSource = templatePath
 }
 
 // applyStartTemplateIdentity applies the agent's template identity on a start

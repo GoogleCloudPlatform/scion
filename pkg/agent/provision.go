@@ -1006,6 +1006,11 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		return nil, fmt.Errorf("failed to load template: %w", err)
 	}
 
+	// Each template contributes its job keys only (ptone/scion#4524):
+	// templateJobConfig drops its environment keys (reported) and its env,
+	// which is the separate template env layer Start applies as a final
+	// fill. Template env is therefore never merged into the agent config or
+	// persisted in scion-agent.json.
 	finalScionCfg := &api.ScionConfig{}
 	for _, tpl := range chain {
 		// Load scion-agent config from this template and merge it
@@ -1019,7 +1024,7 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 			return nil, fmt.Errorf("template %s: %w", templateRef(tpl), err)
 		}
 
-		finalScionCfg = config.MergeScionConfig(finalScionCfg, tplCfg)
+		finalScionCfg = config.MergeScionConfig(finalScionCfg, templateJobConfig(ctx, tpl, tplCfg))
 	}
 
 	if inlineCfg != nil {
@@ -1103,7 +1108,9 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 		templateName = defaultTemplate
 	}
 
-	_, err = resolveTemplateAndHarnessConfig(ctx, templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
+	// The real provisioning repeats this resolution and reports any ignored
+	// template environment keys; stay quiet here so each is reported once.
+	_, err = resolveTemplateAndHarnessConfig(withQuietTemplateEnvWarnings(ctx), templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
 	return err
 }
 
@@ -2408,20 +2415,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	// Record each image input at its own tier (ptone/scion#1799), so Start
 	// never has to reuse the merged finalScionCfg.Image — which folds in
-	// the inline, settings and profile values of this moment — as if it
-	// were the template's. Image provenance is recorded in broker-side agent
+	// the inline, settings and profile values of this moment. No template
+	// image is recorded: a template's image is an ignored environment key
+	// (ptone/scion#4524). Image provenance is recorded in broker-side agent
 	// state (the agent dir), never in the agent home, which is inside a
 	// container mount.
-	tplImage, tplPullPolicy := templateChainImage(chain)
 	if err := writeImageProvenance(agentDir, imageProvenance{
-		RequestImage:            agentImage,
-		TemplateImage:           tplImage,
-		TemplateImagePullPolicy: tplPullPolicy,
-		InlineImage:             explicitImage,
-		InlineImagePullPolicy:   explicitPullPolicy,
-		Profile:                 profileName,
-		Template:                displayTemplateName,
-		TemplateHash:            templateHash,
+		RequestImage:          agentImage,
+		InlineImage:           explicitImage,
+		InlineImagePullPolicy: explicitPullPolicy,
+		Profile:               profileName,
+		Template:              displayTemplateName,
+		TemplateHash:          templateHash,
 	}); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write image provenance: %w", err)
 	}
@@ -4036,6 +4041,10 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		return agentDir, agentHome, agentWorkspace, agentCfg, nil
 	}
 
+	// Each template contributes its job keys only (ptone/scion#4524):
+	// templateJobConfig drops its environment keys and its env, so a restart
+	// never reintroduces them under the stored config. Start applies the
+	// live template env as a final fill.
 	mergedCfg := &api.ScionConfig{}
 	for _, tpl := range chain {
 		tplCfg, err := tpl.LoadConfig()
@@ -4043,7 +4052,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 			fmt.Fprintf(os.Stderr, "Warning: failed to load config from template %s, skipping: %v\n", templateRef(tpl), err)
 			continue
 		}
-		mergedCfg = config.MergeScionConfig(mergedCfg, tplCfg)
+		mergedCfg = config.MergeScionConfig(mergedCfg, templateJobConfig(ctx, tpl, tplCfg))
 	}
 
 	finalCfg := config.MergeScionConfig(mergedCfg, agentCfg)
