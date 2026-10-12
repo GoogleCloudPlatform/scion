@@ -205,8 +205,8 @@ test('ordinary settings are not harness-owned', () => {
 });
 
 test('runtimeBroker needs testIdentities', async () => {
-  await expect(
-    startHub({ runtimeBroker: true, build: false, binary, stateFile })
-  ).rejects.toThrow('startHub: runtimeBroker needs testIdentities');
+  await expect(startHub({ runtimeBroker: true, build: false, binary, stateFile })).rejects.toThrow(
+    'startHub: runtimeBroker needs testIdentities'
+  );
   expect(invocations(), 'nothing ran').toEqual([]);
 });

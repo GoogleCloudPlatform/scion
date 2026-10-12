@@ -201,7 +201,7 @@ async function adminRequest(
     headers: { Authorization: `Bearer ${hub.devToken}` },
   });
   const text = await res.text();
-  let body: unknown = null;
+  let body: unknown;
   try {
     body = text ? JSON.parse(text) : null;
   } catch {
@@ -269,8 +269,7 @@ async function submitCreateForm(
   await form.locator(SELECTORS.createTaskInput).fill(opts.task);
 
   const createResponse = page.waitForResponse(
-    (res) =>
-      res.request().method() === 'POST' && CREATE_PATH.test(new URL(res.url()).pathname)
+    (res) => res.request().method() === 'POST' && CREATE_PATH.test(new URL(res.url()).pathname)
   );
   const docIdBefore = await documentId(page);
   const loadsBefore = tracked.documentLoads;
@@ -447,8 +446,10 @@ async function badImageTemplate(): Promise<string> {
   runScionCLI(hub, ['templates', 'push', name]);
   fs.rmSync(dir, { recursive: true, force: true });
   const list = await adminRequest(hub, 'GET', '/api/v1/templates?limit=100');
-  const found = ((list.body as { templates?: Array<{ id: string; name: string; status?: string }> })
-    ?.templates ?? []).find((tpl) => tpl.name === name);
+  const found = (
+    (list.body as { templates?: Array<{ id: string; name: string; status?: string }> })
+      ?.templates ?? []
+  ).find((tpl) => tpl.name === name);
   if (!found) throw new Error(`fixture template ${name} not found after push`);
   expect(found.status, 'fixture template status').toBe('active');
   journey.template = { name, id: found.id };
@@ -603,7 +604,7 @@ test.describe.serial('async agent create from the web form', () => {
 
     journey.context = await browser.newContext({ baseURL: t.baseURL });
     await redeemTestIdentity(journey.context, { codeFile });
-    await assertTestIdentity(journey.context.request, { email: journey.email!, role: 'member' });
+    await assertTestIdentity(journey.context.request, { email: journey.email, role: 'member' });
 
     if (t.projectId) {
       journey.projectId = t.projectId;
@@ -688,7 +689,10 @@ test.describe.serial('async agent create from the web form', () => {
       timeline.some((r) => r.launchBanner),
       'launch banner shown during the launch'
     ).toBe(true);
-    expect(timeline.some((r) => r.incompleteBanner), 'no failed-create panel').toBe(false);
+    expect(
+      timeline.some((r) => r.incompleteBanner),
+      'no failed-create panel'
+    ).toBe(false);
     expectForwardOnly(phaseSequence(timeline.map((r) => r.phase)), 'Status tab phases');
 
     // A2: SSE launch payloads.
