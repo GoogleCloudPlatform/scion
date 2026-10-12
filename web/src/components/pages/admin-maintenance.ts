@@ -961,7 +961,9 @@ export class ScionPageAdminMaintenance extends LitElement {
       this.startPolling();
     } catch (err) {
       console.error('Failed to start migration:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to start migration';
+      // The page stays as it is; a failed action is reported as a toast.
+      // The dialog stays open so the user can retry or cancel.
+      showToast(err instanceof Error ? err.message : 'Failed to start migration');
     } finally {
       this.runInProgress = false;
     }
@@ -995,7 +997,9 @@ export class ScionPageAdminMaintenance extends LitElement {
       this.startPolling();
     } catch (err) {
       console.error('Failed to start operation:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to start operation';
+      // The page stays as it is; a failed action is reported as a toast.
+      // The dialog stays open so the user can retry or cancel.
+      showToast(err instanceof Error ? err.message : 'Failed to start operation');
     } finally {
       this.runInProgress = false;
     }
