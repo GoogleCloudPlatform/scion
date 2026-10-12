@@ -143,16 +143,32 @@ func startTemplateEnv(t *testing.T, ctx context.Context, projectScionDir, name s
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
+	return effectiveContainerEnv(t, captured), info
+}
+
+// effectiveContainerEnv returns the env a runtime gives the container from
+// cfg's env and fallback layers: RunConfig.Env, then RunConfig.FallbackEnv
+// applied as the last step (runtime.FallbackEnvEntries). Runtime-side sources
+// (auth env, harness env, env secrets) are covered by the pkg/runtime tests.
+// It also checks that template env never rides RunConfig.Env.
+func effectiveContainerEnv(t *testing.T, cfg runtime.RunConfig) map[string]string {
+	t.Helper()
 	env := map[string]string{}
-	for _, kv := range captured.Env {
+	emitted := map[string]bool{}
+	for _, kv := range cfg.Env {
 		if k, v, ok := strings.Cut(kv, "="); ok {
 			if _, dup := env[k]; dup {
 				t.Errorf("container env has %s twice", k)
 			}
 			env[k] = v
+			emitted[k] = true
 		}
 	}
-	return env, info
+	for _, kv := range runtime.FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
+		k, v, _ := strings.Cut(kv, "=")
+		env[k] = v
+	}
+	return env
 }
 
 func startWarnings(info *api.AgentInfo) string {
@@ -405,32 +421,137 @@ func TestStart_TemplateEnvReservedScionKeyIgnored(t *testing.T) {
 	}
 }
 
-func TestApplyTemplateEnvFill(t *testing.T) {
-	base := []string{"SET=other", "EMPTY="}
-	orig := append([]string(nil), base...)
-	got, warnings := applyTemplateEnvFill(base, map[string]string{
-		"SET":    "template",
-		"EMPTY":  "filled",
+func TestTemplateEnvFallback(t *testing.T) {
+	got, warnings := templateEnvFallback(map[string]string{
 		"NEW":    "n",
 		"BLANK":  "",
 		"DOLLAR": "${HOME}/x",
 		"TZ":     "UTC",
 	}, true, "a")
-	sort.Strings(got)
-	want := []string{"DOLLAR=${HOME}/x", "EMPTY=filled", "NEW=n", "SET=other"}
+	want := map[string]string{"NEW": "n", "DOLLAR": "${HOME}/x"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("env = %v, want %v", got, want)
-	}
-	if !reflect.DeepEqual(base, orig) {
-		t.Errorf("caller's env slice was modified: %v", base)
+		t.Errorf("fallback = %v, want %v (empty skipped, ${...} literal, TZ hub-only on a broker start)", got, want)
 	}
 	if len(warnings) != 2 {
 		t.Errorf("warnings = %q, want the empty-value and ${...} warnings", warnings)
 	}
 	// Outside broker mode the hub-only rule does not apply.
-	got, _ = applyTemplateEnvFill(nil, map[string]string{"TZ": "UTC"}, false, "a")
-	if !reflect.DeepEqual(got, []string{"TZ=UTC"}) {
-		t.Errorf("non-broker TZ fill = %v", got)
+	got, _ = templateEnvFallback(map[string]string{"TZ": "UTC"}, false, "a")
+	if !reflect.DeepEqual(got, map[string]string{"TZ": "UTC"}) {
+		t.Errorf("non-broker TZ fallback = %v", got)
+	}
+}
+
+// Template env never rides RunConfig.Env: it travels only in FallbackEnv,
+// which the runtime applies last.
+func TestStart_TemplateEnvTravelsAsFallbackEnv(t *testing.T) {
+	project := templateEnvStart{tplEnv: map[string]string{"TPL_ONLY": "v"}}.fixture(t)
+	var captured runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			captured = cfg
+			return "mock-id", nil
+		},
+	}
+	if _, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+		Name: "travel", Template: "tenv", ProjectPath: project, BrokerMode: true, NoAuth: true, Env: map[string]string{},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, kv := range captured.Env {
+		if strings.HasPrefix(kv, "TPL_ONLY=") {
+			t.Errorf("template env rode RunConfig.Env: %s", kv)
+		}
+	}
+	if captured.FallbackEnv["TPL_ONLY"] != "v" {
+		t.Errorf("FallbackEnv = %v, want TPL_ONLY=v", captured.FallbackEnv)
+	}
+}
+
+// FYI-5 ruling: the harness-config's auth-candidate keys are suppressed for
+// the fallback, so a template never supplies a credential, even one nothing
+// else set.
+func TestStart_TemplateEnvAuthCandidateKeysSuppressed(t *testing.T) {
+	project := templateEnvStart{tplEnv: map[string]string{"ANTHROPIC_API_KEY": "template-key", "TPL_TOOL": "ok"}}.fixture(t)
+	hcFile := filepath.Join(os.Getenv("HOME"), ".scion", "harness-configs", "test-harness", "config.yaml")
+	auth := "auth:\n  default_type: api-key\n  types:\n    api-key:\n      required_env:\n        - any_of: [ANTHROPIC_API_KEY]\n"
+	data, err := os.ReadFile(hcFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hcFile, append(data, []byte(auth)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var captured runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			captured = cfg
+			return "mock-id", nil
+		},
+	}
+	if _, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+		Name: "suppress", Template: "tenv", ProjectPath: project, BrokerMode: true, NoAuth: true, Env: map[string]string{},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	found := false
+	for _, k := range captured.SuppressedFallbackKeys {
+		if k == "ANTHROPIC_API_KEY" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("SuppressedFallbackKeys = %v, want ANTHROPIC_API_KEY", captured.SuppressedFallbackKeys)
+	}
+	env := effectiveContainerEnv(t, captured)
+	if v, ok := env["ANTHROPIC_API_KEY"]; ok {
+		t.Errorf("template credential ANTHROPIC_API_KEY=%q reached the container", v)
+	}
+	assertEnv(t, env, "TPL_TOOL", "ok")
+}
+
+// B1: a hosted agent's start or restart leaves opts.Template unset; the
+// broker passes the hydrated template in opts.TemplateEnvSource, which
+// supplies the template env without a "not found" warning. Without it, the
+// env fallback is not applied and Start warns.
+func TestStart_TemplateEnvFromTemplateEnvSource(t *testing.T) {
+	project := templateEnvStart{}.fixture(t)
+	hashDir := filepath.Join(os.Getenv("HOME"), "template-cache", testContentHash)
+	if err := os.MkdirAll(hashDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hashDir, "scion-agent.json"),
+		[]byte(`{"default_harness_config": "test-harness", "env": {"TPL_HOSTED": "cached"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Create from the hydrated cache dir, as the broker does on create.
+	env, _ := startTemplateEnv(t, context.Background(), project, "hosted", func(o *api.StartOptions) {
+		o.Template, o.TemplateName = hashDir, "web-dev"
+	})
+	assertEnv(t, env, "TPL_HOSTED", "cached")
+
+	// Restart with opts.Template unset and the env source set.
+	env, info := startTemplateEnv(t, context.Background(), project, "hosted", func(o *api.StartOptions) {
+		o.Template, o.TemplateEnvSource = "", hashDir
+	})
+	assertEnv(t, env, "TPL_HOSTED", "cached")
+	if w := startWarnings(info); strings.Contains(w, "its env fallback is not applied") {
+		t.Errorf("unexpected env-fallback warning with a template env source:\n%s", w)
+	}
+
+	// Restart without an env source: no template env, and a warning.
+	env, info = startTemplateEnv(t, context.Background(), project, "hosted", func(o *api.StartOptions) { o.Template = "" })
+	if v, ok := env["TPL_HOSTED"]; ok {
+		t.Errorf("TPL_HOSTED=%q applied without a template env source", v)
+	}
+	if w := startWarnings(info); !strings.Contains(w, "template web-dev not found; its env fallback is not applied") {
+		t.Errorf("missing the env-fallback warning:\n%s", w)
 	}
 }
 

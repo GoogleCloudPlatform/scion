@@ -137,6 +137,40 @@ func TestApplyStartTemplateIdentity_NoIdentityKeepsPreviousBehaviour(t *testing.
 	assert.Empty(t, f.opts.Template)
 }
 
+// ptone/scion#4524: on a start whose agent state survived, the agent's Hub
+// template is resolved for its env fallback only: TemplateEnvSource is set,
+// Template stays unset.
+func TestApplyStartTemplateEnvSource_SurvivingStateSetsEnvSourceOnly(t *testing.T) {
+	f := newTemplateIdentityFixture(t, "kept-agent", true)
+	conn, wantDir := templateConn(t, "web-dev", nil, nil)
+
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, &f.opts, conn, "web-dev")
+	assert.Equal(t, wantDir, f.opts.TemplateEnvSource)
+	assert.Empty(t, f.opts.Template, "the env source must never become the agent's template")
+}
+
+// A hydration failure never fails the start: the env source stays unset and
+// the agent manager warns that the env fallback is not applied.
+func TestApplyStartTemplateEnvSource_HydrationFailureIsNotFatal(t *testing.T) {
+	f := newTemplateIdentityFixture(t, "kept-agent", true)
+	conn, _ := templateConn(t, "web-dev", errors.New("hub unavailable"), nil)
+
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, &f.opts, conn, "web-dev")
+	assert.Empty(t, f.opts.TemplateEnvSource)
+	assert.Empty(t, f.opts.Template)
+}
+
+// Without a template identity (an older Hub) nothing is resolved.
+func TestApplyStartTemplateEnvSource_NoIdentityResolvesNothing(t *testing.T) {
+	f := newTemplateIdentityFixture(t, "kept-agent", true)
+	conn, _ := templateConn(t, "web-dev", nil, func() {
+		t.Error("nothing may be hydrated without a template identity")
+	})
+
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{}, &f.opts, conn, "web-dev")
+	assert.Empty(t, f.opts.TemplateEnvSource)
+}
+
 func TestRestartAgentConfig_NilWithoutInputs(t *testing.T) {
 	assert.Nil(t, restartAgentConfig(false, "", "", "", nil, true, nil, nil, ""),
 		"an older Hub's restart (sharedWorkspace alone, no project named) builds no config")
