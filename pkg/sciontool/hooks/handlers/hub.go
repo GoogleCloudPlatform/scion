@@ -137,6 +137,13 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 	case hooks.EventToolStart:
 		// Claude-specific: ExitPlanMode and AskUserQuestion mean waiting for user
 		if isClaudeUserWaitTool(event) {
+			// A sub-agent's question during a wait the agent set itself
+			// leaves that wait in place locally; sending a new
+			// waiting_for_input would replace the agent's own message.
+			if isSubagentEvent(event) && h.isLocalWaitAgentSet() {
+				log.Debug("Hub: Skipping waiting_for_input from sub-agent (agent-set wait kept)")
+				return nil
+			}
 			message := "Waiting on parent"
 			if event.Data.ToolName == "ExitPlanMode" {
 				message = "Waiting for plan approval"
@@ -151,11 +158,13 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			break
 		}
 
-		// Tool-start clears waiting_for_input (user has responded) but
-		// preserves completed (tools may fire after task_completed as wrap-up).
-		localActivity := readLocalActivity()
-		if localActivity == string(state.ActivityCompleted) || localActivity == string(state.ActivityLimitsExceeded) {
-			log.Debug("Hub: Skipping executing (completed is sticky, post-completion tool)")
+		// The Hub follows the local result. The StatusHandler has already
+		// replaced a waiting_for_input (the user has responded) and kept
+		// every other held status: completed (tools may fire after
+		// task_completed as wrap-up), blocked, limits_exceeded and crashed.
+		// A held local status means no executing update.
+		if h.isLocalActivitySticky() {
+			log.Debug("Hub: Skipping executing (local activity is sticky)")
 			return nil
 		}
 
@@ -191,6 +200,13 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		})
 
 	case hooks.EventNotification:
+		// A Notification during a wait the agent set itself leaves that
+		// wait in place locally; sending a new waiting_for_input would
+		// replace the agent's own message.
+		if h.isLocalWaitAgentSet() {
+			log.Debug("Hub: Skipping waiting_for_input (agent-set wait kept)")
+			return nil
+		}
 		// Agent is waiting for input
 		message := "Waiting on parent"
 		if event.Data.Message != "" {
@@ -263,6 +279,12 @@ func (h *HubHandler) isLocalActivitySticky() bool {
 	return isStickyActivity(activity)
 }
 
+// isLocalWaitAgentSet reports whether the local agent-info.json holds a
+// waiting_for_input that the agent set itself (no notification marker).
+func (h *HubHandler) isLocalWaitAgentSet() bool {
+	return isAgentSetWaiting(readLocalAgentInfo())
+}
+
 // readLocalActivity reads the current activity from the local agent-info.json file.
 //
 // The read goes through dirfd.ReadFileNoFollow with agentInfoMaxBytes, the
@@ -273,6 +295,15 @@ func (h *HubHandler) isLocalActivitySticky() bool {
 // (not sticky), the same fail-open result an unreadable file always gave,
 // and logs only the reason at debug level, never the file's contents.
 func readLocalActivity() string {
+	activity, _ := readLocalAgentInfo()["activity"].(string)
+	return activity
+}
+
+// readLocalAgentInfo reads the local agent-info.json into a map, with the
+// same bounded, no-follow read as readLocalActivity. It returns an empty map
+// when the file is missing, refused or not valid JSON.
+func readLocalAgentInfo() map[string]interface{} {
+	info := map[string]interface{}{}
 	home := os.Getenv("HOME")
 	if home == "" {
 		home = "/home/scion"
@@ -284,16 +315,14 @@ func readLocalActivity() string {
 		if !errors.Is(err, os.ErrNotExist) {
 			log.Debug("Hub: not reading local activity: %v", err)
 		}
-		return ""
+		return info
 	}
 
-	var info map[string]interface{}
-	if err := json.Unmarshal(data, &info); err != nil {
-		return ""
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil || parsed == nil {
+		return info
 	}
-
-	activity, _ := info["activity"].(string)
-	return activity
+	return parsed
 }
 
 // ReportWaitingForInput sends a waiting-for-input status to the Hub.

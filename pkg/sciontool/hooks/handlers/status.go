@@ -60,6 +60,21 @@ const activitySourceKey = "activitySource"
 // activitySourceNotification marks an activity set by a Notification event.
 const activitySourceNotification = "notification"
 
+// notificationWaitAgentsKey is the agent-info.json field that lists the
+// sub-agents (by agent_id) whose question holds a notification-set
+// waiting_for_input. It exists only next to the activitySource marker: every
+// write that is not a notification write removes both. While the list is not
+// empty, a sub-agent event clears only its own entry, and the wait stays until
+// the last listed sub-agent's question is answered. A sibling sub-agent and
+// the parent's tool-end (for example the parent's Agent tool returning for
+// another sub-agent) leave it in place. A wait with no list behaves as before:
+// any tool-end or agent-end clears it.
+const notificationWaitAgentsKey = "notificationWaitAgents"
+
+// maxNotificationWaitAgents caps notificationWaitAgentsKey. Past the cap, a
+// sub-agent's question still sets the wait but its agent_id is not recorded.
+const maxNotificationWaitAgents = 64
+
 // isStickyActivity returns true if the given activity is a "sticky" value that
 // should resist being overwritten by normal event-driven updates.
 func isStickyActivity(activity string) bool {
@@ -75,6 +90,14 @@ type eventResult struct {
 
 // Handle processes an event and updates the agent status.
 func (h *StatusHandler) Handle(event *hooks.Event) error {
+	// A sub-agent that ends no longer holds a question open. Its entry is
+	// removed from the notification wait's owner list; the activity is left
+	// alone, so the parent's tool-end for that sub-agent then clears the wait
+	// if no other sub-agent still holds it.
+	if event.Name == hooks.EventSubagentEnd && isSubagentEvent(event) {
+		return h.releaseNotificationWaitOwner(subagentID(event))
+	}
+
 	result := eventToPhaseActivity(event)
 	if result == nil {
 		return nil // Event doesn't trigger a state change
@@ -90,7 +113,7 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 	// agent-end rule: a status the parent agent set and still holds (for
 	// example an ask_user waiting_for_input, or completed) stays in place.
 	if isHeldSubagentEvent(event) {
-		return h.updateActivityIfNotSticky(result.activity, event.Data.ToolName, clearNotificationWaiting)
+		return h.updateActivityIfNotSticky(result.activity, event.Data.ToolName, clearNotificationWaiting, subagentID(event))
 	}
 
 	// New work events (prompt-submit, agent-start, session-start): always
@@ -105,53 +128,166 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 		if isClaudeUserWaitTool(event) {
 			// A sub-agent's question is a harness prompt inside the
 			// parent's session, not a status the parent set. Record it as
-			// notification-set, so the sub-agent's own tool-end (the user
-			// answered) or later events clear it.
+			// notification-set and owned by the sub-agent, so the
+			// sub-agent's own tool-end (the user answered) clears it.
 			if isSubagentEvent(event) {
-				return h.setWaitingFromNotification()
+				return h.setWaitingFromNotificationFor(subagentID(event))
 			}
 			return h.UpdateActivity(state.ActivityWaitingForInput, "")
 		}
 
 		// Tool-start clears waiting_for_input (user has responded) but
 		// preserves completed (tools may fire after task_completed as wrap-up).
-		return h.updateActivityIfNotSticky(result.activity, event.Data.ToolName, clearAnyWaiting)
+		return h.updateActivityIfNotSticky(result.activity, event.Data.ToolName, clearAnyWaiting, "")
 	}
 
 	// Notification event: set waiting_for_input directly (sticky), marked as
-	// set by a notification so tool-end or agent-end can clear it.
+	// set by a notification so tool-end or agent-end can clear it. A
+	// sub-agent's Notification is owned by that sub-agent.
 	if event.Name == hooks.EventNotification {
-		return h.setWaitingFromNotification()
+		return h.setWaitingFromNotificationFor(subagentID(event))
 	}
 
 	// Tool-end and agent-end: the harness prompt that a Notification reported
 	// has been answered (the tool ran) or the turn is over (no prompt can be
 	// open at turn end), so a notification-set waiting_for_input is cleared.
 	// Every other sticky activity, including an agent-set waiting_for_input,
-	// is kept.
-	if event.Name == hooks.EventToolEnd || event.Name == hooks.EventAgentEnd {
-		return h.updateActivityIfNotSticky(result.activity, "", clearNotificationWaiting)
+	// is kept. A wait that sub-agents hold is cleared only by their own
+	// events, or by the parent's agent-end (the turn is over).
+	if event.Name == hooks.EventToolEnd {
+		return h.updateActivityIfNotSticky(result.activity, "", clearNotificationWaiting, subagentID(event))
+	}
+	if event.Name == hooks.EventAgentEnd {
+		return h.updateActivityIfNotSticky(result.activity, "", clearTurnEndWaiting, subagentID(event))
 	}
 
 	// All other events (model-end, etc.): update activity only if current
 	// activity is not sticky.
-	return h.updateActivityIfNotSticky(result.activity, "", clearNone)
+	return h.updateActivityIfNotSticky(result.activity, "", clearNone, "")
 }
 
 // setWaitingFromNotification sets waiting_for_input and marks it as set by a
-// Notification event.
+// Notification event, with no owning sub-agent.
 func (h *StatusHandler) setWaitingFromNotification() error {
+	return h.setWaitingFromNotificationFor("")
+}
+
+// setWaitingFromNotificationFor sets waiting_for_input, marks it as set by a
+// Notification event and, when owner (a sub-agent's agent_id) is not empty,
+// adds owner to the wait's owner list. A waiting_for_input the agent set
+// itself is left unchanged: a harness prompt must not turn it into a
+// notification-set wait that the prompt's answer would then clear.
+func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	info := h.readAgentInfoMap()
+	if isAgentSetWaiting(info) {
+		return nil
+	}
+
+	var owners []string
+	if isNotificationWaiting(info) {
+		owners = notificationWaitOwners(info)
+	}
+	if owner != "" && !containsString(owners, owner) && len(owners) < maxNotificationWaitAgents {
+		owners = append(owners, owner)
+	}
+
 	info["activity"] = string(state.ActivityWaitingForInput)
 	info[activitySourceKey] = activitySourceNotification
+	setNotificationWaitOwners(info, owners)
 	delete(info, "toolName")
 	delete(info, "status")
 	delete(info, "sessionStatus")
 
 	return h.writeAgentInfoLocked(info)
+}
+
+// releaseNotificationWaitOwner removes owner from the owner list of a
+// notification-set waiting_for_input. The activity is not changed. Nothing is
+// written when owner is not listed.
+func (h *StatusHandler) releaseNotificationWaitOwner(owner string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	info := h.readAgentInfoMap()
+	if !isNotificationWaiting(info) {
+		return nil
+	}
+	owners := notificationWaitOwners(info)
+	remaining, removed := removeString(owners, owner)
+	if !removed {
+		return nil
+	}
+	setNotificationWaitOwners(info, remaining)
+	return h.writeAgentInfoLocked(info)
+}
+
+// isNotificationWaiting reports whether info holds a waiting_for_input that a
+// Notification (or a sub-agent's question) set.
+func isNotificationWaiting(info map[string]interface{}) bool {
+	activity, _ := info["activity"].(string)
+	source, _ := info[activitySourceKey].(string)
+	return activity == string(state.ActivityWaitingForInput) && source == activitySourceNotification
+}
+
+// isAgentSetWaiting reports whether info holds a waiting_for_input that the
+// agent set itself (sciontool status ask_user, or the parent's own
+// ExitPlanMode or AskUserQuestion).
+func isAgentSetWaiting(info map[string]interface{}) bool {
+	activity, _ := info["activity"].(string)
+	source, _ := info[activitySourceKey].(string)
+	return activity == string(state.ActivityWaitingForInput) && source != activitySourceNotification
+}
+
+// notificationWaitOwners returns the string entries of the owner list.
+func notificationWaitOwners(info map[string]interface{}) []string {
+	list, _ := info[notificationWaitAgentsKey].([]interface{})
+	var owners []string
+	for _, v := range list {
+		if s, ok := v.(string); ok && s != "" {
+			owners = append(owners, s)
+		}
+	}
+	return owners
+}
+
+// setNotificationWaitOwners writes the owner list, or removes the field when
+// the list is empty.
+func setNotificationWaitOwners(info map[string]interface{}, owners []string) {
+	if len(owners) == 0 {
+		delete(info, notificationWaitAgentsKey)
+		return
+	}
+	list := make([]interface{}, len(owners))
+	for i, o := range owners {
+		list[i] = o
+	}
+	info[notificationWaitAgentsKey] = list
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// removeString returns list without s and whether s was present.
+func removeString(list []string, s string) ([]string, bool) {
+	out := make([]string, 0, len(list))
+	removed := false
+	for _, v := range list {
+		if v == s {
+			removed = true
+			continue
+		}
+		out = append(out, v)
+	}
+	return out, removed
 }
 
 // UpdateActivity writes the activity to the agent-info.json file atomically.
@@ -178,6 +314,7 @@ func (h *StatusHandler) UpdateActivity(activity state.Activity, toolName string)
 
 	// This write did not come from a Notification.
 	delete(info, activitySourceKey)
+	delete(info, notificationWaitAgentsKey)
 
 	// Remove legacy fields if present
 	delete(info, "status")
@@ -213,6 +350,7 @@ func (h *StatusHandler) UpdatePhase(phase state.Phase, activity state.Activity, 
 
 	// This write did not come from a Notification.
 	delete(info, activitySourceKey)
+	delete(info, notificationWaitAgentsKey)
 
 	// Remove legacy fields if present
 	delete(info, "status")
@@ -289,8 +427,14 @@ const (
 	// clearNone keeps every sticky activity.
 	clearNone waitingClear = iota
 	// clearNotificationWaiting clears waiting_for_input only when a
-	// Notification set it (tool-end, agent-end).
+	// Notification set it (tool-end, and a sub-agent's tool-start or
+	// prompt). A wait that sub-agents hold is cleared only once the last of
+	// them has had its own event; the parent's tool-end keeps it.
 	clearNotificationWaiting
+	// clearTurnEndWaiting is clearNotificationWaiting for agent-end: the
+	// parent's turn is over, so no prompt can still be open and a wait that
+	// sub-agents hold is cleared too.
+	clearTurnEndWaiting
 	// clearAnyWaiting clears any waiting_for_input (tool-start: the user has
 	// responded and the agent is running a tool).
 	clearAnyWaiting
@@ -299,36 +443,61 @@ const (
 // stickyBlocksUpdate reports whether the activity recorded in info is sticky
 // and must not be overwritten by an event with the given clear rule. Only
 // waiting_for_input can be cleared; completed, blocked, limits_exceeded and
-// crashed always block.
-func stickyBlocksUpdate(info map[string]interface{}, clear waitingClear) bool {
+// crashed always block. subagent is the event's sub-agent agent_id, or ""
+// for the parent's own event. When a sub-agent's event is blocked only
+// because other sub-agents still hold the wait, its own entry is removed from
+// info's owner list and released is true, so the caller writes info.
+func stickyBlocksUpdate(info map[string]interface{}, clear waitingClear, subagent string) (blocks, released bool) {
 	currentActivity, _ := info["activity"].(string)
 	if !isStickyActivity(currentActivity) {
-		return false
+		return false, false
 	}
 	if currentActivity != string(state.ActivityWaitingForInput) {
-		return true
+		return true, false
 	}
 	switch clear {
 	case clearAnyWaiting:
-		return false
-	case clearNotificationWaiting:
-		source, _ := info[activitySourceKey].(string)
-		return source != activitySourceNotification
+		return false, false
+	case clearNotificationWaiting, clearTurnEndWaiting:
+		if !isNotificationWaiting(info) {
+			return true, false
+		}
+		owners := notificationWaitOwners(info)
+		if len(owners) == 0 {
+			return false, false
+		}
+		if subagent == "" {
+			// The parent's own event: agent-end clears the wait, tool-end
+			// keeps a wait that sub-agents hold.
+			return clear != clearTurnEndWaiting, false
+		}
+		remaining, removed := removeString(owners, subagent)
+		if !removed {
+			return true, false // a sibling's question is still open
+		}
+		if len(remaining) == 0 {
+			return false, false
+		}
+		setNotificationWaitOwners(info, remaining)
+		return true, true
 	default:
-		return true
+		return true, false
 	}
 }
 
 // updateActivityIfNotSticky updates the activity only if the current activity
 // is not sticky, or is a waiting_for_input that clear allows this event to
-// clear.
-func (h *StatusHandler) updateActivityIfNotSticky(activity state.Activity, toolName string, clear waitingClear) error {
+// clear. subagent is the event's sub-agent agent_id, or "" for the parent.
+func (h *StatusHandler) updateActivityIfNotSticky(activity state.Activity, toolName string, clear waitingClear, subagent string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	info := h.readAgentInfoMap()
 
-	if stickyBlocksUpdate(info, clear) {
+	if blocks, released := stickyBlocksUpdate(info, clear, subagent); blocks {
+		if released {
+			return h.writeAgentInfoLocked(info)
+		}
 		return nil // Activity is sticky, don't overwrite
 	}
 
@@ -344,6 +513,7 @@ func (h *StatusHandler) updateActivityIfNotSticky(activity state.Activity, toolN
 
 	// This write did not come from a Notification.
 	delete(info, activitySourceKey)
+	delete(info, notificationWaitAgentsKey)
 
 	// Remove legacy fields if present
 	delete(info, "status")
@@ -434,6 +604,16 @@ func isSubagentEvent(event *hooks.Event) bool {
 	}
 	agentID, _ := event.Data.Raw["agent_id"].(string)
 	return agentID != "" && agentID != event.Data.SessionID
+}
+
+// subagentID returns the agent_id of a sub-agent's event, or "" for any other
+// event.
+func subagentID(event *hooks.Event) string {
+	if !isSubagentEvent(event) {
+		return ""
+	}
+	id, _ := event.Data.Raw["agent_id"].(string)
+	return id
 }
 
 // isClaudeUserWaitTool reports whether a claude tool-start is for a tool that
