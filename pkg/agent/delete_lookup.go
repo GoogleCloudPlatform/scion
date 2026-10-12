@@ -43,8 +43,9 @@ import (
 // directory kept by stale-directory cleanup is found too. It only reads the
 // filesystem. agentName must pass the same single-path-element check
 // DeleteAgentFiles applies, or an error is returned. An error resolving the
-// project, or a stat error other than not-exist (for example permission
-// denied), is returned rather than reported as no directory.
+// project is returned rather than reported as no directory, and so is a stat
+// error other than not-exist (for example permission denied) when no root
+// has the directory.
 func LocalAgentDirExists(agentName, projectPath string) (bool, error) {
 	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
 		return false, err
@@ -52,24 +53,28 @@ func LocalAgentDirExists(agentName, projectPath string) (bool, error) {
 
 	projectDir, err := resolveDeleteLookupProjectDir(projectPath)
 	if err != nil {
-		return false, fmt.Errorf("resolve project for agent %q: %w", agentName, err)
+		return false, fmt.Errorf("resolve project: %w", err)
 	}
 	roots := []string{filepath.Join(projectDir, "agents")}
 	if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
 		roots = append(roots, extDir)
 	}
 
+	// Every root is checked, so an error on one root does not hide a
+	// directory in another; the first such error is returned only when no
+	// root has the directory.
+	var firstErr error
 	for _, root := range roots {
 		dir := filepath.Join(root, agentName)
 		_, err := os.Stat(dir)
 		if err == nil {
 			return true, nil
 		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return false, fmt.Errorf("check agent directory %s: %w", dir, err)
+		if !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+			firstErr = fmt.Errorf("check agent directory %s: %w", dir, err)
 		}
 	}
-	return false, nil
+	return false, firstErr
 }
 
 // resolveDeleteLookupProjectDir resolves the project directory for

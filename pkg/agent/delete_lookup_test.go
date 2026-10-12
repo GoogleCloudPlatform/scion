@@ -19,6 +19,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -263,8 +264,35 @@ func TestLocalAgentDirExistsReturnsStatError(t *testing.T) {
 		}
 
 		found, err := LocalAgentDirExists("some-agent", scionDir)
-		if found || err == nil {
-			t.Fatalf("LocalAgentDirExists = %v, %v; want false and an error", found, err)
+		if found || !errors.Is(err, syscall.ENOTDIR) {
+			t.Fatalf("LocalAgentDirExists = %v, %v; want false and an error wrapping ENOTDIR", found, err)
 		}
 	})
+}
+
+// TestLocalAgentDirExistsStatErrorDoesNotHideOtherRoot checks that a stat
+// error on the project's agents root does not hide an agent directory in
+// the external agents root.
+func TestLocalAgentDirExistsStatErrorDoesNotHideOtherRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	oldWd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(home); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	const agentName = "external-agent"
+	projectPath, agentDir, _, _ := externalKeptLayout(t, home, agentName)
+	mustMkdirAll(t, agentDir)
+	// The project's own agents root is a regular file, so a stat under it
+	// fails with an error other than not-exist.
+	if err := os.WriteFile(filepath.Join(projectPath, "agents"), nil, 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	found, err := LocalAgentDirExists(agentName, projectPath)
+	if err != nil || !found {
+		t.Fatalf("LocalAgentDirExists = %v, %v; want true, nil", found, err)
+	}
 }
