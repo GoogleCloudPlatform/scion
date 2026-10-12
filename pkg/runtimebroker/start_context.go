@@ -2308,14 +2308,40 @@ func isLoopbackEndpointURL(endpoint string) bool {
 // applyStartTemplateEnvSource resolves the agent's Hub template on a start or
 // restart that leaves opts.Template unset (the agent's state survived), and
 // passes its local path in opts.TemplateEnvSource, which the agent manager
-// uses only to compute the template env fallback (ptone/scion#4524). It goes
-// through the template cache like create: a cache hit is local, a miss
-// hydrates. opts.Template is never set here, so image, harness-config and
+// uses only to compute the template env fallback (ptone/scion#4524). The
+// template cache is checked first by the Hub's TemplateHash (a hit needs no
+// Hub round trip); a miss hydrates as create does. opts.Template is never set here, so image, harness-config and
 // agent config resolution are unchanged. A hydration failure is logged and
 // the start goes on without template env (the agent manager warns that the
 // env fallback is not applied); it never fails the start.
+//
+// An older Hub sends no template identity: the template hash recorded at
+// provision (broker-side provenance) is then looked up in the template cache,
+// read-only. A hit sets the env source; a miss leaves it unset (the agent
+// manager warns).
 func (s *Server) applyStartTemplateEnvSource(ctx context.Context, in startContextInputs, opts *api.StartOptions, hubConn *HubConnection, templateSlug string) {
-	if (in.TemplateID == "" && in.TemplateHash == "") || hubConn == nil {
+	if in.TemplateID == "" && in.TemplateHash == "" {
+		if s.cache == nil {
+			return
+		}
+		hash := agent.ProvisionedTemplateHash(opts.ProjectPath, opts.Name, opts.SharedWorkspace, opts.HubProjectID)
+		if hash == "" {
+			return
+		}
+		if path, ok := s.cache.Get(hash); ok {
+			opts.TemplateEnvSource = path
+		}
+		return
+	}
+	// Cache first: the cache is content-addressed, so a hit for the hash the
+	// Hub sent is authoritative and needs no Hub round trip.
+	if in.TemplateHash != "" && s.cache != nil {
+		if path, ok := s.cache.Get(in.TemplateHash); ok {
+			opts.TemplateEnvSource = path
+			return
+		}
+	}
+	if hubConn == nil {
 		return
 	}
 	templatePath, err := s.hydrateTemplate(ctx, &CreateAgentConfig{

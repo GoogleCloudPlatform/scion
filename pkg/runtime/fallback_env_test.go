@@ -41,6 +41,7 @@ func TestFallbackEnvEntries(t *testing.T) {
 		"BAD=KEY":   "x",
 		"":          "x",
 		"A_LITERAL": "${HOME}",
+		"SCION_X":   "template",
 	}, []string{"SUPPRESS"}, map[string]bool{"EMITTED": true})
 	want := []string{"A_LITERAL=${HOME}", "NEW=n"}
 	if !reflect.DeepEqual(got, want) {

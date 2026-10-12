@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
 // templateIdentityFixture is a project directory and the start options a
@@ -160,15 +161,74 @@ func TestApplyStartTemplateEnvSource_HydrationFailureIsNotFatal(t *testing.T) {
 	assert.Empty(t, f.opts.Template)
 }
 
-// Without a template identity (an older Hub) nothing is resolved.
-func TestApplyStartTemplateEnvSource_NoIdentityResolvesNothing(t *testing.T) {
+// recordTemplateHash writes broker-side image provenance recording hash as
+// the agent's template hash, as provisioning from a cached template does.
+func recordTemplateHash(t *testing.T, f *templateIdentityFixture, hash string) {
+	t.Helper()
+	agentDir := config.GetAgentDir(f.projectDir, f.opts.Name, false)
+	body := `{"version": 1, "template": "web-dev", "templateHash": "` + hash + `"}`
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, config.ImageProvenanceFileName), []byte(body), 0o600))
+}
+
+// Cache first: when the template for the Hub's TemplateHash is already in
+// the broker's cache, the env source is set from it with no Hub round trip.
+func TestApplyStartTemplateEnvSource_CacheHitSkipsHydration(t *testing.T) {
 	f := newTemplateIdentityFixture(t, "kept-agent", true)
+	cache, err := templatecache.New(t.TempDir(), 0)
+	require.NoError(t, err)
+	const hash = "sha256-cached-template"
+	cachedDir, err := cache.Put(hash, map[string][]byte{"scion-agent.json": []byte(`{}`)})
+	require.NoError(t, err)
+	f.srv.cache = cache
 	conn, _ := templateConn(t, "web-dev", nil, func() {
-		t.Error("nothing may be hydrated without a template identity")
+		t.Error("a cache hit must not ask the Hub for the template")
+	})
+
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{TemplateID: "tpl-uuid", TemplateHash: hash}, &f.opts, conn, "web-dev")
+	assert.Equal(t, cachedDir, f.opts.TemplateEnvSource)
+	assert.Empty(t, f.opts.Template)
+}
+
+// An older Hub sends no template identity: the template hash recorded at
+// provision is looked up in the broker's template cache, read-only. A hit
+// sets the env source without asking the Hub (no hydration).
+func TestApplyStartTemplateEnvSource_OlderHubCacheHitSetsEnvSource(t *testing.T) {
+	f := newTemplateIdentityFixture(t, "kept-agent", true)
+	cache, err := templatecache.New(t.TempDir(), 0)
+	require.NoError(t, err)
+	const hash = "sha256-older-hub-template"
+	cachedDir, err := cache.Put(hash, map[string][]byte{"scion-agent.json": []byte(`{"env": {"TPL": "x"}}`)})
+	require.NoError(t, err)
+	f.srv.cache = cache
+	recordTemplateHash(t, f, hash)
+	conn, _ := templateConn(t, "web-dev", nil, func() {
+		t.Error("an older Hub's start must not ask the Hub for a template")
 	})
 
 	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{}, &f.opts, conn, "web-dev")
-	assert.Empty(t, f.opts.TemplateEnvSource)
+	assert.Equal(t, cachedDir, f.opts.TemplateEnvSource)
+	assert.Empty(t, f.opts.Template)
+}
+
+// A cache miss leaves the env source unset, silently: the agent manager
+// warns that the env fallback is not applied. A start with no recorded
+// template hash resolves nothing either.
+func TestApplyStartTemplateEnvSource_OlderHubCacheMissLeavesUnset(t *testing.T) {
+	f := newTemplateIdentityFixture(t, "kept-agent", true)
+	cache, err := templatecache.New(t.TempDir(), 0)
+	require.NoError(t, err)
+	f.srv.cache = cache
+	conn, _ := templateConn(t, "web-dev", nil, func() {
+		t.Error("an older Hub's start must not ask the Hub for a template")
+	})
+
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{}, &f.opts, conn, "web-dev")
+	assert.Empty(t, f.opts.TemplateEnvSource, "no recorded template hash: nothing to look up")
+
+	recordTemplateHash(t, f, "sha256-not-in-cache")
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{}, &f.opts, conn, "web-dev")
+	assert.Empty(t, f.opts.TemplateEnvSource, "cache miss: the env source stays unset")
+	assert.Empty(t, f.opts.Template)
 }
 
 func TestRestartAgentConfig_NilWithoutInputs(t *testing.T) {

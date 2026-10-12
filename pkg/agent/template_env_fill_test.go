@@ -386,15 +386,30 @@ func TestStart_TemplateEnvLegacyBakedKeysDemoted(t *testing.T) {
 
 func TestDemoteLegacyTemplateEnv(t *testing.T) {
 	cfg := &api.ScionConfig{Model: "m", Env: map[string]string{"EQ": "v", "DIFF": "mine", "OWN": "x"}}
-	got := demoteLegacyTemplateEnv(cfg, map[string]string{"EQ": "v", "DIFF": "template"})
+	got, demoted := demoteLegacyTemplateEnv(cfg, map[string]string{"EQ": "v", "DIFF": "template"})
+	if !reflect.DeepEqual(demoted, []string{"EQ"}) {
+		t.Errorf("demoted = %v, want [EQ]", demoted)
+	}
 	if want := map[string]string{"DIFF": "mine", "OWN": "x"}; !reflect.DeepEqual(got.Env, want) {
 		t.Errorf("Env = %v, want %v (only the equal-value key demoted)", got.Env, want)
 	}
 	if cfg.Env["EQ"] != "v" || got.Model != "m" {
 		t.Errorf("input modified or job keys lost: cfg=%v got=%+v", cfg.Env, got)
 	}
-	if demoteLegacyTemplateEnv(cfg, map[string]string{"OTHER": "1"}) != cfg {
-		t.Error("nothing to demote: want cfg itself")
+	if same, none := demoteLegacyTemplateEnv(cfg, map[string]string{"OTHER": "1"}); same != cfg || none != nil {
+		t.Error("nothing to demote: want cfg itself and no demoted keys")
+	}
+}
+
+// A demoted legacy key that is also an auth-candidate key is reported, never
+// dropped silently.
+func TestSuppressedDemotedKeyWarnings(t *testing.T) {
+	got := suppressedDemotedKeyWarnings([]string{"ANTHROPIC_API_KEY", "TOOL_HOME"}, []string{"ANTHROPIC_API_KEY", "GOOGLE_CLOUD_PROJECT"})
+	if len(got) != 1 || !strings.Contains(got[0], "stored env ANTHROPIC_API_KEY came from the template") {
+		t.Errorf("warnings = %q, want one for ANTHROPIC_API_KEY", got)
+	}
+	if got := suppressedDemotedKeyWarnings([]string{"TOOL_HOME"}, []string{"ANTHROPIC_API_KEY"}); got != nil {
+		t.Errorf("non-auth demoted key warned: %q", got)
 	}
 }
 
@@ -471,13 +486,20 @@ func TestStart_TemplateEnvTravelsAsFallbackEnv(t *testing.T) {
 	}
 }
 
-// FYI-5 ruling: the harness-config's auth-candidate keys are suppressed for
-// the fallback, so a template never supplies a credential, even one nothing
-// else set.
+// FYI-5 ruling: ALL of the harness-config's auth-candidate keys are
+// suppressed for the fallback, so a template never supplies a credential,
+// even one nothing else set. The agent resolves to vertex-ai, so
+// ANTHROPIC_API_KEY belongs to an auth type it does NOT use: suppressing only
+// the selected type's keys would let it through (the vertex scenario: a
+// present API key can switch the in-container CLI off vertex).
 func TestStart_TemplateEnvAuthCandidateKeysSuppressed(t *testing.T) {
-	project := templateEnvStart{tplEnv: map[string]string{"ANTHROPIC_API_KEY": "template-key", "TPL_TOOL": "ok"}}.fixture(t)
+	project := templateEnvStart{tplEnv: map[string]string{
+		"ANTHROPIC_API_KEY":    "template-key",
+		"GOOGLE_CLOUD_PROJECT": "template-project",
+		"TPL_TOOL":             "ok",
+	}}.fixture(t)
 	hcFile := filepath.Join(os.Getenv("HOME"), ".scion", "harness-configs", "test-harness", "config.yaml")
-	auth := "auth:\n  default_type: api-key\n  types:\n    api-key:\n      required_env:\n        - any_of: [ANTHROPIC_API_KEY]\n"
+	auth := "auth:\n  default_type: vertex-ai\n  types:\n    api-key:\n      required_env:\n        - any_of: [ANTHROPIC_API_KEY]\n    vertex-ai:\n      required_env:\n        - any_of: [GOOGLE_CLOUD_PROJECT]\n"
 	data, err := os.ReadFile(hcFile)
 	if err != nil {
 		t.Fatal(err)
@@ -496,22 +518,26 @@ func TestStart_TemplateEnvAuthCandidateKeysSuppressed(t *testing.T) {
 		},
 	}
 	if _, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
-		Name: "suppress", Template: "tenv", ProjectPath: project, BrokerMode: true, NoAuth: true, Env: map[string]string{},
+		Name: "suppress", Template: "tenv", ProjectPath: project, BrokerMode: true, NoAuth: true,
+		HarnessAuth: "vertex-ai", Env: map[string]string{},
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	found := false
+	suppressed := map[string]bool{}
 	for _, k := range captured.SuppressedFallbackKeys {
-		if k == "ANTHROPIC_API_KEY" {
-			found = true
-		}
+		suppressed[k] = true
 	}
-	if !found {
-		t.Fatalf("SuppressedFallbackKeys = %v, want ANTHROPIC_API_KEY", captured.SuppressedFallbackKeys)
+	for _, k := range []string{"ANTHROPIC_API_KEY", "GOOGLE_CLOUD_PROJECT"} {
+		if !suppressed[k] {
+			t.Errorf("SuppressedFallbackKeys = %v, want %s (every auth-candidate key, used or not)", captured.SuppressedFallbackKeys, k)
+		}
 	}
 	env := effectiveContainerEnv(t, captured)
 	if v, ok := env["ANTHROPIC_API_KEY"]; ok {
-		t.Errorf("template credential ANTHROPIC_API_KEY=%q reached the container", v)
+		t.Errorf("template credential ANTHROPIC_API_KEY=%q reached a vertex-ai agent's container", v)
+	}
+	if v, ok := env["GOOGLE_CLOUD_PROJECT"]; ok {
+		t.Errorf("template GOOGLE_CLOUD_PROJECT=%q (a credential key of the selected method) reached the container", v)
 	}
 	assertEnv(t, env, "TPL_TOOL", "ok")
 }

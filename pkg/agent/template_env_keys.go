@@ -204,11 +204,12 @@ func sortedKeys[V any](m map[string]V) []string {
 // demoteLegacyTemplateEnv returns cfg for this start's env assembly with
 // every Env key whose value equals the live template env value removed, so
 // a template value merged into scion-agent.json by an older version applies
-// only through the template fill. cfg is not modified (nothing on disk
-// changes); cfg itself is returned when no key is demoted.
-func demoteLegacyTemplateEnv(cfg *api.ScionConfig, tplEnv map[string]string) *api.ScionConfig {
+// only through the template fallback, plus the demoted keys (sorted). cfg is
+// not modified (nothing on disk changes); cfg itself is returned when no key
+// is demoted.
+func demoteLegacyTemplateEnv(cfg *api.ScionConfig, tplEnv map[string]string) (*api.ScionConfig, []string) {
 	if cfg == nil || len(cfg.Env) == 0 || len(tplEnv) == 0 {
-		return cfg
+		return cfg, nil
 	}
 	var demote []string
 	for k, v := range cfg.Env {
@@ -217,7 +218,7 @@ func demoteLegacyTemplateEnv(cfg *api.ScionConfig, tplEnv map[string]string) *ap
 		}
 	}
 	if len(demote) == 0 {
-		return cfg
+		return cfg, nil
 	}
 	out := *cfg
 	out.Env = make(map[string]string, len(cfg.Env)-len(demote))
@@ -228,8 +229,30 @@ func demoteLegacyTemplateEnv(cfg *api.ScionConfig, tplEnv map[string]string) *ap
 		delete(out.Env, k)
 	}
 	sort.Strings(demote)
-	util.Debugf("template env: demoted legacy stored env key(s) %v to the template fill", demote)
-	return &out
+	util.Debugf("template env: demoted legacy stored env key(s) %v to the template fallback", demote)
+	return &out, demote
+}
+
+// suppressedDemotedKeyWarnings returns a start warning for each demoted
+// legacy key that is also suppressed for the fallback (an auth-candidate
+// key): an agent whose scion-agent.json carries a credential merged in from
+// its template by an older version no longer gets it, and must not lose it
+// silently.
+func suppressedDemotedKeyWarnings(demoted, suppressed []string) []string {
+	if len(demoted) == 0 || len(suppressed) == 0 {
+		return nil
+	}
+	blocked := make(map[string]bool, len(suppressed))
+	for _, k := range suppressed {
+		blocked[k] = true
+	}
+	var warnings []string
+	for _, k := range demoted {
+		if blocked[k] {
+			warnings = append(warnings, fmt.Sprintf("Warning: stored env %s came from the template and is an auth credential key of the harness-config; it is no longer applied (template env never supplies credentials). Set it as a secret or harness-config env instead.", k))
+		}
+	}
+	return warnings
 }
 
 // templateDisplayName returns the name to show for an agent's template in a

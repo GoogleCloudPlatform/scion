@@ -19,15 +19,25 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // FallbackEnvEntries returns the "KEY=VALUE" entries of fallback (a
 // RunConfig's FallbackEnv, the template env layer of ptone/scion#4524) that a
 // runtime adds as the LAST step of its container env assembly: every
 // non-empty fallback key that no other source emitted (emitted holds the keys
-// the runtime has already set, with any value) and that is not suppressed
-// (RunConfig.SuppressedFallbackKeys). Values are used literally. Entries are
+// the runtime has already set, with any value), that is not suppressed
+// (RunConfig.SuppressedFallbackKeys) and that is not a reserved SCION_* key
+// (config.IsReservedTemplateEnvKey). Values are used literally. Entries are
 // sorted by key, so the result is deterministic.
+//
+// The SCION_* skip keeps the fallback final even against env a runtime adds
+// after this step: the only such additions are broker-owned SCION_* keys
+// (Podman's SCION_KEEPID_UID and SCION_SUPPLEMENTAL_GIDS from
+// appendSharedDirGroupArgs, which envKeysOfArgs cannot see). The agent
+// manager already strips SCION_* from template env; this is the runtime-side
+// guarantee.
 //
 // Being applied last by every runtime makes the fallback final by
 // construction: auth env, harness env, telemetry env, env-type secrets,
@@ -42,7 +52,7 @@ func FallbackEnvEntries(fallback map[string]string, suppressed []string, emitted
 	}
 	keys := make([]string, 0, len(fallback))
 	for k, v := range fallback {
-		if k == "" || v == "" || strings.Contains(k, "=") || emitted[k] || blocked[k] {
+		if k == "" || v == "" || strings.Contains(k, "=") || emitted[k] || blocked[k] || config.IsReservedTemplateEnvKey(k) {
 			continue
 		}
 		keys = append(keys, k)

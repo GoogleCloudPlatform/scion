@@ -63,8 +63,9 @@ broker settings
 - Defaults fill only what higher tiers leave unset. Policy overrides for its keys only.
 - An environment key found in a template is ignored at load with a warning, and the admin validate report lists the template. Uploads are not rejected.
 - Template env (ptone/scion#4524): a template may set env vars for the tools it ships with, but they never take part in system settings.
-  - It is its own layer: never merged into the agent config or persisted in `scion-agent.json`, and recomputed from the live template chain on every start. An unresolvable template has no template env, with a start warning.
-  - It is applied as the final step of container env assembly, after every other source (config env, request env, telemetry env, hub default env, broker-injected vars). A key is set only when no other source set it to a non-empty value.
+  - It is its own layer: never merged into the agent config or persisted in `scion-agent.json`, and recomputed from the live template chain on every start (for a Hub template, the broker resolves the template, cache first, on every start). An unresolvable template has no template env, with a start warning.
+  - It is applied by the runtime (every runtime, as `RunConfig.FallbackEnv`) as the final step of its container env assembly, after every other source: config env, request env, telemetry env, hub default env, broker-injected vars, and the env the runtime adds itself (resolved auth env, harness env, env-type secrets). A key is set only when no other source set it, to any value.
+  - The harness-config's auth-candidate keys (every key its auth metadata lists, for any auth type) are never set from template env, even when nothing else sets them, so a template never supplies a credential.
   - Values are literal: no expansion against the broker host environment and no host passthrough for empty values (an empty value is skipped with a warning; a `${...}` value is used as is, with a warning).
   - It does not count toward auth credential detection or env-gather required keys, and the hub-only rule (`TZ`) applies to it like any broker-local layer.
   - Existing agents: a stored `env` key whose value equals the live template env value applies only through the template fill. Nothing on disk is rewritten.

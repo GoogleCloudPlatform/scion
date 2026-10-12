@@ -1552,7 +1552,15 @@ authDone:
 	// merged in from the template by an older version: it applies only
 	// through the template fill (demoted on a per-start copy; scion-agent.json
 	// is not rewritten).
-	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(demoteLegacyTemplateEnv(finalScionCfg, templateEnv), opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
+	//
+	// The harness-config's auth-candidate keys are suppressed for the
+	// template env fallback (RunConfig.SuppressedFallbackKeys), so a
+	// template never takes part in auth; a demoted key among them is
+	// reported, never dropped silently.
+	suppressedFallbackKeys := sortedKeys(configAuthEnvKeySet(authMeta))
+	envCfg, demotedTemplateKeys := demoteLegacyTemplateEnv(finalScionCfg, templateEnv)
+	warnings = append(warnings, suppressedDemotedKeyWarnings(demotedTemplateKeys, suppressedFallbackKeys)...)
+	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(envCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
 	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
 	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
 	warnings = append(warnings, hubOnlyEnvWarnings...)
@@ -2228,11 +2236,10 @@ authDone:
 	// The template env layer is never part of agentEnv: it travels as
 	// RunConfig.FallbackEnv, which every runtime applies as the LAST step
 	// of its own env assembly, after auth env, harness env, telemetry env
-	// and env-type secrets too. The harness-config's auth-candidate keys
-	// are suppressed, so a template never takes part in auth.
+	// and env-type secrets too; suppressedFallbackKeys (above) keeps it
+	// out of auth.
 	templateFallbackEnv, templateEnvFallbackWarnings := templateEnvFallback(templateEnv, opts.BrokerMode, opts.Name)
 	warnings = append(warnings, templateEnvFallbackWarnings...)
-	suppressedFallbackKeys := sortedKeys(configAuthEnvKeySet(authMeta))
 
 	// Write the full task to the agent home, and pass a short pointer to
 	// it instead when the task is too large to pass inline.
