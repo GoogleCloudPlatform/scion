@@ -41,9 +41,10 @@ after the hub's grace period. A deleted artifact cannot be restored.
 The artifact's owner, a user it granted admin, or an admin of its home
 project can delete it. Agents cannot delete artifacts.
 
-The command asks for confirmation; pass --yes (or --non-interactive, which
-implies it) to skip the prompt. Without either it refuses, deleting
-nothing, when stdin is not a terminal.
+The command asks for confirmation; pass --yes (or --non-interactive, or the
+cli.interactive_disabled setting, which imply it) to skip the prompt.
+Without any of them it refuses, deleting nothing, when stdin is not a
+terminal.
 
 Examples:
   scion artifact delete scion://artifact/5f1c2d3e-...
@@ -70,10 +71,12 @@ func init() {
 
 // errDeleteNeedsConfirmation is returned when scion artifact delete cannot
 // ask for confirmation (stdin is not a terminal) and --yes was not given.
-var errDeleteNeedsConfirmation = errors.New("not deleted: deleting needs confirmation, and stdin is not a terminal; pass --yes to confirm")
+var errDeleteNeedsConfirmation = errors.New("not deleted: deleting needs confirmation, and stdin is not a terminal; " +
+	"pass --yes (or --non-interactive, or the cli.interactive_disabled setting, which imply it) to confirm")
 
 // deleteConfirm is how scion artifact delete confirms: Yes (--yes, or
-// --non-interactive, which implies it) skips the prompt; otherwise
+// --non-interactive, or the cli.interactive_disabled setting, which imply
+// it) skips the prompt; otherwise
 // Interactive must be true and Ask must answer yes.
 type deleteConfirm struct {
 	Yes         bool

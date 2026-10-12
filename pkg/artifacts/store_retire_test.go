@@ -428,6 +428,18 @@ func TestStoreChangeAndEventCommitTogether(t *testing.T) {
 		if _, err := st.SetExpiry(ctx, expired.ID, &past, testActor); err != nil {
 			t.Fatal(err)
 		}
+		// An artifact already marked orphaned (for the clear direction) and
+		// one with an expiry (for expiry_cleared).
+		marked := seedOwned(t, st, PrincipalKindAgent, "agent-rb-marked")
+		markedAt := time.Now()
+		if n, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindAgent, Ref: "agent-rb-marked"}, true, markedAt, 10); err != nil || n != 1 {
+			t.Fatalf("mark: %d, %v", n, err)
+		}
+		expiring := seedOwned(t, st, PrincipalKindUser, "user-rb-exp")
+		keep := time.Now().Add(48 * time.Hour)
+		if _, err := st.SetExpiry(ctx, expiring.ID, &keep, testActor); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := db.Exec("DROP TABLE artifact_event"); err != nil {
 			t.Fatal(err)
 		}
@@ -467,6 +479,21 @@ func TestStoreChangeAndEventCommitTogether(t *testing.T) {
 		failed("move", err)
 		failed("DeleteGrant", st.DeleteGrant(ctx, a.ID, g.ID, testActor))
 		failed("RevokeLink", st.RevokeLink(ctx, a.ID, link.ID, testActor))
+
+		// Clearing the orphan mark rolls back with its event: still marked.
+		if _, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindAgent, Ref: "agent-rb-marked"}, false, time.Now(), 10); err == nil {
+			t.Error("clearing the orphan mark with the event insert failing: no error")
+		}
+		if got, err := st.GetArtifact(ctx, marked.ID); err != nil || got.OrphanedAt == nil || !got.OrphanedAt.Equal(dbRounded(markedAt)) {
+			t.Errorf("marked artifact after a failed clear = %+v, %v; want orphaned_at kept", got, err)
+		}
+		// Clearing an expiry rolls back with its event: the expiry stays.
+		if _, err := st.SetExpiry(ctx, expiring.ID, nil, testActor); err == nil {
+			t.Error("clearing the expiry with the event insert failing: no error")
+		}
+		if got, err := st.GetArtifact(ctx, expiring.ID); err != nil || got.ExpiresAt == nil || !got.ExpiresAt.Equal(dbRounded(keep)) {
+			t.Errorf("expiring artifact after a failed clear = %+v, %v; want the expiry kept", got, err)
+		}
 
 		// The expiry sweep goes through DeleteArtifact: the expired
 		// artifact stays (it is unreadable because expired, but not
