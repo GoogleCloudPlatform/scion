@@ -115,8 +115,29 @@ func StartComponent(component, executable string, args []string, globalDir strin
 	return nil
 }
 
-// StopComponent terminates a running daemon by reading its PID and sending SIGTERM.
+// DefaultStopTimeout is how long StopComponent waits for a daemon to exit
+// after it has been sent an interrupt.
+const DefaultStopTimeout = 30 * time.Second
+
+// stopPollInterval is how often a stop checks whether the process has exited.
+const stopPollInterval = 100 * time.Millisecond
+
+// ErrStopTimeout indicates the daemon was signalled but did not exit within
+// the stop timeout. The PID file is left in place so the process can still be
+// found, for example by a forced stop.
+var ErrStopTimeout = errors.New("daemon did not exit before the stop timeout")
+
+// StopComponent sends an interrupt to a running daemon and waits up to
+// DefaultStopTimeout for it to exit. See StopComponentWithTimeout.
 func StopComponent(component, globalDir string) error {
+	return StopComponentWithTimeout(component, globalDir, DefaultStopTimeout)
+}
+
+// StopComponentWithTimeout sends an interrupt to a running daemon and waits
+// up to timeout for the process to exit. The PID file is removed only once
+// the process has exited. If the process is still running when the timeout
+// expires, it returns an error wrapping ErrStopTimeout and keeps the PID file.
+func StopComponentWithTimeout(component, globalDir string, timeout time.Duration) error {
 	pid, err := ReadPIDComponent(component, globalDir)
 	if err != nil {
 		return ErrNotRunning
@@ -133,11 +154,32 @@ func StopComponent(component, globalDir string) error {
 		return ErrNotRunning
 	}
 
-	if err := RemovePIDComponent(component, globalDir); err != nil {
+	if !waitForProcessExit(process, timeout) {
+		return fmt.Errorf("%w: %s (PID %d) still running after %s", ErrStopTimeout, component, pid, timeout)
+	}
+
+	if err := RemovePIDComponent(component, globalDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove PID file: %w", err)
 	}
 
 	return nil
+}
+
+// waitForProcessExit polls process liveness (signal 0, as StatusComponent
+// does) until the process is gone or timeout expires. It reports whether the
+// process exited.
+func waitForProcessExit(process *os.Process, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := process.Signal(syscall.Signal(0)); err != nil {
+			return true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		time.Sleep(min(stopPollInterval, remaining))
+	}
 }
 
 // StatusComponent checks if a component daemon is running.

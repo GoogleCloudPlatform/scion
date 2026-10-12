@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_6
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -151,6 +149,8 @@ func collectStringConsts(decl ast.Decl, into map[string]string) {
 func TestNoRawMemorySQLiteOpen(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards in-memory sql.Open/ent.Open in test files, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards in-memory sql.Open/ent.Open in test files (no test file moves), which identity.go and identity_credential.go do not contain.
 	names, err := filepath.Glob("*_test.go")
 	if err != nil {
 		t.Fatal(err)

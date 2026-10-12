@@ -133,6 +133,13 @@ var conversationGetCmd = &cobra.Command{
 	Short: "Get conversation details",
 	Long: `Get details of a single conversation including participants.
 
+The MSG MODE column shows each agent participant's message mode (see
+scion set-message-mode --help) in the conversation's project; for a
+conversation without a project (a DM or legacy group), in the calling
+agent's project. It shows "-" for users, for any agent outside that
+project, and for every agent when a user reads a conversation without a
+project.
+
 Examples:
   scion conversation get conv:a1b2c3d4-...
   scion conversation get @my-agent --json`,
@@ -176,6 +183,13 @@ var conversationParticipantsCmd = &cobra.Command{
 	Use:   "participants <conversation-ref>",
 	Short: "List participants in a conversation",
 	Long: `List participants in a conversation.
+
+The MSG MODE column shows each agent participant's message mode (see
+scion set-message-mode --help) in the conversation's project; for a
+conversation without a project (a DM or legacy group), in the calling
+agent's project. It shows "-" for users, for any agent outside that
+project, and for every agent when a user reads a conversation without a
+project.
 
 Examples:
   scion conversation participants conv:a1b2c3d4-...
@@ -496,17 +510,61 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Created:        %s\n", clitime.Format(conv.CreatedAt, clitime.Full))
 	fmt.Printf("Last Activity:  %s\n", clitime.Format(conv.LastActivityAt, clitime.Full))
 
-	if len(conv.Participants) > 0 {
-		fmt.Println("\nParticipants:")
-		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "  KIND\tID\tROLE")
-		for _, p := range conv.Participants {
-			shortID := truncateRunes(p.PrincipalID, 12, false)
-			_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\n", p.PrincipalKind, shortID, p.Role)
-		}
-		_ = tw.Flush()
-	}
+	writeConversationGetParticipants(os.Stdout, conv.Participants)
 	return nil
+}
+
+// participantModeCell is the MSG MODE cell for a participant: the agent's
+// message mode, or "-" for a user or an agent whose mode the hub did not
+// report (an agent outside the conversation's project, or any agent when a
+// user reads a conversation without a project).
+func participantModeCell(p hubclient.ConversationParticipantDetail) string {
+	if p.MessageMode == "" {
+		return "-"
+	}
+	return p.MessageMode
+}
+
+// conversationModeHint is printed under the conversation get participants
+// table when an agent participant has a restricted message mode.
+const conversationModeHint = "Agent-to-agent delivery requires compatible message modes; see `scion set-message-mode --help`."
+
+// writeConversationGetParticipants writes the participants section of
+// `scion conversation get`, including each agent's message mode
+// (ptone/scion#4411).
+func writeConversationGetParticipants(w io.Writer, participants []hubclient.ConversationParticipantDetail) {
+	if len(participants) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(w, "\nParticipants:")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "  KIND\tID\tROLE\tMSG MODE")
+	restricted := false
+	for _, p := range participants {
+		shortID := truncateRunes(p.PrincipalID, 12, false)
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", p.PrincipalKind, shortID, p.Role, participantModeCell(p))
+		switch p.MessageMode {
+		case "", "project", "hub":
+		default:
+			restricted = true
+		}
+	}
+	_ = tw.Flush()
+	if restricted {
+		_, _ = fmt.Fprintln(w, "\n"+conversationModeHint)
+	}
+}
+
+// writeConversationParticipantsTable writes the `scion conversation
+// participants` table, including each agent's message mode.
+func writeConversationParticipantsTable(w io.Writer, participants []hubclient.ConversationParticipantDetail) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "KIND\tID\tROLE\tMSG MODE\tJOINED")
+	for _, p := range participants {
+		joined := clitime.Ago(p.JoinedAt)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", p.PrincipalKind, p.PrincipalID, p.Role, participantModeCell(p), joined)
+	}
+	return tw.Flush()
 }
 
 // writeMessageBody writes msg.Msg to w with no added bytes — no trailing
@@ -649,13 +707,7 @@ func runConversationParticipants(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "KIND\tID\tROLE\tJOINED")
-	for _, p := range conv.Participants {
-		joined := clitime.Ago(p.JoinedAt)
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", p.PrincipalKind, p.PrincipalID, p.Role, joined)
-	}
-	return tw.Flush()
+	return writeConversationParticipantsTable(os.Stdout, conv.Participants)
 }
 
 func runConversationJoin(cmd *cobra.Command, args []string) error {

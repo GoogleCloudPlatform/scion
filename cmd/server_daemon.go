@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -340,29 +341,84 @@ func runServerStop(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Stopping server daemon (PID: %d)...\n", pid)
 
+	// StopComponent waits for the process to exit and only then removes
+	// the PID file.
 	if err := daemon.StopComponent(serverDaemonComponent, globalDir); err != nil {
-		return fmt.Errorf("failed to stop daemon: %w", err)
-	}
-
-	// Verify it stopped
-	time.Sleep(500 * time.Millisecond)
-	running, _, _ = daemon.StatusComponent(serverDaemonComponent, globalDir)
-	if running {
-		return fmt.Errorf("daemon may still be running. Check with 'scion server status'")
+		return serverStopError(err)
 	}
 
 	fmt.Println("Server daemon stopped.")
 	return nil
 }
 
+// serverForceStopGrace is how long 'server stop --force' waits for the
+// server to exit after the interrupt before killing processes on its ports.
+// A variable so tests can shorten it.
+var serverForceStopGrace = 5 * time.Second
+
+// serverForceExitWait is how long 'server stop --force' waits, after killing
+// processes on the server ports, for the recorded server process to be gone.
+// A killed process still answers liveness checks until it has been reaped.
+var serverForceExitWait = 2 * time.Second
+
+// serverProcessIdentity reports whether pid is a scion server daemon: its
+// command line must be this scion binary (by base name) running
+// "server start --foreground". It errors when the command line cannot be
+// read. A variable so tests can substitute the check.
+var serverProcessIdentity = func(pid int) (bool, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return false, err
+	}
+	return daemon.IsProcessCommand(pid, executable, serverDaemonArgsPrefix...)
+}
+
+// serverDaemonArgsPrefix is the leading argv of the server daemon started by
+// 'server start' (see buildDaemonStartArgs), used to recognise it.
+var serverDaemonArgsPrefix = []string{"server", "start", "--foreground"}
+
+// serverStopError turns a daemon stop failure into a user-facing error,
+// pointing at the forced stop when the server did not exit in time.
+func serverStopError(err error) error {
+	if errors.Is(err, daemon.ErrStopTimeout) {
+		return fmt.Errorf("server stop timed out: %w\n\nUse 'scion server stop --force' to force it to stop", err)
+	}
+	return fmt.Errorf("failed to stop daemon: %w", err)
+}
+
+// forcedStopStillRunningError reports a server process that survived
+// 'server stop --force'. The manual kill hint is given only for a valid PID:
+// "kill -9 0" would signal the caller's whole process group.
+func forcedStopStillRunningError(pid int, err error) error {
+	if pid <= 0 {
+		return fmt.Errorf("server process is still running after the forced stop: %w", err)
+	}
+	return fmt.Errorf("server process (PID %d) is still running after the forced stop: %w\n\nKill it manually, for example: kill -9 %d", pid, err, pid)
+}
+
+// forcedStopUnconfirmedError reports a recorded process that survived
+// 'server stop --force' but was not confirmed as the server. It gives no kill
+// hint, since the PID may have been reused by another process.
+func forcedStopUnconfirmedError(pid int, err error) error {
+	if pid <= 0 {
+		return forcedStopStillRunningError(pid, err)
+	}
+	return fmt.Errorf("process (PID %d) from the server PID file is still running after the forced stop, but it could not be confirmed as the scion server: %w\n\nCheck what PID %d is before stopping it manually", pid, err, pid)
+}
+
 func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts []int) error {
 	killed := false
+	// confirmed records that the identity check passed for pid. Only then is
+	// the manual kill hint given for a process that is still running.
+	confirmed := false
 
 	// If PID file exists and process is running, stop it normally first.
 	if pidRunning {
 		fmt.Printf("Stopping server daemon (PID: %d)...\n", pid)
-		if err := daemon.StopComponent(serverDaemonComponent, globalDir); err == nil {
-			time.Sleep(500 * time.Millisecond)
+		// Give the server a short grace period to exit on its own; if it
+		// does not, fall through to killing whatever holds the ports.
+		err := daemon.StopComponentWithTimeout(serverDaemonComponent, globalDir, serverForceStopGrace)
+		if err == nil || errors.Is(err, daemon.ErrStopTimeout) {
 			killed = true
 		}
 	}
@@ -387,8 +443,41 @@ func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts 
 		}
 	}
 
-	// Clean up stale PID file
-	_ = daemon.RemovePIDComponent(serverDaemonComponent, globalDir)
+	// A hung server that holds no port survives the port kill. Kill the
+	// recorded process directly, but only once it is confirmed to still be
+	// the server, so a reused PID is never killed.
+	if pidRunning && pid > 0 {
+		if running, curPID, _ := daemon.StatusComponent(serverDaemonComponent, globalDir); running && curPID == pid {
+			ok, err := serverProcessIdentity(pid)
+			switch {
+			case err != nil:
+				fmt.Fprintf(os.Stderr, "Warning: PID %d could not be confirmed as the scion server (%v); not killing it\n", pid, err)
+			case !ok:
+				fmt.Fprintf(os.Stderr, "Warning: PID %d could not be confirmed as the scion server (its command line does not match); not killing it\n", pid)
+			default:
+				confirmed = true
+				if process, err := os.FindProcess(pid); err == nil && process.Kill() == nil {
+					fmt.Printf("Killed server process %d\n", pid)
+					killed = true
+				}
+			}
+		}
+	}
+
+	// Clean up the PID file, but only once its process has exited. A process
+	// killed above can still answer liveness checks until it is reaped, so
+	// wait briefly; WaitForExitComponent removes the PID file once the
+	// process is gone and keeps it if the process is still running.
+	if err := daemon.WaitForExitComponent(serverDaemonComponent, globalDir, serverForceExitWait); err != nil {
+		stillPID, readErr := daemon.ReadPIDComponent(serverDaemonComponent, globalDir)
+		if readErr != nil || stillPID <= 0 {
+			stillPID = pid
+		}
+		if confirmed && stillPID == pid {
+			return forcedStopStillRunningError(stillPID, err)
+		}
+		return forcedStopUnconfirmedError(stillPID, err)
+	}
 
 	if killed {
 		fmt.Println("Server stopped (forced).")
@@ -411,13 +500,10 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 
 	// Stop the daemon
 	fmt.Printf("Stopping server daemon (PID: %d)...\n", pid)
+	// StopComponent waits for the old process to exit, so the new server is
+	// never started while the old one is still running.
 	if err := daemon.StopComponent(serverDaemonComponent, globalDir); err != nil {
-		return fmt.Errorf("failed to stop daemon: %w", err)
-	}
-
-	// Wait for the process to exit
-	if err := daemon.WaitForExitComponent(serverDaemonComponent, globalDir, 10*time.Second); err != nil {
-		return fmt.Errorf("failed to stop server: %w", err)
+		return serverStopError(err)
 	}
 	fmt.Println("Server daemon stopped.")
 

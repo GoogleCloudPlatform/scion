@@ -64,4 +64,17 @@ func (m *mockUserStore) CountLiveTestFixtureUsers(context.Context, string, time.
 func (m *mockUserStore) ListTestFixtureUsers(context.Context, string, time.Time, int) ([]store.User, error) {
 	return nil, nil
 }
+func (m *mockUserStore) ListExpiredTestFixtureUsers(context.Context, store.ExpiredTestFixtureQuery) ([]store.User, error) {
+	return nil, nil
+}
 func (m *mockUserStore) LockTestFixtureIssuance(context.Context) error { return nil }
+func (m *mockUserStore) ReplaceTestIdentityLoginCode(context.Context, *store.TestIdentityLoginCode) error {
+	return nil
+}
+func (m *mockUserStore) ConsumeTestIdentityLoginCode(context.Context, string, time.Time) (*store.TestIdentityLoginCode, error) {
+	return nil, store.ErrNotFound
+}
+func (m *mockUserStore) CountLiveTestAdminUsers(context.Context, string, string, time.Time) (int, error) {
+	return 0, nil
+}
+func (m *mockUserStore) ListTestAdminUsers(context.Context) ([]store.User, error) { return nil, nil }

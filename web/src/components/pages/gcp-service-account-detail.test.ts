@@ -102,7 +102,14 @@ function statusView(overrides: Partial<GCPServiceAccountStatus> = {}): GCPServic
         state: 'unknown',
         unknownReason: 'report_old_version',
       },
-      { brokerId: 'b1', brokerName: 'b', profile: 'gke-3', state: 'not_mapped', ambiguous: true },
+      {
+        brokerId: 'b1',
+        brokerName: 'b',
+        profile: 'gke-3',
+        state: 'unknown',
+        unknownReason: 'ambiguous_mapping',
+        ambiguous: true,
+      },
       { brokerId: 'b1', brokerName: 'b', profile: 'gke-old', state: 'mapped' },
       { brokerId: 'b1', brokerName: 'b', profile: 'gke-silent', state: 'not_reported' },
     ],
@@ -215,7 +222,8 @@ describe('GCP service account detail: status sections', () => {
 
     const ambiguous = root.querySelector('tr[data-profile="gke-3"]')!;
     expect(ambiguous.querySelector('[data-note="ambiguous"]')).not.toBeNull();
-    expect(ambiguous.textContent).toContain('Not mapped');
+    expect(ambiguous.querySelector('[data-note="unknown"]')).toBeNull();
+    expect(ambiguous.textContent).toContain('Unknown');
 
     // An older broker's row: the state alone, no details or markers.
     const old = root.querySelector('tr[data-profile="gke-old"]')!;

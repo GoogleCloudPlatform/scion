@@ -109,6 +109,7 @@ type CompositeStore struct {
 	*ProjectPreStartHookStore
 	*AgentSessionMetricsStore
 	*ConversationStore
+	*ThreadGroupStore
 	*RoleStore
 	*DelegationEdgeStore
 	*SAAssignmentStore
@@ -160,6 +161,46 @@ type CompositeStore struct {
 	// adoption writes and before the record update; a non-nil error rolls
 	// the hop back. Tests use it to inject a write failure mid-hop.
 	adoptionTxHook func(tx store.Store, rec *store.DelegationAdoption) error
+
+	// schemaShadowGuard turns on the Postgres search_path shadow check at the
+	// top of Migrate; see EnableSchemaShadowGuard. Off by default; hub
+	// server startup and the cmd maintenance commands that migrate the hub
+	// database turn it on.
+	schemaShadowGuard bool
+	// allowShadowedSchema makes the shadow check log a warning and continue
+	// instead of refusing to migrate.
+	allowShadowedSchema bool
+	// schemaShadowMaintenance marks the shadow check's refusal as coming
+	// from a maintenance command; see EnableMaintenanceSchemaShadowGuard.
+	schemaShadowMaintenance bool
+	// schemaShadowLogger receives the shadow check's warning. Nil means
+	// slog.Default().
+	schemaShadowLogger *slog.Logger
+}
+
+// EnableSchemaShadowGuard makes Migrate, on PostgreSQL, first check that the
+// migration would not create a fresh hub table set in current_schema() while
+// another schema on the connection's search_path already holds the hub
+// tables (ptone/scion#4348). When it would, Migrate fails with a
+// *SchemaShadowError, unless allowShadowed is set, in which case it logs a
+// warning and continues. The guard is off unless this is called; hub server
+// startup and every cmd maintenance command that migrates the hub database
+// call it before migrating (ptone/scion#4432). It has no effect on other
+// dialects.
+func (c *CompositeStore) EnableSchemaShadowGuard(allowShadowed bool) {
+	c.schemaShadowGuard = true
+	c.allowShadowedSchema = allowShadowed
+	c.schemaShadowMaintenance = false
+}
+
+// EnableMaintenanceSchemaShadowGuard is EnableSchemaShadowGuard for the
+// maintenance commands that migrate the hub database (ptone/scion#4432). The
+// check and the override are the same; the refusal's SchemaShadowError has
+// Maintenance set, so its message says it refuses to migrate rather than to
+// start.
+func (c *CompositeStore) EnableMaintenanceSchemaShadowGuard(allowShadowed bool) {
+	c.EnableSchemaShadowGuard(allowShadowed)
+	c.schemaShadowMaintenance = true
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
@@ -209,6 +250,8 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.AccessConstraintStore.inTx = true
 	txStore.MembershipLossCheckStore.inTx = true
 	txStore.AgentHoldStore.inTx = true
+	txStore.ConversationStore.inTx = true
+	txStore.ThreadGroupStore.inTx = true
 	return txStore
 }
 
@@ -241,6 +284,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ProjectPreStartHookStore:   NewProjectPreStartHookStore(client),
 		AgentSessionMetricsStore:   NewAgentSessionMetricsStore(client),
 		ConversationStore:          NewConversationStore(client),
+		ThreadGroupStore:           NewThreadGroupStore(client),
 		RoleStore:                  NewRoleStore(client),
 		DelegationEdgeStore:        NewDelegationEdgeStore(client),
 		SAAssignmentStore:          NewSAAssignmentStore(client),
@@ -418,6 +462,12 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	// explicit or a deleted project's keys stay reserved forever.
 	if _, err := c.client.AgentIdentityKey.Delete().
 		Where(agentidentitykey.ProjectIDEQ(uid)).Exec(ctx); err != nil {
+		return err
+	}
+	// thread_groups and thread_group_members carry project_id as a plain
+	// column with no DB-level FK either, so a project's thread groups are
+	// removed explicitly in the same transaction (ptone/scion#4424).
+	if err := c.DeleteThreadGroupsForProject(ctx, id); err != nil {
 		return err
 	}
 	return c.ProjectStore.DeleteProject(ctx, id)
@@ -618,6 +668,15 @@ func (c *CompositeStore) Ping(ctx context.Context) error {
 // seeds the built-in maintenance operations, matching the behavior of the
 // former raw-SQL store (which seeded these as part of its migrations).
 func (c *CompositeStore) Migrate(ctx context.Context) error {
+	// Before anything reads or creates tables: on Postgres, refuse to build a
+	// new table set that would shadow an existing one later on the
+	// search_path. Enabled by EnableSchemaShadowGuard.
+	if c.schemaShadowGuard {
+		if err := checkSchemaShadowing(ctx, c.Dialect(), c.DB(), c.allowShadowedSchema, c.schemaShadowMaintenance, c.schemaShadowLogger); err != nil {
+			return err
+		}
+	}
+
 	// The data fixes that must precede the schema migration are shared with
 	// every other migrate entry point; see PreMigrate.
 	if err := PreMigrate(ctx, c.client); err != nil {

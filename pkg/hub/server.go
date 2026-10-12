@@ -367,6 +367,11 @@ type ServerConfig struct {
 	// those routes return 404 and every test-fixture user is refused at
 	// authentication. It is a startup-only switch, never a runtime setting.
 	EnableTestIdentities bool
+	// TestIdentityWebSessionKey is the hub-local test identity web session
+	// key cmd read from the test infrastructure marker at startup (WS1,
+	// DEC-8), or the reason there is none. Without a usable key, test
+	// identity web sessions are unavailable; the member tier is unaffected.
+	TestIdentityWebSessionKey TestIdentityWebSessionKey
 	// TestAdminGate is the validated test admin tier gate
 	// (--enable-test-admin-identities, ptone/scion#4240 phase A0). cmd's
 	// validateTestAdminIdentities builds it; New re-checks it, verifies
@@ -1516,6 +1521,13 @@ type Server struct {
 	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
 	nfsCleanupWG sync.WaitGroup
 
+	// startupLayer1 holds the startup values ApplySnapshot reverts to when
+	// a saved Layer-1 setting is cleared (recordStartupLayer1Values).
+	startupLayer1 startupLayer1Values
+	// notificationApply serializes notification channel registry rebuilds
+	// (applyNotificationChannels) and guards the channels last applied.
+	notificationApply notificationChannelsApplyState
+
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
 	// from LoadGlobalConfig(serverConfigPath), else the hostname).
@@ -1555,9 +1567,13 @@ type Server struct {
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
 	conduitAuthzMetrics atomic.Pointer[conduitStreamAuthzMetrics]
+	conduitBrokerRevoke atomic.Pointer[conduitBrokerRevoker] // broker session re-check (conduit_broker_revoke.go)
 	// portProxyMetrics counts agent port proxy upstream header timeouts
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
 	portProxyMetrics atomic.Pointer[portProxyMetrics]
+	// conduitRefreshMetrics counts agent AuthRefresh outcomes
+	// (conduit_agent_refresh.go); nil until SetConduitAgentRefreshMetrics.
+	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu     sync.Mutex
@@ -1750,11 +1766,18 @@ type Server struct {
 	// testIdentities is the state of hub-issued test identities
 	// (handlers_test_identities.go).
 	testIdentities testIdentityState
+	// testIdentityWeb is the test identity web session state (WS1): the
+	// marker cookie codec built from the hub-local key, fixed in New.
+	testIdentityWeb testIdentityWebState
 
 	// testAdminGate is the immutable test admin tier gate captured by New
 	// (test_admin_gate.go). It has no setter: testAdminTierEnabled reads
 	// only this value.
 	testAdminGate testAdminGate
+
+	// testAdminIssuance is the state of admin-kind test identity issuance
+	// (handlers_test_admin_identities.go).
+	testAdminIssuance testAdminIssuanceState
 	// testAdminAudit is the synchronous, level-independent stdout writer
 	// for test admin tier events (test_admin_audit_sink.go).
 	testAdminAudit *testAdminAuditSink
@@ -2176,6 +2199,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// The startup-resolved hub name, which ApplySnapshot returns to when
 	// the configured hub_name is unset.
 	srv.startupHubName = cfg.HubName
+	srv.recordStartupLayer1Values()
 	srv.setStartClaimSettings(cfg.StartClaim)
 	// Every start trigger runs under a start claim.
 	srv.startClaimsOn = true
@@ -2386,6 +2410,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// isReservedPlatformIdentity treats as inert.
 	srv.platformAuthSA = cfg.PlatformAuthSA
 	srv.testIdentities = newTestIdentityState(cfg.EnableTestIdentities)
+	srv.testIdentityWeb = newTestIdentityWebState(cfg.TestIdentityWebSessionKey)
+	srv.logTestIdentityWebSessionState()
+	srv.testAdminIssuance = newTestAdminIssuanceState()
 
 	// Store transport token minter if configured
 	if cfg.TransportMinter != nil {
@@ -2494,6 +2521,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// gates whether this server currently admits dev_local authority at
 	// all. See devLocalAuthorityEnabled's doc comment (devauth.go).
 	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
+	// Admin test identities (ptone/scion#4240): the authorization
+	// service's admin-kind clamp reads the immutable gate and the test
+	// identity clock through these closures.
+	setAuthzTestAdminTier(srv.authzService,
+		func(kind string) bool { return srv.testAdminTierEnabled(testAdminKind(kind)) },
+		func() time.Time { return srv.testIdentities.clock() })
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
 	srv.wireAgentDelegation()
@@ -2753,6 +2786,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// row block's test-fixture checks use.
 		TestIdentitiesEnabled: srv.testIdentities.enabled,
 		Now:                   func() time.Time { return srv.testIdentities.clock() },
+		// Admin test identities: the row block's admin-kind checks read
+		// the kind through kindForPrincipal and the immutable gate.
+		KindForPrincipal:     srv.kindForPrincipal,
+		TestAdminTierEnabled: func(kind string) bool { return srv.testAdminTierEnabled(testAdminKind(kind)) },
 
 		// Agent delegated credentials (scion_adt_ bearers); refused while
 		// hub.agent_delegation is off.
@@ -2833,6 +2870,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// See platformAuthSA above: shared by the GE exchange endpoint and the
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
+	// Same policy as isUserAuthorized above, in its code-returning form,
+	// so a refusal's audit entry records the code the decision returned.
+	googleResolver.SetSignInDenial(srv.signInDenial)
 	// Give the resolver's existing-record-by-email branch the same
 	// account-state handling (invited activation, role re-evaluation,
 	// super-admin binding, grant sync, audit) that provisionUser's
@@ -3666,6 +3706,16 @@ func (s *Server) writeDenyEnabled() bool {
 	return ops != nil && ops.ConversationEnvelopeSwitch()
 }
 
+// recordLog returns the logger for message records: the dedicated message
+// logger if configured, otherwise the standard subsystem message logger
+// (the same choice as logMessage).
+func (s *Server) recordLog() *slog.Logger {
+	if s.dedicatedMessageLog != nil {
+		return s.dedicatedMessageLog
+	}
+	return s.messageLog
+}
+
 // logMessage logs a message dispatch event to the dedicated message logger
 // if configured, otherwise falls back to the standard subsystem message logger.
 func (s *Server) logMessage(msg string, attrs ...any) {
@@ -4069,6 +4119,7 @@ func (s *Server) SetEventPublisher(ep EventPublisher) {
 	s.mu.Unlock()
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
+	s.bindConduitBrokerRevokeEvents()
 }
 
 // SetCommandBus sets the inter-node dispatch signal bus. Nil is safe (treated
@@ -4105,7 +4156,7 @@ func (s *Server) StartNotificationDispatcher() {
 
 	nd := NewNotificationDispatcher(s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.notifications"))
 	nd.messageLog = s.dedicatedMessageLog
-	nd.channelRegistry = s.channelRegistry
+	nd.channelRegistryFn = s.currentChannelRegistry
 	nd.writeDenyEnabled = func() bool {
 		ops := s.GetOperationalSettings()
 		return ops != nil && ops.ConversationEnvelopeSwitch()
@@ -4341,8 +4392,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 	dispatcher.SetDispatchExperimentsProvider(s.dispatchExperiments)
 
-	// Set image registry so bare image names are rewritten before dispatch
-	dispatcher.SetImageRegistry(s.resolveImageRegistry())
+	// Set image registry so bare image names are rewritten before dispatch.
+	// It is read per dispatch, so a saved image_registry applies to the
+	// next agent (ptone/scion#3904).
+	dispatcher.SetImageRegistryProvider(s.resolveImageRegistry)
 
 	return dispatcher
 }
@@ -4495,6 +4548,16 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 		return false
 	}
 
+	// Skip agents that stalled while initializing: the harness never
+	// showed it was reading input, so a long start (or a lost readiness
+	// report) is not idleness and must not suspend the agent. The stall
+	// marker itself still applies, for visibility.
+	if agent.StalledFromActivity == string(state.ActivityInitializing) {
+		slog.Info("Scheduler: skipping auto-suspend; agent stalled while initializing",
+			"agent_id", agent.ID, "agent_name", agent.Name)
+		return false
+	}
+
 	// Skip agents whose harness does not support resume — suspending
 	// them would imply resumability that doesn't exist.
 	if agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig != "" {
@@ -4604,22 +4667,36 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 // soft-deleted agents that have exceeded the retention period.
 func (s *Server) purgeHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
-		// Purge soft-deleted agents
-		cutoff := time.Now().Add(-s.config.SoftDeleteRetention)
-		purged, err := s.store.PurgeDeletedAgents(ctx, cutoff)
-		if err != nil {
-			slog.Error("Scheduler: agent purge failed", "error", err)
-		} else if purged > 0 {
-			slog.Info("Scheduler: purged soft-deleted agents", "count", purged, "cutoff", cutoff)
+		// Purge soft-deleted agents. The retention is read per tick, so a
+		// saved change applies to the next purge without a restart
+		// (ptone/scion#3904).
+		//
+		// A retention of 0 skips this purge: it makes later deletes hard,
+		// and agents soft-deleted earlier stay until a retention is set
+		// again. That is what a hub started with retention 0 does, and a
+		// save never deletes those agents at once.
+		if retention, _ := s.softDeleteSettings(); retention > 0 {
+			cutoff := time.Now().Add(-retention)
+			purged, err := s.store.PurgeDeletedAgents(ctx, cutoff)
+			if err != nil {
+				slog.Error("Scheduler: agent purge failed", "error", err)
+			} else if purged > 0 {
+				slog.Info("Scheduler: purged soft-deleted agents", "count", purged, "cutoff", cutoff)
+			}
 		}
 
-		// Purge old scheduled events (non-pending, older than 7 days)
-		eventCutoff := time.Now().Add(-7 * 24 * time.Hour)
-		purgedEvents, err := s.store.PurgeOldScheduledEvents(ctx, eventCutoff)
-		if err != nil {
-			slog.Error("Scheduler: scheduled event purge failed", "error", err)
-		} else if purgedEvents > 0 {
-			slog.Info("Scheduler: purged old scheduled events", "count", purgedEvents)
+		// Purge old scheduled events (non-pending, older than 7 days). This
+		// keeps its startup gate: it runs only on a hub started with a
+		// soft-delete retention, as when the whole job was registered
+		// only then.
+		if s.startupLayer1.SoftDeleteRetention > 0 {
+			eventCutoff := time.Now().Add(-7 * 24 * time.Hour)
+			purgedEvents, err := s.store.PurgeOldScheduledEvents(ctx, eventCutoff)
+			if err != nil {
+				slog.Error("Scheduler: scheduled event purge failed", "error", err)
+			} else if purgedEvents > 0 {
+				slog.Info("Scheduler: purged old scheduled events", "count", purgedEvents)
+			}
 		}
 	}
 }
@@ -4800,7 +4877,7 @@ func (s *Server) messageEventHandler() EventHandler {
 		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer retryCancel()
 
-		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
+		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
 		}
 		// Log the revision authority the send ran under alongside the
@@ -5706,11 +5783,16 @@ func (s *Server) registerSchedulerHandlers() {
 	// retry, expiry scan and full sweep. Not gated by any setting.
 	s.registerMembershipStandingReconciler()
 
+	// Test identity expiry reaper (ptone/scion#4240): only with
+	// --enable-test-identities.
+	s.registerTestIdentityReaper()
+
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
-	if s.config.SoftDeleteRetention > 0 {
-		s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
-	}
+	// Registered whatever the startup retention: soft_delete_retention is
+	// applied live, and the handler skips the agent purge while it is 0.
+	// The scheduled-event purge inside it keeps its startup gate.
+	s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
@@ -6573,6 +6655,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/test-identities", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities", s.handleCreateTestIdentity)))
 	s.mux.HandleFunc("GET /api/v1/test-identities", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identities", s.handleListTestIdentities)))
 	s.mux.HandleFunc("POST /api/v1/test-identities/{id}/token", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities/{id}/token", s.handleIssueTestIdentityToken)))
+	s.mux.HandleFunc("POST /api/v1/test-identities/{id}/web-login-code", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities/{id}/web-login-code", s.handleIssueTestIdentityWebCode)))
+	// Admin-kind test identities (admin tier A1). 404 for every caller
+	// unless the test admin gate is on; the gate runs before the guard.
+	s.mux.HandleFunc("POST /api/v1/test-identities/admin", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin", s.handleIssueTestAdminIdentity)))
+	s.mux.HandleFunc("POST /api/v1/test-identities/admin/revoke-all", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin/revoke-all", s.handleRevokeAllTestAdminIdentities)))
 	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
 
 	// Telegram account linking endpoints

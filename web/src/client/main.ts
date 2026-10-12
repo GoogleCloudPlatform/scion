@@ -319,6 +319,9 @@ async function fetchCurrentUser(): Promise<User | null> {
       avatar: data.avatarUrl || data.avatar,
       role: data.role || undefined,
       preferences: data.preferences || undefined,
+      testIdentity: data.testIdentity?.expiresAt
+        ? { expiresAt: data.testIdentity.expiresAt }
+        : undefined,
     };
   } catch {
     return null;
