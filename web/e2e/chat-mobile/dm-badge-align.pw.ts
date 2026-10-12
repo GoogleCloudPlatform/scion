@@ -129,8 +129,12 @@ test('@static the DM heading badge lines up with the space heading badge', async
 
   // The spacer adds no height: the DM heading is no taller than a space
   // heading.
-  const { dmHeader, spaceHeader } = await measure(page);
-  expect(dmHeader).not.toBeNull();
-  expect(spaceHeader).not.toBeNull();
-  expect(dmHeader!.height).toBeLessThanOrEqual(spaceHeader!.height + 1);
+  await expect
+    .poll(async () => {
+      const { dmHeader, spaceHeader } = await measure(page);
+      return dmHeader && spaceHeader
+        ? dmHeader.height - spaceHeader.height
+        : Number.POSITIVE_INFINITY;
+    })
+    .toBeLessThanOrEqual(1);
 });
