@@ -89,3 +89,32 @@ func TestFlatOtherProjectAgentsInUse_CountsSiblingInstances(t *testing.T) {
 		t.Fatalf("unused project: busy=%v err=%v, want not busy", busy, err)
 	}
 }
+
+// TestFlatRelink_UnreadableSiblingRefuses: another instance of the host
+// whose agents cannot be read counts as using the project (fail closed), so
+// the re-link refuses (409) and leaves both directories unchanged.
+func TestFlatRelink_UnreadableSiblingRefuses(t *testing.T) {
+	f := newRelinkFixture(t)
+	d := &sharedDaemon{}
+	locks := NewWorkspaceLocks()
+	a := newPartitionInstanceWithLocks(t, d, "docker-a", t.TempDir(), locks)
+	locks.registerWorkspaceUser(&Server{}, &workspaceUser{instance: "unreadable-sibling",
+		projectInUse: func(string) (bool, error) { return false, errors.New("ownership records cannot be read") }})
+
+	if busy, err := a.srv.otherProjectAgentsInUse(context.Background(), relinkOldID, ""); err != nil || !busy {
+		t.Fatalf("unreadable sibling: busy=%v err=%v, want busy", busy, err)
+	}
+	err := a.srv.relinkSharedProjectIdentity(context.Background(), f.root, "", relinkNewID, relinkAgent)
+	var relinkErr *projectRelinkError
+	if !errors.As(err, &relinkErr) {
+		t.Fatalf("expected a projectRelinkError, got %v", err)
+	}
+	if got := projectRelinkStartContextError(err).Status; got != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", got, http.StatusConflict)
+	}
+	assertState(t, f.oldRoot)
+	assertAbsent(t, f.newRoot)
+	if got := f.markerID(t); got != relinkOldID {
+		t.Fatalf("marker rewritten to %q", got)
+	}
+}

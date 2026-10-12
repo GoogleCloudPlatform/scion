@@ -6816,7 +6816,9 @@ var nfsCleanupAttemptHook func(attempt int)
 // back), so immediately before each attempt the cleanup checks that no agent
 // of the project that this broker did not already know when the delete
 // arrived is in use (newProjectAgentsInUse; a listing error counts as in
-// use) and otherwise keeps the tree, logged at Info. The deleted project's
+// use; on a flat Runtime Broker instance, another instance of the host with
+// live agents in the project counts too) and otherwise keeps the tree,
+// logged at Info. The deleted project's
 // own agents, still terminating, do not block it; a removal that fails
 // because they are still writing is retried after nfsProjectCleanupRetryDelay. A
 // missing tree is success; a final failure is logged for an operator, never

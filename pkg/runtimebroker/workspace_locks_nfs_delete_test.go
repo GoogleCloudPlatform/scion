@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -96,4 +97,72 @@ func TestWorkspaceLocks_ProjectDeleteInUseLocalDirGoneStartsNoNFSCleanup(t *test
 	a.srv.nfsCleanupWG.Wait()
 	require.Empty(t, *attempts, "no NFS tree cleanup started")
 	assertPresent(t, filepath.Join(tree, "workspace", "README.md"))
+}
+
+// nfsDeleteSiblings sets up two flat instances of one host sharing a
+// workspace lock service, instance A with NFS workspace storage holding the
+// project's tree. The tree's workspace cannot be removed until restore is
+// called, so A's first cleanup attempt fails and the retry runs.
+func nfsDeleteSiblings(t *testing.T) (a, b *partitionInstance, d *sharedDaemon, tree string, restore func()) {
+	t.Helper()
+	setupTestScionEnv(t)
+	d = &sharedDaemon{}
+	locks := NewWorkspaceLocks()
+	a = newPartitionInstanceWithLocks(t, d, "docker-a", t.TempDir(), locks)
+	b = newPartitionInstanceWithLocks(t, d, "docker-b", t.TempDir(), locks)
+	mountRoot := filepath.Join(t.TempDir(), "mnt")
+	a.srv.config.NFSConfig = &config.V1NFSConfig{
+		MountRoot:   mountRoot,
+		SubPathRoot: "projects",
+		Shares:      []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/ws"}},
+	}
+	subRoot := filepath.Join(mountRoot, "share1", "projects")
+	require.NoError(t, os.MkdirAll(subRoot, 0o755))
+	hubProjectDir(t, "shared-proj", scopeProjA)
+	tree = seedNFSProjectTree(t, subRoot, scopeProjA)
+	restore = makeWorkspaceUnremovable(t, tree)
+	return a, b, d, tree, restore
+}
+
+// TestWorkspaceLocks_SiblingAgentBeforeNFSRetryKeepsTree: a project ID can
+// come back after a delete. When another instance of the host starts an
+// agent of that project between instance A's failed first NFS cleanup
+// attempt and its retry, the retry keeps the host-shared tree.
+func TestWorkspaceLocks_SiblingAgentBeforeNFSRetryKeepsTree(t *testing.T) {
+	a, b, d, tree, restore := nfsDeleteSiblings(t)
+	var beginErr error
+	attempts := setBrokerAttemptHook(t, func(attempt int) {
+		if attempt == 2 {
+			restore()
+			// What b.own does, without t.Fatal off the test goroutine.
+			d.add(api.AgentInfo{ID: "cid-b1", ContainerID: "cid-b1", Name: "worker", ProjectID: scopeProjA, Phase: "running",
+				Labels: map[string]string{"scion.agent": "true", "scion.name": "worker", "scion.project_id": scopeProjA, "agent_id": "agent-b1",
+					api.LabelRunID: "run-cid-b1", api.LabelRuntimeBrokerID: b.identity.RuntimeBrokerID}})
+			beginErr = b.srv.ownership.BeginRun(scopeProjA, "agent-b1", "worker", "run-cid-b1")
+		}
+	})
+
+	w := serveFlat(a.srv, http.MethodDelete, "/api/v1/projects/shared-proj?project_id="+scopeProjA, "")
+	require.Equal(t, http.StatusNoContent, w.Code, w.Body.String())
+	a.srv.nfsCleanupWG.Wait()
+	require.NoError(t, beginErr)
+	require.Equal(t, []int{1, 2}, *attempts)
+	assertPresent(t, filepath.Join(tree, "workspace", "README.md"))
+}
+
+// TestWorkspaceLocks_NFSRetryWithoutSiblingAgentRemovesTree: the control:
+// with no agent of the project on any instance, A's retry removes the tree.
+func TestWorkspaceLocks_NFSRetryWithoutSiblingAgentRemovesTree(t *testing.T) {
+	a, _, _, tree, restore := nfsDeleteSiblings(t)
+	attempts := setBrokerAttemptHook(t, func(attempt int) {
+		if attempt == 2 {
+			restore()
+		}
+	})
+
+	w := serveFlat(a.srv, http.MethodDelete, "/api/v1/projects/shared-proj?project_id="+scopeProjA, "")
+	require.Equal(t, http.StatusNoContent, w.Code, w.Body.String())
+	a.srv.nfsCleanupWG.Wait()
+	require.Equal(t, []int{1, 2}, *attempts)
+	assertGone(t, tree)
 }
