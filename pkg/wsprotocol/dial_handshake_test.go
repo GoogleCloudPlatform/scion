@@ -107,7 +107,14 @@ func TestDialWithConfig_CancelEndsUnansweredHandshake(t *testing.T) {
 	cancel()
 	r := waitDial(t, done, "the dial to end after its context was cancelled")
 	require.ErrorIs(t, r.err, context.Canceled, "a cancelled dial reports the cancellation")
-	require.ErrorIs(t, r.err, net.ErrClosed, "the transport error stays reachable")
+	// The cancel can land while the TCP dial itself is still in progress
+	// (the server may accept before the client's connect returns), in which
+	// case the transport error is the cancelled dial, not the closed
+	// connection; either way it stays reachable. The closed-connection case
+	// is pinned deterministically by
+	// TestDialWithConfig_CancelBeforeDialerDeadlineEndsDial.
+	var opErr *net.OpError
+	require.ErrorAs(t, r.err, &opErr, "the transport error stays reachable")
 	require.Nil(t, r.conn)
 }
 
