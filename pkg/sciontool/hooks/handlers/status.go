@@ -103,6 +103,13 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 	if event.Name == hooks.EventToolStart {
 		// Claude-specific: ExitPlanMode and AskUserQuestion set waiting_for_input (sticky).
 		if isClaudeUserWaitTool(event) {
+			// A sub-agent's question is a harness prompt inside the
+			// parent's session, not a status the parent set. Record it as
+			// notification-set, so the sub-agent's own tool-end (the user
+			// answered) or later events clear it.
+			if isSubagentEvent(event) {
+				return h.setWaitingFromNotification()
+			}
 			return h.UpdateActivity(state.ActivityWaitingForInput, "")
 		}
 
@@ -405,7 +412,8 @@ func isClaudeUserWaitTool(event *hooks.Event) bool {
 // isHeldSubagentEvent reports whether an event is a sub-agent's new-work or
 // tool-start event that must not clear a status the parent agent holds. A
 // sub-agent's ExitPlanMode or AskUserQuestion tool-start is excluded: the
-// user is being asked, so it still sets waiting_for_input.
+// user is being asked, so it still sets waiting_for_input (recorded as
+// notification-set, see Handle).
 func isHeldSubagentEvent(event *hooks.Event) bool {
 	if !isSubagentEvent(event) || isClaudeUserWaitTool(event) {
 		return false

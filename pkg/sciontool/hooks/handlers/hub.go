@@ -134,7 +134,7 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 
 	case hooks.EventToolStart:
 		// Claude-specific: ExitPlanMode and AskUserQuestion mean waiting for user
-		if event.Dialect == "claude" && (event.Data.ToolName == "ExitPlanMode" || event.Data.ToolName == "AskUserQuestion") {
+		if isClaudeUserWaitTool(event) {
 			message := "Waiting on parent"
 			if event.Data.ToolName == "ExitPlanMode" {
 				message = "Waiting for plan approval"

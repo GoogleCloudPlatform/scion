@@ -83,9 +83,9 @@ func TestClaudeSubagent_IsSubagentEvent(t *testing.T) {
 
 // A sub-agent prompt-submit or tool-start leaves every status the parent set
 // and still holds unchanged: an agent-set waiting_for_input (sciontool status
-// ask_user), blocked, completed and crashed.
+// ask_user), blocked, completed, limits_exceeded and crashed.
 func TestClaudeSubagent_HeldActivitiesKept(t *testing.T) {
-	for _, held := range []state.Activity{state.ActivityWaitingForInput, state.ActivityBlocked, state.ActivityCompleted, state.ActivityCrashed} {
+	for _, held := range []state.Activity{state.ActivityWaitingForInput, state.ActivityBlocked, state.ActivityCompleted, state.ActivityLimitsExceeded, state.ActivityCrashed} {
 		for _, raw := range []string{"UserPromptSubmit", "PreToolUse"} {
 			t.Run(string(held)+"/"+raw, func(t *testing.T) {
 				statusPath := filepath.Join(t.TempDir(), "agent-info.json")
@@ -198,11 +198,10 @@ func TestClaudeSubagent_NoHoldUpdatesAsBefore(t *testing.T) {
 	}
 }
 
-// claudeHubRun sets up a parent status, runs one event through the
-// StatusHandler and then the HubHandler (the hook process order) against an
-// httptest Hub, and returns the Hub status values sent and the local
-// activity afterwards.
-func claudeHubRun(t *testing.T, held state.Activity, notificationWait bool, event *hooks.Event) ([]string, string) {
+// claudeHubSetup points a StatusHandler and a HubHandler at a temp HOME and
+// an httptest Hub, and returns them with a func that reports the Hub status
+// values sent so far.
+func claudeHubSetup(t *testing.T) (*StatusHandler, *HubHandler, func() []string) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -219,7 +218,7 @@ func claudeHubRun(t *testing.T, held state.Activity, notificationWait bool, even
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{}`))
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	scrubHubEnv(t)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
@@ -231,19 +230,35 @@ func claudeHubRun(t *testing.T, held state.Activity, notificationWait bool, even
 	hubHandler := NewHubHandler()
 	require.NotNil(t, hubHandler)
 
+	return statusHandler, hubHandler, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), statuses...)
+	}
+}
+
+// claudeHubHandle runs one event through the StatusHandler and then the
+// HubHandler, the hook process order.
+func claudeHubHandle(t *testing.T, statusHandler *StatusHandler, hubHandler *HubHandler, event *hooks.Event) {
+	t.Helper()
+	require.NoError(t, statusHandler.Handle(event))
+	require.NoError(t, hubHandler.Handle(event))
+}
+
+// claudeHubRun sets up a parent status, runs one event through both
+// handlers against an httptest Hub, and returns the Hub status values sent
+// and the local activity afterwards.
+func claudeHubRun(t *testing.T, held state.Activity, notificationWait bool, event *hooks.Event) ([]string, string) {
+	t.Helper()
+	statusHandler, hubHandler, sent := claudeHubSetup(t)
 	if notificationWait {
 		require.NoError(t, statusHandler.setWaitingFromNotification())
 	} else {
 		require.NoError(t, statusHandler.UpdateActivity(held, ""))
 	}
 
-	require.NoError(t, statusHandler.Handle(event))
-	require.NoError(t, hubHandler.Handle(event))
-
-	mu.Lock()
-	got := append([]string(nil), statuses...)
-	mu.Unlock()
-	return got, readAgentInfo(t, statusHandler.StatusPath).Activity
+	claudeHubHandle(t, statusHandler, hubHandler, event)
+	return sent(), readAgentInfo(t, statusHandler.StatusPath).Activity
 }
 
 // The Hub follows the local result: a sub-agent event that the parent's held
@@ -268,6 +283,8 @@ func TestClaudeSubagent_HubFollowsLocal(t *testing.T) {
 		{"sub-agent tool-start with blocked", state.ActivityBlocked, false, sub, "PreToolUse", "", "blocked"},
 		{"sub-agent prompt with completed", state.ActivityCompleted, false, sub, "UserPromptSubmit", "", "completed"},
 		{"sub-agent tool-start with crashed", state.ActivityCrashed, false, sub, "PreToolUse", "", "crashed"},
+		{"sub-agent prompt with limits_exceeded", state.ActivityLimitsExceeded, false, sub, "UserPromptSubmit", "", "limits_exceeded"},
+		{"sub-agent tool-start with limits_exceeded", state.ActivityLimitsExceeded, false, sub, "PreToolUse", "", "limits_exceeded"},
 		{"sub-agent prompt with notification wait", "", true, sub, "UserPromptSubmit", "thinking", "thinking"},
 		{"sub-agent tool-start with notification wait", "", true, sub, "PreToolUse", "executing", "executing"},
 		{"sub-agent prompt with no hold", state.ActivityWorking, false, sub, "UserPromptSubmit", "thinking", "thinking"},
@@ -291,19 +308,81 @@ func TestClaudeSubagent_HubFollowsLocal(t *testing.T) {
 
 // A sub-agent's AskUserQuestion or ExitPlanMode tool-start asks the user, so
 // it still sets waiting_for_input locally and reports it to the Hub, as the
-// parent's does.
+// parent's does. It overwrites whatever the parent held, including blocked,
+// completed, limits_exceeded and crashed; that is unchanged from before the
+// sub-agent check. The wait is recorded as notification-set.
 func TestClaudeSubagent_UserWaitToolSetsWaiting(t *testing.T) {
 	waitingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWaitingForInput}.DisplayStatus()
 	for _, tool := range []string{"AskUserQuestion", "ExitPlanMode"} {
-		for _, held := range []state.Activity{state.ActivityWorking, state.ActivityWaitingForInput} {
+		for _, held := range []state.Activity{state.ActivityWorking, state.ActivityWaitingForInput, state.ActivityBlocked, state.ActivityCompleted, state.ActivityLimitsExceeded, state.ActivityCrashed} {
 			t.Run(tool+"/"+string(held), func(t *testing.T) {
 				event := claudeEvent(t, "PreToolUse", tool, claudeSubagentChildID)
 				require.True(t, isSubagentEvent(event))
 
-				got, local := claudeHubRun(t, held, false, event)
-				assert.Equal(t, "waiting_for_input", local)
-				assert.Equal(t, []string{waitingStatus}, got)
+				statusHandler, hubHandler, sent := claudeHubSetup(t)
+				require.NoError(t, statusHandler.UpdateActivity(held, ""))
+				claudeHubHandle(t, statusHandler, hubHandler, event)
+
+				info := readAgentInfoMap(t, statusHandler.StatusPath)
+				assert.Equal(t, "waiting_for_input", info["activity"])
+				assert.Equal(t, activitySourceNotification, info[activitySourceKey])
+				assert.Equal(t, []string{waitingStatus}, sent())
 			})
 		}
+	}
+}
+
+// A sub-agent asks the user, the user answers, and the sub-agent keeps
+// working: its own tool-end clears the wait and the next tool-start is
+// reported, locally and to the Hub. The wait does not outlive the answer.
+func TestClaudeSubagent_UserWaitAnsweredThenContinues(t *testing.T) {
+	waitingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWaitingForInput}.DisplayStatus()
+	workingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}.DisplayStatus()
+	executingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityExecuting}.DisplayStatus()
+	for _, tool := range []string{"AskUserQuestion", "ExitPlanMode"} {
+		t.Run(tool, func(t *testing.T) {
+			statusHandler, hubHandler, sent := claudeHubSetup(t)
+			require.NoError(t, statusHandler.UpdateActivity(state.ActivityWorking, ""))
+
+			claudeHubHandle(t, statusHandler, hubHandler, claudeEvent(t, "PreToolUse", tool, claudeSubagentChildID))
+			assert.Equal(t, "waiting_for_input", readAgentInfo(t, statusHandler.StatusPath).Activity, "after the sub-agent asks")
+
+			claudeHubHandle(t, statusHandler, hubHandler, claudeEvent(t, "PostToolUse", tool, claudeSubagentChildID))
+			assert.Equal(t, "working", readAgentInfo(t, statusHandler.StatusPath).Activity, "after the user answers")
+
+			claudeHubHandle(t, statusHandler, hubHandler, claudeSubagentEvent(t, "PreToolUse"))
+			info := readAgentInfo(t, statusHandler.StatusPath)
+			assert.Equal(t, "executing", info.Activity, "sub-agent work after the answer")
+			assert.Equal(t, "Bash", info.ToolName)
+
+			assert.Equal(t, []string{waitingStatus, workingStatus, executingStatus}, sent())
+		})
+	}
+}
+
+// The parent's own AskUserQuestion or ExitPlanMode wait is unchanged: it is
+// an agent-set wait, kept by the tool-end that follows and cleared by the
+// parent's next tool-start.
+func TestClaudeSubagent_ParentUserWaitUnchanged(t *testing.T) {
+	waitingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWaitingForInput}.DisplayStatus()
+	executingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityExecuting}.DisplayStatus()
+	for _, tool := range []string{"AskUserQuestion", "ExitPlanMode"} {
+		t.Run(tool, func(t *testing.T) {
+			statusHandler, hubHandler, sent := claudeHubSetup(t)
+			require.NoError(t, statusHandler.UpdateActivity(state.ActivityWorking, ""))
+
+			claudeHubHandle(t, statusHandler, hubHandler, claudeEvent(t, "PreToolUse", tool, ""))
+			info := readAgentInfoMap(t, statusHandler.StatusPath)
+			assert.Equal(t, "waiting_for_input", info["activity"])
+			assert.NotContains(t, info, activitySourceKey)
+
+			claudeHubHandle(t, statusHandler, hubHandler, claudeEvent(t, "PostToolUse", tool, ""))
+			assert.Equal(t, "waiting_for_input", readAgentInfo(t, statusHandler.StatusPath).Activity, "the parent's tool-end keeps its wait")
+
+			claudeHubHandle(t, statusHandler, hubHandler, claudeParentEvent(t, "PreToolUse"))
+			assert.Equal(t, "executing", readAgentInfo(t, statusHandler.StatusPath).Activity)
+
+			assert.Equal(t, []string{waitingStatus, executingStatus}, sent())
+		})
 	}
 }
