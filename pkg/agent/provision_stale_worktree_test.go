@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -606,11 +608,20 @@ func TestHandleAgentDirWithoutConfig_CleanWorktreeWithOnlyIgnoredFileIsRemoved(t
 		t.Fatal(err)
 	}
 
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
 		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "ignored_count=1") || !strings.Contains(logs, "settings.local") {
+		t.Errorf("logs = %q, want a Warn with the ignored file count and path", logs)
 	}
 }
 
@@ -1089,8 +1100,9 @@ func TestHandleAgentDirWithoutConfig_WorktreeWithoutSubmoduleRunsStatus(t *testi
 	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
 	}
-	if n := countSubcommand(*subcommands, "status"); n != 1 {
-		t.Errorf("git subcommands = %q, want git status to run once", *subcommands)
+	// Once for the check, once to list the ignored files before removal.
+	if n := countSubcommand(*subcommands, "status"); n != 2 {
+		t.Errorf("git subcommands = %q, want git status to run twice", *subcommands)
 	}
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
 		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
@@ -1129,4 +1141,130 @@ func TestHandleAgentDirWithoutConfig_NonBranchSymbolicHeadIsKept(t *testing.T) {
 
 	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
+}
+
+// A rebase paused with --autostash before any commit is rewritten leaves a
+// clean tree and HEAD on a commit the branch reaches, while the uncommitted
+// changes live only in the rebase state of the worktree's admin dir: the
+// dir is kept and no git runs.
+func TestHandleAgentDirWithoutConfig_PausedAutostashRebaseIsKeptWithoutGit(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, ws, "commit", "-q", "--allow-empty", "-m", "agent work")
+	if err := os.WriteFile(filepath.Join(ws, "README"), []byte("uncommitted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "-C", ws, "rebase", "-q", "-i", "--autostash", "HEAD~1")
+	cmd.Env = append(os.Environ(), "GIT_SEQUENCE_EDITOR=sed -i 1s/^pick/edit/")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("setup: rebase: %v\n%s", err, out)
+	}
+	if got := runGitT(t, ws, "status", "--porcelain"); got != "" {
+		t.Fatalf("setup: git status = %q, want a clean worktree", got)
+	}
+	if _, err := os.Stat(filepath.Join(worktreeAdminDir(repo, "workspace"), "rebase-merge", "autostash")); err != nil {
+		t.Fatalf("setup: expected the rebase to hold an autostash: %v", err)
+	}
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
+}
+
+// Any admin dir entry an idle worktree does not have, such as the state of
+// an in-progress operation or a per-worktree ref, keeps the dir without
+// running git.
+func TestHandleAgentDirWithoutConfig_InProgressAdminStateIsKeptWithoutGit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dir  bool
+	}{
+		{"rebase-merge", true},
+		{"rebase-apply", true},
+		{"MERGE_HEAD", false},
+		{"MERGE_AUTOSTASH", false},
+		{"CHERRY_PICK_HEAD", false},
+		{"REVERT_HEAD", false},
+		{"sequencer", true},
+		{"BISECT_LOG", false},
+		{"refs/bisect/bad", false},
+		{"refs/worktree/x", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+			p := filepath.Join(worktreeAdminDir(repo, "workspace"), filepath.FromSlash(tc.name))
+			if tc.dir {
+				if err := os.MkdirAll(p, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				head := runGitT(t, ws, "rev-parse", "HEAD")
+				if err := os.WriteFile(p, []byte(head+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gitRuns := countWorktreeGit(t)
+
+			err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+			requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
+		})
+	}
+}
+
+// The admin dir entries an idle worktree gains from normal use (a commit,
+// a fetch, a stash push and pop, a per-worktree ref created and deleted)
+// do not keep a clean worktree on a branch: the dir is removed.
+func TestHandleAgentDirWithoutConfig_IdleAdminEntriesAreRemoved(t *testing.T) {
+	_, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, ws, "commit", "-q", "--allow-empty", "-m", "committed work")
+	runGitT(t, ws, "fetch", "-q", repo, "main")
+	if err := os.WriteFile(filepath.Join(ws, "README"), []byte("stashed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitT(t, ws, "stash", "-q")
+	runGitT(t, ws, "stash", "pop", "-q")
+	runGitT(t, ws, "checkout", "-q", "README")
+	runGitT(t, ws, "update-ref", "refs/worktree/x", "HEAD")
+	runGitT(t, ws, "update-ref", "-d", "refs/worktree/x")
+	admin := worktreeAdminDir(repo, "workspace")
+	for _, name := range []string{"COMMIT_EDITMSG", "FETCH_HEAD", "ORIG_HEAD", "refs"} {
+		if _, err := os.Stat(filepath.Join(admin, name)); err != nil {
+			t.Fatalf("setup: expected %s in the worktree admin dir: %v", name, err)
+		}
+	}
+
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
+}
+
+// git status skips an untracked directory it cannot read, warns on stderr
+// and exits 0: the check fails closed and the dir is kept.
+func TestHandleAgentDirWithoutConfig_UnreadableUntrackedDirIsKept(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a mode 000 directory")
+	}
+	base, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	unreadable := filepath.Join(ws, "private")
+	if err := os.MkdirAll(unreadable, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unreadable, "notes"), []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unreadable, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o755) })
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, unreadable)
+	if !strings.Contains(err.Error(), "could not check") {
+		t.Errorf("error = %v, want the could-not-check conflict", err)
+	}
 }

@@ -3135,7 +3135,7 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		if err != nil {
 			slog.Warn("GetAgent: agent workspace could not be checked for uncommitted work; keeping the agent directory",
 				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace, "error", err)
-			return fmt.Errorf("%w: agent %q state directory kept: could not check the agent's workspace for uncommitted work (git refused it or did not finish); check its ownership and permissions, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
+			return fmt.Errorf("%w: agent %q state directory kept: could not check the agent's workspace for uncommitted work; check its ownership and permissions, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if hasWork {
 			slog.Warn("GetAgent: agent directory has no config file but its workspace may hold work; keeping it",
@@ -3167,9 +3167,13 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 //   - a .git pointer file whose worktree metadata does not point back to
 //     the project repository (see projectWorktreeOf).
 //
-// A locked worktree (git worktree lock), or any worktree while the project
-// repository has per-worktree config on (extensions.worktreeConfig), also
-// reports true without running git. Worktrees with submodules are always
+// A worktree whose admin dir has any entry an idle worktree does not have
+// (see idleWorktreeAdminEntries: for example a lock, or an in-progress
+// rebase, merge, cherry-pick, revert, sequencer or bisect, whose state can
+// hold work such as a rebase autostash), or a per-worktree ref under
+// refs/, or any worktree while the project repository has per-worktree
+// config on (extensions.worktreeConfig), also reports true without running
+// git. Worktrees with submodules are always
 // kept: a gitlink entry in the index reports true before git status runs,
 // because status would read each submodule's own repository metadata, and
 // only worktree metadata that points back to the project repository is
@@ -3195,12 +3199,11 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 //     reported by git status and are removed with the worktree. Keeping on
 //     them would make almost every used worktree a permanent conflict
 //     (node_modules, dist and similar). A global excludes file is not
-//     applied, so it cannot hide an untracked file.
-//   - The per-worktree admin state goes with the prune: the HEAD reflog,
-//     ORIG_HEAD, refs/bisect/*, refs/worktree/*, and an in-progress rebase
-//     or merge. A rebase that has rewritten commits is kept (its detached
-//     HEAD is unreachable); commits reachable only from the HEAD reflog
-//     are lost.
+//     applied, so it cannot hide an untracked file. Their count and a few
+//     paths are logged at Warn before the removal.
+//   - The idle per-worktree admin state goes with the prune: the HEAD
+//     reflog, ORIG_HEAD, FETCH_HEAD and AUTO_MERGE. Commits reachable only
+//     from them are lost.
 func worktreeMayHoldWork(agentDir, ws string) (hasWork, inspected bool, err error) {
 	info, err := os.Lstat(ws)
 	if err != nil {
@@ -3230,10 +3233,20 @@ func worktreeMayHoldWork(agentDir, ws string) (hasWork, inspected bool, err erro
 	if !ok {
 		return true, false, nil
 	}
-	// git worktree lock marks a worktree as one not to prune or remove.
-	if _, err := os.Lstat(filepath.Join(wt.gitDir, "locked")); !errors.Is(err, fs.ErrNotExist) {
+	// An entry an idle worktree does not have (an in-progress operation, a
+	// lock, a per-worktree ref) may hold work git status does not report.
+	idle, err := worktreeAdminDirIdle(wt.gitDir)
+	if err != nil {
+		return false, false, err
+	}
+	if !idle {
 		return true, false, nil
 	}
+	defer func() {
+		if err == nil && inspected && !hasWork {
+			warnIgnoredFiles(wt)
+		}
+	}()
 	// With per-worktree config on, git would read a config.worktree in the
 	// gitdir, which projectWorktreeOf only checked before git starts.
 	on, err := worktreeConfigEnabled(wt.commonDir)
@@ -3293,6 +3306,85 @@ func worktreeMayHoldWork(agentDir, ws string) (hasWork, inspected bool, err erro
 		return false, true, fmt.Errorf("git for-each-ref: %w", err)
 	}
 	return strings.TrimSpace(refs) == "", true, nil
+}
+
+// idleWorktreeAdminEntries are the entries the admin dir of an idle linked
+// worktree (<common dir>/worktrees/<id>) has. Observed with git 2.56 after
+// worktree add, commit, switch, fetch, merge, reset, rebase and stash
+// push/pop; see also git-worktree(1) DETAILS and REFS, and
+// gitrepository-layout(5) worktrees/<id>/. Anything else, for example
+// locked, config.worktree, rebase-merge, rebase-apply, MERGE_HEAD,
+// CHERRY_PICK_HEAD, REVERT_HEAD, sequencer or BISECT_LOG, is not idle.
+var idleWorktreeAdminEntries = map[string]bool{
+	"HEAD":           true,
+	"ORIG_HEAD":      true,
+	"FETCH_HEAD":     true,
+	"AUTO_MERGE":     true,
+	"COMMIT_EDITMSG": true,
+	"commondir":      true,
+	"gitdir":         true,
+	"index":          true,
+	"logs":           true,
+	"refs":           true,
+}
+
+// worktreeAdminDirIdle reports whether the worktree admin dir gitDir has
+// only idleWorktreeAdminEntries, and whether its refs/ directory, which
+// holds the per-worktree refs (refs/bisect, refs/worktree,
+// refs/rewritten), has no entry other than directories. It reads the
+// filesystem only. A read failure is returned.
+func worktreeAdminDirIdle(gitDir string) (bool, error) {
+	entries, err := os.ReadDir(gitDir)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if !idleWorktreeAdminEntries[e.Name()] {
+			return false, nil
+		}
+	}
+	idle := true
+	err = filepath.WalkDir(filepath.Join(gitDir, "refs"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			idle = false
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	return idle, nil
+}
+
+// warnIgnoredFiles logs, at Warn, how many ignored files the clean
+// worktree wt has and a few of their paths, because they are removed with
+// it. It changes nothing; a failure is logged too.
+func warnIgnoredFiles(wt projectWorktree) {
+	out, err := runWorktreeGit(wt, "status", "--porcelain", "-z", "--untracked-files=normal", "--ignored=matching")
+	if err != nil {
+		slog.Warn("GetAgent: could not list the ignored files of a clean stale agent workspace before removing it",
+			"workspace", wt.workTree, "error", err)
+		return
+	}
+	var ignored []string
+	for _, entry := range strings.Split(out, "\x00") {
+		if p, ok := strings.CutPrefix(entry, "!! "); ok {
+			ignored = append(ignored, p)
+		}
+	}
+	if len(ignored) == 0 {
+		return
+	}
+	sample := ignored
+	if len(sample) > 5 {
+		sample = sample[:5]
+	}
+	slog.Warn("GetAgent: clean stale agent workspace has ignored files; they are removed with it",
+		"workspace", wt.workTree, "ignored_count", len(ignored), "ignored_sample", sample)
 }
 
 // hasHiddenIndexEntries reports whether NUL-separated git ls-files -v
@@ -3558,6 +3650,13 @@ func worktreeGit(wt projectWorktree, args ...string) (string, error) {
 			return "", fmt.Errorf("%w: %s", err, msg)
 		}
 		return "", err
+	}
+	// git status warns on stderr and still exits 0 when it skips a
+	// directory it cannot read, so its output would be incomplete.
+	if len(args) > 0 && args[0] == "status" {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("git status wrote to stderr: %s", msg)
+		}
 	}
 	return string(out), nil
 }
