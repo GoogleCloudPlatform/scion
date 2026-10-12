@@ -146,6 +146,8 @@ const (
 	FieldLaunchStep = "launch_step"
 	// FieldLaunchError holds the string denoting the launch_error field in the database.
 	FieldLaunchError = "launch_error"
+	// FieldLaunchCause holds the string denoting the launch_cause field in the database.
+	FieldLaunchCause = "launch_cause"
 	// FieldDeletionState holds the string denoting the deletion_state field in the database.
 	FieldDeletionState = "deletion_state"
 	// FieldDeletionClaim holds the string denoting the deletion_claim field in the database.
@@ -309,6 +311,7 @@ var Columns = []string{
 	FieldLaunchSeq,
 	FieldLaunchStep,
 	FieldLaunchError,
+	FieldLaunchCause,
 	FieldDeletionState,
 	FieldDeletionClaim,
 	FieldDeletionLeaseAt,
@@ -395,6 +398,8 @@ var (
 	DefaultLaunchStep string
 	// DefaultLaunchError holds the default value on creation for the "launch_error" field.
 	DefaultLaunchError string
+	// DefaultLaunchCause holds the default value on creation for the "launch_cause" field.
+	DefaultLaunchCause string
 	// DefaultDeletionState holds the default value on creation for the "deletion_state" field.
 	DefaultDeletionState string
 	// DefaultDeletionClaim holds the default value on creation for the "deletion_claim" field.
@@ -789,6 +794,11 @@ func ByLaunchStep(opts ...sql.OrderTermOption) OrderOption {
 // ByLaunchError orders the results by the launch_error field.
 func ByLaunchError(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchError, opts...).ToFunc()
+}
+
+// ByLaunchCause orders the results by the launch_cause field.
+func ByLaunchCause(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLaunchCause, opts...).ToFunc()
 }
 
 // ByDeletionState orders the results by the deletion_state field.

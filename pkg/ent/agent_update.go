@@ -1160,6 +1160,26 @@ func (_u *AgentUpdate) ClearLaunchError() *AgentUpdate {
 	return _u
 }
 
+// SetLaunchCause sets the "launch_cause" field.
+func (_u *AgentUpdate) SetLaunchCause(v string) *AgentUpdate {
+	_u.mutation.SetLaunchCause(v)
+	return _u
+}
+
+// SetNillableLaunchCause sets the "launch_cause" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchCause(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchCause(*v)
+	}
+	return _u
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (_u *AgentUpdate) ClearLaunchCause() *AgentUpdate {
+	_u.mutation.ClearLaunchCause()
+	return _u
+}
+
 // SetDeletionState sets the "deletion_state" field.
 func (_u *AgentUpdate) SetDeletionState(v string) *AgentUpdate {
 	_u.mutation.SetDeletionState(v)
@@ -2208,6 +2228,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.LaunchErrorCleared() {
 		_spec.ClearField(agent.FieldLaunchError, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchCause(); ok {
+		_spec.SetField(agent.FieldLaunchCause, field.TypeString, value)
+	}
+	if _u.mutation.LaunchCauseCleared() {
+		_spec.ClearField(agent.FieldLaunchCause, field.TypeString)
 	}
 	if value, ok := _u.mutation.DeletionState(); ok {
 		_spec.SetField(agent.FieldDeletionState, field.TypeString, value)
@@ -3700,6 +3726,26 @@ func (_u *AgentUpdateOne) ClearLaunchError() *AgentUpdateOne {
 	return _u
 }
 
+// SetLaunchCause sets the "launch_cause" field.
+func (_u *AgentUpdateOne) SetLaunchCause(v string) *AgentUpdateOne {
+	_u.mutation.SetLaunchCause(v)
+	return _u
+}
+
+// SetNillableLaunchCause sets the "launch_cause" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchCause(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchCause(*v)
+	}
+	return _u
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (_u *AgentUpdateOne) ClearLaunchCause() *AgentUpdateOne {
+	_u.mutation.ClearLaunchCause()
+	return _u
+}
+
 // SetDeletionState sets the "deletion_state" field.
 func (_u *AgentUpdateOne) SetDeletionState(v string) *AgentUpdateOne {
 	_u.mutation.SetDeletionState(v)
@@ -4778,6 +4824,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.LaunchErrorCleared() {
 		_spec.ClearField(agent.FieldLaunchError, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchCause(); ok {
+		_spec.SetField(agent.FieldLaunchCause, field.TypeString, value)
+	}
+	if _u.mutation.LaunchCauseCleared() {
+		_spec.ClearField(agent.FieldLaunchCause, field.TypeString)
 	}
 	if value, ok := _u.mutation.DeletionState(); ok {
 		_spec.SetField(agent.FieldDeletionState, field.TypeString, value)

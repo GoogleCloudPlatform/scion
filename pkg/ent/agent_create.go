@@ -876,6 +876,20 @@ func (_c *AgentCreate) SetNillableLaunchError(v *string) *AgentCreate {
 	return _c
 }
 
+// SetLaunchCause sets the "launch_cause" field.
+func (_c *AgentCreate) SetLaunchCause(v string) *AgentCreate {
+	_c.mutation.SetLaunchCause(v)
+	return _c
+}
+
+// SetNillableLaunchCause sets the "launch_cause" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchCause(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchCause(*v)
+	}
+	return _c
+}
+
 // SetDeletionState sets the "deletion_state" field.
 func (_c *AgentCreate) SetDeletionState(v string) *AgentCreate {
 	_c.mutation.SetDeletionState(v)
@@ -1408,6 +1422,10 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultLaunchError
 		_c.mutation.SetLaunchError(v)
 	}
+	if _, ok := _c.mutation.LaunchCause(); !ok {
+		v := agent.DefaultLaunchCause
+		_c.mutation.SetLaunchCause(v)
+	}
 	if _, ok := _c.mutation.DeletionState(); !ok {
 		v := agent.DefaultDeletionState
 		_c.mutation.SetDeletionState(v)
@@ -1825,6 +1843,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.LaunchError(); ok {
 		_spec.SetField(agent.FieldLaunchError, field.TypeString, value)
 		_node.LaunchError = value
+	}
+	if value, ok := _c.mutation.LaunchCause(); ok {
+		_spec.SetField(agent.FieldLaunchCause, field.TypeString, value)
+		_node.LaunchCause = value
 	}
 	if value, ok := _c.mutation.DeletionState(); ok {
 		_spec.SetField(agent.FieldDeletionState, field.TypeString, value)
@@ -3074,6 +3096,24 @@ func (u *AgentUpsert) UpdateLaunchError() *AgentUpsert {
 // ClearLaunchError clears the value of the "launch_error" field.
 func (u *AgentUpsert) ClearLaunchError() *AgentUpsert {
 	u.SetNull(agent.FieldLaunchError)
+	return u
+}
+
+// SetLaunchCause sets the "launch_cause" field.
+func (u *AgentUpsert) SetLaunchCause(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchCause, v)
+	return u
+}
+
+// UpdateLaunchCause sets the "launch_cause" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchCause() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchCause)
+	return u
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (u *AgentUpsert) ClearLaunchCause() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchCause)
 	return u
 }
 
@@ -4748,6 +4788,27 @@ func (u *AgentUpsertOne) UpdateLaunchError() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearLaunchError() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchError()
+	})
+}
+
+// SetLaunchCause sets the "launch_cause" field.
+func (u *AgentUpsertOne) SetLaunchCause(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchCause(v)
+	})
+}
+
+// UpdateLaunchCause sets the "launch_cause" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchCause() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchCause()
+	})
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (u *AgentUpsertOne) ClearLaunchCause() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchCause()
 	})
 }
 
@@ -6658,6 +6719,27 @@ func (u *AgentUpsertBulk) UpdateLaunchError() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearLaunchError() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchError()
+	})
+}
+
+// SetLaunchCause sets the "launch_cause" field.
+func (u *AgentUpsertBulk) SetLaunchCause(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchCause(v)
+	})
+}
+
+// UpdateLaunchCause sets the "launch_cause" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchCause() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchCause()
+	})
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (u *AgentUpsertBulk) ClearLaunchCause() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchCause()
 	})
 }
 
