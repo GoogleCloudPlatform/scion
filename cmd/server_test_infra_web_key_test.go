@@ -158,3 +158,39 @@ func TestTestInfraUnmark_HumanCLIOnlyAndArgs(t *testing.T) {
 	}
 	require.NotNil(t, found, "server test-infra unmark is registered")
 }
+
+// Unmark through the guarded open path (openTestInfraDatabase →
+// openTestInfraClient → migrateHubStore, the path runTestInfraUnmark uses)
+// destroys the hub-local web session key that mark generated, and the
+// startup read then reports web sessions unavailable.
+func TestTestInfraUnmark_GuardedOpenDestroysKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+	t.Cleanup(func() {
+		testInfraMarkHubID, testInfraMarkAcknowledge = "", false
+		testInfraUnmarkHubID, testInfraUnmarkAcknowledge = "", false
+	})
+
+	// Mark through the same guarded opener the mark command uses.
+	cfg, markClient := tiaMarkDB(t)
+	testInfraMarkHubID, testInfraMarkAcknowledge = tiaCmdHubID, true
+	var out bytes.Buffer
+	require.NoError(t, markTestInfra(ctx, markClient, cfg, &out))
+	before := loadTestIdentityWebSessionKey(ctx, markClient, tiaCmdHubID, true)
+	require.Len(t, before.Key, testinfra.WebSessionKeyLen, "mark generated the key")
+
+	// Unmark through openTestInfraDatabase, as runTestInfraUnmark does.
+	_, client, err := openTestInfraDatabase(ctx, "", cfg.Database.URL)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	testInfraUnmarkHubID, testInfraUnmarkAcknowledge = tiaCmdHubID, true
+	out.Reset()
+	require.NoError(t, unmarkTestInfra(ctx, client, &out))
+
+	_, err = testinfra.ReadWebSessionKey(ctx, client, tiaCmdHubID)
+	assert.ErrorIs(t, err, testinfra.ErrMarkerAbsent, "the key is gone with the marker")
+	after := loadTestIdentityWebSessionKey(ctx, client, tiaCmdHubID, true)
+	assert.Empty(t, after.Key)
+	assert.Equal(t, "marker_absent", after.Unavailable, "web sessions report unavailable")
+	assert.Equal(t, "TestIdentityWebSessionKey{unavailable: \"marker_absent\"}", after.String())
+}
