@@ -2806,7 +2806,7 @@ func (h *taskArgHarness) GetCommand(task string, _ bool, args []string) []string
 // tasks.
 func TestQuotedTaskBytes(t *testing.T) {
 	startCmd := func(task string) string {
-		line, ok := harnessCmdLine(RunConfig{Harness: &taskArgHarness{}, Task: task})
+		line, ok := harnessCmdLine(RunConfig{Harness: &taskArgHarness{}, Task: task}, harnessCmdLineOptions{})
 		if !ok {
 			t.Fatal("harnessCmdLine: no command line")
 		}

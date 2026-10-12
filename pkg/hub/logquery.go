@@ -171,6 +171,16 @@ func (s *LogQueryService) Query(ctx context.Context, opts LogQueryOptions) (*Log
 	}, nil
 }
 
+// messageRecordFilter restricts message log queries to message records:
+// entries tagged log_kind=event (lifecycle and delivery acknowledgement
+// lines) are left out, as are entries with neither a sender nor a
+// recipient label (older lifecycle lines written before the tag).
+// "NOT x = v" also matches entries without the label; "x:*" tests that
+// the label is present.
+var messageRecordFilter = fmt.Sprintf(
+	`NOT labels.%s = %q AND (labels.%s:* OR labels.%s:*)`,
+	logging.AttrLogKind, logging.LogKindEvent, logging.AttrSender, logging.AttrRecipient)
+
 // BuildLogFilter constructs a Cloud Logging filter string from the options.
 // When projectID is provided and opts.LogID is set, a logName filter is added
 // to restrict results to the specific Cloud Logging log.
@@ -198,6 +208,9 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 			opts.AgentID, opts.AgentID))
 	} else if opts.AgentID != "" {
 		parts = append(parts, fmt.Sprintf(`labels.agent_id = %q`, opts.AgentID))
+	}
+	if opts.LogID == logging.MessageLogID {
+		parts = append(parts, messageRecordFilter)
 	}
 	// DEF-128b: participant scoping. When ParticipantID is set, restrict
 	// results to entries where that user is either the sender or the
