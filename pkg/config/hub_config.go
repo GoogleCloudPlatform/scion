@@ -1526,6 +1526,8 @@ var snakeCaseFields = map[string]string{
 	"autoexposeports":            "auto_expose_ports",
 	"autosuspendstalled":         "auto_suspend_stalled",
 	"cafile":                     "ca_file",
+	"certfile":                   "cert_file",
+	"keyfile":                    "key_file",
 	"defaultharnessconfig":       "default_harness_config",
 	"defaultmaxduration":         "default_max_duration",
 	"defaultuserrole":            "default_user_role",
