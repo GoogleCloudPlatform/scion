@@ -868,7 +868,7 @@ type adminRemoval struct {
 // st may be a transaction handle so the check reads the same state the
 // caller then writes.
 func checkConstraintAdminLockout(ctx context.Context, st store.Store, now time.Time, scopeType, scopeID string, rm adminRemoval) error {
-	adminUsers, err := resolveConstraintAdminUsers(ctx, st, now, scopeType, scopeID)
+	adminUsers, inactiveOnly, err := resolveConstraintAdmins(ctx, st, now, scopeType, scopeID)
 	if err != nil {
 		return &GovernanceError{
 			Code:    ErrCodeConstraintAdminLockout,
@@ -878,8 +878,10 @@ func checkConstraintAdminLockout(ctx context.Context, st store.Store, now time.T
 
 	if rm.userID != "" {
 		// A user who is not an active admin here removes no admin
-		// authority from this scope.
-		isAdmin := false
+		// authority from this scope. A user whose admin bindings here
+		// are all outside their activation window (inactiveOnly) still
+		// has the scope judged, over the active admins.
+		isAdmin := inactiveOnly[rm.userID]
 		for _, au := range adminUsers {
 			if au.userID == rm.userID {
 				isAdmin = true
@@ -1095,10 +1097,16 @@ func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.
 		if checked[key] {
 			continue
 		}
+		// A binding whose role definition no longer exists grants
+		// nothing; any other read error refuses the change.
 		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if err != nil || !roleHasConstraintAdmin(rd) {
-			// resolveConstraintAdminUsers skips an unreadable role
-			// definition the same way.
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("resolve role for constraint-admin lockout check: %w", err)
+		}
+		if !roleHasConstraintAdmin(rd) {
 			continue
 		}
 		checked[key] = true

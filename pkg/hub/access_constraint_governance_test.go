@@ -1861,6 +1861,104 @@ func TestConstraintAdminLockout_ReadFailureRefuses(t *testing.T) {
 	}
 }
 
+// Removing a user whose constraint-admin bindings at the scope are all
+// outside their activation window still has the scope judged over the
+// active admins: with none left, or none once scheduled constraints
+// activate, the removal is refused. A user with no constraint-admin
+// binding at the scope runs no check.
+func TestConstraintAdminLockout_UserRemovalInactiveAdmin(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	future := now.Add(time.Hour)
+	past := now.Add(-time.Hour)
+	tests := []struct {
+		name      string
+		route     string // how the removed user holds the admin binding
+		notBefore *time.Time
+		expiresAt *time.Time
+		other     string // "", "active" or "blocked"
+		refused   bool
+	}{
+		{name: "expired-only-admin", route: "user", expiresAt: &past, refused: true},
+		{name: "scheduled-only-admin", route: "user", notBefore: &future, refused: true},
+		{name: "group-expired-only-admin", route: "group", expiresAt: &past, refused: true},
+		{name: "scheduled-other-blocked", route: "user", notBefore: &future, other: "blocked", refused: true},
+		{name: "expired-other-active", route: "user", expiresAt: &past, other: "active"},
+		{name: "no-admin-binding", route: "none"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			prefix := "lockout-urm-" + tc.name
+			projectID := pvSeedProject(t, s, prefix+"-project")
+			rd := createTestRoleDefinition(t, s, prefix+"-admin-role",
+				store.RoleScopeProject, []string{PermissionConstraintAdmin})
+			user := pvSeedUser(t, s, prefix+"-user")
+			principalType, principalID := "user", user
+			if tc.route == "group" {
+				principalType = "group"
+				principalID = pvSeedGroup(t, s, prefix+"-group")
+				pvSeedGroupMember(t, s, principalID, store.GroupMemberTypeUser, user)
+			}
+			if tc.route != "none" {
+				_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+					RoleDefinitionID: rd.ID,
+					PrincipalType:    principalType,
+					PrincipalID:      principalID,
+					ScopeType:        store.RoleScopeProject,
+					ScopeID:          projectID,
+					NotBefore:        tc.notBefore,
+					ExpiresAt:        tc.expiresAt,
+					CreatedBy:        "test",
+				})
+				require.NoError(t, err)
+			}
+			if tc.other != "" {
+				other := pvSeedUser(t, s, prefix+"-other")
+				pvSeedRoleBinding(t, s, rd.ID, "user", other, store.RoleScopeProject, projectID)
+				if tc.other == "blocked" {
+					_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+						Name:                 prefix + "-scheduled",
+						SubjectKind:          store.ConstraintSubjectPrincipal,
+						SubjectPrincipalType: pvStrPtr("user"),
+						SubjectPrincipalID:   pvStrPtr(other),
+						ScopeType:            store.RoleScopeProject,
+						ScopeID:              projectID,
+						MaximumPermissions:   []string{"agent.read"},
+						NotBefore:            &future,
+						Purpose:              "scheduled restriction",
+						CreatedBy:            "test",
+					})
+					require.NoError(t, err)
+				}
+			}
+
+			err := checkConstraintAdminLockout(ctx, s, now, store.RoleScopeProject, projectID,
+				adminRemoval{userID: user, userAction: userRemovalSuspend})
+			if !tc.refused {
+				assert.NoError(t, err)
+				return
+			}
+			var ge *GovernanceError
+			require.ErrorAs(t, err, &ge)
+			assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+		})
+	}
+}
+
+// A role definition read error while listing the scopes a removed user
+// administers refuses the removal.
+func TestConstraintAdminLockout_UserRemovalRoleReadFailureRefuses(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	_, users, _ := lockoutProjectAdmins(t, s, "lockout-urm-readerr", 2)
+	require.NoError(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), users[0], userRemovalSuspend),
+		"control: reads succeed")
+
+	st := lockoutReadErrStore{Store: s, roleDefErr: errors.New("read failed")}
+	assert.Error(t, checkUserRemovalAdminLockout(ctx, st, time.Now(), users[0], userRemovalSuspend))
+}
+
 // DELETE /projects/{id}/members/principals/group/{groupID}.
 func TestConstraintAdminLockout_ProjectMemberGroupPrincipalDelete(t *testing.T) {
 	srv, s := testServer(t)
