@@ -101,8 +101,8 @@ func equalActivities(a, b []state.Activity) bool {
 // afterFirstPoll wraps cfg.MarkerReady so that write runs once, right after
 // the watcher's first poll has found no marker. This places the hook event
 // after the watch began without a sleep: on every poll the watcher checks
-// the marker before the deadline, so the next poll sees it however slowly
-// the test is scheduled.
+// the marker before the deadline, so any poll after the first sees it, even
+// if it runs after the deadline.
 func afterFirstPoll(t *testing.T, cfg *readyWatchConfig, write func()) {
 	t.Helper()
 	inner := cfg.MarkerReady
