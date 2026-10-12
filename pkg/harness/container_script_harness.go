@@ -575,6 +575,37 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 	return nil
 }
 
+// SetManifestAgentWorkspace records containerWorkspace as agent_workspace in
+// the manifest staged under agentHome. The provisioner runs inside the
+// container, where the workspace is mounted at a container path (for example
+// /repo-root/<relative path> for a worktree under the repo root) rather than
+// at the host path Provision receives, so Start calls this once the
+// container-side workspace is known. A missing manifest (no container-script
+// bundle staged) is not an error.
+func SetManifestAgentWorkspace(agentHome, containerWorkspace string) error {
+	manifestPath := filepath.Join(agentHome, ".scion", "harness", "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read manifest.json: %w", err)
+	}
+	var manifest ProvisionManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("parse manifest.json: %w", err)
+	}
+	manifest.AgentWorkspace = containerWorkspace
+	manifestData, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal manifest: %w", err)
+	}
+	if err := os.WriteFile(manifestPath, manifestData, 0644); err != nil {
+		return fmt.Errorf("write manifest.json: %w", err)
+	}
+	return nil
+}
+
 // ApplyAuthSettings stages resolved auth metadata into
 // agent_home/.scion/harness/inputs/auth-candidates.json so the container-side
 // script can finalize harness-native auth selection on every start/resume.
