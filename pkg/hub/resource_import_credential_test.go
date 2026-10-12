@@ -25,6 +25,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -39,9 +40,11 @@ type importCredSecretBackend struct {
 	projectID string
 	values    map[string]string
 	getErr    error
+	gets      int // number of Get calls
 }
 
 func (b *importCredSecretBackend) Get(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+	b.gets++
 	if b.getErr != nil {
 		return nil, b.getErr
 	}
@@ -56,15 +59,54 @@ func (b *importCredSecretBackend) Get(_ context.Context, name, scope, scopeID st
 }
 
 // newImportCredServer returns a server whose secret backend serves values for
-// projectID and whose resource log is captured in the returned buffer. The
-// project does not exist in the store, so no GitHub App token is minted.
-func newImportCredServer(t *testing.T, projectID string, values map[string]string) (*Server, *bytes.Buffer) {
+// projectID and whose resource log is captured in the returned buffer. Unless
+// the caller creates it (see createAppInstalledProject), the project does not
+// exist in the store, so no GitHub App token is minted.
+func newImportCredServer(t *testing.T, projectID string, values map[string]string) (*Server, store.Store, *importCredSecretBackend, *bytes.Buffer) {
 	t.Helper()
-	srv, _ := testServer(t)
-	srv.SetSecretBackend(&importCredSecretBackend{projectID: projectID, values: values})
+	srv, s := testServer(t)
+	backend := &importCredSecretBackend{projectID: projectID, values: values}
+	srv.SetSecretBackend(backend)
 	var logBuf bytes.Buffer
 	srv.resourceLog = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return srv, &logBuf
+	return srv, s, backend, &logBuf
+}
+
+// createAppInstalledProject stores project projectID with a GitHub App
+// installation and enables the App on srv without a private key. Any mint
+// attempt therefore fails in getGitHubAppClient and records an error
+// GitHubAppStatus on the project, which is how the tests detect a mint.
+func createAppInstalledProject(t *testing.T, srv *Server, s store.Store, projectID string, installationID int64) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: installationID,
+		AccountLogin:   "acme-corp",
+		AccountType:    "Organization",
+		AppID:          1,
+		Status:         store.GitHubInstallationStatusActive,
+	}); err != nil {
+		t.Fatalf("failed to create installation: %v", err)
+	}
+	id := installationID
+	if err := s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: projectID, Slug: projectID,
+		GitHubInstallationID: &id,
+		Created:              time.Now(), Updated: time.Now(),
+	}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	srv.config.GitHubAppConfig.AppID = 1
+}
+
+// projectAppStatus returns the stored project's GitHubAppStatus.
+func projectAppStatus(t *testing.T, s store.Store, projectID string) *store.GitHubAppProjectStatus {
+	t.Helper()
+	project, err := s.GetProject(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("failed to get project: %v", err)
+	}
+	return project.GitHubAppStatus
 }
 
 // assertNoCredentialInLog fails if any credential value appears in the log.
@@ -130,7 +172,7 @@ func TestImportCredential_GitHubCascade(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, logBuf := newImportCredServer(t, projectID, tt.values)
+			srv, _, _, logBuf := newImportCredServer(t, projectID, tt.values)
 			got := srv.importCredential(context.Background(), projectID, sourceURL)
 			if got != tt.want {
 				t.Errorf("importCredential = %q, want %q", got, tt.want)
@@ -145,33 +187,93 @@ func TestImportCredential_GitHubCascade(t *testing.T) {
 
 // TestImportCredential_NonGitHubURLsUnaffected verifies that URLs which are
 // not GitHub folders (archives, even on github.com, rclone and other hosts)
-// never consult the GH_ convention keys and keep the GITHUB_TOKEN fallback.
+// get no credential: FetchRemoteTemplate would ignore it, so importCredential
+// reads no secret and mints no GitHub App token, even for a project that has
+// an App installation and a GITHUB_TOKEN.
 func TestImportCredential_NonGitHubURLsUnaffected(t *testing.T) {
-	const projectID = "project-import-cred-nongh"
 	values := map[string]string{
 		"GH_ACME_CORP__TEMPLATES": "fake-repo-cred",
 		"GH_ACME_CORP":            "fake-owner-cred",
 		"GITHUB_TOKEN":            "fake-default-cred",
 	}
-	for _, sourceURL := range []string{
+	for i, sourceURL := range []string{
 		"https://github.com/acme-corp/templates/archive/main.tar.gz",
 		"https://example.com/acme-corp/templates.tgz",
 		":gcs:bucket/acme-corp/templates",
 	} {
 		t.Run(sourceURL, func(t *testing.T) {
-			srv, logBuf := newImportCredServer(t, projectID, values)
-			if got := srv.importCredential(context.Background(), projectID, sourceURL); got != "fake-default-cred" {
-				t.Errorf("importCredential = %q, want the GITHUB_TOKEN value", got)
+			projectID := tid("project-import-cred-nongh")
+			srv, s, backend, _ := newImportCredServer(t, projectID, values)
+			createAppInstalledProject(t, srv, s, projectID, int64(91000+i))
+			if got := srv.importCredential(context.Background(), projectID, sourceURL); got != "" {
+				t.Errorf("importCredential = %q, want no credential", got)
 			}
-			assertNoCredentialInLog(t, logBuf.String(), values)
+			if backend.gets != 0 {
+				t.Errorf("secret backend Get called %d times, want 0", backend.gets)
+			}
+			if status := projectAppStatus(t, s, projectID); status != nil {
+				t.Errorf("GitHub App status = %+v, want untouched (no mint attempted)", status)
+			}
 		})
+	}
+}
+
+// TestImportCredential_GHKeyBeatsGitHubApp pins the precedence between the
+// GH_ convention keys and the GitHub App installation token: a matching GH_
+// key wins and no App mint is attempted. The control case shows the App mint
+// does run when no GH_ key matches, so the first case's untouched App status
+// is meaningful.
+func TestImportCredential_GHKeyBeatsGitHubApp(t *testing.T) {
+	const sourceURL = "https://github.com/acme-corp/templates/tree/main/.scion/templates"
+
+	t.Run("GH key wins without minting", func(t *testing.T) {
+		projectID := tid("project-import-cred-app-gh")
+		srv, s, _, _ := newImportCredServer(t, projectID, map[string]string{
+			"GH_ACME_CORP__TEMPLATES": "fake-repo-cred",
+			"GITHUB_TOKEN":            "fake-default-cred",
+		})
+		createAppInstalledProject(t, srv, s, projectID, 92001)
+		if got := srv.importCredential(context.Background(), projectID, sourceURL); got != "fake-repo-cred" {
+			t.Errorf("importCredential = %q, want the GH_ repo credential", got)
+		}
+		if status := projectAppStatus(t, s, projectID); status != nil {
+			t.Errorf("GitHub App status = %+v, want untouched (no mint attempted)", status)
+		}
+	})
+
+	t.Run("App mint runs when no GH key matches", func(t *testing.T) {
+		projectID := tid("project-import-cred-app-default")
+		srv, s, _, _ := newImportCredServer(t, projectID, map[string]string{
+			"GITHUB_TOKEN": "fake-default-cred",
+		})
+		createAppInstalledProject(t, srv, s, projectID, 92002)
+		if got := srv.importCredential(context.Background(), projectID, sourceURL); got != "fake-default-cred" {
+			t.Errorf("importCredential = %q, want the GITHUB_TOKEN fallback after the failed mint", got)
+		}
+		status := projectAppStatus(t, s, projectID)
+		if status == nil || status.State != store.GitHubAppStateError {
+			t.Errorf("GitHub App status = %+v, want an error state from the attempted mint", status)
+		}
+	})
+}
+
+// TestImportCredential_DotGitURLUsesRepoKey verifies that a clone-style URL
+// ending in .git uses the same repo-specific credential as the URL without it.
+func TestImportCredential_DotGitURLUsesRepoKey(t *testing.T) {
+	const projectID = "project-import-cred-dotgit"
+	srv, _, _, _ := newImportCredServer(t, projectID, map[string]string{
+		"GH_ACME_CORP__TEMPLATES": "fake-repo-cred",
+		"GH_ACME_CORP":            "fake-owner-cred",
+	})
+	if got := srv.importCredential(context.Background(), projectID, "https://github.com/acme-corp/templates.git"); got != "fake-repo-cred" {
+		t.Errorf("importCredential = %q, want the GH_ repo credential", got)
 	}
 }
 
 // TestImportCredential_NoProject verifies that a global-scope import (no
 // project) stays unauthenticated even when convention keys exist.
 func TestImportCredential_NoProject(t *testing.T) {
-	srv, _ := newImportCredServer(t, "", map[string]string{"GH_ACME_CORP": "fake-owner-cred", "GITHUB_TOKEN": "fake-default-cred"})
+	srv, _, _, _ := newImportCredServer(t, "", map[string]string{"GH_ACME_CORP": "fake-owner-cred", "GITHUB_TOKEN": "fake-default-cred"})
 	if got := srv.importCredential(context.Background(), "", "https://github.com/acme-corp/templates"); got != "" {
 		t.Errorf("importCredential = %q, want unauthenticated", got)
 	}
@@ -182,7 +284,7 @@ func TestImportCredential_NoProject(t *testing.T) {
 // fetch unauthenticated rather than failing it.
 func TestImportCredential_BackendErrorFallsThrough(t *testing.T) {
 	const projectID = "project-import-cred-err"
-	srv, logBuf := newImportCredServer(t, projectID, nil)
+	srv, _, _, logBuf := newImportCredServer(t, projectID, nil)
 	srv.SetSecretBackend(&importCredSecretBackend{projectID: projectID, getErr: errors.New("backend unavailable")})
 	if got := srv.importCredential(context.Background(), projectID, "https://github.com/acme-corp/templates"); got != "" {
 		t.Errorf("importCredential = %q, want unauthenticated", got)

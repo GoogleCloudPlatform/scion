@@ -47,9 +47,8 @@ var skillDiscoverKind = resourceImportKind{
 // DiscoverSkillsRequest is the request body for
 // POST /api/v1/skills/discover-directory.
 //
-// ProjectID is optional; when set it is used to resolve GitHub credentials (a
-// GitHub App installation token, falling back to the project's GITHUB_TOKEN
-// secret) so private repositories can be scanned.
+// ProjectID is optional; when set it is used to resolve the project's GitHub
+// credential (see importCredential) so private repositories can be scanned.
 type DiscoverSkillsRequest struct {
 	SourceURL string `json:"sourceUrl"`
 	ProjectID string `json:"projectId,omitempty"`

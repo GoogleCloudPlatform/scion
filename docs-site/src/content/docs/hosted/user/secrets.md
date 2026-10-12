@@ -278,7 +278,7 @@ Create a project secret with one of these naming patterns:
 | `GH_{OWNER}__{REPO}` | One specific repo | `GH_ACME_CORP__PRIVATE_SKILLS` |
 | `GH_{OWNER}` | All repos under an owner/org | `GH_ACME_CORP` |
 
-**Normalization rules:** uppercase the name, replace hyphens (`-`) and dots (`.`) with underscores (`_`). The double underscore (`__`) separates owner from repo. *Note: Because of this normalization, names that differ only by hyphens, dots, or underscores (e.g., `acme-corp` and `acme_corp`) will resolve to the same secret name.*
+**Normalization rules:** uppercase the name, replace hyphens (`-`) and dots (`.`) with underscores (`_`). The double underscore (`__`) separates owner from repo. *Note: Because of this normalization, names that differ only by hyphens, dots, or underscores (e.g., `acme-corp` and `acme_corp`) will resolve to the same secret name.* A trailing `.git` on the repository name is dropped, so `acme-corp/templates.git` uses `GH_ACME_CORP__TEMPLATES`.
 
 **Examples:**
 
@@ -322,6 +322,25 @@ When resolving a `gh://owner/repo/...` URI, Scion checks credentials in this ord
 The first match wins. If no convention secret exists, behavior is identical to the default single-token resolution.
 
 *Note: Credentials resolved for private `gh://` URIs are preserved end-to-end through the entire download sequence, preventing unauthenticated fallback or 404 errors during multi-file resolution.*
+
+### Template and Harness-Config Imports
+
+The same secret names authenticate remote imports into a project. This covers importing templates and harness-configs from a GitHub URL with project scope, and scanning a GitHub directory for skills. For a `https://github.com/{owner}/{repo}/...` folder URL, the Hub checks credentials in this order:
+
+| Priority | Source | Description |
+| :--- | :--- | :--- |
+| 1 | `GH_{OWNER}__{REPO}` | Repo-specific convention secret |
+| 2 | `GH_{OWNER}` | Owner-level convention secret |
+| 3 | GitHub App installation token | Only if the project has a GitHub App installation |
+| 4 | `GITHUB_TOKEN` | Project secret |
+| 5 | Unauthenticated | No credential found; works for public repos only |
+
+For example, with a `GH_ACME_CORP` project secret, a project-scope import from `https://github.com/acme-corp/templates/tree/main/.scion/templates` uses that credential.
+
+Limits:
+
+- Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip`, including `github.com/.../archive/...` links), rclone sources and other hosts are always fetched without one.
+- Global-scope (Hub-level) imports and `scion harness-config install` are unauthenticated, so they work only with public repositories.
 
 ### Injection Mode Behavior
 

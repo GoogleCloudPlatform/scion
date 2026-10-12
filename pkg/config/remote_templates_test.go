@@ -101,6 +101,7 @@ func TestGitHubRepoForURL(t *testing.T) {
 		{"tree URL", "https://github.com/acme-corp/templates/tree/main/.scion/templates", "acme-corp", "templates", true},
 		{"repo root", "https://github.com/acme-corp/templates", "acme-corp", "templates", true},
 		{"direct path", "https://github.com/acme-corp/templates/harnesses/claude", "acme-corp", "templates", true},
+		{"clone URL keeps .git (ghauth.RepoKey drops it)", "https://github.com/acme-corp/templates.git", "acme-corp", "templates.git", true},
 		{"github archive", "https://github.com/acme-corp/templates/archive/main.tar.gz", "", "", false},
 		{"owner only", "https://github.com/acme-corp", "", "", false},
 		{"other host", "https://example.com/acme-corp/templates", "", "", false},

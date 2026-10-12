@@ -35,8 +35,13 @@ func NormalizeName(name string) string {
 }
 
 // RepoKey returns the repo-specific credential name for owner/repo:
-// GH_{OWNER}__{REPO}.
+// GH_{OWNER}__{REPO}. A trailing ".git" on repo is dropped first, so
+// "templates.git" (as in a clone URL) names the same credential as
+// "templates"; GitHub repository names cannot end in ".git".
 func RepoKey(owner, repo string) string {
+	if strings.HasSuffix(strings.ToLower(repo), ".git") {
+		repo = repo[:len(repo)-len(".git")]
+	}
 	return "GH_" + NormalizeName(owner) + "__" + NormalizeName(repo)
 }
 

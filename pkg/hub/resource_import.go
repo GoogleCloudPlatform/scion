@@ -307,28 +307,33 @@ func (s *Server) fetchRemoteForImport(ctx context.Context, projectID, sourceURL 
 }
 
 // importCredential returns the GitHub credential for fetching sourceURL on
-// behalf of projectID, or "" to fetch unauthenticated. It mirrors the skill
-// resolver's project-scope cascade:
+// behalf of projectID, or "" to fetch unauthenticated. For a GitHub folder URL
+// it mirrors the skill resolver's project-scope cascade:
 //
-//  1. For a GitHub folder URL, the repo-specific project secret
-//     GH_{OWNER}__{REPO}, then the owner-level GH_{OWNER} (see pkg/ghauth).
+//  1. The repo-specific project secret GH_{OWNER}__{REPO}, then the
+//     owner-level GH_{OWNER} (see pkg/ghauth).
 //  2. A GitHub App installation token for the project, if it has one.
 //  3. The project's GITHUB_TOKEN secret.
 //
-// projectID may be "" for global-scope (hub-level) imports, which have no
-// project to authenticate against; in that case the fetch is unauthenticated.
-// Credential values are never logged; only the secret name is.
+// Other sources (archives, even on github.com, rclone and other hosts) get
+// "": FetchRemoteTemplate sends a credential only for GitHub folders, so
+// neither an App token is minted nor a secret read for them. projectID may
+// be "" for global-scope (hub-level) imports, which have no project to
+// authenticate against; those fetches are unauthenticated too. Credential
+// values are never logged; only the secret name is.
 func (s *Server) importCredential(ctx context.Context, projectID, sourceURL string) string {
 	if projectID == "" {
 		return ""
 	}
+	owner, repo, ok := config.GitHubRepoForURL(sourceURL)
+	if !ok {
+		return ""
+	}
 
-	if owner, repo, ok := config.GitHubRepoForURL(sourceURL); ok {
-		for _, key := range []string{ghauth.RepoKey(owner, repo), ghauth.OwnerKey(owner)} {
-			if val := s.projectSecretForImport(ctx, projectID, key); val != "" {
-				s.resourceLog.Info("using project credential for resource import", "projectID", projectID, "secret", key)
-				return val
-			}
+	for _, key := range []string{ghauth.RepoKey(owner, repo), ghauth.OwnerKey(owner)} {
+		if val := s.projectSecretForImport(ctx, projectID, key); val != "" {
+			s.resourceLog.Info("using project credential for resource import", "projectID", projectID, "secret", key)
+			return val
 		}
 	}
 
