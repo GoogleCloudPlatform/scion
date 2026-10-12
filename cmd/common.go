@@ -372,6 +372,9 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		TargetAgent:      targetAgent,
 		ExcludedAgents:   excludedAgents,
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
+		// A project from the current context names a project on a
+		// specific hub, so the hub.enabled gate does not apply.
+		ExplicitHub: isContextProject(projectPath),
 		// On the local workstation hub, link an unregistered project
 		// without prompting; a remote hub keeps the prompt.
 		AutoLinkLocal: true,
@@ -379,7 +382,7 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 
 	// A hub project reference needs hub mode: offer to enable it (when
 	// logged in, interactively) or name 'scion hub enable' (#3533).
-	if !noHub && projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
+	if !noHub && !opts.ExplicitHub && projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
 		if err := ensureHubModeForHubProjectRefForInvocation(projectPath); err != nil {
 			return nil, err
 		}

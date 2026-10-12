@@ -86,6 +86,11 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	case "scion":
 		// Root command itself doesn't require project
 		return false
+	case "use":
+		// Top-level 'use' (alias of 'project use') acts on user state.
+		if isTopLevel(cmd) {
+			return false
+		}
 	}
 	// Hub login and connection commands (ptone/scion#3317).
 	if parentName == "auth" && commandInSubtree(cmd, "hub") {

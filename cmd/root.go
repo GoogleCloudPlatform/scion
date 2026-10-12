@@ -126,6 +126,12 @@ return an error instead of blocking.`,
 			return err
 		}
 
+		// Fill the hub endpoint and project from the current context
+		// ('scion use') where no flag, environment variable or directory
+		// project chose them. It runs before the project requirement check
+		// so a selected project satisfies it.
+		resolveInvocationTarget(cmd, mode)
+
 		// A config subcommand's own --global flag (config set --global,
 		// config migrate --global) shadows the root --global, so cobra never
 		// sets globalMode for it. Treat it as the root flag too, so the

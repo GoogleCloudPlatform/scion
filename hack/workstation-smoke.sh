@@ -24,6 +24,10 @@
 #   3. scion hub link              links to the local hub without a prompt
 #   4. scion hub status            reports the project as linked
 #   5. scion list                  returns an empty list through the hub
+#  5b. scion use <project>         from a directory outside any project
+#                                  selects the linked project; scion list
+#                                  then returns the empty list through the
+#                                  hub, and scion use shows source "context"
 #   6. scion server stop           stops the server
 #   7. no image registry           in a second fresh HOME with no
 #                                  image_registry anywhere, scion server start
@@ -303,6 +307,24 @@ grep -q "Using hub: http://127.0.0.1:" "$WORK/list.err" || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list --format json"; }
 tr -d '[:space:]' <"$WORK/list.json" | grep -Eq '^(\[\]|null)$' || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list did not return an empty list"; }
+
+log "5b. outside any project, scion use selects the project and scion list targets it"
+HUB_PROJECT_ID="$(tr -d '\n' <"$WORK/status.json" | grep -o '"hubProjectId"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | head -n 1)"
+[ -n "$HUB_PROJECT_ID" ] || { cat "$WORK/status.json" >&2; fail "hub status did not report the hub project ID"; }
+USE_DIR="$(mktemp -d "$WORK/use.XXXXXX")"
+(cd "$USE_DIR" && "$SCION" use "$HUB_PROJECT_ID") >"$WORK/use.out" 2>&1 || {
+  cat "$WORK/use.out" >&2; fail "scion use <project>"; }
+cat "$WORK/use.out"
+grep -q "^Now using project '.*' on hub 'local' (http://127.0.0.1:" "$WORK/use.out" || {
+  fail "scion use did not select the project on the local hub"; }
+(cd "$USE_DIR" && "$SCION" list --format json) >"$WORK/list-use.json" 2>"$WORK/list-use.err" || {
+  cat "$WORK/list-use.json" "$WORK/list-use.err" >&2; fail "scion list after scion use"; }
+tr -d '[:space:]' <"$WORK/list-use.json" | grep -Eq '^(\[\]|null)$' || {
+  cat "$WORK/list-use.json" "$WORK/list-use.err" >&2; fail "scion list after scion use did not return an empty list"; }
+(cd "$USE_DIR" && "$SCION" use --format json) >"$WORK/use.json" 2>"$WORK/use.err" || {
+  cat "$WORK/use.json" "$WORK/use.err" >&2; fail "scion use --format json"; }
+grep -Eq '"source"[[:space:]]*:[[:space:]]*"context"' "$WORK/use.json" || {
+  cat "$WORK/use.json" >&2; fail "scion use does not report the current context as the source"; }
 
 log "6. scion server stop"
 stop_server || { cat "$WORK/stop.out" >&2; fail "scion server stop"; }
