@@ -425,8 +425,17 @@ async function expectNoStartNoReload(tracked: TrackedPage, submit: SubmitResult)
 }
 
 /** The failed-create panel contract; returns the code shown. */
-async function expectFailedCreatePanel(page: Page): Promise<{ code: string; message: string }> {
+async function expectFailedCreatePanel(
+  page: Page,
+  evidence?: Record<string, unknown>
+): Promise<{ code: string; message: string }> {
+  // With evidence, each fact is merged in as soon as it is read and each
+  // A3c result as soon as it is checked, so a later failure cannot erase
+  // what already passed.
+  const panel: Record<string, unknown> = {};
+  if (evidence) evidence.panel = panel;
   await expect(page.locator(SELECTORS.incompleteBanner)).toBeVisible({ timeout: LAUNCH_TIMEOUT });
+  panel.visible = true;
   // The panel may first show only "stopping" while the create winds down.
   await expect
     .poll(
@@ -436,20 +445,27 @@ async function expectFailedCreatePanel(page: Page): Promise<{ code: string; mess
     )
     .not.toBe('');
   const code = launchErrorCodeOf(await page.locator(SELECTORS.launchErrorCode).innerText());
+  const message = (await page.locator(SELECTORS.incompleteMessage).innerText()).trim();
+  if (evidence) Object.assign(evidence, { code, messageLength: message.length });
+  // A3b: a known code and a message.
   expect(KNOWN_LAUNCH_ERROR_CODES as readonly string[], `code ${code} is a known code`).toContain(
     code
   );
-  const message = (await page.locator(SELECTORS.incompleteMessage).innerText()).trim();
   expect(message, 'the panel error message').not.toBe('');
+  // A3c: Delete and Create again offered, no Start/Resume in the header.
   await expect(incompleteDeleteButton(page)).toBeVisible();
+  panel.deleteAction = true;
   await expect(incompleteCreateAgainLink(page)).toHaveAttribute(
     'href',
     `/agents/new?projectId=${encodeURIComponent(journey.projectId!)}`
   );
+  panel.createAgainAction = true;
   const header = await headerButtonTexts(page);
+  panel.headerActions = header;
   for (const action of FORBIDDEN_HEADER_ACTIONS) {
     expect(header, `header offers no "${action}"`).not.toContain(action);
   }
+  panel.forbiddenHeaderActions = false;
   return { code, message };
 }
 
@@ -1183,23 +1199,16 @@ test.describe.serial('async agent create from the web form', () => {
     expect(submit.requestImage, 'the form sent the typed image as config.image').toBe(image);
 
     // 1. Graded UX rows (A3b, A3c): the failed-create panel with code and
-    //    message, Delete and Create again, no Start/Resume in the header;
-    //    then no /start and no reload. Their evidence is merged in at once.
-    const panel = await expectFailedCreatePanel(tracked.page);
-    await expectNoStartNoReload(tracked, submit);
+    //    message, Delete and Create again, no Start/Resume in the header
+    //    (each merged into the evidence as it is read or checked); then the
+    //    reload/state evidence is recorded before no /start and no reload
+    //    are asserted.
+    const panel = await expectFailedCreatePanel(tracked.page, a4Evidence);
     const sse = await sseRecords(tracked.page, submit.agentId);
     const lastLaunch = sse.filter((r) => r.launch).at(-1)?.launch ?? null;
     const imageReason = imageFailureReason(panel.message, panel.code, lastLaunch, image);
     const timeline = await timelineRows(tracked.page, submit.agentId);
     Object.assign(a4Evidence, {
-      code: panel.code,
-      messageLength: panel.message.length,
-      panel: {
-        visible: true,
-        deleteAction: true,
-        createAgainAction: true,
-        forbiddenHeaderActions: false,
-      },
       finalLaunch: lastLaunch,
       a4ImageReasonExposed: imageReason.exposed,
       imageReasonSource: imageReason.source,
@@ -1209,6 +1218,7 @@ test.describe.serial('async agent create from the web form', () => {
       sse,
       requests: requestsSinceSubmit(tracked, submit),
     });
+    await expectNoStartNoReload(tracked, submit);
     // Recorded finding, never silent and never a failure on its own: the
     // failure cause text is not exposed to clients yet (upstream #4666).
     if (!imageReason.exposed) {
