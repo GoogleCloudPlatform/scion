@@ -80,6 +80,64 @@ export interface StartHubOptions {
   build?: boolean;
   /** State file shared with stopHub. Default: the main suite's. */
   stateFile?: string;
+  /**
+   * Extra environment of the hub process, e.g. supported configuration
+   * such as SCION_SERVER_HUB_ASYNCAGENTLAUNCH=true or SCION_IMAGE_REGISTRY.
+   * Applied over the harness environment (also over the SCION_*-free
+   * environment of a member-level test hub). Keys the harness owns
+   * (HARNESS_OWNED_ENV) are refused.
+   */
+  env?: Record<string, string>;
+  /**
+   * Run the co-located runtime broker in the same process
+   * (--enable-runtime-broker on a free loopback port, --auto-provide), so a
+   * hub-managed project created on this hub gets it as its provider.
+   * Requires testIdentities (the broker writes under the private HOME).
+   * The broker runs containers only where a container runtime works; it
+   * registers either way. Default false.
+   */
+  runtimeBroker?: boolean;
+  /** Hub binary to run. Default: build/scion. For the harness's own tests. */
+  binary?: string;
+}
+
+/**
+ * Environment keys the harness sets itself; StartHubOptions.env may not
+ * set them.
+ */
+export const HARNESS_OWNED_ENV: readonly string[] = [
+  'HOME',
+  'SCION_CLI_MODE',
+  'SCION_SERVER_HUB_HUBID',
+  'SCION_SERVER_HUB_CLASS',
+  'SCION_SERVER_RUNTIMEBROKER_HOST',
+];
+
+/**
+ * Prefixes of environment keys StartHubOptions.env may not set either: the
+ * test mode and test identity settings stay with the harness (the
+ * --enable-test-identities flag and the marker).
+ */
+export const HARNESS_OWNED_ENV_PREFIXES: readonly string[] = [
+  'SCION_SERVER_HUB_TEST',
+  'SCION_SERVER_TEST',
+];
+
+/** Whether StartHubOptions.env may not set key. */
+export function isHarnessOwnedEnv(key: string): boolean {
+  const upper = key.toUpperCase();
+  return (
+    HARNESS_OWNED_ENV.includes(upper) ||
+    HARNESS_OWNED_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix))
+  );
+}
+
+/** Throws if extra sets a harness-owned key. */
+function checkExtraEnv(extra: Record<string, string>): void {
+  const owned = Object.keys(extra).filter(isHarnessOwnedEnv);
+  if (owned.length > 0) {
+    throw new Error(`startHub: env may not set harness-owned keys: ${owned.join(', ')}`);
+  }
 }
 
 /** Acknowledgement flag of `scion server test-infra mark`. */
@@ -232,6 +290,12 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   const testLogin = options.testLogin ?? true;
   const testIdentities = options.testIdentities ?? false;
   const stateFile = options.stateFile ?? STATE_FILE;
+  const binary = options.binary ?? HUB_BINARY;
+  const extraEnv = options.env ?? {};
+  checkExtraEnv(extraEnv);
+  if (options.runtimeBroker && !testIdentities) {
+    throw new Error('startHub: runtimeBroker needs testIdentities (a private HOME)');
+  }
 
   // Build assets and binary
   if (options.build ?? true) {
@@ -262,7 +326,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     env = isolatedEnv(homeDir, { SCION_SERVER_HUB_HUBID: hubId, SCION_SERVER_HUB_CLASS: 'test' });
     console.info(`[hub] Marking ${dbPath} as test infrastructure for hub ${hubId}...`);
     const markOut = execFileSync(
-      HUB_BINARY,
+      binary,
       [
         'server',
         'test-infra',
@@ -279,6 +343,13 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     );
     for (const line of markOut.trim().split('\n')) console.info(`[hub:mark] ${redact(line)}`);
   }
+
+  // The hub process gets the caller's extra environment; the mark step
+  // above does not need it. Harness-owned keys were refused above.
+  env = { ...env, ...extraEnv };
+  // The co-located broker listens on loopback, like the hub (it would
+  // default to all interfaces in hosted mode).
+  if (options.runtimeBroker) env.SCION_SERVER_RUNTIMEBROKER_HOST = '127.0.0.1';
 
   // Find a free port
   const port = await findFreePort();
@@ -298,14 +369,24 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     String(port),
     '--enable-hub',
     '--enable-web',
-    '--enable-runtime-broker=false',
     '--hosted',
     '--dev-auth',
   ];
+  if (options.runtimeBroker) {
+    const brokerPort = await findFreePort();
+    args.push(
+      '--enable-runtime-broker',
+      '--runtime-broker-port',
+      String(brokerPort),
+      '--auto-provide'
+    );
+  } else {
+    args.push('--enable-runtime-broker=false');
+  }
   if (testLogin) args.push('--enable-test-login', '--session-secret', E2E_SESSION_SECRET);
   if (testIdentities) args.push(`--test-mode=member:${hubId}`);
   args.push('--db', dbPath, '--web-assets-dir', webAssetsDir);
-  const hubProcess = spawn(HUB_BINARY, args, {
+  const hubProcess = spawn(binary, args, {
     cwd: homeDir ?? WORKSPACE_ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
