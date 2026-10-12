@@ -227,7 +227,8 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 // column was added, so no dispatch recorded this launch's run) and a report
 // with no run ID change nothing. Best-effort: a failed write is logged and
 // leaves the row as it was, which costs a later delete only a run-scoped
-// refusal or extra 404s. On a swap, row is updated to match.
+// refusal or extra 404s. On a swap, row's RunID and PreviousRunIDs are
+// updated to match.
 func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *RemoteAgentInfo) {
 	if info == nil || info.RunID == "" {
 		return
