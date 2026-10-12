@@ -159,6 +159,33 @@ func countWorktreeGit(t *testing.T) *int {
 	return &n
 }
 
+// recordWorktreeGit wraps runWorktreeGit for the rest of the test and
+// returns a pointer to the git subcommands it ran, in order.
+func recordWorktreeGit(t *testing.T) *[]string {
+	t.Helper()
+	var subcommands []string
+	orig := runWorktreeGit
+	runWorktreeGit = func(wt projectWorktree, args ...string) (string, error) {
+		if len(args) > 0 {
+			subcommands = append(subcommands, args[0])
+		}
+		return orig(wt, args...)
+	}
+	t.Cleanup(func() { runWorktreeGit = orig })
+	return &subcommands
+}
+
+// countSubcommand returns how many times name appears in subcommands.
+func countSubcommand(subcommands []string, name string) int {
+	n := 0
+	for _, s := range subcommands {
+		if s == name {
+			n++
+		}
+	}
+	return n
+}
+
 // noConfigGitProject builds a git project with an agent dir that has no
 // scion-agent config file and an empty external home, but no workspace.
 func noConfigGitProject(t *testing.T) (base, repo, agentDir, agentHome, ws string) {
@@ -625,7 +652,7 @@ func TestHandleAgentDirWithoutConfig_DirtySubmoduleHiddenByConfigIsKept(t *testi
 }
 
 // GIT_* variables in the process environment do not reach the workspace
-// check: config injected through GIT_CONFIG_COUNT that would ignore every
+// check: config set through GIT_CONFIG_COUNT that would ignore every
 // file does not hide an untracked file, so the dir is kept.
 func TestHandleAgentDirWithoutConfig_InheritedGitEnvIsIgnored(t *testing.T) {
 	base, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
@@ -1026,4 +1053,80 @@ func TestHandleAgentDirWithoutConfig_LockedWorktreeIsKeptWithoutGit(t *testing.T
 
 	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
 	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
+}
+
+// A worktree whose index has a submodule (gitlink) entry is kept even when
+// clean and on a branch, and git status never runs in it.
+func TestHandleAgentDirWithoutConfig_SubmoduleWorktreeIsKeptWithoutStatus(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := noConfigGitProject(t)
+	sub := filepath.Join(base, "subrepo")
+	initTestRepo(t, sub)
+	runGitT(t, repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+	runGitT(t, repo, "commit", "-q", "-m", "add submodule")
+	runGitT(t, repo, "worktree", "add", "-q", "--relative-paths", "-b", "a", ws)
+	runGitT(t, ws, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init")
+	if got := runGitT(t, ws, "status", "--porcelain"); got != "" {
+		t.Fatalf("setup: git status = %q, want a clean worktree", got)
+	}
+	subcommands := recordWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
+	if n := countSubcommand(*subcommands, "ls-files"); n == 0 {
+		t.Errorf("git subcommands = %q, want the index listed", *subcommands)
+	}
+	if n := countSubcommand(*subcommands, "status"); n != 0 {
+		t.Errorf("git subcommands = %q, want no git status", *subcommands)
+	}
+}
+
+// A worktree without a submodule entry is inspected as before: the index is
+// listed, then git status runs, and a clean worktree on a branch is removed.
+func TestHandleAgentDirWithoutConfig_WorktreeWithoutSubmoduleRunsStatus(t *testing.T) {
+	_, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	subcommands := recordWorktreeGit(t)
+
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if n := countSubcommand(*subcommands, "status"); n != 1 {
+		t.Errorf("git subcommands = %q, want git status to run once", *subcommands)
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
+}
+
+// A per-worktree config setting git cannot read as a boolean fails the
+// check: the dir is kept with the could-not-check conflict and no git runs
+// in the worktree.
+func TestHandleAgentDirWithoutConfig_UnreadableWorktreeConfigSettingIsKept(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, repo, "config", "extensions.worktreeConfig", "maybe")
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
+	if !strings.Contains(err.Error(), "could not check") {
+		t.Errorf("error = %v, want the could-not-check conflict", err)
+	}
+	if *gitRuns != 0 {
+		t.Errorf("git ran %d times in the worktree, want 0", *gitRuns)
+	}
+}
+
+// HEAD on a symbolic ref outside refs/heads/ is not on a branch: a commit
+// that only that ref reaches would be lost, so the dir is kept.
+func TestHandleAgentDirWithoutConfig_NonBranchSymbolicHeadIsKept(t *testing.T) {
+	base, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, ws, "checkout", "-q", "--detach")
+	runGitT(t, ws, "commit", "-q", "--allow-empty", "-m", "work on no branch")
+	runGitT(t, ws, "update-ref", "refs/worktree/x", "HEAD")
+	runGitT(t, ws, "symbolic-ref", "HEAD", "refs/worktree/x")
+	if got := runGitT(t, ws, "status", "--porcelain"); got != "" {
+		t.Fatalf("setup: git status = %q, want a clean worktree", got)
+	}
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
 }

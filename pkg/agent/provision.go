@@ -3169,35 +3169,38 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 //
 // A locked worktree (git worktree lock), or any worktree while the project
 // repository has per-worktree config on (extensions.worktreeConfig), also
-// reports true without running git.
+// reports true without running git. Worktrees with submodules are always
+// kept: a gitlink entry in the index reports true before git status runs,
+// because status would read each submodule's own repository metadata, and
+// only worktree metadata that points back to the project repository is
+// trusted.
 //
 // For a worktree of the project repository, work is an uncommitted or
 // untracked change, any index entry with the assume-unchanged or
 // skip-worktree bit (git status does not report edits to those files), or
-// a detached HEAD whose commit no branch or remote ref reaches. A worktree on a named branch is fine for the second check:
-// removing the directory does not delete the branch, which lives in the
-// project repository, so its commits stay reachable. Any failure, including
-// a git command that exceeds worktreeGitTimeout, is returned, and callers
-// must treat it as "may hold work".
+// a HEAD that is not on a branch (detached, or a symbolic ref outside
+// refs/heads/) whose commit no branch or remote ref reaches. A worktree on
+// a named branch is fine for the detached-HEAD check: removing the
+// directory does not delete the branch, which lives in the project
+// repository, so its commits stay reachable. Any failure, including a git
+// command that exceeds worktreeGitTimeout, is returned, and callers must
+// treat it as "may hold work".
 //
 // Deliberate exceptions to "keep when unsure", for a clean worktree of the
 // project repository that is removed:
 //
-//   - Files ignored by the repository's own ignore rules (for example
-//     .env, local config, build outputs) are not reported by git status
-//     and are removed with the worktree. Keeping on them would make almost
-//     every used worktree a permanent conflict (node_modules, dist and
-//     similar). A global excludes file is not applied, so it cannot hide
-//     an untracked file.
+//   - Files ignored by any .gitignore inside the workspace (tracked or
+//     untracked, including one that ignores itself) or by the repository's
+//     info/exclude (for example .env, local config, build outputs) are not
+//     reported by git status and are removed with the worktree. Keeping on
+//     them would make almost every used worktree a permanent conflict
+//     (node_modules, dist and similar). A global excludes file is not
+//     applied, so it cannot hide an untracked file.
 //   - The per-worktree admin state goes with the prune: the HEAD reflog,
 //     ORIG_HEAD, refs/bisect/*, refs/worktree/*, and an in-progress rebase
 //     or merge. A rebase that has rewritten commits is kept (its detached
 //     HEAD is unreachable); commits reachable only from the HEAD reflog
 //     are lost.
-//   - A submodule's git dir lives under the worktree's admin dir, so
-//     commits on a submodule-local branch are lost even when the
-//     superproject is clean. A dirty or advanced submodule is reported
-//     (--ignore-submodules=none) and kept.
 func worktreeMayHoldWork(agentDir, ws string) (hasWork, inspected bool, err error) {
 	info, err := os.Lstat(ws)
 	if err != nil {
@@ -3241,7 +3244,19 @@ func worktreeMayHoldWork(agentDir, ws string) (hasWork, inspected bool, err erro
 		return true, false, nil
 	}
 
-	status, err := runWorktreeGit(wt, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
+	// Only trust worktree metadata that points back to the project
+	// repository: git status would read each submodule's own repository,
+	// so a worktree with a gitlink entry is kept before status runs.
+	// Listing the index does not descend into submodules.
+	staged, err := runWorktreeGit(wt, "ls-files", "-s", "-z")
+	if err != nil {
+		return false, true, fmt.Errorf("git ls-files: %w", err)
+	}
+	if hasGitlinkEntries(staged) {
+		return true, true, nil
+	}
+
+	status, err := runWorktreeGit(wt, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=dirty")
 	if err != nil {
 		return false, true, fmt.Errorf("git status: %w", err)
 	}
@@ -3259,14 +3274,19 @@ func worktreeMayHoldWork(agentDir, ws string) (hasWork, inspected bool, err erro
 		return true, true, nil
 	}
 
-	// symbolic-ref -q exits 1 with no output for a detached HEAD.
-	_, err = runWorktreeGit(wt, "symbolic-ref", "-q", "HEAD")
+	// symbolic-ref -q exits 1 with no output for a detached HEAD. A
+	// symbolic ref outside refs/heads/ (for example refs/worktree/x) is not
+	// a branch, so it gets the same reachability check as a detached HEAD.
+	head, err := runWorktreeGit(wt, "symbolic-ref", "-q", "HEAD")
 	if err == nil {
-		return false, true, nil
-	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-		return false, true, fmt.Errorf("git symbolic-ref: %w", err)
+		if strings.HasPrefix(strings.TrimSpace(head), "refs/heads/") {
+			return false, true, nil
+		}
+	} else {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return false, true, fmt.Errorf("git symbolic-ref: %w", err)
+		}
 	}
 	refs, err := runWorktreeGit(wt, "for-each-ref", "--count=1", "--contains", "HEAD", "--format=%(refname)", "refs/heads/", "refs/remotes/")
 	if err != nil {
@@ -3284,6 +3304,17 @@ func hasHiddenIndexEntries(lsFiles string) bool {
 			continue
 		}
 		if tag := entry[0]; tag == 'S' || (tag >= 'a' && tag <= 'z') {
+			return true
+		}
+	}
+	return false
+}
+
+// hasGitlinkEntries reports whether NUL-separated git ls-files -s output
+// has an entry with mode 160000 (a submodule).
+func hasGitlinkEntries(lsFiles string) bool {
+	for _, entry := range strings.Split(lsFiles, "\x00") {
+		if strings.HasPrefix(entry, "160000 ") {
 			return true
 		}
 	}
@@ -3493,8 +3524,8 @@ var runWorktreeGit = worktreeGit
 var worktreeGitTimeout = 30 * time.Second
 
 // worktreeGit runs git in the worktree wt with a fixed locale, with the
-// file-system monitor and the untracked cache off, with only the
-// repository's own ignore rules (no global excludes file), within
+// file-system monitor and the untracked cache off, with only the ignore
+// rules inside the repository and workspace (no global excludes file), within
 // worktreeGitTimeout, and without GIT_* variables from the process
 // environment, so the answer does not depend on how the process was
 // started. GIT_DIR, GIT_COMMON_DIR and GIT_WORK_TREE are pinned to the paths
