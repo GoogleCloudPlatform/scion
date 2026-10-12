@@ -100,26 +100,49 @@ type leakGuardResult struct {
 	counts map[string]int
 	total  int
 	stacks []string
+	// ids holds the goroutine ID of every counted goroutine.
+	ids map[string]bool
 }
 
 // scanLeakedGoroutines returns the live goroutines that match
 // leakGuardSignatures. A goroutine counts once, under the first signature
-// it matches.
-func scanLeakedGoroutines() leakGuardResult {
-	res := leakGuardResult{counts: map[string]int{}}
+// it matches. Goroutines whose ID is in exclude are skipped; Go never
+// reuses a goroutine ID within a process, so an excluded ID can only ever
+// refer to the goroutine it was taken from.
+func scanLeakedGoroutines(exclude map[string]bool) leakGuardResult {
+	res := leakGuardResult{counts: map[string]int{}, ids: map[string]bool{}}
 	for _, block := range strings.Split(string(allGoroutineStacks()), "\n\n") {
 		block = strings.TrimSpace(block)
+		id := goroutineID(block)
+		if exclude[id] {
+			continue
+		}
 		for _, sig := range leakGuardSignatures {
 			if strings.Contains(block, sig) {
 				res.counts[sig]++
 				res.total++
 				res.stacks = append(res.stacks, block)
+				res.ids[id] = true
 				break
 			}
 		}
 	}
 	sort.Strings(res.stacks)
 	return res
+}
+
+// goroutineID returns the ID from a stack block's "goroutine N [...]:"
+// header, or "" if the block has no such header.
+func goroutineID(block string) string {
+	rest, ok := strings.CutPrefix(block, "goroutine ")
+	if !ok {
+		return ""
+	}
+	id, _, ok := strings.Cut(rest, " ")
+	if !ok {
+		return ""
+	}
+	return id
 }
 
 func allGoroutineStacks() []byte {
@@ -137,11 +160,17 @@ func allGoroutineStacks() []byte {
 // threshold, then reports to w. It returns false when the count is still
 // above max.
 func checkPackageLeaks(w io.Writer, max int, settle time.Duration, alwaysReport bool) bool {
+	return checkLeaksExcluding(w, max, settle, alwaysReport, nil)
+}
+
+// checkLeaksExcluding is checkPackageLeaks, ignoring the goroutines whose
+// IDs are in exclude (see scanLeakedGoroutines).
+func checkLeaksExcluding(w io.Writer, max int, settle time.Duration, alwaysReport bool, exclude map[string]bool) bool {
 	deadline := time.Now().Add(settle)
-	res := scanLeakedGoroutines()
+	res := scanLeakedGoroutines(exclude)
 	for res.total > max && time.Now().Before(deadline) {
 		time.Sleep(50 * time.Millisecond)
-		res = scanLeakedGoroutines()
+		res = scanLeakedGoroutines(exclude)
 	}
 	if alwaysReport || res.total > max {
 		var b bytes.Buffer
