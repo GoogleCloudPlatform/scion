@@ -143,7 +143,12 @@ func TestSubstrateBrokerManifest_HubEndpointFromServerKey(t *testing.T) {
 //     value in every case;
 //   - the public hub endpoint (resolveHubEndpointWithSource) does follow
 //     the env var, but a broker-only server does not consume it: the
-//     container hub settings derived from it are the same in every case.
+//     container hub settings derived from it are the same in every case;
+//   - the env var also marks the process as a hub context, so the
+//     cwd-default project (ResolveProjectPath("")) from a working directory
+//     outside any project is a synthetic <cwd>/.scion that does not exist.
+//     Without it, the default is the global directory, which is already
+//     loaded as the global settings layer.
 func TestSubstrateBrokerHubEndpointResolution(t *testing.T) {
 	m := loadSubstrateBrokerManifest(t)
 
@@ -162,6 +167,9 @@ func TestSubstrateBrokerHubEndpointResolution(t *testing.T) {
 		env            string
 		wantPublic     string
 		wantPublicFrom hubEndpointSource
+		// wantCwdProject is the expected cwd-default project: true for the
+		// synthetic <cwd>/.scion, false for the global directory.
+		wantCwdProject bool
 	}{
 		{
 			name:           "env unset (manifest without the fallback)",
@@ -173,12 +181,14 @@ func TestSubstrateBrokerHubEndpointResolution(t *testing.T) {
 			env:            substrateBrokerManifestHubURL,
 			wantPublic:     substrateBrokerManifestHubURL,
 			wantPublicFrom: hubEndpointSourceBrokerSettings,
+			wantCwdProject: true,
 		},
 		{
 			name:           "env set to a different value",
 			env:            otherHubURL,
 			wantPublic:     otherHubURL,
 			wantPublicFrom: hubEndpointSourceBrokerSettings,
+			wantCwdProject: true,
 		},
 	}
 
@@ -188,8 +198,11 @@ func TestSubstrateBrokerHubEndpointResolution(t *testing.T) {
 			t.Setenv("HOME", home)
 			require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"), []byte(m.settings), 0o644))
-			// The pod's working directory is not inside a project.
-			t.Chdir(home)
+			// The pod sets no workingDir, so the server runs from the image's
+			// working directory, outside any project and outside HOME.
+			workDir := filepath.Join(t.TempDir(), "app")
+			require.NoError(t, os.MkdirAll(workDir, 0o755))
+			t.Chdir(workDir)
 			if tt.env != "" {
 				t.Setenv("SCION_HUB_ENDPOINT", tt.env)
 			} else {
@@ -228,6 +241,17 @@ func TestSubstrateBrokerHubEndpointResolution(t *testing.T) {
 				},
 			}, nil)
 			assert.Equal(t, containerHubEndpointResult{}, got)
+
+			projectDir, isGlobal, err := config.ResolveProjectPath("")
+			require.NoError(t, err)
+			if tt.wantCwdProject {
+				assert.Equal(t, filepath.Join(workDir, config.DotScion), projectDir)
+				assert.False(t, isGlobal)
+				assert.NoDirExists(t, projectDir)
+			} else {
+				assert.Equal(t, filepath.Join(home, config.DotScion), projectDir)
+				assert.True(t, isGlobal)
+			}
 		})
 	}
 }
