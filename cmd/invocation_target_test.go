@@ -430,7 +430,7 @@ func TestResolveInvocationTarget_WarningToCommandErr(t *testing.T) {
 	list.SetErr(&errOut)
 	t.Cleanup(func() { list.SetErr(nil) })
 
-	stderr := captureStderr(t, func() { resolveInvocationTarget(list, ModeHuman) })
+	stderr := captureStderr(t, func() { require.NoError(t, resolveInvocationTarget(list, ModeHuman)) })
 	assert.Contains(t, errOut.String(), "Warning: ignoring the current context")
 	assert.Empty(t, stderr)
 }

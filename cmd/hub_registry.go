@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sync"
 	"text/tabwriter"
 	"time"
@@ -181,7 +180,7 @@ func runHubAdd(cmd *cobra.Command, args []string) error {
 	if err := checkHubRegistryAvailable(); err != nil {
 		return err
 	}
-	return hubAdd(os.Stdout, os.Stderr, args[0], args[1], hubAddUse)
+	return hubAdd(cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], args[1], hubAddUse)
 }
 
 func hubAdd(out, stderr io.Writer, name, url string, use bool) error {
@@ -236,7 +235,7 @@ func runHubList(cmd *cobra.Command, args []string) error {
 	if err := checkHubRegistryAvailable(); err != nil {
 		return err
 	}
-	return hubList(os.Stdout, os.Stderr, hubListCheck)
+	return hubList(cmd.OutOrStdout(), cmd.ErrOrStderr(), hubListCheck)
 }
 
 func hubList(out, stderr io.Writer, check bool) error {
@@ -311,7 +310,7 @@ func runHubRename(cmd *cobra.Command, args []string) error {
 	if err := checkHubRegistryAvailable(); err != nil {
 		return err
 	}
-	return hubRename(os.Stdout, args[0], args[1])
+	return hubRename(cmd.OutOrStdout(), args[0], args[1])
 }
 
 func hubRename(out io.Writer, oldName, newName string) error {
@@ -343,7 +342,7 @@ func runHubRemove(cmd *cobra.Command, args []string) error {
 	if err := checkHubRegistryAvailable(); err != nil {
 		return err
 	}
-	return hubRemove(os.Stdout, args[0], hubRemoveLogout)
+	return hubRemove(cmd.OutOrStdout(), args[0], hubRemoveLogout)
 }
 
 func hubRemove(out io.Writer, name string, logout bool) error {

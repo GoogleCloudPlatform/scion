@@ -416,7 +416,7 @@ func runUseShow(out, stderr io.Writer) error {
 		_, _ = fmt.Fprintf(out, "Auth:     %s\n", useAuthLine(info, hubLoginCommand(c, t.HubEndpoint)))
 	}
 	if t.HubSource == useSourceContext {
-		warnHubTokenForContextHub(os.Stderr, hubName)
+		warnHubTokenForContextHub(stderr, hubName)
 	}
 	if overridden {
 		project := "-"

@@ -89,7 +89,7 @@ func TestRecordLoginEndpoint_HubURLStillPersists(t *testing.T) {
 // to the command's stdout.
 func TestRecordLoginEndpoint_WritesToCommandOut(t *testing.T) {
 	setupLoginContextTest(t)
-	resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman)
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
 	require.Equal(t, targetSourceContext, hubSource)
 	var out strings.Builder
 	hubAuthLoginCmd.SetOut(&out)

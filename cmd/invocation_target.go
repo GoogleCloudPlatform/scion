@@ -17,6 +17,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -147,14 +148,15 @@ var importGlobalHubSettings = true
 
 // loadInvocationContext reads context.yaml for this invocation, after the
 // one-time import of the global settings' hub configuration. A failure to
-// save the import is a warning: the returned context holds it anyway.
-func loadInvocationContext() (*config.CLIContext, error) {
+// save the import is a warning on stderr: the returned context holds it
+// anyway.
+func loadInvocationContext(stderr io.Writer) (*config.CLIContext, error) {
 	if !importGlobalHubSettings {
 		return config.LoadCLIContext()
 	}
 	c, err := config.LoadCLIContextImported(useHubBaseName)
 	if errors.Is(err, config.ErrCLIContextImport) {
-		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "Warning: %v\n", err)
 		return c, nil
 	}
 	return c, err
@@ -231,7 +233,7 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 	if ignored && !isHubNickname(hubEndpoint) {
 		return nil
 	}
-	ctx, err := loadInvocationContext()
+	ctx, err := loadInvocationContext(cmd.ErrOrStderr())
 	if err != nil {
 		if isHubNickname(hubEndpoint) {
 			return fmt.Errorf("cannot look up hub '%s': %w", hubEndpoint, err)

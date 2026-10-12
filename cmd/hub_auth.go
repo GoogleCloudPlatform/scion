@@ -186,7 +186,7 @@ func finishHubAuthLogin(cmd *cobra.Command, hubURL string, tokenResp *hubclient.
 		return err
 	}
 	if loginHubURLGivenExplicitly() {
-		registerLoginHub(os.Stdout, os.Stderr, hubURL)
+		registerLoginHub(cmd.OutOrStdout(), cmd.ErrOrStderr(), hubURL)
 	}
 	recordLoginEndpoint(cmd, hubURL)
 	return nil
