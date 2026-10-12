@@ -187,9 +187,12 @@ directory's project is never used. These commands work only through the target h
 - no agent directory, worktree, sync state or agent name cache is written or removed;
 - `--type` must name a template that exists on the target; a local template is never read or
   uploaded;
-- no local environment value is sent to the target. A start does not ask for missing
-  environment values, and if the target asks anyway the start fails: set the values as secrets
-  or environment on the target hub instead.
+- no environment value is gathered from the local environment. A start does not ask for
+  missing environment values, and if the target asks anyway the start fails: set the values as
+  secrets or environment on the target hub instead. This covers implicit gathering only.
+- `--config` and `--task-file` are explicit input: their content is sent to the target as
+  given. An inline config can carry environment values and, through `file://` references, the
+  contents of local files, so pass only what the target should receive.
 
 They fail closed, before any agent request, where they would need local state or another
 credential: `--attach`, `--workspace`, `--upload-template`, `delete --cleanup-only`,
@@ -265,3 +268,8 @@ target as the `--as` identity, and a profile for the agent's own hub is refused 
   issuer audience. Either test identities are off there, or no workload issuer is configured.
 - **"no profile credential applies"**: the profile has no `--issuer-delegation member=<id>`,
   and no `--as` identity was given.
+- **`web-code` answers that web sessions are not available**: the target cannot mint web-login
+  codes. A target in proxy auth mode (behind IAP) answers this for every code until the IAP
+  driver binding for test identity web sessions is available on it; test identities still work
+  for API calls there. The other causes are a target without the test infrastructure marker or
+  with test identities off.
