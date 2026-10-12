@@ -284,12 +284,19 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 			return fmt.Errorf("webhook_url is required when inbound_mode is \"webhook\"")
 		}
 
+		// The webhook listener verifies every inbound request against this
+		// secret, so it is required in webhook mode, including standalone HA
+		// mode (skip_set_webhook=true). Validate before calling SetWebhook.
+		webhookSecret := config["webhook_secret"]
+		if webhookSecret == "" {
+			b.store.Close()
+			return fmt.Errorf("webhook_secret is required when inbound_mode is \"webhook\"")
+		}
+
 		webhookListen := config["webhook_listen"]
 		if webhookListen == "" {
 			webhookListen = ":9094"
 		}
-
-		webhookSecret := config["webhook_secret"]
 
 		// In standalone HA mode, skip_set_webhook=true means this instance
 		// should start the HTTP listener but NOT call setWebhook. Only the

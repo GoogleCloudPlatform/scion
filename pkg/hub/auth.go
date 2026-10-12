@@ -136,6 +136,15 @@ type AuthConfig struct {
 	// Now is the clock for the test-fixture expiry check. Nil means
 	// time.Now.
 	Now func() time.Time
+	// KindForPrincipal reads a user principal's stored kind
+	// (Server.kindForPrincipal). The JWT arm's row block uses it for the
+	// admin-kind checks (testAdminRejection). Nil reads the kind from the
+	// row the block loaded, through the same classification.
+	KindForPrincipal func(ctx context.Context, userID string) (principalKind, error)
+	// TestAdminTierEnabled reports whether an admin test identity kind is
+	// enabled (the immutable startup gate). Nil means every admin kind is
+	// off, so the row block refuses every admin-kind row.
+	TestAdminTierEnabled func(kind string) bool
 	// DelegatedAgentAuth authenticates an agent delegated credential
 	// (Authorization: Bearer scion_adt_...) and returns its request state
 	// (the delegated identity and the rows loaded for it). It returns
@@ -143,6 +152,11 @@ type AuthConfig struct {
 	// not be determined and any other error to refuse the credential. Nil
 	// refuses every delegated credential.
 	DelegatedAgentAuth func(ctx context.Context, token string) (*delegatedRequestState, error)
+	// WorkloadIssuer is the workload-bound issuer delegation arm's startup
+	// state (test_identity_workload_issuer.go). Nil when no workload issuer
+	// is configured: a request that names a delegation is then refused.
+	// The arm accepts a request only while TestIdentitiesEnabled is true.
+	WorkloadIssuer *workloadIssuerAuthenticator
 }
 
 // tokenType represents the type of authentication token.
@@ -280,6 +294,18 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					log.Debug("Skipping auth for unauthenticated endpoint", "path", logging.RequestPath(r))
 				}
 				serveAfterAuth(w, next, r)
+				return
+			}
+
+			// Step 0: Workload-bound issuer delegation (test identities,
+			// ptone/scion#4240). A request that names a delegation, or whose
+			// bearer carries the hub's issuer audience, is handled only by
+			// this arm and never falls through: it runs before every other
+			// arm, so a workload token never reaches the agent, federation,
+			// external-bearer (serveExternalBearer) or proxy paths, and it is
+			// accepted only on the test identity issuance routes.
+			if isWorkloadDelegationRequest(r, cfg.WorkloadIssuer) {
+				serveWorkloadDelegation(w, r, next, cfg, log)
 				return
 			}
 
@@ -693,6 +719,31 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							"invalid access token: no active user record for this token", nil)
 						return
 					}
+					// Admin test identities: the same row block refuses an
+					// admin-kind row whose kind is off, whose expiry is
+					// missing or past, or whose token's role claim is not
+					// the kind's role. The kind is read through
+					// kindForPrincipal; a read error fails closed.
+					if uErr == nil {
+						kind, reason, kErr := testAdminRowRejection(ctx, cfg.KindForPrincipal, cfg.TestAdminTierEnabled, u, claims.Role, now)
+						if kErr != nil {
+							log.Error("JWT auth: user kind lookup failed",
+								"user_id", claims.UserID, "error", kErr)
+							writeError(w, http.StatusServiceUnavailable, "store_error",
+								"unable to verify user status", nil)
+							return
+						}
+						if reason != "" {
+							log.Warn("JWT auth rejected: test admin identity not admitted",
+								"user_id", claims.UserID, "reason", reason)
+							writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
+								"invalid access token: no active user record for this token", nil)
+							return
+						}
+						if kind.isTestAdmin() {
+							ctx = contextWithTestAdminActor(ctx, u)
+						}
+					}
 				}
 				user := NewAuthenticatedUser(
 					claims.UserID,
@@ -733,6 +784,29 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
+}
+
+// serveWorkloadDelegation is UnifiedAuthMiddleware's workload-bound issuer
+// delegation arm (test_identity_workload_issuer.go, isWorkloadDelegationRequest).
+// It never falls through to another arm: a request it handles is served as
+// the delegation's grantor, within the delegation's scope, or refused.
+func serveWorkloadDelegation(w http.ResponseWriter, r *http.Request, next http.Handler, cfg AuthConfig, log *slog.Logger) {
+	ctx := r.Context()
+	auth, refusal := cfg.WorkloadIssuer.authenticate(ctx, r, cfg.TestIdentitiesEnabled)
+	if refusal != nil {
+		log.Warn("workload delegation refused",
+			slog.String("auth_type", AuthTypeWorkloadDelegation),
+			slog.String("reason", refusal.reason),
+			slog.Int("status", refusal.status))
+		writeWorkloadDelegationRefusal(w, refusal)
+		return
+	}
+	ctx = context.WithValue(ctx, userContextKey{}, auth.identity)
+	ctx = contextWithIdentity(ctx, auth.identity)
+	ctx = contextWithCredentialContext(ctx, auth.credential)
+	ctx = contextWithAuthType(ctx, AuthTypeWorkloadDelegation)
+	ctx = contextWithWorkloadDelegationState(ctx, auth.state)
+	serveAfterAuth(w, next, r.WithContext(ctx))
 }
 
 // logUATRejection logs a single "credential rejected" line for a UAT that
@@ -868,7 +942,7 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/api/v1/settings/public": // Public settings (no auth required)
 		return true
-	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (three bools)
+	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (four bools and the issuer audience)
 		return true
 	}
 	return false

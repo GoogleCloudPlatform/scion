@@ -182,13 +182,13 @@ func validateTestAdminGateConfig(cfg ServerConfig, hasStore bool) error {
 	return nil
 }
 
-// testAdminKind names an admin test-identity kind. The kinds themselves
-// (user rows, issuance) arrive in phase A1; A0 only gates them.
+// testAdminKind names an admin test-identity kind; the values are the
+// stored user kinds.
 type testAdminKind string
 
 const (
-	testAdminKindHubAdmin   testAdminKind = "test_hub_admin"
-	testAdminKindSuperAdmin testAdminKind = "test_super_admin"
+	testAdminKindHubAdmin   testAdminKind = store.UserKindTestHubAdmin
+	testAdminKindSuperAdmin testAdminKind = store.UserKindTestSuperAdmin
 )
 
 // testAdminGate is the immutable gate value captured by New. Its fields are
@@ -245,10 +245,13 @@ func (s *Server) TestAdminTierOn() bool {
 }
 
 // liveTestAdminIdentityCount is the number of live admin-kind test
-// identities. Phase A0 has no admin kinds, so it is always 0; phase A1
-// replaces the body with a store count.
-func (s *Server) liveTestAdminIdentityCount(_ context.Context) (int, error) {
-	return 0, nil
+// identities (test_hub_admin and test_super_admin whose expiry is after
+// the test identity clock), as reported by the health summary.
+func (s *Server) liveTestAdminIdentityCount(ctx context.Context) (int, error) {
+	if s.store == nil {
+		return 0, nil
+	}
+	return s.store.CountLiveTestAdminUsers(ctx, "", "", s.testIdentities.clock())
 }
 
 // Signing-key source labels (signingKeySource). Labels only: no key

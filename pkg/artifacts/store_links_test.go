@@ -74,13 +74,13 @@ func TestStoreLinks(t *testing.T) {
 		if err := st.CreateLink(ctx, linkGrant(b.ID, LinkTokenHash("tok"), now.Add(time.Hour)), 5, now); err == nil {
 			t.Errorf("a second link with the same hash was accepted")
 		}
-		if err := st.RevokeLink(ctx, b.ID, g.ID); !errors.Is(err, ErrNotFound) {
+		if err := st.RevokeLink(ctx, b.ID, g.ID, testActor); !errors.Is(err, ErrNotFound) {
 			t.Errorf("revoke via another artifact: %v", err)
 		}
-		if err := st.RevokeLink(ctx, a.ID, g.ID); err != nil {
+		if err := st.RevokeLink(ctx, a.ID, g.ID, testActor); err != nil {
 			t.Fatalf("RevokeLink: %v", err)
 		}
-		if err := st.RevokeLink(ctx, a.ID, g.ID); !errors.Is(err, ErrNotFound) {
+		if err := st.RevokeLink(ctx, a.ID, g.ID, testActor); !errors.Is(err, ErrNotFound) {
 			t.Errorf("revoke twice: %v", err)
 		}
 		if _, _, err := st.ResolveLink(ctx, LinkTokenHash("tok"), now); !errors.Is(err, ErrNotFound) {

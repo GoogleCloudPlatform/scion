@@ -1509,6 +1509,19 @@ type V1PluginEntry struct {
 	AuthAudience string `json:"auth_audience,omitempty" yaml:"auth_audience,omitempty" koanf:"auth_audience"`
 }
 
+// V1TestIdentitiesConfig is server.hub.test_identities in the versioned
+// settings layout.
+type V1TestIdentitiesConfig struct {
+	WorkloadIssuers []V1TestIdentityWorkloadIssuer `json:"workload_issuers,omitempty" yaml:"workload_issuers,omitempty" koanf:"workload_issuers"`
+}
+
+// V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
+// entry.
+type V1TestIdentityWorkloadIssuer struct {
+	Sub     string `json:"sub" yaml:"sub" koanf:"sub"`
+	MaxTier string `json:"max_tier" yaml:"max_tier" koanf:"max_tier"`
+}
+
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).
 type V1ServerHubConfig struct {
 	Port      int    `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
@@ -1519,6 +1532,10 @@ type V1ServerHubConfig struct {
 	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
 	// file/env only: the server-config API refuses it in every mode.
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
+	// TestIdentities is server.hub.test_identities (see
+	// HubServerConfig.TestIdentities). It is file/env only: the
+	// server-config API refuses it in every mode.
+	TestIdentities *V1TestIdentitiesConfig `json:"test_identities,omitempty" yaml:"test_identities,omitempty" koanf:"test_identities"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -3408,6 +3425,13 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.HubClass != "" {
 			gc.Hub.HubClass = v1.Hub.HubClass
 		}
+		if v1.Hub.TestIdentities != nil {
+			ti := &TestIdentitiesConfig{}
+			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
+				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
+			}
+			gc.Hub.TestIdentities = ti
+		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
 				gc.Hub.ReadTimeout = d
@@ -3839,6 +3863,13 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			AllowedHeaders: gc.Hub.CORSAllowedHeaders,
 			MaxAge:         gc.Hub.CORSMaxAge,
 		},
+	}
+	if gc.Hub.TestIdentities != nil {
+		ti := &V1TestIdentitiesConfig{}
+		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
+			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
+		}
+		v1Hub.TestIdentities = ti
 	}
 	if gc.Hub.SoftDeleteRetention > 0 {
 		v1Hub.SoftDeleteRetention = gc.Hub.SoftDeleteRetention.String()
@@ -4539,7 +4570,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 //     internally by LoadVersionedSettings/LoadSettingsKoanf/
 //     detectHierarchyFormat, treats WHATEVER path it is given as if it
 //     might be a project directory: if ~/.scion itself contains a
-//     project-id or grove-id file (plausible — a broker's ~/.scion can
+//     project-id file (plausible — a broker's ~/.scion can
 //     double as its own hub-side project identity), it resolves to
 //     GetProjectConfigDir(globalDir), i.e.
 //     ~/.scion/project-configs/<slug>__<id>/.scion — a completely
@@ -4635,7 +4666,7 @@ func GlobalSettingsMentions(substr string) bool {
 // did. Round 6 addendum (hy-aud-6): detectHierarchyFormat(globalDir) is NOT
 // actually global-only — it calls resolveEffectiveProjectPath(globalDir)
 // internally, which treats the global directory as if it might itself be a
-// project directory and, if ~/.scion contains a project-id or grove-id
+// project directory and, if ~/.scion contains a project-id
 // file, resolves to a completely unrelated project's split-storage
 // settings.yaml under ~/.scion/project-configs/<slug>__<id>/.scion and
 // merges its format in too. detectDirSettingsFormat never calls

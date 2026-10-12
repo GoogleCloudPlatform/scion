@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 // Tests for the agent_secrets.user_scope_only hub setting (design
 // ptone/scion#2291, Option B — blanket rule): pkg/hub/handlers_env_secrets.go

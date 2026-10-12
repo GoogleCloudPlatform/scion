@@ -309,3 +309,58 @@ CREATE INDEX IF NOT EXISTS idx_artifact_blob_unreferenced
 CREATE INDEX IF NOT EXISTS idx_artifact_expires
     ON artifact (expires_at) WHERE deleted_at IS NULL AND expires_at IS NOT NULL;
 `
+
+// migrationOrphans adds what retiring and adopting orphaned artifacts
+// needs (ptone/scion#4465): on artifact, when the reconciler found the
+// owner gone (orphaned_at), the owning agent's delegating user
+// (sponsor_ref), where the expiry came from (expiry_source: retention,
+// manual or orphan_policy), and the record of an ownership transfer
+// (former_owner_kind, former_owner_ref, transferred_at, former_key); and
+// the append-only artifact_event audit table. Every column is nullable and
+// nothing is backfilled, so existing rows keep their meaning. Columns that
+// later phases use are added here so the schema changes once.
+const migrationOrphans = "0007_orphans"
+
+const sqliteOrphans = `
+ALTER TABLE artifact ADD COLUMN orphaned_at TEXT;
+ALTER TABLE artifact ADD COLUMN sponsor_ref TEXT;
+ALTER TABLE artifact ADD COLUMN expiry_source TEXT;
+ALTER TABLE artifact ADD COLUMN former_owner_kind TEXT;
+ALTER TABLE artifact ADD COLUMN former_owner_ref TEXT;
+ALTER TABLE artifact ADD COLUMN transferred_at TEXT;
+ALTER TABLE artifact ADD COLUMN former_key TEXT;
+CREATE TABLE IF NOT EXISTS artifact_event (
+    id          TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL,
+    at          TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    actor_kind  TEXT NOT NULL,
+    actor_ref   TEXT NOT NULL,
+    authority   TEXT NOT NULL,
+    detail      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_event_artifact
+    ON artifact_event (artifact_id, at);
+`
+
+const postgresOrphans = `
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS orphaned_at TIMESTAMPTZ;
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS sponsor_ref TEXT;
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS expiry_source TEXT;
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS former_owner_kind TEXT;
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS former_owner_ref TEXT;
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS transferred_at TIMESTAMPTZ;
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS former_key TEXT;
+CREATE TABLE IF NOT EXISTS artifact_event (
+    id          TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL,
+    at          TIMESTAMPTZ NOT NULL,
+    action      TEXT NOT NULL,
+    actor_kind  TEXT NOT NULL,
+    actor_ref   TEXT NOT NULL,
+    authority   TEXT NOT NULL,
+    detail      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_event_artifact
+    ON artifact_event (artifact_id, at);
+`

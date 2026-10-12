@@ -21,6 +21,7 @@
     "./terminal-pane/*.ts",
     "./terminal-workspace/*.ts",
     "./test-hub-banner/*.ts",
+    "./test-identity-session/*.ts",
     "./client-main-stub.ts",
     "./event-source-stub.ts",
     "./palette-focus.ts",

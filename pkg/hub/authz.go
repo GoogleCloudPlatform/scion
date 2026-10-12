@@ -2523,16 +2523,14 @@ func (a *AuthzService) hasActiveSystemRole(ctx context.Context, userID, roleName
 	return false
 }
 
-// isBindingActive checks whether a store RoleBinding is currently active
-// based on its notBefore/expiresAt fields. R-2 fix.
+// isBindingActive checks whether a store RoleBinding is active at now
+// based on its notBefore/expiresAt fields. It delegates to
+// bindingActivationOK so it applies exactly the kernel's rule
+// (evaluateActivation): an unset bound is unbounded, notBefore is
+// inclusive, expiresAt is exclusive, and a zero now with any bound set is
+// inactive.
 func isBindingActive(b *store.RoleBinding, now time.Time) bool {
-	if b.NotBefore != nil && now.Before(*b.NotBefore) {
-		return false
-	}
-	if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
-		return false
-	}
-	return true
+	return bindingActivationOK(b, now)
 }
 
 // hubMembersSlug is the slug of the seeded hub-members group.
@@ -2544,12 +2542,39 @@ func (a *AuthzService) isCurrentHubMember(ctx context.Context, userID string) bo
 	if userID == "" {
 		return false
 	}
+	// An admin-kind test identity counts only while its kind is enabled
+	// and it has not expired (the same decide-time rule as the admin
+	// clamp); a kind read error denies.
+	if live, err := a.testAdminPrincipalLive(ctx, userID); err != nil || !live {
+		return false
+	}
 	group, err := a.store.GetGroupBySlug(ctx, hubMembersSlug)
 	if err != nil {
 		return false
 	}
 	_, err = a.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
 	return err == nil
+}
+
+// testAdminPrincipalLive reports whether userID may hold authority under
+// the admin-kind decide-time rule: true for any principal that is not an
+// admin-kind test identity; for an admin kind, only while its kind is
+// enabled on this hub and its expiry is in the future (clampTestAdmin's
+// rule, for decisions that do not read role bindings). The kind is read
+// through kindForPrincipal; an error is returned and callers deny.
+func (a *AuthzService) testAdminPrincipalLive(ctx context.Context, userID string) (bool, error) {
+	k, err := a.kindForPrincipal(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	if !k.isTestAdmin() {
+		return true, nil
+	}
+	c := a.kindCache()
+	if c == nil {
+		return false, nil
+	}
+	return c.adminTierEnabled(k.Kind) && k.ExpiresAt != nil && c.clock().Before(*k.ExpiresAt), nil
 }
 
 // storeToHubAccessConstraint converts a store AccessConstraint to a hub
@@ -2653,15 +2678,50 @@ func (a *AuthzService) isProjectOwner(ctx context.Context, userID, projectID str
 			continue
 		}
 		// Activation lifecycle: binding must be currently active.
-		if rb.NotBefore != nil && now.Before(*rb.NotBefore) {
-			continue
-		}
-		if rb.ExpiresAt != nil && now.After(*rb.ExpiresAt) {
+		if !isBindingActive(rb, now) {
 			continue
 		}
 		return true
 	}
 	return false
+}
+
+// activeDirectProjectRoles returns the role names of userID's active
+// (isBindingActive), direct user-principal bindings on projectID, read
+// through st. With clamp set the bindings are passed through the test
+// identity clamps with authz's wiring (clampBindingsForUser), for a store
+// handle outside the authorization service; without it st must be the
+// authorization service's own clamped store. It replaces the unclamped,
+// unfiltered GetProjectMembership on decision paths. A read or kind error,
+// or a nil store, is returned; callers deny.
+func activeDirectProjectRoles(ctx context.Context, st store.Store, authz *AuthzService, clamp bool, userID, projectID string) (map[string]bool, error) {
+	if st == nil {
+		return nil, errors.New("active direct project roles: no store")
+	}
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	if clamp {
+		if bindings, err = clampBindingsForUser(ctx, st, authz, userID, bindings); err != nil {
+			return nil, err
+		}
+	}
+	now := time.Now()
+	roles := map[string]bool{}
+	for _, b := range bindings {
+		if b == nil || b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID || !isBindingActive(b, now) {
+			continue
+		}
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			return nil, err
+		}
+		if rd != nil {
+			roles[rd.Name] = true
+		}
+	}
+	return roles, nil
 }
 
 // isProjectOwnerOrAdmin reports whether the user has project-owner or
@@ -2671,12 +2731,11 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 		return false
 	}
 
-	// 1. Direct user membership (existing behavior).
-	membership, err := a.store.GetProjectMembership(ctx, projectID, userID)
-	if err == nil && membership != nil {
-		if membership.Role == store.ProjectRoleOwner || membership.Role == store.ProjectRoleAdmin {
-			return true
-		}
+	// 1. Direct user membership: the user's active project bindings, read
+	// through the clamped store (so the test identity clamps apply).
+	roles, err := activeDirectProjectRoles(ctx, a.store, nil, false, userID, projectID)
+	if err == nil && (roles[store.ProjectRoleOwner] || roles[store.ProjectRoleAdmin]) {
+		return true
 	}
 
 	// 2. Group-expanded: check if any of the user's groups have owner/admin
@@ -2686,8 +2745,11 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 		return false
 	}
 
-	// Build principals for batched query.
-	var principals []store.PrincipalRef
+	// Build principals for batched query. The user principal is listed
+	// with its groups, so the test identity clamps see the user (they key
+	// on a user principal in the list); only group-held bindings count
+	// below.
+	principals := []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: userID}}
 	for _, gid := range groupIDs {
 		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
 	}
@@ -2695,8 +2757,15 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 	if err != nil {
 		return false
 	}
+	now := time.Now()
 	for _, b := range bindings {
+		if b.PrincipalType != store.RoleBindingPrincipalGroup {
+			continue
+		}
 		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
+			continue
+		}
+		if !isBindingActive(b, now) {
 			continue
 		}
 		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
@@ -2763,12 +2832,7 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 		cb := &CandidateBinding{
 			BindingID: b.ID,
 		}
-		if b.NotBefore != nil {
-			cb.NotBefore = *b.NotBefore
-		}
-		if b.ExpiresAt != nil {
-			cb.ExpiresAt = *b.ExpiresAt
-		}
+		cb.NotBefore, cb.ExpiresAt = candidateActivationBounds(b)
 		activation := evaluateActivation(cb, now)
 		if !activation.Active {
 			continue

@@ -64,12 +64,27 @@ locals {
         baseUrl     = var.public_url
         adminEmails = var.admin_emails
         webPort     = var.port
+        # Only these two keys: the chart's other hub.securityContext settings
+        # are fixed in its templates, and Helm merges this map with the
+        # chart's defaults.
+        securityContext = {
+          runAsUser  = var.hub_run_as_uid
+          runAsGroup = var.hub_run_as_gid
+        }
       },
       var.db_password_rotation == "" ? {} : {
         podAnnotations = {
           "scion.dev/db-password-rotation" = var.db_password_rotation
         }
       },
+      # Only when enabled, so existing hubs' values stay byte-identical by
+      # default (the chart's own default is false). Unrelated to test login,
+      # which the chart does not offer.
+      var.test_identities_enabled ? {
+        testIdentities = {
+          enabled = true
+        }
+      } : {},
     )
 
     serviceAccount = {
@@ -84,6 +99,7 @@ locals {
 
     runtime = {
       namespace = var.runtime_namespace
+      gke       = var.agent_runtime_gke_mode
     }
 
     agents = {
@@ -100,6 +116,10 @@ locals {
     cloudsql = {
       enabled                = true
       instanceConnectionName = var.sql_connection_name
+      # The instance created by modules/cloudsql-instance has no public IP, and
+      # the GKE cluster is VPC-native on the same privately connected network,
+      # so the proxy must connect over the private IP.
+      privateIp = true
     }
 
     storage = {
@@ -128,6 +148,30 @@ locals {
         platformAuthSa = var.transport_sa_email
       }
       existingSecret = local.session_secret_name
+    }
+
+    # Workspace storage: one chart value renders settings.yaml
+    # server.workspace_storage (backend nfs) and mounts the export in the hub
+    # pod at <mountRoot>/<shareId>, so the settings and the mount cannot
+    # drift. With backend nfs the hub's /readyz returns 503 until that path
+    # exists in the hub container. The settings uid/gid come from
+    # hub.securityContext.runAsUser/runAsGroup. With shares[0].pv_name set,
+    # the Kubernetes runtime mounts agent workspaces and shared dirs by
+    # subPath from this hub's NFS claim and creates no per-directory claims.
+    # The runtime broker in the hub pod creates the workspace and shared-dir
+    # subPath directories through this mount, as the hub's uid, before the
+    # agent pod starts. The kubelet creates them only if the broker can't
+    # (ensureNFSWorkspaceLeaf, pkg/agent/nfs_workspace_leaf.go).
+    workspaceStorage = {
+      nfs = {
+        enabled     = true
+        server      = var.nfs.server
+        export      = var.nfs.export
+        mountRoot   = var.nfs_mount_root
+        shareId     = var.hub_name
+        pvName      = var.nfs.pv_name
+        subpathRoot = var.nfs_subpath_root
+      }
     }
   }
 

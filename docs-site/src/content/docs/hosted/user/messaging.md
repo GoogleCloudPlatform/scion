@@ -199,7 +199,11 @@ scion message @tech-lead --body-file - < ./review-notes.md
 
 For `--body-file` and stdin, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
 
-A successful send to an agent prints `Message accepted for agent '<name>'`. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it. It does not mean the agent has read it. A send to an agent that is reincarnating prints a separate notice that the message was saved for catch-up. See [`scion message`](/scion/reference/cli/#scion-message-or-msg) for what each status means.
+A successful send to an agent prints `Message accepted for agent '<name>'`. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it. It does not mean the agent has read it. A send to an agent that is reincarnating prints a separate notice that the message was saved for catch-up.
+
+**Messages to an agent that is still starting.** Until its harness accepts input, an agent's activity is `initializing` (shown as "starting"). Messages sent in that window, from the CLI, web chat or a DM, are accepted and held by the agent's runtime. They are pasted once the harness reports it is ready, or after at most 90 seconds, so early messages are not lost. An `--interrupt` sent in that window is delivered as an ordinary message. To wait for readiness before you send, start the agent with [`scion start --wait-ready`](/scion/reference/cli/#scion-start-or-run).
+
+See [`scion message`](/scion/reference/cli/#scion-message-or-msg) for what each status means.
 
 ### Message Formatting
 
@@ -344,9 +348,17 @@ The available modes are:
 
 - **Project Mode (Default)**: Any user with the `agent:message` permission in the project can message the agent. Any peer agent in the project (that is not restricted by lineage mode) can also message it. The most permissive mode. Note that the default project-member role does **not** include `agent:message` — messaging requires an owner, admin, or ancestry relationship with the agent (i.e., the agent's creator or their ancestors). This aligns messaging authorization with the terminal attach permission gate.
 - **Hub Mode**: Behaves like Project mode within the agent's own project, and additionally allows the agent to send direct messages across project boundaries when [cross-project messaging](#cross-project-messaging) is enabled. A project-mode agent can *receive* a cross-project DM but cannot *reply* across the boundary until granted Hub mode.
-- **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it.
+- **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it. Agent-to-agent messages need both agents in branch mode and one to be the other's direct parent; siblings, grandparents, and pairs that mix branch with another mode are denied.
 - **Lineage Mode**: Strictly restricts messaging to users in the agent's ancestry chain (its creator and their ancestors). No agent-to-agent messaging is permitted.
 - **None Mode**: Seals the agent from all messaging except system-plane notices. No users and no agents can message a none-mode agent through normal paths.
+
+A new agent's mode is set once, at creation: the `--message-mode` flag of `scion create` or `scion start` if given, else the template's `message_mode`, else the parent agent's mode when an agent creates it, else `project`. A default that resolves to `hub` still needs a hub-mode grant.
+
+To see modes:
+
+- `scion whoami --full` shows the calling agent's own mode (`messageMode` in `--format json`).
+- `scion conversation get` and `scion conversation participants` show a **MSG MODE** column for agent participants in the conversation's project; for a conversation without a project (a DM or legacy group), in the calling agent's project (`messageMode` in JSON). It shows `-` for users, for agents outside that project, and for every agent when a user reads a conversation without a project.
+- When a send is denied, the CLI error names the reason and both modes, for example `message_denied: Message delivery denied [reason: ..., sender mode: branch, recipient mode: project] (status: 403)`.
 
 ### Piercing
 Highly privileged users can bypass an agent's message mode restrictions. This is called **piercing**.
