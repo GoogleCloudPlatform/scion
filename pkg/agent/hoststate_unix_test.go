@@ -18,6 +18,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,11 +37,11 @@ func TestHostStateFIFOAtPathErrors(t *testing.T) {
 	}
 	// O_NONBLOCK keeps the open from blocking; the regular-file check
 	// then refuses the FIFO.
-	if _, err := ReadHostState(a.root, a.name); err == nil {
-		t.Fatal("ReadHostState: want error for a FIFO at the path")
+	if _, err := ReadHostState(a.root, a.name); !errors.Is(err, errHostStateNotRegular) {
+		t.Fatalf("ReadHostState: err=%v, want errHostStateNotRegular", err)
 	}
-	if err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "x"; return nil }); err == nil {
-		t.Fatal("UpdateHostState: want error for a FIFO at the path")
+	if err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "x"; return nil }); !errors.Is(err, errHostStateNotRegular) {
+		t.Fatalf("UpdateHostState: err=%v, want errHostStateNotRegular", err)
 	}
 }
 
@@ -95,13 +96,13 @@ func TestHostStateSymlinkBelowRootRefused(t *testing.T) {
 			if err := os.Symlink(target, linkAt); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := ReadHostState(root, "agent-1"); err == nil {
-				t.Fatal("ReadHostState: want error through a symlink below the root")
+			if _, err := ReadHostState(root, "agent-1"); !errors.Is(err, errHostStatePathSymlink) {
+				t.Fatalf("ReadHostState: err=%v, want errHostStatePathSymlink", err)
 			}
 			called := false
 			err := UpdateHostState(root, "agent-1", func(hs *HostState) error { called = true; hs.RunID = "x"; return nil })
-			if err == nil || called {
-				t.Fatalf("UpdateHostState: err=%v called=%v, want error and no mutate", err, called)
+			if !errors.Is(err, errHostStatePathSymlink) || called {
+				t.Fatalf("UpdateHostState: err=%v called=%v, want errHostStatePathSymlink and no mutate", err, called)
 			}
 			entries, err := os.ReadDir(outside.dir)
 			if err != nil {
@@ -116,8 +117,9 @@ func TestHostStateSymlinkBelowRootRefused(t *testing.T) {
 
 // TestHostStateUnlockedParallelWritesStayWhole makes the lock unusable (a
 // directory at the lock path), so every update runs unlocked. Updates may
-// then be lost, but each write is atomic with its own random temp name:
-// no update fails, the file always parses, and no temp file is left.
+// then be lost, and two goroutines may race for a temp name, which fails
+// that update with EEXIST and writes nothing. No other error occurs, the
+// file always parses, and no temp file is left.
 func TestHostStateUnlockedParallelWritesStayWhole(t *testing.T) {
 	a := newHostStateAgent(t)
 	if err := os.Mkdir(agentinfolock.LockPath(a.path), 0o700); err != nil {
@@ -145,7 +147,7 @@ func TestHostStateUnlockedParallelWritesStayWhole(t *testing.T) {
 	wg.Wait()
 	close(errs)
 	for err := range errs {
-		if err != nil {
+		if err != nil && !errors.Is(err, syscall.EEXIST) {
 			t.Fatalf("UpdateHostState: %v", err)
 		}
 	}
@@ -158,7 +160,7 @@ func TestHostStateUnlockedParallelWritesStayWhole(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".tmp") {
+		if strings.Contains(e.Name(), ".tmp") {
 			t.Fatalf("temp file left: %s", e.Name())
 		}
 	}

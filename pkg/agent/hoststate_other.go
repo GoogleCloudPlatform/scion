@@ -38,14 +38,14 @@ type hostStateDir struct {
 // matches fs.ErrNotExist.
 func openHostStateDir(l hostStateLayout) (*hostStateDir, error) {
 	cur := l.root
-	for _, name := range l.rel {
+	for i, name := range l.rel {
 		cur = filepath.Join(cur, name)
 		fi, err := os.Lstat(cur)
 		if err != nil {
-			return nil, fmt.Errorf("host state dir: %w", err)
+			return nil, hostStateComponentErr(cur, i, 0, false, err)
 		}
-		if !fi.IsDir() {
-			return nil, fmt.Errorf("host state dir: %s is not a directory (or is a symlink)", cur)
+		if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+			return nil, hostStateComponentErr(cur, i, fi.Mode(), true, nil)
 		}
 	}
 	return &hostStateDir{path: cur}, nil
@@ -68,8 +68,38 @@ func (d *hostStateDir) openFile() (*os.File, error) {
 	return os.Open(path)
 }
 
-// writeFile writes data to HostStateFile with writeAgentInfoFile, the
-// package's temp-file-and-rename helper (random temp name in agentDir).
+// writeFile writes data to HostStateFile through a temp file with a random
+// name in agentDir, chmod 0600, fsync, then rename. It is not
+// writeAgentInfoFile because that helper does not fsync: after a crash a
+// zero-length host-state.json would be refused as corrupt and block every
+// later update.
 func (d *hostStateDir) writeFile(data []byte) error {
-	return writeAgentInfoFile(filepath.Join(d.path, HostStateFile), data, 0o600)
+	path := filepath.Join(d.path, HostStateFile)
+	tmp, err := os.CreateTemp(d.path, "."+HostStateFile+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	err = func() error {
+		if err := tmp.Chmod(0o600); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+		if _, err := tmp.Write(data); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+		if err := tmp.Sync(); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		return os.Rename(tmpPath, path)
+	}()
+	if err != nil {
+		_ = os.Remove(tmpPath)
+	}
+	return err
 }

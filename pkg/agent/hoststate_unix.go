@@ -17,12 +17,11 @@
 package agent
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 
@@ -31,8 +30,9 @@ import (
 
 // hostStateNoFollowParent is passed as agentinfolock.Options.NoFollowParent.
 // UpdateHostState gives agentinfolock the lock path below the resolved
-// root, so the walk from / meets no symlink above the root, and a symlink
-// below it makes the update run unlocked (and then fail in the read).
+// root, so the walk from / meets no symlink above the root. A symlink
+// below the root has already been refused by openHostStateDir before the
+// lock is taken.
 const hostStateNoFollowParent = true
 
 // hostStateDir is agentDir opened once: the resolved trusted root, then
@@ -55,19 +55,40 @@ func openHostStateDir(l hostStateLayout) (*hostStateDir, error) {
 		return nil, &os.PathError{Op: "open", Path: l.root, Err: err}
 	}
 	cur := l.root
-	for _, name := range l.rel {
+	for i, name := range l.rel {
 		cur = filepath.Join(cur, name)
 		child, err := unix.Openat(fd, name, dirFlags|unix.O_NOFOLLOW, 0)
-		_ = unix.Close(fd)
 		if err != nil {
-			return nil, fmt.Errorf("host state dir: %w", &os.PathError{Op: "open", Path: cur, Err: err})
+			mode, statOK := lstatModeAt(fd, name)
+			_ = unix.Close(fd)
+			return nil, hostStateComponentErr(cur, i, mode, statOK, err)
 		}
+		_ = unix.Close(fd)
 		fd = child
 	}
 	return &hostStateDir{fd: fd, path: cur}, nil
 }
 
 func (d *hostStateDir) close() { _ = unix.Close(d.fd) }
+
+// lstatModeAt returns the file type of name in dirFd without following a
+// symlink, as an fs.FileMode type (permission bits are not set).
+func lstatModeAt(dirFd int, name string) (fs.FileMode, bool) {
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirFd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return 0, false
+	}
+	switch uint32(st.Mode) & unix.S_IFMT {
+	case unix.S_IFDIR:
+		return fs.ModeDir, true
+	case unix.S_IFREG:
+		return 0, true
+	case unix.S_IFLNK:
+		return fs.ModeSymlink, true
+	default:
+		return fs.ModeIrregular, true
+	}
+}
 
 // openFile opens HostStateFile read-only, refusing a symlink at it
 // (O_NOFOLLOW, and O_NONBLOCK so a FIFO cannot block the open).
@@ -79,8 +100,7 @@ func (d *hostStateDir) close() { _ = unix.Close(d.fd) }
 func (d *hostStateDir) openFile() (*os.File, error) {
 	f, err := dirfd.OpenAt(d.fd, HostStateFile, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		var st unix.Stat_t
-		if serr := unix.Fstatat(d.fd, HostStateFile, &st, unix.AT_SYMLINK_NOFOLLOW); serr == nil && st.Mode&unix.S_IFMT == unix.S_IFLNK {
+		if mode, ok := lstatModeAt(d.fd, HostStateFile); ok && mode&fs.ModeSymlink != 0 {
 			return nil, fmt.Errorf("%w: %s", errHostStateSymlink, filepath.Join(d.path, HostStateFile))
 		}
 		return nil, &os.PathError{Op: "open", Path: filepath.Join(d.path, HostStateFile), Err: err}
@@ -88,50 +108,18 @@ func (d *hostStateDir) openFile() (*os.File, error) {
 	return f, nil
 }
 
-// writeFile writes data to HostStateFile through a temp file created with
-// O_EXCL|O_NOFOLLOW under a random name in agentDir, then renameat. The
-// rename replaces a symlink at HostStateFile rather than writing through
-// it. Each write is atomic, and parallel writers never share a temp file.
+// writeFile writes data to HostStateFile with dirfd.WriteAtNoFollowWithChown
+// on the agentDir fd: an O_EXCL|O_NOFOLLOW temp file, chmod 0600, fsync,
+// then renameat over the leaf (ReplaceLeaf replaces the entry and never
+// writes through it; the read under the same update has already refused a
+// symlink or non-regular file there). uid -1 skips the chown.
+//
+// The helper names the temp file by pid and nanosecond time and does not
+// retry. Two goroutines in one process can only race for a name when the
+// lock is unusable; the loser's O_EXCL create then fails with EEXIST and
+// it writes nothing, so a collision fails the update and never corrupts
+// the file.
 func (d *hostStateDir) writeFile(data []byte) error {
-	var (
-		tmp  *os.File
-		name string
-		err  error
-	)
-	for i := 0; i < 10; i++ {
-		var b [8]byte
-		if _, err = rand.Read(b[:]); err != nil {
-			return err
-		}
-		name = "." + HostStateFile + "." + hex.EncodeToString(b[:]) + ".tmp"
-		tmp, err = dirfd.CreateExclAt(d.fd, name, 0o600)
-		if !errors.Is(err, unix.EEXIST) {
-			break
-		}
-	}
-	if err != nil {
-		return fmt.Errorf("host state temp file in %s: %w", d.path, err)
-	}
-	ok := false
-	defer func() {
-		if !ok {
-			_ = tmp.Close()
-			_ = dirfd.UnlinkAt(d.fd, name)
-		}
-	}()
-	// Set the mode explicitly; the create mode is reduced by the umask.
-	if err := tmp.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := dirfd.RenameAt(d.fd, name, HostStateFile); err != nil {
-		return fmt.Errorf("host state file %s: rename: %w", filepath.Join(d.path, HostStateFile), err)
-	}
-	ok = true
-	return nil
+	return dirfd.WriteAtNoFollowWithChown(d.fd, HostStateFile, filepath.Join(d.path, HostStateFile),
+		data, 0o600, -1, -1, dirfd.ReplaceLeaf, syscall.Fchown)
 }

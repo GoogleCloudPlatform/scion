@@ -69,11 +69,11 @@ func TestHostStateBadArgumentsRefused(t *testing.T) {
 			t.Errorf("UpdateHostState(%q): err=%v called=%v, want errHostStateAgentName", name, err, called)
 		}
 	}
-	if _, err := ReadHostState("relative/root", "agent-1"); err == nil {
-		t.Error("ReadHostState: want error for a relative root")
+	if _, err := ReadHostState("relative/root", "agent-1"); !errors.Is(err, errHostStateRelativeRoot) {
+		t.Errorf("ReadHostState: err=%v, want errHostStateRelativeRoot", err)
 	}
-	if err := UpdateHostState("relative/root", "agent-1", func(*HostState) error { return nil }); err == nil {
-		t.Error("UpdateHostState: want error for a relative root")
+	if err := UpdateHostState("relative/root", "agent-1", func(*HostState) error { return nil }); !errors.Is(err, errHostStateRelativeRoot) {
+		t.Errorf("UpdateHostState: err=%v, want errHostStateRelativeRoot", err)
 	}
 	if entries, _ := os.ReadDir(root); len(entries) != 0 {
 		t.Fatalf("entries created in root: %v", entries)
@@ -344,14 +344,52 @@ func TestHostStateDirectoryAtPathErrors(t *testing.T) {
 	if err := os.Mkdir(a.path, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadHostState(a.root, a.name); err == nil {
-		t.Fatal("ReadHostState: want error for a directory at the path")
+	if _, err := ReadHostState(a.root, a.name); !errors.Is(err, errHostStateNotRegular) {
+		t.Fatalf("ReadHostState: err=%v, want errHostStateNotRegular", err)
 	}
-	if err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "x"; return nil }); err == nil {
-		t.Fatal("UpdateHostState: want error for a directory at the path")
+	if err := UpdateHostState(a.root, a.name, func(hs *HostState) error { hs.RunID = "x"; return nil }); !errors.Is(err, errHostStateNotRegular) {
+		t.Fatalf("UpdateHostState: err=%v, want errHostStateNotRegular", err)
 	}
 	if fi, err := os.Lstat(a.path); err != nil || !fi.IsDir() {
 		t.Fatalf("directory replaced: fi=%v err=%v", fi, err)
+	}
+}
+
+// TestHostStateMarkerFileAtRootErrors passes a project directory whose
+// .scion is a marker file (the hub-native and non-git layout) as the root,
+// and a root whose .scion/agents is a file. Both are refused with their
+// own error and nothing is written.
+func TestHostStateMarkerFileAtRootErrors(t *testing.T) {
+	cases := map[string]struct {
+		file string
+		want error
+	}{
+		"marker file": {file: ".scion", want: errHostStateMarkerFile},
+		"agents file": {file: filepath.Join(".scion", "agents"), want: errHostStateNotDirectory},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			p := filepath.Join(root, tc.file)
+			if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			const content = "project-id: 1234\n"
+			if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadHostState(root, "agent-1"); !errors.Is(err, tc.want) {
+				t.Fatalf("ReadHostState: err=%v, want %v", err, tc.want)
+			}
+			called := false
+			err := UpdateHostState(root, "agent-1", func(*HostState) error { called = true; return nil })
+			if !errors.Is(err, tc.want) || called {
+				t.Fatalf("UpdateHostState: err=%v called=%v, want %v and no mutate", err, called, tc.want)
+			}
+			if got, _ := os.ReadFile(p); string(got) != content {
+				t.Fatalf("file changed: %q", got)
+			}
+		})
 	}
 }
 

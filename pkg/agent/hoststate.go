@@ -40,13 +40,30 @@ import (
 // Callers name the file by a trusted root and an agent name, never by a
 // path: agentDir is <root>/.scion/agents/<name>, built here with the
 // config agent-dir layout helpers. The root is the broker-side directory
-// that holds the project's .scion directory: a linked project's directory,
-// a hub-native project's directory under ~/.scion/projects, or the external
-// project-configs directory of a shared-workspace project. It must come from
-// broker configuration, never from anything stored under agentDir or in
-// the project's files. Symlinks in the root's own path are resolved once
-// (EvalSymlinks) and trusted; below the root, every component (.scion,
-// agents, the agent name) is opened without following a symlink on unix.
+// that holds the project's .scion DIRECTORY (not a .scion marker file):
+//
+//   - a linked git project (agent state in the project): the project's
+//     checkout directory;
+//   - a hub-native project, a non-git linked project, or a shared-workspace
+//     git project: the external project-configs directory
+//     ~/.scion/project-configs/<slug>__<project-id>. In these layouts the
+//     .scion inside the project directory is only a marker file, and
+//     passing the project directory as the root fails with
+//     errHostStateMarkerFile;
+//   - the global project: $HOME.
+//
+// The caller derives the root from broker configuration and from the
+// project ID the broker itself holds (its hub record or broker settings),
+// never from the project-id in a marker file, from anything stored under
+// agentDir, or from anything else in the project tree. When no
+// broker-held project ID is available for a layout that needs one, the
+// caller must refuse, not fall back to another root. The agent name comes
+// from the broker request or dispatch context, not from the project tree.
+// This package takes only the root and the name; mapping a project ID to a
+// root is the caller's job. Symlinks in the root's own path are resolved
+// once (EvalSymlinks) and trusted; below the root, every component
+// (.scion, agents, the agent name) is opened without following a symlink
+// on unix.
 //
 // The file is host-owned in the sense that the agent home and workspace,
 // which are mounted into the container, never contain it. That is not an
@@ -88,7 +105,42 @@ var (
 	// errHostStateAgentName is returned for an agent name that is not a
 	// single path element.
 	errHostStateAgentName = errors.New("invalid agent name for host state")
+	// errHostStateRelativeRoot is returned for a trusted root that is not
+	// an absolute path.
+	errHostStateRelativeRoot = errors.New("host state root is not absolute")
+	// errHostStateNotRegular is returned when something other than a
+	// regular file (a directory, FIFO, device or socket) is at
+	// HostStateFile.
+	errHostStateNotRegular = errors.New("host state file is not a regular file")
+	// errHostStatePathSymlink is returned when a component of agentDir
+	// below the trusted root is a symlink.
+	errHostStatePathSymlink = errors.New("host state path has a symlink below the trusted root")
+	// errHostStateNotDirectory is returned when a component of agentDir
+	// below the trusted root exists but is not a directory.
+	errHostStateNotDirectory = errors.New("host state path component is not a directory")
+	// errHostStateMarkerFile is returned when <root>/.scion is a regular
+	// file: the root is a project directory with a .scion marker file,
+	// not the directory that holds the .scion directory.
+	errHostStateMarkerFile = errors.New("host state root holds a .scion marker file, not a .scion directory")
 )
+
+// hostStateComponentErr builds the error for the component of agentDir at
+// path (index idx below the root) that could not be opened as a directory.
+// mode is the component's lstat mode when statOK; otherwise openErr is
+// wrapped as it is, so a missing component still matches fs.ErrNotExist.
+func hostStateComponentErr(path string, idx int, mode fs.FileMode, statOK bool, openErr error) error {
+	if statOK {
+		switch {
+		case mode&fs.ModeSymlink != 0:
+			return fmt.Errorf("%w: %s", errHostStatePathSymlink, path)
+		case idx == 0 && mode.IsRegular():
+			return fmt.Errorf("%w: %s (pass the directory that holds the .scion directory, e.g. the project-configs directory, as the root)", errHostStateMarkerFile, path)
+		case !mode.IsDir():
+			return fmt.Errorf("%w: %s", errHostStateNotDirectory, path)
+		}
+	}
+	return fmt.Errorf("host state dir: %w", &fs.PathError{Op: "open", Path: path, Err: openErr})
+}
 
 // hostStateLayout is where HostStateFile lives for one agent: the trusted
 // root with symlinks resolved, and the path components of agentDir below it.
@@ -142,7 +194,7 @@ func HostStatePath(trustedRoot, agentName string) (string, error) {
 // it into components.
 func resolveHostStateLayout(trustedRoot, agentName string) (hostStateLayout, error) {
 	if !filepath.IsAbs(trustedRoot) {
-		return hostStateLayout{}, fmt.Errorf("host state root %q is not absolute", trustedRoot)
+		return hostStateLayout{}, fmt.Errorf("%w: %q", errHostStateRelativeRoot, trustedRoot)
 	}
 	rel, err := hostStateAgentRel(trustedRoot, agentName)
 	if err != nil {
@@ -210,7 +262,7 @@ func readHostStateBytes(d *hostStateDir) ([]byte, error) {
 		return nil, fmt.Errorf("host state file %s: %w", path, err)
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("host state file %s is not a regular file", path)
+		return nil, fmt.Errorf("%w: %s", errHostStateNotRegular, path)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxHostStateSize+1))
 	if err != nil {
@@ -226,8 +278,8 @@ func readHostStateBytes(d *hostStateDir) ([]byte, error) {
 // trustedRoot (see HostStateFile for the layout and what the root must
 // be). It runs a read-modify-write through agentinfolock.Update on the
 // file: it reads the current state (as ReadHostState does), calls mutate,
-// and writes the result through a temp file in agentDir and a rename, with
-// mode 0600. agentDir must already exist.
+// and writes the result through a temp file in agentDir, fsync and a
+// rename, with mode 0600. agentDir must already exist.
 //
 // On unix, agentDir is opened once by walking each component below the
 // resolved root without following a symlink, and the read, the temp create
@@ -238,24 +290,32 @@ func readHostStateBytes(d *hostStateDir) ([]byte, error) {
 // symlinked, unreadable, corrupt or too large file is refused and left as
 // it is.
 //
+// agentDir is opened before the lock is taken, so a refused path (a
+// symlink below the root, a missing agentDir) returns at once and never
+// reaches the lock.
+//
 // The serialization is best effort, as agentinfolock documents: on unix
 // the update runs unlocked when the lock file is unusable or another holder
 // keeps the lock past the wait, and on other platforms there is no lock.
-// Two concurrent updates can then lose one of their writes. Each write is
-// still atomic (temp file and rename), so the file is never torn.
+// The lock file is opened by walking from / over the resolved root path,
+// which needs read permission on every ancestor directory; where that is
+// missing (say a 0711 ancestor owned by another user), the lock is
+// unusable and the update runs unlocked. Two concurrent unlocked updates
+// can lose one of their writes. Each write is still atomic (temp file,
+// fsync and rename), so the file is never torn.
 func UpdateHostState(trustedRoot, agentName string, mutate func(*HostState) error) error {
 	l, err := resolveHostStateLayout(trustedRoot, agentName)
 	if err != nil {
 		return err
 	}
+	d, err := openHostStateDir(l)
+	if err != nil {
+		return err
+	}
+	defer d.close()
 	lockTarget := filepath.Join(l.agentDir(), HostStateFile)
 	opts := agentinfolock.Options{NoFollowParent: hostStateNoFollowParent}
 	return agentinfolock.Update(lockTarget, opts, func() error {
-		d, err := openHostStateDir(l)
-		if err != nil {
-			return err
-		}
-		defer d.close()
 		hs, err := readHostStateIn(d)
 		if err != nil {
 			return err
