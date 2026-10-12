@@ -453,9 +453,9 @@ func hubFuncDecl(t *testing.T, file, fn string) *ast.FuncDecl {
 	return out
 }
 
-// onStack reports whether a function whose name ends in "."+fn is a caller
+// recipientOnStack reports whether a function whose name ends in "."+fn is a caller
 // of the current goroutine's stack.
-func onStack(fn string) bool {
+func recipientOnStack(fn string) bool {
 	pcs := make([]uintptr, 64)
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
 	for {
@@ -487,7 +487,7 @@ func TestArtifactRecipientWarning_ChainWalkFailureIsSilent(t *testing.T) {
 	// recipient's chain walk.
 	first := 0
 	fst.getDelegationEdgesForDelegateHook = func(call int) {
-		if first == 0 && onStack("(*recipientSubject).Permits") {
+		if first == 0 && recipientOnStack("(*recipientSubject).Permits") {
 			first = call
 		}
 	}
