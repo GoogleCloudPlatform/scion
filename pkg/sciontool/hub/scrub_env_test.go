@@ -105,10 +105,13 @@ func clientEnvConstantNames(t *testing.T) []string {
 	return names
 }
 
-// Every environment variable constant the client declares or references must
-// be either cleared by the shared scrub list or listed, with a reason, as
-// deliberately left alone. A new variable fails this test until it is
-// classified.
+// Every Env* constant declared in this package's non-test sources, and every
+// transportauth.Env* identifier those sources reference, must be either
+// cleared by the shared scrub list or listed, with a reason, as deliberately
+// left alone. A new constant of either kind fails this test until it is
+// classified. The test does not see environment reads through string
+// literals, constants from other packages, or helpers in other packages
+// that read the environment themselves.
 func TestScrubHubEnv_CoversClientEnvKeys(t *testing.T) {
 	names := clientEnvConstantNames(t)
 	if len(names) == 0 {
@@ -126,7 +129,8 @@ func TestScrubHubEnv_CoversClientEnvKeys(t *testing.T) {
 				t.Errorf("testutil.HubEnvKeys() is missing %s (%s)", value, name)
 			}
 		case !unscrubbed:
-			t.Errorf("%s is not classified: add it to the testutil hubEnvKeys list and scrubbedClientEnv, or to unscrubbedClientEnv with a reason", name)
+			t.Errorf("%s is not classified: add it to the testutil hubEnvKeys list "+
+				"and scrubbedClientEnv, or to unscrubbedClientEnv with a reason", name)
 		}
 	}
 	for name := range scrubbedClientEnv {

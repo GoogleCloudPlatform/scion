@@ -20,9 +20,10 @@ import (
 )
 
 // hubEnvKeys lists the environment variables that point the in-container
-// Hub client at a Hub, authenticate it, or identify the agent to it. An agent
-// container sets them ambiently. The values are spelled out here rather than imported so this
-// package stays free of dependencies on the packages that use it.
+// Hub client at a Hub, authenticate it, or identify the agent to it. An
+// agent container sets them ambiently. The values are spelled out here
+// rather than imported so this package stays free of dependencies on the
+// packages that use it.
 var hubEnvKeys = []string{
 	"SCION_HUB_ENDPOINT",
 	"SCION_HUB_URL",
