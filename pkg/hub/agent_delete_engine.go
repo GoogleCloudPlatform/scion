@@ -137,6 +137,10 @@ type agentDeleteParams struct {
 	removeBranch bool
 	force        bool
 	requestedBy  string
+	// hard always removes the row, whatever the soft-delete retention,
+	// without force's skipping of broker failures. Only the test identity
+	// purge (fixture_purge.go) sets it; no request parameter maps to it.
+	hard bool
 }
 
 // deleteClaimStopping reports whether a claim moves a's phase to stopping
@@ -229,7 +233,7 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 				RemoveBranch: p.removeBranch,
 				Force:        p.force,
 				RequestedBy:  p.requestedBy,
-				Soft:         retention > 0 && !p.force && !post.IsIncompleteCreate(),
+				Soft:         retention > 0 && !p.force && !p.hard && !post.IsIncompleteCreate(),
 			}
 			if req.Soft && retainFiles {
 				req.DeleteFiles = false

@@ -329,3 +329,99 @@ describe('scion-chat-members wobble', () => {
     expect(isWobbling(el)).toBe(false);
   });
 });
+
+describe('scion-chat-members people search', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  const humans = [
+    { id: 'u1', kind: 'user' as const, displayName: 'Ann', email: 'ann@example.com' },
+    { id: 'u2', kind: 'user' as const, displayName: 'Bob', email: 'bob@example.com' },
+  ];
+
+  function names(el: ScionChatMembers): string[] {
+    return Array.from(el.shadowRoot?.querySelectorAll('.member-name') ?? []).map(
+      (n) => n.textContent?.trim() ?? ''
+    );
+  }
+
+  it('is hidden while the people list is complete', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.people-search input')).toBeNull();
+  });
+
+  it('on a truncated list: filters what is listed and asks the page to search the hub', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    await el.updateComplete;
+    const queries: string[] = [];
+    el.addEventListener('member-search', (e) =>
+      queries.push((e as CustomEvent<{ query: string }>).detail.query)
+    );
+    const input = el.shadowRoot?.querySelector('.people-search input') as HTMLInputElement;
+    expect(input).toBeTruthy();
+
+    input.value = 'bob@';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    expect(queries).toEqual(['bob@']);
+    expect(names(el)).toEqual(['Bob']);
+  });
+
+  it('says "Searching…" rather than "No matches" while the server search is pending', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    el.searching = true;
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector('.people-search input') as HTMLInputElement;
+    input.value = 'zed';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    const notes = (): string[] =>
+      Array.from(el.shadowRoot?.querySelectorAll('.people-section .empty-note') ?? []).map(
+        (n) => n.textContent?.trim() ?? ''
+      );
+    expect(notes()).toEqual(['Searching…']);
+    // Announced to assistive technology as it changes.
+    expect(el.shadowRoot?.querySelector('.people-section .empty-note')?.getAttribute('role')).toBe(
+      'status'
+    );
+
+    el.searching = false;
+    await el.updateComplete;
+    expect(notes()).toEqual(['No matches']);
+  });
+
+  it('notes neutrally that the list is bounded while no query is typed', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    await el.updateComplete;
+    const text = el.shadowRoot?.textContent ?? '';
+    expect(text).toContain('Showing up to 100 people. Search to find others.');
+  });
+
+  it('drops the query when the list stops being truncated', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector('.people-search input') as HTMLInputElement;
+    input.value = 'bob';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    el.humansTruncated = false;
+    await el.updateComplete;
+    expect(names(el)).toEqual(['Ann', 'Bob']);
+    el.humansTruncated = true;
+    await el.updateComplete;
+    expect(names(el)).toEqual(['Ann', 'Bob']);
+  });
+});
