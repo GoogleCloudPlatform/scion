@@ -50,36 +50,48 @@ func asyncCreateBody(name, launchID string) map[string]any {
 }
 
 // TestAsyncCreate_RuntimeWithoutAsyncSupportStaysSynchronous: an otherwise
-// eligible async create whose resolved runtime is substrate (which does not
-// call the async launch hooks) takes the synchronous path and logs why.
+// eligible async create whose resolved runtime does not call the async
+// launch hooks (substrate, both Cloud Run runtimes) takes the synchronous
+// path and logs why.
 func TestAsyncCreate_RuntimeWithoutAsyncSupportStaysSynchronous(t *testing.T) {
-	mgr := &runtimeAsyncManager{asyncManager: newAsyncManager(), rt: newTestSubstrateRuntime()}
-	srv, rtb := newAsyncTestServer(t, mgr)
-	var logBuf bytes.Buffer
-	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, nil))
+	for _, tc := range []struct {
+		name string
+		rt   runtime.Runtime
+	}{
+		{"substrate", newTestSubstrateRuntime()},
+		{"cloudrun", &runtime.CloudRunRuntime{}},
+		{"cloudrun-sandbox", &runtime.CloudRunSandboxRuntime{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &runtimeAsyncManager{asyncManager: newAsyncManager(), rt: tc.rt}
+			srv, rtb := newAsyncTestServer(t, mgr)
+			var logBuf bytes.Buffer
+			srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	w := postCreate(t, srv, asyncCreateBody("agent-sub", "L-sub"))
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	resp := decodeCreateResponse(t, w)
-	if resp.LaunchPending {
-		t.Fatalf("LaunchPending must be false for a runtime without async launch support: %+v", resp)
-	}
-	if resp.Agent == nil || !resp.Created {
-		t.Fatalf("expected a synchronous created agent: %+v", resp)
-	}
-	if n := mgr.PreflightCallCount(); n != 0 {
-		t.Fatalf("Preflight must not be called on the synchronous path, got %d calls", n)
-	}
-	if n := mgr.StartCallCount(); n != 1 {
-		t.Fatalf("expected exactly 1 synchronous Start call, got %d", n)
-	}
-	if len(rtb.getLaunchReports()) != 0 {
-		t.Fatalf("the synchronous path must send no launch reports")
-	}
-	if !strings.Contains(logBuf.String(), asyncUnsupportedWarn) {
-		t.Fatalf("expected the fallback warning in the log, got:\n%s", logBuf.String())
+			w := postCreate(t, srv, asyncCreateBody("agent-"+tc.name, "L-"+tc.name))
+			if w.Code != http.StatusCreated {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			resp := decodeCreateResponse(t, w)
+			if resp.LaunchPending {
+				t.Fatalf("LaunchPending must be false for a runtime without async launch support: %+v", resp)
+			}
+			if resp.Agent == nil || !resp.Created {
+				t.Fatalf("expected a synchronous created agent: %+v", resp)
+			}
+			if n := mgr.PreflightCallCount(); n != 0 {
+				t.Fatalf("Preflight must not be called on the synchronous path, got %d calls", n)
+			}
+			if n := mgr.StartCallCount(); n != 1 {
+				t.Fatalf("expected exactly 1 synchronous Start call, got %d", n)
+			}
+			if len(rtb.getLaunchReports()) != 0 {
+				t.Fatalf("the synchronous path must send no launch reports")
+			}
+			if !strings.Contains(logBuf.String(), asyncUnsupportedWarn) {
+				t.Fatalf("expected the fallback warning in the log, got:\n%s", logBuf.String())
+			}
+		})
 	}
 }
 

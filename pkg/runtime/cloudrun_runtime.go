@@ -191,6 +191,16 @@ func (r *CloudRunRuntime) Name() string { return "cloudrun" }
 // runtime is Cloud Run must not advertise the capability.
 func (r *CloudRunRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
 
+// AsyncLaunchUnsupported implements AsyncLaunchUnsupportedRuntime. Run does
+// not implement RunConfig.Checkpoint or RunConfig.OnResourceCreated: it
+// calls neither hook, so the broker can neither cancel a Cloud Run launch
+// at a checkpoint nor learn which resources to clean up after it. The
+// broker serves an async create request for this runtime synchronously
+// instead, until Run calls the hooks.
+func (r *CloudRunRuntime) AsyncLaunchUnsupported() bool { return true }
+
+var _ AsyncLaunchUnsupportedRuntime = (*CloudRunRuntime)(nil)
+
 func (r *CloudRunRuntime) ExecUser() string {
 	return "scion"
 }
