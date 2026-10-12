@@ -239,8 +239,10 @@ describe('chat-space-rail Unread DMs section', () => {
     const mobileButton = declarationsFor(mobile, '.space-actions sl-icon-button::part(base)');
     expect(Object.fromEntries(mobileButton)).toEqual({ width: '44px', height: '44px' });
 
-    // The spacer takes no height and is never painted.
+    // The spacer keeps its button's width (overflow: hidden would otherwise
+    // let it shrink to nothing), takes no height, and is never painted.
     const spacerRule = declarationsFor(topLevel, '.space-actions .menu-spacer');
+    expect(spacerRule.get('flex')).toBe('0 0 auto');
     expect(spacerRule.get('height')).toBe('0');
     expect(spacerRule.get('visibility')).toBe('hidden');
     expect(spacerRule.get('overflow')).toBe('hidden');

@@ -643,6 +643,7 @@ export class ScionChatSpaceRail extends LitElement {
        and the copy is never seen, focused or announced. */
     .space-actions .menu-spacer {
       display: flex;
+      flex: 0 0 auto;
       height: 0;
       overflow: hidden;
       visibility: hidden;
