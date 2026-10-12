@@ -71,7 +71,9 @@ list | regex)
 	[ $# -eq 2 ] || usage
 	k=$1 n=$2
 	is_count "$n" || die "N must be a positive number: $n"
-	is_count "$k" && [ "$k" -le "$n" ] || die "K must be a number from 1 to $n: $k"
+	if ! is_count "$k" || [ "$k" -gt "$n" ]; then
+		die "K must be a number from 1 to $n: $k"
+	fi
 	selected=$(names | part "$k" "$n")
 	[ -n "$selected" ] || die "part $k of $n is empty (fewer test names than parts?)"
 	if [ "$cmd" = list ]; then
