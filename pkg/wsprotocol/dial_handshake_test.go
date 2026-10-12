@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -107,6 +108,7 @@ func TestDialWithConfig_CancelEndsUnansweredHandshake(t *testing.T) {
 	cancel()
 	r := waitDial(t, done, "the dial to end after its context was cancelled")
 	require.ErrorIs(t, r.err, context.Canceled, "a cancelled dial reports the cancellation")
+	require.ErrorIs(t, r.err, os.ErrDeadlineExceeded, "the transport error stays reachable")
 	require.Nil(t, r.conn)
 }
 

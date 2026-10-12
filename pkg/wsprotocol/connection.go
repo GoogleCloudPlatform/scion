@@ -382,8 +382,9 @@ func DialWithConfig(ctx context.Context, url string, headers http.Header, config
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// A cancelled dial reports the cancellation, not the deadline
-			// error the past deadline caused.
-			return nil, resp, fmt.Errorf("%w: %v", ctxErr, err)
+			// error the past deadline caused; both stay reachable through
+			// errors.Is and errors.As.
+			return nil, resp, fmt.Errorf("%w: %w", ctxErr, err)
 		}
 		return nil, resp, err
 	}
