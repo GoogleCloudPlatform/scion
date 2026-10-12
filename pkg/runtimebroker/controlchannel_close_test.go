@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -91,11 +92,13 @@ func TestControlChannelClient_ConnectCompletingAfterCloseRegistersNoSession(t *t
 
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- c.Close() }()
-	waitChan(t, closeDone, "Close to return while the dial is held")
+	if err := waitChan(t, closeDone, "Close to return while the dial is held"); err != nil {
+		t.Errorf("Close = %v, want nil", err)
+	}
 	close(proceed)
 
-	if err := waitChan(t, connectDone, "Connect to return after Close"); err == nil {
-		t.Error("Connect returned nil after Close, want the cancellation error")
+	if err := waitChan(t, connectDone, "Connect to return after Close"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Connect after Close = %v, want context.Canceled", err)
 	}
 	waitChan(t, ended, "the Hub side of the connection to end")
 	if n := gotConnect.Load(); n != 0 {
@@ -148,9 +151,11 @@ func TestControlChannelClient_CloseWhileDialBlockedReturnsPromptly(t *testing.T)
 
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- c.Close() }()
-	waitChan(t, closeDone, "Close to return while the dial is blocked")
-	if err := waitChan(t, connectDone, "the connect loop to end after Close"); err == nil {
-		t.Error("Connect returned nil after Close, want the cancellation error")
+	if err := waitChan(t, closeDone, "Close to return while the dial is blocked"); err != nil {
+		t.Errorf("Close = %v, want nil", err)
+	}
+	if err := waitChan(t, connectDone, "the connect loop to end after Close"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Connect after Close = %v, want context.Canceled", err)
 	}
 }
 
@@ -175,9 +180,11 @@ func TestControlChannelClient_CloseDuringBackoffReturnsPromptly(t *testing.T) {
 
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- c.Close() }()
-	waitChan(t, closeDone, "Close to return during the backoff")
-	if err := waitChan(t, connectDone, "the connect loop to end after Close"); err == nil {
-		t.Error("Connect returned nil after Close, want the cancellation error")
+	if err := waitChan(t, closeDone, "Close to return during the backoff"); err != nil {
+		t.Errorf("Close = %v, want nil", err)
+	}
+	if err := waitChan(t, connectDone, "the connect loop to end after Close"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Connect after Close = %v, want context.Canceled", err)
 	}
 }
 

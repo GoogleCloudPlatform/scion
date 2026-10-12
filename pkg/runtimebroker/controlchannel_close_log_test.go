@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -114,9 +115,11 @@ func TestControlChannelClient_CloseDuringDialLogsNoError(t *testing.T) {
 		waitChan(t, accepted, "the dial to reach the Hub")
 		closeDone := make(chan error, 1)
 		go func() { closeDone <- c.Close() }()
-		_ = waitChan(t, closeDone, "Close to return")
-		if err := waitChan(t, connectDone, "the connect loop to end after Close"); err == nil {
-			t.Error("Connect returned nil after Close, want the cancellation error")
+		if err := waitChan(t, closeDone, "Close to return"); err != nil {
+			t.Errorf("Close = %v, want nil", err)
+		}
+		if err := waitChan(t, connectDone, "the connect loop to end after Close"); !errors.Is(err, context.Canceled) {
+			t.Errorf("Connect after Close = %v, want context.Canceled", err)
 		}
 		if msgs := rec.errorMessages(); len(msgs) != 0 {
 			t.Errorf("a connect ended by Close (client closed) logged Error records: %q", msgs)
@@ -143,8 +146,8 @@ func TestControlChannelClient_CloseDuringDialLogsNoError(t *testing.T) {
 		// Close then ends the wait.
 		waitChan(t, (<-chan struct{})(rec.firstError), "the Error record of the refused connect")
 		_ = c.Close()
-		if err := waitChan(t, connectDone, "the connect loop to end after Close"); err == nil {
-			t.Error("Connect returned nil after Close, want the cancellation error")
+		if err := waitChan(t, connectDone, "the connect loop to end after Close"); !errors.Is(err, context.Canceled) {
+			t.Errorf("Connect after Close = %v, want context.Canceled", err)
 		}
 		if msgs := rec.errorMessages(); len(msgs) == 0 {
 			t.Error("a connect refused by the Hub logged no Error record")
