@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -412,6 +413,83 @@ func TestSAParentCeiling_ReplaceAndClearCauses(t *testing.T) {
 	rows := activeAssignments(t, f.store, agent.ID)
 	require.Len(t, rows, 1, "a replacement leaves one active row")
 	assert.Equal(t, sa2.ID, rows[0].ServiceAccountID)
+}
+
+// patchDisposition decodes the disposition of an agent PATCH response.
+func patchDisposition(t *testing.T, rec *httptest.ResponseRecorder) AgentUpdateDisposition {
+	t.Helper()
+	var resp struct {
+		Disposition *AgentUpdateDisposition `json:"disposition"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	require.NotNil(t, resp.Disposition, rec.Body.String())
+	return *resp.Disposition
+}
+
+// TestSAParentCeiling_PatchDispositionListsRecordedIdentity: a PATCH that
+// records a service-account assignment lists gcp_identity under applied,
+// including one that names the agent's current account, since the row is
+// re-recorded from the caller. A PATCH with no identity field, or one the
+// assign gate refuses, does not.
+func TestSAParentCeiling_PatchDispositionListsRecordedIdentity(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	ctx := context.Background()
+	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
+	sa2 := bypassAgentsCreateSA(t, f, f.proj.ID, true)
+	agent := pendingAgentForPatch(t, f, "sa-rec-disp")
+	assignBody := func(id string) map[string]interface{} {
+		return map[string]interface{}{"metadata_mode": store.GCPMetadataModeAssign, "service_account_id": id}
+	}
+
+	rec := patchGCPIdentityAsOwner(t, f, agent.ID, assignBody(sa.ID))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"gcp_identity"}, patchDisposition(t, rec).Applied)
+
+	// The current account again, from another caller: the row is
+	// re-recorded with that caller as its source, and the key is listed.
+	caller := &store.User{
+		ID: tid("sa-rec-disp-caller"), Email: "sa-rec-disp-caller@example.com", DisplayName: "Disp Caller",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, f.store.CreateUser(ctx, caller))
+	ensureHubMembership(ctx, f.store, caller.ID)
+	grantProjectRole(t, f.store, caller.ID, f.proj.ID, store.ProjectRoleAdmin)
+	rec = doRequestAsUser(t, f.srv, caller, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+		map[string]interface{}{"gcp_identity": assignBody(sa.ID)})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	d := patchDisposition(t, rec)
+	assert.Equal(t, []string{"gcp_identity"}, d.Applied)
+	assert.Empty(t, d.Held)
+	assert.Empty(t, d.HeldForReincarnate)
+	rows := activeAssignments(t, f.store, agent.ID)
+	require.Len(t, rows, 1)
+	assert.Equal(t, sa.ID, rows[0].ServiceAccountID)
+	assert.Equal(t, caller.ID, rows[0].SourcePrincipalID, "the echo re-records the row from the caller")
+
+	// A different allowed account.
+	rec = patchGCPIdentityAsOwner(t, f, agent.ID, assignBody(sa2.ID))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"gcp_identity"}, patchDisposition(t, rec).Applied)
+
+	// No identity field: no assignment write, no key.
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+		map[string]interface{}{"labels": map[string]string{"team": "infra"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"labels"}, patchDisposition(t, rec).Applied)
+	rows = activeAssignments(t, f.store, agent.ID)
+	require.Len(t, rows, 1)
+	recorded := rows[0]
+
+	// A refused echo of the current account answers 403 with no
+	// disposition and leaves the row as it was.
+	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().
+		DenyTarget(sa2.Email, "caller lacks iam.serviceAccounts.actAs"))
+	rec = patchGCPIdentityAsOwner(t, f, agent.ID, assignBody(sa2.ID))
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), `"disposition"`)
+	rows = activeAssignments(t, f.store, agent.ID)
+	require.Len(t, rows, 1)
+	assert.Equal(t, recorded.ID, rows[0].ID, "a refused PATCH writes no row")
 }
 
 // TestSAParentCeiling_PatchSourceCeilingDenied covers the source ceiling an
