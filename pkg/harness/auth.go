@@ -577,8 +577,8 @@ func AutoDetectAuthType(authMeta *config.HarnessAuthMetadata, fileSecretNames, e
 		return ""
 	}
 
-	fileType := resolveAutodetectLeg(authMeta, authMeta.Autodetect.Files, fileSecretNames)
-	envType := resolveAutodetectLeg(authMeta, authMeta.Autodetect.Env, envKeys)
+	fileType := resolveAutodetectLeg(authMeta.DefaultType, authMeta.Autodetect.Files, fileSecretNames)
+	envType := resolveAutodetectLeg(authMeta.DefaultType, authMeta.Autodetect.Env, envKeys)
 
 	if fileType != "" {
 		if fileType == "vertex-ai" && envType == "api-key" && authMeta.DefaultType == "api-key" {
@@ -595,17 +595,18 @@ func AutoDetectAuthType(authMeta *config.HarnessAuthMetadata, fileSecretNames, e
 
 // resolveAutodetectLeg returns the auth type one autodetect table resolves
 // for the present keys, or "" when no present key maps to any type. Unlike
-// pickAutodetectCandidate it returns default_type (not "") when a present
-// credential resolves to the default type; see AutoDetectAuthType.
-func resolveAutodetectLeg(authMeta *config.HarnessAuthMetadata, autodetect map[string]string, presentKeys map[string]struct{}) string {
-	if detected := pickAutodetectCandidate(authMeta.DefaultType, autodetect, presentKeys); detected != "" {
+// pickAutodetectCandidate it returns defaultType (the harness default_type,
+// not "") when a present credential resolves to the default type; see
+// AutoDetectAuthType.
+func resolveAutodetectLeg(defaultType string, autodetect map[string]string, presentKeys map[string]struct{}) string {
+	if detected := pickAutodetectCandidate(defaultType, autodetect, presentKeys); detected != "" {
 		return detected
 	}
 	if hasAutodetectCandidate(autodetect, presentKeys) {
 		// pickAutodetectCandidate only returns "" for a present candidate
-		// when authMeta.DefaultType is non-empty and among the matched
-		// candidates, so this is never itself empty.
-		return authMeta.DefaultType
+		// when defaultType is non-empty and among the matched candidates,
+		// so this is never itself empty.
+		return defaultType
 	}
 	return ""
 }
