@@ -770,6 +770,12 @@ func TestIsTestIdentityIssuanceRoute(t *testing.T) {
 		{http.MethodPost, "/api/v1/test-identities", true},
 		{http.MethodGet, "/api/v1/test-identities", true},
 		{http.MethodPost, "/api/v1/test-identities/abc/token", true},
+		{http.MethodPost, "/api/v1/test-identities/abc/web-login-code", true},
+		{http.MethodGet, "/api/v1/test-identities/abc/web-login-code", false},
+		{http.MethodDelete, "/api/v1/test-identities/abc/web-login-code", false},
+		{http.MethodPost, "/api/v1/test-identities//web-login-code", false},
+		{http.MethodPost, "/api/v1/test-identities/a/b/web-login-code", false},
+		{http.MethodPost, "/api/v1/test-identities/a%2Fb/web-login-code", false},
 		{http.MethodDelete, "/api/v1/test-identities/abc", true},
 		{http.MethodDelete, "/api/v1/test-identities", false},
 		{http.MethodGet, "/api/v1/test-identities/abc", false},
@@ -1465,57 +1471,161 @@ func TestTestIdentityDelegation_LabelIsAlwaysValidUTF8(t *testing.T) {
 	assert.Equal(t, "ab�cd", stored.Label)
 }
 
-// The web-login code route (WS1) is not a workload issuance route: a
-// workload token is refused there before any verification, for the
-// delegation that issued the identity and for any other one. The
-// management checks the route shares with the issuance routes are
-// delegation-scoped as well: D2 cannot manage D1's identity, and the rate
-// key is per delegation.
-func TestWorkloadDelegation_WebLoginCodeRefusedForEveryDelegation(t *testing.T) {
-	e := newX2Env(t, true)
+// x2EnableWebSessions gives e's server a hub-local web session key, so
+// test identity web sessions are available.
+func x2EnableWebSessions(t *testing.T, e *x2Env) {
+	t.Helper()
 	key := make([]byte, testIdentityWebKeyLen)
 	_, err := rand.Read(key)
 	require.NoError(t, err)
 	e.srv.testIdentityWeb = newTestIdentityWebState(TestIdentityWebSessionKey{Key: key})
 	webOn, _ := e.srv.testIdentityWebSessionGate()
 	require.True(t, webOn, "web sessions are available in this setup")
+}
 
-	grantor, _ := e.bindingGrantor(t, "x2-web-grantor")
+// x2WebCodeAudits returns the web-login code audit records for identity id.
+func x2WebCodeAudits(t *testing.T, e *x2Env, id string) []store.MutationAuditRecord {
+	t.Helper()
+	audits, _, err := e.s.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: testIdentityWebCodeIssueMutation, TargetID: id})
+	require.NoError(t, err)
+	return audits
+}
+
+// X3b (ptone/scion#4240): a workload delegation mints a web-login code for
+// a member-tier identity it issued itself. The code is returned once, and
+// the audit names the grantor as the actor and the delegation as the
+// credential, with the delegation in the summary; it holds no code.
+func TestWorkloadDelegation_WebLoginCodeForOwnIdentity(t *testing.T) {
+	e := newX2Env(t, true)
+	x2EnableWebSessions(t, e)
+
+	grantor, _ := e.bindingGrantor(t, "x2-web-own-grantor")
 	d1 := e.delegate(t, grantor, nil)
-	d2 := e.delegate(t, grantor, nil)
 	rec := e.mint(t, d1.ID)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	i1 := tiDecode(t, rec).Identity
 	path := "/api/v1/test-identities/" + i1.ID + "/web-login-code"
 
-	assert.False(t, isTestIdentityIssuanceRoute(httptest.NewRequest(http.MethodPost, path, nil)))
-	verified := e.google.calls.Load()
-	for _, d := range []string{d1.ID, d2.ID} {
-		rec = e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), d, nil, nil)
-		assert.Equal(t, http.StatusUnauthorized, rec.Code, "delegation %s: %s", d, rec.Body.String())
+	assert.True(t, isTestIdentityIssuanceRoute(httptest.NewRequest(http.MethodPost, path, nil)))
+	rec = e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), d1.ID, nil, map[string]string{testIssuerRunLabelHeader: "x3b-run"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+	var resp TestIdentityWebCodeResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Code)
+	require.NotEmpty(t, resp.CodeID)
+
+	audits := x2WebCodeAudits(t, e, i1.ID)
+	require.Len(t, audits, 1)
+	a := audits[0]
+	assert.Equal(t, grantor.ID, a.ActorPrincipalID, "the grantor is the actor")
+	assert.Equal(t, d1.ID, a.ActorCredentialID, "the delegation is the credential")
+	assert.NotContains(t, a.AfterSummary, resp.Code)
+	var summary struct {
+		CredentialKind string                     `json:"credential_kind"`
+		Workload       *testIdentityWorkloadAudit `json:"workload_delegation"`
 	}
-	assert.Equal(t, verified, e.google.calls.Load(), "refused before any verification")
+	require.NoError(t, json.Unmarshal([]byte(a.AfterSummary), &summary))
+	require.NotNil(t, summary.Workload, "the summary records the workload delegation")
+	assert.Equal(t, d1.ID, summary.Workload.DelegationID)
+	assert.Equal(t, grantor.ID, summary.Workload.Grantor)
+	assert.Equal(t, x2Sub, summary.Workload.WorkloadSub)
+	assert.Equal(t, "x3b-run", summary.Workload.RunLabel)
+	assert.Equal(t, string(CredentialKindWorkloadDelegation), summary.CredentialKind)
+
+	// The web session gate still applies to a workload request.
+	e.srv.testIdentityWeb = nil
+	rec = e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), d1.ID, nil, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), testIdentityWebReasonUnavailable)
+	assert.Len(t, x2WebCodeAudits(t, e, i1.ID), 1, "no code minted while web sessions are unavailable")
+}
+
+// X3b (ptone/scion#4240): a workload delegation gets the same 404 as for
+// an unknown identity on another delegation's identity, on the grantor's
+// own (session-issued) identity and on an admin-kind identity; nothing is
+// minted. The grantor's own session still mints a code for the identity.
+func TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities(t *testing.T) {
+	e := newX2Env(t, true)
+	x2EnableWebSessions(t, e)
 	ctx := context.Background()
-	audits, _, err := e.s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: testIdentityWebCodeIssueMutation, TargetID: i1.ID})
+
+	grantor, _ := e.bindingGrantor(t, "x2-web-other-grantor")
+	d1 := e.delegate(t, grantor, nil)
+	d2 := e.delegate(t, grantor, nil)
+	rec := e.mint(t, d1.ID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	i1 := tiDecode(t, rec).Identity
+
+	// An identity the grantor issued with its own session, through no
+	// delegation.
+	rec = doRequestAsUser(t, e.srv, grantor, http.MethodPost, "/api/v1/test-identities", map[string]string{"role": "member"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	own := tiDecode(t, rec).Identity
+
+	// An admin-kind identity issued by the same grantor.
+	rd, err := e.s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
-	assert.Empty(t, audits, "no code was minted for a workload request")
-
-	// Positive control: the grantor's own session mints a code for it.
-	rec = doRequestAsUser(t, e.srv, grantor, http.MethodPost, path, nil)
-	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-
-	// The shared management checks, with each delegation's state attached.
-	stateCtx := func(id string) context.Context {
-		d, err := e.s.GetTestIdentityDelegation(ctx, id)
-		require.NoError(t, err)
-		c := contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindWorkloadDelegation, ID: id})
-		return contextWithWorkloadDelegationState(c, &workloadDelegationState{delegation: d})
+	exp := time.Now().Add(30 * time.Minute)
+	issuer := grantor.ID
+	issuance := generateID()
+	admin := &store.User{
+		ID:          generateID(),
+		Email:       "test-admin-" + generateID()[:8] + "@" + store.TestHubAdminEmailDomain,
+		DisplayName: "x3b admin kind",
+		Role:        store.TestAdminRole(store.UserKindTestHubAdmin),
+		Status:      store.UserStatusActive,
+		Kind:        store.UserKindTestHubAdmin,
+		ExpiresAt:   &exp,
+		IssuedBy:    &issuer,
+		IssuanceID:  &issuance,
 	}
-	row, err := e.s.GetUser(ctx, i1.ID)
+	_, err = e.s.CreateTestAdminUser(ctx, admin, rd.ID)
 	require.NoError(t, err)
-	caller := NewAuthenticatedUser(grantor.ID, grantor.Email, "", "member", "api")
-	assert.True(t, canManageTestIdentity(stateCtx(d1.ID), caller, row), "D1 manages its own identity")
-	assert.False(t, canManageTestIdentity(stateCtx(d2.ID), caller, row), "D2 does not manage D1's identity")
-	assert.Equal(t, "delegation:"+d2.ID, testIdentityRateKey(stateCtx(d2.ID), caller))
-	assert.Equal(t, grantor.ID, testIdentityRateKey(ctx, caller))
+
+	unknown := e.workload(t, http.MethodPost, "/api/v1/test-identities/"+generateID()+"/web-login-code", x2Token(t, x2TokenOpts{}), d1.ID, nil, nil)
+	require.Equal(t, http.StatusNotFound, unknown.Code, unknown.Body.String())
+
+	for _, tc := range []struct {
+		name, delegation, identity string
+	}{
+		{"another delegation's identity", d2.ID, i1.ID},
+		{"the grantor's session-issued identity", d1.ID, own.ID},
+		{"an admin-kind identity", d1.ID, admin.ID},
+	} {
+		path := "/api/v1/test-identities/" + tc.identity + "/web-login-code"
+		rec := e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), tc.delegation, nil, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "%s: %s", tc.name, rec.Body.String())
+		assert.JSONEq(t, unknown.Body.String(), rec.Body.String(), "%s: same answer as an unknown identity", tc.name)
+		assert.Empty(t, x2WebCodeAudits(t, e, tc.identity), "%s: no code minted", tc.name)
+	}
+
+	// Positive control: the grantor's own session mints a code for the
+	// delegation's identity.
+	rec = doRequestAsUser(t, e.srv, grantor, http.MethodPost, "/api/v1/test-identities/"+i1.ID+"/web-login-code", nil)
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+}
+
+// The member-tier rule of workloadWebCodeAdmitted on its own: the store
+// never holds an admin-kind row with a delegation id, so the handler test
+// above cannot reach this branch with one.
+func TestWorkloadWebCodeAdmitted(t *testing.T) {
+	ctx := context.Background()
+	did := "d-1"
+	member := &store.User{ID: "u-member", Kind: store.UserKindTestFixture, IssuerDelegationID: &did}
+	admin := &store.User{ID: "u-admin", Kind: store.UserKindTestHubAdmin, IssuerDelegationID: &did}
+	superAdmin := &store.User{ID: "u-super", Kind: store.UserKindTestSuperAdmin, IssuerDelegationID: &did}
+	withState := func(scope string) context.Context {
+		c := contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindWorkloadDelegation, ID: did})
+		return contextWithWorkloadDelegationState(c, &workloadDelegationState{delegation: &store.TestIdentityDelegation{ID: did, Scope: scope}})
+	}
+
+	assert.True(t, workloadWebCodeAdmitted(ctx, member), "not a workload request")
+	assert.True(t, workloadWebCodeAdmitted(ctx, admin), "not a workload request: the kind rule is testIdentityWebKindAdmitted's")
+	assert.True(t, workloadWebCodeAdmitted(withState(testIdentityDelegationScope), member))
+	assert.False(t, workloadWebCodeAdmitted(withState(testIdentityDelegationScope), admin))
+	assert.False(t, workloadWebCodeAdmitted(withState(testIdentityDelegationScope), superAdmin))
+	assert.False(t, workloadWebCodeAdmitted(withState("test_identity:issue_admin"), member), "a scope other than the member scope")
+	noState := contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindWorkloadDelegation, ID: did})
+	assert.False(t, workloadWebCodeAdmitted(noState, member), "a workload credential without its state")
 }
