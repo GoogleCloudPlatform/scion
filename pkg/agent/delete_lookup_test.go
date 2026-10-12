@@ -16,6 +16,7 @@ package agent
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -207,4 +208,63 @@ func TestLocalAgentDirExistsRejectsMultiElementName(t *testing.T) {
 			t.Errorf("LocalAgentDirExists(%q) = %v, %v; want false and an error", name, found, err)
 		}
 	}
+}
+
+// TestLocalAgentDirExistsReturnsProjectResolveError checks that a failure to
+// resolve the project is returned, not reported as no agent directory (which
+// scion delete would show as "agent not found").
+func TestLocalAgentDirExistsReturnsProjectResolveError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	scionDir := filepath.Join(home, "project", ".scion")
+	mustMkdirAll(t, filepath.Join(scionDir, "agents"))
+
+	resolveErr := errors.New("resolve failed")
+	orig := resolveDeleteLookupProjectDir
+	resolveDeleteLookupProjectDir = func(string) (string, error) { return "", resolveErr }
+	t.Cleanup(func() { resolveDeleteLookupProjectDir = orig })
+
+	found, err := LocalAgentDirExists("some-agent", scionDir)
+	if found || !errors.Is(err, resolveErr) {
+		t.Fatalf("LocalAgentDirExists = %v, %v; want false and an error wrapping %v", found, err, resolveErr)
+	}
+}
+
+// TestLocalAgentDirExistsReturnsStatError checks that a stat error other
+// than not-exist is returned, not treated as no agent directory.
+func TestLocalAgentDirExistsReturnsStatError(t *testing.T) {
+	t.Run("permission denied", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("directory permissions do not apply to root")
+		}
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		scionDir := filepath.Join(home, "project", ".scion")
+		agentsDir := filepath.Join(scionDir, "agents")
+		mustMkdirAll(t, filepath.Join(agentsDir, "locked-agent"))
+		if err := os.Chmod(agentsDir, 0); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(agentsDir, 0755) })
+
+		found, err := LocalAgentDirExists("locked-agent", scionDir)
+		if found || !errors.Is(err, fs.ErrPermission) {
+			t.Fatalf("LocalAgentDirExists = %v, %v; want false and a permission error", found, err)
+		}
+	})
+
+	t.Run("agents root is a file", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		scionDir := filepath.Join(home, "project", ".scion")
+		mustMkdirAll(t, scionDir)
+		if err := os.WriteFile(filepath.Join(scionDir, "agents"), nil, 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		found, err := LocalAgentDirExists("some-agent", scionDir)
+		if found || err == nil {
+			t.Fatalf("LocalAgentDirExists = %v, %v; want false and an error", found, err)
+		}
+	})
 }
