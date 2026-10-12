@@ -18,6 +18,7 @@ package hub
 
 import (
 	"go/ast"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"os"
@@ -222,5 +223,223 @@ func good() {
 	if len(got) != 7 {
 		t.Fatalf("want 7 offenders (literal, const, multi-line, paren arg, local mode=memory const, ent, implicit const), got %d:\n  %s",
 			len(got), strings.Join(got, "\n  "))
+	}
+}
+
+// mattnDriverAllowed lists the functions, by file, that may keep using the
+// mattn/go-sqlite3 driver in a file excluded from no_sqlite builds.
+var mattnDriverAllowed = map[string]map[string]bool{
+	// The fault injection needs an authorizer hook, which modernc.org/sqlite
+	// does not expose.
+	"webchannel_store_schema_test.go": {"TestSQLiteWebChatStore_TableExistsError_Surfaces": true},
+}
+
+// excludedFromNoSQLite reports whether src carries a //go:build constraint
+// that is false when the no_sqlite tag is set, whatever the other tags.
+// Such a file is never compiled by "make test-fast" (go test -tags
+// no_sqlite), so it can always use the production modernc.org/sqlite driver.
+func excludedFromNoSQLite(src []byte) bool {
+	for _, line := range strings.Split(string(src), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "package ") {
+			return false
+		}
+		if !constraint.IsGoBuild(line) {
+			continue
+		}
+		expr, err := constraint.Parse(line)
+		if err != nil {
+			return false
+		}
+		// Try every assignment of the other tags the expression names.
+		var tags []string
+		collectConstraintTags(expr, map[string]bool{"no_sqlite": true}, &tags)
+		for mask := 0; mask < 1<<len(tags); mask++ {
+			on := map[string]bool{"no_sqlite": true}
+			for i, tag := range tags {
+				on[tag] = mask&(1<<i) != 0
+			}
+			if expr.Eval(func(tag string) bool { return on[tag] }) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// collectConstraintTags appends to tags each tag expr names that is not
+// already in seen, in first-seen order.
+func collectConstraintTags(expr constraint.Expr, seen map[string]bool, tags *[]string) {
+	switch e := expr.(type) {
+	case *constraint.TagExpr:
+		if !seen[e.Tag] {
+			seen[e.Tag] = true
+			*tags = append(*tags, e.Tag)
+		}
+	case *constraint.NotExpr:
+		collectConstraintTags(e.X, seen, tags)
+	case *constraint.AndExpr:
+		collectConstraintTags(e.X, seen, tags)
+		collectConstraintTags(e.Y, seen, tags)
+	case *constraint.OrExpr:
+		collectConstraintTags(e.X, seen, tags)
+		collectConstraintTags(e.Y, seen, tags)
+	}
+}
+
+// mattnDriverUses returns every use of the mattn/go-sqlite3 driver in files
+// that no_sqlite builds exclude: a blank import of the package, or an
+// openTestMemorySQLite, sql.Open or ent.Open call whose driver argument is
+// the string literal "sqlite3". Files built under no_sqlite are skipped:
+// there modernc.org/sqlite is not linked and mattn is the only driver.
+func mattnDriverUses(files map[string][]byte) ([]string, error) {
+	fset := token.NewFileSet()
+	var offenders []string
+	for name, src := range files {
+		if !excludedFromNoSQLite(src) {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, err
+		}
+		for _, imp := range f.Imports {
+			if imp.Name != nil && imp.Name.Name == "_" && imp.Path.Value == `"github.com/mattn/go-sqlite3"` {
+				offenders = append(offenders, fset.Position(imp.Pos()).String()+": blank import of github.com/mattn/go-sqlite3")
+			}
+		}
+		for _, decl := range f.Decls {
+			fnName := ""
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				fnName = fn.Name.Name
+			}
+			if mattnDriverAllowed[filepath.Base(name)][fnName] {
+				continue
+			}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				var callee string
+				driverArg := 0
+				switch fun := call.Fun.(type) {
+				case *ast.Ident:
+					if fun.Name != "openTestMemorySQLite" {
+						return true
+					}
+					callee, driverArg = fun.Name, 1
+				case *ast.SelectorExpr:
+					pkg, ok := fun.X.(*ast.Ident)
+					if !ok || fun.Sel.Name != "Open" || (pkg.Name != "sql" && pkg.Name != "ent") {
+						return true
+					}
+					callee = pkg.Name + ".Open"
+				default:
+					return true
+				}
+				if len(call.Args) <= driverArg {
+					return true
+				}
+				lit, ok := call.Args[driverArg].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING || lit.Value != `"sqlite3"` {
+					return true
+				}
+				offenders = append(offenders, fset.Position(call.Pos()).String()+": "+callee+` with driver "sqlite3"`)
+				return true
+			})
+		}
+	}
+	sort.Strings(offenders)
+	return offenders, nil
+}
+
+// TestSQLiteOnlyTestsUseProductionDriver keeps pkg/hub test files that
+// no_sqlite builds exclude on the driver production uses, modernc.org/sqlite
+// ("sqlite"), rather than mattn/go-sqlite3 ("sqlite3"). The two drivers
+// differ in time handling, DSN options and error types, so a test on mattn
+// can pass where production fails (ptone/scion#4694). Files that "make
+// test-fast" compiles stay on mattn, the only driver linked there.
+func TestSQLiteOnlyTestsUseProductionDriver(t *testing.T) {
+	names, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{}
+	for _, f := range names {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[f] = data
+	}
+	offenders, err := mattnDriverUses(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("pkg/hub test files excluded from no_sqlite builds use the mattn driver; "+
+			"open with the production driver \"sqlite\" (modernc.org/sqlite) instead, "+
+			"or add the function to mattnDriverAllowed with the reason:\n  %s",
+			strings.Join(offenders, "\n  "))
+	}
+}
+
+// TestMattnDriverUsesDetector checks the driver guard against the spellings
+// it must catch and the ones it must allow.
+func TestMattnDriverUsesDetector(t *testing.T) {
+	const sqliteOnly = "//go:build !no_sqlite && (!hubshard || hubshard_1)\n\n"
+	const body = `package hub
+
+import (
+	"database/sql"
+
+	_ "github.com/mattn/go-sqlite3"
+)
+
+func bad(t *testing.T) {
+	_ = openTestMemorySQLite(t, "sqlite3")
+	_, _ = sql.Open("sqlite3", "file:x.db")
+	_, _ = ent.Open(
+		"sqlite3",
+		"file:x.db",
+	)
+}
+
+func good(t *testing.T) {
+	// _ = openTestMemorySQLite(t, "sqlite3")
+	_ = openTestMemorySQLite(t, "sqlite")
+	_, _ = sql.Open("sqlite", "file:x.db")
+	_ = NewWebChatStore(nil, "sqlite3")
+}
+`
+	const allowed = sqliteOnly + `package hub
+
+func TestSQLiteWebChatStore_TableExistsError_Surfaces(t *testing.T) {
+	_ = openTestMemorySQLite(t, "sqlite3")
+}
+
+func other(t *testing.T) {
+	_ = openTestMemorySQLite(t, "sqlite3")
+}
+`
+	got, err := mattnDriverUses(map[string][]byte{
+		"sqlite_only_test.go":             []byte(sqliteOnly + body),
+		"untagged_test.go":                []byte(body),
+		"shard_only_test.go":              []byte("//go:build !hubshard || hubshard_1\n\n" + body),
+		"webchannel_store_schema_test.go": []byte(allowed),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("want 5 offenders (blank import, helper, sql.Open, multi-line ent.Open in sqlite_only_test.go; other() in the allowlisted file), got %d:\n  %s",
+			len(got), strings.Join(got, "\n  "))
+	}
+	for _, o := range got {
+		if !strings.HasPrefix(o, "sqlite_only_test.go:") && !strings.HasPrefix(o, "webchannel_store_schema_test.go:") {
+			t.Errorf("unexpected offender outside the no_sqlite-excluded files: %s", o)
+		}
 	}
 }

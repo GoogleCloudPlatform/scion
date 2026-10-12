@@ -1583,8 +1583,8 @@ func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 	enableWriteDenySwitch(t, srv)
 
 	// Wire webChatStore for reply affinity assertions.
-	wcsDB := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(wcsDB, "sqlite3")
+	wcsDB := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(wcsDB, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -1836,8 +1836,8 @@ func setupMutePinTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.
 	// The dev user is a member: chat tracks unread only in member projects.
 	bindProjectMember(t, s, proj.ID, DevUserID)
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1864,8 +1864,8 @@ func setupChatAuthzTest(t *testing.T) (*Server, store.Store, WebChatStore, *stor
 	t.Helper()
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -2174,8 +2174,8 @@ func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Pro
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -2520,7 +2520,7 @@ func wireSharedWebChatStore(t *testing.T, srv *Server, s store.Store) WebChatSto
 	rawDB := dbProvider.DB()
 	require.NotNil(t, rawDB, "store DB() returned nil")
 
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	return wcs
@@ -2541,7 +2541,7 @@ func setupGroupConvTopicTest(t *testing.T) (*Server, store.Store, WebChatStore, 
 	rawDB := dbProvider.DB()
 	require.NotNil(t, rawDB, "store DB() returned nil")
 
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -3650,7 +3650,7 @@ func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 	// thread membership requires.
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok, "store does not expose DB()")
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -3803,7 +3803,7 @@ func attachWebChatStore(t *testing.T, srv *Server, s store.Store) WebChatStore {
 	t.Helper()
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	return wcs

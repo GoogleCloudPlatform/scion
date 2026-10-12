@@ -201,8 +201,8 @@ func newSpacesPerfFixtureOn(t *testing.T, srv *Server, s store.Store, owner, mem
 	t.Helper()
 	ctx := context.Background()
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	base := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	base := NewWebChatStore(db, "sqlite")
 	require.NoError(t, base.Init())
 	wcs := &spacesCountingWCS{WebChatStore: base}
 	srv.SetWebChatStore(wcs)

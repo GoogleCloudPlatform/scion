@@ -523,7 +523,7 @@ func TestScheduledSend_SendNowRateLimited(t *testing.T) {
 
 func TestScheduledStore_SQLite_ConversationIndex(t *testing.T) {
 	_, dsn := openScheduledStorePair(t)
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 	var n int

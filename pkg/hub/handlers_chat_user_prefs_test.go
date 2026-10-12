@@ -29,8 +29,8 @@ import (
 func TestChatV2_UserPrefs_ResponseUsesRequestFieldNames(t *testing.T) {
 	srv, _ := testServer(t)
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

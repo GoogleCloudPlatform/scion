@@ -58,9 +58,9 @@ func def158BrokerSetup(t *testing.T) (
 	ctx := context.Background()
 
 	// WebChatStore.
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	wcs = NewWebChatStore(db, "sqlite3")
+	wcs = NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -201,8 +201,8 @@ func TestDEF158_SurfaceFallback_NoAffinity_ChannelDerivedFromSurface(t *testing.
 	srv, s, project, agent, user := def138Setup(t)
 	ctx := context.Background()
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -536,8 +536,8 @@ func TestDEF159_Fixed_NormalPathBackfillsChannelAndThreadID(t *testing.T) {
 	proxy.subscribeProjectUserMessages(project.ID)
 
 	// WebChatStore for affinity lookups — but do NOT seed any affinity.
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
