@@ -7564,7 +7564,7 @@ func scionEntry(path string) string {
 }
 
 // projectIDAtPath returns the project identity recorded at path, or "".
-// For a .scion directory it is the project-id (or legacy grove-id) file. For a
+// For a .scion directory it is the project-id file. For a
 // .scion marker file (non-git linked project) it is the marker's project ID.
 // If path is a project's external config dir, which has no project-id file,
 // the result is "".
