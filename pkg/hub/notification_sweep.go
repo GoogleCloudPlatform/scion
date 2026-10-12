@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // notificationDispatchSweepHandler returns a recurring handler that queries for
@@ -252,7 +253,7 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 
 	// Use the caller's context directly — the sweep/drain handler already
 	// sets a 30s timeout, and dispatchWithBrokerRetry respects ctx.Done().
-	if err := dispatchWithBrokerRetry(ctx, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
+	if err := dispatchWithBrokerRetry(ctx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
 		nd.log.Error("retry: delivery failed, leaving claimed",
 			"notificationID", notif.ID, "subscriberID", sub.SubscriberID, "error", err)
 		// Leave claimed (dispatched=true). The delivery attempt was made; the
@@ -268,8 +269,10 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 				"agent_name", subscriber.Name,
 				"project_id", subscriber.ProjectID,
 				"notification_id", notif.ID,
+				// The record was written before dispatch; this outcome
+				// line carries no record fields or content.
+				logging.AttrLogKind, logging.LogKindEvent,
 			}
-			logAttrs = append(logAttrs, structuredMsg.LogAttrs()...)
 			nd.messageLog.Debug("retry: notification message dispatched", logAttrs...)
 		}
 	}

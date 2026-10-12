@@ -130,6 +130,11 @@ type HealthSummaryHub struct {
 	// LiveTestAdminIdentities is the number of live admin-kind test
 	// identities. Null when the count could not be read.
 	LiveTestAdminIdentities *int `json:"live_test_admin_identities"`
+	// TestIdentityWebSessionsEnabled is true when test identity web
+	// sessions are available on this instance (ptone/scion#4240, WS1; the
+	// same value as testIdentityWebSessions in GET
+	// /api/v1/test-infra/status). Read-only.
+	TestIdentityWebSessionsEnabled bool `json:"test_identity_web_sessions_enabled"`
 }
 
 // HealthSummaryBrokers is the runtime broker section of the health
@@ -346,6 +351,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	hubSummary.TestIdentitiesEnabled = s.testIdentities.enabled
 	hubSummary.TestAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindHubAdmin)
 	hubSummary.TestSuperAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindSuperAdmin)
+	hubSummary.TestIdentityWebSessionsEnabled, _ = s.testIdentityWebSessionGate()
 	if n, err := s.liveTestAdminIdentityCount(ctx); err != nil {
 		slog.Error("health summary: failed to count live test admin identities", "error", err)
 	} else {

@@ -147,7 +147,12 @@ const (
 // unreachable (ErrMessageDeferred). The caller must set a deadline on ctx
 // (typically 30s). Returns nil on success, ErrBrokerTimeout if the deadline
 // expires while still retrying, or the original error for non-transient failures.
-func dispatchWithBrokerRetry(ctx context.Context, dispatcher AgentDispatcher, agent *store.Agent, msg string, urgent bool, structuredMsg *messages.StructuredMessage) error {
+//
+// recordLog is where the hub writes this message's record to the message
+// log, once, before the first attempt (see logMessageRecord). Callers that
+// write their own record pass nil.
+func dispatchWithBrokerRetry(ctx context.Context, recordLog *slog.Logger, dispatcher AgentDispatcher, agent *store.Agent, msg string, urgent bool, structuredMsg *messages.StructuredMessage) error {
+	logMessageRecord(recordLog, agent, structuredMsg)
 	urgent = effectiveInterrupt(agent, urgent)
 	backoff := brokerRetryInitialBackoff
 	for {
@@ -212,4 +217,18 @@ func StoreAffinityLookup(st store.Store, freshness time.Duration) func(ctx conte
 		alive := !b.LastHeartbeat.IsZero() && time.Since(b.LastHeartbeat) < freshness
 		return *b.ConnectedHubID, alive
 	}
+}
+
+// logMessageRecord writes the hub's message record for structuredMsg to the
+// message log. The rule: each message gets one record, written when the hub
+// hands the message to delivery and before the outcome is known, so
+// deferred and failed deliveries keep theirs. Outcome lines are tagged
+// log_kind=event. A nil logger, agent or message writes nothing.
+func logMessageRecord(l *slog.Logger, agent *store.Agent, structuredMsg *messages.StructuredMessage) {
+	if l == nil || agent == nil || structuredMsg == nil {
+		return
+	}
+	attrs := []any{"agent_id", agent.ID, "project_id", agent.ProjectID}
+	attrs = append(attrs, structuredMsg.LogAttrs()...)
+	l.Info("message handed to delivery", attrs...)
 }
