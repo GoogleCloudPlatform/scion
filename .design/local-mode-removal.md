@@ -13,6 +13,8 @@ This is the public copy of the design. User-facing documentation of the result i
 
 ## Summary
 
+> **Current behaviour:** nothing auto-starts a server (Amendment 3). Where this document describes auto-start, read it as superseded: with no hub, commands point at `scion server start`.
+
 Local-only mode is the CLI calling the `pkg/agent` Manager directly whenever `CheckHubAvailability*` returns a nil HubContext (`--no-hub`, or hub not enabled in settings). The engine itself stays, because the Runtime Broker is built on it. What goes is the CLI's direct-dispatch path, the mode switch (`--no-hub`, `hub enable`, `hub disable`, `hub.enabled`, `hub.local_only`), and the local-to-hub reconcile in `pkg/hubsync`.
 
 After removal, every agent operation goes through a hub. A workstation user gets one automatically: when no hub is configured, the CLI starts the existing workstation server (hub, broker and web on loopback, SQLite, dev auth) as a daemon, writes its endpoint, and links the current repo to it without prompting. A new user's first command can be `scion start <agent> "<task>"`, the same as in local mode today.
@@ -330,7 +332,7 @@ Acceptance:
 
 ### Phase 2b: credential parity on a workstation broker (M)
 
-Mechanism (clarified 2026-10-10 with the implementer). The harness auth metadata (`authMeta`) is only known inside `pkg/agent` `Manager.Start` (run.go ~960). On start and restart, `buildStartContext` has no harness config. So the policy decision and the file gathering live in different layers:
+Mechanism (clarified 2026-10-10). The harness auth metadata (`authMeta`) is only known inside `pkg/agent` `Manager.Start` (run.go ~960). On start and restart, `buildStartContext` has no harness config. So the policy decision and the file gathering live in different layers:
 
 1. **Eligibility (cmd → broker config).** A new `runtimebroker.ServerConfig.HostCredentials bool`. cmd/server_foreground.go sets it, next to `HubToken: devAuthToken`, to `config.HostCredentialsEligible(hostedMode, devAuth)`: workstation mode with dev auth enabled. Do **not** infer it from `HubToken != ""`. That field means "token for hub API calls", and a future non-dev use of it would silently widen host-credential access. The user setting `use_host_credentials` is **not** frozen into the server config at startup. It is re-read on every start (step 2), so turning it off takes effect on the next start or restart without restarting the server.
 2. **Per start (pkg/runtimebroker/start_context.go).** `colocatedHostCredentials(...)` returns true only if all of these hold:
@@ -397,7 +399,7 @@ Scope: see "Docs". It lands in the same release as phase 3. If it merges first, 
 Acceptance:
 - The docs site builds.
 - `git grep -n -i "no-hub\|local-only mode\|local mode\|hub disable\|hub enable\|solo mode" -- docs-site README.md AGENTS.md GLOSSARY.md` returns only the migration/reference page and historical notes.
-- The getting-started tutorial, followed literally on a fresh machine, works (a manual check by the reviewer).
+- The getting-started tutorial, followed literally on a fresh machine, works (checked by reading it against the code).
 
 ### Phase 6: engine and package cleanup (M)
 
@@ -605,7 +607,7 @@ Size: phase 2a stays M (this adds about 40 LOC plus tests).
 
 ### Amendment 2 (2026-10-10): phase-1 acceptance restated; fresh-install preconditions
 
-Source: the phase-1 implementer ran the slice on a fresh HOME. Three findings:
+Source: running the phase-1 slice on a fresh HOME. Three findings:
 - the auto-started server exits without `image_registry`;
 - a repo without `.scion` is not a project, and `init` needs `init --machine` plus a container runtime;
 - outside a project, commands need `--global`.
@@ -631,14 +633,14 @@ Trigger: the maintainer questioned auto-start: "not sure autostart is a key feat
   - the broker is not started, and a warning is logged and printed;
   - `server start` prints the registry fix next to the wizard URL.
 
-  The broker starts once the wizard sets the registry. Whether that can happen without a restart depends on the existing broker re-init path (server_foreground.go:3510, "engine without a full server restart"). Otherwise the wizard tells the user to run `scion server restart`; that is for the implementer to confirm. **Confirmed (phase 1b):** the re-init path only swaps the engine of a broker that is already running; it cannot start one that was skipped. The remedy is `scion server restart`, stated in three places:
+  The broker starts once the wizard sets the registry. Whether that can happen without a restart depends on the existing broker re-init path (server_foreground.go:3510, "engine without a full server restart"). Otherwise the wizard tells the user to run `scion server restart`; that was left to confirm during implementation. **Confirmed (phase 1b):** the re-init path only swaps the engine of a broker that is already running; it cannot start one that was skipped. The remedy is `scion server restart`, stated in three places:
 - the CLI output and the server log;
 - the wizard: after a registry save, when `status.embeddedBrokerID` is empty, it shows "Run `scion server restart` to start the broker" (small onboarding.ts change in the same PR);
 - the linked-workspace step's "No embedded broker available" error gets the same hint.
 
 If the onboarding-status call fails, or the server is not ready, the wizard trigger falls back to the legacy signal (settings file missing before start). Hosted mode keeps the fail-fast. This is the same as Amendment 2's open item, resolved the other way: the wizard, not a CLI preflight.
 
-**Phase-1 pieces (PR at review-complete) in the variant**
+**Phase-1 pieces (phase-1 PR) in the variant**
 
 | Piece | Fate |
 |---|---|
@@ -684,16 +686,16 @@ This keeps the reviewed PR a pure subtraction and puts the new behaviour in its 
 
 ### Amendment 4 (2026-10-12): interaction with the CLI current-context design
 
-Source: the maintainer's direction that, after the current-context work (the separate design "A current hub and project for the CLI"), no hub config exists outside its hub list, and every hub command maps to the current context. The rulings below came from the workstation lead on that design's amendment. They keep phase 3 as designed, with one internal-structure change.
+Source: the maintainer's direction that, after the current-context work (the separate design "A current hub and project for the CLI"), no hub config exists outside its hub list, and every hub command maps to the current context. The points below align the two designs. They keep phase 3 as designed, with one internal-structure change.
 
-- **R-6 (approved): one seam for "hub configured".** Phase 3 implements the check as **one** cmd-level function, for example `hubConfigured()`, used at the ~14 former `IsHubEnabled` call sites. Those sites do not call `Settings.HasHubEndpoint` directly. Its body in phase 3 is the D8 rule (endpoint from flag, env or settings). This is internal structure only, with no behaviour change. A later context phase swaps that one function body to "current context hub".
-- **R-7 (deferred): error and stub texts unchanged.** Phase 3's `errHubNotConfigured`, the "not running" text, and the hidden `--no-hub` / `hub enable` / `hub disable` stub texts stay as designed (`scion server start` / `scion config set hub.endpoint <url>`). The context design's phase 2 updates them when the hub registry exists.
-- **R-8: broker project-settings readers are not phase 3.** The broker-side readers of project settings (for example `hubEndpointFromProjectSettings`, pkg/runtimebroker/hubenv.go) are not in phase 3's scope. They go to phase 6 here, or to the flat-broker work, whichever lands first.
+- **One seam for "hub configured".** Phase 3 implements the check as **one** cmd-level function, for example `hubConfigured()`, used at the ~14 former `IsHubEnabled` call sites. Those sites do not call `Settings.HasHubEndpoint` directly. Its body in phase 3 is the D8 rule (endpoint from flag, env or settings). This is internal structure only, with no behaviour change. A later context phase swaps that one function body to "current context hub".
+- **Error and stub texts unchanged for now.** Phase 3's `errHubNotConfigured`, the "not running" text, and the hidden `--no-hub` / `hub enable` / `hub disable` stub texts stay as designed (`scion server start` / `scion config set hub.endpoint <url>`). The context design's phase 2 updates them when the hub registry exists.
+- **Broker project-settings readers are not phase 3.** The broker-side readers of project settings (for example `hubEndpointFromProjectSettings`, pkg/runtimebroker/hubenv.go) are not in phase 3's scope. They go to phase 6 here, or to the flat-broker work, whichever lands first.
 - **Unchanged:** everything else in phase 3, including the `hub.enabled` deprecation and the `HasHubEndpoint` semantics, proceeds as designed. The context design's phase 7 replaces the settings-based hub config later. Settings stay compatible in between.
 
 ### Amendment 5 (2026-10-12, OPEN, needs a maintainer decision): new agents in a linked repo are cloned, not worktreed; D4 premise corrected
 
-Source: the phase-5 docs implementer, checked by the architect against main at d1bd2992.
+Source: a review of the docs phase against main at d1bd2992.
 
 **Finding 1: workspace regression for new agents (design error).** "Target state" and "Migration" say a linked project keeps its layout and that "the co-located broker uses the same paths". That is true for **existing** agent dirs (adopted or imported; Phase V run 1), but **not for new agents**.
 - Auto-link and `hub link` register the project with its git remote and no workspace mode.
