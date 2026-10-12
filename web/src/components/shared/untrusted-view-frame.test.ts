@@ -46,7 +46,9 @@ describe('renderUntrustedViewFrame', () => {
     expect(frame.getAttribute('src')).toBe(URL_);
     expect(frame.hasAttribute('srcdoc')).toBe(false);
     expect(frame.getAttribute('title')).toBe('Site (sandboxed)');
-    const bar = (host.querySelector('.untrusted-bar')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    const bar = (host.querySelector('.untrusted-bar')?.textContent ?? '')
+      .replace(/\s+/g, ' ')
+      .trim();
     expect(bar).toBe('Content published by agent-1 · runs sandboxed, isolated from Scion');
     expect(host.querySelector('.untrusted-bar sl-icon')?.getAttribute('name')).toBe('shield-lock');
   });

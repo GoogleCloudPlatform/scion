@@ -1142,80 +1142,80 @@ export class ScionChatFilePreview extends LitElement {
   static override styles = [
     untrustedViewFrameStyles,
     css`
-    :host {
-      display: contents;
-    }
-    /* One dialog serves both a path preview (code/markdown panel) and an
+      :host {
+        display: contents;
+      }
+      /* One dialog serves both a path preview (code/markdown panel) and an
      * attachment preview (full-height image), so its width policy must be
      * generous enough for either content type. */
-    .file-preview-dialog::part(panel) {
-      width: min(90vw, 900px);
-      /* The app frame's height, not the viewport's: it shrinks with the
+      .file-preview-dialog::part(panel) {
+        width: min(90vw, 900px);
+        /* The app frame's height, not the viewport's: it shrinks with the
          iOS keyboard and the browser toolbar (see client/viewport.ts). */
-      max-height: calc(var(--scion-app-height, 100dvh) * 0.85);
-    }
-    .file-preview-dialog::part(body) {
-      padding: 0;
-      overflow: auto;
-    }
-    .file-preview-placeholder {
-      padding: 2rem;
-      text-align: center;
-      color: var(--scion-text-muted, #64748b);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 0.75rem;
-    }
-    .file-preview-placeholder.error {
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-    .console-fallback-link {
-      color: var(--sl-color-primary-600, #2563eb);
-      font-size: var(--chat-fs-base, 0.875rem);
-    }
-    .file-preview-image {
-      display: block;
-      margin: 0 auto;
-      max-width: 100%;
-      max-height: calc(var(--scion-app-height, 100dvh) * 0.75);
-      object-fit: contain;
-    }
-    .notice {
-      margin: 0.5rem;
-    }
-    .untrusted {
-      --untrusted-frame-height: calc(var(--scion-app-height, 100dvh) * 0.65);
-    }
-    .artifact-label {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    .version-badge {
-      font-size: 0.6875rem;
-      font-weight: 500;
-      padding: 0.0625rem 0.5rem;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 999px;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #475569);
-    }
-    .footer {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-      width: 100%;
-    }
-    .footer .path {
-      flex: 1;
-      font-size: var(--chat-fs-base, 0.875rem);
-      color: var(--scion-text-muted, #64748b);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-  `,
+        max-height: calc(var(--scion-app-height, 100dvh) * 0.85);
+      }
+      .file-preview-dialog::part(body) {
+        padding: 0;
+        overflow: auto;
+      }
+      .file-preview-placeholder {
+        padding: 2rem;
+        text-align: center;
+        color: var(--scion-text-muted, #64748b);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      .file-preview-placeholder.error {
+        color: var(--sl-color-danger-600, #dc2626);
+      }
+      .console-fallback-link {
+        color: var(--sl-color-primary-600, #2563eb);
+        font-size: var(--chat-fs-base, 0.875rem);
+      }
+      .file-preview-image {
+        display: block;
+        margin: 0 auto;
+        max-width: 100%;
+        max-height: calc(var(--scion-app-height, 100dvh) * 0.75);
+        object-fit: contain;
+      }
+      .notice {
+        margin: 0.5rem;
+      }
+      .untrusted {
+        --untrusted-frame-height: calc(var(--scion-app-height, 100dvh) * 0.65);
+      }
+      .artifact-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .version-badge {
+        font-size: 0.6875rem;
+        font-weight: 500;
+        padding: 0.0625rem 0.5rem;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: 999px;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #475569);
+      }
+      .footer {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        width: 100%;
+      }
+      .footer .path {
+        flex: 1;
+        font-size: var(--chat-fs-base, 0.875rem);
+        color: var(--scion-text-muted, #64748b);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    `,
   ];
 }
 
