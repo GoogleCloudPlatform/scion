@@ -190,21 +190,19 @@ const (
 	// own hand-built *sql.Tx.
 	LockAgentLaunchDeadline AdvisoryLockKey = 0x5C10001A
 
-	// LockWorkspaceProvision is retired: it has no production user. It was
-	// the CLASS ID for per-project workspace provisioning locks, used with
-	// the two-int advisory lock form pg_try_advisory_lock(classid, objid)
-	// (objid a stable hash of the project ID) for the NFS first-access
-	// provisioning flow (design §7, risk RN1). Workspace provisioning now
-	// serializes with a file lock on the shared filesystem instead (see
-	// pkg/provision). The key stays reserved: do not reuse this value for
-	// another lock.
+	// Retired per-object class ID values. They are reserved and must not be
+	// reused for another lock:
+	//   - 0x5C101001: per-project workspace provisioning (NFS first access).
+	//     Workspace provisioning serializes with a file lock on the shared
+	//     filesystem instead (see pkg/provision).
+	//   - 0x5C101003: per-agent start of an agent whose home is on NFS. Starts
+	//     are serialized by the hub start claim instead.
 	//
-	// The value is intentionally in a different range (0x5C10_1001) from
-	// the singleton keys above (0x5C10_0001..0005) to avoid collisions
-	// when the two-int lock form's classid is compared against the
-	// single-int form's key — Postgres treats them as separate namespaces,
-	// but keeping them visually distinct aids debugging.
-	LockWorkspaceProvision AdvisoryLockKey = 0x5C101001
+	// Per-object class IDs are intentionally in a different range
+	// (0x5C10_1xxx) from the singleton keys (0x5C10_0xxx) to avoid
+	// collisions when the two-int lock form's classid is compared against
+	// the single-int form's key — Postgres treats them as separate
+	// namespaces, but keeping them visually distinct aids debugging.
 
 	// LockQuotaEnforcement is the CLASS ID for per-scope quota enforcement
 	// locks. It is used with the two-int advisory lock form
@@ -213,13 +211,6 @@ const (
 	// quota checks for the same scope so that the "check count + reserve"
 	// sequence is atomic, preventing over-allocation.
 	LockQuotaEnforcement AdvisoryLockKey = 0x5C101002
-
-	// LockAgentHomeStart is the CLASS ID for per-agent start locks of
-	// agents whose home is on NFS, used with the two-int form where objid
-	// is StableProjectHash("<projectID>/<agentID>"). It is held from before
-	// the agent's previous pod is removed until the new pod exists, so two
-	// starts of one agent never overlap.
-	LockAgentHomeStart AdvisoryLockKey = 0x5C101003
 
 	// LockBrokerQuotaReconcile guards the periodic (and startup, tick 0)
 	// reconcile of stale max_agents_per_broker reservations (ptone/scion#1963)
@@ -288,19 +279,19 @@ type AdvisoryLocker interface {
 
 	// TryAdvisoryLockObject acquires a per-object advisory lock using
 	// Postgres's two-integer form: pg_try_advisory_lock(classid, objid).
-	// classid identifies the lock family (e.g. LockWorkspaceProvision) and
+	// classid identifies the lock family (e.g. LockQuotaEnforcement) and
 	// objid identifies the specific object within that family (e.g. a
-	// stable hash of the project ID). Two different objIDs under the same
+	// stable hash of the scope ID). Two different objIDs under the same
 	// classid are independent locks; the same (classid, objid) pair
 	// provides mutual exclusion across all replicas.
 	//
-	// This is the per-project provisioning guard (design §7, risk RN1):
-	// two agents for the same project on different nodes contend on the
-	// same (classid, hash(projectID)) lock; agents for different projects
-	// never contend.
+	// For example, quota enforcement uses it so that two checks for the
+	// same scope on different replicas contend on the same
+	// (classid, hash(scopeID)) lock; checks for different scopes never
+	// contend.
 	//
 	// On SQLite the lock is a no-op that always succeeds — the single-
-	// writer model already serializes provisioning.
+	// writer model already serializes the guarded work.
 	TryAdvisoryLockObject(ctx context.Context, classID AdvisoryLockKey, objID int32) (acquired bool, release func() error, err error)
 }
 

@@ -46,3 +46,9 @@ variable "deletion_protection" {
   type        = bool
   default     = true
 }
+
+variable "create_after" {
+  description = "Resources the cluster must be created after, passed through purely for depends_on ordering (see configurations/shared-infra/main.tf)."
+  type        = any
+  default     = null
+}
