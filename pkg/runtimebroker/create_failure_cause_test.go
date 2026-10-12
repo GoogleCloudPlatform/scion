@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -73,10 +74,10 @@ func TestRuntimeFailureCause(t *testing.T) {
 		wantReason metav1.StatusReason
 		wantCode   string
 	}{
-		{"forbidden", k8sStartFailure(forbidden), forbidden, metav1.StatusReasonForbidden, CauseRuntimeForbidden},
-		{"unauthorized", k8sStartFailure(unauthorized), unauthorized, metav1.StatusReasonUnauthorized, CauseRuntimeUnauthorized},
+		{"forbidden", k8sStartFailure(forbidden), forbidden, metav1.StatusReasonForbidden, api.BrokerRuntimeCauseForbidden},
+		{"unauthorized", k8sStartFailure(unauthorized), unauthorized, metav1.StatusReasonUnauthorized, api.BrokerRuntimeCauseUnauthorized},
 		{"not found has no code", k8sStartFailure(notFound), notFound, metav1.StatusReasonNotFound, ""},
-		{"multi-wrapped forbidden", fmt.Errorf("%w: cannot read: %w", errors.New("previous_pod_unconfirmed"), forbidden), forbidden, metav1.StatusReasonForbidden, CauseRuntimeForbidden},
+		{"multi-wrapped forbidden", fmt.Errorf("%w: cannot read: %w", errors.New("previous_pod_unconfirmed"), forbidden), forbidden, metav1.StatusReasonForbidden, api.BrokerRuntimeCauseForbidden},
 		{"plain error: innermost leaf", fmt.Errorf("failed to launch container: %w", fmt.Errorf("run: %w", leaf)), leaf, "", ""},
 		{"nil", nil, nil, "", ""},
 	}
@@ -136,8 +137,8 @@ func assertCauseLogged(t *testing.T, rec map[string]any, agentID string) {
 	if rec["k8s_reason"] != string(metav1.StatusReasonForbidden) {
 		t.Errorf("log k8s_reason = %v, want Forbidden", rec["k8s_reason"])
 	}
-	if rec["cause_code"] != CauseRuntimeForbidden {
-		t.Errorf("log cause_code = %v, want %q", rec["cause_code"], CauseRuntimeForbidden)
+	if rec["cause_code"] != api.BrokerRuntimeCauseForbidden {
+		t.Errorf("log cause_code = %v, want %q", rec["cause_code"], api.BrokerRuntimeCauseForbidden)
 	}
 }
 
@@ -177,14 +178,42 @@ func TestSyncCreate_K8sForbidden_CauseCode(t *testing.T) {
 	if resp.Error.Message != "Failed to create agent" {
 		t.Errorf("message = %q, want the fixed text", resp.Error.Message)
 	}
-	if got := resp.Error.Details["cause"]; got != CauseRuntimeForbidden {
-		t.Errorf("details.cause = %v, want %q (details %v)", got, CauseRuntimeForbidden, resp.Error.Details)
+	if got := resp.Error.Details["cause"]; got != api.BrokerRuntimeCauseForbidden {
+		t.Errorf("details.cause = %v, want %q (details %v)", got, api.BrokerRuntimeCauseForbidden, resp.Error.Details)
 	}
 	if len(resp.Error.Details) != 1 {
 		t.Errorf("details = %v, want only cause", resp.Error.Details)
 	}
 	assertNoK8sIdentity(t, body)
 	assertCauseLogged(t, findCauseLogRecord(t, logs, "Agent create failed"), name)
+}
+
+// TestSyncCreate_K8sUnauthorized_CauseCode: the same as the Forbidden case
+// for a runtime whose own credentials are refused: details.cause is
+// runtime_unauthorized end to end, and the ERROR record names the reason.
+func TestSyncCreate_K8sUnauthorized_CauseCode(t *testing.T) {
+	const name = "agent-sync-unauthorized"
+	status, body, resp, logs := postSyncCreateFailure(t, name, k8sStartFailure(k8serrors.NewUnauthorized("token for "+causeTestServiceAccount+" expired")))
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", status, body)
+	}
+	if resp.Error.Code != ErrCodeRuntimeError || resp.Error.Message != "Failed to create agent" {
+		t.Errorf("error = %+v, want runtime_error with the fixed text", resp.Error)
+	}
+	if got := resp.Error.Details["cause"]; got != api.BrokerRuntimeCauseUnauthorized || len(resp.Error.Details) != 1 {
+		t.Errorf("details = %v, want only cause=%q", resp.Error.Details, api.BrokerRuntimeCauseUnauthorized)
+	}
+	assertNoK8sIdentity(t, body)
+	rec := findCauseLogRecord(t, logs, "Agent create failed")
+	if rec["agent_id"] != name {
+		t.Errorf("log agent_id = %v, want %q", rec["agent_id"], name)
+	}
+	if rec["k8s_reason"] != string(metav1.StatusReasonUnauthorized) {
+		t.Errorf("log k8s_reason = %v, want Unauthorized", rec["k8s_reason"])
+	}
+	if rec["cause_code"] != api.BrokerRuntimeCauseUnauthorized {
+		t.Errorf("log cause_code = %v, want %q", rec["cause_code"], api.BrokerRuntimeCauseUnauthorized)
+	}
 }
 
 // TestSyncCreate_NonK8sFailure_Unchanged: a runtime failure with no

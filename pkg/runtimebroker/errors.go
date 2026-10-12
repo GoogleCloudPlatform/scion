@@ -436,36 +436,30 @@ func notFoundResourceText(err error, templateSlug string) string {
 // text for the same failure (ptone/scion#3113).
 const opCreateAgent = "create agent"
 
-// Fixed details.cause codes for a create whose runtime start failed with a
-// Kubernetes API status the operator can act on (ptone/scion#4555). The set
-// is kept small on purpose: a NotFound reaching the start error is ambiguous
-// (the pre-create reads treat a missing pod as normal), and a timeout
-// overlaps the launch deadline handling, so neither gets a code.
-const (
-	// CauseRuntimeForbidden: the runtime's credentials may not perform a
-	// call the start needs (for example, the namespace ServiceAccount may
-	// not get or list pods).
-	CauseRuntimeForbidden = "runtime_forbidden"
-	// CauseRuntimeUnauthorized: the runtime's own credentials were refused
-	// (expired or invalid).
-	CauseRuntimeUnauthorized = "runtime_unauthorized"
-)
-
 // runtimeCauseCodes maps the Kubernetes reasons that get a details.cause
-// code to that code.
+// code on a create's 500 to that code: an api.BrokerRuntimeCause value, the
+// set the hub relays. The reasons are kept few on purpose
+// (ptone/scion#4555): a NotFound reaching the start error is ambiguous (the
+// pre-create reads treat a missing pod as normal), and a timeout overlaps
+// the launch deadline handling, so neither gets one.
 var runtimeCauseCodes = map[metav1.StatusReason]string{
-	metav1.StatusReasonForbidden:    CauseRuntimeForbidden,
-	metav1.StatusReasonUnauthorized: CauseRuntimeUnauthorized,
+	metav1.StatusReasonForbidden:    api.BrokerRuntimeCauseForbidden,
+	metav1.StatusReasonUnauthorized: api.BrokerRuntimeCauseUnauthorized,
 }
 
 // runtimeFailureCause looks through a Manager.Start error for the failure
-// behind it. The runtimes return start errors with fixed, identity-free
-// text (for example the Kubernetes runtime's opaque start errors), so the
-// cause is reached through Unwrap, never by widening that text.
+// behind it. The create's client body never carries a start error's text
+// (it gets the fixed runtimeOpError text), and the text of a runtime's
+// start error need not name the underlying failure (the Kubernetes
+// runtime's opaque start errors do not), so the cause is reached through
+// errors.As and Unwrap.
 //
-//   - cause is the first Kubernetes API status in err's chain, or else the
-//     innermost error reached by single-error Unwrap. Its text can name a
-//     namespace, ServiceAccount or object, so it is for server logs only.
+//   - cause is the first Kubernetes API status in err's chain (errors.As
+//     also searches multi-%w errors). Without one, it is the deepest error
+//     reached by single-error errors.Unwrap, which stops at an error that
+//     wraps several (a multi-%w error) and returns that error. Its text can
+//     name a namespace, ServiceAccount or object, so it is for server logs
+//     only.
 //   - reason is the Kubernetes status reason ("" when there is none).
 //   - code is the fixed, client-safe details.cause code for reason, or ""
 //     when reason has none (runtimeCauseCodes).

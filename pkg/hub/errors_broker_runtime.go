@@ -21,6 +21,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // MissingEnvVars writes a 422 Unprocessable Entity response when required
@@ -90,16 +92,17 @@ const restartStopFailedRetryAfter = "30"
 var brokerCodePattern = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 
 // brokerRuntimeCauseDetails returns {"cause": code} when err is a broker
-// runtime_error answer whose details.cause is a well-formed code
-// (brokerCodePattern), else nil. Only the fixed code is copied, never the
-// broker's message or any other detail (ptone/scion#4555).
+// runtime_error answer whose details.cause is one of the known codes
+// (api.IsBrokerRuntimeCause) and well-formed (brokerCodePattern), else nil.
+// Only the fixed code is copied, never the broker's message or any other
+// detail (ptone/scion#4555).
 func brokerRuntimeCauseDetails(err error) map[string]interface{} {
 	var se *brokerStatusError
 	if !errors.As(err, &se) || se.brokerErrorCode() != ErrCodeRuntimeError {
 		return nil
 	}
 	code, _ := se.brokerErrorDetails()["cause"].(string)
-	if !brokerCodePattern.MatchString(code) {
+	if !api.IsBrokerRuntimeCause(code) || !brokerCodePattern.MatchString(code) {
 		return nil
 	}
 	return map[string]interface{}{"cause": code}

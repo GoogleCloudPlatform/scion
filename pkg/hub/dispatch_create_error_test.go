@@ -179,10 +179,10 @@ func TestDispatchCreateErrorResponse_SkillResolutionRelaysStatusAndRetryAfter(t 
 }
 
 // TestDispatchCreateErrorResponse_RelaysRuntimeCause: a broker runtime_error
-// carrying a fixed details.cause code (ptone/scion#4555) keeps the generic
-// 502 and its message, and relays only that code as details.cause. A
-// malformed code, a cause under another error code, or no cause at all
-// leaves details empty.
+// carrying a known details.cause code (api.IsBrokerRuntimeCause,
+// ptone/scion#4555) keeps the generic 502 and its message, and relays only
+// that code as details.cause. An unknown or malformed code, a cause under
+// another error code, or no cause at all leaves details empty.
 func TestDispatchCreateErrorResponse_RelaysRuntimeCause(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -191,6 +191,8 @@ func TestDispatchCreateErrorResponse_RelaysRuntimeCause(t *testing.T) {
 	}{
 		{"runtime_forbidden relayed", `{"error":{"code":"runtime_error","message":"Failed to create agent","details":{"cause":"runtime_forbidden","other":"x"}}}`, "runtime_forbidden"},
 		{"no details", `{"error":{"code":"runtime_error","message":"Failed to create agent"}}`, ""},
+		{"runtime_unauthorized relayed", `{"error":{"code":"runtime_error","message":"Failed to create agent","details":{"cause":"runtime_unauthorized"}}}`, "runtime_unauthorized"},
+		{"well-formed unknown code dropped", `{"error":{"code":"runtime_error","message":"Failed to create agent","details":{"cause":"runtime_other"}}}`, ""},
 		{"malformed code dropped", `{"error":{"code":"runtime_error","message":"Failed to create agent","details":{"cause":"pods \"a\" is forbidden"}}}`, ""},
 		{"other error code", `{"error":{"code":"internal_error","message":"boom","details":{"cause":"runtime_forbidden"}}}`, ""},
 		{"not json", "boom", ""},
