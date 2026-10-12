@@ -78,6 +78,10 @@ type ArtifactService interface {
 
 	// RevokeLink revokes one share link.
 	RevokeLink(ctx context.Context, id, linkID string) error
+
+	// Delete deletes an artifact (a soft delete: its grants and share
+	// links end with it, and its bytes are removed later).
+	Delete(ctx context.Context, id string) error
 }
 
 // ArtifactLink describes a share link. It never carries the token.
@@ -192,6 +196,8 @@ type Artifact struct {
 	CurrentSeq int       `json:"currentSeq"`
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
+	// OwnerDeleted is true when the hub found the artifact's owner gone.
+	OwnerDeleted bool `json:"ownerDeleted,omitempty"`
 }
 
 // ArtifactVersion describes one version of an artifact.
@@ -497,6 +503,15 @@ func (s *artifactService) ListLinks(ctx context.Context, id string) ([]ArtifactL
 // RevokeLink implements ArtifactService.
 func (s *artifactService) RevokeLink(ctx context.Context, id, linkID string) error {
 	resp, err := s.c.delete(ctx, artifactPath(id)+"/links/"+url.PathEscape(linkID), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// Delete implements ArtifactService.
+func (s *artifactService) Delete(ctx context.Context, id string) error {
+	resp, err := s.c.delete(ctx, artifactPath(id), nil)
 	if err != nil {
 		return err
 	}
