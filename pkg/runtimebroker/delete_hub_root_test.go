@@ -108,8 +108,10 @@ func TestSyncCreateFailure_RemovesStateDirOfHubProjectID(t *testing.T) {
 // project-id marker.
 func TestCleanupAbortedLaunch_RemovesStateDirOfHubProjectID(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	t.Setenv("HOME", t.TempDir())
-	t.Chdir(t.TempDir())
+	// The server's test setup sets its own temp HOME and working dir, so
+	// it is built before any directory below is resolved under HOME.
+	mgr := newAsyncManager()
+	srv, _ := newAsyncTestServer(t, mgr)
 
 	const agentName = "agent-x"
 	_, dotScion := identityProjectDir(t, hubRootLocalID)
@@ -123,6 +125,9 @@ func TestCleanupAbortedLaunch_RemovesStateDirOfHubProjectID(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stateDir, "scion-agent.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if home := os.Getenv("HOME"); home == "" || !strings.HasPrefix(stateDir, filepath.Clean(home)+string(filepath.Separator)) {
+		t.Fatalf("test setup: the Hub-ID dir %s is not under the server's HOME %q", stateDir, home)
+	}
 	extAgents, err := config.GetGitProjectExternalAgentsDir(dotScion)
 	if err != nil || extAgents == "" {
 		t.Fatalf("GetGitProjectExternalAgentsDir: dir=%q err=%v", extAgents, err)
@@ -133,8 +138,6 @@ func TestCleanupAbortedLaunch_RemovesStateDirOfHubProjectID(t *testing.T) {
 	if err := writeLaunchMarker(dotScion, false, agentName, "L1"); err != nil {
 		t.Fatal(err)
 	}
-	mgr := newAsyncManager()
-	srv, _ := newAsyncTestServer(t, mgr)
 	rec := newLaunchRecord("L1", "agent-id", store.LaunchKindCreate, "", time.Now().Add(time.Minute), func() {})
 	lc := launchCtx{
 		opts: api.StartOptions{Name: agentName, ProjectPath: dotScion, RunID: "run-a", HubProjectID: hubRootHubID},
