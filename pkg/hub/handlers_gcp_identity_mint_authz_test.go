@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 // Package hub — ptone/scion#2129: handler-level tests for the live-mint
 // record recheck in handleAgentGCPToken and handleAgentGCPIdentityToken. Each

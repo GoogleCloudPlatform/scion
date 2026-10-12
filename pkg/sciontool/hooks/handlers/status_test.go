@@ -83,10 +83,10 @@ func TestStatusHandler_Handle(t *testing.T) {
 			wantActivity: "",
 		},
 		{
-			name:         "PostStart sets running/working",
+			name:         "PostStart sets running/initializing",
 			event:        &hooks.Event{Name: hooks.EventPostStart},
 			wantPhase:    "running",
-			wantActivity: "working",
+			wantActivity: "initializing",
 		},
 		{
 			name:         "SessionStart sets working activity",
@@ -397,12 +397,15 @@ func TestStatusHandler_Handle_CompletedLifecycle(t *testing.T) {
 	assert.Equal(t, "thinking", info.Activity)
 }
 
+// An agent-set waiting_for_input (sciontool status ask_user writes it with
+// UpdateActivity) is not cleared by tool-end. Only a waiting_for_input that
+// a Notification set is; see status_waiting_clear_test.go.
 func TestStatusHandler_Handle_ToolEndDoesNotClearWaiting(t *testing.T) {
 	tmpDir := t.TempDir()
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
 	h := &StatusHandler{StatusPath: statusPath}
 
-	// Pre-set activity to waiting_for_input
+	// Pre-set activity to waiting_for_input, as sciontool status ask_user does
 	err := h.UpdateActivity(state.ActivityWaitingForInput, "")
 	require.NoError(t, err)
 
@@ -944,4 +947,53 @@ func TestStatusHandler_WriteUsesMode0644(t *testing.T) {
 	fi, err := os.Stat(statusPath)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0644), fi.Mode().Perm())
+}
+
+// Every readiness event must move the local activity off initializing, so
+// `sciontool init` can use the local file to avoid overwriting a hook-set
+// activity.
+func TestStatusHandler_ReadinessEventsReplaceInitializing(t *testing.T) {
+	events := map[string]string{
+		hooks.EventSessionStart:     "working",
+		hooks.EventPromptSubmit:     "thinking",
+		hooks.EventAgentStart:       "thinking",
+		hooks.EventModelStart:       "thinking",
+		hooks.EventModelEnd:         "working",
+		hooks.EventToolStart:        "executing",
+		hooks.EventToolEnd:          "working",
+		hooks.EventAgentEnd:         "working",
+		hooks.EventNotification:     "waiting_for_input",
+		hooks.EventResponseComplete: "completed",
+	}
+	for name, want := range events {
+		t.Run(name, func(t *testing.T) {
+			statusPath := filepath.Join(t.TempDir(), "agent-info.json")
+			h := &StatusHandler{StatusPath: statusPath}
+			require.NoError(t, h.Handle(&hooks.Event{Name: hooks.EventPostStart}))
+			require.Equal(t, "initializing", readAgentInfo(t, statusPath).Activity)
+			require.NoError(t, h.Handle(&hooks.Event{Name: name, Data: hooks.EventData{ToolName: "Bash"}}))
+			assert.Equal(t, want, readAgentInfo(t, statusPath).Activity)
+		})
+	}
+}
+
+func TestStatusHandler_ReplaceActivityIf(t *testing.T) {
+	statusPath := filepath.Join(t.TempDir(), "agent-info.json")
+	h := &StatusHandler{StatusPath: statusPath}
+	require.NoError(t, h.UpdatePhase(state.PhaseRunning, state.ActivityInitializing, ""))
+
+	swapped, err := h.ReplaceActivityIf(state.ActivityInitializing, state.ActivityWorking)
+	require.NoError(t, err)
+	assert.True(t, swapped)
+	info := readAgentInfo(t, statusPath)
+	assert.Equal(t, "running", info.Phase)
+	assert.Equal(t, "working", info.Activity)
+	assert.Equal(t, state.ActivityWorking, h.CurrentActivity())
+
+	// A hook-set activity is left alone.
+	require.NoError(t, h.UpdateActivity(state.ActivityWaitingForInput, ""))
+	swapped, err = h.ReplaceActivityIf(state.ActivityInitializing, state.ActivityWorking)
+	require.NoError(t, err)
+	assert.False(t, swapped)
+	assert.Equal(t, "waiting_for_input", readAgentInfo(t, statusPath).Activity)
 }

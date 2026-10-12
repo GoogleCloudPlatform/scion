@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -62,23 +62,23 @@ func TestProjectSAMappingWarnings_Matrix(t *testing.T) {
 		{
 			name:     "kubernetes profile maps it",
 			email:    mappedGSA,
-			profiles: [][]store.BrokerProfile{{k8sProfile("k8s", true, mappedGSA)}},
+			profiles: [][]store.BrokerProfile{{authoritativeProfile("k8s", mappedGSA)}},
 		},
 		{
 			name:     "kubernetes profile maps it, case-insensitive",
 			email:    "Mapped@p.iam.gserviceaccount.com",
-			profiles: [][]store.BrokerProfile{{k8sProfile("k8s", true, mappedGSA)}},
+			profiles: [][]store.BrokerProfile{{authoritativeProfile("k8s", mappedGSA)}},
 		},
 		{
 			name:     "kubernetes profile does not map it",
 			email:    unmappedGSA,
-			profiles: [][]store.BrokerProfile{{k8sProfile("k8s", true, mappedGSA)}},
+			profiles: [][]store.BrokerProfile{{authoritativeProfile("k8s", mappedGSA)}},
 			want:     []string{unmappedGSA, "b0/k8s", "kubernetes_service_account_mappings"},
 		},
 		{
 			name:     "reported with nothing mapped",
 			email:    unmappedGSA,
-			profiles: [][]store.BrokerProfile{{k8sProfile("k8s", true)}},
+			profiles: [][]store.BrokerProfile{{authoritativeProfile("k8s")}},
 			want:     []string{unmappedGSA},
 		},
 		{
@@ -90,35 +90,85 @@ func TestProjectSAMappingWarnings_Matrix(t *testing.T) {
 			name:  "mapped on another provider broker",
 			email: mappedGSA,
 			profiles: [][]store.BrokerProfile{
-				{k8sProfile("k8s", true)},
-				{k8sProfile("gke", true, mappedGSA)},
+				{authoritativeProfile("k8s")},
+				{authoritativeProfile("gke", mappedGSA)},
 			},
 		},
 		{
 			name:  "unmapped with one unreported profile notes it",
 			email: unmappedGSA,
 			profiles: [][]store.BrokerProfile{
-				{k8sProfile("k8s", true, mappedGSA)},
+				{authoritativeProfile("k8s", mappedGSA)},
 				{k8sProfile("old", false)},
 			},
-			want: []string{unmappedGSA, "1 Kubernetes profile(s) did not report"},
+			want: []string{unmappedGSA, "1 other Kubernetes profile(s) could not be checked"},
 		},
 		{
-			name:     "custom-named runtime with reported mappings counts as kubernetes",
-			email:    unmappedGSA,
-			profiles: [][]store.BrokerProfile{{{Name: "gke", Type: "gke-prod", MappingsReported: true, ServiceAccountMappings: []store.BrokerProfileSAMapping{{GSA: mappedGSA}}}}},
-			want:     []string{unmappedGSA},
+			// The shared decision cannot tell that a custom runtime key is
+			// Kubernetes, so it is unknown and does not warn.
+			name:  "custom-named runtime with a current report is unknown",
+			email: unmappedGSA,
+			profiles: [][]store.BrokerProfile{{func() store.BrokerProfile {
+				p := authoritativeProfile("gke", mappedGSA)
+				p.Type = "gke-prod"
+				return p
+			}()}},
 		},
 		{
-			name:     "custom-named kubernetes runtime reported with nothing mapped",
+			name:  "reported but incomplete is unknown",
+			email: unmappedGSA,
+			profiles: [][]store.BrokerProfile{{func() store.BrokerProfile {
+				p := authoritativeProfile("k8s", mappedGSA)
+				p.MappingsComplete, p.MappingsIncompleteReason = false, api.BrokerKSADiscoveryListFailed
+				return p
+			}()}},
+		},
+		{
+			name:     "reported without completeness (older broker) is unknown",
 			email:    unmappedGSA,
-			profiles: [][]store.BrokerProfile{{{Name: "gke", Type: "gke", MappingsReported: true}}},
-			want:     []string{unmappedGSA, "b0/gke"},
+			profiles: [][]store.BrokerProfile{{k8sProfile("k8s", true, mappedGSA)}},
+		},
+		{
+			name:  "stale report is unknown",
+			email: unmappedGSA,
+			profiles: [][]store.BrokerProfile{{func() store.BrokerProfile {
+				p := authoritativeProfile("k8s", mappedGSA)
+				at := time.Now().Add(-profileSAReportFreshFor - time.Minute)
+				p.MappingsReportedAt = &at
+				return p
+			}()}},
+		},
+		{
+			name:  "ambiguous account is unknown",
+			email: unmappedGSA,
+			profiles: [][]store.BrokerProfile{{func() store.BrokerProfile {
+				p := authoritativeProfile("k8s", mappedGSA)
+				p.AmbiguousGSAs = []string{unmappedGSA}
+				return p
+			}()}},
+		},
+		{
+			name:  "not mapped on a current report, unknown on another: warns and notes it",
+			email: unmappedGSA,
+			profiles: [][]store.BrokerProfile{
+				{authoritativeProfile("k8s", mappedGSA)},
+				{k8sProfile("old", true, mappedGSA)},
+			},
+			want: []string{unmappedGSA, "profiles checked: b0/k8s;", "1 other Kubernetes profile(s) could not be checked"},
+		},
+		{
+			name:  "docker profile with an old report needs no mapping",
+			email: unmappedGSA,
+			profiles: [][]store.BrokerProfile{{func() store.BrokerProfile {
+				p := authoritativeProfile("local", mappedGSA)
+				p.Type = "docker"
+				return p
+			}()}},
 		},
 		{
 			name:     "upper-case reported GSA still matches",
 			email:    mappedGSA,
-			profiles: [][]store.BrokerProfile{{k8sProfile("k8s", true, "Mapped@p.iam.gserviceaccount.com")}},
+			profiles: [][]store.BrokerProfile{{authoritativeProfile("k8s", "Mapped@p.iam.gserviceaccount.com")}},
 		},
 	}
 	for _, tc := range cases {
@@ -146,7 +196,7 @@ func TestProjectSAMappingWarnings_Matrix(t *testing.T) {
 // (ptone/scion#4019). Another project's account is still skipped.
 func TestProjectSAMappingWarnings_HubScopedAccountWarned(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true, mappedGSA))
+	addProviderBroker(t, s, projectID, "b", authoritativeProfile("k8s", mappedGSA))
 	hubSA := &store.GCPServiceAccount{
 		ID: tid("hub-sa"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
 	}
@@ -172,8 +222,8 @@ func TestHubSAMappingWarnings_ChecksEveryBroker(t *testing.T) {
 	require.NoError(t, s.CreateProject(context.Background(), &store.Project{
 		ID: otherProject, Name: "Other Mapping Project", Slug: "map-other-project",
 	}))
-	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
-	addProviderBroker(t, s, otherProject, "b2", k8sProfile("k8s", true, mappedGSA))
+	addProviderBroker(t, s, projectID, "b1", authoritativeProfile("k8s"))
+	addProviderBroker(t, s, otherProject, "b2", authoritativeProfile("k8s", mappedGSA))
 
 	hubUnmapped := &store.GCPServiceAccount{
 		ID: tid("hub-unmapped"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
@@ -199,7 +249,7 @@ func TestHubSAMappingWarnings_ChecksEveryBroker(t *testing.T) {
 // mapping is seen.
 func TestHubSAMappingWarnings_ViewCachedForTTL(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	addProviderBroker(t, s, projectID, "b1", authoritativeProfile("k8s"))
 	hubSA := &store.GCPServiceAccount{
 		ID: tid("hub-sa"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
 	}
@@ -213,7 +263,7 @@ func TestHubSAMappingWarnings_ViewCachedForTTL(t *testing.T) {
 
 	// A second broker maps the account. Within the window the cached view
 	// still answers; past it the walk runs again and sees the mapping.
-	addProviderBroker(t, s, projectID, "b2", k8sProfile("k8s", true, unmappedGSA))
+	addProviderBroker(t, s, projectID, "b2", authoritativeProfile("k8s", unmappedGSA))
 	now = now.Add(hubSAMappingCacheTTL - time.Second)
 	assert.Len(t, srv.hubSAMappingWarnings(context.Background(), hubSA), 1, "cached view reused within the TTL")
 	now = now.Add(2 * time.Second)
@@ -272,7 +322,7 @@ func TestHubSAMappings_LockNotHeldDuringLoad(t *testing.T) {
 		w.started = make(chan struct{})
 		w.release = make(chan struct{})
 	})
-	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	addProviderBroker(t, s, projectID, "b1", authoritativeProfile("k8s"))
 	fault.Arm()
 
 	done := make(chan projectSAMappingView, 1)
@@ -293,14 +343,15 @@ func TestHubSAMappings_LockNotHeldDuringLoad(t *testing.T) {
 
 	close(hold.release)
 	view := <-done
-	assert.Equal(t, []string{"b1/k8s"}, view.reported)
+	require.Len(t, view.profiles, 1)
+	assert.Equal(t, "b1/k8s", view.profiles[0].label())
 }
 
 // A failed walk is not cached and does not replace the last good view: the
 // previous view answers until a walk succeeds again.
 func TestHubSAMappings_FailureReturnsLastGoodView(t *testing.T) {
 	srv, s, projectID, flaky, fault := newMappingProjectWithBrokerListFault(t, nil)
-	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	addProviderBroker(t, s, projectID, "b1", authoritativeProfile("k8s"))
 	fault.Arm()
 	hubSA := &store.GCPServiceAccount{
 		ID: tid("hub-sa"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
@@ -317,21 +368,23 @@ func TestHubSAMappings_FailureReturnsLastGoodView(t *testing.T) {
 	flaky.fail.Store(true)
 	now = now.Add(hubSAMappingCacheTTL + time.Second)
 	assert.Len(t, srv.hubSAMappingWarnings(context.Background(), hubSA), 1, "last good view used on failure")
-	assert.Equal(t, []string{"b1/k8s"}, srv.hubSAMappings(context.Background()).reported)
+	last := srv.hubSAMappings(context.Background()).profiles
+	require.Len(t, last, 1)
+	assert.Equal(t, "b1/k8s", last[0].label())
 
 	// The failure was not cached: the next walk succeeds and sees a new mapping.
 	flaky.fail.Store(false)
-	addProviderBroker(t, s, projectID, "b2", k8sProfile("k8s", true, unmappedGSA))
+	addProviderBroker(t, s, projectID, "b2", authoritativeProfile("k8s", unmappedGSA))
 	assert.Empty(t, srv.hubSAMappingWarnings(context.Background(), hubSA), "view reloaded once the walk succeeds")
 }
 
 // With no good view yet, a failed walk answers with its partial view.
 func TestHubSAMappings_FailureWithoutPriorViewReturnsPartial(t *testing.T) {
 	srv, s, projectID, flaky, fault := newMappingProjectWithBrokerListFault(t, nil)
-	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	addProviderBroker(t, s, projectID, "b1", authoritativeProfile("k8s"))
 	flaky.fail.Store(true)
 	fault.Arm()
-	assert.Empty(t, srv.hubSAMappings(context.Background()).reported)
+	assert.Empty(t, srv.hubSAMappings(context.Background()).profiles)
 	assert.False(t, srv.hubSAMappingCache.loaded, "failed walk not cached")
 }
 
@@ -380,16 +433,28 @@ func TestProjectSAMappingWarnings_EmbeddedBrokerReadsLiveSettings(t *testing.T) 
 		return live, nil
 	}
 
+	rows := srv.projectKubernetesProfileMappings(context.Background(), projectID)
+	assert.Equal(t, 1, loads, "live settings are loaded once per broker")
+	labels := []string{}
+	byLabel := map[string]kubernetesProfileMappings{}
+	for _, r := range rows {
+		labels = append(labels, r.label())
+		byLabel[r.label()] = r
+	}
+	assert.ElementsMatch(t, []string{"embedded/gke", "embedded/default"}, labels,
+		"gke counts as Kubernetes by its live runtime type; the synthetic default falls back to its record")
+	now := time.Now()
+	gke := byLabel["embedded/gke"]
+	assert.Equal(t, SAMappingStateMapped, gke.decision(mappedGSA, now).State, "the live explicit mapping wins")
+	d := gke.decision(unmappedGSA, now)
+	assert.Equal(t, SAMappingStateUnknown, d.State, "a mapping keyed by the profile's Type is not read")
+	assert.Equal(t, SAMappingReasonRuntimeUnrecognized, d.Reason,
+		"the stored type is a custom runtime key, which the shared decision (like the refusal) cannot tell is Kubernetes")
+
 	mapped := mappingTestSA(t, s, projectID, mappedGSA)
 	unmapped := mappingTestSA(t, s, projectID, unmappedGSA)
-	got := srv.projectSAMappingWarnings(context.Background(), projectID, mapped, unmapped)
-	require.Len(t, got, 1)
-	assert.Contains(t, got[0], unmappedGSA)
-	assert.Contains(t, got[0], "embedded/gke", "gke counts as Kubernetes by its live runtime type")
-	assert.NotContains(t, got[0], "embedded/local")
-	assert.Contains(t, got[0], "1 Kubernetes profile(s) did not report",
-		"the synthetic default profile falls back to its record, which did not report")
-	assert.Equal(t, 1, loads, "live settings are loaded once per broker")
+	assert.Empty(t, srv.projectSAMappingWarnings(context.Background(), projectID, mapped, unmapped),
+		"without a current, complete stored report every unmapped decision is unknown")
 
 	// Unreadable live settings: fall back to the records, none of which
 	// report mappings, so unknown and no warning.
@@ -405,7 +470,7 @@ func TestProjectSAMappingWarnings_EmbeddedProfileWithoutRuntimeIsUnknown(t *test
 	srv, s, projectID := newMappingProject(t)
 	b := addProviderBroker(t, s, projectID, "embedded",
 		store.BrokerProfile{Name: "noruntime", Type: "kubernetes"},
-		k8sProfile("k8s", true, mappedGSA),
+		authoritativeProfile("k8s", mappedGSA),
 	)
 	srv.SetEmbeddedBrokerID(b.ID)
 	prev := loadEmbeddedBrokerMappingSettings
@@ -424,7 +489,7 @@ func TestProjectSAMappingWarnings_EmbeddedProfileWithoutRuntimeIsUnknown(t *test
 	got := srv.projectSAMappingWarnings(context.Background(), projectID, mappingTestSA(t, s, projectID, unmappedGSA))
 	require.Len(t, got, 1)
 	assert.Contains(t, got[0], "profiles checked: embedded/k8s;")
-	assert.Contains(t, got[0], "1 Kubernetes profile(s) did not report")
+	assert.Contains(t, got[0], "1 other Kubernetes profile(s) could not be checked")
 }
 
 // Live settings are not loaded for an embedded broker whose profiles are
@@ -445,7 +510,7 @@ func TestProjectSAMappingWarnings_EmbeddedBrokerLoadsLazily(t *testing.T) {
 // The profiles checked are listed once per response, not per warning.
 func TestProjectSAMappingWarnings_ContextListedOnce(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true))
+	addProviderBroker(t, s, projectID, "b", authoritativeProfile("k8s"))
 	a := mappingTestSA(t, s, projectID, "a@p.iam.gserviceaccount.com")
 	c := mappingTestSA(t, s, projectID, "c@p.iam.gserviceaccount.com")
 	got := srv.projectSAMappingWarnings(context.Background(), projectID, a, c)
@@ -657,7 +722,8 @@ func TestBrokerHeartbeat_ProfileSAMappingsPersisted(t *testing.T) {
 	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{
 		Status: "online",
 		ProfileSAMappings: []brokerProfileSAMappings{
-			{Name: "k8s", ServiceAccountMappings: []store.BrokerProfileSAMapping{{GSA: mappedGSA}}},
+			{Name: "k8s", ServiceAccountMappings: []store.BrokerProfileSAMapping{{GSA: mappedGSA}},
+				Complete: true, ReportVersion: api.BrokerSAReportVersion},
 		},
 	})
 	stored, err := s.GetRuntimeBroker(context.Background(), b.ID)
@@ -775,7 +841,7 @@ func TestBrokerHeartbeat_ProfileSAMappingsDroppedForFlatRow(t *testing.T) {
 
 func TestCreateGCPServiceAccount_WarnsWhenUnmapped(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true, mappedGSA))
+	addProviderBroker(t, s, projectID, "b", authoritativeProfile("k8s", mappedGSA))
 
 	for _, path := range []string{
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID),
@@ -816,7 +882,7 @@ func TestCreateGCPServiceAccount_NoWarningWithoutKubernetesProviders(t *testing.
 // on the hub maps it (ptone/scion#4019), and not when one does.
 func TestHubScopedCreate_WarnsWhenUnmapped(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true, mappedGSA))
+	addProviderBroker(t, s, projectID, "b", authoritativeProfile("k8s", mappedGSA))
 	ensureHubMembership(context.Background(), s, DevUserID)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/gcp-service-accounts?scope=hub",
@@ -838,7 +904,7 @@ func TestHubScopedCreate_WarnsWhenUnmapped(t *testing.T) {
 
 func TestListGCPServiceAccounts_Warnings(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true, mappedGSA))
+	addProviderBroker(t, s, projectID, "b", authoritativeProfile("k8s", mappedGSA))
 	mappingTestSA(t, s, projectID, mappedGSA)
 	mappingTestSA(t, s, projectID, unmappedGSA)
 	hubSA := &store.GCPServiceAccount{
@@ -877,7 +943,7 @@ func TestListGCPServiceAccounts_Warnings(t *testing.T) {
 func TestMintGCPServiceAccount_WarnsWhenUnmapped(t *testing.T) {
 	srv, s, _ := testServerWithMinting(t)
 	projectID := createTestProjectForSA(t, srv, nil)
-	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true, mappedGSA))
+	addProviderBroker(t, s, projectID, "b", authoritativeProfile("k8s", mappedGSA))
 
 	rec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID), map[string]string{})
@@ -895,7 +961,7 @@ func TestMintGCPServiceAccount_WarnsWhenUnmapped(t *testing.T) {
 func TestVerifyGCPServiceAccount_Warnings(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
 	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub@test.iam.gserviceaccount.com"})
-	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true, mappedGSA))
+	addProviderBroker(t, s, projectID, "b", authoritativeProfile("k8s", mappedGSA))
 	sa := mappingTestSA(t, s, projectID, unmappedGSA)
 
 	rec := doRequest(t, srv, http.MethodPost,

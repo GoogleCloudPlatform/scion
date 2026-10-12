@@ -1114,6 +1114,8 @@ func parseHubProduction(t *testing.T) (*token.FileSet, []*ast.File) {
 	fset := token.NewFileSet()
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards provenance-chain and scope-ceiling callers, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards provenance-chain and scope-ceiling callers, which identity.go and identity_credential.go do not contain.
 	paths, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	var files []*ast.File
@@ -1214,6 +1216,7 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.message", "agent.set_message_mode", "agent.grant_hub_mode",
 		"agent.status_update", "agent.notify",
 		"agent.token_refresh", "agent.port_forward", "agent.identity_token",
+		"agent.delegation.create",
 	},
 	// No {"owner", "user", "project"} cell: Project.OwnerID grants nothing
 	// (ptone/scion#2586); see TestRelationshipCharacterization_OwnerProjectGrantsNothing.
@@ -1248,6 +1251,7 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.message", "agent.set_message_mode", "agent.grant_hub_mode",
 		"agent.status_update", "agent.notify",
 		"agent.token_refresh", "agent.port_forward", "agent.identity_token",
+		"agent.delegation.create",
 	},
 	// Agent ancestors are further limited by their JWT scopes; this cell is
 	// the set reachable when the agent holds every registered agent scope.

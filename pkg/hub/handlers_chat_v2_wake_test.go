@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 // Tests for wake-on-send in chat v2: a send to a suspended primary can ask
 // the hub to offer a wake (offer_wake: 409 instead of a failed row) or to
@@ -773,4 +773,38 @@ func TestChatV2Wake_StalledStoreAfterWake_EndsAtDeadline(t *testing.T) {
 
 	_, begin := f.srv.chatIdempotency.Begin(DevUserID, "key-stall")
 	assert.Equal(t, IdempotencyNew, begin, "the key must be released after the failed send")
+}
+
+// A chat send with wake and interrupt to a suspended agent that is still
+// initializing when the wake wait ends is delivered as an ordinary
+// (buffered) message; an agent that reports working keeps the interrupt.
+func TestChatV2Interrupt_WakeInitializingIsBuffered(t *testing.T) {
+	orig := wakeReadyTimeout
+	wakeReadyTimeout = 1500 * time.Millisecond
+	t.Cleanup(func() { wakeReadyTimeout = orig })
+
+	for _, tc := range []struct {
+		activity      string
+		wantInterrupt bool
+	}{
+		{"initializing", false},
+		{"working", true},
+	} {
+		t.Run(tc.activity, func(t *testing.T) {
+			f := chatWakeSetup(t, string(state.PhaseSuspended))
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				_ = f.s.UpdateAgentStatus(context.Background(), f.agent.ID, store.AgentStatusUpdate{
+					Phase: string(state.PhaseRunning), Activity: tc.activity,
+				})
+			}()
+			rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+				map[string]any{"content": "stop and look", "wake": true, "interrupt": true})
+			require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+			msgs := f.disp.getMessageCalls()
+			require.Len(t, msgs, 1, "the message is delivered")
+			assert.Equal(t, tc.wantInterrupt, msgs[0].Interrupt)
+		})
+	}
 }

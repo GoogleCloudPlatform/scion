@@ -91,6 +91,15 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Test admin tier: only the co-located broker may register. Checked
+	// before any lookup or mutation.
+	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
+		return
+	}
+	if s.refuseTestAdminPluginLabel(w, req.Labels) {
+		return
+	}
+
 	// Validate GCP host SA email format if provided.
 	if req.GCPHostServiceAccountEmail != "" {
 		if !isValidServiceAccountEmail(req.GCPHostServiceAccountEmail) {
@@ -254,6 +263,10 @@ func joinTokenAuditDetails(resp *CreateBrokerRegistrationResponse) map[string]st
 // client-observable conflict the caller can retry, not a server fault — so
 // it maps to 409 rather than the generic 500 used for everything else.
 func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrTestAdminRemoteBrokerRefused) {
+		writeTestAdminBrokerRefusal(w)
+		return
+	}
 	if errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		Conflict(w, err.Error())
 		return
@@ -283,10 +296,28 @@ func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
 // hub boundary), its ceiling must contain broker.create, and its user must
 // currently hold broker.create. authorize() writes 401 for no identity and
 // 403 when any of these checks fails.
+//
+// A hub test identity (kind test_fixture, ptone/scion#4240) never creates or
+// re-mints a broker: brokers carry no provenance stamp, so a fixture-made
+// broker could not be purged. The kind is read from the store
+// (lookupUserKind), never from token claims, and a read error refuses.
 func (s *Server) authorizeBrokerCreate(w http.ResponseWriter, r *http.Request) bool {
 	resource := Resource{Type: "broker"}
 	if !s.requireUserCredentialKind(w, r, resource, ActionCreate, true) {
 		return false
+	}
+	if user := GetUserIdentityFromContext(r.Context()); user != nil {
+		isFixture, _, err := lookupUserKind(r.Context(), s.store, user.ID())
+		if err != nil {
+			InternalError(w)
+			return false
+		}
+		if isFixture {
+			logAuthzDenial(r, user, resource, ActionCreate, "test identity cannot create brokers")
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "a test identity cannot create or register brokers",
+				map[string]interface{}{"reason": testIdentityReasonFixtureBroker})
+			return false
+		}
 	}
 	return s.authorize(w, r, resource, ActionCreate)
 }
@@ -549,6 +580,12 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Test admin tier: only the co-located broker may complete a join.
+	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error())
+		return
+	}
+
 	// Determine hub endpoint
 	hubEndpoint := s.config.HubEndpoint
 	if hubEndpoint == "" {
@@ -571,6 +608,8 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		}
 		// Determine error type and return appropriate response
 		switch {
+		case errors.Is(err, ErrTestAdminRemoteBrokerRefused):
+			writeTestAdminBrokerRefusal(w)
 		case errors.Is(err, ErrJoinTokenInvalid), errors.Is(err, ErrJoinTokenBrokerMismatch):
 			writeError(w, http.StatusUnauthorized, ErrCodeInvalidJoinToken, err.Error(), nil)
 		case errors.Is(err, ErrJoinTokenExpired):
@@ -584,6 +623,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 
 	// Log successful join
 	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "")
+	s.conduitBrokerCredentialChanged(req.BrokerID)
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -682,6 +722,7 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 			"failed to rotate secret: "+err.Error(), nil)
 		return
 	}
+	s.conduitBrokerCredentialChanged(brokerID)
 
 	// Log audit event
 	actorID := ""

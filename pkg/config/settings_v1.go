@@ -1516,6 +1516,9 @@ type V1ServerHubConfig struct {
 	HubID     string `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
 	HubName   string `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
+	// file/env only: the server-config API refuses it in every mode.
+	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -1642,6 +1645,12 @@ type V1ServerHubConduitConfig struct {
 	// (e.g. "3500s"; default "3500s", 90s-24h). The relay sends GoAway
 	// 60s before it.
 	LifetimeCap string `json:"lifetime_cap,omitempty" yaml:"lifetime_cap,omitempty" koanf:"lifetime_cap"`
+	// ShutdownGrace is the time the platform allows between SIGTERM and
+	// killing the process (e.g. "10s"; no default, greater than 0 when
+	// set). When set, the SIGTERM GoAway drain deadline is cut to
+	// shutdown_grace - 2s (1ms at or below 2s); unset, it stays 30s.
+	// Read at startup.
+	ShutdownGrace string `json:"shutdown_grace,omitempty" yaml:"shutdown_grace,omitempty" koanf:"shutdown_grace"`
 	// ProxySessionMaxAge bounds how long a user conduit session admitted
 	// through trusted-proxy authentication may open new tunnels, counted
 	// from admission (e.g. "30m"; default "1h", 5m-1h).
@@ -1719,6 +1728,11 @@ type V1DatabaseConfig struct {
 	MaxIdleConns    int    `json:"max_idle_conns,omitempty" yaml:"max_idle_conns,omitempty" koanf:"max_idle_conns"`
 	ConnMaxLifetime string `json:"conn_max_lifetime,omitempty" yaml:"conn_max_lifetime,omitempty" koanf:"conn_max_lifetime"`
 	ConnMaxIdleTime string `json:"conn_max_idle_time,omitempty" yaml:"conn_max_idle_time,omitempty" koanf:"conn_max_idle_time"`
+	// AllowShadowedSchema lets the hub start (and the maintenance commands
+	// that migrate its database run) on PostgreSQL when the migration would
+	// create a new table set that hides existing hub tables
+	// later on the search_path. See DatabaseConfig.AllowShadowedSchema.
+	AllowShadowedSchema bool `json:"allow_shadowed_schema,omitempty" yaml:"allow_shadowed_schema,omitempty" koanf:"allow_shadowed_schema"`
 }
 
 // V1AuthConfig holds authentication settings.
@@ -3129,6 +3143,7 @@ var knownCompoundFields = []string{
 	"stalled_threshold",
 	"reconnect_window",
 	"internal_listen",
+	"shutdown_grace",
 	"peer_audience",
 	"lifetime_cap",
 	"instance_id",
@@ -3379,6 +3394,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.MonitoringDashboardURL != "" {
 			gc.Hub.MonitoringDashboardURL = v1.Hub.MonitoringDashboardURL
 		}
+		if v1.Hub.HubClass != "" {
+			gc.Hub.HubClass = v1.Hub.HubClass
+		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
 				gc.Hub.ReadTimeout = d
@@ -3483,6 +3501,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				InstanceID:           c.InstanceID,
 				AuthzRecheckInterval: c.AuthzRecheckInterval,
 				LifetimeCap:          c.LifetimeCap,
+				ShutdownGrace:        c.ShutdownGrace,
 				ProxySessionMaxAge:   c.ProxySessionMaxAge,
 			}
 			if m := c.StreamAuthzMax; m != nil {
@@ -3571,6 +3590,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Database.ConnMaxIdleTime != "" {
 			gc.Database.ConnMaxIdleTime = v1.Database.ConnMaxIdleTime
 		}
+		gc.Database.AllowShadowedSchema = v1.Database.AllowShadowedSchema
 	}
 
 	// Auth config
@@ -3797,6 +3817,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		PublicURL:              gc.Hub.Endpoint,
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
+		HubClass:               gc.Hub.HubClass,
 		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,
@@ -3830,6 +3851,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			InstanceID:           c.InstanceID,
 			AuthzRecheckInterval: c.AuthzRecheckInterval,
 			LifetimeCap:          c.LifetimeCap,
+			ShutdownGrace:        c.ShutdownGrace,
 			ProxySessionMaxAge:   c.ProxySessionMaxAge,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
@@ -3910,6 +3932,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		MaxIdleConns:    gc.Database.MaxIdleConns,
 		ConnMaxLifetime: gc.Database.ConnMaxLifetime,
 		ConnMaxIdleTime: gc.Database.ConnMaxIdleTime,
+
+		AllowShadowedSchema: gc.Database.AllowShadowedSchema,
 	}
 
 	// Auth config

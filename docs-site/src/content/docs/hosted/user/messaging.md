@@ -5,16 +5,22 @@ description: Bidirectional communication between humans and agents.
 
 Scion provides a robust messaging system that allows for bidirectional communication between humans and running agents. This is particularly useful for long-running tasks where an agent might need clarification, approval, or simply wants to notify you of its progress.
 
-## The Inbox Tray
+## Unread Conversations
 
 :::note[Design Record]
 For an in-depth look at the architecture, semantic contract, and design invariants underlying the Scion messaging system, see the [Conversation Model Design](https://github.com/GoogleCloudPlatform/scion/blob/main/.design/messaging-conversation-model.md) and its companion [Defect Inventory](https://github.com/GoogleCloudPlatform/scion/blob/main/.design/messaging-conversation-model-findings.md) in the project repository.
 :::
 
-In the Web Dashboard, the **Inbox Tray** provides a centralized view of all messages sent by your agents.
-- **Unread Badges:** The top navigation bar displays a badge indicating the number of unread messages across all your agents.
-- **Mark as Read:** You can mark individual messages or all messages as read, helping you keep track of what needs your attention.
-- **Contextual Links:** Messages in the tray often link directly to the agent that sent them, allowing you to quickly jump in and provide the requested input or review the agent's work.
+In the Web Dashboard, messages from your agents and other users arrive as chat conversations (see [Native Web Chat](#native-web-chat) below). There is no separate inbox:
+- **Unread Badge:** The Chat entry in the header's mode selector shows how many of your conversations have unread messages. A conversation counts once, however many unread messages it has. Only unmuted DMs and unmuted threads that you are a member of and have permission to read are counted. The browser tab title shows the same number.
+- **Popups:** New chat messages raise chat popups and browser notifications (see [Push Notifications & Presence](#push-notifications--presence)).
+- **Agent events:** The bell's notification tray carries agent events (such as an agent stalling or asking for input), not chat messages.
+
+The badge number comes from `GET /api/v1/chat/unread-count` (see the [API Reference](/scion/reference/api/)).
+
+:::caution[Changed behavior]
+The Hub no longer creates `MENTION` or `DM_RECEIVED` notification rows for chat, and the Messages envelope and inbox tray have been removed from the Web Dashboard. Unread chat is shown only by the unread badge.
+:::
 
 ## Native Web Chat
 
@@ -30,7 +36,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
   - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the toggle falls back to the top-level dashboard `/`.
 - **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports robust 1-on-1 Direct Messages (DMs). This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
   - **DM Promotion to Shared Threads**: When a 1-on-1 Direct Message with an agent develops context useful for the broader team, you can promote the DM conversation into a Shared Space Thread. This atomic operation safely re-keys the messages and streams the transition live to all clients via SSE without a page reload. Use the promotion button located in the DM header.
-- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message. The thread's default agent is listed first in the AGENTS section of the sidebar, under a **Thread default** sub-heading. When a thread has a default agent, the thread header shows **terminal** and **graph** buttons for that agent, the same as a DM with an agent. Members can be filtered (All/Unread toggle) and sorted (Alphabetical or Recent Activity).
+- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message. The thread's default agent is listed first in the AGENTS section of the sidebar, under a **Thread default** sub-heading. When a thread has a default agent, the thread header shows **terminal** and **graph** buttons for that agent, the same as a DM with an agent. Members can be sorted (Alphabetical or Recent Activity). A blue dot marks members with unread messages; to find unread DMs, use the rail's **Unread** filter.
 - **The Thread Rail & Mobile Swipe Navigation**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. On mobile viewports, the rail supports native **swipe gestures** for fluid, app-like drawer navigation.
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
 - **Zero-Reload Navigation**: Move between threads, project spaces, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
@@ -104,7 +110,7 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
 - **Real-Time Browser Notifications**: Stay informed of `@mentions` and incoming DMs with native browser push notifications.
 - **Smart Suppression**: Notifications are mute-aware and automatically suppressed for active conversations (threads you are currently looking at) to prevent alert fatigue.
 - **Chat Chime**: A short two-tone chime plays when a chat message arrives from someone else. Your own messages never chime. The chime plays at most once every 2 seconds and does not depend on browser notification permission. Turn it off globally with **Chat chime sound** in your profile's notification settings. To turn it off for one project, choose **Chime on/off** from the thread rail's options menu. Both preferences are stored in the browser. If the browser's autoplay policy blocks audio, no sound plays.
-- **Unread Badges**: The tab title dynamically updates with an unread badge count when you are away from the tab.
+- **Unread Badges**: The tab title shows the same unread conversation count as the Chat mode badge.
 - **Per-Thread Draft Persistence**: Drafts are saved locally per-thread, so if you switch threads or close the tab, your unsent message remains waiting when you return.
 
 ---
@@ -127,7 +133,7 @@ The web composer features a security-hardened, developer-friendly file upload sy
 - **16K Input Character Limit**: A robust 16,000-character limit is enforced in the composer, protecting token context limits.
 - **SSE Direct Append & Real-Time Attachments**: Chat messages stream via Server-Sent Events (SSE) using direct-append logic, providing lag-free typing rendering. Additionally, attachment previews render immediately on incoming SSE messages, ensuring the user interface instantly displays attachment references without waiting for subsequent user-triggered renders.
 - **Idempotency Keys**: Client-side idempotency keys eliminate duplicate messages during transient connection drops or retry states.
-- **Honest Delivery Status**: A message to an agent that is not running is marked **Agent unreachable** instead of **Delivered**. A thread message that mentions no agent is saved to the thread but marked **Not delivered to any agent**; mention an agent to deliver the message to it. If the Runtime Broker fails to deliver a message to the agent's terminal, it makes up to 3 attempts in total, but never retries once part of the text has already reached the terminal (so the agent does not see it twice), and a user sender sees the failure live in the chat. Messages to an agent that has been deleted fail right away instead of waiting in the queue. Failed messages are purged after 7 days.
+- **Honest Delivery Status**: A message to an agent that is not running is marked **Agent unreachable** instead of **Accepted**. **Accepted** means the agent's runtime took the message and buffered it, not that the agent has read it; **Seen** appears once the agent has read it. A thread message that mentions no agent is saved to the thread but marked **Not delivered to any agent**; mention an agent to deliver the message to it. If the Runtime Broker fails to deliver a message to the agent's terminal, it makes up to 3 attempts in total, but never retries once part of the text has already reached the terminal (so the agent does not see it twice), and a user sender sees the failure live in the chat. Messages to an agent that has been deleted fail right away instead of waiting in the queue. Failed messages are purged after 7 days.
 - **Wake and Send**: If you send to a suspended agent and you are allowed to start it (the `agent.lifecycle` permission), the chat asks whether to wake it instead of marking the message **Agent unreachable**. Choose **Wake and send**: the Hub resumes the agent, waits up to 30 seconds for it to be ready, and delivers your message as its first input. The bubble shows **Waking agent…** in the meantime. A retry after a dropped connection does not send the message twice. Without the permission, or when the agent is stopped, in error or deleted, you see the ordinary **Agent unreachable** status.
 - **Cursor-Based Scrollback Pagination**: Solved previous scroll-jump issues and cursor-mismatches. Scrollback pagination and scroll-to-bottom locks operate smoothly as history loads.
 
@@ -192,6 +198,8 @@ scion message @tech-lead --body-file - < ./review-notes.md
 ```
 
 For `--body-file` and stdin, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
+
+A successful send to an agent prints `Message accepted for agent '<name>'`. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it. It does not mean the agent has read it. A send to an agent that is reincarnating prints a separate notice that the message was saved for catch-up. See [`scion message`](/scion/reference/cli/#scion-message-or-msg) for what each status means.
 
 ### Message Formatting
 
@@ -299,7 +307,7 @@ channels, see [External Channels](/scion/hosted/user/external-channels/).
 
 When an agent uses the `ask_user` tool (or similar mechanism depending on the harness), Scion automatically performs two actions:
 1. **State Update:** The agent's state changes to `WAITING_FOR_INPUT`.
-2. **Explicit Message:** A persistent message is generated and delivered to your Inbox Tray (and Discord, if configured), clearly stating what the agent needs.
+2. **Explicit Message:** A persistent message from the agent, clearly stating what it needs, reaches you in Chat (and Discord, if configured), and the agent event appears in the notification tray.
 
 ## Real-Time Delivery
 

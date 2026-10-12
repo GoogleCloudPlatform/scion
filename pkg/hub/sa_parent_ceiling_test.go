@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -790,6 +790,8 @@ func TestSAParentCeiling_UseHasNoAgentScopeAndNoSeededRole(t *testing.T) {
 // not wired into a handler: the GCP token endpoints compose it with the
 // actAs check in a later change, which removes this test.
 func TestSAParentCeiling_NotCalledFromTokenHandlers(t *testing.T) {
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards EvaluateServiceAccountParentCeiling callers, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
 	for _, e := range entries {

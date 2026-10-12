@@ -414,6 +414,7 @@ export const PROJECT_COMPACT_KEYS: ReadonlySet<string> = new Set([
   'template',
   'projectId',
   'project',
+  'projectSlug',
   'labels',
   'phase',
   'activity',

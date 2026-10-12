@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -962,6 +963,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// previous shutdown may have left, so a resumed session is counted.
 	runClearSessionTombstoneAtStartup(agentHome)
 
+	// A harness whose usage source is native holds its session reports at
+	// session-end, so late native usage is added first; send them once
+	// they are due. Stopped before the shutdown backstop below, which
+	// sends what is still held.
+	stopHeldReportSender := runStartHeldReportSender(agentHome, harnessEnvOverlay, hub.NewClient)
+	defer stopHeldReportSender()
+
 	// Create supervisor with configuration
 	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
 	sup := supervisor.New(config)
@@ -999,6 +1007,27 @@ func RunInit(args []string, opts InitRunOptions) int {
 		err  error
 	}, 1)
 
+	// Start a new harness-readiness run before tmux starts: drop the previous
+	// run's files and record a fresh nonce and mode. The agent runtime waits
+	// on these before pasting a buffered message. Failure only means the
+	// runtime falls back to its session-age check, so it is not fatal.
+	readyNonce, err := writeInitRunFile(os.Getenv("SCION_HARNESS"))
+	if err != nil {
+		log.Warn("Harness readiness: writing init-run file: %v", err)
+		readyNonce = ""
+	}
+	readyMode := hooks.HarnessReadyMode(os.Getenv("SCION_HARNESS"))
+	harnessLaunchedAt := time.Now()
+
+	// The conduit SSH server and its host key are prepared, and the first
+	// host key report attempted (bounded), before the harness starts.
+	var conduitSSH *sshd.Config
+	if hubClient != nil && hubClient.IsConfigured() && !opts.DisablePortForwarding {
+		conduitSSH = prepareConduitSSH(hubClient, !opts.DisableConduit,
+			conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
+			sshSessionEnv(config), os.Getenv)
+	}
+
 	// since_init_ms (not elapsed_ms, unlike the other sciontool init: lines
 	// above): this is the time since process start, the same quantity as
 	// startup_ms below, not the duration of a single step. Naming it
@@ -1020,6 +1049,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 	var tokenRefreshDone <-chan struct{}
 	var ghTokenRefreshCancel context.CancelFunc
 	var ghTokenRefreshDone <-chan struct{}
+	var readyWatchCancel context.CancelFunc
+	var readyWatchDone chan struct{}
 
 	// Wait a moment for process to start, then run post-start hooks
 	// Use a short timeout to detect immediate startup failures
@@ -1050,7 +1081,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 			hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			startedAtStr := time.Now().UTC().Format(time.RFC3339)
 			zeroCount := 0
-			s := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}
+			// The harness process is up but not yet known to read input:
+			// report initializing; the readiness watcher started below
+			// reports working once the harness is ready. Older hubs store
+			// the activity as given, and the legacy Status stays "running".
+			s := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityInitializing}
 			// startup_ms (elapsed since sciontool init started) rides in
 			// Metadata rather than a new StatusUpdate field: it is
 			// observability only, read by the hub purely for a log line,
@@ -1058,7 +1093,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			startupMs := strconv.FormatInt(time.Since(initStart).Milliseconds(), 10)
 			if err := hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
 				Phase:             state.PhaseRunning,
-				Activity:          state.ActivityWorking,
+				Activity:          state.ActivityInitializing,
 				Status:            s.DisplayStatus(),
 				Message:           "Agent started",
 				StartedAt:         startedAtStr,
@@ -1071,7 +1106,40 @@ func RunInit(args []string, opts InitRunOptions) int {
 				log.Info("Reported running status to Hub (startedAt=%s)", startedAtStr)
 			}
 			hubCancel()
+		}
 
+		// Start the readiness watcher after the initializing report has
+		// returned, so a ready marker that already exists tells the
+		// watcher the hook may have reported before it (see
+		// watchHarnessReady). It never blocks init.
+		readyCfg := readyWatchConfig{
+			Nonce:         readyNonce,
+			Mode:          readyMode,
+			Start:         harnessLaunchedAt,
+			MarkerReady:   harnessReadyMarkerMatches,
+			LocalActivity: statusHandler.CurrentActivity,
+			ReplaceLocal:  statusHandler.ReplaceActivityIf,
+		}
+		if hubClient != nil && hubClient.IsConfigured() {
+			readyCfg.Report = func(ctx context.Context, activity state.Activity, message string) error {
+				as := state.AgentState{Phase: state.PhaseRunning, Activity: activity}
+				return hubClient.UpdateStatus(ctx, hub.StatusUpdate{
+					Phase:    state.PhaseRunning,
+					Activity: activity,
+					Status:   as.DisplayStatus(),
+					Message:  message,
+				})
+			}
+		}
+		var readyWatchCtx context.Context
+		readyWatchCtx, readyWatchCancel = context.WithCancel(context.Background())
+		readyWatchDone = make(chan struct{})
+		go func() {
+			defer close(readyWatchDone)
+			watchHarnessReady(readyWatchCtx, readyCfg)
+		}()
+
+		if hubClient != nil && hubClient.IsConfigured() {
 			// Start heartbeat loop in background
 			var heartbeatCtx context.Context
 			heartbeatCtx, heartbeatCancel = context.WithCancel(context.Background())
@@ -1095,7 +1163,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 				log.Info("port forwarding disabled: skipping port-forward tunnel manager and auto-expose")
 			} else {
 				go newPortForwarding(hubClient, opts.DisableConduit,
-					conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop), os.Getenv).run(ctx)
+					conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
+					conduitSSH, os.Getenv).run(ctx)
 
 				// Auto-expose: detect and register listening ports
 				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
@@ -1342,6 +1411,14 @@ waitLoop:
 		}
 	}
 
+	// Stop the readiness watcher first so it cannot report working after
+	// the harness has exited.
+	if readyWatchCancel != nil {
+		readyWatchCancel()
+		<-readyWatchDone
+		log.Debug("Harness readiness watcher stopped")
+	}
+
 	// Stop token refresh loops and heartbeat before reporting shutdown status to prevent races
 	if ghTokenRefreshCancel != nil {
 		ghTokenRefreshCancel()
@@ -1397,6 +1474,7 @@ waitLoop:
 	// shutdown itself, so no stop grace period was running.) It is bounded
 	// (2s lock wait plus shutdownSessionReportTimeout) and deliberately
 	// runs ahead of the stopping and final status reports.
+	stopHeldReportSender()
 	runReportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
 
 	// Clean up the GitHub token file on exit
@@ -2391,13 +2469,31 @@ func adjustScionUser(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop
 			// logs.
 		}
 	} else {
+		// groupmod and usermod run as root, so both are resolved through
+		// rootexec's fixed search path (never the inherited $PATH) and run
+		// with its fixed environment. A resolve failure is handled exactly
+		// like the command itself failing, so a missing binary takes the
+		// same path it always has.
+
 		// Modify group first (if different from current)
-		if err := procreap.RunManaged(exec.Command("groupmod", "-o", "-g", hostGID, "scion")); err != nil {
+		groupmodPath, err := rootexec.Resolve("groupmod")
+		if err == nil {
+			groupmodCmd := exec.Command(groupmodPath, "-o", "-g", hostGID, "scion")
+			groupmodCmd.Env = rootexec.Env()
+			err = procreap.RunManaged(groupmodCmd)
+		}
+		if err != nil {
 			log.Error("Failed to modify scion group to %s: %v", hostGID, err)
 		}
 
 		// Modify user UID and primary group
-		if err := procreap.RunManaged(exec.Command("usermod", "-o", "-u", hostUID, "-g", hostGID, "scion")); err != nil {
+		usermodPath, err := rootexec.Resolve("usermod")
+		if err == nil {
+			usermodCmd := exec.Command(usermodPath, "-o", "-u", hostUID, "-g", hostGID, "scion")
+			usermodCmd.Env = rootexec.Env()
+			err = procreap.RunManaged(usermodCmd)
+		}
+		if err != nil {
 			// usermod can fail with exit code 12 on runtimes where the home
 			// directory is a mount point (e.g. Apple Virtualization / VirtioFS)
 			// because it tries a recursive chown that the filesystem rejects.
@@ -2525,18 +2621,27 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 	// -i's substitute exits 0 whether or not anything matched, and a
 	// primary group not literally named after username (e.g. useradd -g
 	// users scion) is a legitimate case for this to silently no-op on.
-	groupSed := exec.Command("sed", "-i", "-E",
+	//
+	// sed runs as root, so it is resolved through rootexec's fixed search
+	// path (never the inherited $PATH) and run with its fixed environment.
+	sedPath, err := rootexec.Resolve("sed")
+	if err != nil {
+		return fmt.Errorf("sed %s: %w", groupPath, err)
+	}
+	groupSed := exec.Command(sedPath, "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:/\1%s:/`, username, newGID),
 		groupPath)
+	groupSed.Env = rootexec.Env()
 	if out, err := procreap.CombinedOutputManaged(groupSed); err != nil {
 		return fmt.Errorf("sed %s: %w (output: %s)", groupPath, err, string(out))
 	}
 
 	// Update /etc/passwd's UID/GID fields, unconditional and best-effort
 	// for the same reason as the group sed above.
-	passwdSed := exec.Command("sed", "-i", "-E",
+	passwdSed := exec.Command(sedPath, "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:[0-9]+:/\1%s:%s:/`, username, newUID, newGID),
 		passwdPath)
+	passwdSed.Env = rootexec.Env()
 	if out, err := procreap.CombinedOutputManaged(passwdSed); err != nil {
 		return fmt.Errorf("sed %s: %w (output: %s)", passwdPath, err, string(out))
 	}

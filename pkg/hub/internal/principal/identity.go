@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package hub provides the Scion Hub API server.
-package hub
+package principal
 
 import (
 	"context"
@@ -99,12 +98,6 @@ func (u *AuthenticatedUser) ID() string { return u.id }
 
 // Type returns the identity type ("user").
 func (u *AuthenticatedUser) Type() string { return "user" }
-
-// localAncestryProvenance reports that a local user is the root of its own
-// ancestry chain: it opts AuthenticatedUser into AncestryIsHubAttested.
-func (u *AuthenticatedUser) localAncestryProvenance() ancestryProvenance {
-	return ancestryProvenanceLocalUser
-}
 
 // Email returns the user email.
 func (u *AuthenticatedUser) Email() string { return u.email }
@@ -234,7 +227,7 @@ func (s *ScopedUserIdentity) Decoration() *CredentialDecoration {
 	if s.decoration == nil {
 		return nil
 	}
-	d := s.decoration.clone()
+	d := s.decoration.Clone()
 	return &d
 }
 
@@ -247,23 +240,6 @@ func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }
 
 // CredentialID returns the persisted ID of the UAT that authenticated this identity.
 func (s *ScopedUserIdentity) CredentialID() string { return s.credentialID }
-
-// localAncestryProvenance reports that a UAT-backed identity is still a local
-// user: the wrapped UserIdentity is the root of its own ancestry chain. It is
-// declared directly (not inherited through the embedded UserIdentity field)
-// because Go only promotes methods declared by an embedded interface's own
-// method set, and localAncestryProvenance is not part of UserIdentity.
-//
-// This method's mere presence is what AncestryIsHubAttested tests for, so it
-// cannot itself refuse to be "implemented" when the wrapped identity turns
-// out to be federated — see AncestryIsHubAttested's explicit unwrap check for
-// where that case is actually rejected. Production only ever wraps
-// *AuthenticatedUser (useraccesstoken.go), so this path is not reachable
-// today; it exists so a future caller cannot silently attest a UAT issued
-// against a federated identity.
-func (s *ScopedUserIdentity) localAncestryProvenance() ancestryProvenance {
-	return ancestryProvenanceLocalUser
-}
 
 // Ceiling returns the normalized, frozen permission ceiling this identity's
 // credential carries. Every credential-scope restriction (Decide step 7a,
@@ -296,48 +272,17 @@ func IsScopedUserIdentity(identity Identity) bool {
 // being demoted. For contexts that need an explicit role-binding check, use
 // AuthzService.IsSystemAdmin instead.
 func IsUnscopedLocalPlatformAdmin(user UserIdentity) bool {
-	// isNilIdentity treats a typed-nil UserIdentity (for example
+	// IsNilIdentity treats a typed-nil UserIdentity (for example
 	// (*AuthenticatedUser)(nil)) as missing, denying here rather than
 	// reaching user.Role() below.
-	if isNilIdentity(user) || user.Role() != "admin" || IsScopedUserIdentity(user) {
+	if IsNilIdentity(user) || user.Role() != "admin" || IsScopedUserIdentity(user) {
 		return false
 	}
 	_, federated := user.(FederatedIdentity)
 	return !federated
 }
 
-// ancestryProvenance names the recognized source of an identity's local
-// ancestry chain, for explain/audit and tests. It is unexported: the value
-// itself carries no authority, only the presence of a
-// localAncestryProvenanceIdentity implementation does.
-type ancestryProvenance string
-
-const (
-	// ancestryProvenanceLocalUser marks a local user (interactive or
-	// UAT-backed) as the root of its own ancestry chain.
-	ancestryProvenanceLocalUser ancestryProvenance = "local_user"
-	// ancestryProvenanceAgentJWT marks an ancestry chain carried in a hub-signed
-	// agent JWT.
-	ancestryProvenanceAgentJWT ancestryProvenance = "agent_jwt"
-	// ancestryProvenanceStoreAgent marks an ancestry chain read back from a
-	// hub-persisted agent record (not from the JWT that authenticated the
-	// request).
-	ancestryProvenanceStoreAgent ancestryProvenance = "store_agent"
-)
-
-// localAncestryProvenanceIdentity is implemented only by identity wrappers
-// whose ancestry chain has recognized local provenance: signed by this hub
-// (agent JWT) or persisted by this hub (store-derived wrappers), or is
-// itself the root of the chain (a local user). The method is unexported so
-// that a type outside package hub cannot implement it, and so that a type
-// inside package hub — including a test fake — must opt in explicitly
-// rather than acquiring attestation by accident (e.g. by merely returning
-// Type() == "agent").
-type localAncestryProvenanceIdentity interface {
-	localAncestryProvenance() ancestryProvenance
-}
-
-// isNilIdentity reports whether identity is either the nil interface or a
+// IsNilIdentity reports whether identity is either the nil interface or a
 // non-nil Identity value holding a nil concrete pointer (a "typed nil" — for
 // example a nil *DevUser or nil *AuthenticatedUser boxed into the Identity
 // interface). In Go, an interface value equals nil only when both its type
@@ -365,7 +310,7 @@ type localAncestryProvenanceIdentity interface {
 // (principalContextForIdentity, credentialContextForIdentity,
 // AncestryIsHubAttested) and decide's entry check treats a typed-nil identity
 // identically to a nil interface, before doing anything else with identity.
-func isNilIdentity(identity Identity) bool {
+func IsNilIdentity(identity Identity) bool {
 	if identity == nil {
 		return true
 	}
@@ -380,66 +325,6 @@ func isNilIdentity(identity Identity) bool {
 	default:
 		return false
 	}
-}
-
-// AncestryIsHubAttested returns true when the identity's ancestry chain has
-// recognized local provenance: signed by this hub (agent JWT) or persisted
-// by this hub (store-derived wrappers), or is itself the root of the chain
-// (a local user). Federated agent ancestry is a remote claim about local
-// principal IDs and must not be used for delegation matching or ceiling
-// evaluation, so FederatedIdentity is rejected first, before any local
-// allow path.
-//
-// This is the single predicate for ancestry trust. There will be more
-// consumers of ancestry after F1.7, and each one must answer this
-// question the same way — not via scattered Type() comparisons.
-//
-// The parameter is typed as Identity (not interface{}) so that callers
-// cannot accidentally pass an unrelated type. Nil, unknown, and unrecognized
-// identity types all return false (fail closed): an identity is attested
-// only if it implements localAncestryProvenanceIdentity, which — unlike
-// Type() — cannot be satisfied by an arbitrary or future type string. A
-// typed-nil concrete identity is treated the same as a nil interface: see
-// isNilIdentity.
-//
-// *hubDeliveryIdentity (ptone/scion#2228 part 2) never implements
-// localAncestryProvenanceIdentity, so this always returns false for it: the
-// credential is minted by the hub for one delivery and attests nothing
-// about how the agent came to exist. For a deliver permission, relationship
-// stage 2 and the progeny fact read ancestry evidence explicitly from the
-// stored agent record (hubDeliveryIdentity.evidence) instead — see
-// relationshipStageAncestryAttested (authz_delivery_credential.go).
-// ProgenyListPredicate and EvaluateProgeny call this function directly, so
-// they return not-attested / match-nothing for a hub_delivery principal.
-// Every other consumer of this function (the
-// step-10 pre-backfill allow, messaging, material_grants, material_runtime)
-// stays on its not-attested path too, so no consumer extends trust to the
-// credential without an explicit arm.
-func AncestryIsHubAttested(identity Identity) bool {
-	if isNilIdentity(identity) {
-		return false
-	}
-	// All FederatedIdentity types (FederatedAgentIdentity,
-	// FederatedUserIdentity, FederatedServiceIdentity) are NOT
-	// hub-attested. Test the interface, not a single concrete type. This
-	// check comes first: federated ancestry must never reach the local
-	// allow path below, however it is packaged.
-	if _, isFederated := identity.(FederatedIdentity); isFederated {
-		return false
-	}
-	// A *ScopedUserIdentity is attested unconditionally by the marker check
-	// below, whatever UserIdentity it wraps — because IssuerURL is not part
-	// of the UserIdentity interface's method set, Go does not promote it
-	// through the embedded field, so a ScopedUserIdentity wrapping a
-	// FederatedUserIdentity would not satisfy the FederatedIdentity check
-	// above. Unwrap explicitly instead of trusting the outer type's marker.
-	if scoped, ok := identity.(*ScopedUserIdentity); ok {
-		if _, wrappedFederated := scoped.UserIdentity.(FederatedIdentity); wrappedFederated {
-			return false
-		}
-	}
-	_, ok := identity.(localAncestryProvenanceIdentity)
-	return ok
 }
 
 // HasScope returns true if this identity has the given scope.
@@ -458,19 +343,19 @@ type identityContextKey struct{}
 // credentialContextKey is the key for request credential metadata.
 type credentialContextKey struct{}
 
-// contextIdentityValue returns the identity stored under identityContextKey
-// by contextWithIdentity, and whether one was stored at all. It performs no
-// nil or typed-nil filtering: callers apply isNilIdentity themselves. It
-// exists so code outside the principal types (GetIdentityFromContext's
-// legacy fallback, auth_identity_context.go) can read the key without
-// naming identityContextKey.
-func contextIdentityValue(ctx context.Context) (Identity, bool) {
+// IdentityFrom returns the identity stored under identityContextKey
+// by ContextWithIdentity, and whether one was stored at all. It performs no
+// nil or typed-nil filtering: callers apply IsNilIdentity themselves. It
+// exists so code outside the principal types (GetIdentityFromContext in
+// auth_identity_context.go, GetBrokerIdentityFromContext in
+// brokeridentity.go) can read the key without naming identityContextKey.
+func IdentityFrom(ctx context.Context) (Identity, bool) {
 	identity, ok := ctx.Value(identityContextKey{}).(Identity)
 	return identity, ok
 }
 
-// contextWithIdentity returns a new context with the identity set.
-func contextWithIdentity(ctx context.Context, identity Identity) context.Context {
+// ContextWithIdentity returns a new context with the identity set.
+func ContextWithIdentity(ctx context.Context, identity Identity) context.Context {
 	return context.WithValue(ctx, identityContextKey{}, identity)
 }
 
@@ -486,45 +371,45 @@ func GetCredentialContextFromContext(ctx context.Context) CredentialContext {
 // context when its credential context was recorded.
 type credentialSubjectContextKey struct{}
 
-// contextWithCredentialContext records credential caveats for request-based authorization.
+// ContextWithCredentialContext records credential caveats for request-based authorization.
 // It also records the identity the context holds at that moment (the
 // authentication middleware sets the identity first), so
-// requestCredentialBindsIdentity can tell whether the identity was later
+// RequestCredentialBindsIdentity can tell whether the identity was later
 // replaced.
-func contextWithCredentialContext(ctx context.Context, credential CredentialContext) context.Context {
+func ContextWithCredentialContext(ctx context.Context, credential CredentialContext) context.Context {
 	ctx = context.WithValue(ctx, credentialContextKey{}, credential)
 	return context.WithValue(ctx, credentialSubjectContextKey{}, ctx.Value(identityContextKey{}))
 }
 
-// requestCredentialBindsIdentity reports whether ctx's current identity is
+// RequestCredentialBindsIdentity reports whether ctx's current identity is
 // the very identity the authentication middleware derived from the request's
 // credentials: a credential context is present, and the identity recorded
 // with it is the same object (the same pointer) as the identity ctx holds
 // now. A context that
 // holds only an identity, or whose identity was replaced after
-// authentication (contextWithIdentity on a request context), does not bind,
+// authentication (ContextWithIdentity on a request context), does not bind,
 // even when the replacement names the same principal.
-func requestCredentialBindsIdentity(ctx context.Context) bool {
+func RequestCredentialBindsIdentity(ctx context.Context) bool {
 	if GetCredentialContextFromContext(ctx).Kind == "" {
 		return false
 	}
 	subject, ok := ctx.Value(credentialSubjectContextKey{}).(Identity)
-	if !ok || isNilIdentity(subject) {
+	if !ok || IsNilIdentity(subject) {
 		return false
 	}
 	current, ok := ctx.Value(identityContextKey{}).(Identity)
-	if !ok || isNilIdentity(current) {
+	if !ok || IsNilIdentity(current) {
 		return false
 	}
-	return sameIdentityObject(subject, current)
+	return SameIdentityObject(subject, current)
 }
 
-// sameIdentityObject reports whether a and b are the same identity object:
+// SameIdentityObject reports whether a and b are the same identity object:
 // both non-nil pointers of the same type to the same address. Every identity
 // the authentication middleware creates is a pointer type. A value-typed
 // identity never matches, even an identical copy of itself, because two
 // equal values cannot be told apart from an in-process reconstruction.
-func sameIdentityObject(a, b Identity) bool {
+func SameIdentityObject(a, b Identity) bool {
 	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
 	if va.Kind() != reflect.Pointer || vb.Kind() != reflect.Pointer || va.IsNil() || vb.IsNil() {
 		return false
@@ -547,12 +432,16 @@ type BrokerOnBehalfOf struct {
 // brokerOnBehalfOfContextKey is the context key for the BrokerOnBehalfOf marker.
 type brokerOnBehalfOfContextKey struct{}
 
-// contextWithBrokerOnBehalfOf records the BrokerOnBehalfOf marker. It is
-// unexported: the only caller is the shared authenticated-broker/OBO context
-// helper in brokerauth.go, invoked only after HMAC verification and a
-// successful resolveOnBehalfOf. An invalid HMAC or a bare/unresolved header
-// must never reach this function.
-func contextWithBrokerOnBehalfOf(ctx context.Context, obo BrokerOnBehalfOf) context.Context {
+// ContextWithBrokerOnBehalfOf records the BrokerOnBehalfOf marker. It is
+// exported only so package hub can reach it: this package is internal to
+// pkg/hub, so nothing outside pkg/hub/... can call it, and package hub keeps
+// it behind the unexported alias contextWithBrokerOnBehalfOf. The only
+// caller is the shared authenticated-broker/OBO context helper in
+// brokerauth.go, invoked only after HMAC verification and a successful
+// resolveOnBehalfOf (pinned by TestPrincipalContextSetterFileAllowList in
+// package hub). An invalid HMAC or a bare/unresolved header must never reach
+// this function.
+func ContextWithBrokerOnBehalfOf(ctx context.Context, obo BrokerOnBehalfOf) context.Context {
 	return context.WithValue(ctx, brokerOnBehalfOfContextKey{}, obo)
 }
 
@@ -622,4 +511,7 @@ const (
 	// token issued by a trusted external issuer (e.g. a Google ID token)
 	// rather than a Hub-issued credential. See auth_external_bearer.go.
 	AuthTypeExternalBearer = "external-bearer"
+	// AuthTypeAgentDelegation marks a request authenticated with an agent
+	// delegated credential (.design/agent-delegation.md §12.1).
+	AuthTypeAgentDelegation = "agent-delegation"
 )

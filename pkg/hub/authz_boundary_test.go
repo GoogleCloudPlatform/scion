@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -1681,6 +1681,7 @@ func TestNormalizePrincipalType_AgreesWithRelationshipPrincipalKind(t *testing.T
 		string(PrincipalKindFederatedService),
 		string(PrincipalKindBroker),
 		string(PrincipalKindDev),
+		string(PrincipalKindAgentDelegated),
 		"totally-unrecognized-kind",
 	}
 	for _, k := range kinds {

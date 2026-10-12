@@ -15,24 +15,46 @@
 package tunnelclient
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/url"
 	"regexp"
 	"strings"
 )
 
+// RedactEndpoint returns the hub endpoint as it is shown in status
+// records, status output and error lines: scheme, host, port and path
+// only, never userinfo, a query or a fragment, with trailing slashes
+// removed. An endpoint that does not parse as a URL with a host is shown
+// as "the configured hub endpoint".
+func RedactEndpoint(endpoint string) string {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "the configured hub endpoint"
+	}
+	r := url.URL{Scheme: u.Scheme, Host: u.Host, Path: strings.TrimRight(u.Path, "/")}
+	return r.String()
+}
+
 // NormalizeEndpoint returns the form of a hub endpoint used to identify a
-// session locally: surrounding space and trailing slashes removed, scheme
-// and host lowercased, and the scheme's default port dropped. It follows
-// the CLI's rule for comparing hub URLs.
+// session locally: the redacted endpoint (RedactEndpoint) with scheme and
+// host lowercased and the scheme's default port dropped. It follows the
+// CLI's rule for comparing hub URLs. Input that is not a URL with a host
+// gives "invalid:" and a short digest of the input, so different invalid
+// inputs never compare equal and no input text is kept.
 //
-// Normalisation is for session reuse only. The credential lookup is exact
-// by design: it receives the endpoint exactly as given.
+// Normalisation is for session reuse and comparison only. The credential
+// lookup is exact by design: it receives the endpoint exactly as given,
+// and the connection uses the endpoint as configured.
 func NormalizeEndpoint(endpoint string) string {
 	s := strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	u, err := url.Parse(s)
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return strings.ToLower(s)
+		// Not a URL with a host: a key distinct per input that holds
+		// none of the input's text.
+		sum := sha256.Sum256([]byte(strings.ToLower(s)))
+		return "invalid:" + hex.EncodeToString(sum[:8])
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
 	host := strings.ToLower(u.Hostname())
@@ -40,16 +62,51 @@ func NormalizeEndpoint(endpoint string) string {
 	if (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80") {
 		port = ""
 	}
-	if port != "" {
-		u.Host = net.JoinHostPort(host, port)
-	} else if strings.Contains(host, ":") {
-		u.Host = "[" + host + "]"
-	} else {
-		u.Host = host
+	r := url.URL{Scheme: u.Scheme, Path: strings.TrimRight(u.Path, "/")}
+	switch {
+	case port != "":
+		r.Host = net.JoinHostPort(host, port)
+	case strings.Contains(host, ":"):
+		r.Host = "[" + host + "]"
+	default:
+		r.Host = host
 	}
-	u.Path = strings.TrimRight(u.Path, "/")
-	u.RawPath = ""
-	return u.String()
+	return r.String()
+}
+
+// scrubEndpoint removes the endpoint's userinfo, query and fragment from
+// text (for example, a transport error that quotes the URL).
+func scrubEndpoint(text, endpoint string) string {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return text
+	}
+	if u.User != nil {
+		name := u.User.Username()
+		text = strings.ReplaceAll(text, u.User.String()+"@", "")
+		text = strings.ReplaceAll(text, name+":***@", "")
+		if name != "" {
+			text = strings.ReplaceAll(text, name+"@", "")
+		}
+		if pw, ok := u.User.Password(); ok && pw != "" {
+			text = strings.ReplaceAll(text, pw, "***")
+		}
+	}
+	if u.RawQuery != "" {
+		text = strings.ReplaceAll(text, "?"+u.RawQuery, "")
+		text = strings.ReplaceAll(text, u.RawQuery, "")
+		for _, vs := range u.Query() {
+			for _, v := range vs {
+				if len(v) >= 3 {
+					text = strings.ReplaceAll(text, v, "***")
+				}
+			}
+		}
+	}
+	if u.Fragment != "" {
+		text = strings.ReplaceAll(text, "#"+u.EscapedFragment(), "")
+	}
+	return text
 }
 
 // SessionKey identifies a session locally: the normalised endpoint and the

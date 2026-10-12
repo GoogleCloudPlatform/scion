@@ -39,6 +39,12 @@ type Agent struct {
 	// Project association
 	ProjectID string `json:"projectId"` // FK to Project.ID
 
+	// Fixture is the creation-time test-identity provenance stamp. It is
+	// written only at create, from the hub's server-side resolution
+	// (pkg/hub/fixture_provenance.go), and no update path can change it.
+	// json:"-": no request decodes it and no response carries it.
+	Fixture FixtureProvenance `json:"-"`
+
 	// Metadata (stored as JSON)
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -96,6 +102,7 @@ type Agent struct {
 
 	// Enriched fields (populated by Hub when returning data, not persisted)
 	Project           string `json:"project,omitempty"`           // Project name (resolved from ProjectID)
+	ProjectSlug       string `json:"projectSlug,omitempty"`       // Project slug (resolved from ProjectID)
 	RuntimeBrokerName string `json:"runtimeBrokerName,omitempty"` // Broker name (resolved from RuntimeBrokerID)
 	HarnessConfig     string `json:"harnessConfig,omitempty"`     // Harness config name (resolved from AppliedConfig.HarnessConfig)
 	HarnessAuth       string `json:"harnessAuth,omitempty"`       // Harness auth method (resolved from AppliedConfig.HarnessAuth)
@@ -178,6 +185,21 @@ type Agent struct {
 	// delete names each of them other than RunID. Like RunID, UpdateAgent
 	// never writes it.
 	PreviousRunIDs []string `json:"-"`
+
+	// RunIDUpdatedAt is when RunID last changed to a different value
+	// (ptone/scion#3661): every run-ID write that changes it sets it in the
+	// same write, and no other write does. nil for a row whose RunID has not
+	// changed since the column was added. Like RunID, UpdateAgent never
+	// writes it.
+	RunIDUpdatedAt *time.Time `json:"-"`
+
+	// SSHHostKey is the authorized_keys line of the agent's SSH host key
+	// for the run SSHHostKeyRunID. The reported host key is bound to the
+	// reporting agent's current run: the only writer is SetAgentSSHHostKey,
+	// and readers use it only while SSHHostKeyRunID equals RunID. Like
+	// RunID, UpdateAgent never writes them.
+	SSHHostKey      string `json:"-"`
+	SSHHostKeyRunID string `json:"-"`
 
 	// RunIntent is whether the agent should be running ("running" or
 	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
@@ -927,6 +949,12 @@ type Project struct {
 	// Configuration (stored as JSON)
 	SharedDirs []api.SharedDir `json:"sharedDirs,omitempty"`
 
+	// Fixture is the creation-time test-identity provenance stamp. It is
+	// written only at create, from the hub's server-side resolution
+	// (pkg/hub/fixture_provenance.go), and no update path can change it.
+	// json:"-": no request decodes it and no response carries it.
+	Fixture FixtureProvenance `json:"-"`
+
 	// GitHub App integration
 	GitHubInstallationID *int64                  `json:"githubInstallationId,omitempty"`
 	GitHubPermissions    *GitHubTokenPermissions `json:"githubPermissions,omitempty"`
@@ -1434,6 +1462,63 @@ type User struct {
 // IsTestFixture reports whether u is a hub-issued test fixture.
 func (u *User) IsTestFixture() bool {
 	return u != nil && u.Kind == UserKindTestFixture
+}
+
+// ExpiredTestFixtureQuery selects test fixture users by expiry for
+// Store.ListExpiredTestFixtureUsers. A fixture row always has an expiry
+// (the users_test_fixture_expiry_check CHECK), so every selected row has
+// one.
+type ExpiredTestFixtureQuery struct {
+	// ExpiredAtOrBefore keeps rows with expires_at <= ExpiredAtOrBefore.
+	// Required.
+	ExpiredAtOrBefore time.Time
+	// ExpiredAfter, when non-zero, keeps rows with expires_at >
+	// ExpiredAfter.
+	ExpiredAfter time.Time
+	// AfterID, when non-empty, is a keyset cursor: only rows strictly after
+	// (AfterExpiresAt, AfterID) in (expires_at, id) order are returned.
+	AfterExpiresAt time.Time
+	AfterID        string
+	// Limit caps the rows returned when positive.
+	Limit int
+}
+
+// FixtureRootedResources is what Store.ListFixtureRootedResources found for
+// one fixture root: every resource whose stamp names it.
+type FixtureRootedResources struct {
+	// Agents includes soft-deleted agents.
+	Agents    []Agent
+	Schedules []Schedule
+	Groups    []Group
+	Projects  []Project
+	// Truncated is true when a kind had more rows than the limit.
+	Truncated bool
+}
+
+// FixtureProvenance is the creation-time test-identity provenance stamp of
+// an agent, project, schedule or group: the hub test identity at the root
+// of the principal chain that created the row (RootID) and that identity's
+// issued_by user (IssuerID). The zero value means the row was not created
+// under a test identity, or predates the stamp.
+//
+// The store writes it only in the entity's create, and only when both IDs
+// are set or neither is; the columns are Immutable, so no update path can
+// change it. The hub sets it only from its server-side resolution
+// (pkg/hub/fixture_provenance.go).
+type FixtureProvenance struct {
+	RootID   string
+	IssuerID string
+}
+
+// IsZero reports whether p carries no stamp.
+func (p FixtureProvenance) IsZero() bool {
+	return p.RootID == "" && p.IssuerID == ""
+}
+
+// Valid reports whether p is either empty or complete. A half-set stamp is
+// invalid and the store refuses to write it.
+func (p FixtureProvenance) Valid() bool {
+	return (p.RootID == "") == (p.IssuerID == "")
 }
 
 // UserPreferences holds user preferences.
@@ -1972,6 +2057,12 @@ type Group struct {
 	// Ownership
 	CreatedBy string `json:"createdBy,omitempty"`
 	OwnerID   string `json:"ownerId,omitempty"`
+
+	// Fixture is the creation-time test-identity provenance stamp. It is
+	// written only at create, from the hub's server-side resolution
+	// (pkg/hub/fixture_provenance.go), and no update path can change it.
+	// json:"-": no request decodes it and no response carries it.
+	Fixture FixtureProvenance `json:"-"`
 }
 
 // GroupMember represents membership in a group.
@@ -2782,6 +2873,12 @@ type Schedule struct {
 	// InitiatorAttribution and AuthorizationRevision, and never on its own.
 	// The zero value is unrecorded.
 	AuthorityCeiling EffectCeiling `json:"-"`
+
+	// Fixture is the creation-time test-identity provenance stamp. It is
+	// written only at create, from the hub's server-side resolution
+	// (pkg/hub/fixture_provenance.go), and no update path can change it.
+	// json:"-": no request decodes it and no response carries it.
+	Fixture FixtureProvenance `json:"-"`
 }
 
 // ScheduleStatus constants
@@ -3791,6 +3888,10 @@ const (
 	MembershipLossTriggerSystemScopeChange     MembershipLossTrigger = "system_scope_change"
 	MembershipLossTriggerRestoreCheck          MembershipLossTrigger = "restore_check"
 	MembershipLossTriggerReconcile             MembershipLossTrigger = "reconcile"
+	// MembershipLossTriggerTestIdentityExpiry: a hub test identity
+	// (ptone/scion#4240) passed its expiry, so it is no longer admitted
+	// anywhere and its agents are held until the expiry reaper purges them.
+	MembershipLossTriggerTestIdentityExpiry MembershipLossTrigger = "test_identity_expiry"
 )
 
 // ValidMembershipLossTrigger reports whether t is a recognised trigger.
@@ -3805,7 +3906,8 @@ func ValidMembershipLossTrigger(t MembershipLossTrigger) bool {
 		MembershipLossTriggerBindingExpiry,
 		MembershipLossTriggerSystemScopeChange,
 		MembershipLossTriggerRestoreCheck,
-		MembershipLossTriggerReconcile:
+		MembershipLossTriggerReconcile,
+		MembershipLossTriggerTestIdentityExpiry:
 		return true
 	}
 	return false
@@ -4020,6 +4122,26 @@ type MutationAuditRecord struct {
 	// Empty for an ordinary live request.
 	ExecutorKind string
 	ExecutorID   string
+
+	// Agent delegation block (.design/agent-delegation.md §18.1). All
+	// optional, default "", and written only by the agent delegation paths
+	// (grant issuance, credential exchange, revocation). Every other writer
+	// leaves them empty.
+	//
+	// ActorAgentID is the verified actor agent; AuthorizingUserID is the
+	// grant issuer; SourceGrantID is the grant; ParentGrantID and
+	// DelegationEdgeID are reserved and always empty in v1;
+	// ExchangeAgentCredentialID is the agent credential verified at
+	// exchange; ActorKind is "agent_delegated"; AgentDelegationCode is the
+	// agent delegation code on a denial-related record.
+	ActorAgentID              string
+	AuthorizingUserID         string
+	SourceGrantID             string
+	ParentGrantID             string
+	DelegationEdgeID          string
+	ExchangeAgentCredentialID string
+	ActorKind                 string
+	AgentDelegationCode       string
 }
 
 // MutationAuditFilter defines query parameters for listing mutation audit records.
@@ -4209,3 +4331,93 @@ const (
 	// type "group". Legacy rows are marked Degraded and evaluated fail-closed.
 	ConstraintPrincipalTypeGroup = "group"
 )
+
+// =============================================================================
+// Agent delegation (.design/agent-delegation.md §18.1)
+// =============================================================================
+
+// AgentDelegationGrant is a durable record, created by an interactive user
+// (the issuer), that binds one agent to a boundary, a frozen permission
+// ceiling and an expiry. It confers nothing until the bound agent exchanges
+// it for an AgentDelegatedCredential.
+type AgentDelegationGrant struct {
+	ID string
+	// AgentID is the bound agent. AgentProjectID, AgentGeneration and
+	// AgentStateVersion snapshot the agent row at issuance.
+	AgentID           string
+	AgentProjectID    string
+	AgentGeneration   int
+	AgentStateVersion int64
+	// IssuerUserID is the user who created the grant.
+	IssuerUserID string
+	// BoundaryKind is "project" or "hub"; BoundaryProjectID is set iff
+	// the kind is "project".
+	BoundaryKind      string
+	BoundaryProjectID string
+	// CeilingVersion is always >= 1; CeilingPermissionIDs are canonical
+	// permission IDs.
+	CeilingVersion       int
+	CeilingPermissionIDs []string
+	// Name, Purpose and Labels are issuer-supplied descriptive metadata.
+	// They never affect a decision.
+	Name    string
+	Purpose string
+	Labels  map[string]string
+	// AllowSubdelegation, ParentGrantID and Depth are always false, "" and
+	// 0 in v1.
+	AllowSubdelegation      bool
+	ParentGrantID           string
+	Depth                   int
+	MaxCredentialTTLSeconds int
+	ExpiresAt               time.Time
+	Created                 time.Time
+	LastExchangedAt         *time.Time
+	RevokedAt               *time.Time
+	RevokedBy               string
+	RevokeReason            string
+	IssuanceAuditID         string
+	RevocationAuditID       string
+}
+
+// AgentDelegatedCredential is a short-lived opaque bearer produced by
+// exchanging one AgentDelegationGrant. Only KeyHash (the SHA-256 of the
+// bearer) is stored; Prefix is the fixed credential marker.
+type AgentDelegatedCredential struct {
+	ID                        string
+	GrantID                   string
+	AgentID                   string
+	KeyHash                   string
+	Prefix                    string
+	Audience                  string
+	CeilingPermissionIDs      []string
+	ExchangeAgentCredentialID string
+	IssuedAt                  time.Time
+	ExpiresAt                 time.Time
+	RevokedAt                 *time.Time
+	RevokeReason              string
+	LastSeenAt                *time.Time
+}
+
+// ErrAgentDelegationGrantInvalid is returned for an agent delegation grant
+// whose boundary or ceiling is malformed.
+var ErrAgentDelegationGrantInvalid = errors.New("invalid agent delegation grant")
+
+// Validate checks the structural invariants every stored grant holds: a
+// well-formed boundary (permissions.ValidBoundary), a ceiling version of at
+// least 1 with at least one permission, and the v1 subdelegation shape (no
+// subdelegation, no parent, depth 0).
+func (g *AgentDelegationGrant) Validate() error {
+	if g == nil {
+		return fmt.Errorf("%w: missing grant", ErrAgentDelegationGrantInvalid)
+	}
+	if !permissions.ValidBoundary(permissions.BoundaryKind(g.BoundaryKind), g.BoundaryProjectID) {
+		return fmt.Errorf("%w: boundary", ErrAgentDelegationGrantInvalid)
+	}
+	if g.CeilingVersion < 1 || len(g.CeilingPermissionIDs) == 0 {
+		return fmt.Errorf("%w: ceiling", ErrAgentDelegationGrantInvalid)
+	}
+	if g.AllowSubdelegation || g.ParentGrantID != "" || g.Depth != 0 {
+		return fmt.Errorf("%w: subdelegation", ErrAgentDelegationGrantInvalid)
+	}
+	return nil
+}

@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_2
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -352,6 +354,8 @@ func TestConduitBrokerTunnel_NotConstructedInProduction(t *testing.T) {
 	for dir, g := range guarded {
 		// pkgmove:scan-covers pkg/hub/apierr
 		// unaffected: guards conduitBrokerTunnel construction, which errors.go and json_response.go do not contain.
+		// pkgmove:scan-covers pkg/hub/internal/principal
+		// unaffected: guards conduitBrokerTunnel construction, which identity.go and identity_credential.go do not contain.
 		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		if err != nil {
 			t.Fatal(err)

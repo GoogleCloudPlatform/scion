@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_6
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -117,6 +119,8 @@ func discoverEffectCallSites(t *testing.T) []effectCallSite {
 	// Walk pkg/hub and all subdirectories to avoid the subpackage blind spot.
 	// pkgmove:scan-covers pkg/hub/apierr
 	// recursive walk already includes pkg/hub/apierr.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// recursive walk already includes pkg/hub/internal/principal.
 	err := filepath.Walk(hubDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

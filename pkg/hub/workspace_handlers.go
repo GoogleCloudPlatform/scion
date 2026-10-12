@@ -555,6 +555,9 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if writeAgentTokenIssueError(w, err) {
 				return
 			}
+			if writeSecretResolutionError(w, err) {
+				return
+			}
 			if writeEmptyPerAgentCapabilityError(w, err) {
 				return
 			}

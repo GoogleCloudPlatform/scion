@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -809,6 +809,8 @@ func findDeleteProjectCallSites(t *testing.T) []callSite {
 		fullDir := filepath.Join(repoRoot(t), dir)
 		// pkgmove:scan-covers pkg/hub/apierr
 		// unaffected: guards DeleteProject call sites, which errors.go and json_response.go do not contain.
+		// pkgmove:scan-covers pkg/hub/internal/principal
+		// unaffected: guards DeleteProject call sites, which identity.go and identity_credential.go do not contain.
 		entries, err := os.ReadDir(fullDir)
 		if err != nil {
 			continue

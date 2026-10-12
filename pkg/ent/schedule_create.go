@@ -206,6 +206,34 @@ func (_c *ScheduleCreate) SetNillableAuthorityCeilingSourceExpiresAt(v *time.Tim
 	return _c
 }
 
+// SetFixtureRootID sets the "fixture_root_id" field.
+func (_c *ScheduleCreate) SetFixtureRootID(v uuid.UUID) *ScheduleCreate {
+	_c.mutation.SetFixtureRootID(v)
+	return _c
+}
+
+// SetNillableFixtureRootID sets the "fixture_root_id" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableFixtureRootID(v *uuid.UUID) *ScheduleCreate {
+	if v != nil {
+		_c.SetFixtureRootID(*v)
+	}
+	return _c
+}
+
+// SetFixtureIssuerID sets the "fixture_issuer_id" field.
+func (_c *ScheduleCreate) SetFixtureIssuerID(v uuid.UUID) *ScheduleCreate {
+	_c.mutation.SetFixtureIssuerID(v)
+	return _c
+}
+
+// SetNillableFixtureIssuerID sets the "fixture_issuer_id" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableFixtureIssuerID(v *uuid.UUID) *ScheduleCreate {
+	if v != nil {
+		_c.SetFixtureIssuerID(*v)
+	}
+	return _c
+}
+
 // SetProjectID sets the "project_id" field.
 func (_c *ScheduleCreate) SetProjectID(v uuid.UUID) *ScheduleCreate {
 	_c.mutation.SetProjectID(v)
@@ -625,6 +653,14 @@ func (_c *ScheduleCreate) createSpec() (*Schedule, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.AuthorityCeilingSourceExpiresAt(); ok {
 		_spec.SetField(schedule.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime, value)
 		_node.AuthorityCeilingSourceExpiresAt = &value
+	}
+	if value, ok := _c.mutation.FixtureRootID(); ok {
+		_spec.SetField(schedule.FieldFixtureRootID, field.TypeUUID, value)
+		_node.FixtureRootID = &value
+	}
+	if value, ok := _c.mutation.FixtureIssuerID(); ok {
+		_spec.SetField(schedule.FieldFixtureIssuerID, field.TypeUUID, value)
+		_node.FixtureIssuerID = &value
 	}
 	if value, ok := _c.mutation.ProjectID(); ok {
 		_spec.SetField(schedule.FieldProjectID, field.TypeUUID, value)
@@ -1192,6 +1228,12 @@ func (u *ScheduleUpsertOne) UpdateNewValues() *ScheduleUpsertOne {
 	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(schedule.FieldID)
+		}
+		if _, exists := u.create.mutation.FixtureRootID(); exists {
+			s.SetIgnore(schedule.FieldFixtureRootID)
+		}
+		if _, exists := u.create.mutation.FixtureIssuerID(); exists {
+			s.SetIgnore(schedule.FieldFixtureIssuerID)
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(schedule.FieldCreated)
@@ -1920,6 +1962,12 @@ func (u *ScheduleUpsertBulk) UpdateNewValues() *ScheduleUpsertBulk {
 		for _, b := range u.create.builders {
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(schedule.FieldID)
+			}
+			if _, exists := b.mutation.FixtureRootID(); exists {
+				s.SetIgnore(schedule.FieldFixtureRootID)
+			}
+			if _, exists := b.mutation.FixtureIssuerID(); exists {
+				s.SetIgnore(schedule.FieldFixtureIssuerID)
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(schedule.FieldCreated)

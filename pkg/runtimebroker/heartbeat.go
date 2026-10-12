@@ -446,6 +446,9 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
+			// This broker applies hub telemetry defaults and policy as
+			// separate tiers (ptone/scion#4218).
+			TemplateTiers: true,
 		},
 	}
 	if s.workspaceStorage != nil {
@@ -755,10 +758,15 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore
 	// slug — that agent would then never be reported in heartbeats and its
 	// status on the Hub would go stale (e.g. stuck at "starting"). This
 	// mirrors the dedup key used by the agent-list handler.
+	//
+	// An entry dropped by this dedup is still reported, with its target and
+	// run label, as one of the reported agent's OtherEntries, so the Hub
+	// sees every entry's run (ptone/scion#3661).
 	seen := make(map[string]bool)
 	for _, ag := range agents {
 		seen[heartbeatAgentKey(ag)] = true
 	}
+	otherEntries := make(map[string][]hubclient.AgentRuntimeEntry)
 	for i := 1; i < len(targets); i++ {
 		if listErrs[i] != nil {
 			continue
@@ -769,7 +777,18 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore
 				seen[k] = true
 				agents = append(agents, ag)
 				agentTargets[k] = targets[i].id
+			} else {
+				otherEntries[k] = append(otherEntries[k], hubclient.AgentRuntimeEntry{RuntimeTarget: targets[i].id, RunID: ag.RunID})
 			}
+		}
+	}
+	// The report covers every entry's label only when every target was
+	// listed and can be identified: a failed or unidentified listing may
+	// hold entries the report does not show.
+	inventory.RunLabels = true
+	for i, t := range targets {
+		if t.id == "" || listErrs[i] != nil {
+			inventory.RunLabels = false
 		}
 	}
 
@@ -807,6 +826,12 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore
 			ExitCode:        ag.ExitCode,
 			ExitReason:      ag.ExitReason,
 			RuntimeTarget:   agentTargets[heartbeatAgentKey(ag)],
+			RunID:           ag.RunID,
+		}
+		// The other entries go with the first reported entry of the key.
+		if more := otherEntries[heartbeatAgentKey(ag)]; len(more) > 0 {
+			agentHB.OtherEntries = more
+			delete(otherEntries, heartbeatAgentKey(ag))
 		}
 		if ag.Detail != nil && ag.Detail.Message != "" {
 			agentHB.Message = ag.Detail.Message

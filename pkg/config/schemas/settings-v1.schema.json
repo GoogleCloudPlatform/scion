@@ -1237,6 +1237,11 @@
           "x-env-var": "SCION_SERVER_HUB_AGENTENDPOINT",
           "x-since": "1"
         },
+        "class": {
+          "type": "string",
+          "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the test admin identity gate (--enable-test-admin-identities). Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
+          "x-env-var": "SCION_SERVER_HUB_CLASS"
+        },
         "monitoring_dashboard_url": {
           "type": "string",
           "format": "uri",
@@ -1425,6 +1430,12 @@
               "type": "string",
               "description": "Platform lifetime cap of a conduit session (Cloud Run request timeout, load balancer or proxy limit). The relay sends GoAway 60s before it and closes streams still open with 4503 relay_restart by the cap (e.g. '3500s'; default '3500s', between '90s' and '24h').",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_LIFETIMECAP",
+              "x-since": "1"
+            },
+            "shutdown_grace": {
+              "type": "string",
+              "description": "Time the platform allows between SIGTERM and killing the hub process (Cloud Run: 10s). On SIGTERM the conduit relay sends GoAway to every session before the listeners close; when this key is set, the drain deadline is at most shutdown_grace minus 2s (1ms at or below 2s), and unset it stays 30s. Read at startup (e.g. '10s'; no default, greater than 0 when set).",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_SHUTDOWNGRACE",
               "x-since": "1"
             },
             "proxy_session_max_age": {
@@ -1619,6 +1630,12 @@
         "conn_max_idle_time": {
           "type": "string",
           "description": "Maximum time a connection may sit idle in the pool before it is closed (Go duration, e.g. '5m'). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty takes the driver default (postgres: 5m; sqlite: no idle limit). '0' means no idle limit."
+        },
+        "allow_shadowed_schema": {
+          "type": "boolean",
+          "default": false,
+          "description": "PostgreSQL only. By default the hub refuses to start, and the maintenance commands that migrate the hub database refuse to run, when current_schema() has no hub tables but a later schema on the connection's search_path does, because the migration would create a new, empty table set that hides the existing data. Set true to log a warning and continue anyway, creating the new table set in the current schema.",
+          "x-env-var": "SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA"
         }
       }
     },

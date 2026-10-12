@@ -806,13 +806,13 @@ export class ScionNotificationTray extends LitElement {
         <div class="panel-footer">
           ${this.renderPushToggle()}
           <a
-            href="/projects"
+            href="/profile/settings"
             class="manage-link"
             @click=${(e: Event): void => {
               e.preventDefault();
               this.open = false;
               document.removeEventListener('click', this.boundOnClickOutside, true);
-              navigateTo('/projects');
+              navigateTo('/profile/settings');
             }}
             >Manage subscriptions</a
           >
