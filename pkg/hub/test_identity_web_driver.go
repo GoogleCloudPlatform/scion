@@ -163,7 +163,7 @@ func (r *GoogleIdentityResolver) isTransportIdentity(email string) bool {
 // logProxyDriverCreateRefusal logs an admin request refused because it would
 // create a user for a proxy driver principal: the endpoint, the acting
 // principal and the email, with the specific reason. The answer to the
-// caller stays generic (proxyDriverPrincipalUserMessage).
+// caller does not name drivers (see proxyDriverPrincipalUserMessage).
 func logProxyDriverCreateRefusal(endpoint, actorID, email string) {
 	slog.Warn("user creation refused: the email is a proxy driver principal",
 		"endpoint", endpoint, "actor", actorID, "email", email, "reason", proxyDriverPrincipalLogReason)
