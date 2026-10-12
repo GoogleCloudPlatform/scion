@@ -611,6 +611,24 @@ type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned';
 const PUBLIC_URL_KEY = 'server.hub.public_url';
 
 /**
+ * Superseded keys without the public URL while an operator setting pins it:
+ * the pinned value wins over the database value, so nothing supersedes it,
+ * and the field's pinned badge says why it is read-only (ptone/scion#3905).
+ */
+function withoutPinnedPublicUrl(
+  keys: Record<string, SupersededKeyInfo[]> | null,
+  status: PublicURLStatus | null
+): Record<string, SupersededKeyInfo[]> | null {
+  if (!keys || !status?.pinned_by) return keys;
+  const out: Record<string, SupersededKeyInfo[]> = {};
+  for (const [section, list] of Object.entries(keys)) {
+    const kept = list.filter((sk) => sk.key !== PUBLIC_URL_KEY);
+    if (kept.length > 0) out[section] = kept;
+  }
+  return out;
+}
+
+/**
  * Workstation fields that `scion server start` overrides at every start
  * (workstation defaults and flags such as --enable-runtime-broker,
  * --dev-auth, --host, --storage-bucket), so a settings.yaml value has no
@@ -1943,7 +1961,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.envKeys = new Set(this.envOverrides);
     this.publicUrlStatus = data.public_url_status || null;
     this.sectionMetadata = data.section_metadata || null;
-    this.supersededKeys = data.superseded_keys || null;
+    this.supersededKeys = withoutPinnedPublicUrl(
+      data.superseded_keys || null,
+      this.publicUrlStatus
+    );
     this.deprecatedEnvKeys =
       data.deprecated_env_keys && data.deprecated_env_keys.length > 0
         ? data.deprecated_env_keys
