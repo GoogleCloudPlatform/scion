@@ -71,13 +71,13 @@ func init() {
 // runSSHCommand is the RunE of scion ssh.
 func runSSHCommand(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "scion ssh: %s\n", sshUsageLine)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "scion ssh: %s\n", sshUsageLine)
 		sshExit(sshExitFailure)
 		return nil
 	}
 	env, err := defaultSSHCommandEnv()
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "scion ssh: %s\n", sshOneLine(err.Error()))
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "scion ssh: %s\n", sshOneLine(err.Error()))
 		sshExit(sshExitFailure)
 		return nil
 	}
@@ -97,7 +97,7 @@ func reportSSHError(w io.Writer, err error) int {
 // sshFlagError reports a flag error on scion ssh as one line and exits 255,
 // following the ssh convention instead of the CLI's usual error output.
 func sshFlagError(cmd *cobra.Command, err error) error {
-	fmt.Fprintf(cmd.ErrOrStderr(), "scion ssh: %s; %s\n", sshOneLine(err.Error()), sshUsageLine)
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "scion ssh: %s; %s\n", sshOneLine(err.Error()), sshUsageLine)
 	sshExit(sshExitFailure)
 	return err
 }
@@ -121,7 +121,7 @@ func runSSH(ctx context.Context, env *sshCommandEnv, args []string) int {
 	}
 	sshBin, err := exec.LookPath("ssh")
 	if err != nil {
-		fmt.Fprintln(env.stderr, "scion ssh: ssh client not found on PATH")
+		_, _ = fmt.Fprintln(env.stderr, "scion ssh: ssh client not found on PATH")
 		return sshExitFailure
 	}
 	c := exec.CommandContext(ctx, sshBin, sshArgs...)

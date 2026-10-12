@@ -126,14 +126,14 @@ func classifySSHHubError(endpoint string, err error) *tunnelclient.Error {
 	}
 	var apiErr *apiclient.APIError
 	if errors.As(err, &apiErr) {
-		switch {
-		case apiErr.StatusCode == http.StatusUnauthorized:
+		switch apiErr.StatusCode {
+		case http.StatusUnauthorized:
 			return tunnelclient.Errorf(tunnelclient.ExitCredential, "credential refused by hub %s; run scion hub auth login", endpoint)
-		case apiErr.StatusCode == http.StatusForbidden:
+		case http.StatusForbidden:
 			return tunnelclient.Errorf(tunnelclient.ExitForbidden, "not permitted by hub %s", endpoint)
-		case apiErr.StatusCode == http.StatusBadGateway,
-			apiErr.StatusCode == http.StatusServiceUnavailable,
-			apiErr.StatusCode == http.StatusGatewayTimeout:
+		case http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout:
 			return tunnelclient.Errorf(tunnelclient.ExitHubUnavailable, "hub unreachable or unavailable: %s (status %d)", endpoint, apiErr.StatusCode)
 		default:
 			return tunnelclient.Errorf(tunnelclient.ExitError, "hub %s: %s", endpoint, sshOneLine(apiErr.Error()))
@@ -240,7 +240,7 @@ func checkPinnedSSHHostKey(stderr io.Writer, p sshPaths, endpoint, projectSlug, 
 	if err != nil || want == pinned {
 		return false
 	}
-	fmt.Fprintln(stderr, sshRecreatedHint)
+	_, _ = fmt.Fprintln(stderr, sshRecreatedHint)
 	return true
 }
 
