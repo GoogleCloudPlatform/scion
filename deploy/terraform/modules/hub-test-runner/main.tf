@@ -13,8 +13,8 @@
 #
 # Every IAM member carries a precondition: the project must record DATA_READ
 # audit logs for iamcredentials.googleapis.com (or allServices) and exempt no
-# impersonator from them, so every token minted for these accounts is logged. See the README for why this only
-# holds at provision time.
+# impersonator from them, so every token minted for these accounts is
+# logged. See the README for why this only holds at provision time.
 
 locals {
   # Bare emails of the impersonators, for the alert filter.
@@ -193,8 +193,9 @@ resource "google_logging_metric" "foreign_token_mint" {
 
 # Fires on any matching call. The service_account log resource is not
 # expected to have a Monitoring resource type of its own, so the metric's
-# points are expected on resource.type="global". Confirm that on the metric descriptor after the
-# first data point (part of the first live enablement above).
+# points are expected on resource.type="global". Confirm that on the metric
+# descriptor after the first data point (part of the first live enablement
+# above).
 resource "google_monitoring_alert_policy" "foreign_token_mint" {
   count = local.alerts_enabled ? 1 : 0
 

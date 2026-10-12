@@ -282,6 +282,25 @@ run "precondition_fails_when_impersonator_exempted_in_other_case" {
   ]
 }
 
+# Policy data that is not JSON: try() decodes it to no audit config, so the
+# precondition fails closed.
+run "precondition_fails_when_policy_unparseable" {
+  command = plan
+
+  override_data {
+    target = data.google_project_iam_policy.this
+    values = {
+      policy_data = "not json"
+    }
+  }
+
+  expect_failures = [
+    google_service_account_iam_member.uat_token_creator,
+    google_service_account_iam_member.issuer_token_creator,
+    google_iap_web_backend_service_iam_member.uat,
+  ]
+}
+
 # DATA_READ enabled in one config and an exemption for someone else in the
 # other: (a) and (b) both hold.
 run "precondition_passes_with_data_read_split_across_configs" {

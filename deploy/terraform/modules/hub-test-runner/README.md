@@ -127,11 +127,12 @@ The tests run with a mock provider and need no credentials. They cover the
 five objects and their exact roles and scopes, that `<hub>-issuer` has no IAP
 grant, the precondition (fails without the audit config, with `ADMIN_READ`
 only, for another service, with an exempted impersonator in either config,
-including when only one of the two configs exempts it, or with an exemption
-that differs only in case; passes with `iamcredentials.googleapis.com` or
-`allServices` `DATA_READ`, or with `DATA_READ` in one config and no
-impersonator exempted in either), the alert objects and filter, the outputs
-and the input validations (including a mixed-case email).
+including when only one of the two configs exempts it, with an exemption
+that differs only in case, or with policy data that is not JSON; passes with
+`iamcredentials.googleapis.com` or `allServices` `DATA_READ`, or with
+`DATA_READ` in one config and no impersonator exempted in either), the alert
+objects and filter, the outputs and the input validations (including a
+mixed-case email).
 
 The IAP-only-on-`-uat` check is carried by the `outputs_and_grant_targets`
 apply run (against the mock provider): it asserts the IAP grant's `member` is
