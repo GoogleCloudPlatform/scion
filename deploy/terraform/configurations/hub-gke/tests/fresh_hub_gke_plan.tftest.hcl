@@ -405,7 +405,9 @@ run "newer_gke_minor_passes" {
 
 # --- Test-runner identities (modules/hub-test-runner) ---
 #
-# All emails are fake. Each enabled run overrides the module's IAM-policy read
+# All emails are fake. Override targets carry the [0] instance key: overrides
+# match the module instance's address, and an unkeyed target does not match
+# a counted module. Each enabled run overrides the module's IAM-policy read
 # with an iamcredentials DATA_READ audit config; the precondition itself is
 # covered by the module's own tests (a child module's precondition cannot be
 # named in a root test's expect_failures).
@@ -421,7 +423,7 @@ run "test_runner_enabled_adds_the_module" {
   }
 
   override_data {
-    target = module.hub_test_runner.data.google_project_iam_policy.this
+    target = module.hub_test_runner[0].data.google_project_iam_policy.this
     values = {
       policy_data = "{\"auditConfigs\":[{\"service\":\"iamcredentials.googleapis.com\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\"}]}]}"
     }
@@ -465,7 +467,7 @@ run "test_runner_alerts_with_channels" {
   }
 
   override_data {
-    target = module.hub_test_runner.data.google_project_iam_policy.this
+    target = module.hub_test_runner[0].data.google_project_iam_policy.this
     values = {
       policy_data = "{\"auditConfigs\":[{\"service\":\"allServices\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\"}]}]}"
     }
@@ -495,14 +497,14 @@ run "test_runner_outputs_pass_through" {
   }
 
   override_data {
-    target = module.hub_test_runner.data.google_project_iam_policy.this
+    target = module.hub_test_runner[0].data.google_project_iam_policy.this
     values = {
       policy_data = "{\"auditConfigs\":[{\"service\":\"iamcredentials.googleapis.com\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\"}]}]}"
     }
   }
 
   override_resource {
-    target = module.hub_test_runner.google_service_account.uat
+    target = module.hub_test_runner[0].google_service_account.uat
     values = {
       name      = "projects/tfha-test-project/serviceAccounts/tfha-gke-h3-uat@tfha-test-project.iam.gserviceaccount.com"
       email     = "tfha-gke-h3-uat@tfha-test-project.iam.gserviceaccount.com"
@@ -511,7 +513,7 @@ run "test_runner_outputs_pass_through" {
   }
 
   override_resource {
-    target = module.hub_test_runner.google_service_account.issuer
+    target = module.hub_test_runner[0].google_service_account.issuer
     values = {
       name      = "projects/tfha-test-project/serviceAccounts/tfha-gke-h3-issuer@tfha-test-project.iam.gserviceaccount.com"
       email     = "tfha-gke-h3-issuer@tfha-test-project.iam.gserviceaccount.com"
