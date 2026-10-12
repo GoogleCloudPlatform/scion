@@ -1085,10 +1085,11 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 			displayHost = "127.0.0.1"
 		}
 
-		// Register the local hub in the hub list (current when no hub is
-		// current), so that `scion hub` commands work immediately after
-		// workstation-mode start. No hub.endpoint is written: the server
-		// advertises its loopback endpoint without one.
+		// Register the local hub in the hub list, so that `scion hub`
+		// commands work immediately after workstation-mode start (see
+		// registerLocalHub for when it becomes the current hub). No
+		// hub.endpoint is written: the server advertises its loopback
+		// endpoint without one.
 		registerLocalHub(os.Stdout, os.Stderr, fmt.Sprintf("http://%s:%d", displayHost, wPort))
 
 		// Wait for the server before asking the hub for its onboarding
