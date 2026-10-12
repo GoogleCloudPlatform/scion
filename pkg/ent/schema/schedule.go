@@ -108,6 +108,6 @@ func (Schedule) Indexes() []ent.Index {
 // Annotations of the Schedule.
 func (Schedule) Annotations() []schema.Annotation {
 	return []schema.Annotation{
-		entsql.Annotation{Table: "schedules"},
+		entsql.Annotation{Table: "schedules", Checks: fixtureStampCheck("schedules")},
 	}
 }

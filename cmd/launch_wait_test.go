@@ -673,7 +673,7 @@ func TestStartAgentViaHub_CreateIncomplete409(t *testing.T) {
 	assert.Contains(t, err.Error(), "create did not complete (image_pull_failed)")
 	assert.Contains(t, err.Error(), "Template: claude")
 	assert.Contains(t, err.Error(), "Task: fix the tests")
-	assert.NotContains(t, err.Error(), "scion hub disable")
+	assert.NotContains(t, err.Error(), "scion hub status")
 	assert.Equal(t, 1, strings.Count(err.Error(), "create it again"), err.Error())
 	assert.NotContains(t, err.Error(), "Delete the agent and create it again")
 	assert.Equal(t, 0, hub.getsAfterCR)
