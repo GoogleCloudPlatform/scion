@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !hubshard || hubshard_1
-
 package hub
 
 import (
@@ -182,12 +180,12 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"authz.go:isCurrentHubMember:GetGroupMembership":                    "decision: hub-members membership (relationship grant); admin kinds count only while live and enabled (testAdminPrincipalLive)",
 
 	// Holder-counting guards: test identities never count.
-	"access_constraint_preview.go:resolveConstraintAdminUsers:GetEffectiveGroups":                censusExcludesTestIdentities,
-	"access_constraint_preview.go:resolveConstraintAdminUsers:GetGroupMembers":                   censusExcludesTestIdentities,
-	"access_constraint_preview.go:resolveConstraintAdminUsers:ListRoleBindingsForScope":          censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdmins:GetEffectiveGroups":                    censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdmins:GetGroupMembers":                       censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdmins:ListRoleBindingsForScope":              censusExcludesTestIdentities,
 	"handlers_users_core.go:checkLastSuperAdminTx:ListRoleBindingsForScope":                      censusExcludesTestIdentities,
 	"seed.go:ReconcileSuperAdminBindings:ListRoleBindingsForPrincipal":                           censusExcludesTestIdentities,
-	"access_constraint_governance.go:adminLosesAuthority:ListRoleBindingsForPrincipals":          "guard: counts survivors among resolveConstraintAdminUsers' admin set, which counts only positively human rows (IsHumanKind)",
+	"access_constraint_governance.go:checkConstraintAdminLockout:ListRoleBindingsForScope":       "guard: counts survivors among resolveConstraintAdmins' admin set, which counts only positively human rows (IsHumanKind); a scope binding keeps an admin only when active (isBindingActive) and it names that admin or one of its groups",
 	"access_constraint_governance.go:checkUserRemovalAdminLockout:GetEffectiveGroups":            "guard: scopes to lockout-check for a user removal; an extra scope only adds a check, never admits",
 	"access_constraint_governance.go:checkUserRemovalAdminLockout:ListRoleBindingsForPrincipals": "guard: scopes to lockout-check for a user removal (clamped, unwired: admin kinds never constraint admins); an extra, even expired, binding only adds a check, never admits",
 
