@@ -992,8 +992,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Duration-valued keys (opsettings Section.Durations and
-	// NestedDurations) must parse as a Go duration; "" or null clears. Checked on the documents built from
-	// the body, before any merge, so only the values sent are checked.
+	// NestedDurations) must parse as a Go duration; "" or null clears.
+	// Checked on the documents built from the body, before any merge, so
+	// only the values sent are checked.
 	if fieldErr := validateDurationSettings(sectionDocs); fieldErr != nil {
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, fieldErr.Error(), map[string]interface{}{
 			"field": fieldErr.field,
