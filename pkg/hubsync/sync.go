@@ -1762,7 +1762,7 @@ func readAgentTokenFile() string {
 //
 // This is the Hub client builder used by EnsureHubReady and
 // resolveHubProjectRef — i.e. everything that goes through
-// CheckHubAvailability* (cmd/common.go), including `scion list`. It
+// requireHub (cmd/common.go), including `scion list`. It
 // duplicates cmd/hub.go's getHubClient, which implements the identical
 // priority order independently for commands that call it directly instead
 // (`broker`, `clean`, `notifications`, `project`, `doctor`, template sync,

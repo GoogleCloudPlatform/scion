@@ -56,8 +56,7 @@ may then need separate cleanup on that broker. --force does not purge an
 agent that is already soft-deleted.
 
 --force cannot be combined with --stopped; name the agents to
-force-delete. In local mode (no Hub), --force has no effect: local delete
-already removes the container.
+force-delete.
 
 --cleanup-only removes only the agent's local files: its worktree, its
 agent directory and, unless --preserve-branch is given, its git branch. Use
@@ -96,24 +95,13 @@ refuses unless --force is given.`,
 		}
 
 		if deleteCleanupOnly {
-			hubCtx, hubErr := CheckHubAvailabilityForAgents(projectPath, args, true)
+			hubCtx, hubErr := requireHub(projectPath)
 			return deleteAgentsCleanupOnly(hubCtx, hubErr, args)
 		}
 
-		// Check if Hub should be used, excluding all target agents from sync requirements.
-		var excludedAgents []string
-		if !deleteStopped {
-			excludedAgents = args
-		}
-		hubCtx, err := CheckHubAvailabilityForAgents(projectPath, excludedAgents, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
-		}
-
-		// --force only changes Hub behaviour. Local delete already removes the
-		// container unconditionally, so warn and proceed rather than fail.
-		if deleteForce && hubCtx == nil {
-			statusln("Warning: --force has no effect without a Hub; deleting locally as usual.")
 		}
 
 		if deleteStopped {
@@ -354,24 +342,17 @@ const cleanupOnlyForceHint = "add --force to remove the local files without chec
 // result of the Hub availability check. The rules:
 //   - the Hub still has the agent: refuse (run 'scion delete <agent>');
 //   - the Hub has no such agent, or only a soft-deleted one: remove the files;
-//   - the Hub cannot be checked (hubErr, no Hub in use, or the lookup
-//     fails): refuse unless --force.
+//   - the Hub cannot be checked (hubErr, including no hub configured, or
+//     the lookup fails): refuse unless --force.
 //
 // --preserve-branch is honoured.
 func deleteAgentsCleanupOnly(hubCtx *HubContext, hubErr error, agentNames []string) error {
 	agentNames = dedupeNames(agentNames)
 
-	if hubErr != nil || hubCtx == nil {
-		reason := "no Hub is in use"
-		if hubErr != nil {
-			reason = fmt.Sprintf("the Hub could not be checked: %v", hubErr)
-		}
+	if hubErr != nil {
+		reason := fmt.Sprintf("the Hub could not be checked: %v", hubErr)
 		if !deleteForce {
 			msg := fmt.Sprintf("--cleanup-only checks that the Hub no longer has the agent, but %s\n\nTo %s", reason, cleanupOnlyForceHint)
-			if hubErr == nil {
-				// Local-only mode: a plain delete removes the agent and its files.
-				msg += ", or delete the agent with 'scion delete <agent>'"
-			}
 			return errors.New(msg + ".")
 		}
 		statusf("Warning: %s; removing local files anyway because of --force.\n", reason)

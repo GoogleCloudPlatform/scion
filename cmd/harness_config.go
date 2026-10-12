@@ -83,7 +83,7 @@ var harnessConfigListCmd = &cobra.Command{
 
 		// Include Hub results if requested or when running in hub context (agent containers)
 		if includeHub {
-			hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+			hubCtx, err := requireHub(gp)
 			if err == nil && hubCtx != nil {
 				hubResp, err := hubCtx.Client.HarnessConfigs().List(context.Background(), &hubclient.ListHarnessConfigsOptions{
 					Status: "active",
@@ -325,14 +325,10 @@ the local directory: files deleted locally are removed from the Hub.`,
 			return fmt.Errorf("harness-config %q not found: %w", name, err)
 		}
 
-		hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+		hubCtx, err := requireHub(gp)
 		if err != nil {
 			return err
 		}
-		if hubCtx == nil {
-			return fmt.Errorf("hub integration is not enabled, configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
-		}
-
 		PrintUsingHub(hubCtx.Endpoint)
 
 		hubName, _ := cmd.Flags().GetString("name")
@@ -368,14 +364,10 @@ var harnessConfigPullCmd = &cobra.Command{
 			gp = projectDir
 		}
 
-		hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+		hubCtx, err := requireHub(gp)
 		if err != nil {
 			return err
 		}
-		if hubCtx == nil {
-			return fmt.Errorf("hub integration is not enabled, configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
-		}
-
 		PrintUsingHub(hubCtx.Endpoint)
 
 		// Find the harness-config on the Hub
@@ -445,7 +437,7 @@ var harnessConfigShowCmd = &cobra.Command{
 		}
 
 		// Try Hub
-		hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+		hubCtx, err := requireHub(gp)
 		if err != nil {
 			return fmt.Errorf("harness-config %q not found locally and Hub unavailable: %w", name, err)
 		}
@@ -502,14 +494,10 @@ var harnessConfigDeleteCmd = &cobra.Command{
 			gp = projectDir
 		}
 
-		hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+		hubCtx, err := requireHub(gp)
 		if err != nil {
 			return err
 		}
-		if hubCtx == nil {
-			return fmt.Errorf("hub integration is not enabled, configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
-		}
-
 		PrintUsingHub(hubCtx.Endpoint)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

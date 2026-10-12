@@ -78,7 +78,7 @@ Examples:
 			return fmt.Errorf("scion keys does not support cross-project targets; message the agent from within its own project")
 		}
 
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}

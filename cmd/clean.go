@@ -104,15 +104,6 @@ func runClean(cmd *cobra.Command, args []string) error {
 	// Determine if we should check Hub status
 	shouldCheckHub := !cleanSkipHubCheck
 
-	// If Hub is explicitly disabled in settings, ask if user wants to check anyway
-	if shouldCheckHub && settings != nil && !settings.IsHubEnabled() && !noHub {
-		if hubsync.ShowCheckHubAnywayPrompt(autoConfirm) {
-			shouldCheckHub = true
-		} else {
-			shouldCheckHub = false
-		}
-	}
-
 	// Check Hub status
 	hubLinked := false
 	hubReachable := false

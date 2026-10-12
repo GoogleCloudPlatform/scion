@@ -17,7 +17,6 @@ package cmd
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -98,65 +97,19 @@ var listCmd = &cobra.Command{
 			return err
 		}
 
-		// Check if Hub should be used
-		hubCtx, err := CheckHubAvailability(projectPath)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
-			// Check if this is because Hub is enabled but project not
-			// linked. A project the user unlinked is not offered the link
-			// prompt: it refuses with the pointer to 'scion hub link'.
-			if !errors.Is(err, hubsync.ErrProjectUnlinked) && handleUnlinkedProjectPrompt(cmd, args) {
-				// User chose to link - retry
-				hubCtx, err = CheckHubAvailability(projectPath)
-				if err != nil {
-					return err
-				}
-			} else {
-				return err
-			}
+			return err
 		}
 
 		if hubCtx != nil {
 			return listAgentsViaHub(hubCtx)
 		}
 
-		// Local mode
-		if err := rejectHubOnlyFiltersInLocalMode(); err != nil {
-			return err
-		}
+		// Local mode (unreachable: requireHub never returns a nil context;
+		// removed with the local tails)
 		return listAgentsLocal()
 	},
-}
-
-// rejectHubOnlyFiltersInLocalMode returns a clear error if any Hub-only
-// filter flag is set while listing locally (ptone/scion#2146).
-//
-// Local listing has no store.AgentFilter to push these into — it filters an
-// in-memory runtime.List() result by name/label only. Before this check,
-// setting e.g. --owner or --ancestors in local mode was silently a no-op:
-// the flag was simply never read outside listAgentsViaHub, so the command
-// printed every agent as though it were the filtered set. A narrowing filter
-// that silently narrows nothing makes the output *wider* than what was
-// asked for, with no indication anything was ignored — dangerous when the
-// output feeds a script (e.g. piped into a bulk stop or delete). Erroring
-// is the only response that can't be misread as "no matches."
-func rejectHubOnlyFiltersInLocalMode() error {
-	type hubOnlyFlag struct {
-		name string
-		set  bool
-	}
-	for _, f := range []hubOnlyFlag{
-		{"owner", filterOwner != ""},
-		{"broker", filterBroker != ""},
-		{"harness", filterHarness != ""},
-		{"descendants", filterDescendants != ""},
-		{"ancestors", filterAncestors != ""},
-		{"lineage", filterLineage != ""},
-	} {
-		if f.set {
-			return fmt.Errorf("--%s requires Hub mode (no Hub is configured for this project)", f.name)
-		}
-	}
-	return nil
 }
 
 // listAgentsLocal lists agents using the local runtime
@@ -1057,111 +1010,6 @@ func formatLastActivity(status string, t time.Time) string {
 		return status
 	}
 	return fmt.Sprintf("%s, %s", status, timePart)
-}
-
-// handleUnlinkedProjectPrompt checks if the error is due to an unlinked project and prompts the user.
-// Returns true if the user chose to link and the link succeeded. On cancel it
-// returns false, so the caller returns the original error.
-func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
-	// Resolve project path to check settings
-	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return false
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return false
-	}
-
-	// Only handle this case if Hub is enabled but project is not linked
-	if !settings.IsHubEnabled() {
-		return false
-	}
-
-	// Check if project is actually registered on the Hub
-	endpoint := GetHubEndpoint(settings)
-	if endpoint == "" {
-		return false
-	}
-
-	client, err := getHubClient(settings)
-	if err != nil {
-		return false
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Check Hub connectivity first
-	if _, err := client.Health(ctx); err != nil {
-		return false // Hub not reachable, different error
-	}
-
-	// Check if project is registered — prefer hub.projectId over project_id
-	projectID := settings.GetHubProjectID()
-	if projectID == "" {
-		projectID = settings.ProjectID
-	}
-	if projectID == "" {
-		projectID = config.GenerateProjectID()
-	}
-
-	linked, err := isProjectLinkedToHub(ctx, client, projectID)
-	if err != nil || linked {
-		return false // Error checking or project is already linked
-	}
-
-	// Get project name for display
-	var projectName string
-	if isGlobal {
-		projectName = "global"
-	} else {
-		projectName = config.GetProjectName(resolvedPath)
-	}
-
-	// Show prompt
-	choice := hubsync.ShowProjectLinkOrDisablePrompt(projectName, autoConfirm)
-
-	switch choice {
-	case hubsync.LinkOrDisableLink:
-		// Run the link command
-		if err := runHubLink(cmd, args); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to link project: %v\n", err)
-			return false
-		}
-		return true
-	default:
-		return false
-	}
-}
-
-// isProjectLinkedToHub checks if a project is linked to the Hub.
-func isProjectLinkedToHub(ctx context.Context, client hubclient.Client, projectID string) (bool, error) {
-	if projectID == "" {
-		return false, nil
-	}
-
-	_, err := client.Projects().Get(ctx, projectID)
-	if err != nil {
-		errStr := err.Error()
-		if containsStr(errStr, "404") || containsStr(errStr, "not found") {
-			return false, nil
-		}
-		return false, err
-	}
-
-	return true, nil
-}
-
-// containsStr is a simple case-sensitive substring check.
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // provisionedPhaseLabel shows phase "created" as "created (not started)"

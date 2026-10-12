@@ -163,15 +163,11 @@ func subcommandGlobalFlagSet(cmd *cobra.Command) bool {
 //   - inside a hub-connected container (config.IsHubContext);
 //   - a hub project reference (slug, name or git URL) for --project, which
 //     goes to the hub or fails with a hub-mode error;
-//   - hub enabled in settings with an endpoint from any source.
-//
-// --no-hub turns off the last two.
+//   - a hub endpoint from any source (local-only mode was removed, so a
+//     configured endpoint is what makes the CLI use a hub).
 func isHubDispatchInvocation(projectPath string) bool {
 	if config.IsHubContext() {
 		return true
-	}
-	if noHub {
-		return false
 	}
 	if projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
 		return true
@@ -180,5 +176,5 @@ func isHubDispatchInvocation(projectPath string) bool {
 	if err != nil || settings == nil {
 		return false
 	}
-	return settings.IsHubEnabled() && GetHubEndpoint(settings) != ""
+	return GetHubEndpoint(settings) != ""
 }

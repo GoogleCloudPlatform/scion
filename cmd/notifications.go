@@ -56,7 +56,8 @@ var notificationsCmd = &cobra.Command{
 	Short:   "Manage notifications and subscriptions",
 	Long: `Manage notifications and notification subscriptions.
 
-Notifications require Hub mode. Enable with 'scion hub enable <endpoint>'.
+Notifications go through the hub (start the local one with 'scion server start',
+or set a remote one with 'scion config set hub.endpoint <url>').
 
 Commands:
   scion notifications                         List your notifications
@@ -178,18 +179,13 @@ func init() {
 	notificationsSubscriptionsCmd.Flags().BoolVar(&subscriptionsJSON, "json", false, "Output in JSON format")
 }
 
-// requireHubClient resolves settings and returns a hub client, or errors if hub is not enabled.
-//
-// In addition to settings.IsHubEnabled(), this also accepts the in-container
-// fallback that hubsync.EnsureHubReady uses: when running inside a hub-connected
-// agent container, hub.enabled is never written to settings, but the hub context
-// env vars (SCION_HUB_ENDPOINT/SCION_HUB_URL/SCION_PROJECT_ID) are
-// always set. Without this fallback, every conversation and notifications
-// subcommand fails with "requires Hub mode" inside an agent, even though the
-// hub handlers already accept agent-scoped auth (SCION_AUTH_TOKEN) and the
-// endpoint can be resolved from the same env vars via GetHubEndpoint. This does
-// not widen access: callers still need valid agent-scoped credentials for
-// getHubClient to authenticate.
+// requireHubClient resolves settings and returns a hub client, or
+// errHubNotConfigured when no hub endpoint is configured. The endpoint comes
+// from GetHubEndpoint (--hub, settings, then SCION_HUB_ENDPOINT/SCION_HUB_URL),
+// so inside a hub-connected agent container, where settings carry no hub
+// section, the container's hub env vars are enough. This does not widen
+// access: callers still need valid credentials for getHubClient to
+// authenticate.
 func requireHubClient() (*config.Settings, hubclient.Client, error) {
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
@@ -201,8 +197,8 @@ func requireHubClient() (*config.Settings, hubclient.Client, error) {
 		return nil, nil, fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	if !settings.IsHubEnabled() && !config.IsHubContext() {
-		return nil, nil, fmt.Errorf("notifications require Hub mode. Enable with 'scion hub enable <endpoint>'")
+	if GetHubEndpoint(settings) == "" {
+		return nil, nil, errHubNotConfigured
 	}
 
 	client, err := getHubClient(settings)

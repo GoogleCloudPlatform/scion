@@ -77,14 +77,10 @@ func runTemplatesUpdate(cmd *cobra.Command, args []string) error {
 		gp = projectDir
 	}
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+	hubCtx, err := requireHub(gp)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub is not available, the update command requires a hub connection")
-	}
-
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Project templates are limited to the current project when one is

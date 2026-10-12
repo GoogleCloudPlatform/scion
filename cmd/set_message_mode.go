@@ -54,14 +54,10 @@ Use --dry-run to preview cascade effects without applying.`,
 			return asUsageError(err)
 		}
 
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, false)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
-		if hubCtx == nil {
-			return fmt.Errorf("set-message-mode requires Hub mode")
-		}
-
 		PrintUsingHub(hubCtx.Endpoint)
 
 		projectID, err := GetProjectID(hubCtx)

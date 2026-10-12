@@ -61,9 +61,9 @@ Examples:
 		var hubCtx *HubContext
 		var err error
 		if bcastAll {
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+			hubCtx, err = requireHub(projectPath)
 		} else {
-			hubCtx, err = CheckHubAvailability(projectPath)
+			hubCtx, err = requireHub(projectPath)
 		}
 		if err != nil {
 			return err

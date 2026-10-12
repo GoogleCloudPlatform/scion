@@ -143,14 +143,10 @@ func init() {
 // resolveProjectHookClient resolves the Hub client and project ID, then returns
 // a ProjectPreStartHookService.
 func resolveProjectHookClient(ctx context.Context, projectArg string) (hubclient.ProjectPreStartHookService, error) {
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("hub connection required: %w", err)
 	}
-	if hubCtx == nil {
-		return nil, fmt.Errorf("hub is not enabled; configure hub.endpoint to use project pre-start hooks")
-	}
-
 	var projectID string
 	if projectArg != "" {
 		project, err := resolveProjectByNameOrID(ctx, hubCtx.Client, projectArg)

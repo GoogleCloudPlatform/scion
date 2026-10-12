@@ -62,7 +62,7 @@ var stopCmd = &cobra.Command{
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if stopAll {
-			hubCtx, err := CheckHubAvailability(projectPath)
+			hubCtx, err := requireHub(projectPath)
 			if err != nil {
 				return err
 			}
@@ -75,7 +75,7 @@ var stopCmd = &cobra.Command{
 		agentName := api.Slugify(args[0])
 
 		// Check if Hub should be used, excluding the target agent from sync requirements.
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}

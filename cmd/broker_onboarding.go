@@ -30,7 +30,7 @@ import (
 
 // shouldOfferProjectProvider reports whether runtime-broker register should
 // offer to add the newly registered broker as a provider for the current
-// project. It needs a hub-linked project with hub mode on, and the project
+// project. It needs a hub-linked project and a hub endpoint, and the project
 // must not be the global directory: "global" is a local pseudo-project and is
 // never linked to, or created on, the hub (ptone/scion#3534).
 func shouldOfferProjectProvider(projectID string, hubEnabled, isGlobal bool) bool {

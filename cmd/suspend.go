@@ -67,7 +67,7 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if suspendAll {
-			hubCtx, err := CheckHubAvailability(projectPath)
+			hubCtx, err := requireHub(projectPath)
 			if err != nil {
 				return err
 			}
@@ -79,7 +79,7 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 
 		agentName := api.Slugify(args[0])
 
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}

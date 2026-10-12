@@ -370,59 +370,16 @@ Examples:
 			}
 		}
 
-		// Check if Hub should be used
-		var hubCtx *HubContext
-		if convRef != nil {
-			// Conversation references require Hub mode for resolution
-			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
-		} else if len(groupRecipients) > 0 {
-			// Group recipients: skip sync (multiple recipients, no single agent)
-			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
-		} else if userRecipient != "" {
-			// User recipient: skip sync (no agent involved)
-			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
-		} else if crossProjectTarget != "" {
-			// Cross-project: set up hub from agent's own project
-			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
-		} else {
-			// Single agent: exclude target from sync requirements
-			hubCtx, err = CheckHubAvailabilityForAgent(senderProjectPath, agentName, true)
-		}
+		// Every send goes through the hub. A cross-project send sets up the
+		// hub from the sending agent's own project.
+		hubCtx, err := requireHub(senderProjectPath)
 		if err != nil {
 			return err
 		}
 
-		// Conversation references require Hub mode
-		if convRef != nil && hubCtx == nil {
-			return fmt.Errorf("conversation references require Hub mode (use 'scion hub enable' first)")
-		}
-
-		// Group recipients require Hub mode
-		if len(groupRecipients) > 0 && hubCtx == nil {
-			return fmt.Errorf("group[] recipients require Hub mode (use 'scion hub enable' first)")
-		}
-
-		// User recipients require Hub mode
-		if userRecipient != "" && hubCtx == nil {
-			return fmt.Errorf("sending messages to users requires Hub mode (use 'scion hub enable' first)")
-		}
-
 		// Handle scheduled messages
 		if msgIn != "" || msgAt != "" {
-			if hubCtx == nil {
-				return fmt.Errorf("scheduled messages require Hub mode (use 'scion hub enable' first)")
-			}
 			return scheduleMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgPlain)
-		}
-
-		// --notify requires Hub mode
-		if msgNotify && hubCtx == nil {
-			return fmt.Errorf("--notify requires Hub mode (use 'scion hub enable' first)")
-		}
-
-		// --cc requires Hub mode
-		if len(parsedCC) > 0 && hubCtx == nil {
-			return fmt.Errorf("--cc requires Hub mode (use 'scion hub enable' first)")
 		}
 
 		// Stage attachments to shared volume (after Hub mode confirmed)
@@ -465,25 +422,8 @@ Examples:
 			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgNotify, msgWake)
 		}
 
-		// --wake requires Hub mode
-		if msgWake {
-			return fmt.Errorf("--wake requires Hub mode (use 'scion hub enable' first)")
-		}
-
-		// --artifact requires Hub mode: references are resolved by the Hub.
-		if len(msgArtifactRefs) > 0 {
-			return fmt.Errorf("--artifact requires Hub mode (use 'scion hub enable' first)")
-		}
-
-		// --attach requires Hub mode: attachments are delivered through Hub
-		// storage, while local mode writes plain text to the agent terminal
-		// and cannot transfer files.
-		if len(msgAttach) > 0 {
-			return fmt.Errorf("--attach requires Hub mode (use 'scion hub enable' first); in local mode, include the file contents in the message text")
-		}
-
-		// Local mode — structured messages are only available in Hub mode,
-		// so local mode continues to use plain text delivery.
+		// Local tail: unreachable, since requireHub never returns a nil
+		// context; removed with the local tails.
 		ctx := context.Background()
 
 		rt := runtime.GetRuntime(projectPath, profile)
@@ -1652,12 +1592,9 @@ var messageChannelsCmd = &cobra.Command{
 	Long:  "Lists the registered message broker channels that can be targeted with --channel.",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
-		}
-		if hubCtx == nil {
-			return fmt.Errorf("listing message channels requires Hub mode (use 'scion hub enable' first)")
 		}
 		if !isJSONOutput() {
 			PrintUsingHub(hubCtx.Endpoint)

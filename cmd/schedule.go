@@ -188,14 +188,10 @@ func resolveScheduleID(ctx context.Context, hubCtx *HubContext, projectID, prefi
 }
 
 func scheduleHubContext() (*HubContext, string, context.Context, context.CancelFunc, error) {
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return nil, "", nil, nil, err
 	}
-	if hubCtx == nil {
-		return nil, "", nil, nil, fmt.Errorf("scheduled events require Hub mode (use 'scion hub enable' first)")
-	}
-
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}

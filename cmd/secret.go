@@ -119,14 +119,10 @@ func init() {
 func runAgentSecretGet(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("secret commands require Hub mode (use 'scion hub enable' first)")
-	}
-
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
@@ -238,14 +234,10 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("secret commands require Hub mode (use 'scion hub enable' first)")
-	}
-
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
@@ -324,14 +316,10 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentSecretList(cmd *cobra.Command, _ []string) error {
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("secret commands require Hub mode (use 'scion hub enable' first)")
-	}
-
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)

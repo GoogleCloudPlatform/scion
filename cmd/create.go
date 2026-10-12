@@ -72,7 +72,7 @@ The agent is provisioned but not started, even when a task is given. Run
 		// Check if Hub should be used, excluding the target agent from sync requirements.
 		// This allows creating an agent even if it already exists on Hub (recreate scenario)
 		// or if other agents are out of sync.
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
@@ -493,10 +493,8 @@ func init() {
 // flag keeps its own ID over SCION_PROJECT_ID (ptone/scion#3123).
 func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
 	return hubsync.EnsureHubReadyOptions{
-		NoHub:           noHub,
 		AutoConfirm:     true,
 		NonInteractive:  nonInteractive,
-		SkipSync:        true,
 		ExplicitProject: explicitProjectTargetFor(projectPath),
 	}
 }

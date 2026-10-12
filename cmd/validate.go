@@ -62,14 +62,10 @@ func nameOrAllArgs(noun string) cobra.PositionalArgs {
 func runTemplateValidate(cmd *cobra.Command, args []string) error {
 	validateAll, _ := cmd.Flags().GetBool("all")
 
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub integration is not enabled, use 'scion hub enable' first")
-	}
-
 	PrintUsingHub(hubCtx.Endpoint)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -143,14 +139,10 @@ Examples:
 func runHarnessConfigValidate(cmd *cobra.Command, args []string) error {
 	validateAll, _ := cmd.Flags().GetBool("all")
 
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub integration is not enabled, use 'scion hub enable' first")
-	}
-
 	PrintUsingHub(hubCtx.Endpoint)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

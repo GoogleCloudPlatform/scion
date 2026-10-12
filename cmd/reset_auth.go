@@ -72,14 +72,10 @@ given: review the summary first, then apply.`,
 			return fmt.Errorf("--all is a dry run unless --apply is given; --dry-run is not used with --all")
 		}
 
-		hubCtx, err := CheckHubAvailability(projectPath)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
-		if hubCtx == nil {
-			return fmt.Errorf("reset-auth requires Hub connectivity (hub not configured)")
-		}
-
 		if resetAuthAll {
 			return reissueScopesAllViaHub(hubCtx, resetAuthApply)
 		}

@@ -50,7 +50,7 @@ var logsCmd = &cobra.Command{
 		}
 
 		// Check if Hub is enabled
-		hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
