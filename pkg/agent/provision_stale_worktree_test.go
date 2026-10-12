@@ -1067,7 +1067,9 @@ func TestHandleAgentDirWithoutConfig_LockedWorktreeIsKeptWithoutGit(t *testing.T
 }
 
 // A worktree whose index has a submodule (gitlink) entry is kept even when
-// clean and on a branch, and git status never runs in it.
+// clean and on a branch, and git status never runs in it. The submodule is
+// not initialized in the worktree, so its admin dir has no modules/ entry
+// and the gitlink check, not the idle admin dir check, keeps it.
 func TestHandleAgentDirWithoutConfig_SubmoduleWorktreeIsKeptWithoutStatus(t *testing.T) {
 	base, repo, agentDir, agentHome, ws := noConfigGitProject(t)
 	sub := filepath.Join(base, "subrepo")
@@ -1075,7 +1077,9 @@ func TestHandleAgentDirWithoutConfig_SubmoduleWorktreeIsKeptWithoutStatus(t *tes
 	runGitT(t, repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
 	runGitT(t, repo, "commit", "-q", "-m", "add submodule")
 	runGitT(t, repo, "worktree", "add", "-q", "--relative-paths", "-b", "a", ws)
-	runGitT(t, ws, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init")
+	if idle, err := worktreeAdminDirIdle(worktreeAdminDir(repo, "workspace")); err != nil || !idle {
+		t.Fatalf("setup: worktree admin dir idle = %v (err=%v), want idle", idle, err)
+	}
 	if got := runGitT(t, ws, "status", "--porcelain"); got != "" {
 		t.Fatalf("setup: git status = %q, want a clean worktree", got)
 	}
