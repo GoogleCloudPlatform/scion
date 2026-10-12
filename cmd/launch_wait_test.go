@@ -151,7 +151,19 @@ func TestWaitForAgentLaunch_TerminalStates(t *testing.T) {
 				"Template: claude", "Task: fix the tests",
 				"scion delete a1", "scion start a1", "force=true or purged",
 			},
-			wantMissing: []string{"scion logs"},
+			wantMissing: []string{"scion logs", "cause"},
+		},
+		{
+			name: "create failed with a runtime cause",
+			agent: &hubclient.Agent{
+				Phase: "error", Template: "claude", Message: "launching: Failed to create agent",
+				Launch: &hubclient.AgentLaunch{ID: "l1", State: "ended", Kind: "create", Error: "runtime_error", Cause: "runtime_forbidden", EndReason: "failed"},
+			},
+			wantIncomplete: true,
+			wantContains: []string{
+				"agent 'a1' create did not complete (runtime_error, cause runtime_forbidden): launching: Failed to create agent",
+				"scion delete a1",
+			},
 		},
 		{
 			name: "create stopped",

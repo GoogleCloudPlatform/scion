@@ -207,7 +207,9 @@ func (s *AgentStore) applyLaunchReportEnded(ctx context.Context, ltx *launchTx, 
 			upd := ltx.client.Agent.UpdateOneID(current.ID).
 				SetStateVersion(current.StateVersion + 1)
 			if r.ErrorCode != "" {
-				upd.SetLaunchError(r.ErrorCode)
+				// The cause qualifies this code, so it is written with
+				// it; otherwise the reaper's code stands, with no cause.
+				upd.SetLaunchError(r.ErrorCode).SetLaunchCause(r.Cause)
 			}
 			msg := formatFailureMessage(r.Step, r.Message)
 			if msg != "" {
@@ -281,10 +283,12 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		// a phase=running write ends a launch automatically, so this row can
 		// carry phase=error while its launch is still active).
 		newLaunchError := current.LaunchError
+		newLaunchCause := current.LaunchCause
 		newMessage := current.Message
 		if r.State == store.LaunchReportStateFailed {
 			if r.ErrorCode != "" {
 				newLaunchError = r.ErrorCode
+				newLaunchCause = r.Cause
 			} else if newLaunchError == "" {
 				// Design §3.3: launch_error must not stay empty on this
 				// launch-ending write. current.LaunchError may already be
@@ -303,6 +307,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonFailed).
 			SetLaunchError(newLaunchError).
+			SetLaunchCause(newLaunchCause).
 			SetMessage(newMessage).
 			SetStateVersion(current.StateVersion + 1)
 		if ownerToSet != "" {
@@ -336,6 +341,7 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 		upd := ltx.client.Agent.UpdateOneID(current.ID).
 			SetPhase(string(state.PhaseRunning)).
 			SetLaunchError("").
+			SetLaunchCause("").
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonSucceeded).
 			SetLaunchLastReportAt(now).
@@ -365,6 +371,7 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 			SetPhase(string(state.PhaseError)).
 			SetMessage(msg).
 			SetLaunchError(errorCode).
+			SetLaunchCause(r.Cause).
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonFailed).
 			SetLaunchLastReportAt(now).

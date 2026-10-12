@@ -132,6 +132,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchSeq:           a.LaunchSeq,
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
+		LaunchCause:         a.LaunchCause,
 		RunID:               a.RunID,
 		PreviousRunIDs:      append([]string(nil), a.PreviousRunIds...),
 		WorkspacePlacement:  a.WorkspacePlacement,
@@ -850,7 +851,7 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 	// launch_* column from the caller's struct; this is the one exception,
 	// and it is unconditional (not gated on the row's launch_state).
 	if a.Phase == "running" {
-		update.SetLaunchError("")
+		update.SetLaunchError("").SetLaunchCause("")
 	}
 
 	return update, nil
@@ -1602,7 +1603,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// method has already locked (not on the caller's struct, which may be
 	// stale). No CASE SQL: both are plain Go conditionals on current.
 	if su.Phase == "running" {
-		upd.SetLaunchError("")
+		upd.SetLaunchError("").SetLaunchCause("")
 		if current.LaunchState == store.LaunchStateActive {
 			upd.SetLaunchState(store.LaunchStateEnded)
 			upd.SetLaunchEndReason(store.LaunchEndReasonRunningObserved)

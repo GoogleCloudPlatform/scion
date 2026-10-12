@@ -89,6 +89,7 @@ type AgentLaunchReport struct {
 	Step       string                 `json:"step,omitempty"`
 	Message    string                 `json:"message,omitempty"`
 	ErrorCode  string                 `json:"errorCode,omitempty"`
+	Cause      string                 `json:"cause,omitempty"` // failed runtime_error only: an api.BrokerRuntimeCause code
 	Agent      *AgentLaunchReportInfo `json:"agent,omitempty"` // succeeded only
 	At         time.Time              `json:"at,omitzero"`
 }

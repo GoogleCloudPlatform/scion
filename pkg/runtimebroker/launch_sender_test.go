@@ -83,7 +83,7 @@ func TestLaunchSender_KeepaliveStopsOnTerminalStart(t *testing.T) {
 		t.Fatal("expected at least one keepalive before the terminal")
 	}
 
-	if _, err := s.SendTerminal(context.Background(), true, "", "", "", nil); err != nil {
+	if _, err := s.SendTerminal(context.Background(), true, "", "", "", "", nil); err != nil {
 		t.Fatalf("SendTerminal: %v", err)
 	}
 	s.WaitKeepaliveStopped()
@@ -292,7 +292,7 @@ func TestLaunchSender_EachReportKindUsesItsOwnAttemptTimeout(t *testing.T) {
 		}
 		rtb.ctxHook = func(ctx context.Context) { seen <- ctx }
 		s := newTestLaunchSender(t, rtb, time.Hour)
-		if _, err := s.SendTerminal(context.Background(), true, "", "", "", nil); err != nil {
+		if _, err := s.SendTerminal(context.Background(), true, "", "", "", "", nil); err != nil {
 			t.Fatalf("SendTerminal: %v", err)
 		}
 		assertFiveSecondDeadline(t, "terminal", <-seen)
@@ -570,7 +570,7 @@ func TestLaunchSender_TerminalNotEndedByAbortRecordedDuringIt(t *testing.T) {
 	// finish in milliseconds.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result, err := s.SendTerminal(ctx, false, "launching", "runtime_error", "boom", nil)
+	result, err := s.SendTerminal(ctx, false, "launching", "runtime_error", "boom", "", nil)
 	if err != nil {
 		t.Fatalf("SendTerminal error = %v, want the second attempt's answer (an abort recorded during the terminal must not end it)", err)
 	}

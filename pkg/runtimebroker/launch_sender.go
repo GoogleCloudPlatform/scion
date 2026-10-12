@@ -620,13 +620,16 @@ func (s *launchSender) sendKeepaliveOnce(ctx context.Context) {
 // first: "only the terminal's answer decides cleanup" from this point on
 // (design §3.8.5). step records which generic step (claim/launching) the
 // launch was in when it failed (design §3.9's generic claim -> launching ->
-// terminal sequence); ignored for a succeeded terminal.
-func (s *launchSender) SendTerminal(ctx context.Context, succeeded bool, step, errorCode, message string, agentInfo *hubclient.AgentLaunchReportInfo) (*hubclient.AgentLaunchReportResult, error) {
+// terminal sequence); ignored for a succeeded terminal. cause is the fixed
+// runtime cause code of a failed terminal's runtime_error (ptone/scion#4666),
+// or ""; ignored for a succeeded terminal.
+func (s *launchSender) SendTerminal(ctx context.Context, succeeded bool, step, errorCode, message, cause string, agentInfo *hubclient.AgentLaunchReportInfo) (*hubclient.AgentLaunchReportResult, error) {
 	s.markTerminalStarted()
 	state := hubclient.AgentLaunchReportStateFailed
 	if succeeded {
 		state = hubclient.AgentLaunchReportStateSucceeded
 		step = ""
+		cause = ""
 	}
 	report := &hubclient.AgentLaunchReport{
 		LaunchID:   s.rec.ID,
@@ -636,6 +639,7 @@ func (s *launchSender) SendTerminal(ctx context.Context, succeeded bool, step, e
 		Step:       step,
 		ErrorCode:  errorCode,
 		Message:    message,
+		Cause:      cause,
 		Agent:      agentInfo,
 		At:         time.Now(),
 	}

@@ -40,6 +40,7 @@ type AgentLaunchReport struct {
 	Step       string           `json:"step,omitempty"`
 	Message    string           `json:"message,omitempty"`
 	ErrorCode  string           `json:"errorCode,omitempty"`
+	Cause      string           `json:"cause,omitempty"` // failed runtime_error only: an api.BrokerRuntimeCause code
 	Agent      *RemoteAgentInfo `json:"agent,omitempty"` // succeeded only
 	At         time.Time        `json:"at,omitzero"`
 }
@@ -78,6 +79,21 @@ func hasControlCharacter(s string) bool {
 		}
 	}
 	return false
+}
+
+// launchReportCause returns the cause the hub stores for report r
+// (ptone/scion#4666): r.Cause when r is a failed report whose code is
+// runtime_error (the code a cause qualifies, as on a synchronous create's
+// details.cause) and r.Cause is one of the fixed relayable codes
+// (relayableRuntimeCause), else "". An older broker sends no cause, and a
+// cause this hub does not know is dropped rather than rejected: rejecting
+// the terminal report would leave the broker retrying it and skipping its
+// cleanup.
+func launchReportCause(r AgentLaunchReport) string {
+	if r.State != store.LaunchReportStateFailed || r.ErrorCode != ErrCodeRuntimeError {
+		return ""
+	}
+	return relayableRuntimeCause(r.Cause)
 }
 
 // handleAgentLaunchReport implements the broker->Hub launch report endpoint
@@ -131,6 +147,7 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		Step:       sanitizeFailureReason(req.Step),
 		Message:    sanitizeFailureReason(req.Message),
 		ErrorCode:  sanitizeFailureReason(req.ErrorCode),
+		Cause:      launchReportCause(req),
 	}
 	if req.Agent != nil {
 		sr.Runtime = req.Agent.Runtime

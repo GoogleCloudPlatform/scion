@@ -365,9 +365,15 @@ func newLaunchFailedError(name string, a *hubclient.Agent) *launchFailedError {
 	e := &launchFailedError{Agent: name, Phase: phase}
 	if a.Launch != nil && a.Launch.Error != "" {
 		e.Incomplete = a.Launch.Kind == "" || a.Launch.Kind == "create"
-		reason := fmt.Sprintf("agent '%s' did not start (%s)", name, a.Launch.Error)
+		code := a.Launch.Error
+		if a.Launch.Cause != "" {
+			// The fixed runtime cause code (ptone/scion#4666), such as
+			// runtime_forbidden: the runtime refused the start.
+			code += ", cause " + a.Launch.Cause
+		}
+		reason := fmt.Sprintf("agent '%s' did not start (%s)", name, code)
 		if e.Incomplete {
-			reason = fmt.Sprintf("agent '%s' create did not complete (%s)", name, a.Launch.Error)
+			reason = fmt.Sprintf("agent '%s' create did not complete (%s)", name, code)
 		}
 		if a.Message != "" {
 			reason += ": " + a.Message
