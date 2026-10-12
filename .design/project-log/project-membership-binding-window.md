@@ -52,22 +52,21 @@ methods.
 ## Hub helper aligned
 
 `isBindingActive` in `pkg/hub/authz.go` treated `now == ExpiresAt` as active
-(`now.After`), while the kernel treats it as inactive. It now uses
-`!now.Before(ExpiresAt)`; its NotBefore side already matched. Its zero-now
-behaviour is unchanged (the kernel fails closed on a zero evaluation time;
-every isBindingActive caller passes `time.Now()` or a service clock).
-The test identity expiry check (`now.Before(ExpiresAt)`) already used the
-exclusive rule, so the clamp and the binding check now agree at the instant.
+(`now.After`), while the kernel treats it as inactive. It now delegates to
+`bindingActivationOK`, so `ExpiresAt` is exclusive and a zero evaluation time
+with any bound set is inactive, as in the kernel. Every caller passes
+`time.Now()` or a service clock. The test identity expiry check
+(`now.Before(ExpiresAt)`) already used the exclusive rule, so the clamp and the
+binding check agree at the instant.
 
-Follow-up: `isBindingActive` now delegates to `bindingActivationOK`, so the
-zero-now case fails closed like the kernel. Every store-to-kernel bound
-conversion (`toCandidateBindings`, `bindingActivationOK`,
-`getEffectivePermissions`, the access-constraint preview) goes through
-`candidateActivationBounds`, which maps a set-but-zero bound to the earliest
-non-zero instant. A set-but-zero ExpiresAt is therefore expired in the
-kernel, the hub helpers and the store alike. Some handlers still have their
-own inline window checks (`artifacts_host.go`, `handlers_users_core.go`,
-`handlers_admin_effective_access.go`); they are left for a later change.
+Every store-to-kernel bound conversion (`toCandidateBindings`,
+`bindingActivationOK`, `getEffectivePermissions`, the access-constraint
+preview) goes through `candidateActivationBounds`, which maps a set-but-zero
+bound to the earliest non-zero instant. A set-but-zero `ExpiresAt` is therefore
+expired in the kernel, the hub helpers and the store alike. Some handlers still
+have their own inline window checks (`artifacts_host.go`,
+`handlers_users_core.go`, `handlers_admin_effective_access.go`); they are left
+for a later change.
 
 ## Tests
 
@@ -75,5 +74,9 @@ own inline window checks (`artifacts_host.go`, `handlers_users_core.go`,
 future bindings are not membership; unbounded and in-window bindings are;
 an expired owner row beside an active member binding resolves to member;
 boundary instants match the kernel; unit table for `roleBindingActiveAt`.
-`pkg/hub/authz_test.go` `TestIsBindingActive_BoundariesMatchKernel`
-checks `isBindingActive` against `bindingActivationOK` (the kernel rule).
+`pkg/hub/authz_test.go` `TestIsBindingActive_BoundariesMatchKernel` checks
+`isBindingActive`, `bindingActivationOK` and the kernel candidate path against
+a fixed expected result per case (boundaries, unbounded, set-but-zero bounds,
+zero evaluation time). `TestEvaluate_StoredBindingWindowMatchesIsBindingActive`
+runs stored bindings through `toCandidateBindings` and the kernel evaluator and
+checks the decision matches `isBindingActive`.
