@@ -329,6 +329,68 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         })
         self.assertEqual(resolved["method"], "api-key")
 
+    # --- staged COPILOT_CONFIG secret copilot cannot read (ptone/scion#4665)
+    # The start fails with a ProvisionError that names the staged file and
+    # never includes its content; nothing is written to ~/.copilot.
+
+    STAGED_MARKER = "placeholder-marker-4665"
+
+    def _stage_config_secret(self, raw: bytes) -> str:
+        secret = os.path.join(self.bundle, "secrets", "COPILOT_CONFIG")
+        os.makedirs(os.path.dirname(secret), exist_ok=True)
+        with open(secret, "wb") as f:
+            f.write(raw)
+        return secret
+
+    def _provision_staged(self) -> dict:
+        return self._provision({
+            "file_secret_files": {"COPILOT_CONFIG": "$HOME/.scion/harness/secrets/COPILOT_CONFIG"},
+        })
+
+    def _assert_staged_refused(self, raw: bytes, kind: str) -> None:
+        secret = self._stage_config_secret(raw)
+        with self.assertRaises(scion_harness.ProvisionError) as cm:
+            self._provision_staged()
+        msg = str(cm.exception)
+        self.assertIn(f"COPILOT_CONFIG secret file {secret} ", msg)
+        self.assertIn(kind, msg)
+        self.assertNotIn(self.STAGED_MARKER, msg)
+        self.assertIsNone(cm.exception.__cause__)
+        self.assertTrue(cm.exception.__suppress_context__)
+        self.assertFalse(os.path.exists(self.config_path))
+
+    def test_staged_non_utf8_config_is_refused(self) -> None:
+        raw = ('{"placeholder_sign_in": "' + self.STAGED_MARKER).encode() + b'\xff"}'
+        self._assert_staged_refused(raw, "is not valid UTF-8")
+
+    def test_staged_non_finite_config_is_refused(self) -> None:
+        for lit in ("NaN", "Infinity", "-Infinity", "1e400", "-1e400"):
+            with self.subTest(lit):
+                raw = ('{"placeholder_sign_in": "' + self.STAGED_MARKER
+                       + '", "n": ' + lit + "}").encode()
+                self._assert_staged_refused(raw, "holds NaN, Infinity or a number beyond float range")
+
+    def test_staged_invalid_json_config_is_refused(self) -> None:
+        raw = ('{"placeholder_sign_in": "' + self.STAGED_MARKER + '",}').encode()
+        self._assert_staged_refused(raw, "is not valid JSON")
+
+    def test_staged_too_deep_config_is_refused(self) -> None:
+        raw = ('{"placeholder_sign_in": "' + self.STAGED_MARKER + '", "n": '
+               + "[" * 100000 + "]" * 100000 + "}").encode()
+        self._assert_staged_refused(raw, "is nested too deeply to validate")
+
+    def test_staged_long_int_config_is_accepted(self) -> None:
+        # Copilot and the host read long integers; the file is copied as is.
+        raw = ('// note\n{"placeholder_sign_in": {"login": "example-user"}, "n": '
+               + self.LONG_INT + "}").encode()
+        self._stage_config_secret(raw)
+        resolved = self._provision_staged()
+        self.assertEqual(resolved["method"], "auth-file")
+        self.assertTrue(resolved.get("config_file_written"))
+        # _ensure_settings cannot rewrite it losslessly and the host's rule
+        # says it may hold sign-in, so it stays byte-for-byte as staged.
+        self.assertEqual(self._read_raw(), raw)
+
     # --- config.json that is not cleanly readable (ptone/scion#4624) -------
     # A file that cannot be decoded or converted is handled like unparseable
     # JSON: replaced, unless the host's rule says it may hold sign-in, in
@@ -703,6 +765,68 @@ class HostRuleCrossCheckTest(unittest.TestCase):
                     f.write(tc["data"])
                 self.assertIs(provision._config_file_may_hold_credential(p), tc["signIn"],
                               f"{tc['name']}: {tc['data']!r}")
+
+
+# Characters on which Python's str.splitlines()/str.strip() and the host's
+# strings.Split(s, "\n")/strings.TrimSpace disagree (ptone/scion#4665).
+PARITY_CHARS = ("\v", "\f", "\x1c", "\x1d", "\x1e", "\u2028")
+
+
+def parity_cases() -> list[tuple[str, str, object]]:
+    """(name, content, expected) per character, by the host's rule; expected
+    is the parsed value, or None when the host cannot parse the content."""
+    cases: list[tuple[str, str, object]] = []
+    for ch in PARITY_CHARS:
+        name = f"U+{ord(ch):04X}"
+        # Inside a string: JSON allows U+2028 there but not a control character.
+        cases.append((f"{name} in string", '{"k": "a' + ch + 'b"}',
+                      {"k": "a\u2028b"} if ch == "\u2028" else None))
+        # Leading a // line: trimmed, so the line is a comment, only if the
+        # host counts it as whitespace.
+        cases.append((f"{name} before comment line", '{"k": 1}\n' + ch + "// note\n",
+                      {"k": 1} if ch in scion_harness.HOST_SPACE else None))
+        # Not a line break for the host, so "// note" is not a comment line.
+        cases.append((f"{name} as line break", '{"k": 1}' + ch + "// note\n", None))
+    return cases
+
+
+class CommentLineHostParityTest(unittest.TestCase):
+    """The strict loader and the staged-config check split lines and trim
+    whitespace as the host does (ptone/scion#4665)."""
+
+    def test_space_set_matches_shared_helper(self) -> None:
+        self.assertEqual(provision._GO_SPACE, scion_harness.HOST_SPACE)
+
+    def test_strict_loader_matches_host(self) -> None:
+        cases = parity_cases()
+        self.assertEqual(len(cases), 3 * len(PARITY_CHARS))
+        for name, content, expected in cases:
+            with self.subTest(name):
+                raw = content.encode("utf-8")
+                if expected is None:
+                    with self.assertRaises(ValueError):
+                        provision._load_config_strictly(raw)
+                else:
+                    self.assertEqual(provision._load_config_strictly(raw), expected)
+
+    def test_staged_config_check_matches_host(self) -> None:
+        for name, content, expected in parity_cases():
+            with self.subTest(name):
+                if expected is None:
+                    with self.assertRaises(scion_harness.ProvisionError):
+                        provision._validate_staged_config(content, "/staged/COPILOT_CONFIG")
+                else:
+                    provision._validate_staged_config(content, "/staged/COPILOT_CONFIG")
+
+    def test_host_comment_line_rule_unchanged(self) -> None:
+        # The cases above encode the host's rule; fail if the host changes it.
+        with open(HOST_RULE_GO, encoding="utf-8") as f:
+            src = f.read()
+        m = re.search(r"func copilotConfigHoldsSignIn\(data \[\]byte\) bool \{(.*?)\n\}", src, re.S)
+        self.assertIsNotNone(m, "copilotConfigHoldsSignIn not found in " + HOST_RULE_GO)
+        assert m is not None
+        self.assertIn('strings.Split(string(data), "\\n")', m.group(1))
+        self.assertIn('strings.HasPrefix(strings.TrimSpace(ln), "//")', m.group(1))
 
 
 if __name__ == "__main__":
