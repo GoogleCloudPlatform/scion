@@ -59,7 +59,12 @@ the project delete, and `cleanAgentDelete`; `cleanup.final` re-reads every
 agent, the project, the template and the identity after all deletes. A
 row removed only by the project delete is gone in `final` but not a clean
 agent delete. `forcedDeletes` lists every force fallback next to
-`launchCapable`.
+`launchCapable`. The panel checks record the page's own DELETE answers as
+`panelDeleteStatuses`. In any status list, `null` means no answer (failed
+or still pending), and `unansweredDeletes` counts those. `deleteForced`
+means a force was attempted: it is set before the Force Delete click, so
+it holds even if the force then fails. `a1.windowEnd` is when the A1 page
+closed.
 
 `E2E_KEEP_HUB_STATE=1` keeps the local hub's temp dir (database, private
 HOME) at teardown and prints its path. It contains hub credentials: do not

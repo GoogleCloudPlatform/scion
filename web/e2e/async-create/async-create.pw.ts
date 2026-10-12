@@ -130,6 +130,8 @@ interface TrackedPage {
   requests: RequestRecord[];
   navigations: NavigationRecord[];
   documentLoads: number;
+  /** When the page closed. */
+  closedAt?: number;
 }
 
 interface CreatedAgent {
@@ -264,6 +266,9 @@ async function trackedPage(): Promise<TrackedPage> {
   });
   page.on('domcontentloaded', () => {
     tracked.documentLoads++;
+  });
+  page.once('close', () => {
+    tracked.closedAt = Date.now();
   });
   return tracked;
 }
@@ -560,6 +565,25 @@ function panelDeletes(tracked: TrackedPage, agentId: string): RequestRecord[] {
   );
 }
 
+/**
+ * Sends an agent DELETE as the member and records its answer, or null when
+ * the request throws (then rethrows). Returns the status.
+ */
+async function deleteAgentRecorded(
+  agentId: string,
+  query: string,
+  forced: boolean
+): Promise<number> {
+  try {
+    const res = await member().delete(`/api/v1/agents/${agentId}${query}`);
+    noteAgentDelete(agentId, [res.status()], forced);
+    return res.status();
+  } catch (err) {
+    noteAgentDelete(agentId, [null], forced);
+    throw err;
+  }
+}
+
 /** Records DELETE answers for an agent (see journey.agentDeletes). */
 function noteAgentDelete(agentId: string, statuses: Array<number | null>, forced: boolean): void {
   const entry = (journey.agentDeletes[agentId] ??= { statuses: [], forced: false });
@@ -634,29 +658,40 @@ async function cleanUpAgentsAndProject(
   const agentResults: Record<string, unknown> = {};
   cleanup.agents = agentResults;
   for (const agent of journey.context ? journey.agents : []) {
+    // Filled as the cleanup goes; the finally writes the agent's entry from
+    // them and from journey.agentDeletes, so a later throw cannot drop it.
+    let gone = false;
+    let stateBeforeProjectDelete: ReadState | 'not read' = 'not read';
     try {
       if (!(await agentGone(member(), agent.id))) {
-        const res = await member().delete(`/api/v1/agents/${agent.id}`);
-        noteAgentDelete(agent.id, [res.status()], false);
-        if (res.status() === 502 || res.status() === 503) {
+        const res = await deleteAgentRecorded(agent.id, '', false);
+        if (res === 502 || res === 503) {
           // The broker cannot remove it (e.g. no container runtime): the
-          // same force delete the web UI falls back to.
-          // Recorded before the request, so a failing force is never lost.
+          // same force delete the web UI falls back to. Recorded before
+          // the request, so a failing force is never lost.
           noteAgentDelete(agent.id, [], true);
           recordForcedDelete(`A5 cleanup (agent ${agent.check})`, true);
-          const forced = await member().delete(`/api/v1/agents/${agent.id}?force=true`);
-          noteAgentDelete(agent.id, [forced.status()], true);
+          await deleteAgentRecorded(agent.id, '?force=true', true);
         }
       }
       // Gone here means gone by its own delete, before the project delete
       // (which can remove agent rows itself).
-      const gone = await expect
+      gone = await expect
         .poll(() => agentGone(member(), agent.id), { timeout: 120_000 })
         .toBe(true)
         .then(
           () => true,
           () => false
         );
+      try {
+        stateBeforeProjectDelete = await agentReadState(member(), agent.id);
+      } catch {
+        stateBeforeProjectDelete = 'unknown';
+      }
+      if (!gone) residue.push(`agent ${agent.id} (${agent.check})`);
+    } catch (err) {
+      residue.push(`cleanup error (agent ${agent.id}): ${firstLine(err)}`);
+    } finally {
       const deletes = journey.agentDeletes[agent.id] ?? { statuses: [], forced: false };
       const brokerDeleteFailed = deletes.statuses.some((st) => st !== null && st >= 500);
       agentResults[agent.check] = {
@@ -669,12 +704,9 @@ async function cleanUpAgentsAndProject(
         // the agent, even when its row is gone later.
         brokerDeleteFailed,
         goneBeforeProjectDelete: gone,
-        stateBeforeProjectDelete: await agentReadState(member(), agent.id),
+        stateBeforeProjectDelete,
         cleanAgentDelete: gone && !brokerDeleteFailed,
       };
-      if (!gone) residue.push(`agent ${agent.id} (${agent.check})`);
-    } catch (err) {
-      residue.push(`cleanup error (agent ${agent.id}): ${firstLine(err)}`);
     }
   }
 
@@ -1170,7 +1202,7 @@ test.describe.serial('async agent create from the web form', () => {
     // the close; the SSE stream then shows abortedAfterResponse).
     if (journey.a1Page && journey.a1Submit) {
       const a1 = (journey.evidence.a1 ?? {}) as Record<string, unknown>;
-      a1.windowEnd = Date.now();
+      a1.windowEnd = journey.a1Page.closedAt ?? Date.now();
       a1.requests = requestsSinceSubmit(journey.a1Page, journey.a1Submit);
       journey.evidence.a1 = a1;
     }
