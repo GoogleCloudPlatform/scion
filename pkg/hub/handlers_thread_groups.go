@@ -44,8 +44,9 @@ import (
 //     (authorizeSelfScoped, as handleCreateConversation does). Delete is for
 //     users only; an agent gets 403, mirroring handleTopicDelete.
 //
-// Every handler is reached through requireExperiment(ChatThreadGroups), so
-// the routes answer 404 while the experiment is off.
+// Every handler is reached through threadGroupsGate, so the routes answer
+// 404 while the experiment is off, unregistered, or the stored experiments
+// row is malformed.
 
 // threadGroupListResponse is the body of GET /api/v1/thread-groups.
 type threadGroupListResponse struct {
