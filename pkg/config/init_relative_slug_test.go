@@ -123,7 +123,9 @@ func TestExternalProjectNameAndSlug(t *testing.T) {
 		wantErr     string
 	}{
 		{projectRoot: filepath.Join(root, "work", "My Project"), wantName: "My Project", wantSlug: "my-project"},
-		{projectRoot: filepath.Join(root, "work", "!!!"), wantErr: "ASCII letters or digits (a-z, 0-9)"},
+		{projectRoot: filepath.Join(root, "work", "Café"), wantName: "Café", wantSlug: "cafe"},
+		{projectRoot: filepath.Join(root, "work", "!!!"), wantErr: "ASCII letters or digits (A-Z, a-z, 0-9)"},
+		{projectRoot: filepath.Join(root, "work", "日本語"), wantErr: "ASCII letters or digits (A-Z, a-z, 0-9)"},
 		{projectRoot: root, wantErr: "has no name usable as a project slug"},
 	}
 	for _, tt := range tests {

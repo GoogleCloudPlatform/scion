@@ -428,7 +428,7 @@ func externalProjectNameAndSlug(projectRoot string) (name, slug string, err erro
 	name = filepath.Base(projectRoot)
 	slug = api.Slugify(name)
 	if slug == "" {
-		return "", "", fmt.Errorf("cannot initialize project: the directory name %q of %s gives an empty project slug; use a directory name that contains ASCII letters or digits (a-z, 0-9)", name, projectRoot)
+		return "", "", fmt.Errorf("cannot initialize project: the directory name %q of %s gives an empty project slug; use a directory name that contains ASCII letters or digits (A-Z, a-z, 0-9)", name, projectRoot)
 	}
 	return name, slug, nil
 }
