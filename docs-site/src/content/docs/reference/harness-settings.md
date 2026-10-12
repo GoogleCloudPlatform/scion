@@ -15,7 +15,7 @@ Each agent has a dedicated "Home" directory that is mounted into the container. 
 
 ## Seeding from Harness-Configs & Templates
 When an agent is created, Scion composes its home directory by layering files from multiple sources:
-1.  **Harness-Config**: Base settings for the specific LLM tool (from `~/.scion/harness-configs/<name>/home/`).
+1.  **Harness-Config**: Base settings for the specific LLM tool (from `~/.scion/harness-configs/<name>/home/`, or another [harness-config location](#managing-harness-configs)).
 2.  **Template**: Role-specific prompts and configuration (from `.scion/templates/<name>/home/`).
 3.  **Common Files**: Shared dotfiles like `.tmux.conf` and `.zshrc`.
 
@@ -30,7 +30,7 @@ A **harness-config** is a named, versioned bundle that defines a harness: its `c
 `.scion/harness-configs/<name>/` (project-level); project-level configs override global ones with
 the same name. A template can also bundle harness-configs in its own `harness-configs/<name>/`
 directory, and these take precedence over both project and global configs of the same name (a
-bundled directory that fails to load is skipped). When a Hub dispatch names a Hub harness-config,
+directory that fails to load is skipped and the next one is tried). When a Hub dispatch names a Hub harness-config,
 the Hub's copy is used instead of any of these directories; if the Runtime Broker cannot fetch it,
 the start fails rather than falling back to them.
 

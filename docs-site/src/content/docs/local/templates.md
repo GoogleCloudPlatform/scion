@@ -345,7 +345,7 @@ For the condensed command list, see the [CLI reference](/scion/reference/cli/#te
 
 ## Harness-configs
 
-A **harness-config** is the counterpart to a template: it holds the runtime *mechanics* a template deliberately omits, so roles stay harness-agnostic. Harness-configs live in `~/.scion/harness-configs/` (global) or `.scion/harness-configs/` (project) and contain:
+A **harness-config** is the counterpart to a template: it holds the runtime *mechanics* a template deliberately omits, so roles stay harness-agnostic. Harness-configs live in `~/.scion/harness-configs/` (global) or `.scion/harness-configs/` (project), or are bundled in a template's own `harness-configs/<name>/` directory (see [precedence](/scion/reference/harness-settings/#managing-harness-configs)), and contain:
 
 - `config.yaml` — runtime parameters (container image, model aliases, auth type).
 - `home/` — base files copied into the agent's home directory (e.g. `.claude.json`, `.gemini/settings.json`).
