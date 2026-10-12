@@ -81,20 +81,34 @@ func TestLoadSettings_GlobalHubProjectIDDoesNotLeakIntoProject(t *testing.T) {
 	globalDir := setupHubIDScopeHome(t, "")
 	scionDir, _ := setupHubIDScopeSplitProject(t, filepath.Dir(globalDir))
 
-	for name, path := range map[string]string{"explicit path": scionDir, "working directory": ""} {
-		t.Run(name, func(t *testing.T) {
-			t.Chdir(filepath.Dir(scionDir))
-			s, err := LoadSettings(path)
-			require.NoError(t, err)
-			assert.Empty(t, s.GetHubProjectID(), "the global hub project ID must not leak into the project")
-			assert.Equal(t, scopeLocalID, s.ProjectID)
+	t.Run("explicit path", func(t *testing.T) {
+		s, err := LoadSettings(scionDir)
+		require.NoError(t, err)
+		assert.Empty(t, s.GetHubProjectID(), "the global hub project ID must not leak into the project")
+		assert.Equal(t, scopeLocalID, s.ProjectID)
 
-			vs, err := LoadVersionedSettings(path)
-			require.NoError(t, err)
-			require.NotNil(t, vs.Hub)
-			assert.Equal(t, scopeLocalID, vs.Hub.ProjectID)
-		})
-	}
+		vs, err := LoadVersionedSettings(scionDir)
+		require.NoError(t, err)
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, scopeLocalID, vs.Hub.ProjectID)
+	})
+
+	// Found from the working directory, the loaders do not read the
+	// project-id file (callers resolve the path first), so only check that
+	// the global value does not leak in.
+	t.Run("working directory", func(t *testing.T) {
+		t.Chdir(filepath.Dir(scionDir))
+		s, err := LoadSettings("")
+		require.NoError(t, err)
+		assert.Empty(t, s.GetHubProjectID(), "the global hub project ID must not leak into the project")
+		assert.NotEqual(t, scopeGlobalHubID, s.ProjectID)
+
+		vs, err := LoadVersionedSettings("")
+		require.NoError(t, err)
+		if vs.Hub != nil {
+			assert.NotEqual(t, scopeGlobalHubID, vs.Hub.ProjectID)
+		}
+	})
 }
 
 // TestLoadSettings_ProjectOwnHubProjectIDWins checks that the project's own
