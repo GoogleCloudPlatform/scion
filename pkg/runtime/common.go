@@ -112,25 +112,89 @@ func buildNoAuthCmdLine(noAuthMsg, noAuthCmd string) string {
 	return "exec bash"
 }
 
+// harnessCmdLineOptions holds per-runtime choices for harnessCmdLine. The
+// zero value builds the plain harness command line.
+type harnessCmdLineOptions struct {
+	// FreshStartOnFailedResume makes a resume fall back to a fresh start of
+	// the harness when the resume attempt exits non-zero within
+	// resumeFallbackWindowSeconds (see resumeFallbackCmdLine). Set it only
+	// where the agent home, and so the harness's saved session, does not
+	// survive a restart: the Kubernetes runtime with a pod-local home.
+	// Where the home persists, a fast failure has another cause (network,
+	// auth) and must not silently drop the conversation.
+	FreshStartOnFailedResume bool
+}
+
+// resumeFallbackWindowSeconds bounds how soon a failed resume attempt must
+// exit for FreshStartOnFailedResume to start the harness fresh. A harness
+// with no session to resume exits within a few seconds; a resumed session
+// that fails later is not restarted fresh.
+const resumeFallbackWindowSeconds = 30
+
+// resumeFallbackNotice is printed to stderr before the fresh start.
+const resumeFallbackNotice = "scion: no resumable session; starting fresh"
+
 // harnessCmdLine builds the shell command line that runs the harness (or
 // the no-auth shell), from the fields shared by every runtime's entrypoint
 // builder: NoAuth/NoAuthMessage/NoAuthCommand, or Harness.GetCommand with
 // Task/Resume/CommandArgs. It returns ok=false when neither is configured;
 // callers decide how to handle that case, since it differs by runtime
 // (error out, or fall back to a placeholder command).
-func harnessCmdLine(cfg RunConfig) (cmdLine string, ok bool) {
+func harnessCmdLine(cfg RunConfig, opts harnessCmdLineOptions) (cmdLine string, ok bool) {
 	if cfg.NoAuth {
 		return buildNoAuthCmdLine(cfg.NoAuthMessage, cfg.NoAuthCommand), true
 	}
 	if cfg.Harness != nil {
 		harnessArgs := cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
-		quotedArgs := make([]string, 0, len(harnessArgs))
-		for _, a := range harnessArgs {
-			quotedArgs = append(quotedArgs, shellQuote(a))
+		if cfg.Resume && opts.FreshStartOnFailedResume {
+			freshArgs := cfg.Harness.GetCommand(cfg.Task, false, cfg.CommandArgs)
+			if !slices.Equal(harnessArgs, freshArgs) {
+				return resumeFallbackCmdLine(cfg.Task, harnessArgs, freshArgs), true
+			}
 		}
-		return strings.Join(quotedArgs, " "), true
+		return quotedArgsLine(harnessArgs, "", ""), true
 	}
 	return "", false
+}
+
+// quotedArgsLine shell-quotes each argument and joins them with spaces. An
+// argument equal to a non-empty task is replaced by taskRef instead.
+func quotedArgsLine(args []string, task, taskRef string) string {
+	quotedArgs := make([]string, 0, len(args))
+	for _, a := range args {
+		if task != "" && a == task {
+			quotedArgs = append(quotedArgs, taskRef)
+			continue
+		}
+		quotedArgs = append(quotedArgs, shellQuote(a))
+	}
+	return strings.Join(quotedArgs, " ")
+}
+
+// resumeFallbackCmdLine runs resumeArgs and, when they exit with a status
+// from 1 to 127 within resumeFallbackWindowSeconds, prints
+// resumeFallbackNotice and runs freshArgs. A status of 128 or more means
+// the harness was killed by a signal (a stop, suspend or pod delete), which
+// never starts the fresh run; if the shell itself is signalled it dies and
+// runs nothing further. freshArgs is the harness's own non-resume command,
+// so the fallback drops exactly the resume flag that harness adds, plus any
+// prompt GetCommand adds only on resume, and carries the same task: on a
+// wake that is no task, never the original prompt. The line's exit status is that of the last harness run, so
+// tmuxAgentWindowCmd records the real code. The task is stored once in a
+// shell variable that both commands reference, so it adds to the line
+// about what it adds to the plain line (see QuotedTaskBytes).
+func resumeFallbackCmdLine(task string, resumeArgs, freshArgs []string) string {
+	const taskRef = `"$scion_task"`
+	return fmt.Sprintf(
+		`scion_task=%s; scion_start=$(date +%%s); %s; scion_rc=$?; `+
+			`if [ "$scion_rc" -gt 0 ] && [ "$scion_rc" -lt 128 ] && [ $(( $(date +%%s) - scion_start )) -lt %d ]; `+
+			`then printf '%%s\n' %s >&2; %s; else (exit "$scion_rc"); fi`,
+		shellQuote(task),
+		quotedArgsLine(resumeArgs, task, taskRef),
+		resumeFallbackWindowSeconds,
+		shellQuote(resumeFallbackNotice),
+		quotedArgsLine(freshArgs, task, taskRef),
+	)
 }
 
 // tmuxAgentWindowCmd wraps cmdLine so the harness's real exit code is
@@ -630,7 +694,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// directly into the sh -c used by the tmux agent window. This avoids
 	// the double-sh-c wrapping that previously caused the no-auth command
 	// to be injected as terminal input instead of running standalone.
-	cmdLine, ok := harnessCmdLine(config)
+	cmdLine, ok := harnessCmdLine(config, harnessCmdLineOptions{})
 	if !ok {
 		return nil, fmt.Errorf("no harness provided")
 	}
