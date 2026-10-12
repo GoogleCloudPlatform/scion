@@ -176,6 +176,144 @@ func TestAgentDelegationStore_CredentialAndRevocation(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
+func TestAgentDelegationStore_ListCountAndLocks(t *testing.T) {
+	s := NewCompositeStore(enttest.NewClient(t))
+	ctx := context.Background()
+	now := time.Now()
+
+	issuer := uuid.NewString()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: issuer, Email: "delegation-issuer@example.com", Role: store.UserRoleMember, Status: "active", Created: now,
+	}))
+	agentA, agentB := uuid.NewString(), uuid.NewString()
+	mk := func(agentID, issuerID string, expires time.Time, created time.Time) *store.AgentDelegationGrant {
+		g := testDelegationGrant()
+		g.AgentID, g.IssuerUserID, g.ExpiresAt, g.Created = agentID, issuerID, expires, created
+		require.NoError(t, s.CreateAgentDelegationGrant(ctx, g))
+		return g
+	}
+	older := mk(agentA, issuer, now.Add(time.Hour), now.Add(-2*time.Minute))
+	newer := mk(agentA, issuer, now.Add(time.Hour), now.Add(-time.Minute))
+	expired := mk(agentA, issuer, now.Add(-time.Minute), now.Add(-3*time.Minute))
+	otherIssuer := mk(agentA, uuid.NewString(), now.Add(time.Hour), now)
+	onB := mk(agentB, issuer, now.Add(time.Hour), now)
+	revoked := mk(agentB, issuer, now.Add(time.Hour), now.Add(-time.Minute))
+	_, err := s.RevokeAgentDelegationGrant(ctx, revoked.ID, "test", "test", "", now)
+	require.NoError(t, err)
+
+	ids := func(gs []*store.AgentDelegationGrant) []string {
+		out := make([]string, 0, len(gs))
+		for _, g := range gs {
+			out = append(out, g.ID)
+		}
+		return out
+	}
+	byAgent, err := s.ListAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{AgentID: agentA})
+	require.NoError(t, err)
+	assert.Equal(t, []string{otherIssuer.ID, newer.ID, older.ID, expired.ID}, ids(byAgent), "newest first")
+	byIssuer, err := s.ListAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{IssuerUserID: issuer})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{older.ID, newer.ID, expired.ID, onB.ID, revoked.ID}, ids(byIssuer))
+	both, err := s.ListAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{AgentID: agentB, IssuerUserID: issuer})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{onB.ID, revoked.ID}, ids(both))
+	_, err = s.ListAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{})
+	assert.ErrorIs(t, err, store.ErrInvalidInput, "an empty filter never lists every grant")
+
+	n, err := s.CountActiveAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{AgentID: agentA}, now)
+	require.NoError(t, err)
+	assert.Equal(t, 3, n, "expired grants do not count")
+	n, err = s.CountActiveAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{IssuerUserID: issuer}, now)
+	require.NoError(t, err)
+	assert.Equal(t, 3, n, "revoked and expired grants do not count")
+	_, err = s.CountActiveAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{}, now)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	require.NoError(t, s.WithTx(ctx, func(tx store.Store) error {
+		require.NoError(t, tx.LockAgentDelegationIssuer(ctx, issuer))
+		assert.ErrorIs(t, tx.LockAgentDelegationIssuer(ctx, uuid.NewString()), store.ErrNotFound)
+		locked, err := tx.LockAgentDelegationGrant(ctx, revoked.ID)
+		require.NoError(t, err)
+		assert.NotNil(t, locked.RevokedAt, "the grant is read under the lock")
+		_, err = tx.LockAgentDelegationGrant(ctx, uuid.NewString())
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		return nil
+	}))
+}
+
+func TestAgentDelegationStore_CredentialRevokeListAndPurge(t *testing.T) {
+	s := NewCompositeStore(enttest.NewClient(t))
+	ctx := context.Background()
+	now := time.Now()
+
+	g1, g2 := testDelegationGrant(), testDelegationGrant()
+	require.NoError(t, s.CreateAgentDelegationGrant(ctx, g1))
+	require.NoError(t, s.CreateAgentDelegationGrant(ctx, g2))
+	mk := func(g *store.AgentDelegationGrant, hash string, issued, expires time.Time) *store.AgentDelegatedCredential {
+		c := &store.AgentDelegatedCredential{
+			GrantID: g.ID, AgentID: g.AgentID, KeyHash: hash, Prefix: "scion_adt_", Audience: "scion-hub",
+			CeilingPermissionIDs: []string{"agent.read"}, ExchangeAgentCredentialID: uuid.NewString(),
+			IssuedAt: issued, ExpiresAt: expires,
+		}
+		require.NoError(t, s.CreateAgentDelegatedCredential(ctx, c))
+		return c
+	}
+	first := mk(g1, "h-first", now.Add(-3*time.Minute), now.Add(10*time.Minute))
+	second := mk(g1, "h-second", now.Add(-2*time.Minute), now.Add(10*time.Minute))
+	stale := mk(g1, "h-stale", now.Add(-time.Hour), now.Add(-time.Minute))
+	onG2 := mk(g2, "h-g2", now.Add(-time.Minute), now.Add(10*time.Minute))
+
+	got, err := s.GetAgentDelegatedCredential(ctx, second.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "h-second", got.KeyHash)
+	_, err = s.GetAgentDelegatedCredential(ctx, uuid.NewString())
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	active, err := s.ListActiveAgentDelegatedCredentials(ctx, []string{g1.ID}, now)
+	require.NoError(t, err)
+	require.Len(t, active, 2)
+	assert.Equal(t, first.ID, active[0].ID, "oldest first")
+	assert.Equal(t, second.ID, active[1].ID)
+	all, err := s.ListActiveAgentDelegatedCredentials(ctx, []string{g1.ID, g2.ID}, time.Time{})
+	require.NoError(t, err)
+	assert.Len(t, all, 4, "the zero time lists every unrevoked credential")
+	none, err := s.ListActiveAgentDelegatedCredentials(ctx, nil, now)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+
+	revoked, err := s.RevokeAgentDelegatedCredential(ctx, first.ID, "superseded", now)
+	require.NoError(t, err)
+	assert.True(t, revoked)
+	revoked, err = s.RevokeAgentDelegatedCredential(ctx, first.ID, "other", now)
+	require.NoError(t, err)
+	assert.False(t, revoked, "a repeat changes nothing")
+	got, err = s.GetAgentDelegatedCredential(ctx, first.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "superseded", got.RevokeReason)
+	_, err = s.RevokeAgentDelegatedCredential(ctx, uuid.NewString(), "x", now)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	active, err = s.ListActiveAgentDelegatedCredentials(ctx, []string{g1.ID}, now)
+	require.NoError(t, err)
+	require.Len(t, active, 1)
+	assert.Equal(t, second.ID, active[0].ID)
+
+	// Purge deletes rows that expired before the cutoff, revoked or not.
+	purged, err := s.PurgeAgentDelegatedCredentials(ctx, now)
+	require.NoError(t, err)
+	assert.Equal(t, 1, purged)
+	_, err = s.GetAgentDelegatedCredential(ctx, stale.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	purged, err = s.PurgeAgentDelegatedCredentials(ctx, now.Add(time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 3, purged)
+	for _, id := range []string{first.ID, second.ID, onG2.ID} {
+		_, err = s.GetAgentDelegatedCredential(ctx, id)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	}
+	_, err = s.GetAgentDelegationGrant(ctx, g1.ID)
+	require.NoError(t, err, "grants are never purged")
+}
+
 func TestAgentDelegationStore_WritesRollBackWithTheTransaction(t *testing.T) {
 	s := NewCompositeStore(enttest.NewClient(t))
 	ctx := context.Background()

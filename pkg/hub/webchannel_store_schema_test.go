@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -28,6 +28,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	sqlite3 "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -345,4 +346,181 @@ func TestWebChatStore_Postgres_ThreadMigrationsRunOnce(t *testing.T) {
 		"a recorded backfill must not run again")
 	assert.Equal(t, 1, pgMigrationRecords(t, db, "thread_id_backfill"))
 	assert.Equal(t, 1, pgMigrationRecords(t, db, "thread_id_index"))
+}
+
+// sqliteThreadMigrationMessagesDDL carries the messages columns the SQLite
+// thread_id backfill reads and writes (the real table is created by the Ent
+// migration).
+const sqliteThreadMigrationMessagesDDL = `CREATE TABLE messages (
+    id TEXT PRIMARY KEY, created TEXT NOT NULL, channel TEXT, thread_id TEXT,
+    sender TEXT, sender_id TEXT, recipient TEXT, recipient_id TEXT)`
+
+// insertSQLiteLegacyAgentThreadMessage inserts a web message in the legacy
+// "agent:<id>" thread format that the thread_id backfill rewrites.
+func insertSQLiteLegacyAgentThreadMessage(t *testing.T, db *sql.DB, id string) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO messages
+		(id, created, channel, thread_id, sender, sender_id, recipient, recipient_id)
+		VALUES (?, '2026-01-01T00:00:00Z', 'web', 'agent:agent-a', 'agent:agent-a', 'agent-a', 'user:user-1', 'user-1')`, id)
+	require.NoError(t, err)
+}
+
+func sqliteMessageThreadID(t *testing.T, db *sql.DB, id string) string {
+	t.Helper()
+	var tid string
+	require.NoError(t, db.QueryRow(`SELECT thread_id FROM messages WHERE id = ?`, id).Scan(&tid))
+	return tid
+}
+
+func sqliteMigrationRecords(t *testing.T, db *sql.DB, name string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM webchat_migrations WHERE name = ?`, name).Scan(&n))
+	return n
+}
+
+// TestSQLiteWebChatStore_ThreadMigrationsWaitForMessagesTable checks that
+// when the store starts before the Ent migration has created messages, the
+// thread_id backfill and thread_id index migrations are not recorded as
+// completed, and that they run on the next Init once the table exists.
+func TestSQLiteWebChatStore_ThreadMigrationsWaitForMessagesTable(t *testing.T) {
+	db := openTestMemorySQLite(t, "sqlite")
+	const legacyID = "msg-legacy-1"
+
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
+	assert.Zero(t, sqliteMigrationRecords(t, db, "thread_id_backfill"),
+		"backfill must not be recorded while messages does not exist")
+	assert.Zero(t, sqliteMigrationRecords(t, db, "thread_id_index"),
+		"index migration must not be recorded while messages does not exist")
+
+	// The Ent migration creates messages later; it holds a legacy row.
+	_, err := db.Exec(sqliteThreadMigrationMessagesDDL)
+	require.NoError(t, err)
+	insertSQLiteLegacyAgentThreadMessage(t, db, legacyID)
+	require.False(t, sqliteIndexExists(db, "idx_messages_thread_id"))
+
+	// The next store start runs both migrations and records them.
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
+	assert.Equal(t, "dm:agent:agent-a:user:user-1", sqliteMessageThreadID(t, db, legacyID),
+		"backfill must run once messages exists")
+	assert.True(t, sqliteIndexExists(db, "idx_messages_thread_id"),
+		"thread_id index must be created once messages exists")
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_backfill"))
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_index"))
+}
+
+// TestSQLiteWebChatStore_ThreadMigrationsRunOnce checks that with messages
+// present the thread_id migrations run on the first Init and are recorded,
+// and that a later Init does not run them again.
+func TestSQLiteWebChatStore_ThreadMigrationsRunOnce(t *testing.T) {
+	db := openTestMemorySQLite(t, "sqlite")
+	const firstID = "msg-first"
+	const laterID = "msg-later"
+
+	_, err := db.Exec(sqliteThreadMigrationMessagesDDL)
+	require.NoError(t, err)
+	insertSQLiteLegacyAgentThreadMessage(t, db, firstID)
+
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
+	assert.Equal(t, "dm:agent:agent-a:user:user-1", sqliteMessageThreadID(t, db, firstID))
+	assert.True(t, sqliteIndexExists(db, "idx_messages_thread_id"))
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_backfill"))
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_index"))
+
+	// A recorded migration does not run again: a legacy row written after
+	// the first Init is left as it is, and nothing is recorded twice.
+	insertSQLiteLegacyAgentThreadMessage(t, db, laterID)
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
+	assert.Equal(t, "agent:agent-a", sqliteMessageThreadID(t, db, laterID),
+		"a recorded backfill must not run again")
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_backfill"))
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_index"))
+}
+
+// SQLite authorizer codes (https://www.sqlite.org/c3ref/c_alter_table.html,
+// https://www.sqlite.org/c3ref/c_deny.html). go-sqlite3 exports these only in
+// cgo builds, so they are spelled out here to keep the file compiling without
+// cgo.
+const (
+	sqliteAuthOK   = 0  // SQLITE_OK
+	sqliteAuthDeny = 1  // SQLITE_DENY
+	sqliteAuthRead = 20 // SQLITE_READ
+)
+
+// setSQLiteSchemaReadDenied installs (deny=true) or removes (deny=false) an
+// authorizer that rejects reads of sqlite_master, so the table-existence
+// check fails while other statements still work. openTestMemorySQLite pins
+// the pool to one connection, so the authorizer applies to every later
+// query on db.
+func setSQLiteSchemaReadDenied(t *testing.T, db *sql.DB, deny bool) {
+	t.Helper()
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	defer conn.Close() //nolint:errcheck
+	require.NoError(t, conn.Raw(func(dc any) error {
+		sc, ok := dc.(*sqlite3.SQLiteConn)
+		if !ok {
+			return fmt.Errorf("driver connection is %T, want *sqlite3.SQLiteConn", dc)
+		}
+		if !deny {
+			sc.RegisterAuthorizer(nil)
+			return nil
+		}
+		sc.RegisterAuthorizer(func(op int, arg1, _, _ string) int {
+			if op == sqliteAuthRead && (arg1 == "sqlite_master" || arg1 == "sqlite_schema") {
+				return sqliteAuthDeny
+			}
+			return sqliteAuthOK
+		})
+		return nil
+	}))
+}
+
+// TestSQLiteWebChatStore_TableExistsError_Surfaces checks that a failed
+// table-existence query is returned as an error rather than treated as
+// "table absent". For the two migrations, treating it as absent would also
+// mark the migration completed, so it would never run.
+func TestSQLiteWebChatStore_TableExistsError_Surfaces(t *testing.T) {
+	newStore := func(t *testing.T) (*sqliteWebChatStore, *sql.DB) {
+		// Stays on mattn/go-sqlite3: the fault injection needs an
+		// authorizer hook (setSQLiteSchemaReadDenied), which
+		// modernc.org/sqlite, the production driver, does not expose.
+		db := openTestMemorySQLite(t, "sqlite3")
+		s := &sqliteWebChatStore{db: db}
+		require.NoError(t, s.Init())
+		// Init on a database without messages records nothing; make sure,
+		// so the assertions below see only what the call under test wrote.
+		_, err := db.Exec(`DELETE FROM webchat_migrations WHERE name IN ('thread_id_backfill', 'thread_id_index')`)
+		require.NoError(t, err)
+		setSQLiteSchemaReadDenied(t, db, true)
+		return s, db
+	}
+
+	t.Run("SearchChatMessages", func(t *testing.T) {
+		s, db := newStore(t)
+		res, cursor, err := s.SearchChatMessages(context.Background(), ChatSearchFilter{Query: "x", ProjectID: "p"})
+		require.Error(t, err, "a failed existence check must be returned, not read as no results")
+		assert.Contains(t, err.Error(), "check table messages exists")
+		assert.Nil(t, res)
+		assert.Empty(t, cursor)
+		setSQLiteSchemaReadDenied(t, db, false)
+	})
+
+	for name, run := range map[string]func(*sqliteWebChatStore) error{
+		"migrateThreadIDs": func(s *sqliteWebChatStore) error { return s.migrateThreadIDs(DefaultMigrationBatchSize) },
+		"addThreadIDIndex": func(s *sqliteWebChatStore) error { return s.addThreadIDIndex() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, db := newStore(t)
+			err := run(s)
+			require.Error(t, err, "a failed existence check must be returned")
+			assert.Contains(t, err.Error(), "check table messages exists")
+
+			setSQLiteSchemaReadDenied(t, db, false)
+			assert.Zero(t, sqliteMigrationRecords(t, db, "thread_id_backfill"),
+				"a failed existence check must not mark the migration completed")
+			assert.Zero(t, sqliteMigrationRecords(t, db, "thread_id_index"),
+				"a failed existence check must not mark the migration completed")
+		})
+	}
 }

@@ -1,4 +1,4 @@
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 // Copyright 2026 Google LLC
 //
@@ -48,8 +48,8 @@ type dmPeerEnv struct {
 func setupDMPeerEnv(t *testing.T) *dmPeerEnv {
 	t.Helper()
 	srv, s, alice, bob, project := setupDemoPolicyTest(t)
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	return &dmPeerEnv{srv: srv, s: s, wcs: wcs, alice: alice, bob: bob, project: project}

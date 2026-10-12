@@ -127,6 +127,15 @@ func (User) Fields() []ent.Field {
 			Nillable().
 			Immutable().
 			Comment("ID of the issuer's user access token for an admin-kind test identity; null for a session issuer"),
+		// issuer_delegation_id is set only on a test_fixture row issued
+		// through a workload-bound issuer delegation
+		// (test_identity_delegations), at create, and never changes. The
+		// per-delegation cap and management scope key on it.
+		field.String("issuer_delegation_id").
+			Optional().
+			Nillable().
+			Immutable().
+			Comment("ID of the issuer delegation a test_fixture user was issued through; empty for session and PAT issuance"),
 	}
 }
 
@@ -158,6 +167,8 @@ func (User) Indexes() []ent.Index {
 		index.Fields("last_seen"),
 		// Supports the live test-fixture counts behind the issuance caps.
 		index.Fields("kind", "issued_by"),
+		// Supports the live per-delegation count behind the delegation cap.
+		index.Fields("kind", "issuer_delegation_id"),
 	}
 }
 
@@ -175,6 +186,11 @@ func (User) Edges() []ent.Edge {
 		edge.To("external_identities", ExternalIdentity.Type).
 			Annotations(entsql.OnDelete(entsql.Cascade)),
 		edge.To("terminal_workspace", UserTerminalWorkspace.Type).
+			Unique().
+			Annotations(entsql.OnDelete(entsql.Cascade)),
+		// A test identity's single-use web-login code goes with the
+		// user row (ptone/scion#4240, phase WS1).
+		edge.To("test_identity_login_code", TestIdentityLoginCode.Type).
 			Unique().
 			Annotations(entsql.OnDelete(entsql.Cascade)),
 	}

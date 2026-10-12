@@ -441,6 +441,27 @@ describe('artifact page', () => {
     }
   });
 
+  it('offers a review-only caller Review, and not Edit or Upload new version', async () => {
+    const meta = { ...artifact('design.md', 'text/markdown'), canPublish: false, canReview: true };
+    mockFetch(meta, '# Doc');
+    const el = await mount(true);
+    expect(button(el, '.header-actions sl-button', 'Review')).toBeDefined();
+    expect(button(el, '.header-actions sl-button', 'Edit')).toBeUndefined();
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    expect((panel.textContent ?? '').includes('Upload new version')).toBe(false);
+    // Review opens Review mode with its Save review action.
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    expect(button(el, '.edit-footer sl-button', 'Save review')).toBeDefined();
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    // A text entry cannot be reviewed, so a review-only caller gets neither.
+    mockFetch({ ...artifact('notes.txt', 'text/plain'), canPublish: false, canReview: true }, 'hi');
+    const txt = await mount(true);
+    expect(button(txt, '.header-actions sl-button', 'Review')).toBeUndefined();
+    expect(button(txt, '.header-actions sl-button', 'Edit')).toBeUndefined();
+  });
+
   it('offers Upload new version below a longer history only to a publisher', async () => {
     const versions: ArtifactVersion[] = [2, 1].map((seq) => ({
       seq,
@@ -795,6 +816,57 @@ describe('artifact page', () => {
     expect(dialog.open).toBe(false);
     expect(dialog.artifact).toMatchObject({ expiresAt: '2026-12-01T00:00:00Z' });
   });
+
+  it('offers Grant review access, the Share dialog in review mode, to who may grant review but not manage', async () => {
+    const meta = (extra: Partial<ArtifactResponse>): ArtifactResponse => {
+      const m = { ...artifact('notes.md', 'text/markdown'), ...extra };
+      m.artifact = { ...m.artifact, ownerKind: 'agent', ownerRef: 'agent-1' };
+      return m;
+    };
+    const actionButton = (el: ScionPageArtifactDetail, text: string): HTMLElement | undefined =>
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
+        b.textContent!.includes(text)
+      ) as HTMLElement | undefined;
+    type Dialog = HTMLElement & { open: boolean; mode: string; artifact: { id: string } };
+
+    // canGrantReview without canManage: Grant review access, not Share.
+    mockFetch(meta({ canGrantReview: true }));
+    let el = await mount(true);
+    expect(actionButton(el, 'Share')).toBeUndefined();
+    const grant = actionButton(el, 'Grant review access');
+    expect(grant).toBeDefined();
+    let dialog = el.shadowRoot!.querySelector('scion-artifact-share-dialog') as Dialog;
+    expect(dialog.mode).toBe('review');
+    expect(dialog.artifact.id).toBe(ID);
+    expect(dialog.open).toBe(false);
+    grant!.click();
+    await el.updateComplete;
+    expect(dialog.open).toBe(true);
+    dialog.dispatchEvent(new CustomEvent('artifact-share-closed'));
+    await el.updateComplete;
+    expect(dialog.open).toBe(false);
+    document.body.innerHTML = '';
+
+    // canManage wins: Share with the full dialog, never both actions.
+    mockFetch(meta({ canManage: true, canGrantReview: true }));
+    el = await mount(true);
+    expect(actionButton(el, 'Share')).toBeDefined();
+    expect(actionButton(el, 'Grant review access')).toBeUndefined();
+    dialog = el.shadowRoot!.querySelector('scion-artifact-share-dialog') as Dialog;
+    expect(dialog.mode).toBe('share');
+    document.body.innerHTML = '';
+
+    // Neither: no action and no dialog.
+    for (const canGrantReview of [false, undefined]) {
+      mockFetch(meta({ canGrantReview }));
+      el = await mount(true);
+      expect(actionButton(el, 'Grant review access')).toBeUndefined();
+      expect(actionButton(el, 'Share')).toBeUndefined();
+      expect(el.shadowRoot!.querySelector('scion-artifact-share-dialog')).toBeNull();
+      document.body.innerHTML = '';
+    }
+  });
+
   /** A review version (current) of a markdown artifact owned by an agent. */
   function reviewMeta(): ArtifactResponse {
     const meta = artifact('plan.md', 'text/markdown');

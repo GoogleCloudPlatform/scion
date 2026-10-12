@@ -1415,7 +1415,7 @@ func splitSubstrateID(id string) (atespace, actorName string, err error) {
 // PID 1 does: no TTY, so it polls the tmux session's liveness rather than
 // attaching.
 func buildSubstrateStartCmd(cfg RunConfig) (string, error) {
-	cmdLine, ok := harnessCmdLine(cfg)
+	cmdLine, ok := harnessCmdLine(cfg, harnessCmdLineOptions{})
 	if !ok {
 		return "", fmt.Errorf("substrate: no harness provided")
 	}

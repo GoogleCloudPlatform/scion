@@ -372,6 +372,12 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		TargetAgent:      targetAgent,
 		ExcludedAgents:   excludedAgents,
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
+		// A project from the current context names a project on a
+		// specific hub, so the hub.enabled gate does not apply.
+		ExplicitHub: isContextProject(projectPath),
+		// The hub selected with 'scion use' never links or registers a
+		// project that is already linked to a hub.
+		HubFromContext: hubSource == targetSourceContext,
 		// On the local workstation hub, link an unregistered project
 		// without prompting; a remote hub keeps the prompt.
 		AutoLinkLocal: true,
@@ -379,7 +385,7 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 
 	// A hub project reference needs hub mode: offer to enable it (when
 	// logged in, interactively) or name 'scion hub enable' (#3533).
-	if !noHub && projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
+	if !noHub && !opts.ExplicitHub && projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
 		if err := ensureHubModeForHubProjectRefForInvocation(projectPath); err != nil {
 			return nil, err
 		}
@@ -409,7 +415,15 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 
 // errHubNotConfigured is returned by requireHub when the command needs a hub
 // but none is in use (hub not enabled, or --no-hub was given).
-var errHubNotConfigured = errors.New("this command needs a hub; run 'scion server start' or 'scion hub enable'")
+var errHubNotConfigured error = hubNotConfiguredError{}
+
+// hubNotConfiguredError is the type of errHubNotConfigured. Its message is
+// a full sentence that names the ways to select a hub.
+type hubNotConfiguredError struct{}
+
+func (hubNotConfiguredError) Error() string {
+	return "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'."
+}
 
 // requireHub is CheckHubAvailability for commands that only work against a
 // hub. It never returns a nil HubContext without an error: when no hub is in

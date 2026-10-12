@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 package hub
 
@@ -81,7 +81,13 @@ func agentRouteCases() []agentRouteCase {
 		byID(get, "/metrics/summary", AgentRouteMetricsSummary, "", none),
 		byID(post, "/hold/lift", AgentRouteHoldLift, opAgentHoldLift, none),
 		byID(post, "/delegations", AgentRouteDelegations, opAgentDelegationCreate, none),
-		byID(get, "/delegations", AgentRouteDelegations, "", none),
+		byID(get, "/delegations", AgentRouteDelegations, opAgentDelegationList, none),
+		byID(http.MethodPut, "/delegations", AgentRouteDelegations, "", none),
+		byID(get, "/delegations/g-1", AgentRouteDelegationItem, opAgentDelegationRead, AgentSubRouteSuffix{Param: "g-1"}),
+		byID(http.MethodDelete, "/delegations/g-1", AgentRouteDelegationItem, opAgentDelegationRevoke, AgentSubRouteSuffix{Param: "g-1"}),
+		byID(post, "/delegations/g-1", AgentRouteDelegationItem, "", AgentSubRouteSuffix{Param: "g-1"}),
+		byID(http.MethodDelete, "/delegations/g-1/credentials/c-1", AgentRouteDelegationCredential, opAgentDelegationCredentialRevoke, AgentSubRouteSuffix{Param: "g-1", SecondParam: "c-1"}),
+		byID(get, "/delegations/g-1/credentials/c-1", AgentRouteDelegationCredential, "", AgentSubRouteSuffix{Param: "g-1", SecondParam: "c-1"}),
 		byID(post, "/delegations/g-1/exchange", AgentRouteDelegationExchange, opAgentDelegationExchange, AgentSubRouteSuffix{Param: "g-1"}),
 		byID(get, "/delegations/g-1/exchange", AgentRouteDelegationExchange, "", AgentSubRouteSuffix{Param: "g-1"}),
 		byID(post, "/status", AgentRouteActionStatus, "", none),
@@ -384,6 +390,24 @@ func TestAgentSubRoute_CatalogDrift(t *testing.T) {
 		opAgentTokenRefresh, opAgentOutboundMessage, opAgentMetricsReport,
 	} {
 		assert.NotEmpty(t, discovered[op], "operation %s has no resolver entry point", op)
+	}
+	// An operation may also declare HTTP entry points outside the agent
+	// sub-route namespace (agent.delegation.list also serves
+	// /api/v1/users/me/delegations). The resolver does not own those;
+	// TestCatalogHTTPEntryPoints_LiveMethodCheck checks them against the
+	// live mux. They are carried over so the drift check judges only the
+	// resolver's own namespace.
+	for _, spec := range authzop.Catalog {
+		if _, resolved := discovered[spec.ID]; !resolved {
+			continue
+		}
+		for _, ep := range spec.EntryPoints {
+			if ep.Kind != authzop.EntryPointHTTPRoute || strings.HasPrefix(ep.Pattern, "/api/v1/agents") ||
+				strings.HasPrefix(ep.Pattern, "/api/v1/projects/{projectId}/agents") {
+				continue
+			}
+			discovered[spec.ID] = append(discovered[spec.ID], authzop.DiscoveredEntryPoint{Kind: ep.Kind, Pattern: ep.Pattern, Method: ep.Method})
+		}
 	}
 	assert.Empty(t, authzop.CheckDrift(discovered))
 }

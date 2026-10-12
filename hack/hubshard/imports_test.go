@@ -52,9 +52,9 @@ var driverFixture = map[string]string{
 	"ext_test.go": "package hub_test\n\nimport _ \"example.com/importshub\"\n",
 }
 
-func writeFiles(t *testing.T, files map[string]string) (dir, assign string) {
+func writeFiles(t *testing.T, files map[string]string) (root, dir string) {
 	t.Helper()
-	root := t.TempDir()
+	root = t.TempDir()
 	dir = filepath.Join(root, "hub")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -64,31 +64,21 @@ func writeFiles(t *testing.T, files map[string]string) (dir, assign string) {
 			t.Fatal(err)
 		}
 	}
-	return dir, filepath.Join(root, "assignment.txt")
+	return root, dir
 }
 
-func driverArgs(dir, assign string) []string {
+func driverArgs(root, dir string) []string {
 	// -maxgroupdiv 1: no size cut, so only main_test.go is common.
-	return []string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-maxgroupdiv", "1"}
+	return []string{"-root", root, "-dir", dir, "-maxgroupdiv", "1", "-n", "2"}
 }
 
 func TestDriverImports(t *testing.T) {
-	dir, assign := writeFiles(t, driverFixture)
-	args := driverArgs(dir, assign)
-	if err := run(append(args, "-n", "2"), &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	_, as, err := readAssignment(assign)
-	if err != nil {
-		t.Fatal(err)
-	}
+	root, dir := writeFiles(t, driverFixture)
+	args := driverArgs(root, dir)
+	files, _ := overlayFiles(t, args)
+	as := shardOfOverlay(t, files)
 	if as["reg_test.go"] == as["user_test.go"] || as["reg_test.go"] == 0 || as["user_test.go"] == 0 {
 		t.Fatalf("setup: want reg and user in different shards, got %v", as)
-	}
-	for n := range as {
-		if isImportsFile(n) {
-			t.Errorf("%s: generated file listed in the assignment file", n)
-		}
 	}
 
 	want := map[string]struct{ build, imports string }{
@@ -97,15 +87,24 @@ func TestDriverImports(t *testing.T) {
 		"zz_hubshard_drivers_2_test.go": {"//go:build (darwin && !no_sqlite) || linux\n", "import (\n\t_ \"example.com/multi\"\n)\n"},
 		"zz_hubshard_drivers_3_test.go": {"//go:build linux\n", "import (\n\t_ \"example.com/linuxonly\"\n)\n"},
 	}
-	got, err := filepath.Glob(filepath.Join(dir, "zz_*"))
-	if err != nil {
-		t.Fatal(err)
+	n := 0
+	for name := range files {
+		if isImportsFile(name) {
+			n++
+		}
 	}
-	if len(got) != len(want) {
-		t.Errorf("generated files: got %v, want %d", got, len(want))
+	if n != len(want) {
+		t.Errorf("generated imports files: got %d, want %d", n, len(want))
 	}
 	for name, w := range want {
-		src := read(t, dir, name)
+		src, ok := files[name]
+		if !ok {
+			t.Errorf("%s: not in the overlay", name)
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s: written to the tree: %v", name, err)
+		}
 		if !strings.HasSuffix(src, w.imports) {
 			t.Errorf("%s: want imports\n%s\ngot:\n%s", name, w.imports, src)
 		}
@@ -134,107 +133,35 @@ func TestDriverImports(t *testing.T) {
 		}
 	}
 
-	// Byte-stable: a second run rewrites nothing, and -check -strict passes.
-	before := map[string]string{}
-	for name := range want {
-		before[name] = read(t, dir, name)
-	}
+	// -parity passes, and warns about the external package's blank import.
 	var out bytes.Buffer
-	if err := run(args, &out); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), "rewrote 0 file(s)") {
-		t.Errorf("second run rewrote files:\n%s", out.String())
-	}
-	for name, src := range before {
-		if read(t, dir, name) != src {
-			t.Errorf("%s changed on the second run", name)
-		}
-	}
-	out.Reset()
-	if err := run(append(args, "-check", "-strict"), &out); err != nil {
-		t.Fatalf("-check -strict: %v", err)
+	if err := run(append(args, "-parity"), &out); err != nil {
+		t.Fatalf("-parity: %v\n%s", err, out.String())
 	}
 	if !strings.Contains(out.String(), "warning: ext_test.go: package hub_test, tagged for shard") {
 		t.Errorf("want a warning for the external package's blank import, got:\n%s", out.String())
 	}
 }
 
-func TestDriverImportsCheck(t *testing.T) {
-	remove := func(t *testing.T, dir, name string) {
-		t.Helper()
-		if err := os.Remove(filepath.Join(dir, name)); err != nil {
-			t.Fatal(err)
-		}
+func TestParityCatchesMissingDriver(t *testing.T) {
+	// Without the generated imports files, user_test.go's shard would not
+	// link the sqlite3 driver: -parity must say so.
+	_, dir := writeFiles(t, driverFixture)
+	maxGroupDiv = 1
+	defer func() { maxGroupDiv = defaultMaxGroupDiv }()
+	files, err := loadFiles(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	add := func(t *testing.T, dir, name, src string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	an := analyze(files)
+	s, err := newSharding(dir, files, an, assignShards(an, files, 2), 2)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		name string
-		edit func(t *testing.T, dir string)
-		want string // "" = -check passes
-	}{
-		{"imports file missing", func(t *testing.T, dir string) {
-			remove(t, dir, "zz_hubshard_drivers_test.go")
-		}, "zz_hubshard_drivers_test.go: generated imports file is missing"},
-		{"conditional imports file missing", func(t *testing.T, dir string) {
-			remove(t, dir, "zz_hubshard_drivers_1_test.go")
-		}, "zz_hubshard_drivers_1_test.go: generated imports file is missing"},
-		{"imports file tagged by hand", func(t *testing.T, dir string) {
-			p := "zz_hubshard_drivers_test.go"
-			add(t, dir, p, "//go:build !hubshard || hubshard_1\n\n"+read(t, dir, p))
-		}, "zz_hubshard_drivers_test.go: generated imports file differs"},
-		{"imports file hand-edited", func(t *testing.T, dir string) {
-			p := "zz_hubshard_drivers_1_test.go"
-			add(t, dir, p, read(t, dir, p)+"\n// edited\n")
-		}, "zz_hubshard_drivers_1_test.go: generated imports file differs"},
-		{"common file imports a driver already in the imports file", func(t *testing.T, dir string) {
-			add(t, dir, "db_helpers_test.go", header+"import _ \"github.com/mattn/go-sqlite3\"\n")
-		}, ""},
-		{"new driver in a sharded file", func(t *testing.T, dir string) {
-			src := read(t, dir, "user_test.go")
-			add(t, dir, "user_test.go", strings.Replace(src, "\"database/sql\"\n", "\"database/sql\"\n\n\t_ \"example.com/newdriver\"\n", 1))
-		}, "blank-imports example.com/newdriver"},
-		{"new untagged file with a driver", func(t *testing.T, dir string) {
-			add(t, dir, "new_test.go", header+"import _ \"example.com/newdriver\"\n")
-		}, "zz_hubshard_drivers_test.go: generated imports file differs"},
-		{"obsolete imports file", func(t *testing.T, dir string) {
-			add(t, dir, "zz_hubshard_drivers_7_test.go", header+"import _ \"example.com/gone\"\n")
-		}, "zz_hubshard_drivers_7_test.go: generated imports file is obsolete"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir, assign := writeFiles(t, driverFixture)
-			args := driverArgs(dir, assign)
-			if err := run(append(args, "-n", "2"), &bytes.Buffer{}); err != nil {
-				t.Fatal(err)
-			}
-			_, as, _ := readAssignment(assign)
-			if as["reg_test.go"] != 1 {
-				t.Fatalf("setup: want reg_test.go in shard 1, got %v", as)
-			}
-			tc.edit(t, dir)
-			err := run(append(args, "-check"), &bytes.Buffer{})
-			switch {
-			case tc.want == "" && err != nil:
-				t.Fatalf("-check: %v", err)
-			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
-				t.Fatalf("-check: want an error containing %q, got %v", tc.want, err)
-			}
-			// make hubshard fixes every case.
-			if err := run(args, &bytes.Buffer{}); err != nil {
-				t.Fatal(err)
-			}
-			if err := run(append(args, "-check", "-strict"), &bytes.Buffer{}); err != nil {
-				t.Fatalf("-check -strict after make hubshard: %v", err)
-			}
-			if _, err := os.Stat(filepath.Join(dir, "zz_hubshard_drivers_7_test.go")); !os.IsNotExist(err) {
-				t.Errorf("stale imports file not removed: %v", err)
-			}
-		})
+	s.genImports = map[string]*fileInfo{}
+	err = s.parity(&bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "blank-imports github.com/mattn/go-sqlite3") {
+		t.Fatalf("want a blank import problem, got %v", err)
 	}
 }
 
@@ -251,7 +178,7 @@ func TestImportBreakage(t *testing.T) {
 		{"no common importer", header, "reg_test.go (shard 1) blank-imports example.com/drv"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir, _ := writeFiles(t, map[string]string{
+			_, dir := writeFiles(t, map[string]string{
 				"reg_test.go":        "//go:build !no_sqlite && (!hubshard || hubshard_1)\n\n" + header + "import _ \"example.com/drv\"\n",
 				"db_helpers_test.go": tc.common,
 			})
@@ -293,9 +220,9 @@ func TestFileNameConstraint(t *testing.T) {
 }
 
 func TestMaxGroupDivDoesNotLeak(t *testing.T) {
-	dir, assign := writeFiles(t, driverFixture)
-	args := []string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign}
-	if err := run(append(args, "-n", "2", "-maxgroupdiv", "1"), &bytes.Buffer{}); err != nil {
+	root, dir := writeFiles(t, driverFixture)
+	args := []string{"-root", root, "-dir", dir, "-n", "2"}
+	if err := run(append(args, "-maxgroupdiv", "1"), &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	if maxGroupDiv != 1 {
@@ -315,36 +242,22 @@ func TestInitWarning(t *testing.T) {
 		"reg_test.go":  header + "func register() {}\n\nfunc init() { register() }\n",
 		"a_test.go":    header + "import \"testing\"\n\nfunc TestA(t *testing.T) {}\n",
 	}
-	dir, assign := writeFiles(t, files)
-	args := driverArgs(dir, assign)
-	if err := run(append(args, "-n", "2"), &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
+	root, dir := writeFiles(t, files)
 	var out bytes.Buffer
-	if err := run(append(args, "-check"), &out); err != nil {
+	if err := run(append(driverArgs(root, dir), "-parity"), &out); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "warning") {
 		t.Fatalf("init file is common, want no warning:\n%s", out.String())
 	}
-	// Tag it by hand (and record it), as an older generator would have.
-	src := read(t, dir, "reg_test.go")
-	if err := os.WriteFile(filepath.Join(dir, "reg_test.go"), []byte("//go:build !hubshard || hubshard_2\n\n"+src), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	a, err := os.ReadFile(assign)
+	// A tagged file with such an init (if the common rule ever changed).
+	f, err := parseFile("reg_test.go", []byte("//go:build !hubshard || hubshard_2\n\n"+files["reg_test.go"]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(assign, bytes.Replace(a, []byte("0 reg_test.go"), []byte("2 reg_test.go"), 1), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out.Reset()
-	if err := run(append(args, "-check"), &out); err != nil {
-		t.Fatalf("-check: a warning must not fail: %v", err)
-	}
-	if !strings.Contains(out.String(), "warning: reg_test.go: init function in a file tagged for shard 2") {
-		t.Errorf("want an init warning, got:\n%s", out.String())
+	got := strings.Join(sideEffectWarnings(map[string]*fileInfo{"reg_test.go": f}, "hub"), "\n")
+	if !strings.Contains(got, "warning: reg_test.go: init function in a file tagged for shard 2") {
+		t.Errorf("want an init warning, got:\n%s", got)
 	}
 }
 

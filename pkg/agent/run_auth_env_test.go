@@ -682,12 +682,12 @@ func TestResolveAuthEnvOverlay_NilSettings(t *testing.T) {
 // Mechanism: resolveAuthEnvOverlay injects harness-config env into opts.Env
 // through the *api.StartOptions pointer, and Start later calls
 // buildAgentEnv(finalScionCfg, opts.Env) at run.go:807 — where opts.Env is
-// extraEnv and OVERRIDES scionCfg.Env. Template env lives in finalScionCfg.Env.
-// So in broker mode harness-config env now outranks template env in the
-// container, where before the !opts.BrokerMode conjunct it lost.
+// extraEnv and OVERRIDES scionCfg.Env. Template env is a separate
+// lowest-precedence fill applied after all of these (ptone/scion#4524), so
+// harness-config env outranks it in the container in both modes.
 
 // rankProbeFixture stands up a tmp HOME in which the SAME key is declared by
-// both the template (RANK_PROBE=from-template, inside finalScionCfg.Env) and
+// both the template (RANK_PROBE=from-template, the template env fill) and
 // the settings harness config (RANK_PROBE=from-harness-config, which reaches
 // opts.Env only via resolveAuthEnvOverlay). Returns the project .scion path.
 func rankProbeFixture(t *testing.T) string {
@@ -714,8 +714,8 @@ func rankProbeFixture(t *testing.T) string {
 	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"),
 		[]byte("harness: claude\nuser: scion\nimage: test-image:latest\n"), 0644)
 
-	// Template declares RANK_PROBE — this lands in finalScionCfg.Env, the BASE
-	// map for buildAgentEnv.
+	// Template declares RANK_PROBE — the template env layer, applied as the
+	// final fill after buildAgentEnv (ptone/scion#4524).
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
 	_ = os.MkdirAll(tplDir, 0755)
 	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"),

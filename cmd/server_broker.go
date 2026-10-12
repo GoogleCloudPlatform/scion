@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -154,20 +155,11 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			AutoProvide:                autoProvide,
 			GCPHostServiceAccountEmail: detectedSAEmail,
 			GCPHostProjectID:           detectedProjectID,
-			Capabilities: &store.BrokerCapabilities{
-				WebPTY:                   false,
-				Sync:                     true,
-				Attach:                   runtime.HasAttachSupport(rt),
-				Reprovision:              true,
-				AsyncLaunch:              true,
-				EmptyPerAgentWorkspace:   runtime.HasEmptyPerAgentSupport(rt),
-				AgentMove:                true,
-				ReprovisionEmptyPerAgent: true,
-			},
-			Profiles:         profiles,
-			DefaultProfile:   defaultProfile,
-			WorkspaceStorage: workspaceStorage,
-			Labels:           brokerLabels,
+			Capabilities:               storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt)),
+			Profiles:                   profiles,
+			DefaultProfile:             defaultProfile,
+			WorkspaceStorage:           workspaceStorage,
+			Labels:                     brokerLabels,
 		}
 
 		if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -200,16 +192,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		// path) never runs for the embedded broker. That produced a
 		// permanent false 412 on `scion reincarnate` for every embedded
 		// deployment.
-		broker.Capabilities = &store.BrokerCapabilities{
-			WebPTY:                   false,
-			Sync:                     true,
-			Attach:                   runtime.HasAttachSupport(rt),
-			Reprovision:              true,
-			AsyncLaunch:              true,
-			EmptyPerAgentWorkspace:   runtime.HasEmptyPerAgentSupport(rt),
-			AgentMove:                true,
-			ReprovisionEmptyPerAgent: true,
-		}
+		broker.Capabilities = storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt))
 		// A nil descriptor (not reported) keeps the stored one; the
 		// broker's heartbeats refresh it either way.
 		if workspaceStorage != nil {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_3)
+//go:build !no_sqlite
 
 package hub
 
@@ -359,7 +359,7 @@ func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
 }
 
 // TestLeakGuardReportsUnclosedStore checks that the package-exit leak guard
-// (leak_guard_helpers_test.go) sees an unclosed store and names it in its
+// (internal/hubtestutil/leak_guard.go) sees an unclosed store and names it in its
 // failure output, and passes again once the store is closed.
 func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 	// Record the matching goroutines that are already running (for example
@@ -367,7 +367,7 @@ func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 	// ID and leave them out of every check below. Comparing totals instead
 	// is racy: one of them exiting after the baseline cancels out the new
 	// store's goroutine and the guard wrongly passes (ptone/scion#4635).
-	baseline := scanLeakedGoroutines(nil).ids
+	baseline := scanLeakedGoroutines(nil).IDs
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
@@ -396,11 +396,11 @@ func TestLeakGuardScanNeverExcludesUnparsedID(t *testing.T) {
 	parsed := "goroutine 7 [select]:\n" + sig + "(...)"
 
 	base := scanStacks([]byte(first+"\n\n"+parsed), nil)
-	if base.total != 2 || len(base.ids) != 1 || !base.ids["7"] {
-		t.Fatalf("baseline scan: total=%d ids=%v, want total=2 ids={7}", base.total, base.ids)
+	if base.Total != 2 || len(base.IDs) != 1 || !base.IDs["7"] {
+		t.Fatalf("baseline scan: total=%d ids=%v, want total=2 ids={7}", base.Total, base.IDs)
 	}
-	got := scanStacks([]byte(first+"\n\n"+second+"\n\n"+parsed), base.ids)
-	if got.total != 2 {
-		t.Fatalf("scan with baseline excluded: total=%d, want 2 (both unparsed blocks counted, goroutine 7 excluded)", got.total)
+	got := scanStacks([]byte(first+"\n\n"+second+"\n\n"+parsed), base.IDs)
+	if got.Total != 2 {
+		t.Fatalf("scan with baseline excluded: total=%d, want 2 (both unparsed blocks counted, goroutine 7 excluded)", got.Total)
 	}
 }

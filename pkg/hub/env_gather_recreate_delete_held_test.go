@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 // handleExistingAgent's env-gather re-provisioning branch removes the
 // existing provisioning row the way a create rollback does

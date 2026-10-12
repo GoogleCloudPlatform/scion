@@ -75,8 +75,20 @@ export interface ArtifactResponse {
   warnings?: string[];
   /** On a GET: the caller may share and change the artifact. */
   canManage?: boolean;
-  /** On a GET: the caller may publish new versions (edit, upload, review). */
+  /** On a GET: the caller may publish new versions of any kind (edit, upload, review). */
   canPublish?: boolean;
+  /**
+   * On a GET: the caller may publish reviews only, through a review grant
+   * (ptone/scion#4538). Never set with canPublish.
+   */
+  canReview?: boolean;
+  /**
+   * On a GET: the caller may not manage the artifact but may give a user
+   * review access (a review grant): the delegating user of the agent that
+   * owns it, the project owners and admins of its home project, and
+   * super-admins. Never set with canManage.
+   */
+  canGrantReview?: boolean;
 }
 
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
@@ -617,8 +629,12 @@ export interface CreateLinkResponse {
   clampedToArtifactExpiry?: boolean;
 }
 
-/** Grant permissions, weakest first. */
-export type GrantPermission = 'read' | 'write' | 'admin';
+/**
+ * Grant permissions. Review (a user only) lets someone who can already read
+ * the artifact publish reviews of it, and nothing else; it gives no read
+ * access (ptone/scion#4538).
+ */
+export type GrantPermission = 'read' | 'review' | 'write' | 'admin';
 
 /** A grant to a user or agent ("principal") or a project ("scope"). */
 export interface ArtifactGrant {
@@ -660,9 +676,17 @@ export const DEFAULT_LINK_HOURS = 7 * 24;
 /** Labels of the grant permissions. */
 export const PERMISSION_LABELS: Record<GrantPermission, string> = {
   read: 'Can view',
+  review: 'Can review',
   write: 'Can edit',
   admin: 'Can manage',
 };
+
+/**
+ * The permissions the Share dialog's permission menus offer, weakest first.
+ * Review is given through Grant review access, and a review grant is shown
+ * with its label only.
+ */
+export const SELECTABLE_PERMISSIONS: readonly GrantPermission[] = ['read', 'write', 'admin'];
 
 /** Lists an artifact's unexpired share links. */
 export async function listLinks(id: string): Promise<ShareLink[]> {

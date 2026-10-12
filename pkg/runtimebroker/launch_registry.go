@@ -64,6 +64,12 @@ type launchRecord struct {
 	ownerHub string // the connection whose answer the sender has pinned to (rule 4)
 
 	cancel context.CancelFunc
+
+	// ownedRun is the flat instance's ownership key of this launch's run,
+	// set before Manager.Start returns; launch cleanup finishes that run
+	// after removing its objects (zero for a legacy Runtime Broker).
+	ownedRunMu sync.Mutex
+	ownedRun   ownedRunKey
 	// done is closed once runLaunch (including any cleanup), or a create's
 	// registration (syncStart.finish), has fully finished. A later create
 	// for the same key waits on this before any name-addressed work

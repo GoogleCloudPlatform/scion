@@ -740,7 +740,7 @@ func envArgs(env map[string]string) []string {
 //	    while tmux has-session -t scion 2>/dev/null; do sleep 2; done
 func buildEntrypoint(cfg RunConfig) ([]string, error) {
 	// Build the harness command line.
-	cmdLine, ok := harnessCmdLine(cfg)
+	cmdLine, ok := harnessCmdLine(cfg, harnessCmdLineOptions{})
 	if !ok {
 		return nil, fmt.Errorf("cloudrun-sandbox: no harness provided")
 	}
@@ -1110,6 +1110,17 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// Per-agent mounts -- each sandbox gets only its own paths (not /scion root).
 	for _, m := range mountsFor(paths, cfg.SharedDirs) {
 		args = append(args, "--mount", m)
+	}
+
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only keys no source above set, never a suppressed key.
+	emitted := make(map[string]bool, len(env))
+	for k := range env {
+		emitted[k] = true
+	}
+	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
+		k, v, _ := strings.Cut(e, "=")
+		env[k] = v
 	}
 
 	// Environment variables via --env flags (repeatable, confirmed by AC-0 retest).

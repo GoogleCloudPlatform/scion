@@ -216,6 +216,24 @@ type ServerConfig struct {
 	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
 	NFSMountChecker MountChecker
 
+	// NFSHostMounter, when set, is the host's single NFS mount owner: a
+	// host-bind instance registers its requirement with it and uses
+	// its shared reconciler instead of building and running its own; a
+	// Kubernetes or Cloud Run instance keeps its own verify-only check.
+	NFSHostMounter *HostNFSMounter
+
+	// SharedCaches, when set, are a flat host's caches: the server uses
+	// its own partition of the file caches and the host's GitHub
+	// resolution cache instead of opening its own, and never closes the
+	// shared one (the host does).
+	SharedCaches *SharedCaches
+
+	// WorkspaceLocks coordinates operations on shared local paths with
+	// every other Runtime Broker server of the process. The flat
+	// host passes one service to all its instances; nil gives this server
+	// its own.
+	WorkspaceLocks *WorkspaceLocks
+
 	// FlatInstance, when set, makes this server host exactly one flat Runtime
 	// Broker instance bound to one runtime target (see FlatInstanceConfig).
 	// Nil keeps the legacy, profile-resolving Runtime Broker.
@@ -255,6 +273,8 @@ type Server struct {
 	mux        *http.ServeMux
 	mu         sync.RWMutex
 	startTime  time.Time
+	// servicesStarted is set once startServices begins (Started).
+	servicesStarted bool
 
 	// nfsCleanupWG tracks background NFS project tree removals started by
 	// project delete (startNFSProjectTreeCleanup), so tests can wait for them.
@@ -340,6 +360,23 @@ type Server struct {
 
 	stateDir string
 
+	// ownership is a flat instance's durable ownership record store
+	// (ownership.go); nil for a legacy Runtime Broker.
+	ownership *OwnershipStore
+	// ownedStarts maps a run ID to its in-flight ownership mirror
+	// (installOwnedStart / completeOwnedStart).
+	ownedStarts sync.Map
+	// unmirroredUIDs holds the object UIDs from the journals of this
+	// instance's launches whose ownership recording failed; launch cleanup
+	// may delete them although the record may lack them (launchHandleOwned).
+	// The value is the creating run, kept for diagnosis only: ownership is
+	// decided by the UID, which is immutable and unique on every runtime a
+	// flat instance can use (each must confirm absence by identity).
+	unmirroredUIDs sync.Map
+	// ownershipSetupErr refuses a flat instance whose manager could not be
+	// owner-scoped (startServices).
+	ownershipSetupErr error
+
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
 	// Used by LookupContainerID/LookupAgent as a fallback when the default
@@ -400,14 +437,24 @@ type Server struct {
 	agentOwnRuntimes     sync.Map
 	agentOwnRuntimeGroup singleflight.Group
 
-	// projectProvisionMu serializes worktree provisioning per project on this
-	// node. Without this, concurrent agent creations for the same project could
-	// race inside ProvisionShared (double-clone / corrupt .git state).
-	// Key: ProjectID (or ProjectPath if ID is empty).
-	projectProvisionMu sync.Map
+	// workspaceLocks serializes operations on shared local paths (worktree
+	// provisioning, project and agent file cleanup) with every server of
+	// the process that shares it (workspace_locks.go).
+	workspaceLocks     *WorkspaceLocks
+	workspaceLocksOnce sync.Once
+
+	// flatK8sIdentity is a flat instance's own Kubernetes GCP identity
+	// policy, snapshotted when the server is built (flat_k8s_identity.go).
+	flatK8sIdentity flatKubernetesIdentityPolicy
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
+	// nfsHostOwned is set when nfsMountReconciler is the host mounter's:
+	// the host runs its loop, this server never does.
+	nfsHostOwned bool
+	// hostSetupErr refuses an instance whose host-level setup failed (an
+	// NFS requirement incompatible with another instance's).
+	hostSetupErr error
 	// exportIDs reads (or creates) the export identity marker reported in
 	// the workspace storage descriptor.
 	exportIDs exportIDProbe
@@ -486,18 +533,65 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		messageLog:        logging.Subsystem("broker.messages"),
 		envSecretLog:      logging.Subsystem("broker.env-secrets"),
 	}
+	// A flat instance's own loggers carry its identity, so several
+	// instances in one process log distinguishably without changing the
+	// process-wide default logger.
+	if fi := srv.flatInstance(); fi != nil {
+		attrs := []any{slog.String(logging.AttrBrokerID, fi.Identity.RuntimeBrokerID), slog.String("instance", fi.Instance.Key)}
+		srv.agentLifecycleLog = srv.agentLifecycleLog.With(attrs...)
+		srv.messageLog = srv.messageLog.With(attrs...)
+		srv.envSecretLog = srv.envSecretLog.With(attrs...)
+	}
 
+	srv.workspaceLocks = cfg.WorkspaceLocks
+	if srv.workspaceLocks == nil {
+		srv.workspaceLocks = NewWorkspaceLocks()
+	}
 	srv.stateDir = cfg.StateDir
 	if srv.stateDir == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
+		if dir, err := DefaultStateDir(cfg.BrokerID); err != nil {
 			slog.Warn("Failed to resolve user home directory for state dir", "error", err)
 		} else {
-			brokerDir := cfg.BrokerID
-			if brokerDir == "" {
-				brokerDir = "default"
-			}
-			srv.stateDir = filepath.Join(homeDir, ".scion", "runtime-broker-state", brokerDir)
+			srv.stateDir = dir
+		}
+	}
+	if fi := srv.flatInstance(); fi != nil {
+		srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(fi)
+	}
+	if fi := srv.flatInstance(); fi != nil {
+		// Fail closed: without an exact absence check a deleted agent's
+		// record and slug could never be finished (a delete request is not
+		// confirmed absence).
+		if _, ok := rt.(scionrt.ResourceAbsenceChecker); !ok {
+			srv.ownershipSetupErr = fmt.Errorf("flat Runtime Broker %s: its runtime (%T) cannot confirm that a deleted object is gone, so it cannot serve as a flat instance", fi.Identity.RuntimeBrokerID, rt)
+			slog.Error("Flat Runtime Broker instance will not serve", "error", srv.ownershipSetupErr)
+		}
+	}
+	if fi := srv.flatInstance(); fi != nil && srv.stateDir == "" {
+		// Fail closed: without a state root there are no ownership records.
+		srv.ownershipSetupErr = fmt.Errorf("flat Runtime Broker %s: no state directory for its ownership records", fi.Identity.RuntimeBrokerID)
+		slog.Error("Flat Runtime Broker instance will not serve", "error", srv.ownershipSetupErr)
+	}
+	if fi := srv.flatInstance(); fi != nil && srv.stateDir != "" {
+		// A flat instance owns only what its records and its reserved
+		// label say it owns (ptone/scion#3274).
+		srv.ownership = NewOwnershipStore(srv.stateDir, fi.Identity.RuntimeBrokerID)
+		srv.ownership.SetConflicting(fi.ConflictingOwnershipKeys)
+		srv.workspaceLocks.registerWorkspaceUser(srv, &workspaceUser{
+			instance:        fi.Identity.RuntimeBrokerID,
+			projectInUse:    srv.ownership.HasLiveAgents,
+			slugReservation: srv.ownership.SlugReservation,
+		})
+		if am, ok := mgr.(ownerScopedManager); !ok {
+			// Fail closed: a manager that cannot be restricted to this
+			// instance's objects would serve every instance's agents.
+			srv.ownershipSetupErr = fmt.Errorf("flat Runtime Broker %s: its agent manager (%T) cannot be restricted to this instance's objects", fi.Identity.RuntimeBrokerID, mgr)
+			slog.Error("Flat Runtime Broker instance will not serve", "error", srv.ownershipSetupErr)
+		} else {
+			am.SetOwner(agent.OwnerScope{RuntimeBrokerID: fi.Identity.RuntimeBrokerID,
+				FileAgentOwned: srv.fileAgentOwned, EntryUnresolved: srv.ownership.ConflictingLabels,
+				EntryPathTrusted: trustedEntryProjectPath, LaunchHandleOwned: srv.launchHandleOwned,
+				WorkspaceLock: srv.locks().Lock})
 		}
 	}
 	if srv.stateDir != "" {
@@ -506,9 +600,38 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		}
 	}
 
+	// A host-bind instance of a host with a single NFS mount owner uses
+	// that owner's reconciler (registered requirement, shared status, one
+	// mounter); everything else builds its own below.
+	hostNFS := cfg.NFSHostMounter != nil && cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 &&
+		rt != nil && !NFSWarnOnlyRuntime(rt.Name())
+	if hostNFS && srv.ownershipSetupErr != nil {
+		// The instance refuses at StartServices, after the host mounter
+		// has started; its requirement must not reach the union, which
+		// cannot shrink once the mounter runs. It builds no reconciler
+		// either.
+		slog.Warn("Runtime Broker instance cannot serve; its NFS mount requirement is not registered", "error", srv.ownershipSetupErr)
+	} else if hostNFS {
+		key := cfg.BrokerID
+		if fi := srv.flatInstance(); fi != nil {
+			key = fi.Instance.Key
+		}
+		r, err := cfg.NFSHostMounter.Register(key, rt.Name(), cfg.NFSConfig)
+		if err != nil {
+			srv.hostSetupErr = err
+			slog.Error("Runtime Broker instance will not serve", "error", err)
+		} else if r != nil {
+			srv.nfsMountReconciler = r
+			srv.nfsHostOwned = true
+			done := make(chan struct{})
+			srv.nfsStartupReconcileDone = done
+			go func() { <-cfg.NFSHostMounter.FirstPassDone(); close(done) }()
+		}
+	}
+
 	// Initialize NFS mount reconciler when NFS storage is configured.
 	// This only constructs the reconciler; its loop is started in Start().
-	if cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 {
+	if !hostNFS && cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 {
 		nfsLog := logging.Subsystem("broker.nfs-mount")
 		checker := cfg.NFSMountChecker
 		if checker == nil {
@@ -539,7 +662,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	// Initialize Hub integration if enabled. A flat instance that may not be
 	// hosted here (no Hub in the same process) sets up no Hub connection at
 	// all; Start refuses it.
-	if cfg.HubEnabled && (cfg.HubEndpoint != "" || cfg.InMemoryCredentials != nil) && srv.flatHostingError() == nil {
+	if cfg.HubEnabled && (cfg.HubEndpoint != "" || cfg.InMemoryCredentials != nil || srv.flatInstance().remoteActivated()) && srv.flatHostingError() == nil {
 		if err := srv.initHubIntegration(); err != nil {
 			slog.Warn("Failed to initialize Hub integration", "error", err)
 		}
@@ -550,11 +673,50 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	return srv
 }
 
+// DefaultStateDir is a Runtime Broker's state root when ServerConfig.StateDir
+// is not set: ~/.scion/runtime-broker-state/<brokerID> ("default" when the
+// ID is empty).
+func DefaultStateDir(brokerID string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if brokerID == "" {
+		brokerID = "default"
+	}
+	return filepath.Join(homeDir, ".scion", "runtime-broker-state", brokerID), nil
+}
+
 // RuntimeName returns the name of the currently active container runtime.
 func (s *Server) RuntimeName() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.runtime.Name()
+}
+
+// defaultPair returns one consistent snapshot of the broker's default
+// manager and runtime, read under s.mu: SwapRuntime replaces both together
+// while requests are in flight. A caller that uses both takes one snapshot
+// and uses it throughout, so it never pairs the old manager with the new
+// runtime. Callers must not hold s.mu.
+func (s *Server) defaultPair() (agent.Manager, scionrt.Runtime) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.manager, s.runtime
+}
+
+// currentManager returns the broker's default manager, read under s.mu
+// (see defaultPair). Callers must not hold s.mu.
+func (s *Server) currentManager() agent.Manager {
+	mgr, _ := s.defaultPair()
+	return mgr
+}
+
+// currentRuntime returns the broker's default runtime, read under s.mu
+// (see defaultPair). Callers must not hold s.mu.
+func (s *Server) currentRuntime() scionrt.Runtime {
+	_, rt := s.defaultPair()
+	return rt
 }
 
 // SwapRuntime replaces the broker's container runtime and agent manager.
@@ -591,65 +753,46 @@ func (s *Server) SwapRuntime(rt scionrt.Runtime) {
 	)
 }
 
-// initHubIntegration initializes the shared template cache and hub connections.
+// initHubIntegration opens the broker caches and the hub connections.
 func (s *Server) initHubIntegration() error {
-	// 1. Initialize shared template cache
+	if sc := s.config.SharedCaches; sc != nil {
+		// A flat host's instance: its own partition of the file caches and
+		// the host's shared GitHub resolution cache.
+		fc, err := sc.forInstance(s.config.BrokerID)
+		if err != nil {
+			return fmt.Errorf("failed to open the instance's broker caches: %w", err)
+		}
+		s.cache, s.hcCache, s.skCache, s.ghResolutionCache = fc.templates, fc.harnessConfigs, fc.skills, sc.GitHub
+		return s.initHubConnections()
+	}
 	cacheDir := s.config.TemplateCacheDir
 	if cacheDir == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("failed to get home directory: %w", err)
+		var err error
+		if cacheDir, err = defaultTemplateCacheDir(); err != nil {
+			return err
 		}
-		cacheDir = filepath.Join(homeDir, ".scion", "cache", "templates")
 	}
+	// The template cache, and the harness-config and skill caches in
+	// sibling directories so the content-addressed stores stay independent.
+	fc, err := openFileCaches(cacheDir, s.config.TemplateCacheMaxSize)
+	if err != nil {
+		return err
+	}
+	s.cache, s.hcCache, s.skCache = fc.templates, fc.harnessConfigs, fc.skills
+	// The GitHub resolution cache holds resolution metadata, not file
+	// content; nil is safe (resolution then runs uncached).
+	s.ghResolutionCache = openGitHubResolutionCache()
 
 	maxSize := s.config.TemplateCacheMaxSize
 	if maxSize <= 0 {
 		maxSize = templatecache.DefaultMaxSize
 	}
+	slog.Info("Broker caches initialized", "cache", cacheDir, "max_size_mb", maxSize/(1024*1024))
+	return s.initHubConnections()
+}
 
-	cache, err := templatecache.New(cacheDir, maxSize)
-	if err != nil {
-		return fmt.Errorf("failed to initialize template cache: %w", err)
-	}
-	s.cache = cache
-
-	// 1b. Initialize the harness-config cache alongside the template cache,
-	// under a sibling directory so the two content-addressed stores stay
-	// independent.
-	hcCacheDir := filepath.Join(filepath.Dir(cacheDir), "harness-configs")
-	hcCache, err := templatecache.New(hcCacheDir, maxSize)
-	if err != nil {
-		return fmt.Errorf("failed to initialize harness-config cache: %w", err)
-	}
-	s.hcCache = hcCache
-
-	// 1c. Initialize the skill cache for broker-side caching of resolved
-	// skill content, keyed by content hash.
-	skCacheDir := filepath.Join(filepath.Dir(cacheDir), "skills")
-	skCacheMaxSize := int64(500 * 1024 * 1024) // 500MB default
-	skCache, err := templatecache.New(skCacheDir, skCacheMaxSize)
-	if err != nil {
-		return fmt.Errorf("failed to initialize skill cache: %w", err)
-	}
-	s.skCache = skCache
-
-	// 1d. Initialize the GitHub resolution cache for broker-side caching of
-	// GitHub skill resolution metadata (not file content).
-	ghResDir, err := agent.GitHubResolutionCacheDir()
-	if err != nil {
-		slog.Warn("github resolution cache: cannot determine cache dir", "error", err)
-	} else {
-		ghCache, err := agent.NewGitHubResolutionCache(ghResDir, agent.DefaultResolutionCacheTTL)
-		if err != nil {
-			slog.Warn("github resolution cache: init failed (running uncached)", "error", err)
-			// nil cache is safe — resolver falls through to API call
-		} else {
-			s.ghResolutionCache = ghCache
-			slog.Info("GitHub resolution cache initialized", "dir", ghResDir, "ttl", agent.DefaultResolutionCacheTTL)
-		}
-	}
-
+// initHubConnections sets up the hub connections (after the caches).
+func (s *Server) initHubConnections() error {
 	// 2. Initialize hub connections map (already done in New)
 
 	// 3. Handle InMemoryCredentials -> "local" connection (co-located mode)
@@ -687,6 +830,25 @@ func (s *Server) initHubIntegration() error {
 	// broker-credentials.json or a config-derived connection, so the
 	// steps below are skipped and no credential watcher is started.
 	if s.isFlat() {
+		// A validated remote activation connects only with the instance's
+		// own credentials (contract R10).
+		for i := range s.flatInstance().RemoteCredentials {
+			c := s.flatInstance().RemoteCredentials[i]
+			if c.Name == "" {
+				c.Name = brokercredentials.DeriveHubName(c.HubEndpoint)
+			}
+			if _, exists := s.hubConnections[c.Name]; exists {
+				continue
+			}
+			conn, err := s.createHubConnection(c.Name, &c)
+			if err != nil {
+				slog.Warn("Failed to create hub connection from instance credentials", "name", c.Name, "error", err)
+				continue
+			}
+			s.hubMu.Lock()
+			s.hubConnections[c.Name] = conn
+			s.hubMu.Unlock()
+		}
 		s.buildAuthMiddleware()
 		slog.Info("Hub integration initialized for flat Runtime Broker instance",
 			"connections", len(s.hubConnections),
@@ -757,8 +919,7 @@ func (s *Server) initHubIntegration() error {
 
 	slog.Info("Hub integration initialized",
 		"connections", len(s.hubConnections),
-		"cache", cacheDir,
-		"max_size_mb", maxSize/(1024*1024),
+		"shared_caches", s.config.SharedCaches != nil,
 	)
 
 	return nil
@@ -1145,29 +1306,77 @@ func (s *Server) GetHydrator() *templatecache.Hydrator {
 	return nil
 }
 
-// Start starts the HTTP server.
+// Start starts the broker's services and its own HTTP listener, and blocks
+// until ctx is done (then shuts down) or the listener fails.
 func (s *Server) Start(ctx context.Context) error {
-	// P1 hosts a flat instance only co-located with its Hub
-	// (flat_runtime_broker_remote_unsupported); refuse before serving,
-	// connecting or accepting any dispatch.
+	if err := s.startServices(ctx, true); err != nil {
+		return err
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return s.Shutdown(context.Background())
+	}
+}
+
+// Started reports whether the server's services were started.
+func (s *Server) Started() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.servicesStarted
+}
+
+// StartServices starts everything Start does except the HTTP listener: hub
+// connections (control channel, heartbeat), NFS checks and the credential
+// watcher. It returns once they are started. A host that owns the listener
+// (several Runtime Broker instances in one process) serves Handler itself
+// and calls Shutdown when done.
+func (s *Server) StartServices(ctx context.Context) error {
+	return s.startServices(ctx, false)
+}
+
+// startServices is Start without serving; withListener also builds the
+// server's own http.Server.
+func (s *Server) startServices(ctx context.Context, withListener bool) error {
+	// A flat instance is served only co-located with its Hub or after the
+	// host validated its remote activation
+	// (flat_runtime_broker_remote_unsupported otherwise); refuse before
+	// serving, connecting or accepting any dispatch.
 	if err := s.flatHostingError(); err != nil {
 		return err
+	}
+	if s.ownershipSetupErr != nil {
+		return s.ownershipSetupErr
+	}
+	if s.hostSetupErr != nil {
+		return s.hostSetupErr
 	}
 
 	s.mu.Lock()
 	s.startTime = time.Now()
+	s.servicesStarted = true
 	if err := s.validateBrokerAuthStartup(); err != nil {
 		s.mu.Unlock()
 		return err
 	}
 
-	handler := s.applyMiddleware(s.mux)
-
-	s.httpServer = &http.Server{
-		Addr:         fmt.Sprintf("%s:%d", s.config.Host, s.config.Port),
-		Handler:      handler,
-		ReadTimeout:  s.config.ReadTimeout,
-		WriteTimeout: s.config.WriteTimeout,
+	if withListener {
+		s.httpServer = &http.Server{
+			Addr:         fmt.Sprintf("%s:%d", s.config.Host, s.config.Port),
+			Handler:      s.applyMiddleware(s.mux),
+			ReadTimeout:  s.config.ReadTimeout,
+			WriteTimeout: s.config.WriteTimeout,
+		}
 	}
 	s.mu.Unlock()
 
@@ -1196,7 +1405,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// once, not twice. On-disk layout migration is expected to run at this
 	// same hook point.
 	config.WarnRemovedLegacyEnvOnce(os.Getenv, config.NewSlogReporter())
-	// Per-project migration (config.ReadProjectID, as projects load) reports
+	// Legacy settings and marker key migration (as projects load) reports
 	// through slog here too. This is already the default, but set it
 	// explicitly so all three boot hooks (CLI, hub, broker) are visible at
 	// their call sites.
@@ -1241,20 +1450,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.startCredentialWatcher(ctx)
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-		close(errCh)
-	}()
-
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		return s.Shutdown(context.Background())
-	}
+	return nil
 }
 
 // startNFSReconcileLoop starts the NFS reconciler's background loop (see
@@ -1262,8 +1458,8 @@ func (s *Server) Start(ctx context.Context) error {
 // starts at most one loop per Server. The loop stops when ctx is cancelled
 // or Shutdown is called.
 func (s *Server) startNFSReconcileLoop(ctx context.Context) {
-	if s.nfsMountReconciler == nil {
-		return
+	if s.nfsMountReconciler == nil || s.nfsHostOwned {
+		return // none, or the host mounter runs it
 	}
 	s.nfsReconcileOnce.Do(func() {
 		loopCtx, cancel := context.WithCancel(ctx)
@@ -1315,8 +1511,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// bound derived from it would already be cancelled here.
 	parentCtx := ctx
 	defer func() {
-		if s.ghResolutionCache == nil {
-			return
+		if s.ghResolutionCache == nil || s.config.SharedCaches != nil {
+			return // none, or the host's, which the host closes
 		}
 		closeCtx, cancel := context.WithTimeout(parentCtx, ghResolutionCacheCloseTimeout)
 		defer cancel()
@@ -1389,6 +1585,33 @@ func (s *Server) hubConnectionList() []*HubConnection {
 // This is useful for testing without starting a listener.
 func (s *Server) Handler() http.Handler {
 	return s.applyMiddleware(s.mux)
+}
+
+// PrefixedHandler serves this server's routes under prefix (for example
+// "/instances/<runtimeBrokerID>"), for a host that runs several Runtime
+// Broker instances behind one listener (ptone/scion#3273). The broker
+// authentication verifies the request signature over the full, prefixed
+// path the Hub signed; only then is the prefix removed and the request
+// handled exactly as Handler would handle the unprefixed path. The health
+// endpoints under the prefix stay unauthenticated. A path outside the prefix
+// is 404.
+func (s *Server) PrefixedHandler(prefix string) http.Handler {
+	prefix = strings.TrimSuffix(prefix, "/")
+	inner := http.StripPrefix(prefix, s.innerMiddleware(s.mux))
+	authenticated := s.outerMiddleware(inner)
+	health := otelhttp.NewHandler(inner, "broker")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rest, ok := strings.CutPrefix(r.URL.Path, prefix)
+		if !ok || (rest != "" && !strings.HasPrefix(rest, "/")) {
+			http.NotFound(w, r)
+			return
+		}
+		if rest == "/healthz" || rest == "/readyz" {
+			health.ServeHTTP(w, r)
+			return
+		}
+		authenticated.ServeHTTP(w, r)
+	})
 }
 
 // getAuxiliaryManagers returns the managers for all registered auxiliary runtimes.
@@ -1467,6 +1690,25 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 	s.discoverAuxiliaryRuntimesForProjects(projectPaths)
 }
 
+// logUnresolvedAuxiliaryProfile reports a settings profile whose runtime
+// could not be built during auxiliary runtime discovery
+// (ptone/scion#3605). For the active profile that is a warning. Any other
+// profile (for example a Kubernetes profile on a host without cluster
+// access) is reported at Info with a hint: it only matters if agents use it.
+func logUnresolvedAuxiliaryProfile(profileName, activeProfile string, resolved scionrt.Runtime) {
+	var cause error
+	if er, ok := resolved.(*scionrt.ErrorRuntime); ok {
+		cause = er.Err
+	}
+	if profileName == activeProfile {
+		slog.Warn("Failed to resolve the runtime of the active profile", "profile", profileName, "error", cause)
+		return
+	}
+	slog.Info("Runtime of a non-active profile is not available on this broker; agents that use it are not found until it resolves",
+		"profile", profileName, "error", cause,
+		"hint", "fix the profile's runtime configuration if agents use it, or remove the profile")
+}
+
 // discoverAuxiliaryRuntimesForProjects scans the given project settings
 // directories for runtime profiles that resolve to a runtime different from
 // the broker's default, and registers each distinct resolved runtime once.
@@ -1486,13 +1728,14 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 // de-duplication and registration directly, without depending on the
 // broker's on-disk project discovery.
 func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
+	defRT := s.currentRuntime()
 	// Compared against every resolved profile below so that a profile
 	// pointing at the broker's own runtime instance — not merely the same
 	// TYPE as the broker's default — is recognized and skipped. A broker
 	// whose default is Kubernetes must still register a profile aimed at a
 	// different cluster/context/namespace as an auxiliary runtime; comparing
 	// types alone would wrongly treat it as "the default" and drop it.
-	defaultIdentity := auxiliaryRuntimeIdentity(s.runtime)
+	defaultIdentity := auxiliaryRuntimeIdentity(defRT)
 
 	discoveredIdentities := make(map[string]bool)
 
@@ -1520,7 +1763,7 @@ func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
 
 			resolved := s.resolveAuxiliaryRuntime(gp, "", profileName)
 			if resolved.Name() == "error" {
-				slog.Warn("Failed to resolve auxiliary runtime", "profile", profileName)
+				logUnresolvedAuxiliaryProfile(profileName, vs.ActiveProfile, resolved)
 				continue
 			}
 
@@ -1621,7 +1864,7 @@ func canonicalRuntimeTypeName(runtimeType string) string {
 // means the cheap check could not prove a match, so the caller should fall
 // back to fully resolving the profile for a conclusive answer.
 func (s *Server) defaultRuntimeMatchesProfile(runtimeType string, rtConfig config.V1RuntimeConfig) bool {
-	return runtimeMatchesProfile(s.runtime, runtimeType, rtConfig)
+	return runtimeMatchesProfile(s.currentRuntime(), runtimeType, rtConfig)
 }
 
 // runtimeMatchesProfile is defaultRuntimeMatchesProfile for a given
@@ -1776,7 +2019,8 @@ type agentMatch struct {
 // path reads them from the same entry it acts on. Resolution order and
 // errors are exactly lookupAgentTarget's.
 func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (agentMatch, error) {
-	if s.manager == nil {
+	defMgr, defRT := s.defaultPair()
+	if defMgr == nil {
 		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
 
@@ -1800,14 +2044,14 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	var agents []api.AgentInfo
 	var err error
 	if useDefault {
-		agents, err = s.manager.List(ctx, filter)
+		agents, err = defMgr.List(ctx, filter)
 		if err != nil {
 			return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
 		agents = agentsForProject(agents, projectID)
 	}
-	matchManager := s.manager
-	matchRuntime := s.runtime
+	matchManager := defMgr
+	matchRuntime := defRT
 
 	// Fall back to auxiliary runtimes (e.g. kubernetes when default is docker)
 	if len(agents) == 0 {
@@ -1827,14 +2071,14 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		if useDefault {
-			agents, err = s.manager.List(ctx, fallbackFilter)
+			agents, err = defMgr.List(ctx, fallbackFilter)
 			if err != nil {
 				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 			}
 			agents = agentsWithoutProjectLabel(agents)
 		}
-		matchManager = s.manager
-		matchRuntime = s.runtime
+		matchManager = defMgr
+		matchRuntime = defRT
 		if len(agents) == 0 {
 			auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
 			if auxErr != nil {
@@ -1877,7 +2121,7 @@ func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, ru
 	if runID == "" {
 		return s.lookupAgentMatch(ctx, slug, projectID)
 	}
-	if s.manager == nil {
+	if defMgr, _ := s.defaultPair(); defMgr == nil {
 		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
 	slug = strings.ToLower(slug)
@@ -2024,7 +2268,8 @@ var errAuxiliaryRuntimeList = errors.New("auxiliary runtime")
 // It looks up an agent by slug and returns detailed info including the runtime.
 // projectID scopes the lookup to prevent cross-project collision.
 func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*AgentLookupResult, error) {
-	if s.manager == nil {
+	defMgr, defRT := s.defaultPair()
+	if defMgr == nil {
 		return nil, fmt.Errorf("agent manager not available")
 	}
 
@@ -2049,14 +2294,14 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		}
 	} else {
 		// Try default manager first
-		agents, err = s.manager.List(ctx, filter)
+		agents, err = defMgr.List(ctx, filter)
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
 		agents = agentsForProject(agents, projectID)
 	}
 
-	runtimeName := s.runtime.Name()
+	runtimeName := defRT.Name()
 	var matchedRuntime scionrt.Runtime
 	if own != nil {
 		runtimeName = own.rt.Name()
@@ -2103,7 +2348,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" && own == nil {
 		fallbackFilter := map[string]string{"scion.name": slug}
-		agents, err = s.manager.List(ctx, fallbackFilter)
+		agents, err = defMgr.List(ctx, fallbackFilter)
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
@@ -2151,10 +2396,10 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 
 	// Determine the exec user from the runtime that owns this agent.
 	// resolvedRuntime is the same one that produced ag: nil matchedRuntime
-	// means the primary s.manager/s.runtime pair matched.
+	// means the primary defMgr/defRT pair matched.
 	resolvedRuntime := matchedRuntime
 	if resolvedRuntime == nil {
-		resolvedRuntime = s.runtime
+		resolvedRuntime = defRT
 	}
 	execUser := "scion"
 	if resolvedRuntime != nil {
@@ -2165,7 +2410,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// actually produced this match: matchedRuntime is set on every
 	// auxiliary-runtime match path above (including the no-project-label
 	// fallback stage), and stays nil only when the match came from the
-	// primary manager, in which case it's s.runtime. Callers use this to
+	// primary manager, in which case it's defRT. Callers use this to
 	// ask capability questions (e.g. scionrt.HasAttachSupport) about the
 	// runtime that actually owns the agent, not assume it is the broker's
 	// default.
@@ -2175,7 +2420,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		ExecUser:    execUser,
 		// Phase is deliberately re-read from the runtime directly
 		// (rawRuntimePhase), not taken from ag.Phase above: ag came from
-		// s.manager.List / aux.Manager.List, which is agent.Manager's merged
+		// defMgr.List / aux.Manager.List, which is agent.Manager's merged
 		// view (runtime status overlaid with agent-info.json). That overlay
 		// can keep reporting a stale "stopped"/"error" phase for a
 		// container that has since restarted or is still starting up (see
@@ -2511,11 +2756,12 @@ func (s *Server) buildProjectFilterForHub(hubEndpoint string) func(string) bool 
 		// For now, try to find the project's settings to determine its hub endpoint.
 		// This requires the agent manager to provide project paths.
 		// As a simple implementation, we scan agents and check their project settings.
-		if s.manager == nil {
+		mgr := s.currentManager()
+		if mgr == nil {
 			return true // Can't filter without a manager
 		}
 
-		agents, err := s.manager.List(context.Background(), nil)
+		agents, err := mgr.List(context.Background(), nil)
 		if err != nil {
 			return true // Allow on error
 		}
@@ -2727,6 +2973,12 @@ func (s *Server) registerRoutes() {
 
 // applyMiddleware wraps the handler with middleware.
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
+	return s.outerMiddleware(s.innerMiddleware(h))
+}
+
+// innerMiddleware is the middleware that runs after authentication:
+// profile resolution, recovery, request logging and CORS.
+func (s *Server) innerMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
 	h = s.profileResolutionMiddleware(h)
 	h = s.recoveryMiddleware(h)
@@ -2738,6 +2990,12 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	if s.config.CORSEnabled {
 		h = s.corsMiddleware(h)
 	}
+	return h
+}
+
+// outerMiddleware is broker authentication (when configured) inside OTel
+// tracing.
+func (s *Server) outerMiddleware(h http.Handler) http.Handler {
 	// The handler is built once (and once per control channel), but
 	// buildAuthMiddleware can set this component up after the handler is
 	// built, so look it up per request instead of capturing it here.
@@ -2916,6 +3174,14 @@ func extractAction(r *http.Request, prefix string) (id, action string) {
 		action = parts[1]
 	}
 	return
+}
+
+// HubConnectionCount returns the number of Hub connections the server has
+// (the connections its control channel and heartbeat run on).
+func (s *Server) HubConnectionCount() int {
+	s.hubMu.RLock()
+	defer s.hubMu.RUnlock()
+	return len(s.hubConnections)
 }
 
 // IsControlChannelConnected reports whether the broker has at least one live

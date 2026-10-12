@@ -52,6 +52,8 @@ const (
 	FieldIssuanceID = "issuance_id"
 	// FieldIssuerCredentialID holds the string denoting the issuer_credential_id field in the database.
 	FieldIssuerCredentialID = "issuer_credential_id"
+	// FieldIssuerDelegationID holds the string denoting the issuer_delegation_id field in the database.
+	FieldIssuerDelegationID = "issuer_delegation_id"
 	// EdgeOwnedGroups holds the string denoting the owned_groups edge name in mutations.
 	EdgeOwnedGroups = "owned_groups"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -62,6 +64,8 @@ const (
 	EdgeExternalIdentities = "external_identities"
 	// EdgeTerminalWorkspace holds the string denoting the terminal_workspace edge name in mutations.
 	EdgeTerminalWorkspace = "terminal_workspace"
+	// EdgeTestIdentityLoginCode holds the string denoting the test_identity_login_code edge name in mutations.
+	EdgeTestIdentityLoginCode = "test_identity_login_code"
 	// Table holds the table name of the user in the database.
 	Table = "users"
 	// OwnedGroupsTable is the table that holds the owned_groups relation/edge.
@@ -99,6 +103,13 @@ const (
 	TerminalWorkspaceInverseTable = "user_terminal_workspaces"
 	// TerminalWorkspaceColumn is the table column denoting the terminal_workspace relation/edge.
 	TerminalWorkspaceColumn = "user_id"
+	// TestIdentityLoginCodeTable is the table that holds the test_identity_login_code relation/edge.
+	TestIdentityLoginCodeTable = "test_identity_login_codes"
+	// TestIdentityLoginCodeInverseTable is the table name for the TestIdentityLoginCode entity.
+	// It exists in this package in order to avoid circular dependency with the "testidentitylogincode" package.
+	TestIdentityLoginCodeInverseTable = "test_identity_login_codes"
+	// TestIdentityLoginCodeColumn is the table column denoting the test_identity_login_code relation/edge.
+	TestIdentityLoginCodeColumn = "user_id"
 )
 
 // Columns holds all SQL columns for user fields.
@@ -122,6 +133,7 @@ var Columns = []string{
 	FieldPurpose,
 	FieldIssuanceID,
 	FieldIssuerCredentialID,
+	FieldIssuerDelegationID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -320,6 +332,11 @@ func ByIssuerCredentialID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldIssuerCredentialID, opts...).ToFunc()
 }
 
+// ByIssuerDelegationID orders the results by the issuer_delegation_id field.
+func ByIssuerDelegationID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuerDelegationID, opts...).ToFunc()
+}
+
 // ByOwnedGroupsCount orders the results by owned_groups count.
 func ByOwnedGroupsCount(opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
@@ -382,6 +399,13 @@ func ByTerminalWorkspaceField(field string, opts ...sql.OrderTermOption) OrderOp
 		sqlgraph.OrderByNeighborTerms(s, newTerminalWorkspaceStep(), sql.OrderByField(field, opts...))
 	}
 }
+
+// ByTestIdentityLoginCodeField orders the results by test_identity_login_code field.
+func ByTestIdentityLoginCodeField(field string, opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newTestIdentityLoginCodeStep(), sql.OrderByField(field, opts...))
+	}
+}
 func newOwnedGroupsStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -415,5 +439,12 @@ func newTerminalWorkspaceStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(TerminalWorkspaceInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2O, false, TerminalWorkspaceTable, TerminalWorkspaceColumn),
+	)
+}
+func newTestIdentityLoginCodeStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(TestIdentityLoginCodeInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2O, false, TestIdentityLoginCodeTable, TestIdentityLoginCodeColumn),
 	)
 }
