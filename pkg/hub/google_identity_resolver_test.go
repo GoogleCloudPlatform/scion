@@ -232,7 +232,6 @@ func TestGoogleIdentityResolver_Resolve_ExistingIdentitiesLookupStoreError_Retur
 			extStore := &identitiesLookupErrExtIDStore{memExtIDStore: inner, err: tc.err}
 			resolver := newTestResolver(userStore, extStore, alwaysAuthorized, nil)
 			identity := validGmailIdentity()
-			identity.DisplayName = "Changed Name"
 
 			user, err := resolver.Resolve(context.Background(), identity, ResolvePolicy{})
 			if !errors.Is(err, tc.err) {
