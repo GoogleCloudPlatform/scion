@@ -29,6 +29,8 @@ func TestValidatePublicURL_Accepted(t *testing.T) {
 		{"https://hub.example.com/", "https://hub.example.com"},
 		{"HTTPS://hub.example.com:8443/", "https://hub.example.com:8443"},
 		{"http://localhost:8080", "http://localhost:8080"},
+		{"http://LOCALHOST:8080", "http://localhost:8080"},
+		{"https://HUB.Example.com/", "https://hub.example.com"},
 		{"http://127.0.0.1:9810", "http://127.0.0.1:9810"},
 		{"http://[::1]:9810", "http://[::1]:9810"},
 		{"https://[2001:db8::1]", "https://[2001:db8::1]"},
@@ -79,5 +81,38 @@ func TestValidatePublicURL_Rejected(t *testing.T) {
 				t.Errorf("error %q does not name %s", err, PublicURLKey)
 			}
 		})
+	}
+}
+
+// TestIsLoopbackHost documents the loopback rule shared by the public URL
+// check and the dev-auth bind check. It matches only the exact name
+// "localhost" and loopback IP literals; callers that want case-insensitive
+// host names lower-case first (ValidatePublicURL does).
+func TestIsLoopbackHost(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"localhost", true},
+		{"127.0.0.1", true},
+		{"127.1.2.3", true},
+		{"::1", true},
+		{"::ffff:127.0.0.1", true},
+
+		{"LOCALHOST", false},
+		{"localhost.", false},
+		{"hub.localhost", false},
+		{"0.0.0.0", false},
+		{"::", false},
+		{"10.0.0.1", false},
+		{"192.168.1.1", false},
+		{"172.16.0.1", false},
+		{"example.com", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := IsLoopbackHost(tt.host); got != tt.want {
+			t.Errorf("IsLoopbackHost(%q) = %v, want %v", tt.host, got, tt.want)
+		}
 	}
 }

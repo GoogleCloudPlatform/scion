@@ -58,6 +58,7 @@ func TestResolveHubEndpoints_Precedence(t *testing.T) {
 		{"database value normalized", HubEndpoints{Operator: fileURL, OperatorSource: "file"}, "HTTPS://db.example.com/", dbURL, HubEndpointSourceDatabase},
 		{"database value equal to operator", HubEndpoints{Operator: "http://hub.internal:8080", OperatorSource: "file"}, "http://hub.internal:8080/", "http://hub.internal:8080", "file"},
 		{"database value differing only in case", HubEndpoints{Operator: "https://hub.example.com", OperatorSource: "file"}, "HTTPS://hub.example.com/", "https://hub.example.com", "file"},
+		{"database value differing only in host case", HubEndpoints{Operator: "https://hub.example.com", OperatorSource: "file"}, "https://HUB.Example.com", "https://hub.example.com", "file"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

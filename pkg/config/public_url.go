@@ -38,7 +38,8 @@ const PublicURLKey = "server.hub.public_url"
 //   - no path other than "/" (the hub serves from the root of its URL);
 //   - a port, if any, between 1 and 65535.
 //
-// The normalized form has a lower-case scheme and no trailing slash.
+// The normalized form has a lower-case scheme and host and no trailing
+// slash.
 //
 // This rule applies to the database value only. Values from the environment,
 // startup flags or settings.yaml keep their existing handling. No error
@@ -70,7 +71,9 @@ func ValidatePublicURL(raw string) (string, error) {
 	if u.Path != "" && u.Path != "/" {
 		return "", fmt.Errorf("%s: must not contain a path", PublicURLKey)
 	}
-	host := u.Hostname()
+	// Host names are case-insensitive: the host is checked and emitted
+	// lower-cased, so values differing only in host case compare equal.
+	host := strings.ToLower(u.Hostname())
 	if host == "" {
 		return "", fmt.Errorf("%s: must include a host", PublicURLKey)
 	}

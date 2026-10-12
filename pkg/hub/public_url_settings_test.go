@@ -277,3 +277,61 @@ func TestPublicURLWrites_AuditFailureBlocksChange(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "https://saved.example.com", got, "the reset is not made")
 }
+
+// publicURLFailingSettingStore is a settings store whose writes fail once
+// failWrites is set.
+type publicURLFailingSettingStore struct {
+	*fakeHubSettingStore
+	failWrites bool
+}
+
+func (f *publicURLFailingSettingStore) UpsertHubSetting(ctx context.Context, section string, value json.RawMessage, updatedBy string, expectedRevision int64, origin string) (*store.HubSetting, error) {
+	if f.failWrites {
+		return nil, errors.New("injected settings write failure")
+	}
+	return f.fakeHubSettingStore.UpsertHubSetting(ctx, section, value, updatedBy, expectedRevision, origin)
+}
+
+func (f *publicURLFailingSettingStore) DeleteHubSetting(ctx context.Context, section string) error {
+	if f.failWrites {
+		return errors.New("injected settings write failure")
+	}
+	return f.fakeHubSettingStore.DeleteHubSetting(ctx, section)
+}
+
+// TestPublicURLWrites_StoreErrorRecordsNotApplied checks that a recorded
+// public URL change whose write fails with a store error, by a save or by a
+// reset, returns 500 and leaves one not-applied record each.
+func TestPublicURLWrites_StoreErrorRecordsNotApplied(t *testing.T) {
+	srv, fake, ops, st := publicURLAuditFixture(t)
+	_, err := fake.UpsertHubSetting(context.Background(), "endpoints",
+		json.RawMessage(`{"public_url":"https://saved.example.com"}`), "admin@example.com", -1, "managed")
+	require.NoError(t, err)
+	_, err = ops.Refresh(context.Background())
+	require.NoError(t, err)
+	failing := &publicURLFailingSettingStore{fakeHubSettingStore: fake, failWrites: true}
+	ops.store = failing
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"https://new.example.com"}}}`)
+	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+	reset := resetEndpoints(t, srv)
+	require.Equal(t, http.StatusInternalServerError, reset.Code, reset.Body.String())
+
+	got, ok := storedEndpointsPublicURL(t, fake)
+	require.True(t, ok)
+	assert.Equal(t, "https://saved.example.com", got, "neither write is made")
+
+	notApplied := publicURLAudits(t, st, gcpIAMNotAppliedMutation)
+	require.Len(t, notApplied, 2, "one for the save and one for the reset")
+	pairs := map[string]string{}
+	surfaces := map[string]bool{}
+	for _, r := range notApplied {
+		pairs[r.AfterSummary] = r.BeforeSummary
+		surfaces[r.ExecutorID] = true
+	}
+	assert.Equal(t, map[string]string{
+		"https://new.example.com": "https://saved.example.com",
+		"":                        "https://saved.example.com",
+	}, pairs)
+	assert.Equal(t, map[string]bool{gcpIAMSurfaceSave: true, gcpIAMSurfaceReset: true}, surfaces)
+}
