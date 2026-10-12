@@ -100,10 +100,47 @@ func TestQuotaAdminToken_ResolvesHubTarget(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, 6, got.DefaultValue)
 
+	// Entitlement bindings follow the same rules: create needs quota:read
+	// and quota:create, update quota:update, delete quota:delete.
+	entitlement := map[string]interface{}{"subjectType": store.EntitlementSubjectUser, "subjectId": super, "scopeType": store.QuotaScopeSystem, "value": 2}
+	rec = doRequestWithToken(t, srv, readKey, http.MethodPost, limitPath+"/entitlements", entitlement)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	rec = doRequestWithToken(t, srv, createOnly, http.MethodPost, limitPath+"/entitlements", entitlement)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	rec = doRequestWithToken(t, srv, createKey, http.MethodPost, limitPath+"/entitlements", entitlement)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var binding store.EntitlementBinding
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &binding))
+	entitlementPath := "/api/v1/admin/entitlements/" + binding.ID
+
+	rec = doRequestWithToken(t, srv, readKey, http.MethodGet, entitlementPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	entitlementUpdate := map[string]interface{}{"subjectType": store.EntitlementSubjectUser, "subjectId": super, "scopeType": store.QuotaScopeSystem, "value": 5}
+	rec = doRequestWithToken(t, srv, createKey, http.MethodPut, entitlementPath, entitlementUpdate)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	updateOnly := mintHubConfigToken(t, srv, super, hubBoundary(), "quota:update")
+	rec = doRequestWithToken(t, srv, updateOnly, http.MethodPut, entitlementPath, entitlementUpdate)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	rec = doRequestWithToken(t, srv, updateKey, http.MethodPut, entitlementPath, entitlementUpdate)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	gotBinding, err := s.GetEntitlementBinding(ctx, binding.ID)
+	require.NoError(t, err)
+	assert.EqualValues(t, 5, gotBinding.Value)
+
+	deleteOnly := mintHubConfigToken(t, srv, super, hubBoundary(), "quota:delete")
+	rec = doRequestWithToken(t, srv, deleteOnly, http.MethodDelete, entitlementPath, nil)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	rec = doRequestWithToken(t, srv, updateKey, http.MethodDelete, entitlementPath, nil)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	deleteKey := mintHubConfigToken(t, srv, super, hubBoundary(), "quota:read", "quota:delete")
+	rec = doRequestWithToken(t, srv, deleteKey, http.MethodDelete, entitlementPath, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	_, err = s.GetEntitlementBinding(ctx, binding.ID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+
 	// Delete needs quota:delete.
 	rec = doRequestWithToken(t, srv, updateKey, http.MethodDelete, limitPath, nil)
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	deleteKey := mintHubConfigToken(t, srv, super, hubBoundary(), "quota:read", "quota:delete")
 	rec = doRequestWithToken(t, srv, deleteKey, http.MethodDelete, limitPath, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	_, err = s.GetLimitDefinition(ctx, def.ID)
@@ -116,11 +153,14 @@ func TestQuotaAdminToken_ResolvesHubTarget(t *testing.T) {
 }
 
 // TestQuotaAdminToken_RequiresLiveAuthority requires a quota selector to be
-// minted only by a user who holds the permission: a hub member, whose hub
+// minted only by a user who holds the permission, and a minted token to be
+// refused once its holder loses the permission: a hub member, whose hub
 // membership carries quota.read, mints quota:read and reads limits, and
-// cannot mint quota:create, quota:update or quota:delete.
+// cannot mint quota:create, quota:update or quota:delete; a user whose only
+// quota.read grant is removed after mint is refused on the next request.
 func TestQuotaAdminToken_RequiresLiveAuthority(t *testing.T) {
 	srv, s := testServer(t)
+	ctx := context.Background()
 	member := hubConfigTokenUser(t, s, "qat-member", store.SystemRoleHubMember)
 
 	key := mintHubConfigToken(t, srv, member, hubBoundary(), "quota:read")
@@ -133,6 +173,22 @@ func TestQuotaAdminToken_RequiresLiveAuthority(t *testing.T) {
 		})
 		require.Error(t, err, "a hub member must not mint %s", sel)
 	}
+
+	// The grant is the user's only source of quota.read (no hub
+	// membership), so removing it leaves the token without live authority.
+	granted := newPlainUser(t, s, "qat-live-granted")
+	grantUserActionOnResource(t, s, granted.ID, "quota", "hub", ActionRead)
+	grantedKey := mintHubConfigToken(t, srv, granted.ID, hubBoundary(), "quota:read")
+	rec = doRequestWithToken(t, srv, grantedKey, http.MethodGet, "/api/v1/admin/limits", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, granted.ID)
+	require.NoError(t, err)
+	require.Len(t, bindings, 1, "the quota.read grant is the user's only binding")
+	require.NoError(t, s.DeleteRoleBinding(ctx, bindings[0].ID))
+
+	rec = doRequestWithToken(t, srv, grantedKey, http.MethodGet, "/api/v1/admin/limits", nil)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 }
 
 // TestQuotaAdminToken_ProjectBoundaryDenied requires the quota selectors to
@@ -158,6 +214,20 @@ func TestQuotaAdminToken_ProjectBoundaryDenied(t *testing.T) {
 	})
 	require.NoError(t, err)
 	broker := newBrokerSettingsTestBroker(t, s, "qat-pb", super)
+
+	// A project-boundary credential that does carry quota:read is refused
+	// by the boundary, before the ceiling: the hub-scoped quota target is
+	// outside every project boundary.
+	ceiling := bearerCeiling(t, "quota:read")
+	eval := srv.authzService.EvaluateBearerCeiling(context.Background(), activeUserPrincipal(super), projectBoundary(project), ceiling, "quota.read", hubScopedResource("quota", "hub"), BearerOptions{})
+	assert.False(t, eval.Decision.Allowed)
+	assert.Equal(t, BearerStageOutsideBoundary, eval.Stage, eval.Decision.Reason)
+	scoped := NewScopedUserIdentityWithBoundary(NewAuthenticatedUser(super, super+"@test.com", "Super", "admin", string(ClientTypeAPI)),
+		projectBoundary(project), []string{"quota:read"}, "qat-pb-scoped", ceiling)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/limits", nil).WithContext(contextWithIdentity(context.Background(), scoped))
+	boundaryRec := httptest.NewRecorder()
+	srv.guarded("/api/v1/admin/limits", srv.handleAdminLimits)(boundaryRec, req)
+	require.Equal(t, http.StatusForbidden, boundaryRec.Code, boundaryRec.Body.String())
 
 	key := mintHubConfigToken(t, srv, super, projectBoundary(project), "project:read")
 	for _, tc := range []struct {
