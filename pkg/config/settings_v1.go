@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -2962,8 +2963,8 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
 	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
 		if plaintext, err := strconv.ParseBool(raw); err != nil {
-			// Keep the settings value for telemetry.cloud.tls.enabled.
-			warnUnparseableSetting("SCION_OTEL_INSECURE")
+			warnUnparseableSettingOnce("SCION_OTEL_INSECURE",
+				"settings: value does not parse; ignoring SCION_OTEL_INSECURE and using the configured telemetry.cloud.tls.enabled")
 		} else {
 			_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
 		}
@@ -3058,6 +3059,10 @@ func unmarshalSkippingBadSettings(k *koanf.Koanf, settings *VersionedSettings) e
 	}
 	for _, key := range bad {
 		warnUnparseableSetting(key)
+		// Delete resolves key through koanf's own key parts, so it removes
+		// exactly the entry the probe found. Set splits key on ".", which
+		// is safe here: the embedded defaults have no map keys with a dot,
+		// so a key with a dot inside one part never exists in defaults.
 		k.Delete(key)
 		if defaults.Exists(key) {
 			if err := k.Set(key, defaults.Get(key)); err != nil {
@@ -3083,20 +3088,55 @@ func unmarshalSkippingBadSettings(k *koanf.Koanf, settings *VersionedSettings) e
 // explains. It names no values, since callers log it.
 var errSettingsDoNotDecode = errors.New("settings: values do not decode into the settings structure")
 
-// warnUnparseableSetting logs that the setting named by key has a value that
-// does not parse and that its default is used instead. The value itself is
-// never logged, since it may be a secret.
+// warnedUnparseableSettings records the settings keys already warned about
+// in this process. Settings are loaded several times per CLI invocation and
+// hub startup, so one bad value would otherwise be reported once per load.
+var warnedUnparseableSettings sync.Map
+
+// resetWarnedUnparseableSettingsCache clears the unparseable-setting warning
+// dedup cache. Tests that assert whether this warning fires must call this
+// first, so that an earlier test in the same process cannot suppress it.
+func resetWarnedUnparseableSettingsCache() {
+	warnedUnparseableSettings.Clear()
+}
+
+// warnUnparseableSetting logs, once per process, that the setting named by
+// key has a value that does not parse and is ignored, so the field falls
+// back to its embedded default or to unset. The value itself is never
+// logged, since it may be a secret.
 func warnUnparseableSetting(key string) {
-	slog.Warn("settings: value does not parse; using the default for this setting", "key", key)
+	warnUnparseableSettingOnce(key, "settings: value does not parse; ignoring it and using the default for this setting")
+}
+
+// warnUnparseableSettingOnce logs msg with key the first time key is
+// reported in this process.
+func warnUnparseableSettingOnce(key, msg string) {
+	if _, seen := warnedUnparseableSettings.LoadOrStore(key, struct{}{}); seen {
+		return
+	}
+	slog.Warn(msg, "key", key)
 }
 
 // undecodableSettingsKeys returns the keys of k whose value fails to decode
-// into VersionedSettings when decoded alone.
+// into VersionedSettings when decoded alone. Each probe is built from
+// koanf's own key parts, not by splitting the flat key on ".", so a map
+// entry whose key contains a dot (a service account email, for example)
+// keeps its real shape.
 func undecodableSettingsKeys(k *koanf.Koanf) []string {
+	keyMap := k.KeyMap()
 	var bad []string
 	for _, key := range k.Keys() {
+		parts, ok := keyMap[key]
+		if !ok || len(parts) == 0 {
+			parts = strings.Split(key, ".")
+		}
+		nested := map[string]interface{}{parts[len(parts)-1]: k.Get(key)}
+		for i := len(parts) - 2; i >= 0; i-- {
+			nested = map[string]interface{}{parts[i]: nested}
+		}
 		probe := koanf.New(".")
-		if err := probe.Load(confmap.Provider(map[string]interface{}{key: k.Get(key)}, "."), nil); err != nil {
+		// An empty delimiter loads nested as is, with no unflattening.
+		if err := probe.Load(confmap.Provider(nested, ""), nil); err != nil {
 			bad = append(bad, key)
 			continue
 		}

@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -33,6 +34,8 @@ profiles:
   local:
     runtime: docker
     clone_depth: %s
+    kubernetes_service_account_mappings:
+      agent@example-project.iam.gserviceaccount.com: agent-ksa
 server:
   broker:
     broker_name: file-broker
@@ -65,6 +68,9 @@ func setupBadValueProject(t *testing.T, cloneDepth, autoSuspendStalled string) (
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 	content := []byte(fmt.Sprintf(badValueSettingsYAML, cloneDepth, autoSuspendStalled))
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), content, 0644))
+
+	resetWarnedUnparseableSettingsCache()
+	t.Cleanup(resetWarnedUnparseableSettingsCache)
 
 	var buf bytes.Buffer
 	old := slog.Default()
@@ -174,4 +180,40 @@ func TestLoadVersionedSettings_BadCloneDepthFallsBack(t *testing.T) {
 	out := logs.String()
 	assert.Contains(t, out, badValueWarning)
 	assert.Contains(t, out, "profiles.local.clone_depth")
+}
+
+// TestLoadVersionedSettings_BadValueKeepsDottedMapKeys: the fallback must not
+// touch a valid map entry whose key contains a dot. A service account email
+// key is split into several parts if the probe re-splits the flat key on
+// ".", and the entry would then be reported as bad and dropped.
+func TestLoadVersionedSettings_BadValueKeepsDottedMapKeys(t *testing.T) {
+	projectDir, logs := setupBadValueProject(t, "5", "true")
+	t.Setenv("SCION_SERVER_BROKER_PORT", "abc")
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, vs.Server.Broker.Port)
+	require.Contains(t, vs.Profiles, "local")
+	assert.Equal(t, map[string]string{"agent@example-project.iam.gserviceaccount.com": "agent-ksa"},
+		vs.Profiles["local"].KubernetesServiceAccountMappings,
+		"a valid mapping keyed by a service account email must survive the fallback")
+
+	out := logs.String()
+	assert.Contains(t, out, "server.broker.port")
+	assert.NotContains(t, out, "kubernetes_service_account_mappings", "no warning for the valid mapping")
+}
+
+// TestLoadVersionedSettings_BadValueWarnsOncePerKey: settings are loaded
+// several times per process, so the warning for one bad key is logged once.
+func TestLoadVersionedSettings_BadValueWarnsOncePerKey(t *testing.T) {
+	projectDir, logs := setupBadValueProject(t, "5", "true")
+	t.Setenv("SCION_SERVER_BROKER_PORT", "abc")
+
+	for i := 0; i < 3; i++ {
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err)
+		assert.Equal(t, 0, vs.Server.Broker.Port)
+	}
+	assert.Equal(t, 1, strings.Count(logs.String(), "key=server.broker.port"))
 }
