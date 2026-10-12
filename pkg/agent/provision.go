@@ -1004,15 +1004,13 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		return nil, fmt.Errorf("failed to load template: %w", err)
 	}
 
-	// Environment keys in a template are ignored (ptone/scion#4524). The
-	// credential env keys among them depend on the resolved harness-config,
-	// which in turn may come from the template, so the chain is merged
-	// twice: first without environment keys (which never decide the
-	// harness-config name) to resolve it, then again with each template
-	// stripped against that harness-config's auth metadata.
-	tplCfgs := make([]*api.ScionConfig, len(chain))
+	// Each template contributes its job keys only (ptone/scion#4524):
+	// templateJobConfig drops its environment keys (reported) and its env,
+	// which is the separate template env layer Start applies as a final
+	// fill. Template env is therefore never merged into the agent config or
+	// persisted in scion-agent.json.
 	finalScionCfg := &api.ScionConfig{}
-	for i, tpl := range chain {
+	for _, tpl := range chain {
 		// Load scion-agent config from this template and merge it
 		tplCfg, err := tpl.LoadConfig()
 		if err != nil {
@@ -1024,9 +1022,7 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 			return nil, fmt.Errorf("template %s: %w", templateRef(tpl), err)
 		}
 
-		tplCfgs[i] = tplCfg
-		stripped, _ := config.StripTemplateEnvironmentKeys(tplCfg, nil)
-		finalScionCfg = config.MergeScionConfig(finalScionCfg, stripped)
+		finalScionCfg = config.MergeScionConfig(finalScionCfg, templateJobConfig(ctx, tpl, tplCfg))
 	}
 
 	if inlineCfg != nil {
@@ -1056,15 +1052,6 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 	}
 	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, harness.EffectiveConfig(harnessConfigName, hcDir, settings, profileName)); err != nil {
 		return nil, err
-	}
-
-	authMeta := harnessConfigAuthMeta(hcDir, settings, profileName, harnessConfigName)
-	finalScionCfg = &api.ScionConfig{}
-	for i, tpl := range chain {
-		finalScionCfg = config.MergeScionConfig(finalScionCfg, stripTemplateEnvironment(ctx, tpl, tplCfgs[i], authMeta))
-	}
-	if inlineCfg != nil {
-		finalScionCfg = config.MergeScionConfig(finalScionCfg, inlineCfg)
 	}
 
 	return &resolvedTemplate{
@@ -3431,10 +3418,10 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		return agentDir, agentHome, agentWorkspace, agentCfg, nil
 	}
 
-	// Environment keys in a template are ignored (ptone/scion#4524): strip
-	// each template against the agent's harness-config before merging, so
-	// a restart never reintroduces them under the stored config.
-	restartAuthMeta := restartTemplateAuthMeta(ctx, chain, agentCfg, projectDir, vs, profileName)
+	// Each template contributes its job keys only (ptone/scion#4524):
+	// templateJobConfig drops its environment keys and its env, so a restart
+	// never reintroduces them under the stored config. Start applies the
+	// live template env as a final fill.
 	mergedCfg := &api.ScionConfig{}
 	for _, tpl := range chain {
 		tplCfg, err := tpl.LoadConfig()
@@ -3442,7 +3429,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 			fmt.Fprintf(os.Stderr, "Warning: failed to load config from template %s, skipping: %v\n", templateRef(tpl), err)
 			continue
 		}
-		mergedCfg = config.MergeScionConfig(mergedCfg, stripTemplateEnvironment(ctx, tpl, tplCfg, restartAuthMeta))
+		mergedCfg = config.MergeScionConfig(mergedCfg, templateJobConfig(ctx, tpl, tplCfg))
 	}
 
 	finalCfg := config.MergeScionConfig(mergedCfg, agentCfg)

@@ -26,19 +26,6 @@ import (
 
 // Tests for the template key classification (ptone/scion#4524).
 
-func testAuthMeta() *HarnessAuthMetadata {
-	return &HarnessAuthMetadata{
-		DefaultType: "api-key",
-		Types: map[string]api.HarnessAuthTypeMetadata{
-			"api-key": {RequiredEnv: []api.HarnessAuthEnvRequirement{{AnyOf: []string{"ANTHROPIC_API_KEY", "CLAUDE_API_KEY"}}}},
-			"vertex-ai": {
-				RequiredEnv:   []api.HarnessAuthEnvRequirement{{AnyOf: []string{"GOOGLE_CLOUD_PROJECT"}}},
-				RequiredFiles: []api.HarnessAuthFileRequirement{{Name: "gcloud-adc", AlternativeEnvKeys: []string{"GOOGLE_APPLICATION_CREDENTIALS"}}},
-			},
-		},
-	}
-}
-
 func TestStripTemplateEnvironmentKeys_AllEnvironmentKeys(t *testing.T) {
 	cfg := &api.ScionConfig{
 		HarnessConfig: "claude",
@@ -51,12 +38,12 @@ func TestStripTemplateEnvironmentKeys_AllEnvironmentKeys(t *testing.T) {
 		Volumes:       []api.VolumeMount{{Source: "/a", Target: "/b"}},
 		Skills:        []api.SkillReference{{URI: "skill://x"}},
 		Env: map[string]string{
-			"SCION_HUB_URL":                  "http://hub",
-			"OTEL_EXPORTER_OTLP_ENDPOINT":    "http://otel",
-			"TZ":                             "UTC",
-			"ANTHROPIC_API_KEY":              "sk",
-			"GOOGLE_APPLICATION_CREDENTIALS": "/adc.json",
-			"MY_FLAG":                        "1",
+			"SCION_HUB_URL":               "http://hub",
+			"SCION_WORKSPACE_GIT":         "true",
+			"OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel",
+			"TZ":                          "UTC",
+			"ANTHROPIC_API_KEY":           "sk",
+			"MY_FLAG":                     "1",
 		},
 	}
 	orig := *cfg
@@ -65,14 +52,14 @@ func TestStripTemplateEnvironmentKeys_AllEnvironmentKeys(t *testing.T) {
 		origEnv[k] = v
 	}
 
-	got, ignored := StripTemplateEnvironmentKeys(cfg, testAuthMeta())
+	got, ignored := StripTemplateEnvironmentKeys(cfg)
 
+	// Only SCION_* env is reserved. OTEL_*, TZ and credential keys stay:
+	// template env is a lowest-precedence fill applied by the agent, and TZ
+	// is handled by the hub-only rule there.
 	wantIgnored := []string{
-		"env.ANTHROPIC_API_KEY",
-		"env.GOOGLE_APPLICATION_CREDENTIALS",
-		"env.OTEL_EXPORTER_OTLP_ENDPOINT",
 		"env.SCION_HUB_URL",
-		"env.TZ",
+		"env.SCION_WORKSPACE_GIT",
 		"hub", "image", "kubernetes", "resources", "telemetry", "volumes",
 	}
 	if !reflect.DeepEqual(ignored, wantIgnored) {
@@ -81,8 +68,14 @@ func TestStripTemplateEnvironmentKeys_AllEnvironmentKeys(t *testing.T) {
 	if got.Telemetry != nil || got.Hub != nil || got.Image != "" || got.Resources != nil || got.Kubernetes != nil || got.Volumes != nil {
 		t.Errorf("environment keys survived: %+v", got)
 	}
-	if !reflect.DeepEqual(got.Env, map[string]string{"MY_FLAG": "1"}) {
-		t.Errorf("Env = %v, want only the non-reserved key", got.Env)
+	wantEnv := map[string]string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel",
+		"TZ":                          "UTC",
+		"ANTHROPIC_API_KEY":           "sk",
+		"MY_FLAG":                     "1",
+	}
+	if !reflect.DeepEqual(got.Env, wantEnv) {
+		t.Errorf("Env = %v, want every non-SCION_ key kept", got.Env)
 	}
 	if got.HarnessConfig != "claude" || got.Model != "opus" || len(got.Skills) != 1 {
 		t.Errorf("job keys changed: %+v", got)
@@ -95,19 +88,19 @@ func TestStripTemplateEnvironmentKeys_AllEnvironmentKeys(t *testing.T) {
 
 func TestStripTemplateEnvironmentKeys_NoEnvironmentKeys(t *testing.T) {
 	cfg := &api.ScionConfig{Model: "opus", Env: map[string]string{"MY_FLAG": "1", "ANTHROPIC_API_KEY": "sk"}}
-	// Without auth metadata, a credential key is not reserved.
-	got, ignored := StripTemplateEnvironmentKeys(cfg, nil)
+	// A credential key is not reserved: template env is a fill.
+	got, ignored := StripTemplateEnvironmentKeys(cfg)
 	if ignored != nil || got != cfg {
 		t.Errorf("got (%p, %v), want the input back and no ignored keys", got, ignored)
 	}
-	if got, ignored := StripTemplateEnvironmentKeys(nil, nil); got != nil || ignored != nil {
+	if got, ignored := StripTemplateEnvironmentKeys(nil); got != nil || ignored != nil {
 		t.Errorf("nil cfg: got (%v, %v)", got, ignored)
 	}
 }
 
 func TestStripTemplateEnvironmentKeys_OnlyReservedEnvDropsEnvMap(t *testing.T) {
 	cfg := &api.ScionConfig{Env: map[string]string{"SCION_X": "1"}}
-	got, ignored := StripTemplateEnvironmentKeys(cfg, nil)
+	got, ignored := StripTemplateEnvironmentKeys(cfg)
 	if !reflect.DeepEqual(ignored, []string{"env.SCION_X"}) {
 		t.Errorf("ignored = %v", ignored)
 	}
@@ -116,16 +109,16 @@ func TestStripTemplateEnvironmentKeys_OnlyReservedEnvDropsEnvMap(t *testing.T) {
 	}
 }
 
-func TestHarnessAuthCredentialEnvKeys(t *testing.T) {
-	got := HarnessAuthCredentialEnvKeys(testAuthMeta())
-	want := map[string]struct{}{
-		"ANTHROPIC_API_KEY": {}, "CLAUDE_API_KEY": {}, "GOOGLE_CLOUD_PROJECT": {}, "GOOGLE_APPLICATION_CREDENTIALS": {},
+func TestIsReservedTemplateEnvKey(t *testing.T) {
+	for _, k := range []string{"SCION_HUB_URL", "SCION_WORKSPACE_GIT", "SCION_"} {
+		if !IsReservedTemplateEnvKey(k) {
+			t.Errorf("%s: want reserved", k)
+		}
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %v, want %v", got, want)
-	}
-	if HarnessAuthCredentialEnvKeys(nil) != nil {
-		t.Error("nil metadata should give nil")
+	for _, k := range []string{"OTEL_EXPORTER_OTLP_ENDPOINT", "TZ", "ANTHROPIC_API_KEY", "MY_SCION_X", "scion_x"} {
+		if IsReservedTemplateEnvKey(k) {
+			t.Errorf("%s: want not reserved", k)
+		}
 	}
 }
 
@@ -155,7 +148,7 @@ func TestEmbeddedTemplatesSetNoEnvironmentKeys(t *testing.T) {
 			t.Errorf("%s: parse: %v", p, err)
 			return nil
 		}
-		if keys := TemplateEnvironmentKeys(cfg, nil); len(keys) > 0 {
+		if keys := TemplateEnvironmentKeys(cfg); len(keys) > 0 {
 			t.Errorf("embedded template %s sets environment key(s) %v; templates must set job keys only", p, keys)
 		}
 		checked++
@@ -181,7 +174,7 @@ func TestTemplateEnvironmentKeysWarning(t *testing.T) {
 // top-level environment keys are dropped and no env key is reserved.
 func TestStripTemplateEnvironmentKeys_CopyDoesNotAliasEnv(t *testing.T) {
 	cfg := &api.ScionConfig{Image: "tpl:1", Env: map[string]string{"MY_FLAG": "1"}}
-	got, ignored := StripTemplateEnvironmentKeys(cfg, nil)
+	got, ignored := StripTemplateEnvironmentKeys(cfg)
 	if !reflect.DeepEqual(ignored, []string{"image"}) {
 		t.Fatalf("ignored = %v, want [image]", ignored)
 	}
@@ -197,7 +190,7 @@ func TestStripTemplateEnvironmentKeys_CopyDoesNotAliasEnv(t *testing.T) {
 
 // A dropped key with a nil Env leaves Env nil in the copy.
 func TestStripTemplateEnvironmentKeys_NilEnvStaysNil(t *testing.T) {
-	got, _ := StripTemplateEnvironmentKeys(&api.ScionConfig{Image: "tpl:1"}, nil)
+	got, _ := StripTemplateEnvironmentKeys(&api.ScionConfig{Image: "tpl:1"})
 	if got.Env != nil {
 		t.Errorf("Env = %v, want nil", got.Env)
 	}

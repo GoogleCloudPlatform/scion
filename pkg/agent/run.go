@@ -427,8 +427,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		templateName = opts.Template
 	}
 	var templatePaths []string
+	var templateChain []*config.Template
 	if templateName != "" {
 		if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
+			templateChain = chain
 			for _, tpl := range chain {
 				templatePaths = append(templatePaths, tpl.Path)
 			}
@@ -610,6 +612,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	warnings := templateEnvWarns.Warnings()
+
+	// The template env layer (ptone/scion#4524): recomputed from the live
+	// template chain on every start, never read from scion-agent.json, and
+	// applied as the final fill below (applyTemplateEnvFill). An
+	// unresolvable template has no template env.
+	templateEnv := templateChainEnv(templateChain)
+	if templateUnresolvable {
+		templateEnv = nil
+		if label := templateDisplayName(templateName, provenance, finalScionCfg); label != "" {
+			warnings = append(warnings, fmt.Sprintf("Warning: template %s not found; its env fallback is not applied", label))
+		}
+	}
 
 	// There is no live template tier: image and kubernetes are environment
 	// keys, which a template may not set (ptone/scion#4524).
@@ -1522,7 +1536,11 @@ authDone:
 		}
 	}
 
-	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(finalScionCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
+	// A stored Env key whose value equals the live template env value was
+	// merged in from the template by an older version: it applies only
+	// through the template fill (demoted on a per-start copy; scion-agent.json
+	// is not rewritten).
+	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(demoteLegacyTemplateEnv(finalScionCfg, templateEnv), opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
 	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
 	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
 	warnings = append(warnings, hubOnlyEnvWarnings...)
@@ -2195,6 +2213,16 @@ authDone:
 	// request or template env is replaced.
 	agentEnv = withLaunchIDEnv(agentEnv, runID)
 
+	// System decisions read from the env before the template fill, so the
+	// template env layer never takes part in them.
+	metadataInterception := hasMetadataInterception(agentEnv)
+
+	// The template env layer is the final fill: applied here, at the single
+	// point where the container env is finalized, after every other source
+	// (config, request, telemetry, hub default env, broker-injected vars).
+	agentEnv, templateEnvFillWarnings := applyTemplateEnvFill(agentEnv, templateEnv, opts.BrokerMode, opts.Name)
+	warnings = append(warnings, templateEnvFillWarnings...)
+
 	// Write the full task to the agent home, and pass a short pointer to
 	// it instead when the task is too large to pass inline.
 	task, err = deliverTaskFile(agentHome, task)
@@ -2399,7 +2427,7 @@ authDone:
 		}(),
 		Debug:                util.DebugEnabled(),
 		Resume:               opts.Resume,
-		MetadataInterception: hasMetadataInterception(agentEnv),
+		MetadataInterception: metadataInterception,
 		ExtraHosts:           mergeExtraHosts(opts.ExtraHosts, runtime.BridgeExtraHosts(m.Runtime.Name(), agentEnv)),
 		NetworkMode:          networkMode,
 		Labels: func() map[string]string {

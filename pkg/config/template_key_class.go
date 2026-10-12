@@ -26,13 +26,20 @@ import (
 //
 // A template describes the agent's job, not its operating environment.
 // Template configs may set job keys (model, skills, instructions, harness
-// config, non-reserved env, ...). Environment keys come from settings (hub,
-// broker, profile, harness-config). An environment key found in a template
-// is ignored with a warning; uploads that carry one are not rejected.
+// config, ...). Environment keys come from settings (hub, broker, profile,
+// harness-config). An environment key found in a template is ignored with a
+// warning; uploads that carry one are not rejected.
+//
+// A template's env is for the job's own tools. It is not an environment key,
+// but it never takes part in system settings: agents apply it as the
+// lowest-precedence fill (a key is set only when no other source sets it),
+// with literal values (see pkg/agent's template env layer). The one reserved
+// env prefix is SCION_, the platform's own namespace, whose keys can carry
+// meaning by their absence.
 //
 // This file is the single classification. Agent provisioning strips every
-// template-chain config with StripTemplateEnvironmentKeys before merging
-// it, and the hub reports templates that set environment keys.
+// template-chain config with StripTemplateEnvironmentKeys before using it,
+// and the hub reports templates that set environment keys.
 
 // Environment keys of api.ScionConfig, by their scion-agent.yaml name.
 const (
@@ -48,9 +55,9 @@ const (
 // inside env (e.g. "env.SCION_HUB_URL").
 const templateEnvPrefix = "env."
 
-// reservedTemplateEnvPrefixes are env-key prefixes a template may not set:
-// the platform's own SCION_* contract and OpenTelemetry's OTEL_* settings.
-var reservedTemplateEnvPrefixes = []string{"SCION_", "OTEL_"}
+// reservedTemplateEnvPrefix is the env-key prefix a template may not set:
+// the platform's own SCION_* namespace.
+const reservedTemplateEnvPrefix = "SCION_"
 
 // hubOnlyEnvKeys lists the env keys that only the hub may supply for a
 // hub-dispatched agent. pkg/agent's IsHubOnlyEnvKey delegates here.
@@ -65,49 +72,10 @@ func IsHubOnlyEnvKey(key string) bool {
 	return ok
 }
 
-// HarnessAuthCredentialEnvKeys returns the credential env keys declared by a
-// harness-config's auth metadata, across all auth types: every
-// required_env any_of key and every required_files alternative_env_keys
-// entry. Nil metadata yields nil.
-func HarnessAuthCredentialEnvKeys(authMeta *HarnessAuthMetadata) map[string]struct{} {
-	if authMeta == nil {
-		return nil
-	}
-	keys := map[string]struct{}{}
-	for _, t := range authMeta.Types {
-		for _, req := range t.RequiredEnv {
-			for _, k := range req.AnyOf {
-				if k != "" {
-					keys[k] = struct{}{}
-				}
-			}
-		}
-		for _, f := range t.RequiredFiles {
-			for _, k := range f.AlternativeEnvKeys {
-				if k != "" {
-					keys[k] = struct{}{}
-				}
-			}
-		}
-	}
-	return keys
-}
-
 // IsReservedTemplateEnvKey reports whether a template may not set env key
-// key: a SCION_ or OTEL_ key, a hub-only key, or one of credKeys (the
-// resolved harness-config's credential keys, see
-// HarnessAuthCredentialEnvKeys).
-func IsReservedTemplateEnvKey(key string, credKeys map[string]struct{}) bool {
-	for _, p := range reservedTemplateEnvPrefixes {
-		if strings.HasPrefix(key, p) {
-			return true
-		}
-	}
-	if IsHubOnlyEnvKey(key) {
-		return true
-	}
-	_, isCred := credKeys[key]
-	return isCred
+// key: a key in the platform's SCION_* namespace.
+func IsReservedTemplateEnvKey(key string) bool {
+	return strings.HasPrefix(key, reservedTemplateEnvPrefix)
 }
 
 // TemplateEnvironmentKeysWarning is the warning for a template that sets
@@ -120,20 +88,19 @@ func TemplateEnvironmentKeysWarning(templateName string, keys []string) string {
 
 // TemplateEnvironmentKeys returns the environment keys cfg sets, sorted:
 // the top-level names (e.g. "telemetry", "image") and "env.<KEY>" for each
-// reserved env key. authMeta, when non-nil, adds the harness-config's
-// credential keys to the reserved env keys. It does not modify cfg.
-func TemplateEnvironmentKeys(cfg *api.ScionConfig, authMeta *HarnessAuthMetadata) []string {
-	_, ignored := StripTemplateEnvironmentKeys(cfg, authMeta)
+// reserved env key. It does not modify cfg.
+func TemplateEnvironmentKeys(cfg *api.ScionConfig) []string {
+	_, ignored := StripTemplateEnvironmentKeys(cfg)
 	return ignored
 }
 
 // StripTemplateEnvironmentKeys returns a copy of cfg without its environment
-// keys, plus the sorted names it dropped (see TemplateEnvironmentKeys for
-// the naming). The copy is shallow: dropped fields are cleared and Env is
-// rebuilt, every other field is shared with cfg, which is not modified. A
-// nil cfg yields (nil, nil); a cfg with no environment keys is returned as
-// is.
-func StripTemplateEnvironmentKeys(cfg *api.ScionConfig, authMeta *HarnessAuthMetadata) (*api.ScionConfig, []string) {
+// keys and reserved env keys, plus the sorted names it dropped (see
+// TemplateEnvironmentKeys for the naming). The copy is shallow: dropped
+// fields are cleared and Env is rebuilt, every other field is shared with
+// cfg, which is not modified. A nil cfg yields (nil, nil); a cfg with no
+// environment keys is returned as is.
+func StripTemplateEnvironmentKeys(cfg *api.ScionConfig) (*api.ScionConfig, []string) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -156,10 +123,9 @@ func StripTemplateEnvironmentKeys(cfg *api.ScionConfig, authMeta *HarnessAuthMet
 	if len(cfg.Volumes) > 0 {
 		ignored = append(ignored, TemplateEnvKeyVolumes)
 	}
-	credKeys := HarnessAuthCredentialEnvKeys(authMeta)
 	var reservedEnv []string
 	for k := range cfg.Env {
-		if IsReservedTemplateEnvKey(k, credKeys) {
+		if IsReservedTemplateEnvKey(k) {
 			reservedEnv = append(reservedEnv, k)
 		}
 	}
@@ -179,7 +145,7 @@ func StripTemplateEnvironmentKeys(cfg *api.ScionConfig, authMeta *HarnessAuthMet
 	if cfg.Env != nil {
 		env := make(map[string]string, len(cfg.Env)-len(reservedEnv))
 		for k, v := range cfg.Env {
-			if !IsReservedTemplateEnvKey(k, credKeys) {
+			if !IsReservedTemplateEnvKey(k) {
 				env[k] = v
 			}
 		}
