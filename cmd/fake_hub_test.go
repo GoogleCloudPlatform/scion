@@ -88,7 +88,7 @@ func withFakeHub(t *testing.T) *fakeHub {
 			http.NotFound(w, r)
 		}
 	}))
-	t.Cleanup(h.Server.Close)
+	t.Cleanup(h.Close)
 	t.Setenv("SCION_HUB_ENDPOINT", h.URL)
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_fakehub")
 	return h
