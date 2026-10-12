@@ -89,8 +89,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
@@ -251,10 +251,10 @@ type Client struct {
 	SubscriptionTemplate *SubscriptionTemplateClient
 	// Template is the client for interacting with the Template builders.
 	Template *TemplateClient
-	// TestIdentityLoginCode is the client for interacting with the TestIdentityLoginCode builders.
-	TestIdentityLoginCode *TestIdentityLoginCodeClient
 	// TestIdentityDelegation is the client for interacting with the TestIdentityDelegation builders.
 	TestIdentityDelegation *TestIdentityDelegationClient
+	// TestIdentityLoginCode is the client for interacting with the TestIdentityLoginCode builders.
+	TestIdentityLoginCode *TestIdentityLoginCodeClient
 	// TestInfraMarker is the client for interacting with the TestInfraMarker builders.
 	TestInfraMarker *TestInfraMarkerClient
 	// ThreadGroup is the client for interacting with the ThreadGroup builders.
@@ -353,8 +353,8 @@ func (c *Client) init() {
 	c.SkillVersion = NewSkillVersionClient(c.config)
 	c.SubscriptionTemplate = NewSubscriptionTemplateClient(c.config)
 	c.Template = NewTemplateClient(c.config)
-	c.TestIdentityLoginCode = NewTestIdentityLoginCodeClient(c.config)
 	c.TestIdentityDelegation = NewTestIdentityDelegationClient(c.config)
+	c.TestIdentityLoginCode = NewTestIdentityLoginCodeClient(c.config)
 	c.TestInfraMarker = NewTestInfraMarkerClient(c.config)
 	c.ThreadGroup = NewThreadGroupClient(c.config)
 	c.ThreadGroupMember = NewThreadGroupMemberClient(c.config)
@@ -527,8 +527,8 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		SkillVersion:                  NewSkillVersionClient(cfg),
 		SubscriptionTemplate:          NewSubscriptionTemplateClient(cfg),
 		Template:                      NewTemplateClient(cfg),
-		TestIdentityLoginCode:         NewTestIdentityLoginCodeClient(cfg),
 		TestIdentityDelegation:        NewTestIdentityDelegationClient(cfg),
+		TestIdentityLoginCode:         NewTestIdentityLoginCodeClient(cfg),
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
 		ThreadGroup:                   NewThreadGroupClient(cfg),
 		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
@@ -628,8 +628,8 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		SkillVersion:                  NewSkillVersionClient(cfg),
 		SubscriptionTemplate:          NewSubscriptionTemplateClient(cfg),
 		Template:                      NewTemplateClient(cfg),
-		TestIdentityLoginCode:         NewTestIdentityLoginCodeClient(cfg),
 		TestIdentityDelegation:        NewTestIdentityDelegationClient(cfg),
+		TestIdentityLoginCode:         NewTestIdentityLoginCodeClient(cfg),
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
 		ThreadGroup:                   NewThreadGroupClient(cfg),
 		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
@@ -685,12 +685,9 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
 		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
 		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.TestIdentityLoginCode, c.TestInfraMarker,
-		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
-		c.UserAccessToken, c.UserTerminalWorkspace,
 		c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
-		c.User, c.UserAccessToken, c.UserTerminalWorkspace,
+		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
+		c.UsageReservation, c.User, c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
 	}
@@ -719,12 +716,9 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
 		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
 		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.TestIdentityLoginCode, c.TestInfraMarker,
-		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
-		c.UserAccessToken, c.UserTerminalWorkspace,
 		c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
-		c.User, c.UserAccessToken, c.UserTerminalWorkspace,
+		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
+		c.UsageReservation, c.User, c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -879,10 +873,10 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.SubscriptionTemplate.mutate(ctx, m)
 	case *TemplateMutation:
 		return c.Template.mutate(ctx, m)
-	case *TestIdentityLoginCodeMutation:
-		return c.TestIdentityLoginCode.mutate(ctx, m)
 	case *TestIdentityDelegationMutation:
 		return c.TestIdentityDelegation.mutate(ctx, m)
+	case *TestIdentityLoginCodeMutation:
+		return c.TestIdentityLoginCode.mutate(ctx, m)
 	case *TestInfraMarkerMutation:
 		return c.TestInfraMarker.mutate(ctx, m)
 	case *ThreadGroupMutation:
@@ -11107,37 +11101,6 @@ func (c *TemplateClient) mutate(ctx context.Context, m *TemplateMutation) (Value
 	}
 }
 
-// TestIdentityLoginCodeClient is a client for the TestIdentityLoginCode schema.
-type TestIdentityLoginCodeClient struct {
-	config
-}
-
-// NewTestIdentityLoginCodeClient returns a client for the TestIdentityLoginCode from the given config.
-func NewTestIdentityLoginCodeClient(c config) *TestIdentityLoginCodeClient {
-	return &TestIdentityLoginCodeClient{config: c}
-}
-
-// Use adds a list of mutation hooks to the hooks stack.
-// A call to `Use(f, g, h)` equals to `testidentitylogincode.Hooks(f(g(h())))`.
-func (c *TestIdentityLoginCodeClient) Use(hooks ...Hook) {
-	c.hooks.TestIdentityLoginCode = append(c.hooks.TestIdentityLoginCode, hooks...)
-}
-
-// Intercept adds a list of query interceptors to the interceptors stack.
-// A call to `Intercept(f, g, h)` equals to `testidentitylogincode.Intercept(f(g(h())))`.
-func (c *TestIdentityLoginCodeClient) Intercept(interceptors ...Interceptor) {
-	c.inters.TestIdentityLoginCode = append(c.inters.TestIdentityLoginCode, interceptors...)
-}
-
-// Create returns a builder for creating a TestIdentityLoginCode entity.
-func (c *TestIdentityLoginCodeClient) Create() *TestIdentityLoginCodeCreate {
-	mutation := newTestIdentityLoginCodeMutation(c.config, OpCreate)
-	return &TestIdentityLoginCodeCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// CreateBulk returns a builder for creating a bulk of TestIdentityLoginCode entities.
-func (c *TestIdentityLoginCodeClient) CreateBulk(builders ...*TestIdentityLoginCodeCreate) *TestIdentityLoginCodeCreateBulk {
-	return &TestIdentityLoginCodeCreateBulk{config: c.config, builders: builders}
 // TestIdentityDelegationClient is a client for the TestIdentityDelegation schema.
 type TestIdentityDelegationClient struct {
 	config
@@ -11173,12 +11136,6 @@ func (c *TestIdentityDelegationClient) CreateBulk(builders ...*TestIdentityDeleg
 
 // MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
 // a builder and applies setFunc on it.
-func (c *TestIdentityLoginCodeClient) MapCreateBulk(slice any, setFunc func(*TestIdentityLoginCodeCreate, int)) *TestIdentityLoginCodeCreateBulk {
-	rv := reflect.ValueOf(slice)
-	if rv.Kind() != reflect.Slice {
-		return &TestIdentityLoginCodeCreateBulk{err: fmt.Errorf("calling to TestIdentityLoginCodeClient.MapCreateBulk with wrong type %T, need slice", slice)}
-	}
-	builders := make([]*TestIdentityLoginCodeCreate, rv.Len())
 func (c *TestIdentityDelegationClient) MapCreateBulk(slice any, setFunc func(*TestIdentityDelegationCreate, int)) *TestIdentityDelegationCreateBulk {
 	rv := reflect.ValueOf(slice)
 	if rv.Kind() != reflect.Slice {
@@ -11189,35 +11146,6 @@ func (c *TestIdentityDelegationClient) MapCreateBulk(slice any, setFunc func(*Te
 		builders[i] = c.Create()
 		setFunc(builders[i], i)
 	}
-	return &TestIdentityLoginCodeCreateBulk{config: c.config, builders: builders}
-}
-
-// Update returns an update builder for TestIdentityLoginCode.
-func (c *TestIdentityLoginCodeClient) Update() *TestIdentityLoginCodeUpdate {
-	mutation := newTestIdentityLoginCodeMutation(c.config, OpUpdate)
-	return &TestIdentityLoginCodeUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// UpdateOne returns an update builder for the given entity.
-func (c *TestIdentityLoginCodeClient) UpdateOne(_m *TestIdentityLoginCode) *TestIdentityLoginCodeUpdateOne {
-	mutation := newTestIdentityLoginCodeMutation(c.config, OpUpdateOne, withTestIdentityLoginCode(_m))
-	return &TestIdentityLoginCodeUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// UpdateOneID returns an update builder for the given id.
-func (c *TestIdentityLoginCodeClient) UpdateOneID(id uuid.UUID) *TestIdentityLoginCodeUpdateOne {
-	mutation := newTestIdentityLoginCodeMutation(c.config, OpUpdateOne, withTestIdentityLoginCodeID(id))
-	return &TestIdentityLoginCodeUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// Delete returns a delete builder for TestIdentityLoginCode.
-func (c *TestIdentityLoginCodeClient) Delete() *TestIdentityLoginCodeDelete {
-	mutation := newTestIdentityLoginCodeMutation(c.config, OpDelete)
-	return &TestIdentityLoginCodeDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// DeleteOne returns a builder for deleting the given entity.
-func (c *TestIdentityLoginCodeClient) DeleteOne(_m *TestIdentityLoginCode) *TestIdentityLoginCodeDeleteOne {
 	return &TestIdentityDelegationCreateBulk{config: c.config, builders: builders}
 }
 
@@ -11251,18 +11179,6 @@ func (c *TestIdentityDelegationClient) DeleteOne(_m *TestIdentityDelegation) *Te
 }
 
 // DeleteOneID returns a builder for deleting the given entity by its id.
-func (c *TestIdentityLoginCodeClient) DeleteOneID(id uuid.UUID) *TestIdentityLoginCodeDeleteOne {
-	builder := c.Delete().Where(testidentitylogincode.ID(id))
-	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
-	return &TestIdentityLoginCodeDeleteOne{builder}
-}
-
-// Query returns a query builder for TestIdentityLoginCode.
-func (c *TestIdentityLoginCodeClient) Query() *TestIdentityLoginCodeQuery {
-	return &TestIdentityLoginCodeQuery{
-		config: c.config,
-		ctx:    &QueryContext{Type: TypeTestIdentityLoginCode},
 func (c *TestIdentityDelegationClient) DeleteOneID(id uuid.UUID) *TestIdentityDelegationDeleteOne {
 	builder := c.Delete().Where(testidentitydelegation.ID(id))
 	builder.mutation.id = &id
@@ -11279,13 +11195,6 @@ func (c *TestIdentityDelegationClient) Query() *TestIdentityDelegationQuery {
 	}
 }
 
-// Get returns a TestIdentityLoginCode entity by its id.
-func (c *TestIdentityLoginCodeClient) Get(ctx context.Context, id uuid.UUID) (*TestIdentityLoginCode, error) {
-	return c.Query().Where(testidentitylogincode.ID(id)).Only(ctx)
-}
-
-// GetX is like Get, but panics if an error occurs.
-func (c *TestIdentityLoginCodeClient) GetX(ctx context.Context, id uuid.UUID) *TestIdentityLoginCode {
 // Get returns a TestIdentityDelegation entity by its id.
 func (c *TestIdentityDelegationClient) Get(ctx context.Context, id uuid.UUID) (*TestIdentityDelegation, error) {
 	return c.Query().Where(testidentitydelegation.ID(id)).Only(ctx)
@@ -11293,6 +11202,139 @@ func (c *TestIdentityDelegationClient) Get(ctx context.Context, id uuid.UUID) (*
 
 // GetX is like Get, but panics if an error occurs.
 func (c *TestIdentityDelegationClient) GetX(ctx context.Context, id uuid.UUID) *TestIdentityDelegation {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *TestIdentityDelegationClient) Hooks() []Hook {
+	return c.hooks.TestIdentityDelegation
+}
+
+// Interceptors returns the client interceptors.
+func (c *TestIdentityDelegationClient) Interceptors() []Interceptor {
+	return c.inters.TestIdentityDelegation
+}
+
+func (c *TestIdentityDelegationClient) mutate(ctx context.Context, m *TestIdentityDelegationMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&TestIdentityDelegationCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&TestIdentityDelegationUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&TestIdentityDelegationUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&TestIdentityDelegationDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown TestIdentityDelegation mutation op: %q", m.Op())
+	}
+}
+
+// TestIdentityLoginCodeClient is a client for the TestIdentityLoginCode schema.
+type TestIdentityLoginCodeClient struct {
+	config
+}
+
+// NewTestIdentityLoginCodeClient returns a client for the TestIdentityLoginCode from the given config.
+func NewTestIdentityLoginCodeClient(c config) *TestIdentityLoginCodeClient {
+	return &TestIdentityLoginCodeClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `testidentitylogincode.Hooks(f(g(h())))`.
+func (c *TestIdentityLoginCodeClient) Use(hooks ...Hook) {
+	c.hooks.TestIdentityLoginCode = append(c.hooks.TestIdentityLoginCode, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `testidentitylogincode.Intercept(f(g(h())))`.
+func (c *TestIdentityLoginCodeClient) Intercept(interceptors ...Interceptor) {
+	c.inters.TestIdentityLoginCode = append(c.inters.TestIdentityLoginCode, interceptors...)
+}
+
+// Create returns a builder for creating a TestIdentityLoginCode entity.
+func (c *TestIdentityLoginCodeClient) Create() *TestIdentityLoginCodeCreate {
+	mutation := newTestIdentityLoginCodeMutation(c.config, OpCreate)
+	return &TestIdentityLoginCodeCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of TestIdentityLoginCode entities.
+func (c *TestIdentityLoginCodeClient) CreateBulk(builders ...*TestIdentityLoginCodeCreate) *TestIdentityLoginCodeCreateBulk {
+	return &TestIdentityLoginCodeCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *TestIdentityLoginCodeClient) MapCreateBulk(slice any, setFunc func(*TestIdentityLoginCodeCreate, int)) *TestIdentityLoginCodeCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &TestIdentityLoginCodeCreateBulk{err: fmt.Errorf("calling to TestIdentityLoginCodeClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*TestIdentityLoginCodeCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &TestIdentityLoginCodeCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for TestIdentityLoginCode.
+func (c *TestIdentityLoginCodeClient) Update() *TestIdentityLoginCodeUpdate {
+	mutation := newTestIdentityLoginCodeMutation(c.config, OpUpdate)
+	return &TestIdentityLoginCodeUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *TestIdentityLoginCodeClient) UpdateOne(_m *TestIdentityLoginCode) *TestIdentityLoginCodeUpdateOne {
+	mutation := newTestIdentityLoginCodeMutation(c.config, OpUpdateOne, withTestIdentityLoginCode(_m))
+	return &TestIdentityLoginCodeUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *TestIdentityLoginCodeClient) UpdateOneID(id uuid.UUID) *TestIdentityLoginCodeUpdateOne {
+	mutation := newTestIdentityLoginCodeMutation(c.config, OpUpdateOne, withTestIdentityLoginCodeID(id))
+	return &TestIdentityLoginCodeUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for TestIdentityLoginCode.
+func (c *TestIdentityLoginCodeClient) Delete() *TestIdentityLoginCodeDelete {
+	mutation := newTestIdentityLoginCodeMutation(c.config, OpDelete)
+	return &TestIdentityLoginCodeDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *TestIdentityLoginCodeClient) DeleteOne(_m *TestIdentityLoginCode) *TestIdentityLoginCodeDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *TestIdentityLoginCodeClient) DeleteOneID(id uuid.UUID) *TestIdentityLoginCodeDeleteOne {
+	builder := c.Delete().Where(testidentitylogincode.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &TestIdentityLoginCodeDeleteOne{builder}
+}
+
+// Query returns a query builder for TestIdentityLoginCode.
+func (c *TestIdentityLoginCodeClient) Query() *TestIdentityLoginCodeQuery {
+	return &TestIdentityLoginCodeQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeTestIdentityLoginCode},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a TestIdentityLoginCode entity by its id.
+func (c *TestIdentityLoginCodeClient) Get(ctx context.Context, id uuid.UUID) (*TestIdentityLoginCode, error) {
+	return c.Query().Where(testidentitylogincode.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *TestIdentityLoginCodeClient) GetX(ctx context.Context, id uuid.UUID) *TestIdentityLoginCode {
 	obj, err := c.Get(ctx, id)
 	if err != nil {
 		panic(err)
@@ -11338,28 +11380,6 @@ func (c *TestIdentityLoginCodeClient) mutate(ctx context.Context, m *TestIdentit
 		return (&TestIdentityLoginCodeDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown TestIdentityLoginCode mutation op: %q", m.Op())
-// Hooks returns the client hooks.
-func (c *TestIdentityDelegationClient) Hooks() []Hook {
-	return c.hooks.TestIdentityDelegation
-}
-
-// Interceptors returns the client interceptors.
-func (c *TestIdentityDelegationClient) Interceptors() []Interceptor {
-	return c.inters.TestIdentityDelegation
-}
-
-func (c *TestIdentityDelegationClient) mutate(ctx context.Context, m *TestIdentityDelegationMutation) (Value, error) {
-	switch m.Op() {
-	case OpCreate:
-		return (&TestIdentityDelegationCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
-	case OpUpdate:
-		return (&TestIdentityDelegationUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
-	case OpUpdateOne:
-		return (&TestIdentityDelegationUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
-	case OpDelete, OpDeleteOne:
-		return (&TestIdentityDelegationDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
-	default:
-		return nil, fmt.Errorf("ent: unknown TestIdentityDelegation mutation op: %q", m.Op())
 	}
 }
 
@@ -12442,9 +12462,8 @@ type (
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RelayInstance,
 		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
 		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
-		Template, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
-		Template, TestIdentityDelegation, TestInfraMarker, ThreadGroup,
-		ThreadGroupMember, UsageReservation, User, UserAccessToken,
+		Template, TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker,
+		ThreadGroup, ThreadGroupMember, UsageReservation, User, UserAccessToken,
 		UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
@@ -12465,9 +12484,8 @@ type (
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RelayInstance,
 		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
 		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
-		Template, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
-		Template, TestIdentityDelegation, TestInfraMarker, ThreadGroup,
-		ThreadGroupMember, UsageReservation, User, UserAccessToken,
+		Template, TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker,
+		ThreadGroup, ThreadGroupMember, UsageReservation, User, UserAccessToken,
 		UserTerminalWorkspace []ent.Interceptor
 	}
 )

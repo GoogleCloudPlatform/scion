@@ -79,8 +79,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
@@ -2401,28 +2401,6 @@ func init() {
 	templateDescID := templateFields[0].Descriptor()
 	// template.DefaultID holds the default value on creation for the id field.
 	template.DefaultID = templateDescID.Default.(func() uuid.UUID)
-	testidentitylogincodeFields := schema.TestIdentityLoginCode{}.Fields()
-	_ = testidentitylogincodeFields
-	// testidentitylogincodeDescCodeHash is the schema descriptor for code_hash field.
-	testidentitylogincodeDescCodeHash := testidentitylogincodeFields[2].Descriptor()
-	// testidentitylogincode.CodeHashValidator is a validator for the "code_hash" field. It is called by the builders before save.
-	testidentitylogincode.CodeHashValidator = testidentitylogincodeDescCodeHash.Validators[0].(func(string) error)
-	// testidentitylogincodeDescIssuedBy is the schema descriptor for issued_by field.
-	testidentitylogincodeDescIssuedBy := testidentitylogincodeFields[3].Descriptor()
-	// testidentitylogincode.IssuedByValidator is a validator for the "issued_by" field. It is called by the builders before save.
-	testidentitylogincode.IssuedByValidator = testidentitylogincodeDescIssuedBy.Validators[0].(func(string) error)
-	// testidentitylogincodeDescIssuerCredentialID is the schema descriptor for issuer_credential_id field.
-	testidentitylogincodeDescIssuerCredentialID := testidentitylogincodeFields[4].Descriptor()
-	// testidentitylogincode.DefaultIssuerCredentialID holds the default value on creation for the issuer_credential_id field.
-	testidentitylogincode.DefaultIssuerCredentialID = testidentitylogincodeDescIssuerCredentialID.Default.(string)
-	// testidentitylogincodeDescCreatedAt is the schema descriptor for created_at field.
-	testidentitylogincodeDescCreatedAt := testidentitylogincodeFields[7].Descriptor()
-	// testidentitylogincode.DefaultCreatedAt holds the default value on creation for the created_at field.
-	testidentitylogincode.DefaultCreatedAt = testidentitylogincodeDescCreatedAt.Default.(func() time.Time)
-	// testidentitylogincodeDescID is the schema descriptor for id field.
-	testidentitylogincodeDescID := testidentitylogincodeFields[0].Descriptor()
-	// testidentitylogincode.DefaultID holds the default value on creation for the id field.
-	testidentitylogincode.DefaultID = testidentitylogincodeDescID.Default.(func() uuid.UUID)
 	testidentitydelegationFields := schema.TestIdentityDelegation{}.Fields()
 	_ = testidentitydelegationFields
 	// testidentitydelegationDescGrantorID is the schema descriptor for grantor_id field.
@@ -2449,6 +2427,28 @@ func init() {
 	testidentitydelegationDescID := testidentitydelegationFields[0].Descriptor()
 	// testidentitydelegation.DefaultID holds the default value on creation for the id field.
 	testidentitydelegation.DefaultID = testidentitydelegationDescID.Default.(func() uuid.UUID)
+	testidentitylogincodeFields := schema.TestIdentityLoginCode{}.Fields()
+	_ = testidentitylogincodeFields
+	// testidentitylogincodeDescCodeHash is the schema descriptor for code_hash field.
+	testidentitylogincodeDescCodeHash := testidentitylogincodeFields[2].Descriptor()
+	// testidentitylogincode.CodeHashValidator is a validator for the "code_hash" field. It is called by the builders before save.
+	testidentitylogincode.CodeHashValidator = testidentitylogincodeDescCodeHash.Validators[0].(func(string) error)
+	// testidentitylogincodeDescIssuedBy is the schema descriptor for issued_by field.
+	testidentitylogincodeDescIssuedBy := testidentitylogincodeFields[3].Descriptor()
+	// testidentitylogincode.IssuedByValidator is a validator for the "issued_by" field. It is called by the builders before save.
+	testidentitylogincode.IssuedByValidator = testidentitylogincodeDescIssuedBy.Validators[0].(func(string) error)
+	// testidentitylogincodeDescIssuerCredentialID is the schema descriptor for issuer_credential_id field.
+	testidentitylogincodeDescIssuerCredentialID := testidentitylogincodeFields[4].Descriptor()
+	// testidentitylogincode.DefaultIssuerCredentialID holds the default value on creation for the issuer_credential_id field.
+	testidentitylogincode.DefaultIssuerCredentialID = testidentitylogincodeDescIssuerCredentialID.Default.(string)
+	// testidentitylogincodeDescCreatedAt is the schema descriptor for created_at field.
+	testidentitylogincodeDescCreatedAt := testidentitylogincodeFields[7].Descriptor()
+	// testidentitylogincode.DefaultCreatedAt holds the default value on creation for the created_at field.
+	testidentitylogincode.DefaultCreatedAt = testidentitylogincodeDescCreatedAt.Default.(func() time.Time)
+	// testidentitylogincodeDescID is the schema descriptor for id field.
+	testidentitylogincodeDescID := testidentitylogincodeFields[0].Descriptor()
+	// testidentitylogincode.DefaultID holds the default value on creation for the id field.
+	testidentitylogincode.DefaultID = testidentitylogincodeDescID.Default.(func() uuid.UUID)
 	testinframarkerFields := schema.TestInfraMarker{}.Fields()
 	_ = testinframarkerFields
 	// testinframarkerDescHubID is the schema descriptor for hub_id field.

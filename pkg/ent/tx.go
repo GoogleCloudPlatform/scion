@@ -158,10 +158,10 @@ type Tx struct {
 	SubscriptionTemplate *SubscriptionTemplateClient
 	// Template is the client for interacting with the Template builders.
 	Template *TemplateClient
-	// TestIdentityLoginCode is the client for interacting with the TestIdentityLoginCode builders.
-	TestIdentityLoginCode *TestIdentityLoginCodeClient
 	// TestIdentityDelegation is the client for interacting with the TestIdentityDelegation builders.
 	TestIdentityDelegation *TestIdentityDelegationClient
+	// TestIdentityLoginCode is the client for interacting with the TestIdentityLoginCode builders.
+	TestIdentityLoginCode *TestIdentityLoginCodeClient
 	// TestInfraMarker is the client for interacting with the TestInfraMarker builders.
 	TestInfraMarker *TestInfraMarkerClient
 	// ThreadGroup is the client for interacting with the ThreadGroup builders.
@@ -380,8 +380,8 @@ func (tx *Tx) init() {
 	tx.SkillVersion = NewSkillVersionClient(tx.config)
 	tx.SubscriptionTemplate = NewSubscriptionTemplateClient(tx.config)
 	tx.Template = NewTemplateClient(tx.config)
-	tx.TestIdentityLoginCode = NewTestIdentityLoginCodeClient(tx.config)
 	tx.TestIdentityDelegation = NewTestIdentityDelegationClient(tx.config)
+	tx.TestIdentityLoginCode = NewTestIdentityLoginCodeClient(tx.config)
 	tx.TestInfraMarker = NewTestInfraMarkerClient(tx.config)
 	tx.ThreadGroup = NewThreadGroupClient(tx.config)
 	tx.ThreadGroupMember = NewThreadGroupMemberClient(tx.config)

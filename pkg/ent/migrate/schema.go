@@ -2765,6 +2765,32 @@ var (
 			},
 		},
 	}
+	// TestIdentityDelegationsColumns holds the columns for the "test_identity_delegations" table.
+	TestIdentityDelegationsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "grantor_id", Type: field.TypeString},
+		{Name: "workload_sub", Type: field.TypeString},
+		{Name: "scope", Type: field.TypeString},
+		{Name: "member_cap", Type: field.TypeInt},
+		{Name: "label", Type: field.TypeString, Default: ""},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
+		{Name: "revoked_by", Type: field.TypeString, Nullable: true},
+	}
+	// TestIdentityDelegationsTable holds the schema information for the "test_identity_delegations" table.
+	TestIdentityDelegationsTable = &schema.Table{
+		Name:       "test_identity_delegations",
+		Columns:    TestIdentityDelegationsColumns,
+		PrimaryKey: []*schema.Column{TestIdentityDelegationsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "testidentitydelegation_grantor_id",
+				Unique:  false,
+				Columns: []*schema.Column{TestIdentityDelegationsColumns[1]},
+			},
+		},
+	}
 	// TestIdentityLoginCodesColumns holds the columns for the "test_identity_login_codes" table.
 	TestIdentityLoginCodesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2794,29 +2820,6 @@ var (
 				Name:    "testidentitylogincode_expires_at",
 				Unique:  false,
 				Columns: []*schema.Column{TestIdentityLoginCodesColumns[4]},
-	// TestIdentityDelegationsColumns holds the columns for the "test_identity_delegations" table.
-	TestIdentityDelegationsColumns = []*schema.Column{
-		{Name: "id", Type: field.TypeUUID},
-		{Name: "grantor_id", Type: field.TypeString},
-		{Name: "workload_sub", Type: field.TypeString},
-		{Name: "scope", Type: field.TypeString},
-		{Name: "member_cap", Type: field.TypeInt},
-		{Name: "label", Type: field.TypeString, Default: ""},
-		{Name: "created_at", Type: field.TypeTime},
-		{Name: "expires_at", Type: field.TypeTime},
-		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
-		{Name: "revoked_by", Type: field.TypeString, Nullable: true},
-	}
-	// TestIdentityDelegationsTable holds the schema information for the "test_identity_delegations" table.
-	TestIdentityDelegationsTable = &schema.Table{
-		Name:       "test_identity_delegations",
-		Columns:    TestIdentityDelegationsColumns,
-		PrimaryKey: []*schema.Column{TestIdentityDelegationsColumns[0]},
-		Indexes: []*schema.Index{
-			{
-				Name:    "testidentitydelegation_grantor_id",
-				Unique:  false,
-				Columns: []*schema.Column{TestIdentityDelegationsColumns[1]},
 			},
 		},
 	}
@@ -3148,8 +3151,8 @@ var (
 		SkillVersionsTable,
 		SubscriptionTemplatesTable,
 		TemplatesTable,
-		TestIdentityLoginCodesTable,
 		TestIdentityDelegationsTable,
+		TestIdentityLoginCodesTable,
 		TestInfraMarkerTable,
 		ThreadGroupsTable,
 		ThreadGroupMembersTable,
@@ -3346,11 +3349,12 @@ func init() {
 	TemplatesTable.Annotation = &entsql.Annotation{
 		Table: "templates",
 	}
+	TestIdentityDelegationsTable.Annotation = &entsql.Annotation{
+		Table: "test_identity_delegations",
+	}
 	TestIdentityLoginCodesTable.ForeignKeys[0].RefTable = UsersTable
 	TestIdentityLoginCodesTable.Annotation = &entsql.Annotation{
 		Table: "test_identity_login_codes",
-	TestIdentityDelegationsTable.Annotation = &entsql.Annotation{
-		Table: "test_identity_delegations",
 	}
 	TestInfraMarkerTable.Annotation = &entsql.Annotation{
 		Table: "test_infra_marker",
