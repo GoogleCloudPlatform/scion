@@ -498,6 +498,13 @@ func (c *GitHubResolutionCache) Close(ctx context.Context) error {
 	return err
 }
 
+// Closed reports whether Close has been called.
+func (c *GitHubResolutionCache) Closed() bool {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	return c.closing
+}
+
 // refreshesRunning reports whether any background refresh has not finished.
 func (c *GitHubResolutionCache) refreshesRunning() bool {
 	c.lifecycleMu.Lock()

@@ -54,6 +54,10 @@ func (m *AgentManager) CleanupLaunch(ctx context.Context, handles []ResourceHand
 
 	var errs []error
 	for _, h := range handles {
+		if !m.ownsLaunchHandle(h) {
+			errs = append(errs, fmt.Errorf("cleanup launch resource %s %s/%s (%s): %w", h.Kind, h.Namespace, h.Name, h.UID, ErrNotOwned))
+			continue
+		}
 		if !supportsUIDPrecondition {
 			// A plain Delete(ctx, h.Name) has no UID check, which is exactly
 			// what the precondition exists to prevent (a stale launch's

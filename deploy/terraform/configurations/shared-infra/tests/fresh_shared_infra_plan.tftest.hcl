@@ -59,4 +59,32 @@ run "fresh_shared_infra_plans_clean" {
     condition     = output.sql_availability_type == "REGIONAL"
     error_message = "the Cloud SQL instance's settings.availability_type must be REGIONAL by default — if this disagrees with var.sql_availability_type's default, the value stopped flowing through module.cloudsql_instance."
   }
+
+  # Opt-in: no audit config by default.
+  assert {
+    condition     = length(google_project_iam_audit_config.iamcredentials) == 0
+    error_message = "iamcredentials_data_access_logs defaults to false and must create no audit config."
+  }
+}
+
+run "iamcredentials_data_access_logs_opt_in" {
+  command = plan
+
+  variables {
+    iamcredentials_data_access_logs = true
+  }
+
+  assert {
+    condition     = length(google_project_iam_audit_config.iamcredentials) == 1
+    error_message = "the opt-in must create exactly one audit config."
+  }
+
+  assert {
+    condition = (
+      google_project_iam_audit_config.iamcredentials[0].service == "iamcredentials.googleapis.com" &&
+      google_project_iam_audit_config.iamcredentials[0].project == "tfha-test-project" &&
+      [for c in google_project_iam_audit_config.iamcredentials[0].audit_log_config : c.log_type] == ["DATA_READ"]
+    )
+    error_message = "the audit config must enable DATA_READ for iamcredentials.googleapis.com on the project."
+  }
 }

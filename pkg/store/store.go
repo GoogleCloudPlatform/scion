@@ -192,8 +192,9 @@ type Store interface {
 	// UserKindTestHubAdmin or UserKindTestSuperAdmin. It requires an admin
 	// Kind, the kind's role (TestAdminRole), an email in the kind's domain
 	// (TestAdminEmailDomain), a non-nil ExpiresAt, a non-empty IssuedBy and
-	// IssuanceID, and a system-scoped roleDefinitionID; it returns
-	// ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
+	// IssuanceID, and a system-scoped roleDefinitionID, and refuses a non-nil
+	// IssuerDelegationID (workload issuer delegations issue the member tier
+	// only); it returns ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
 	// to the identity's expiry and CreatedBy TestIdentityIssuanceCreatedBy,
 	// so it never outlives the identity. It is a Store method because it
 	// spans the user and role-binding sub-stores.
@@ -353,6 +354,9 @@ type Store interface {
 
 	// Hub-instance registry operations (health dashboard F3)
 	HubInstanceStore
+
+	// Workload-bound issuer delegations (test identities, ptone/scion#4240)
+	TestIdentityDelegationStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -514,7 +518,8 @@ type AgentStore interface {
 
 	// AdoptAgentRunID is CompareAndSwapAgentRunID (expectedRunID to
 	// newRunID, clearing PreviousRunIDs) for the hub's heartbeat adoption
-	// of a stranded run (ptone/scion#3661). It swaps only while
+	// of a stranded run (ptone/scion#3661) and for the settle of a
+	// succeeded launch report (ptone/scion#2965). It swaps only while
 	// RunIDUpdatedAt is set and no later than unchangedSince, so a run_id
 	// that changed and changed back after the caller's read is not
 	// adopted. Like SetAgentRunID, it writes nothing while the row is
@@ -1759,7 +1764,8 @@ type UserStore interface {
 	// the only store path that writes Kind=UserKindTestFixture. It requires
 	// Kind=UserKindTestFixture, a non-nil ExpiresAt, a non-empty IssuedBy,
 	// an email in TestFixtureEmailDomain and the member or viewer role, and
-	// returns ErrInvalidInput otherwise. CreateUser refuses all of these
+	// returns ErrInvalidInput otherwise. A non-nil IssuerDelegationID must
+	// be non-empty and is written once. CreateUser refuses all of these
 	// rows, every admin kind and every email in a test identity domain
 	// (IsReservedTestIdentityEmail) with ErrTestFixtureKindRefused.
 	CreateTestFixtureUser(ctx context.Context, user *User) error
@@ -1819,6 +1825,44 @@ type UserStore interface {
 	// ListTestAdminUsers returns every admin-kind test identity, live or
 	// not, oldest first.
 	ListTestAdminUsers(ctx context.Context) ([]User, error)
+}
+
+// TestIdentityDelegationStore persists workload-bound issuer delegations
+// (TestIdentityDelegation) and answers the per-delegation questions the
+// issuance caps and management scope need. These are the only methods that
+// write the delegation table.
+type TestIdentityDelegationStore interface {
+	// CreateTestIdentityDelegation creates a delegation. It requires a
+	// grantor, a workload subject, exactly one scope, a positive member cap
+	// and an expiry after the creation time, and returns ErrInvalidInput
+	// otherwise. RevokedAt and RevokedBy must be unset. An empty ID is
+	// generated; Created defaults to now.
+	CreateTestIdentityDelegation(ctx context.Context, d *TestIdentityDelegation) error
+
+	// GetTestIdentityDelegation returns a delegation by ID, or ErrNotFound
+	// (also for an ID that is not a UUID).
+	GetTestIdentityDelegation(ctx context.Context, id string) (*TestIdentityDelegation, error)
+
+	// ListTestIdentityDelegations returns delegations, newest first. A
+	// non-empty grantorID restricts the list to that grantor. A positive
+	// limit caps the number returned.
+	ListTestIdentityDelegations(ctx context.Context, grantorID string, limit int) ([]TestIdentityDelegation, error)
+
+	// RevokeTestIdentityDelegation sets RevokedAt and RevokedBy on a
+	// delegation that is not yet revoked and reports changed=true. Revoking
+	// a revoked delegation changes nothing and reports changed=false with a
+	// nil error, so of two concurrent revocations exactly one reports a
+	// change. Returns ErrNotFound for an unknown ID.
+	RevokeTestIdentityDelegation(ctx context.Context, id, revokedBy string, at time.Time) (changed bool, err error)
+
+	// CountLiveTestFixtureUsersByDelegation counts test fixture users
+	// issued through delegationID whose expiry is after now.
+	CountLiveTestFixtureUsersByDelegation(ctx context.Context, delegationID string, now time.Time) (int, error)
+
+	// ListTestFixtureUsersByDelegation returns test fixture users issued
+	// through delegationID, newest first, with ListTestFixtureUsers'
+	// liveAt and limit semantics.
+	ListTestFixtureUsersByDelegation(ctx context.Context, delegationID string, liveAt time.Time, limit int) ([]User, error)
 }
 
 // UserFilter defines criteria for filtering users.
@@ -3349,9 +3393,11 @@ type DelegationEdgeStore interface {
 	ListAllDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*DelegationEdge, error)
 
 	// DeactivateDelegationEdgeGuarded deactivates edgeID with cause and
-	// opID only when it is active and satisfies guard. It reports false,
-	// with no write, when the precondition does not hold; ErrNotFound when
-	// the edge does not exist.
+	// opID only when it is active and satisfies guard. guard.UpdatedAt is
+	// compared as an instant, and the write's WHERE holds the exact stored
+	// value just read, so a concurrent change refuses rather than being
+	// overwritten. It reports false, with no write, when the precondition
+	// does not hold; ErrNotFound when the edge does not exist.
 	DeactivateDelegationEdgeGuarded(ctx context.Context, edgeID string, guard DelegationEdgeDeactivateGuard, cause EdgeDeactivationCause, opID string) (bool, error)
 
 	// ReactivateDelegationEdge reactivates edgeID and clears its
@@ -3597,6 +3643,56 @@ type AgentDelegationStore interface {
 	// UpdateAgentDelegatedCredentialLastSeen sets the credential's
 	// last_seen_at. Callers treat a failure as best effort.
 	UpdateAgentDelegatedCredentialLastSeen(ctx context.Context, id string, at time.Time) error
+
+	// ListAgentDelegationGrants returns the grants that match filter,
+	// newest first. At least one of filter.AgentID and filter.IssuerUserID
+	// must be set; an empty filter returns ErrInvalidInput.
+	ListAgentDelegationGrants(ctx context.Context, filter AgentDelegationGrantFilter) ([]*AgentDelegationGrant, error)
+
+	// CountActiveAgentDelegationGrants counts the grants that match filter
+	// and are active at now: not revoked and expiring after now. The same
+	// filter rule as ListAgentDelegationGrants applies.
+	CountActiveAgentDelegationGrants(ctx context.Context, filter AgentDelegationGrantFilter, now time.Time) (int, error)
+
+	// LockAgentDelegationIssuer serializes grant issuance for one issuer.
+	// On PostgreSQL it runs SELECT ... FOR UPDATE on the user row; on
+	// SQLite, which serializes writes, it is a plain existence check. It
+	// must run inside WithTx, before the per-issuer grant count. Returns
+	// ErrNotFound if the user does not exist.
+	LockAgentDelegationIssuer(ctx context.Context, userID string) error
+
+	// LockAgentDelegationGrant serializes credential issuance and
+	// revocation for one grant, the same way, on the grant row, and
+	// returns the grant as read under the lock. Returns ErrNotFound if
+	// the grant does not exist.
+	LockAgentDelegationGrant(ctx context.Context, id string) (*AgentDelegationGrant, error)
+
+	// GetAgentDelegatedCredential returns the delegated credential with
+	// id, or ErrNotFound.
+	GetAgentDelegatedCredential(ctx context.Context, id string) (*AgentDelegatedCredential, error)
+
+	// ListActiveAgentDelegatedCredentials returns the credentials of the
+	// given grants that are active at now (not revoked and expiring after
+	// now), oldest first.
+	ListActiveAgentDelegatedCredentials(ctx context.Context, grantIDs []string, now time.Time) ([]*AgentDelegatedCredential, error)
+
+	// RevokeAgentDelegatedCredential revokes the credential with id, with
+	// reason. The update is conditional on revoked_at being NULL: a
+	// credential that is already revoked is left unchanged and reports
+	// revoked=false. Returns ErrNotFound if the credential does not exist.
+	RevokeAgentDelegatedCredential(ctx context.Context, id, reason string, at time.Time) (revoked bool, err error)
+
+	// PurgeAgentDelegatedCredentials deletes every delegated credential
+	// whose expiry is before expiredBefore, revoked or not, and returns
+	// the number deleted. Grants are never purged.
+	PurgeAgentDelegatedCredentials(ctx context.Context, expiredBefore time.Time) (int, error)
+}
+
+// AgentDelegationGrantFilter selects agent delegation grants by bound
+// agent, by issuer, or both.
+type AgentDelegationGrantFilter struct {
+	AgentID      string
+	IssuerUserID string
 }
 
 // =============================================================================

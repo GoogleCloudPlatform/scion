@@ -151,7 +151,8 @@ var tunnelTransportSource = func(ts *transportauth.TransportSettings) (transport
 
 // tunnelCredential resolves the credential through the CLI's WebSocket
 // credential chain (getHubAccessToken) and labels its kind. The lookup
-// uses the endpoint exactly as given.
+// normalises the endpoint as config.NormalizeEndpoint does; a different
+// scheme, host, port or path never matches.
 func tunnelCredential(endpoint string) tunnelclient.Credential {
 	tok := getHubAccessToken(endpoint)
 	switch {
@@ -310,11 +311,7 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	tunnelSSHHostKeyHint(cmd, tunnelSSH, endpoint, project, args[0])
-	var ts *transportauth.TransportSettings
-	if settings != nil && settings.Hub != nil && settings.Hub.Transport != nil {
-		ts = &transportauth.TransportSettings{Mode: settings.Hub.Transport.Mode, Audience: settings.Hub.Transport.Audience}
-	}
-	src, mode, err := tunnelTransportSource(ts)
+	src, mode, err := tunnelTransportSource(hubTransportSettings(settings, endpoint))
 	if err != nil {
 		return tunnelclient.Errorf(tunnelclient.ExitError, "resolving transport auth: %v", err)
 	}

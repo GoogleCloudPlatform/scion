@@ -208,9 +208,11 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	iam := s.currentGCPIAMSettings()
 	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
 	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
-	// server.hub.class is never API-writable, so it is not shown either:
-	// a client that echoes this body back must not send it.
+	// server.hub.class and server.hub.test_identities are never
+	// API-writable, so they are not shown either: a client that echoes
+	// this body back must not send them.
 	resp.Server.Hub.HubClass = ""
+	resp.Server.Hub.TestIdentities = nil
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -991,6 +993,17 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Duration-valued keys (opsettings Section.Durations and
+	// NestedDurations) must parse as a Go duration; "" or null clears.
+	// Checked on the documents built from the body, before any merge, so
+	// only the values sent are checked.
+	if fieldErr := validateDurationSettings(sectionDocs); fieldErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, fieldErr.Error(), map[string]interface{}{
+			"field": fieldErr.field,
+		})
+		return
+	}
+
 	// Sections merged on the current row by mergeSectionOnCurrent: only the
 	// keys the body sends change, and the row revision read is the CAS base
 	// (ptone/scion#3718, ptone/scion#3720).
@@ -1155,17 +1168,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			// Validate duration strings before conversion (which silently
 			// falls back to zero for invalid values). Invalid durations like
 			// "1hour" would fail at time.ParseDuration during ApplySnapshot.
+			// A value sent in the body was checked by validateDurationSettings;
+			// this catches one carried over from the stored row by the merge.
 			if fedSettings.RefreshInterval != "" {
 				if _, err := time.ParseDuration(fedSettings.RefreshInterval); err != nil {
 					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid refresh_interval %q: %v", fedSettings.RefreshInterval, err), nil)
+						fmt.Sprintf("invalid refresh_interval %q: %v", fedSettings.RefreshInterval, err),
+						map[string]interface{}{"field": "server.federation.refresh_interval"})
 					return
 				}
 			}
 			if fedSettings.DebounceInterval != "" {
 				if _, err := time.ParseDuration(fedSettings.DebounceInterval); err != nil {
 					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid debounce_interval %q: %v", fedSettings.DebounceInterval, err), nil)
+						fmt.Sprintf("invalid debounce_interval %q: %v", fedSettings.DebounceInterval, err),
+						map[string]interface{}{"field": "server.federation.debounce_interval"})
 					return
 				}
 			}
@@ -1798,6 +1815,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.HubClass != "" {
 				keys = append(keys, config.HubClassKey)
+			}
+			if hub.TestIdentities != nil {
+				keys = append(keys, config.TestIdentitiesKey)
 			}
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")

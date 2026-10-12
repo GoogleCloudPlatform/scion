@@ -134,6 +134,15 @@ return an error instead of blocking.`,
 			globalMode = true
 		}
 
+		// Fill the hub endpoint and project from the current context
+		// ('scion use') where no flag, environment variable or directory
+		// project chose them. It runs after every --global form is known
+		// and before the project requirement check, so a selected project
+		// satisfies it.
+		if err := resolveInvocationTarget(cmd, mode); err != nil {
+			return err
+		}
+
 		if globalMode && projectPath == "" {
 			projectPath = "global"
 		}
@@ -451,7 +460,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&outputFormat, "format", "", "Output format (e.g., json)")
 
 	// Hub integration flags
-	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub API endpoint URL (overrides SCION_HUB_ENDPOINT)")
+	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub nickname or API endpoint URL (overrides SCION_HUB_ENDPOINT)")
 	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Disable Hub integration for this invocation (local-only mode)")
 
 	// Confirmation and non-interactive flags
@@ -592,7 +601,10 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 		return
 	}
 
-	// Check if Hub is enabled (either via settings or --hub flag override)
+	// Check if Hub is enabled (either via settings or --hub flag override).
+	// A hub selected with 'scion use' is in hubEndpoint too and counts the
+	// same way: a project from the current context is resolved on that hub
+	// without hub.enabled, so dev auth is really in use.
 	hubEnabled := settings.IsHubEnabled() || hubEndpoint != ""
 	if !hubEnabled {
 		return

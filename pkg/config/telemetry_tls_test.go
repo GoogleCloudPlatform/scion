@@ -46,9 +46,11 @@ func TestTelemetryTLSPlaintextEnvOverridesSettingsAndRejectsConflict(t *testing.
 	if _, err := LoadVersionedSettings(""); err != nil {
 		t.Fatalf("verified/skip TLS env rejected: %v", err)
 	}
+	// An unparseable plaintext switch is ignored with a warning; see
+	// TestLoadVersionedSettings_BadOtelInsecureFallsBack.
 	t.Setenv("SCION_OTEL_INSECURE", "not-a-bool")
-	if _, err := LoadVersionedSettings(""); err == nil || !strings.Contains(err.Error(), "SCION_OTEL_INSECURE") {
-		t.Fatalf("invalid plaintext switch error = %v", err)
+	if _, err := LoadVersionedSettings(""); err != nil {
+		t.Fatalf("invalid plaintext switch must not fail the load: %v", err)
 	}
 }
 
