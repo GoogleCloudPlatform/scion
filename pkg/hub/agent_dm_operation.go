@@ -498,7 +498,8 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// credential (ptone/scion#3222).
 	var artifactRefs []artifacts.MessageRef
 	var artifactWarning string
-	structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+	structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
+		directAgentRecipient(input.TargetAgent, input.GroupID))
 	structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 	// Stamp attachment metadata onto the structured message.

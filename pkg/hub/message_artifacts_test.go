@@ -62,7 +62,7 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 		before[k] = v
 	}
 
-	out, admitted, warning := srv.admitMessageArtifacts(ctx, md)
+	out, admitted, warning := srv.admitMessageArtifacts(ctx, md, artifactRecipient{})
 	assert.Equal(t, before, md, "input metadata must not be mutated")
 	assert.Equal(t, []artifacts.MessageRef{{ArtifactID: own, Seq: 1}}, admitted)
 	assert.Equal(t, artifactRefsWarning(3, 0), warning, "unreadable, missing and malformed refs are all dropped")
@@ -76,7 +76,7 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	assert.Empty(t, artifactRefsWarning(0, 0))
 
 	// Nothing admitted: the key is absent, not empty.
-	out, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})})
+	out, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})}, artifactRecipient{})
 	assert.Empty(t, admitted)
 	assert.Equal(t, artifactRefsWarning(1, 0), warning)
 	assert.NotContains(t, out, artifacts.MessageMetadataKey)
@@ -84,7 +84,7 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	// A sender identity the artifact service does not serve (no token id,
 	// as for in-process identities) admits nothing, even for its own artifact.
 	inProc := requestAuthCtx(context.Background(), agentCtxIdentity(sender))
-	_, admitted, warning = srv.admitMessageArtifacts(inProc, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
+	_, admitted, warning = srv.admitMessageArtifacts(inProc, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})}, artifactRecipient{})
 	assert.Empty(t, admitted)
 	assert.Equal(t, artifactRefsWarning(1, 0), warning)
 
@@ -92,7 +92,7 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	// context from the authentication middleware) resolves nothing, even
 	// for a token-backed identity that owns the artifact.
 	identityOnly := contextWithIdentity(context.Background(), ident)
-	_, admitted, warning = srv.admitMessageArtifacts(identityOnly, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
+	_, admitted, warning = srv.admitMessageArtifacts(identityOnly, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})}, artifactRecipient{})
 	assert.Empty(t, admitted)
 	assert.Equal(t, artifactRefsWarning(1, 0), warning)
 	views, unchecked := srv.resolveArtifactRefs(identityOnly, []artifacts.MessageRef{{ArtifactID: own}})
@@ -104,7 +104,7 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	require.NoError(t, err)
 	srv.experiments = reg
 	require.False(t, srv.experimentEnabled(experiments.Artifacts))
-	out, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
+	out, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})}, artifactRecipient{})
 	assert.Empty(t, admitted)
 	assert.Equal(t, artifactRefsDisabled(1), warning)
 	assert.Contains(t, warning, "not enabled on this hub")
@@ -136,7 +136,7 @@ func TestAdmitMessageArtifacts_GrantReadFailure(t *testing.T) {
 	srv.SetArtifactStore(failGrantsArtifactStore{st})
 
 	refs := []artifacts.MessageRef{{ArtifactID: own}, {ArtifactID: elsewhere}, {ArtifactID: missing}}
-	out, admitted, warning := srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(refs...)})
+	out, admitted, warning := srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(refs...)}, artifactRecipient{})
 	assert.Equal(t, []artifacts.MessageRef{{ArtifactID: own}}, admitted)
 	assert.Equal(t, refsValue(artifacts.MessageRef{ArtifactID: own}), out[artifacts.MessageMetadataKey])
 	assert.Equal(t, artifactRefsWarning(1, 1), warning, "missing is dropped, the grant read failure is unchecked")
@@ -145,7 +145,7 @@ func TestAdmitMessageArtifacts_GrantReadFailure(t *testing.T) {
 	assert.NotContains(t, warning, missing)
 
 	// Only the failing reference: the server-error warning alone.
-	_, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})})
+	_, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})}, artifactRecipient{})
 	assert.Empty(t, admitted)
 	assert.Equal(t, artifactRefsWarning(0, 1), warning)
 
@@ -374,8 +374,8 @@ func TestMessageArtifacts_UnreadableIsByteIdenticalToMissing(t *testing.T) {
 	}
 
 	// Send-time admission: same metadata, same admitted refs, same warning.
-	outU, admU, warnU := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: unreadable})})
-	outM, admM, warnM := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: missing})})
+	outU, admU, warnU := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: unreadable})}, artifactRecipient{})
+	outM, admM, warnM := srv.admitMessageArtifacts(senderCtx, map[string]string{"k": "v", artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: missing})}, artifactRecipient{})
 	assert.Equal(t, outM, outU)
 	assert.Equal(t, admM, admU)
 	assert.Equal(t, warnM, warnU)

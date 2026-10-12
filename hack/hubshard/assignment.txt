@@ -951,6 +951,7 @@
 4 message_artifacts_coverage_test.go
 1 message_artifacts_gate_test.go
 4 message_artifacts_live_test.go
+4 message_artifacts_recipient_test.go
 1 message_artifacts_sites_test.go
 5 message_artifacts_test.go
 5 message_delivery_failures_test.go

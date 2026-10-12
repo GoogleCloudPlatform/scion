@@ -23,7 +23,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Artifact references in messages (ptone/scion#3222, design D10).
@@ -51,6 +53,100 @@ const artifactRefsDisabledWarning = "artifact references are not enabled on this
 // checked because a store read failed (artifacts.ResolveError). Like
 // artifactRefsDroppedWarning it carries a count only.
 const artifactRefsUncheckedWarning = "%d artifact reference(s) not attached: they could not be checked because of a server error; try again"
+
+// artifactRefsRecipientWarning is the warning when attached references may
+// not be readable by the message's direct recipient (ptone/scion#4575). It
+// carries a count and the recipient as the sender addressed it, never which
+// references or why: see artifactRecipientWarning.
+const artifactRefsRecipientWarning = "%d artifact reference(s) may not be readable by %s; ask someone who manages them to grant access, or check the recipient's scopes"
+
+// artifactRecipient is the direct recipient of a message, for the
+// send-time recipient warning. The zero value is "no direct recipient" (a
+// group, conversation or broadcast send), for which no recipient check
+// runs: the warning covers direct recipients only.
+type artifactRecipient struct {
+	// kind is artifacts.PrincipalKindAgent or artifacts.PrincipalKindUser.
+	kind string
+	// id is the agent or user id.
+	id string
+	// label names the recipient in the warning, as the sender addressed it.
+	label string
+}
+
+// directAgentRecipient is the artifactRecipient for a message to one agent,
+// or the zero value when groupID marks it as one member of a group send.
+func directAgentRecipient(agent *store.Agent, groupID string) artifactRecipient {
+	if agent == nil || agent.ID == "" || groupID != "" {
+		return artifactRecipient{}
+	}
+	return artifactRecipient{kind: artifacts.PrincipalKindAgent, id: agent.ID, label: agent.Slug}
+}
+
+// directUserRecipient is the artifactRecipient for an agent's outbound
+// message routed to one user, or the zero value otherwise (a group, a
+// conversation that is not a direct one, or a recipient that is not a
+// user). The user is taken from the resolved direct conversation's own key,
+// which names the sending agent and that user, never from the request's
+// recipient fields alone: on an asserted conversation those are raw
+// payload, and the check must not run against a principal the sender
+// merely named.
+func directUserRecipient(r *routingResult, senderAgentID string) artifactRecipient {
+	if r == nil || r.RecipientID == "" || r.GroupID != "" || r.Recipients != "" || senderAgentID == "" {
+		return artifactRecipient{}
+	}
+	if r.ConvResult == nil || r.ConvResult.Kind != "direct" {
+		return artifactRecipient{}
+	}
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(r.ConvResult.ExternalRef)
+	if err != nil {
+		return artifactRecipient{}
+	}
+	var userID string
+	switch {
+	case kindA == "agent" && idA == senderAgentID && kindB == "user":
+		userID = idB
+	case kindB == "agent" && idB == senderAgentID && kindA == "user":
+		userID = idA
+	}
+	if userID == "" || userID != r.RecipientID {
+		return artifactRecipient{}
+	}
+	name, ok := strings.CutPrefix(r.Recipient, "user:")
+	if !ok || name == "" {
+		name = "the recipient"
+	}
+	return artifactRecipient{kind: artifacts.PrincipalKindUser, id: userID, label: name}
+}
+
+// artifactRecipientWarning returns the warning for admitted references the
+// direct recipient may not be able to read, or "". It is the only caller of
+// artifacts.Service.RecipientMayNotRead, and that count is used only to
+// build this warning (TestArtifactRecipientCheckIsWarningOnly): it never
+// changes which references are admitted, recorded or delivered.
+//
+// Only references admitted under the sender's own credential are checked,
+// so the warning tells the sender nothing about an artifact it cannot read.
+// A failed check is logged and gives no warning: a failure is not evidence
+// either way.
+func (s *Server) artifactRecipientWarning(ctx context.Context, admitted []artifacts.MessageRef, to artifactRecipient) string {
+	if len(admitted) == 0 || to.kind == "" || to.id == "" {
+		return ""
+	}
+	n, err := s.artifactRefResolver().RecipientMayNotRead(ctx, admitted, to.kind, to.id)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifact references: recipient check failed", "recipient_kind", to.kind, "recipient_id", to.id, "error", err)
+		return ""
+	}
+	if n <= 0 {
+		return ""
+	}
+	slog.InfoContext(ctx, "artifact references may not be readable by the recipient", "recipient_kind", to.kind, "recipient_id", to.id, "count", n, "admitted", len(admitted))
+	label := to.label
+	if label == "" {
+		label = "the recipient"
+	}
+	return fmt.Sprintf(artifactRefsRecipientWarning, n, label)
+}
 
 // artifactRefsWarning returns the warning for references dropped as
 // unreadable or malformed and for references that could not be checked,
@@ -133,8 +229,11 @@ func (s *Server) resolveArtifactRefs(ctx context.Context, refs []artifacts.Messa
 // admitted. warning is "" when every reference was admitted, otherwise the
 // sender-facing warning (artifactRefsWarning, which also counts references a
 // failed store read left unchecked, or artifactRefsDisabled when
-// references are off on this hub). md is never mutated.
-func (s *Server) admitMessageArtifacts(ctx context.Context, md map[string]string) (out map[string]string, admitted []artifacts.MessageRef, warning string) {
+// references are off on this hub). When to names a direct recipient, the
+// warning also counts admitted references that recipient may not be able
+// to read (artifactRecipientWarning); that never changes what is admitted.
+// md is never mutated.
+func (s *Server) admitMessageArtifacts(ctx context.Context, md map[string]string, to artifactRecipient) (out map[string]string, admitted []artifacts.MessageRef, warning string) {
 	raw := md[artifacts.MessageMetadataKey]
 	out = messaging.StripReservedMetadata(md)
 	if raw == "" {
@@ -166,7 +265,14 @@ func (s *Server) admitMessageArtifacts(ctx context.Context, md map[string]string
 	if dropped > 0 || unchecked > 0 {
 		slog.InfoContext(ctx, "message artifact references not attached", "dropped", dropped, "unchecked", unchecked, "admitted", len(admitted))
 	}
-	return out, admitted, artifactRefsWarning(dropped, unchecked)
+	warning = artifactRefsWarning(dropped, unchecked)
+	if rw := s.artifactRecipientWarning(ctx, admitted, to); rw != "" {
+		if warning != "" {
+			warning += "; "
+		}
+		warning += rw
+	}
+	return out, admitted, warning
 }
 
 // recordMessageArtifacts persists admitted references for a stored

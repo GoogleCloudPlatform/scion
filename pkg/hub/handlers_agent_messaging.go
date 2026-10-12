@@ -1347,7 +1347,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// agent can read under its own request credential. The flag lets
 	// deliverToUser record them on the broker path.
 	outboundArtifactRefs, outboundArtifactWarning := []artifacts.MessageRef(nil), ""
-	structuredMsg.Metadata, outboundArtifactRefs, outboundArtifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+	structuredMsg.Metadata, outboundArtifactRefs, outboundArtifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
+		directUserRecipient(result, agent.ID))
 	structuredMsg.ArtifactRefsAdmitted = len(outboundArtifactRefs) > 0
 
 	// Process attachments.
@@ -2679,7 +2680,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// artifact references the sender can read under its own request
 		// credential (ptone/scion#3222).
 		var artifactRefs, recordedRefs []artifacts.MessageRef
-		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
+			directAgentRecipient(agent, groupID))
 		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {

@@ -150,7 +150,7 @@ func TestResolveArtifactRefs_ReplacedOrUnauthenticatedIdentityResolvesNothing(t 
 		t.Run(tc.name, func(t *testing.T) {
 			assert.False(t, requestCredentialBindsIdentity(tc.ctx))
 			assert.False(t, resolvesAvailable(t, srv, tc.ctx, tc.artifact))
-			_, admitted, warning := srv.admitMessageArtifacts(tc.ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: tc.artifact})})
+			_, admitted, warning := srv.admitMessageArtifacts(tc.ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: tc.artifact})}, artifactRecipient{})
 			assert.Empty(t, admitted)
 			assert.Equal(t, artifactRefsWarning(1, 0), warning)
 		})
