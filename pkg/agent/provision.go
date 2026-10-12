@@ -2384,7 +2384,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// default and built-in values merged into finalScionCfg are applied by
 	// Start from current settings on every start, so a later settings or
 	// profile change reaches the agent on its next start (ptone/scion#4561).
-	// The returned config keeps the merged values.
+	// The returned config keeps the merged values (see the reload below).
 	persistedCfg := withEnvironment(finalScionCfg, provisionedAgentEnvironment(inlineCfg, workspaceVolume))
 	agentCfgData, err := json.MarshalIndent(persistedCfg, "", "  ")
 	if err != nil {
@@ -2493,11 +2493,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Reload config to get harness updates (e.g. Env vars injected by harness)
+	// Reload config to get harness updates (e.g. Env vars injected by harness).
+	// The reloaded file holds only the agent's own environment values; the
+	// returned config carries the effective ones merged above (for the
+	// create response and other callers), which Start re-derives from
+	// current settings on every start (ptone/scion#4561).
+	effectiveEnv := environmentOf(finalScionCfg)
 	reloadTpl := &config.Template{Path: agentDir}
 	if updatedCfg, err := reloadTpl.LoadConfig(); err == nil {
 		updatedCfg.Info = finalScionCfg.Info // Re-attach info
-		finalScionCfg = updatedCfg
+		finalScionCfg = withEnvironment(updatedCfg, effectiveEnv)
 	} else {
 		fmt.Fprintf(os.Stderr, "Warning: failed to reload agent config after harness provisioning: %v\n", err)
 	}
