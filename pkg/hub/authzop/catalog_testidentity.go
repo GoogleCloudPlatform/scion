@@ -102,6 +102,37 @@ var testIdentityOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
 	{
+		ID:          "testidentity.webcode.issue",
+		Domain:      "testidentity",
+		Description: "Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer or an unscoped platform admin session; only on hubs where test identity web sessions are available",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}/web-login-code", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "test_identity.issue",
+		Effects:          []SecurityEffect{EffectMintCredential},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "Only the identity's issuer (or an unscoped platform admin session) mints a code; at most one unredeemed code per identity, redeemable once, never past the identity's expiry",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "test_identity_web_code_issue",
+			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
+			AfterFields:   []string{"user_id", "code_id", "code_expires_at", "issued_by"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestTestIdentityWeb_Mint"},
+		},
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
+	},
+	{
 		ID:          "testidentity.delete",
 		Domain:      "testidentity",
 		Description: "Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven",
