@@ -19,7 +19,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -80,11 +79,8 @@ func verifyAgentTokenCredential(ctx context.Context, cfg AuthConfig, log *slog.L
 			// Credential found and active.
 			credState.cred = cred
 			ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
-			// Update last_seen_at (fire-and-forget)
-			go func() {
-				_ = cfg.CredentialStore.UpdateAgentCredentialLastSeen(
-					context.Background(), cred.ID, time.Now())
-			}()
+			// Update last_seen_at (fire-and-forget, throttled).
+			cfg.LastSeenThrottle.touch(cfg.CredentialStore, cred.ID)
 		}
 	}
 

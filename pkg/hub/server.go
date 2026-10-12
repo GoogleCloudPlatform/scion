@@ -2782,6 +2782,8 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// can never diverge.
 		PlatformAuthSA: srv.platformAuthSA,
 		AgentRunScope:  newAgentRunScopeChecker(cfg.AgentRunScope, s, srv.authLog),
+		LastSeenThrottle: newAgentCredentialLastSeenThrottle(
+			agentCredentialLastSeenMax, agentCredentialLastSeenInterval),
 		// Test identities (ptone/scion#4240): the flag and clock the JWT
 		// row block's test-fixture checks use.
 		TestIdentitiesEnabled: srv.testIdentities.enabled,

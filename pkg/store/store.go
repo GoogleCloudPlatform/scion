@@ -365,6 +365,11 @@ type AgentStore interface {
 	// Returns ErrNotFound if the agent doesn't exist.
 	GetAgent(ctx context.Context, id string) (*Agent, error)
 
+	// GetAgentRunState reads only the run_id and deleted_at of an agent,
+	// by ID. Like GetAgent it returns a soft-deleted row (DeletedAt set),
+	// and ErrNotFound for a missing row or a malformed ID.
+	GetAgentRunState(ctx context.Context, id string) (AgentRunState, error)
+
 	// GetAgentBySlug retrieves an agent by its slug within a project.
 	// Returns ErrNotFound if the agent doesn't exist.
 	GetAgentBySlug(ctx context.Context, projectID, slug string) (*Agent, error)
