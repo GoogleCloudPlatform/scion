@@ -399,3 +399,16 @@ func TestAgentDelegation_RegisteredDefaultOff(t *testing.T) {
 		t.Errorf("agent delegation experiment metadata mismatch: %+v", entry)
 	}
 }
+
+// TestFederationProjectVisitors_RegisteredDefaultOff pins
+// federation.project_visitors as a server-layer experiment that is off
+// unless an operator turns it on.
+func TestFederationProjectVisitors_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(FederationProjectVisitors)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", FederationProjectVisitors)
+	}
+	if entry.Name != "federation.project_visitors" || entry.Default || len(entry.Layers) != 1 || entry.Layers[0] != LayerServer || entry.Stage != StageAlpha || entry.Issue != "ptone/scion#4603" {
+		t.Errorf("project visitors experiment metadata mismatch: %+v", entry)
+	}
+}

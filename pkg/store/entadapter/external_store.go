@@ -639,6 +639,15 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 		return err
 	}
 
+	// A federated account holds no user access token.
+	federated, err := isFederatedUser(ctx, s.client, userUID)
+	if err != nil {
+		return err
+	}
+	if federated {
+		return store.ErrFederatedAccountRefused
+	}
+
 	if token.Created.IsZero() {
 		token.Created = time.Now()
 	}

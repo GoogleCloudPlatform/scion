@@ -439,6 +439,13 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 				wantAttested:       false,
 			},
 			{
+				name:               "VisitorIdentity",
+				identity:           NewVisitorIdentity(tid("classify-visitor"), "https://issuer.example", "sub", "v@example.com", "V"),
+				wantPrincipalKind:  PrincipalKindVisitor,
+				wantCredentialKind: CredentialKindFederation,
+				wantAttested:       false,
+			},
+			{
 				name:               "nil identity",
 				identity:           nil,
 				wantPrincipalKind:  "",
@@ -1213,6 +1220,8 @@ func TestIdentityClassification_TypedNilTreatedAsMissing(t *testing.T) {
 				identity = (*FederatedAgentIdentity)(nil)
 			case "FederatedServiceIdentity":
 				identity = (*FederatedServiceIdentity)(nil)
+			case "VisitorIdentity":
+				identity = (*VisitorIdentity)(nil)
 			default:
 				t.Fatalf("no typed-nil case constructed for inventory type %q; add one here", name)
 			}

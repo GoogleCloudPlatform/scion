@@ -2784,6 +2784,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// Agent delegated credentials (scion_adt_ bearers); refused while
 		// hub.agent_delegation is off.
 		DelegatedAgentAuth: srv.authenticateDelegatedAgentCredential,
+
+		// Federated visitors: a verified user token linked to an active
+		// federated account; off while federation.project_visitors is off.
+		ResolveFederatedVisitor: srv.resolveFederatedVisitor,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {

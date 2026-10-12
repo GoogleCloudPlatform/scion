@@ -152,6 +152,14 @@ type AuthConfig struct {
 	// not be determined and any other error to refuse the credential. Nil
 	// refuses every delegated credential.
 	DelegatedAgentAuth func(ctx context.Context, token string) (*delegatedRequestState, error)
+	// ResolveFederatedVisitor maps a verified federated identity to the
+	// VisitorIdentity of its linked active federated account
+	// (Server.resolveFederatedVisitor). It returns (nil, nil) to keep the
+	// verified identity, which it does for every identity that is not a
+	// linked active account and whenever the federation.project_visitors
+	// experiment is off. An error answers 503. Nil keeps every verified
+	// identity.
+	ResolveFederatedVisitor func(ctx context.Context, identity FederatedIdentity) (*VisitorIdentity, error)
 }
 
 // tokenType represents the type of authentication token.
@@ -346,6 +354,22 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid federation token", nil)
 					return
+				}
+				// A verified user token whose (issuer, subject) is linked
+				// to an active federated account becomes that account's
+				// VisitorIdentity; every other case keeps the verified
+				// identity unchanged.
+				if cfg.ResolveFederatedVisitor != nil {
+					visitor, vErr := cfg.ResolveFederatedVisitor(ctx, identity)
+					if vErr != nil {
+						log.Error("Federation visitor lookup failed", "issuer", identity.IssuerURL(), "error", vErr)
+						writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+							"unable to verify federated account", nil)
+						return
+					}
+					if visitor != nil {
+						identity = visitor
+					}
 				}
 				ctx = contextWithIdentity(ctx, identity)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
@@ -684,6 +708,16 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							"user_id", claims.UserID)
 						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
 							"invalid access token: no user record for this token", nil)
+						return
+					}
+					// A federated account authenticates only with its
+					// issuer's token (the federated branch above), never
+					// with a hub-issued session or user token.
+					if u.IsFederated() {
+						log.Warn("JWT auth rejected: federated account",
+							"user_id", claims.UserID)
+						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
+							"invalid access token: no active user record for this token", nil)
 						return
 					}
 					// Test identities (ptone/scion#4240): the row is the

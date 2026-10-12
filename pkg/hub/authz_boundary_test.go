@@ -1682,6 +1682,7 @@ func TestNormalizePrincipalType_AgreesWithRelationshipPrincipalKind(t *testing.T
 		string(PrincipalKindBroker),
 		string(PrincipalKindDev),
 		string(PrincipalKindAgentDelegated),
+		string(PrincipalKindVisitor),
 		"totally-unrecognized-kind",
 	}
 	for _, k := range kinds {

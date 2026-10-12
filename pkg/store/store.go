@@ -199,6 +199,40 @@ type Store interface {
 	// spans the user and role-binding sub-stores.
 	CreateTestAdminUser(ctx context.Context, user *User, roleDefinitionID string) (*RoleBinding, error)
 
+	// CreateFederatedUser creates a federated account: a local user row
+	// for a user of a trusted external issuer. It is the only store path
+	// that writes UserKindFederated. It requires Kind UserKindFederated,
+	// a non-empty HomeIssuer with a host and a FederatedEmail containing
+	// "@", Status UserStatusPending or UserStatusActive, an empty Email
+	// and an empty or viewer Role, and none of the test identity or
+	// invite fields; it returns ErrInvalidInput otherwise. It generates
+	// the ID when empty, normalizes HomeIssuer (NormalizeFederatedIssuer)
+	// and FederatedEmail (NormalizeFederatedEmail), sets Role to viewer
+	// and Email to FederatedSyntheticEmail, and writes them back to user.
+	// A second account for the same (HomeIssuer, FederatedEmail) returns
+	// ErrAlreadyExists.
+	CreateFederatedUser(ctx context.Context, user *User) error
+
+	// GetFederatedUserByEmail returns the federated account of
+	// (homeIssuer, federatedEmail), both normalized before the lookup,
+	// or ErrNotFound.
+	GetFederatedUserByEmail(ctx context.Context, homeIssuer, federatedEmail string) (*User, error)
+
+	// LinkFederatedIdentity records that the (issuer, subject) pair of
+	// the trusted issuer is the federated account userID: an
+	// ExternalIdentityBinding with Provider FederationIdentityProvider and
+	// the lower-cased email. The account must be UserKindFederated with
+	// HomeIssuer equal to the normalized issuer, and must not be linked
+	// already (ErrInvalidInput otherwise); a pair linked to any account
+	// returns ErrAlreadyExists. It does not change the account's status.
+	LinkFederatedIdentity(ctx context.Context, userID, issuer, subject, email string) (*ExternalIdentityBinding, error)
+
+	// GetFederatedUserBySubject resolves the (issuer, subject) pair of a
+	// trusted issuer to its federated account through the binding
+	// LinkFederatedIdentity wrote. It returns ErrNotFound when the pair
+	// is not linked, or when the linked row is not UserKindFederated.
+	GetFederatedUserBySubject(ctx context.Context, issuer, subject string) (*User, error)
+
 	// ListFixtureRootedResources returns the agents (soft-deleted ones
 	// included), schedules, groups and projects whose creation-time
 	// provenance stamp has fixture_root_id == rootID (ptone/scion#4240,
@@ -1710,7 +1744,10 @@ type UserStore interface {
 	// skipped. The returned map is keyed by user ID.
 	GetUsersByIDs(ctx context.Context, ids []string) (map[string]*User, error)
 
-	// GetUserByEmail retrieves a user by email.
+	// GetUserByEmail retrieves a user by email. It never returns a
+	// federated account (UserKindFederated), even for its synthetic
+	// address: those are found only by GetFederatedUserByEmail and
+	// GetFederatedUserBySubject.
 	// Returns ErrNotFound if the user doesn't exist.
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 
@@ -1739,12 +1776,14 @@ type UserStore interface {
 	// the user does not exist.
 	LockUserRow(ctx context.Context, id string, exclusive bool) error
 
-	// ListUsers returns users matching the filter criteria.
+	// ListUsers returns users matching the filter criteria. Federated
+	// accounts (UserKindFederated) are never listed.
 	ListUsers(ctx context.Context, filter UserFilter, opts ListOptions) (*ListResult[User], error)
 
 	// IsUserInvitedOrActive returns true if a User record exists with the
 	// given email and status in ("invited", "active"). Used by the
 	// invite_only authorization gate as a replacement for IsEmailAllowListed.
+	// A federated account never matches.
 	IsUserInvitedOrActive(ctx context.Context, email string) (bool, error)
 
 	// IncrementSessionGeneration atomically increments the user's
