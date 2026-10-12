@@ -704,7 +704,7 @@ Each KSA must exist in its namespace, carry the `iam.gke.io/gcp-service-account`
 - **The pod is not created, and the error names the ServiceAccount.** The mapped KSA does not exist in the namespace the runtime entry resolves to. Create it there.
 - **The pod runs, but GCP calls fail with authentication or permission errors.** Check the KSA annotation, the `roles/iam.workloadIdentityUser` binding (the member must name the same namespace and KSA), that the node pool uses `GKE_METADATA`, and that the GSA itself holds the roles the agent needs.
 - **`resolves namespace ... in the project's settings` or `sets context ...`.** A project's `settings.yaml` overrides `runtimes.<entry>.namespace` or `.context` for the selected entry. Remove the override, or select another runtime entry.
-- **409 `was resolved for ...` on start or restart.** The agent's profile or runtime settings changed after its identity was resolved. Restore them, or recreate the agent.
+- **409 `was resolved for ...` on start or restart.** The agent's profile or runtime settings changed after its identity was resolved. Restore them, or recreate the agent. On a flat Runtime Broker instance the message names the Runtime Broker instance and runtime target the identity was resolved for instead: start the agent on that instance and target, or recreate it.
 - **The agent shows the emulator variables (`GCE_METADATA_HOST`).** The agent did not run on the Kubernetes runtime. Check which profile the dispatch resolved to.
 
 ### Slow Pod Starts and Asynchronous Create

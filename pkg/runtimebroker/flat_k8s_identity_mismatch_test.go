@@ -95,30 +95,30 @@ func TestFlatKubernetesIdentity_MismatchRefusalNamesInstances(t *testing.T) {
 		{
 			name: "assign, another instance",
 			sce:  rejectKubernetesAssignRuntimeChange(assign, &early, "kubernetes", late),
-			want: `GCP identity mode "assign" was resolved for Runtime Broker instance "k8s-a" and runtime target "flat-k8s-target", but this dispatch now resolves to Runtime Broker instance "k8s-b" and runtime target "flat-k8s-target-b"; `,
+			want: `GCP identity mode "assign" was resolved for Runtime Broker instance "k8s-a" and runtime target "flat-k8s-target", but this dispatch now resolves to Runtime Broker instance "k8s-b" and runtime target "flat-k8s-target-b"; recreate the agent, or start it on the Runtime Broker instance and runtime target it was resolved for`,
 		},
 		{
 			name: "block, another instance",
 			sce:  rejectKubernetesBlockRuntimeChange(block, &early, "kubernetes", late),
-			want: `GCP identity mode "block" was resolved for Runtime Broker instance "k8s-a" and runtime target "flat-k8s-target", but this dispatch now resolves to Runtime Broker instance "k8s-b" and runtime target "flat-k8s-target-b"; `,
+			want: `GCP identity mode "block" was resolved for Runtime Broker instance "k8s-a" and runtime target "flat-k8s-target", but this dispatch now resolves to Runtime Broker instance "k8s-b" and runtime target "flat-k8s-target-b"; recreate the agent, or start it on the Runtime Broker instance and runtime target it was resolved for`,
 		},
 		{
 			name: "assign, now not Kubernetes",
 			sce:  rejectKubernetesAssignRuntimeChange(assign, &early, "docker", late),
-			want: `GCP identity mode "assign" was resolved for the Kubernetes runtime (Runtime Broker instance "k8s-a", runtime target "flat-k8s-target"), but this dispatch now resolves to runtime "docker"; `,
+			want: `GCP identity mode "assign" was resolved for the Kubernetes runtime (Runtime Broker instance "k8s-a", runtime target "flat-k8s-target"), but this dispatch now resolves to runtime "docker"; recreate the agent, or start it on the Runtime Broker instance and runtime target it was resolved for`,
 		},
 		{
 			name: "block, now not Kubernetes",
 			sce:  rejectKubernetesBlockRuntimeChange(block, &early, "docker", late),
-			want: `GCP identity mode "block" was resolved for the Kubernetes runtime (Runtime Broker instance "k8s-a", runtime target "flat-k8s-target"), but this dispatch now resolves to runtime "docker"; `,
+			want: `GCP identity mode "block" was resolved for the Kubernetes runtime (Runtime Broker instance "k8s-a", runtime target "flat-k8s-target"), but this dispatch now resolves to runtime "docker"; recreate the agent, or start it on the Runtime Broker instance and runtime target it was resolved for`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.sce == nil || tc.sce.Status != http.StatusConflict {
 				t.Fatalf("got %v, want a 409 refusal", tc.sce)
 			}
-			if !strings.HasPrefix(tc.sce.Message, tc.want) {
-				t.Errorf("message = %q, want prefix %q", tc.sce.Message, tc.want)
+			if tc.sce.Message != tc.want {
+				t.Errorf("message = %q, want %q", tc.sce.Message, tc.want)
 			}
 			if strings.Contains(tc.sce.Message, `profile ""`) || strings.Contains(tc.sce.Message, `runtime entry ""`) {
 				t.Errorf("message names an empty profile or runtime entry: %q", tc.sce.Message)
@@ -126,18 +126,32 @@ func TestFlatKubernetesIdentity_MismatchRefusalNamesInstances(t *testing.T) {
 		})
 	}
 
+	t.Run("mixed flat and legacy selections use flat wording", func(t *testing.T) {
+		legacy := dispatchProfileSelection{}
+		sce := rejectKubernetesAssignRuntimeChange(assign, &early, "kubernetes", func() dispatchProfileSelection { return legacy })
+		want := `GCP identity mode "assign" was resolved for Runtime Broker instance "k8s-a" and runtime target "flat-k8s-target", but this dispatch now resolves to no Runtime Broker instance; ` + flatIdentityChangeRemedy
+		if sce == nil || sce.Message != want {
+			t.Fatalf("flat early, legacy late: got %v, want message %q", sce, want)
+		}
+		sce = rejectKubernetesBlockRuntimeChange(block, &legacy, "kubernetes", func() dispatchProfileSelection { return other })
+		want = `GCP identity mode "block" was resolved for no Runtime Broker instance, but this dispatch now resolves to Runtime Broker instance "k8s-b" and runtime target "flat-k8s-target-b"; ` + flatIdentityChangeRemedy
+		if sce == nil || sce.Message != want {
+			t.Fatalf("legacy early, flat late: got %v, want message %q", sce, want)
+		}
+	})
+
 	t.Run("legacy wording unchanged", func(t *testing.T) {
 		was := dispatchProfileSelection{ProfileName: "prod", RuntimeEntryName: "k8s"}
 		now := dispatchProfileSelection{ProfileName: "team", RuntimeEntryName: "k8s-team"}
 		sce := rejectKubernetesAssignRuntimeChange(assign, &was, "kubernetes", func() dispatchProfileSelection { return now })
-		want := `GCP identity mode "assign" was resolved for profile "prod" and runtime entry "k8s", but this dispatch now resolves to profile "team" and runtime entry "k8s-team"; `
-		if sce == nil || !strings.HasPrefix(sce.Message, want) {
-			t.Fatalf("got %v, want message prefix %q", sce, want)
+		want := `GCP identity mode "assign" was resolved for profile "prod" and runtime entry "k8s", but this dispatch now resolves to profile "team" and runtime entry "k8s-team"; recreate the agent, or restore the profile or runtime settings it was resolved with`
+		if sce == nil || sce.Message != want {
+			t.Fatalf("got %v, want message %q", sce, want)
 		}
 		sce = rejectKubernetesBlockRuntimeChange(block, &was, "docker", func() dispatchProfileSelection { return now })
-		want = `GCP identity mode "block" was resolved for the Kubernetes runtime (profile "prod", runtime entry "k8s"), but this dispatch now resolves to runtime "docker"; `
-		if sce == nil || !strings.HasPrefix(sce.Message, want) {
-			t.Fatalf("got %v, want message prefix %q", sce, want)
+		want = `GCP identity mode "block" was resolved for the Kubernetes runtime (profile "prod", runtime entry "k8s"), but this dispatch now resolves to runtime "docker"; recreate the agent, or restore the profile or runtime settings it was resolved with`
+		if sce == nil || sce.Message != want {
+			t.Fatalf("got %v, want message %q", sce, want)
 		}
 	})
 }
