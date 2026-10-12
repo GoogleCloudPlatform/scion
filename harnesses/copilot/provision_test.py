@@ -331,7 +331,9 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
 
     # --- staged COPILOT_CONFIG secret copilot cannot read (ptone/scion#4665)
     # The start fails with a ProvisionError that names the staged file and
-    # never includes its content; nothing is written to ~/.copilot.
+    # never includes its content; nothing is written to ~/.copilot. Long
+    # integers and nesting too deep for Python are accepted: copilot and the
+    # host read them, and the file is copied unchanged.
 
     STAGED_MARKER = "placeholder-marker-4665"
 
@@ -374,10 +376,17 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         raw = ('{"placeholder_sign_in": "' + self.STAGED_MARKER + '",}').encode()
         self._assert_staged_refused(raw, "is not valid JSON")
 
-    def test_staged_too_deep_config_is_refused(self) -> None:
-        raw = ('{"placeholder_sign_in": "' + self.STAGED_MARKER + '", "n": '
+    def test_staged_too_deep_config_is_accepted(self) -> None:
+        # Copilot and the host read nesting deeper than Python's decoder
+        # does; the file is copied as is, and _ensure_settings keeps it.
+        raw = ('{"placeholder_sign_in": {"login": "example-user"}, "n": '
                + "[" * 100000 + "]" * 100000 + "}").encode()
-        self._assert_staged_refused(raw, "is nested too deeply to validate")
+        self.assertFalse(provision._validate_staged_config(raw.decode(), "/staged/COPILOT_CONFIG"))
+        self._stage_config_secret(raw)
+        resolved = self._provision_staged()
+        self.assertEqual(resolved["method"], "auth-file")
+        self.assertTrue(resolved.get("config_file_written"))
+        self.assertEqual(self._read_raw(), raw)
 
     def test_staged_long_int_config_is_accepted(self) -> None:
         # Copilot and the host read long integers; the file is copied as is.
@@ -769,7 +778,7 @@ class HostRuleCrossCheckTest(unittest.TestCase):
 
 # Characters on which Python's str.splitlines()/str.strip() and the host's
 # strings.Split(s, "\n")/strings.TrimSpace disagree (ptone/scion#4665).
-PARITY_CHARS = ("\v", "\f", "\x1c", "\x1d", "\x1e", "\u2028")
+PARITY_CHARS = ("\v", "\f", "\x1c", "\x1d", "\x1e", "\x1f", "\x85", "\u2028", "\u2029")
 
 
 def parity_cases() -> list[tuple[str, str, object]]:
@@ -778,9 +787,10 @@ def parity_cases() -> list[tuple[str, str, object]]:
     cases: list[tuple[str, str, object]] = []
     for ch in PARITY_CHARS:
         name = f"U+{ord(ch):04X}"
-        # Inside a string: JSON allows U+2028 there but not a control character.
+        # Inside a string: JSON allows any character there except a control
+        # character (below U+0020).
         cases.append((f"{name} in string", '{"k": "a' + ch + 'b"}',
-                      {"k": "a\u2028b"} if ch == "\u2028" else None))
+                      {"k": "a" + ch + "b"} if ord(ch) >= 0x20 else None))
         # Leading a // line: trimmed, so the line is a comment, only if the
         # host counts it as whitespace.
         cases.append((f"{name} before comment line", '{"k": 1}\n' + ch + "// note\n",
@@ -794,9 +804,6 @@ class CommentLineHostParityTest(unittest.TestCase):
     """The strict loader and the staged-config check split lines and trim
     whitespace as the host does (ptone/scion#4665)."""
 
-    def test_space_set_matches_shared_helper(self) -> None:
-        self.assertEqual(provision._GO_SPACE, scion_harness.HOST_SPACE)
-
     def test_strict_loader_matches_host(self) -> None:
         cases = parity_cases()
         self.assertEqual(len(cases), 3 * len(PARITY_CHARS))
@@ -809,6 +816,15 @@ class CommentLineHostParityTest(unittest.TestCase):
                 else:
                     self.assertEqual(provision._load_config_strictly(raw), expected)
 
+    def test_strict_loader_lone_carriage_return_is_not_a_line_break(self) -> None:
+        with self.assertRaises(ValueError):
+            provision._load_config_strictly(b'{"k": 1}\r// note\n')
+
+    def test_strict_loader_crlf_comment_lines_are_dropped(self) -> None:
+        self.assertEqual(
+            provision._load_config_strictly(b'// note\r\n{"k": 1}\r\n  // more\r\n'),
+            {"k": 1})
+
     def test_staged_config_check_matches_host(self) -> None:
         for name, content, expected in parity_cases():
             with self.subTest(name):
@@ -816,7 +832,8 @@ class CommentLineHostParityTest(unittest.TestCase):
                     with self.assertRaises(scion_harness.ProvisionError):
                         provision._validate_staged_config(content, "/staged/COPILOT_CONFIG")
                 else:
-                    provision._validate_staged_config(content, "/staged/COPILOT_CONFIG")
+                    self.assertTrue(
+                        provision._validate_staged_config(content, "/staged/COPILOT_CONFIG"))
 
     def test_host_comment_line_rule_unchanged(self) -> None:
         # The cases above encode the host's rule; fail if the host changes it.

@@ -7,7 +7,8 @@ Table-driven tests covering:
   - Instruction projection (compose, strip, legacy markers, unclosed guard)
   - TOML helpers (escape, inline table, string array, strip sections)
   - Secret whitespace policy
-  - read_json_skipping_comment_lines
+  - read_json_skipping_comment_lines (errors name the file, no content)
+  - drop_json_comment_lines / HOST_SPACE parity with the host's rule
   - capture_auth_main
   - run() scaffold
   - Thinking level resolution (parse/map/resolve_thinking)
@@ -1729,7 +1730,7 @@ class TestReadJsonSkippingComments(unittest.TestCase):
 
 # Characters on which Python's str.splitlines()/str.strip() and the host's
 # strings.Split(s, "\n")/strings.TrimSpace disagree (ptone/scion#4665).
-PARITY_CHARS = ("\v", "\f", "\x1c", "\x1d", "\x1e", "\u2028")
+PARITY_CHARS = ("\v", "\f", "\x1c", "\x1d", "\x1e", "\x1f", "\x85", "\u2028", "\u2029")
 
 
 def parity_cases() -> list[tuple[str, str, Any]]:
@@ -1738,9 +1739,10 @@ def parity_cases() -> list[tuple[str, str, Any]]:
     cases: list[tuple[str, str, Any]] = []
     for ch in PARITY_CHARS:
         name = f"U+{ord(ch):04X}"
-        # Inside a string: JSON allows U+2028 there but not a control character.
+        # Inside a string: JSON allows any character there except a control
+        # character (below U+0020).
         cases.append((f"{name} in string", '{"k": "a' + ch + 'b"}',
-                      {"k": "a\u2028b"} if ch == "\u2028" else None))
+                      {"k": "a" + ch + "b"} if ord(ch) >= 0x20 else None))
         # Leading a // line: trimmed, so the line is a comment, only if the
         # host counts it as whitespace.
         cases.append((f"{name} before comment line", '{"k": 1}\n' + ch + "// note\n",

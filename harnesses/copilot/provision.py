@@ -84,16 +84,6 @@ _COPILOT_TOKENS_KEY = "copilot_tokens"
 _COPILOT_HMAC_KEYS = frozenset({"copilot_hmac_key", "capi_hmac_key"})
 _COPILOT_CREDENTIAL_KEYS = frozenset({_COPILOT_TOKENS_KEY}) | _COPILOT_HMAC_KEYS
 
-# The characters Go's strings.TrimSpace removes (unicode.IsSpace). Python's
-# str.strip() also removes U+001C..U+001F, so it is not used for this check.
-# The same set as scion_harness.HOST_SPACE (a test checks this).
-_GO_SPACE = (
-    "\t\n\v\f\r \x85\xa0\u1680"
-    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
-    "\u2028\u2029\u202f\u205f\u3000"
-)
-
-
 def _reject_json_constant(name: str) -> Any:
     # Go's encoding/json rejects NaN and Infinity; Python's json accepts them.
     raise ValueError(f"invalid JSON constant {name}")
@@ -156,10 +146,9 @@ def _config_holds_sign_in_or_too_deep(raw: bytes) -> bool:
     such content may hold sign-in there; _ensure_settings must keep it.
     """
     text = raw.decode("utf-8", errors="replace")
-    kept = [ln for ln in text.split("\n") if not ln.lstrip(_GO_SPACE).startswith("//")]
     try:
         top = json.loads(
-            "\n".join(kept),
+            scion_harness.drop_json_comment_lines(text),
             parse_constant=_reject_json_constant,
             parse_int=_json_int_unconverted,
         )
@@ -172,7 +161,10 @@ def _config_holds_sign_in_or_too_deep(raw: bytes) -> bool:
         k = key.lower()
         if k == _COPILOT_TOKENS_KEY:
             if isinstance(value, dict) and any(
-                isinstance(v, str) and v.strip(_GO_SPACE) for v in value.values()
+                # HOST_SPACE is what Go's strings.TrimSpace removes; Python's
+                # str.strip() also removes U+001C..U+001F.
+                isinstance(v, str) and v.strip(scion_harness.HOST_SPACE)
+                for v in value.values()
             ):
                 return True
         elif k in _COPILOT_HMAC_KEYS:
@@ -243,14 +235,18 @@ def _read_token(ctx: scion_harness.ProvisionContext, env_key: str) -> str:
     return os.environ.get(env_key, "")
 
 
-def _validate_staged_config(content: str, path: str) -> None:
+def _validate_staged_config(content: str, path: str) -> bool:
     """Check that staged config.json content is JSON copilot can read.
 
-    The rules are _load_config_strictly's, except that an integer of any
-    length is accepted: the content is copied unchanged, and copilot and the
-    host both read long integers. NaN, Infinity and numbers beyond float
-    range (1e400) are refused, as copilot cannot parse them. Raises
-    ProvisionError naming path; the message never includes file content.
+    The rules are _load_config_strictly's, except for two Python limits:
+    the content is copied unchanged, and copilot and the host read both
+    integers of any length and nesting deeper than Python's decoder allows,
+    so a working config is not refused for either. A long integer is
+    accepted; content nested too deeply to check is accepted unchecked and
+    False is returned (as _ensure_settings keeps such a config.json). NaN,
+    Infinity and numbers beyond float range (1e400) are refused, as copilot
+    cannot parse them. Raises ProvisionError naming path; the message never
+    includes file content. Returns True when the content was checked.
     """
     prefix = f"COPILOT_CONFIG secret file {path}"
     try:
@@ -273,26 +269,28 @@ def _validate_staged_config(content: str, path: str) -> None:
             "which copilot cannot read"
         ) from None
     except RecursionError:
-        raise scion_harness.ProvisionError(
-            f"{prefix} is nested too deeply to validate"
-        ) from None
+        return False
+    return True
 
 
 def _write_copilot_config_file(ctx: scion_harness.ProvisionContext) -> None:
     """Write ~/.copilot/config.json from a staged COPILOT_CONFIG file secret."""
-    staged = ctx.file_secret_files.get("COPILOT_CONFIG") or ""
+    staged = scion_harness.expand_path(ctx.file_secret_files.get("COPILOT_CONFIG") or "")
     try:
         content = ctx.read_file_secret("COPILOT_CONFIG")
     except UnicodeDecodeError:
         raise scion_harness.ProvisionError(
-            f"COPILOT_CONFIG secret file {scion_harness.expand_path(staged)} "
-            "is not valid UTF-8"
+            f"COPILOT_CONFIG secret file {staged} is not valid UTF-8"
         ) from None
     if not content:
         return
     if not content.strip():
         raise scion_harness.ProvisionError("COPILOT_CONFIG secret is empty")
-    _validate_staged_config(content, scion_harness.expand_path(staged))
+    if not _validate_staged_config(content, staged):
+        ctx.info(
+            f"COPILOT_CONFIG secret file {staged} is nested too deeply to "
+            "check; copying it unchanged"
+        )
     config_dir = scion_harness.expand_path("~/.copilot")
     os.makedirs(config_dir, exist_ok=True)
     target = os.path.join(config_dir, "config.json")
