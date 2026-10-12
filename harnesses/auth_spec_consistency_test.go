@@ -39,7 +39,12 @@ import (
 //	   is one group) equal the type's required_env groups. A type with no
 //	   required_env may instead be backed by one required file whose name or
 //	   alternative_env_keys are the method's keys (the env carries the
-//	   credential the file would hold);
+//	   credential the file would hold). Because of this exemption, rule (b)
+//	   does not itself check that a provisioner using this shape accepts
+//	   the file-only case (file present, env key unset); such a provisioner
+//	   must handle it and test it itself. For antigravity's explicit
+//	   oauth-token, ExplicitOAuthTokenTest in antigravity/provision_test.py
+//	   pins that behaviour;
 //	c. a file method's path is "~" + target_suffix and its secret_key is
 //	   the name of the type's only required file, and the type declares no
 //	   required_env;
