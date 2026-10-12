@@ -37,7 +37,8 @@ const substrateBrokerManifestHubURL = "https://hub.substrate.example.com"
 type substrateBrokerManifest struct {
 	// settings is the settings.yaml held by the broker's ConfigMap.
 	settings string
-	// args and env are the broker container's arguments and env names.
+	// args and env are the broker container's arguments and its env
+	// names and values.
 	args []string
 	env  map[string]string
 }
@@ -203,11 +204,12 @@ func TestSubstrateBrokerHubEndpointResolution(t *testing.T) {
 			workDir := filepath.Join(t.TempDir(), "app")
 			require.NoError(t, os.MkdirAll(workDir, 0o755))
 			t.Chdir(workDir)
+			// Every hub-context variable starts empty (empty counts as
+			// unset for IsHubContext and the settings env overlay), so only
+			// the case's SCION_HUB_ENDPOINT can make this a hub context.
+			clearHubContextEnv(t)
 			if tt.env != "" {
 				t.Setenv("SCION_HUB_ENDPOINT", tt.env)
-			} else {
-				t.Setenv("SCION_HUB_ENDPOINT", "")
-				require.NoError(t, os.Unsetenv("SCION_HUB_ENDPOINT"))
 			}
 
 			// server start --hosted --enable-runtime-broker (no --enable-hub).
