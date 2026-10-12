@@ -174,19 +174,30 @@ func TestStart_TemplateEnvFillsAbsentKey(t *testing.T) {
 }
 
 // Acceptance 2: the same key set by any other source beats the template
-// value, one subtest per source. The SCION_* sources (telemetry env, hub
-// default env, broker-injected vars) also show that a template's reserved
-// key is ignored.
+// value, one subtest per source.
+//
+// Order-detecting subtests use non-reserved keys, so a fill applied too
+// early would make the template value win: the harness-config file and the
+// requester env (config tier), the settings harness-config entry and the
+// hub env scope (request tier), and a broker-injected var (GCE_METADATA_HOST,
+// which the broker injects for metadata interception).
+//
+// Guard subtests ("guard: ...") cover sources whose keys are all SCION_*,
+// which a template may not set at all: Start's telemetry env
+// (config.TelemetryConfigToEnv emits only SCION_* keys, and no harness's
+// GetTelemetryEnv returns anything today), the hub default env
+// (SCION_AUTO_EXPOSE_PORTS) and the launch id injected after assembly. They
+// show the template value is ignored and the source wins; they cannot
+// detect a wrong fill order.
 func TestStart_TemplateEnvLosesToEverySource(t *testing.T) {
 	const key = "TPL_SHARED"
 	cases := []struct {
-		name    string
-		f       templateEnvStart
-		ctx     func() context.Context
-		mutate  func(*api.StartOptions)
-		key     string
-		want    string
-		notWant string
+		name   string
+		f      templateEnvStart
+		ctx    func() context.Context
+		mutate func(*api.StartOptions)
+		key    string
+		want   string
 	}{
 		{
 			name: "harness-config file",
@@ -211,7 +222,7 @@ func TestStart_TemplateEnvLosesToEverySource(t *testing.T) {
 			key:    key, want: "requester",
 		},
 		{
-			name: "telemetry env",
+			name: "guard: telemetry env",
 			f: templateEnvStart{
 				tplEnv:        map[string]string{"SCION_OTEL_ENDPOINT": "template:4317"},
 				settingsExtra: "telemetry:\n  cloud:\n    endpoint: settings:4317\n",
@@ -219,7 +230,7 @@ func TestStart_TemplateEnvLosesToEverySource(t *testing.T) {
 			key: "SCION_OTEL_ENDPOINT", want: "settings:4317",
 		},
 		{
-			name: "hub default env",
+			name: "guard: hub default env",
 			f:    templateEnvStart{tplEnv: map[string]string{api.EnvAutoExposePorts: "false"}},
 			ctx: func() context.Context {
 				on := true
@@ -229,12 +240,18 @@ func TestStart_TemplateEnvLosesToEverySource(t *testing.T) {
 		},
 		{
 			name:   "broker-injected var",
+			f:      templateEnvStart{tplEnv: map[string]string{"GCE_METADATA_HOST": "template-metadata:80"}},
+			mutate: func(o *api.StartOptions) { o.Env["GCE_METADATA_HOST"] = "169.254.169.254:8888" },
+			key:    "GCE_METADATA_HOST", want: "169.254.169.254:8888",
+		},
+		{
+			name:   "guard: broker-injected SCION_* var",
 			f:      templateEnvStart{tplEnv: map[string]string{"SCION_AGENT_ID": "template-id"}},
 			mutate: func(o *api.StartOptions) { o.Env["SCION_AGENT_ID"] = "broker-id" },
 			key:    "SCION_AGENT_ID", want: "broker-id",
 		},
 		{
-			name:   "launch id injected after assembly",
+			name:   "guard: launch id injected after assembly",
 			f:      templateEnvStart{tplEnv: map[string]string{envLaunchID: "template-launch"}},
 			mutate: func(o *api.StartOptions) { o.RunID = "run-123" },
 			key:    envLaunchID, want: "run-123",
