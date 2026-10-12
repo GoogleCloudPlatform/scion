@@ -18,9 +18,7 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"testing"
 
@@ -48,26 +46,6 @@ import (
 // commit), which has neither the pushed-down predicate nor a working
 // cursor.
 // ============================================================================
-
-// decodeSkillsPage performs one GET against path as user and decodes the
-// ListSkillsResponse.
-func decodeSkillsPage(t *testing.T, srv *Server, user *store.User, path string) ListSkillsResponse {
-	t.Helper()
-	rec := doRequestAsUser(t, srv, user, http.MethodGet, path, nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var resp ListSkillsResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	return resp
-}
-
-// skillIDSet extracts the set of skill IDs from a page of results.
-func skillIDSet(skills []SkillWithCapabilities) map[string]bool {
-	set := make(map[string]bool, len(skills))
-	for _, sk := range skills {
-		set[sk.ID] = true
-	}
-	return set
-}
 
 // TestSkillListPagination_OwnerAndGlobalSurviveOutOfScopeNoise is the direct
 // INFO-1-pagination regression test: alice's own user-scoped skill and a

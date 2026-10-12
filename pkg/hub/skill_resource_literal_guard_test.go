@@ -57,6 +57,10 @@ func TestSkillResourceLiterals_AllUseCanonicalConstructor(t *testing.T) {
 	fset := token.NewFileSet()
 	totalSkillResourceLiterals := 0
 
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards skill Resource literals, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards skill Resource literals, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("failed to read %s: %v", dir, err)

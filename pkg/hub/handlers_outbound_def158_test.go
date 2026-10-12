@@ -58,9 +58,9 @@ func def158BrokerSetup(t *testing.T) (
 	ctx := context.Background()
 
 	// WebChatStore.
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	wcs = NewWebChatStore(db, "sqlite3")
+	wcs = NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -107,27 +107,6 @@ func def158BrokerSetup(t *testing.T) (
 	require.NoError(t, wcs.RecordChannel(ctx, user.ID, project.ID, agent.ID, "web", time.Now()))
 
 	return srv, s, wcs, project, agent, user, dmConv, dmKey
-}
-
-// postConvRefNoRecipient sends an outbound message with conversation_ref
-// but NO explicit recipient — the exact shape the CLI produces.
-func postConvRefNoRecipient(t *testing.T, srv *Server, projectID, agentID, msg, convRef string) *httptest.ResponseRecorder {
-	t.Helper()
-	body, _ := json.Marshal(OutboundMessageRequest{
-		Msg:             msg,
-		ConversationRef: convRef,
-	})
-	req := httptest.NewRequest(http.MethodPost,
-		"/api/v1/agents/"+agentID+"/outbound-message",
-		bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-	}}))
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, agentID)
-	return rr
 }
 
 // readConversationHistoryAsUser calls GET /api/v1/chat/conversations/{key}/messages
@@ -222,8 +201,8 @@ func TestDEF158_SurfaceFallback_NoAffinity_ChannelDerivedFromSurface(t *testing.
 	srv, s, project, agent, user := def138Setup(t)
 	ctx := context.Background()
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -557,8 +536,8 @@ func TestDEF159_Fixed_NormalPathBackfillsChannelAndThreadID(t *testing.T) {
 	proxy.subscribeProjectUserMessages(project.ID)
 
 	// WebChatStore for affinity lookups — but do NOT seed any affinity.
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 

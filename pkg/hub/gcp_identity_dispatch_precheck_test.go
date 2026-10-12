@@ -432,3 +432,174 @@ func TestApplyProfileSAMappings_ReportVersionGatesPrecheck(t *testing.T) {
 		})
 	}
 }
+
+// saDecisionCase is one row of the shared decision table.
+type saDecisionCase struct {
+	name      string
+	noBroker  bool
+	profile   func(p *store.BrokerProfile)
+	selection string // "" means "gke"; "-" means no profile
+	account   string // "" means precheckGSA; "-" means no account
+	state     string
+	reason    string
+	namespace string
+}
+
+func saDecisionCases(now time.Time) []saDecisionCase {
+	return []saDecisionCase{
+		{name: "kubernetes, complete recent report without the account", state: SAMappingStateNotMapped, namespace: "agents"},
+		{name: "k8s alias", profile: func(p *store.BrokerProfile) { p.Type = "k8s" }, state: SAMappingStateNotMapped, namespace: "agents"},
+		{name: "report just inside the threshold", profile: func(p *store.BrokerProfile) {
+			at := now.Add(-profileSAReportFreshFor)
+			p.MappingsReportedAt = &at
+		}, state: SAMappingStateNotMapped, namespace: "agents"},
+		{name: "mapped", profile: func(p *store.BrokerProfile) {
+			p.ServiceAccountMappings = append(p.ServiceAccountMappings, store.BrokerProfileSAMapping{GSA: precheckGSA, KSA: "a", Namespace: "team"})
+		}, state: SAMappingStateMapped, namespace: "team"},
+		{name: "mapped in another case", account: "Agent@Example-Project.iam.gserviceaccount.com", profile: func(p *store.BrokerProfile) {
+			p.ServiceAccountMappings = append(p.ServiceAccountMappings, store.BrokerProfileSAMapping{GSA: precheckGSA, KSA: "a", Namespace: "team"})
+		}, state: SAMappingStateMapped, namespace: "team"},
+		{name: "docker needs no mapping", profile: func(p *store.BrokerProfile) { p.Type = "docker" }, state: SAMappingStateNotRequired},
+		{name: "podman needs no mapping", profile: func(p *store.BrokerProfile) { p.Type = "podman" }, state: SAMappingStateNotRequired},
+		{name: "container needs no mapping", profile: func(p *store.BrokerProfile) { p.Type = "container" }, state: SAMappingStateNotRequired},
+		{name: "custom runtime key", profile: func(p *store.BrokerProfile) { p.Type = "gke" }, state: SAMappingStateUnknown, reason: SAMappingReasonRuntimeUnrecognized},
+		{name: "no broker", noBroker: true, state: SAMappingStateUnknown, reason: SAMappingReasonNoBroker},
+		{name: "no profile", selection: "-", state: SAMappingStateUnknown, reason: SAMappingReasonNoProfile},
+		{name: "no account", account: "-", state: SAMappingStateUnknown, reason: SAMappingReasonNoAccount},
+		{name: "profile not on broker", selection: "other", state: SAMappingStateUnknown, reason: SAMappingReasonProfileNotOnBroker},
+		{name: "report missing", profile: func(p *store.BrokerProfile) {
+			p.MappingsReported, p.MappingsComplete, p.MappingsReportedAt, p.ServiceAccountMappings = false, false, nil, nil
+		}, state: SAMappingStateUnknown, reason: SAMappingReasonReportMissing},
+		{name: "report incomplete", profile: func(p *store.BrokerProfile) {
+			p.MappingsComplete = false
+			p.MappingsIncompleteReason = api.BrokerKSADiscoveryListFailed
+		}, state: SAMappingStateUnknown, reason: SAMappingReasonReportIncomplete},
+		{name: "report unversioned", profile: func(p *store.BrokerProfile) { p.MappingsReportVersion = 0 }, state: SAMappingStateUnknown, reason: SAMappingReasonReportOldVersion},
+		{name: "report older version", profile: func(p *store.BrokerProfile) { p.MappingsReportVersion = api.BrokerSAReportVersion - 1 }, state: SAMappingStateUnknown, reason: SAMappingReasonReportOldVersion},
+		{name: "report stale", profile: func(p *store.BrokerProfile) {
+			at := now.Add(-profileSAReportFreshFor - time.Second)
+			p.MappingsReportedAt = &at
+		}, state: SAMappingStateUnknown, reason: SAMappingReasonReportStale},
+		{name: "report without timestamp", profile: func(p *store.BrokerProfile) { p.MappingsReportedAt = nil }, state: SAMappingStateUnknown, reason: SAMappingReasonReportStale},
+		{name: "ambiguous account", profile: func(p *store.BrokerProfile) { p.AmbiguousGSAs = []string{precheckGSA} }, state: SAMappingStateUnknown, reason: SAMappingReasonAmbiguousMapping},
+	}
+}
+
+func (c saDecisionCase) inputs(now time.Time) (*store.RuntimeBroker, string, string) {
+	p := precheckProfile(now)
+	if c.profile != nil {
+		c.profile(&p)
+	}
+	var broker *store.RuntimeBroker
+	if !c.noBroker {
+		broker = &store.RuntimeBroker{ID: "b1", Name: "broker-a", Profiles: []store.BrokerProfile{p}}
+	}
+	sel := "gke"
+	switch c.selection {
+	case "-":
+		sel = ""
+	case "":
+	default:
+		sel = c.selection
+	}
+	account := precheckGSA
+	switch c.account {
+	case "-":
+		account = ""
+	case "":
+	default:
+		account = c.account
+	}
+	return broker, sel, account
+}
+
+func TestProfileSAMappingDecision(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	for _, tc := range saDecisionCases(now) {
+		t.Run(tc.name, func(t *testing.T) {
+			broker, sel, account := tc.inputs(now)
+			d := profileSAMappingDecision(broker, sel, account, now)
+			assert.Equal(t, tc.state, d.State)
+			assert.Equal(t, tc.reason, d.Reason)
+			assert.Equal(t, tc.namespace, d.Namespace)
+			if tc.state != SAMappingStateUnknown {
+				assert.Empty(t, d.Reason)
+			}
+		})
+	}
+}
+
+// The dispatch refusal and the shared decision agree: for every row of the
+// decision table, kubernetesIdentityNotMapped refuses if and only if the
+// state is not_mapped.
+func TestProfileSAMappingDecision_MatchesDispatchRefusal(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	for _, tc := range saDecisionCases(now) {
+		t.Run(tc.name, func(t *testing.T) {
+			broker, sel, account := tc.inputs(now)
+			d := profileSAMappingDecision(broker, sel, account, now)
+			refusal := kubernetesIdentityNotMapped(broker, sel, precheckAssign(account), now)
+			assert.Equal(t, d.State == SAMappingStateNotMapped, refusal != nil)
+		})
+	}
+}
+
+// The per-account status view, the not-mapped warnings and the dispatch
+// refusal agree for every state of the shared decision (ptone/scion#4360):
+// the view shows the decision's state and reason, a warning is given only
+// on not_mapped, and the refusal refuses only on not_mapped. The view and
+// the warnings always have a broker, a profile and an account, so the rows
+// without one have no view or warning to compare.
+func TestSAMappingDecision_StatusViewWarningsAndRefusalAgree(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	srv := &Server{}
+	for _, tc := range saDecisionCases(now) {
+		if tc.noBroker || tc.selection != "" || tc.account == "-" {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			broker, sel, account := tc.inputs(now)
+			d := profileSAMappingDecision(broker, sel, account, now)
+			require.Equal(t, tc.state, d.State)
+
+			refusal := kubernetesIdentityNotMapped(broker, sel, precheckAssign(account), now)
+			assert.Equal(t, d.State == SAMappingStateNotMapped, refusal != nil, "refusal")
+
+			rows := srv.brokerKubernetesProfileMappings([]*store.RuntimeBroker{broker})
+			view := gcpSAProfileMappings(account, rows, now)
+			switch {
+			case d.State == SAMappingStateNotRequired:
+				assert.Empty(t, view, "a profile that needs no mapping is not listed")
+			case d.Reason == SAMappingReasonReportMissing:
+				require.Len(t, view, 1)
+				assert.Equal(t, GCPSAMappingNotReported, view[0].State, "no report at all reads as not_reported")
+			default:
+				require.Len(t, view, 1)
+				assert.Equal(t, d.State, view[0].State, "status view state")
+				assert.Equal(t, d.Reason, view[0].UnknownReason, "status view reason")
+				assert.Equal(t, d.Reason == SAMappingReasonAmbiguousMapping, view[0].Ambiguous)
+			}
+
+			sa := &store.GCPServiceAccount{Scope: store.ScopeProject, ScopeID: "p1", Email: account}
+			warnings := mappingViewFrom("this project", rows).warningsAt([]*store.GCPServiceAccount{sa}, now)
+			if d.State == SAMappingStateNotMapped {
+				require.Len(t, warnings, 1, "not_mapped warns")
+				assert.Contains(t, warnings[0], "broker-a/gke")
+			} else {
+				assert.Empty(t, warnings, "only not_mapped warns")
+			}
+		})
+	}
+}
+
+// A nil profile is decided, not dereferenced: unknown with reason
+// no_profile, so no caller (the view, the warnings or the refusal) refuses
+// or warns on it.
+func TestProfileSAMappingDecisionOn_NilProfile(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	d := profileSAMappingDecisionOn("broker-a", nil, precheckGSA, now)
+	assert.Equal(t, SAMappingDecision{
+		State: SAMappingStateUnknown, Reason: SAMappingReasonNoProfile,
+		Account: precheckGSA, Broker: "broker-a",
+	}, d)
+}

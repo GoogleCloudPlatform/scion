@@ -1,0 +1,1253 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// Hub-issued test identities (ptone/scion#4240).
+//
+// POST /api/v1/test-identities creates a fresh, short-lived synthetic member
+// or viewer user (kind=test_fixture, email in store.TestFixtureEmailDomain)
+// and returns one access token for it. POST /api/v1/test-identities/{id}/token
+// re-issues a token for a live identity, GET /api/v1/test-identities lists
+// identities, and DELETE /api/v1/test-identities/{id} deletes one. The
+// feature is off unless the hub starts with --enable-test-identities; while
+// it is off the routes return 404 and the auth middleware refuses every
+// test-fixture row (testFixtureRejection).
+//
+// The caller needs test_identity.issue at hub scope (an admin session, a
+// role binding, or a hub-boundary user access token carrying the
+// test_identity:issue scope). The role is member or viewer only. No refresh
+// token and no cookie is ever issued. Every issuance and re-issue writes a
+// durable mutation audit in the same transaction: an audit failure rolls the
+// action back.
+
+// Test identity defaults (design §6).
+const (
+	// testIdentityDefaultTokenTTL is the access token lifetime when the
+	// request names none.
+	testIdentityDefaultTokenTTL = 30 * time.Minute
+	// testIdentityMaxTokenTTL caps a requested token lifetime. A token also
+	// never outlives its identity.
+	testIdentityMaxTokenTTL = 8 * time.Hour
+	// testIdentityDefaultLifetime is the identity lifetime when the request
+	// names none.
+	testIdentityDefaultLifetime = time.Hour
+	// testIdentityMaxLifetime caps an identity's lifetime.
+	testIdentityMaxLifetime = 8 * time.Hour
+	// testIdentityPerIssuerCap is the number of live identities one issuer
+	// may hold at once.
+	testIdentityPerIssuerCap = 5
+	// testIdentityHubCap is the number of live identities the hub holds at
+	// once.
+	testIdentityHubCap = 20
+	// testIdentityRatePerSecond and testIdentityRateBurst bound issuance
+	// and re-issue requests per issuer.
+	testIdentityRatePerSecond = 0.2
+	testIdentityRateBurst     = 10
+
+	testIdentityPurposeMaxRunes = 200
+	testIdentityMaxBodyBytes    = 16 << 10
+	testIdentityEmailPrefix     = "test-identity"
+)
+
+// permissionTestIdentityIssue is the permission every test identity route
+// requires at hub scope.
+const permissionTestIdentityIssue = "test_identity.issue"
+
+// Mutation audit types for test identities.
+const (
+	testIdentityIssueMutation      = "test_identity_issue"
+	testIdentityTokenIssueMutation = "test_identity_token_issue"
+	testIdentityDeleteMutation     = "test_identity_delete"
+	testIdentityAuditTargetType    = "user"
+	testIdentityGrantsCreatedBy    = "test-identity-issuance"
+)
+
+// details.reason values.
+const (
+	testIdentityReasonIssuerCap   = "issuer_cap_reached"
+	testIdentityReasonHubCap      = "hub_cap_reached"
+	testIdentityReasonRateLimited = "rate_limited"
+	testIdentityReasonExpired     = "test_identity_expired"
+	testIdentityReasonFixtureCall = "test_identity_cannot_issue"
+	// testIdentityReasonBusy answers a transient store conflict on
+	// issuance and on delete (shared; the value predates delete).
+	testIdentityReasonBusy = "issuance_busy"
+	// testIdentityReasonPurgeIncomplete answers a purge that left work for
+	// a later run.
+	testIdentityReasonPurgeIncomplete = "purge_incomplete"
+	// testIdentityReasonFixtureBroker refuses broker creation by a test
+	// identity.
+	testIdentityReasonFixtureBroker = "test_identity_cannot_create_broker"
+)
+
+// isTransientIssuanceConflict reports whether err is a store conflict that
+// a retry resolves: a busy or locked SQLite database, or a Postgres
+// serialization failure or deadlock. Issuance answers these with 429 and
+// Retry-After instead of 500. The production SQLite pool has one
+// connection, so issuance transactions queue rather than collide, and on
+// Postgres the issuance advisory lock serializes them; this is the
+// fallback for any other configuration.
+//
+// The store marks these errors with store.ErrTransient from the typed
+// driver error (entadapter.markTransient). The message match below is only
+// a fallback for a store that does not.
+func isTransientIssuanceConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, store.ErrTransient) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{"database is locked", "database table is locked", "sqlite_busy", "sqlite_locked", "(sqlstate 40001)", "(sqlstate 40p01)", "could not serialize access", "deadlock detected"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	errTestIdentityIssuerCap = errors.New("live test identity limit for this issuer reached")
+	errTestIdentityHubCap    = errors.New("live test identity limit for this hub reached")
+	// errTestIdentityDelegationNotLive refuses a mint whose workload
+	// delegation was revoked or expired after the request authenticated
+	// (re-checked inside the issuance transaction).
+	errTestIdentityDelegationNotLive = errors.New("issuer delegation is no longer live")
+)
+
+// testIdentityRoles is the complete request role enum. There is no admin
+// value and no code path that sets one.
+var testIdentityRoles = map[string]bool{
+	store.UserRoleMember: true,
+	store.UserRoleViewer: true,
+}
+
+// testIdentityHooks are seams for tests: the hub grant sync and the audit
+// write that run inside the issuance transaction.
+type testIdentityHooks struct {
+	syncGrants func(ctx context.Context, st store.Store, userID, role, createdBy string) error
+	writeAudit func(ctx context.Context, tx store.Store, record *store.MutationAuditRecord) error
+}
+
+// testIdentityState is the server-side state of the feature.
+type testIdentityState struct {
+	enabled bool
+	// reaperCursor is the expiry reaper's purge cursor
+	// (test_identity_reaper.go).
+	reaperCursor *testIdentityReaperCursor
+	limiter      *GCPTokenRateLimiter
+	hooks        testIdentityHooks
+	now          func() time.Time
+}
+
+// clock returns the current time from the state's clock, or time.Now for a
+// zero state (a Server not built by New).
+func (t *testIdentityState) clock() time.Time {
+	if t.now == nil {
+		return time.Now()
+	}
+	return t.now()
+}
+
+func newTestIdentityState(enabled bool) testIdentityState {
+	return testIdentityState{
+		enabled:      enabled,
+		reaperCursor: &testIdentityReaperCursor{},
+		limiter:      NewGCPTokenRateLimiter(testIdentityRatePerSecond, testIdentityRateBurst),
+		hooks: testIdentityHooks{
+			syncGrants: syncHubRoleGrants,
+			writeAudit: func(ctx context.Context, tx store.Store, record *store.MutationAuditRecord) error {
+				return tx.CreateMutationAudit(ctx, record)
+			},
+		},
+		now: time.Now,
+	}
+}
+
+// isReservedTestIdentityEmail reports whether email is in a reserved test
+// identity domain: the member fixture domain or either admin kind's domain
+// (store.IsReservedTestIdentityEmail). Every path that resolves or creates a user by email
+// refuses such an email, except the issuance endpoint (which creates it)
+// and the hub-issued JWT path (where the fixture's own token is checked by
+// testFixtureRejection instead). It is deliberately separate from
+// isReservedPlatformIdentity, which also guards the JWT path.
+func isReservedTestIdentityEmail(email string) bool {
+	return store.IsReservedTestIdentityEmail(email)
+}
+
+// emailResolvedPrincipalRefused reports whether a path that resolves a user
+// by email must refuse it. Such a path does not go through the hub-issued
+// JWT and its per-request row block (testFixtureRejection), so it cannot
+// apply a test identity's expiry or the feature switch; it refuses test
+// identities outright instead, whether or not the feature is enabled. Call
+// it with u == nil on the presented email before the lookup, and again
+// with the resolved row. Callers today: broker on-behalf-of
+// (resolveOnBehalfOf) and the broker inbound message paths
+// (handleBrokerInbound, handleBrokerInboundRouted).
+func emailResolvedPrincipalRefused(email string, u *store.User) bool {
+	if isReservedTestIdentityEmail(email) {
+		return true
+	}
+	return u != nil && (!u.IsHumanKind() || isReservedTestIdentityEmail(u.Email))
+}
+
+// testFixtureRejection returns a non-empty reason when u must not
+// authenticate: a test-fixture row while the feature is off, with no
+// expiry, or past its expiry; or a non-fixture row in the reserved domain.
+// It runs inside the per-request user-row block of UnifiedAuthMiddleware's
+// JWT arm, and in handleAuthValidate, which mirrors that block.
+func testFixtureRejection(u *store.User, enabled bool, now time.Time) string {
+	if u == nil {
+		return ""
+	}
+	if !u.IsTestFixture() {
+		// An admin-kind row is checked by testAdminRowRejection, which
+		// runs next in the same row block.
+		if u.IsTestAdmin() {
+			return ""
+		}
+		if isReservedTestIdentityEmail(u.Email) {
+			return "reserved_test_identity_domain"
+		}
+		return ""
+	}
+	if !enabled {
+		return "test_identities_disabled"
+	}
+	if u.ExpiresAt == nil || !now.Before(*u.ExpiresAt) {
+		return "test_identity_expired"
+	}
+	return ""
+}
+
+// TestIdentityView is the response view of a test identity. It never
+// carries a token.
+type TestIdentityView struct {
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Role        string `json:"role"`
+	Status      string `json:"status"`
+	Purpose     string `json:"purpose,omitempty"`
+	IssuedBy    string `json:"issuedBy"`
+	// IssuerDelegationID is the workload issuer delegation the identity was
+	// issued through; empty for session and PAT issuance.
+	IssuerDelegationID string    `json:"issuerDelegationId,omitempty"`
+	ExpiresAt          time.Time `json:"expiresAt"`
+	Created            time.Time `json:"created"`
+	Live               bool      `json:"live"`
+}
+
+func testIdentityViewOf(u *store.User, now time.Time) TestIdentityView {
+	v := TestIdentityView{
+		ID:          u.ID,
+		Email:       u.Email,
+		DisplayName: u.DisplayName,
+		Role:        u.Role,
+		Status:      u.Status,
+		Created:     u.Created,
+	}
+	if u.Purpose != nil {
+		v.Purpose = *u.Purpose
+	}
+	if u.IssuedBy != nil {
+		v.IssuedBy = *u.IssuedBy
+	}
+	if u.IssuerDelegationID != nil {
+		v.IssuerDelegationID = *u.IssuerDelegationID
+	}
+	if u.ExpiresAt != nil {
+		v.ExpiresAt = *u.ExpiresAt
+		v.Live = now.Before(*u.ExpiresAt)
+	}
+	return v
+}
+
+// CreateTestIdentityRequest is the request body of POST
+// /api/v1/test-identities. Unknown fields are rejected, so no other user
+// field (kind, email, expiry, issuer) can be bound from a request.
+type CreateTestIdentityRequest struct {
+	// Role is "member" or "viewer". Empty means member.
+	Role string `json:"role,omitempty"`
+	// Purpose is a short free-text label recorded on the identity and in
+	// the audit.
+	Purpose string `json:"purpose,omitempty"`
+	// LifetimeSeconds is the identity lifetime. 0 means the default (1 h);
+	// at most 8 h.
+	LifetimeSeconds int64 `json:"lifetimeSeconds,omitempty"`
+	// TokenTTLSeconds is the access token lifetime. 0 means the default
+	// (30 min). The token never outlives the identity.
+	TokenTTLSeconds int64 `json:"tokenTtlSeconds,omitempty"`
+}
+
+// IssueTestIdentityTokenRequest is the request body of POST
+// /api/v1/test-identities/{id}/token. The body is optional.
+type IssueTestIdentityTokenRequest struct {
+	TokenTTLSeconds int64 `json:"tokenTtlSeconds,omitempty"`
+}
+
+// TestIdentityTokenResponse is the response of issuance and re-issue. It
+// holds exactly one token: there is no refresh token.
+type TestIdentityTokenResponse struct {
+	Identity       TestIdentityView `json:"identity"`
+	AccessToken    string           `json:"accessToken"`
+	TokenType      string           `json:"tokenType"`
+	ExpiresIn      int64            `json:"expiresIn"`
+	TokenExpiresAt time.Time        `json:"tokenExpiresAt"`
+}
+
+// ListTestIdentitiesResponse is the response of GET /api/v1/test-identities.
+type ListTestIdentitiesResponse struct {
+	Items []TestIdentityView `json:"items"`
+	// Truncated is true when more identities match than the limit returned.
+	Truncated bool `json:"truncated"`
+}
+
+// List bounds of GET /api/v1/test-identities.
+const (
+	testIdentityListDefaultLimit = 100
+	testIdentityListMaxLimit     = 500
+)
+
+// decodeTestIdentityBody strictly decodes an optional JSON body into v.
+func decodeTestIdentityBody(r *http.Request, v any) error {
+	body, err := io.ReadAll(io.LimitReader(r.Body, testIdentityMaxBodyBytes+1))
+	if err != nil {
+		return fmt.Errorf("failed to read request body")
+	}
+	if len(body) > testIdentityMaxBodyBytes {
+		return fmt.Errorf("request body too large")
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return fmt.Errorf("invalid request body: %v", err)
+	}
+	if dec.More() {
+		return fmt.Errorf("invalid request body: trailing data")
+	}
+	return nil
+}
+
+// testIdentityTokenTTL resolves a requested token lifetime against the
+// default, the cap, and the identity's remaining lifetime. It returns the
+// lifetime, whole seconds, and false when the request is invalid.
+func testIdentityTokenTTL(requestedSeconds int64, expiresAt, now time.Time) (time.Duration, bool) {
+	if requestedSeconds < 0 {
+		return 0, false
+	}
+	ttl := testIdentityDefaultTokenTTL
+	if requestedSeconds > 0 {
+		if requestedSeconds > int64(testIdentityMaxTokenTTL/time.Second) {
+			return 0, false
+		}
+		ttl = time.Duration(requestedSeconds) * time.Second
+	}
+	if remaining := expiresAt.Sub(now).Truncate(time.Second); remaining < ttl {
+		ttl = remaining
+	}
+	if ttl < time.Second {
+		return 0, false
+	}
+	return ttl, true
+}
+
+// testIdentityCaller runs the checks every test identity route shares after
+// the route guard: the feature flag, the credential kind, the handler-level
+// permission check, and the rule that a test fixture cannot itself issue.
+// It writes the response and returns false on refusal.
+func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
+	ctx := r.Context()
+	if !s.testIdentities.enabled {
+		NotFound(w, "endpoint")
+		return nil, false
+	}
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+		return nil, false
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok || isNilIdentity(user) {
+		writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
+		return nil, false
+	}
+	switch GetCredentialContextFromContext(ctx).Kind {
+	case CredentialKindInteractive, CredentialKindDev, CredentialKindUAT:
+	case CredentialKindWorkloadDelegation:
+		// A workload delegation (phase X2) is admitted only with the state
+		// its auth arm attached for this request, for the grantor the
+		// delegation names, as a hub-boundary scoped identity. The arm
+		// already checked the token, the delegation (C2, C3) and the
+		// grantor; the Decide below applies C1 (the grantor's live bindings
+		// intersected with the delegation's scope).
+		st := workloadDelegationCaller(ctx)
+		scoped, isScoped := user.(*ScopedUserIdentity)
+		if st == nil || !isScoped || scoped.ID() != st.delegation.GrantorID || scoped.CredentialID() != st.delegation.ID {
+			logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "workload delegation state missing or inconsistent")
+			writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
+			return nil, false
+		}
+	default:
+		// Fail closed: broker on-behalf-of, agent, federation and any
+		// unknown credential cannot issue test identities.
+		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "credential kind not admitted for test identity issuance")
+		writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
+		return nil, false
+	}
+	// Defence in depth: the route guard already ran this decision.
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:      principalContextForIdentity(user),
+		Credential:     credentialContextForIdentity(user),
+		Resource:       Resource{Type: permissions.ResourceTestIdentity},
+		Action:         ActionIssue,
+		Permission:     permissionTestIdentityIssue,
+		TargetEvidence: hubCollectionEvidence(permissionTestIdentityIssue),
+	})
+	if !decision.Allowed {
+		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, decision.Reason)
+		writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
+		return nil, false
+	}
+	// A test identity of any kind never issues test identities, whatever
+	// grant it may have been given. The kind is read through
+	// kindForPrincipal; a read error or an unrecognized kind fails closed.
+	if k, err := s.kindForPrincipal(ctx, user.ID()); err == nil && k.isTestIdentity() {
+		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "test identity cannot issue test identities")
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "a test identity cannot issue test identities",
+			map[string]interface{}{"reason": testIdentityReasonFixtureCall})
+		return nil, false
+	} else if err != nil {
+		InternalError(w)
+		return nil, false
+	}
+	return user, true
+}
+
+// testIdentitiesGate answers 404 while the feature is off. It wraps the
+// route guard, so the answer does not depend on the caller's permissions.
+// The handlers check the flag again (testIdentityCaller).
+func (s *Server) testIdentitiesGate(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.testIdentities.enabled {
+			NotFound(w, "endpoint")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// testIdentityRateKey returns the rate limiter key of a request: the
+// issuer delegation for a workload delegation request, so parallel runs on
+// separate delegations do not share a bucket, and the issuer's user id
+// otherwise.
+func testIdentityRateKey(ctx context.Context, caller UserIdentity) string {
+	if st := workloadDelegationCaller(ctx); st != nil {
+		return "delegation:" + st.delegation.ID
+	}
+	return caller.ID()
+}
+
+// testIdentityAllow applies the per-issuer (per-delegation for a workload
+// delegation) rate limit.
+func (s *Server) testIdentityAllow(w http.ResponseWriter, key string) bool {
+	if s.testIdentities.limiter.Allow(key) {
+		return true
+	}
+	writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many test identity requests; retry later",
+		map[string]interface{}{"reason": testIdentityReasonRateLimited})
+	return false
+}
+
+// testIdentityWorkloadAudit is the workload delegation part of an issuance
+// or re-issue audit record (DEC-3 C4): the delegation, its grantor, the
+// workload subject, the workload token's iat and the self-asserted run
+// label. It never holds any part of a token.
+type testIdentityWorkloadAudit struct {
+	DelegationID string `json:"delegation_id"`
+	Grantor      string `json:"grantor"`
+	WorkloadSub  string `json:"workload_sub"`
+	TokenIAT     string `json:"token_iat,omitempty"`
+	RunLabel     string `json:"run_label,omitempty"`
+}
+
+// testIdentityWorkloadAuditOf returns the workload audit part of a request,
+// or nil when the request is not a workload delegation request.
+func testIdentityWorkloadAuditOf(ctx context.Context) *testIdentityWorkloadAudit {
+	st := workloadDelegationCaller(ctx)
+	if st == nil {
+		return nil
+	}
+	a := &testIdentityWorkloadAudit{
+		DelegationID: st.delegation.ID,
+		Grantor:      st.delegation.GrantorID,
+		WorkloadSub:  st.sub,
+		RunLabel:     st.runLabel,
+	}
+	if !st.tokenIAT.IsZero() {
+		a.TokenIAT = st.tokenIAT.UTC().Format(time.RFC3339)
+	}
+	return a
+}
+
+// testIdentityAuditSummary is the AfterSummary of a test identity audit
+// record. It never includes a token.
+func testIdentityAuditSummary(u *store.User, tokenTTL time.Duration) string {
+	return testIdentityAuditSummaryWith(u, tokenTTL, nil)
+}
+
+// testIdentityAuditSummaryWith is testIdentityAuditSummary with the
+// workload delegation part, when wl is non-nil.
+func testIdentityAuditSummaryWith(u *store.User, tokenTTL time.Duration, wl *testIdentityWorkloadAudit) string {
+	purpose := ""
+	if u.Purpose != nil {
+		purpose = *u.Purpose
+	}
+	issuedBy := ""
+	if u.IssuedBy != nil {
+		issuedBy = *u.IssuedBy
+	}
+	var expiresAt string
+	if u.ExpiresAt != nil {
+		expiresAt = u.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	b, _ := json.Marshal(struct {
+		UserID          string                     `json:"user_id"`
+		Email           string                     `json:"email"`
+		Role            string                     `json:"role"`
+		IssuedBy        string                     `json:"issued_by"`
+		Purpose         string                     `json:"purpose"`
+		ExpiresAt       string                     `json:"expires_at"`
+		TokenTTLSeconds int64                      `json:"token_ttl_seconds"`
+		Workload        *testIdentityWorkloadAudit `json:"workload_delegation,omitempty"`
+	}{u.ID, u.Email, u.Role, issuedBy, purpose, expiresAt, int64(tokenTTL / time.Second), wl})
+	return string(b)
+}
+
+// newTestIdentityEmail returns a fresh email in the reserved domain with a
+// 128-bit random local part.
+func newTestIdentityEmail() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return testIdentityEmailPrefix + "-" + hex.EncodeToString(b) + "@" + store.TestFixtureEmailDomain, nil
+}
+
+// validTestIdentityPurpose reports whether purpose is acceptable.
+func validTestIdentityPurpose(purpose string) bool {
+	if utf8.RuneCountInString(purpose) > testIdentityPurposeMaxRunes {
+		return false
+	}
+	return !hasControlChar(purpose, false)
+}
+
+// handleCreateTestIdentity handles POST /api/v1/test-identities.
+func (s *Server) handleCreateTestIdentity(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	issuer, ok := s.testIdentityCaller(w, r)
+	if !ok {
+		return
+	}
+
+	var req CreateTestIdentityRequest
+	if err := decodeTestIdentityBody(r, &req); err != nil {
+		BadRequest(w, err.Error())
+		return
+	}
+	role := req.Role
+	if role == "" {
+		role = store.UserRoleMember
+	}
+	if !testIdentityRoles[role] {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			`invalid role: must be "member" or "viewer"`, map[string]interface{}{"field": "role"})
+		return
+	}
+	purpose := strings.TrimSpace(req.Purpose)
+	if !validTestIdentityPurpose(purpose) {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			fmt.Sprintf("invalid purpose: at most %d characters, no control characters", testIdentityPurposeMaxRunes),
+			map[string]interface{}{"field": "purpose"})
+		return
+	}
+	lifetime := testIdentityDefaultLifetime
+	if req.LifetimeSeconds != 0 {
+		if req.LifetimeSeconds < 60 || req.LifetimeSeconds > int64(testIdentityMaxLifetime/time.Second) {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("invalid lifetimeSeconds: must be between 60 and %d", int64(testIdentityMaxLifetime/time.Second)),
+				map[string]interface{}{"field": "lifetimeSeconds"})
+			return
+		}
+		lifetime = time.Duration(req.LifetimeSeconds) * time.Second
+	}
+	now := s.testIdentities.clock()
+	expiresAt := now.Add(lifetime)
+	tokenTTL, ok := testIdentityTokenTTL(req.TokenTTLSeconds, expiresAt, now)
+	if !ok {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			fmt.Sprintf("invalid tokenTtlSeconds: must be between 1 and %d", int64(testIdentityMaxTokenTTL/time.Second)),
+			map[string]interface{}{"field": "tokenTtlSeconds"})
+		return
+	}
+	if s.userTokenService == nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "user token service is not configured", nil)
+		return
+	}
+	if !s.testIdentityAllow(w, testIdentityRateKey(ctx, issuer)) {
+		return
+	}
+	// A workload delegation request is capped per delegation (its member
+	// cap, at most testIdentityPerIssuerCap) and stamps the delegation on
+	// the identity; any other request is capped per issuer user.
+	workload := workloadDelegationCaller(ctx)
+	workloadAudit := testIdentityWorkloadAuditOf(ctx)
+	perCredentialCap := testIdentityPerIssuerCap
+	var delegationID *string
+	if workload != nil {
+		id := workload.delegation.ID
+		delegationID = &id
+		if workload.delegation.MemberCap < perCredentialCap {
+			perCredentialCap = workload.delegation.MemberCap
+		}
+	}
+
+	email, err := newTestIdentityEmail()
+	if err != nil {
+		InternalError(w)
+		return
+	}
+	issuerID := issuer.ID()
+	u := &store.User{
+		ID:          generateID(),
+		Email:       email,
+		DisplayName: "Test identity " + strings.TrimPrefix(strings.Split(email, "@")[0], testIdentityEmailPrefix+"-")[:8],
+		Role:        role,
+		Status:      store.UserStatusActive,
+		Kind:        store.UserKindTestFixture,
+		ExpiresAt:   &expiresAt,
+		IssuedBy:    &issuerID,
+		Created:     now,
+	}
+	u.IssuerDelegationID = delegationID
+	if purpose != "" {
+		u.Purpose = &purpose
+	}
+	auditActor := s.buildAuditActorFromContext(ctx)
+
+	var token string
+	var expiresIn int64
+	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.LockTestFixtureIssuance(ctx); err != nil {
+			return err
+		}
+		var (
+			n   int
+			err error
+		)
+		if workload != nil {
+			// C3 inside the lock: a delegation revoked or expired since
+			// the request authenticated mints nothing.
+			if err := s.recheckWorkloadDelegation(ctx, tx, workload, now); err != nil {
+				return err
+			}
+			n, err = tx.CountLiveTestFixtureUsersByDelegation(ctx, workload.delegation.ID, now)
+		} else {
+			n, err = tx.CountLiveTestFixtureUsers(ctx, issuerID, now)
+		}
+		if err != nil {
+			return err
+		}
+		if n >= perCredentialCap {
+			return errTestIdentityIssuerCap
+		}
+		n, err = tx.CountLiveTestFixtureUsers(ctx, "", now)
+		if err != nil {
+			return err
+		}
+		if n >= testIdentityHubCap {
+			return errTestIdentityHubCap
+		}
+		if err := tx.CreateTestFixtureUser(ctx, u); err != nil {
+			return fmt.Errorf("create test identity: %w", err)
+		}
+		// Unlike sign-in, a grant sync failure fails the issuance.
+		if err := s.testIdentities.hooks.syncGrants(ctx, tx, u.ID, u.Role, testIdentityGrantsCreatedBy); err != nil {
+			return fmt.Errorf("sync hub role grants: %w", err)
+		}
+		token, expiresIn, err = s.userTokenService.GenerateAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeAPI, tokenTTL)
+		if err != nil {
+			return fmt.Errorf("issue token: %w", err)
+		}
+		record := &store.MutationAuditRecord{
+			MutationType: testIdentityIssueMutation,
+			TargetType:   testIdentityAuditTargetType,
+			TargetID:     u.ID,
+			AfterSummary: testIdentityAuditSummaryWith(u, tokenTTL, workloadAudit),
+			Timestamp:    now,
+		}
+		auditActor.ApplyActor(record)
+		if err := s.testIdentities.hooks.writeAudit(ctx, tx, record); err != nil {
+			return fmt.Errorf("audit test identity issue: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		token = ""
+		switch {
+		case errors.Is(err, errTestIdentityIssuerCap):
+			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(),
+				map[string]interface{}{"reason": testIdentityReasonIssuerCap, "limit": perCredentialCap})
+		case errors.Is(err, errTestIdentityDelegationNotLive):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "workload delegation does not grant this request", nil)
+		case errors.Is(err, errTestIdentityHubCap):
+			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(),
+				map[string]interface{}{"reason": testIdentityReasonHubCap, "limit": testIdentityHubCap})
+		case isTransientIssuanceConflict(err):
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "test identity issuance is busy; retry shortly",
+				map[string]interface{}{"reason": testIdentityReasonBusy})
+		default:
+			slog.ErrorContext(ctx, "test identity issuance failed", "issuer_id", issuerID, "error", err)
+			InternalError(w)
+		}
+		return
+	}
+
+	slog.InfoContext(ctx, "test identity issued", "test_identity_id", u.ID, "issuer_id", issuerID, "role", u.Role, "expires_at", expiresAt)
+	writeJSON(w, http.StatusCreated, TestIdentityTokenResponse{
+		Identity:       testIdentityViewOf(u, now),
+		AccessToken:    token,
+		TokenType:      "Bearer",
+		ExpiresIn:      expiresIn,
+		TokenExpiresAt: now.Add(tokenTTL),
+	})
+}
+
+// testIdentityCallerSeesAll reports whether caller, already admitted by the
+// test_identity.issue route guard, sees and re-issues every test identity
+// rather than only its own: an unscoped platform admin session. It widens
+// the result scope only; it grants no access on its own.
+func testIdentityCallerSeesAll(caller UserIdentity) bool {
+	return IsUnscopedLocalPlatformAdmin(caller)
+}
+
+// canManageTestIdentity reports whether caller may see, re-issue for or
+// delete u. A workload delegation request manages only the identities
+// issued through its own delegation, so parallel runs on separate
+// delegations cannot touch each other's identities. Any other caller
+// manages the identities it issued (including those issued through its
+// delegations: the grantor's own session), and an unscoped platform admin
+// session manages all.
+func canManageTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
+	if st := workloadDelegationCaller(ctx); st != nil {
+		return u.IssuerDelegationID != nil && *u.IssuerDelegationID == st.delegation.ID &&
+			u.IssuedBy != nil && *u.IssuedBy == st.delegation.GrantorID
+	}
+	if GetCredentialContextFromContext(ctx).Kind == CredentialKindWorkloadDelegation {
+		// A workload credential without its state: fail closed.
+		return false
+	}
+	if testIdentityCallerSeesAll(caller) {
+		return true
+	}
+	return u.IssuedBy != nil && *u.IssuedBy == caller.ID()
+}
+
+// recheckWorkloadDelegation re-reads a workload delegation inside an
+// issuance or re-issue transaction and returns
+// errTestIdentityDelegationNotLive unless it is still live (DEC-3 C3 at the
+// mint itself). "Live" is the auth arm's own definition
+// (checkDelegationLive: not revoked, before its expiry and its hard maximum
+// age, the accepted scope, a subject the allowlist covers), plus the same
+// grantor and subject the request authenticated with.
+func (s *Server) recheckWorkloadDelegation(ctx context.Context, tx store.Store, st *workloadDelegationState, now time.Time) error {
+	d, err := tx.GetTestIdentityDelegation(ctx, st.delegation.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return errTestIdentityDelegationNotLive
+	}
+	if err != nil {
+		return err
+	}
+	if d.GrantorID != st.delegation.GrantorID || d.WorkloadSub != st.sub {
+		return errTestIdentityDelegationNotLive
+	}
+	if s.workloadIssuer == nil || s.workloadIssuer.checkDelegationLive(d, now) != nil {
+		return errTestIdentityDelegationNotLive
+	}
+	return nil
+}
+
+// handleIssueTestIdentityToken handles POST /api/v1/test-identities/{id}/token.
+func (s *Server) handleIssueTestIdentityToken(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, ok := s.testIdentityCaller(w, r)
+	if !ok {
+		return
+	}
+	var req IssueTestIdentityTokenRequest
+	if err := decodeTestIdentityBody(r, &req); err != nil {
+		BadRequest(w, err.Error())
+		return
+	}
+
+	id := r.PathValue("id")
+	u, err := s.store.GetUser(ctx, id)
+	// An admin-kind identity gets exactly one token, at issuance: no
+	// re-issue (409), for its issuer or an unscoped platform admin.
+	if err == nil && u.IsTestAdmin() && canManageTestIdentity(ctx, caller, u) {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "an admin-kind test identity's token is never re-issued",
+			map[string]interface{}{"reason": testAdminReasonAdminKindTokens})
+		return
+	}
+	// One answer for a missing user, a non-fixture user, and a fixture the
+	// caller did not issue, so the route is no user-existence oracle.
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !canManageTestIdentity(ctx, caller, u))) {
+		NotFound(w, "test identity")
+		return
+	}
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	now := s.testIdentities.clock()
+	if u.ExpiresAt == nil || !now.Before(*u.ExpiresAt) {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "test identity has expired",
+			map[string]interface{}{"reason": testIdentityReasonExpired})
+		return
+	}
+	if u.Status != store.UserStatusActive {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "test identity is not active", nil)
+		return
+	}
+	tokenTTL, ok := testIdentityTokenTTL(req.TokenTTLSeconds, *u.ExpiresAt, now)
+	if !ok {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			fmt.Sprintf("invalid tokenTtlSeconds: must be between 1 and %d", int64(testIdentityMaxTokenTTL/time.Second)),
+			map[string]interface{}{"field": "tokenTtlSeconds"})
+		return
+	}
+	if s.userTokenService == nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "user token service is not configured", nil)
+		return
+	}
+	if !s.testIdentityAllow(w, testIdentityRateKey(ctx, caller)) {
+		return
+	}
+
+	auditActor := s.buildAuditActorFromContext(ctx)
+	workload := workloadDelegationCaller(ctx)
+	workloadAudit := testIdentityWorkloadAuditOf(ctx)
+	var token string
+	var expiresIn int64
+	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		var err error
+		if workload != nil {
+			if err := s.recheckWorkloadDelegation(ctx, tx, workload, now); err != nil {
+				return err
+			}
+		}
+		token, expiresIn, err = s.userTokenService.GenerateAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeAPI, tokenTTL)
+		if err != nil {
+			return fmt.Errorf("issue token: %w", err)
+		}
+		record := &store.MutationAuditRecord{
+			MutationType: testIdentityTokenIssueMutation,
+			TargetType:   testIdentityAuditTargetType,
+			TargetID:     u.ID,
+			AfterSummary: testIdentityAuditSummaryWith(u, tokenTTL, workloadAudit),
+			Timestamp:    now,
+		}
+		auditActor.ApplyActor(record)
+		return s.testIdentities.hooks.writeAudit(ctx, tx, record)
+	})
+	if err != nil {
+		token = ""
+		if errors.Is(err, errTestIdentityDelegationNotLive) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "workload delegation does not grant this request", nil)
+			return
+		}
+		slog.ErrorContext(ctx, "test identity token issue failed", "test_identity_id", u.ID, "error", err)
+		InternalError(w)
+		return
+	}
+	slog.InfoContext(ctx, "test identity token issued", "test_identity_id", u.ID, "issuer_id", caller.ID())
+	writeJSON(w, http.StatusOK, TestIdentityTokenResponse{
+		Identity:       testIdentityViewOf(u, now),
+		AccessToken:    token,
+		TokenType:      "Bearer",
+		ExpiresIn:      expiresIn,
+		TokenExpiresAt: now.Add(tokenTTL),
+	})
+}
+
+// handleListTestIdentities handles GET /api/v1/test-identities: the
+// caller's own identities, or every identity for an unscoped platform
+// admin session.
+func (s *Server) handleListTestIdentities(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, ok := s.testIdentityCaller(w, r)
+	if !ok {
+		return
+	}
+	issuedBy := caller.ID()
+	if testIdentityCallerSeesAll(caller) {
+		issuedBy = ""
+	}
+	// A workload delegation request lists only its own delegation's
+	// identities.
+	workload := workloadDelegationCaller(ctx)
+	// Live identities only, unless includeExpired=true; newest first, at
+	// most limit (default 100, at most 500).
+	q := r.URL.Query()
+	includeExpired := false
+	if v := q.Get("includeExpired"); v != "" {
+		switch v {
+		case "true":
+			includeExpired = true
+		case "false":
+		default:
+			BadRequest(w, `invalid includeExpired: must be "true" or "false"`)
+			return
+		}
+	}
+	limit := testIdentityListDefaultLimit
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > testIdentityListMaxLimit {
+			BadRequest(w, fmt.Sprintf("invalid limit: must be between 1 and %d", testIdentityListMaxLimit))
+			return
+		}
+		limit = n
+	}
+	now := s.testIdentities.clock()
+	liveAt := now
+	if includeExpired {
+		liveAt = time.Time{}
+	}
+	var users []store.User
+	var err error
+	if workload != nil {
+		users, err = s.store.ListTestFixtureUsersByDelegation(ctx, workload.delegation.ID, liveAt, limit+1)
+	} else {
+		users, err = s.store.ListTestFixtureUsers(ctx, issuedBy, liveAt, limit+1)
+	}
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	truncated := len(users) > limit
+	if truncated {
+		users = users[:limit]
+	}
+	items := make([]TestIdentityView, 0, len(users))
+	for i := range users {
+		items = append(items, testIdentityViewOf(&users[i], now))
+	}
+	writeJSON(w, http.StatusOK, ListTestIdentitiesResponse{Items: items, Truncated: truncated})
+}
+
+// canDeleteTestIdentity reports whether caller may delete the test identity
+// u (design §2 D.6): its issuer or an unscoped platform admin session
+// (canManageTestIdentity, as for re-issue and list), or a principal that,
+// besides test_identity.issue (checked by testIdentityCaller), holds
+// user.delete on u.
+func (s *Server) canDeleteTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
+	if canManageTestIdentity(ctx, caller, u) {
+		return true
+	}
+	// A workload delegation deletes only its own delegation's identities;
+	// it never falls back to user.delete.
+	if GetCredentialContextFromContext(ctx).Kind == CredentialKindWorkloadDelegation {
+		return false
+	}
+	return s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(caller),
+		Credential: credentialContextForIdentity(caller),
+		Resource:   Resource{Type: "user", ID: u.ID},
+		Action:     Action("delete"),
+		Permission: "user.delete",
+	}).Allowed
+}
+
+// testIdentityDeleteSummary is the BeforeSummary of a test_identity_delete
+// audit record: the deleted identity's facts. It never includes a token.
+func testIdentityDeleteSummary(u *store.User) string {
+	purpose := ""
+	if u.Purpose != nil {
+		purpose = *u.Purpose
+	}
+	issuedBy := ""
+	if u.IssuedBy != nil {
+		issuedBy = *u.IssuedBy
+	}
+	var expiresAt string
+	if u.ExpiresAt != nil {
+		expiresAt = u.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	b, _ := json.Marshal(struct {
+		UserID    string `json:"user_id"`
+		Email     string `json:"email"`
+		Role      string `json:"role"`
+		IssuedBy  string `json:"issued_by"`
+		Purpose   string `json:"purpose"`
+		ExpiresAt string `json:"expires_at"`
+	}{u.ID, u.Email, u.Role, issuedBy, purpose, expiresAt})
+	return string(b)
+}
+
+// handleDeleteTestIdentity handles DELETE /api/v1/test-identities/{id}: it
+// deletes a test identity (Phase 2c teardown, without purge). Only a
+// kind=test_fixture row can be deleted here; any other user, a missing
+// one, and a fixture the caller may not delete all get the same 404, so the
+// route is no user-existence oracle and never deletes a human user. A
+// second delete of the same identity gets 404 too.
+//
+// It runs the same cascade as DELETE /api/v1/users/{id}
+// (deleteUserRowCascadeTx): while the identity owns agents it answers 409
+// with details.agents, and while it is the last owner of a project 409
+// last_owner with details.projects; nothing is deleted then. Otherwise its
+// role bindings, group memberships and skill injections go with the row,
+// so its tokens stop working at once. A test_identity_delete audit record
+// is written in the same transaction; an audit failure rolls the delete
+// back.
+func (s *Server) handleDeleteTestIdentity(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, ok := s.testIdentityCaller(w, r)
+	if !ok {
+		return
+	}
+	switch r.URL.Query().Get("purge") {
+	case "true":
+		s.handlePurgeTestIdentity(w, r, caller)
+		return
+	case "", "false":
+	default:
+		BadRequest(w, `invalid purge: must be "true" or "false"`)
+		return
+	}
+
+	id := r.PathValue("id")
+	u, err := s.store.GetUser(ctx, id)
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !s.canDeleteTestIdentity(ctx, caller, u))) {
+		NotFound(w, "test identity")
+		return
+	}
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	auditActor := s.buildAuditActorFromContext(ctx)
+	now := s.testIdentities.clock()
+	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := deleteUserRowCascadeTx(ctx, tx, u.ID, s.membershipNow()); err != nil {
+			return err
+		}
+		record := &store.MutationAuditRecord{
+			MutationType:  testIdentityDeleteMutation,
+			TargetType:    testIdentityAuditTargetType,
+			TargetID:      u.ID,
+			BeforeSummary: testIdentityDeleteSummary(u),
+			Timestamp:     now,
+		}
+		auditActor.ApplyActor(record)
+		if err := s.testIdentities.hooks.writeAudit(ctx, tx, record); err != nil {
+			return fmt.Errorf("audit test identity delete: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			// Deleted concurrently.
+			NotFound(w, "test identity")
+		case writeUserDeleteCascadeError(w, err):
+		case isTransientIssuanceConflict(err):
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "test identity delete is busy; retry shortly",
+				map[string]interface{}{"reason": testIdentityReasonBusy})
+		default:
+			slog.ErrorContext(ctx, "test identity delete failed", "test_identity_id", u.ID, "error", err)
+			InternalError(w)
+		}
+		return
+	}
+
+	s.afterUserDeleted(ctx, u.ID)
+	slog.InfoContext(ctx, "test identity deleted", "test_identity_id", u.ID, "deleted_by", caller.ID())
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePurgeTestIdentity handles DELETE /api/v1/test-identities/{id}?purge=true
+// (Phase 3b; fixture_purge.go). The identity ID in the path is the only
+// input: any other query parameter, or a request body, is refused with 400,
+// so a caller can never name what is removed. The targets are the resources
+// whose provenance stamp names the identity.
+//
+// The caller must be allowed to delete the identity (canDeleteTestIdentity).
+// When the identity row is already gone, its stamped leftovers are removed
+// for the issuer recorded on them, or an unscoped platform admin session;
+// never for a workload delegation request (see below).
+// Every other case (an ID that is no test identity, a human user, a test
+// identity the caller may not delete, an identity with nothing left) gets
+// the same 200 with an empty report, so the route reveals nothing about
+// which IDs exist.
+//
+// A complete run answers 200 with the report. An incomplete one (a delete
+// left in_doubt or not finished, a broker not reachable, agents without
+// the stamp that keep the identity) answers 409 purge_incomplete with the
+// report in details; running it again continues.
+func (s *Server) handlePurgeTestIdentity(w http.ResponseWriter, r *http.Request, caller UserIdentity) {
+	ctx := r.Context()
+	for key := range r.URL.Query() {
+		if key != "purge" {
+			BadRequest(w, fmt.Sprintf("invalid query parameter %q: a purge takes only the identity ID", key))
+			return
+		}
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, testIdentityMaxBodyBytes+1))
+	if err != nil {
+		BadRequest(w, "failed to read request body")
+		return
+	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		BadRequest(w, "a purge takes no request body: the identity ID is its only input")
+		return
+	}
+
+	id := r.PathValue("id")
+	run := fixturePurgeRun{
+		rootID:      id,
+		trigger:     testIdentityPurgeMutation,
+		executor:    fixturePurgeExecutorRequest,
+		requestedBy: caller.ID(),
+		actor:       s.buildAuditActorFromContext(ctx),
+	}
+	u, err := s.store.GetUser(ctx, id)
+	switch {
+	case err == nil:
+		if !u.IsTestFixture() || !s.canDeleteTestIdentity(ctx, caller, u) {
+			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
+			return
+		}
+		run.user = u
+		if u.IssuedBy != nil {
+			run.issuerID = *u.IssuedBy
+		}
+	case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
+		issuer, ok, lerr := s.fixtureLeftoverIssuer(ctx, id)
+		if lerr != nil {
+			slog.ErrorContext(ctx, "test identity purge: reading leftovers failed", "test_identity_id", id, "error", lerr)
+			InternalError(w)
+			return
+		}
+		// A workload delegation manages only identities stamped with its own
+		// delegation (canManageTestIdentity). The leftovers of a deleted
+		// identity record only the issuing user, not the delegation, so a
+		// workload delegation request cannot be shown to own them and gets
+		// the same empty report; the grantor's session or an admin session
+		// purges them.
+		if !ok || GetCredentialContextFromContext(ctx).Kind == CredentialKindWorkloadDelegation ||
+			(!testIdentityCallerSeesAll(caller) && issuer != caller.ID()) {
+			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
+			return
+		}
+		run.issuerID = issuer
+	default:
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	report, err := s.purgeTestIdentity(ctx, run)
+	if err != nil {
+		slog.ErrorContext(ctx, "test identity purge failed", "test_identity_id", id, "error", err)
+		if isTransientIssuanceConflict(err) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "test identity purge is busy; retry shortly",
+				map[string]interface{}{"reason": testIdentityReasonBusy, "report": report})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "test identity purge failed; run it again",
+			map[string]interface{}{"reason": testIdentityReasonPurgeIncomplete, "report": report})
+		return
+	}
+	slog.InfoContext(ctx, "test identity purge", "test_identity_id", id, "purged_by", caller.ID(),
+		"complete", report.Complete, "agents", report.Deleted.Agents, "projects", report.Deleted.Projects)
+	if !report.Complete {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "test identity purge did not complete; run it again",
+			map[string]interface{}{"reason": testIdentityReasonPurgeIncomplete, "report": report})
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+// fixtureLeftoverIssuer returns the issuer recorded on the resources still
+// stamped with rootID, for an identity whose row is gone; ok is false when
+// none are left (or rootID is not a valid ID).
+func (s *Server) fixtureLeftoverIssuer(ctx context.Context, rootID string) (string, bool, error) {
+	set, err := s.store.ListFixtureRootedResources(ctx, rootID, 1)
+	if errors.Is(err, store.ErrInvalidInput) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	for _, stamps := range [][]store.FixtureProvenance{
+		fixtureStamps(set.Agents, func(a store.Agent) store.FixtureProvenance { return a.Fixture }),
+		fixtureStamps(set.Schedules, func(sc store.Schedule) store.FixtureProvenance { return sc.Fixture }),
+		fixtureStamps(set.Groups, func(g store.Group) store.FixtureProvenance { return g.Fixture }),
+		fixtureStamps(set.Projects, func(p store.Project) store.FixtureProvenance { return p.Fixture }),
+	} {
+		for _, st := range stamps {
+			if st.RootID == rootID && st.IssuerID != "" {
+				return st.IssuerID, true, nil
+			}
+		}
+	}
+	return "", false, nil
+}
+
+func fixtureStamps[T any](items []T, get func(T) store.FixtureProvenance) []store.FixtureProvenance {
+	out := make([]store.FixtureProvenance, 0, len(items))
+	for _, it := range items {
+		out = append(out, get(it))
+	}
+	return out
+}

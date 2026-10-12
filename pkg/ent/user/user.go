@@ -40,6 +40,20 @@ const (
 	FieldLastSeen = "last_seen"
 	// FieldSessionGeneration holds the string denoting the session_generation field in the database.
 	FieldSessionGeneration = "session_generation"
+	// FieldKind holds the string denoting the kind field in the database.
+	FieldKind = "kind"
+	// FieldExpiresAt holds the string denoting the expires_at field in the database.
+	FieldExpiresAt = "expires_at"
+	// FieldIssuedBy holds the string denoting the issued_by field in the database.
+	FieldIssuedBy = "issued_by"
+	// FieldPurpose holds the string denoting the purpose field in the database.
+	FieldPurpose = "purpose"
+	// FieldIssuanceID holds the string denoting the issuance_id field in the database.
+	FieldIssuanceID = "issuance_id"
+	// FieldIssuerCredentialID holds the string denoting the issuer_credential_id field in the database.
+	FieldIssuerCredentialID = "issuer_credential_id"
+	// FieldIssuerDelegationID holds the string denoting the issuer_delegation_id field in the database.
+	FieldIssuerDelegationID = "issuer_delegation_id"
 	// EdgeOwnedGroups holds the string denoting the owned_groups edge name in mutations.
 	EdgeOwnedGroups = "owned_groups"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -50,6 +64,8 @@ const (
 	EdgeExternalIdentities = "external_identities"
 	// EdgeTerminalWorkspace holds the string denoting the terminal_workspace edge name in mutations.
 	EdgeTerminalWorkspace = "terminal_workspace"
+	// EdgeTestIdentityLoginCode holds the string denoting the test_identity_login_code edge name in mutations.
+	EdgeTestIdentityLoginCode = "test_identity_login_code"
 	// Table holds the table name of the user in the database.
 	Table = "users"
 	// OwnedGroupsTable is the table that holds the owned_groups relation/edge.
@@ -87,6 +103,13 @@ const (
 	TerminalWorkspaceInverseTable = "user_terminal_workspaces"
 	// TerminalWorkspaceColumn is the table column denoting the terminal_workspace relation/edge.
 	TerminalWorkspaceColumn = "user_id"
+	// TestIdentityLoginCodeTable is the table that holds the test_identity_login_code relation/edge.
+	TestIdentityLoginCodeTable = "test_identity_login_codes"
+	// TestIdentityLoginCodeInverseTable is the table name for the TestIdentityLoginCode entity.
+	// It exists in this package in order to avoid circular dependency with the "testidentitylogincode" package.
+	TestIdentityLoginCodeInverseTable = "test_identity_login_codes"
+	// TestIdentityLoginCodeColumn is the table column denoting the test_identity_login_code relation/edge.
+	TestIdentityLoginCodeColumn = "user_id"
 )
 
 // Columns holds all SQL columns for user fields.
@@ -104,6 +127,13 @@ var Columns = []string{
 	FieldLastLogin,
 	FieldLastSeen,
 	FieldSessionGeneration,
+	FieldKind,
+	FieldExpiresAt,
+	FieldIssuedBy,
+	FieldPurpose,
+	FieldIssuanceID,
+	FieldIssuerCredentialID,
+	FieldIssuerDelegationID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -181,6 +211,34 @@ func StatusValidator(s Status) error {
 	}
 }
 
+// Kind defines the type for the "kind" enum field.
+type Kind string
+
+// KindHuman is the default value of the Kind enum.
+const DefaultKind = KindHuman
+
+// Kind values.
+const (
+	KindHuman          Kind = "human"
+	KindTestFixture    Kind = "test_fixture"
+	KindTestHubAdmin   Kind = "test_hub_admin"
+	KindTestSuperAdmin Kind = "test_super_admin"
+)
+
+func (k Kind) String() string {
+	return string(k)
+}
+
+// KindValidator is a validator for the "kind" field enum values. It is called by the builders before save.
+func KindValidator(k Kind) error {
+	switch k {
+	case KindHuman, KindTestFixture, KindTestHubAdmin, KindTestSuperAdmin:
+		return nil
+	default:
+		return fmt.Errorf("user: invalid enum value for kind field: %q", k)
+	}
+}
+
 // OrderOption defines the ordering options for the User queries.
 type OrderOption func(*sql.Selector)
 
@@ -242,6 +300,41 @@ func ByLastSeen(opts ...sql.OrderTermOption) OrderOption {
 // BySessionGeneration orders the results by the session_generation field.
 func BySessionGeneration(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSessionGeneration, opts...).ToFunc()
+}
+
+// ByKind orders the results by the kind field.
+func ByKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldKind, opts...).ToFunc()
+}
+
+// ByExpiresAt orders the results by the expires_at field.
+func ByExpiresAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExpiresAt, opts...).ToFunc()
+}
+
+// ByIssuedBy orders the results by the issued_by field.
+func ByIssuedBy(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuedBy, opts...).ToFunc()
+}
+
+// ByPurpose orders the results by the purpose field.
+func ByPurpose(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPurpose, opts...).ToFunc()
+}
+
+// ByIssuanceID orders the results by the issuance_id field.
+func ByIssuanceID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuanceID, opts...).ToFunc()
+}
+
+// ByIssuerCredentialID orders the results by the issuer_credential_id field.
+func ByIssuerCredentialID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuerCredentialID, opts...).ToFunc()
+}
+
+// ByIssuerDelegationID orders the results by the issuer_delegation_id field.
+func ByIssuerDelegationID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuerDelegationID, opts...).ToFunc()
 }
 
 // ByOwnedGroupsCount orders the results by owned_groups count.
@@ -306,6 +399,13 @@ func ByTerminalWorkspaceField(field string, opts ...sql.OrderTermOption) OrderOp
 		sqlgraph.OrderByNeighborTerms(s, newTerminalWorkspaceStep(), sql.OrderByField(field, opts...))
 	}
 }
+
+// ByTestIdentityLoginCodeField orders the results by test_identity_login_code field.
+func ByTestIdentityLoginCodeField(field string, opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newTestIdentityLoginCodeStep(), sql.OrderByField(field, opts...))
+	}
+}
 func newOwnedGroupsStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -339,5 +439,12 @@ func newTerminalWorkspaceStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(TerminalWorkspaceInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2O, false, TerminalWorkspaceTable, TerminalWorkspaceColumn),
+	)
+}
+func newTestIdentityLoginCodeStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(TestIdentityLoginCodeInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2O, false, TestIdentityLoginCodeTable, TestIdentityLoginCodeColumn),
 	)
 }

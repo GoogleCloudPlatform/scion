@@ -377,7 +377,14 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 		}
 		counts[results[i].Status]++
 
+		// The sender must be allowed to add the target under its message
+		// mode (group_message_mode.go).
 		if results[i].Status == "delivered" && registerAfter {
+			if joinOK, joinReason := s.groupAgentJoinAllowed(aggregateCtx, in.SenderIdent, target); !joinOK {
+				s.messageLog.Info("mention target not registered as group participant: message mode",
+					"conversation_id", convID, "agent_id", target.ID, "reason", joinReason)
+				continue
+			}
 			// A short, detached context of its own: the aggregate budget
 			// may already be nearly spent by the delivery above, and this
 			// write matters even if it is. Same pattern as the dispatch

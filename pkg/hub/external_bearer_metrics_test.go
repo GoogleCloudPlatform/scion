@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -39,63 +38,6 @@ import (
 // since serveExternalBearer's outcome switch records at most once per
 // request (auth_external_bearer.go).
 // ---------------------------------------------------------------------------
-
-// externalBearerMetricCall is one recorded scion_hub_external_bearer_total
-// increment.
-type externalBearerMetricCall struct {
-	kind      ExternalBearerKind
-	principal ExternalBearerPrincipal
-	outcome   ExternalBearerOutcome
-}
-
-// fakeExternalBearerMetrics records every RecordExternalBearer call for
-// assertion. Safe for concurrent use (needed for the singleflight-collapsed
-// path, and general defensiveness).
-type fakeExternalBearerMetrics struct {
-	mu    sync.Mutex
-	calls []externalBearerMetricCall
-}
-
-func (f *fakeExternalBearerMetrics) RecordExternalBearer(kind ExternalBearerKind, principal ExternalBearerPrincipal, outcome ExternalBearerOutcome) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, externalBearerMetricCall{kind, principal, outcome})
-}
-
-func (f *fakeExternalBearerMetrics) allCalls() []externalBearerMetricCall {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]externalBearerMetricCall, len(f.calls))
-	copy(out, f.calls)
-	return out
-}
-
-// attachExternalBearerMetrics wires a fresh fakeExternalBearerMetrics into
-// cfg via the *atomic.Pointer indirection AuthConfig.ExternalBearerMetrics
-// requires (see its doc comment): production wires this after New()
-// returns, but a test can just store directly, since doExternalBearerRequest
-// builds the middleware from this cfg value after the field is set.
-func attachExternalBearerMetrics(cfg *AuthConfig) *fakeExternalBearerMetrics {
-	fake := &fakeExternalBearerMetrics{}
-	var rec ExternalBearerMetricsRecorder = fake
-	var p atomic.Pointer[ExternalBearerMetricsRecorder]
-	p.Store(&rec)
-	cfg.ExternalBearerMetrics = &p
-	return fake
-}
-
-// wantOneCall asserts that exactly one RecordExternalBearer call happened,
-// with the exact triple given.
-func wantOneCall(t *testing.T, fake *fakeExternalBearerMetrics, want externalBearerMetricCall) {
-	t.Helper()
-	calls := fake.allCalls()
-	if len(calls) != 1 {
-		t.Fatalf("RecordExternalBearer called %d time(s), want exactly 1: calls=%+v", len(calls), calls)
-	}
-	if calls[0] != want {
-		t.Errorf("recorded call = %+v, want %+v", calls[0], want)
-	}
-}
 
 func TestExternalBearerMetrics_OK_UserIDToken(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")

@@ -101,6 +101,36 @@ func SessionGeneration(v int64) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldSessionGeneration, v))
 }
 
+// ExpiresAt applies equality check predicate on the "expires_at" field. It's identical to ExpiresAtEQ.
+func ExpiresAt(v time.Time) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldExpiresAt, v))
+}
+
+// IssuedBy applies equality check predicate on the "issued_by" field. It's identical to IssuedByEQ.
+func IssuedBy(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuedBy, v))
+}
+
+// Purpose applies equality check predicate on the "purpose" field. It's identical to PurposeEQ.
+func Purpose(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldPurpose, v))
+}
+
+// IssuanceID applies equality check predicate on the "issuance_id" field. It's identical to IssuanceIDEQ.
+func IssuanceID(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuanceID, v))
+}
+
+// IssuerCredentialID applies equality check predicate on the "issuer_credential_id" field. It's identical to IssuerCredentialIDEQ.
+func IssuerCredentialID(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuerCredentialID, v))
+}
+
+// IssuerDelegationID applies equality check predicate on the "issuer_delegation_id" field. It's identical to IssuerDelegationIDEQ.
+func IssuerDelegationID(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuerDelegationID, v))
+}
+
 // EmailEQ applies the EQ predicate on the "email" field.
 func EmailEQ(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldEmail, v))
@@ -686,6 +716,451 @@ func SessionGenerationLTE(v int64) predicate.User {
 	return predicate.User(sql.FieldLTE(FieldSessionGeneration, v))
 }
 
+// KindEQ applies the EQ predicate on the "kind" field.
+func KindEQ(v Kind) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldKind, v))
+}
+
+// KindNEQ applies the NEQ predicate on the "kind" field.
+func KindNEQ(v Kind) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldKind, v))
+}
+
+// KindIn applies the In predicate on the "kind" field.
+func KindIn(vs ...Kind) predicate.User {
+	return predicate.User(sql.FieldIn(FieldKind, vs...))
+}
+
+// KindNotIn applies the NotIn predicate on the "kind" field.
+func KindNotIn(vs ...Kind) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldKind, vs...))
+}
+
+// ExpiresAtEQ applies the EQ predicate on the "expires_at" field.
+func ExpiresAtEQ(v time.Time) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldExpiresAt, v))
+}
+
+// ExpiresAtNEQ applies the NEQ predicate on the "expires_at" field.
+func ExpiresAtNEQ(v time.Time) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldExpiresAt, v))
+}
+
+// ExpiresAtIn applies the In predicate on the "expires_at" field.
+func ExpiresAtIn(vs ...time.Time) predicate.User {
+	return predicate.User(sql.FieldIn(FieldExpiresAt, vs...))
+}
+
+// ExpiresAtNotIn applies the NotIn predicate on the "expires_at" field.
+func ExpiresAtNotIn(vs ...time.Time) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldExpiresAt, vs...))
+}
+
+// ExpiresAtGT applies the GT predicate on the "expires_at" field.
+func ExpiresAtGT(v time.Time) predicate.User {
+	return predicate.User(sql.FieldGT(FieldExpiresAt, v))
+}
+
+// ExpiresAtGTE applies the GTE predicate on the "expires_at" field.
+func ExpiresAtGTE(v time.Time) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldExpiresAt, v))
+}
+
+// ExpiresAtLT applies the LT predicate on the "expires_at" field.
+func ExpiresAtLT(v time.Time) predicate.User {
+	return predicate.User(sql.FieldLT(FieldExpiresAt, v))
+}
+
+// ExpiresAtLTE applies the LTE predicate on the "expires_at" field.
+func ExpiresAtLTE(v time.Time) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldExpiresAt, v))
+}
+
+// ExpiresAtIsNil applies the IsNil predicate on the "expires_at" field.
+func ExpiresAtIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldExpiresAt))
+}
+
+// ExpiresAtNotNil applies the NotNil predicate on the "expires_at" field.
+func ExpiresAtNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldExpiresAt))
+}
+
+// IssuedByEQ applies the EQ predicate on the "issued_by" field.
+func IssuedByEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuedBy, v))
+}
+
+// IssuedByNEQ applies the NEQ predicate on the "issued_by" field.
+func IssuedByNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldIssuedBy, v))
+}
+
+// IssuedByIn applies the In predicate on the "issued_by" field.
+func IssuedByIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldIssuedBy, vs...))
+}
+
+// IssuedByNotIn applies the NotIn predicate on the "issued_by" field.
+func IssuedByNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldIssuedBy, vs...))
+}
+
+// IssuedByGT applies the GT predicate on the "issued_by" field.
+func IssuedByGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldIssuedBy, v))
+}
+
+// IssuedByGTE applies the GTE predicate on the "issued_by" field.
+func IssuedByGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldIssuedBy, v))
+}
+
+// IssuedByLT applies the LT predicate on the "issued_by" field.
+func IssuedByLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldIssuedBy, v))
+}
+
+// IssuedByLTE applies the LTE predicate on the "issued_by" field.
+func IssuedByLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldIssuedBy, v))
+}
+
+// IssuedByContains applies the Contains predicate on the "issued_by" field.
+func IssuedByContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldIssuedBy, v))
+}
+
+// IssuedByHasPrefix applies the HasPrefix predicate on the "issued_by" field.
+func IssuedByHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldIssuedBy, v))
+}
+
+// IssuedByHasSuffix applies the HasSuffix predicate on the "issued_by" field.
+func IssuedByHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldIssuedBy, v))
+}
+
+// IssuedByIsNil applies the IsNil predicate on the "issued_by" field.
+func IssuedByIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldIssuedBy))
+}
+
+// IssuedByNotNil applies the NotNil predicate on the "issued_by" field.
+func IssuedByNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldIssuedBy))
+}
+
+// IssuedByEqualFold applies the EqualFold predicate on the "issued_by" field.
+func IssuedByEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldIssuedBy, v))
+}
+
+// IssuedByContainsFold applies the ContainsFold predicate on the "issued_by" field.
+func IssuedByContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldIssuedBy, v))
+}
+
+// PurposeEQ applies the EQ predicate on the "purpose" field.
+func PurposeEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldPurpose, v))
+}
+
+// PurposeNEQ applies the NEQ predicate on the "purpose" field.
+func PurposeNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldPurpose, v))
+}
+
+// PurposeIn applies the In predicate on the "purpose" field.
+func PurposeIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldPurpose, vs...))
+}
+
+// PurposeNotIn applies the NotIn predicate on the "purpose" field.
+func PurposeNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldPurpose, vs...))
+}
+
+// PurposeGT applies the GT predicate on the "purpose" field.
+func PurposeGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldPurpose, v))
+}
+
+// PurposeGTE applies the GTE predicate on the "purpose" field.
+func PurposeGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldPurpose, v))
+}
+
+// PurposeLT applies the LT predicate on the "purpose" field.
+func PurposeLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldPurpose, v))
+}
+
+// PurposeLTE applies the LTE predicate on the "purpose" field.
+func PurposeLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldPurpose, v))
+}
+
+// PurposeContains applies the Contains predicate on the "purpose" field.
+func PurposeContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldPurpose, v))
+}
+
+// PurposeHasPrefix applies the HasPrefix predicate on the "purpose" field.
+func PurposeHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldPurpose, v))
+}
+
+// PurposeHasSuffix applies the HasSuffix predicate on the "purpose" field.
+func PurposeHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldPurpose, v))
+}
+
+// PurposeIsNil applies the IsNil predicate on the "purpose" field.
+func PurposeIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldPurpose))
+}
+
+// PurposeNotNil applies the NotNil predicate on the "purpose" field.
+func PurposeNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldPurpose))
+}
+
+// PurposeEqualFold applies the EqualFold predicate on the "purpose" field.
+func PurposeEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldPurpose, v))
+}
+
+// PurposeContainsFold applies the ContainsFold predicate on the "purpose" field.
+func PurposeContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldPurpose, v))
+}
+
+// IssuanceIDEQ applies the EQ predicate on the "issuance_id" field.
+func IssuanceIDEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuanceID, v))
+}
+
+// IssuanceIDNEQ applies the NEQ predicate on the "issuance_id" field.
+func IssuanceIDNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldIssuanceID, v))
+}
+
+// IssuanceIDIn applies the In predicate on the "issuance_id" field.
+func IssuanceIDIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldIssuanceID, vs...))
+}
+
+// IssuanceIDNotIn applies the NotIn predicate on the "issuance_id" field.
+func IssuanceIDNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldIssuanceID, vs...))
+}
+
+// IssuanceIDGT applies the GT predicate on the "issuance_id" field.
+func IssuanceIDGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldIssuanceID, v))
+}
+
+// IssuanceIDGTE applies the GTE predicate on the "issuance_id" field.
+func IssuanceIDGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldIssuanceID, v))
+}
+
+// IssuanceIDLT applies the LT predicate on the "issuance_id" field.
+func IssuanceIDLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldIssuanceID, v))
+}
+
+// IssuanceIDLTE applies the LTE predicate on the "issuance_id" field.
+func IssuanceIDLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldIssuanceID, v))
+}
+
+// IssuanceIDContains applies the Contains predicate on the "issuance_id" field.
+func IssuanceIDContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldIssuanceID, v))
+}
+
+// IssuanceIDHasPrefix applies the HasPrefix predicate on the "issuance_id" field.
+func IssuanceIDHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldIssuanceID, v))
+}
+
+// IssuanceIDHasSuffix applies the HasSuffix predicate on the "issuance_id" field.
+func IssuanceIDHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldIssuanceID, v))
+}
+
+// IssuanceIDIsNil applies the IsNil predicate on the "issuance_id" field.
+func IssuanceIDIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldIssuanceID))
+}
+
+// IssuanceIDNotNil applies the NotNil predicate on the "issuance_id" field.
+func IssuanceIDNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldIssuanceID))
+}
+
+// IssuanceIDEqualFold applies the EqualFold predicate on the "issuance_id" field.
+func IssuanceIDEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldIssuanceID, v))
+}
+
+// IssuanceIDContainsFold applies the ContainsFold predicate on the "issuance_id" field.
+func IssuanceIDContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldIssuanceID, v))
+}
+
+// IssuerCredentialIDEQ applies the EQ predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuerCredentialID, v))
+}
+
+// IssuerCredentialIDNEQ applies the NEQ predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldIssuerCredentialID, v))
+}
+
+// IssuerCredentialIDIn applies the In predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldIssuerCredentialID, vs...))
+}
+
+// IssuerCredentialIDNotIn applies the NotIn predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldIssuerCredentialID, vs...))
+}
+
+// IssuerCredentialIDGT applies the GT predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldIssuerCredentialID, v))
+}
+
+// IssuerCredentialIDGTE applies the GTE predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldIssuerCredentialID, v))
+}
+
+// IssuerCredentialIDLT applies the LT predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldIssuerCredentialID, v))
+}
+
+// IssuerCredentialIDLTE applies the LTE predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldIssuerCredentialID, v))
+}
+
+// IssuerCredentialIDContains applies the Contains predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldIssuerCredentialID, v))
+}
+
+// IssuerCredentialIDHasPrefix applies the HasPrefix predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldIssuerCredentialID, v))
+}
+
+// IssuerCredentialIDHasSuffix applies the HasSuffix predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldIssuerCredentialID, v))
+}
+
+// IssuerCredentialIDIsNil applies the IsNil predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldIssuerCredentialID))
+}
+
+// IssuerCredentialIDNotNil applies the NotNil predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldIssuerCredentialID))
+}
+
+// IssuerCredentialIDEqualFold applies the EqualFold predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldIssuerCredentialID, v))
+}
+
+// IssuerCredentialIDContainsFold applies the ContainsFold predicate on the "issuer_credential_id" field.
+func IssuerCredentialIDContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldIssuerCredentialID, v))
+}
+
+// IssuerDelegationIDEQ applies the EQ predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDNEQ applies the NEQ predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDIn applies the In predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldIssuerDelegationID, vs...))
+}
+
+// IssuerDelegationIDNotIn applies the NotIn predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldIssuerDelegationID, vs...))
+}
+
+// IssuerDelegationIDGT applies the GT predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDGTE applies the GTE predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDLT applies the LT predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDLTE applies the LTE predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDContains applies the Contains predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDHasPrefix applies the HasPrefix predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDHasSuffix applies the HasSuffix predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDIsNil applies the IsNil predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldIssuerDelegationID))
+}
+
+// IssuerDelegationIDNotNil applies the NotNil predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldIssuerDelegationID))
+}
+
+// IssuerDelegationIDEqualFold applies the EqualFold predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDContainsFold applies the ContainsFold predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldIssuerDelegationID, v))
+}
+
 // HasOwnedGroups applies the HasEdge predicate on the "owned_groups" edge.
 func HasOwnedGroups() predicate.User {
 	return predicate.User(func(s *sql.Selector) {
@@ -793,6 +1268,29 @@ func HasTerminalWorkspace() predicate.User {
 func HasTerminalWorkspaceWith(preds ...predicate.UserTerminalWorkspace) predicate.User {
 	return predicate.User(func(s *sql.Selector) {
 		step := newTerminalWorkspaceStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
+// HasTestIdentityLoginCode applies the HasEdge predicate on the "test_identity_login_code" edge.
+func HasTestIdentityLoginCode() predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, TestIdentityLoginCodeTable, TestIdentityLoginCodeColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasTestIdentityLoginCodeWith applies the HasEdge predicate on the "test_identity_login_code" edge with a given conditions (other predicates).
+func HasTestIdentityLoginCodeWith(preds ...predicate.TestIdentityLoginCode) predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := newTestIdentityLoginCodeStep()
 		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
 			for _, p := range preds {
 				p(s)

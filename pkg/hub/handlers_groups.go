@@ -322,6 +322,18 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		CreatedBy:   createdBy,
 	}
 
+	// The creation-time provenance stamp comes from the request's
+	// principal, never from the request body.
+	if err := stampGroup(ctx, s.store, group, fixturePrincipalFromContext(ctx)); err != nil {
+		if parentEdge != nil {
+			s.releaseGroupMemberSlot(ctx, parentEdge.GroupID, parentEdge.MemberType, parentEdge.MemberID)
+		}
+		if !writeFixtureRootError(w, err) {
+			writeErrorFromErr(w, err, "")
+		}
+		return
+	}
+
 	if err := s.store.CreateGroup(ctx, group); err != nil {
 		if parentEdge != nil {
 			s.releaseGroupMemberSlot(ctx, parentEdge.GroupID, parentEdge.MemberType, parentEdge.MemberID)
@@ -709,7 +721,7 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 
 	// Authorization on the group: addMember, the role hierarchy, and the
 	// delegation check (see authorizeGroupMemberGrant).
-	canDelegateResult, canDelegateReason, ok := s.authorizeGroupMemberGrant(w, r, group, req.Role)
+	canDelegateResult, canDelegateReason, ok := s.authorizeGroupMemberGrant(w, r, group, req.Role, req.MemberType, req.MemberID)
 	if !ok {
 		return
 	}
@@ -934,7 +946,7 @@ func (s *Server) auditGroupMemberAddTx(ctx context.Context, tx store.Store, memb
 //
 // On success it returns the CanDelegate result and reason for the audit
 // record.
-func (s *Server) authorizeGroupMemberGrant(w http.ResponseWriter, r *http.Request, group *store.Group, role string) (canDelegateResult, canDelegateReason string, ok bool) {
+func (s *Server) authorizeGroupMemberGrant(w http.ResponseWriter, r *http.Request, group *store.Group, role, memberType, memberID string) (canDelegateResult, canDelegateReason string, ok bool) {
 	ctx := r.Context()
 
 	// Only group owners, group admins or callers granted group.addMember
@@ -1011,8 +1023,10 @@ func (s *Server) authorizeGroupMemberGrant(w http.ResponseWriter, r *http.Reques
 		actorIdentity := GetIdentityFromContext(ctx)
 		if actorIdentity != nil {
 			grantDesc := GrantDescriptor{
-				Type:    GrantTypeGroupMembership,
-				GroupID: group.ID,
+				Type:        GrantTypeGroupMembership,
+				GroupID:     group.ID,
+				GranteeType: memberType,
+				GranteeID:   memberID,
 			}
 			delegateDecision := s.authzService.CanDelegate(ctx, actorIdentity, grantDesc)
 			canDelegateResult = "allow"
@@ -1035,7 +1049,7 @@ func (s *Server) authorizeGroupMemberGrant(w http.ResponseWriter, r *http.Reques
 // group rule of requireSessionForRoleBoundGroup applies to parent. It writes
 // the refusal response and returns ok=false when the caller may not.
 func (s *Server) authorizeChildGroupGrant(w http.ResponseWriter, r *http.Request, parent *store.Group) (canDelegateResult, canDelegateReason string, ok bool) {
-	canDelegateResult, canDelegateReason, ok = s.authorizeGroupMemberGrant(w, r, parent, store.GroupMemberRoleMember)
+	canDelegateResult, canDelegateReason, ok = s.authorizeGroupMemberGrant(w, r, parent, store.GroupMemberRoleMember, store.GroupMemberTypeGroup, "")
 	if !ok {
 		return "", "", false
 	}

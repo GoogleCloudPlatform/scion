@@ -93,14 +93,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    3, // R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
+			Revision:    5, // R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    5, // R5: hub.env_vars.read
+			Revision:    6, // R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -124,7 +124,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubMember,
 			Description: "Hub member with read access to directory resources and project creation",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    4, // R4: self-scoped inbox.read, inbox.write, user_skill_injection.update; R3: add broker.create (ptone/scion#2138)
+			Revision:    5, // R5: drop Reserved user.list (ptone/scion#4229); R4: self-scoped inbox.read, inbox.write, user_skill_injection.update; R3: add broker.create (ptone/scion#2138)
 			Permissions: hubMemberPermissionIDs(),
 		},
 		{
@@ -133,7 +133,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubViewer,
 			Description: "Hub viewer with read-only access to directory resources",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    2,
+			Revision:    3, // R3: drop Reserved user.list (ptone/scion#4229)
 			Permissions: hubViewerPermissionIDs(),
 		},
 
@@ -203,8 +203,8 @@ func BuiltInRoles() []BuiltInRole {
 func hubMemberPermissionIDs() []string {
 	return []string{
 		// User directory (read-only)
+		// user.list is Reserved: no route checks it (ptone/scion#4229).
 		"user.read",
-		"user.list",
 		// Group directory (read-only)
 		"group.read",
 		"group.list",
@@ -257,7 +257,6 @@ func hubMemberPermissionIDs() []string {
 func hubViewerPermissionIDs() []string {
 	return []string{
 		"user.read",
-		"user.list",
 		"group.read",
 		"group.list",
 		"template.read",
@@ -800,8 +799,8 @@ func hubAdminPermissionIDs() []string {
 	// This set is a product decision; changes require architect or sponsor review.
 	included := map[string]bool{
 		// User management (not suspend/promote — those remain super-admin-only)
+		// user.list is Reserved: no route checks it (ptone/scion#4229).
 		"user.read":   true,
-		"user.list":   true,
 		"user.update": true,
 		"user.invite": true,
 		// Group management
@@ -829,19 +828,19 @@ func hubAdminPermissionIDs() []string {
 		"hub.scheduler.read":          true,
 		"hub.scheduler.update":        true,
 		// Scheduled event management (hub-wide visibility and control)
-		"scheduled_event.read":      true,
-		"scheduled_event.list":      true,
-		"scheduled_event.create":    true,
-		"scheduled_event.delete":    true,
-		"scheduled_event.update":    true,
-		"hub.federation.read":       true,
-		"hub.federation.update":     true,
-		"hub.teams_manifest.read":   true,
-		"hub.teams_manifest.update": true,
-		"hub.github_app.read":       true,
-		"hub.github_app.update":     true,
-		"hub.metrics.read":          true,
-		"hub.validate.execute":      true,
+		"scheduled_event.read":   true,
+		"scheduled_event.list":   true,
+		"scheduled_event.create": true,
+		"scheduled_event.delete": true,
+		"scheduled_event.update": true,
+		// hub.federation.read, hub.federation.update and
+		// hub.teams_manifest.update are Reserved: no route checks them
+		// (ptone/scion#4229).
+		"hub.teams_manifest.read": true,
+		"hub.github_app.read":     true,
+		"hub.github_app.update":   true,
+		"hub.metrics.read":        true,
+		"hub.validate.execute":    true,
 		// Hub-level environment variables: list only. Writes and every
 		// secret surface stay with the legacy admin check.
 		"hub.env_vars.read": true,
@@ -1530,6 +1529,21 @@ func warnOwnerOnlyLegacyProject(ctx context.Context, s store.Store, p *store.Pro
 		"project_id", p.ID, "owner_id", p.OwnerID, "created_by", p.CreatedBy)
 }
 
+// reconcileSkipsUser reports whether ReconcileSuperAdminBindings must leave
+// u out of both passes and the effect-guard count: every row that is not
+// positively human, i.e. a hub test identity of any kind (member or admin)
+// or an unrecognized kind. It classifies the row already listed
+// (classifyUserKind, the classification behind kindForPrincipal), so it
+// adds no read and no read-error mode.
+func reconcileSkipsUser(u *store.User) bool {
+	k, err := classifyUserKind(u)
+	if err != nil {
+		slog.Warn("super-admin reconciliation: unrecognized user kind; leaving the user untouched", "user_id", u.ID, "error", err)
+		return true
+	}
+	return !k.isHuman()
+}
+
 // ReconcileSuperAdminBindings ensures bidirectional consistency between
 // User.Role == "admin", the AdminEmails config list, and system-scoped
 // super-admin role bindings (Phase 1F, D11 revocability fix). On startup:
@@ -1605,6 +1619,14 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 				return false, err
 			}
 			for i := range users.Items {
+				// A hub test identity of any kind is skipped by pass 2,
+				// so it never counts toward the intended admin set. The
+				// kind is read through kindForPrincipal; a user whose kind
+				// cannot be read is not counted either (an undercount can
+				// only refuse demotions, never cause one).
+				if reconcileSkipsUser(&users.Items[i]) {
+					continue
+				}
 				if adminSet[strings.ToLower(users.Items[i].Email)] {
 					intendedAdminCount++
 					continue
@@ -1669,6 +1691,16 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 		for i := range users.Items {
 			u := &users.Items[i]
 			inAdminList := adminSet[strings.ToLower(u.Email)]
+			// A hub test identity of any kind is neither promoted (even if
+			// an operator lists its address in admin_emails) nor demoted:
+			// its role and its expiring bindings are fixed at issuance. A
+			// user whose kind cannot be read is left untouched.
+			if reconcileSkipsUser(u) {
+				if inAdminList {
+					slog.Warn("skipping admin promotion of a test identity listed in admin_emails", "user_id", u.ID)
+				}
+				continue
+			}
 
 			if inAdminList {
 				// Forward: ensure admin role and super-admin binding.

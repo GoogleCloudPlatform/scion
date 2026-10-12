@@ -36,6 +36,7 @@ permissions on the secret file.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from typing import Any
@@ -50,6 +51,148 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
 )
 
 COPILOT_CONFIG_FILE = "~/.copilot/config.json"
+
+# What counts as sign-in in copilot's config.json. This is the same rule the
+# host applies before it ships the file into an agent
+# (copilotConfigHoldsSignIn in pkg/harness/host_credentials_content.go), so
+# the host and the container agree about the same file. Keep the two in sync:
+# provision_test.py checks these key sets against the Go source and runs this
+# predicate over the Go test fixtures in
+# pkg/harness/testdata/copilot_config_signin.json.
+#
+# Top-level keys, lowercased, that hold settings or identity but never a
+# credential (copilotSettingsKeys on the host). Includes trustedFolders,
+# which _ensure_settings writes on every provision.
+_COPILOT_SETTINGS_KEYS = frozenset({
+    "banner",
+    "beep",
+    "copilot_integration_id",
+    "copilot_url",
+    "last_logged_in_user",
+    "logged_in_users",
+    "model",
+    "render_markdown",
+    "screen_reader",
+    "theme",
+    "trusted_folders",
+    "trustedfolders",
+})
+
+# Top-level keys, lowercased, where copilot keeps a credential. They count as
+# sign-in only with a non-empty value (see _config_holds_sign_in).
+_COPILOT_TOKENS_KEY = "copilot_tokens"
+_COPILOT_HMAC_KEYS = frozenset({"copilot_hmac_key", "capi_hmac_key"})
+_COPILOT_CREDENTIAL_KEYS = frozenset({_COPILOT_TOKENS_KEY}) | _COPILOT_HMAC_KEYS
+
+def _reject_json_constant(name: str) -> Any:
+    # Go's encoding/json rejects NaN and Infinity; Python's json accepts them.
+    raise ValueError(f"invalid JSON constant {name}")
+
+
+def _reject_non_finite_float(literal: str) -> float:
+    # A literal such as 1e400 parses to inf, which json would write back as
+    # non-standard Infinity. Only the strict loaders use this: the host
+    # accepts 1e400 (it never converts numbers), so the sign-in rule must not.
+    value = float(literal)
+    if not math.isfinite(value):
+        raise ValueError("JSON number out of float range")
+    return value
+
+
+def _json_int_unconverted(literal: str) -> int:
+    # The host decodes config.json into json.RawMessage values and never
+    # converts numbers, so an integer literal beyond Python's int conversion
+    # limit (4300 digits) must not make the content unparseable here. The
+    # predicate below only tests values for being non-empty strings, so a
+    # placeholder number is enough.
+    return 0
+
+
+def _config_holds_sign_in(raw: bytes) -> bool:
+    """Report whether config.json content may hold sign-in data.
+
+    Mirrors the host's copilotConfigHoldsSignIn. Lines that start with "//"
+    (after leading whitespace) are dropped and the rest is parsed as JSON.
+    Top-level keys are compared lowercased, as copilot lowercases them.
+    One known difference: Python and Go lowercase U+0130 differently, so a
+    key spelled with it is unknown here (fail open, signed in) while the
+    host may read it as a credential key.
+
+      - copilot_tokens holding a string value that is not blank, or a
+        non-empty string in copilot_hmac_key or capi_hmac_key, is sign-in.
+      - Otherwise, a file whose other keys are all known settings keys is not
+        sign-in; empty credential values do not count either. This is the
+        file scion writes, and the file of a user who signs in through the OS
+        keychain.
+      - Any key in neither list counts as possible sign-in (fail open): a
+        future copilot version may keep a credential under a new key.
+      - Content that is not a JSON object (unparseable, an array, null, or
+        empty) is not sign-in: copilot cannot read sign-in from it, and
+        _ensure_settings replaces unparseable JSON. Invalid UTF-8 outside a
+        string and NaN or Infinity make content unparseable, as on the host;
+        invalid UTF-8 inside a string and integers of any length do not.
+
+    Values are only tested for emptiness; they are never logged or returned.
+    """
+    try:
+        return _config_holds_sign_in_or_too_deep(raw)
+    except RecursionError:
+        return False
+
+
+def _config_holds_sign_in_or_too_deep(raw: bytes) -> bool:
+    """_config_holds_sign_in, but raise RecursionError for content nested too
+    deeply for Python's decoder. The host's decoder allows deeper nesting, so
+    such content may hold sign-in there; _ensure_settings must keep it.
+    """
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        top = json.loads(
+            scion_harness.drop_json_comment_lines(text),
+            parse_constant=_reject_json_constant,
+            parse_int=_json_int_unconverted,
+        )
+    except ValueError:
+        return False
+    if not isinstance(top, dict):
+        return False
+    unknown = False
+    for key, value in top.items():
+        k = key.lower()
+        if k == _COPILOT_TOKENS_KEY:
+            if isinstance(value, dict) and any(
+                # HOST_SPACE is what Go's strings.TrimSpace removes; Python's
+                # str.strip() also removes U+001C..U+001F.
+                isinstance(v, str) and v.strip(scion_harness.HOST_SPACE)
+                for v in value.values()
+            ):
+                return True
+        elif k in _COPILOT_HMAC_KEYS:
+            if isinstance(value, str) and value:
+                return True
+        elif k not in _COPILOT_SETTINGS_KEYS:
+            unknown = True
+    return unknown
+
+
+def _config_file_may_hold_credential(path: str) -> bool:
+    """Report whether an existing ~/.copilot/config.json may hold sign-in state.
+
+    config.json is both copilot's settings file and its sign-in file, and
+    _ensure_settings writes trustedFolders into it on every provision, so a
+    file holding only settings must not satisfy the auth-file method, or a
+    restart with no credential would look signed in. The content rule is the
+    host's (_config_holds_sign_in). A file that cannot be read counts as
+    possible sign-in (fail open, as before); the host has no such case,
+    because it only applies its rule to content it has already read.
+    """
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return True
+    return _config_holds_sign_in(raw)
+
 
 AUTH = scion_harness.AuthSpec(
     "copilot",
@@ -68,6 +211,7 @@ AUTH = scion_harness.AuthSpec(
             path=COPILOT_CONFIG_FILE,
             hint=f"provide copilot config at {COPILOT_CONFIG_FILE}",
             secret_key="COPILOT_CONFIG",
+            present_check=_config_file_may_hold_credential,
         ),
     ],
     fallback_to_none_on_error=True,
@@ -91,20 +235,62 @@ def _read_token(ctx: scion_harness.ProvisionContext, env_key: str) -> str:
     return os.environ.get(env_key, "")
 
 
+def _validate_staged_config(content: str, path: str) -> bool:
+    """Check that staged config.json content is JSON copilot can read.
+
+    The rules are _load_config_strictly's, except for two Python limits:
+    the content is copied unchanged, and copilot and the host read both
+    integers of any length and nesting deeper than Python's decoder allows,
+    so a working config is not refused for either. A long integer is
+    accepted; content nested too deeply to check is accepted unchecked and
+    False is returned (as _ensure_settings keeps such a config.json). NaN,
+    Infinity and numbers beyond float range (1e400) are refused, as copilot
+    cannot parse them. Raises ProvisionError naming path; the message never
+    includes file content. Returns True when the content was checked.
+    """
+    prefix = f"COPILOT_CONFIG secret file {path}"
+    try:
+        json.loads(
+            scion_harness.drop_json_comment_lines(content),
+            parse_constant=_reject_json_constant,
+            parse_float=_reject_non_finite_float,
+            parse_int=_json_int_unconverted,
+        )
+    except json.JSONDecodeError as exc:
+        raise scion_harness.ProvisionError(
+            f"{prefix} is not valid JSON "
+            f"({exc.msg} at line {exc.lineno} column {exc.colno})"
+        ) from None
+    except ValueError:
+        # Only _reject_json_constant and _reject_non_finite_float raise a
+        # plain ValueError here.
+        raise scion_harness.ProvisionError(
+            f"{prefix} holds NaN, Infinity or a number beyond float range, "
+            "which copilot cannot read"
+        ) from None
+    except RecursionError:
+        return False
+    return True
+
+
 def _write_copilot_config_file(ctx: scion_harness.ProvisionContext) -> None:
     """Write ~/.copilot/config.json from a staged COPILOT_CONFIG file secret."""
-    content = ctx.read_file_secret("COPILOT_CONFIG")
+    staged = scion_harness.expand_path(ctx.file_secret_files.get("COPILOT_CONFIG") or "")
+    try:
+        content = ctx.read_file_secret("COPILOT_CONFIG")
+    except UnicodeDecodeError:
+        raise scion_harness.ProvisionError(
+            f"COPILOT_CONFIG secret file {staged} is not valid UTF-8"
+        ) from None
     if not content:
         return
     if not content.strip():
         raise scion_harness.ProvisionError("COPILOT_CONFIG secret is empty")
-    try:
-        lines = [ln for ln in content.splitlines() if not ln.strip().startswith("//")]
-        json.loads("\n".join(lines))
-    except json.JSONDecodeError as exc:
-        raise scion_harness.ProvisionError(
-            f"COPILOT_CONFIG secret is not valid JSON: {exc}"
-        ) from exc
+    if not _validate_staged_config(content, staged):
+        ctx.info(
+            f"COPILOT_CONFIG secret file {staged} is nested too deeply to "
+            "check; copying it unchanged"
+        )
     config_dir = scion_harness.expand_path("~/.copilot")
     os.makedirs(config_dir, exist_ok=True)
     target = os.path.join(config_dir, "config.json")
@@ -237,9 +423,11 @@ _COPILOT_HOOK_EVENTS = [
 def _write_hooks(home: str) -> None:
     """Write ~/.copilot/hooks/scion.json wiring Copilot events to sciontool.
 
-    Each hook fires ``sciontool hook <event> --dialect=copilot`` which creates
-    a synthetic event and processes it through the copilot mapping dialect
-    (staged as dialect.yaml alongside this script).
+    Each hook fires ``sciontool hook <event> --dialect=copilot``. Copilot
+    pipes the event's JSON payload (camelCase keys, selected by the camelCase
+    event names) on stdin; sciontool merges it under the named event and
+    processes it through the copilot mapping dialect (staged as dialect.yaml
+    alongside this script).
     """
     hooks: dict[str, list[dict[str, Any]]] = {}
     for event in _COPILOT_HOOK_EVENTS:
@@ -265,6 +453,29 @@ def _write_hooks(home: str) -> None:
         )
 
 
+def _load_config_strictly(raw: bytes) -> Any:
+    """Parse config.json content that is safe to rewrite.
+
+    Lines that start with "//" are dropped, as copilot allows. Raises
+    ValueError (UnicodeDecodeError and json.JSONDecodeError included) or
+    RecursionError when the content is not strict UTF-8, not JSON, holds an
+    integer too long to convert, holds NaN or Infinity, which copilot's own
+    JSON parser rejects, or holds a number beyond float range (1e400), which
+    would be written back as Infinity.
+
+    Mirrors scion_harness.read_json_skipping_comment_lines, and shares its
+    comment-line rule (the host's), except that it takes bytes, rejects NaN,
+    Infinity and numbers beyond float range, and lets UnicodeDecodeError and
+    the long-integer ValueError reach the caller as unreadable content.
+    """
+    text = raw.decode("utf-8")
+    return json.loads(
+        scion_harness.drop_json_comment_lines(text),
+        parse_constant=_reject_json_constant,
+        parse_float=_reject_non_finite_float,
+    )
+
+
 def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
     """Ensure ~/.copilot/settings.json and config.json have sane defaults."""
     config_dir = os.path.join(ctx.home, ".copilot")
@@ -274,10 +485,19 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
     settings: dict[str, Any] = {}
     if os.path.isfile(settings_path):
         try:
-            loaded = scion_harness.load_json(settings_path)
+            with open(settings_path, "r", encoding="utf-8") as f:
+                loaded = json.load(
+                    f,
+                    parse_constant=_reject_json_constant,
+                    parse_float=_reject_non_finite_float,
+                )
             if isinstance(loaded, dict):
                 settings = loaded
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError, RecursionError):
+            # Unreadable, not UTF-8, not JSON, an integer too long to
+            # convert, NaN or Infinity, a number beyond float range (1e400),
+            # or nested too deeply: rewritten with the defaults, so
+            # non-standard JSON is never written back.
             pass
 
     defaults = {"autoUpdate": False, "banner": "never"}
@@ -291,13 +511,46 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
 
     config_path = os.path.join(config_dir, "config.json")
     config: dict[str, Any] = {}
+    too_deep_note = (
+        "~/.copilot/config.json is nested too deeply to read; leaving it "
+        "unchanged (workspace not added to trustedFolders)"
+    )
     if os.path.isfile(config_path):
         try:
-            loaded = scion_harness.read_json_skipping_comment_lines(config_path)
-            if isinstance(loaded, dict):
-                config = loaded
-        except (OSError, json.JSONDecodeError):
-            pass
+            with open(config_path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            raw = None
+        if raw is not None:
+            try:
+                loaded = _load_config_strictly(raw)
+                if isinstance(loaded, dict):
+                    config = loaded
+            except RecursionError:
+                # Too deep for Python's decoder, though the host (Go, 10000
+                # levels) may still read sign-in from it: never replace it.
+                ctx.info(too_deep_note)
+                return
+            except ValueError:
+                # Not cleanly readable: not JSON, not UTF-8, an integer too
+                # long to convert, NaN or Infinity, or a number beyond float
+                # range. Rewriting it could only write back a lossy copy, so
+                # a file that may hold sign-in (the host's rule) is left
+                # untouched and any other file is replaced. The sign-in parse
+                # may itself hit the nesting limit past the defect: keep that
+                # file too.
+                try:
+                    may_hold_sign_in = _config_holds_sign_in_or_too_deep(raw)
+                except RecursionError:
+                    ctx.info(too_deep_note)
+                    return
+                if may_hold_sign_in:
+                    ctx.info(
+                        "~/.copilot/config.json is not clean JSON but may hold "
+                        "sign-in; leaving it unchanged (workspace not added to "
+                        "trustedFolders)"
+                    )
+                    return
 
     folders = config.get("trustedFolders")
     if not isinstance(folders, list):

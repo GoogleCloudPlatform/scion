@@ -396,6 +396,7 @@ var updateVersionedSettingKeys = []string{
 	"image_registry", "cli.autohelp", "hub.enabled", "hub.linked", "hub.endpoint",
 	"hub.local_only", "hub.brokerId", "hub.brokerToken", "hub.brokerNickname",
 	"server.auth.display_name", "server.auth.email", "server.auth.username",
+	"use_host_credentials",
 	"project_id", "hub.project_id",
 	"hub.token", "hub.apiKey", "hub.lastSyncedAt",
 	"bucket.provider", "bucket.name", "bucket.prefix", "hub_connections.foo.endpoint",
@@ -493,7 +494,7 @@ var structParityBases = []structParityBase{
 // UpdateVersionedSetting takes the package-wide settings-file lock
 // (LockSettingsFile), so that part of each case still runs one at a time.
 // Callers must not use t.Setenv or change package variables
-// (createTempFile, syncFile, ...) while the subtests run.
+// (such as createTempFile) while the subtests run.
 func runStructParity(t *testing.T, bases []structParityBase) {
 	t.Helper()
 	values := []string{"new-value", "", "true", "false", "yes", "123"}

@@ -26,7 +26,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -622,8 +621,6 @@ func TestBuildPod_NFSProvision_InjectsCloneInitContainer(t *testing.T) {
 	// Must invoke sciontool provision (clone mode)
 	assert.Equal(t, "sciontool", ic.Command[0])
 	assert.Equal(t, "provision", ic.Command[1])
-	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"),
-		"must not have --wait-for-sentinel flag")
 
 	// URL must NOT appear in command args (injection safety — passed via env)
 	for _, arg := range ic.Command {
@@ -678,42 +675,13 @@ func TestBuildPod_NFSConcurrentProjects_Independent(t *testing.T) {
 		t.Fatalf("project B: expected 1 init container, got %d", len(podB.Spec.InitContainers))
 	}
 
-	// Both should be clone init containers — sciontool provision without --wait
+	// Both should be clone init containers — sciontool provision
 	icA := podA.Spec.InitContainers[0]
 	icB := podB.Spec.InitContainers[0]
 	assert.Equal(t, "sciontool", icA.Command[0])
 	assert.Equal(t, "provision", icA.Command[1])
-	assert.False(t, hasFlag(icA.Command, "--wait-for-sentinel"))
 	assert.Equal(t, "sciontool", icB.Command[0])
 	assert.Equal(t, "provision", icB.Command[1])
-	assert.False(t, hasFlag(icB.Command, "--wait-for-sentinel"))
-}
-
-// --- Run()-level Locker tests ---
-
-// errorLocker is an AdvisoryLocker that always returns an error.
-type errorLocker struct {
-	err error
-}
-
-func (l *errorLocker) TryAdvisoryLock(_ context.Context, _ store.AdvisoryLockKey) (bool, func() error, error) {
-	return false, func() error { return nil }, l.err
-}
-
-func (l *errorLocker) TryAdvisoryLockObject(_ context.Context, _ store.AdvisoryLockKey, _ int32) (bool, func() error, error) {
-	return false, func() error { return nil }, l.err
-}
-
-// alwaysLoseLocker is an AdvisoryLocker where TryAdvisoryLockObject always
-// returns acquired=false (another node holds the lock).
-type alwaysLoseLocker struct{}
-
-func (l *alwaysLoseLocker) TryAdvisoryLock(_ context.Context, _ store.AdvisoryLockKey) (bool, func() error, error) {
-	return false, func() error { return nil }, nil
-}
-
-func (l *alwaysLoseLocker) TryAdvisoryLockObject(_ context.Context, _ store.AdvisoryLockKey, _ int32) (bool, func() error, error) {
-	return false, func() error { return nil }, nil
 }
 
 // TestWaitForPodReady_NamesFailedInitContainer is the F-111 review fix
@@ -943,71 +911,6 @@ func TestWaitForPodReady_MainContainerTerminalWaitingReasons(t *testing.T) {
 				t.Errorf("unexpected error text for %s:\n got:  %s\n want: %s", tc.reason, err.Error(), tc.wantErr)
 			}
 		})
-	}
-}
-
-func TestRun_NFSWorkspace_DoesNotUseLocker(t *testing.T) {
-	// NFS workspace provisioning does not take the Locker (sciontool
-	// provision serializes provisioners with a file lock on the export):
-	// with a Locker set and no NFS home, Run never calls it and the pod
-	// gets the provisioning init container.
-	r := newNFSTestK8sRuntime()
-	locker := &countingLocker{acquire: true}
-	config := nfsBaseConfig("scion-test-nfs-locker")
-	config.Locker = locker
-
-	// Run() creates the pod, then fails readiness at its first poll (see
-	// failPodReadiness), which keeps the pod for inspection.
-	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	r.Run(ctx, config) //nolint:errcheck
-
-	pods, err := r.Client.Clientset.CoreV1().Pods("default").List(
-		context.Background(), metav1.ListOptions{},
-	)
-	if err != nil {
-		t.Fatalf("failed to list pods: %v", err)
-	}
-	if len(pods.Items) != 1 {
-		t.Fatalf("expected 1 pod, got %d", len(pods.Items))
-	}
-
-	pod := pods.Items[0]
-	if len(pod.Spec.InitContainers) != 1 {
-		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
-	}
-
-	cmd := pod.Spec.InitContainers[0].Command
-	assert.Equal(t, "sciontool", cmd[0])
-	assert.Equal(t, "provision", cmd[1])
-	assert.False(t, hasFlag(cmd, "--wait-for-sentinel"),
-		"pod should NOT have --wait-for-sentinel flag")
-	assert.Equal(t, 0, locker.acquires, "workspace provisioning must not take the Locker")
-}
-
-func TestRun_LocalBackend_NoLockAttempt(t *testing.T) {
-	// Local backend should never attempt the advisory lock, even if a
-	// Locker is provided. The lock is only for an NFS home.
-	r := newNFSTestK8sRuntime()
-	locker := &errorLocker{err: errors.New("should not be called")}
-	config := RunConfig{
-		Name:         "scion-test-local-nolock",
-		Image:        "test-image",
-		UnixUsername: "scion",
-		ProjectID:    "proj-local",
-		Locker:       locker,
-		// No NFS fields → local backend
-	}
-
-	// Run() should NOT fail with lock error (lock is only for NFS).
-	// It will fail at waitForPodReady with fake client, but NOT at lock.
-	// Short-lived context to avoid blocking.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	_, err := r.Run(ctx, config)
-	if err != nil && strings.Contains(err.Error(), "advisory lock") {
-		t.Errorf("local backend should not attempt advisory lock, got: %v", err)
 	}
 }
 

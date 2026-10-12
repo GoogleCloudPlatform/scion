@@ -151,9 +151,10 @@ records.
 - **Last-admin guard.** `checkLastSuperAdminTx` (`:880`) takes a row lock and counts only **active**
   users with an active system super-admin binding. It is enforced on demotion and on `DELETE`
   (`:1011`). Self-demotion and self-deletion are refused.
-- **Stock roles** (`hubAdminPermissionIDs`, `seed.go:694`). Hub-admin holds `user.read`, `user.list`,
+- **Stock roles** (`hubAdminPermissionIDs`, `seed.go:694`). Hub-admin holds `user.read`,
   `user.update` and `user.invite`. It lacks `user.suspend`, `user.promote` and `user.delete`.
-  Super-admin holds all permissions.
+  `user.list` is reserved: no route checks it and no role grants it.
+  Super-admin holds all non-reserved permissions.
 - **Registry** (`pkg/hub/permissions/registry.go`):
   - `user.invite` (`:253`) has UAT selector `user:invite` and `NonRouteUse` only.
   - `user.promote`, `user.suspend` and `user.delete` (`:254`-`:256`) have no UAT selector.
@@ -905,10 +906,12 @@ Provision(ctx context.Context, req *ProvisionUserRequest) (*ProvisionUserRespons
 Mode availability (`AGENTS.md:92`, `.design/cli-modes.md`, `cmd/cli_mode.go`):
 
 - **Agent mode:** unavailable automatically, because `hub` is not in `agentAllowed`.
-- **Assistant mode:** proposed available, because `hub.users` is not in `assistantDenied`. The
-  command is not interactive and not credential lifecycle. Its closest equivalent is
-  `hub allow-list add EMAIL` (`cmd/hub_allow_list.go:55`), which creates the same `invited` record and
-  which assistants can already run. `scion hub invite` (`cmd/hub_invite.go:36`) is a different flow:
+- **Assistant mode:** has since been removed from the CLI, which now has only human mode and agent
+  mode, so the command is available in human mode (and still absent in agent mode). While assistant
+  mode existed, the command was proposed available there, because `hub.users` was not in
+  `assistantDenied`. The command is not interactive and not credential lifecycle. Its closest
+  equivalent is `hub allow-list add EMAIL` (`cmd/hub_allow_list.go:55`), which creates the same
+  `invited` record and which assistants could already run. `scion hub invite` (`cmd/hub_invite.go:36`) is a different flow:
   it manages redeemable invite **codes**, not user records.
 - Under OD-8(a), `cmd/cli_mode.go` needs no map change; H.2 adds a mode test only. Under OD-8(b), H.2
   adds `hub.users.provision` to `assistantDenied`.
@@ -1321,6 +1324,9 @@ Under either option, `admin_emails` remains independent configured authority.
 - (a) Available in human and assistant modes, absent in agent mode. **Recommended.**
 - (b) Also deny it in assistant mode.
 
+(Assistant mode has since been removed from the CLI; the decision now means: available in human
+mode, absent in agent mode.)
+
 **OD-9 — stricter email policy at creation. DECIDED by ptone (a), 2026-10-04.**
 - (a) Warn only, keeping invite parity. **Recommended.**
 - (b) Tighten creation-time email policy for **both** invite and provision together. This changes
@@ -1392,7 +1398,7 @@ This choice is OD-10 (§19), decided (a) by ptone on 2026-10-04.
 | --- | --- | --- |
 | 2026-09-28 | **OD-1 decided:** the role at activation follows the current configured policy. There is no member/viewer selection before sign-in and no pending-role column (§6). | `agent:pat-refactor` |
 | 2026-09-28 | Continuing [ptone/scion#2116](https://github.com/ptone/scion/issues/2116) is approved as a separate followup. It is not a core prerequisite and does not gate core UAT delivery. | `agent:pat-refactor` |
-| 2026-10-04 | **OD-2 to OD-10 decided: option (a) for each** ("go with recommendation, a"). Admin is not provisionable (422 for any non-null role); no new edit/withdraw capability for pending records; no initial groups; no expiry; the provider name applies at activation; natural-key idempotency only; the CLI is available in human and assistant modes and absent in agent mode; warn-only email policy at invite parity; records created through a hub UAT persist (creation authorizes the whole invitation effect; mutation-audit credential attribution; audit and explicit withdrawal). | `agent:pat-h-lead` |
+| 2026-10-04 | **OD-2 to OD-10 decided: option (a) for each** ("go with recommendation, a"). Admin is not provisionable (422 for any non-null role); no new edit/withdraw capability for pending records; no initial groups; no expiry; the provider name applies at activation; natural-key idempotency only; the CLI is available in human and assistant modes and absent in agent mode; warn-only email policy at invite parity; records created through a hub UAT persist (creation authorizes the whole invitation effect; mutation-audit credential attribution; audit and explicit withdrawal). Assistant mode was later removed; the CLI is available in human mode and absent in agent mode. | `agent:pat-h-lead` |
 | 2026-10-07 | **Dev auth is not supported for provisioning:** "remove devauth support. de auth is single user local mode and should not mix with other user auth setups" (on GoogleCloudPlatform/scion#2735). `POST /api/v1/users` is refused with `403 dev_auth_not_supported` for every caller while the hub runs with dev auth, including the dev auto-login session (§7.3, §8 row 4a); other endpoints are unchanged. | `agent:pat-h-lead` |
 
 No other decision has been made.

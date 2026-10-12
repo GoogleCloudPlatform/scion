@@ -78,6 +78,11 @@ var (
 	// ErrUATCredentialDenied is returned when a non-session credential
 	// (UAT, agent JWT, broker token) attempts a token-management operation.
 	ErrUATCredentialDenied = errors.New("access tokens cannot manage other access tokens")
+
+	// ErrUATTestIdentityDenied is returned when a hub test identity tries
+	// to create an access token. Test identities hold only the single
+	// short-lived token the issuance endpoint gives them.
+	ErrUATTestIdentityDenied = errors.New("test identities cannot create access tokens")
 )
 
 // UATScopeViolationError names the selector and machine-readable reason when
@@ -291,6 +296,38 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 	// A1: Credential caveat at service boundary.
 	if err := s.enforceSessionCredential(ctx, params.UserID); err != nil {
 		return "", nil, err
+	}
+
+	// Containment: a test identity of any kind (member or admin) never
+	// mints further credentials. The reserved-domain check needs no store
+	// read; the kind check reads the token owner's and the acting user's
+	// stored kind through kindForPrincipal. A read error or unrecognized
+	// kind fails closed.
+	actingUserID := ""
+	if identity := GetIdentityFromContext(ctx); !isNilIdentity(identity) {
+		if u, ok := identity.(UserIdentity); ok {
+			if isReservedTestIdentityEmail(u.Email()) {
+				return "", nil, ErrUATTestIdentityDenied
+			}
+			actingUserID = u.ID()
+		}
+	}
+	if s.users != nil {
+		for _, uid := range []string{params.UserID, actingUserID} {
+			if uid == "" {
+				continue
+			}
+			k, err := kindForPrincipalVia(ctx, s.users, nil, uid)
+			if err != nil {
+				return "", nil, fmt.Errorf("load token owner: %w", err)
+			}
+			if k.isTestIdentity() {
+				return "", nil, ErrUATTestIdentityDenied
+			}
+			if actingUserID == params.UserID {
+				break
+			}
+		}
 	}
 
 	// --- Input validation (typed errors) ---

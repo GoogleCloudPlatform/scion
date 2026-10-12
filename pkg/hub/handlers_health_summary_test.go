@@ -61,6 +61,7 @@ func TestHandleHealthSummary_AdminAccess(t *testing.T) {
 
 func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 	srv, _ := testServer(t)
+	tickHubInstance(t, srv)
 
 	// Use the full router with dev auth (admin)
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
@@ -73,17 +74,24 @@ func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 	// Verify top-level status is present
 	assert.NotEmpty(t, resp.Status)
 
-	// Verify hub section populated
-	assert.NotEmpty(t, resp.Hub.Status)
+	// The hub section describes the fleet, from the registry rows.
+	assert.Equal(t, HealthStatusHealthy, resp.Hub.Status)
 	assert.NotEmpty(t, resp.Hub.Version)
-	assert.NotEmpty(t, resp.Hub.Uptime)
+	assert.Equal(t, srv.InstanceID(), resp.Hub.InstanceID)
+	require.NotNil(t, resp.Hub.Instances)
+	assert.Equal(t, HealthSummaryHubFleet{Live: 1, Healthy: 1}, *resp.Hub.Instances)
+	assert.NotNil(t, resp.Hub.UnhealthyChecks)
+	assert.Empty(t, resp.Hub.UnhealthyChecks)
 
-	// The database pool is per instance (hub_instances[].database); the
-	// database check stays in the hub checks.
+	// Uptime, the check map and the database pool are per instance
+	// (hub_instances[]); the hub section carries none of them.
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
 	assert.NotContains(t, raw, "database", "no top-level database block")
-	assert.NotEmpty(t, resp.Hub.Checks["database"])
+	var rawHub map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw["hub"], &rawHub))
+	assert.NotContains(t, rawHub, "uptime")
+	assert.NotContains(t, rawHub, "checks")
 
 	// Verify brokers is an array (even if empty)
 	assert.NotNil(t, resp.Brokers.Items)
@@ -104,6 +112,7 @@ func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 
 func TestHandleHealthSummary_AgentAggregation(t *testing.T) {
 	srv, s := testServer(t)
+	tickHubInstance(t, srv)
 	ctx := context.Background()
 
 	// Create a project
@@ -340,6 +349,7 @@ func TestHandleHealthSummary_ProjectSlugsOneLookup(t *testing.T) {
 // agent is not a health signal and appears nowhere in the response.
 func TestHandleHealthSummary_StalledOnlyStaysHealthy(t *testing.T) {
 	srv, s := testServer(t)
+	tickHubInstance(t, srv)
 	ctx := context.Background()
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: tid("stall-proj"), Name: "stall", Slug: "stall"}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
@@ -382,6 +392,7 @@ func TestHandleHealthSummary_WarningOnlyAgentsStayHealthy(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s := testServer(t)
+			tickHubInstance(t, srv)
 			ctx := context.Background()
 			require.NoError(t, s.CreateProject(ctx, &store.Project{ID: tid("warn-proj"), Name: "warn", Slug: "warn"}))
 			require.NoError(t, s.CreateAgent(ctx, &store.Agent{
@@ -421,6 +432,7 @@ func (aggregateFailStore) AggregateAgentHealth(context.Context) (*store.AgentHea
 // explains the missing section.
 func TestHandleHealthSummary_AgentsNullWhenAggregateFails(t *testing.T) {
 	srv, _ := testServer(t)
+	tickHubInstance(t, srv)
 	srv.store = aggregateFailStore{srv.store}
 
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
@@ -458,6 +470,7 @@ func TestOrderedPhaseCounts(t *testing.T) {
 
 func TestHandleHealthSummary_BrokerMixedStatus(t *testing.T) {
 	srv, s := testServer(t)
+	tickHubInstance(t, srv)
 	ctx := context.Background()
 
 	// Create a project
@@ -554,8 +567,8 @@ func TestHandleHealthSummary_DatabaseHealthy(t *testing.T) {
 	var resp HealthSummaryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 
-	// SQLite test DB should be healthy
-	assert.Equal(t, "healthy", resp.Hub.Checks["database"])
+	// SQLite test DB should be healthy: no failing check in the fleet.
+	assert.Empty(t, resp.Hub.UnhealthyChecks)
 	// The serving instance's pool is in its hub_instances row, written by
 	// its registry tick.
 	require.NotNil(t, resp.HubInstances)
@@ -586,6 +599,7 @@ func TestHandleHealthSummary_SurfacesNonHealthyChecks(t *testing.T) {
 	srv, _ := testServer(t)
 	srv.ExpectEmbeddedBroker()
 	srv.EmbeddedBrokerRegistrationFailed(errors.New("boom"))
+	tickHubInstance(t, srv)
 
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -594,15 +608,21 @@ func TestHandleHealthSummary_SurfacesNonHealthyChecks(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.Equal(t, "degraded", resp.Status)
 	assert.Equal(t, "degraded", resp.Hub.Status)
-	assert.Equal(t, "healthy", resp.Hub.Checks["database"], "database itself is fine; the cause is elsewhere")
-	assert.Equal(t, "unhealthy: registration failed", resp.Hub.Checks["colocated_broker"])
-	assert.Equal(t, []string{"colocated_broker: unhealthy: registration failed"}, resp.Hub.UnhealthyChecks)
+	require.NotNil(t, resp.HubInstances)
+	require.Len(t, resp.HubInstances.Items, 1)
+	// The database itself is fine; the cause is elsewhere, tagged with its
+	// instance. The value is the row's normalised fixed word.
+	assert.Equal(t, []HealthSummaryHubCheck{{
+		InstanceID: srv.InstanceID(), InstanceLabel: resp.HubInstances.Items[0].Label,
+		Name: "colocated_broker", Value: "unhealthy",
+	}}, resp.Hub.UnhealthyChecks)
 }
 
 // TestHandleHealthSummary_HealthyHasNoUnhealthyChecks: the cause list is
 // omitted when everything is healthy.
 func TestHandleHealthSummary_HealthyHasNoUnhealthyChecks(t *testing.T) {
 	srv, _ := testServer(t)
+	tickHubInstance(t, srv)
 
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -610,8 +630,8 @@ func TestHandleHealthSummary_HealthyHasNoUnhealthyChecks(t *testing.T) {
 	var resp HealthSummaryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.Equal(t, "healthy", resp.Status)
+	assert.Equal(t, "healthy", resp.Hub.Status)
 	assert.Empty(t, resp.Hub.UnhealthyChecks)
-	assert.Equal(t, "healthy", resp.Hub.Checks["database"])
 }
 
 // TestHandleHealthSummary_UnhealthyNotDowngraded: degrading signals (stalled
@@ -627,6 +647,8 @@ func TestHandleHealthSummary_UnhealthyNotDowngraded(t *testing.T) {
 		Status: store.BrokerStatusOffline,
 	}))
 	srv.store = pingFailStore{srv.store}
+	// The instance's tick records its failed database check in its row.
+	tickHubInstance(t, srv)
 
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -634,8 +656,10 @@ func TestHandleHealthSummary_UnhealthyNotDowngraded(t *testing.T) {
 	var resp HealthSummaryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.Equal(t, "unhealthy", resp.Status)
-	assert.Equal(t, "unhealthy", resp.Hub.Checks["database"])
-	assert.Contains(t, resp.Hub.UnhealthyChecks, "database: unhealthy")
+	assert.Equal(t, "unhealthy", resp.Hub.Status)
+	require.NotEmpty(t, resp.Hub.UnhealthyChecks)
+	assert.Equal(t, "database", resp.Hub.UnhealthyChecks[0].Name)
+	assert.Equal(t, "unhealthy", resp.Hub.UnhealthyChecks[0].Value)
 }
 
 // Chat plugin broker records are always marked online; the connected broker

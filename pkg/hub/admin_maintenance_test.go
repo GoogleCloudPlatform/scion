@@ -27,24 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
-
-func newTestServerWithStore(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		t.Fatalf("failed to create sqlite store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
-	srv := &Server{
-		store:          s,
-		maintenanceLog: logging.Subsystem("hub.maintenance"),
-	}
-	return srv, s
-}
 
 func TestListMaintenanceOperations(t *testing.T) {
 	srv, _ := newTestServerWithStore(t)

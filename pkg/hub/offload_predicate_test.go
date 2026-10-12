@@ -25,53 +25,12 @@ package hub
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// predicateSetup creates two projects, each with one agent, and a hub owner.
-// Hub-level cross-project messaging starts disabled (compiled default).
-func predicateSetup(t *testing.T) (srv *Server, s store.Store, projA, projB string, agentA, agentB *store.Agent) {
-	t.Helper()
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	owner := &store.User{
-		ID:      tid("pred-owner"),
-		Email:   "pred-owner@test.example",
-		Role:    store.UserRoleMember,
-		Status:  "active",
-		Created: time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, owner))
-	ensureHubMembership(ctx, s, owner.ID)
-
-	projA = tid("pred-project-a")
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID: projA, Name: "pred-a", Slug: "pred-a", OwnerID: owner.ID, CreatedBy: owner.ID,
-	}))
-	projB = tid("pred-project-b")
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID: projB, Name: "pred-b", Slug: "pred-b", OwnerID: owner.ID, CreatedBy: owner.ID,
-	}))
-
-	agentA = &store.Agent{
-		ID: tid("pred-agent-a"), Name: "agent-a", Slug: "agent-a",
-		ProjectID: projA, Phase: "running", Ancestry: []string{owner.ID},
-	}
-	require.NoError(t, s.CreateAgent(ctx, agentA))
-	agentB = &store.Agent{
-		ID: tid("pred-agent-b"), Name: "agent-b", Slug: "agent-b",
-		ProjectID: projB, Phase: "running", Ancestry: []string{owner.ID},
-	}
-	require.NoError(t, s.CreateAgent(ctx, agentB))
-
-	return srv, s, projA, projB, agentA, agentB
-}
 
 func TestCrossProjectPeerAllowed_HumanPeerAlwaysAllowed(t *testing.T) {
 	srv, _, projA, _, _, _ := predicateSetup(t)

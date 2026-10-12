@@ -17,80 +17,18 @@ package hub
 import (
 	"context"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
-	gax "github.com/googleapis/gax-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/api/iterator"
 	googlemetricpb "google.golang.org/genproto/googleapis/api/metric"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
-
-// fakeTimeSeriesIterator is a canned timeSeriesIterator.
-type fakeTimeSeriesIterator struct {
-	series []*monitoringpb.TimeSeries
-	err    error
-	idx    int
-}
-
-func (it *fakeTimeSeriesIterator) Next() (*monitoringpb.TimeSeries, error) {
-	if it.err != nil {
-		return nil, it.err
-	}
-	if it.idx >= len(it.series) {
-		return nil, iterator.Done
-	}
-	ts := it.series[it.idx]
-	it.idx++
-	return ts, nil
-}
-
-// fakeMetricsClient is the "narrow interface over monitoring.MetricClient"
-// fake used by the dashboard contract test (design §7.2): it records every
-// request filter, and returns canned series or errors keyed by the exact
-// filter string a query produced.
-type fakeMetricsClient struct {
-	mu       sync.Mutex
-	requests []*monitoringpb.ListTimeSeriesRequest
-
-	seriesByFilter map[string][]*monitoringpb.TimeSeries
-	errByFilter    map[string]error
-}
-
-func newFakeMetricsClient() *fakeMetricsClient {
-	return &fakeMetricsClient{seriesByFilter: map[string][]*monitoringpb.TimeSeries{}, errByFilter: map[string]error{}}
-}
-
-func (c *fakeMetricsClient) ListTimeSeries(_ context.Context, req *monitoringpb.ListTimeSeriesRequest, _ ...gax.CallOption) timeSeriesIterator {
-	c.mu.Lock()
-	c.requests = append(c.requests, req)
-	c.mu.Unlock()
-	if err, ok := c.errByFilter[req.Filter]; ok {
-		return &fakeTimeSeriesIterator{err: err}
-	}
-	return &fakeTimeSeriesIterator{series: c.seriesByFilter[req.Filter]}
-}
-
-func (c *fakeMetricsClient) requestFilters() []string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	filters := make([]string, len(c.requests))
-	for i, r := range c.requests {
-		filters[i] = r.Filter
-	}
-	return filters
-}
-
-func newContractTestService(client *fakeMetricsClient) *MetricsDashboardService {
-	return &MetricsDashboardService{client: client, projectID: "test-project", cache: make(map[string]*cacheEntry)}
-}
 
 // requireExactlyOneFilterContaining asserts exactly one recorded filter
 // contains every given substring, and returns it.

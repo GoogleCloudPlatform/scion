@@ -21,8 +21,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
-	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -69,49 +67,6 @@ func (d *capturingDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		return nil, err
 	}
 	return envReqsResult(d.envReqs), nil
-}
-
-// setProjectHarnessConfigAnnotation stamps the project-level
-// default-harness-config annotation, exactly as PUT /settings would.
-func setProjectHarnessConfigAnnotation(t *testing.T, s store.Store, project *store.Project, value string) {
-	t.Helper()
-	if project.Annotations == nil {
-		project.Annotations = map[string]string{}
-	}
-	project.Annotations[projectSettingDefaultHarnessConfig] = value
-	require.NoError(t, s.UpdateProject(context.Background(), project))
-}
-
-// setProjectAnnotations merges the given annotations into the project, exactly
-// as PUT /settings would. Used where a test needs more than one setting.
-func setProjectAnnotations(t *testing.T, s store.Store, project *store.Project, annotations map[string]string) {
-	t.Helper()
-	if project.Annotations == nil {
-		project.Annotations = map[string]string{}
-	}
-	for k, v := range annotations {
-		project.Annotations[k] = v
-	}
-	require.NoError(t, s.UpdateProject(context.Background(), project))
-}
-
-// createHarnessTemplate creates a global template whose DefaultHarnessConfig is
-// set. ContentHash is populated so the agent-create handler's "template has no
-// files" guard does not reject it.
-func createHarnessTemplate(t *testing.T, s store.Store, slug, defaultHarnessConfig string) *store.Template {
-	t.Helper()
-	tmpl := &store.Template{
-		ID:                   tid("template-" + slug + "-" + t.Name()),
-		Name:                 slug,
-		Slug:                 slug,
-		Harness:              "claude",
-		DefaultHarnessConfig: defaultHarnessConfig,
-		ContentHash:          "d00dfeed",
-		Scope:                store.TemplateScopeGlobal,
-		Status:               "active",
-	}
-	require.NoError(t, s.CreateTemplate(context.Background(), tmpl))
-	return tmpl
 }
 
 // createHarnessOnlyTemplate creates a global template with no
@@ -463,48 +418,6 @@ func TestCreateAgent_ProjectHarnessConfigUnresolvableLeavesIDEmpty(t *testing.T)
 // Not-found logging: level tracks provenance
 // ---------------------------------------------------------------------------
 
-// levelCapturingHandler records the level and message of every log record that
-// passes the level filter, so a test can assert on how loudly something was
-// logged rather than only whether it happened.
-type levelCapturingHandler struct {
-	mu      sync.Mutex
-	records []slog.Record
-}
-
-func (h *levelCapturingHandler) Enabled(context.Context, slog.Level) bool { return true }
-
-func (h *levelCapturingHandler) Handle(_ context.Context, r slog.Record) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.records = append(h.records, r.Clone())
-	return nil
-}
-
-func (h *levelCapturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *levelCapturingHandler) WithGroup(string) slog.Handler      { return h }
-
-// harnessNotFoundRecords returns the captured records for the
-// harness-config-not-found message.
-func (h *levelCapturingHandler) harnessNotFoundRecords() []slog.Record {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	var out []slog.Record
-	for _, r := range h.records {
-		if strings.Contains(r.Message, "harness config not found") {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// captureHarnessLogs swaps the server's agent-lifecycle logger for a capturing
-// one and returns the handler.
-func captureHarnessLogs(srv *Server) *levelCapturingHandler {
-	h := &levelCapturingHandler{}
-	srv.agentLifecycleLog = slog.New(h)
-	return h
-}
-
 // TestCreateAgent_UnresolvableProjectHarnessConfigWarns pins the WARN half of
 // the provenance rule. A project annotation naming a harness config that does
 // not exist is an operator-fixable misconfiguration that displaced a known-good
@@ -677,44 +590,6 @@ func TestCreateAgent_RequestProfileBeatsProjectActiveProfile(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Scheduler dispatch path (server.go, dispatchAgentEventHandler)
 // ---------------------------------------------------------------------------
-
-// runDispatchAgentEvent fires a dispatch_agent scheduled event for the project
-// and returns the created agent.
-func runDispatchAgentEvent(t *testing.T, srv *Server, s store.Store, projectID, agentName, template string) *store.Agent {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := s.GetUser(ctx, DevUserID); err != nil {
-		require.ErrorIs(t, err, store.ErrNotFound)
-		require.NoError(t, s.CreateUser(ctx, &store.User{
-			ID:          DevUserID,
-			Email:       "dev@localhost",
-			DisplayName: "Dev User",
-			Role:        store.UserRoleAdmin,
-		}))
-	}
-
-	payload, err := json.Marshal(DispatchAgentEventPayload{
-		AgentName: agentName,
-		Template:  template,
-		Task:      "do the thing",
-	})
-	require.NoError(t, err)
-
-	handler := srv.dispatchAgentEventHandler()
-	require.NoError(t, handler(ctx, withSessionRevision(store.ScheduledEvent{
-		ID:        tid("sched-" + agentName + "-" + t.Name()),
-		ProjectID: projectID,
-		EventType: "dispatch_agent",
-		Payload:   string(payload),
-		CreatedBy: DevUserID,
-	}, DevUserID)))
-
-	agent, err := s.GetAgentBySlug(ctx, projectID, agentName)
-	require.NoError(t, err)
-	require.NotNil(t, agent)
-	require.NotNil(t, agent.AppliedConfig)
-	return agent
-}
 
 // TestSchedulerDispatch_ProjectHarnessConfigBeatsTemplate mirrors the headline
 // create-path case. Site 2 is where the only-if-unset guard inside

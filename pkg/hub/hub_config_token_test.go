@@ -36,31 +36,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hubConfigTokenUser creates an active user holding the named system role
-// and hub membership, and returns the user ID.
-func hubConfigTokenUser(t *testing.T, s store.Store, name, systemRole string) string {
-	t.Helper()
-	id := tid(name)
-	userRole := "member"
-	if systemRole == store.SystemRoleSuperAdmin {
-		userRole = "admin"
-	}
-	createTestUserWithRole(t, s, id, id+"@test.com", userRole, systemRole)
-	ensureHubMembership(context.Background(), s, id)
-	return id
-}
-
-// mintHubConfigToken mints a real token for userID through
-// UserAccessTokenService over a session.
-func mintHubConfigToken(t *testing.T, srv *Server, userID string, boundary TokenBoundary, scopes ...string) string {
-	t.Helper()
-	key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(userID), CreateTokenParams{
-		UserID: userID, Name: "hct-" + tid("tok"), Boundary: boundary, Scopes: scopes,
-	})
-	require.NoError(t, err, "mint %s token with %v", boundary.Kind, scopes)
-	return key
-}
-
 // requireTokenRefusedKeys asserts a refusal of refused settings keys: 403,
 // the session-only details with reason GOV_PENDING, and details.keys equal
 // to want.

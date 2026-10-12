@@ -201,8 +201,8 @@ func newSpacesPerfFixtureOn(t *testing.T, srv *Server, s store.Store, owner, mem
 	t.Helper()
 	ctx := context.Background()
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	base := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	base := NewWebChatStore(db, "sqlite")
 	require.NoError(t, base.Init())
 	wcs := &spacesCountingWCS{WebChatStore: base}
 	srv.SetWebChatStore(wcs)
@@ -231,6 +231,12 @@ func newSpacesPerfFixtureOn(t *testing.T, srv *Server, s store.Store, owner, mem
 		require.NoError(t, s.CreateProject(ctx, op))
 		srv.seedProjectCreatorMembership(ctx, op)
 		f.projects = append(f.projects, op.ID)
+	}
+
+	// The admin is an explicit member of every project, so its rollups
+	// count unread everywhere (unread is tracked only in member projects).
+	for _, id := range f.projects {
+		bindProjectMember(t, s, id, admin.ID)
 	}
 
 	// Threads: f.projects[0] gets read, unread, muted-unread and never-read
@@ -276,10 +282,6 @@ func getSpaces(t *testing.T, srv *Server, u *store.User) chatSpacesResponse {
 	return resp
 }
 
-func identityOf(u *store.User) UserIdentity {
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))
-}
-
 // The spaces list must be the same spaces, in the same order, with the same
 // counts and emoji as before the batched rewrite, for a member who sees a
 // subset of projects and for an admin who sees them all.
@@ -292,6 +294,10 @@ func TestChatSpaces_BatchedMatchesLegacy(t *testing.T) {
 
 			stripped := make([]chatSpaceEntry, len(got.Spaces))
 			for i, sp := range got.Spaces {
+				// The legacy rollup predates unread tracking; every space
+				// here is a member project of the user, so all are tracked.
+				assert.True(t, sp.UnreadTracked, "space %s", sp.ProjectSlug)
+				sp.UnreadTracked = false
 				sp.LastActivityAt = nil
 				stripped[i] = sp
 			}
@@ -548,4 +554,61 @@ func TestChatSpaces_BatchReadFailureIsLogged(t *testing.T) {
 		assert.Contains(t, logs.String(), "chat spaces: batched read-state read failed")
 		assert.Contains(t, logs.String(), "injected read states failure")
 	})
+}
+
+// The unread count reads the same rollup strictly: a failed batch read
+// fails the request, so the badge keeps its last count instead of showing
+// a guess.
+func TestChatUnreadCount_RollupReadFailureFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arm  func(*spacesPerfFixture)
+	}{
+		{"topics", func(f *spacesPerfFixture) { f.wcs.failTopicsBatch = true }},
+		{"read states", func(f *spacesPerfFixture) { f.wcs.failReadStates = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSpacesPerfFixture(t)
+			tc.arm(f)
+			rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, "/api/v1/chat/unread-count", nil)
+			assert.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+}
+
+// The unread count costs a constant number of store reads however many
+// projects the hub has: one summary project list, one read decision per
+// project, one batched topic read and one batched read-state read (the
+// caller has no DMs here, so the DM read states cost nothing). This pins
+// the shared rollup against a regression to per-project reads.
+func TestChatUnreadCount_ConstantStoreCalls(t *testing.T) {
+	f, counting, fault := newSpacesPerfFixtureWithCounting(t)
+	fault.Arm()
+	emitter := &parityRecordingAuditEmitter{}
+	f.srv.authzService.SetDecisionAuditEmitter(emitter)
+	f.srv.authzService.DecisionAuditSampleRate = 1.0
+
+	rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp chatUnreadCountResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, chatUnreadCountResponse{Conversations: 2, Threads: 2}, resp,
+		"the unread thread in projects[0] and the one in projects[1]")
+
+	assert.Equal(t, len(f.projects), countProjectDecisions(emitter.snapshot()), "one read decision per project")
+	assert.Equal(t, 1, counting.summaries, "one summary project list")
+	assert.Equal(t, 0, counting.list, "no enriched project list")
+	assert.Equal(t, 0, f.wcs.listTopics, "no per-project topic reads")
+	assert.Equal(t, 1, f.wcs.topicsBatch, "one batched topic read")
+	assert.Equal(t, 1, f.wcs.getReadStates, "one batched read-state read")
+}
+
+// The bound warning is allowed once per interval.
+func TestLogRateLimit(t *testing.T) {
+	l := &logRateLimit{every: time.Hour}
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	assert.True(t, l.allow(t0), "first line")
+	assert.False(t, l.allow(t0.Add(time.Minute)), "inside the interval")
+	assert.True(t, l.allow(t0.Add(time.Hour)), "after the interval")
+	assert.False(t, l.allow(t0.Add(time.Hour+time.Second)))
 }

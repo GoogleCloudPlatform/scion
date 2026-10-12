@@ -18,11 +18,9 @@ package hub
 
 import (
 	"database/sql"
-	"os"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -173,16 +171,6 @@ func sqliteColumnExists(db *sql.DB, table, column string) bool {
 	return false
 }
 
-// sqliteIndexExists checks whether a named index exists in the database.
-func sqliteIndexExists(db *sql.DB, indexName string) bool {
-	var count int
-	err := db.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
-		indexName,
-	).Scan(&count)
-	return err == nil && count > 0
-}
-
 // sqliteMigrationRecorded checks whether a migration name is present in webchat_migrations.
 func sqliteMigrationRecorded(db *sql.DB, name string) bool {
 	var count int
@@ -198,9 +186,9 @@ func sqliteMigrationRecorded(db *sql.DB, name string) bool {
 // TestC4Fix_SQLite_FreshDB verifies that on a brand-new database, Init
 // succeeds and the conversation_id column and unique index both exist.
 func TestC4Fix_SQLite_FreshDB(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init(), "Init on fresh DB must succeed")
 
 	require.True(t, sqliteColumnExists(db, "webchat_topic", "conversation_id"),
@@ -217,7 +205,7 @@ func TestC4Fix_SQLite_FreshDB(t *testing.T) {
 // three prior migrations recorded). Init must succeed, add the column, create
 // the index, and record the migration.
 func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Seed the DB with the pre-existing schema (no conversation_id column).
 	_, err := db.Exec(preExistingSQLiteSchemaSQL)
@@ -229,7 +217,7 @@ func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
 	require.False(t, sqliteIndexExists(db, "idx_webchat_topic_conversation"),
 		"precondition: idx_webchat_topic_conversation must not exist before Init")
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init(), "Init on pre-existing DB must succeed")
 
 	require.True(t, sqliteColumnExists(db, "webchat_topic", "conversation_id"),
@@ -242,9 +230,9 @@ func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
 
 // TestC4Fix_SQLite_Idempotent verifies Init can be called twice without error.
 func TestC4Fix_SQLite_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init(), "first Init must succeed")
 	require.NoError(t, store.Init(), "second Init must succeed (idempotent)")
 
@@ -257,43 +245,25 @@ func TestC4Fix_SQLite_Idempotent(t *testing.T) {
 // TestC4Fix_SQLite_PreExistingDB_Idempotent verifies that Init on a
 // pre-existing DB is idempotent: the second call succeeds cleanly.
 func TestC4Fix_SQLite_PreExistingDB_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	_, err := db.Exec(preExistingSQLiteSchemaSQL)
 	require.NoError(t, err)
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init(), "first Init on pre-existing DB must succeed")
 	require.NoError(t, store.Init(), "second Init on pre-existing DB must succeed")
 }
 
 // --- Postgres integration tests (require SCION_TEST_POSTGRES_DSN) ---
 
-func requirePostgresDSN(t *testing.T) string {
-	t.Helper()
-	dsn := os.Getenv("SCION_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("set SCION_TEST_POSTGRES_DSN to run Postgres webchat store tests")
-	}
-	return dsn
-}
-
-// pgColumnExists checks whether a column exists in a table (Postgres).
+// pgColumnExists checks whether a column exists in a table in the current
+// schema (Postgres).
 func pgColumnExists(db *sql.DB, table, column string) bool {
 	var count int
 	err := db.QueryRow(
-		"SELECT COUNT(*) FROM information_schema.columns WHERE table_name=$1 AND column_name=$2",
+		"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name=$2",
 		table, column,
-	).Scan(&count)
-	return err == nil && count > 0
-}
-
-// pgIndexExists checks whether a named index exists (Postgres).
-func pgIndexExists(db *sql.DB, indexName string) bool {
-	var count int
-	err := db.QueryRow(
-		"SELECT COUNT(*) FROM pg_indexes WHERE indexname=$1",
-		indexName,
 	).Scan(&count)
 	return err == nil && count > 0
 }
@@ -306,28 +276,6 @@ func pgMigrationRecorded(db *sql.DB, name string) bool {
 		name,
 	).Scan(&count)
 	return err == nil && count > 0
-}
-
-// pgDropWebchatTables drops all webchat_* tables so each test starts clean.
-func pgDropWebchatTables(t *testing.T, db *sql.DB) {
-	t.Helper()
-	tables := []string{
-		"webchat_mention",
-		"webchat_message_ext",
-		"webchat_message_attachment",
-		"webchat_attachment",
-		"webchat_migrations",
-		"webchat_dm",
-		"webchat_user_prefs",
-		"webchat_read_state",
-		"webchat_topic",
-		"webchat_thread_prefs",
-		"webchat_conversation_context",
-		"webchat_thread",
-	}
-	for _, tbl := range tables {
-		_, _ = db.Exec("DROP TABLE IF EXISTS " + tbl + " CASCADE")
-	}
 }
 
 const preExistingPostgresSchemaSQL = `

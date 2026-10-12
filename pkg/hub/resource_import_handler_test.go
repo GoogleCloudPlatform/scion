@@ -32,25 +32,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ensureAdminRoleBinding grants a super-admin role binding to the given user
-// (CO1 cutover: role bindings are required for authorization).
-func ensureAdminRoleBinding(t *testing.T, s store.Store, userID string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        store.SystemReconcileCreatedBy,
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create admin role binding: %v", err)
-	}
-}
-
 // mockTemplateTarball installs a mock HTTP transport that serves a gzip tarball
 // containing a single template under templates/my-template, and returns a
 // cleanup func that restores the previous transport. It must not be used with
@@ -144,9 +125,17 @@ func doStreamRequestAsUser(t *testing.T, srv *Server, user *store.User, method, 
 	if err != nil {
 		t.Fatal(err)
 	}
+	return doStreamRequestWithToken(t, srv, token, method, path, body)
+}
+
+// doStreamRequestWithToken issues a request authenticated with token and
+// Accept: application/x-ndjson so the import endpoint streams progress events.
+func doStreamRequestWithToken(t *testing.T, srv *Server, token, method, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
 
 	var bodyBytes []byte
 	if body != nil {
+		var err error
 		bodyBytes, err = json.Marshal(body)
 		if err != nil {
 			t.Fatal(err)

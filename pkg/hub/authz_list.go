@@ -16,11 +16,16 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// errDelegatedListScope is ResolveListScopes's answer for an agent
+// delegated credential.
+var errDelegatedListScope = errors.New("ResolveListScopes: no list scope for a delegated credential")
 
 // ListScopeResult is the outcome of a single authoritative scope decision
 // for a list request. It communicates both the authorized scope set and any
@@ -68,6 +73,13 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 
 	if identity == nil {
 		return none, nil
+	}
+	// An agent delegated credential never gets a list scope from this
+	// function: the agent's own principals contribute nothing, and no list
+	// operation admits a delegated credential yet (.design/agent-delegation.md
+	// §11.8). An error, never a scope, so the caller fails closed.
+	if isDelegatedAgentIdentity(identity) {
+		return none, errDelegatedListScope
 	}
 
 	// Note: Suspension is enforced at the auth middleware layer, which rejects
@@ -352,12 +364,43 @@ func toCandidateBindings(bindings []*store.RoleBinding) []CandidateBinding {
 			ScopeType:        b.ScopeType,
 			ScopeID:          b.ScopeID,
 		}
-		if b.NotBefore != nil {
-			candidates[i].NotBefore = *b.NotBefore
-		}
-		if b.ExpiresAt != nil {
-			candidates[i].ExpiresAt = *b.ExpiresAt
-		}
+		candidates[i].NotBefore, candidates[i].ExpiresAt = candidateActivationBounds(b)
 	}
 	return candidates
+}
+
+// setZeroBound stands in for a stored activation bound that is set but
+// holds the zero time. It is the earliest non-zero instant, so the kernel
+// sees a time condition rather than an unset bound.
+var setZeroBound = time.Time{}.Add(time.Nanosecond)
+
+// candidateActivationBounds converts a store RoleBinding's optional
+// activation bounds to the kernel's value form, where a zero time means
+// unset. A bound that is set but zero maps to setZeroBound, so the kernel
+// agrees with the store's membership reads: a set-but-zero ExpiresAt is
+// already expired, and any set bound fails closed on a zero evaluation
+// time. Every conversion from store.RoleBinding to CandidateBinding uses
+// this, so all activation checks in pkg/hub apply one rule.
+//
+// A nil binding gets bounds that no evaluation time satisfies (NotBefore
+// and ExpiresAt both setZeroBound: active would need now >= setZeroBound
+// and now < setZeroBound), so it is never active. Zero bounds would read
+// as unbounded, which is active.
+func candidateActivationBounds(b *store.RoleBinding) (notBefore, expiresAt time.Time) {
+	if b == nil {
+		return setZeroBound, setZeroBound
+	}
+	if b.NotBefore != nil {
+		notBefore = *b.NotBefore
+		if notBefore.IsZero() {
+			notBefore = setZeroBound
+		}
+	}
+	if b.ExpiresAt != nil {
+		expiresAt = *b.ExpiresAt
+		if expiresAt.IsZero() {
+			expiresAt = setZeroBound
+		}
+	}
+	return notBefore, expiresAt
 }

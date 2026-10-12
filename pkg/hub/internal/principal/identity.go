@@ -1,0 +1,517 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package principal
+
+import (
+	"context"
+	"reflect"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+)
+
+// Identity represents an authenticated identity (user or agent).
+type Identity interface {
+	ID() string
+	// Type returns a human-readable identity kind, e.g. "user", "agent",
+	// "dev", "federated_user", "federated_agent", "federated_service", or
+	// "broker". It is informational only — new concrete types are free to
+	// return any string, including one already used by another type — and
+	// must never be trusted for authorization classification. Principal and
+	// credential kind, and ancestry attestation, are decided through
+	// explicit type assertions and opt-in markers (principalContextForIdentity,
+	// credentialContextForIdentity, AncestryIsHubAttested), which fail closed
+	// on any identity they don't explicitly recognize.
+	Type() string
+}
+
+// UserIdentity represents an authenticated user.
+type UserIdentity interface {
+	Identity
+	Email() string
+	DisplayName() string
+	Role() string
+}
+
+// AgentIdentity represents an authenticated agent.
+type AgentIdentity interface {
+	Identity
+	ProjectID() string
+	Scopes() []AgentTokenScope
+	HasScope(scope AgentTokenScope) bool
+	Ancestry() []string   // Ordered ancestor chain: [root_user, ..., parent_agent]
+	OriginUserID() string // Returns Ancestry[0] if present, empty string otherwise
+	TokenID() string      // JWT ID (jti) of the current token
+}
+
+// AgentTokenScope represents the authorized scopes for an agent. The scope
+// values, and the token logic that mints and checks them, live in
+// agenttoken.go.
+type AgentTokenScope string
+
+// FederatedIdentity is implemented by all identity types that originate from
+// an external OIDC issuer. It provides the common federation metadata.
+type FederatedIdentity interface {
+	Identity
+	IssuerURL() string
+}
+
+// BrokerIdentity represents an authenticated Runtime Broker.
+type BrokerIdentity interface {
+	Identity
+	BrokerID() string
+}
+
+// AuthenticatedUser implements UserIdentity.
+type AuthenticatedUser struct {
+	id          string
+	email       string
+	displayName string
+	role        string
+	clientType  string // "web", "cli", "api"
+}
+
+// NewAuthenticatedUser creates a new AuthenticatedUser.
+func NewAuthenticatedUser(id, email, displayName, role, clientType string) *AuthenticatedUser {
+	return &AuthenticatedUser{
+		id:          id,
+		email:       email,
+		displayName: displayName,
+		role:        role,
+		clientType:  clientType,
+	}
+}
+
+// ID returns the user ID.
+func (u *AuthenticatedUser) ID() string { return u.id }
+
+// Type returns the identity type ("user").
+func (u *AuthenticatedUser) Type() string { return "user" }
+
+// Email returns the user email.
+func (u *AuthenticatedUser) Email() string { return u.email }
+
+// DisplayName returns the user display name.
+func (u *AuthenticatedUser) DisplayName() string { return u.displayName }
+
+// Role returns the user role.
+func (u *AuthenticatedUser) Role() string { return u.role }
+
+// ClientType returns the client type (web, cli, api).
+func (u *AuthenticatedUser) ClientType() string { return u.clientType }
+
+// ScopedUserIdentity wraps a UserIdentity with project and scope constraints.
+// It is produced when authenticating with a User Access Token (UAT).
+type ScopedUserIdentity struct {
+	UserIdentity
+	boundary     TokenBoundary
+	scopes       []string
+	credentialID string
+	ceiling      permissions.FrozenPermissionCeiling
+
+	// decoration holds descriptive credential metadata: populated only by
+	// UserAccessTokenService.ValidateToken from the server-validated token
+	// row, and never by any other caller. nil for identities not backed by
+	// a validated UAT row (e.g. constructed directly by older tests/callers).
+	decoration *CredentialDecoration
+}
+
+// newScopedUserIdentity is the single constructor body every
+// NewScopedUserIdentity* variant below funnels through, so the field set
+// cannot drift between them.
+func newScopedUserIdentity(user UserIdentity, boundary TokenBoundary, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return &ScopedUserIdentity{
+		UserIdentity: user,
+		boundary:     boundary,
+		scopes:       scopes,
+		credentialID: credentialID,
+		ceiling:      ceiling,
+		decoration:   decoration,
+	}
+}
+
+// NewScopedUserIdentity creates a ScopedUserIdentity confined to a project
+// boundary. The ceiling is derived from scopes via the frozen legacy
+// normalization (permissions.NormalizeLegacyUATScopes) — the same
+// interpretation a real CeilingVersionUnspecified token gets — so callers
+// that construct an identity directly from raw scope strings (most test
+// fixtures) exercise the same permission-ID-based restriction that
+// production applies. An empty projectID yields an invalid boundary (see
+// TokenBoundary.Valid()), which every consumer of Boundary() must treat as
+// fail-closed. A caller minting a real token should use
+// NewScopedUserIdentityWithBoundaryAndDecoration with the token's actual
+// persisted boundary and store.UserAccessToken.NormalizedCeiling() instead,
+// so a CeilingVersionV1+ ceiling is not silently reinterpreted as legacy.
+func NewScopedUserIdentity(user UserIdentity, projectID string, scopes []string) *ScopedUserIdentity {
+	return NewScopedUserIdentityWithCredentialID(user, projectID, scopes, "")
+}
+
+// NewScopedUserIdentityWithCredentialID creates a project-boundary,
+// UAT-backed identity with its persisted credential ID available for
+// authorization audit context. See NewScopedUserIdentity for how the
+// ceiling is derived and how projectID becomes a boundary.
+func NewScopedUserIdentityWithCredentialID(user UserIdentity, projectID string, scopes []string, credentialID string) *ScopedUserIdentity {
+	return NewScopedUserIdentityWithCeiling(user, projectID, scopes, credentialID, permissions.FrozenPermissionCeiling{
+		Version:       permissions.CeilingVersionUnspecified,
+		PermissionIDs: permissions.NormalizeLegacyUATScopes(scopes),
+	})
+}
+
+// NewScopedUserIdentityWithCeiling creates a project-boundary, UAT-backed
+// identity carrying an explicit, already-normalized FrozenPermissionCeiling.
+// Prefer NewScopedUserIdentityWithBoundaryAndDecoration for a token whose
+// persisted boundary may be hub, not project.
+func NewScopedUserIdentityWithCeiling(user UserIdentity, projectID string, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling) *ScopedUserIdentity {
+	return newScopedUserIdentity(user, TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, scopes, credentialID, ceiling, nil)
+}
+
+// NewScopedUserIdentityWithDecoration creates a project-boundary, UAT-backed
+// identity carrying descriptive credential decoration alongside its
+// credential ID. The ceiling is derived from scopes the same way
+// NewScopedUserIdentityWithCredentialID derives it; see
+// NewScopedUserIdentityWithBoundaryAndDecoration for the canonical
+// constructor that also takes an explicit boundary.
+func NewScopedUserIdentityWithDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return NewScopedUserIdentityWithCeilingAndDecoration(user, projectID, scopes, credentialID, permissions.FrozenPermissionCeiling{
+		Version:       permissions.CeilingVersionUnspecified,
+		PermissionIDs: permissions.NormalizeLegacyUATScopes(scopes),
+	}, decoration)
+}
+
+// NewScopedUserIdentityWithCeilingAndDecoration creates a project-boundary,
+// UAT-backed identity carrying both an explicit, already-normalized
+// FrozenPermissionCeiling and descriptive credential decoration. Prefer
+// NewScopedUserIdentityWithBoundaryAndDecoration for a token whose persisted
+// boundary may be hub, not project.
+func NewScopedUserIdentityWithCeilingAndDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return newScopedUserIdentity(user, TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, scopes, credentialID, ceiling, decoration)
+}
+
+// NewScopedUserIdentityWithBoundary creates a UAT-backed identity carrying an
+// explicit TokenBoundary (project or hub) and an explicit, already-normalized
+// FrozenPermissionCeiling, with no credential decoration. It is for callers
+// that rebuild an identity from a stored token row outside a request, such as
+// scheduled dispatch, and have no decoration to carry.
+func NewScopedUserIdentityWithBoundary(user UserIdentity, boundary TokenBoundary, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling) *ScopedUserIdentity {
+	return newScopedUserIdentity(user, boundary, scopes, credentialID, ceiling, nil)
+}
+
+// NewScopedUserIdentityWithBoundaryAndDecoration creates a UAT-backed
+// identity carrying an explicit TokenBoundary (project or hub), an explicit,
+// already-normalized FrozenPermissionCeiling, and descriptive credential
+// decoration. UserAccessTokenService.ValidateToken — the single point that
+// has the server-validated token row, including its persisted boundary, in
+// hand — uses this constructor, so a hub-boundary token is never
+// misrepresented as project-scoped and a CeilingVersionV1+ ceiling is never
+// silently reinterpreted as legacy.
+func NewScopedUserIdentityWithBoundaryAndDecoration(user UserIdentity, boundary TokenBoundary, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return newScopedUserIdentity(user, boundary, scopes, credentialID, ceiling, decoration)
+}
+
+// Decoration returns a deep copy of the descriptive credential metadata
+// attached at authentication time, or nil if none was derived. Callers may
+// freely mutate the returned value (including its Labels map) without
+// affecting this identity's stored decoration.
+func (s *ScopedUserIdentity) Decoration() *CredentialDecoration {
+	if s.decoration == nil {
+		return nil
+	}
+	d := s.decoration.Clone()
+	return &d
+}
+
+// Boundary returns the credential-side boundary (project or hub) this
+// identity's UAT was issued under.
+func (s *ScopedUserIdentity) Boundary() TokenBoundary { return s.boundary }
+
+// ScopedScopes returns the action scopes this identity is limited to.
+func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }
+
+// CredentialID returns the persisted ID of the UAT that authenticated this identity.
+func (s *ScopedUserIdentity) CredentialID() string { return s.credentialID }
+
+// Ceiling returns the normalized, frozen permission ceiling this identity's
+// credential carries. Every credential-scope restriction (Decide step 7a,
+// CanDelegate's intersectCredentialCaveats) reads this instead of
+// re-deriving permission IDs from raw scopes, so legacy and current-version
+// tokens are evaluated through the exact same "empty/malformed/unknown
+// denies" rule (FrozenPermissionCeiling.Allows).
+func (s *ScopedUserIdentity) Ceiling() permissions.FrozenPermissionCeiling { return s.ceiling }
+
+// IsScopedUserIdentity reports whether an identity is backed by a scoped UAT.
+// Scoped credentials must not use role-only administrative bypasses.
+func IsScopedUserIdentity(identity Identity) bool {
+	_, ok := identity.(*ScopedUserIdentity)
+	return ok
+}
+
+// IsUnscopedLocalPlatformAdmin reports whether a local, non-bearer-scoped user
+// may use platform-admin bypasses. Federated identities are never local
+// platform administrators, regardless of an issuer-provided role claim.
+//
+// Phase 1F: This function uses User.Role == "admin" as a performance fast-path.
+// The startup reconciliation (ReconcileSuperAdminBindings) ensures
+// bidirectional consistency: User.Role == "admin" is always backed by a
+// system-scoped super-admin role binding, and a user removed from AdminEmails
+// has both User.Role demoted and the super-admin binding deleted.
+//
+// D11-fix2: Super-admin binding removal now also happens at login time
+// (provisionUser → deleteSuperAdminBinding) when demotion actually occurs,
+// closing the window where IsSystemAdmin could return true despite Role
+// being demoted. For contexts that need an explicit role-binding check, use
+// AuthzService.IsSystemAdmin instead.
+func IsUnscopedLocalPlatformAdmin(user UserIdentity) bool {
+	// IsNilIdentity treats a typed-nil UserIdentity (for example
+	// (*AuthenticatedUser)(nil)) as missing, denying here rather than
+	// reaching user.Role() below.
+	if IsNilIdentity(user) || user.Role() != "admin" || IsScopedUserIdentity(user) {
+		return false
+	}
+	_, federated := user.(FederatedIdentity)
+	return !federated
+}
+
+// IsNilIdentity reports whether identity is either the nil interface or a
+// non-nil Identity value holding a nil concrete pointer (a "typed nil" — for
+// example a nil *DevUser or nil *AuthenticatedUser boxed into the Identity
+// interface). In Go, an interface value equals nil only when both its type
+// and value are nil; a typed nil has a non-nil type descriptor, so
+// identity == nil is false for it even though the concrete pointer it holds
+// is nil. Every concrete Identity implementation in this package is a
+// pointer type, and several of their ID()/Type() methods dereference the
+// receiver with no nil guard (e.g. DevUser.ID() returns u.id directly), so
+// calling one on a typed-nil identity panics (GCP#2188 review comment on
+// initiatorMatchesExecutor, ptone/scion#2342).
+//
+// Deliberately reflect-based rather than a type switch enumerating every
+// concrete Identity implementation, which is what the review comment
+// suggested: a hand-written switch must be extended every time a new
+// Identity implementation is added anywhere in the package, and silently
+// stops catching that type's typed-nil case if a future author forgets. A
+// pointer-kind nil check via reflection generalizes over any current or
+// future implementation without that maintenance burden, at the cost of one
+// reflect call in a defensive guard that is not on any hot path. This helper
+// answers only the narrow nil-safety question — it says nothing about which
+// concrete type identity is or what it means; principalContextForIdentity
+// and credentialContextForIdentity's type switches (authz.go) remain the
+// place concrete Identity types are classified by meaning, and are
+// unaffected by this helper. Every classifier in this package
+// (principalContextForIdentity, credentialContextForIdentity,
+// AncestryIsHubAttested) and decide's entry check treats a typed-nil identity
+// identically to a nil interface, before doing anything else with identity.
+func IsNilIdentity(identity Identity) bool {
+	if identity == nil {
+		return true
+	}
+	// reflect.ValueOf(identity) already unwraps the interface to its
+	// concrete dynamic value, so v.Kind() can never itself be
+	// reflect.Interface here — that case is omitted so this list names only
+	// the kinds IsNil can actually observe through this call.
+	v := reflect.ValueOf(identity)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+// HasScope returns true if this identity has the given scope.
+func (s *ScopedUserIdentity) HasScope(scope string) bool {
+	for _, sc := range s.scopes {
+		if sc == scope {
+			return true
+		}
+	}
+	return false
+}
+
+// identityContextKey is the key for storing identity in the request context.
+type identityContextKey struct{}
+
+// credentialContextKey is the key for request credential metadata.
+type credentialContextKey struct{}
+
+// IdentityFrom returns the identity stored under identityContextKey
+// by ContextWithIdentity, and whether one was stored at all. It performs no
+// nil or typed-nil filtering: callers apply IsNilIdentity themselves. It
+// exists so code outside the principal types (GetIdentityFromContext in
+// auth_identity_context.go, GetBrokerIdentityFromContext in
+// brokeridentity.go) can read the key without naming identityContextKey.
+func IdentityFrom(ctx context.Context) (Identity, bool) {
+	identity, ok := ctx.Value(identityContextKey{}).(Identity)
+	return identity, ok
+}
+
+// ContextWithIdentity returns a new context with the identity set.
+func ContextWithIdentity(ctx context.Context, identity Identity) context.Context {
+	return context.WithValue(ctx, identityContextKey{}, identity)
+}
+
+// GetCredentialContextFromContext returns the credential metadata recorded by
+// authentication middleware. It intentionally returns a zero value when a
+// legacy test or internal caller set only an identity.
+func GetCredentialContextFromContext(ctx context.Context) CredentialContext {
+	credential, _ := ctx.Value(credentialContextKey{}).(CredentialContext)
+	return credential
+}
+
+// credentialSubjectContextKey records the identity that was current in the
+// context when its credential context was recorded.
+type credentialSubjectContextKey struct{}
+
+// ContextWithCredentialContext records credential caveats for request-based authorization.
+// It also records the identity the context holds at that moment (the
+// authentication middleware sets the identity first), so
+// RequestCredentialBindsIdentity can tell whether the identity was later
+// replaced.
+func ContextWithCredentialContext(ctx context.Context, credential CredentialContext) context.Context {
+	ctx = context.WithValue(ctx, credentialContextKey{}, credential)
+	return context.WithValue(ctx, credentialSubjectContextKey{}, ctx.Value(identityContextKey{}))
+}
+
+// RequestCredentialBindsIdentity reports whether ctx's current identity is
+// the very identity the authentication middleware derived from the request's
+// credentials: a credential context is present, and the identity recorded
+// with it is the same object (the same pointer) as the identity ctx holds
+// now. A context that
+// holds only an identity, or whose identity was replaced after
+// authentication (ContextWithIdentity on a request context), does not bind,
+// even when the replacement names the same principal.
+func RequestCredentialBindsIdentity(ctx context.Context) bool {
+	if GetCredentialContextFromContext(ctx).Kind == "" {
+		return false
+	}
+	subject, ok := ctx.Value(credentialSubjectContextKey{}).(Identity)
+	if !ok || IsNilIdentity(subject) {
+		return false
+	}
+	current, ok := ctx.Value(identityContextKey{}).(Identity)
+	if !ok || IsNilIdentity(current) {
+		return false
+	}
+	return SameIdentityObject(subject, current)
+}
+
+// SameIdentityObject reports whether a and b are the same identity object:
+// both non-nil pointers of the same type to the same address. Every identity
+// the authentication middleware creates is a pointer type. A value-typed
+// identity never matches, even an identical copy of itself, because two
+// equal values cannot be told apart from an in-process reconstruction.
+func SameIdentityObject(a, b Identity) bool {
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	if va.Kind() != reflect.Pointer || vb.Kind() != reflect.Pointer || va.IsNil() || vb.IsNil() {
+		return false
+	}
+	return va.Type() == vb.Type() && va.Pointer() == vb.Pointer()
+}
+
+// BrokerOnBehalfOf is the hub-set marker proving that a broker-authenticated
+// request's effective identity was substituted by BrokerAuthMiddleware (or
+// its audited variant) after HMAC verification and a successful
+// X-Scion-On-Behalf-Of resolution — never merely by the presence of the
+// header or a caller-supplied broker credential. BrokerID duplicates
+// Broker.ID() so a compatibility check can bind Credential.ID to it without
+// re-deriving it from the interface value.
+type BrokerOnBehalfOf struct {
+	Broker   BrokerIdentity
+	BrokerID string
+}
+
+// brokerOnBehalfOfContextKey is the context key for the BrokerOnBehalfOf marker.
+type brokerOnBehalfOfContextKey struct{}
+
+// ContextWithBrokerOnBehalfOf records the BrokerOnBehalfOf marker. It is
+// exported only so package hub can reach it: this package is internal to
+// pkg/hub, so nothing outside pkg/hub/... can call it, and package hub keeps
+// it behind the unexported alias contextWithBrokerOnBehalfOf. The only
+// caller is the shared authenticated-broker/OBO context helper in
+// brokerauth.go, invoked only after HMAC verification and a successful
+// resolveOnBehalfOf (pinned by TestPrincipalContextSetterFileAllowList in
+// package hub). An invalid HMAC or a bare/unresolved header must never reach
+// this function.
+func ContextWithBrokerOnBehalfOf(ctx context.Context, obo BrokerOnBehalfOf) context.Context {
+	return context.WithValue(ctx, brokerOnBehalfOfContextKey{}, obo)
+}
+
+// BrokerOnBehalfOfFromContext returns the BrokerOnBehalfOf marker set by the
+// broker authentication middleware, and whether one was set at all.
+func BrokerOnBehalfOfFromContext(ctx context.Context) (BrokerOnBehalfOf, bool) {
+	obo, ok := ctx.Value(brokerOnBehalfOfContextKey{}).(BrokerOnBehalfOf)
+	return obo, ok
+}
+
+// ExecutorContext identifies what is currently executing a request, as
+// distinct from the principal/credential that originally authorized the work
+// (plan §3.5). It is set only by deferred-execution entry points — for
+// example a scheduler firing a persisted scheduled event, or a schedule
+// evaluator materializing a recurrence (E.2b) — never by an ordinary live
+// request. An empty ExecutorContext is exactly what a live request looks
+// like; that emptiness is the discriminator audit/log readers use to tell a
+// live request from deferred execution of an earlier one.
+//
+// Authorization code must not read this: it exists purely for audit/log
+// attribution, mirroring the same rule as CredentialDecoration.
+type ExecutorContext struct {
+	// Kind names the executing subsystem, e.g. "scheduler",
+	// "schedule_evaluator", "broker_dispatch", or "system:<job>".
+	Kind string
+	// ID identifies the specific unit of deferred work, e.g.
+	// "scheduled_event:<id>", "schedule:<id>", or a dispatch ID.
+	ID string
+}
+
+// IsZero reports whether ec carries no executor attribution (the live-request
+// case).
+func (ec ExecutorContext) IsZero() bool {
+	return ec.Kind == "" && ec.ID == ""
+}
+
+// executorContextKey is the context key for ExecutorContext.
+type executorContextKey struct{}
+
+// ContextWithExecutor returns a new context carrying the given executor
+// attribution. Deferred-execution entry points (E.2b) call this before
+// invoking authorization/audit code for the unit of work they are executing.
+func ContextWithExecutor(ctx context.Context, ec ExecutorContext) context.Context {
+	return context.WithValue(ctx, executorContextKey{}, ec)
+}
+
+// ExecutorContextFromContext returns the executor attribution recorded on
+// ctx, if any. Ordinary live requests have none.
+func ExecutorContextFromContext(ctx context.Context) (ExecutorContext, bool) {
+	ec, ok := ctx.Value(executorContextKey{}).(ExecutorContext)
+	return ec, ok
+}
+
+// AuthType constants for request logging.
+const (
+	AuthTypeJWT        = "jwt"
+	AuthTypeUAT        = "uat"
+	AuthTypeDevToken   = "dev-token"
+	AuthTypeAgent      = "agent"
+	AuthTypeBroker     = "broker"
+	AuthTypeProxy      = "proxy"
+	AuthTypeFederation = "federation"
+	// AuthTypeSignedURL labels a credential-less request admitted on the shape
+	// of a skill file capability URL (#1792). It carries no identity.
+	AuthTypeSignedURL = "signed-url"
+	// AuthTypeExternalBearer marks a Hub user authenticated with a bearer
+	// token issued by a trusted external issuer (e.g. a Google ID token)
+	// rather than a Hub-issued credential. See auth_external_bearer.go.
+	AuthTypeExternalBearer = "external-bearer"
+	// AuthTypeAgentDelegation marks a request authenticated with an agent
+	// delegated credential (.design/agent-delegation.md §12.1).
+	AuthTypeAgentDelegation = "agent-delegation"
+)

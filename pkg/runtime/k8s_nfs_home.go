@@ -18,7 +18,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -515,8 +514,8 @@ func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome, work
 		},
 		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:                int64Ptr(containerUID),
-			RunAsGroup:               int64Ptr(containerUID),
+			RunAsUser:                int64Ptr(K8sContainerUID),
+			RunAsGroup:               int64Ptr(K8sContainerUID),
 			RunAsNonRoot:             boolPtr(true),
 			AllowPrivilegeEscalation: &noEscalation,
 			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
@@ -807,35 +806,6 @@ func (r *KubernetesRuntime) waitForPodTermination(ctx context.Context, namespace
 			return err
 		}
 	}
-}
-
-// errAgentStartInProgress is the retryable refusal when another start of
-// the same NFS-home agent holds the start lock.
-var errAgentStartInProgress = errors.New("agent_start_in_progress")
-
-// acquireHomeStartLock takes the per-agent start lock of an NFS-home agent
-// and returns its release. Without a locker (no shared store) it is a
-// no-op: the termination wait and the unique pod name are then the guards.
-func acquireHomeStartLock(ctx context.Context, config RunConfig) (func(), error) {
-	if config.Locker == nil || config.HomeStorage == nil {
-		runtimeLog.Debug("No advisory locker; NFS-home start is guarded by the termination wait only", "agent", config.Name)
-		return func() {}, nil
-	}
-	objID := store.StableProjectHash(config.HomeStorage.ProjectID + "/" + config.HomeStorage.AgentID)
-	acquired, release, err := config.Locker.TryAdvisoryLockObject(ctx, store.LockAgentHomeStart, objID)
-	if err != nil {
-		return nil, fmt.Errorf("agent start lock for %s: %w", config.Name, err)
-	}
-	if !acquired {
-		return nil, fmt.Errorf("%w: another start of agent %s is in progress; retry", errAgentStartInProgress, config.Name)
-	}
-	// Run calls the returned func exactly once: after the pod is created,
-	// or on the way out of a start that did not get that far.
-	return func() {
-		if err := release(); err != nil {
-			runtimeLog.Error("Failed to release the agent start lock", "agent", config.Name, "error", err)
-		}
-	}, nil
 }
 
 // k8sHomeHooksGuardCommand fails when .scion or .scion/hooks in the home is

@@ -256,6 +256,18 @@ type ProjectSettings struct {
 	DefaultAgentRole string `json:"defaultAgentRole,omitempty"`
 }
 
+// ProjectGCPIdentityDefaultsUpdate is a partial project settings PUT body
+// that carries only the default GCP identity fields. A nil field is left out
+// of the body and keeps its stored value; a pointer to "" (or to an empty
+// map) is sent and clears the field. ProjectSettings cannot express this,
+// because its string fields drop "" (omitempty) and a full ProjectSettings
+// round trip would resend every other setting.
+type ProjectGCPIdentityDefaultsUpdate struct {
+	Mode                      *string            `json:"defaultGCPIdentityMode,omitempty"`
+	ServiceAccountID          *string            `json:"defaultGCPIdentityServiceAccountID,omitempty"`
+	ServiceAccountIDByProfile *map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile,omitempty"`
+}
+
 // ResolvedHubDefault reports whether a hub-level default exists for a project
 // setting, in the GET /api/v1/projects/{id}/settings/resolved response.
 //
@@ -388,6 +400,13 @@ type BrokerCapabilities struct {
 	// then does the hub read a start's absence from that list as "no start
 	// in flight".
 	StartsInFlight bool `json:"startsInFlight,omitempty"`
+	// TemplateTiers indicates the broker takes hub settings as separate
+	// tiers (ptone/scion#4218): HubAgentDefaults.Telemetry as a default
+	// below the agent's own config telemetry (requester inline telemetry
+	// from older hubs, and the stored config), and TelemetryPolicy on
+	// create/start/restart as policy above everything. A hub may stop writing those values into
+	// InlineConfig only for a broker that reports this (ptone/scion#4222).
+	TemplateTiers bool `json:"templateTiers,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.

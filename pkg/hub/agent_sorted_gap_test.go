@@ -757,11 +757,3 @@ func TestListProjectAgentsSortedAgentJWT_RowMissingOnlyFromFullRowReadIsDropped(
 		assert.Equal(t, []string{sibs[0], self.ID}, agentIDs(next))
 	})
 }
-
-func agentIDs(resp ListAgentsResponse) []string {
-	ids := make([]string, len(resp.Agents))
-	for i, a := range resp.Agents {
-		ids[i] = a.ID
-	}
-	return ids
-}

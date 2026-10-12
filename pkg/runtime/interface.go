@@ -20,7 +20,6 @@ import (
 	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 type RunConfig struct {
@@ -186,18 +185,6 @@ type RunConfig struct {
 	// workspace provisioning (N2-2). When set, buildPod adds an init container
 	// that clones/provisions the workspace before the main container starts.
 	GitCloneForInit *api.GitCloneConfig
-
-	// Locker provides the per-agent start lock of an NFS-home agent
-	// (acquireHomeStartLock): it keeps two starts of the same agent from
-	// running at once across brokers. On Postgres-backed deployments it
-	// would come from the store's AdvisoryLocker capability.
-	//
-	// May be nil — no production caller sets it today, and without it the
-	// NFS-home start is guarded by the termination wait only. The
-	// Kubernetes runtime's NFS workspace provisioning does not use it:
-	// sciontool provision serializes provisioners with a file lock on the
-	// export.
-	Locker store.AdvisoryLocker
 
 	// Checkpoint and OnResourceCreated are an async launch's runtime hooks
 	// (design t1-async-create-v11.md §3.8.3, §3.8.4), copied from

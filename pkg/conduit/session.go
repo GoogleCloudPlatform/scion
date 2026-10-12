@@ -125,9 +125,16 @@ func newSession(cfg Config, conn transport.Conn, isDialer bool) *session {
 
 // ---------------------------------------------------------------- handshake
 
+// afterDialHook, if set, runs in Dial after the transport connect returns
+// and before ctx is checked and the Hello is sent. Tests only; nil in
+// production.
+var afterDialHook func(ctx context.Context)
+
 // Dial opens a session to the relay: it dials the transport, sends hello
 // and waits for Welcome. A GoAway in place of Welcome (admission refused)
-// is returned as a *CloseError carrying 4401/4403.
+// is returned as a *CloseError carrying 4401/4403. If ctx is cancelled by
+// the time the connect returns, Dial closes the connection and returns
+// ctx's error without sending hello.
 func Dial(ctx context.Context, d transport.Dialer, cfg Config, hello *conduitv1.Hello) (Session, *conduitv1.Welcome, error) {
 	cfg = cfg.withDefaults()
 	if _, err := PrincipalKindFromProto(hello.GetPrincipalKind()); err != nil {
@@ -135,6 +142,18 @@ func Dial(ctx context.Context, d transport.Dialer, cfg Config, hello *conduitv1.
 	}
 	conn, err := d.Dial(ctx)
 	if err != nil {
+		return nil, nil, err
+	}
+	if afterDialHook != nil {
+		afterDialHook(ctx)
+	}
+	// A connect that completes after ctx is cancelled (the client is
+	// stopping) is closed without sending Hello, so the relay does not
+	// admit a session for it. A cancel that lands after this check but
+	// before the Hello write still lets the Hello out; the handshake read
+	// below then returns ctx's error and closes the connection.
+	if err := ctx.Err(); err != nil {
+		_ = conn.Close()
 		return nil, nil, err
 	}
 	s := newSession(cfg, conn, true)
@@ -183,6 +202,17 @@ func WelcomeFromContext(ctx context.Context) *conduitv1.Welcome {
 		return nil
 	}
 	return s.welcome.Load()
+}
+
+// LocalSessionFromContext returns the session whose StreamHandler or
+// RPCHandler received ctx (relay or dialer side), or nil for any other
+// context.
+func LocalSessionFromContext(ctx context.Context) LocalSession {
+	s, _ := ctx.Value(sessionCtxKey{}).(*session)
+	if s == nil {
+		return nil
+	}
+	return s
 }
 
 // Accept runs the relay side of the handshake on conn: it reads Hello,
@@ -369,7 +399,7 @@ func (s *session) setInfo(h *conduitv1.Hello, w *conduitv1.Welcome) {
 // writeDirect writes a handshake frame before the writer goroutine runs.
 func (s *session) writeDirect(f *conduitv1.Frame) error {
 	for _, g := range s.intercept(Outbound, f) {
-		b, err := proto.Marshal(g)
+		b, err := encodeFrame(g)
 		if err != nil {
 			return err
 		}
@@ -630,7 +660,7 @@ func (s *session) writeLoop() {
 		}
 		if of.f != nil {
 			for _, f := range s.intercept(Outbound, of.f) {
-				b, err := proto.Marshal(f)
+				b, err := encodeFrame(f)
 				if err != nil {
 					s.fail(fmt.Errorf("conduit: encode frame: %w", err))
 					return
@@ -1347,6 +1377,9 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 	if proto.Size(frame) > s.cfg.MaxRPCFrame {
 		return &conduitv1.RpcResponse{RequestId: id, Status: 413}, nil
 	}
+	if err := checkRPCFrameEncodes(frame); err != nil {
+		return nil, err // nothing is queued; the session is unaffected
+	}
 	ch := make(chan *conduitv1.RpcResponse, 1)
 	s.mu.Lock()
 	if s.isDone() {
@@ -1404,6 +1437,40 @@ func (s *session) handleRPCResponse(r *conduitv1.RpcResponse) {
 		default: // duplicate response
 		}
 	}
+}
+
+// ErrRPCEncode is returned (wrapped with the cause) by Call when the
+// request cannot be encoded. Nothing is sent and the session stays open.
+var ErrRPCEncode = errors.New("conduit: rpc request cannot be encoded")
+
+// rpcResponseEncodeFailedBody is the body of the 500 that replaces a
+// handler response which cannot be encoded.
+const rpcResponseEncodeFailedBody = "conduit: rpc response cannot be encoded"
+
+// frameMarshalOptions is the one encoding used for every outbound frame.
+// writeDirect, writeLoop and checkRPCFrameEncodes all go through
+// encodeFrame, so a frame that passes the pre-enqueue check is encoded
+// the same way when it is written.
+var frameMarshalOptions = proto.MarshalOptions{}
+
+// encodeFrame encodes an outbound frame with frameMarshalOptions.
+func encodeFrame(f *conduitv1.Frame) ([]byte, error) {
+	return frameMarshalOptions.Marshal(f)
+}
+
+// checkRPCFrameEncodes encodes an RPC frame before it is queued, so an
+// encode failure fails only that RPC. Once a frame is queued, any write
+// failure is a transport failure and ends the session (writeLoop).
+//
+// The frame is encoded again by writeLoop; the bytes are not carried.
+// writeLoop applies the outbound Interceptor to the queued frame and
+// encodes what the Interceptor returns, so a frame an Interceptor makes
+// unencodable still ends the session there, as before.
+func checkRPCFrameEncodes(f *conduitv1.Frame) error {
+	if _, err := encodeFrame(f); err != nil {
+		return fmt.Errorf("%w: %w", ErrRPCEncode, err)
+	}
+	return nil
 }
 
 // RetryAfterHeader is set (to "0") on the 503 answering an RPC that
@@ -1475,6 +1542,11 @@ func (s *session) handleRPCRequest(req *conduitv1.RpcRequest) {
 		frame := &conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: resp}}
 		if len(resp.GetBody()) > MaxRPCBody || proto.Size(frame) > s.cfg.MaxRPCFrame {
 			frame = &conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: &conduitv1.RpcResponse{RequestId: id, Status: 413}}}
+		} else if err := checkRPCFrameEncodes(frame); err != nil {
+			// Only this RPC fails: the caller gets a 500 and the
+			// session and its other RPCs carry on.
+			s.cfg.Logger.Warn("conduit rpc response failed to encode; answering 500", "request_id", id, "error", err)
+			frame = &conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: &conduitv1.RpcResponse{RequestId: id, Status: 500, Body: []byte(rpcResponseEncodeFailedBody)}}}
 		}
 		_ = s.sendControl(s.ctx, frame)
 	}()

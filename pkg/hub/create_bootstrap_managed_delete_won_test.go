@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
@@ -102,74 +101,6 @@ func TestBootstrapCreate_DeleteWon_Answers409(t *testing.T) {
 			assert.Zero(t, pub.count("created"), "no created: %v", pub.kinds())
 		})
 	}
-}
-
-// recordingManagedBackend is a managed-agent backend whose CreateInteraction
-// runs hook (with the create's row ID) and succeeds, and which records the
-// interactions it is asked to cancel. Every interaction reads in progress.
-type recordingManagedBackend struct {
-	failingManagedAgentBackend
-	s         store.Store
-	projectID string
-	hook      func(agentID string)
-
-	mu        sync.Mutex
-	cancelled []string
-	cancelErr error
-	getErr    error
-	// noState makes GetInteraction answer no state and no error.
-	noState bool
-	// cancelCtxErr records the ctx error each cancel saw.
-	cancelCtxErr []error
-}
-
-func (b *recordingManagedBackend) CreateInteraction(context.Context, managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
-	if b.hook != nil {
-		result, err := b.s.ListAgents(context.Background(), store.AgentFilter{ProjectID: b.projectID}, store.ListOptions{})
-		if err == nil && len(result.Items) == 1 {
-			b.hook(result.Items[0].ID)
-		}
-	}
-	return &managedagent.InteractionHandle{InteractionID: "interaction-1"}, nil
-}
-
-func (b *recordingManagedBackend) GetInteraction(_ context.Context, id string) (*managedagent.InteractionState, error) {
-	if b.getErr != nil {
-		return nil, b.getErr
-	}
-	if b.noState {
-		return nil, nil
-	}
-	return &managedagent.InteractionState{InteractionID: id, Status: managedagent.StatusInProgress}, nil
-}
-
-func (b *recordingManagedBackend) CancelInteraction(ctx context.Context, id string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.cancelled = append(b.cancelled, id)
-	b.cancelCtxErr = append(b.cancelCtxErr, ctx.Err())
-	return b.cancelErr
-}
-
-func (b *recordingManagedBackend) cancels() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]string(nil), b.cancelled...)
-}
-
-// useManagedBackend installs backend for the test. Tests that call it must
-// not run in parallel: the backend is package-level.
-func useManagedBackend(t *testing.T, backend managedagent.ManagedAgentBackend) {
-	t.Helper()
-	managedBackendMu.Lock()
-	prev := managedBackendInst
-	managedBackendInst = backend
-	managedBackendMu.Unlock()
-	t.Cleanup(func() {
-		managedBackendMu.Lock()
-		managedBackendInst = prev
-		managedBackendMu.Unlock()
-	})
 }
 
 // afterRunningWriteStore runs hook once, right after the managed create's

@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 import tomllib
-from typing import Any, Collection
+from typing import Any, Callable, Collection
 
 # ---------------------------------------------------------------------------
 # Version contract (§3.3)
@@ -407,6 +407,7 @@ class AuthMethod:
         hint: str = "",
         env_fallback: bool = False,
         secret_key: str = "",
+        present_check: Callable[[str], bool] | None = None,
     ):
         self.name = name
         self.kind = kind  # "env" or "file"
@@ -416,6 +417,11 @@ class AuthMethod:
         self.hint = hint
         self.env_fallback = env_fallback
         self.secret_key = secret_key
+        # present_check, when set, decides whether a file that already exists
+        # in the container at path holds a credential. It receives the
+        # expanded path and is consulted only for that case: a staged file
+        # secret or a candidate file mapping always satisfies the method.
+        self.present_check = present_check
 
 
 def env_method(
@@ -436,9 +442,18 @@ def file_method(
     path: str,
     hint: str = "",
     secret_key: str = "",
+    present_check: Callable[[str], bool] | None = None,
 ) -> AuthMethod:
-    """Declare a file-based auth method."""
-    return AuthMethod(name, "file", path=path, hint=hint, secret_key=secret_key)
+    """Declare a file-based auth method.
+
+    By default a file that already exists in the container at path satisfies
+    the method. Pass present_check when that path can also hold a file that
+    is not a credential (for example, a settings file the harness or its home
+    template writes at the same path); it receives the expanded path and
+    returns whether the file holds a credential.
+    """
+    return AuthMethod(name, "file", path=path, hint=hint, secret_key=secret_key,
+                      present_check=present_check)
 
 
 class AuthSpec:
@@ -724,9 +739,13 @@ class ProvisionContext:
                                        auth_file=method.path or "",
                                        spec_entry=method)
                 if explicit:
+                    detail = ""
+                    if (method.present_check is not None and method.path
+                            and os.path.isfile(expand_path(method.path))):
+                        detail = " (a file exists there but holds no credential)"
                     raise ProvisionError(
                         f"{spec.harness}: auth type {explicit!r} selected but "
-                        f"no auth file found; expected {method.path}"
+                        f"no auth file found; expected {method.path}{detail}"
                     )
 
         hints_parts: list[str] = []
@@ -795,7 +814,8 @@ class ProvisionContext:
         if any(expand_path(p) == target for p in file_paths):
             return True
         if os.path.isfile(target):
-            return True
+            if method.present_check is None or method.present_check(target):
+                return True
         if method.secret_key and method.secret_key in file_secrets:
             return True
         return False
@@ -1844,12 +1864,55 @@ def atomic_write_text(path: str, content: str, *, mode: int | None = None) -> No
 # ---------------------------------------------------------------------------
 
 
+# The characters the host's comment-line rule trims (Go's strings.TrimSpace,
+# that is unicode.IsSpace). Python's str.strip() also removes U+001C..U+001F,
+# and str.splitlines() also splits on \r, \v, \f, U+001C..U+001E, U+0085,
+# U+2028 and U+2029, so neither is used for comment lines: the host splits
+# on "\n" only and trims only these characters.
+HOST_SPACE = (
+    "\t\n\v\f\r \x85\xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+def drop_json_comment_lines(text: str) -> str:
+    """Drop the lines of text that start with "//" after leading whitespace.
+
+    Lines are split on "\n" only and leading whitespace is HOST_SPACE, the
+    host's rule, so the result matches what the host parses.
+    """
+    return "\n".join(
+        ln for ln in text.split("\n") if not ln.lstrip(HOST_SPACE).startswith("//")
+    )
+
+
 def read_json_skipping_comment_lines(path: str) -> Any:
-    """Read a JSON file, stripping lines starting with // before parsing."""
-    with open(path, "r", encoding="utf-8") as f:
+    """Read a JSON file, dropping lines that start with // before parsing.
+
+    Comment lines follow the host's rule (drop_json_comment_lines); the file
+    is read as bytes, so a lone \r is not a line break. Content that is not
+    UTF-8, not JSON, holds an integer too long to convert, or is nested too
+    deeply raises ProvisionError naming the file. The message never includes
+    file content. OSError (for example, a missing file) is raised unchanged.
+    """
+    with open(path, "rb") as f:
         raw = f.read()
-    lines = [ln for ln in raw.splitlines() if not ln.strip().startswith("//")]
-    return json.loads("\n".join(lines))
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ProvisionError(f"{path} is not valid UTF-8") from None
+    try:
+        return json.loads(drop_json_comment_lines(text))
+    except json.JSONDecodeError as exc:
+        raise ProvisionError(
+            f"{path} is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})"
+        ) from None
+    except ValueError:
+        # An integer literal beyond Python's int conversion limit.
+        raise ProvisionError(f"{path} holds a number that cannot be converted") from None
+    except RecursionError:
+        raise ProvisionError(f"{path} is nested too deeply to read") from None
 
 
 # ---------------------------------------------------------------------------

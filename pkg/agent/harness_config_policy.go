@@ -92,7 +92,7 @@ func harnessAfterResolveError(ctx context.Context, agentHome, harnessName, harne
 	if config.HarnessConfigPolicyFromContext(ctx) != nil && agentHome != "" && harness.HarnessProvisionHookStaged(agentHome) {
 		return nil, fmt.Errorf("%w: %w", ErrHarnessConfigPolicy, &HarnessConfigNotEvaluatedError{Name: harnessName, Cause: resolveErr})
 	}
-	if err := resetStagedProvisioning(agentHome); err != nil {
+	if err := writeAgentHome(ctx, func() error { return resetStagedProvisioning(agentHome) }); err != nil {
 		return nil, err
 	}
 	return harness.New(harnessType), nil

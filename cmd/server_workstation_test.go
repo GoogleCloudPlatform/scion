@@ -174,49 +174,125 @@ func TestBrokerDelegationUsesHostedMode(t *testing.T) {
 }
 
 func TestBrokerDelegationDefaultsToLoopback(t *testing.T) {
-	// Verify the standalone broker loopback logic:
-	// When hostedMode=true, host not changed, broker enabled, hub disabled,
-	// the broker host should be forced to loopback.
-	t.Cleanup(resetServerFlags)
-	resetServerFlags()
-
-	hostedMode = true
-	enableRuntimeBroker = true
-	enableHub = false
-
-	// Simulate the reconciliation logic: in hosted mode with broker-only,
-	// if host wasn't explicitly set, default broker to loopback.
+	// Hosted standalone broker (broker enabled, hub disabled) without --host
+	// defaults to loopback.
 	cfg := config.DefaultGlobalConfig()
-	cfg.RuntimeBroker.Enabled = enableRuntimeBroker
-	hostChanged := false // simulates !cmd.Flags().Changed("host")
+	cfg.RuntimeBroker.Enabled = true
 
-	if hostedMode && !hostChanged && cfg.RuntimeBroker.Enabled && !enableHub {
-		cfg.RuntimeBroker.Host = "127.0.0.1"
-	}
+	applyServerListenHosts(&cfg, true, false, "0.0.0.0", false)
 
 	assert.Equal(t, "127.0.0.1", cfg.RuntimeBroker.Host,
 		"standalone broker in hosted mode should default to loopback")
 }
 
 func TestBrokerDelegationExplicitHostKeepsValue(t *testing.T) {
-	// When --host is explicitly provided, the broker should use that value.
-	t.Cleanup(resetServerFlags)
-	resetServerFlags()
-
-	hostedMode = true
-	enableRuntimeBroker = true
-	enableHub = false
-
+	// Hosted standalone broker with --host keeps the configured broker host.
 	cfg := config.DefaultGlobalConfig()
-	cfg.RuntimeBroker.Enabled = enableRuntimeBroker
-	hostChanged := true // simulates cmd.Flags().Changed("host")
+	cfg.RuntimeBroker.Enabled = true
 
-	if hostedMode && !hostChanged && cfg.RuntimeBroker.Enabled && !enableHub {
-		cfg.RuntimeBroker.Host = "127.0.0.1"
-	}
+	applyServerListenHosts(&cfg, true, true, "10.0.0.5", false)
 
 	assert.Equal(t, "0.0.0.0", cfg.RuntimeBroker.Host,
-		"explicit --host should keep the configured value")
+		"explicit --host should keep the configured broker host")
+	assert.Equal(t, "10.0.0.5", cfg.Hub.Host, "--host sets the hub listener")
+}
+
+func TestApplyServerListenHosts(t *testing.T) {
+	tests := []struct {
+		name       string
+		hosted     bool
+		brokerHost string // "" keeps the default from DefaultGlobalConfig
+		hostSet    bool
+		host       string
+		hubEnabled bool
+		wantHub    string
+		wantBroker string
+	}{
+		{
+			name:       "workstation without --host",
+			hubEnabled: true,
+			wantHub:    "127.0.0.1",
+			wantBroker: "127.0.0.1",
+		},
+		{
+			name:       "workstation with --host moves only the hub",
+			hostSet:    true,
+			host:       "0.0.0.0",
+			hubEnabled: true,
+			wantHub:    "0.0.0.0",
+			wantBroker: "127.0.0.1",
+		},
+		{
+			name:       "workstation with --host keeps explicit broker host",
+			brokerHost: "192.168.1.10",
+			hostSet:    true,
+			host:       "0.0.0.0",
+			hubEnabled: true,
+			wantHub:    "0.0.0.0",
+			wantBroker: "192.168.1.10",
+		},
+		{
+			name:       "workstation broker host 0.0.0.0 counts as unset",
+			brokerHost: "0.0.0.0",
+			hostSet:    true,
+			host:       "0.0.0.0",
+			hubEnabled: true,
+			wantHub:    "0.0.0.0",
+			wantBroker: "127.0.0.1",
+		},
+		{
+			name:       "workstation without --host keeps explicit broker host",
+			brokerHost: "192.168.1.10",
+			hubEnabled: true,
+			wantHub:    "127.0.0.1",
+			wantBroker: "192.168.1.10",
+		},
+		{
+			name:       "hosted combo without --host is unchanged",
+			hosted:     true,
+			hubEnabled: true,
+			wantHub:    "0.0.0.0",
+			wantBroker: "0.0.0.0",
+		},
+		{
+			name:       "hosted combo with --host moves only the hub",
+			hosted:     true,
+			hostSet:    true,
+			host:       "10.0.0.5",
+			hubEnabled: true,
+			wantHub:    "10.0.0.5",
+			wantBroker: "0.0.0.0",
+		},
+		{
+			name:       "hosted standalone broker without --host uses loopback",
+			hosted:     true,
+			brokerHost: "10.0.0.7",
+			wantHub:    "0.0.0.0",
+			wantBroker: "127.0.0.1",
+		},
+		{
+			name:       "hosted keeps configured broker host",
+			hosted:     true,
+			brokerHost: "10.0.0.7",
+			hubEnabled: true,
+			wantHub:    "0.0.0.0",
+			wantBroker: "10.0.0.7",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultGlobalConfig()
+			cfg.RuntimeBroker.Enabled = true
+			if tt.brokerHost != "" {
+				cfg.RuntimeBroker.Host = tt.brokerHost
+			}
+
+			applyServerListenHosts(&cfg, tt.hosted, tt.hostSet, tt.host, tt.hubEnabled)
+
+			assert.Equal(t, tt.wantHub, cfg.Hub.Host, "hub listen host")
+			assert.Equal(t, tt.wantBroker, cfg.RuntimeBroker.Host, "broker listen host")
+		})
+	}
 }
 
 func TestPrintWorkstationQuickstart(t *testing.T) {
@@ -225,12 +301,14 @@ func TestPrintWorkstationQuickstart(t *testing.T) {
 	token := "scion_dev_abc123"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "dev-token"), []byte(token+"\n"), 0600))
 
+	stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
+
 	// Capture stdout
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, true, true)
+	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, true, true, true, true)
 
 	_ = w.Close()
 	os.Stdout = old
@@ -245,12 +323,13 @@ func TestPrintWorkstationQuickstart(t *testing.T) {
 
 func TestPrintWorkstationQuickstart_NoWeb(t *testing.T) {
 	dir := t.TempDir()
+	stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
 
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, false, false)
+	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, false, false, true, true)
 
 	_ = w.Close()
 	os.Stdout = old
@@ -265,12 +344,13 @@ func TestPrintWorkstationQuickstart_NoWeb(t *testing.T) {
 
 func TestPrintWorkstationQuickstart_WildcardHost(t *testing.T) {
 	dir := t.TempDir()
+	stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
 
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	printWorkstationQuickstart(false, dir, "0.0.0.0", 9090, true, false)
+	printWorkstationQuickstart(false, dir, "0.0.0.0", 9090, true, false, true, true)
 
 	_ = w.Close()
 	os.Stdout = old

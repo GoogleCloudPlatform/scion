@@ -32,6 +32,7 @@ var (
 	noAutoMigrate        bool
 	enableDevAuth        bool
 	enableTestLogin      bool
+	enableTestIdentities bool
 	enableDebugEndpoints bool
 	enableDebug          bool
 	storageBucket        string
@@ -241,7 +242,7 @@ func init() {
 	// Hub API flags
 	serverStartCmd.Flags().BoolVar(&enableHub, "enable-hub", false, "Enable the Hub API")
 	serverStartCmd.Flags().IntVar(&hubPort, "port", 9810, "Hub API port (standalone mode only; ignored when --enable-web is set, use --web-port instead)")
-	serverStartCmd.Flags().StringVar(&hubHost, "host", "0.0.0.0", "Hub API host to bind")
+	serverStartCmd.Flags().StringVar(&hubHost, "host", "0.0.0.0", "Listen address for the Hub API and web server; the runtime broker listener is set by server.broker.host (workstation default 127.0.0.1; 0.0.0.0 counts as unset)")
 	serverStartCmd.Flags().StringVar(&dbURL, "db", "", "Database URL/path")
 	serverStartCmd.Flags().BoolVar(&noAutoMigrate, "no-auto-migrate", false, "Skip automatic in-process upgrade of a legacy raw-SQL hub.db to the Ent schema (operator opt-out)")
 
@@ -252,6 +253,8 @@ func init() {
 	// Auth flags
 	serverStartCmd.Flags().BoolVar(&enableDevAuth, "dev-auth", false, "Enable development authentication (auto-generates token)")
 	serverStartCmd.Flags().BoolVar(&enableTestLogin, "enable-test-login", false, "Enable the test-login endpoint for integration testing (do not use in production)")
+	serverStartCmd.Flags().BoolVar(&enableTestIdentities, "enable-test-identities", false, "Enable hub-issued short-lived test identities (POST /api/v1/test-identities) for test hubs (do not use in production)")
+	registerTestAdminFlags(serverStartCmd)
 
 	// Debug flags
 	serverStartCmd.Flags().BoolVar(&enableDebugEndpoints, "enable-debug-endpoints", false, "Serve diagnostic endpoints for local development; refused in hosted mode and independent of --debug")

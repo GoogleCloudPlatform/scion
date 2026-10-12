@@ -22,6 +22,10 @@ type Tx struct {
 	Agent *AgentClient
 	// AgentCredential is the client for interacting with the AgentCredential builders.
 	AgentCredential *AgentCredentialClient
+	// AgentDelegatedCredential is the client for interacting with the AgentDelegatedCredential builders.
+	AgentDelegatedCredential *AgentDelegatedCredentialClient
+	// AgentDelegationGrant is the client for interacting with the AgentDelegationGrant builders.
+	AgentDelegationGrant *AgentDelegationGrantClient
 	// AgentHold is the client for interacting with the AgentHold builders.
 	AgentHold *AgentHoldClient
 	// AgentIdentityKey is the client for interacting with the AgentIdentityKey builders.
@@ -30,6 +34,8 @@ type Tx struct {
 	AgentRecovery *AgentRecoveryClient
 	// AgentReincarnation is the client for interacting with the AgentReincarnation builders.
 	AgentReincarnation *AgentReincarnationClient
+	// AgentServiceAccountAssignment is the client for interacting with the AgentServiceAccountAssignment builders.
+	AgentServiceAccountAssignment *AgentServiceAccountAssignmentClient
 	// AgentSessionMetrics is the client for interacting with the AgentSessionMetrics builders.
 	AgentSessionMetrics *AgentSessionMetricsClient
 	// AllowListEntry is the client for interacting with the AllowListEntry builders.
@@ -40,6 +46,8 @@ type Tx struct {
 	BrokerDispatch *BrokerDispatchClient
 	// BrokerJoinToken is the client for interacting with the BrokerJoinToken builders.
 	BrokerJoinToken *BrokerJoinTokenClient
+	// BrokerReportedRun is the client for interacting with the BrokerReportedRun builders.
+	BrokerReportedRun *BrokerReportedRunClient
 	// BrokerSecret is the client for interacting with the BrokerSecret builders.
 	BrokerSecret *BrokerSecretClient
 	// BrokerSetting is the client for interacting with the BrokerSetting builders.
@@ -150,6 +158,16 @@ type Tx struct {
 	SubscriptionTemplate *SubscriptionTemplateClient
 	// Template is the client for interacting with the Template builders.
 	Template *TemplateClient
+	// TestIdentityDelegation is the client for interacting with the TestIdentityDelegation builders.
+	TestIdentityDelegation *TestIdentityDelegationClient
+	// TestIdentityLoginCode is the client for interacting with the TestIdentityLoginCode builders.
+	TestIdentityLoginCode *TestIdentityLoginCodeClient
+	// TestInfraMarker is the client for interacting with the TestInfraMarker builders.
+	TestInfraMarker *TestInfraMarkerClient
+	// ThreadGroup is the client for interacting with the ThreadGroup builders.
+	ThreadGroup *ThreadGroupClient
+	// ThreadGroupMember is the client for interacting with the ThreadGroupMember builders.
+	ThreadGroupMember *ThreadGroupMemberClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
 	// User is the client for interacting with the User builders.
@@ -294,15 +312,19 @@ func (tx *Tx) init() {
 	tx.AccessPolicy = NewAccessPolicyClient(tx.config)
 	tx.Agent = NewAgentClient(tx.config)
 	tx.AgentCredential = NewAgentCredentialClient(tx.config)
+	tx.AgentDelegatedCredential = NewAgentDelegatedCredentialClient(tx.config)
+	tx.AgentDelegationGrant = NewAgentDelegationGrantClient(tx.config)
 	tx.AgentHold = NewAgentHoldClient(tx.config)
 	tx.AgentIdentityKey = NewAgentIdentityKeyClient(tx.config)
 	tx.AgentRecovery = NewAgentRecoveryClient(tx.config)
 	tx.AgentReincarnation = NewAgentReincarnationClient(tx.config)
+	tx.AgentServiceAccountAssignment = NewAgentServiceAccountAssignmentClient(tx.config)
 	tx.AgentSessionMetrics = NewAgentSessionMetricsClient(tx.config)
 	tx.AllowListEntry = NewAllowListEntryClient(tx.config)
 	tx.ApiKey = NewApiKeyClient(tx.config)
 	tx.BrokerDispatch = NewBrokerDispatchClient(tx.config)
 	tx.BrokerJoinToken = NewBrokerJoinTokenClient(tx.config)
+	tx.BrokerReportedRun = NewBrokerReportedRunClient(tx.config)
 	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
 	tx.BrokerSetting = NewBrokerSettingClient(tx.config)
 	tx.BrokerTargetInventory = NewBrokerTargetInventoryClient(tx.config)
@@ -358,6 +380,11 @@ func (tx *Tx) init() {
 	tx.SkillVersion = NewSkillVersionClient(tx.config)
 	tx.SubscriptionTemplate = NewSubscriptionTemplateClient(tx.config)
 	tx.Template = NewTemplateClient(tx.config)
+	tx.TestIdentityDelegation = NewTestIdentityDelegationClient(tx.config)
+	tx.TestIdentityLoginCode = NewTestIdentityLoginCodeClient(tx.config)
+	tx.TestInfraMarker = NewTestInfraMarkerClient(tx.config)
+	tx.ThreadGroup = NewThreadGroupClient(tx.config)
+	tx.ThreadGroupMember = NewThreadGroupMemberClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)

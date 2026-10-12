@@ -40,28 +40,6 @@ import (
 // credential. Rotation admits no user access token.
 // ============================================================================
 
-// mintHubBrokerUAT mints a hub-boundary user access token for userID with
-// the given scopes and returns its key.
-func mintHubBrokerUAT(t *testing.T, srv *Server, userID string, scopes ...string) string {
-	t.Helper()
-	key, token, err := srv.uatService.CreateTokenWithParams(rs4MintContext(userID), CreateTokenParams{
-		UserID:   userID,
-		Name:     "hub-broker-token",
-		Boundary: TokenBoundary{Kind: BoundaryKindHub},
-		Scopes:   scopes,
-	})
-	require.NoError(t, err)
-	require.Equal(t, string(BoundaryKindHub), token.BoundaryKind)
-	return key
-}
-
-func decodeBrokerRegistration(t *testing.T, body *bytes.Buffer) CreateBrokerRegistrationResponse {
-	t.Helper()
-	var resp CreateBrokerRegistrationResponse
-	require.NoError(t, json.NewDecoder(body).Decode(&resp))
-	return resp
-}
-
 func assertNoBrokerNamed(t *testing.T, s store.Store, name string) {
 	t.Helper()
 	_, err := s.GetRuntimeBrokerByName(context.Background(), name)
@@ -79,6 +57,7 @@ func removeFromHubMembers(t *testing.T, s store.Store, userID string) {
 // ----------------------------------------------------------------------------
 
 func TestBrokerHubToken_NewRegistrationAdmitted(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	member := newHubMemberUser(t, s, "hubtoken-new-member")
@@ -103,6 +82,7 @@ func TestBrokerHubToken_NewRegistrationAdmitted(t *testing.T) {
 }
 
 func TestBrokerHubToken_WithoutBrokerCreateScopeDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	member := newHubMemberUser(t, s, "hubtoken-noscope-member")
 	key := mintHubBrokerUAT(t, srv, member.ID, "broker:read")
@@ -116,6 +96,7 @@ func TestBrokerHubToken_WithoutBrokerCreateScopeDenied(t *testing.T) {
 }
 
 func TestBrokerHubToken_UserRemovedFromHubMembersDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	member := newHubMemberUser(t, s, "hubtoken-removed-member")
 	key := mintHubBrokerUAT(t, srv, member.ID, "broker:create")
@@ -130,6 +111,7 @@ func TestBrokerHubToken_UserRemovedFromHubMembersDenied(t *testing.T) {
 }
 
 func TestBrokerHubToken_RevokedTokenRejected(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	member := newHubMemberUser(t, s, "hubtoken-revoked-member")
 	key, token, err := srv.uatService.CreateTokenWithParams(rs4MintContext(member.ID), CreateTokenParams{
@@ -146,6 +128,7 @@ func TestBrokerHubToken_RevokedTokenRejected(t *testing.T) {
 }
 
 func TestBrokerHubToken_ExpiredTokenRejected(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	member := newHubMemberUser(t, s, "hubtoken-expired-member")
 
@@ -167,6 +150,7 @@ func TestBrokerHubToken_ExpiredTokenRejected(t *testing.T) {
 }
 
 func TestBrokerHubToken_SuspendedUserRejected(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	member := newHubMemberUser(t, s, "hubtoken-suspended-member")
@@ -185,6 +169,7 @@ func TestBrokerHubToken_SuspendedUserRejected(t *testing.T) {
 }
 
 func TestBrokerHubToken_PlainUserCannotMintBrokerCreate(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	plain := newPlainUser(t, s, "hubtoken-plain-mint")
 
@@ -200,6 +185,7 @@ func TestBrokerHubToken_PlainUserCannotMintBrokerCreate(t *testing.T) {
 }
 
 func TestBrokerHubToken_ExpiredHubMemberBindingSessionDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	user := newPlainUser(t, s, "hubtoken-expired-binding")
@@ -230,6 +216,7 @@ func TestBrokerHubToken_ExpiredHubMemberBindingSessionDenied(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 func TestBrokerHubToken_OwnerReregistersByName(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newHubMemberUser(t, s, "hubtoken-rereg-owner-name")
@@ -251,6 +238,7 @@ func TestBrokerHubToken_OwnerReregistersByName(t *testing.T) {
 }
 
 func TestBrokerHubToken_OwnerReregistersByIDWithNewName(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newHubMemberUser(t, s, "hubtoken-rereg-owner-id")
 	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-owner-id-broker", owner.ID)
@@ -268,6 +256,7 @@ func TestBrokerHubToken_OwnerReregistersByIDWithNewName(t *testing.T) {
 }
 
 func TestBrokerHubToken_SuperAdminTokenCannotReregisterOtherUsersBroker(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		req  func(b *store.RuntimeBroker) CreateBrokerRegistrationRequest
@@ -301,6 +290,7 @@ func TestBrokerHubToken_SuperAdminTokenCannotReregisterOtherUsersBroker(t *testi
 }
 
 func TestBrokerHubToken_SuperAdminTokenReregistersOwnBroker(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	admin := newSuperAdminUser(t, s, "hubtoken-rereg-admin-own")
 	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-admin-own-broker", admin.ID)
@@ -317,6 +307,7 @@ func TestBrokerHubToken_SuperAdminTokenReregistersOwnBroker(t *testing.T) {
 }
 
 func TestBrokerHubToken_SuperAdminTokenCannotReregisterOwnerlessBroker(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	audit := installBrokerAuditCapture(srv)
 	admin := newSuperAdminUser(t, s, "hubtoken-rereg-admin-ownerless")
@@ -335,6 +326,7 @@ func TestBrokerHubToken_SuperAdminTokenCannotReregisterOwnerlessBroker(t *testin
 }
 
 func TestBrokerHubToken_SuperAdminDevCredentialReregistersOtherUsersBroker(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newHubMemberUser(t, s, "hubtoken-rereg-dev-owner")
 	broker := createReregistrationTestBroker(t, s, "hubtoken-rereg-dev-broker", owner.ID)
@@ -356,6 +348,7 @@ func TestBrokerHubToken_SuperAdminDevCredentialReregistersOtherUsersBroker(t *te
 // an interactive or dev credential, and a user access token is held to the
 // creator arm.
 func TestBrokerRemintTargetAuthorized_SuperAdminArmNeedsSessionCredential(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newHubMemberUser(t, s, "remint-helper-owner")
@@ -391,6 +384,7 @@ func TestBrokerRemintTargetAuthorized_SuperAdminArmNeedsSessionCredential(t *tes
 }
 
 func TestBrokerHubToken_SuperAdminTokenWithoutBrokerCreateDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newHubMemberUser(t, s, "hubtoken-rereg-narrow-owner")
 	admin := newSuperAdminUser(t, s, "hubtoken-rereg-narrow-admin")
@@ -407,6 +401,7 @@ func TestBrokerHubToken_SuperAdminTokenWithoutBrokerCreateDenied(t *testing.T) {
 }
 
 func TestBrokerHubToken_NonOwnerReregistrationDenied(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		req  func(b *store.RuntimeBroker) CreateBrokerRegistrationRequest
@@ -437,6 +432,7 @@ func TestBrokerHubToken_NonOwnerReregistrationDenied(t *testing.T) {
 }
 
 func TestBrokerHubToken_OwnNameWithOtherBrokerIDReregistersOwnBroker(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newHubMemberUser(t, s, "hubtoken-namewins-owner")
@@ -461,6 +457,7 @@ func TestBrokerHubToken_OwnNameWithOtherBrokerIDReregistersOwnBroker(t *testing.
 }
 
 func TestBrokerHubToken_OwnerTokenCannotRotate(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newHubMemberUser(t, s, "hubtoken-rotate-owner")
@@ -542,6 +539,7 @@ func assertNoJoinToken(t *testing.T, s store.Store, brokerID string) {
 }
 
 func TestBrokerHubToken_SameNameBrokerAppearsDuringNewRegistration(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	member := newHubMemberUser(t, s, "hubtoken-race-new-member")
 	other := newHubMemberUser(t, s, "hubtoken-race-new-other")
@@ -567,6 +565,7 @@ func TestBrokerHubToken_SameNameBrokerAppearsDuringNewRegistration(t *testing.T)
 }
 
 func TestBrokerHubToken_NameMatchChangesDuringOwnerReregistration(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newHubMemberUser(t, s, "hubtoken-race-rereg-owner")
 	other := newHubMemberUser(t, s, "hubtoken-race-rereg-other")
@@ -596,6 +595,7 @@ func TestBrokerHubToken_NameMatchChangesDuringOwnerReregistration(t *testing.T) 
 // broker.auto_provide check, so it is pinned to the broker still having
 // auto-provide on when the service re-reads it.
 func TestBrokerHubToken_AutoProvideTurnedOffDuringOwnerReregistration(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newHubMemberUser(t, s, "hubtoken-race-autoprovide-owner")

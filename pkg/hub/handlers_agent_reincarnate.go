@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"sort"
@@ -316,6 +317,9 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	if !ok {
 		return
 	}
+	if !s.resolveRepairAssignment(w, r, agent, auth, targetRole != storedRole, patch) {
+		return
+	}
 
 	// A target broker other than the agent's current one is a move. The
 	// target is resolved without writing anything (no provider link).
@@ -547,6 +551,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
+	addAuthorityToPlan(&plan, auth)
 	targetGeneration := agent.Generation + 1
 
 	if req.DryRun {
@@ -562,7 +567,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	s.startReincarnation(w, r, agent, auth, fresh, plan, targetGeneration, req.Handoff, admittedDeletionClaim,
+	s.startReincarnation(w, r, agent, auth, patch, fresh, plan, targetGeneration, req.Handoff, admittedDeletionClaim,
 		brokerIDIfSet(targetBrokerID, agent.RuntimeBrokerID), targetBrokerID, nil)
 }
 
@@ -571,9 +576,38 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 // or one that keeps the role (except a user repair, ptone/scion#3948)) and
 // starts the detached worker, answering 202. sourceBrokerID and targetBrokerID are
 // echoed in the response (both empty unless the request named a target);
-// move is non-nil for a cross-broker move.
-func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agent *store.Agent, auth *reincarnateAuthority, fresh *store.AgentAppliedConfig, plan ReincarnationPlan, targetGeneration int, handoff string, admittedDeletionClaim int64, sourceBrokerID, targetBrokerID string, move *reincarnationMove) {
+// move is non-nil for a cross-broker move. patch is the validated request
+// patch (nil when none); a --service-account patch records the requester as
+// the source of the new service-account assignment, in the claim
+// transaction, and so does a same-role repair whose requester passed the
+// assignment gate (auth.Assignment).
+func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agent *store.Agent, auth *reincarnateAuthority, patch *reincarnatePatch, fresh *store.AgentAppliedConfig, plan ReincarnationPlan, targetGeneration int, handoff string, admittedDeletionClaim int64, sourceBrokerID, targetBrokerID string, move *reincarnationMove) {
 	ctx := r.Context()
+
+	// A --service-account patch sets the next generation's account; the
+	// requester (already authorized by the assignment gate) is recorded as
+	// its source under the requester's frozen ceiling. This runs before
+	// anything is written.
+	var saAssignment *store.AgentServiceAccountAssignment
+	if patch != nil && patch.GCPIdentity != nil {
+		next := *agent
+		next.AppliedConfig = fresh
+		if !agentHasAssignModeIdentity(&next) || agentAssignedServiceAccountID(&next) == "" {
+			slog.ErrorContext(ctx, "reincarnate: service-account patch did not produce an assign-mode identity", "agent_id", agent.ID)
+			InternalError(w)
+			return
+		}
+		ceiling, prov, ok := s.saAssignmentSourceCeiling(w, r,
+			Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: agent.ProjectID}, ActionUpdate)
+		if !ok {
+			return
+		}
+		saAssignment = newSAAssignment(&next, store.SAAssignmentOriginReincarnate, ceiling, prov)
+	} else if auth != nil && auth.Assignment != nil {
+		// A same-role repair re-records the assignment from the requester
+		// (resolveRepairAssignment).
+		saAssignment = auth.Assignment
+	}
 
 	// The claim is guarded by the agent row's own optimistic lock
 	// (state_version), and the claim and the reincarnation record commit
@@ -615,7 +649,7 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 	// The claim also requires that no start claim is held, live or
 	// unconfirmed: a start whose outcome is unknown may still create a
 	// container this reincarnation would then compete with.
-	if err := s.reincarnateClaimTx(ctx, agent, rec, auth, auditActorFromContext(ctx)); err != nil {
+	if err := s.reincarnateClaimTx(ctx, agent, rec, auth, saAssignment, auditActorFromContext(ctx)); err != nil {
 		var held *store.ClaimHeldError
 		if errors.Is(err, store.ErrVersionConflict) {
 			Conflict(w, "agent was concurrently modified; retry")
@@ -778,6 +812,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
+	addAuthorityToPlan(&plan, auth)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
 	// The access probes judge the config the next generation runs with: a
 	// --service-account patch replaces a passthrough identity, so the
@@ -801,7 +836,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		})
 		return
 	}
-	s.startReincarnation(w, r, agent, auth, fresh, plan, agent.Generation+1, req.Handoff, admittedDeletionClaim, src.ID, dst.ID, &reincarnationMove{
+	s.startReincarnation(w, r, agent, auth, patch, fresh, plan, agent.Generation+1, req.Handoff, admittedDeletionClaim, src.ID, dst.ID, &reincarnationMove{
 		SourceBrokerID:    src.ID,
 		TargetBrokerID:    dst.ID,
 		ProjectID:         project.ID,

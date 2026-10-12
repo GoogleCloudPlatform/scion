@@ -229,7 +229,6 @@ func TestSeedReconcile_GlobalCatalogAuthorAppearsOnUpgrade(t *testing.T) {
 	// Create a raw store — no testServer, so no automatic seeding.
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, migrateTestStore(context.Background(), s))
 	ctx := context.Background()
 
 	// ── Simulate the pre-upgrade state (revision 3 hub-admin, no global-catalog-author) ──
@@ -387,18 +386,4 @@ func TestGlobalWriteAction_MapsCorrectly(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
-}
-
-// createNamedTestUser creates a user with a given name prefix and role.
-func createNamedTestUser(t *testing.T, s store.Store, namePrefix, role string) *store.User {
-	t.Helper()
-	u := &store.User{
-		ID:          tid(namePrefix),
-		Email:       namePrefix + "@test.com",
-		DisplayName: namePrefix,
-		Role:        role,
-		Status:      "active",
-	}
-	require.NoError(t, s.CreateUser(context.Background(), u))
-	return u
 }

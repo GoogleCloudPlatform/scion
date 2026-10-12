@@ -145,22 +145,6 @@ func TestChatV2_A2511_R1_AgentUser_UserUUIDInAgentSlot_NoPhantomRow(t *testing.T
 // caller-uncontrolled phantom row).
 // ---------------------------------------------------------------------------
 
-// getUserErrStore wraps a real store and makes GetUser return a non-NotFound
-// error for one specific ID, simulating a transient store failure during
-// peer resolution — distinct from a ghost ID, which returns store.ErrNotFound
-// and is already covered by the shapes above.
-type getUserErrStore struct {
-	store.Store
-	failID string
-}
-
-func (s *getUserErrStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if id == s.failID {
-		return nil, errors.New("injected store error")
-	}
-	return s.Store.GetUser(ctx, id)
-}
-
 // getAgentErrStore is getUserErrStore's mirror for the agent-slot lookup.
 type getAgentErrStore struct {
 	store.Store

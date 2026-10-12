@@ -138,7 +138,7 @@ func TestSendOutboundMessageViaHub_StaleThreadRejected(t *testing.T) {
 	assert.NotContains(t, out, "Message sent", "a rejected send must not report success")
 	assert.Contains(t, err.Error(), "failed to send message to user:alice")
 	assert.Contains(t, err.Error(), "conv:<uuid>", "the hub's guidance must reach the user")
-	assert.NotContains(t, err.Error(), "scion hub disable", "a 4xx gets no local-only hint")
+	assert.NotContains(t, err.Error(), "scion hub status", "a 4xx gets no hub-check hint")
 	assert.True(t, isHubFailure(err), "the rejection must render as a hub failure (exit 1)")
 	assert.False(t, showUsageForError(messageCmd, err, true), "no Usage block for a hub rejection")
 }
@@ -166,5 +166,5 @@ func TestSendGroupMessageViaHub_StaleThreadUserMemberFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "group delivery failed")
 	assert.Contains(t, out, "Failed: user:alice")
 	assert.Contains(t, out, "conv:<uuid>", "the per-member failure carries the hub's reason")
-	assert.NotContains(t, out, "Delivered: user:alice")
+	assert.NotContains(t, out, "Accepted: user:alice")
 }

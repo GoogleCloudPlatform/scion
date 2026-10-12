@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -1220,6 +1221,14 @@ type VersionedSettings struct {
 	// co-located (workstation) mode.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty" yaml:"auto_inject_gcloud_adc,omitempty" koanf:"auto_inject_gcloud_adc"`
 
+	// UseHostCredentials controls whether agents on a co-located workstation
+	// broker (hub on loopback with dev auth) receive the host's
+	// harness-declared credential files (for example OAuth login files) as
+	// file secrets. Unset means true in workstation mode; ignored (always off)
+	// in hosted mode. Hub secrets of the same name or target take precedence.
+	// See HostCredentialsPolicy.
+	UseHostCredentials *bool `json:"use_host_credentials,omitempty" yaml:"use_host_credentials,omitempty" koanf:"use_host_credentials"`
+
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *AutoExposePortsSettings `json:"auto_expose_ports,omitempty" yaml:"auto_expose_ports,omitempty" koanf:"auto_expose_ports"`
 
@@ -1501,6 +1510,19 @@ type V1PluginEntry struct {
 	AuthAudience string `json:"auth_audience,omitempty" yaml:"auth_audience,omitempty" koanf:"auth_audience"`
 }
 
+// V1TestIdentitiesConfig is server.hub.test_identities in the versioned
+// settings layout.
+type V1TestIdentitiesConfig struct {
+	WorkloadIssuers []V1TestIdentityWorkloadIssuer `json:"workload_issuers,omitempty" yaml:"workload_issuers,omitempty" koanf:"workload_issuers"`
+}
+
+// V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
+// entry.
+type V1TestIdentityWorkloadIssuer struct {
+	Sub     string `json:"sub" yaml:"sub" koanf:"sub"`
+	MaxTier string `json:"max_tier" yaml:"max_tier" koanf:"max_tier"`
+}
+
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).
 type V1ServerHubConfig struct {
 	Port      int    `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
@@ -1508,6 +1530,13 @@ type V1ServerHubConfig struct {
 	HubID     string `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
 	HubName   string `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
+	// file/env only: the server-config API refuses it in every mode.
+	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
+	// TestIdentities is server.hub.test_identities (see
+	// HubServerConfig.TestIdentities). It is file/env only: the
+	// server-config API refuses it in every mode.
+	TestIdentities *V1TestIdentitiesConfig `json:"test_identities,omitempty" yaml:"test_identities,omitempty" koanf:"test_identities"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -1574,6 +1603,19 @@ type V1ServerHubConfig struct {
 	// Conduit holds the conduit relay and grant settings (hub.conduit
 	// experiment). Read at startup; changes need a restart.
 	Conduit *V1ServerHubConduitConfig `json:"conduit,omitempty" yaml:"conduit,omitempty" koanf:"conduit"`
+	// PortProxy holds the agent port proxy settings. Read at startup;
+	// changes need a restart.
+	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+}
+
+// V1ServerHubPortProxyConfig holds the agent port proxy settings of the
+// hub server (server.hub.port_proxy). Validated at startup
+// (HubPortProxyConfig.Validate); an invalid value is a startup error.
+type V1ServerHubPortProxyConfig struct {
+	// ResponseHeaderTimeout bounds the wait for an agent port's response
+	// headers, the WebSocket handshake included (e.g. "60s"; default
+	// "60s", between "5s" and "10m"). The body is not time-limited.
+	ResponseHeaderTimeout string `json:"response_header_timeout,omitempty" yaml:"response_header_timeout,omitempty" koanf:"response_header_timeout"`
 }
 
 // V1ServerHubConduitConfig holds the conduit settings of the hub server
@@ -1621,6 +1663,16 @@ type V1ServerHubConduitConfig struct {
 	// (e.g. "3500s"; default "3500s", 90s-24h). The relay sends GoAway
 	// 60s before it.
 	LifetimeCap string `json:"lifetime_cap,omitempty" yaml:"lifetime_cap,omitempty" koanf:"lifetime_cap"`
+	// ShutdownGrace is the time the platform allows between SIGTERM and
+	// killing the process (e.g. "10s"; no default, greater than 0 when
+	// set). When set, the SIGTERM GoAway drain deadline is cut to
+	// shutdown_grace - 2s (1ms at or below 2s); unset, it stays 30s.
+	// Read at startup.
+	ShutdownGrace string `json:"shutdown_grace,omitempty" yaml:"shutdown_grace,omitempty" koanf:"shutdown_grace"`
+	// ProxySessionMaxAge bounds how long a user conduit session admitted
+	// through trusted-proxy authentication may open new tunnels, counted
+	// from admission (e.g. "30m"; default "1h", 5m-1h).
+	ProxySessionMaxAge string `json:"proxy_session_max_age,omitempty" yaml:"proxy_session_max_age,omitempty" koanf:"proxy_session_max_age"`
 	// StreamAuthzMax is the authorization interval of open streams per
 	// originating principal kind: when a stream reaches it, the hub
 	// re-checks the principal and renews or closes the stream (defaults
@@ -1694,6 +1746,11 @@ type V1DatabaseConfig struct {
 	MaxIdleConns    int    `json:"max_idle_conns,omitempty" yaml:"max_idle_conns,omitempty" koanf:"max_idle_conns"`
 	ConnMaxLifetime string `json:"conn_max_lifetime,omitempty" yaml:"conn_max_lifetime,omitempty" koanf:"conn_max_lifetime"`
 	ConnMaxIdleTime string `json:"conn_max_idle_time,omitempty" yaml:"conn_max_idle_time,omitempty" koanf:"conn_max_idle_time"`
+	// AllowShadowedSchema lets the hub start (and the maintenance commands
+	// that migrate its database run) on PostgreSQL when the migration would
+	// create a new table set that hides existing hub tables
+	// later on the search_path. See DatabaseConfig.AllowShadowedSchema.
+	AllowShadowedSchema bool `json:"allow_shadowed_schema,omitempty" yaml:"allow_shadowed_schema,omitempty" koanf:"allow_shadowed_schema"`
 }
 
 // V1AuthConfig holds authentication settings.
@@ -2911,9 +2968,14 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	// 4. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
 		// An exported but empty variable is treated as unset, so it never
-		// blanks a value from the settings files. This also keeps an empty
-		// SCION_OTEL_INSECURE from being mapped onto tls.enabled.
+		// blanks a value from the settings files.
 		if value == "" {
+			return "", nil
+		}
+		// SCION_OTEL_INSECURE is applied below, inverted. Mapped here as
+		// is, a value that is not a bool would stay on tls.enabled and
+		// replace the configured value.
+		if key == "SCION_OTEL_INSECURE" {
 			return "", nil
 		}
 		return versionedEnvKeyMapper(key), value
@@ -2922,11 +2984,12 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
 	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
-		plaintext, err := strconv.ParseBool(raw)
-		if err != nil {
-			return nil, fmt.Errorf("SCION_OTEL_INSECURE: %w", err)
+		if plaintext, err := strconv.ParseBool(raw); err != nil {
+			warnUnparseableSettingOnce("SCION_OTEL_INSECURE",
+				"settings: value does not parse; ignoring SCION_OTEL_INSECURE and using the configured telemetry.cloud.tls.enabled")
+		} else {
+			_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
 		}
-		_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
 	}
 
 	// For git projects, the project_id is stored in a project-id file inside the
@@ -2968,6 +3031,8 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 // koanf decoder is weakly typed and would turn clone_depth: true into "1";
 // normalizing first gives the settings loader the same value the schema
 // validator and the template loader see (true stays "true", 5.0 is "5").
+// A clone_depth value that cannot be normalized (a list, for example) is
+// dropped with a warning, so the profile falls back to the default depth.
 func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) error {
 	normalized := map[string]interface{}{}
 	for _, key := range k.Keys() {
@@ -2977,7 +3042,9 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 		}
 		cd, err := api.CloneDepthFromValue(k.Get(key))
 		if err != nil {
-			return fmt.Errorf("%s: %w", key, err)
+			warnUnparseableSetting(key)
+			k.Delete(key)
+			continue
 		}
 		normalized[key] = string(cd)
 	}
@@ -2986,7 +3053,120 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 			return err
 		}
 	}
-	return k.Unmarshal("", settings)
+	if err := k.Unmarshal("", settings); err == nil {
+		return nil
+	}
+	return unmarshalSkippingBadSettings(k, settings)
+}
+
+// unmarshalSkippingBadSettings handles a decode failure in
+// unmarshalVersionedSettings. One value that does not parse (for example
+// SCION_SERVER_BROKER_PORT=abc) must not discard the whole settings struct:
+// callers skip the entire section on error, which silently turns off hub
+// features. Each key whose value does not decode on its own is reset to its
+// embedded default, or dropped when there is none, with a warning that names
+// the key. The value is never logged, since it may be a secret. The rest of
+// the settings then decode as usual.
+func unmarshalSkippingBadSettings(k *koanf.Koanf, settings *VersionedSettings) error {
+	bad := undecodableSettingsKeys(k)
+	if len(bad) == 0 {
+		// The failure is not tied to a single key. The decoder's error
+		// quotes the offending value, so it is not returned as is.
+		return errSettingsDoNotDecode
+	}
+
+	defaults := koanf.New(".")
+	if data, err := GetDefaultSettingsDataYAML(); err == nil {
+		_ = defaults.Load(rawbytes.Provider(data), yaml.Parser())
+	}
+	for _, key := range bad {
+		warnUnparseableSetting(key)
+		// Delete resolves key through koanf's own key parts, so it removes
+		// exactly the entry the probe found. Set splits key on ".", which
+		// is safe here: the embedded defaults have no map keys with a dot,
+		// so a key with a dot inside one part never exists in defaults.
+		k.Delete(key)
+		if defaults.Exists(key) {
+			if err := k.Set(key, defaults.Get(key)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// The failed attempt may have partly filled settings. Decode again into
+	// the same empty maps both callers start from.
+	*settings = VersionedSettings{
+		Runtimes:       make(map[string]V1RuntimeConfig),
+		HarnessConfigs: make(map[string]HarnessConfigEntry),
+		Profiles:       make(map[string]V1ProfileConfig),
+	}
+	if err := k.Unmarshal("", settings); err != nil {
+		return errSettingsDoNotDecode
+	}
+	return nil
+}
+
+// errSettingsDoNotDecode reports a decode failure that no single setting
+// explains. It names no values, since callers log it.
+var errSettingsDoNotDecode = errors.New("settings: values do not decode into the settings structure")
+
+// warnedUnparseableSettings records the settings keys already warned about
+// in this process. Settings are loaded several times per CLI invocation and
+// hub startup, so one bad value would otherwise be reported once per load.
+var warnedUnparseableSettings sync.Map
+
+// resetWarnedUnparseableSettingsCache clears the unparseable-setting warning
+// dedup cache. Tests that assert whether this warning fires must call this
+// first, so that an earlier test in the same process cannot suppress it.
+func resetWarnedUnparseableSettingsCache() {
+	warnedUnparseableSettings.Clear()
+}
+
+// warnUnparseableSetting logs, once per process, that the setting named by
+// key has a value that does not parse and is ignored, so the field falls
+// back to its embedded default or to unset. The value itself is never
+// logged, since it may be a secret.
+func warnUnparseableSetting(key string) {
+	warnUnparseableSettingOnce(key, "settings: value does not parse; ignoring it and using the default for this setting")
+}
+
+// warnUnparseableSettingOnce logs msg with key the first time key is
+// reported in this process.
+func warnUnparseableSettingOnce(key, msg string) {
+	if _, seen := warnedUnparseableSettings.LoadOrStore(key, struct{}{}); seen {
+		return
+	}
+	slog.Warn(msg, "key", key)
+}
+
+// undecodableSettingsKeys returns the keys of k whose value fails to decode
+// into VersionedSettings when decoded alone. Each probe is built from
+// koanf's own key parts, not by splitting the flat key on ".", so a map
+// entry whose key contains a dot (a service account email, for example)
+// keeps its real shape.
+func undecodableSettingsKeys(k *koanf.Koanf) []string {
+	keyMap := k.KeyMap()
+	var bad []string
+	for _, key := range k.Keys() {
+		parts, ok := keyMap[key]
+		if !ok || len(parts) == 0 {
+			continue // Every key from k.Keys() is in KeyMap; never re-split on ".".
+		}
+		nested := map[string]interface{}{parts[len(parts)-1]: k.Get(key)}
+		for i := len(parts) - 2; i >= 0; i-- {
+			nested = map[string]interface{}{parts[i]: nested}
+		}
+		probe := koanf.New(".")
+		// An empty delimiter loads nested as is, with no unflattening.
+		if err := probe.Load(confmap.Provider(nested, ""), nil); err != nil {
+			bad = append(bad, key)
+			continue
+		}
+		if err := probe.Unmarshal("", &VersionedSettings{}); err != nil {
+			bad = append(bad, key)
+		}
+	}
+	return bad
 }
 
 // settingsExcludedEnvVars lists SCION_* variables that are never settings
@@ -3086,10 +3266,12 @@ var conduitV1EnvListKeys = []string{
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
 	"start_create_unconfirmed_hold",
+	"response_header_timeout",
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"start_unconfirmed_hold",
 	"authz_recheck_interval",
+	"proxy_session_max_age",
 	"start_claim_lease_ttl",
 	"stream_authz_max",
 	"soft_delete_retention",
@@ -3102,9 +3284,11 @@ var knownCompoundFields = []string{
 	"stalled_threshold",
 	"reconnect_window",
 	"internal_listen",
+	"shutdown_grace",
 	"peer_audience",
 	"lifetime_cap",
 	"instance_id",
+	"port_proxy",
 	"peer_auth",
 	"authorized_domains",
 	"platform_auth_sa",
@@ -3351,6 +3535,16 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.MonitoringDashboardURL != "" {
 			gc.Hub.MonitoringDashboardURL = v1.Hub.MonitoringDashboardURL
 		}
+		if v1.Hub.HubClass != "" {
+			gc.Hub.HubClass = v1.Hub.HubClass
+		}
+		if v1.Hub.TestIdentities != nil {
+			ti := &TestIdentitiesConfig{}
+			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
+				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
+			}
+			gc.Hub.TestIdentities = ti
+		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
 				gc.Hub.ReadTimeout = d
@@ -3455,10 +3649,15 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				InstanceID:           c.InstanceID,
 				AuthzRecheckInterval: c.AuthzRecheckInterval,
 				LifetimeCap:          c.LifetimeCap,
+				ShutdownGrace:        c.ShutdownGrace,
+				ProxySessionMaxAge:   c.ProxySessionMaxAge,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 			}
+		}
+		if p := v1.Hub.PortProxy; p != nil {
+			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 		}
 	}
 
@@ -3539,6 +3738,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Database.ConnMaxIdleTime != "" {
 			gc.Database.ConnMaxIdleTime = v1.Database.ConnMaxIdleTime
 		}
+		gc.Database.AllowShadowedSchema = v1.Database.AllowShadowedSchema
 	}
 
 	// Auth config
@@ -3765,6 +3965,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		PublicURL:              gc.Hub.Endpoint,
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
+		HubClass:               gc.Hub.HubClass,
 		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,
@@ -3775,6 +3976,13 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			AllowedHeaders: gc.Hub.CORSAllowedHeaders,
 			MaxAge:         gc.Hub.CORSMaxAge,
 		},
+	}
+	if gc.Hub.TestIdentities != nil {
+		ti := &V1TestIdentitiesConfig{}
+		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
+			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
+		}
+		v1Hub.TestIdentities = ti
 	}
 	if gc.Hub.SoftDeleteRetention > 0 {
 		v1Hub.SoftDeleteRetention = gc.Hub.SoftDeleteRetention.String()
@@ -3798,10 +4006,15 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			InstanceID:           c.InstanceID,
 			AuthzRecheckInterval: c.AuthzRecheckInterval,
 			LifetimeCap:          c.LifetimeCap,
+			ShutdownGrace:        c.ShutdownGrace,
+			ProxySessionMaxAge:   c.ProxySessionMaxAge,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 		}
+	}
+	if p := gc.Hub.PortProxy; !p.IsZero() {
+		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
@@ -3874,6 +4087,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		MaxIdleConns:    gc.Database.MaxIdleConns,
 		ConnMaxLifetime: gc.Database.ConnMaxLifetime,
 		ConnMaxIdleTime: gc.Database.ConnMaxIdleTime,
+
+		AllowShadowedSchema: gc.Database.AllowShadowedSchema,
 	}
 
 	// Auth config
@@ -4468,7 +4683,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 //     internally by LoadVersionedSettings/LoadSettingsKoanf/
 //     detectHierarchyFormat, treats WHATEVER path it is given as if it
 //     might be a project directory: if ~/.scion itself contains a
-//     project-id or grove-id file (plausible — a broker's ~/.scion can
+//     project-id file (plausible — a broker's ~/.scion can
 //     double as its own hub-side project identity), it resolves to
 //     GetProjectConfigDir(globalDir), i.e.
 //     ~/.scion/project-configs/<slug>__<id>/.scion — a completely
@@ -4564,7 +4779,7 @@ func GlobalSettingsMentions(substr string) bool {
 // did. Round 6 addendum (hy-aud-6): detectHierarchyFormat(globalDir) is NOT
 // actually global-only — it calls resolveEffectiveProjectPath(globalDir)
 // internally, which treats the global directory as if it might itself be a
-// project directory and, if ~/.scion contains a project-id or grove-id
+// project directory and, if ~/.scion contains a project-id
 // file, resolves to a completely unrelated project's split-storage
 // settings.yaml under ~/.scion/project-configs/<slug>__<id>/.scion and
 // merges its format in too. detectDirSettingsFormat never calls
@@ -4769,6 +4984,7 @@ var versionedSettingKeys = map[string]versionedSettingKey{
 	"server.auth.display_name": {path: []string{"server", "auth", "display_name"}},
 	"server.auth.email":        {path: []string{"server", "auth", "email"}},
 	"server.auth.username":     {path: []string{"server", "auth", "username"}},
+	"use_host_credentials":     {path: []string{"use_host_credentials"}, isBool: true},
 }
 
 // versionedSettingEditFor returns the edit UpdateVersionedSetting makes for
@@ -5097,6 +5313,9 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 		}
 		autohelp := value == "true"
 		vs.CLI.AutoHelp = &autohelp
+	case "use_host_credentials":
+		use := value == "true"
+		vs.UseHostCredentials = &use
 
 	// --- Hub client settings ---
 	case "hub.enabled":
@@ -5220,6 +5439,14 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 	case "cli.autohelp":
 		if vs.CLI != nil && vs.CLI.AutoHelp != nil {
 			if *vs.CLI.AutoHelp {
+				return "true", nil
+			}
+			return "false", nil
+		}
+		return "", nil
+	case "use_host_credentials":
+		if vs.UseHostCredentials != nil {
+			if *vs.UseHostCredentials {
 				return "true", nil
 			}
 			return "false", nil

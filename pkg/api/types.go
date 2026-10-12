@@ -1180,6 +1180,18 @@ type HubAgentDefaults struct {
 	// experiments.K8sNFSHome). The hub sends only names that are on; an
 	// absent name is off.
 	Experiments []string `json:"experiments,omitempty"`
+	// Telemetry is the hub's default telemetry config. It is a DEFAULT,
+	// not policy: the broker applies it at Start in base position, above
+	// the broker settings telemetry applied at Start and below the agent's
+	// own config telemetry (requester inline telemetry from older hubs,
+	// and the stored config). Templates contribute no telemetry once
+	// environment keys are ignored in templates (ptone/scion#4524). It is
+	// applied per start and never persisted into scion-agent.json, so a
+	// later hub change reaches the agent at its next start
+	// (ptone/scion#4218). Note that ProvisionAgent already folds broker
+	// settings telemetry into the stored config on create, so those
+	// fields rank as agent config here (ptone/scion#4241).
+	Telemetry *TelemetryConfig `json:"telemetry,omitempty"`
 }
 
 // ExperimentEnabled reports whether the hub sent name as enabled.
@@ -1195,6 +1207,15 @@ func (d *HubAgentDefaults) ExperimentEnabled(name string) bool {
 	return false
 }
 
+// TelemetryDefault returns the hub's default telemetry config, or nil when
+// the hub sent none. Safe on a nil receiver.
+func (d *HubAgentDefaults) TelemetryDefault() *TelemetryConfig {
+	if d == nil {
+		return nil
+	}
+	return d.Telemetry
+}
+
 // IsEmpty reports whether no default carries a value. An empty set is not put
 // on the wire, which is what keeps file-mode dispatch byte-identical to the
 // pre-change behaviour (the file-mode snapshot leaves these fields zero).
@@ -1203,7 +1224,7 @@ func (d *HubAgentDefaults) IsEmpty() bool {
 		return true
 	}
 	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil &&
-		d.AutoExposePorts == nil && len(d.Experiments) == 0
+		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil
 }
 
 // EnvAutoExposePorts is the env key that enables in-container port
@@ -1358,6 +1379,15 @@ type StartOptions struct {
 	// Like ResolvedKubernetesServiceAccountName it is never persisted, so it
 	// is recomputed on every dispatch.
 	KubernetesBlockIdentity *KubernetesBlockIdentity
+
+	// HostCredentialFiles is set by a co-located workstation broker whose
+	// host-credential policy allows it (hub on loopback, dev auth,
+	// use_host_credentials on). In broker mode the agent manager then reads
+	// the harness-declared credential files from the broker user's home and
+	// adds them as file secrets, unless a resolved secret with the same name
+	// or target already exists. Like KubernetesBlockIdentity it is never
+	// persisted, so it is recomputed on every dispatch.
+	HostCredentialFiles bool
 }
 
 // KubernetesBlockIdentity describes how a GCP identity "block" pod runs on

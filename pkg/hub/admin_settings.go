@@ -275,6 +275,13 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 			"use DELETE /api/v1/admin/experiments", nil)
 		return
 	}
+	// While the test admin tier is on, federation settings are refused on
+	// every write path, resets included (G8).
+	if sectionName == "federation" && s.testAdminTierOn() {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+			errTestAdminFederationRefused.Error(), map[string]interface{}{"keys": []string{"federation"}})
+		return
+	}
 
 	sec := opsettings.SectionByName(sectionName)
 	if sec == nil {
@@ -426,6 +433,13 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	if vs.Server != nil && vs.Server.Federation != nil {
 		resp.Federation = vs.Server.Federation
 	}
+	// server.hub.class and server.hub.test_identities are never
+	// API-writable, so they are not shown either: a client that echoes
+	// this body back must not send them.
+	if resp.Server != nil && resp.Server.Hub != nil {
+		resp.Server.Hub.HubClass = ""
+		resp.Server.Hub.TestIdentities = nil
+	}
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
 	// show env-pinned fields in file mode too (H1).
@@ -467,6 +481,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
+	// Gate-protected keys (server.hub.class always; federation while the
+	// test admin tier is on) are refused before anything is decoded.
+	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
 	var req ServerConfigUpdateRequest

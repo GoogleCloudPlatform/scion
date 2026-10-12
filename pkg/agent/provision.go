@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -637,18 +638,19 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 //
 // Preconditions are enforced here rather than merely documented (design §3.4
 // Amendments A2.1/A2.4 and A23), before ProvisionAgent ever runs:
-// ProvisionAgent's worktree-creation branch decides whether to create a
-// worktree using CWD-dependent git checks (util.BranchExists), which are
-// always wrong on a broker (its CWD is outside the repo) — so calling it for
-// a clone-per-agent agent without first confirming a real, existing clone
-// risks os.RemoveAll on a live worktree-per-agent workspace, destroying
-// uncommitted work. Likewise, ProvisionAgent unconditionally creates the
-// agent directory (os.MkdirAll) before it even looks at the workspace mode,
-// so the explicit-mount case needs its own existence checks to avoid
-// silently standing up a fresh, empty agent directory for a name that was
-// never actually provisioned. Phase 4 may replace the clone-per-agent
-// refusal with a proper "workspace exists → reuse as-is" branch that does
-// not depend on CWD.
+// ProvisionAgent's worktree-creation branch removes and recreates the
+// agent's workspace directory whenever its branch lookups find no existing
+// worktree (those lookups once ran against the process CWD, which on a
+// broker is outside the repo; they now run against the project repository,
+// ptone/scion#4439) — so calling it for a clone-per-agent agent without
+// first confirming a real, existing clone risks os.RemoveAll on a live
+// worktree-per-agent workspace, destroying uncommitted work. Likewise,
+// ProvisionAgent unconditionally creates the agent directory (os.MkdirAll)
+// before it even looks at the workspace mode, so the explicit-mount case
+// needs its own existence checks to avoid silently standing up a fresh,
+// empty agent directory for a name that was never actually provisioned.
+// Phase 4 may replace the clone-per-agent refusal with a proper "workspace
+// exists → reuse as-is" branch.
 //
 // Once past those checks, Reprovision never touches:
 //   - the agent's workspace, clone-per-agent or explicit-mount (ProvisionAgent's
@@ -1271,6 +1273,37 @@ func withAgentStateDir(ctx context.Context, projectDir, agentName string) (conte
 	return ctx, dir, shared, err
 }
 
+// AgentNeedsProvision reports whether starting the agent opts names would
+// provision it again rather than load its existing state: GetAgent
+// provisions when the agent's state directory does not exist, or exists
+// without a scion-agent.json (a stale directory it removes first). The state
+// directory is resolved the way Start resolves it, from the same options
+// (broker mode, shared workspace, Hub project ID). It reads the filesystem
+// only and changes nothing.
+func AgentNeedsProvision(ctx context.Context, opts api.StartOptions) (bool, error) {
+	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
+	if err != nil {
+		return false, err
+	}
+	ctx, _ = buildProvisionContext(ctx, opts)
+	_, agentDir, _, err := withAgentStateDir(ctx, projectDir, opts.Name)
+	if err != nil {
+		return false, err
+	}
+	return !agentStateProvisioned(agentDir), nil
+}
+
+// agentStateProvisioned reports whether agentDir holds a provisioned agent:
+// the directory exists and has a scion-agent.json. A directory that cannot be
+// read counts as provisioned, so a caller does not treat an unreadable agent
+// as one to provision again.
+func agentStateProvisioned(agentDir string) bool {
+	if _, err := os.Stat(agentDir); err != nil {
+		return !os.IsNotExist(err)
+	}
+	return config.GetScionAgentConfigPath(agentDir) != ""
+}
+
 // CheckAgentDirContained is the exported form of checkAgentDirContained, for
 // callers outside this package that resolve an agent directory from a
 // request-supplied name and need to verify containment before their own file
@@ -1282,7 +1315,7 @@ func CheckAgentDirContained(projectDir, agentName string, sharedWorkspace bool) 
 	return checkAgentDirContained(projectDir, agentName, sharedWorkspace)
 }
 
-func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {
+func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (_ string, _ string, _ *api.ScionConfig, retErr error) {
 	provisionStart := time.Now()
 	// 1. Prepare agent directories
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
@@ -1403,8 +1436,41 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, err
 	}
-	_, agentDirStatErr := os.Lstat(agentDir)
-	newAgentDir := errors.Is(agentDirStatErr, fs.ErrNotExist)
+	// Claim the agent dir and home by creating them: os.Mkdir succeeds only
+	// for the caller that actually creates the directory, so of two
+	// concurrent first provisions only one treats it as its own, and a
+	// directory that already existed is never treated as created here.
+	if err := os.MkdirAll(filepath.Dir(agentDir), 0755); err != nil {
+		return "", "", nil, fmt.Errorf("failed to create agent directory: %w", err)
+	}
+	newAgentDir, err := claimDir(agentDir)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to create agent directory: %w", err)
+	}
+	newAgentHome := false
+	newAgentHomeParent := false
+	if newAgentDir {
+		// A failed first provision removes what this call created, so the
+		// next start provisions the agent afresh. Without this, the copied
+		// home would be left with no scion-agent.json, which GetAgent keeps
+		// and refuses rather than removes (ptone/scion#4438). A directory
+		// that existed before this call is never removed here.
+		defer func() {
+			if retErr == nil {
+				return
+			}
+			slog.Warn("provision: failed before completing; removing the agent directory it created",
+				"agent", agentName, "agent_dir", agentDir, "error", retErr)
+			removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace, agentWorkspace != "")
+			if newAgentHome && !pathWithin(agentHome, agentDir) {
+				removeAgentDirAndPruneWorktrees(agentHome, "", false)
+				if newAgentHomeParent {
+					// os.Remove only removes an empty directory.
+					_ = os.Remove(filepath.Dir(agentHome))
+				}
+			}
+		}()
+	}
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent directory: %w", err)
 	}
@@ -1414,6 +1480,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if err := markHomeStoragePending(agentDir); err != nil {
 			return "", "", nil, fmt.Errorf("failed to record the agent's home storage: %w", err)
 		}
+	}
+	homeParent := filepath.Dir(agentHome)
+	if err := os.MkdirAll(filepath.Dir(homeParent), 0755); err != nil {
+		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
+	}
+	if newAgentHomeParent, err = claimDir(homeParent); err != nil {
+		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
+	}
+	if newAgentHome, err = claimDir(agentHome); err != nil {
+		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
 	}
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
@@ -1516,21 +1592,32 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			targetBranch = api.Slugify(agentName)
 		}
 
-		// Check if we should use an existing worktree
+		// Check if we should use an existing worktree. The branch and
+		// worktree lookups run against the project's repository, not the
+		// process's current directory: a runtime broker runs outside the
+		// repository, and a CWD-relative lookup there misses the agent's
+		// existing branch (ptone/scion#4439). That matters most when a
+		// worktree-per-agent agent is resumed after its project switched to
+		// a shared workspace: agentWorkspace is empty in shared mode, so the
+		// agent's existing worktree is the only workspace it can reuse.
+		//
+		// Prune first, so a registration whose directory was removed out of
+		// band is dropped and the create path below recreates the worktree,
+		// and only attach to a worktree whose directory still exists.
 		usedExistingWorktree := false
-		if util.BranchExists(targetBranch) {
-			if existingPath, err := util.FindWorktreeByBranch(targetBranch); err == nil && existingPath != "" {
+		repoRoot, repoRootErr := util.RepoRootDir(projectDir)
+		if repoRootErr == nil {
+			_ = util.PruneWorktreesIn(repoRoot)
+		}
+		if repoRootErr == nil && util.BranchExistsIn(repoRoot, targetBranch) {
+			if existingPath, err := util.FindWorktreeByBranchIn(repoRoot, targetBranch); err == nil && existingPath != "" && dirExists(existingPath) {
 				workspaceSource = existingPath
 				agentWorkspace = "" // Using external worktree
 				usedExistingWorktree = true
 				fmt.Printf("Warning: Relying on existing worktree for branch '%s' at '%s'\n", targetBranch, existingPath)
 				// Register as sharer for refcounted teardown (I3). Fail loudly:
 				// an untracked agent breaks the refcount (premature/leaked removal).
-				root, rootErr := util.RepoRootDir(projectDir)
-				if rootErr != nil {
-					return "", "", nil, fmt.Errorf("resolve repo root for sharer registration: %w", rootErr)
-				}
-				if regErr := provision.RegisterSharer(root, projectDir, targetBranch, existingPath, agentName); regErr != nil {
+				if regErr := provision.RegisterSharer(repoRoot, projectDir, targetBranch, existingPath, agentName); regErr != nil {
 					return "", "", nil, fmt.Errorf("register sharer (attach): %w", regErr)
 				}
 			}
@@ -1584,6 +1671,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	// Worktree Creation (if needed)
+	if shouldCreateWorktree && agentWorkspace == "" {
+		// Shared-workspace mode has no per-agent workspace directory to
+		// create a worktree in. Refuse clearly instead of running git
+		// worktree creation with an empty path.
+		return "", "", nil, fmt.Errorf("agent %q has no existing worktree for its branch in the project repository and the project uses a shared workspace, so there is no per-agent worktree path to create one in; pass a workspace path or re-create the agent", agentName)
+	}
 	if shouldCreateWorktree {
 		worktreeStart := time.Now()
 		// Remove existing workspace dir if it exists to allow worktree add
@@ -1592,9 +1685,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// Prune worktrees to clean up any stale entries.
 		// Use repo-root-aware prune so it works when the process CWD is
 		// outside the repository (e.g. runtime broker).
-		if root, err := util.RepoRootDir(filepath.Dir(agentWorkspace)); err == nil {
-			_ = util.PruneWorktreesIn(root)
-		} else {
+		// agentWorkspace is non-empty here (refused above), so the fallback
+		// only runs when no repository holds the workspace.
+		if !pruneWorktreesForWorkspace(agentWorkspace) {
 			_ = util.PruneWorktrees()
 		}
 
@@ -1832,7 +1925,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	util.Debugf("provision: home/skills copy completed in %s", time.Since(homeCopyStart))
 
 	// Step 3a2: Inject platform skills from embedded resources
-	hubEnabled := (settings != nil && settings.IsHubEnabled()) || api.IsBrokerModeFromContext(ctx)
+	hubEnabled := platformSkillsHubEnabled(ctx, settings)
 	injCtx := workspaceSkillsInjectionContext{
 		IsGit:              isGitWorkspace,
 		HubEnabled:         hubEnabled,
@@ -2090,9 +2183,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if hConfig.AuthSelectedType != "" {
 				settingsCfg.AuthSelectedType = hConfig.AuthSelectedType
 			}
-			if settings.Telemetry != nil {
-				settingsCfg.Telemetry = config.ConvertV1TelemetryToAPI(settings.Telemetry)
-			}
+			// settings.Telemetry is deliberately NOT merged here
+			// (ptone/scion#4241). finalScionCfg is persisted to
+			// scion-agent.json below, where a baked settings value would
+			// rank as agent config at Start, above the hub default
+			// telemetry tier, and later settings changes would never reach
+			// the agent. Start applies settings telemetry in its own tier
+			// on every start.
+			//
 			// Template has highest priority IN THIS MERGE, so it overrides
 			// settings here. We construct a config with ONLY the settings env,
 			// then merge finalScionCfg over it.
@@ -2469,6 +2567,13 @@ type workspaceSkillsInjectionContext struct {
 	TemplateSkillNames map[string]bool
 }
 
+// platformSkillsHubEnabled reports whether hub_enabled platform skills are
+// injected: always for an agent a broker provisions, and for a local agent
+// when a hub endpoint is configured. hub.enabled is not consulted.
+func platformSkillsHubEnabled(ctx context.Context, settings *config.VersionedSettings) bool {
+	return api.IsBrokerModeFromContext(ctx) || (settings != nil && settings.IsHubConfigured())
+}
+
 // shouldInjectSkill checks whether a skill should be injected based on its
 // inject_when frontmatter condition and the current provisioning context.
 func shouldInjectSkill(fm skillFrontmatter, injCtx workspaceSkillsInjectionContext) bool {
@@ -2777,7 +2882,7 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 
 	update(&info)
 
-	newData, err := json.MarshalIndent(info, "", "  ")
+	newData, err := marshalAgentInfoKeepUnknown(data, &info)
 	if err != nil {
 		return err
 	}
@@ -2951,6 +3056,747 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 	})
 }
 
+// handleAgentDirWithoutConfig deals with an agent directory that exists but
+// holds no scion-agent config file (ptone/scion#4438). Such a dir is either
+// left by a provisioning attempt that failed before writing
+// scion-agent.json, or belongs to an agent created before scion-agent.json
+// existed. It is a no-op when agentDir does not exist or has a config file.
+//
+//   - A populated home (non-empty home/, either agentHome or agentDir/home)
+//     with a stored agent record (agent-info.json in agentHome) is kept: a
+//     minimal scion-agent.json is written from the record, and nothing is
+//     removed.
+//   - A populated home with no usable record, or a home that cannot be
+//     read, is never removed: the call returns an error wrapping
+//     config.ErrAgentStateConflict. The error text names no host path.
+//   - A dir with no home state whose in-dir workspace may hold work is
+//     never removed: the call returns an error wrapping
+//     config.ErrAgentStateConflict (ptone/scion#4460). See
+//     worktreeMayHoldWork; only worktrees that belong to the project
+//     repository are inspected, and anything else that may hold data, or
+//     cannot be checked, is kept.
+//   - Any other dir with no home state is stale: it is removed, and
+//     worktrees are pruned, so the caller re-provisions it.
+func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace string) error {
+	if _, err := os.Stat(agentDir); err != nil {
+		return nil
+	}
+	if config.GetScionAgentConfigPath(agentDir) != "" {
+		return nil
+	}
+
+	homes := []string{agentHome}
+	if inDir := filepath.Join(agentDir, "home"); filepath.Clean(inDir) != filepath.Clean(agentHome) {
+		homes = append(homes, inDir)
+	}
+	populatedHome := ""
+	for _, h := range homes {
+		has, err := dirHasEntries(h)
+		if err != nil {
+			// Fail closed: a home that cannot be read may hold data.
+			slog.Warn("GetAgent: agent home could not be read; keeping the agent directory",
+				"agent", agentName, "agent_dir", agentDir, "home", h, "error", err)
+			return fmt.Errorf("%w: agent %q state directory kept: could not read the agent's home; check its permissions, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
+		}
+		if has {
+			populatedHome = h
+			break
+		}
+	}
+
+	if populatedHome != "" {
+		info := readStoredAgentRecord(agentHome)
+		if info == nil {
+			slog.Warn("GetAgent: agent directory has home data but no config file and no agent-info.json record; keeping it",
+				"agent", agentName, "agent_dir", agentDir, "home", populatedHome)
+			return fmt.Errorf("%w: agent %q state directory kept: it has home data but no agent record; delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
+		}
+		cfg := minimalAgentConfigFromRecord(info)
+		data, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal agent config: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), data, 0644); err != nil {
+			return fmt.Errorf("failed to write agent config: %w", err)
+		}
+		slog.Info("GetAgent: agent directory had no config file; wrote a minimal scion-agent.json from agent-info.json and kept the home",
+			"agent", agentName, "agent_dir", agentDir, "home", populatedHome,
+			"template", info.Template, "harness_config", info.HarnessConfig)
+		return nil
+	}
+
+	// No home state, but the in-dir workspace may still hold work
+	// (ptone/scion#4460). Keep the dir when it does, or when that cannot be
+	// checked. A shared-workspace agent has no workspace path, but its state
+	// dir can be the one an earlier worktree-per-agent life used, so the
+	// in-dir workspace/ is checked too (ptone/scion#4526). The prune below
+	// gets the original path, so an empty one prunes nothing, except for a
+	// clean leftover worktree that git inspected as one of the project
+	// repository's: it is pruned through its in-dir path, whose parent is
+	// agentDir, so the repository resolves from the agent dir and never
+	// from the process's current directory (ptone/scion#4511). Otherwise
+	// the project repository would keep the removed worktree registered,
+	// and its branch would stay "in use" until a manual git worktree prune.
+	inDirWorkspace := agentWorkspace
+	if inDirWorkspace == "" {
+		inDirWorkspace = filepath.Join(agentDir, "workspace")
+	}
+	prunePath := agentWorkspace
+	if pathWithin(inDirWorkspace, agentDir) {
+		hasWork, inspected, err := worktreeMayHoldWork(agentDir, inDirWorkspace)
+		if err != nil {
+			slog.Warn("GetAgent: agent workspace could not be checked for uncommitted work; keeping the agent directory",
+				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace, "error", err)
+			return fmt.Errorf("%w: agent %q state directory kept: could not check the agent's workspace for uncommitted work; check its ownership and permissions, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
+		}
+		if hasWork {
+			slog.Warn("GetAgent: agent directory has no config file but its workspace may hold work; keeping it",
+				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace)
+			return fmt.Errorf("%w: agent %q state directory kept: its workspace may hold work (files, uncommitted changes, a standalone clone, or commits on no branch); save it, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
+		}
+		if prunePath == "" && inspected {
+			prunePath = inDirWorkspace
+		}
+	}
+
+	slog.Info("GetAgent: stale agent directory (no config file, no home state); removing it",
+		"agent", agentName, "agent_dir", agentDir)
+	removeAgentDirAndPruneWorktrees(agentDir, prunePath, true)
+	return nil
+}
+
+// worktreeMayHoldWork reports whether the workspace ws inside agentDir
+// holds work that removing it would lose, and whether git inspected it. A
+// missing ws, or an empty directory with no .git entry, holds none. Only a
+// worktree that belongs to the project repository (the repository holding
+// agentDir) is inspected with git; anything else that may hold data reports
+// true without running git:
+//
+//   - a ws that is not a plain directory, or a non-empty one with no .git;
+//   - a .git directory (a standalone clone: removing it would delete its
+//     local branches and stash) or any .git entry that is not a regular
+//     file;
+//   - a .git pointer file whose worktree metadata does not point back to
+//     the project repository (see projectWorktreeOf).
+//
+// A worktree whose admin dir has any entry an idle worktree does not have
+// (see idleWorktreeAdminEntries: for example a lock, or an in-progress
+// rebase, merge, cherry-pick, revert, sequencer or bisect, whose state can
+// hold work such as a rebase autostash), or a per-worktree ref under
+// refs/, or any worktree while the project repository has per-worktree
+// config on (extensions.worktreeConfig), also reports true without running
+// git. Worktrees with submodules are always
+// kept: a gitlink entry in the index reports true before git status runs,
+// because status would read each submodule's own repository metadata, and
+// only worktree metadata that points back to the project repository is
+// trusted.
+//
+// For a worktree of the project repository, work is an uncommitted or
+// untracked change, any index entry with the assume-unchanged or
+// skip-worktree bit (git status does not report edits to those files), or
+// a HEAD that is not on a branch (detached, or a symbolic ref outside
+// refs/heads/) whose commit no branch or remote ref reaches. A worktree on
+// a named branch is fine for the detached-HEAD check: removing the
+// directory does not delete the branch, which lives in the project
+// repository, so its commits stay reachable. Any failure, including a git
+// command that exceeds worktreeGitTimeout, is returned, and callers must
+// treat it as "may hold work".
+//
+// Deliberate exceptions to "keep when unsure", for a clean worktree of the
+// project repository that is removed:
+//
+//   - Files ignored by any .gitignore inside the workspace (tracked or
+//     untracked, including one that ignores itself) or by the repository's
+//     info/exclude (for example .env, local config, build outputs) are not
+//     reported by git status and are removed with the worktree. Keeping on
+//     them would make almost every used worktree a permanent conflict
+//     (node_modules, dist and similar). A global excludes file is not
+//     applied, so it cannot hide an untracked file. The number of ignored
+//     status entries (a fully ignored directory counts once) and a few
+//     paths are logged at Warn before the removal.
+//   - The idle per-worktree admin state goes with the prune: the HEAD
+//     reflog, ORIG_HEAD, FETCH_HEAD and AUTO_MERGE. Commits reachable only
+//     from them are lost.
+func worktreeMayHoldWork(agentDir, ws string) (hasWork, inspected bool, err error) {
+	info, err := os.Lstat(ws)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	if !info.IsDir() {
+		return true, false, nil
+	}
+	gitInfo, err := os.Lstat(filepath.Join(ws, ".git"))
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false, false, err
+		}
+		has, err := dirHasEntries(ws)
+		if err != nil {
+			return false, false, err
+		}
+		return has, false, nil
+	}
+	if !gitInfo.Mode().IsRegular() {
+		return true, false, nil
+	}
+	wt, ok := projectWorktreeOf(agentDir, ws)
+	if !ok {
+		return true, false, nil
+	}
+	// An entry an idle worktree does not have (an in-progress operation, a
+	// lock, a per-worktree ref) may hold work git status does not report.
+	idle, err := worktreeAdminDirIdle(wt.gitDir)
+	if err != nil {
+		return false, false, err
+	}
+	if !idle {
+		return true, false, nil
+	}
+	defer func() {
+		if err == nil && inspected && !hasWork {
+			warnIgnoredFiles(wt)
+		}
+	}()
+	// With per-worktree config on, git would read a config.worktree in the
+	// gitdir, which projectWorktreeOf only checked before git starts.
+	on, err := worktreeConfigEnabled(wt.commonDir)
+	if err != nil {
+		return false, false, err
+	}
+	if on {
+		return true, false, nil
+	}
+
+	// Only trust worktree metadata that points back to the project
+	// repository: git status would read each submodule's own repository,
+	// so a worktree with a gitlink entry is kept before status runs.
+	// Listing the index does not descend into submodules.
+	staged, err := runWorktreeGit(wt, "ls-files", "-s", "-z")
+	if err != nil {
+		return false, true, fmt.Errorf("git ls-files: %w", err)
+	}
+	if hasGitlinkEntries(staged) {
+		return true, true, nil
+	}
+
+	status, err := runWorktreeGit(wt, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=dirty")
+	if err != nil {
+		return false, true, fmt.Errorf("git status: %w", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return true, true, nil
+	}
+	// git status does not report edits to files with the assume-unchanged
+	// or skip-worktree index bit, so a clean status cannot be trusted when
+	// any entry has one.
+	entries, err := runWorktreeGit(wt, "ls-files", "-v", "-z")
+	if err != nil {
+		return false, true, fmt.Errorf("git ls-files: %w", err)
+	}
+	if hasHiddenIndexEntries(entries) {
+		return true, true, nil
+	}
+
+	// symbolic-ref -q exits 1 with no output for a detached HEAD. A
+	// symbolic ref outside refs/heads/ (for example refs/worktree/x) is not
+	// a branch, so it gets the same reachability check as a detached HEAD.
+	head, err := runWorktreeGit(wt, "symbolic-ref", "-q", "HEAD")
+	if err == nil {
+		if strings.HasPrefix(strings.TrimSpace(head), "refs/heads/") {
+			return false, true, nil
+		}
+	} else {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return false, true, fmt.Errorf("git symbolic-ref: %w", err)
+		}
+	}
+	refs, err := runWorktreeGit(wt, "for-each-ref", "--count=1", "--contains", "HEAD", "--format=%(refname)", "refs/heads/", "refs/remotes/")
+	if err != nil {
+		return false, true, fmt.Errorf("git for-each-ref: %w", err)
+	}
+	return strings.TrimSpace(refs) == "", true, nil
+}
+
+// idleWorktreeAdminEntries are the entries the admin dir of an idle linked
+// worktree (<common dir>/worktrees/<id>) has. Observed with git 2.56 after
+// worktree add, commit, switch, fetch, merge, reset, rebase and stash
+// push/pop; see also git-worktree(1) DETAILS and REFS, and
+// gitrepository-layout(5) worktrees/<id>/. Anything else, for example
+// locked, config.worktree, rebase-merge, rebase-apply, MERGE_HEAD,
+// CHERRY_PICK_HEAD, REVERT_HEAD, sequencer or BISECT_LOG, is not idle.
+var idleWorktreeAdminEntries = map[string]bool{
+	"HEAD":           true,
+	"ORIG_HEAD":      true,
+	"FETCH_HEAD":     true,
+	"AUTO_MERGE":     true,
+	"COMMIT_EDITMSG": true,
+	"commondir":      true,
+	"gitdir":         true,
+	"index":          true,
+	"logs":           true,
+	"refs":           true,
+}
+
+// worktreeAdminDirIdle reports whether the worktree admin dir gitDir has
+// only idleWorktreeAdminEntries, and whether its refs/ directory, which
+// holds the per-worktree refs (refs/bisect, refs/worktree,
+// refs/rewritten), has no entry other than directories. It reads the
+// filesystem only. A read failure is returned.
+func worktreeAdminDirIdle(gitDir string) (bool, error) {
+	entries, err := os.ReadDir(gitDir)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if !idleWorktreeAdminEntries[e.Name()] {
+			return false, nil
+		}
+	}
+	idle := true
+	err = filepath.WalkDir(filepath.Join(gitDir, "refs"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			idle = false
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	return idle, nil
+}
+
+// warnIgnoredFiles logs, at Warn, how many ignored git status entries the
+// clean worktree wt has and a few of their paths, because they are removed
+// with it. The count is of entries, not files: a fully ignored directory is
+// one entry however many files it holds. It changes nothing; a failure is
+// logged too.
+func warnIgnoredFiles(wt projectWorktree) {
+	out, err := runWorktreeGit(wt, "status", "--porcelain", "-z", "--untracked-files=normal", "--ignored=matching")
+	if err != nil {
+		slog.Warn("GetAgent: could not list the ignored files of a clean stale agent workspace before removing it",
+			"workspace", wt.workTree, "error", err)
+		return
+	}
+	var ignored []string
+	for _, entry := range strings.Split(out, "\x00") {
+		if p, ok := strings.CutPrefix(entry, "!! "); ok {
+			ignored = append(ignored, p)
+		}
+	}
+	if len(ignored) == 0 {
+		return
+	}
+	sample := ignored
+	if len(sample) > 5 {
+		sample = sample[:5]
+	}
+	slog.Warn("GetAgent: clean stale agent workspace has ignored files; they are removed with it",
+		"workspace", wt.workTree, "ignored_entries", len(ignored), "ignored_sample", sample)
+}
+
+// hasHiddenIndexEntries reports whether NUL-separated git ls-files -v
+// output has an entry whose tag is lowercase (assume-unchanged) or 'S'
+// (skip-worktree).
+func hasHiddenIndexEntries(lsFiles string) bool {
+	for _, entry := range strings.Split(lsFiles, "\x00") {
+		if entry == "" {
+			continue
+		}
+		if tag := entry[0]; tag == 'S' || (tag >= 'a' && tag <= 'z') {
+			return true
+		}
+	}
+	return false
+}
+
+// hasGitlinkEntries reports whether NUL-separated git ls-files -s output
+// has an entry with mode 160000 (a submodule).
+func hasGitlinkEntries(lsFiles string) bool {
+	for _, entry := range strings.Split(lsFiles, "\x00") {
+		if strings.HasPrefix(entry, "160000 ") {
+			return true
+		}
+	}
+	return false
+}
+
+// worktreeConfigEnabled reports whether the project repository's config
+// file in commonDir turns on extensions.worktreeConfig. git reads only that
+// file (no includes, no system or global config), with the same scrubbed
+// environment as worktreeGit. A value git cannot read as a boolean, or any
+// other failure, is returned as an error.
+func worktreeConfigEnabled(commonDir string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "config", "--file", filepath.Join(commonDir, "config"), "--type=bool", "--get", "extensions.worktreeConfig")
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Dir = commonDir
+	cmd.Env = worktreeGitEnv()
+	out, err := cmd.Output()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, fmt.Errorf("git config: %w", ctxErr)
+	}
+	if err != nil {
+		// --get exits 1 when the key is not set.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("git config: %w", err)
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("git config: unexpected value %q", strings.TrimSpace(string(out)))
+	}
+}
+
+// projectWorktree names a worktree of the project repository by its
+// resolved paths: the work tree, its per-worktree gitdir under
+// <commonDir>/worktrees/, and the project repository's common git dir.
+type projectWorktree struct {
+	workTree  string
+	gitDir    string
+	commonDir string
+}
+
+// projectWorktreeOf reports whether ws is a worktree of the project
+// repository, the repository holding agentDir, and returns its resolved
+// paths. It reads the filesystem only and runs no git. It only trusts
+// worktree metadata that points back to the project repository; all paths
+// are compared after resolving symlinks, and all of these must hold:
+//
+//   - the .git pointer file in ws names a gitdir that is a direct child of
+//     the project repository's <common dir>/worktrees/;
+//   - that gitdir's commondir file exists and names exactly the project
+//     repository's common dir;
+//   - that gitdir has no config.worktree file;
+//   - that gitdir's gitdir file names ws/.git.
+//
+// Anything else, including a project repository that cannot be found or a
+// path that cannot be resolved, reports false.
+func projectWorktreeOf(agentDir, ws string) (projectWorktree, bool) {
+	common, ok := projectRepoCommonDir(filepath.Dir(filepath.Clean(agentDir)))
+	if !ok {
+		return projectWorktree{}, false
+	}
+	commonDir, err := filepath.EvalSymlinks(common)
+	if err != nil {
+		return projectWorktree{}, false
+	}
+	workTree, err := filepath.EvalSymlinks(ws)
+	if err != nil {
+		return projectWorktree{}, false
+	}
+	dotGit := filepath.Join(workTree, ".git")
+	pointer, ok := readGitdirPointer(dotGit)
+	if !ok {
+		return projectWorktree{}, false
+	}
+	gitDir, err := filepath.EvalSymlinks(pointer)
+	if err != nil {
+		return projectWorktree{}, false
+	}
+	name := filepath.Base(gitDir)
+	if filepath.Dir(gitDir) != filepath.Join(commonDir, "worktrees") || name == "." || name == ".." || name == string(filepath.Separator) {
+		return projectWorktree{}, false
+	}
+	if target, ok := readPathFile(filepath.Join(gitDir, "commondir"), gitDir); !ok || target != commonDir {
+		return projectWorktree{}, false
+	}
+	if _, err := os.Lstat(filepath.Join(gitDir, "config.worktree")); !errors.Is(err, fs.ErrNotExist) {
+		return projectWorktree{}, false
+	}
+	if target, ok := readPathFile(filepath.Join(gitDir, "gitdir"), gitDir); !ok || target != dotGit {
+		return projectWorktree{}, false
+	}
+	return projectWorktree{workTree: workTree, gitDir: gitDir, commonDir: commonDir}, true
+}
+
+// readPathFile reads a git admin file that holds a single path (commondir,
+// gitdir), resolves it against base when relative, and returns it with
+// symlinks resolved.
+func readPathFile(path, base string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, 4096))
+	if err != nil {
+		return "", false
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	p := strings.TrimSpace(strings.TrimRight(line, "\r"))
+	if p == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(base, p)
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return "", false
+	}
+	return resolved, true
+}
+
+// projectRepoCommonDir walks up from dir to the nearest .git entry and
+// returns that repository's common git dir: the .git directory itself, or,
+// for a .git pointer file (a project checked out in a linked worktree), the
+// directory its gitdir's commondir file names. It reads the filesystem
+// only.
+func projectRepoCommonDir(dir string) (string, bool) {
+	for {
+		dotGit := filepath.Join(dir, ".git")
+		if info, err := os.Lstat(dotGit); err == nil {
+			if info.IsDir() {
+				return dotGit, true
+			}
+			if !info.Mode().IsRegular() {
+				return "", false
+			}
+			gitdir, ok := readGitdirPointer(dotGit)
+			if !ok {
+				return "", false
+			}
+			data, err := os.ReadFile(filepath.Join(gitdir, "commondir"))
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return gitdir, true
+				}
+				return "", false
+			}
+			common := strings.TrimSpace(string(data))
+			if common == "" {
+				return "", false
+			}
+			if !filepath.IsAbs(common) {
+				common = filepath.Join(gitdir, common)
+			}
+			return filepath.Clean(common), true
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+// readGitdirPointer parses a .git pointer file ("gitdir: <path>") and
+// returns the gitdir it names, resolved against the file's directory when
+// relative.
+func readGitdirPointer(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, 4096))
+	if err != nil {
+		return "", false
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	gitdir, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), "gitdir: ")
+	gitdir = strings.TrimSpace(gitdir)
+	if !ok || gitdir == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(filepath.Dir(path), gitdir)
+	}
+	return filepath.Clean(gitdir), true
+}
+
+// runWorktreeGit runs git in a worktree of the project repository. Tests
+// replace it to observe whether git ran.
+var runWorktreeGit = worktreeGit
+
+// worktreeGitTimeout bounds each git command worktreeGit runs. A command
+// that exceeds it fails, so the workspace counts as "may hold work".
+var worktreeGitTimeout = 30 * time.Second
+
+// worktreeGit runs git in the worktree wt with a fixed locale, with the
+// file-system monitor and the untracked cache off, with only the ignore
+// rules inside the repository and workspace (no global excludes file), within
+// worktreeGitTimeout, and without GIT_* variables from the process
+// environment, so the answer does not depend on how the process was
+// started. GIT_DIR, GIT_COMMON_DIR and GIT_WORK_TREE are pinned to the paths
+// projectWorktreeOf checked, so git does not follow the worktree's own
+// metadata files again when it runs, mirroring the pin in
+// provision.SafeGitCommand.
+func worktreeGit(wt projectWorktree, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{
+		"-c", "core.fsmonitor=false",
+		"-c", "core.untrackedCache=false",
+		"-c", "core.excludesFile=" + os.DevNull,
+		"-C", wt.workTree,
+	}, args...)...)
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Env = append(worktreeGitEnv(),
+		"GIT_DIR="+wt.gitDir,
+		"GIT_COMMON_DIR="+wt.commonDir,
+		"GIT_WORK_TREE="+wt.workTree,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), ctxErr)
+	}
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("%w: %s", err, msg)
+		}
+		return "", err
+	}
+	// git status warns on stderr and still exits 0 when it skips a
+	// directory it cannot read, so its output would be incomplete.
+	if len(args) > 0 && args[0] == "status" {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("git status wrote to stderr: %s", msg)
+		}
+	}
+	return string(out), nil
+}
+
+// worktreeGitEnv returns the process environment without GIT_* variables
+// (other than GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL) and with LC_ALL=C.
+func worktreeGitEnv() []string {
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		switch {
+		case k == "GIT_CONFIG_NOSYSTEM" || k == "GIT_CONFIG_GLOBAL":
+			// These only choose which system and global config files git
+			// reads, as for any git the process runs; they add no
+			// repository settings. Keeping them lets tests skip the host's
+			// system config.
+		case strings.HasPrefix(k, "GIT_") || k == "LC_ALL":
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "LC_ALL=C")
+}
+
+// removeAgentDirAndPruneWorktrees removes agentDir and, when prune is set,
+// prunes the worktrees of the repository holding agentWorkspace, so git
+// forgets any worktree that pointed into the removed directory and a later
+// provision can recreate it. An empty agentWorkspace (a shared-workspace
+// agent) has no worktree of its own, so nothing is pruned: resolving the
+// repository from an empty path would pick the process's current directory,
+// which is unrelated to the agent (ptone/scion#4511).
+func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool) {
+	// chmod to ensure we can remove root-owned files left by containers.
+	_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		_ = os.Chmod(path, 0755)
+		return nil
+	})
+	_ = os.RemoveAll(agentDir)
+	if !prune {
+		return
+	}
+	pruneWorktreesForWorkspace(agentWorkspace)
+}
+
+// pruneWorktreesForWorkspace prunes the worktrees of the repository holding
+// agentWorkspace and reports whether it found that repository. Prune errors
+// are ignored, as at every call site. An empty agentWorkspace (a
+// shared-workspace agent) has no worktree of its own, so nothing is pruned
+// and it reports false: resolving the repository from an empty path would
+// pick the process's current directory, which is unrelated to the agent
+// (ptone/scion#4511).
+func pruneWorktreesForWorkspace(agentWorkspace string) bool {
+	if agentWorkspace == "" {
+		return false
+	}
+	root, err := util.RepoRootDir(filepath.Dir(agentWorkspace))
+	if err != nil {
+		return false
+	}
+	_ = util.PruneWorktreesIn(root)
+	return true
+}
+
+// claimDir creates dir with os.Mkdir and reports whether this call created
+// it. A dir that already exists is not an error and reports false.
+func claimDir(dir string) (bool, error) {
+	err := os.Mkdir(dir, 0755)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// pathWithin reports whether path is dir or lies under it.
+func pathWithin(path, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// dirHasEntries reports whether path is a directory with at least one entry.
+// A missing path has no entries. Any other error is returned, and callers
+// must treat it as "may hold data".
+func dirHasEntries(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(entries) > 0, nil
+}
+
+// readStoredAgentRecord returns the agent-info.json in agentHome (the home
+// GetAgent reads it from) if it parses and names a template or
+// harness-config, or nil otherwise.
+func readStoredAgentRecord(agentHome string) *api.AgentInfo {
+	data, err := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
+	if err != nil {
+		return nil
+	}
+	var info api.AgentInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil
+	}
+	if info.Template == "" && info.HarnessConfig == "" {
+		return nil
+	}
+	return &info
+}
+
+// minimalAgentConfigFromRecord builds the scion-agent.json written for an
+// agent adopted by handleAgentDirWithoutConfig. It records only the
+// harness-config; GetAgent layers the template named in agent-info.json
+// beneath it as for any existing agent.
+func minimalAgentConfigFromRecord(info *api.AgentInfo) *api.ScionConfig {
+	return &api.ScionConfig{HarnessConfig: info.HarnessConfig}
+}
+
 func GetAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, string, *api.ScionConfig, error) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
@@ -2979,27 +3825,12 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		agentWorkspace = filepath.Join(agentDir, "workspace")
 	}
 
-	// Check for stale/incomplete agent directory (dir exists but no config file).
-	// This can happen when a previous provisioning attempt created the directory
-	// but failed before writing scion-agent.json. Remove it so we re-provision.
-	if _, err := os.Stat(agentDir); err == nil {
-		if configPath := config.GetScionAgentConfigPath(agentDir); configPath == "" {
-			util.Debugf("GetAgent: stale agent directory detected (no config file), removing: %s", agentDir)
-			// chmod to ensure we can remove root-owned files left by containers.
-			_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return nil
-				}
-				_ = os.Chmod(path, 0755)
-				return nil
-			})
-			_ = os.RemoveAll(agentDir)
-			// Prune worktrees so git forgets any worktree that pointed into the
-			// now-deleted directory, allowing ProvisionAgent to recreate it cleanly.
-			if root, rootErr := util.RepoRootDir(filepath.Dir(agentWorkspace)); rootErr == nil {
-				_ = util.PruneWorktreesIn(root)
-			}
-		}
+	// Handle an agent directory that exists but has no config file. See
+	// handleAgentDirWithoutConfig: a populated home is kept (adopted from
+	// agent-info.json, or refused), and only a dir with no home state is
+	// removed so it can be re-provisioned.
+	if err := handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace); err != nil {
+		return "", "", "", nil, err
 	}
 
 	// An explicit --workspace agent has no managed per-agent worktree: its mount
@@ -3049,9 +3880,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 				if targetBranch == "" {
 					targetBranch = api.Slugify(agentName)
 				}
-				if root, rootErr := util.RepoRootDir(filepath.Dir(agentWorkspace)); rootErr == nil {
-					_ = util.PruneWorktreesIn(root)
-				}
+				pruneWorktreesForWorkspace(agentWorkspace)
 				if err := util.CreateWorktree(agentWorkspace, targetBranch); err != nil {
 					util.Debugf("GetAgent: failed to recreate worktree at %s: %v, clearing workspace", agentWorkspace, err)
 					agentWorkspace = ""
@@ -3355,4 +4184,10 @@ func applyBuiltinResourceDefaults(cfg *api.ScionConfig) {
 		kc.Resources = newK8sRes
 		cfg.Kubernetes = &kc
 	}
+}
+
+// dirExists reports whether path exists and is a directory.
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
 }

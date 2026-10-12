@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
@@ -174,6 +175,104 @@ func (_c *UserCreate) SetNillableSessionGeneration(v *int64) *UserCreate {
 	return _c
 }
 
+// SetKind sets the "kind" field.
+func (_c *UserCreate) SetKind(v user.Kind) *UserCreate {
+	_c.mutation.SetKind(v)
+	return _c
+}
+
+// SetNillableKind sets the "kind" field if the given value is not nil.
+func (_c *UserCreate) SetNillableKind(v *user.Kind) *UserCreate {
+	if v != nil {
+		_c.SetKind(*v)
+	}
+	return _c
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (_c *UserCreate) SetExpiresAt(v time.Time) *UserCreate {
+	_c.mutation.SetExpiresAt(v)
+	return _c
+}
+
+// SetNillableExpiresAt sets the "expires_at" field if the given value is not nil.
+func (_c *UserCreate) SetNillableExpiresAt(v *time.Time) *UserCreate {
+	if v != nil {
+		_c.SetExpiresAt(*v)
+	}
+	return _c
+}
+
+// SetIssuedBy sets the "issued_by" field.
+func (_c *UserCreate) SetIssuedBy(v string) *UserCreate {
+	_c.mutation.SetIssuedBy(v)
+	return _c
+}
+
+// SetNillableIssuedBy sets the "issued_by" field if the given value is not nil.
+func (_c *UserCreate) SetNillableIssuedBy(v *string) *UserCreate {
+	if v != nil {
+		_c.SetIssuedBy(*v)
+	}
+	return _c
+}
+
+// SetPurpose sets the "purpose" field.
+func (_c *UserCreate) SetPurpose(v string) *UserCreate {
+	_c.mutation.SetPurpose(v)
+	return _c
+}
+
+// SetNillablePurpose sets the "purpose" field if the given value is not nil.
+func (_c *UserCreate) SetNillablePurpose(v *string) *UserCreate {
+	if v != nil {
+		_c.SetPurpose(*v)
+	}
+	return _c
+}
+
+// SetIssuanceID sets the "issuance_id" field.
+func (_c *UserCreate) SetIssuanceID(v string) *UserCreate {
+	_c.mutation.SetIssuanceID(v)
+	return _c
+}
+
+// SetNillableIssuanceID sets the "issuance_id" field if the given value is not nil.
+func (_c *UserCreate) SetNillableIssuanceID(v *string) *UserCreate {
+	if v != nil {
+		_c.SetIssuanceID(*v)
+	}
+	return _c
+}
+
+// SetIssuerCredentialID sets the "issuer_credential_id" field.
+func (_c *UserCreate) SetIssuerCredentialID(v string) *UserCreate {
+	_c.mutation.SetIssuerCredentialID(v)
+	return _c
+}
+
+// SetNillableIssuerCredentialID sets the "issuer_credential_id" field if the given value is not nil.
+func (_c *UserCreate) SetNillableIssuerCredentialID(v *string) *UserCreate {
+	if v != nil {
+		_c.SetIssuerCredentialID(*v)
+	}
+	return _c
+}
+
+// SetIssuerDelegationID sets the "issuer_delegation_id" field.
+func (_c *UserCreate) SetIssuerDelegationID(v string) *UserCreate {
+	_c.mutation.SetIssuerDelegationID(v)
+	return _c
+}
+
+// SetNillableIssuerDelegationID sets the "issuer_delegation_id" field if the given value is not nil.
+func (_c *UserCreate) SetNillableIssuerDelegationID(v *string) *UserCreate {
+	if v != nil {
+		_c.SetIssuerDelegationID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *UserCreate) SetID(v uuid.UUID) *UserCreate {
 	_c.mutation.SetID(v)
@@ -267,6 +366,25 @@ func (_c *UserCreate) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserCreate
 	return _c.SetTerminalWorkspaceID(v.ID)
 }
 
+// SetTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID.
+func (_c *UserCreate) SetTestIdentityLoginCodeID(id uuid.UUID) *UserCreate {
+	_c.mutation.SetTestIdentityLoginCodeID(id)
+	return _c
+}
+
+// SetNillableTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID if the given value is not nil.
+func (_c *UserCreate) SetNillableTestIdentityLoginCodeID(id *uuid.UUID) *UserCreate {
+	if id != nil {
+		_c = _c.SetTestIdentityLoginCodeID(*id)
+	}
+	return _c
+}
+
+// SetTestIdentityLoginCode sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (_c *UserCreate) SetTestIdentityLoginCode(v *TestIdentityLoginCode) *UserCreate {
+	return _c.SetTestIdentityLoginCodeID(v.ID)
+}
+
 // Mutation returns the UserMutation object of the builder.
 func (_c *UserCreate) Mutation() *UserMutation {
 	return _c.mutation
@@ -318,6 +436,10 @@ func (_c *UserCreate) defaults() {
 		v := user.DefaultSessionGeneration
 		_c.mutation.SetSessionGeneration(v)
 	}
+	if _, ok := _c.mutation.Kind(); !ok {
+		v := user.DefaultKind
+		_c.mutation.SetKind(v)
+	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := user.DefaultID()
 		_c.mutation.SetID(v)
@@ -358,6 +480,14 @@ func (_c *UserCreate) check() error {
 	}
 	if _, ok := _c.mutation.SessionGeneration(); !ok {
 		return &ValidationError{Name: "session_generation", err: errors.New(`ent: missing required field "User.session_generation"`)}
+	}
+	if _, ok := _c.mutation.Kind(); !ok {
+		return &ValidationError{Name: "kind", err: errors.New(`ent: missing required field "User.kind"`)}
+	}
+	if v, ok := _c.mutation.Kind(); ok {
+		if err := user.KindValidator(v); err != nil {
+			return &ValidationError{Name: "kind", err: fmt.Errorf(`ent: validator failed for field "User.kind": %w`, err)}
+		}
 	}
 	return nil
 }
@@ -443,6 +573,34 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 		_spec.SetField(user.FieldSessionGeneration, field.TypeInt64, value)
 		_node.SessionGeneration = value
 	}
+	if value, ok := _c.mutation.Kind(); ok {
+		_spec.SetField(user.FieldKind, field.TypeEnum, value)
+		_node.Kind = value
+	}
+	if value, ok := _c.mutation.ExpiresAt(); ok {
+		_spec.SetField(user.FieldExpiresAt, field.TypeTime, value)
+		_node.ExpiresAt = &value
+	}
+	if value, ok := _c.mutation.IssuedBy(); ok {
+		_spec.SetField(user.FieldIssuedBy, field.TypeString, value)
+		_node.IssuedBy = &value
+	}
+	if value, ok := _c.mutation.Purpose(); ok {
+		_spec.SetField(user.FieldPurpose, field.TypeString, value)
+		_node.Purpose = &value
+	}
+	if value, ok := _c.mutation.IssuanceID(); ok {
+		_spec.SetField(user.FieldIssuanceID, field.TypeString, value)
+		_node.IssuanceID = &value
+	}
+	if value, ok := _c.mutation.IssuerCredentialID(); ok {
+		_spec.SetField(user.FieldIssuerCredentialID, field.TypeString, value)
+		_node.IssuerCredentialID = &value
+	}
+	if value, ok := _c.mutation.IssuerDelegationID(); ok {
+		_spec.SetField(user.FieldIssuerDelegationID, field.TypeString, value)
+		_node.IssuerDelegationID = &value
+	}
 	if nodes := _c.mutation.OwnedGroupsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
@@ -516,6 +674,22 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.TestIdentityLoginCodeIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TestIdentityLoginCodeTable,
+			Columns: []string{user.TestIdentityLoginCodeColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(testidentitylogincode.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -768,6 +942,27 @@ func (u *UserUpsertOne) UpdateNewValues() *UserUpsertOne {
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(user.FieldCreated)
+		}
+		if _, exists := u.create.mutation.Kind(); exists {
+			s.SetIgnore(user.FieldKind)
+		}
+		if _, exists := u.create.mutation.ExpiresAt(); exists {
+			s.SetIgnore(user.FieldExpiresAt)
+		}
+		if _, exists := u.create.mutation.IssuedBy(); exists {
+			s.SetIgnore(user.FieldIssuedBy)
+		}
+		if _, exists := u.create.mutation.Purpose(); exists {
+			s.SetIgnore(user.FieldPurpose)
+		}
+		if _, exists := u.create.mutation.IssuanceID(); exists {
+			s.SetIgnore(user.FieldIssuanceID)
+		}
+		if _, exists := u.create.mutation.IssuerCredentialID(); exists {
+			s.SetIgnore(user.FieldIssuerCredentialID)
+		}
+		if _, exists := u.create.mutation.IssuerDelegationID(); exists {
+			s.SetIgnore(user.FieldIssuerDelegationID)
 		}
 	}))
 	return u
@@ -1188,6 +1383,27 @@ func (u *UserUpsertBulk) UpdateNewValues() *UserUpsertBulk {
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(user.FieldCreated)
+			}
+			if _, exists := b.mutation.Kind(); exists {
+				s.SetIgnore(user.FieldKind)
+			}
+			if _, exists := b.mutation.ExpiresAt(); exists {
+				s.SetIgnore(user.FieldExpiresAt)
+			}
+			if _, exists := b.mutation.IssuedBy(); exists {
+				s.SetIgnore(user.FieldIssuedBy)
+			}
+			if _, exists := b.mutation.Purpose(); exists {
+				s.SetIgnore(user.FieldPurpose)
+			}
+			if _, exists := b.mutation.IssuanceID(); exists {
+				s.SetIgnore(user.FieldIssuanceID)
+			}
+			if _, exists := b.mutation.IssuerCredentialID(); exists {
+				s.SetIgnore(user.FieldIssuerCredentialID)
+			}
+			if _, exists := b.mutation.IssuerDelegationID(); exists {
+				s.SetIgnore(user.FieldIssuerDelegationID)
 			}
 		}
 	}))

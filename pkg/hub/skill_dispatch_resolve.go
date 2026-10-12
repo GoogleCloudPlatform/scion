@@ -205,17 +205,11 @@ func (s *Server) templateSkillRefs(ctx context.Context, templateID string) []api
 		return nil
 	}
 	for _, name := range []string{"scion-agent.yaml", "scion-agent.yml", "scion-agent.json"} {
-		found := false
-		for _, f := range tmpl.Files {
-			if f.Path == name {
-				found = true
-				break
-			}
-		}
+		entry, found := templateFileByPath(tmpl.Files, name)
 		if !found {
 			continue
 		}
-		data, err := readDispatchTemplateFile(ctx, stor, tmpl.StoragePath+"/"+name)
+		data, err := readDispatchTemplateFile(ctx, stor, templateObjectPath(tmpl, entry))
 		if err != nil {
 			if !errors.Is(err, storage.ErrNotFound) {
 				slog.WarnContext(ctx, "dispatch skill pre-resolution: failed to read template config",

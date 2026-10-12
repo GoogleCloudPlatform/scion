@@ -12,7 +12,7 @@ The **Scion Hub** is the central brain of a hosted Scion architecture. It mainta
 - **Central Registry**: Maintains a record of all Projects (projects), Runtime Brokers, and Templates.
 - **Identity Provider**: Manages user authentication (OAuth) and issues scoped JWTs for Agents and Brokers.
 - **State Store**: Tracks the lifecycle, status, and metadata of all agents.
-- **Task Dispatcher**: Routes agent commands from the CLI or Dashboard to the correct Runtime Broker via persistent WebSocket tunnels.
+- **Task Dispatcher**: Routes agent commands from the CLI or Dashboard to the correct Runtime Broker via persistent WebSocket connections.
 
 ## Running the Hub
 
@@ -248,9 +248,7 @@ server:
 ```
 
 ### PostgreSQL (Production)
-**NOT IMPLEMENTED**
-
-Recommended for high-availability or multi-node deployments.
+Required for high-availability (multi-instance) deployments, and also usable for a single Hub. The URL is a standard Postgres connection string. The same settings can come from `SCION_SERVER_DATABASE_DRIVER` and `SCION_SERVER_DATABASE_URL`.
 ```yaml
 server:
   database:
@@ -258,12 +256,28 @@ server:
     url: "postgres://user:password@localhost:5432/scion?sslmode=disable"
 ```
 
+Setting `driver: postgres` marks the Hub as an HA deployment. Events and Runtime Broker commands then reach every Hub replica through Postgres `LISTEN/NOTIFY`. In hosted mode (`--hosted`, or server mode `hosted` or its legacy spelling `production` in `settings.yaml` or `SCION_SERVER_MODE`), the Hub then runs the HA startup checks and refuses to start without an explicit `server.hub.hub_id`, a `server.database.url`, GCS storage (`server.storage.provider: gcs` with a bucket) and a durable session secret, plus the IAP settings when `server.auth.mode` is `proxy` (see [Deploy on GCP](/scion/hosted/ha/setup-gcp/)). See [Database (`server.database`)](/scion/reference/server-config/#database-serverdatabase) for the fields.
+
+To move an existing SQLite Hub to Postgres, run `scion server migrate`:
+
+```bash
+scion server migrate \
+  --from sqlite:///var/lib/scion/hub.db \
+  --to "postgres://scion:secret@db.example.com:5432/scion?sslmode=require"
+```
+
+The copy reads the SQLite file without changing it, skips rows already in the destination (so a failed run can be restarted), and compares row counts after each table. A restart expects the destination to hold only rows from an earlier run; rows changed or deleted in the source since then are not reconciled, and a row-count mismatch stops the run. The SQLite file is kept unless you pass `--drop-source`.
+
 ## Storage Backends
 
 The Hub stores agent templates and other artifacts.
 
 - **Local File System**: Default. Stores files in `~/.scion/storage`.
 - **Google Cloud Storage (GCS)**: Recommended for cloud deployments. Set the `SCION_SERVER_STORAGE_BUCKET` environment variable.
+
+Template files are stored by content: each file is stored once under `<template path>.blobs/<sha256>` and never overwritten, and uploads are staged under `<template path>.staging/` until the push is committed. A Runtime Broker that downloads a template in this layout while a new version is pushed gets either the old version or the new one, never a mix. A commit does not delete the files a new version dropped. The Hub deletes stored template files that no template references, and abandoned staged uploads, once they are older than 24 hours (the grace period can be raised but not set below 1 hour). It does this every hour, and an admin can run it at any time as the **Template Blob Garbage Collection** maintenance operation, with an optional `grace` parameter (for example `48h`).
+
+Templates stored before this layout keep their old layout (one object per file path) until their next commit (a push, a file edit, or a re-import), which moves them to the new layout. That commit then removes the old copy, unless another template still uses the same path or a path inside it. If a file in the old copy no longer matches its recorded hash (for example, two templates once shared the path), the commit keeps the content that is actually stored and records its real hash. A Runtime Broker that is downloading the old copy at that moment can fail once; it retries and gets the new version.
 
 For Hub-managed workspaces, the Hub uploads the workspace to its GCS bucket and sends that bucket name to the Runtime Broker in the agent create request, so the Runtime Broker downloads from the same bucket (the bucket is also kept across reincarnation). A Runtime Broker that receives no bucket falls back to its own GCS storage bucket setting. With neither, the create request fails up front with `422 workspace_storage_unconfigured` instead of a generic gateway error.
 
@@ -275,11 +289,13 @@ This upload works only with GCS Hub storage. On any other storage provider, a Hu
 
 The most direct path to getting a deployed demonstration hub is to use the GCE setup scripts in `/scripts/starter-hub` (the Developer Hub tier)
 
-### Cloud Run, GKE (GCP) *Future*
+### Cloud Run, GKE (GCP)
 The Hub is designed to be stateless and is highly compatible with Google Cloud Run. 
 - Use **Cloud SQL** (PostgreSQL) for the database.
 - Use **Cloud Storage** for template persistence.
 - Connect the Hub to Cloud SQL using the Cloud SQL Auth Proxy or a VPC connector.
+
+See [Cloud Run](/scion/hosted/single-node/hub-setup-cloudrun/) and [Helm](/scion/hosted/ha/helm/).
 
 ## Discord Integration
 
@@ -303,7 +319,7 @@ To enable log forwarding, set `SCION_OTEL_LOG_ENABLED=true` and `SCION_OTEL_ENDP
 ## Monitoring
 
 The Hub exposes health check endpoints:
-- `/healthz`: Basic liveness check. Always `200`; the body's `status` is `healthy`, `degraded` (the server is up, but a non-critical check such as the co-located broker is failing), or `unhealthy` (a critical check — the database, or the configured shared workspace storage mount — is failing), with `checks` naming any failing subsystem. On a single-node setup (Hub + co-located runtime broker), the co-located broker check reports `healthy`, `unhealthy: registration failed`, or `unhealthy: registration pending` — a failed registration is not retried, so `status` stays `degraded` until the broker configuration is fixed and the server is restarted. The single-node workstation setup runs combined (web server + Hub on one port), so the web server answers `/healthz` and nests the Hub's own health under `hub` — the check is at `hub.checks.colocated_broker`, not top-level `checks.colocated_broker` (that path is only for a standalone Hub with no web server). `scion server status` reports a degraded server as running and names the failing checks (in either shape); an unhealthy one is reported as `unhealthy` with its checks. `scion server start` names them too, but only when it waits to open a browser (an interactive, non-headless terminal with web enabled, and `SCION_NO_BROWSER` unset): it waits up to 20 seconds for `healthy`, then opens the browser anyway with a warning if the server is still degraded. Other `start` invocations print nothing about it.
+- `/healthz`: Basic liveness check. Always `200`; the body's `status` is `healthy`, `degraded` (the server is up, but a non-critical check such as the co-located broker is failing), or `unhealthy` (a critical check — the database, or the configured shared workspace storage mount — is failing), with `checks` naming any failing subsystem. On a single-node setup (Hub + co-located runtime broker), the co-located broker check reports `healthy`, `unhealthy: registration failed`, or `unhealthy: registration pending` — a failed registration is not retried, so `status` stays `degraded` until the broker configuration is fixed and the server is restarted. The single-node workstation setup runs combined (web server + Hub on one port), so the web server answers `/healthz` and nests the Hub's own health under `hub` — the check is at `hub.checks.colocated_broker`, not top-level `checks.colocated_broker` (that path is only for a standalone Hub with no web server). `scion server status` reports a degraded server as running and names the failing checks (in either shape); an unhealthy one is reported as `unhealthy` with its checks. `scion server start` names them too, but only when it waits to open a browser (an interactive, non-headless terminal with web enabled, and `SCION_NO_BROWSER` unset): it waits up to 20 seconds for `healthy`, then opens the browser anyway with a warning if the server is still degraded. Other `start` invocations print nothing about it. Separately, every daemon `scion server start` and `scion server restart` waits about 30 seconds at most for each started listener (web, standalone Hub, runtime broker) to answer `/healthz` with any status before it returns, and exits non-zero, leaving the server running, if one does not.
 - `/readyz`: Readiness check (verifies database connectivity and, when a non-`local` workspace storage backend is configured, that its mount is available). Unaffected by the co-located broker check above — use `/readyz`, not `/healthz`, for Kubernetes/Cloud Run readiness probes.
 - `/health`: Legacy/alternative liveness check endpoint.
 

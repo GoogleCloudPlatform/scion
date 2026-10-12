@@ -184,6 +184,8 @@ Registering a broker never associates it with a project. Brokers registered befo
 
 Register, re-register, rotate, link and unlink events in the audit log record the credential kind and credential ID next to the user, so you can tell whether a sign-in or a specific token was used.
 
+With the `hub.conduit` [experiment](/scion/reference/experiments/) on, each of the Runtime Broker's Conduit sessions is tied to the secret it was admitted with. Deregistering the Runtime Broker, rotating or replacing its secret, or a secret that is no longer active closes those sessions with `4401 authz_expired`. The Runtime Broker retries with backoff (1 to 60 seconds); after a rotation it is admitted again with its new secret. A session that cannot be checked (for example during a database error) stays open until the next check.
+
 ## Headless registration with a hub token
 
 To register a broker on a machine where you cannot sign in interactively (a build host or a VM), mint a short-lived hub-boundary token on a machine where you are signed in, then use it on the host.
@@ -235,7 +237,7 @@ Once a broker is associated by its owner (or a super-admin), **members of the pr
 Related rules:
 
 - **Default broker:** a project's default runtime broker must already be a provider of the project. Provide the broker first, then set it as the default (`scion runtime-broker provide --make-default`).
-- **Withdrawing:** a provider can be removed by anyone with `project.update`, or by the broker's owner (or a super-admin) for that broker without update permission on the project: `scion runtime-broker withdraw --project <project>`, or `DELETE /api/v1/projects/{id}/providers/{brokerId}`. Removal admits a sign-in or a user access token; a Runtime Broker request acting on behalf of a user is not admitted.
+- **Withdrawing:** a provider can be removed by anyone with `project.update`, or by the broker's owner (or a super-admin) for that broker without update permission on the project: `scion runtime-broker withdraw --project <project>`, or `DELETE /api/v1/projects/{id}/providers/{brokerId}`. Removal admits a sign-in or a user access token; a Runtime Broker request acting on behalf of a user is not admitted. A withdrawn standalone Runtime Broker keeps its project directory when the project is later deleted (see [What remains after a project delete](/scion/hosted/ha/kubernetes/#what-remains-after-a-project-delete)).
 - **Auto-provide:** an auto-provide broker is linked to every new project and is usable by every user. Turning it on requires `broker.auto_provide`.
 
 ## Broker Health Monitoring

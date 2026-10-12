@@ -465,6 +465,12 @@
       "description": "Automatically inject the host's gcloud Application Default Credentials file into agent containers in co-located (workstation) mode.",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "use_host_credentials": {
+      "type": "boolean",
+      "description": "Inject the host's harness credential files (for example OAuth login files) into agent containers when the broker is co-located with a workstation hub on loopback using dev auth. Defaults to true in workstation mode; ignored in hosted mode. Hub secrets take precedence.",
+      "x-scope": "global",
+      "x-since": "1"
     }
   },
   "additionalProperties": false,
@@ -1231,6 +1237,23 @@
           "x-env-var": "SCION_SERVER_HUB_AGENTENDPOINT",
           "x-since": "1"
         },
+        "class": {
+          "type": "string",
+          "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the test admin identity gate (--enable-test-admin-identities). Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
+          "x-env-var": "SCION_SERVER_HUB_CLASS"
+        },
+        "test_identities": {
+          "type": "object",
+          "description": "Startup-only settings of hub-issued test identities. Settable only in the settings file: the server-config API refuses this key, and every key under it, in every mode.",
+          "properties": {
+            "workload_issuers": {
+              "type": "array",
+              "description": "Workload subjects a human issuer may pin a test identity issuer delegation to. Each entry is a Google subject (a service account's unique id) and the highest tier a delegation to it may cover; only \"member\" is accepted in this release. Read once at startup.",
+              "items": { "$ref": "#/$defs/serverTestIdentityWorkloadIssuer" }
+            }
+          },
+          "additionalProperties": false
+        },
         "monitoring_dashboard_url": {
           "type": "string",
           "format": "uri",
@@ -1421,6 +1444,18 @@
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_LIFETIMECAP",
               "x-since": "1"
             },
+            "shutdown_grace": {
+              "type": "string",
+              "description": "Time the platform allows between SIGTERM and killing the hub process (Cloud Run: 10s). On SIGTERM the conduit relay sends GoAway to every session before the listeners close; when this key is set, the drain deadline is at most shutdown_grace minus 2s (1ms at or below 2s), and unset it stays 30s. Read at startup (e.g. '10s'; no default, greater than 0 when set).",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_SHUTDOWNGRACE",
+              "x-since": "1"
+            },
+            "proxy_session_max_age": {
+              "type": "string",
+              "description": "How long a user conduit session admitted through trusted-proxy authentication (no bearer credential) may open new tunnels, counted from admission. After it, a new tunnel request on that session is refused with 401; open tunnels are unaffected (e.g. '30m'; default '1h', between '5m' and '1h').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PROXYSESSIONMAXAGE",
+              "x-since": "1"
+            },
             "stream_authz_max": {
               "type": "object",
               "description": "Authorization interval of open streams, per originating principal kind: when a stream reaches it, the hub re-checks the principal and renews the stream (AuthRefresh) or closes it with 4401 authz_expired. Each value is a duration between '1m' and '168h'. Enforced on user streams; the broker and agent values apply once those streams are tracked.",
@@ -1445,6 +1480,19 @@
                   "x-since": "1"
                 }
               },
+              "x-since": "1"
+            }
+          }
+        },
+        "port_proxy": {
+          "type": "object",
+          "description": "Agent port proxy settings. Read at startup; restart required to change. Invalid values are a startup error.",
+          "additionalProperties": false,
+          "properties": {
+            "response_header_timeout": {
+              "type": "string",
+              "description": "Bound on the wait for an agent port's response headers, the WebSocket handshake included; on timeout the proxy answers 504. The response body is not time-limited (e.g. '60s'; default '60s', between '5s' and '10m').",
+              "x-env-var": "SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT",
               "x-since": "1"
             }
           }
@@ -1594,6 +1642,12 @@
         "conn_max_idle_time": {
           "type": "string",
           "description": "Maximum time a connection may sit idle in the pool before it is closed (Go duration, e.g. '5m'). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty takes the driver default (postgres: 5m; sqlite: no idle limit). '0' means no idle limit."
+        },
+        "allow_shadowed_schema": {
+          "type": "boolean",
+          "default": false,
+          "description": "PostgreSQL only. By default the hub refuses to start, and the maintenance commands that migrate the hub database refuse to run, when current_schema() has no hub tables but a later schema on the connection's search_path does, because the migration would create a new, empty table set that hides the existing data. Set true to log a warning and continue anyway, creating the new table set in the current schema.",
+          "x-env-var": "SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA"
         }
       }
     },
@@ -2299,6 +2353,15 @@
           ],
           "description": "Go duration, e.g. \"30s\". Empty means the default. An unquoted 0 is accepted (it loads as \"0\")."
         }
+      },
+      "additionalProperties": false
+    },
+    "serverTestIdentityWorkloadIssuer": {
+      "type": "object",
+      "required": ["sub", "max_tier"],
+      "properties": {
+        "sub": { "type": "string", "pattern": "^[0-9]{1,64}$" },
+        "max_tier": { "type": "string", "enum": ["member", "admin"] }
       },
       "additionalProperties": false
     },

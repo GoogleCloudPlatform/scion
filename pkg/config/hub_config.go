@@ -91,6 +91,19 @@ type HubServerConfig struct {
 	// Defaults to os.Hostname() if not set.
 	HubName string `json:"hubName,omitempty" yaml:"hubName,omitempty" koanf:"hubName"`
 
+	// HubClass is server.hub.class: the deploy-time class of this hub. The
+	// only recognised value is HubClassTest; empty (the default) means the
+	// hub is not a test hub. It is read once at startup by the test admin
+	// tier gate and is never writable through the settings API in any mode
+	// (see pkg/hub neverAPIWritableSettingsKeys).
+	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
+
+	// TestIdentities is server.hub.test_identities: startup-only settings of
+	// hub-issued test identities, such as the workload issuer allowlist
+	// (ptone/scion#4240, phase X2). Like HubClass it is never writable
+	// through the settings API in any mode.
+	TestIdentities *TestIdentitiesConfig `json:"testIdentities,omitempty" yaml:"testIdentities,omitempty" koanf:"testIdentities"`
+
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
 	// it when set. See ValidateMonitoringDashboardURL.
@@ -187,6 +200,10 @@ type HubServerConfig struct {
 	// Conduit holds the conduit relay and grant settings (validated by
 	// HubConduitConfig.Validate at startup).
 	Conduit HubConduitConfig `json:"conduit" yaml:"conduit" koanf:"conduit"`
+
+	// PortProxy holds the agent port proxy settings (validated by
+	// HubPortProxyConfig.Validate at startup).
+	PortProxy HubPortProxyConfig `json:"portProxy" yaml:"portProxy" koanf:"portProxy"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -587,6 +604,15 @@ type DatabaseConfig struct {
 	// request after an idle period stalls waiting for a dead connection to time
 	// out. Empty means no idle limit.
 	ConnMaxIdleTime string `json:"conn_max_idle_time" yaml:"conn_max_idle_time" koanf:"conn_max_idle_time"`
+
+	// AllowShadowedSchema lets the hub start, and the maintenance commands
+	// that migrate the hub database run, on PostgreSQL when
+	// current_schema() has no hub tables but a later schema on the
+	// connection's search_path does. The migration would then create a new,
+	// empty table set that hides the existing one, so by default the hub
+	// refuses to start (and those commands refuse to migrate); with this set
+	// it logs a warning and continues.
+	AllowShadowedSchema bool `json:"allowShadowedSchema" yaml:"allowShadowedSchema" koanf:"allowShadowedSchema"`
 }
 
 // ConnMaxLifetimeDuration parses ConnMaxLifetime into a time.Duration.
@@ -971,6 +997,10 @@ type StorageConfig struct {
 	LocalPath string `json:"localPath" yaml:"localPath" koanf:"localPath"`
 }
 
+// DefaultBrokerHost is the built-in runtime broker listen host
+// (server.broker.host) used when settings do not set one.
+const DefaultBrokerHost = "0.0.0.0"
+
 // DefaultGlobalConfig returns the default global configuration.
 func DefaultGlobalConfig() GlobalConfig {
 	return GlobalConfig{
@@ -989,7 +1019,7 @@ func DefaultGlobalConfig() GlobalConfig {
 		RuntimeBroker: RuntimeBrokerConfig{
 			Enabled:                       false,
 			Port:                          9800,
-			Host:                          "0.0.0.0",
+			Host:                          DefaultBrokerHost,
 			ReadTimeout:                   30 * time.Second,
 			WriteTimeout:                  120 * time.Second, // Longer for agent operations
 			CORSEnabled:                   true,
@@ -1531,7 +1561,11 @@ var snakeCaseFields = map[string]string{
 	"debounceinterval":           "debounce_interval",
 	"authzrecheckinterval":       "authz_recheck_interval",
 	"lifetimecap":                "lifetime_cap",
+	"shutdowngrace":              "shutdown_grace",
+	"proxysessionmaxage":         "proxy_session_max_age",
 	"streamauthzmax":             "stream_authz_max",
+	"portproxy":                  "port_proxy",
+	"responseheadertimeout":      "response_header_timeout",
 	"instanceid":                 "instance_id",
 	"notificationchannels":       "notification_channels",
 	"privatekeypath":             "private_key_path",
@@ -1594,6 +1628,7 @@ var camelCaseFields = map[string]string{
 	"agentrunscope":                 "agentRunScope",
 	"agentrunscopelegacyuntil":      "agentRunScopeLegacyUntil",
 	"allowcontainerscriptharnesses": "allowContainerScriptHarnesses",
+	"allowshadowedschema":           "allowShadowedSchema",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
 	"asyncagentlaunch":              "asyncAgentLaunch",
@@ -1645,7 +1680,11 @@ var camelCaseFields = map[string]string{
 	"reconnectwindow":               "reconnectWindow",
 	"authzrecheckinterval":          "authzRecheckInterval",
 	"lifetimecap":                   "lifetimeCap",
+	"shutdowngrace":                 "shutdownGrace",
+	"proxysessionmaxage":            "proxySessionMaxAge",
 	"streamauthzmax":                "streamAuthzMax",
+	"portproxy":                     "portProxy",
+	"responseheadertimeout":         "responseHeaderTimeout",
 	"instanceid":                    "instanceId",
 	"startclaimleasettl":            "startClaimLeaseTtl",
 	"startmaxduration":              "startMaxDuration",

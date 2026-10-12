@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"io"
 	"regexp"
 	"runtime"
 	"sort"
@@ -360,21 +359,21 @@ func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
 }
 
 // TestLeakGuardReportsUnclosedStore checks that the package-exit leak guard
-// (leak_guard_helpers_test.go) sees an unclosed store and names it in its
+// (internal/hubtestutil/leak_guard.go) sees an unclosed store and names it in its
 // failure output, and passes again once the store is closed.
 func TestLeakGuardReportsUnclosedStore(t *testing.T) {
-	// Let goroutines from earlier tests (for example the connectionOpener
-	// of a store that was just closed) finish exiting before taking the
-	// baseline, so one exiting between the snapshot and the check cannot
-	// cancel out the new store's goroutine.
-	checkPackageLeaks(io.Discard, 0, leakGuardSettle, false)
-	base := scanLeakedGoroutines().total
+	// Record the matching goroutines that are already running (for example
+	// the connectionOpener of a store an earlier test is still closing) by
+	// ID and leave them out of every check below. Comparing totals instead
+	// is racy: one of them exiting after the baseline cancels out the new
+	// store's goroutine and the guard wrongly passes (ptone/scion#4635).
+	baseline := scanLeakedGoroutines(nil).IDs
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
 	}
 	var out bytes.Buffer
-	if checkPackageLeaks(&out, base, 0, false) {
+	if checkLeaksExcluding(&out, 0, 0, false, baseline) {
 		t.Fatalf("leak guard passed with an open store; output:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "database/sql.(*DB).connectionOpener") || !strings.Contains(out.String(), "FAIL: leak guard") {
@@ -382,7 +381,26 @@ func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 	}
 	_ = s.Close()
 	out.Reset()
-	if !checkPackageLeaks(&out, base, 5*time.Second, false) {
+	if !checkLeaksExcluding(&out, 0, 5*time.Second, false, baseline) {
 		t.Errorf("leak guard still fails after the store was closed:\n%s", out.String())
+	}
+}
+
+// TestLeakGuardScanNeverExcludesUnparsedID checks that a stack block
+// without a parsable "goroutine N" header is never recorded as a baseline
+// ID, so it cannot cause a later unparsed block to be skipped.
+func TestLeakGuardScanNeverExcludesUnparsedID(t *testing.T) {
+	const sig = "database/sql.(*DB).connectionOpener"
+	first := "garbled header\n" + sig + "(...)"
+	second := "another garbled header\n" + sig + "(...)"
+	parsed := "goroutine 7 [select]:\n" + sig + "(...)"
+
+	base := scanStacks([]byte(first+"\n\n"+parsed), nil)
+	if base.Total != 2 || len(base.IDs) != 1 || !base.IDs["7"] {
+		t.Fatalf("baseline scan: total=%d ids=%v, want total=2 ids={7}", base.Total, base.IDs)
+	}
+	got := scanStacks([]byte(first+"\n\n"+second+"\n\n"+parsed), base.IDs)
+	if got.Total != 2 {
+		t.Fatalf("scan with baseline excluded: total=%d, want 2 (both unparsed blocks counted, goroutine 7 excluded)", got.Total)
 	}
 }

@@ -41,10 +41,14 @@ import (
 // that existing clients decode as-is. The status read also costs broker and
 // agent queries the plain GET should not pay.
 
-// Mapping states for one Kubernetes broker profile.
+// Mapping states for one Kubernetes broker profile: the shared decision's
+// states (profileSAMappingDecision), plus "not_reported" for a profile
+// with no report at all. A profile whose decision is not_required is not
+// listed.
 const (
-	GCPSAMappingMapped      = "mapped"
-	GCPSAMappingNotMapped   = "not_mapped"
+	GCPSAMappingMapped      = SAMappingStateMapped
+	GCPSAMappingNotMapped   = SAMappingStateNotMapped
+	GCPSAMappingUnknown     = SAMappingStateUnknown
 	GCPSAMappingNotReported = "not_reported"
 )
 
@@ -106,15 +110,39 @@ type GCPServiceAccountVerification struct {
 
 // GCPServiceAccountProfileMapping is one Kubernetes broker profile's mapping
 // state for the account. Mappings stay broker-owned; this is read-only.
+//
+// Every field after State is additive and omitted when the broker did not
+// report it, so a report from an older broker reads as State alone.
 type GCPServiceAccountProfileMapping struct {
 	BrokerID   string `json:"brokerId"`
 	BrokerName string `json:"brokerName"`
 	Profile    string `json:"profile"`
 	State      string `json:"state"`
-	// KubernetesServiceAccount and Namespace are reserved for when brokers
-	// report them (ptone/scion#3329 phase 4); always empty today.
+	// KubernetesServiceAccount, Namespace and Source describe a mapped
+	// account: the ServiceAccount the agent pod runs as, its namespace, and
+	// whether the broker found it in kubernetes_service_account_mappings
+	// ("mapped") or by annotation discovery ("discovered").
 	KubernetesServiceAccount string `json:"kubernetesServiceAccount,omitempty"`
 	Namespace                string `json:"namespace,omitempty"`
+	Source                   string `json:"source,omitempty"`
+	// ReportedAt is when the hub last stored or confirmed the profile's
+	// report; clients show its age.
+	ReportedAt *time.Time `json:"reportedAt,omitempty"`
+	// Incomplete is true when the broker said its report may not list
+	// every account the profile can serve, for IncompleteReason (for
+	// example a ServiceAccount list that failed). A "not_mapped" state on
+	// an incomplete report is then not conclusive.
+	Incomplete       bool   `json:"incomplete,omitempty"`
+	IncompleteReason string `json:"incompleteReason,omitempty"`
+	// Ambiguous is true when more than one ServiceAccount in the namespace
+	// is annotated with the account and none is mapped explicitly; the
+	// broker refuses it at dispatch. State is then "unknown" with
+	// UnknownReason ambiguous_mapping.
+	Ambiguous bool `json:"ambiguous,omitempty"`
+	// UnknownReason says why State is "unknown": the shared decision's
+	// reason (SAMappingReason*), for example report_stale or
+	// ambiguous_mapping.
+	UnknownReason string `json:"unknownReason,omitempty"`
 }
 
 // GCPServiceAccountBinding is the Workload Identity binding state.
@@ -221,7 +249,7 @@ func (s *Server) buildGCPServiceAccountStatus(ctx context.Context, project *stor
 			ID: sa.ID, DisplayName: sa.DisplayName, Scope: sa.Scope, Email: sa.Email,
 		},
 		Verification: gcpSAVerificationOf(sa),
-		Mappings:     gcpSAProfileMappings(sa.Email, profiles),
+		Mappings:     gcpSAProfileMappings(sa.Email, profiles, time.Now()),
 		WorkloadIdentityBinding: GCPServiceAccountBinding{
 			State:  GCPSABindingUnknown,
 			Reason: "not checked",
@@ -253,21 +281,35 @@ func gcpSAVerificationOf(sa *store.GCPServiceAccount) GCPServiceAccountVerificat
 }
 
 // gcpSAProfileMappings maps each Kubernetes profile to a state for email,
-// sorted by broker then profile name.
-func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings) []GCPServiceAccountProfileMapping {
+// sorted by broker then profile name. The state is the shared decision's
+// (kubernetesProfileMappings.decision, the dispatch refusal's rule), so the
+// view, the warnings and the refusal agree. A profile with no report at all
+// is "not_reported"; one whose decision is not_required is left out.
+func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings, now time.Time) []GCPServiceAccountProfileMapping {
 	out := make([]GCPServiceAccountProfileMapping, 0, len(profiles))
 	key := strings.ToLower(email)
 	for _, p := range profiles {
-		state := GCPSAMappingNotReported
-		if p.reported {
-			state = GCPSAMappingNotMapped
-			if p.gsas[key] {
-				state = GCPSAMappingMapped
-			}
+		m := GCPServiceAccountProfileMapping{
+			BrokerID: p.brokerID, BrokerName: p.brokerName, Profile: p.profile, State: GCPSAMappingNotReported,
 		}
-		out = append(out, GCPServiceAccountProfileMapping{
-			BrokerID: p.brokerID, BrokerName: p.brokerName, Profile: p.profile, State: state,
-		})
+		if p.reported {
+			d := p.decision(email, now)
+			if d.State == SAMappingStateNotRequired {
+				continue
+			}
+			m.State, m.UnknownReason = d.State, d.Reason
+			if m.State == GCPSAMappingMapped {
+				e := p.entries[key]
+				m.KubernetesServiceAccount, m.Namespace, m.Source = e.KSA, e.Namespace, e.Source
+			}
+			m.ReportedAt = p.report.MappingsReportedAt
+			if p.report.MappingsReported && !p.report.MappingsComplete {
+				m.IncompleteReason = p.report.MappingsIncompleteReason
+			}
+			m.Incomplete = m.IncompleteReason != ""
+			m.Ambiguous = d.Reason == SAMappingReasonAmbiguousMapping
+		}
+		out = append(out, m)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].BrokerName != out[j].BrokerName {
@@ -278,19 +320,27 @@ func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings) []
 	return out
 }
 
-// gcpSAMappedCount returns how many profiles map email and how many reported.
-func gcpSAMappedCount(email string, profiles []kubernetesProfileMappings) (mapped, reported int) {
-	key := strings.ToLower(email)
+// gcpSAMappedCount counts, with the shared decision at now
+// (kubernetesProfileMappings.decision), the profiles whose decision for
+// email is mapped and the profiles that reported. A profile whose decision
+// is not_required is counted in neither (the status view does not list it);
+// notRequired counts those so the summary can leave them out of the
+// unreported count too.
+func gcpSAMappedCount(email string, profiles []kubernetesProfileMappings, now time.Time) (mapped, reported, notRequired int) {
 	for _, p := range profiles {
 		if !p.reported {
 			continue
 		}
-		reported++
-		if p.gsas[key] {
+		switch p.decision(email, now).State {
+		case SAMappingStateNotRequired:
+			notRequired++
+			continue
+		case SAMappingStateMapped:
 			mapped++
 		}
+		reported++
 	}
-	return mapped, reported
+	return mapped, reported, notRequired
 }
 
 // gcpSADefaultsFor lists the defaults that name saID: the project default
@@ -323,9 +373,11 @@ func (s *Server) gcpSADefaultsFor(project *store.Project, saID string) []GCPServ
 // gcpSANextStep derives the first missing link. Verification comes first.
 // Then mapping: a profile whose project default is this account but which
 // does not map it, or else, when Kubernetes profiles reported and none maps
-// it, the first of them. A profile that did not report is not a known
-// missing link. The Workload Identity binding is not checked, so it never
-// produces a step.
+// it, the first of them. A profile that did not report, or whose state is
+// unknown, is not a known missing link, except an ambiguous mapping on a
+// current, complete report (the broker refuses it, and an operator can fix
+// it).
+// The Workload Identity binding is not checked, so it never produces a step.
 func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, defaults []GCPServiceAccountDefault) GCPServiceAccountNextStep {
 	if !verified {
 		return GCPServiceAccountNextStep{
@@ -347,7 +399,10 @@ func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, de
 		switch m.State {
 		case GCPSAMappingMapped:
 			anyMapped = true
-		case GCPSAMappingNotMapped:
+		case GCPSAMappingNotMapped, GCPSAMappingUnknown:
+			if m.State == GCPSAMappingUnknown && !m.Ambiguous {
+				continue
+			}
 			if defaultProfiles[m.Profile] {
 				return gcpSANotMappedStep(m)
 			}
@@ -366,12 +421,18 @@ func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, de
 }
 
 func gcpSANotMappedStep(m *GCPServiceAccountProfileMapping) GCPServiceAccountNextStep {
+	msg := fmt.Sprintf("No Kubernetes service account mapping on profile %s of broker %s. "+
+		"A broker operator must add it to kubernetes_service_account_mappings.", m.Profile, m.BrokerName)
+	if m.Ambiguous {
+		msg = fmt.Sprintf("More than one Kubernetes service account on profile %s of broker %s is annotated "+
+			"with this account, so the broker refuses it. A broker operator must add an explicit entry to "+
+			"kubernetes_service_account_mappings or remove the extra annotations.", m.Profile, m.BrokerName)
+	}
 	return GCPServiceAccountNextStep{
 		Code:       GCPSANextStepNotMapped,
 		BrokerName: m.BrokerName,
 		Profile:    m.Profile,
-		Message: fmt.Sprintf("No Kubernetes service account mapping on profile %s of broker %s. "+
-			"A broker operator must add it to kubernetes_service_account_mappings.", m.Profile, m.BrokerName),
+		Message:    msg,
 	}
 }
 
@@ -423,8 +484,10 @@ func (s *Server) gcpServiceAccountAgents(ctx context.Context, projectID, saID st
 }
 
 // GCPServiceAccountMappingSummary counts, for one account, the Kubernetes
-// broker profiles of a project that map it (MappedProfiles), that reported
-// their mappings (ReportedProfiles) and that did not (UnreportedProfiles).
+// broker profiles of a project whose shared mapping decision is mapped
+// (MappedProfiles, the status view's "mapped"), that reported their
+// mappings (ReportedProfiles) and that did not (UnreportedProfiles). A
+// profile whose runtime needs no mapping is not counted.
 type GCPServiceAccountMappingSummary struct {
 	MappedProfiles     int `json:"mappedProfiles"`
 	ReportedProfiles   int `json:"reportedProfiles"`
@@ -433,12 +496,13 @@ type GCPServiceAccountMappingSummary struct {
 
 // annotateGCPSAMappings sets the mapping summary on every listed account.
 func annotateGCPSAMappings(items []GCPServiceAccountWithCapabilities, profiles []kubernetesProfileMappings) {
+	now := time.Now()
 	for i := range items {
-		mapped, reported := gcpSAMappedCount(items[i].Email, profiles)
+		mapped, reported, notRequired := gcpSAMappedCount(items[i].Email, profiles, now)
 		items[i].Mapping = &GCPServiceAccountMappingSummary{
 			MappedProfiles:     mapped,
 			ReportedProfiles:   reported,
-			UnreportedProfiles: len(profiles) - reported,
+			UnreportedProfiles: len(profiles) - reported - notRequired,
 		}
 	}
 }

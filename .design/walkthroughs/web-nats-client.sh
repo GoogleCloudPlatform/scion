@@ -186,7 +186,9 @@ cmd_subscribe() {
     #   event: connected
     #   data: {"connectionId":"sse-1","subjects":["project.test-project.>"]}
     #
-    # Then :heartbeat <timestamp> comments every 30 seconds to keep alive.
+    # Then a named heartbeat event every 30 seconds to keep alive:
+    #   event: heartbeat
+    #   data: <millisecond timestamp>
     info "Expected: initial 'connected' event, then heartbeats every 30s"
     info "Publish events via: ./web-nats-client.sh publish"
     echo ""
@@ -377,8 +379,8 @@ cmd_lifecycle() {
     # 6.1 Heartbeat verification
     step "6.1 Heartbeat Verification"
     info "Opening SSE connection for 35 seconds to observe heartbeats..."
-    info "Heartbeats are SSE comments (:heartbeat <timestamp>) every 30 seconds."
-    info "They are ignored by EventSource but keep TCP connections alive through proxies."
+    info "Heartbeats are named events (event: heartbeat, data: <ms timestamp>) every 30 seconds."
+    info "Page code can observe them; they carry no id line and keep TCP connections alive through proxies."
     echo ""
     timeout 35 curl -N -H "Cookie: ${SESSION_COOKIE}" \
         "${BASE_URL}/events?sub=project.${TEST_PROJECT}.>" 2>/dev/null || true

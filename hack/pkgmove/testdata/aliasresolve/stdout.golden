@@ -1,0 +1,70 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (4):
+  git mv hub/handlers.go hub/sub/handlers.go
+  git mv hub/handlers_shadow.go hub/sub/handlers_shadow.go
+  git mv hub/handlers_test.go hub/sub/handlers_test.go
+  git mv hub/handlers_typed.go hub/sub/handlers_typed.go
+
+Renames (0):
+
+Alias entries (7):
+  var   Handle = sub.Handle
+  var   HandleJSON = sub.HandleJSON
+  var   Safe = sub.Safe
+  var   Shadowed = sub.Shadowed
+  var   Typed = sub.Typed
+  var   Where = sub.Where
+  var   Writer = sub.Writer
+
+Alias files (1):
+  hub/zz_alias_sub.go (19 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Alias references resolved to their targets (16):
+  hub/handlers.go:11: writeError -> apierr.WriteError
+  hub/handlers.go:11: codeNotFound -> apierr.CodeNotFound
+  hub/handlers.go:13: code -> apierr.Code
+  hub/handlers.go:14: box -> apierr.Box
+  hub/handlers.go:14: first -> apierr.First
+  hub/handlers.go:15: writeError -> apierr.WriteError
+  hub/handlers.go:20: WriteJSON -> apierr.WriteJSON
+  hub/handlers.go:25: code -> apierr.Code
+  hub/handlers.go:25: writeError -> apierr.WriteError
+  hub/handlers.go:28: callerAt -> apierr.CallerAt
+  hub/handlers.go:31: guard -> apierr.Guard
+  hub/handlers_shadow.go:7: writeError -> apierr2.WriteError
+  hub/handlers_shadow.go:7: codeNotFound -> apierr2.CodeNotFound
+  hub/handlers_test.go:23: codeNotFound -> apierr.CodeNotFound
+  hub/handlers_typed.go:11: codeNotFound -> apierr.CodeNotFound
+  hub/handlers_typed.go:12: writeError -> apierr.WriteError
+
+Remaining source files edited (0):
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 4. Findings: 8. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/handlers.go:9: example.com/fx/hub.Handle is now example.com/fx/hub/sub.Handle for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers.go:19: example.com/fx/hub.HandleJSON is now example.com/fx/hub/sub.HandleJSON for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers.go:25: example.com/fx/hub.Writer is now example.com/fx/hub/sub.Writer for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers.go:28: example.com/fx/hub.Where is now example.com/fx/hub/sub.Where for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers.go:31: example.com/fx/hub.Safe is now example.com/fx/hub/sub.Safe for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers_shadow.go:6: example.com/fx/hub.Shadowed is now example.com/fx/hub/sub.Shadowed for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers_typed.go:10: example.com/fx/hub.Typed is now example.com/fx/hub/sub.Typed for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: func value through a wrapper alias resolved to its target ==
+  hub/handlers.go:25: writeError is a wrapper of example.com/fx/apierr.WriteError used as a value; the moved file now uses example.com/fx/apierr.WriteError itself, so its identity (reflect Pointer, runtime.FuncForPC name) differs from staying uses of the wrapper
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK

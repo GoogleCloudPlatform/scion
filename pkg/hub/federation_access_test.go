@@ -280,7 +280,7 @@ func TestRequireFederationAccess_FederatedUserWithScope(t *testing.T) {
 
 // TestRequireFederationAccess_DefaultFederationScopes verifies that a federated
 // agent with DefaultFederationScopes has ScopeAgentStatusUpdate but not
-// ScopeProjectSecretRead.
+// ScopeProjectSecretRead or ScopeAgentLogAppend.
 func TestRequireFederationAccess_DefaultFederationScopes(t *testing.T) {
 	t.Parallel()
 	identity := NewFederatedAgentIdentity(
@@ -301,6 +301,11 @@ func TestRequireFederationAccess_DefaultFederationScopes(t *testing.T) {
 	// HasScope(ScopeProjectSecretRead) should return false
 	if identity.HasScope(ScopeProjectSecretRead) {
 		t.Error("expected HasScope(ScopeProjectSecretRead) to return false with DefaultFederationScopes")
+	}
+
+	// agent.log_append is Reserved, so its scope is not a default.
+	if identity.HasScope(ScopeAgentLogAppend) {
+		t.Error("expected HasScope(ScopeAgentLogAppend) to return false with DefaultFederationScopes")
 	}
 
 	// Verify via middleware: ScopeAgentStatusUpdate -> 200

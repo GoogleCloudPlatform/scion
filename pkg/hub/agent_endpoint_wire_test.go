@@ -17,23 +17,10 @@
 package hub
 
 import (
-	"bytes"
 	"context"
-	"log/slog"
 	"strings"
 	"testing"
 )
-
-// captureSlogDefault swaps slog's default logger for a text handler writing
-// to the returned buffer, and restores the previous default on test cleanup.
-func captureSlogDefault(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
-}
 
 // TestCreateAuthenticatedDispatcher_AgentEndpoint pins the production wiring
 // in CreateAuthenticatedDispatcher that installs the agent-endpoint override

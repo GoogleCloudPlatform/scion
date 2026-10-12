@@ -21,6 +21,8 @@ import (
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 )
 
 // deduplicateAccessPolicies removes duplicate access_policies rows before the
@@ -32,13 +34,13 @@ import (
 //
 // The function is idempotent: when no duplicates exist (or the table does not
 // exist yet on a fresh database) it is a no-op.
-func (c *CompositeStore) deduplicateAccessPolicies(ctx context.Context) error {
-	db := c.DB()
+func deduplicateAccessPolicies(ctx context.Context, client *ent.Client) error {
+	db := clientDB(client)
 	if db == nil {
 		return nil
 	}
 
-	exists, err := c.accessPoliciesTableExists(ctx, db)
+	exists, err := accessPoliciesTableExists(ctx, client, db)
 	if err != nil || !exists {
 		return err
 	}
@@ -77,13 +79,13 @@ func (c *CompositeStore) deduplicateAccessPolicies(ctx context.Context) error {
 //
 // The function is idempotent: when no duplicates exist (or the table does not
 // exist yet on a fresh database) it is a no-op.
-func (c *CompositeStore) deduplicateDelegationEdges(ctx context.Context) error {
-	db := c.DB()
+func deduplicateDelegationEdges(ctx context.Context, client *ent.Client) error {
+	db := clientDB(client)
 	if db == nil {
 		return nil
 	}
 
-	exists, err := c.tableExists(ctx, db, "delegation_edges")
+	exists, err := tableExists(ctx, client, db, "delegation_edges")
 	if err != nil || !exists {
 		return err
 	}
@@ -127,13 +129,13 @@ func (c *CompositeStore) deduplicateDelegationEdges(ctx context.Context) error {
 //
 // The function is idempotent: when no duplicates exist (or the table does not
 // exist yet on a fresh database) it is a no-op.
-func (c *CompositeStore) deduplicateAgentSessionMetrics(ctx context.Context) error {
-	db := c.DB()
+func deduplicateAgentSessionMetrics(ctx context.Context, client *ent.Client) error {
+	db := clientDB(client)
 	if db == nil {
 		return nil
 	}
 
-	exists, err := c.tableExists(ctx, db, "agent_session_metrics")
+	exists, err := tableExists(ctx, client, db, "agent_session_metrics")
 	if err != nil || !exists {
 		return err
 	}
@@ -166,8 +168,8 @@ func (c *CompositeStore) deduplicateAgentSessionMetrics(ctx context.Context) err
 //
 // tableName is interpolated into the SQL (see tableExistsQuery), so it must be
 // a compile-time constant, never user or config input.
-func (c *CompositeStore) tableExists(ctx context.Context, db *sql.DB, tableName string) (bool, error) {
-	drv, ok := c.client.Driver().(*entsql.Driver)
+func tableExists(ctx context.Context, client *ent.Client, db *sql.DB, tableName string) (bool, error) {
+	drv, ok := client.Driver().(*entsql.Driver)
 	if !ok {
 		return false, nil
 	}
@@ -211,6 +213,15 @@ func tableExistsQuery(d, tableName string) string {
 
 // accessPoliciesTableExists checks whether the access_policies table exists
 // in the database.
-func (c *CompositeStore) accessPoliciesTableExists(ctx context.Context, db *sql.DB) (bool, error) {
-	return c.tableExists(ctx, db, "access_policies")
+func accessPoliciesTableExists(ctx context.Context, client *ent.Client, db *sql.DB) (bool, error) {
+	return tableExists(ctx, client, db, "access_policies")
+}
+
+// clientDB returns the *sql.DB behind client, or nil if the client is not
+// backed by a database/sql driver.
+func clientDB(client *ent.Client) *sql.DB {
+	if drv, ok := client.Driver().(*entsql.Driver); ok {
+		return drv.DB()
+	}
+	return nil
 }

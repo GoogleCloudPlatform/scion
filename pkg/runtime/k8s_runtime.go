@@ -644,22 +644,18 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	if err := hooks.checkpoint(ctx, CheckpointStepPreClean); err != nil {
 		return "", err
 	}
-	// NFS-home agents: one start at a time per agent, across brokers that
-	// share the store, from before the previous pod is removed until the new
-	// pod exists, so two pods never write to the same home.
+	// NFS-home agents: two pods must never write to the same home. The hub
+	// start claim admits one start of an agent at a time, across hub
+	// replicas and brokers. Here, the pre-clean waits until the previous
+	// pod's termination is confirmed before the new pod is created (and
+	// refuses with previous_pod_unconfirmed otherwise), and every object
+	// carries this start's ID, so the cleanup of a failed start never
+	// removes a newer start's pod and mark-seeded refuses once a newer start
+	// owns the home.
 	nfsHomeStart, err := nfsHomePod(config)
 	if err != nil {
 		return "", err
 	}
-	releaseHomeLock := func() {}
-	if nfsHomeStart {
-		release, err := acquireHomeStartLock(ctx, config)
-		if err != nil {
-			return "", err
-		}
-		releaseHomeLock = release
-	}
-	defer func() { releaseHomeLock() }()
 
 	if runID := config.Labels[api.LabelRunID]; runID != "" {
 		// Run-scoped pre-clean (ptone/scion#2550), with the same NFS-home
@@ -829,8 +825,6 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	podCreated = true
 	r.trackCreatedPod(createdPod)
 	hooks.created(api.ResourceHandle{Kind: api.ResourceKindPod, Namespace: namespace, Name: createdPod.Name, UID: string(createdPod.UID)})
-	releaseHomeLock()
-	releaseHomeLock = func() {}
 	runtimeLog.Info("Pod created", "agent", config.Name, "namespace", namespace,
 		"phase", "pod-create", "elapsed_ms", time.Since(podCreateStart).Milliseconds())
 
@@ -2091,8 +2085,17 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// equivalent. No-auth mode builds a raw shell command string to avoid
 	// the double-sh-c wrapping that previously caused the no-auth command
 	// to be injected as terminal input instead of running standalone.
+	//
+	// nfsHome is the value that decides the NFS agent-home mount below. A
+	// pod-local home (no NFS home) is lost when the pod is deleted, so a
+	// resume has no harness session to continue: let it fall back to a
+	// fresh start instead of exiting (ptone/scion#2665).
+	nfsHome, err := nfsHomePod(config)
+	if err != nil {
+		return nil, err
+	}
 	var cmd []string
-	cmdLine, ok := harnessCmdLine(config)
+	cmdLine, ok := harnessCmdLine(config, harnessCmdLineOptions{FreshStartOnFailedResume: !nfsHome})
 	if !ok {
 		cmdLine = "sleep infinity"
 	}
@@ -2176,10 +2179,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	var extraVolumes []corev1.Volume
 	var extraVolumeMounts []corev1.VolumeMount
 
-	nfsHome, err := nfsHomePod(config)
-	if err != nil {
-		return nil, err
-	}
 	containerHome := util.GetHomeDir(config.UnixUsername)
 	fileProjections := r.k8sFileProjections(config)
 	if err := checkK8sHomeFileTargets(r.k8sHomeFilePlacements(config)); err != nil {
@@ -2426,8 +2425,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	allowPrivilegeEscalation := false
 	podSecurityContext := &corev1.PodSecurityContext{
 		FSGroup:      &fsGroupGID,
-		RunAsUser:    int64Ptr(containerUID),
-		RunAsGroup:   int64Ptr(containerUID),
+		RunAsUser:    int64Ptr(K8sContainerUID),
+		RunAsGroup:   int64Ptr(K8sContainerUID),
 		RunAsNonRoot: &runAsNonRoot,
 		SeccompProfile: &corev1.SeccompProfile{
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
@@ -2627,7 +2626,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// uid is the RunAsUser the agent runs as, gid is the NFS fsGroup.
 		// The configured NFS uid is not applied to RunAsUser, so it is not
 		// passed here either.
-		initCommand := nfsProvisionCommand(initGitClone, containerUID, fsGroupGID)
+		initCommand := nfsProvisionCommand(initGitClone, K8sContainerUID, fsGroupGID)
 
 		// F-111: shared dirs served from the workspace PVC by subPath
 		// (nfsSharedDirs below) are siblings of the workspace under the
@@ -3665,11 +3664,11 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 	if err != nil && (nfsHome || hs != nil) {
 		// An NFS-home start never force-deletes a pod it could not read:
 		// it may be a previous pod of this agent still writing to the home.
-		return fmt.Errorf("%w: cannot read the previous pod %s: %v", errPreviousPodUnconfirmed, podName, err)
+		return fmt.Errorf("%w: cannot read the previous pod %s: %w", errPreviousPodUnconfirmed, podName, err)
 	}
 	if err == nil && isNFSHomePod(pod) {
 		if derr := pods.Delete(ctx, podName, podDeleteOptions(pod)); derr != nil && !k8serrors.IsNotFound(derr) {
-			return fmt.Errorf("%w: failed to delete the previous pod %s: %v", errPreviousPodUnconfirmed, podName, derr)
+			return fmt.Errorf("%w: failed to delete the previous pod %s: %w", errPreviousPodUnconfirmed, podName, derr)
 		}
 		bound := nfsHomeTerminationBound(pod, hs)
 		runtimeLog.Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace, "bound", bound.String(), "phase", "home-wait")
@@ -4567,10 +4566,34 @@ func nfsInitContainerInjected(config RunConfig) bool {
 	return config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 }
 
-// containerUID is the uid agent pods run as (pod RunAsUser/RunAsGroup):
+// K8sContainerUID is the uid agent pods run as (pod RunAsUser/RunAsGroup):
 // the image's non-root scion user. The NFS provisioning init container
 // chowns the workspace to this uid so the agent owns what it clones.
-const containerUID int64 = 1000
+//
+// Heads-up: server.workspace_storage.nfs.uid is deliberately not applied
+// on Kubernetes (#2608); agents always run as 1000 here, and the broker
+// logs a warning when nfs.uid is set to another value (see
+// warnK8sNFSUIDIgnored in pkg/agent). Unlike the docker runtime, which
+// starts as root and drops to the configured uid, the pod is non-root from
+// the first process (RunAsUser/RunAsNonRoot in buildPod's
+// podSecurityContext), and the image's /etc/passwd only has scion as uid
+// 1000, so a different RunAsUser would have no user name, no home and no
+// way to su to it. The provision init container itself runs as uid 0
+// whatever the pod uid is (see its securityContext override and the
+// pod-level RunAsUser=1000/RunAsNonRoot=true note there); what depends on
+// 1000 is the chown target buildPod passes to nfsProvisionCommand, which is
+// K8sContainerUID, not the configured nfs.uid.
+//
+// Honouring nfs.uid on Kubernetes (option B) would need at least:
+//   - a passwd entry for the uid, e.g. written by an init container or
+//     provided at run time with nss_wrapper;
+//   - exec and attach that do not su to a user by name (ExecAsUserCmd and
+//     its callers in the broker PTY handlers);
+//   - a writable home directory for that uid;
+//   - a one-off re-own of existing workspace and agent trees on the export
+//     that are owned by 1000;
+//   - broker delete rights over files owned by that uid on the export.
+const K8sContainerUID int64 = 1000
 
 // nfsProvisionCommand builds the Command slice for the provisioning init
 // container. It invokes `sciontool provision` with numeric flags for depth
@@ -4578,7 +4601,7 @@ const containerUID int64 = 1000
 // (nfsProvisionEnv) to prevent shell injection.
 //
 // buildPod passes the identity the agent container runs as: uid is the pod
-// RunAsUser (containerUID) and gid is the pod fsGroup (the resolved
+// RunAsUser (K8sContainerUID) and gid is the pod fsGroup (the resolved
 // workspace_storage.nfs gid). A zero value omits the flag, so sciontool's
 // own default of 1000 applies.
 func nfsProvisionCommand(gc *api.GitCloneConfig, uid, gid int64) []string {

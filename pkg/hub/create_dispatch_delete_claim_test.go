@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -35,31 +34,6 @@ import (
 // change the phase of a row a delete has claimed (ptone/scion#3055, design
 // ptone/scion#2483 §2.1: phase writers outside UpdateAgentStatus respect the
 // deletion predicate).
-
-// newRaceSyncCreateServer is newRaceAsyncCreateServer with async launch off,
-// so createAgent takes the synchronous broker create path through the real
-// HTTPAgentDispatcher.
-func newRaceSyncCreateServer(t *testing.T) (*Server, store.Store, *store.Project, *raceAsyncClient) {
-	t.Helper()
-	srv, s, project, client := newRaceAsyncCreateServer(t)
-	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
-	d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings { return AsyncLaunchSettings{} })
-	srv.SetDispatcher(d)
-	return srv, s, project, client
-}
-
-// syncRunningAnswer is the broker's answer to a synchronous create that
-// started the container.
-func syncRunningAnswer(req *RemoteCreateAgentRequest) *RemoteAgentResponse {
-	return &RemoteAgentResponse{
-		Agent: &RemoteAgentInfo{
-			ID: "container-" + req.Slug, Slug: req.Slug, Name: req.Name,
-			Phase: string(state.PhaseRunning), ContainerStatus: "Up 1 second",
-			RunID: req.RunID,
-		},
-		Created: true,
-	}
-}
 
 // A synchronous create dispatch returns while a DELETE is blocked in its
 // broker call (the N3 probe). The dispatch write leaves the claimed row's

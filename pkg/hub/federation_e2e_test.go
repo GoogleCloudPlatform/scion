@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,15 +29,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
-
-// newFedAuthPointer creates an atomic.Pointer pre-loaded with the given authenticator.
-func newFedAuthPointer(auth *FederationAuthenticator) *atomic.Pointer[FederationAuthenticator] {
-	p := &atomic.Pointer[FederationAuthenticator]{}
-	if auth != nil {
-		p.Store(auth)
-	}
-	return p
-}
 
 // e2eResponse is the JSON response returned by the E2E test endpoint handler
 // to verify identity details from the full authentication flow.
@@ -220,7 +210,7 @@ func TestFederationE2E_FullSuccessPath(t *testing.T) {
 func TestFederationE2E_ScopeDenied(t *testing.T) {
 	t.Parallel()
 	// Server requires ScopeProjectSecretRead, but default scopes only include
-	// ScopeAgentStatusUpdate and ScopeAgentLogAppend.
+	// ScopeAgentStatusUpdate.
 	server, hubAKey, hubAIssuer, hubBAudience, kid := setupE2EServer(t, ScopeProjectSecretRead)
 
 	claims := validFederationClaims(hubAIssuer, hubBAudience)

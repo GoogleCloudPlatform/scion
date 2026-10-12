@@ -35,6 +35,10 @@ func TestDispatchStateEnumeration(t *testing.T) {
 	hubDir := findHubDir(t)
 	fset := token.NewFileSet()
 
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards store.Message literals, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards store.Message literals, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)
