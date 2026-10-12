@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/backoff"
 	scionhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
@@ -65,7 +66,29 @@ type Reconciler struct {
 	// Refreshed after register/delete operations or every cacheRefreshInterval ticks.
 	cachedRegistered  map[int]string
 	ticksSinceRefresh int
+
+	// backoff paces reconciles after failures; state is the loop's
+	// current health, used to log only on changes.
+	backoff backoff.Backoff
+	state   loopState
+
+	// after returns a channel that fires after d. Defaults to time.After;
+	// overridable in tests.
+	after func(d time.Duration) <-chan time.Time
 }
+
+// loopState is the health of the reconcile loop.
+type loopState int
+
+const (
+	stateHealthy      loopState = iota
+	stateBackoff                // recent reconciles failed; delays grow
+	stateUnauthorized           // the hub answered 401; retry at the cap
+)
+
+// DefaultMaxBackoff caps the delay between reconciles after failures,
+// including while the hub does not accept the agent's credential.
+const DefaultMaxBackoff = 5 * time.Minute
 
 // cacheRefreshInterval is the number of ticks between forced cache refreshes.
 // Between refreshes, the reconciler uses its local cache to avoid HTTP calls.
@@ -78,6 +101,12 @@ func NewReconciler(client HubPortClient, cfg Config) *Reconciler {
 		cfg:         cfg,
 		scan:        ScanListeners,
 		autoExposed: make(map[int]bool),
+		backoff: backoff.Backoff{
+			Base:   cfg.Interval,
+			Max:    max(DefaultMaxBackoff, cfg.Interval),
+			Jitter: backoff.DefaultJitter,
+		},
+		after: time.After,
 	}
 }
 
@@ -88,29 +117,60 @@ func (r *Reconciler) SetMessageClient(mc MessageClient) {
 }
 
 // Run starts the reconciliation loop. It blocks until ctx is cancelled.
+//
+// While reconciles succeed they run every cfg.Interval. After a failure the
+// delay doubles per consecutive failure up to the backoff cap, and a 401
+// from the hub moves straight to the cap: the agent token can be refreshed
+// in place while the container runs, so the loop keeps retrying slowly
+// rather than stopping. A successful reconcile restores the base interval.
 func (r *Reconciler) Run(ctx context.Context) {
-	ticker := time.NewTicker(r.cfg.Interval)
-	defer ticker.Stop()
-
-	// Do an initial reconcile immediately.
-	r.reconcileOnce(ctx)
-
 	for {
+		delay := r.nextDelay(r.reconcileOnce(ctx))
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			r.reconcileOnce(ctx)
+		case <-r.after(delay):
 		}
 	}
 }
 
-func (r *Reconciler) reconcileOnce(ctx context.Context) {
+// nextDelay records the outcome of a reconcile, logs state changes, and
+// returns the delay before the next one.
+func (r *Reconciler) nextDelay(err error) time.Duration {
+	if err == nil {
+		if r.state != stateHealthy {
+			log.Info("auto-expose: hub requests succeeded again; resuming every %s", r.cfg.Interval)
+		}
+		r.state = stateHealthy
+		r.backoff.Reset()
+		return r.cfg.Interval
+	}
+	if scionhub.IsUnauthorized(err) {
+		delay := r.backoff.AtMax()
+		if r.state != stateUnauthorized {
+			log.Error("auto-expose: hub refused the agent credential (401); retrying every %s until it is accepted", r.backoff.Max)
+		}
+		r.state = stateUnauthorized
+		return delay
+	}
+	delay := r.backoff.Failure()
+	if r.state != stateBackoff {
+		log.Error("auto-expose: reconcile failed: %v; backing off (up to %s between attempts)", err, r.backoff.Max)
+	} else {
+		log.Debug("auto-expose: reconcile failed: %v; next attempt in %s", err, delay)
+	}
+	r.state = stateBackoff
+	return delay
+}
+
+// reconcileOnce runs one scan-and-reconcile pass. It returns the first error
+// from the scan or the hub; a 401 ends the pass early since further hub
+// calls with the same credential would be refused too.
+func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	// 1. Scan for listening sockets.
 	sockets, err := r.scan()
 	if err != nil {
-		log.Error("auto-expose: scan failed: %v", err)
-		return
+		return fmt.Errorf("scan failed: %w", err)
 	}
 
 	// 2. Filter through policy.
@@ -119,8 +179,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) {
 	// 3. Get currently registered ports (from cache or hub).
 	registered, err := r.getRegistered(ctx, false)
 	if err != nil {
-		log.Error("auto-expose: failed to list registered ports: %v", err)
-		return
+		return fmt.Errorf("failed to list registered ports: %w", err)
 	}
 
 	// 4. Diff: ports to expose = wanted - registered.
@@ -129,11 +188,22 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) {
 	// 5. Diff: ports to unexpose = autoExposed - wanted (only ports we registered).
 	toUnexpose := r.diffToUnexpose(wanted)
 
+	var firstErr error
+	fail := func(err error) bool {
+		if firstErr == nil {
+			firstErr = err
+		}
+		return scionhub.IsUnauthorized(err)
+	}
+
 	// 6. Register new ports.
 	changed := false
 	for _, port := range toExpose {
 		if err := r.registerPort(ctx, port); err != nil {
-			log.Error("auto-expose: failed to register port %d: %v", port, err)
+			log.Debug("auto-expose: failed to register port %d: %v", port, err)
+			if fail(fmt.Errorf("failed to register port %d: %w", port, err)) {
+				return firstErr
+			}
 			continue
 		}
 		changed = true
@@ -142,7 +212,10 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) {
 	// 7. Deregister stale ports.
 	for _, port := range toUnexpose {
 		if err := r.deregisterPort(ctx, port); err != nil {
-			log.Error("auto-expose: failed to deregister port %d: %v", port, err)
+			log.Debug("auto-expose: failed to deregister port %d: %v", port, err)
+			if fail(fmt.Errorf("failed to deregister port %d: %w", port, err)) {
+				return firstErr
+			}
 			continue
 		}
 		changed = true
@@ -154,6 +227,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) {
 			log.Debug("auto-expose: cache refresh after changes failed: %v", err)
 		}
 	}
+	return firstErr
 }
 
 // filterPorts applies the configured policy to scanned sockets, returning

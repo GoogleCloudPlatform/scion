@@ -28,13 +28,19 @@ import (
 	"time"
 
 	wire "github.com/GoogleCloudPlatform/scion/pkg/portforward"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/backoff"
 	scionhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/gorilla/websocket"
 )
 
 const (
-	reconnectDelay       = 5 * time.Second
+	// reconnectDelay is the first reconnect delay; it doubles on each
+	// consecutive failed connect up to maxReconnectDelay.
+	reconnectDelay = 5 * time.Second
+	// maxReconnectDelay caps the reconnect delay, and is the retry
+	// interval while the hub answers 401.
+	maxReconnectDelay    = 5 * time.Minute
 	localRequestTimeout  = 60 * time.Second
 	maxLocalResponseBody = 64 << 20
 )
@@ -43,42 +49,101 @@ type Manager struct {
 	client  *scionhub.Client
 	http    *http.Client
 	writeMu sync.Mutex
+
+	// backoff paces reconnects after failed connects.
+	backoff backoff.Backoff
+	// connect runs one tunnel session (runOnce); after returns a channel
+	// that fires after d (time.After). Both are overridable in tests.
+	connect func(ctx context.Context) (connected bool, err error)
+	after   func(d time.Duration) <-chan time.Time
 }
 
 func NewManager(client *scionhub.Client) *Manager {
-	return &Manager{
+	m := &Manager{
 		client: client,
 		http: &http.Client{
 			Timeout: localRequestTimeout,
 		},
+		backoff: backoff.Backoff{
+			Base:   reconnectDelay,
+			Max:    maxReconnectDelay,
+			Jitter: backoff.DefaultJitter,
+		},
+		after: time.After,
 	}
+	m.connect = m.runOnce
+	return m
 }
 
+// Run keeps the tunnel connected until ctx is cancelled.
+//
+// After a session that connected, the next connect waits reconnectDelay.
+// Each consecutive failed connect doubles the delay up to
+// maxReconnectDelay. A 401 on the upgrade request moves straight to
+// maxReconnectDelay: the agent token can be refreshed in place while the
+// container runs, so the tunnel keeps retrying slowly rather than stopping.
 func (m *Manager) Run(ctx context.Context) {
 	if m == nil || m.client == nil || !m.client.IsConfigured() {
 		return
 	}
+	m.run(ctx)
+}
+
+func (m *Manager) run(ctx context.Context) {
+	state := tunnelHealthy
 	for {
-		err := m.runOnce(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				log.Info("Port-forward tunnel disconnected: context cancelled")
-			} else {
-				log.Error("Port-forward tunnel disconnected: %v", err)
+		connected, err := m.connect(ctx)
+		if ctx.Err() != nil {
+			log.Info("Port-forward tunnel disconnected: context cancelled")
+			return
+		}
+		var delay time.Duration
+		switch {
+		case connected:
+			// The session was up; a drop afterwards starts a fresh backoff.
+			m.backoff.Reset()
+			state = tunnelHealthy
+			delay = m.backoff.Failure()
+			log.Error("Port-forward tunnel disconnected: %v; reconnecting in %s", err, delay)
+		case scionhub.IsUnauthorized(err):
+			delay = m.backoff.AtMax()
+			if state != tunnelUnauthorized {
+				log.Error("Port-forward tunnel: hub refused the agent credential (401); retrying every %s until it is accepted", m.backoff.Max)
 			}
+			state = tunnelUnauthorized
+		default:
+			delay = m.backoff.Failure()
+			if state != tunnelBackoff {
+				log.Error("Port-forward tunnel: connect failed: %v; backing off (up to %s between attempts)", err, m.backoff.Max)
+			} else {
+				log.Debug("Port-forward tunnel: connect failed: %v; next attempt in %s", err, delay)
+			}
+			state = tunnelBackoff
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(reconnectDelay):
+		case <-m.after(delay):
 		}
 	}
 }
 
-func (m *Manager) runOnce(ctx context.Context) error {
+// tunnelState is the health of the reconnect loop, used to log only on
+// changes.
+type tunnelState int
+
+const (
+	tunnelHealthy      tunnelState = iota
+	tunnelBackoff                  // consecutive connects failed
+	tunnelUnauthorized             // the hub answered 401
+)
+
+// runOnce runs one tunnel session. connected reports whether the websocket
+// upgrade succeeded; err is why the session ended or failed to start.
+func (m *Manager) runOnce(ctx context.Context) (connected bool, err error) {
 	endpoint, err := tunnelURL(m.client.HubURL(), m.client.AgentID())
 	if err != nil {
-		return err
+		return false, err
 	}
 	header := http.Header{}
 	header.Set("X-Scion-Agent-Token", m.client.AuthToken())
@@ -90,9 +155,12 @@ func (m *Manager) runOnce(ctx context.Context) error {
 	if err := m.client.ApplyTransportHeaders(header); err != nil {
 		log.Debug("Port-forward tunnel: no transport credential available: %v", err)
 	}
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, endpoint, header)
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, endpoint, header)
 	if err != nil {
-		return err
+		if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols {
+			return false, &scionhub.StatusError{StatusCode: resp.StatusCode, Body: err.Error()}
+		}
+		return false, err
 	}
 	defer func() { _ = conn.Close() }()
 	// Close the connection when the context is cancelled to unblock ReadJSON.
@@ -104,7 +172,7 @@ func (m *Manager) runOnce(ctx context.Context) error {
 	for {
 		var msg wire.Message
 		if err := conn.ReadJSON(&msg); err != nil {
-			return err
+			return true, err
 		}
 		if msg.Type != wire.MessageTypeRequest || msg.Request == nil {
 			continue
