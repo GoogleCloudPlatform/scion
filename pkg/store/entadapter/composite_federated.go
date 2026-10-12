@@ -101,7 +101,7 @@ func (c *CompositeStore) CreateFederatedUser(ctx context.Context, u *store.User)
 		return err
 	}
 	u.Email = email
-	return c.UserStore.createUser(ctx, u, func(create *ent.UserCreate) {
+	return c.createUser(ctx, u, func(create *ent.UserCreate) {
 		create.SetKind(user.KindFederated).
 			SetHomeIssuer(*u.HomeIssuer).
 			SetFederatedEmail(*u.FederatedEmail)
