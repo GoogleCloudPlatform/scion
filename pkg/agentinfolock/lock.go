@@ -1,0 +1,88 @@
+/*
+Copyright 2026 The Scion Authors.
+*/
+
+// Package agentinfolock serializes read-modify-write updates of an agent's
+// agent-info.json across processes (ptone/scion#4681).
+//
+// Several processes update agent-info.json: the broker or CLI on the host
+// (pkg/agent) and, inside the container, sciontool init (PID 1), every
+// `sciontool hook` invocation and `sciontool status`. Each update reads the
+// whole file, changes a few fields and writes the whole file back through a
+// temp file and rename. Without a lock, two updates that overlap lose one
+// side's fields. On bind-mount runtimes the host and the container share the
+// file, so the race also crosses that boundary.
+//
+// Update takes an advisory flock(2) on a sibling lock file,
+// agent-info.json.lock, in the same directory. The lock cannot be on
+// agent-info.json itself, because the rename replaces its inode.
+//
+// The lock is best effort and never blocks or fails an update: hooks and the
+// broker's agent list must stay non-blocking. When the lock file is not a
+// regular file (the workload owns the agent home and can put anything there)
+// or cannot be opened, the update runs without the lock and a message is
+// logged. When another holder keeps the lock longer than the wait, the update
+// also runs without it. The unlocked path calls the same rmw func, so the
+// read and write are the same either way.
+//
+// flock is advisory and per open file description, which covers processes on
+// one kernel, including a Linux host and a bind-mounted container. It does
+// not cover a host and container in different kernels (apple container,
+// Docker Desktop on macOS); see ptone/scion#4681 Q1.
+package agentinfolock
+
+import (
+	"fmt"
+	"log/slog"
+	"path/filepath"
+	"time"
+)
+
+// LockSuffix is appended to the agent-info.json path to name its lock file.
+const LockSuffix = ".lock"
+
+// DefaultWait bounds how long Update waits for another holder. It is well
+// under the 2 s session-state lock wait, since the hook path must not stall.
+const DefaultWait = 200 * time.Millisecond
+
+// pollInterval is how often Update retries a held lock.
+const pollInterval = 5 * time.Millisecond
+
+// Options tunes Update. The zero value uses DefaultWait and slog.Debug.
+type Options struct {
+	// Wait bounds how long to wait for the lock. Zero means DefaultWait.
+	Wait time.Duration
+	// Logf receives the skip and timeout messages. Nil means slog.Debug.
+	Logf func(format string, args ...any)
+}
+
+func (o Options) wait() time.Duration {
+	if o.Wait > 0 {
+		return o.Wait
+	}
+	return DefaultWait
+}
+
+func (o Options) logf(format string, args ...any) {
+	if o.Logf != nil {
+		o.Logf(format, args...)
+		return
+	}
+	slog.Debug("agent-info lock", "detail", fmt.Sprintf(format, args...))
+}
+
+// LockPath returns the lock file path for an agent-info.json path.
+func LockPath(infoPath string) string {
+	return filepath.Join(filepath.Dir(infoPath), filepath.Base(infoPath)+LockSuffix)
+}
+
+// Update runs rmw, a read-modify-write of the file at infoPath, while
+// holding the agent-info lock when it can be taken. It returns rmw's error.
+// It never fails or blocks beyond opts.Wait because of the lock itself.
+func Update(infoPath string, opts Options, rmw func() error) error {
+	unlock, ok := acquire(LockPath(infoPath), opts)
+	if ok {
+		defer unlock()
+	}
+	return rmw()
+}

@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -29,11 +30,37 @@ import (
 const agentInfoMaxBytes = 1 << 20
 
 // StatusHandler manages agent status in a JSON file.
+//
+// Every write is a read-modify-write of the whole file. h.mu orders writes
+// inside one process; the agent-info lock (pkg/agentinfolock) orders them
+// across processes: init (PID 1), each `sciontool hook` and `sciontool
+// status`, and the host broker on bind-mount runtimes (#4681).
 type StatusHandler struct {
 	// StatusPath is the path to the agent-info.json file.
 	StatusPath string
 
+	// lockOpts tunes the agent-info lock. Tests shorten the wait.
+	lockOpts agentinfolock.Options
+
 	mu sync.Mutex
+}
+
+// update runs one locked read-modify-write: it reads the map, lets mutate
+// change it, and writes it back unless mutate returns false.
+func (h *StatusHandler) update(mutate func(info map[string]interface{}) bool) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	opts := h.lockOpts
+	if opts.Logf == nil {
+		opts.Logf = log.Debug
+	}
+	return agentinfolock.Update(h.StatusPath, opts, func() error {
+		info := h.readAgentInfoMap()
+		if !mutate(info) {
+			return nil
+		}
+		return h.writeAgentInfoLocked(info)
+	})
 }
 
 // NewStatusHandler creates a new status handler.
@@ -141,28 +168,28 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 // setWaitingFromNotification sets waiting_for_input and marks it as set by a
 // Notification event.
 func (h *StatusHandler) setWaitingFromNotification() error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	info := h.readAgentInfoMap()
-	info["activity"] = string(state.ActivityWaitingForInput)
-	info[activitySourceKey] = activitySourceNotification
-	delete(info, "toolName")
-	delete(info, "status")
-	delete(info, "sessionStatus")
-
-	return h.writeAgentInfoLocked(info)
+	return h.update(func(info map[string]interface{}) bool {
+		info["activity"] = string(state.ActivityWaitingForInput)
+		info[activitySourceKey] = activitySourceNotification
+		delete(info, "toolName")
+		delete(info, "status")
+		delete(info, "sessionStatus")
+		return true
+	})
 }
 
 // UpdateActivity writes the activity to the agent-info.json file atomically.
 // Used for runtime activity changes (most events). Preserves the current phase.
 func (h *StatusHandler) UpdateActivity(activity state.Activity, toolName string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	return h.update(func(info map[string]interface{}) bool {
+		applyActivity(info, activity, toolName)
+		return true
+	})
+}
 
-	info := h.readAgentInfoMap()
-
-	// Update the activity field
+// applyActivity sets or clears activity and toolName, and removes the
+// notification marker and legacy fields.
+func applyActivity(info map[string]interface{}, activity state.Activity, toolName string) {
 	if activity == "" {
 		delete(info, "activity")
 	} else {
@@ -182,68 +209,72 @@ func (h *StatusHandler) UpdateActivity(activity state.Activity, toolName string)
 	// Remove legacy fields if present
 	delete(info, "status")
 	delete(info, "sessionStatus")
+}
 
-	return h.writeAgentInfoLocked(info)
+// applyMessage sets detail.message, or removes it when message is empty.
+func applyMessage(info map[string]interface{}, message string) {
+	detail, _ := info["detail"].(map[string]interface{})
+	if detail == nil {
+		detail = make(map[string]interface{})
+	}
+	if message != "" {
+		detail["message"] = message
+	} else {
+		delete(detail, "message")
+	}
+	if len(detail) > 0 {
+		info["detail"] = detail
+	} else {
+		delete(info, "detail")
+	}
 }
 
 // UpdatePhase writes both phase and activity to the agent-info.json file atomically.
 // Used for lifecycle phase changes (pre-start, post-start, pre-stop, session-end).
 func (h *StatusHandler) UpdatePhase(phase state.Phase, activity state.Activity, toolName string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	return h.update(func(info map[string]interface{}) bool {
+		info["phase"] = string(phase)
+		applyActivity(info, activity, toolName)
+		return true
+	})
+}
 
-	info := h.readAgentInfoMap()
-
-	// Update phase
-	info["phase"] = string(phase)
-
-	// Update activity
-	if activity == "" {
-		delete(info, "activity")
-	} else {
-		info["activity"] = string(activity)
-	}
-
-	// Set or clear toolName
-	if activity == state.ActivityExecuting && toolName != "" {
-		info["toolName"] = toolName
-	} else {
-		delete(info, "toolName")
-	}
-
-	// This write did not come from a Notification.
-	delete(info, activitySourceKey)
-
-	// Remove legacy fields if present
-	delete(info, "status")
-	delete(info, "sessionStatus")
-
-	return h.writeAgentInfoLocked(info)
+// UpdatePhaseAndMessage writes phase, activity and detail.message in one
+// locked read-modify-write, so no other writer can land between the phase
+// and its message (#4681). An empty message removes detail.message.
+func (h *StatusHandler) UpdatePhaseAndMessage(phase state.Phase, activity state.Activity, message string) error {
+	return h.update(func(info map[string]interface{}) bool {
+		info["phase"] = string(phase)
+		applyActivity(info, activity, "")
+		applyMessage(info, message)
+		return true
+	})
 }
 
 // ReplaceActivityIf sets the activity to `to` only when the current activity
 // is `from`, and reports whether it did. The phase is left unchanged. It
 // lets `sciontool init` end the initializing activity without overwriting an
-// activity a hook has already written. Hooks run in other processes, so the
-// check and the write are not atomic across processes; the window is a
-// single read-modify-write of a small local file.
+// activity a hook has already written. The check and the write run under
+// the agent-info lock, so a hook in another process cannot land between
+// them while the lock is held (it is best effort; see pkg/agentinfolock).
 func (h *StatusHandler) ReplaceActivityIf(from, to state.Activity) (bool, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	info := h.readAgentInfoMap()
-	current, _ := info["activity"].(string)
-	if current != string(from) {
-		return false, nil
-	}
-	info["activity"] = string(to)
-	delete(info, "toolName")
-	delete(info, "status")
-	delete(info, "sessionStatus")
-	if err := h.writeAgentInfoLocked(info); err != nil {
+	replaced := false
+	err := h.update(func(info map[string]interface{}) bool {
+		current, _ := info["activity"].(string)
+		if current != string(from) {
+			return false
+		}
+		info["activity"] = string(to)
+		delete(info, "toolName")
+		delete(info, "status")
+		delete(info, "sessionStatus")
+		replaced = true
+		return true
+	})
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	return replaced, nil
 }
 
 // CurrentActivity returns the activity recorded in agent-info.json, or ""
@@ -259,27 +290,10 @@ func (h *StatusHandler) CurrentActivity() state.Activity {
 // This is used to persist error messages so the broker heartbeat can
 // relay them to the hub even after the container exits.
 func (h *StatusHandler) SetMessage(message string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	info := h.readAgentInfoMap()
-
-	detail, _ := info["detail"].(map[string]interface{})
-	if detail == nil {
-		detail = make(map[string]interface{})
-	}
-	if message != "" {
-		detail["message"] = message
-	} else {
-		delete(detail, "message")
-	}
-	if len(detail) > 0 {
-		info["detail"] = detail
-	} else {
-		delete(info, "detail")
-	}
-
-	return h.writeAgentInfoLocked(info)
+	return h.update(func(info map[string]interface{}) bool {
+		applyMessage(info, message)
+		return true
+	})
 }
 
 // waitingClear selects which waiting_for_input values an event may clear.
@@ -323,37 +337,18 @@ func stickyBlocksUpdate(info map[string]interface{}, clear waitingClear) bool {
 // is not sticky, or is a waiting_for_input that clear allows this event to
 // clear.
 func (h *StatusHandler) updateActivityIfNotSticky(activity state.Activity, toolName string, clear waitingClear) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	info := h.readAgentInfoMap()
-
-	if stickyBlocksUpdate(info, clear) {
-		return nil // Activity is sticky, don't overwrite
-	}
-
-	// Update activity
-	info["activity"] = string(activity)
-
-	// Set or clear toolName
-	if activity == state.ActivityExecuting && toolName != "" {
-		info["toolName"] = toolName
-	} else {
-		delete(info, "toolName")
-	}
-
-	// This write did not come from a Notification.
-	delete(info, activitySourceKey)
-
-	// Remove legacy fields if present
-	delete(info, "status")
-	delete(info, "sessionStatus")
-
-	return h.writeAgentInfoLocked(info)
+	return h.update(func(info map[string]interface{}) bool {
+		if stickyBlocksUpdate(info, clear) {
+			return false // Activity is sticky, don't overwrite
+		}
+		// activity is never empty here, so applyActivity always sets it.
+		applyActivity(info, activity, toolName)
+		return true
+	})
 }
 
 // readAgentInfoMap reads agent-info.json into a generic map, preserving all
-// fields. Caller must hold h.mu.
+// fields. Caller must hold h.mu (and, via update, the agent-info lock).
 //
 // This handler is registered in the root PID-1 init process and is called
 // throughout the workload's lifetime (post-start, pre-stop, session-end,
