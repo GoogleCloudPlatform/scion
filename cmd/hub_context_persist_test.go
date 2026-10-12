@@ -172,3 +172,46 @@ func TestHubLink_EndpointSource(t *testing.T) {
 		})
 	}
 }
+
+// TestHubShadow_EndpointSource: 'scion hub shadow' on the hub selected with
+// 'scion use' writes the shadow's project ID but no hub.endpoint (the shadow
+// directory then resolves to the current hub); with --hub the endpoint is
+// still written.
+func TestHubShadow_EndpointSource(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		flag bool
+	}{{name: "context hub is not written"}, {name: "--hub is written", flag: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupContextTest(t)
+			srv, _ := useFakeHub(t)
+			t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+			saveTestContext(t, srv.URL, ctxTestProjectID)
+			if tc.flag {
+				hubEndpoint = srv.URL
+			}
+			shadow := findCommand(t, "hub", "shadow")
+			resolveInvocationTarget(shadow, ModeHuman)
+			require.Equal(t, srv.URL, hubEndpoint)
+			if !tc.flag {
+				require.Equal(t, targetSourceContext, hubSource)
+			}
+
+			_ = captureStdout(t, func() { require.NoError(t, runHubShadow(shadow, []string{"foo"})) })
+
+			wd, err := os.Getwd()
+			require.NoError(t, err)
+			marker, err := config.ReadProjectMarker(filepath.Join(wd, config.DotScion))
+			require.NoError(t, err)
+			settingsFile := filepath.Join(os.Getenv("HOME"), config.GlobalDir, config.ProjectConfigsDir, marker.DirName(), config.DotScion, "settings.yaml")
+			written := readFileT(t, settingsFile)
+			assert.Contains(t, written, ctxTestProjectID, "the shadow records its hub project")
+			if tc.flag {
+				assert.Contains(t, written, srv.URL)
+			} else {
+				assert.NotContains(t, written, srv.URL, "the context hub must not be written into the shadow's settings")
+				assert.NotContains(t, written, "endpoint")
+			}
+		})
+	}
+}
