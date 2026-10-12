@@ -87,6 +87,10 @@ func init() {
 // configured. Name 'scion hub add' here once the hub registry exists.
 const noHubSelectedMessage = "No hub selected. Start a local hub with 'scion server start', or log in to a hub with 'scion hub auth login --hub-url <url>' and run 'scion use <project>'."
 
+// noHubSelectedError is the error 'scion use <project>' returns when no hub
+// is configured: noHubSelectedMessage in Go error style.
+const noHubSelectedError = "no hub selected; start a local hub with 'scion server start', or log in to a hub with 'scion hub auth login --hub-url <url>' and run 'scion use <project>'"
+
 func runProjectUse(cmd *cobra.Command, args []string) error {
 	if contextDisabled(resolveMode()) {
 		return errors.New("'scion use' is not available inside an agent")
@@ -451,7 +455,7 @@ func runUseSelect(out, stderr io.Writer, ref string) error {
 	}
 	endpoint := GetHubEndpoint(settings)
 	if endpoint == "" {
-		return errors.New(noHubSelectedMessage)
+		return errors.New(noHubSelectedError)
 	}
 	if getAuthInfo(settings, endpoint).MethodType == "none" {
 		return fmt.Errorf("not logged in to the hub at %s\n\nLog in with: scion hub auth login --hub-url %s", endpoint, endpoint)

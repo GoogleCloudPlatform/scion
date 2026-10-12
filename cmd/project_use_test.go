@@ -203,7 +203,7 @@ func TestUseSelectProject_NoHub(t *testing.T) {
 	writeHomeGlobalSettings(t, "")
 	_, _, err := runScion(t, "use", "foo")
 	require.Error(t, err)
-	assert.Equal(t, noHubSelectedMessage, err.Error())
+	assert.Equal(t, noHubSelectedError, err.Error())
 }
 
 func TestUseSelectProject_InDirectoryProjectNotes(t *testing.T) {
