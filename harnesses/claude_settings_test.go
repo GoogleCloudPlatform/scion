@@ -132,3 +132,42 @@ func TestClaudeSettings_NotificationMatcherUsesClaudeTypes(t *testing.T) {
 		t.Error("Notification matcher must include permission_prompt")
 	}
 }
+
+// TestClaudeSettings_RegistersToolEndHooks pins that both tool-end events
+// reach sciontool. Claude Code sends PostToolUse for a successful tool call
+// and PostToolUseFailure for a failed one; without the latter, a failed tool
+// never runs the tool-end handling that clears a notification-set wait.
+func TestClaudeSettings_RegistersToolEndHooks(t *testing.T) {
+	data, err := fs.ReadFile(FS, "claude/home/.claude/settings.json")
+	if err != nil {
+		t.Fatalf("read embedded claude settings: %v", err)
+	}
+	var settings struct {
+		Hooks map[string][]claudeHookGroup `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse claude settings: %v", err)
+	}
+
+	for _, event := range []string{"PostToolUse", "PostToolUseFailure"} {
+		groups := settings.Hooks[event]
+		if len(groups) == 0 {
+			t.Errorf("claude settings register no %s hook", event)
+			continue
+		}
+		registered := false
+		for _, g := range groups {
+			if g.Matcher != "*" {
+				continue
+			}
+			for _, h := range g.Hooks {
+				if strings.Contains(h.Command, "sciontool hook --dialect=claude") {
+					registered = true
+				}
+			}
+		}
+		if !registered {
+			t.Errorf("%s has no matcher \"*\" group running sciontool hook --dialect=claude", event)
+		}
+	}
+}
