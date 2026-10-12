@@ -53,7 +53,8 @@ type recheckFixture struct {
 	portRoleID   string
 }
 
-func newRecheckFixture(t *testing.T, events EventPublisher, interval time.Duration) *recheckFixture {
+// Each mod runs on the fixture before the re-check starts.
+func newRecheckFixture(t *testing.T, events EventPublisher, interval time.Duration, mods ...func(*recheckFixture)) *recheckFixture {
 	t.Helper()
 	f := &recheckFixture{
 		conduitFixture: newConduitFixture(t),
@@ -72,6 +73,9 @@ func newRecheckFixture(t *testing.T, events EventPublisher, interval time.Durati
 	f.attachRoleID, f.portRoleID = attachRD.ID, portRD.ID
 	f.u1 = f.newUser(t, "u1")
 	f.u2 = f.newUser(t, "u2")
+	for _, mod := range mods {
+		mod(f)
+	}
 
 	if events == nil {
 		events = NewChannelEventPublisher()
