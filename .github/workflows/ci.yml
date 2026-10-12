@@ -1101,6 +1101,24 @@ jobs:
             exit 1
           fi
 
+      # Fails when go mod tidy would change go.mod or go.sum (ptone/scion#4799),
+      # for example when tidy would drop go.sum lines that the ent generator
+      # needs. Runs after the ent check, which fails first on its own
+      # go.mod/go.sum drift. tidy-check exits 3 when go mod tidy itself failed
+      # and 1 when the module is not tidy; make collapses both to exit 2, so
+      # the step tells them apart by the target's "(not drift)" line.
+      - name: Check go.mod and go.sum are tidy
+        run: |
+          set -o pipefail
+          if ! make tidy-check 2>&1 | tee "$RUNNER_TEMP/tidy-check.log"; then
+            if grep -qF 'go mod tidy -diff failed (not drift)' "$RUNNER_TEMP/tidy-check.log"; then
+              echo "::error title=go mod tidy failed (not drift)::go mod tidy -diff failed, so tidiness was NOT checked. The error (module download or resolution) is in the step log above."
+            else
+              echo "::error title=go.mod/go.sum not tidy::go mod tidy would change go.mod or go.sum. Run 'go mod tidy' and commit the result."
+            fi
+            exit 1
+          fi
+
   single-node-vm-deploy-tests:
     name: single-node-vm deploy.sh test harness
     needs: changes
