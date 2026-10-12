@@ -105,3 +105,38 @@ func TestSendMessageViaConversation_NoNoticeWhenAgentWoken(t *testing.T) {
 	_, stderr := sendGroupPostForNotice(t, hubCtx)
 	assert.NotContains(t, stderr, "No agent was woken")
 }
+
+func TestSendMessageViaConversation_NoAgentWokenNoticeLookupError(t *testing.T) {
+	hubCtx := newNoAgentWokenHub(t, "proj-no-agent-woken-error", map[string]interface{}{
+		"no_agent_woken":       true,
+		"default_agent_result": map[string]string{"status": "error"},
+	})
+	_, stderr := sendGroupPostForNotice(t, hubCtx)
+	assert.Contains(t, stderr, "No agent was woken: the default agent could not be reached (error).")
+}
+
+// The user-recipient send path (--thread-id into a thread) prints the same
+// notice.
+func TestSendOutboundMessageViaHub_NoAgentWokenNotice(t *testing.T) {
+	orig := saveMessageTestState()
+	origFormat, origThreadID, origChannel := outputFormat, msgThreadID, msgChannel
+	t.Cleanup(func() {
+		orig.restore()
+		outputFormat, msgThreadID, msgChannel = origFormat, origThreadID, origChannel
+	})
+	outputFormat = ""
+	msgThreadID = "thread-group"
+	msgChannel = ""
+	t.Setenv("SCION_AGENT_NAME", "sender")
+	hubCtx := newNoAgentWokenHub(t, "proj-no-agent-woken-thread", map[string]interface{}{
+		"no_agent_woken": true,
+	})
+
+	var sendErr error
+	stdout, stderr := captureStdoutStderr(t, func() {
+		sendErr = sendOutboundMessageViaHub(hubCtx, "user:someone@example.com", "status update", false)
+	})
+	require.NoError(t, sendErr)
+	assert.Contains(t, stdout, "Message sent to user:someone@example.com via Hub")
+	assert.Contains(t, stderr, "No agent was woken by this post.")
+}

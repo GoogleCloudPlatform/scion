@@ -49,12 +49,13 @@ type groupWakeFixture struct {
 	target     *store.Agent
 	bystander  *store.Agent
 	convID     string
+	dmConvID   string
 	dispatcher *recordingDispatcher
 }
 
 func newGroupWakeFixture(t *testing.T) *groupWakeFixture {
 	t.Helper()
-	srv, s, project, sender, target, bystander, _, dispatcher := mentionFanoutSetup(t)
+	srv, s, project, sender, target, bystander, dmConvID, dispatcher := mentionFanoutSetup(t)
 	wireWebBrokerForMentionTests(t, srv, s, project.ID, dispatcher)
 	grantAgentProjectAccess(t, s, sender.ID, project.ID)
 
@@ -73,7 +74,7 @@ func newGroupWakeFixture(t *testing.T) *groupWakeFixture {
 	require.NoError(t, json.Unmarshal(createRR.Body.Bytes(), &created))
 
 	return &groupWakeFixture{srv: srv, s: s, projectID: project.ID, sender: sender,
-		target: target, bystander: bystander, convID: created.ID, dispatcher: dispatcher}
+		target: target, bystander: bystander, convID: created.ID, dmConvID: dmConvID, dispatcher: dispatcher}
 }
 
 func (f *groupWakeFixture) setDefault(t *testing.T, agentID string) {
@@ -314,6 +315,7 @@ func TestGroupDefaultAgentWake_ThreadKeyPostWakesTopicDefault(t *testing.T) {
 	conv, err := f.s.GetConversation(ctx, topicConvID)
 	require.NoError(t, err)
 	require.Nil(t, conv.DefaultAgentID, "precondition: the default comes from the topic only")
+	require.NotEmpty(t, conv.ExternalRef, "precondition: the topic conversation has a thread key")
 
 	resp := f.postRequest(t, OutboundMessageRequest{
 		Recipient: "user:parity-owner@test.example",
@@ -337,4 +339,74 @@ func TestGroupDefaultAgentWake_ThreadKeyPostWakesTopicDefault(t *testing.T) {
 	require.Equal(t, "delivered", resp.DefaultAgentResult.Status)
 	require.Equal(t, []string{f.target.Slug}, resp.WokenAgents)
 	require.Nil(t, resp.NoAgentWoken)
+}
+
+// The reporting fields belong to group posts only: a post to a user, or an
+// agent-to-agent DM, reports neither.
+func TestGroupDefaultAgentWake_UserPostReportsNeither(t *testing.T) {
+	f := newGroupWakeFixture(t)
+	f.setDefault(t, f.target.ID)
+
+	resp := f.postRequest(t, OutboundMessageRequest{
+		Recipient: "user:parity-owner@test.example",
+		Msg:       "a direct note",
+	})
+
+	require.Empty(t, dispatchesTo(f.dispatcher, f.target.ID))
+	require.Nil(t, resp.DefaultAgentResult)
+	require.Empty(t, resp.WokenAgents)
+	require.Nil(t, resp.NoAgentWoken, "a post to a user must not report no_agent_woken")
+}
+
+func TestGroupDefaultAgentWake_AgentDMReportsNeither(t *testing.T) {
+	f := newGroupWakeFixture(t)
+
+	rr := sendViaOutbound(t, f.srv, f.sender, f.dmConvID, "a direct note")
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+	require.NotContains(t, raw, "default_agent_result")
+	require.NotContains(t, raw, "woken_agents")
+	require.NotContains(t, raw, "no_agent_woken")
+}
+
+// A group conversation whose thread key names a topic that is linked to a
+// different conversation does not take that topic's default agent.
+func TestGroupDefaultAgentWake_TopicLinkedElsewhereIsIgnored(t *testing.T) {
+	f := newGroupWakeFixture(t)
+	ctx := context.Background()
+	wcs := f.srv.webChatStore
+	require.NotNil(t, wcs)
+
+	topicID := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: f.projectID, Name: "gdw-linked-elsewhere",
+		DefaultAgent: f.target.Slug,
+		CreatedBy:    tid("parity-owner"), CreatedAt: time.Now(),
+	}))
+	topicConvID, err := wcs.GetTopicConversationID(ctx, topicID)
+	require.NoError(t, err)
+	topicConv, err := f.s.GetConversation(ctx, topicConvID)
+	require.NoError(t, err)
+	threadKey := topicConv.ExternalRef
+	require.NotEmpty(t, threadKey)
+
+	// Move the topic's own conversation off the thread key, and give the
+	// fixture's group conversation that key. The topic still points at
+	// its own conversation, not at the fixture's.
+	topicConv.ExternalRef = threadKey + "-moved"
+	require.NoError(t, f.s.UpdateConversation(ctx, topicConv))
+	conv, err := f.s.GetConversation(ctx, f.convID)
+	require.NoError(t, err)
+	require.Nil(t, conv.DefaultAgentID)
+	conv.ExternalRef = threadKey
+	require.NoError(t, f.s.UpdateConversation(ctx, conv))
+
+	resp := f.post(t, "status update for the group", "")
+
+	require.Empty(t, dispatchesTo(f.dispatcher, f.target.ID),
+		"a topic linked to another conversation must not supply the default agent")
+	require.Nil(t, resp.DefaultAgentResult)
+	requireNoAgentWoken(t, resp)
 }
