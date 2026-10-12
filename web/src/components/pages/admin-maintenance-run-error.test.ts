@@ -101,7 +101,7 @@ function handler(opts: Options) {
         savedEnabled = opts.enabledAfterFailedToggle ?? savedEnabled;
         return json({ error: { code: 'internal', message: TOGGLE_ERROR } }, status);
       }
-      const { enabled } = JSON.parse(String(init?.body)) as { enabled: boolean };
+      const { enabled } = JSON.parse(init?.body as string) as { enabled: boolean };
       savedEnabled = enabled;
       return json({ enabled, message: '' });
     }
