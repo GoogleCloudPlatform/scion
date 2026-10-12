@@ -5,9 +5,11 @@ Copyright 2026 The Scion Authors.
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -153,4 +155,37 @@ func TestLimitsHandler_IncrementUnreadableFileUnchanged(t *testing.T) {
 			assert.Equal(t, tc.content, string(got), "unreadable agent-limits.json bytes")
 		})
 	}
+}
+
+// TestLimitsHandler_IncrementOverCapKeepsFileReadable: an unknown value
+// whose input is under agentLimitsMaxBytes but whose re-indented form is
+// over it is dropped, so the file stays the plain encoding and every later
+// read (and so limit enforcement) still works.
+func TestLimitsHandler_IncrementOverCapKeepsFileReadable(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+
+	// A flat array of 200000 ones: 2 bytes per element compact, 7 bytes
+	// ("\n    1,") per element once re-indented under a top-level key.
+	big := strings.TrimSuffix(strings.Repeat("1,", 200000), ",")
+	orig := `{"turn_count":0,"model_call_count":0,"max_turns":100,"max_model_calls":100,"started_at":"2026-01-02T03:04:05Z","big":[` + big + `]}`
+	require.Less(t, len(orig), agentLimitsMaxBytes, "test input must be under the read cap")
+	var indented bytes.Buffer
+	require.NoError(t, json.Indent(&indented, []byte(orig), "", "  "))
+	require.Greater(t, indented.Len(), agentLimitsMaxBytes, "re-indented test input must be over the read cap")
+	require.NoError(t, os.WriteFile(limitsPath, []byte(orig), 0600))
+
+	h := newKeepUnknownLimitsHandler(tmpDir, limitsPath)
+	require.NoError(t, h.Handle(&hooks.Event{Name: hooks.EventAgentEnd}))
+
+	want, err := json.MarshalIndent(LimitsState{TurnCount: 1, MaxTurns: 100, MaxModelCalls: 100, StartedAt: "2026-01-02T03:04:05Z"}, "", "  ")
+	require.NoError(t, err)
+	got, err := os.ReadFile(limitsPath)
+	require.NoError(t, err)
+	assert.True(t, bytes.Equal(want, got), "over-cap agent-limits.json bytes: got %d bytes, want plain %d bytes", len(got), len(want))
+
+	ls, err := h.readLimitsState()
+	require.NoError(t, err, "over-cap agent-limits.json readable after increment")
+	assert.Equal(t, 1, ls.TurnCount, "turn_count after over-cap increment")
 }

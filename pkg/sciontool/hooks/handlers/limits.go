@@ -256,9 +256,13 @@ func (h *LimitsHandler) readLimitsStateData() (*LimitsState, []byte, error) {
 // encodes them. When orig has no unknown keys, or is not a JSON object
 // (missing, empty, null, corrupt), the result is byte-for-byte
 // json.MarshalIndent(ls, "", "  "). Otherwise the unknown keys follow the
-// known ones in sorted order, with their values as read (re-indented, not
-// re-escaped). A key that matches a known name case-insensitively counts as
-// known, since json.Unmarshal already read it into the struct.
+// known ones in sorted order. Only their values keep their original bytes
+// (re-indented, not re-escaped); their keys are re-encoded with
+// json.Marshal. A key that matches a known name case-insensitively counts as
+// known, since json.Unmarshal already read it into the struct. If the
+// re-indented result would exceed agentLimitsMaxBytes, which every later
+// read would refuse (and limits would stop being enforced), the unknown keys
+// are dropped with a log line and the plain encoding is returned instead.
 func marshalLimitsStateKeepUnknown(orig []byte, ls *LimitsState) ([]byte, error) {
 	plain, err := json.MarshalIndent(ls, "", "  ")
 	if err != nil {
@@ -304,6 +308,10 @@ func marshalLimitsStateKeepUnknown(orig []byte, ls *LimitsState) ([]byte, error)
 	var out bytes.Buffer
 	if err := json.Indent(&out, buf.Bytes(), "", "  "); err != nil {
 		return nil, err
+	}
+	if out.Len() > agentLimitsMaxBytes {
+		log.Error("agent-limits.json with %d unknown keys would be %d bytes, over the %d byte read cap; dropping the unknown keys", len(unknown), out.Len(), agentLimitsMaxBytes)
+		return plain, nil
 	}
 	return out.Bytes(), nil
 }
