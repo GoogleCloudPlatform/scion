@@ -1671,10 +1671,12 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 	} else {
 		_, _ = fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
-	// Store the hub project ID separately if it differs from the local project_id.
-	// Don't overwrite project_id — changing it shifts the external config
-	// directory, orphaning settings.
-	if resp.Project.ID != hubCtx.ProjectID {
+	// Always store the hub project ID in the project's own settings, even
+	// when it equals the local project_id, so the link never depends on a
+	// value inherited from another settings file. Don't overwrite
+	// project_id: changing it shifts the external config directory,
+	// orphaning settings.
+	if resp.Project.ID != "" {
 		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.projectId", resp.Project.ID, isGlobal); err != nil {
 			_, _ = fmt.Fprintf(promptOut, "Warning: failed to save hub project ID: %v\n", err)
 		} else {

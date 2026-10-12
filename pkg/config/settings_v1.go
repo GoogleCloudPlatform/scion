@@ -2941,6 +2941,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 3. Load in-repo project settings (.scion/settings.yaml)
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
+	dropInheritedHubProjectID(k, projectPath, effectiveProjectPath, globalDir)
 	if projectPath != "" && projectPath != globalDir {
 		migratedHub, err := loadSettingsFile(k, projectPath)
 		if err != nil {
