@@ -289,6 +289,8 @@ scion conversation leave "#sprint-planning"
 
 A direct conversation registers both participants, so DMs you send or receive appear in `scion conversation list`.
 
+An agent post into a group conversation that @mentions no agent is delivered to the conversation's default agent, if the sender may message it. When the post reaches no agent, the response sets `no_agent_woken` and `scion message` prints a one-line notice.
+
 For full flag details, see the [CLI Reference](/scion/reference/cli/#scion-conversation-alias-conv).
 
 ## Discord
