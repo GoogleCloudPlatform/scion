@@ -2964,3 +2964,52 @@ func TestConstraintAdminLockout_ScheduledScopeReadFailureRefuses(t *testing.T) {
 	requireLockoutErr(t, checkConstraintAdminLockout(ctx, st, now, store.RoleScopeProject, projectID, rm))
 	assert.Equal(t, 2, calls, "the admin resolution read succeeded and the second read failed")
 }
+
+// Every user the admin resolution reaches from a bound group, walking
+// group members down, has that group among the user's effective groups
+// (GetEffectiveGroups, which walks parent groups up). The graph nests
+// three groups in a cycle and nests a project_agents group (agent
+// members only) in the middle one; the admin role is bound to the outer
+// group and to the project_agents group.
+func TestConstraintAdminLockout_GroupWalksAgree(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	projectID := pvSeedProject(t, s, "walk-agree-project")
+	rd := createTestRoleDefinition(t, s, "walk-agree-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin})
+	outer := pvSeedGroup(t, s, "walk-agree-outer")
+	mid := pvSeedGroup(t, s, "walk-agree-mid")
+	inner := pvSeedGroup(t, s, "walk-agree-inner")
+	pvSeedGroupMember(t, s, outer, store.GroupMemberTypeGroup, mid)
+	pvSeedGroupMember(t, s, mid, store.GroupMemberTypeGroup, inner)
+	pvSeedGroupMember(t, s, inner, store.GroupMemberTypeGroup, outer)
+	agents := tid("walk-agree-agents")
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID:        agents,
+		Name:      "walk-agree-agents",
+		Slug:      "project:walk-agree:agents",
+		GroupType: store.GroupTypeProjectAgents,
+		ProjectID: projectID,
+	}))
+	pvSeedGroupMember(t, s, mid, store.GroupMemberTypeGroup, agents)
+	var users []string
+	for i, g := range []string{outer, mid, inner} {
+		u := pvSeedUser(t, s, fmt.Sprintf("walk-agree-user-%d", i))
+		pvSeedGroupMember(t, s, g, store.GroupMemberTypeUser, u)
+		users = append(users, u)
+	}
+	lockoutProjectBinding(t, s, rd.ID, "group", outer, projectID)
+	lockoutProjectBinding(t, s, rd.ID, "group", agents, projectID)
+
+	admins, err := resolveConstraintAdminUsers(ctx, s, time.Now(), store.RoleScopeProject, projectID)
+	require.NoError(t, err)
+	var reached []string
+	for _, a := range admins {
+		reached = append(reached, a.userID)
+		groups, err := s.GetEffectiveGroups(ctx, a.userID)
+		require.NoError(t, err)
+		assert.Contains(t, groups, outer,
+			"user %s reached from the bound group has it among its effective groups", a.userID)
+	}
+	assert.ElementsMatch(t, users, reached, "the walk reaches every user in the cycle")
+}
