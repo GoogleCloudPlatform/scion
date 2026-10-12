@@ -897,7 +897,7 @@ func TestTestIdentityReaper_StuckIdentitiesDoNotStarve(t *testing.T) {
 	}
 }
 
-// The reaper is registered only with --enable-test-identities.
+// The reaper is registered only with --test-mode=member or above.
 func TestTestIdentityReaper_Registration(t *testing.T) {
 	for _, enabled := range []bool{true, false} {
 		srv, _ := newTestIdentityServer(t, enabled)

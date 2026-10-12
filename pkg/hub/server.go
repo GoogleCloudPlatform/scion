@@ -5790,7 +5790,7 @@ func (s *Server) registerSchedulerHandlers() {
 	s.registerMembershipStandingReconciler()
 
 	// Test identity expiry reaper (ptone/scion#4240): only with
-	// --enable-test-identities.
+	// --test-mode=member or above.
 	s.registerTestIdentityReaper()
 
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
