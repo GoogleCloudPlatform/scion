@@ -564,10 +564,6 @@ export class ScionChatSpaceRail extends LitElement {
       letter-spacing: 0.05em;
       color: var(--scion-text-muted, #64748b);
       user-select: none;
-      /* Width of a space heading's three-dot menu button. The Direct
-         messages heading has no menu and reserves the same width, so the
-         unread badges of every heading line up in one column. */
-      --space-menu-width: calc(var(--chat-fs-base) + 0.25rem);
     }
 
     .space-header:hover {
@@ -638,12 +634,18 @@ export class ScionChatSpaceRail extends LitElement {
     .space-actions sl-icon-button::part(base) {
       font-size: var(--chat-fs-base);
       padding: 0.125rem;
-      width: var(--space-menu-width);
     }
 
-    /* Stands in for the menu button in a heading that has none. */
+    /* The Direct messages heading has no menu. In its place it holds an
+       invisible copy of a space heading's menu button, styled by the same
+       rules, so its badge ends where a space heading's badge does at every
+       size. No height and no visibility: the heading keeps its own height,
+       and the copy is never seen, focused or announced. */
     .space-actions .menu-spacer {
-      flex: 0 0 var(--space-menu-width);
+      display: flex;
+      height: 0;
+      overflow: hidden;
+      visibility: hidden;
     }
 
     .space-actions sl-menu {
@@ -1104,7 +1106,6 @@ export class ScionChatSpaceRail extends LitElement {
       .space-header {
         font-size: 14px;
         min-height: 44px;
-        --space-menu-width: 44px;
       }
 
       .space-header .unread-badge,
@@ -1130,6 +1131,7 @@ export class ScionChatSpaceRail extends LitElement {
       }
 
       .space-actions sl-icon-button::part(base) {
+        width: 44px;
         height: 44px;
       }
 
@@ -3615,7 +3617,9 @@ export class ScionChatSpaceRail extends LitElement {
           <span class="space-name">Direct messages</span>
           <div class="space-actions">
             ${unread > 0 ? html`<span class="unread-badge">${unread}</span>` : nothing}
-            <span class="menu-spacer" aria-hidden="true"></span>
+            <span class="menu-spacer" aria-hidden="true" inert>
+              <sl-icon-button name="three-dots-vertical" tabindex="-1"></sl-icon-button>
+            </span>
           </div>
         </div>
         <div class="thread-list">
