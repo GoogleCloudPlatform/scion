@@ -53,17 +53,31 @@ breakage of a `-tags hubshard,hubshard_K` build:
   not listed (a hand edit);
 - an `assignment.txt` entry for a file that no longer exists, i.e. after
   deleting or renaming a `pkg/hub` test file;
-- a hubshard tag outside `pkg/hub` (see below).
+- a hubshard tag outside `pkg/hub` (see below);
+- a blank import (`_ "github.com/mattn/go-sqlite3"`) in a tagged file that
+  no untagged file covers, i.e. no untagged file imports the same package
+  under a build constraint the tagged file's own constraint implies (see
+  [Blank imports](#blank-imports-driver-registration));
+- a generated `zz_hubshard_drivers*_test.go` file that is missing, out of
+  date (a test file's blank imports changed, or the file was hand-edited)
+  or obsolete.
 
 The fix for each is `make hubshard`.
 
+`-check` also prints `warning:` lines, which do not fail it, for what it
+cannot judge: a tagged file with an `init` function that does more than
+`_ = x` discards (its effect exists only in that shard), and a blank import
+in a tagged file of an external `hub_test` package (not copied, see below).
+Review them.
+
 A **new untagged** test file that uses only untagged files (the common
-helpers, or nothing shared) passes. It compiles in every shard; it just
-costs memory in each shard until `make hubshard` assigns it, and
-`-check` lists it as not yet balanced. The check uses the generator's
-conservative use graph, so a name collision (for example a struct-literal
-key that matches a helper in a sharded file) can fail it; `make hubshard`
-then groups the files.
+helpers, or nothing shared) passes, unless it blank-imports a package, or
+a build condition, not yet in the generated imports files (then run `make
+hubshard`). It compiles in every shard; it just costs memory in each shard
+until `make hubshard` assigns it, and `-check` lists it as not yet
+balanced. The check uses the generator's conservative use graph, so a name
+collision (for example a struct-literal key that matches a helper in a
+sharded file) can fail it; `make hubshard` then groups the files.
 
 **Rebalancing.** Run `make hubshard` from time to time, for example when
 `make hubshard-check` lists unbalanced files, or before measuring the
@@ -82,6 +96,68 @@ hubshard tag in its build line: a `-tags hubshard,hubshard_J` build would
 silently drop that file from its package.
 
 `make hubshard-check` is part of `make ci` (it only parses files).
+
+## Blank imports (driver registration)
+
+A blank import is a dependency without a symbol: a file that blank-imports
+`github.com/mattn/go-sqlite3` registers the `sqlite3` `database/sql`
+driver, and another file that only calls `sql.Open("sqlite3", ...)` relies
+on it without referencing anything the first file declares. The use graph
+has no edge between them, so a shard without an importing file compiles
+and then fails at run time (`sql: unknown driver "sqlite3"`).
+
+So `make hubshard` also writes generated, untagged
+`pkg/hub/zz_hubshard_drivers*_test.go` files (`// Code generated ... DO NOT
+EDIT.`). They blank-import every package that a `pkg/hub` test file
+blank-imports, so every shard links them:
+
+- `zz_hubshard_drivers_test.go` holds the packages that at least one
+  importing file imports without a build constraint;
+- `zz_hubshard_drivers_K_test.go` (K = 1, 2, ...) holds the rest, one file
+  per build condition, carrying `//go:build <condition>`, where the
+  condition is the OR of the importing files' own constraints (the
+  hubshard clause aside, and including a GOOS/GOARCH file-name suffix as
+  go/build reads it: `foo_linux_test.go` counts as `linux`). For example,
+  `pgx/v5/stdlib` imported only by `!no_sqlite` files stays out of a
+  `-tags no_sqlite` build.
+
+So the default build (no tags) links exactly the packages it linked before;
+the files only repeat imports. The files are byte-stable (sorted imports,
+gofmt-clean), not listed in `assignment.txt`, and removed or renumbered by
+`make hubshard` when the importing files change. Do not edit them.
+
+Why generated files rather than requiring a common file to import each
+such package: the generator can fix every case itself (`make hubshard`),
+the build condition comes out exact without a human picking a common file
+whose constraint fits, and no helper file gains an import unrelated to its
+helpers.
+
+## Known limitations
+
+- **Side effects without a blank import.** A package that a test file
+  imports by name and that registers something in its `init` is linked into
+  a shard only if a file of that shard (or a common file) imports it. If
+  another shard's file relies on that registration by name only (a string
+  driver name, a global registry lookup), the tool cannot see the
+  dependency. Add a blank import of the package to the file that relies on
+  it; `make hubshard` then copies it into the imports file.
+- **`init` functions in test files.** A file with an `init` that does more
+  than `_ = x` discards is common, so its `init` runs in every shard, as in
+  the default build. `-check` warns about a tagged file with such an `init`
+  (for example after a hand edit). Package-level initializers with side
+  effects (`var _ = register()`) are neither detected nor warned about:
+  syntactically they look like the common `var _ Iface = (*T)(nil)`
+  assertions. Put such a call in an `init` function.
+- **External test package.** Blank imports in `package hub_test` files are
+  not copied into the imports files (the imported package might import
+  `pkg/hub`, which would be an import cycle in package `hub`); `-check`
+  warns about them in tagged files.
+- **Build tags are independent in the coverage check.** `-check` decides
+  "constraint A implies B" over a truth table of the tags in A and B (a
+  GOOS/GOARCH file-name suffix counts as a tag) and does not know that,
+  say, `linux` implies `unix`, or that two GOOS values exclude each
+  other. That can only report a covered import as uncovered; `make
+  hubshard` then writes an imports file with the exact condition.
 
 ## Test flags
 
@@ -103,7 +179,9 @@ unknown flag. The default build has every flag.
    a false edge (for example a struct-literal key that happens to match a
    helper name) can only make a file common or group files together. It can
    never drop a needed file from a shard.
-2. **Common seeds.** Helper-only `*_helpers_test.go` files (see
+2. **Common seeds.** (The generated imports files are not part of the
+   graph; see [Blank imports](#blank-imports-driver-registration).)
+   Helper-only `*_helpers_test.go` files (see
    `hack/hubshard/extract`), files with `TestMain`, and files with an `init`
    function that does more than `_ = x` discards.
 3. **Closure.** Anything a common file uses is common.
@@ -156,6 +234,13 @@ Between the default build and a shard, the peak grows by about 1.45 GiB per
 100k test lines. N=4 would put about 189k test lines in each shard, so its
 projected peak is about 6.3 GiB, over the 6 GiB per-compile target. That is
 why N=6.
+
+Re-measured after a plain `make hubshard` (same 16G form, each shard compiled
+in a fresh private cache): shard 1 5.78 GiB, shard 2 5.53 GiB, shard 3 5.19 GiB,
+shard 4 5.65 GiB, shard 5 5.70 GiB, shard 6 6.01 GiB.
+Shard 6 is slightly over the 6 GiB per-compile target. When a shard drifts past
+6 GiB, the fix is a rebalance (below), which moves files between shards; run
+it when few branches are in flight, since it touches many build lines.
 
 Regenerate from scratch with:
 

@@ -48,7 +48,7 @@ func newNotFoundHub(t *testing.T, body string) *httptest.Server {
 
 // assertAgentNotFoundRendering checks the same-project 404 rendering for
 // ptone/scion#631: the error names the agent as not found, carries no
-// local-only hint, does not trigger the Usage block, and is returned (so
+// hub-check hint, does not trigger the Usage block, and is returned (so
 // Execute exits 1).
 func assertAgentNotFoundRendering(t *testing.T, err error) {
 	t.Helper()
@@ -56,7 +56,7 @@ func assertAgentNotFoundRendering(t *testing.T, err error) {
 	msg := err.Error()
 	assert.True(t, strings.HasPrefix(msg, "agent 'ghost' not found"), "error should lead with the missing agent: %q", msg)
 	assert.Contains(t, msg, `Agent "ghost" not found in project`, "hub message should be kept as the cause")
-	assert.NotContains(t, msg, "scion hub disable", "a 404 must not suggest local-only mode")
+	assert.NotContains(t, msg, "scion hub status", "a 404 must not get the hub-check hint")
 	assert.True(t, apiclient.IsNotFoundError(err), "the APIError should remain reachable via errors.As")
 	assert.False(t, showUsageForError(messageCmd, err, true), "a hub 404 must not print the Usage block")
 }
@@ -145,7 +145,7 @@ func TestAgentMessageSend_OtherNotFoundKeepsGenericWording(t *testing.T) {
 				msg := err.Error()
 				assert.Contains(t, msg, "failed to send message to agent 'ghost' via Hub")
 				assert.NotContains(t, msg, "agent 'ghost' not found")
-				assert.NotContains(t, msg, "scion hub disable")
+				assert.NotContains(t, msg, "scion hub status")
 				assert.False(t, showUsageForError(messageCmd, err, true))
 			}
 		})
