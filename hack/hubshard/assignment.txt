@@ -159,6 +159,7 @@
 4 artifacts_orphans_test.go
 6 artifacts_permits_test.go
 6 artifacts_review_grant_test.go
+6 artifacts_review_grant_ui_test.go
 4 artifacts_review_test.go
 4 artifacts_scope_ceiling_test.go
 4 artifacts_settings_test.go
