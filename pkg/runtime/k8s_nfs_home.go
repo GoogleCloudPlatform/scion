@@ -306,7 +306,7 @@ func (r *KubernetesRuntime) verifyK8sHomeLinks(ctx context.Context, namespace, p
 	for _, l := range links {
 		targets = append(targets, l.Target)
 	}
-	runtimeLog.Info("Checking linked files in agent home", "agent", config.Name, "phase", "home-files", "targets", targets)
+	runtimeLog().Info("Checking linked files in agent home", "agent", config.Name, "phase", "home-files", "targets", targets)
 	out, err := r.execInPod(ctx, namespace, podName, k8sHomeLinksResultCommand)
 	if err != nil {
 		return fmt.Errorf("failed to read %s: %w", k8sHomeLinksResultFile, err)
@@ -791,7 +791,7 @@ func (r *KubernetesRuntime) waitForPodTermination(ctx context.Context, namespace
 			if !clock.now().Before(deadline) {
 				return fmt.Errorf("%w: cannot read the previous pod %s: %v", errPreviousPodUnconfirmed, podName, err)
 			}
-			runtimeLog.Debug("Reading the previous pod failed; retrying", "pod", podName, "error", err)
+			runtimeLog().Debug("Reading the previous pod failed; retrying", "pod", podName, "error", err)
 		case pod.UID != uid:
 			// The name now belongs to another pod: the one we waited for is gone.
 			return nil
@@ -818,7 +818,7 @@ var errAgentStartInProgress = errors.New("agent_start_in_progress")
 // no-op: the termination wait and the unique pod name are then the guards.
 func acquireHomeStartLock(ctx context.Context, config RunConfig) (func(), error) {
 	if config.Locker == nil || config.HomeStorage == nil {
-		runtimeLog.Debug("No advisory locker; NFS-home start is guarded by the termination wait only", "agent", config.Name)
+		runtimeLog().Debug("No advisory locker; NFS-home start is guarded by the termination wait only", "agent", config.Name)
 		return func() {}, nil
 	}
 	objID := store.StableProjectHash(config.HomeStorage.ProjectID + "/" + config.HomeStorage.AgentID)
@@ -833,7 +833,7 @@ func acquireHomeStartLock(ctx context.Context, config RunConfig) (func(), error)
 	// or on the way out of a start that did not get that far.
 	return func() {
 		if err := release(); err != nil {
-			runtimeLog.Error("Failed to release the agent start lock", "agent", config.Name, "error", err)
+			runtimeLog().Error("Failed to release the agent start lock", "agent", config.Name, "error", err)
 		}
 	}, nil
 }

@@ -58,7 +58,7 @@ func reportContainerCreated(hooks launchHooks, name, out string) {
 			return
 		}
 	}
-	runtimeLog.Warn("Container run output has no well-formed container ID; launch cleanup will not track this container",
+	runtimeLog().Warn("Container run output has no well-formed container ID; launch cleanup will not track this container",
 		"name", name, "output_lines", len(lines))
 }
 
@@ -113,7 +113,7 @@ func (r *KubernetesRuntime) DeleteResource(ctx context.Context, h api.ResourceHa
 				// The name now belongs to another pod, which this launch
 				// must not delete. The precondition below covers a
 				// recreate after this read.
-				runtimeLog.Info("Launch cleanup skipped a resource recreated by another launch",
+				runtimeLog().Info("Launch cleanup skipped a resource recreated by another launch",
 					"kind", h.Kind, "namespace", h.Namespace, "name", h.Name, "uid", h.UID)
 				return nil
 			}
@@ -130,7 +130,7 @@ func (r *KubernetesRuntime) DeleteResource(ctx context.Context, h api.ResourceHa
 	case k8serrors.IsConflict(err):
 		// The UID precondition failed: the name now belongs to another
 		// object, which this launch must not delete.
-		runtimeLog.Info("Launch cleanup skipped a resource recreated by another launch",
+		runtimeLog().Info("Launch cleanup skipped a resource recreated by another launch",
 			"kind", h.Kind, "namespace", h.Namespace, "name", h.Name, "uid", h.UID)
 		return nil
 	default:
