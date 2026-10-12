@@ -1639,7 +1639,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
 					"run_id", opts.RunID, "files_run_id", owner)
-			} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
+			} else if _, cleanupErr := agent.DeleteAgentFilesForHubProject(opts.Name, opts.ProjectPath, opts.HubProjectID, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
 				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 			} else {
@@ -2536,7 +2536,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	s.agentLifecycleLog.Debug("Agent delete: resolved target",
 		"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 		"container_id", target.containerID, "target_run_id", target.runID)
-	_, err = target.mgr.DeleteTarget(ctx, target.name, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
+	// The request's project ID is the Hub project ID the agent was started
+	// with (opts.HubProjectID); file deletion resolves the agent's state
+	// directory with it, as lookup does. Without one, nothing changes.
+	_, err = target.mgr.DeleteTarget(api.ContextWithHubProjectID(ctx, projectID), target.name, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
 	if errors.Is(err, scionrt.ErrRunMismatch) {
 		// The runtime found the name held by another run when it came to
 		// delete (the entry was replaced after resolveDeleteTarget listed

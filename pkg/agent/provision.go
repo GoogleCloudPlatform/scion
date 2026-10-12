@@ -52,7 +52,27 @@ var ErrAgentProjectUnresolved = errors.New("the agent's project directory does n
 // removeBranch, branch, and its external per-agent state). It never touches
 // another project's directories; the global project's agents are deleted
 // only when the global project is the target.
+//
+// It resolves the external per-agent state from the project-id marker only.
+// A caller that knows the Hub project ID the agent was started with uses
+// DeleteAgentFilesForHubProject, so delete resolves the agent's state
+// directory with the same Hub project ID lookup uses.
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
+	return deleteAgentFiles(agentName, projectPath, "", removeBranch)
+}
+
+// DeleteAgentFilesForHubProject is DeleteAgentFiles for an agent started
+// with the Hub project ID hubProjectID. Besides everything DeleteAgentFiles
+// removes, it removes the agent's state directory as GetAgent and
+// ProvisionAgent resolve it from that ID (config.AgentDirForProject with
+// the shared-workspace root), when that is a different directory from the
+// ones DeleteAgentFiles already removes. An empty hubProjectID is exactly
+// DeleteAgentFiles.
+func DeleteAgentFilesForHubProject(agentName, projectPath, hubProjectID string, removeBranch bool) (bool, error) {
+	return deleteAgentFiles(agentName, projectPath, hubProjectID, removeBranch)
+}
+
+func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch bool) (bool, error) {
 	// Every path built below joins agentName onto some directory -- the
 	// project's agents dir, the external per-agent
 	// state dir, or the shared worktree base -- so an unvalidated name could
@@ -81,6 +101,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	branchDeleted := false
 	var repoRoot string
 	var externalAgentDir string
+	var hubAgentDir string // state dir resolved from hubProjectID, when distinct
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	var globalWorkspaceDir string
 	// resolvedProjectDir is config.GetResolvedProjectDir's return value,
@@ -142,6 +163,18 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
 			externalAgentDir = filepath.Join(extDir, agentName)
 		}
+
+		// The agent's state directory as lookup resolves it from the Hub
+		// project ID (agentStateDir), which need not be the external dir
+		// above: that one comes from the project-id marker. Skipped when it
+		// is a directory removed anyway.
+		if hubProjectID != "" {
+			if dir, err := config.AgentDirForProject(projectDir, agentName, true, hubProjectID); err == nil &&
+				(externalAgentDir == "" || !sameDir(dir, externalAgentDir)) &&
+				!sameDir(dir, filepath.Join(projectDir, "agents", agentName)) {
+				hubAgentDir = dir
+			}
+		}
 	}
 	// Empty-per-agent (design #2703): the agent's workspace is a private,
 	// non-git directory that owns no worktree or branch. Even when the
@@ -149,7 +182,8 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// repository with a same-named branch, delete must only remove the
 	// agent's directories -- never a worktree, a sharer registration, a
 	// prune of the enclosing repo, or a branch.
-	emptyPerAgent := persistedEmptyPerAgent(agentsDirs, externalAgentDir, agentName)
+	emptyPerAgent := persistedEmptyPerAgent(agentsDirs, externalAgentDir, agentName) ||
+		(hubAgentDir != "" && persistedEmptyPerAgent(nil, hubAgentDir, agentName))
 	if emptyPerAgent {
 		util.Debugf("delete: %s is empty-per-agent; skipping worktree and branch cleanup", agentName)
 		repoRoot = ""
@@ -391,13 +425,20 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// owned by a mapped subuid on the host, making them inaccessible to the
 	// normal user. If standard removal fails, try `podman unshare rm -rf`
 	// which enters the user namespace where the mapped UIDs are accessible.
-	if externalAgentDir != "" {
-		if _, err := os.Stat(externalAgentDir); err == nil {
-			util.Debugf("delete: removing external agent state dir: %s", externalAgentDir)
-			if err := util.RemoveAllSafe(externalAgentDir); err != nil {
+	//
+	// The state dir resolved from the Hub project ID (hubAgentDir) is
+	// removed the same way: it holds a shared-workspace agent's state and
+	// no worktree.
+	for _, extDir := range []string{externalAgentDir, hubAgentDir} {
+		if extDir == "" {
+			continue
+		}
+		if _, err := os.Stat(extDir); err == nil {
+			util.Debugf("delete: removing external agent state dir: %s", extDir)
+			if err := util.RemoveAllSafe(extDir); err != nil {
 				util.Debugf("delete: standard removal failed, trying podman unshare: %v", err)
 				unshareCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				if unshareErr := exec.CommandContext(unshareCtx, "podman", "unshare", "rm", "-rf", externalAgentDir).Run(); unshareErr != nil {
+				if unshareErr := exec.CommandContext(unshareCtx, "podman", "unshare", "rm", "-rf", extDir).Run(); unshareErr != nil {
 					util.Debugf("delete: podman unshare removal also failed: %v", unshareErr)
 				}
 				cancel()

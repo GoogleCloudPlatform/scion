@@ -500,7 +500,10 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 
 	if deleteFiles {
 		util.Debugf("delete: starting filesystem cleanup for agent %s", agentName)
-		branchDeleted, err := DeleteAgentFiles(agentName, projectPath, removeBranch)
+		// The Hub project ID in ctx, when the caller set one, is the one
+		// the agent was started with; delete resolves the agent's state
+		// directory with it, as lookup does.
+		branchDeleted, err := DeleteAgentFilesForHubProject(agentName, projectPath, api.HubProjectIDFromContext(ctx), removeBranch)
 		util.Debugf("delete: filesystem cleanup completed for agent %s", agentName)
 		if errors.Is(err, ErrAgentProjectUnresolved) {
 			// No project directory: none of the agent's files remain
