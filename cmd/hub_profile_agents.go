@@ -134,8 +134,10 @@ func checkProfileAgentFlags(cmd *cobra.Command) error {
 		{"lineage", inferred},
 	}
 	// list --all lists across projects; stop --all and delete --stopped
-	// act on the named project and are allowed.
-	if cmd == listCmd {
+	// act on the named project and are allowed. The command is matched by
+	// path, not by listCmd: listCmd's RunE calls this function, so a
+	// reference to the variable would be an initialization cycle.
+	if commandPath(cmd) == "list" {
 		refused = append(refused, struct{ name, why string }{"all", "name the project with --project"})
 	}
 	for _, r := range refused {
