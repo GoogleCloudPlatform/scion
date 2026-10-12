@@ -178,7 +178,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			s.handleKeepaliveAbort(sender, rec, lc)
 			return
 		case errors.Is(claimErr, context.Canceled):
-			// A local stop/delete (launchRegistry.CancelLocal) woke the
+			// A local stop/delete (launchRegistry.CancelLocalFor) woke the
 			// blocked claim, not a real deadline. The Hub already knows (or
 			// will independently learn) this launch is over, so this is not
 			// "hub unreachable" and gets no terminal.
@@ -318,7 +318,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 
 	if sr.err != nil {
 		if locallyCancelled(ctx) {
-			// A local stop/delete (launchRegistry.CancelLocal) woke Start
+			// A local stop/delete (launchRegistry.CancelLocalFor) woke Start
 			// via ctx' cancellation, not a real deadline (the
 			// launch_timeout case is context.DeadlineExceeded, handled by
 			// classifyStartError below). Same rule as the claim's
@@ -407,7 +407,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 // locallyCancelled reports whether ctx' was cancelled rather than having
 // reached its deadline. Once the keepalive-abort paths have returned, the only
 // remaining source of that cancellation is a local stop/delete
-// (launchRegistry.CancelLocal): runLaunch itself cancels ctx' only on the
+// (launchRegistry.CancelLocalFor): runLaunch itself cancels ctx' only on the
 // KeepaliveAborted branch, which returns, and in its deferred cleanup.
 func locallyCancelled(ctx context.Context) bool {
 	return errors.Is(ctx.Err(), context.Canceled)

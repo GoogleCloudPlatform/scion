@@ -1145,7 +1145,7 @@ func TestAsyncCreate_ClaimUnreachableUntilDeadline_SendsHubUnreachable(t *testin
 }
 
 // TestAsyncCreate_ClaimLocallyCancelled_SendsNoTerminal covers a local
-// stop/delete (launchRegistry.CancelLocal) waking a claim that is still
+// stop/delete (launchRegistry.CancelLocalFor) waking a claim that is still
 // blocked on an unreachable Hub: the Hub already knows, or will
 // independently learn, that this launch is over, so this must not be
 // reported as failed{hub_unreachable} the way a real ctx' deadline is.

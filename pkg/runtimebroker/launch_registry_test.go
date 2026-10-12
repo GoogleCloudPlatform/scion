@@ -85,7 +85,7 @@ func TestLaunchRegistry_CancelLocalFor_WakesTheHeldRecord(t *testing.T) {
 	select {
 	case <-cancelled:
 	case <-time.After(time.Second):
-		t.Fatal("CancelLocal did not cancel the held record")
+		t.Fatal("CancelLocalFor did not cancel the held record")
 	}
 }
 

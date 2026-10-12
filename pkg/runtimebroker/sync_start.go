@@ -63,9 +63,10 @@ var errInvalidLaunchSlug = errors.New("agent slug must be a single path element"
 // agent's name, mirroring what runLaunch keeps for an async launch:
 //
 //   - a launchRegistry record under (projectID, slug), so a delete or stop
-//     of the agent on this broker cancels the start (launchRegistry
-//     CancelLocal), and a later start for the same name cancels this one and
-//     waits for it to finish before doing any name-addressed work;
+//     of the agent on this broker cancels the start
+//     (launchRegistry.CancelLocalFor), and a later start for the same name
+//     cancels this one and waits for it to finish before doing any
+//     name-addressed work;
 //   - for a synchronous start, a launch marker for the slug holding this
 //     start's own owner value (takeName), so the start's failure cleanup can
 //     check, immediately before removing files by name, that no newer start

@@ -173,13 +173,12 @@ func (r *launchRegistry) Handoff(key launchKey, from, to *launchRecord, fromCanc
 // CancelLocalFor wakes the launch or create registered under key for a stop
 // or delete of the agent the hub knows as agentID, naming run runID (design
 // §3.8.1: stop and delete on the same replica call this to wake long
-// waits). It
-// leaves alone a launch of a different agent (ptone/scion#2632: a late stop
-// or delete for an old agent must not cancel the start of a newer agent
-// recreated under the same name) or of a different run (ptone/scion#2550).
-// Each match is skipped when either side lacks the value: a stop or delete
-// from a hub that sends no agentId or runId, or a launch registered without
-// one, matches by name as before.
+// waits). It leaves alone a launch of a different agent (ptone/scion#2632:
+// a late stop or delete for an old agent must not cancel the start of a
+// newer agent recreated under the same name) or of a different run
+// (ptone/scion#2550). Each match is skipped when either side lacks the
+// value: a stop or delete from a hub that sends no agentId or runId, or a
+// launch registered without one, matches by name as before.
 //
 // The cancel runs under the registry lock, as Begin's does, so it is
 // ordered against Handoff: a cancel either reaches the create's
