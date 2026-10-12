@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 )
 
 const (
@@ -36,13 +37,17 @@ const (
 // It validates the secret token, parses updates, and dispatches them to the
 // provided handler function.
 type WebhookServer struct {
-	listenAddr  string
-	secretToken string
-	handler     func(update Update)
-	server      *http.Server
-	log         *slog.Logger
-	// actualAddr is populated after Start() with the resolved listen address.
+	listenAddr string
+	handler    func(update Update)
+	server     *http.Server
+	log        *slog.Logger
+	// listener is bound by Listen and served by Serve.
+	listener net.Listener
+	// actualAddr is populated by Listen with the resolved listen address.
 	actualAddr string
+
+	secretMu    sync.RWMutex
+	secretToken string
 }
 
 // NewWebhookServer creates a new WebhookServer.
@@ -58,9 +63,32 @@ func NewWebhookServer(listenAddr, secretToken string, handler func(Update), log 
 	}
 }
 
-// Start starts the HTTP server in a background goroutine.
+// Start binds the listen address and serves in a background goroutine.
 // It returns the resolved listen address (useful when port 0 is used).
 func (ws *WebhookServer) Start() (string, error) {
+	addr, err := ws.Listen()
+	if err != nil {
+		return "", err
+	}
+	ws.Serve()
+	return addr, nil
+}
+
+// Listen binds the listen address without serving it yet, so a caller can
+// find out the address is unavailable before committing to the server.
+// It returns the resolved listen address.
+func (ws *WebhookServer) Listen() (string, error) {
+	ln, err := net.Listen("tcp", ws.listenAddr)
+	if err != nil {
+		return "", err
+	}
+	ws.listener = ln
+	ws.actualAddr = ln.Addr().String()
+	return ws.actualAddr, nil
+}
+
+// Serve serves the listener bound by Listen in a background goroutine.
+func (ws *WebhookServer) Serve() {
 	mux := http.NewServeMux()
 	mux.HandleFunc(webhookPath, ws.handleWebhook)
 
@@ -69,12 +97,7 @@ func (ws *WebhookServer) Start() (string, error) {
 		Handler: mux,
 	}
 
-	ln, err := net.Listen("tcp", ws.listenAddr)
-	if err != nil {
-		return "", err
-	}
-	ws.actualAddr = ln.Addr().String()
-
+	ln := ws.listener
 	go func() {
 		if err := ws.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			ws.log.Error("Webhook server error", "error", err)
@@ -82,12 +105,28 @@ func (ws *WebhookServer) Start() (string, error) {
 	}()
 
 	ws.log.Info("Webhook server started", "addr", ws.actualAddr)
-	return ws.actualAddr, nil
 }
 
-// Stop gracefully shuts down the webhook server.
+// SetSecretToken replaces the secret token that inbound requests must carry.
+func (ws *WebhookServer) SetSecretToken(token string) {
+	ws.secretMu.Lock()
+	defer ws.secretMu.Unlock()
+	ws.secretToken = token
+}
+
+func (ws *WebhookServer) currentSecretToken() string {
+	ws.secretMu.RLock()
+	defer ws.secretMu.RUnlock()
+	return ws.secretToken
+}
+
+// Stop gracefully shuts down the webhook server. A listener that was bound
+// but never served is closed.
 func (ws *WebhookServer) Stop(ctx context.Context) error {
 	if ws.server == nil {
+		if ws.listener != nil {
+			return ws.listener.Close()
+		}
 		return nil
 	}
 	ws.log.Info("Stopping webhook server")
@@ -103,9 +142,9 @@ func (ws *WebhookServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate secret token.
-	if ws.secretToken != "" {
+	if secretToken := ws.currentSecretToken(); secretToken != "" {
 		token := r.Header.Get(secretTokenHeader)
-		if subtle.ConstantTimeCompare([]byte(token), []byte(ws.secretToken)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(secretToken)) != 1 {
 			ws.log.Warn("Webhook request with invalid secret token")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

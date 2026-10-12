@@ -162,9 +162,10 @@ func (b *TelegramBrokerV2) SetHostCallbacks(hc plugin.HostCallbacks) {
 
 // Configure sets up the v2 Telegram broker from the provided config map.
 //
-// The whole config is validated before any Telegram API call or change to
-// the broker, so a misconfigured plugin fails fast and a failed reconfigure
-// leaves the running store, API client and webhook server in place.
+// The whole config is validated before any Telegram API call, so a
+// misconfigured plugin fails fast. Every error return happens before the
+// broker is changed, so a failed reconfigure leaves the running store, API
+// client, settings and webhook server in place.
 func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -236,7 +237,7 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		if dbPath == "" {
 			dbPath = defaultDBPath
 		}
-		s, err := NewSQLiteStore(dbPath)
+		s, err := openSQLiteStore(dbPath)
 		if err != nil {
 			return fmt.Errorf("init store: %w", err)
 		}
@@ -253,11 +254,34 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		return fmt.Errorf("failed to validate bot token: %w", err)
 	}
 
+	// Bind a new webhook listener before setWebhook and before changing the
+	// broker, so an unavailable address fails with nothing changed. When the
+	// running server already listens on the configured address (Configure is
+	// called twice: first with plugin config, then with hub credentials), it
+	// keeps serving and only its secret is updated below.
+	var newWebhookServer *WebhookServer
+	if inboundMode == "webhook" {
+		webhookListen := config["webhook_listen"]
+		if webhookListen == "" {
+			webhookListen = ":9094"
+		}
+		if b.webhookServer == nil || b.webhookServer.listenAddr != webhookListen {
+			newWebhookServer = NewWebhookServer(webhookListen, webhookSecret, b.handleWebhookUpdate, b.log)
+			if _, err := newWebhookServer.Listen(); err != nil {
+				store.Close()
+				return fmt.Errorf("failed to start webhook server: %w", err)
+			}
+		}
+	}
+
 	// In standalone HA mode, skip_set_webhook=true means this instance
 	// should start the HTTP listener but NOT call setWebhook. Only the
 	// lock holder calls RegisterWebhook() separately.
 	if inboundMode == "webhook" && config["skip_set_webhook"] != "true" {
 		if err := api.SetWebhook(ctx, webhookURL, webhookSecret); err != nil {
+			if newWebhookServer != nil {
+				_ = newWebhookServer.Stop(ctx)
+			}
 			store.Close()
 			return fmt.Errorf("failed to set webhook: %w", err)
 		}
@@ -311,38 +335,19 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 
 	b.registerBotCommands(ctx)
 
-	// Set up webhook if configured.
-	if b.inboundMode == "webhook" {
-		webhookListen := config["webhook_listen"]
-		if webhookListen == "" {
-			webhookListen = ":9094"
-		}
-
-		// Stop any existing webhook server before starting a new one.
-		// Configure() is called twice (first with plugin config, then with hub
-		// credentials). The second call must not fail on port-already-bound.
-		if b.webhookServer != nil {
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = b.webhookServer.Stop(stopCtx)
-			stopCancel()
-			b.webhookServer = nil
-		}
-
-		// Create and start the webhook server.
-		b.webhookServer = NewWebhookServer(webhookListen, webhookSecret, func(update Update) {
-			if update.CallbackQuery != nil {
-				cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cbCancel()
-				b.handleCallbackQuery(cbCtx, update.CallbackQuery)
+	// Switch the webhook server: serve the listener bound above in place of
+	// the old server, or keep the running server with the new secret.
+	if inboundMode == "webhook" {
+		if newWebhookServer != nil {
+			if b.webhookServer != nil {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_ = b.webhookServer.Stop(stopCtx)
+				stopCancel()
 			}
-			if update.Message != nil {
-				b.handleIncomingMessageV2(update.Message)
-			}
-		}, b.log)
-
-		if _, err := b.webhookServer.Start(); err != nil {
-			b.store.Close()
-			return fmt.Errorf("failed to start webhook server: %w", err)
+			newWebhookServer.Serve()
+			b.webhookServer = newWebhookServer
+		} else {
+			b.webhookServer.SetSecretToken(webhookSecret)
 		}
 	}
 
@@ -420,6 +425,22 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		"inbound_mode", b.inboundMode,
 	)
 	return nil
+}
+
+// openSQLiteStore opens the SQLite store in Configure. Tests replace it to
+// observe the store a Configure call opens.
+var openSQLiteStore = NewSQLiteStore
+
+// handleWebhookUpdate dispatches an update received by the webhook server.
+func (b *TelegramBrokerV2) handleWebhookUpdate(update Update) {
+	if update.CallbackQuery != nil {
+		cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cbCancel()
+		b.handleCallbackQuery(cbCtx, update.CallbackQuery)
+	}
+	if update.Message != nil {
+		b.handleIncomingMessageV2(update.Message)
+	}
 }
 
 // RegisterWebhook calls the Telegram setWebhook API to register this instance's

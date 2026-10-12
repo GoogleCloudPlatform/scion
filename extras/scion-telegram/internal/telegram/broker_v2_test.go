@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2267,6 +2268,8 @@ func TestV2_Configure_InvalidConfigMakesNoAPICalls(t *testing.T) {
 			"inbound_mode": "webhook",
 			"webhook_url":  "https://example.com/telegram/webhook",
 		}, "webhook_secret is required"},
+		// Regression guard: agent_cache_ttl was already checked before any
+		// API call on main.
 		{"invalid agent_cache_ttl", map[string]string{"agent_cache_ttl": "soon"}, "invalid agent_cache_ttl"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2293,45 +2296,94 @@ func TestV2_Configure_InvalidConfigMakesNoAPICalls(t *testing.T) {
 	}
 }
 
+// captureOpenedStores records the SQLite stores Configure opens from now
+// until the test ends.
+func captureOpenedStores(t *testing.T) *[]Store {
+	t.Helper()
+	var opened []Store
+	orig := openSQLiteStore
+	openSQLiteStore = func(dbPath string) (Store, error) {
+		s, err := orig(dbPath)
+		if err == nil {
+			opened = append(opened, s)
+		}
+		return s, err
+	}
+	t.Cleanup(func() { openSQLiteStore = orig })
+	return &opened
+}
+
+// postWebhookUpdate sends a no-op update to a webhook server and returns the
+// response status.
+func postWebhookUpdate(t *testing.T, addr, secret string) (int, error) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+webhookPath,
+		strings.NewReader(`{"update_id":1}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(secretTokenHeader, secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// validWebhookConfig returns a webhook-mode config against the fake API.
+func validWebhookConfig(t *testing.T, tgSrv *fakeTGServerV2) map[string]string {
+	t.Helper()
+	return map[string]string{
+		"bot_token":      "test-token",
+		"api_base_url":   tgSrv.srv.URL,
+		"hub_url":        "http://hub.test",
+		"db_path":        filepath.Join(t.TempDir(), "test.db"),
+		"inbound_mode":   "webhook",
+		"webhook_url":    "https://example.com/telegram/webhook",
+		"webhook_listen": ":0",
+		"webhook_secret": "test-secret",
+	}
+}
+
 // A reconfigure that fails, after a valid webhook-mode configure, leaves the
 // running configuration in place: the earlier webhook server keeps serving
-// against the store, which stays open.
+// against the store, which stays open, and Telegram's webhook registration
+// is not changed. A store the failed reconfigure opened is closed again.
 func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
+	type env struct{ rejectingURL, busyAddr string }
 	for _, tc := range []struct {
-		name    string
-		mutate  func(cfg map[string]string, rejectingURL string)
-		wantErr string
+		name       string
+		mutate     func(cfg map[string]string, e env)
+		wantErr    string
+		opensStore bool
 	}{
-		{"missing webhook secret", func(cfg map[string]string, _ string) {
+		{"missing webhook secret", func(cfg map[string]string, _ env) {
 			delete(cfg, "webhook_secret")
-		}, "webhook_secret is required"},
-		{"missing webhook url", func(cfg map[string]string, _ string) {
+		}, "webhook_secret is required", false},
+		{"missing webhook url", func(cfg map[string]string, _ env) {
 			cfg["webhook_url"] = ""
-		}, "webhook_url is required"},
-		{"invalid inbound mode", func(cfg map[string]string, _ string) {
+		}, "webhook_url is required", false},
+		{"invalid inbound mode", func(cfg map[string]string, _ env) {
 			cfg["inbound_mode"] = "push"
-		}, "invalid inbound_mode"},
-		{"bot token rejected", func(cfg map[string]string, rejectingURL string) {
-			cfg["api_base_url"] = rejectingURL
-		}, "failed to validate bot token"},
+		}, "invalid inbound_mode", false},
+		{"bot token rejected", func(cfg map[string]string, e env) {
+			cfg["api_base_url"] = e.rejectingURL
+		}, "failed to validate bot token", true},
+		{"webhook listen address in use", func(cfg map[string]string, e env) {
+			cfg["webhook_listen"] = e.busyAddr
+		}, "failed to start webhook server", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tgSrv := newFakeTGServerV2(t)
 			rejecting, _ := newRejectingTGServer(t)
+			busy, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			defer busy.Close()
 
 			b := NewV2(slog.Default())
 			defer b.Close()
 
-			cfg := map[string]string{
-				"bot_token":      "test-token",
-				"api_base_url":   tgSrv.srv.URL,
-				"hub_url":        "http://hub.test",
-				"db_path":        filepath.Join(t.TempDir(), "test.db"),
-				"inbound_mode":   "webhook",
-				"webhook_url":    "https://example.com/telegram/webhook",
-				"webhook_listen": ":0",
-				"webhook_secret": "test-secret",
-			}
+			cfg := validWebhookConfig(t, tgSrv)
 			require.NoError(t, b.Configure(cfg))
 			server, store, api := b.webhookServer, b.store, b.api
 			require.NotNil(t, server)
@@ -2341,9 +2393,11 @@ func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
 				bad[k] = v
 			}
 			bad["hub_url"] = "http://other-hub.test"
-			tc.mutate(bad, rejecting.URL)
+			bad["webhook_url"] = "https://example.com/telegram/other-webhook"
+			tc.mutate(bad, env{rejectingURL: rejecting.URL, busyAddr: busy.Addr().String()})
 
-			err := b.Configure(bad)
+			opened := captureOpenedStores(t)
+			err = b.Configure(bad)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 
@@ -2353,26 +2407,79 @@ func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
 			assert.Equal(t, "http://hub.test", b.hubURL)
 			assert.Equal(t, "webhook", b.inboundMode)
 
+			tgSrv.mu.Lock()
+			assert.Equal(t, "https://example.com/telegram/webhook", tgSrv.webhookURL,
+				"a failed reconfigure must not change the webhook registration")
+			tgSrv.mu.Unlock()
+
+			link := &GroupLink{ChatID: -300, ProjectID: "proj-1", LinkedAt: time.Now().UTC(), Active: true}
+
 			// The store the webhook handlers use is still open.
-			require.NoError(t, b.store.SaveGroupLink(context.Background(), &GroupLink{
-				ChatID:    -300,
-				ProjectID: "proj-1",
-				LinkedAt:  time.Now().UTC(),
-				Active:    true,
-			}))
+			require.NoError(t, b.store.SaveGroupLink(context.Background(), link))
+
+			// A store the failed reconfigure opened is closed again.
+			if tc.opensStore {
+				require.Len(t, *opened, 1)
+				assert.Error(t, (*opened)[0].SaveGroupLink(context.Background(), link),
+					"a failed reconfigure must close the store it opened")
+			} else {
+				assert.Empty(t, *opened, "an invalid config must not open a store")
+			}
 
 			// The earlier webhook server still accepts updates.
-			req, err := http.NewRequest(http.MethodPost, "http://"+server.actualAddr+webhookPath,
-				strings.NewReader(`{"update_id":1}`))
+			status, err := postWebhookUpdate(t, server.actualAddr, "test-secret")
 			require.NoError(t, err)
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set(secretTokenHeader, "test-secret")
-			resp, err := http.DefaultClient.Do(req)
-			require.NoError(t, err)
-			defer resp.Body.Close()
-			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.Equal(t, http.StatusOK, status)
 		})
 	}
+}
+
+// A reconfigure on the same listen address (the hub configures twice) keeps
+// the running webhook server and applies the new secret.
+func TestV2_Reconfigure_SameListenAddressKeepsServer(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	cfg := validWebhookConfig(t, tgSrv)
+	require.NoError(t, b.Configure(cfg))
+	server := b.webhookServer
+
+	cfg["webhook_secret"] = "rotated-secret"
+	require.NoError(t, b.Configure(cfg))
+	assert.Same(t, server, b.webhookServer)
+
+	status, err := postWebhookUpdate(t, server.actualAddr, "rotated-secret")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, status)
+
+	status, err = postWebhookUpdate(t, server.actualAddr, "test-secret")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusUnauthorized, status, "the old secret must no longer be accepted")
+}
+
+// A reconfigure on a new listen address serves the new address and stops the
+// old server.
+func TestV2_Reconfigure_NewListenAddressSwitchesServer(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	cfg := validWebhookConfig(t, tgSrv)
+	require.NoError(t, b.Configure(cfg))
+	oldAddr := b.webhookServer.actualAddr
+
+	cfg["webhook_listen"] = "127.0.0.1:0"
+	require.NoError(t, b.Configure(cfg))
+	newAddr := b.webhookServer.actualAddr
+	assert.NotEqual(t, oldAddr, newAddr)
+
+	status, err := postWebhookUpdate(t, newAddr, "test-secret")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, status)
+
+	_, err = postWebhookUpdate(t, oldAddr, "test-secret")
+	assert.Error(t, err, "the old webhook server must be stopped")
 }
 
 func TestV2_Configure_DefaultPollMode(t *testing.T) {
