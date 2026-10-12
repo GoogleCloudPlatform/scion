@@ -163,7 +163,7 @@ To move an existing agent onto the current template, image, and harness config w
 
 Reincarnating is also how an existing agent picks up changed harness dotfiles (including hook registrations kept in them, such as Claude's `.claude/settings.json`) and changed template skills, which are otherwise copied only when the agent is created. Harnesses whose provisioner writes its hook configuration at start, such as Copilot, Antigravity and Grok Build, pick up provisioner changes on the next start. See [Changing a harness config affects new agents only](/scion/reference/harness-settings/#changing-a-harness-config-affects-new-agents-only).
 
-In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --broker <name|id>` also moves the agent to another Runtime Broker, keeping its workspace, when both Runtime Brokers mount the same NFS export. An empty-per-agent agent can move only when its workspace is on that export (Kubernetes with NFS workspace storage). See [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
+In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --broker <name|id>` also moves the agent to another Runtime Broker, keeping its workspace, when both Runtime Brokers mount the same NFS export. An agent in an empty-per-agent project can move only when its workspace is on that export (Kubernetes with NFS workspace storage). See [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
 
 ## Auto-Suspend of Stalled Agents
 

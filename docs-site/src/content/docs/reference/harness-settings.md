@@ -29,7 +29,7 @@ A **harness-config** is a named, versioned bundle that defines a harness: its `c
 `scion_harness.py` library). Bundles live in `~/.scion/harness-configs/<name>/` (global) or
 `.scion/harness-configs/<name>/` (project-level); project-level configs override global ones with
 the same name. A template can also bundle harness-configs in its own `harness-configs/<name>/`
-directory, and these take precedence over both project and global configs of the same name (a
+directories, and these take precedence over both project and global configs of the same name (any
 directory that fails to load is skipped and the next one is tried). When a Hub dispatch names a
 Hub harness-config, the Hub's copy is used instead of any of these directories; if the Runtime
 Broker cannot fetch it, the start fails rather than falling back to them.
