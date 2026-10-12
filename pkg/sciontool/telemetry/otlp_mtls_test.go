@@ -23,8 +23,11 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -200,7 +203,8 @@ func TestLoadOTLPTLSConfig_BadFilesNamePathOnly(t *testing.T) {
 
 // TestGenericGRPCMutualTLSAgainstRealServer runs the generic OTLP gRPC
 // exporter against an in-process server that requires a client certificate
-// signed by the test CA.
+// signed by the test CA. It covers both TLS consumers: the raw proto client
+// (ExportProtoLogs) and the otlptracegrpc trace exporter (ExportSpans).
 func TestGenericGRPCMutualTLSAgainstRealServer(t *testing.T) {
 	pki := newTestPKI(t)
 	for _, tc := range []struct {
@@ -222,10 +226,14 @@ func TestGenericGRPCMutualTLSAgainstRealServer(t *testing.T) {
 				ClientCAs:    pki.caPool,
 				MinVersion:   tls.VersionTLS12,
 			}
-			var received atomic.Int32
+			var received, receivedSpans atomic.Int32
 			server := grpc.NewServer(grpc.Creds(credentials.NewTLS(serverTLS)))
 			collogspb.RegisterLogsServiceServer(server, &logsServiceServer{handler: func(context.Context, []*logspb.ResourceLogs) error {
 				received.Add(1)
+				return nil
+			}})
+			coltracepb.RegisterTraceServiceServer(server, &traceServiceServer{handler: func(context.Context, []*tracepb.ResourceSpans) error {
+				receivedSpans.Add(1)
 				return nil
 			}})
 			go func() { _ = server.Serve(listener) }()
@@ -256,6 +264,16 @@ func TestGenericGRPCMutualTLSAgainstRealServer(t *testing.T) {
 			}
 			if got := received.Load(); got != wantReceived {
 				t.Fatalf("server received %d export calls, want %d", got, wantReceived)
+			}
+
+			spanCtx, spanCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer spanCancel()
+			err = exporter.ExportSpans(spanCtx, tracetest.SpanStubs{{Name: "mtls-probe"}}.Snapshots())
+			if (err == nil) != tc.wantSuccess {
+				t.Fatalf("ExportSpans error = %v, want success=%t", err, tc.wantSuccess)
+			}
+			if got := receivedSpans.Load(); got != wantReceived {
+				t.Fatalf("server received %d trace export calls, want %d", got, wantReceived)
 			}
 		})
 	}
