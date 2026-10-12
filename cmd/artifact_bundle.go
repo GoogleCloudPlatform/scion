@@ -367,7 +367,7 @@ func discardReasonText(reason string) string {
 	case artifacts.FailReasonExpired:
 		return "discarded: the upload was not finished in time"
 	default:
-		return "discarded"
+		return "discarded: no reason recorded"
 	}
 }
 

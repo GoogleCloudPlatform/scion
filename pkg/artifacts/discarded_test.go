@@ -134,33 +134,36 @@ func TestListVersionsDiscardedEmpty(t *testing.T) {
 }
 
 // TestListVersionsDiscardedPages: a page walks ready and discarded
-// versions together by seq, so following nextBefore sees every one once.
+// versions together by seq, so following nextBefore sees every one once,
+// including with limit=1, where some pages hold only a discarded version.
 func TestListVersionsDiscardedPages(t *testing.T) {
 	f, id := discardedFixture(t)
-	var ready, discarded []int
-	before := 0
-	for pages := 0; pages < 5; pages++ {
-		target := "/api/v1/artifacts/" + id + "/versions?limit=2"
-		if before > 0 {
-			target += "&before=" + itoa(before)
+	for _, limit := range []int{2, 1} {
+		var ready, discarded []int
+		before := 0
+		for pages := 0; pages < 10; pages++ {
+			target := "/api/v1/artifacts/" + id + "/versions?limit=" + itoa(limit)
+			if before > 0 {
+				target += "&before=" + itoa(before)
+			}
+			resp := decodeInto[VersionListResponse](t, f.do(&agentB, http.MethodGet, target, nil, nil))
+			if len(resp.Versions)+len(resp.Discarded) > limit {
+				t.Fatalf("limit %d: page holds %d rows", limit, len(resp.Versions)+len(resp.Discarded))
+			}
+			for _, v := range resp.Versions {
+				ready = append(ready, v.Seq)
+			}
+			for _, d := range resp.Discarded {
+				discarded = append(discarded, d.Seq)
+			}
+			if resp.NextBefore == 0 {
+				break
+			}
+			before = resp.NextBefore
 		}
-		resp := decodeInto[VersionListResponse](t, f.do(&agentB, http.MethodGet, target, nil, nil))
-		if len(resp.Versions)+len(resp.Discarded) > 2 {
-			t.Fatalf("page holds %d rows, limit 2", len(resp.Versions)+len(resp.Discarded))
+		if !reflect.DeepEqual(ready, []int{4, 1}) || !reflect.DeepEqual(discarded, []int{3, 2}) {
+			t.Errorf("limit %d: paged ready %v discarded %v, want [4 1] and [3 2]", limit, ready, discarded)
 		}
-		for _, v := range resp.Versions {
-			ready = append(ready, v.Seq)
-		}
-		for _, d := range resp.Discarded {
-			discarded = append(discarded, d.Seq)
-		}
-		if resp.NextBefore == 0 {
-			break
-		}
-		before = resp.NextBefore
-	}
-	if !reflect.DeepEqual(ready, []int{4, 1}) || !reflect.DeepEqual(discarded, []int{3, 2}) {
-		t.Errorf("paged ready %v discarded %v, want [4 1] and [3 2]", ready, discarded)
 	}
 }
 

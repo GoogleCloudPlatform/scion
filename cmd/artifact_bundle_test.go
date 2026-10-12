@@ -466,7 +466,7 @@ func TestArtifactVersionsListsDiscarded(t *testing.T) {
 	require.Len(t, lines, 5, out.String())
 	assert.True(t, strings.HasPrefix(lines[1], "* "+ref+"@4"), lines[1])
 	assert.True(t, strings.HasPrefix(lines[2], "  "+ref+"@3"), lines[2])
-	assert.Regexp(t, `discarded\s+2026-10-06 18:20 UTC\s+-\s+-\s+-\s+discarded$`, lines[2])
+	assert.Regexp(t, `discarded\s+2026-10-06 18:20 UTC\s+-\s+-\s+-\s+discarded: no reason recorded$`, lines[2])
 	assert.True(t, strings.HasPrefix(lines[3], "  "+ref+"@2"), lines[3])
 	assert.True(t, strings.HasSuffix(lines[3], "discarded: the review changed text outside its marks"), lines[3])
 	assert.True(t, strings.HasPrefix(lines[4], "  "+ref+"@1"), lines[4])

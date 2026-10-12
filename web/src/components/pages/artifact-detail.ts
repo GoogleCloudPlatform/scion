@@ -140,6 +140,12 @@ export const REVIEW_PREVIEW_DELAY_MS = 250;
 /** Longest delay setTimeout honours. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
+/**
+ * The most extra version pages loadVersions reads in one go while the
+ * pages hold only discarded versions.
+ */
+const MAX_EXTRA_VERSION_PAGES = 5;
+
 @customElement('scion-page-artifact-detail')
 export class ScionPageArtifactDetail extends LitElement {
   @property({ type: Object })
@@ -609,12 +615,27 @@ export class ScionPageArtifactDetail extends LitElement {
 
   private async loadVersions(before = 0, gen = this.loadGen): Promise<void> {
     try {
-      const page = await listVersions(this.artifactId, before);
-      if (gen !== this.loadGen) return;
-      this.versions = before > 0 ? [...this.versions, ...page.versions] : page.versions;
-      const discarded = page.discarded ?? [];
-      this.discarded = before > 0 ? [...this.discarded, ...discarded] : discarded;
-      this.versionsNext = page.nextBefore ?? 0;
+      // A page walks ready and discarded versions together, so after a long
+      // run of discarded versions it can hold no ready one. Keep reading
+      // (a few pages at most) until one arrives, so the version picker and
+      // the review state see a ready version.
+      let next = before;
+      for (let extra = 0; ; extra++) {
+        const page = await listVersions(this.artifactId, next);
+        if (gen !== this.loadGen) return;
+        this.versions = next > 0 ? [...this.versions, ...page.versions] : page.versions;
+        const discarded = page.discarded ?? [];
+        this.discarded = next > 0 ? [...this.discarded, ...discarded] : discarded;
+        this.versionsNext = page.nextBefore ?? 0;
+        if (
+          page.versions.length > 0 ||
+          this.versionsNext <= 0 ||
+          extra >= MAX_EXTRA_VERSION_PAGES
+        ) {
+          break;
+        }
+        next = this.versionsNext;
+      }
       this.resolveNames();
       this.versionsError = null;
     } catch (err) {

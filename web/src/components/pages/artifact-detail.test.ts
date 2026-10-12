@@ -71,6 +71,14 @@ interface MockOptions {
   versions?: ArtifactVersion[];
   /** Discarded versions listed by GET .../versions (default: none). */
   discarded?: DiscardedVersion[];
+  /**
+   * Version list pages by their before= value ('' for the first page);
+   * when set, it replaces versions and discarded.
+   */
+  versionPages?: Record<
+    string,
+    { versions: ArtifactVersion[]; discarded: DiscardedVersion[]; nextBefore?: number }
+  >;
   /** expiresAt of a minted view (default: far in the future). */
   viewExpiresAt?: string;
   /** Answers POST/PUT requests other than the view mint. */
@@ -120,6 +128,11 @@ function mockFetch(
       }
       if (/\/versions(\?|$)/.test(url)) {
         const versions = opts.versions ?? (meta?.version ? [{ ...meta.version, files: [] }] : []);
+        if (opts.versionPages) {
+          const before = /[?&]before=(\d+)/.exec(url)?.[1] ?? '';
+          const page = opts.versionPages[before] ?? { versions: [], discarded: [] };
+          return Promise.resolve(new Response(JSON.stringify(page), { status: 200 }));
+        }
         const discarded = opts.discarded ?? [];
         return Promise.resolve(
           new Response(JSON.stringify({ versions, discarded }), { status: 200 })
@@ -537,6 +550,50 @@ describe('artifact page', () => {
     expect(expanded[0].textContent).toContain('the review was of an older version');
     expect(expanded[1].textContent).toContain('the review changed text outside its marks');
     for (const r of expanded) expect(r.querySelector('sl-icon-button')).toBeNull();
+  });
+
+  it('keeps reading version pages until a ready version arrives', async () => {
+    const ready = (seq: number): ArtifactVersion => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    });
+    const gone = (seq: number): DiscardedVersion => ({
+      seq,
+      state: 'failed',
+      reason: 'unmarked_changes',
+      createdAt: '2026-10-05T12:00:00Z',
+    });
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 1;
+    const urls = mockFetch(meta, '# Doc', {
+      versionPages: {
+        '': { versions: [], discarded: [gone(5), gone(4)], nextBefore: 4 },
+        '4': { versions: [], discarded: [gone(3), gone(2)], nextBefore: 2 },
+        '2': { versions: [ready(1)], discarded: [], nextBefore: 0 },
+      },
+    });
+    const el = await mount(true);
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    expect(urls.filter((u) => /\/versions(\?|$)/.test(u))).toEqual([
+      `/api/v1/artifacts/${ID}/versions`,
+      `/api/v1/artifacts/${ID}/versions?before=4`,
+      `/api/v1/artifacts/${ID}/versions?before=2`,
+    ]);
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    const rows = Array.from(panel.querySelectorAll('tbody tr'));
+    expect(rows).toHaveLength(2);
+    expect((rows[0].textContent ?? '').replace(/\s+/g, ' ')).toContain('v2–v5 · discarded');
+    expect(rows[1].textContent).toContain('v1');
   });
 
   it('names the reason of a single discarded version in its row', async () => {
