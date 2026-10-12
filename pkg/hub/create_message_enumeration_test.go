@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_6
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -115,6 +113,8 @@ func TestCreateMessageEnumeration(t *testing.T) {
 
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards CreateMessage call sites, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards CreateMessage call sites, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)

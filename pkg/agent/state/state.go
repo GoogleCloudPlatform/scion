@@ -20,6 +20,7 @@ package state
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // HarnessExitCodeFile is the container-local path where the tmux agent-window
@@ -51,6 +52,20 @@ const (
 	// ReadyModeSettle means the harness has no usable early hook: the runtime
 	// waits until the tmux session has existed for a fixed settle period.
 	ReadyModeSettle = "settle"
+)
+
+// Harness readiness timing. These constants are the single readiness rule
+// shared by the runtime message buffer (which waits before pasting a message)
+// and `sciontool init` (which reports the agent as working, ending the
+// initializing activity).
+const (
+	// ReadySettleSession is how long the tmux session must exist before a
+	// settle-mode harness (or one with no init-run file) counts as ready.
+	ReadySettleSession = 8 * time.Second
+	// ReadyDeadline bounds the wait for a hook-mode ready marker. At the
+	// deadline the runtime pastes a buffered message anyway and init reports
+	// the agent as working, so no agent stays initializing forever.
+	ReadyDeadline = 90 * time.Second
 )
 
 // FormatInitRun renders the HarnessInitRunFile content for nonce and mode,
@@ -221,6 +236,11 @@ func (p Phase) Validate() error {
 type Activity string
 
 const (
+	// ActivityInitializing means the container and harness process are up
+	// but the harness has not yet shown it is reading input. `sciontool init`
+	// reports it at start and replaces it with working once the harness is
+	// ready (see ReadyDeadline). Displayed as "starting".
+	ActivityInitializing    Activity = "initializing"
 	ActivityWorking         Activity = "working"
 	ActivityThinking        Activity = "thinking"
 	ActivityExecuting       Activity = "executing"
@@ -286,6 +306,7 @@ const ExitReasonContainerMissing ExitReason = "container_missing"
 
 // allActivities is the internal list; Activities() returns a copy.
 var allActivities = []Activity{
+	ActivityInitializing,
 	ActivityWorking,
 	ActivityThinking,
 	ActivityExecuting,
@@ -388,10 +409,40 @@ type AgentState struct {
 	Detail   Detail   `json:"detail,omitempty"`
 }
 
+// AcceptsInput reports whether the agent's harness is ready to read input:
+// the phase is running and the activity is set and is not initializing.
+// Images that predate the initializing activity report working at start, so
+// they count as ready at once.
+//
+// AcceptsInput only changes delivery timing (for example whether an
+// interrupt is pasted at once or buffered until the harness is ready); it
+// must not be used to reject or drop a message for a running agent.
+func (s AgentState) AcceptsInput() bool {
+	return s.Phase == PhaseRunning && s.Activity != "" && s.Activity != ActivityInitializing
+}
+
+// DisplayLabel returns the user-facing label for an activity. It differs
+// from the raw value only for initializing, which is shown as "starting".
+// Use it in display code keyed on activity; the legacy Status string comes
+// from DisplayStatus instead.
+func (a Activity) DisplayLabel() string {
+	if a == ActivityInitializing {
+		return "starting"
+	}
+	return string(a)
+}
+
 // DisplayStatus returns a single human-readable status string for backward
 // compatibility and simple display. When phase is running and an activity is
 // set, the activity is returned; otherwise the phase is returned.
+//
+// Running with the initializing activity returns "running": the legacy
+// Status string feeds older hubs and CLIs, which must keep treating the agent
+// as running exactly as before the initializing activity existed.
 func (s AgentState) DisplayStatus() string {
+	if s.Phase == PhaseRunning && s.Activity == ActivityInitializing {
+		return string(PhaseRunning)
+	}
 	if s.Phase == PhaseRunning && s.Activity != "" {
 		return string(s.Activity)
 	}

@@ -492,6 +492,40 @@ class ProvisionEffortWiringTest(unittest.TestCase):
         self.assertIn("ANTHROPIC_MODEL", env)  # sanity: the overlay was written
 
 
+def _select_with_candidates(home: str, candidates: dict[str, Any]):
+    bundle = os.path.join(home, ".scion", "harness")
+    os.makedirs(os.path.join(bundle, "inputs"), exist_ok=True)
+    with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w", encoding="utf-8") as f:
+        json.dump(candidates, f)
+    ctx = make_ctx(home)
+    ctx.info = lambda *a, **k: None
+    return ctx, ctx.select_auth(provision.AUTH)
+
+
+class VertexAuthSelectionTest(unittest.TestCase):
+    # config.yaml's vertex-ai region group accepts CLOUD_ML_REGION; the
+    # provisioner must accept it too (ptone/scion#4623).
+    def test_explicit_vertex_ai_accepts_cloud_ml_region(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx, resolved = _select_with_candidates(tmp, {
+                "explicit_type": "vertex-ai",
+                "env_vars": ["GOOGLE_CLOUD_PROJECT", "CLOUD_ML_REGION"],
+            })
+            self.assertEqual(resolved.method, "vertex-ai")
+            self.assertEqual(resolved.env_key, "CLOUD_ML_REGION")
+            env = provision._build_env_overlay(ctx, resolved)
+        self.assertEqual(env["CLOUD_ML_REGION"], "${CLOUD_ML_REGION}")
+        self.assertEqual(env["CLAUDE_CODE_USE_VERTEX"], "1")
+
+    def test_explicit_vertex_ai_without_region_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            with self.assertRaises(scion_harness.ProvisionError):
+                _select_with_candidates(tmp, {
+                    "explicit_type": "vertex-ai",
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                })
+
+
 class ConfigYamlTest(unittest.TestCase):
     def test_config_yaml_does_not_pin_anthropic_model(self) -> None:
         """config.yaml env entries land in the container env and would win.

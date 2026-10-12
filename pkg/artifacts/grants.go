@@ -214,7 +214,7 @@ func (s *Service) crossScopeAllowed(ctx context.Context) bool {
 // handleListGrants implements GET /{id}/grants: the principal and scope
 // grants, the home project's first, then oldest first.
 func (s *Service) handleListGrants(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.adminArtifact(w, r, id)
+	b, a, _, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -368,24 +368,53 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
 }
 
-// reviewGrantSubject decides putReviewGrant's request: it returns the user
-// principal ref to give a write grant when every condition holds, cheapest
-// first and the host's authority last, and ok=false otherwise:
-//   - a is owned by an agent;
-//   - the caller is a user whose credential permits artifact.manage in
-//     a's home scope;
-//   - the body is exactly a principal write grant to a user;
-//   - the host implements ReviewGrantAuthority and answers yes.
-func (s *Service) reviewGrantSubject(r *http.Request, a *Artifact) (string, bool) {
-	ctx := r.Context()
+// reviewGrantCaller reports whether the caller of ctx is one that
+// putReviewGrant may serve for artifact a: a is owned by an agent and the
+// caller is a user whose credential permits artifact.manage in a's home
+// scope. It is the cheap half of mayGrantReview.
+func (s *Service) reviewGrantCaller(ctx context.Context, a *Artifact) bool {
 	if a.OwnerKind != PrincipalKindAgent {
-		return "", false
+		return false
 	}
 	kind, _, _, ok := s.host.Principal(ctx)
 	if !ok || kind != PrincipalKindUser {
-		return "", false
+		return false
 	}
-	if !s.host.Permits(ctx, a.ScopeRef, PermissionManage) {
+	return s.host.Permits(ctx, a.ScopeRef, PermissionManage)
+}
+
+// reviewGrantAuthorized reports whether the host's ReviewGrantAuthority
+// lets the caller of ctx give review access on a (the delegating user of
+// a's owning agent, the project owners and admins of a's home project, and
+// super-admins). A host without the authority answers no.
+func (s *Service) reviewGrantAuthorized(ctx context.Context, a *Artifact) bool {
+	authority, ok := s.host.(ReviewGrantAuthority)
+	return ok && authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef)
+}
+
+// mayGrantReview is the caller half of the review-grant decision (design
+// D24, ptone/scion#4014): whether a well-formed review grant from the caller
+// of ctx on a would pass reviewGrantSubject. ArtifactResponse.CanGrantReview
+// states it; reviewGrantSubject makes the same two checks, with the body
+// checks between them. It does not include the store's checks under the
+// artifact's lock (an existing admin grant, a concurrent move).
+func (s *Service) mayGrantReview(ctx context.Context, a *Artifact) bool {
+	return s.reviewGrantCaller(ctx, a) && s.reviewGrantAuthorized(ctx, a)
+}
+
+// reviewGrantSubject decides putReviewGrant's request: it returns the user
+// principal ref to give a write grant when every condition holds, cheapest
+// first and the host's authority last, and ok=false otherwise:
+//   - the caller passes reviewGrantCaller (a is owned by an agent; the
+//     caller is a user whose credential permits artifact.manage in a's
+//     home scope);
+//   - the body is exactly a principal write grant to a user;
+//   - the caller passes reviewGrantAuthorized.
+//
+// Without the body checks this is mayGrantReview.
+func (s *Service) reviewGrantSubject(r *http.Request, a *Artifact) (string, bool) {
+	ctx := r.Context()
+	if !s.reviewGrantCaller(ctx, a) {
 		return "", false
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxGrantRequestBytes+1))
@@ -405,8 +434,7 @@ func (s *Service) reviewGrantSubject(r *http.Request, a *Artifact) (string, bool
 	if !found || pk != PrincipalKindUser || !validSubjectID(id) {
 		return "", false
 	}
-	authority, ok := s.host.(ReviewGrantAuthority)
-	if !ok || !authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef) {
+	if !s.reviewGrantAuthorized(ctx, a) {
 		return "", false
 	}
 	return req.SubjectRef, true
@@ -418,11 +446,11 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 		writeNotFound(w)
 		return
 	}
-	b, a, ok := s.adminArtifact(w, r, id)
+	b, a, actor, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
-	switch err := b.store.DeleteGrant(r.Context(), a.ID, grantID); {
+	switch err := b.store.DeleteGrant(r.Context(), a.ID, grantID, actor); {
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "home_grant", "the home project's grant cannot be removed; move the artifact instead")
 	case errors.Is(err, ErrNotFound):
@@ -451,7 +479,7 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 // home project gets a read grant unless it already has a scope grant.
 // Both changes happen in one store transaction.
 func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.adminArtifact(w, r, id)
+	b, a, actor, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -485,7 +513,7 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 	}
-	u := ArtifactUpdate{SetExpiry: req.ExpiresAt.Set, ExpiresAt: req.ExpiresAt.Value, MaxGrants: MaxGrantsPerArtifact}
+	u := ArtifactUpdate{SetExpiry: req.ExpiresAt.Set, ExpiresAt: req.ExpiresAt.Value, MaxGrants: MaxGrantsPerArtifact, Actor: actor}
 	if req.ScopeRef != nil && *req.ScopeRef != a.ScopeRef {
 		kind, ref, _, _ := s.host.Principal(ctx)
 		u.HomeGrant = &Grant{

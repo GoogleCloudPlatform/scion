@@ -2091,8 +2091,17 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// equivalent. No-auth mode builds a raw shell command string to avoid
 	// the double-sh-c wrapping that previously caused the no-auth command
 	// to be injected as terminal input instead of running standalone.
+	//
+	// nfsHome is the value that decides the NFS agent-home mount below. A
+	// pod-local home (no NFS home) is lost when the pod is deleted, so a
+	// resume has no harness session to continue: let it fall back to a
+	// fresh start instead of exiting (ptone/scion#2665).
+	nfsHome, err := nfsHomePod(config)
+	if err != nil {
+		return nil, err
+	}
 	var cmd []string
-	cmdLine, ok := harnessCmdLine(config)
+	cmdLine, ok := harnessCmdLine(config, harnessCmdLineOptions{FreshStartOnFailedResume: !nfsHome})
 	if !ok {
 		cmdLine = "sleep infinity"
 	}
@@ -2176,10 +2185,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	var extraVolumes []corev1.Volume
 	var extraVolumeMounts []corev1.VolumeMount
 
-	nfsHome, err := nfsHomePod(config)
-	if err != nil {
-		return nil, err
-	}
 	containerHome := util.GetHomeDir(config.UnixUsername)
 	fileProjections := r.k8sFileProjections(config)
 	if err := checkK8sHomeFileTargets(r.k8sHomeFilePlacements(config)); err != nil {
@@ -3665,11 +3670,11 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 	if err != nil && (nfsHome || hs != nil) {
 		// An NFS-home start never force-deletes a pod it could not read:
 		// it may be a previous pod of this agent still writing to the home.
-		return fmt.Errorf("%w: cannot read the previous pod %s: %v", errPreviousPodUnconfirmed, podName, err)
+		return fmt.Errorf("%w: cannot read the previous pod %s: %w", errPreviousPodUnconfirmed, podName, err)
 	}
 	if err == nil && isNFSHomePod(pod) {
 		if derr := pods.Delete(ctx, podName, podDeleteOptions(pod)); derr != nil && !k8serrors.IsNotFound(derr) {
-			return fmt.Errorf("%w: failed to delete the previous pod %s: %v", errPreviousPodUnconfirmed, podName, derr)
+			return fmt.Errorf("%w: failed to delete the previous pod %s: %w", errPreviousPodUnconfirmed, podName, derr)
 		}
 		bound := nfsHomeTerminationBound(pod, hs)
 		runtimeLog.Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace, "bound", bound.String(), "phase", "home-wait")

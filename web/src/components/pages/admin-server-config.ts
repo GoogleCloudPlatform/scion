@@ -241,6 +241,31 @@ interface V1GitHubAppConfig {
   installation_url?: string;
 }
 
+/**
+ * The server.github_app block echoed by the main Server Config save. Every
+ * non-secret field is present, so an empty one goes as an explicit clear (0
+ * or ""): the server keeps the stored value for an omitted key, so dropping
+ * an empty field would restore it.
+ *
+ * The echo is the state when the card last loaded or saved, so a save from a
+ * stale tab can clear a value set elsewhere since then. That last-write-wins
+ * risk applies to every field on this page; optimistic concurrency is
+ * tracked in ptone/scion#3922.
+ */
+function githubAppEcho(
+  appId: number | undefined,
+  apiBaseUrl: string | undefined,
+  installationUrl: string | undefined,
+  webhooksEnabled: boolean
+): V1GitHubAppConfig {
+  return {
+    app_id: appId || 0,
+    api_base_url: apiBaseUrl || '',
+    webhooks_enabled: webhooksEnabled,
+    installation_url: installationUrl || '',
+  };
+}
+
 interface V1ServerConfig {
   mode?: string;
   log_level?: string;
@@ -419,6 +444,14 @@ interface HarnessConfigEntry {
 interface ReloadResult {
   applied?: string[];
   requires_restart?: string[];
+  // DB-backed saves: the changed Layer-1 keys (koanf paths), split into
+  // those applied to the running hub and those that take effect only after
+  // a hub restart (registry restart_required flag).
+  applied_keys?: string[];
+  pending_restart?: string[];
+  // Workstation hubs: the settings.yaml changes applied live (also listed
+  // in applied, next to the section names).
+  file_applied?: string[];
   error?: string;
 }
 
@@ -803,6 +836,16 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // GitHub App
   @state() private githubAppConfigured = false;
+  /**
+   * True once GET /api/v1/github-app has succeeded, false after one fails.
+   * Until it is true the card's fields hold defaults, not the stored config,
+   * so the card cannot be saved and the main save does not echo
+   * server.github_app: either would send the defaults as explicit clears
+   * and wipe the stored App. A reload keeps the previous value while it is
+   * in flight (so the reload after a card save does not flash the "did not
+   * load" hint) and sets it from the result.
+   */
+  @state() private githubAppLoaded = false;
   @state() private githubAppId = 0;
   @state() private githubAppApiBaseUrl = '';
   @state() private githubAppWebhooksEnabled = false;
@@ -2221,7 +2264,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ncDb && !containsMaskedValue(ncDb)) {
       server.notification_channels = ncDb;
     }
-    const ghDb = this.rawConfig?.server?.github_app;
+    // github_app is echoed only once the card has loaded it (see
+    // githubAppLoaded); left out, the server keeps what it has stored.
+    const ghDb = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
     if (ghDb && !containsMaskedValue(ghDb)) {
       server.github_app = ghDb;
     }
@@ -2611,7 +2656,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (oauthFile && !containsMaskedValue(oauthFile)) {
       server.oauth = oauthFile;
     }
-    const ghFile = this.rawConfig?.server?.github_app;
+    const ghFile = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
     if (ghFile && !containsMaskedValue(ghFile)) {
       server.github_app = ghFile;
     }
@@ -3269,10 +3314,22 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderReloadInfo() {
     const r = this.reloadResult;
     if (!r) return nothing;
+    // With the key-level lists, the section-level applied list is replaced
+    // by them; only the settings.yaml changes applied live keep the line.
+    const keyLevel = r.applied_keys !== undefined || r.pending_restart !== undefined;
+    const reloaded = keyLevel ? (r.file_applied ?? []) : (r.applied ?? []);
     return html`
       <div class="reload-info">
-        ${r.applied && r.applied.length > 0
-          ? html`<div class="applied">Reloaded: ${r.applied.join(', ')}</div>`
+        ${reloaded.length > 0
+          ? html`<div class="applied">Reloaded: ${reloaded.join(', ')}</div>`
+          : nothing}
+        ${r.applied_keys && r.applied_keys.length > 0
+          ? html`<div class="applied applied-keys">Applied now: ${r.applied_keys.join(', ')}</div>`
+          : nothing}
+        ${r.pending_restart && r.pending_restart.length > 0
+          ? html`<div class="restart pending-restart">
+              Saved; applies after restart: ${r.pending_restart.join(', ')}
+            </div>`
           : nothing}
         ${r.requires_restart && r.requires_restart.length > 0
           ? html`<div class="restart">Requires restart: ${r.requires_restart.join(', ')}</div>`
@@ -3932,7 +3989,9 @@ export class ScionPageAdminServerConfig extends LitElement {
                         <span class="hint"
                           >Hub-scoped service account assigned to new agents when no project or
                           request-level identity is set. Only verified hub-scoped accounts are
-                          shown.</span
+                          shown. This default applies to any project and runtime profile that has no
+                          default of its own, so no mapping state is shown here; the agent create
+                          and configure pickers show it for the agent's Kubernetes profile.</span
                         >
                         ${this.renderFieldValue(
                           'default_gcp_identity_service_account_id',
@@ -6339,18 +6398,27 @@ export class ScionPageAdminServerConfig extends LitElement {
           <sl-button
             variant="primary"
             ?loading=${this.githubAppSaving}
+            ?disabled=${!this.githubAppLoaded}
+            data-action="save-github-app"
             @click=${() => this.handleSaveGitHubApp()}
           >
             <sl-icon slot="prefix" name="check-lg"></sl-icon>
             Save GitHub App Configuration
           </sl-button>
-          ${this.githubAppConfigured
-            ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
-                >Configured</span
+          ${!this.githubAppLoaded
+            ? html`<span
+                class="hint"
+                data-github-app-not-loaded
+                style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
+                >Cannot save: the GitHub App configuration did not load. Reload the page.</span
               >`
-            : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
-                >Not configured</span
-              >`}
+            : this.githubAppConfigured
+              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
+                  >Configured</span
+                >`
+              : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
+                  >Not configured</span
+                >`}
         </div>
       </div>
 
@@ -6447,20 +6515,24 @@ export class ScionPageAdminServerConfig extends LitElement {
           if (!this.rawConfig.server) {
             this.rawConfig.server = {};
           }
-          const ghApp: V1GitHubAppConfig = { webhooks_enabled: data.webhooks_enabled };
-          if (data.app_id) ghApp.app_id = data.app_id;
-          if (data.api_base_url) ghApp.api_base_url = data.api_base_url;
-          if (data.installation_url) ghApp.installation_url = data.installation_url;
-          this.rawConfig.server.github_app = ghApp;
+          this.rawConfig.server.github_app = githubAppEcho(
+            data.app_id,
+            data.api_base_url,
+            data.installation_url,
+            data.webhooks_enabled
+          );
         }
         // Clear write-only fields after load
         this.githubAppPrivateKey = '';
         this.githubAppWebhookSecret = '';
+        this.githubAppLoaded = true;
       } else {
+        this.githubAppLoaded = false;
         this.githubAppError = await extractApiError(res, 'Failed to load GitHub App configuration');
       }
-    } catch (e) {
-      // Non-critical — tab just shows unconfigured state
+    } catch {
+      this.githubAppLoaded = false;
+      this.githubAppError = 'Failed to load GitHub App configuration';
     }
   }
 
@@ -6596,17 +6668,23 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveGitHubApp(): Promise<void> {
+    // The fields hold defaults, not the stored config, until the load
+    // succeeds; saving them would clear the stored App (see githubAppLoaded).
+    if (!this.githubAppLoaded) return;
     this.githubAppSaving = true;
     this.githubAppError = null;
     this.githubAppSaveError = null;
     this.githubAppSuccess = null;
 
     try {
+      // Every non-secret field is sent, so a cleared one goes as an
+      // explicit clear (0 or ""). The endpoint reads null as "keep the
+      // stored value", so null cannot be used here.
       const payload: Record<string, unknown> = {
-        app_id: this.githubAppId || undefined,
-        api_base_url: this.githubAppApiBaseUrl || undefined,
+        app_id: this.githubAppId || 0,
+        api_base_url: this.githubAppApiBaseUrl,
         webhooks_enabled: this.githubAppWebhooksEnabled,
-        installation_url: this.githubAppInstallationUrl || undefined,
+        installation_url: this.githubAppInstallationUrl,
       };
 
       // Only send secrets if the user provided new values
@@ -6645,11 +6723,12 @@ export class ScionPageAdminServerConfig extends LitElement {
         if (!this.rawConfig.server) {
           this.rawConfig.server = {};
         }
-        const ghApp: V1GitHubAppConfig = { webhooks_enabled: this.githubAppWebhooksEnabled };
-        if (this.githubAppId) ghApp.app_id = this.githubAppId;
-        if (this.githubAppApiBaseUrl) ghApp.api_base_url = this.githubAppApiBaseUrl;
-        if (this.githubAppInstallationUrl) ghApp.installation_url = this.githubAppInstallationUrl;
-        this.rawConfig.server.github_app = ghApp;
+        this.rawConfig.server.github_app = githubAppEcho(
+          this.githubAppId,
+          this.githubAppApiBaseUrl,
+          this.githubAppInstallationUrl,
+          this.githubAppWebhooksEnabled
+        );
       }
       // Reload to get fresh state (has_private_key, has_webhook_secret, configured)
       await this.loadGitHubAppConfig();

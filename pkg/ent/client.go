@@ -89,7 +89,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -247,8 +250,14 @@ type Client struct {
 	SubscriptionTemplate *SubscriptionTemplateClient
 	// Template is the client for interacting with the Template builders.
 	Template *TemplateClient
+	// TestIdentityLoginCode is the client for interacting with the TestIdentityLoginCode builders.
+	TestIdentityLoginCode *TestIdentityLoginCodeClient
 	// TestInfraMarker is the client for interacting with the TestInfraMarker builders.
 	TestInfraMarker *TestInfraMarkerClient
+	// ThreadGroup is the client for interacting with the ThreadGroup builders.
+	ThreadGroup *ThreadGroupClient
+	// ThreadGroupMember is the client for interacting with the ThreadGroupMember builders.
+	ThreadGroupMember *ThreadGroupMemberClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
 	// User is the client for interacting with the User builders.
@@ -341,7 +350,10 @@ func (c *Client) init() {
 	c.SkillVersion = NewSkillVersionClient(c.config)
 	c.SubscriptionTemplate = NewSubscriptionTemplateClient(c.config)
 	c.Template = NewTemplateClient(c.config)
+	c.TestIdentityLoginCode = NewTestIdentityLoginCodeClient(c.config)
 	c.TestInfraMarker = NewTestInfraMarkerClient(c.config)
+	c.ThreadGroup = NewThreadGroupClient(c.config)
+	c.ThreadGroupMember = NewThreadGroupMemberClient(c.config)
 	c.UsageReservation = NewUsageReservationClient(c.config)
 	c.User = NewUserClient(c.config)
 	c.UserAccessToken = NewUserAccessTokenClient(c.config)
@@ -511,7 +523,10 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		SkillVersion:                  NewSkillVersionClient(cfg),
 		SubscriptionTemplate:          NewSubscriptionTemplateClient(cfg),
 		Template:                      NewTemplateClient(cfg),
+		TestIdentityLoginCode:         NewTestIdentityLoginCodeClient(cfg),
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
+		ThreadGroup:                   NewThreadGroupClient(cfg),
+		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
@@ -608,7 +623,10 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		SkillVersion:                  NewSkillVersionClient(cfg),
 		SubscriptionTemplate:          NewSubscriptionTemplateClient(cfg),
 		Template:                      NewTemplateClient(cfg),
+		TestIdentityLoginCode:         NewTestIdentityLoginCodeClient(cfg),
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
+		ThreadGroup:                   NewThreadGroupClient(cfg),
+		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
@@ -661,8 +679,9 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
 		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
 		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.TestInfraMarker, c.UsageReservation,
-		c.User, c.UserAccessToken, c.UserTerminalWorkspace,
+		c.SubscriptionTemplate, c.Template, c.TestIdentityLoginCode, c.TestInfraMarker,
+		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
+		c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
 	}
@@ -691,8 +710,9 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
 		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
 		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.TestInfraMarker, c.UsageReservation,
-		c.User, c.UserAccessToken, c.UserTerminalWorkspace,
+		c.SubscriptionTemplate, c.Template, c.TestIdentityLoginCode, c.TestInfraMarker,
+		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
+		c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -847,8 +867,14 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.SubscriptionTemplate.mutate(ctx, m)
 	case *TemplateMutation:
 		return c.Template.mutate(ctx, m)
+	case *TestIdentityLoginCodeMutation:
+		return c.TestIdentityLoginCode.mutate(ctx, m)
 	case *TestInfraMarkerMutation:
 		return c.TestInfraMarker.mutate(ctx, m)
+	case *ThreadGroupMutation:
+		return c.ThreadGroup.mutate(ctx, m)
+	case *ThreadGroupMemberMutation:
+		return c.ThreadGroupMember.mutate(ctx, m)
 	case *UsageReservationMutation:
 		return c.UsageReservation.mutate(ctx, m)
 	case *UserMutation:
@@ -11067,6 +11093,155 @@ func (c *TemplateClient) mutate(ctx context.Context, m *TemplateMutation) (Value
 	}
 }
 
+// TestIdentityLoginCodeClient is a client for the TestIdentityLoginCode schema.
+type TestIdentityLoginCodeClient struct {
+	config
+}
+
+// NewTestIdentityLoginCodeClient returns a client for the TestIdentityLoginCode from the given config.
+func NewTestIdentityLoginCodeClient(c config) *TestIdentityLoginCodeClient {
+	return &TestIdentityLoginCodeClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `testidentitylogincode.Hooks(f(g(h())))`.
+func (c *TestIdentityLoginCodeClient) Use(hooks ...Hook) {
+	c.hooks.TestIdentityLoginCode = append(c.hooks.TestIdentityLoginCode, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `testidentitylogincode.Intercept(f(g(h())))`.
+func (c *TestIdentityLoginCodeClient) Intercept(interceptors ...Interceptor) {
+	c.inters.TestIdentityLoginCode = append(c.inters.TestIdentityLoginCode, interceptors...)
+}
+
+// Create returns a builder for creating a TestIdentityLoginCode entity.
+func (c *TestIdentityLoginCodeClient) Create() *TestIdentityLoginCodeCreate {
+	mutation := newTestIdentityLoginCodeMutation(c.config, OpCreate)
+	return &TestIdentityLoginCodeCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of TestIdentityLoginCode entities.
+func (c *TestIdentityLoginCodeClient) CreateBulk(builders ...*TestIdentityLoginCodeCreate) *TestIdentityLoginCodeCreateBulk {
+	return &TestIdentityLoginCodeCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *TestIdentityLoginCodeClient) MapCreateBulk(slice any, setFunc func(*TestIdentityLoginCodeCreate, int)) *TestIdentityLoginCodeCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &TestIdentityLoginCodeCreateBulk{err: fmt.Errorf("calling to TestIdentityLoginCodeClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*TestIdentityLoginCodeCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &TestIdentityLoginCodeCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for TestIdentityLoginCode.
+func (c *TestIdentityLoginCodeClient) Update() *TestIdentityLoginCodeUpdate {
+	mutation := newTestIdentityLoginCodeMutation(c.config, OpUpdate)
+	return &TestIdentityLoginCodeUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *TestIdentityLoginCodeClient) UpdateOne(_m *TestIdentityLoginCode) *TestIdentityLoginCodeUpdateOne {
+	mutation := newTestIdentityLoginCodeMutation(c.config, OpUpdateOne, withTestIdentityLoginCode(_m))
+	return &TestIdentityLoginCodeUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *TestIdentityLoginCodeClient) UpdateOneID(id uuid.UUID) *TestIdentityLoginCodeUpdateOne {
+	mutation := newTestIdentityLoginCodeMutation(c.config, OpUpdateOne, withTestIdentityLoginCodeID(id))
+	return &TestIdentityLoginCodeUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for TestIdentityLoginCode.
+func (c *TestIdentityLoginCodeClient) Delete() *TestIdentityLoginCodeDelete {
+	mutation := newTestIdentityLoginCodeMutation(c.config, OpDelete)
+	return &TestIdentityLoginCodeDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *TestIdentityLoginCodeClient) DeleteOne(_m *TestIdentityLoginCode) *TestIdentityLoginCodeDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *TestIdentityLoginCodeClient) DeleteOneID(id uuid.UUID) *TestIdentityLoginCodeDeleteOne {
+	builder := c.Delete().Where(testidentitylogincode.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &TestIdentityLoginCodeDeleteOne{builder}
+}
+
+// Query returns a query builder for TestIdentityLoginCode.
+func (c *TestIdentityLoginCodeClient) Query() *TestIdentityLoginCodeQuery {
+	return &TestIdentityLoginCodeQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeTestIdentityLoginCode},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a TestIdentityLoginCode entity by its id.
+func (c *TestIdentityLoginCodeClient) Get(ctx context.Context, id uuid.UUID) (*TestIdentityLoginCode, error) {
+	return c.Query().Where(testidentitylogincode.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *TestIdentityLoginCodeClient) GetX(ctx context.Context, id uuid.UUID) *TestIdentityLoginCode {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryUser queries the user edge of a TestIdentityLoginCode.
+func (c *TestIdentityLoginCodeClient) QueryUser(_m *TestIdentityLoginCode) *UserQuery {
+	query := (&UserClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(testidentitylogincode.Table, testidentitylogincode.FieldID, id),
+			sqlgraph.To(user.Table, user.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, true, testidentitylogincode.UserTable, testidentitylogincode.UserColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *TestIdentityLoginCodeClient) Hooks() []Hook {
+	return c.hooks.TestIdentityLoginCode
+}
+
+// Interceptors returns the client interceptors.
+func (c *TestIdentityLoginCodeClient) Interceptors() []Interceptor {
+	return c.inters.TestIdentityLoginCode
+}
+
+func (c *TestIdentityLoginCodeClient) mutate(ctx context.Context, m *TestIdentityLoginCodeMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&TestIdentityLoginCodeCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&TestIdentityLoginCodeUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&TestIdentityLoginCodeUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&TestIdentityLoginCodeDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown TestIdentityLoginCode mutation op: %q", m.Op())
+	}
+}
+
 // TestInfraMarkerClient is a client for the TestInfraMarker schema.
 type TestInfraMarkerClient struct {
 	config
@@ -11197,6 +11372,272 @@ func (c *TestInfraMarkerClient) mutate(ctx context.Context, m *TestInfraMarkerMu
 		return (&TestInfraMarkerDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown TestInfraMarker mutation op: %q", m.Op())
+	}
+}
+
+// ThreadGroupClient is a client for the ThreadGroup schema.
+type ThreadGroupClient struct {
+	config
+}
+
+// NewThreadGroupClient returns a client for the ThreadGroup from the given config.
+func NewThreadGroupClient(c config) *ThreadGroupClient {
+	return &ThreadGroupClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `threadgroup.Hooks(f(g(h())))`.
+func (c *ThreadGroupClient) Use(hooks ...Hook) {
+	c.hooks.ThreadGroup = append(c.hooks.ThreadGroup, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `threadgroup.Intercept(f(g(h())))`.
+func (c *ThreadGroupClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ThreadGroup = append(c.inters.ThreadGroup, interceptors...)
+}
+
+// Create returns a builder for creating a ThreadGroup entity.
+func (c *ThreadGroupClient) Create() *ThreadGroupCreate {
+	mutation := newThreadGroupMutation(c.config, OpCreate)
+	return &ThreadGroupCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ThreadGroup entities.
+func (c *ThreadGroupClient) CreateBulk(builders ...*ThreadGroupCreate) *ThreadGroupCreateBulk {
+	return &ThreadGroupCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ThreadGroupClient) MapCreateBulk(slice any, setFunc func(*ThreadGroupCreate, int)) *ThreadGroupCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ThreadGroupCreateBulk{err: fmt.Errorf("calling to ThreadGroupClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ThreadGroupCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ThreadGroupCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ThreadGroup.
+func (c *ThreadGroupClient) Update() *ThreadGroupUpdate {
+	mutation := newThreadGroupMutation(c.config, OpUpdate)
+	return &ThreadGroupUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ThreadGroupClient) UpdateOne(_m *ThreadGroup) *ThreadGroupUpdateOne {
+	mutation := newThreadGroupMutation(c.config, OpUpdateOne, withThreadGroup(_m))
+	return &ThreadGroupUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ThreadGroupClient) UpdateOneID(id uuid.UUID) *ThreadGroupUpdateOne {
+	mutation := newThreadGroupMutation(c.config, OpUpdateOne, withThreadGroupID(id))
+	return &ThreadGroupUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ThreadGroup.
+func (c *ThreadGroupClient) Delete() *ThreadGroupDelete {
+	mutation := newThreadGroupMutation(c.config, OpDelete)
+	return &ThreadGroupDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ThreadGroupClient) DeleteOne(_m *ThreadGroup) *ThreadGroupDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ThreadGroupClient) DeleteOneID(id uuid.UUID) *ThreadGroupDeleteOne {
+	builder := c.Delete().Where(threadgroup.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ThreadGroupDeleteOne{builder}
+}
+
+// Query returns a query builder for ThreadGroup.
+func (c *ThreadGroupClient) Query() *ThreadGroupQuery {
+	return &ThreadGroupQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeThreadGroup},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ThreadGroup entity by its id.
+func (c *ThreadGroupClient) Get(ctx context.Context, id uuid.UUID) (*ThreadGroup, error) {
+	return c.Query().Where(threadgroup.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ThreadGroupClient) GetX(ctx context.Context, id uuid.UUID) *ThreadGroup {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ThreadGroupClient) Hooks() []Hook {
+	return c.hooks.ThreadGroup
+}
+
+// Interceptors returns the client interceptors.
+func (c *ThreadGroupClient) Interceptors() []Interceptor {
+	return c.inters.ThreadGroup
+}
+
+func (c *ThreadGroupClient) mutate(ctx context.Context, m *ThreadGroupMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ThreadGroupCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ThreadGroupUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ThreadGroupUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ThreadGroupDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ThreadGroup mutation op: %q", m.Op())
+	}
+}
+
+// ThreadGroupMemberClient is a client for the ThreadGroupMember schema.
+type ThreadGroupMemberClient struct {
+	config
+}
+
+// NewThreadGroupMemberClient returns a client for the ThreadGroupMember from the given config.
+func NewThreadGroupMemberClient(c config) *ThreadGroupMemberClient {
+	return &ThreadGroupMemberClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `threadgroupmember.Hooks(f(g(h())))`.
+func (c *ThreadGroupMemberClient) Use(hooks ...Hook) {
+	c.hooks.ThreadGroupMember = append(c.hooks.ThreadGroupMember, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `threadgroupmember.Intercept(f(g(h())))`.
+func (c *ThreadGroupMemberClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ThreadGroupMember = append(c.inters.ThreadGroupMember, interceptors...)
+}
+
+// Create returns a builder for creating a ThreadGroupMember entity.
+func (c *ThreadGroupMemberClient) Create() *ThreadGroupMemberCreate {
+	mutation := newThreadGroupMemberMutation(c.config, OpCreate)
+	return &ThreadGroupMemberCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ThreadGroupMember entities.
+func (c *ThreadGroupMemberClient) CreateBulk(builders ...*ThreadGroupMemberCreate) *ThreadGroupMemberCreateBulk {
+	return &ThreadGroupMemberCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ThreadGroupMemberClient) MapCreateBulk(slice any, setFunc func(*ThreadGroupMemberCreate, int)) *ThreadGroupMemberCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ThreadGroupMemberCreateBulk{err: fmt.Errorf("calling to ThreadGroupMemberClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ThreadGroupMemberCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ThreadGroupMemberCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ThreadGroupMember.
+func (c *ThreadGroupMemberClient) Update() *ThreadGroupMemberUpdate {
+	mutation := newThreadGroupMemberMutation(c.config, OpUpdate)
+	return &ThreadGroupMemberUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ThreadGroupMemberClient) UpdateOne(_m *ThreadGroupMember) *ThreadGroupMemberUpdateOne {
+	mutation := newThreadGroupMemberMutation(c.config, OpUpdateOne, withThreadGroupMember(_m))
+	return &ThreadGroupMemberUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ThreadGroupMemberClient) UpdateOneID(id uuid.UUID) *ThreadGroupMemberUpdateOne {
+	mutation := newThreadGroupMemberMutation(c.config, OpUpdateOne, withThreadGroupMemberID(id))
+	return &ThreadGroupMemberUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ThreadGroupMember.
+func (c *ThreadGroupMemberClient) Delete() *ThreadGroupMemberDelete {
+	mutation := newThreadGroupMemberMutation(c.config, OpDelete)
+	return &ThreadGroupMemberDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ThreadGroupMemberClient) DeleteOne(_m *ThreadGroupMember) *ThreadGroupMemberDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ThreadGroupMemberClient) DeleteOneID(id uuid.UUID) *ThreadGroupMemberDeleteOne {
+	builder := c.Delete().Where(threadgroupmember.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ThreadGroupMemberDeleteOne{builder}
+}
+
+// Query returns a query builder for ThreadGroupMember.
+func (c *ThreadGroupMemberClient) Query() *ThreadGroupMemberQuery {
+	return &ThreadGroupMemberQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeThreadGroupMember},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ThreadGroupMember entity by its id.
+func (c *ThreadGroupMemberClient) Get(ctx context.Context, id uuid.UUID) (*ThreadGroupMember, error) {
+	return c.Query().Where(threadgroupmember.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ThreadGroupMemberClient) GetX(ctx context.Context, id uuid.UUID) *ThreadGroupMember {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ThreadGroupMemberClient) Hooks() []Hook {
+	return c.hooks.ThreadGroupMember
+}
+
+// Interceptors returns the client interceptors.
+func (c *ThreadGroupMemberClient) Interceptors() []Interceptor {
+	return c.inters.ThreadGroupMember
+}
+
+func (c *ThreadGroupMemberClient) mutate(ctx context.Context, m *ThreadGroupMemberMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ThreadGroupMemberCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ThreadGroupMemberUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ThreadGroupMemberUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ThreadGroupMemberDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ThreadGroupMember mutation op: %q", m.Op())
 	}
 }
 
@@ -11537,6 +11978,22 @@ func (c *UserClient) QueryTerminalWorkspace(_m *User) *UserTerminalWorkspaceQuer
 	return query
 }
 
+// QueryTestIdentityLoginCode queries the test_identity_login_code edge of a User.
+func (c *UserClient) QueryTestIdentityLoginCode(_m *User) *TestIdentityLoginCodeQuery {
+	query := (&TestIdentityLoginCodeClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(user.Table, user.FieldID, id),
+			sqlgraph.To(testidentitylogincode.Table, testidentitylogincode.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, user.TestIdentityLoginCodeTable, user.TestIdentityLoginCodeColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // Hooks returns the client hooks.
 func (c *UserClient) Hooks() []Hook {
 	return c.hooks.User
@@ -11864,7 +12321,8 @@ type (
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RelayInstance,
 		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
 		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
-		Template, TestInfraMarker, UsageReservation, User, UserAccessToken,
+		Template, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
+		ThreadGroupMember, UsageReservation, User, UserAccessToken,
 		UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
@@ -11885,7 +12343,8 @@ type (
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RelayInstance,
 		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
 		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
-		Template, TestInfraMarker, UsageReservation, User, UserAccessToken,
+		Template, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
+		ThreadGroupMember, UsageReservation, User, UserAccessToken,
 		UserTerminalWorkspace []ent.Interceptor
 	}
 )
