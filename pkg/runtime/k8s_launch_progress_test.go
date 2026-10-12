@@ -174,6 +174,13 @@ func TestPodLaunchStep(t *testing.T) {
 		{"container creating", statusContainerCreating, false, api.LaunchStepContainerCreate},
 		{"CSI-mount-only delay (E-AC7)", *csiOnly, true, api.LaunchStepContainerCreate},
 		{"main container running", statusRunning, false, api.LaunchStepContainerStart},
+		{"only another container running", corev1.PodStatus{
+			Conditions: []corev1.PodCondition{condScheduled(corev1.ConditionTrue, "")},
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "sidecar", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				mainWaiting("ContainerCreating", ""),
+			},
+		}, false, api.LaunchStepContainerCreate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := podLaunchStep(&corev1.Pod{Status: tc.status}, tc.gke)
@@ -323,6 +330,44 @@ func TestWaitForPodReady_GKEUnschedulableWaitsThenTimesOut(t *testing.T) {
 	})
 }
 
+// TestWaitForPodReady_DeadlineDuringGetIsLaunchTimeout checks that when
+// waitForPodReady's own budget runs out during a pod Get (the deadline and
+// a tick can coincide), the Get's context error is still typed
+// launch_timeout in the last step, with the same text as the select branch.
+func TestWaitForPodReady_DeadlineDuringGetIsLaunchTimeout(t *testing.T) {
+	rt, clientset := fastPodReadyRuntime(true)
+	rt.podReadyTimeout = 100 * time.Millisecond
+	var mu sync.Mutex
+	polls := 0
+	clientset.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		mu.Lock()
+		polls++
+		n := polls
+		mu.Unlock()
+		if n == 1 {
+			return true, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}, Status: *statusUnscheduled.DeepCopy()}, nil
+		}
+		// A real client fails the request once its ctx expires.
+		time.Sleep(200 * time.Millisecond)
+		return true, nil, context.DeadlineExceeded
+	})
+
+	err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{})
+	if err == nil {
+		t.Fatal("waitForPodReady succeeded, want a timeout")
+	}
+	if want := "timed out waiting for pod to be ready: context deadline exceeded"; err.Error() != want {
+		t.Errorf("error text %q, want %q", err.Error(), want)
+	}
+	var lf *LaunchFailure
+	if !errors.As(err, &lf) {
+		t.Fatalf("error %T is not a *LaunchFailure: %v", err, err)
+	}
+	if lf.Code != api.LaunchCodeLaunchTimeout || lf.Step != api.LaunchStepAwaitingCapacity {
+		t.Errorf("LaunchFailure{Code %q, Step %q}, want {launch_timeout, awaiting_capacity}", lf.Code, lf.Step)
+	}
+}
+
 // TestLaunchFailure_TextAndUnwrap checks that a LaunchFailure reads as the
 // error it wraps and unwraps to it.
 func TestLaunchFailure_TextAndUnwrap(t *testing.T) {
@@ -417,25 +462,30 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 		return corev1.PodCondition{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: reason, Message: secret}
 	}
 	for _, tc := range []struct {
-		name         string
-		status       corev1.PodStatus
-		deleting     bool
-		gone         bool
-		reason, text string
+		name     string
+		status   corev1.PodStatus
+		deleting bool
+		// goneFrom is the first poll that finds the pod gone (0: never).
+		goneFrom           int
+		step, reason, text string
 	}{
-		{name: "preempted while pending", status: pending(disruption(corev1.PodReasonPreemptionByScheduler)),
-			reason: "PreemptionByScheduler",
-			text:   `pod "p" was disrupted while starting (PreemptionByScheduler) — the cluster preempted or evicted it; start the agent again`},
-		{name: "terminating", status: pending(), deleting: true,
-			text: `pod "p" was deleted while starting — start the agent again`},
+		{name: "preempted (bound, being deleted)", deleting: true,
+			status: pending(condScheduled(corev1.ConditionTrue, ""), disruption(corev1.PodReasonPreemptionByScheduler)),
+			step:   api.LaunchStepContainerCreate, reason: "PreemptionByScheduler",
+			text: `pod "p" was disrupted while starting (PreemptionByScheduler) — the cluster preempted or evicted it; start the agent again`},
+		{name: "terminating", status: pending(), deleting: true, step: api.LaunchStepScheduling,
+			text: `pod "p" was deleted while starting — if you did not stop it, start the agent again`},
 		{name: "evicted and failed", status: corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted", Message: secret},
-			reason: "Evicted", text: "pod terminated with status: Failed"},
+			step: api.LaunchStepScheduling, reason: "Evicted", text: "pod terminated with status: Failed"},
 		{name: "terminated by kubelet", status: corev1.PodStatus{Phase: corev1.PodFailed,
 			Conditions: []corev1.PodCondition{disruption("TerminationByKubelet")},
 			ContainerStatuses: []corev1.ContainerStatus{{Name: agentContainerName, State: corev1.ContainerState{
 				Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "Error", Message: "killed"}}}}},
-			reason: "TerminationByKubelet", text: "pod failed to start: Error - killed"},
-		{name: "gone", status: pending(), gone: true, text: `pods "p" not found`},
+			step: api.LaunchStepScheduling, reason: "TerminationByKubelet", text: "pod failed to start: Error - killed"},
+		{name: "gone", status: pending(condScheduled(corev1.ConditionTrue, "")), goneFrom: 2,
+			step: api.LaunchStepContainerCreate, text: `pods "p" not found`},
+		{name: "gone on poll 1", status: pending(), goneFrom: 1,
+			step: api.LaunchStepScheduling, text: `pods "p" not found`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, clientset := fastPodReadyRuntime(false)
@@ -446,7 +496,7 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 				mu.Lock()
 				defer mu.Unlock()
 				polls++
-				if tc.gone && polls > 1 {
+				if tc.goneFrom > 0 && polls >= tc.goneFrom {
 					return true, nil, k8serrors.NewNotFound(corev1.Resource("pods"), "p")
 				}
 				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}, Status: *tc.status.DeepCopy()}
@@ -468,14 +518,25 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 			if !errors.As(err, &lf) {
 				t.Fatalf("error %T is not a *LaunchFailure: %v", err, err)
 			}
-			if lf.Code != api.LaunchCodePodDisrupted || lf.Reason != tc.reason || lf.Step != api.LaunchStepScheduling {
-				t.Errorf("LaunchFailure{Code %q, Step %q, Reason %q}, want {pod_disrupted, scheduling, %q}", lf.Code, lf.Step, lf.Reason, tc.reason)
+			if lf.Code != api.LaunchCodePodDisrupted || lf.Reason != tc.reason || lf.Step != tc.step {
+				t.Errorf("LaunchFailure{Code %q, Step %q, Reason %q}, want {pod_disrupted, %q, %q}", lf.Code, lf.Step, lf.Reason, tc.step, tc.reason)
 			}
 			if strings.Contains(err.Error(), "secret-team") || strings.Contains(lf.Reason, "secret-team") {
 				t.Errorf("error or Reason carries the Kubernetes message: %v / %q", err, lf.Reason)
 			}
 		})
 	}
+
+	t.Run("cleared disruption keeps waiting", func(t *testing.T) {
+		// A DisruptionTarget condition without a deletion timestamp can be
+		// cleared again (the disruption did not go ahead): not terminal.
+		rt, clientset := fastPodReadyRuntime(false)
+		marked := pending(condScheduled(corev1.ConditionTrue, ""), disruption(corev1.PodReasonPreemptionByScheduler))
+		scriptPodGets(clientset, marked, marked, statusRunning)
+		if err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{}); err != nil {
+			t.Fatalf("waitForPodReady: %v, want it to keep waiting until the pod runs", err)
+		}
+	})
 
 	t.Run("failed without disruption stays untyped", func(t *testing.T) {
 		rt, clientset := fastPodReadyRuntime(false)

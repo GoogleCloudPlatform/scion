@@ -3182,21 +3182,29 @@ func podDisruptionReason(pod *corev1.Pod) string {
 }
 
 // podDisruptedError returns a pod_disrupted *LaunchFailure in step when the
-// pod is being removed (a disruption reason, or a deletion timestamp), or
-// nil. The text names the Kubernetes reason only, never the condition's
-// message.
+// pod is being deleted, or nil. Only the deletion timestamp makes it
+// terminal: Kubernetes can clear a DisruptionTarget condition whose
+// disruption did not go ahead, so the condition only supplies the reason.
+// The text names the Kubernetes reason only, never the condition's message.
 func podDisruptedError(pod *corev1.Pod, podName, step string) error {
-	reason := podDisruptionReason(pod)
-	switch {
-	case reason != "":
-		return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason,
-			fmt.Errorf("pod %q was disrupted while starting (%s) — the cluster preempted or evicted it; start the agent again", podName, reason))
-	case pod.DeletionTimestamp != nil:
-		return newLaunchFailure(api.LaunchCodePodDisrupted, step, "",
-			fmt.Errorf("pod %q was deleted while starting — start the agent again", podName))
-	default:
+	if pod.DeletionTimestamp == nil {
 		return nil
 	}
+	if reason := podDisruptionReason(pod); reason != "" {
+		return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason,
+			fmt.Errorf("pod %q was disrupted while starting (%s) — the cluster preempted or evicted it; start the agent again", podName, reason))
+	}
+	return newLaunchFailure(api.LaunchCodePodDisrupted, step, "",
+		fmt.Errorf("pod %q was deleted while starting — if you did not stop it, start the agent again", podName))
+}
+
+// failStep is the step a waitForPodReady failure is reported in: the last
+// step seen, or scheduling when no poll has completed yet.
+func failStep(lastStep string) string {
+	if lastStep == "" {
+		return api.LaunchStepScheduling
+	}
+	return lastStep
 }
 
 // podTimingUnavailable marks a podLifecycleTimings field as not computable,
@@ -3335,16 +3343,22 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 			err := fmt.Errorf("timed out waiting for pod to be ready: %w", ctx.Err())
 			if parentCtx.Err() == nil {
 				// Our own budget ran out, not the caller's.
-				return newLaunchFailure(api.LaunchCodeLaunchTimeout, lastStep, "", err)
+				return newLaunchFailure(api.LaunchCodeLaunchTimeout, failStep(lastStep), "", err)
 			}
 			return err
 		case <-ticker.C:
 			pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 			if err != nil {
+				if ctx.Err() != nil && parentCtx.Err() == nil {
+					// Our own budget ran out during the Get (the deadline
+					// and a tick can coincide): the same timeout as above.
+					return newLaunchFailure(api.LaunchCodeLaunchTimeout, failStep(lastStep), "",
+						fmt.Errorf("timed out waiting for pod to be ready: %w", ctx.Err()))
+				}
 				if k8serrors.IsNotFound(err) && parentCtx.Err() == nil {
 					// The pod was removed (preempted, evicted or deleted)
 					// before it became ready.
-					return newLaunchFailure(api.LaunchCodePodDisrupted, lastStep, "", err)
+					return newLaunchFailure(api.LaunchCodePodDisrupted, failStep(lastStep), "", err)
 				}
 				return err
 			}
@@ -3354,11 +3368,11 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				hooks.progress(step)
 			}
 
-			// A pod the cluster is removing never becomes usable: fail now
-			// rather than wait for it to disappear. A pod already in a
-			// terminal phase keeps its error text below.
+			// A pod being deleted never becomes usable: fail now rather than
+			// wait for it to disappear. A pod already in a terminal phase
+			// keeps its error text below.
 			if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
-				if err := podDisruptedError(pod, podName, lastStep); err != nil {
+				if err := podDisruptedError(pod, podName, failStep(lastStep)); err != nil {
 					runtimeLog.Error("Pod disrupted while starting", "pod", podName, "reason", podDisruptionReason(pod), "phase", "wait-schedule")
 					return err
 				}
@@ -3470,7 +3484,7 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 					err = fmt.Errorf("pod failed to start: %s - %s", containerStatus.State.Terminated.Reason, containerStatus.State.Terminated.Message)
 				}
 				if reason := podDisruptionReason(pod); reason != "" {
-					return newLaunchFailure(api.LaunchCodePodDisrupted, lastStep, reason, err)
+					return newLaunchFailure(api.LaunchCodePodDisrupted, failStep(lastStep), reason, err)
 				}
 				return err
 			}
