@@ -68,10 +68,14 @@ function json(body: unknown, status = 200): Promise<Response> {
   );
 }
 
+function pathOf(input: string | URL | Request): string {
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  return new URL(url, 'http://localhost').pathname;
+}
+
 function handler(opts: Options) {
   return (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    const path = new URL(url, 'http://localhost').pathname;
+    const path = pathOf(input);
     const method = (init?.method ?? 'GET').toUpperCase();
 
     if (method === 'POST' && path.endsWith('/run')) {
@@ -162,10 +166,9 @@ function expectPageRendered(e: Page): void {
 }
 
 function listFetchCount(): number {
-  return fetchMock.mock.calls.filter(([input]) => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    return new URL(url, 'http://localhost').pathname === '/api/v1/admin/maintenance/operations';
-  }).length;
+  return fetchMock.mock.calls.filter(
+    (call) => pathOf(call[0] as string | URL | Request) === '/api/v1/admin/maintenance/operations'
+  ).length;
 }
 
 describe('admin maintenance run request errors', () => {
