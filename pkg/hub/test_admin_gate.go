@@ -512,11 +512,20 @@ func (s *Server) VerifyTestAdminBrokerSet(ctx context.Context) error {
 	for id := range s.inProcessPluginBrokers {
 		plugins = append(plugins, id)
 	}
+	// The co-located flat Runtime Broker instances admitted with the
+	// embedded broker (testAdminAdmittedBroker); with several there is no
+	// single embedded broker ID, so the line names them here.
+	flat := make([]string, 0, len(s.embeddedFlatIDs))
+	for id := range s.embeddedFlatIDs {
+		flat = append(flat, id)
+	}
 	s.mu.RUnlock()
 	sort.Strings(plugins)
+	sort.Strings(flat)
 	if err := s.testAdminAudit.emit(testAdminAuditEventBrokerSet, map[string]any{
 		"level":              "WARN",
 		"embedded_broker_id": embedded.id,
+		"flat_broker_ids":    flat,
 		"plugin_broker_ids":  plugins,
 	}); err != nil {
 		return fmt.Errorf("test admin tier: broker check line could not be written: %w", err)

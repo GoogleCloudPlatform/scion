@@ -18,7 +18,9 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -39,7 +41,7 @@ const (
 // and a remote broker is still refused. An instance that stops being
 // embedded is refused again.
 func TestTestAdminBroker_ColocatedFlatInstancesAdmitted(t *testing.T) {
-	tiaCaptureAudit(t)
+	buf := tiaCaptureAudit(t)
 	srv, s := testServer(t)
 	ctx := context.Background()
 	tiaBroker(t, s, tiaFlatBrokerA, store.BrokerStatusOnline, nil)
@@ -59,6 +61,9 @@ func TestTestAdminBroker_ColocatedFlatInstancesAdmitted(t *testing.T) {
 	}
 	assert.ErrorIs(t, srv.testAdminBrokerAdmission(ctx, tiaRemoteBrokerID), ErrTestAdminRemoteBrokerRefused)
 	assert.NoError(t, srv.VerifyTestAdminBrokerSet(ctx), "both flat instance rows online")
+	line := tiaBrokerSetAuditLine(t, buf.String())
+	assert.Equal(t, []interface{}{tiaFlatBrokerA, tiaFlatBrokerB}, line["flat_broker_ids"], "the audit line names the admitted flat instances")
+	assert.Equal(t, "", line["embedded_broker_id"])
 
 	tiaBroker(t, s, tiaRemoteOnlineID, store.BrokerStatusOnline, nil)
 	err := srv.VerifyTestAdminBrokerSet(ctx)
@@ -70,4 +75,22 @@ func TestTestAdminBroker_ColocatedFlatInstancesAdmitted(t *testing.T) {
 	assert.ErrorIs(t, srv.testAdminBrokerAdmission(ctx, tiaFlatBrokerB), ErrTestAdminRemoteBrokerRefused,
 		"an instance that is no longer embedded")
 	assert.NoError(t, srv.testAdminBrokerAdmission(ctx, tiaFlatBrokerA))
+}
+
+// tiaBrokerSetAuditLine returns the last test admin broker-set audit line
+// in out, decoded.
+func tiaBrokerSetAuditLine(t *testing.T, out string) map[string]interface{} {
+	t.Helper()
+	var last map[string]interface{}
+	for _, l := range strings.Split(out, "\n") {
+		if !strings.Contains(l, testAdminAuditEventBrokerSet) {
+			continue
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(l[strings.Index(l, "{"):]), &m); err == nil {
+			last = m
+		}
+	}
+	require.NotNil(t, last, "no %s audit line in: %s", testAdminAuditEventBrokerSet, out)
+	return last
 }
