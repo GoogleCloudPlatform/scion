@@ -98,15 +98,15 @@ func callFederationTokenAs(t *testing.T, srv *Server, identity Identity, cred *C
 }
 
 func sessionIdentityFor(u *store.User) *AuthenticatedUser {
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeWeb)
+	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))
 }
 
 func federationTokenBody(aud string) map[string]string {
 	return map[string]string{"audience": aud}
 }
 
-// errorMessage returns the error message of a JSON error response.
-func errorMessage(t *testing.T, w *httptest.ResponseRecorder) string {
+// federationTokenErrorMessage returns the error message of a JSON error response.
+func federationTokenErrorMessage(t *testing.T, w *httptest.ResponseRecorder) string {
 	t.Helper()
 	var body struct {
 		Error struct {
@@ -147,7 +147,7 @@ func TestFederationToken_RefusedCallers(t *testing.T) {
 		identities["status "+status] = sessionIdentityFor(stubUser(store.UserKindHuman, status))
 	}
 	srv.store = stub
-	identities["no stored user"] = NewAuthenticatedUser(uuid.New().String(), "ghost@example.com", "Ghost", "member", ClientTypeWeb)
+	identities["no stored user"] = NewAuthenticatedUser(uuid.New().String(), "ghost@example.com", "Ghost", "member", string(ClientTypeWeb))
 
 	names := make([]string, 0, len(identities))
 	for name := range identities {
@@ -158,7 +158,7 @@ func TestFederationToken_RefusedCallers(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			w := callFederationToken(t, srv, identities[name], federationTokenBody(federationTokenAudience))
 			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
-			assert.Equal(t, federationTokenRefusalMessage, errorMessage(t, w))
+			assert.Equal(t, federationTokenRefusalMessage, federationTokenErrorMessage(t, w))
 			assert.NotContains(t, w.Body.String(), `"token"`)
 		})
 	}
@@ -199,7 +199,7 @@ func TestFederationToken_RefusedCredentialKinds(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			w := callFederationTokenAs(t, srv, tc.identity, &CredentialContext{Kind: tc.kind}, federationTokenBody(federationTokenAudience))
 			require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
-			assert.Equal(t, federationTokenRefusalMessage, errorMessage(t, w))
+			assert.Equal(t, federationTokenRefusalMessage, federationTokenErrorMessage(t, w))
 		})
 	}
 }
@@ -223,7 +223,7 @@ func TestFederationToken_UserAccessTokenNeedsMintScope(t *testing.T) {
 	without := mintHubConfigToken(t, srv, alice.ID, hubBoundary(), "inbox:read")
 	rec = doRequestWithToken(t, srv, without, http.MethodPost, federationTokenPath, body)
 	require.Equal(t, http.StatusForbidden, rec.Code, "token without scope: %s", rec.Body.String())
-	assert.Equal(t, federationTokenRefusalMessage, errorMessage(t, rec))
+	assert.Equal(t, federationTokenRefusalMessage, federationTokenErrorMessage(t, rec))
 
 	project := &store.Project{ID: uuid.New().String(), Name: "FT", Slug: "ft-" + uuid.New().String()[:8]}
 	require.NoError(t, s.CreateProject(context.Background(), project))
@@ -267,7 +267,7 @@ func TestFederationToken_AudienceAllowList(t *testing.T) {
 	t.Run("non-matching audience is 403", func(t *testing.T) {
 		w := callFederationToken(t, srv, alice, federationTokenBody("https://other-hub.example.com"))
 		require.Equal(t, http.StatusForbidden, w.Code)
-		assert.Equal(t, federationTokenAudienceRefusalMessage, errorMessage(t, w))
+		assert.Equal(t, federationTokenAudienceRefusalMessage, federationTokenErrorMessage(t, w))
 	})
 	t.Run("trailing slash matches", func(t *testing.T) {
 		w := callFederationToken(t, srv, alice, federationTokenBody(federationTokenAudience+"/"))
@@ -279,7 +279,7 @@ func TestFederationToken_AudienceAllowList(t *testing.T) {
 		srv.config.OIDCConfig.UserTokenAudiences = nil
 		w := callFederationToken(t, srv, alice, federationTokenBody(federationTokenAudience))
 		require.Equal(t, http.StatusForbidden, w.Code)
-		assert.Equal(t, federationTokenAudienceRefusalMessage, errorMessage(t, w))
+		assert.Equal(t, federationTokenAudienceRefusalMessage, federationTokenErrorMessage(t, w))
 	})
 }
 
