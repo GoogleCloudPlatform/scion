@@ -575,7 +575,8 @@ Key API surface:
   (warn-and-skip per server, demotes project scope to global).
 - **File helpers** — `atomic_write_json`, `atomic_write_text` (tmp +
   `os.replace`), `expand_path`, `load_json`,
-  `read_json_skipping_comment_lines`; TOML emit/reconcile helpers:
+  `read_json_skipping_comment_lines` and `drop_json_comment_lines` (the
+  host's `//` comment-line rule); TOML emit/reconcile helpers:
   `toml_escape`, `toml_inline_table`, `toml_string_array` (tomllib is
   read-only, so TOML editing is manual, line-oriented text surgery).
   `strip_toml_sections(content, header_predicate)` removes whole

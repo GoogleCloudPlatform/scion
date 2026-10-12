@@ -65,10 +65,10 @@ func reviewGrantArtifact(t *testing.T, f reviewGrantFixture, st artifacts.Store,
 
 // TestArtifactCanGrantReviewOnRoutes: GET of the artifact and of a version
 // states canGrantReview for the delegating user of the owning agent and for
-// admins and owners of the home project, and for nobody else; a write
-// grant to a user by the same caller succeeds exactly when canManage or
-// canGrantReview is true; a caller that cannot read the artifact gets the
-// 404 of a missing one.
+// admins and owners of the home project, and for nobody else; a review
+// grant to a user who can already read the artifact, by the same caller,
+// succeeds exactly when canManage or canGrantReview is true; a caller that
+// cannot read the artifact gets the 404 of a missing one.
 func TestArtifactCanGrantReviewOnRoutes(t *testing.T) {
 	type caller struct {
 		name     string
@@ -118,7 +118,10 @@ func TestArtifactCanGrantReviewOnRoutes(t *testing.T) {
 			}
 			// Parity: the grant route agrees with the capabilities.
 			assert.False(t, resp.CanManage && resp.CanGrantReview, "canManage and canGrantReview both true")
-			body := `{"subjectKind":"principal","subjectRef":"user:` + tid("rg-ui-reviewer") + `","permission":"write"}`
+			// The subject is a home-project member, so it can already read
+			// the artifact (ptone/scion#4538).
+			createDCUser(t, f.s, tid("rg-ui-reviewer"), "rg-ui-reviewer@test.com", f.home, store.ProjectRoleMember)
+			body := `{"subjectKind":"principal","subjectRef":"user:` + tid("rg-ui-reviewer") + `","permission":"review"}`
 			post := identityArtifactRequest(t, f.srv, identity, http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte(body))
 			granted := post.Code == http.StatusCreated || post.Code == http.StatusOK
 			if !granted {
@@ -140,6 +143,27 @@ func TestArtifactCanGrantReviewOnRoutes(t *testing.T) {
 		rec := identityArtifactRequest(t, f.srv, f.user(f.delegator), http.MethodGet, "/api/v1/artifacts/"+id, nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assert.NotContains(t, rec.Body.String(), `"canGrantReview"`)
+	})
+
+	t.Run("subject who cannot read is refused", func(t *testing.T) {
+		f := newReviewGrantFixture(t)
+		st, blobs := enableArtifactsForTest(t, f.srv)
+		id := reviewGrantArtifact(t, f, st, blobs)
+		baseline := identityArtifactRequest(t, f.srv, f.user(f.member), http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte("junk"))
+		require.Equal(t, http.StatusForbidden, baseline.Code)
+		// outside is a member of another project only; the second subject
+		// does not exist.
+		for _, subject := range []string{f.outside, tid("rg-ui-nobody")} {
+			body := `{"subjectKind":"principal","subjectRef":"user:` + subject + `","permission":"review"}`
+			post := identityArtifactRequest(t, f.srv, f.user(f.delegator), http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte(body))
+			assert.Equal(t, baseline.Code, post.Code, "subject %s: %s", subject, post.Body.String())
+			assert.Equal(t, baseline.Body.String(), post.Body.String(), "subject %s", subject)
+		}
+		grants, err := st.ListGrants(context.Background(), id)
+		require.NoError(t, err)
+		for _, g := range grants {
+			assert.NotEqual(t, artifacts.GrantReview, g.Permission, "review grant written: %+v", g)
+		}
 	})
 
 	t.Run("unreadable is missing", func(t *testing.T) {

@@ -23,15 +23,18 @@ import (
 	"os"
 	"os/exec"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 var doctorCmd = &cobra.Command{
@@ -148,6 +151,13 @@ func runDoctor() error {
 	}
 	hubChecks = append(hubChecks, d10)
 	printCheck(d10.Name, d10.Status, d10.Message, d10.Remediation)
+
+	// D11: Server hub endpoint deprecation (local check). Reported only on a
+	// host configured as a server; plain CLI hosts get no line.
+	if d11, ok := checkDoctorServerHubEndpointHere(); ok {
+		hubChecks = append(hubChecks, d11)
+		printCheck(d11.Name, d11.Status, d11.Message, d11.Remediation)
+	}
 
 	// D6: Telemetry Pipeline (local check)
 	d6 := checkDoctorTelemetry()
@@ -899,4 +909,121 @@ func trimNewline(s string) string {
 		return s[:len(s)-1]
 	}
 	return s
+}
+
+// doctorServerHost is what 'scion doctor' can tell about the server on
+// this host without the 'server start' flags.
+type doctorServerHost struct {
+	// configured: the global settings carry a server block, or a server or
+	// broker daemon is running.
+	configured bool
+	// brokerOnly: the running daemon is a standalone broker
+	// ('runtime-broker start') and no server daemon runs, so the hub is
+	// known to be disabled.
+	brokerOnly bool
+}
+
+// checkDoctorServerHubEndpointHere runs checkDoctorServerHubEndpoint
+// against this host's global server config and server settings.
+func checkDoctorServerHubEndpointHere() (scionruntime.CheckResult, bool) {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return scionruntime.CheckResult{}, false
+	}
+	host := detectDoctorServerHost(globalDir)
+	if !host.configured {
+		return scionruntime.CheckResult{}, false
+	}
+	cfg, err := config.LoadGlobalConfig("")
+	if err != nil {
+		return scionruntime.CheckResult{}, false
+	}
+	// The global settings only: the server daemon runs in the global
+	// directory, so the project settings of doctor's current directory are
+	// not the server's.
+	settings, err := config.LoadSettings(globalDir)
+	if err != nil {
+		return scionruntime.CheckResult{}, false
+	}
+	return checkDoctorServerHubEndpoint(cfg, settings, host, defaultServerWebPort())
+}
+
+// detectDoctorServerHost reports whether this host is configured as a
+// server: a server block in the global settings file, or a running server
+// or standalone broker daemon.
+func detectDoctorServerHost(globalDir string) doctorServerHost {
+	serverRunning, _, _ := daemon.StatusComponent(serverDaemonComponent, globalDir)
+	brokerRunning, _, _ := daemon.StatusComponent(brokerDaemonComponent, globalDir)
+	return doctorServerHost{
+		configured: serverRunning || brokerRunning || globalSettingsHaveServerBlock(globalDir),
+		brokerOnly: brokerRunning && !serverRunning,
+	}
+}
+
+// globalSettingsHaveServerBlock reports whether the settings file in
+// globalDir has a top-level server key. It only reads the file.
+func globalSettingsHaveServerBlock(globalDir string) bool {
+	path := config.GetSettingsPath(globalDir)
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	_, ok := raw["server"]
+	return ok
+}
+
+// defaultServerWebPort is the default of 'server start --web-port'.
+func defaultServerWebPort() int {
+	if f := serverStartCmd.Flags().Lookup("web-port"); f != nil {
+		if p, err := strconv.Atoi(f.DefValue); err == nil {
+			return p
+		}
+	}
+	return webPort
+}
+
+// checkDoctorServerHubEndpoint performs D11: it reports the server hub
+// endpoint deprecation with serverHubEndpointDeprecated, the check server
+// startup logs. Doctor does not see the server's flags, so unless the host
+// is known to run a standalone broker it evaluates every mode the server
+// could run in (workstation, hosted with and without the web frontend,
+// broker only, with default ports) and warns only when the server would be
+// affected in all of them: it never warns on a guess. For the same reason a
+// loopback legacy value is indeterminate unless the host runs a standalone
+// broker: a workstation on a port doctor cannot see may have written it as
+// its own endpoint. The bool is false when there is nothing to report.
+func checkDoctorServerHubEndpoint(cfg *config.GlobalConfig, settings *config.Settings, host doctorServerHost, defaultWebPort int) (scionruntime.CheckResult, bool) {
+	if !host.configured {
+		return scionruntime.CheckResult{}, false
+	}
+	brokerOnly := serverEndpointMode{brokerEnabled: true}
+	modes := []serverEndpointMode{brokerOnly}
+	if !host.brokerOnly {
+		modes = append(modes,
+			serverEndpointMode{hubEnabled: true, brokerEnabled: true, webEnabled: true, webPort: defaultWebPort},
+			serverEndpointMode{hubEnabled: true, brokerEnabled: true, webEnabled: true, webPort: defaultWebPort, hosted: true},
+			serverEndpointMode{hubEnabled: true, hosted: true},
+		)
+	}
+	legacy := settings.GetHubEndpoint()
+	if !host.brokerOnly && isLoopbackURL(legacy) {
+		return scionruntime.CheckResult{}, false
+	}
+	for _, m := range modes {
+		if !serverHubEndpointDeprecated(cfg, m, legacy) {
+			return scionruntime.CheckResult{}, false
+		}
+	}
+	return scionruntime.CheckResult{
+		Name:    "server-hub-endpoint",
+		Status:  "warn",
+		Message: serverHubEndpointDeprecationWarning,
+	}, true
 }

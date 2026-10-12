@@ -81,6 +81,9 @@ func hubAuthURLFlag(v string) (string, error) {
 	if h == nil {
 		return "", unknownHubError(v, c)
 	}
+	if h.Endpoint == "" {
+		return "", hubWithoutEndpointError(v)
+	}
 	return h.Endpoint, nil
 }
 
