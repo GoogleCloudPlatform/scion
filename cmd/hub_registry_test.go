@@ -56,6 +56,8 @@ func setupRegistryTest(t *testing.T) {
 	setupContextTest(t)
 	restoreAllSilenceUsage(t)
 	t.Cleanup(func() { rootCmd.SetArgs(nil) })
+	// No terminal: 'scion use' never prompts in these tests.
+	withTerminal(t, false)
 }
 
 // closedHubURL returns the URL of a hub that does not respond.
@@ -526,7 +528,7 @@ func TestHubRegistry_AddUseListRename(t *testing.T) {
 	stdout, _, err := runScion(t, "use", "--hub", "prod")
 	require.NoError(t, err)
 	assert.Equal(t, "Now using hub 'prod' ("+srv.URL+").\n"+
-		"No project selected on hub 'prod'; run 'scion use <project>'.\n", stdout)
+		"No project selected on hub 'prod'; run 'scion use <project>' or 'scion project list --hub prod'.\n", stdout)
 
 	stdout, _, err = runScion(t, "hub", "list")
 	require.NoError(t, err)
@@ -555,7 +557,7 @@ func TestUseSwitchHub_RestoresProject(t *testing.T) {
 	stdout, _, err := runScion(t, "use", "--hub", "staging")
 	require.NoError(t, err)
 	assert.Equal(t, "Now using hub 'staging' (https://staging.example.com).\n"+
-		"No project selected on hub 'staging'; run 'scion use <project>'.\n", stdout)
+		"No project selected on hub 'staging'; run 'scion use <project>' or 'scion project list --hub staging'.\n", stdout)
 	assert.Equal(t, "staging", readTestContext(t).CurrentHub)
 
 	stdout, _, err = runScion(t, "project", "use", "--hub", "prod")
@@ -573,7 +575,7 @@ func TestUseSwitchHub_URL(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Registered hub 'hub' (https://hub.example.com); rename with 'scion hub rename'.\n"+
 		"Now using hub 'hub' (https://hub.example.com).\n"+
-		"No project selected on hub 'hub'; run 'scion use <project>'.\n"+
+		"No project selected on hub 'hub'; run 'scion use <project>' or 'scion project list --hub hub'.\n"+
 		"Not logged in to hub 'hub'. Run: scion hub auth login --hub hub\n", stdout)
 	c := readTestContext(t)
 	assert.Equal(t, "hub", c.CurrentHub)
