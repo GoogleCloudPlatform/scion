@@ -76,7 +76,7 @@ func DetectLocalRuntime() (string, error) {
 	}
 
 	if hostGOOS() == "darwin" {
-		return "", fmt.Errorf("no supported container runtime found: install podman, container (Apple Virtualization), or docker")
+		return "", fmt.Errorf("no supported container runtime found: install podman, docker, or container (Apple Virtualization)")
 	}
 	return "", fmt.Errorf("no supported container runtime found: install podman or docker")
 }

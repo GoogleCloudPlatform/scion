@@ -203,7 +203,7 @@ func TestDetectLocalRuntime_NoRuntime(t *testing.T) {
 		goos string
 		want string
 	}{
-		{"darwin", "no supported container runtime found: install podman, container (Apple Virtualization), or docker"},
+		{"darwin", "no supported container runtime found: install podman, docker, or container (Apple Virtualization)"},
 		{"linux", "no supported container runtime found: install podman or docker"},
 	}
 	for _, tt := range tests {
