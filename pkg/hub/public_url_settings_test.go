@@ -244,12 +244,12 @@ func TestPublicURLWrites_SeededResetRecordsNothing(t *testing.T) {
 	assert.Empty(t, publicURLAudits(t, st, gcpIAMNotAppliedMutation))
 }
 
-// failingAuditStore is a store whose audit writes fail.
-type failingAuditStore struct {
+// publicURLFailingAuditStore is a store whose audit writes fail.
+type publicURLFailingAuditStore struct {
 	store.Store
 }
 
-func (failingAuditStore) CreateMutationAudit(context.Context, *store.MutationAuditRecord) error {
+func (publicURLFailingAuditStore) CreateMutationAudit(context.Context, *store.MutationAuditRecord) error {
 	return errors.New("injected audit failure")
 }
 
@@ -263,7 +263,7 @@ func TestPublicURLWrites_AuditFailureBlocksChange(t *testing.T) {
 	require.NoError(t, err)
 	_, err = ops.Refresh(context.Background())
 	require.NoError(t, err)
-	srv.store = failingAuditStore{Store: st}
+	srv.store = publicURLFailingAuditStore{Store: st}
 
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"https://new.example.com"}}}`)
 	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
