@@ -1498,3 +1498,53 @@ func TestIsBindingActive_BoundariesMatchKernel(t *testing.T) {
 		})
 	}
 }
+
+// The kernel's decision path (toCandidateBindings then Evaluate) applies
+// the same activation rule to stored role bindings as isBindingActive.
+func TestEvaluate_StoredBindingWindowMatchesIsBindingActive(t *testing.T) {
+	ref := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { v := ref.Add(d); return &v }
+	zeroBound := func() *time.Time { return &time.Time{} }
+	roles := map[string]*RolePermissions{
+		"r1": NewRolePermissions("r1", "reader", ScopeTypeSystem, []string{"agent.read"}),
+	}
+	cases := []struct {
+		name      string
+		now       time.Time
+		notBefore *time.Time
+		expiresAt *time.Time
+		want      bool
+	}{
+		{"unbounded", ref, nil, nil, true},
+		{"in window", ref, at(-time.Hour), at(time.Hour), true},
+		{"now equals expiresAt", ref, nil, at(0), false},
+		{"zero now with only expiresAt", time.Time{}, nil, at(time.Hour), false},
+		{"set but zero expiresAt", ref, nil, zeroBound(), false},
+		{"set but zero notBefore", ref, zeroBound(), nil, true},
+		{"zero now with set but zero notBefore", time.Time{}, zeroBound(), nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &store.RoleBinding{
+				ID:               "rb",
+				RoleDefinitionID: "r1",
+				PrincipalType:    "user",
+				PrincipalID:      "user1",
+				ScopeType:        ScopeTypeSystem,
+				NotBefore:        tc.notBefore,
+				ExpiresAt:        tc.expiresAt,
+			}
+			d := Evaluate(KernelRequest{
+				Permission:        "agent.read",
+				PrincipalClosure:  closureOf("user:user1"),
+				Resource:          ResourceContext{ProjectID: "proj-a"},
+				CandidateBindings: toCandidateBindings([]*store.RoleBinding{b}),
+				RoleDefinitions:   roles,
+				Now:               tc.now,
+			})
+			assert.Equal(t, tc.want, d.Allowed, "kernel decision")
+			assert.Equal(t, isBindingActive(b, tc.now), d.Allowed,
+				"kernel decision must agree with isBindingActive")
+		})
+	}
+}
