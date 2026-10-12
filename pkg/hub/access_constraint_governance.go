@@ -26,7 +26,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// GovernanceService — transactional boundary mutation governance (B5)
+// GovernanceService — transactional boundary mutation governance
 // ---------------------------------------------------------------------------
 
 // GovernanceService wraps B3's PreviewService with transactional commit.
@@ -694,7 +694,7 @@ func (gs *GovernanceService) enforceLockout(ctx context.Context, req CommitReque
 }
 
 // ---------------------------------------------------------------------------
-// Adjacent-domain governance gates (B5 §4)
+// Adjacent-domain governance gates
 // ---------------------------------------------------------------------------
 
 // AdjacentDomainCheck is the result of checking whether an adjacent-domain
@@ -772,7 +772,7 @@ func (gs *GovernanceService) CheckRoleBindingChange(ctx context.Context, binding
 }
 
 // ---------------------------------------------------------------------------
-// Atomic RoleBinding replacement (B5 §5)
+// RoleBinding replacement in one transaction
 // ---------------------------------------------------------------------------
 
 // ReplaceRoleBinding replaces a role binding in one transaction, so a
