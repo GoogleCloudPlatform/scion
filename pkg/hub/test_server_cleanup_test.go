@@ -367,7 +367,7 @@ func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 	// ID and leave them out of every check below. Comparing totals instead
 	// is racy: one of them exiting after the baseline cancels out the new
 	// store's goroutine and the guard wrongly passes (ptone/scion#4635).
-	baseline := scanLeakedGoroutines(nil).ids
+	baseline := scanLeakedGoroutines(nil).IDs
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
@@ -396,11 +396,11 @@ func TestLeakGuardScanNeverExcludesUnparsedID(t *testing.T) {
 	parsed := "goroutine 7 [select]:\n" + sig + "(...)"
 
 	base := scanStacks([]byte(first+"\n\n"+parsed), nil)
-	if base.total != 2 || len(base.ids) != 1 || !base.ids["7"] {
-		t.Fatalf("baseline scan: total=%d ids=%v, want total=2 ids={7}", base.total, base.ids)
+	if base.Total != 2 || len(base.IDs) != 1 || !base.IDs["7"] {
+		t.Fatalf("baseline scan: total=%d ids=%v, want total=2 ids={7}", base.Total, base.IDs)
 	}
-	got := scanStacks([]byte(first+"\n\n"+second+"\n\n"+parsed), base.ids)
-	if got.total != 2 {
-		t.Fatalf("scan with baseline excluded: total=%d, want 2 (both unparsed blocks counted, goroutine 7 excluded)", got.total)
+	got := scanStacks([]byte(first+"\n\n"+second+"\n\n"+parsed), base.IDs)
+	if got.Total != 2 {
+		t.Fatalf("scan with baseline excluded: total=%d, want 2 (both unparsed blocks counted, goroutine 7 excluded)", got.Total)
 	}
 }

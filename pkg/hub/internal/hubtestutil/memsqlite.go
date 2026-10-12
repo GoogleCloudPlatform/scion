@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package hubtestutil
 
 import (
 	"database/sql"
@@ -42,7 +42,7 @@ import (
 // The cost of one connection: code that holds a *sql.Rows or *sql.Tx and
 // issues a second query on the same *sql.DB blocks forever. Production SQLite
 // has the same constraint, so such a hang is a real bug, not a test artifact.
-func openTestMemorySQLite(t testing.TB, driver string) *sql.DB {
+func OpenTestMemorySQLite(t testing.TB, driver string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open(driver, ":memory:")
 	if err != nil {
