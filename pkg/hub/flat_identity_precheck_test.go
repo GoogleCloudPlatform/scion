@@ -80,13 +80,16 @@ func TestDispatch_FlatProfileFreeAssignSkipsHubPrecheck(t *testing.T) {
 // code and untagged test helpers and compiles in every pkg/hub test shard
 // (see hack/hubshard). They mirror the per-profile precheck test helpers.
 
+// Copied from gcp_identity_dispatch_precheck_test.go: the precheckGSA and precheckOther constants
+// (same values); de-duplicate after ptone/scion#4562.
 const (
 	flatPrecheckGSA   = "agent@example-project.iam.gserviceaccount.com"
 	flatPrecheckOther = "other@example-project.iam.gserviceaccount.com"
 )
 
 // flatPrecheckProfile is a Kubernetes profile with a recent, complete
-// report that maps only flatPrecheckOther.
+// report that maps only flatPrecheckOther. Copied from gcp_identity_dispatch_precheck_test.go:
+// precheckProfile (identical body); de-duplicate after ptone/scion#4562.
 func flatPrecheckProfile(now time.Time) store.BrokerProfile {
 	at := now.Add(-time.Minute)
 	return store.BrokerProfile{
@@ -105,7 +108,11 @@ func flatPrecheckProfile(now time.Time) store.BrokerProfile {
 
 // flatPrecheckDispatcher returns a dispatcher on a fresh store with a legacy
 // Runtime Broker that reports flatPrecheckProfile, and an unsaved agent
-// assigned to it in GCP identity mode assign for flatPrecheckGSA.
+// assigned to it in GCP identity mode assign for flatPrecheckGSA. Copied
+// from gcp_identity_dispatch_precheck_test.go: precheckDispatcher, specialised to the only
+// call this file makes (gsa = precheckGSA, persist = false), with
+// precheckAssign inlined; otherwise identical. De-duplicate after
+// ptone/scion#4562.
 func flatPrecheckDispatcher(t *testing.T, mutate ...func(a *store.Agent)) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent, store.Store) {
 	t.Helper()
 	ctx := context.Background()
@@ -140,13 +147,18 @@ func flatPrecheckDispatcher(t *testing.T, mutate ...func(a *store.Agent)) (*HTTP
 }
 
 // flatPrecheckOp is one dispatch path that runs the identity precheck, and
-// how to tell that it reached the Runtime Broker.
+// how to tell that it reached the Runtime Broker. Copied from
+// gcp_identity_dispatch_precheck_test.go: precheckOp (identical fields); de-duplicate after
+// ptone/scion#4562.
 type flatPrecheckOp struct {
 	name   string
 	run    func(d *HTTPAgentDispatcher, a *store.Agent) error
 	called func(m *mockRuntimeBrokerClient) bool
 }
 
+// flatPrecheckOps lists the dispatch paths. Copied from
+// gcp_identity_dispatch_precheck_test.go: precheckOps (identical entries); de-duplicate after
+// ptone/scion#4562.
 func flatPrecheckOps(ctx context.Context) []flatPrecheckOp {
 	return []flatPrecheckOp{
 		{"create", func(d *HTTPAgentDispatcher, a *store.Agent) error {
