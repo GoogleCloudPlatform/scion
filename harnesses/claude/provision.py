@@ -111,7 +111,9 @@ AUTH = scion_harness.AuthSpec(
         scion_harness.file_method("auth-file", path=CLAUDE_AUTH_FILE, secret_key="CLAUDE_AUTH"),
         scion_harness.env_method("vertex-ai",
                                  all_of=["GOOGLE_CLOUD_PROJECT"],
-                                 any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION"],
+                                 # Shared precedence: LOCATION > REGION > CLOUD_ML_REGION.
+                                 # select_auth picks the first present key as env_key.
+                                 any_of=list(scion_harness.vertex_location_keys()),
                                  hint="provide GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION/GOOGLE_CLOUD_REGION/CLOUD_ML_REGION "
                                       "(with ADC or GCP service account) for Vertex AI"),
     ],
@@ -384,6 +386,7 @@ def _build_env_overlay(ctx: scion_harness.ProvisionContext, auth: scion_harness.
         env = {"CLAUDE_CODE_OAUTH_TOKEN": _resolve(ctx, "CLAUDE_CODE_OAUTH_TOKEN")}
     elif auth.method == "vertex-ai":
         region_key = auth.env_key or "GOOGLE_CLOUD_REGION"
+        scion_harness.warn_vertex_location_conflict(ctx.read_secret, ctx.warn)
         env = {
             "CLAUDE_CODE_USE_VERTEX": "1",
             "ANTHROPIC_VERTEX_PROJECT_ID": _resolve(ctx, "GOOGLE_CLOUD_PROJECT"),

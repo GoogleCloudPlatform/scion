@@ -42,7 +42,7 @@ from typing import Any, Callable, Collection
 # ---------------------------------------------------------------------------
 
 INTERFACE_VERSION = 3
-LIB_VERSION = "2026-10-02"
+LIB_VERSION = "2026-10-12"
 
 # ---------------------------------------------------------------------------
 # Exit codes
@@ -383,6 +383,83 @@ def _merge_into_file(path: str, dotted_path: str, entries: dict[str, dict[str, A
 def warn(message: str) -> None:
     """Write a warning to stderr in a consistent format."""
     print(f"scion_harness: {message}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Vertex AI location precedence
+# ---------------------------------------------------------------------------
+
+# When several Vertex AI location variables are set, GOOGLE_CLOUD_LOCATION
+# wins over GOOGLE_CLOUD_REGION, and CLOUD_ML_REGION is the last fallback.
+# The Go auth path (pkg/harness/auth.go GatherAuthWithEnv) uses the same order.
+VERTEX_LOCATION_KEY = "GOOGLE_CLOUD_LOCATION"
+VERTEX_REGION_KEY = "GOOGLE_CLOUD_REGION"
+VERTEX_ML_REGION_KEY = "CLOUD_ML_REGION"
+
+
+def vertex_location_keys(
+    *,
+    preferred: tuple[str, ...] = (),
+    include_ml_region: bool = True,
+    fallback: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Return the Vertex AI location env names in precedence order.
+
+    The order is: preferred (harness-specific names that win over the shared
+    ones), GOOGLE_CLOUD_LOCATION, GOOGLE_CLOUD_REGION, CLOUD_ML_REGION (unless
+    include_ml_region is False), then fallback.
+    """
+    keys = (*preferred, VERTEX_LOCATION_KEY, VERTEX_REGION_KEY)
+    if include_ml_region:
+        keys += (VERTEX_ML_REGION_KEY,)
+    return keys + tuple(fallback)
+
+
+def warn_vertex_location_conflict(
+    read: Callable[[str], str],
+    warn_fn: Callable[[str], None],
+) -> bool:
+    """Warn once when GOOGLE_CLOUD_LOCATION and GOOGLE_CLOUD_REGION differ.
+
+    read returns the value of an env name ("" when unset). Returns True when
+    a warning was emitted.
+    """
+    location = (read(VERTEX_LOCATION_KEY) or "").strip()
+    region = (read(VERTEX_REGION_KEY) or "").strip()
+    if location and region and location != region:
+        warn_fn(
+            f"{VERTEX_LOCATION_KEY}={location!r} and {VERTEX_REGION_KEY}={region!r} "
+            f"differ; using {VERTEX_LOCATION_KEY}"
+        )
+        return True
+    return False
+
+
+def resolve_vertex_location(
+    read: Callable[[str], str],
+    *,
+    warn_fn: Callable[[str], None] | None = None,
+    preferred: tuple[str, ...] = (),
+    include_ml_region: bool = True,
+    fallback: tuple[str, ...] = (),
+) -> tuple[str, str]:
+    """Return (key, value) of the first non-empty Vertex AI location.
+
+    Keys are tried in vertex_location_keys() order. Returns ("", "") when
+    none is set. When warn_fn is given and the shared keys decide the result
+    (no preferred key is set), a GOOGLE_CLOUD_LOCATION/GOOGLE_CLOUD_REGION
+    conflict is reported through warn_fn.
+    """
+    keys = vertex_location_keys(
+        preferred=preferred, include_ml_region=include_ml_region, fallback=fallback,
+    )
+    for key in keys:
+        value = read(key) or ""
+        if value:
+            if warn_fn is not None and key not in preferred:
+                warn_vertex_location_conflict(read, warn_fn)
+            return key, value
+    return "", ""
 
 
 # ===========================================================================

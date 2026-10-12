@@ -517,6 +517,48 @@ class VertexAuthSelectionTest(unittest.TestCase):
         self.assertEqual(env["CLOUD_ML_REGION"], "${CLOUD_ML_REGION}")
         self.assertEqual(env["CLAUDE_CODE_USE_VERTEX"], "1")
 
+    def test_location_wins_over_region_placeholder_fallback(self) -> None:
+        # Both keys present, no staged secrets: the LOCATION key is chosen and
+        # the ${VAR} placeholder fallback is kept (ptone/scion#4719).
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx, resolved = _select_with_candidates(tmp, {
+                "explicit_type": "vertex-ai",
+                "env_vars": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION"],
+            })
+            warnings: list[str] = []
+            ctx.warn = warnings.append
+            env = provision._build_env_overlay(ctx, resolved)
+        self.assertEqual(resolved.env_key, "GOOGLE_CLOUD_LOCATION")
+        self.assertEqual(env["CLOUD_ML_REGION"], "${GOOGLE_CLOUD_LOCATION}")
+        self.assertEqual(env["ANTHROPIC_VERTEX_PROJECT_ID"], "${GOOGLE_CLOUD_PROJECT}")
+        self.assertEqual(warnings, [])
+
+    def test_location_and_region_differ_location_wins_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            secrets = os.path.join(tmp, "secrets")
+            os.makedirs(secrets)
+            paths = {}
+            for key, value in (
+                ("GOOGLE_CLOUD_PROJECT", "proj-1"),
+                ("GOOGLE_CLOUD_REGION", "us-central1"),
+                ("GOOGLE_CLOUD_LOCATION", "us-east5"),
+            ):
+                paths[key] = os.path.join(secrets, key)
+                with open(paths[key], "w", encoding="utf-8") as f:
+                    f.write(value)
+            ctx, resolved = _select_with_candidates(tmp, {
+                "explicit_type": "vertex-ai",
+                "env_vars": list(paths),
+                "env_secret_files": paths,
+            })
+            warnings: list[str] = []
+            ctx.warn = warnings.append
+            env = provision._build_env_overlay(ctx, resolved)
+        self.assertEqual(resolved.env_key, "GOOGLE_CLOUD_LOCATION")
+        self.assertEqual(env["CLOUD_ML_REGION"], "us-east5")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("GOOGLE_CLOUD_REGION", warnings[0])
+
     def test_explicit_vertex_ai_without_region_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             with self.assertRaises(scion_harness.ProvisionError):
