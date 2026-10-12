@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -330,37 +331,141 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
 
 
 class ConfigFileMayHoldCredentialTest(unittest.TestCase):
-    """The key-based predicate behind the auth-file present_check."""
+    """The content rule behind the auth-file present_check.
 
-    def _check(self, raw: str) -> bool:
+    It is the host's rule (copilotConfigHoldsSignIn): known settings keys do
+    not count, non-empty credential keys do, an unknown key counts, and
+    content that is not a JSON object does not. A file that cannot be read
+    counts. All values are synthetic placeholders.
+    """
+
+    def _check(self, raw: str | bytes) -> bool:
         d = tempfile.mkdtemp()
         p = os.path.join(d, "config.json")
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(raw)
+        with open(p, "wb") as f:
+            f.write(raw if isinstance(raw, bytes) else raw.encode("utf-8"))
         return provision._config_file_may_hold_credential(p)
 
-    def test_settings_only(self) -> None:
+    def test_scion_written_settings_only(self) -> None:
         self.assertFalse(self._check('{"trustedFolders": ["/workspace"]}'))
+
+    def test_copilot_settings_only(self) -> None:
+        # The file of a user who signs in through the OS keychain.
+        self.assertFalse(self._check(
+            '{"trusted_folders": ["/src"], "banner": "never", "theme": "dark",'
+            ' "logged_in_users": [{"host": "https://github.com", "login": "octo"}],'
+            ' "last_logged_in_user": {"host": "https://github.com", "login": "octo"}}'))
+
+    def test_settings_keys_case_insensitive(self) -> None:
+        self.assertFalse(self._check('{"Trusted_Folders": [], "BANNER": "never"}'))
 
     def test_empty_object(self) -> None:
         self.assertFalse(self._check("{}"))
+
+    def test_credential_keys_count(self) -> None:
+        self.assertTrue(self._check(
+            '{"trustedFolders": [], "copilot_tokens": {"https://github.com:octo": "placeholder-token"}}'))
+        self.assertTrue(self._check('{"copilot_hmac_key": "placeholder-hmac"}'))
+        self.assertTrue(self._check('{"theme": "dark", "capi_hmac_key": "placeholder-hmac"}'))
+        self.assertTrue(self._check('{"COPILOT_TOKENS": {"https://github.com:octo": "placeholder-token"}}'))
+
+    def test_empty_credential_values_do_not_count(self) -> None:
+        self.assertFalse(self._check('{"trustedFolders": [], "copilot_tokens": {}}'))
+        self.assertFalse(self._check('{"copilot_tokens": {"https://github.com:octo": "  "}}'))
+        self.assertFalse(self._check('{"copilot_hmac_key": "", "capi_hmac_key": ""}'))
 
     def test_comment_lines_skipped(self) -> None:
         self.assertFalse(self._check('// managed file\n{"trustedFolders": []}'))
         self.assertTrue(self._check('// managed file\n{"placeholder_key": 1}'))
 
-    def test_other_key_counts(self) -> None:
+    def test_unknown_key_counts(self) -> None:
         self.assertTrue(self._check('{"trustedFolders": [], "placeholder_key": 1}'))
 
-    def test_unparseable_fails_open(self) -> None:
-        self.assertTrue(self._check("not json"))
+    def test_unparseable_is_not_sign_in(self) -> None:
+        self.assertFalse(self._check("not json"))
+        self.assertFalse(self._check('{"placeholder_key": '))
+        self.assertFalse(self._check(""))
 
-    def test_non_object_fails_open(self) -> None:
-        self.assertTrue(self._check("[]"))
+    def test_non_object_is_not_sign_in(self) -> None:
+        self.assertFalse(self._check("[]"))
+        self.assertFalse(self._check('["placeholder_key"]'))
+        self.assertFalse(self._check("null"))
+
+    def test_invalid_utf8(self) -> None:
+        # Like Go's encoding/json: invalid UTF-8 inside a string is replaced,
+        # outside one it makes the content unparseable.
+        self.assertTrue(self._check(b'{"placeholder_key": "\xff"}'))
+        self.assertFalse(self._check(b'{"trustedFolders": []}\xff'))
+
+    def test_deep_nesting_is_not_sign_in(self) -> None:
+        # Too deep for Python's decoder, so unparseable here. Go's limit is
+        # 10000 levels; which shallower depths still differ from the host
+        # depends on the decoder (with the C decoder, only 9998-9999).
+        self.assertFalse(self._check('{"placeholder_key": ' + "[" * 100000 + "]" * 100000 + "}"))
 
     def test_unreadable_fails_open(self) -> None:
+        # No host counterpart: the host applies the rule only to content it read.
         self.assertTrue(provision._config_file_may_hold_credential(
             os.path.join(tempfile.mkdtemp(), "missing.json")))
+        self.assertTrue(provision._config_file_may_hold_credential(tempfile.mkdtemp()))
+
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+HOST_RULE_GO = os.path.join(REPO_ROOT, "pkg", "harness", "host_credentials_content.go")
+HOST_FIXTURES = os.path.join(REPO_ROOT, "pkg", "harness", "testdata", "copilot_config_signin.json")
+
+# Floors pinned so that a moved, emptied or refactored host file cannot make
+# the cross-checks below pass vacuously. Raise them when the host lists grow.
+MIN_HOST_FIXTURES = 32
+HOST_SETTINGS_KEY_COUNT = 12
+HOST_CREDENTIAL_KEY_COUNT = 3
+
+
+class HostRuleCrossCheckTest(unittest.TestCase):
+    """The container rule must match the host's copilotConfigHoldsSignIn.
+
+    These read the Go source and test fixtures from the repository. They fail,
+    never skip, when the files are missing or yield too little.
+    """
+
+    def _go_source(self) -> str:
+        with open(HOST_RULE_GO, encoding="utf-8") as f:
+            return f.read()
+
+    def test_settings_keys_match_host(self) -> None:
+        src = self._go_source()
+        m = re.search(r"var copilotSettingsKeys = map\[string\]struct\{\}\{(.*?)\n\}", src, re.S)
+        self.assertIsNotNone(m, "copilotSettingsKeys not found in " + HOST_RULE_GO)
+        assert m is not None
+        host_keys = re.findall(r'^\s*"([^"]+)":\s*\{\},', m.group(1), re.M)
+        self.assertEqual(len(host_keys), HOST_SETTINGS_KEY_COUNT,
+                         f"extracted {host_keys!r} from copilotSettingsKeys")
+        self.assertEqual(frozenset(host_keys), provision._COPILOT_SETTINGS_KEYS)
+
+    def test_credential_keys_match_host(self) -> None:
+        src = self._go_source()
+        m = re.search(r"func copilotConfigHoldsSignIn\(data \[\]byte\) bool \{(.*?)\n\}", src, re.S)
+        self.assertIsNotNone(m, "copilotConfigHoldsSignIn not found in " + HOST_RULE_GO)
+        assert m is not None
+        host_keys: list[str] = []
+        for case in re.findall(r"^\s*case (.+):$", m.group(1), re.M):
+            host_keys += re.findall(r'"([^"]+)"', case)
+        self.assertEqual(len(host_keys), HOST_CREDENTIAL_KEY_COUNT,
+                         f"extracted {host_keys!r} from copilotConfigHoldsSignIn")
+        self.assertEqual(frozenset(host_keys), provision._COPILOT_CREDENTIAL_KEYS)
+
+    def test_host_fixtures(self) -> None:
+        with open(HOST_FIXTURES, encoding="utf-8") as f:
+            fixtures = json.load(f)
+        self.assertGreaterEqual(len(fixtures), MIN_HOST_FIXTURES)
+        d = tempfile.mkdtemp()
+        for i, tc in enumerate(fixtures):
+            with self.subTest(tc["name"]):
+                p = os.path.join(d, f"config-{i}.json")
+                with open(p, "w", encoding="utf-8", newline="") as f:
+                    f.write(tc["data"])
+                self.assertIs(provision._config_file_may_hold_credential(p), tc["signIn"],
+                              f"{tc['name']}: {tc['data']!r}")
 
 
 if __name__ == "__main__":
