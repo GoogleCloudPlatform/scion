@@ -198,5 +198,33 @@ class VertexAuthSelectionTest(unittest.TestCase):
             _select_vertex(["GOOGLE_CLOUD_PROJECT"])
 
 
+class VertexEnvOverlayTest(unittest.TestCase):
+    # Gemini reads only GOOGLE_CLOUD_LOCATION, so every accepted region key
+    # must reach it (ptone/scion#4672).
+    def _location(self, env: dict[str, str]) -> str:
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            return provision._build_env_overlay("vertex-ai", "")["GOOGLE_CLOUD_LOCATION"]
+
+    def test_cloud_ml_region_alone_sets_location(self) -> None:
+        self.assertEqual(
+            self._location({"GOOGLE_CLOUD_PROJECT": "p", "CLOUD_ML_REGION": "europe-west4"}),
+            "europe-west4",
+        )
+
+    def test_location_and_region_keep_precedence_over_cloud_ml_region(self) -> None:
+        self.assertEqual(
+            self._location({
+                "GOOGLE_CLOUD_LOCATION": "us-east5",
+                "GOOGLE_CLOUD_REGION": "us-central1",
+                "CLOUD_ML_REGION": "europe-west4",
+            }),
+            "us-east5",
+        )
+        self.assertEqual(
+            self._location({"GOOGLE_CLOUD_REGION": "us-central1", "CLOUD_ML_REGION": "europe-west4"}),
+            "us-central1",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
