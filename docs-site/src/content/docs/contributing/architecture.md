@@ -154,14 +154,14 @@ type Runtime interface {
 
 | Runtime | Platform | Selection |
 | :--- | :--- | :--- |
-| `AppleContainerRuntime` | macOS | Auto-detected when Apple `container` CLI is present |
+| `AppleContainerRuntime` | macOS | Auto-detected when Apple `container` CLI is present and neither Podman nor Docker is available |
 | `DockerRuntime` | Linux / macOS / Windows | Default fallback; supports remote Docker hosts via `Host` config |
 | `PodmanRuntime` | Linux / macOS | Daemonless/Rootless alternative; supports remote/machine execution |
 | `KubernetesRuntime` | Any (via kubeconfig) | Runs agents as Kubernetes Pods; supports namespace isolation, resource specs, and workspace sync via `tar` snapshots |
 
 **Runtime selection** is handled by the `GetRuntime` factory function, which resolves the runtime based on:
 1. The active profile's `runtime` field in `settings.yaml`.
-2. OS-level auto-detection (macOS with `container` CLI &rarr; Apple; Linux &rarr; Podman if available, else Docker).
+2. OS-level auto-detection (macOS &rarr; Podman, else Docker, else Apple `container`; Linux &rarr; Podman if available, else Docker).
 3. Explicit override via CLI flags.
 
 ---

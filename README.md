@@ -91,7 +91,7 @@ scion init
 
 > **Tip:** Add `.scion/agents` to your `.gitignore` to avoid issues with nested git worktrees.
 
-Scion auto-detects the container runtime: Apple Container first on macOS, then Podman, then Docker. Override this in `.scion/settings.yaml`.
+Scion auto-detects the container runtime: the first available of Podman, then Docker (on macOS: Podman, Docker, then Apple Container). Override this in `.scion/settings.yaml`.
 
 **NOTE** This project is evolving rapidly. Workstation and hosted Hubs, and the Kubernetes runtime, are all supported and in active use. Expect continued iteration — APIs and configuration may change between releases.
 

@@ -133,10 +133,17 @@ def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
             overlay["GOOGLE_CLOUD_PROJECT"] = project
         return overlay
     if method == "vertex-ai":
+        # Gemini reads only GOOGLE_CLOUD_LOCATION. Fill it from any accepted
+        # region key, in precedence order LOCATION > REGION > CLOUD_ML_REGION.
+        location = (
+            os.environ.get("GOOGLE_CLOUD_LOCATION")
+            or os.environ.get("GOOGLE_CLOUD_REGION")
+            or os.environ.get("CLOUD_ML_REGION", "")
+        )
         return {
             "GOOGLE_CLOUD_PROJECT": os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
             "GOOGLE_CLOUD_REGION": os.environ.get("GOOGLE_CLOUD_REGION", ""),
-            "GOOGLE_CLOUD_LOCATION": os.environ.get("GOOGLE_CLOUD_LOCATION") or os.environ.get("GOOGLE_CLOUD_REGION", ""),
+            "GOOGLE_CLOUD_LOCATION": location,
         }
     return {}
 

@@ -224,15 +224,15 @@ On the workstation server, harness login files in your home directory (for examp
 
 ### 5. Select Runtime
 Scion automatically selects the first runtime it finds working, in this order:
-- **macOS**: `container` (Apple Virtualization Framework), then `podman`, then `docker`.
+- **macOS**: `podman`, then `docker`, then `container` (Apple Virtualization Framework).
 - **Linux/Windows**: `podman`, then `docker`.
 
-If you wish to change this (e.g., to use Podman on macOS), you can manually edit `.scion/settings.yaml`:
+If you wish to change this (e.g., to use Apple `container` on macOS when Podman or Docker is also installed), you can manually edit `.scion/settings.yaml`:
 
 ```yaml
 profiles:
   local:
-    runtime: podman
+    runtime: container
 ```
 
 Scion accepts settings in either YAML or JSON. `scion init` writes `settings.yaml`, and YAML is preferred when multiple files are present (the loader looks for `settings.yaml`, then `settings.yml`, then `settings.json`). If you prefer JSON, name the file `.scion/settings.json` and use valid JSON syntax:
