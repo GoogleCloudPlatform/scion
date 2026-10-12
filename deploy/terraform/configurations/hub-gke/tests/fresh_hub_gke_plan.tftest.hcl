@@ -434,13 +434,15 @@ run "test_runner_enabled_adds_the_module" {
     error_message = "test_runner.enabled must create the module once."
   }
 
+  # Role and scope only: each grant's account is derived from the accounts'
+  # computed name and email, resolved in test_runner_outputs_pass_through.
   assert {
-    condition = [for g in module.hub_test_runner[0].iam_grants : "${g.account}|${g.role}|${g.resource}"] == [
-      "uat|roles/iam.serviceAccountOpenIdTokenCreator|service_account",
-      "issuer|roles/iam.serviceAccountOpenIdTokenCreator|service_account",
-      "uat|roles/iap.httpsResourceAccessor|backend_service:tfha-gke-h3-hub-backend",
+    condition = [for g in module.hub_test_runner[0].iam_grants : "${g.role}|${g.resource}"] == [
+      "roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "roles/iap.httpsResourceAccessor|backend_service:tfha-gke-h3-hub-backend",
     ]
-    error_message = "the module must grant token creation on both accounts and IAP on this hub's backend service for -uat only."
+    error_message = "the module must grant token creation twice and IAP on this hub's backend service."
   }
 
   assert {
@@ -530,6 +532,17 @@ run "test_runner_outputs_pass_through" {
     )
     error_message = "the root must pass through both accounts' email and unique_id."
   }
+
+  # account comes from each grant resource (token-creator: service_account_id;
+  # IAP: member), so this proves the IAP grant is for -uat only.
+  assert {
+    condition = [for g in module.hub_test_runner[0].iam_grants : "${g.account}|${g.role}|${g.resource}"] == [
+      "uat|roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "issuer|roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "uat|roles/iap.httpsResourceAccessor|backend_service:tfha-gke-h3-hub-backend",
+    ]
+    error_message = "the module must grant token creation on both accounts and IAP on this hub's backend service for -uat only."
+  }
 }
 
 run "test_runner_rejects_empty_impersonators" {
@@ -564,6 +577,19 @@ run "test_runner_rejects_user_member" {
     test_runner = {
       enabled       = true
       impersonators = ["user:someone@example.com"]
+    }
+  }
+
+  expect_failures = [var.test_runner]
+}
+
+run "test_runner_rejects_mixed_case_email" {
+  command = plan
+
+  variables {
+    test_runner = {
+      enabled       = true
+      impersonators = ["serviceAccount:Orchestrator@example-project.iam.gserviceaccount.com"]
     }
   }
 

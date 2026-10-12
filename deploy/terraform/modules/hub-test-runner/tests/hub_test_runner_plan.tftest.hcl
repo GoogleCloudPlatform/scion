@@ -89,12 +89,6 @@ run "enabled_plans_exactly_five_objects" {
     error_message = "IAP access must be roles/iap.httpsResourceAccessor on the hub's own backend service."
   }
 
-  # The issuer has no IAP grant: the only IAP grant in the module is on -uat.
-  assert {
-    condition     = [for g in output.iam_grants : g.account if startswith(g.resource, "backend_service:")] == ["uat"]
-    error_message = "only -uat may hold an IAP grant; -issuer must have none."
-  }
-
   assert {
     condition     = length(google_logging_metric.foreign_token_mint) == 0 && length(google_monitoring_alert_policy.foreign_token_mint) == 0 && !output.alerts_enabled
     error_message = "no alert objects without notification channels."
@@ -102,7 +96,8 @@ run "enabled_plans_exactly_five_objects" {
 }
 
 # Against the MOCK provider only: resolves the computed emails so the IAP
-# member, the grant targets and the outputs can be checked.
+# member, the grant targets, iam_grants' account values and the outputs can
+# be checked.
 run "outputs_and_grant_targets" {
   command = apply
 
@@ -119,6 +114,20 @@ run "outputs_and_grant_targets" {
   assert {
     condition     = google_iap_web_backend_service_iam_member.uat.member == "serviceAccount:tfha-gke-h3-uat@example-project.iam.gserviceaccount.com"
     error_message = "the IAP grant's member must be the -uat account, never -issuer."
+  }
+
+  # The issuer has no IAP grant. iam_grants derives each grant's account from
+  # the grant resource itself (token-creator: service_account_id; IAP:
+  # member), so these fail if a grant targeted or admitted the wrong account.
+  # Apply run: the accounts' name and email are only resolved after apply.
+  assert {
+    condition     = [for g in output.iam_grants : g.account if startswith(g.resource, "backend_service:")] == ["uat"]
+    error_message = "only -uat may hold an IAP grant; -issuer must have none."
+  }
+
+  assert {
+    condition     = [for g in output.iam_grants : "${g.account}|${g.resource}"] == ["uat|service_account", "issuer|service_account", "uat|backend_service:tfha-gke-h3-hub-backend"]
+    error_message = "iam_grants must report a token-creator grant on each account and the IAP grant for -uat only."
   }
 
   assert {
@@ -217,6 +226,80 @@ run "precondition_fails_when_impersonator_exempted" {
   ]
 }
 
+# Exemptions union across configs: allServices exempting the impersonator
+# leaves its calls unlogged even though iamcredentials exempts no one.
+run "precondition_fails_when_all_services_exempts_impersonator" {
+  command = plan
+
+  override_data {
+    target = data.google_project_iam_policy.this
+    values = {
+      policy_data = "{\"auditConfigs\":[{\"service\":\"allServices\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\",\"exemptedMembers\":[\"serviceAccount:orchestrator@example-project.iam.gserviceaccount.com\"]}]},{\"service\":\"iamcredentials.googleapis.com\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\"}]}]}"
+    }
+  }
+
+  expect_failures = [
+    google_service_account_iam_member.uat_token_creator,
+    google_service_account_iam_member.issuer_token_creator,
+    google_iap_web_backend_service_iam_member.uat,
+  ]
+}
+
+# The mirror case: iamcredentials exempts the impersonator, allServices
+# exempts no one.
+run "precondition_fails_when_iamcredentials_exempts_impersonator" {
+  command = plan
+
+  override_data {
+    target = data.google_project_iam_policy.this
+    values = {
+      policy_data = "{\"auditConfigs\":[{\"service\":\"allServices\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\"}]},{\"service\":\"iamcredentials.googleapis.com\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\",\"exemptedMembers\":[\"serviceAccount:orchestrator@example-project.iam.gserviceaccount.com\"]}]}]}"
+    }
+  }
+
+  expect_failures = [
+    google_service_account_iam_member.uat_token_creator,
+    google_service_account_iam_member.issuer_token_creator,
+    google_iap_web_backend_service_iam_member.uat,
+  ]
+}
+
+# Exempted members are compared case-insensitively.
+run "precondition_fails_when_impersonator_exempted_in_other_case" {
+  command = plan
+
+  override_data {
+    target = data.google_project_iam_policy.this
+    values = {
+      policy_data = "{\"auditConfigs\":[{\"service\":\"iamcredentials.googleapis.com\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\",\"exemptedMembers\":[\"serviceAccount:Orchestrator@Example-Project.iam.gserviceaccount.com\"]}]}]}"
+    }
+  }
+
+  expect_failures = [
+    google_service_account_iam_member.uat_token_creator,
+    google_service_account_iam_member.issuer_token_creator,
+    google_iap_web_backend_service_iam_member.uat,
+  ]
+}
+
+# DATA_READ enabled in one config and an exemption for someone else in the
+# other: (a) and (b) both hold.
+run "precondition_passes_with_data_read_split_across_configs" {
+  command = plan
+
+  override_data {
+    target = data.google_project_iam_policy.this
+    values = {
+      policy_data = "{\"auditConfigs\":[{\"service\":\"allServices\",\"auditLogConfigs\":[{\"logType\":\"ADMIN_READ\"}]},{\"service\":\"iamcredentials.googleapis.com\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\",\"exemptedMembers\":[\"user:someone-else@example.com\"]}]}]}"
+    }
+  }
+
+  assert {
+    condition     = length(output.iam_grants) == 3
+    error_message = "DATA_READ in one of the two configs, exempting no impersonator, must satisfy the precondition."
+  }
+}
+
 run "precondition_passes_with_all_services_data_read" {
   command = plan
 
@@ -264,18 +347,25 @@ run "alert_objects_only_with_channels" {
 
   assert {
     condition = (
+      strcontains(google_logging_metric.foreign_token_mint[0].filter, "logName=\"projects/example-project/logs/cloudaudit.googleapis.com%2Fdata_access\"") &&
       strcontains(google_logging_metric.foreign_token_mint[0].filter, "protoPayload.serviceName=\"iamcredentials.googleapis.com\"") &&
       strcontains(google_logging_metric.foreign_token_mint[0].filter, "protoPayload.methodName:\"GenerateIdToken\"") &&
-      strcontains(google_logging_metric.foreign_token_mint[0].filter, "tfha-gke-h3-uat@example-project.iam.gserviceaccount.com") &&
-      strcontains(google_logging_metric.foreign_token_mint[0].filter, "tfha-gke-h3-issuer@example-project.iam.gserviceaccount.com") &&
+      strcontains(google_logging_metric.foreign_token_mint[0].filter, "resource.type=\"service_account\"") &&
+      strcontains(google_logging_metric.foreign_token_mint[0].filter, "resource.labels.email_id=(\"tfha-gke-h3-uat@example-project.iam.gserviceaccount.com\" OR \"tfha-gke-h3-issuer@example-project.iam.gserviceaccount.com\")") &&
+      !strcontains(google_logging_metric.foreign_token_mint[0].filter, "protoPayload.resourceName") &&
       strcontains(google_logging_metric.foreign_token_mint[0].filter, "NOT protoPayload.authenticationInfo.principalEmail=(\"orchestrator@example-project.iam.gserviceaccount.com\")")
     )
     error_message = "the metric must count GenerateIdToken on either account by principals outside the impersonators."
   }
 
   assert {
-    condition     = google_monitoring_alert_policy.foreign_token_mint[0].conditions[0].condition_threshold[0].filter == "metric.type=\"logging.googleapis.com/user/tfha-gke-h3-test-runner-foreign-token-mint\""
-    error_message = "the alert policy must watch the module's log-based metric."
+    condition     = google_monitoring_alert_policy.foreign_token_mint[0].conditions[0].condition_threshold[0].filter == "metric.type=\"logging.googleapis.com/user/tfha-gke-h3-test-runner-foreign-token-mint\" AND resource.type=\"global\""
+    error_message = "the alert policy must watch the module's log-based metric on the global resource."
+  }
+
+  assert {
+    condition     = google_monitoring_alert_policy.foreign_token_mint[0].alert_strategy[0].auto_close == "1800s"
+    error_message = "the alert policy must auto-close after 30 minutes without matches."
   }
 }
 
@@ -316,6 +406,17 @@ run "rejects_bare_email" {
 
   variables {
     impersonators = ["orchestrator@example-project.iam.gserviceaccount.com"]
+  }
+
+  expect_failures = [var.impersonators]
+}
+
+# The email part must be lowercase.
+run "rejects_mixed_case_email" {
+  command = plan
+
+  variables {
+    impersonators = ["serviceAccount:Orchestrator@example-project.iam.gserviceaccount.com"]
   }
 
   expect_failures = [var.impersonators]

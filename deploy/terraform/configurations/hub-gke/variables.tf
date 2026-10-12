@@ -139,7 +139,7 @@ variable "test_runner" {
     Optional test-runner identities (modules/hub-test-runner) so an agent on
     another hub can run tests against this one. Off by default.
       enabled                     create <hub>-uat and <hub>-issuer and their grants
-      impersonators               serviceAccount:<email> members allowed to mint ID tokens for both accounts
+      impersonators               serviceAccount:<email> members (lowercase email) allowed to mint ID tokens for both accounts
       alert_notification_channels non-empty adds a log-based metric and alert for token minting by anyone else
     Needs iamcredentials DATA_READ audit logs on the project (configurations/shared-infra's
     iamcredentials_data_access_logs); the plan fails without them.
@@ -158,7 +158,7 @@ variable "test_runner" {
   }
 
   validation {
-    condition     = alltrue([for m in var.test_runner.impersonators : can(regex("^serviceAccount:[^@\\s]+@[^@\\s]+$", m))])
-    error_message = "every test_runner.impersonators entry must be serviceAccount:<email>. group:, user: and other member types are rejected."
+    condition     = alltrue([for m in var.test_runner.impersonators : can(regex("^serviceAccount:[a-z0-9._+-]+@[a-z0-9.-]+$", m))])
+    error_message = "every test_runner.impersonators entry must be serviceAccount:<email>, with the email in lowercase. group:, user: and other member types are rejected."
   }
 }

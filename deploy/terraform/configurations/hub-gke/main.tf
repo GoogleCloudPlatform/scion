@@ -221,20 +221,11 @@ module "hub_gke" {
 # is read here at the root: modules/hub-gke must not consume hub-lb
 # attributes beyond the front-door contract, but this module may.
 #
-# test_runner_input_valid repeats var.test_runner's validation conditions.
-# Invalid input already fails the plan at the root variable; the module is
-# then not instantiated, so its own copies of the same validations do not
-# report the same mistake a second time.
-locals {
-  test_runner_input_valid = (
-    length(var.test_runner.impersonators) > 0 &&
-    alltrue([for m in var.test_runner.impersonators : can(regex("^serviceAccount:[^@\\s]+@[^@\\s]+$", m))])
-  )
-}
-
+# Gated on enabled only: invalid input fails the root variable's validation,
+# and the module's own validations report the same mistake again.
 module "hub_test_runner" {
   source = "../../modules/hub-test-runner"
-  count  = var.test_runner.enabled && local.test_runner_input_valid ? 1 : 0
+  count  = var.test_runner.enabled ? 1 : 0
 
   project_id                  = var.project_id
   hub_name                    = var.hub_name

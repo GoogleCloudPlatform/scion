@@ -269,9 +269,12 @@ test_runner = {
 ```
 
 - `impersonators` must be non-empty when enabled, and every entry must be a
-  `serviceAccount:` member. `group:` and `user:` are rejected.
+  `serviceAccount:` member with a lowercase email. `group:` and `user:` are
+  rejected. Invalid input is reported by the root variable and again by the
+  module's own validations.
 - The plan fails unless the project records `DATA_READ` audit logs for
-  `iamcredentials.googleapis.com` (or `allServices`). Apply
+  `iamcredentials.googleapis.com` (or `allServices`) without exempting an
+  impersonator in either config. Apply
   `configurations/shared-infra` with `iamcredentials_data_access_logs = true`
   first.
 - The module passes this hub's backend service name from `hub-lb` at the root.

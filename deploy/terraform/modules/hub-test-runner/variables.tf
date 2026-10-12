@@ -18,7 +18,7 @@ variable "hub_name" {
 }
 
 variable "impersonators" {
-  description = "IAM members granted roles/iam.serviceAccountOpenIdTokenCreator on both accounts, as serviceAccount:<email>. Each must be a dedicated service account assigned only to the testing agent; the module cannot check that (see the README)."
+  description = "IAM members granted roles/iam.serviceAccountOpenIdTokenCreator on both accounts, as serviceAccount:<email> with a lowercase email. Each must be a dedicated service account assigned only to the testing agent; the module cannot check that (see the README)."
   type        = list(string)
 
   validation {
@@ -27,8 +27,8 @@ variable "impersonators" {
   }
 
   validation {
-    condition     = alltrue([for m in var.impersonators : can(regex("^serviceAccount:[^@\\s]+@[^@\\s]+$", m))])
-    error_message = "every impersonator must be serviceAccount:<email>. group:, user: and other member types are rejected: a group or human could mint tokens without a dedicated, auditable identity."
+    condition     = alltrue([for m in var.impersonators : can(regex("^serviceAccount:[a-z0-9._+-]+@[a-z0-9.-]+$", m))])
+    error_message = "every impersonator must be serviceAccount:<email>, with the email in lowercase. group:, user: and other member types are rejected: a group or human could mint tokens without a dedicated, auditable identity."
   }
 }
 

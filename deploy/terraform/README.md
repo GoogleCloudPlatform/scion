@@ -302,7 +302,8 @@ so shared-infra owns it once rather than each hub.
 
 A GKE hub's optional `test_runner` (`modules/hub-test-runner`) requires it:
 the hub plan fails until this audit config, or an `allServices` `DATA_READ`
-equivalent, is in place. The resource is authoritative for that one service,
+equivalent, is in place, and also fails if either config exempts an
+impersonator from `DATA_READ`. The resource is authoritative for that one service,
 so it replaces any iamcredentials audit config set outside Terraform.
 Data-access logs are billed as log volume.
 

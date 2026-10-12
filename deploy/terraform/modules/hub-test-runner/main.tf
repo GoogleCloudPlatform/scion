@@ -12,8 +12,8 @@
 # *_iam_member, never *_iam_binding or *_iam_policy.
 #
 # Every IAM member carries a precondition: the project must record DATA_READ
-# audit logs for iamcredentials.googleapis.com (or allServices), so every
-# token minted for these accounts is logged. See the README for why this only
+# audit logs for iamcredentials.googleapis.com (or allServices) and exempt no
+# impersonator from them, so every token minted for these accounts is logged. See the README for why this only
 # holds at provision time.
 
 locals {
@@ -24,22 +24,37 @@ locals {
   # counts as "no audit config", so the precondition fails closed.
   project_policy = try(jsondecode(data.google_project_iam_policy.this.policy_data), {})
 
-  # Audit configs that make token minting visible: iamcredentials or
-  # allServices, with a DATA_READ log config that exempts none of the
-  # impersonators (an exempted caller's GenerateIdToken calls are not logged).
-  data_read_audited = anytrue([
-    for ac in try(local.project_policy.auditConfigs, []) : (
-      contains(["iamcredentials.googleapis.com", "allServices"], try(ac.service, "")) &&
-      anytrue([
-        for lc in try(ac.auditLogConfigs, []) : (
-          try(lc.logType, "") == "DATA_READ" &&
-          length(setintersection(toset(try(lc.exemptedMembers, [])), toset(var.impersonators))) == 0
-        )
-      ])
-    )
+  # Audit configs combine across services: GCP unions their log types and
+  # their exempted members. So the two conditions are checked separately,
+  # over the iamcredentials.googleapis.com and allServices configs together:
+  #   (a) DATA_READ is enabled in at least one of them, and
+  #   (b) no impersonator is exempted by any DATA_READ log config in either
+  #       (an exempted caller's GenerateIdToken calls are not logged).
+  # Members are compared lowercased on both sides. Only literal members are
+  # compared: an exemption through a group: that contains an impersonator is
+  # not detected.
+  token_audit_configs = [
+    for ac in try(local.project_policy.auditConfigs, []) : ac
+    if contains(["iamcredentials.googleapis.com", "allServices"], try(ac.service, ""))
+  ]
+
+  token_data_read_log_configs = flatten([
+    for ac in local.token_audit_configs : [
+      for lc in try(ac.auditLogConfigs, []) : lc if try(lc.logType, "") == "DATA_READ"
+    ]
   ])
 
-  audit_error = "project ${var.project_id} does not record DATA_READ audit logs for iamcredentials.googleapis.com (or allServices) without exempting an impersonator, so ID tokens minted for the test-runner accounts would go unlogged. Set iamcredentials_data_access_logs = true in configurations/shared-infra and apply it first (or add an equivalent allServices DATA_READ audit config), then re-run this plan. See modules/hub-test-runner/README.md."
+  token_data_read_exempted = toset(flatten([
+    for lc in local.token_data_read_log_configs : [for m in try(lc.exemptedMembers, []) : lower(m)]
+  ]))
+
+  data_read_audited = try(
+    length(local.token_data_read_log_configs) > 0 &&
+    length(setintersection(local.token_data_read_exempted, toset([for m in var.impersonators : lower(m)]))) == 0,
+    false
+  )
+
+  audit_error = "project ${var.project_id} does not record DATA_READ audit logs for iamcredentials.googleapis.com (or allServices), or exempts an impersonator from them in either config, so ID tokens minted for the test-runner accounts would go unlogged. Set iamcredentials_data_access_logs = true in configurations/shared-infra and apply it first (or add an equivalent allServices DATA_READ audit config), then re-run this plan. See modules/hub-test-runner/README.md."
 }
 
 # Read at plan time: only var.project_id feeds it.
@@ -129,26 +144,32 @@ resource "google_iap_web_backend_service_iam_member" "uat" {
 # Counts GenerateIdToken calls on either account whose caller is not one of
 # the impersonators. Only created when alert_notification_channels is set.
 #
-# Exact filter (NEEDS CONFIRMATION against a real GenerateIdToken
-# data-access log entry at review; methodName and the resource label in
-# particular):
+# Filter:
 #
 #   logName="projects/<project>/logs/cloudaudit.googleapis.com%2Fdata_access"
 #   protoPayload.serviceName="iamcredentials.googleapis.com"
 #   protoPayload.methodName:"GenerateIdToken"
-#   (protoPayload.resourceName:"<uat email>" OR protoPayload.resourceName:"<issuer email>")
+#   resource.type="service_account"
+#   resource.labels.email_id=("<uat email>" OR "<issuer email>")
 #   NOT protoPayload.authenticationInfo.principalEmail=("<impersonator 1>" OR ...)
 #
 # methodName uses ":" (substring) so it matches whether the entry carries
-# "GenerateIdToken" or a fully qualified method name. resourceName is
-# projects/-/serviceAccounts/<email>. Denied calls are logged too, so
-# attempts by other principals also count.
+# "GenerateIdToken" or a fully qualified method name. The target account is
+# matched on the log entry's monitored resource (service_account, labelled
+# with the account's email). Denied calls are logged too, so attempts by
+# other principals also count.
+#
+# The mock-provider tests cannot check this against GCP. The first live
+# enablement must confirm, against one real GenerateIdToken entry, that the
+# call is logged under DATA_READ (the data_access log) and that this filter
+# matches it.
 locals {
   foreign_token_mint_filter = join("\n", [
     "logName=\"projects/${var.project_id}/logs/cloudaudit.googleapis.com%2Fdata_access\"",
     "protoPayload.serviceName=\"iamcredentials.googleapis.com\"",
     "protoPayload.methodName:\"GenerateIdToken\"",
-    "(protoPayload.resourceName:\"${google_service_account.uat.email}\" OR protoPayload.resourceName:\"${google_service_account.issuer.email}\")",
+    "resource.type=\"service_account\"",
+    "resource.labels.email_id=(\"${google_service_account.uat.email}\" OR \"${google_service_account.issuer.email}\")",
     "NOT protoPayload.authenticationInfo.principalEmail=(${join(" OR ", [for e in local.impersonator_emails : "\"${e}\""])})",
   ])
 
@@ -170,9 +191,10 @@ resource "google_logging_metric" "foreign_token_mint" {
   }
 }
 
-# Fires on any matching call. The Monitoring filter names only the metric
-# type (no resource.type), so it matches whatever monitored resource the log
-# entries map to; confirm at review alongside the log filter above.
+# Fires on any matching call. The service_account log resource is not
+# expected to have a Monitoring resource type of its own, so the metric's
+# points are expected on resource.type="global". Confirm that on the metric descriptor after the
+# first data point (part of the first live enablement above).
 resource "google_monitoring_alert_policy" "foreign_token_mint" {
   count = local.alerts_enabled ? 1 : 0
 
@@ -185,7 +207,7 @@ resource "google_monitoring_alert_policy" "foreign_token_mint" {
     display_name = "GenerateIdToken by a non-impersonator"
 
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/${one(google_logging_metric.foreign_token_mint[*].name)}\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${one(google_logging_metric.foreign_token_mint[*].name)}\" AND resource.type=\"global\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -195,6 +217,10 @@ resource "google_monitoring_alert_policy" "foreign_token_mint" {
         per_series_aligner = "ALIGN_SUM"
       }
     }
+  }
+
+  alert_strategy {
+    auto_close = "1800s"
   }
 
   documentation {
