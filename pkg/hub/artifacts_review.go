@@ -87,7 +87,7 @@ func (s *Server) deliverArtifactReview(ctx context.Context, n artifacts.ReviewNo
 		}
 		msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{Msg: msg, CreatedAt: ts})
 	}
-	return dispatchWithBrokerRetry(ctx, dispatcher, agent, text, false, msg)
+	return dispatchWithBrokerRetry(ctx, s.recordLog(), dispatcher, agent, text, false, msg)
 }
 
 // artifactReviewNoticeText is the body of a review notice. It is built from

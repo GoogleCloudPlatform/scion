@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
@@ -379,6 +380,25 @@ func (_c *UserCreate) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserCreate
 	return _c.SetTerminalWorkspaceID(v.ID)
 }
 
+// SetTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID.
+func (_c *UserCreate) SetTestIdentityLoginCodeID(id uuid.UUID) *UserCreate {
+	_c.mutation.SetTestIdentityLoginCodeID(id)
+	return _c
+}
+
+// SetNillableTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID if the given value is not nil.
+func (_c *UserCreate) SetNillableTestIdentityLoginCodeID(id *uuid.UUID) *UserCreate {
+	if id != nil {
+		_c = _c.SetTestIdentityLoginCodeID(*id)
+	}
+	return _c
+}
+
+// SetTestIdentityLoginCode sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (_c *UserCreate) SetTestIdentityLoginCode(v *TestIdentityLoginCode) *UserCreate {
+	return _c.SetTestIdentityLoginCodeID(v.ID)
+}
+
 // Mutation returns the UserMutation object of the builder.
 func (_c *UserCreate) Mutation() *UserMutation {
 	return _c.mutation
@@ -672,6 +692,22 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.TestIdentityLoginCodeIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TestIdentityLoginCodeTable,
+			Columns: []string{user.TestIdentityLoginCodeColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(testidentitylogincode.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

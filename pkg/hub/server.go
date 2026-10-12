@@ -367,6 +367,11 @@ type ServerConfig struct {
 	// those routes return 404 and every test-fixture user is refused at
 	// authentication. It is a startup-only switch, never a runtime setting.
 	EnableTestIdentities bool
+	// TestIdentityWebSessionKey is the hub-local test identity web session
+	// key cmd read from the test infrastructure marker at startup (WS1,
+	// DEC-8), or the reason there is none. Without a usable key, test
+	// identity web sessions are unavailable; the member tier is unaffected.
+	TestIdentityWebSessionKey TestIdentityWebSessionKey
 	// TestAdminGate is the validated test admin tier gate
 	// (--enable-test-admin-identities, ptone/scion#4240 phase A0). cmd's
 	// validateTestAdminIdentities builds it; New re-checks it, verifies
@@ -1761,6 +1766,9 @@ type Server struct {
 	// testIdentities is the state of hub-issued test identities
 	// (handlers_test_identities.go).
 	testIdentities testIdentityState
+	// testIdentityWeb is the test identity web session state (WS1): the
+	// marker cookie codec built from the hub-local key, fixed in New.
+	testIdentityWeb testIdentityWebState
 
 	// testAdminGate is the immutable test admin tier gate captured by New
 	// (test_admin_gate.go). It has no setter: testAdminTierEnabled reads
@@ -2402,6 +2410,8 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// isReservedPlatformIdentity treats as inert.
 	srv.platformAuthSA = cfg.PlatformAuthSA
 	srv.testIdentities = newTestIdentityState(cfg.EnableTestIdentities)
+	srv.testIdentityWeb = newTestIdentityWebState(cfg.TestIdentityWebSessionKey)
+	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
 
 	// Store transport token minter if configured
@@ -2864,6 +2874,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// See platformAuthSA above: shared by the GE exchange endpoint and the
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
+	// Same policy as isUserAuthorized above, in its code-returning form,
+	// so a refusal's audit entry records the code the decision returned.
+	googleResolver.SetSignInDenial(srv.signInDenial)
 	// Give the resolver's existing-record-by-email branch the same
 	// account-state handling (invited activation, role re-evaluation,
 	// super-admin binding, grant sync, audit) that provisionUser's
@@ -3695,6 +3708,16 @@ func (s *Server) GetOperationalSettings() *OperationalSettings {
 func (s *Server) writeDenyEnabled() bool {
 	ops := s.GetOperationalSettings()
 	return ops != nil && ops.ConversationEnvelopeSwitch()
+}
+
+// recordLog returns the logger for message records: the dedicated message
+// logger if configured, otherwise the standard subsystem message logger
+// (the same choice as logMessage).
+func (s *Server) recordLog() *slog.Logger {
+	if s.dedicatedMessageLog != nil {
+		return s.dedicatedMessageLog
+	}
+	return s.messageLog
 }
 
 // logMessage logs a message dispatch event to the dedicated message logger
@@ -4858,7 +4881,7 @@ func (s *Server) messageEventHandler() EventHandler {
 		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer retryCancel()
 
-		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
+		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
 		}
 		// Log the revision authority the send ran under alongside the
@@ -6636,6 +6659,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/test-identities", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities", s.handleCreateTestIdentity)))
 	s.mux.HandleFunc("GET /api/v1/test-identities", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identities", s.handleListTestIdentities)))
 	s.mux.HandleFunc("POST /api/v1/test-identities/{id}/token", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities/{id}/token", s.handleIssueTestIdentityToken)))
+	s.mux.HandleFunc("POST /api/v1/test-identities/{id}/web-login-code", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities/{id}/web-login-code", s.handleIssueTestIdentityWebCode)))
 	// Admin-kind test identities (admin tier A1). 404 for every caller
 	// unless the test admin gate is on; the gate runs before the guard.
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin", s.handleIssueTestAdminIdentity)))

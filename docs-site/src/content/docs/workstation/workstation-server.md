@@ -28,10 +28,16 @@ This command performs several actions simultaneously:
 2.  **Starts a Broker**: Binds a local broker interface to execute containers.
 3.  **Links Them**: Automatically registers the local broker with the local hub.
 
+When the server is up, `scion server start` asks the Hub whether onboarding is complete. If it is not, it prints and opens the [onboarding wizard](/scion/getting-started/onboarding/) (`/onboarding`); otherwise it opens the Web Dashboard. If the Hub's onboarding status cannot be read, Scion opens the wizard only when no global settings file existed before this start.
+
+**No image registry yet.** The Runtime Broker needs `image_registry` to pull agent images. If it is not set, the Hub and Web Dashboard still start, so the wizard (which sets the registry) is reachable, and the Runtime Broker is skipped with a warning. Set the registry in the wizard or with `scion config set --global image_registry <registry>`, then run `scion server restart` to start the Runtime Broker. (A hosted server still refuses to start without it.)
+
+**Harness logins from your home directory.** Agents run by the co-located Runtime Broker can use the harness login files you already have in your home directory (for example a Claude or Codex login). Only files declared by the harness configs built into Scion are copied, and only when they resolve to a regular file inside your home directory. A Hub secret with the same name or target always wins.
+
 Because it runs as a background daemon, you can manage its lifecycle using:
 - `scion server status`: View running status, PID, and log file location. A degraded server (up, but a non-critical check such as the co-located broker is failing) is shown as running with the failing checks named; an unhealthy one (database or workspace storage failing) is shown as unhealthy. A degraded runtime broker is shown on its own line with its failing checks; the Hub API line reflects only the hub's own checks, and the Web Frontend line reflects the combined status. With `--json`, `hubRunning`/`webRunning`/`brokerRunning` are true when the component is up (healthy or degraded), `hubStatus`/`webStatus`/`brokerStatus` hold the status when it is not healthy (`degraded` or `unhealthy`), and `hubHealthReason`/`webHealthReason`/`brokerHealthReason` name the failing checks (for example `colocated_broker: unhealthy: registration failed`). The `*Status` and `*HealthReason` keys are omitted for a component that is healthy or not detected.
 - `scion server restart`: Restart the daemon.
-- `scion server stop`: Stop the background process.
+- `scion server stop`: Stop the background process. It waits up to 30 seconds for the process to exit. If it is still running after that, the command fails and keeps the PID file so the process can still be found; `scion server stop --force` then stops it.
 
 If you prefer to run the server interactively, use the `--foreground` flag:
 

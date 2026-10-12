@@ -2881,7 +2881,7 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 
 	update(&info)
 
-	newData, err := json.MarshalIndent(info, "", "  ")
+	newData, err := marshalAgentInfoKeepUnknown(data, &info)
 	if err != nil {
 		return err
 	}

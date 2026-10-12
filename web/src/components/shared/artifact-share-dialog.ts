@@ -21,6 +21,14 @@
  *
  * A share link opens the artifact in the hub's sandboxed viewer; the token
  * is shown only in the answer that created it and never again.
+ *
+ * With mode "review" it is the Grant review access dialog, for a caller the
+ * hub reports canGrantReview for (the delegating user of the agent that
+ * owns the artifact, the project owners and admins of its home project,
+ * and super-admins; design D24, ptone/scion#4014): only the people search,
+ * offering users, with the permission fixed to write. It loads neither the
+ * grants nor the share links (both admin-only) and shows the grants it
+ * made, not a grant list.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -70,6 +78,9 @@ export interface ShareSubject {
   detail: string;
 }
 
+/** "share": the full Share dialog; "review": Grant review access only. */
+export type ShareDialogMode = 'share' | 'review';
+
 /** A retention choice: keep, the current expiry, or a number of days from now. */
 export type RetentionChoice = 'never' | 'current' | `${number}d`;
 
@@ -106,6 +117,8 @@ export class ScionArtifactShareDialog extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
   /** The signed-in user, shown as "You". */
   @property({ type: String }) currentUserId = '';
+  /** "review" limits the dialog to giving users review access. */
+  @property({ type: String }) mode: ShareDialogMode = 'share';
 
   @state() private loading = false;
   @state() private loadError: string | null = null;
@@ -127,6 +140,8 @@ export class ScionArtifactShareDialog extends LitElement {
   @state() private saving = false;
   /** Display names by "user:id", "agent:id" or "project:id". */
   @state() private names = new Map<string, string>();
+  /** In review mode: the people given review access since the dialog opened. */
+  @state() private reviewers: string[] = [];
 
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private searchGen = 0;
@@ -309,12 +324,17 @@ export class ScionArtifactShareDialog extends LitElement {
     if (!changed.has('open')) return;
     if (this.open) {
       this.reset();
+      if (this.reviewOnly) return;
       void this.load();
     } else {
       // A created link is shown once: forget it as soon as the dialog
       // closes, so it stays neither in memory nor in the hidden dialog.
       this.forgetCreated();
     }
+  }
+
+  private get reviewOnly(): boolean {
+    return this.mode === 'review';
   }
 
   private forgetCreated(): void {
@@ -330,8 +350,19 @@ export class ScionArtifactShareDialog extends LitElement {
     this.query = '';
     this.suggestions = [];
     this.subject = null;
-    this.permission = 'read';
+    this.permission = this.reviewOnly ? 'write' : 'read';
     this.retention = this.artifact?.expiresAt ? 'current' : 'never';
+    this.reviewers = [];
+    if (this.reviewOnly) {
+      // Review mode reads no grants or links; drop any a previous Share
+      // session left, so neither the search filter nor the page uses them.
+      this.loadGen++;
+      this.loading = false;
+      this.loadError = null;
+      this.links = [];
+      this.grants = [];
+      this.crossProjectSharing = false;
+    }
   }
 
   private async load(): Promise<void> {
@@ -456,7 +487,8 @@ export class ScionArtifactShareDialog extends LitElement {
   private async search(q: string): Promise<void> {
     const gen = ++this.searchGen;
     const users = searchUsers(q);
-    const projects = this.crossProjectSharing ? searchProjects(q) : Promise.resolve([]);
+    const projects =
+      this.crossProjectSharing && !this.reviewOnly ? searchProjects(q) : Promise.resolve([]);
     const [u, p] = await Promise.all([users, projects]);
     if (gen !== this.searchGen) return;
     const taken = new Set(this.grants.map((g) => `${g.subjectKind}:${g.subjectRef}`));
@@ -470,6 +502,10 @@ export class ScionArtifactShareDialog extends LitElement {
   }
 
   private async add(): Promise<void> {
+    if (this.reviewOnly) {
+      await this.grantReview();
+      return;
+    }
     const a = this.artifact;
     const s = this.subject;
     if (!a || !s || this.adding) return;
@@ -484,6 +520,26 @@ export class ScionArtifactShareDialog extends LitElement {
       this.query = '';
     } catch (err) {
       this.fail(err, 'Could not share');
+    } finally {
+      this.adding = false;
+    }
+  }
+
+  /** Review mode's Add: a write grant to the picked user, and nothing else. */
+  private async grantReview(): Promise<void> {
+    const a = this.artifact;
+    const s = this.subject;
+    if (!a || !s || this.adding) return;
+    if (s.subjectKind !== 'principal' || splitPrincipal(s.subjectRef)[0] !== 'user') return;
+    this.adding = true;
+    this.error = null;
+    try {
+      await putGrant(a.id, 'principal', s.subjectRef, 'write');
+      this.reviewers = [...this.reviewers.filter((r) => r !== s.label), s.label];
+      this.subject = null;
+      this.query = '';
+    } catch (err) {
+      this.fail(err, 'Could not grant review access');
     } finally {
       this.adding = false;
     }
@@ -744,6 +800,60 @@ export class ScionArtifactShareDialog extends LitElement {
     `;
   }
 
+  private renderReview(a: Artifact): TemplateResult {
+    // Follows the people section of the approved Share mock, limited to
+    // giving a user review access (ptone/scion#4593).
+    return html`
+      <section aria-labelledby="review-heading">
+        <p class="hint" id="review-heading">
+          Give a person review access to “${a.title}”. They will be able to read it and publish new
+          versions, including reviews.
+        </p>
+        ${this.reviewers.map(
+          (r) =>
+            html`<sl-alert class="granted" variant="success" open>
+              <sl-icon slot="icon" name="check-circle-fill"></sl-icon>
+              <strong>${r}</strong> can now edit and review.
+            </sl-alert>`
+        )}
+        <div class="row">
+          <div class="picker grow">
+            <sl-input
+              size="small"
+              placeholder="Search people"
+              aria-label="User"
+              autocomplete="off"
+              .value=${this.query}
+              @sl-input=${(e: Event): void => this.onQuery(e)}
+            ></sl-input>
+            ${this.suggestions.length > 0
+              ? html`<ul class="suggestions" role="listbox">
+                  ${this.suggestions.map(
+                    (s) =>
+                      html`<li role="option">
+                        <button type="button" @click=${(): void => this.pick(s)}>
+                          <sl-icon name="person"></sl-icon>
+                          <span>${s.label}</span>
+                          <span class="muted">${s.detail}</span>
+                        </button>
+                      </li>`
+                  )}
+                </ul>`
+              : nothing}
+          </div>
+          <span class="muted permission">Permission: ${PERMISSION_LABELS.write}</span>
+          <sl-button
+            size="small"
+            ?disabled=${!this.subject}
+            ?loading=${this.adding}
+            @click=${(): void => void this.add()}
+            >Add</sl-button
+          >
+        </div>
+      </section>
+    `;
+  }
+
   private renderPermissionSelect(
     value: GrantPermission,
     disabled: boolean,
@@ -849,6 +959,17 @@ export class ScionArtifactShareDialog extends LitElement {
   }
 
   private renderBody(a: Artifact): TemplateResult {
+    if (this.reviewOnly) {
+      return html`
+        ${this.error
+          ? html`<sl-alert variant="danger" open role="alert">
+              <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+              ${this.error}
+            </sl-alert>`
+          : nothing}
+        ${this.renderReview(a)}
+      `;
+    }
     if (this.loading) {
       return html`<div class="row"><sl-spinner></sl-spinner> Loading…</div>`;
     }
@@ -874,7 +995,7 @@ export class ScionArtifactShareDialog extends LitElement {
     const a = this.artifact;
     return html`
       <sl-dialog
-        label=${a ? `Share “${a.title}”` : 'Share'}
+        label=${this.reviewOnly ? 'Grant review access' : a ? `Share “${a.title}”` : 'Share'}
         ?open=${this.open}
         @sl-after-hide=${(e: Event): void => {
           if (e.target === e.currentTarget && this.open) this.close();
@@ -882,27 +1003,31 @@ export class ScionArtifactShareDialog extends LitElement {
       >
         ${a ? this.renderBody(a) : nothing}
         <div slot="footer" class="footer">
-          ${this.retentionChanged
-            ? html`
-                <sl-button
-                  size="small"
-                  ?disabled=${this.saving}
-                  @click=${(): void => {
-                    this.retention = this.initialRetention;
-                  }}
-                  >Cancel</sl-button
-                >
-                <sl-button
-                  size="small"
-                  variant="primary"
-                  ?loading=${this.saving}
-                  @click=${(): void => void this.saveRetention()}
-                  >Save</sl-button
-                >
-              `
-            : html`<sl-button size="small" variant="primary" @click=${(): void => this.close()}
-                >Done</sl-button
-              >`}
+          ${this.reviewOnly
+            ? html`<sl-button size="small" variant="primary" @click=${(): void => this.close()}
+                >Close</sl-button
+              >`
+            : this.retentionChanged
+              ? html`
+                  <sl-button
+                    size="small"
+                    ?disabled=${this.saving}
+                    @click=${(): void => {
+                      this.retention = this.initialRetention;
+                    }}
+                    >Cancel</sl-button
+                  >
+                  <sl-button
+                    size="small"
+                    variant="primary"
+                    ?loading=${this.saving}
+                    @click=${(): void => void this.saveRetention()}
+                    >Save</sl-button
+                  >
+                `
+              : html`<sl-button size="small" variant="primary" @click=${(): void => this.close()}
+                  >Done</sl-button
+                >`}
         </div>
       </sl-dialog>
     `;

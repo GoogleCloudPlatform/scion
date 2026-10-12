@@ -636,6 +636,30 @@ func TestAgentModeAllowsKeys(t *testing.T) {
 		"agent mode must keep the keys command")
 }
 
+// TestSSHCommands_HumanOnly pins that ssh and ssh-config are absent in agent
+// mode: they are not in agentAllowed and are removed from the real tree.
+func TestSSHCommands_HumanOnly(t *testing.T) {
+	for _, name := range []string{"ssh", "ssh-config"} {
+		t.Run(name, func(t *testing.T) {
+			assert.False(t, agentAllowed[name], "agentAllowed must not contain %s", name)
+			real := resolveCommandPath(rootCmd, name)
+			require.NotNil(t, real, "%s must exist in the real command tree", name)
+
+			root := &cobra.Command{Use: "scion"}
+			root.AddCommand(cloneCommandShape(real))
+			t.Setenv("SCION_CLI_MODE", "agent")
+			applyModeRestrictions(root, resolveMode())
+			assert.Nil(t, resolveCommandPath(root, name), "%s must be removed in agent mode", name)
+
+			root = &cobra.Command{Use: "scion"}
+			root.AddCommand(cloneCommandShape(real))
+			t.Setenv("SCION_CLI_MODE", "human")
+			applyModeRestrictions(root, resolveMode())
+			assert.NotNil(t, resolveCommandPath(root, name), "%s stays in human mode", name)
+		})
+	}
+}
+
 // The tunnel commands are human-only: they are not in agentAllowed, and
 // agent-mode filtering over the real tunnel subtree removes all of it.
 func TestTunnelCommandsAbsentInAgentMode(t *testing.T) {
