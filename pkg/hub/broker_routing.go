@@ -223,9 +223,9 @@ func StoreAffinityLookup(st store.Store, freshness time.Duration) func(ctx conte
 // message log. The rule: each message gets one record, written when the hub
 // hands the message to delivery and before the outcome is known, so
 // deferred and failed deliveries keep theirs. Outcome lines are tagged
-// log_kind=event. A nil logger or message writes nothing.
+// log_kind=event. A nil logger, agent or message writes nothing.
 func logMessageRecord(l *slog.Logger, agent *store.Agent, structuredMsg *messages.StructuredMessage) {
-	if l == nil || structuredMsg == nil {
+	if l == nil || agent == nil || structuredMsg == nil {
 		return
 	}
 	attrs := []any{"agent_id", agent.ID, "project_id", agent.ProjectID}
