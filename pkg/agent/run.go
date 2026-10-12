@@ -2423,6 +2423,7 @@ authDone:
 		// §3.8.4); nil on the synchronous path.
 		Checkpoint:        opts.Checkpoint,
 		OnResourceCreated: opts.OnResourceCreated,
+		Progress:          opts.Progress,
 	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())

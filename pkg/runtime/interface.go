@@ -213,6 +213,10 @@ type RunConfig struct {
 	// Checkpoint is set. Callers set both hooks together.
 	Checkpoint        func(ctx context.Context, step string) error
 	OnResourceCreated func(api.ResourceHandle)
+	// Progress is an async launch's non-blocking step hook (design wave 3
+	// §3 E-b), copied from api.StartOptions. Runtimes call it through
+	// launchHooks.progress, which is a no-op when it is nil.
+	Progress func(step, message string)
 
 	// KubernetesBlockIdentity marks a pod whose GCP identity mode is
 	// "block" (ptone/scion#4034). The Kubernetes runtime then sets
@@ -226,21 +230,71 @@ type RunConfig struct {
 
 // Checkpoint step names a runtime passes to RunConfig.Checkpoint (design
 // §3.9's step names; container runtimes keep the generic "launching" step).
+// They are the shared api.LaunchStep* values.
 const (
-	CheckpointStepSecrets   = "secrets"
-	CheckpointStepPodCreate = "pod_create"
-	CheckpointStepLaunching = "launching"
+	CheckpointStepSecrets   = api.LaunchStepSecrets
+	CheckpointStepPodCreate = api.LaunchStepPodCreate
+	CheckpointStepLaunching = api.LaunchStepLaunching
 	// CheckpointStepPreClean precedes a name-based delete of a stale
 	// resource left by an earlier agent of the same name.
-	CheckpointStepPreClean = "pre_clean"
+	CheckpointStepPreClean = api.LaunchStepPreClean
 )
 
+// launchStepMessages is the fixed text a runtime sends with each progress
+// step (RunConfig.Progress). It never carries runtime detail such as an
+// image reference, pod name or namespace.
+var launchStepMessages = map[string]string{
+	api.LaunchStepScheduling:       "waiting to be scheduled",
+	api.LaunchStepAwaitingCapacity: "waiting for node capacity",
+	api.LaunchStepInitContainers:   "running init containers",
+	api.LaunchStepContainerCreate:  "preparing the container (image pull, volume mounts)",
+	api.LaunchStepContainerStart:   "starting the container",
+	api.LaunchStepHomeSync:         "syncing the agent home",
+	api.LaunchStepWorkspaceSync:    "syncing the workspace",
+	api.LaunchStepStartupGate:      "starting the agent",
+}
+
+// LaunchFailure is a runtime start failure the runtime could classify
+// (design wave 3 §3 E-d): Code is an api.LaunchCode* value, Step the
+// api.LaunchStep* value the launch failed in, and Reason the runtime's own
+// reason enum (e.g. the Kubernetes waiting reason "ImagePullBackOff"), never
+// free text, an image reference or an object name. Err is the full error;
+// Error returns its text unchanged, so callers that print or match the
+// error see exactly what they saw before the error was typed.
+type LaunchFailure struct {
+	Code   string
+	Step   string
+	Reason string
+	Err    error
+}
+
+// Error returns the wrapped error's text.
+func (f *LaunchFailure) Error() string {
+	if f.Err == nil {
+		return f.Code
+	}
+	return f.Err.Error()
+}
+
+// Unwrap returns the wrapped error.
+func (f *LaunchFailure) Unwrap() error { return f.Err }
+
+// newLaunchFailure wraps err as a LaunchFailure, or returns nil when err is
+// nil.
+func newLaunchFailure(code, step, reason string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &LaunchFailure{Code: code, Step: step, Reason: reason, Err: err}
+}
+
 // launchHooks carries RunConfig's async-launch hooks into the helpers that
-// make the resource-creating calls. Its zero value (both hooks nil, the
+// make the resource-creating calls. Its zero value (every hook nil, the
 // synchronous path) makes every method a no-op.
 type launchHooks struct {
 	checkpointFn func(ctx context.Context, step string) error
 	createdFn    func(api.ResourceHandle)
+	progressFn   func(step, message string)
 	// recordFn, when set, also receives every created handle. Unlike
 	// createdFn it does not make the hooks active: the Kubernetes runtime
 	// uses it to remember the objects a start created (verifyStartObjects).
@@ -249,7 +303,16 @@ type launchHooks struct {
 
 // launchHooks returns config's async-launch hooks.
 func (config *RunConfig) launchHooks() launchHooks {
-	return launchHooks{checkpointFn: config.Checkpoint, createdFn: config.OnResourceCreated}
+	return launchHooks{checkpointFn: config.Checkpoint, createdFn: config.OnResourceCreated, progressFn: config.Progress}
+}
+
+// progress reports that the launch reached step, with the step's fixed
+// message. It must not block, and is a no-op when the hook is nil.
+func (h launchHooks) progress(step string) {
+	if h.progressFn == nil {
+		return
+	}
+	h.progressFn(step, launchStepMessages[step])
 }
 
 // checkpoint is called immediately before a resource-creating call. A

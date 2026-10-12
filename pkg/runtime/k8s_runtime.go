@@ -75,6 +75,13 @@ type KubernetesRuntime struct {
 	// real exec transport.
 	execProbe execProbeFunc
 
+	// podReadyPollInterval and podReadyTimeout, when non-zero, replace
+	// waitForPodReady's 2s poll interval and 10 min budget. Zero (the
+	// default from NewKubernetesRuntime) keeps the defaults; tests shorten
+	// them so a scripted pod-status sequence runs quickly.
+	podReadyPollInterval time.Duration
+	podReadyTimeout      time.Duration
+
 	// podExec, when set, replaces execInPod's exec transport. Tests use it
 	// to record the in-pod commands Run issues without a real API server.
 	podExec func(ctx context.Context, namespace, podName string, cmd []string) (string, error)
@@ -836,7 +843,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 
 	// Wait for Ready
 	runtimeLog.Info("Waiting for pod ready", "agent", config.Name, "namespace", namespace, "phase", "wait-schedule")
-	if err := r.waitForPodReady(ctx, namespace, createdPod.Name); err != nil {
+	if err := r.waitForPodReady(ctx, namespace, createdPod.Name, hooks); err != nil {
 		return createdPod.Name, err
 	}
 
@@ -873,6 +880,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	if config.HomeDir != "" {
 		destHome := util.GetHomeDir(config.UnixUsername)
 		runtimeLog.Info("Syncing agent home", "agent", config.Name, "source", config.HomeDir, "dest", destHome, "phase", "home-sync")
+		hooks.progress(api.LaunchStepHomeSync)
 		fmt.Printf("  Syncing agent home (%s -> %s)...\n", config.HomeDir, destHome)
 		homeSyncStart := time.Now()
 		// NFS-home pods: the sync never writes over a link target, and the
@@ -969,6 +977,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	nfsProvisioned := nfsInitContainerInjected(config)
 	if config.Workspace != "" && (config.WorkspaceBackendName != "nfs" || !nfsProvisioned) {
 		runtimeLog.Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
+		hooks.progress(api.LaunchStepWorkspaceSync)
 		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
 		workspaceSyncStart := time.Now()
 		err = r.syncWithRetry(ctx, func() error {
@@ -998,6 +1007,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// so it's safe to launch sciontool init → tmux → harness. The gate loop
 	// in the pod command polls for this marker file (see buildPod for details).
 	runtimeLog.Info("Signaling startup gate", "agent", config.Name, "phase", "startup-gate")
+	hooks.progress(api.LaunchStepStartupGate)
 	gateStart := time.Now()
 	if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"touch", "/tmp/.scion-home-ready"}); err != nil {
 		return createdPod.Name, fmt.Errorf("failed to signal startup gate: %w", err)
@@ -3066,7 +3076,36 @@ const annotationSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 // containers — the resulting error names the init container so it can be
 // told apart from the main container in logs. Shared by the init-container
 // and main-container checks in waitForPodReady so their wording can't drift.
+//
+// The error is a *LaunchFailure (design wave 3 §3 E-d) carrying the launch
+// code and step for reason, with Reason set to the Kubernetes reason alone;
+// its text is the plain error's. Any terminal reason of an init container
+// is init_container_failed.
 func classifyTerminalWaitingReason(podName, initContainerName, reason, message string) error {
+	err := terminalWaitingReasonError(podName, initContainerName, reason, message)
+	if err == nil {
+		return nil
+	}
+	if initContainerName != "" {
+		return newLaunchFailure(api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, reason, err)
+	}
+	switch reason {
+	case "ImagePullBackOff", "ErrImagePull":
+		return newLaunchFailure(api.LaunchCodeImagePullFailed, api.LaunchStepContainerCreate, reason, err)
+	case "InvalidImageName":
+		return newLaunchFailure(api.LaunchCodeInvalidImage, api.LaunchStepContainerCreate, reason, err)
+	case "CreateContainerConfigError":
+		return newLaunchFailure(api.LaunchCodeContainerConfig, api.LaunchStepContainerCreate, reason, err)
+	case "CrashLoopBackOff":
+		return newLaunchFailure(api.LaunchCodeCrashLoop, api.LaunchStepContainerStart, reason, err)
+	default:
+		return err
+	}
+}
+
+// terminalWaitingReasonError is classifyTerminalWaitingReason's plain error
+// text.
+func terminalWaitingReasonError(podName, initContainerName, reason, message string) error {
 	container := fmt.Sprintf("pod %q", podName)
 	if initContainerName != "" {
 		container = fmt.Sprintf("init container %q in pod %q", initContainerName, podName)
@@ -3086,6 +3125,42 @@ func classifyTerminalWaitingReason(podName, initContainerName, reason, message s
 	default:
 		return nil
 	}
+}
+
+// podLaunchStep derives the launch step (an api.LaunchStep* value) of a pod
+// that is not yet ready from its status alone (design wave 3 §3 E-c; no
+// Events are read). gke selects awaiting_capacity for an unschedulable pod,
+// which GKE provisions capacity for. An unscheduled pod is in scheduling
+// whatever its container statuses say, and a main container waiting for any
+// reason (image pull or volume mount alike) is in container_create. A
+// running main container is in container_start: waitForPodReady returns on
+// that poll, and its step covers Run's exec-tunnel wait that follows.
+func podLaunchStep(pod *corev1.Pod, gke bool) string {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == agentContainerName && cs.State.Running != nil {
+			return api.LaunchStepContainerStart
+		}
+	}
+	scheduled := false
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type != corev1.PodScheduled {
+			continue
+		}
+		if cond.Status == corev1.ConditionTrue {
+			scheduled = true
+		} else if cond.Reason == corev1.PodReasonUnschedulable && gke {
+			return api.LaunchStepAwaitingCapacity
+		}
+	}
+	if !scheduled {
+		return api.LaunchStepScheduling
+	}
+	for _, ics := range pod.Status.InitContainerStatuses {
+		if ics.State.Waiting != nil || ics.State.Running != nil {
+			return api.LaunchStepInitContainers
+		}
+	}
+	return api.LaunchStepContainerCreate
 }
 
 // podTimingUnavailable marks a podLifecycleTimings field as not computable,
@@ -3192,26 +3267,50 @@ func logPodLifecycleTimings(namespace, podName string, waitMs int64, t podLifecy
 	runtimeLog.Info("Pod ready", attrs...)
 }
 
-func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string) error {
+// waitForPodReady polls the pod until its main container runs. hooks
+// receives a progress step (podLaunchStep) each time the step changes.
+// Terminal failures are *LaunchFailure errors; so is the end of its own time
+// budget while ctx is still live (launch_timeout, in the last step seen).
+func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string, hooks launchHooks) error {
 	waitStart := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute) // GKE Autopilot can be slow
+	parentCtx := ctx
+	timeout := r.podReadyTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Minute // GKE Autopilot can be slow
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	ticker := time.NewTicker(2 * time.Second)
+	pollInterval := r.podReadyPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	lastStatus := ""
+	lastStep := ""
 	autopilotWaitLogged := false
 
 	fmt.Printf("Waiting for pod '%s' to be ready...\n", podName)
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for pod to be ready: %w", ctx.Err())
+			err := fmt.Errorf("timed out waiting for pod to be ready: %w", ctx.Err())
+			if parentCtx.Err() == nil {
+				// Our own budget ran out, not the caller's.
+				return newLaunchFailure(api.LaunchCodeLaunchTimeout, lastStep, "", err)
+			}
+			return err
 		case <-ticker.C:
 			pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 			if err != nil {
 				return err
+			}
+
+			if step := podLaunchStep(pod, r.isGKEScheduling()); step != lastStep {
+				lastStep = step
+				hooks.progress(step)
 			}
 
 			// F-111 review (tf-lead): init container failures (most notably
@@ -3227,8 +3326,9 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 					runtimeLog.Error("Init container failed", "pod", podName, "container", ics.Name,
 						"exitCode", ics.State.Terminated.ExitCode, "reason", ics.State.Terminated.Reason,
 						"message", ics.State.Terminated.Message, "phase", "init-container")
-					return fmt.Errorf("init container %q failed in pod %q: exit code %d (%s): %s",
-						ics.Name, podName, ics.State.Terminated.ExitCode, ics.State.Terminated.Reason, ics.State.Terminated.Message)
+					return newLaunchFailure(api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, ics.State.Terminated.Reason,
+						fmt.Errorf("init container %q failed in pod %q: exit code %d (%s): %s",
+							ics.Name, podName, ics.State.Terminated.ExitCode, ics.State.Terminated.Reason, ics.State.Terminated.Message))
 				}
 				if ics.State.Waiting != nil {
 					if err := classifyTerminalWaitingReason(podName, ics.Name, ics.State.Waiting.Reason, ics.State.Waiting.Message); err != nil {
@@ -3280,7 +3380,8 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 						runtimeLog.Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", message, "phase", "scheduling")
 					} else {
 						runtimeLog.Error("Pod unschedulable", "pod", podName, "message", message, "phase", "scheduling")
-						return fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, message)
+						return newLaunchFailure(api.LaunchCodeUnschedulable, api.LaunchStepScheduling, reason,
+							fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, message))
 					}
 				}
 			}
@@ -3298,7 +3399,8 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 						}
 					} else {
 						runtimeLog.Error("Pod unschedulable", "pod", podName, "message", cond.Message, "phase", "scheduling")
-						return fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, cond.Message)
+						return newLaunchFailure(api.LaunchCodeUnschedulable, api.LaunchStepScheduling, cond.Reason,
+							fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, cond.Message))
 					}
 				}
 			}
