@@ -681,10 +681,10 @@ func TestSweepHandler_StopsWhenBudgetBelowAttemptTimeout(t *testing.T) {
 	setRetryAttemptTimeout(t, 600*time.Millisecond)
 
 	env := setupNotificationTest(t)
-	_, subB := addSubscriberOnBroker(t, env, "subscriber-b")
+	subscriberB, subB := addSubscriberOnBroker(t, env, "subscriber-b")
 	d := &brokerDeferringDispatcher{deferBrokers: map[string]bool{
 		env.subscriber.RuntimeBrokerID: true,
-		tid("subscriber-b-broker"):     true,
+		subscriberB.RuntimeBrokerID:    true,
 	}}
 	nd := NewNotificationDispatcher(env.store, env.pub, func() AgentDispatcher { return d }, slog.Default())
 	srv := &Server{store: env.store, agentLifecycleLog: slog.Default(), notificationDispatcher: nd}
@@ -698,7 +698,10 @@ func TestSweepHandler_StopsWhenBudgetBelowAttemptTimeout(t *testing.T) {
 	defer cancel()
 	srv.notificationDispatchSweepHandler()(ctx)
 
-	assert.Len(t, d.getCalls(), 1, "no attempt may start with less than one attempt timeout left")
+	// Count per subscriber, not total calls: one 600ms attempt can make two
+	// calls, because dispatchWithBrokerRetry retries a deferral after 500ms.
+	assert.GreaterOrEqual(t, d.callsFor(env.subscriber.ID), 1, "the first notification must be attempted")
+	assert.Equal(t, 0, d.callsFor(subscriberB.ID), "no attempt may start with less than one attempt timeout left")
 	assert.False(t, notificationDispatched(t, env, first), "the attempted notification must be reverted")
 	assert.False(t, notificationDispatched(t, env, second), "the unattempted notification must stay undispatched")
 }
