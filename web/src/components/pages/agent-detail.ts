@@ -108,8 +108,13 @@ function launchStepLabel(step: string): string {
   return step.replace(/_/g, ' ');
 }
 
-/** Display text for how a launch ended (store.LaunchEndReason*). */
-function launchEndReasonLabel(endReason?: string): string | undefined {
+/**
+ * Display text for how a launch ended (store.LaunchEndReason*). The hub omits
+ * an empty reason rather than sending null, but a missing, null or empty
+ * reason all mean "no reason" here.
+ */
+function launchEndReasonLabel(endReason?: string | null): string | undefined {
+  if (!endReason) return undefined;
   switch (endReason) {
     case 'failed':
       return 'failed';
@@ -117,9 +122,6 @@ function launchEndReasonLabel(endReason?: string): string | undefined {
       return 'timed out';
     case 'lost':
       return 'broker lost';
-    case undefined:
-    case '':
-      return undefined;
     default:
       return endReason.replace(/_/g, ' ');
   }

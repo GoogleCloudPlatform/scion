@@ -224,6 +224,19 @@ describe('agent page for a create that did not complete', () => {
     expect(text(host.querySelector('[data-testid="launch-error-code"]'))).toBe(want);
   });
 
+  // The hub omits an empty endReason (omitempty) and never sends null, but
+  // the banner must still render if a null reaches it (GCP#3379 review).
+  it('shows only the code when the end reason is null', () => {
+    const launch = { ...failedLaunch(), endReason: null } as unknown as AgentLaunch;
+    const agent = makeAgent({ phase: 'error', message: 'm', launch });
+
+    let host: HTMLElement | undefined;
+    expect(() => {
+      host = renderBanner(agent);
+    }).not.toThrow();
+    expect(text(host!.querySelector('[data-testid="launch-error-code"]'))).toBe('runtime_error');
+  });
+
   it('omits the delete offer without delete permission', () => {
     const host = renderBanner({ ...failed, _capabilities: { actions: ['read', 'lifecycle'] } });
 
