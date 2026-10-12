@@ -2324,6 +2324,7 @@ var (
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
 		{Name: "permissions", Type: field.TypeJSON, Nullable: true},
 		{Name: "system", Type: field.TypeBool, Default: false},
+		{Name: "confers_membership", Type: field.TypeBool, Default: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}
