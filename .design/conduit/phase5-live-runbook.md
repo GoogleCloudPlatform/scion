@@ -303,8 +303,8 @@ reason, under "CI only" after the checklist.
 5. *Optional, test hub only, with the hub owner's agreement:* with the
    broker of `A1` stopped, the same command for `A1` exits 10 with
    `Error: the agent's runtime broker is not connected (runtime_broker_unavailable)`.
-6. If you stopped the broker in step 5, restart it, and wait until the
-   `A1` tunnel from step 1 answers `200` again (reopen it if it exited).
+6. If you stopped the broker in step 5, restart it. Then open an `A1`
+   tunnel as in step 1 and check that it answers `200`.
 7. A hub without tunnels. This needs a test hub whose REST API works and
    whose conduit experiment is off (`HUB_OFF_URL`), with an agent `P/A` on
    it:
