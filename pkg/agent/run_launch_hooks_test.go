@@ -34,6 +34,7 @@ func TestStart_PassesLaunchHooksToRun(t *testing.T) {
 
 	var steps []string
 	var handles []api.ResourceHandle
+	var progress []string
 	ran := false
 	mockRT := &runtime.MockRuntime{
 		NameFunc: func() string { return "kubernetes" },
@@ -41,7 +42,9 @@ func TestStart_PassesLaunchHooksToRun(t *testing.T) {
 			ran = true
 			require.NotNil(t, config.Checkpoint, "RunConfig.Checkpoint")
 			require.NotNil(t, config.OnResourceCreated, "RunConfig.OnResourceCreated")
+			require.NotNil(t, config.Progress, "RunConfig.Progress")
 			require.NoError(t, config.Checkpoint(ctx, "secrets"))
+			config.Progress(api.LaunchStepScheduling, "waiting to be scheduled")
 			config.OnResourceCreated(api.ResourceHandle{Kind: api.ResourceKindPod, Name: "test-agent", UID: "u-1"})
 			return "mock-id", nil
 		},
@@ -56,9 +59,11 @@ func TestStart_PassesLaunchHooksToRun(t *testing.T) {
 			return nil
 		},
 		OnResourceCreated: func(h api.ResourceHandle) { handles = append(handles, h) },
+		Progress:          func(step, message string) { progress = append(progress, step+": "+message) },
 	})
 	require.NoError(t, err)
 	require.True(t, ran, "Runtime.Run was not called")
+	assert.Equal(t, []string{"scheduling: waiting to be scheduled"}, progress)
 	assert.Equal(t, []string{"secrets"}, steps)
 	assert.Equal(t, []api.ResourceHandle{{Kind: api.ResourceKindPod, Name: "test-agent", UID: "u-1"}}, handles)
 }

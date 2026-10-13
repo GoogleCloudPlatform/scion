@@ -89,15 +89,17 @@ func (r *RoleStore) activeRoleBindings(rbs []*ent.RoleBinding) []*ent.RoleBindin
 
 // entRoleDefinitionToStore converts an Ent RoleDefinition entity to a store.RoleDefinition model.
 func entRoleDefinitionToStore(rd *ent.RoleDefinition) *store.RoleDefinition {
+	confers := rd.ConfersMembership
 	return &store.RoleDefinition{
-		ID:          rd.ID.String(),
-		Name:        rd.Name,
-		Description: rd.Description,
-		ScopeType:   string(rd.ScopeType),
-		Permissions: rd.Permissions,
-		System:      rd.System,
-		CreatedAt:   rd.Created,
-		UpdatedAt:   rd.Updated,
+		ID:                rd.ID.String(),
+		Name:              rd.Name,
+		Description:       rd.Description,
+		ScopeType:         string(rd.ScopeType),
+		Permissions:       rd.Permissions,
+		System:            rd.System,
+		CreatedAt:         rd.Created,
+		UpdatedAt:         rd.Updated,
+		ConfersMembership: &confers,
 	}
 }
 
@@ -212,6 +214,10 @@ func (r *RoleStore) CreateRoleDefinition(ctx context.Context, rd *store.RoleDefi
 	}
 	if len(rd.Permissions) > 0 {
 		builder.SetPermissions(rd.Permissions)
+	}
+	// An unset ConfersMembership keeps the schema default (true).
+	if rd.ConfersMembership != nil {
+		builder.SetConfersMembership(*rd.ConfersMembership)
 	}
 
 	created, err := builder.Save(ctx)
@@ -489,7 +495,56 @@ func testAdminExpiry(t time.Time) time.Time { return t.UTC().Truncate(claimTimeR
 //   - super-admin is reconciler-only (D10)
 //   - Duplicate (role, principal, scope) is rejected via unique index
 //   - Lifecycle fields (NotBefore, ExpiresAt) are stored but not evaluated
+//   - A federated account is refused (ErrFederatedAccountRefused)
+//   - A role that does not confer membership is refused
+//     (ErrNonMembershipRoleRefused); CreateVisitorRoleBinding binds it
 func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding) (*store.RoleBinding, error) {
+	return r.createRoleBinding(ctx, rb, false)
+}
+
+// CreateVisitorRoleBinding creates a visitor grant: a binding of the seeded
+// project-visitor role, at project scope, to a federated account. It shares
+// CreateRoleBinding's validation, and differs only in what it admits: the
+// role must be the system project-visitor role (which does not confer
+// membership), the scope must be a project and the principal must be a
+// user whose account is UserKindFederated. Anything else is refused with
+// store.ErrVisitorBindingRefused. An empty RoleDefinitionID resolves the
+// project-visitor role by name. It runs on whichever client the store
+// holds, so it joins the transaction of a store passed to WithTx.
+func (r *RoleStore) CreateVisitorRoleBinding(ctx context.Context, rb *store.RoleBinding) (*store.RoleBinding, error) {
+	if rb == nil {
+		return nil, store.ErrVisitorBindingRefused
+	}
+	if rb.RoleDefinitionID == "" {
+		rd, err := r.client.RoleDefinition.Query().
+			Where(
+				roledefinition.NameEQ(store.ProjectRoleVisitor),
+				roledefinition.ScopeTypeEQ(roledefinition.ScopeTypeProject),
+			).
+			Only(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("resolving the project-visitor role: %w", mapError(err))
+		}
+		resolved := *rb
+		resolved.RoleDefinitionID = rd.ID.String()
+		rb = &resolved
+	}
+	return r.createRoleBinding(ctx, rb, true)
+}
+
+// isVisitorRole reports whether rd is the seeded project-visitor role: a
+// system role of that name, at project scope, that does not confer
+// membership. A custom role of the same name is not.
+func isVisitorRole(rd *ent.RoleDefinition) bool {
+	return rd.Name == store.ProjectRoleVisitor &&
+		rd.ScopeType == roledefinition.ScopeTypeProject &&
+		rd.System &&
+		!rd.ConfersMembership
+}
+
+// createRoleBinding is CreateRoleBinding (visitor false) and
+// CreateVisitorRoleBinding (visitor true).
+func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding, visitor bool) (*store.RoleBinding, error) {
 	// Validate principal type.
 	switch rb.PrincipalType {
 	case store.RoleBindingPrincipalUser, store.RoleBindingPrincipalAgent, store.RoleBindingPrincipalGroup:
@@ -507,6 +562,17 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 	rd, err := r.client.RoleDefinition.Get(ctx, rdUID)
 	if err != nil {
 		return nil, fmt.Errorf("resolving role definition for binding guard: %w", mapError(err))
+	}
+
+	// The visitor path binds only the project-visitor role, at project
+	// scope, to a user principal (the account kind is checked below). The
+	// general path never binds a role that does not confer membership.
+	if visitor {
+		if !isVisitorRole(rd) || rb.ScopeType != store.RoleScopeProject || rb.PrincipalType != store.RoleBindingPrincipalUser {
+			return nil, store.ErrVisitorBindingRefused
+		}
+	} else if !rd.ConfersMembership {
+		return nil, fmt.Errorf("%w: role %q", store.ErrNonMembershipRoleRefused, rd.Name)
 	}
 
 	// Scope type must match the role definition's scope type.
@@ -544,6 +610,16 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 		u, err := r.client.User.Get(ctx, principalUID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: user %s", store.ErrNotFound, rb.PrincipalID)
+		}
+		// A federated account receives no role binding through the
+		// general path, and the visitor path binds only federated
+		// accounts.
+		federated := string(u.Kind) == store.UserKindFederated
+		if visitor && !federated {
+			return nil, store.ErrVisitorBindingRefused
+		}
+		if !visitor && federated {
+			return nil, store.ErrFederatedAccountRefused
 		}
 		exp, err := checkTestAdminSystemBinding(u, rb)
 		if err != nil {
@@ -753,10 +829,18 @@ func (r *RoleStore) DeleteRoleBindingsForScope(ctx context.Context, scopeType, s
 	return n, nil
 }
 
+// confersMembership matches role bindings whose role definition confers
+// project membership. A binding of a role that does not (project-visitor)
+// is never membership, and neither is one whose role definition is unset.
+func confersMembership() predicate.RoleBinding {
+	return rolebinding.HasRoleDefinitionWith(roledefinition.ConfersMembership(true))
+}
+
 // GetProjectMembership returns the project membership for a user in a project.
 // It looks up role bindings scoped to the project for the user and resolves
 // the role definition name. Only bindings whose activation window contains
-// the current time count (roleBindingActiveAt); a user with none has no
+// the current time count (roleBindingActiveAt), and only of roles that
+// confer membership (confersMembership); a user with none has no
 // membership and gets ErrNotFound.
 func (r *RoleStore) GetProjectMembership(ctx context.Context, projectID, userID string) (*store.ProjectMembership, error) {
 	rbs, err := r.client.RoleBinding.Query().
@@ -765,6 +849,7 @@ func (r *RoleStore) GetProjectMembership(ctx context.Context, projectID, userID 
 			rolebinding.PrincipalIDEQ(userID),
 			rolebinding.ScopeTypeEQ(rolebinding.ScopeTypeProject),
 			rolebinding.ScopeIDEQ(projectID),
+			confersMembership(),
 		).
 		WithRoleDefinition().
 		All(ctx)
@@ -802,13 +887,15 @@ func (r *RoleStore) GetProjectMembership(ctx context.Context, projectID, userID 
 
 // ListProjectMembers returns all members of a project via role bindings.
 // Only bindings whose activation window contains the current time count
-// (roleBindingActiveAt).
+// (roleBindingActiveAt), and only of roles that confer membership
+// (confersMembership): a visitor is not listed.
 func (r *RoleStore) ListProjectMembers(ctx context.Context, projectID string) ([]*store.ProjectMembership, error) {
 	rbs, err := r.client.RoleBinding.Query().
 		Where(
 			rolebinding.PrincipalTypeEQ(rolebinding.PrincipalTypeUser),
 			rolebinding.ScopeTypeEQ(rolebinding.ScopeTypeProject),
 			rolebinding.ScopeIDEQ(projectID),
+			confersMembership(),
 		).
 		WithRoleDefinition().
 		All(ctx)
@@ -844,7 +931,8 @@ func (r *RoleStore) ListProjectMembers(ctx context.Context, projectID string) ([
 
 // IsProjectMember returns true if the user has any project-scoped role binding
 // for the given project whose activation window contains the current time
-// (roleBindingActiveAt).
+// (roleBindingActiveAt) and whose role confers membership
+// (confersMembership).
 func (r *RoleStore) IsProjectMember(ctx context.Context, projectID, userID string) (bool, error) {
 	rbs, err := r.client.RoleBinding.Query().
 		Where(
@@ -852,6 +940,7 @@ func (r *RoleStore) IsProjectMember(ctx context.Context, projectID, userID strin
 			rolebinding.PrincipalIDEQ(userID),
 			rolebinding.ScopeTypeEQ(rolebinding.ScopeTypeProject),
 			rolebinding.ScopeIDEQ(projectID),
+			confersMembership(),
 		).
 		All(ctx)
 	if err != nil {

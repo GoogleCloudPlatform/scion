@@ -15,9 +15,11 @@
  */
 
 /**
- * Moves an artifact whose home project was deleted to another project
- * (experiment hub.artifacts). Offered to the artifact's owner or an admin;
- * the hub checks that the caller may publish in the chosen project.
+ * Moves an artifact to another home project (experiment hub.artifacts):
+ * from the artifacts list for an artifact whose home project was deleted
+ * (homeDeleted), and from the artifact page (ptone/scion#4583). Offered to
+ * the artifact's owner or an admin; the hub checks that the caller may
+ * publish in the chosen project.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -37,6 +39,8 @@ interface ProjectOption {
 export class ScionArtifactMoveDialog extends LitElement {
   @property({ type: Object }) artifact: Pick<Artifact, 'id' | 'title' | 'scopeRef'> | null = null;
   @property({ type: Boolean, reflect: true }) open = false;
+  /** The artifact's home project was deleted (said in the dialog). */
+  @property({ type: Boolean }) homeDeleted = false;
 
   @state() private projects: ProjectOption[] = [];
   @state() private target = '';
@@ -142,8 +146,8 @@ export class ScionArtifactMoveDialog extends LitElement {
         ${a
           ? html`<p class="what">
               <strong>${a.title}</strong>
-              The home project of this artifact was deleted. Choose a new home project; its members
-              will be able to view the artifact.
+              ${this.homeDeleted ? 'The home project of this artifact was deleted. ' : ''}Choose a
+              new home project; its members will be able to view the artifact.
             </p>`
           : nothing}
         <sl-select

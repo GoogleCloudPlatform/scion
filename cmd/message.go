@@ -894,6 +894,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// Mention outcomes first, so the confirmation is the last line.
 		printMentionResults(result.MentionResults)
 		printArtifactWarning(result.ArtifactWarning)
+		printNoAgentWoken(result)
 		// Distinguish accepted dispatch from confirmed delivery.
 		switch result.Status {
 		case "sent":
@@ -1032,6 +1033,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	if result != nil {
 		printMentionResults(result.MentionResults)
 		printArtifactWarning(result.ArtifactWarning)
+		printNoAgentWoken(result)
 	}
 	// #2026: name the conversation the message landed in when the hub
 	// reports it, so a send with --channel/--thread-id shows where it went.
@@ -1760,6 +1762,23 @@ func filterMentionNames(names []string, selfSlug, primarySlug string) []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// printNoAgentWoken prints one line to stderr when the hub reports that a
+// group post reached no agent.
+func printNoAgentWoken(result *hubclient.OutboundMessageResult) {
+	if isJSONOutput() || result == nil || !result.NoAgentWoken {
+		return
+	}
+	if d := result.DefaultAgentResult; d != nil {
+		if d.Slug == "" {
+			fmt.Fprintf(os.Stderr, "No agent was woken: the default agent could not be reached (%s).\n", d.Status)
+		} else {
+			fmt.Fprintf(os.Stderr, "No agent was woken: default agent @%s was not reached (%s).\n", d.Slug, d.Status)
+		}
+		return
+	}
+	fmt.Fprintln(os.Stderr, "No agent was woken by this post.")
 }
 
 // printMentionResults prints one line per mention result to stderr,

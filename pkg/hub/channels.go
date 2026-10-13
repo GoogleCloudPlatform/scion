@@ -47,19 +47,23 @@ type ChannelConfig struct {
 // notifications to all matching channels. Channel dispatch is fire-and-forget;
 // delivery failures are logged but do not block the notification pipeline.
 type ChannelRegistry struct {
-	channels []NotificationChannel
-	configs  []ChannelConfig
-	log      *slog.Logger
+	entries []channelEntry
+	log     *slog.Logger
+}
+
+// channelEntry pairs a built channel with the config it was built from, so
+// that skipping an invalid config cannot pair a channel with another
+// channel's filter.
+type channelEntry struct {
+	channel NotificationChannel
+	config  ChannelConfig
 }
 
 // NewChannelRegistry creates a ChannelRegistry from a list of channel configurations.
 // Each config is used to instantiate the appropriate channel implementation.
 // Invalid or unknown channel types are logged and skipped.
 func NewChannelRegistry(configs []ChannelConfig, log *slog.Logger) *ChannelRegistry {
-	r := &ChannelRegistry{
-		configs: configs,
-		log:     log,
-	}
+	r := &ChannelRegistry{log: log}
 
 	for i, cfg := range configs {
 		ch, err := newChannelFromConfig(cfg)
@@ -73,7 +77,7 @@ func NewChannelRegistry(configs []ChannelConfig, log *slog.Logger) *ChannelRegis
 				"index", i, "type", cfg.Type, "error", err)
 			continue
 		}
-		r.channels = append(r.channels, ch)
+		r.entries = append(r.entries, channelEntry{channel: ch, config: cfg})
 		log.Info("Notification channel registered", "type", cfg.Type)
 	}
 
@@ -83,9 +87,9 @@ func NewChannelRegistry(configs []ChannelConfig, log *slog.Logger) *ChannelRegis
 // Dispatch sends a structured message to all registered channels whose
 // filters match the message. Delivery is fire-and-forget with logging.
 func (r *ChannelRegistry) Dispatch(ctx context.Context, msg *messages.StructuredMessage) {
-	for i, ch := range r.channels {
-		cfg := r.configs[i]
-		if !r.matchesFilter(cfg, msg) {
+	for _, e := range r.entries {
+		ch := e.channel
+		if !r.matchesFilter(e.config, msg) {
 			continue
 		}
 		if err := ch.Deliver(ctx, msg); err != nil {
@@ -101,7 +105,7 @@ func (r *ChannelRegistry) Dispatch(ctx context.Context, msg *messages.Structured
 
 // Len returns the number of registered channels.
 func (r *ChannelRegistry) Len() int {
-	return len(r.channels)
+	return len(r.entries)
 }
 
 // matchesFilter checks whether a message passes the channel's filter criteria.

@@ -1302,6 +1302,14 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{ExternalIdentitiesColumns[7]},
 			},
+			{
+				Name:    "externalidentity_user_id_federation",
+				Unique:  true,
+				Columns: []*schema.Column{ExternalIdentitiesColumns[7]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "provider = 'federation'",
+				},
+			},
 		},
 	}
 	// GcpServiceAccountsColumns holds the columns for the "gcp_service_accounts" table.
@@ -2324,6 +2332,7 @@ var (
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
 		{Name: "permissions", Type: field.TypeJSON, Nullable: true},
 		{Name: "system", Type: field.TypeBool, Default: false},
+		{Name: "confers_membership", Type: field.TypeBool, Default: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}
@@ -2951,7 +2960,7 @@ var (
 		{Name: "display_name", Type: field.TypeString},
 		{Name: "avatar_url", Type: field.TypeString, Nullable: true},
 		{Name: "role", Type: field.TypeEnum, Enums: []string{"admin", "member", "viewer"}, Default: "member"},
-		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "suspended", "invited"}, Default: "active"},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "suspended", "invited", "pending"}, Default: "active"},
 		{Name: "preferences", Type: field.TypeJSON, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "invited_by", Type: field.TypeString, Nullable: true},
@@ -2959,12 +2968,14 @@ var (
 		{Name: "last_login", Type: field.TypeTime, Nullable: true},
 		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
 		{Name: "session_generation", Type: field.TypeInt64, Default: 0},
-		{Name: "kind", Type: field.TypeEnum, Enums: []string{"human", "test_fixture", "test_hub_admin", "test_super_admin"}, Default: "human"},
+		{Name: "kind", Type: field.TypeEnum, Enums: []string{"human", "test_fixture", "test_hub_admin", "test_super_admin", "federated"}, Default: "human"},
 		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "issued_by", Type: field.TypeString, Nullable: true},
 		{Name: "purpose", Type: field.TypeString, Nullable: true},
 		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 		{Name: "issuer_credential_id", Type: field.TypeString, Nullable: true},
+		{Name: "federated_email", Type: field.TypeString, Nullable: true},
+		{Name: "home_issuer", Type: field.TypeString, Nullable: true},
 		{Name: "issuer_delegation_id", Type: field.TypeString, Nullable: true},
 	}
 	// UsersTable holds the schema information for the "users" table.
@@ -2984,9 +2995,17 @@ var (
 				Columns: []*schema.Column{UsersColumns[13], UsersColumns[15]},
 			},
 			{
+				Name:    "user_home_issuer_federated_email",
+				Unique:  true,
+				Columns: []*schema.Column{UsersColumns[20], UsersColumns[19]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "kind = 'federated'",
+				},
+			},
+			{
 				Name:    "user_kind_issuer_delegation_id",
 				Unique:  false,
-				Columns: []*schema.Column{UsersColumns[13], UsersColumns[19]},
+				Columns: []*schema.Column{UsersColumns[13], UsersColumns[21]},
 			},
 		},
 	}
@@ -3370,6 +3389,7 @@ func init() {
 		Table: "users",
 	}
 	UsersTable.Annotation.Checks = map[string]string{
+		"users_federated_identity_check":  "(kind <> 'federated' OR (home_issuer IS NOT NULL AND federated_email IS NOT NULL))",
 		"users_test_admin_expiry_check":   "(kind NOT IN ('test_hub_admin', 'test_super_admin') OR expires_at IS NOT NULL)",
 		"users_test_fixture_expiry_check": "(kind <> 'test_fixture' OR expires_at IS NOT NULL)",
 	}
