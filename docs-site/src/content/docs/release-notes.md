@@ -42,7 +42,7 @@ A template now describes the agent's **job** (harness config, model, instruction
 - Agents created before this change keep their already-baked values until they are reprovisioned.
 - Agents created before ptone/scion#4222 keep a copy of the Hub default telemetry in their stored config until they are reprovisioned. Starting them no longer resends it.
 
-**Upgrade order:** upgrade the Hub before the Runtime Brokers. A newer Runtime Broker talking to an older Hub receives Hub `agent_defaults.resources` only at create, and gets the live template env only through the template version the agent was created from.
+**Upgrade order:** upgrade the Hub before the Runtime Brokers. A newer Runtime Broker talking to an older Hub receives Hub `agent_defaults.resources` only at create, and, until the Hub is upgraded, gets the live template env only through the template version the agent was created from.
 
 ## `scion project list` lists projects across hubs
 
