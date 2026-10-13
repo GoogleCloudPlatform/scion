@@ -185,6 +185,9 @@ var agentEditFields = []agentEditField{
 	{Key: "config.config_dir", Tier: EditTierImmutable, LockedReason: editReasonInternal},
 	{Key: "config.detached", Tier: EditTierImmutable, LockedReason: editReasonInternal},
 	{Key: "config.hub", Tier: EditTierImmutable, LockedReason: editReasonInternal},
+	// cleared_fields is derived by the hub from a PATCH's clears
+	// (nextClearedFields); a request never sets it.
+	{Key: "config.cleared_fields", Tier: EditTierImmutable, LockedReason: editReasonInternal},
 }
 
 // agentEditFieldByKey indexes agentEditFields by wire key.

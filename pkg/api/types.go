@@ -547,6 +547,17 @@ type ScionConfig struct {
 	// worktree/branch cleanup for it.
 	EmptyPerAgentWorkspace bool `json:"empty_per_agent_workspace,omitempty" yaml:"empty_per_agent_workspace,omitempty"`
 
+	// ClearedFields lists the config paths the agent's owner cleared after
+	// the agent was created, so the inherited value applies again
+	// (ptone/scion#3906). The Hub records it on the agent's live inline
+	// config and sends it with every start; a Runtime Broker removes each
+	// path from the agent's persisted config after merging the inline
+	// config over it (see ClearableConfigPath), and never writes the list
+	// itself to disk. It is wire-only: templates cannot set it (yaml:"-"),
+	// and config.MergeScionConfig does not carry it. A broker that ignores
+	// it starts the agent exactly as before the field existed.
+	ClearedFields []string `json:"cleared_fields,omitempty" yaml:"-"`
+
 	// Info contains persisted metadata about the agent
 	Info *AgentInfo `json:"-" yaml:"-"`
 }
