@@ -33,6 +33,10 @@ import (
 
 // Halted notification and hook tests (ptone/scion#4853).
 
+// haltCreatorUserID is the ID of the user that creates the watched agent in
+// the creator tests. User IDs are UUIDs (the store rejects any other value).
+var haltCreatorUserID = tid("halt-creator-user")
+
 // haltNotifyEnv is a notification test env whose watched agent is halted.
 type haltNotifyEnv struct {
 	*notificationTestEnv
@@ -156,10 +160,10 @@ func TestDispatchHalted_CreatorFallback(t *testing.T) {
 
 	t.Run("user creator with no subscription", func(t *testing.T) {
 		e := setupHaltNotify(t)
-		e.createUser(t, "creator-user")
-		e.watched.CreatedBy = "creator-user"
+		e.createUser(t, haltCreatorUserID)
+		e.watched.CreatedBy = haltCreatorUserID
 		e.nd.dispatchHalted(ctx, e.watched, "stopped")
-		notifs, err := e.store.GetNotifications(ctx, store.SubscriberTypeUser, "creator-user", false)
+		notifs, err := e.store.GetNotifications(ctx, store.SubscriberTypeUser, haltCreatorUserID, false)
 		require.NoError(t, err)
 		require.Len(t, notifs, 1)
 		assert.Equal(t, "HALTED", notifs[0].Status)
@@ -178,42 +182,42 @@ func TestDispatchHalted_CreatorFallback(t *testing.T) {
 
 	t.Run("creator with a HALTED subscription gets exactly one", func(t *testing.T) {
 		e := setupHaltNotify(t)
-		e.createUser(t, "creator-user")
-		e.watched.CreatedBy = "creator-user"
-		e.subscribe(t, store.SubscriberTypeUser, "creator-user", "HALTED")
+		e.createUser(t, haltCreatorUserID)
+		e.watched.CreatedBy = haltCreatorUserID
+		e.subscribe(t, store.SubscriberTypeUser, haltCreatorUserID, "HALTED")
 		e.nd.dispatchHalted(ctx, e.watched, "stopped")
-		assert.Equal(t, []string{"HALTED"}, e.statuses(t, store.SubscriberTypeUser, "creator-user"))
+		assert.Equal(t, []string{"HALTED"}, e.statuses(t, store.SubscriberTypeUser, haltCreatorUserID))
 	})
 
 	t.Run("creator with an ERROR subscription on an error halt gets exactly one", func(t *testing.T) {
 		e := setupHaltNotify(t)
-		e.createUser(t, "creator-user")
-		e.watched.CreatedBy = "creator-user"
-		e.subscribe(t, store.SubscriberTypeUser, "creator-user", "ERROR")
+		e.createUser(t, haltCreatorUserID)
+		e.watched.CreatedBy = haltCreatorUserID
+		e.subscribe(t, store.SubscriberTypeUser, haltCreatorUserID, "ERROR")
 		e.nd.dispatchHalted(ctx, e.watched, "error")
-		assert.Equal(t, []string{"ERROR"}, e.statuses(t, store.SubscriberTypeUser, "creator-user"))
+		assert.Equal(t, []string{"ERROR"}, e.statuses(t, store.SubscriberTypeUser, haltCreatorUserID))
 	})
 
 	t.Run("creator subscribed without HALTED gets none (opt-out)", func(t *testing.T) {
 		e := setupHaltNotify(t)
-		e.createUser(t, "creator-user")
-		e.watched.CreatedBy = "creator-user"
-		e.subscribe(t, store.SubscriberTypeUser, "creator-user", "COMPLETED")
+		e.createUser(t, haltCreatorUserID)
+		e.watched.CreatedBy = haltCreatorUserID
+		e.subscribe(t, store.SubscriberTypeUser, haltCreatorUserID, "COMPLETED")
 		e.nd.dispatchHalted(ctx, e.watched, "stopped")
-		assert.Empty(t, e.statuses(t, store.SubscriberTypeUser, "creator-user"))
+		assert.Empty(t, e.statuses(t, store.SubscriberTypeUser, haltCreatorUserID))
 	})
 
 	t.Run("creator with a project subscription without HALTED gets none", func(t *testing.T) {
 		e := setupHaltNotify(t)
-		e.createUser(t, "creator-user")
-		e.watched.CreatedBy = "creator-user"
+		e.createUser(t, haltCreatorUserID)
+		e.watched.CreatedBy = haltCreatorUserID
 		require.NoError(t, e.store.CreateNotificationSubscription(ctx, &store.NotificationSubscription{
 			ID: api.NewUUID(), Scope: store.SubscriptionScopeProject, SubscriberType: store.SubscriberTypeUser,
-			SubscriberID: "creator-user", ProjectID: e.project.ID, TriggerActivities: []string{"COMPLETED"},
+			SubscriberID: haltCreatorUserID, ProjectID: e.project.ID, TriggerActivities: []string{"COMPLETED"},
 			CreatedAt: time.Now().Add(-time.Minute), CreatedBy: "test",
 		}))
 		e.nd.dispatchHalted(ctx, e.watched, "stopped")
-		assert.Empty(t, e.statuses(t, store.SubscriberTypeUser, "creator-user"))
+		assert.Empty(t, e.statuses(t, store.SubscriberTypeUser, haltCreatorUserID))
 	})
 
 	t.Run("deleted creator agent gets none", func(t *testing.T) {
@@ -237,11 +241,11 @@ func TestDispatchHalted_CreatorFallback(t *testing.T) {
 
 	t.Run("same-phase halt notifies the creator, no ERROR alias", func(t *testing.T) {
 		e := setupHaltNotify(t)
-		e.createUser(t, "creator-user")
-		e.watched.CreatedBy = "creator-user"
+		e.createUser(t, haltCreatorUserID)
+		e.watched.CreatedBy = haltCreatorUserID
 		e.subscribe(t, store.SubscriberTypeUser, "error-watcher", "ERROR")
 		e.nd.dispatchHalted(ctx, e.watched, "")
-		assert.Equal(t, []string{"HALTED"}, e.statuses(t, store.SubscriberTypeUser, "creator-user"))
+		assert.Equal(t, []string{"HALTED"}, e.statuses(t, store.SubscriberTypeUser, haltCreatorUserID))
 		assert.Empty(t, e.statuses(t, store.SubscriberTypeUser, "error-watcher"))
 	})
 }
