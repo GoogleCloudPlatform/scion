@@ -43,7 +43,7 @@ type HarnessConfigInputs struct {
 //  3. TemplateCfg.DefaultHarnessConfig (template's default_harness_config)
 //  4. TemplateCfg.HarnessConfig (template's harness_config)
 //  5. StoredConfig.Harness (legacy: harness name as fallback, resume only)
-//  6. Profile's DefaultHarnessConfig
+//  6. Profile's DefaultHarnessConfig (a flat instance's agent_defaults.default_harness_config)
 //  7. Settings' top-level DefaultHarnessConfig
 func ResolveHarnessConfigName(inputs HarnessConfigInputs) (*HarnessConfigResolution, error) {
 	// 1. CLI flag
@@ -71,17 +71,10 @@ func ResolveHarnessConfigName(inputs HarnessConfigInputs) (*HarnessConfigResolut
 		return resolved(inputs.StoredConfig.Harness, "stored-harness-name"), nil
 	}
 
-	// 6. Profile's DefaultHarnessConfig
-	if inputs.Settings != nil {
-		effectiveProfile := inputs.ProfileName
-		if effectiveProfile == "" {
-			effectiveProfile = inputs.Settings.ActiveProfile
-		}
-		if effectiveProfile != "" {
-			if p, ok := inputs.Settings.Profiles[effectiveProfile]; ok && p.DefaultHarnessConfig != "" {
-				return resolved(p.DefaultHarnessConfig, fmt.Sprintf("profile-%s", effectiveProfile)), nil
-			}
-		}
+	// 6. Profile's DefaultHarnessConfig (on a flat instance, the instance's
+	// agent_defaults.default_harness_config; TierDefaultHarnessConfig)
+	if name, source := inputs.Settings.TierDefaultHarnessConfig(inputs.ProfileName); name != "" {
+		return resolved(name, source), nil
 	}
 
 	// 7. Settings' top-level default

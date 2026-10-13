@@ -350,7 +350,20 @@ func TestFlatBranches_NeverReachProfileTier(t *testing.T) {
 		t.Fatalf("flat branches reach the profile tier:\n%s", strings.Join(violations, "\n"))
 	}
 	// Not vacuous: every wired flat branch is found.
-	for _, want := range []string{"VersionedSettings.ResolveSharedDirDefaultsWithSource"} {
+	for _, want := range []string{
+		"VersionedSettings.ResolveSharedDirDefaultsWithSource",
+		// agent_defaults (P3.1-c)
+		"VersionedSettings.ResolveHarnessConfig",
+		"VersionedSettings.ResolveCloneDepthWithSource",
+		"VersionedSettings.ResolveImageRegistry",
+		"VersionedSettings.ProfileHarnessOverrideImage",
+		"VersionedSettings.ProfileHarnessOverrideImagePullPolicy",
+		"VersionedSettings.TierResources",
+		"VersionedSettings.TierSecrets",
+		"VersionedSettings.TierHarnessOverride",
+		"VersionedSettings.TierAllHarnessOverrideEnvKeys",
+		"VersionedSettings.TierDefaultHarnessConfig",
+	} {
 		found := false
 		for _, f := range flatFuncs {
 			found = found || f == want
@@ -404,5 +417,40 @@ func (vs *VersionedSettings) Clean() string {
 	}
 	if !reflect.DeepEqual(flatFuncs, []string{"VersionedSettings.Clean", "VersionedSettings.Direct", "VersionedSettings.Indirect"}) {
 		t.Fatalf("flat functions: %v", flatFuncs)
+	}
+}
+
+// TestConvertedProfileReaders_UseTierAccessors extends the guard to the call
+// sites that used to index Profiles directly (contract appendix FC5,
+// P3.1-c): each now reads the Profile tier only through a Tier* accessor,
+// whose flat branch the guard above covers, so none may reference Profiles
+// again.
+func TestConvertedProfileReaders_UseTierAccessors(t *testing.T) {
+	for _, site := range []struct{ file, fn string }{
+		{"resolve_harness_config.go", "ResolveHarnessConfigName"},
+		{filepath.Join("..", "agent", "agent_environment.go"), "resolveEnvironmentResources"},
+		{filepath.Join("..", "runtimebroker", "handlers.go"), "extractRequiredEnvKeys"},
+	} {
+		f, err := parser.ParseFile(token.NewFileSet(), site.file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != site.fn || fn.Body == nil {
+				continue
+			}
+			found = true
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && id.Name == "Profiles" {
+					t.Errorf("%s (%s) references Profiles; read the Profile tier through a Tier* accessor", site.fn, site.file)
+				}
+				return true
+			})
+		}
+		if !found {
+			t.Fatalf("%s not found in %s", site.fn, site.file)
+		}
 	}
 }

@@ -96,16 +96,6 @@ func TestRuntimeBrokerInstances_StrictLoaderRefusesReservedKeys(t *testing.T) {
 			}
 		})
 	}
-	t.Run("agent_defaults", func(t *testing.T) {
-		global := flatTestHome(t)
-		writeFlatTestFile(t, filepath.Join(global, "settings.yaml"),
-			k8sSharedDirInstanceYAML+"        agent_defaults:\n          image_registry: registry.example\n")
-		_, err := LoadRuntimeBrokerInstances("")
-		want := "server.broker.instances[0].agent_defaults: this key is reserved"
-		if err == nil || !strings.Contains(err.Error(), want) {
-			t.Fatalf("got %v, want an error containing %q", err, want)
-		}
-	})
 }
 
 // An unknown key on an entry or under runtime_target fails the strict load

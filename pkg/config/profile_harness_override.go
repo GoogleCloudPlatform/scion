@@ -26,9 +26,17 @@ package config
 // template's image, while the plain settings default does not
 // (ptone/scion#1799; see settings-precedence.md, "Container image and
 // Kubernetes image pull policy").
+//
+// On a flat instance view (ForFlatInstance) the instance's
+// agent_defaults.harness_overrides.<harnessConfigName>.image takes the
+// profile override's place, with the same rank over the template image;
+// profileName is not used.
 func (vs *VersionedSettings) ProfileHarnessOverrideImage(profileName, harnessConfigName string) string {
 	if vs == nil || harnessConfigName == "" {
 		return ""
+	}
+	if vs.flat != nil {
+		return vs.flat.Defaults.HarnessOverrides[harnessConfigName].Image
 	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
@@ -43,10 +51,14 @@ func (vs *VersionedSettings) ProfileHarnessOverrideImage(profileName, harnessCon
 // ProfileHarnessOverrideImagePullPolicy is ProfileHarnessOverrideImage for
 // profiles.<profileName>.harness_overrides.<harnessConfigName>.image_pull_policy.
 // An explicitly set profile pull policy takes the same tier as an explicit
-// profile image (ptone/scion#1799).
+// profile image (ptone/scion#1799). On a flat instance view it is the
+// instance's agent_defaults.harness_overrides.<harnessConfigName>.image_pull_policy.
 func (vs *VersionedSettings) ProfileHarnessOverrideImagePullPolicy(profileName, harnessConfigName string) string {
 	if vs == nil || harnessConfigName == "" {
 		return ""
+	}
+	if vs.flat != nil {
+		return vs.flat.Defaults.HarnessOverrides[harnessConfigName].ImagePullPolicy
 	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile

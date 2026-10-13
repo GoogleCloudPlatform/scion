@@ -1575,6 +1575,7 @@
           "minLength": 1,
           "description": "Runtime Broker name registered with the Hub (a mutable label, not identity)."
         },
+        "agent_defaults": { "$ref": "#/$defs/instanceAgentDefaults" },
         "runtime_target": {
           "type": "object",
           "additionalProperties": false,
@@ -1634,6 +1635,48 @@
               ]
             }
           }
+        }
+      }
+    },
+    "instanceAgentDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Workload defaults of the agents this flat Runtime Broker instance runs. Each takes the place of the profile value of the same name, at the same rung: a template, the agent's own config or the request still wins wherever it won over the profile. Local operator policy, read from the global settings file only.",
+      "properties": {
+        "default_harness_config": {
+          "type": "string",
+          "description": "Default harness config name. Below the template's and the agent's stored harness config, above the top-level default_harness_config."
+        },
+        "image_registry": {
+          "type": "string",
+          "description": "Container image registry prefix. Overrides the top-level image_registry."
+        },
+        "volumes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/volumeMount" },
+          "description": "Volumes appended after the harness config's volumes."
+        },
+        "resources": {
+          "$ref": "#/$defs/resourceSpec",
+          "description": "Default resources: the agent's own resources win over them; they win over the Hub agent_defaults.resources and default_resources."
+        },
+        "harness_overrides": {
+          "type": "object",
+          "description": "Per-harness-config overrides. Keys are harness-config names. An override's image outranks the template image, as a profile override's does.",
+          "additionalProperties": { "$ref": "#/$defs/harnessOverride" }
+        },
+        "secrets": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/requiredSecret" },
+          "description": "Required secret declarations (no values)."
+        },
+        "clone_depth": {
+          "oneOf": [
+            { "type": "string", "pattern": "^(|full|[1-9][0-9]{0,8})$" },
+            { "type": "integer", "minimum": 1, "maximum": 999999999 },
+            { "type": "null" }
+          ],
+          "description": "Git clone depth for clone-per-agent workspaces: \"full\" or an integer N from 1 to 999999999. A template or agent clone_depth wins over this. Unset keeps the default shallow (depth 1) clone."
         }
       }
     },

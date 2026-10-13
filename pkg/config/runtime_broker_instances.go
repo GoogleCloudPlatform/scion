@@ -86,6 +86,11 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 		if inst.Name == "" {
 			errs = append(errs, ValidationError{Path: p + ".name", Message: "name is required"})
 		}
+		if d := inst.AgentDefaults; d != nil {
+			if err := d.CloneDepth.Validate(); err != nil {
+				errs = append(errs, ValidationError{Path: p + ".agent_defaults.clone_depth", Message: err.Error()})
+			}
+		}
 		t := inst.RuntimeTarget
 		if t == nil || t.Type == "" {
 			errs = append(errs, ValidationError{Path: p + ".runtime_target.type", Message: "runtime_target.type is required"})
@@ -293,6 +298,37 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 				return err
 			}
 		}
+		if d, present := m["agent_defaults"]; present && d != nil {
+			dm, ok := d.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("%s.agent_defaults must be a mapping", p)
+			}
+			if err := checkStrings(p+".agent_defaults", dm, "default_harness_config", "image_registry"); err != nil {
+				return err
+			}
+			overrides, _ := dm["harness_overrides"].(map[string]interface{})
+			names := make([]string, 0, len(overrides))
+			for name := range overrides {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				om, _ := overrides[name].(map[string]interface{})
+				op := p + ".agent_defaults.harness_overrides." + name
+				if err := checkStrings(op, om, "image", "image_pull_policy", "user", "auth_selected_type"); err != nil {
+					return err
+				}
+				env, _ := om["env"].(map[string]interface{})
+				envKeys := make([]string, 0, len(env))
+				for k := range env {
+					envKeys = append(envKeys, k)
+				}
+				sort.Strings(envKeys)
+				if err := checkStrings(op+".env", env, envKeys...); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -304,7 +340,7 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 // it, so a key is never accepted without its effect. A change that wires a
 // key removes it here, adds the Go field and adds it to the JSON schema.
 var (
-	reservedInstanceKeys      = []string{"agent_defaults"}
+	reservedInstanceKeys      []string
 	reservedRuntimeTargetKeys = []string{
 		"gke", "priority_class_name", "safe_to_evict",
 		"shared_dir_storage_backend", "shared_dir_storage_backends",
@@ -327,6 +363,10 @@ func knownYAMLKeys(v interface{}) map[string]bool {
 var (
 	knownInstanceKeys      = knownYAMLKeys(V1RuntimeBrokerInstanceConfig{})
 	knownRuntimeTargetKeys = knownYAMLKeys(V1RuntimeTargetConfig{})
+	knownAgentDefaultsKeys = knownYAMLKeys(V1InstanceAgentDefaults{})
+	knownHarnessOverKeys   = knownYAMLKeys(V1HarnessOverride{})
+	knownVolumeMountKeys   = knownYAMLKeys(api.VolumeMount{})
+	knownSecretKeys        = knownYAMLKeys(api.RequiredSecret{})
 )
 
 // checkInstanceKeys refuses every key of an instance entry or its
@@ -362,6 +402,11 @@ func checkInstanceKeys(instRaw interface{}) error {
 		}
 		if tm, ok := m["runtime_target"].(map[string]interface{}); ok {
 			if err := check(p+".runtime_target", tm, knownRuntimeTargetKeys, reservedRuntimeTargetKeys); err != nil {
+				return err
+			}
+		}
+		if dm, ok := m["agent_defaults"].(map[string]interface{}); ok {
+			if err := checkAgentDefaultsKeys(p+".agent_defaults", dm, check); err != nil {
 				return err
 			}
 		}
@@ -404,6 +449,52 @@ func joinValidationErrors(errs []ValidationError) error {
 	return errors.Join(all...)
 }
 
+// checkAgentDefaultsKeys refuses every unknown key of an instance's
+// agent_defaults, of each of its harness overrides, and of each volume and
+// secret declaration in them, naming its settings path.
+func checkAgentDefaultsKeys(path string, dm map[string]interface{}, check func(string, map[string]interface{}, map[string]bool, []string) error) error {
+	if err := check(path, dm, knownAgentDefaultsKeys, nil); err != nil {
+		return err
+	}
+	checkList := func(path string, v interface{}, known map[string]bool) error {
+		list, _ := v.([]interface{})
+		for i, e := range list {
+			if em, ok := e.(map[string]interface{}); ok {
+				if err := check(fmt.Sprintf("%s[%d]", path, i), em, known, nil); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := checkList(path+".volumes", dm["volumes"], knownVolumeMountKeys); err != nil {
+		return err
+	}
+	if err := checkList(path+".secrets", dm["secrets"], knownSecretKeys); err != nil {
+		return err
+	}
+	overrides, _ := dm["harness_overrides"].(map[string]interface{})
+	names := make([]string, 0, len(overrides))
+	for name := range overrides {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		om, ok := overrides[name].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		op := path + ".harness_overrides." + name
+		if err := check(op, om, knownHarnessOverKeys, nil); err != nil {
+			return err
+		}
+		if err := checkList(op+".volumes", om["volumes"], knownVolumeMountKeys); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // v1InstancesToGlobal deep-copies settings instances into server-config form.
 func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInstanceConfig {
 	if len(in) == 0 {
@@ -423,6 +514,17 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
 				SharedDirStorageClass:            i.RuntimeTarget.SharedDirStorageClass,
 				SharedDirSize:                    i.RuntimeTarget.SharedDirSize,
+			}
+		}
+		if d := copyInstanceAgentDefaults(i.AgentDefaults); d != nil {
+			o.AgentDefaults = &InstanceAgentDefaultsConfig{
+				DefaultHarnessConfig: d.DefaultHarnessConfig,
+				ImageRegistry:        d.ImageRegistry,
+				Volumes:              d.Volumes,
+				Resources:            d.Resources,
+				HarnessOverrides:     d.HarnessOverrides,
+				Secrets:              d.Secrets,
+				CloneDepth:           d.CloneDepth,
 			}
 		}
 		out = append(out, o)
@@ -451,6 +553,17 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 				SharedDirSize:                    i.RuntimeTarget.SharedDirSize,
 			}
 		}
+		if i.AgentDefaults != nil {
+			o.AgentDefaults = copyInstanceAgentDefaults(&V1InstanceAgentDefaults{
+				DefaultHarnessConfig: i.AgentDefaults.DefaultHarnessConfig,
+				ImageRegistry:        i.AgentDefaults.ImageRegistry,
+				Volumes:              i.AgentDefaults.Volumes,
+				Resources:            i.AgentDefaults.Resources,
+				HarnessOverrides:     i.AgentDefaults.HarnessOverrides,
+				Secrets:              i.AgentDefaults.Secrets,
+				CloneDepth:           i.AgentDefaults.CloneDepth,
+			})
+		}
 		out = append(out, o)
 	}
 	return out
@@ -461,6 +574,60 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 // comparison against GlobalConfig.RuntimeBroker.Instances.
 func RuntimeBrokerInstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInstanceConfig {
 	return v1InstancesToGlobal(in)
+}
+
+// copyInstanceAgentDefaults returns a deep copy of d (nil for nil): no map,
+// slice or pointer is shared with d. Empty maps and slices copy as nil.
+func copyInstanceAgentDefaults(d *V1InstanceAgentDefaults) *V1InstanceAgentDefaults {
+	if d == nil {
+		return nil
+	}
+	out := *d
+	out.Volumes = copyVolumeMounts(d.Volumes)
+	out.Resources = copyResourceSpec(d.Resources)
+	out.Secrets = copyRequiredSecrets(d.Secrets)
+	out.HarnessOverrides = nil
+	if len(d.HarnessOverrides) > 0 {
+		out.HarnessOverrides = make(map[string]V1HarnessOverride, len(d.HarnessOverrides))
+		for name, o := range d.HarnessOverrides {
+			o.Env = copyStringMap(o.Env)
+			o.Volumes = copyVolumeMounts(o.Volumes)
+			o.Resources = copyResourceSpec(o.Resources)
+			out.HarnessOverrides[name] = o
+		}
+	}
+	return &out
+}
+
+func copyVolumeMounts(v []api.VolumeMount) []api.VolumeMount {
+	if len(v) == 0 {
+		return nil
+	}
+	return append([]api.VolumeMount(nil), v...)
+}
+
+func copyResourceSpec(r *api.ResourceSpec) *api.ResourceSpec {
+	if r == nil {
+		return nil
+	}
+	cpy := *r
+	return &cpy
+}
+
+func copyRequiredSecrets(s []api.RequiredSecret) []api.RequiredSecret {
+	if len(s) == 0 {
+		return nil
+	}
+	out := make([]api.RequiredSecret, len(s))
+	for i, sec := range s {
+		if len(sec.AlternativeEnvKeys) > 0 {
+			sec.AlternativeEnvKeys = append([]string(nil), sec.AlternativeEnvKeys...)
+		} else {
+			sec.AlternativeEnvKeys = nil
+		}
+		out[i] = sec
+	}
+	return out
 }
 
 // copyStringMap returns a copy of m (nil for an empty map).
