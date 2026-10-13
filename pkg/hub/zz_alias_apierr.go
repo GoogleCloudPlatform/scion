@@ -50,6 +50,7 @@ const (
 	ErrCodeExperimentDisabled               = apierr.ErrCodeExperimentDisabled
 	ErrCodeExpiredJoinToken                 = apierr.ErrCodeExpiredJoinToken
 	ErrCodeForbidden                        = apierr.ErrCodeForbidden
+	ErrCodeHarnessConfigConflict            = apierr.ErrCodeHarnessConfigConflict
 	ErrCodeIdentityAmbiguous                = apierr.ErrCodeIdentityAmbiguous
 	ErrCodeInsufficientRelaxationAuthority  = apierr.ErrCodeInsufficientRelaxationAuthority
 	ErrCodeInternalError                    = apierr.ErrCodeInternalError

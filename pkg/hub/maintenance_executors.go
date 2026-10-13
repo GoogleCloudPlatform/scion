@@ -1018,20 +1018,22 @@ func deriveImageBaseName(hc *store.HarnessConfig) string {
 	return hc.Name
 }
 
-// syncBuiltImage updates the harness config's DB record to reference the
-// newly-built image without modifying config.yaml in storage. The image field
-// in config.yaml is a stable reference; two-phase resolution at agent start
-// prefers local images. This matches the CLI build path's behavior
-// (see cmd/build.go syncBuildToHub).
+// syncBuiltImage records the newly-built image on the harness config's DB
+// record without modifying config.yaml in storage. It writes only the
+// BuiltImage column (store.UpdateHarnessConfigBuiltImage): the built image
+// is operational state, not derived from config.yaml, so it never writes
+// Config.Image, which the commit path derives and would otherwise clear on
+// the next commit (ptone/scion#4219). The image handlers show and check
+// BuiltImage when set (effectiveHarnessConfigImage). The image field in
+// config.yaml stays a stable reference; two-phase resolution at agent start
+// prefers local images. This matches the CLI build path's behavior (see
+// cmd/build.go syncBuildToHub).
 func syncBuiltImage(ctx context.Context, storeDB store.Store, logger io.Writer, hc *store.HarnessConfig, outputImage string) error {
-	if hc.Config == nil {
-		hc.Config = &store.HarnessConfigData{}
-	}
-	hc.Config.Image = outputImage
-	if err := storeDB.UpdateHarnessConfig(ctx, hc); err != nil {
+	if err := storeDB.UpdateHarnessConfigBuiltImage(ctx, hc.ID, outputImage); err != nil {
 		return fmt.Errorf("failed to update harness-config record: %w", err)
 	}
-	_, _ = fmt.Fprintf(logger, "Updated harness-config record image to %s\n", outputImage)
+	hc.BuiltImage = outputImage
+	_, _ = fmt.Fprintf(logger, "Updated harness-config record built image to %s\n", outputImage)
 
 	return nil
 }

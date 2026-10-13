@@ -471,8 +471,9 @@ func TestUpdateHarnessConfig(t *testing.T) {
 	got, err := ts.GetHarnessConfig(ctx, hc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "new", got.Name)
-	require.NotNil(t, got.Config)
-	assert.Equal(t, "haiku", got.Config.Model)
+	// Config is a content column: the metadata update leaves it alone
+	// (ptone/scion#4219).
+	assert.Nil(t, got.Config)
 }
 
 func TestUpdateHarnessConfigNotFound(t *testing.T) {

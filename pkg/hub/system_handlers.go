@@ -793,11 +793,13 @@ func (s *Server) syncImageStatusAfterPull(ctx context.Context, harnesses []strin
 			slog.Error("syncImageStatusAfterPull: list failed", "harness", h, "error", err)
 			continue
 		}
-		for _, hc := range configs.Items {
-			if hc.Config == nil || hc.Config.Image == "" {
+		for i := range configs.Items {
+			hc := &configs.Items[i]
+			image := effectiveHarnessConfigImage(hc)
+			if image == "" {
 				continue
 			}
-			s.checkAndUpdateImageStatus(ctx, hc.ID, hc.Config.Image)
+			s.checkAndUpdateImageStatus(ctx, hc.ID, image)
 		}
 	}
 }

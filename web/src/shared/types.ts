@@ -1077,6 +1077,12 @@ export interface HarnessConfig {
   files?: TemplateFileInfo[];
   imageStatus?: string;
   imageStatusCheckedAt?: string;
+  /**
+   * Image the hub's image-build executor last built for this harness-config
+   * (ptone/scion#4219). Operational state, not derived from config.yaml;
+   * when set it is the image to show and check, in place of config.image.
+   */
+  builtImage?: string;
   created?: string;
   updated?: string;
   _capabilities?: Capabilities;

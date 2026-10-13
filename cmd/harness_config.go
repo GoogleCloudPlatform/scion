@@ -18,12 +18,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -785,6 +787,14 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 	// Finalize
 	fmt.Println("Finalizing harness-config...")
 	hc, err := hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL)
+	if isHarnessConfigConflictError(err) {
+		// Another commit changed the harness-config between the Hub's read
+		// and its write (409 harness_config_conflict). The local directory
+		// is the source of truth for a sync, so finalize once more against
+		// the Hub's fresh row (ptone/scion#4219).
+		fmt.Println("Harness-config was changed by another commit during finalize; retrying once...")
+		hc, err = hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL)
+	}
 	if err != nil {
 		if !isHarnessConfigMissingFileError(err) {
 			return fmt.Errorf("failed to finalize: %w", err)
@@ -843,6 +853,17 @@ func isHarnessConfigNoFilesError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "harness config has no files")
+}
+
+// harnessConfigConflictErrorCode is the error code of a harness-config
+// finalize that lost the Hub's compare-and-swap (ptone/scion#4219).
+const harnessConfigConflictErrorCode = "harness_config_conflict"
+
+// isHarnessConfigConflictError reports whether err is the Hub refusing a
+// harness-config finalize with 409 harness_config_conflict.
+func isHarnessConfigConflictError(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == harnessConfigConflictErrorCode
 }
 
 func isHarnessConfigMissingFileError(err error) bool {

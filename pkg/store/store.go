@@ -71,6 +71,13 @@ var (
 	// ErrVersionConflict.
 	ErrTemplateConflict = fmt.Errorf("template content changed: %w", ErrVersionConflict)
 
+	// ErrHarnessConfigConflict is returned by UpdateHarnessConfigContent when
+	// the stored harness-config no longer matches the caller's
+	// HarnessConfigContentPrecondition: another commit changed its files
+	// since the caller read it (ptone/scion#4219). It wraps
+	// ErrVersionConflict.
+	ErrHarnessConfigConflict = fmt.Errorf("harness config content changed: %w", ErrVersionConflict)
+
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
 	// Super-admin authority is conferred exclusively via User.Role (out-of-band)
@@ -1688,6 +1695,16 @@ type TemplateContentPrecondition struct {
 	Layout      string
 }
 
+// HarnessConfigContentPrecondition is the state a harness-config commit
+// expects the stored row to be in (UpdateHarnessConfigContent).
+//
+// ContentHash is the content hash the caller read before computing its new
+// manifest. An empty ContentHash matches a row that has never been
+// committed (no content hash yet).
+type HarnessConfigContentPrecondition struct {
+	ContentHash string
+}
+
 // TemplateFilter defines criteria for filtering templates.
 type TemplateFilter struct {
 	Name      string // Exact match on template name
@@ -1721,9 +1738,30 @@ type HarnessConfigStore interface {
 	// Returns ErrNotFound if the harness config doesn't exist.
 	GetHarnessConfigBySlug(ctx context.Context, slug, scope, scopeID string) (*HarnessConfig, error)
 
-	// UpdateHarnessConfig updates an existing harness config.
+	// UpdateHarnessConfig updates an existing harness config's metadata
+	// (name, slug, display name, description, scope, owner, source URL,
+	// image status and the audit fields). It does not write the content
+	// columns (Files, ContentHash, Harness, Config, Status, StorageURI,
+	// StorageBucket, StoragePath) nor BuiltImage (ptone/scion#4219): those
+	// change only through UpdateHarnessConfigContent and
+	// UpdateHarnessConfigBuiltImage, so a metadata write from a stale read
+	// cannot revert a commit.
 	// Returns ErrNotFound if the harness config doesn't exist.
 	UpdateHarnessConfig(ctx context.Context, hc *HarnessConfig) error
+
+	// UpdateHarnessConfigContent writes the content columns of hc (Files,
+	// ContentHash, Harness, Config, Status, StorageURI, StorageBucket,
+	// StoragePath, SourceURL, UpdatedBy) in one conditional update, only if
+	// the stored row still matches expected. It never writes the metadata
+	// columns or BuiltImage. Returns ErrHarnessConfigConflict when the row
+	// exists but no longer matches, and ErrNotFound when it does not exist.
+	UpdateHarnessConfigContent(ctx context.Context, hc *HarnessConfig, expected HarnessConfigContentPrecondition) error
+
+	// UpdateHarnessConfigBuiltImage writes only the built_image column of
+	// harness-config id (the image-build executor's narrow writer). It
+	// keeps Updated at its stored value.
+	// Returns ErrNotFound if the harness config doesn't exist.
+	UpdateHarnessConfigBuiltImage(ctx context.Context, id, image string) error
 
 	// DeleteHarnessConfig removes a harness config by ID.
 	// Returns ErrNotFound if the harness config doesn't exist.
