@@ -139,6 +139,11 @@ type Client interface {
 
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
+
+	// HealthSummary returns the admin health summary (GET
+	// /api/v1/admin/health/summary), the data behind the health dashboard.
+	// It needs hub.health.read and a user identity.
+	HealthSummary(ctx context.Context) (*HealthSummary, error)
 }
 
 // client is the concrete implementation of Client.

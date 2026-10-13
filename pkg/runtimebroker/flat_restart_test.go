@@ -49,16 +49,17 @@ func TestFlatInstanceRestart_ExpectedTargetMismatchBeforeStopLeg(t *testing.T) {
 
 func TestFlatInstanceRestart_UndecodableBodyRejected(t *testing.T) {
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.seedOwnedAgent(t)
 	for _, body := range []string{`{"resolvedEnv": `, `{"expectedRuntimeTargetId": 42}`, `{"resolvedEnv": "not-a-map"}`} {
-		w := serveFlat(f.srv, http.MethodPost, flatRestartPath, body)
+		w := serveFlat(f.srv, http.MethodPost, flatRestartPath+flatStartQuery, body)
 		expectFlatRefusal(t, w, http.StatusBadRequest, ErrCodeInvalidRequest)
 	}
 	if stops, starts := mgrCalls(f); stops != 0 || starts != 0 {
 		t.Fatalf("an undecodable restart must not stop or start: stops=%d starts=%d", stops, starts)
 	}
 	// Unknown keys stay ignored (start/restart version-skew contract).
-	w := serveFlat(f.srv, http.MethodPost, flatRestartPath,
-		`{"someFutureKey": true, "expectedRuntimeTargetId": "`+f.identity.RuntimeTarget.ID+`"}`)
+	w := serveFlat(f.srv, http.MethodPost, flatRestartPath+flatStartQuery,
+		`{"someFutureKey": true, "expectedRuntimeTargetId": "`+f.identity.RuntimeTarget.ID+`",`+flatAgentEnv+`}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("unknown keys must be accepted: %d %s", w.Code, w.Body.String())
 	}
@@ -72,8 +73,9 @@ func TestFlatInstanceRestart_IgnoresSavedProfile(t *testing.T) {
 	}
 	writeFlatFixtureFile(t, filepath.Join(config.GetAgentHomePath(projectDir, "test-agent-1"), "agent-info.json"),
 		`{"name":"test-agent-1","profile":"batch"}`)
-	w := serveFlat(f.srv, http.MethodPost, flatRestartPath,
-		`{"runId":"run-restart","expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`"}`)
+	f.seedOwnedAgent(t)
+	w := serveFlat(f.srv, http.MethodPost, flatRestartPath+flatStartQuery,
+		`{"runId":"run-restart","expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`",`+flatAgentEnv+`}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body.String())
 	}

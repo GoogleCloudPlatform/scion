@@ -146,6 +146,9 @@ func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclie
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return nil, nil
 }
+func (m *mockHubClient) HealthSummary(ctx context.Context) (*hubclient.HealthSummary, error) {
+	return nil, nil
+}
 
 func TestHydrateSuccess(t *testing.T) {
 	tmpDir := t.TempDir()

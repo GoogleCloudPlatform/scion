@@ -1153,6 +1153,25 @@ scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my
 
 - `scion tunnel status [--json]`: Show the open tunnels of your running `scion tunnel` processes: the Hub endpoint, the credential identity (kind, subject and scope, never the secret), the session IDs and the open tunnels. With `--hub`, only tunnels to that Hub are shown. Reads local state only and never prompts.
 
+### `scion expose` / `scion unexpose`
+
+Register or remove an agent-local HTTP port with the Hub's port forwarding proxy. Run these inside an agent container: they act as the calling agent, using its own Hub identity, and fail with `must be run inside an agent container with a hub connection` anywhere else. Available in agent mode. They need no local project. See [Manual Port Management](/scion/hosted/user/port-forwarding/#manual-port-management).
+
+**Usage:** `scion expose <port> [--label <text>] [--host <addr>]`, `scion expose --list`, `scion unexpose <port>`
+
+- **Flags (`expose`):**
+    - `--label <string>`: Optional label to identify the service.
+    - `--host <string>`: Local host to forward to. Default: `127.0.0.1`.
+    - `--list`: List the agent's exposed ports (port, label, proxy URL) and the auto-expose status instead of exposing one.
+
+Both commands are idempotent: exposing a port that is already exposed, or unexposing one that is not, succeeds. They replace `sciontool expose` and `sciontool unexpose`, which now print a message naming the `scion` command and exit `1`.
+
+```bash
+scion expose 8080 --label my-web-app
+scion expose --list
+scion unexpose 8080
+```
+
 ## Artifacts
 
 ### `scion artifact`
@@ -1163,7 +1182,7 @@ Publishes files as artifacts and fetches them by reference (`scion://artifact/<i
     - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
 - `scion artifact get <ref>`: Write an artifact's entry file to stdout, or with `--out` the file or the whole bundle.
     - Flags: `--out`, `-o <path>` (a file, an existing directory for a single file, or the directory a bundle is written into), `--force` (replace files that already exist under `--out`).
-- `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`.
+- `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`. Discarded versions (a rejected or stale review, or an upload not finished in time) are listed among them by number with their reason, so gaps in the numbering are explained.
 - `scion artifact share <ref>`: Create a share link and print it, with its expiry and the command that revokes it. The link is shown only once. Only the artifact's owner or a user with an admin grant can share it; not available in agent mode, and the Hub refuses agents. See [Share links](/scion/reference/artifacts/#share-links).
     - Flags: `--ttl <n>h|<n>d` (link lifetime; default: the Hub's, 7 days unless changed; a lifetime above the Hub's maximum, 30 days unless changed, is rejected, not shortened), `--list` (list the active links instead), `--revoke <link-id>` (revoke one instead).
 - `scion artifact delete <ref>`: Delete an artifact after confirming (`--yes` skips the prompt; required when stdin is not a terminal). Its grants and share links end with it and its files are removed after the hub's grace period; there is no undelete. The artifact's owner, a user with an admin grant on it, or an admin of its home project can delete it; not available in agent mode, and the Hub refuses agents. See [Deletion](/scion/reference/artifacts/#deletion).
@@ -1317,11 +1336,86 @@ This command modifies the database directly. Use it only when normal admin acces
 
 ### `scion doctor`
 
-Runs host-side diagnostics: checks Git, tmux, the active container runtime, and runtime-specific
-health (Docker/Podman daemon, or Kubernetes cluster/namespace/RBAC/CSI access). Supports
-`--format json`.
+Checks this machine and, when a Hub is configured, the Hub and the platform it manages. It is for
+people checking that Scion is set up and healthy, or troubleshooting agents, from their own
+machine. It is not a self-check for ordinary agents (see `sciontool doctor` below), and it is not
+available inside agent containers.
 
 **Usage:** `scion doctor [flags]`
+
+**Flags:**
+
+- `--verbose`: Add the per-runtime-broker and per-Hub-instance tables, agent counts by phase,
+  and integration details to the Platform Health section. Text output only: JSON output carries
+  the full summary under `healthSummary` instead.
+- `--format json`: Print one JSON object and nothing else on stdout (see below).
+
+**Sections:**
+
+- **General**: Git and tmux on this machine.
+- **Hub Health**: Hub reachability (`/healthz`), authentication, unmapped GCP service accounts of
+  the linked project, and checks of this machine's settings (NFS mounts, Kubernetes profiles,
+  the deprecated server hub endpoint source on hosts configured as a server, telemetry, container
+  images, broker credentials).
+- **Platform Health**: The Hub's health summary (`GET /api/v1/admin/health/summary`), the same
+  data as the [health dashboard](/scion/workstation/dashboard/). It shows the overall status, then
+  every "Needs attention" item in the Hub's order (critical items as failures, warnings as
+  warnings), then one line each for the Hub fleet, runtime brokers, agents, dispatch and
+  integrations, the service account check when it cannot run, and the test identity settings when
+  any is on. Doctor shows the summary as the Hub computed it and does not recompute the status.
+  - Reading the summary needs the `hub.health.read` permission (hub admins). Without it, the
+    section shows `requires hub.health.read`, and Hub Health checks runtime brokers and agents
+    from the lists you can see instead. That agent check uses the same rule as the dashboard:
+    agents in error, crashed or offline count (stopped agents are ignored), and stalled agents do
+    not.
+  - The summary is read whenever the Hub answers, even if its `/healthz` reports it unhealthy.
+    Text that comes from the Hub, such as runtime broker names and integration reasons, is shown
+    with control characters removed.
+  - If the Hub instance cannot read its database, the section shows "Health data not available
+    (database unreachable from this hub instance)" and the list-based checks run.
+- **Runtime**: The active container runtime: the Docker or Podman daemon, the Apple container CLI,
+  or for Kubernetes and Cloud Run the runtime's own diagnostics (cluster connectivity, namespace
+  access, RBAC permissions, CSI drivers).
+
+**Exit status:** doctor reports check results and does not turn them into an exit status. It
+exits zero whenever it ran, including when the Hub is unreachable or `/healthz` reports it
+unhealthy, when the health summary status is `unhealthy`, or when a runtime diagnostic check
+fails; read the results from the text output or from `status` in the JSON output. It exits
+non-zero only when the command itself fails, for example on an invalid flag or when it cannot
+write its output.
+
+**JSON output:** `--format json` prints a single object for every runtime:
+
+```json
+{
+  "status": "warn",
+  "general": [{"name": "git", "status": "pass", "message": "git version 2.43.0"}],
+  "hubChecks": [{"name": "hub-connectivity", "status": "pass", "message": "..."}],
+  "platformHealth": [{"name": "health-summary", "status": "warn", "message": "Platform is degraded (1 item(s) need attention)"}],
+  "healthSummary": {"status": "degraded", "attention": [], "...": "..."},
+  "runtime": "docker",
+  "checks": [{"name": "runtime", "status": "pass", "message": "Active runtime: docker"}]
+}
+```
+
+`status` is `fail` when any check failed, `warn` when any check warned, and `pass` otherwise. It
+does not affect the exit status. `healthSummary` is the Hub's summary response unchanged, and is
+omitted when it could not be read. `runtime` is omitted when no project was found.
+
+**Platform Health for an assistant agent:** an assistant agent that a hub admin has authorized
+to monitor the platform runs `scion doctor` from an environment a person owns, not from inside an
+agent container (agent containers do not offer the command, and the Hub accepts the health
+summary only from user credentials). A hub admin mints a hub-boundary token and the environment
+uses it with no stored login:
+
+```bash
+scion hub token create --boundary hub --name health-check \
+  --scopes hub_health:read,broker:read,agent:list --expires 30d
+SCION_HUB_TOKEN=scion_pat_... scion doctor --format json
+```
+
+`broker:read` and `agent:list` are for the list-based checks; add `hub_integrations:read` to see
+integration names.
 
 :::note[In-container diagnostics]
 A separate **`sciontool doctor`** command runs *inside* an agent container and diagnoses the

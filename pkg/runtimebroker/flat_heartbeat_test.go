@@ -314,3 +314,28 @@ func TestFlatServerStart_NeverResolvesAuxiliaryProfiles(t *testing.T) {
 		}
 	})
 }
+
+// TestFlatHeartbeat_NoProfileSAReportOrHash: a flat instance sends neither
+// a per-profile ServiceAccount report nor its hashes, and never calls the
+// report's producer, even one that would return annotation-only (discovered)
+// candidates (ptone/scion#3274 amendment r6). The legacy report is covered by
+// TestFlatHeartbeat_LegacyHeartbeatUnchanged and the
+// TestHeartbeat_ProfileSAMappings* tests.
+func TestFlatHeartbeat_NoProfileSAReportOrHash(t *testing.T) {
+	svc, client := profileScopedHeartbeat(true)
+	calls := 0
+	svc.profileSAMappings = func() []hubclient.ProfileSAMappingsState {
+		calls++
+		return []hubclient.ProfileSAMappingsState{{Name: "cluster", Complete: true, ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{
+			{GSA: "gsa@example.iam", KSA: "annotated-ksa", Namespace: "agents", Source: api.BrokerKSASourceDiscovered}}}}
+	}
+	for i := 0; i < 2; i++ {
+		hb := lastHeartbeat(t, svc, client)
+		if len(hb.ProfileSAMappings) != 0 || len(hb.ProfileSAMappingsHashes) != 0 {
+			t.Fatalf("heartbeat %d: report %+v, hashes %+v, want neither", i, hb.ProfileSAMappings, hb.ProfileSAMappingsHashes)
+		}
+	}
+	if calls != 0 {
+		t.Errorf("the report producer was called %d time(s), want none", calls)
+	}
+}

@@ -99,9 +99,8 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "simulate-remote-broker", simulateRemoteBroker)
 	// Only forward --host when explicitly set. The parent never loads config, so
 	// hubHost holds a default here; forwarding it unconditionally would make the
-	// child treat --host as changed and clobber a config-file host (and skip the
-	// workstation loopback default for the runtime broker). Unset → the child
-	// derives its own default (127.0.0.1 in workstation mode).
+	// child treat --host as changed and clobber a config-file host. Unset → the
+	// child derives its own default (127.0.0.1 in workstation mode).
 	if cmd.Flags().Changed("host") {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--host=%s", hubHost))
 	}
@@ -902,10 +901,10 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	// The broker is probed on the server's configured broker port
-	// (--runtime-broker-port or server.broker.port), not always 9800.
-	brokerURL := fmt.Sprintf("http://127.0.0.1:%d", serverBrokerPort(globalDir))
-	probed := probeServerStatus(client, "http://127.0.0.1:8080", "http://127.0.0.1:9810", brokerURL)
+	// Probe the ports the server was started with (its saved start args and
+	// config), not the defaults.
+	webBase, hubBase, brokerBase := serverStatusBaseURLs(globalDir, running)
+	probed := probeServerStatus(client, webBase, hubBase, brokerBase)
 	status.HubRunning = probed.HubRunning
 	status.BrokerRunning = probed.BrokerRunning
 	status.WebRunning = probed.WebRunning
@@ -938,6 +937,33 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// serverStatusBaseURLs returns the base URLs (no trailing slash) 'server
+// status' probes: the web port, the standalone hub port and the runtime
+// broker port of the server, with their hosts, resolved by
+// serverListenersFromArgs as the start wait does. While the daemon runs they
+// come from its saved start args and the config those args name. Otherwise
+// the saved args are ignored: they outlive 'server stop' (restart reads
+// them) and a foreground server saves none, so the ports come from the
+// config and the defaults, as a foreground server's do.
+func serverStatusBaseURLs(globalDir string, daemonRunning bool) (webBase, hubBase, brokerBase string) {
+	var saved []string
+	if daemonRunning {
+		if args, err := daemon.LoadArgs(serverDaemonComponent, globalDir); err == nil {
+			saved = args
+		}
+	}
+	cfg, err := config.LoadGlobalConfig(serverConfigPathFromArgs(saved))
+	if err != nil {
+		cfg = nil
+	}
+	// The registry check only decides whether the broker runs, not where it
+	// listens; status probes every component.
+	noRegistryCheck := func() error { return nil }
+	l := serverListenersFromArgs(saved, cfg, config.LoadServerMode(), noRegistryCheck)
+	base := func(host string, port int) string { return strings.TrimSuffix(healthzURL(host, port), "/healthz") }
+	return base(l.HubHost, l.WebPort), base(l.HubHost, l.HubPort), base(l.BrokerHost, l.BrokerPort)
 }
 
 // formatServerStatusComponents renders the "Components:" lines of
@@ -1090,18 +1116,12 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 			displayHost = "127.0.0.1"
 		}
 
-		// Auto-configure hub.endpoint so that `scion hub` commands work
-		// immediately after workstation-mode start.
-		hubEndpoint := fmt.Sprintf("http://%s:%d", displayHost, wPort)
-		if vs, err := config.LoadSingleFileVersioned(globalDir); err == nil {
-			if vs.GetHubEndpoint() == "" {
-				if err := config.UpdateVersionedSetting(globalDir, "hub.endpoint", hubEndpoint); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure hub endpoint: %v\n", err)
-				} else {
-					fmt.Printf("Configured hub endpoint: %s (run 'scion hub status' to verify)\n", hubEndpoint)
-				}
-			}
-		}
+		// Register the local hub in the hub list, so that `scion hub`
+		// commands work immediately after workstation-mode start (see
+		// registerLocalHub for when it becomes the current hub). No
+		// hub.endpoint is written: the server advertises its loopback
+		// endpoint without one.
+		registerLocalHub(os.Stdout, os.Stderr, fmt.Sprintf("http://%s:%d", displayHost, wPort))
 
 		// Wait for the server before asking the hub for its onboarding
 		// status. The Hub API is mounted on the web port in workstation mode.
@@ -1122,7 +1142,10 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		if msg != "" {
 			fmt.Println(msg)
 		}
-		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, requireImageRegistryForBroker) {
+		// The server runs in the global directory, so check the registry
+		// there: a registry set only in the current project does not keep
+		// its broker on.
+		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, daemonRegistryCheck(globalDir)) {
 			fmt.Println(brokerSkippedNotice)
 		}
 

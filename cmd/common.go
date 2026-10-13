@@ -387,6 +387,12 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		// The hub selected with 'scion use' never links or registers a
 		// project that is already linked to a hub.
 		HubFromContext: hubSource == targetSourceContext,
+		// A project registered or linked on the hub selected with 'scion
+		// use' gets a link entry, so it stays on that hub after a hub
+		// switch. Both writers are stderr: this runs before commands that
+		// print JSON on stdout. (The context hub always has an entry, so
+		// no new-hub line is printed here.)
+		RecordLink: contextLinkRecorder(os.Stderr, os.Stderr),
 		// On the local workstation hub, link an unregistered project
 		// without prompting; a remote hub keeps the prompt.
 		AutoLinkLocal: true,
@@ -424,7 +430,15 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 
 // errHubNotConfigured is returned by requireHub when the command needs a hub
 // but none is in use (hub not enabled, or --no-hub was given).
-var errHubNotConfigured = errors.New("this command needs a hub; run 'scion server start' or 'scion hub enable'")
+var errHubNotConfigured error = hubNotConfiguredError{}
+
+// hubNotConfiguredError is the type of errHubNotConfigured. Its message is
+// a full sentence that names the ways to select a hub.
+type hubNotConfiguredError struct{}
+
+func (hubNotConfiguredError) Error() string {
+	return "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'."
+}
 
 // requireHub is CheckHubAvailability for commands that only work against a
 // hub. It never returns a nil HubContext without an error: when no hub is in

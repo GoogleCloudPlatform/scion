@@ -52,7 +52,7 @@ func TestPersistHubFlagEndpoint(t *testing.T) {
 			root := makeDirProject(t, "")
 			globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
 			projectDir := filepath.Join(root, ".scion")
-			resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman)
+			require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman))
 			require.Equal(t, targetSourceContext, hubSource)
 			require.Equal(t, ctxTestHub, hubEndpoint)
 			require.Empty(t, hubFlagEndpoint())
@@ -76,7 +76,7 @@ func TestPersistHubFlagEndpoint(t *testing.T) {
 			globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
 			projectDir := filepath.Join(root, ".scion")
 			hubEndpoint = "https://flag.example.com"
-			resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman)
+			require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman))
 			require.Equal(t, "https://flag.example.com", hubFlagEndpoint())
 
 			target, isGlobal := projectDir, false
@@ -122,7 +122,7 @@ func TestHubEnable_EndpointSource(t *testing.T) {
 			}
 
 			enable := findCommand(t, "hub", "enable")
-			resolveInvocationTarget(enable, ModeHuman)
+			require.NoError(t, resolveInvocationTarget(enable, ModeHuman))
 			require.Equal(t, srv.URL, hubEndpoint)
 			_ = captureStdout(t, func() { require.NoError(t, runHubEnable(enable, nil)) })
 
@@ -136,14 +136,15 @@ func TestHubEnable_EndpointSource(t *testing.T) {
 	}
 }
 
-// TestHubLink_EndpointSource: 'scion --global hub link' on the hub selected
-// with 'scion use' links (writing link identity) but does not pin that hub
-// as hub.endpoint; with --hub the endpoint is still saved.
+// TestHubLink_EndpointSource: 'scion --global hub link' writes link
+// identity and a link entry in the hub list, and never pins the hub as
+// hub.endpoint: not for the hub selected with 'scion use', and not for an
+// explicit --hub either.
 func TestHubLink_EndpointSource(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		flag bool
-	}{{name: "context hub is not written"}, {name: "--hub is written", flag: true}} {
+	}{{name: "context hub"}, {name: "--hub", flag: true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			setupContextTest(t)
 			origYes, origOffer := autoConfirm, offerTemplateSyncOnLinkFn
@@ -159,17 +160,19 @@ func TestHubLink_EndpointSource(t *testing.T) {
 				hubEndpoint = server.URL
 			}
 
-			resolveInvocationTarget(hubLinkCmd, ModeHuman)
+			require.NoError(t, resolveInvocationTarget(hubLinkCmd, ModeHuman))
 			require.Equal(t, server.URL, hubEndpoint)
 			_ = captureStdout(t, func() { require.NoError(t, runHubLink(hubLinkCmd, nil)) })
 			require.True(t, *registered, "the project was linked")
 
-			got := settingsEndpoint(t, filepath.Join(os.Getenv("HOME"), ".scion"))
-			if tc.flag {
-				assert.Equal(t, server.URL, got)
-			} else {
-				assert.Empty(t, got, "the context hub must not be pinned as hub.endpoint")
-			}
+			globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
+			assert.Empty(t, settingsEndpoint(t, globalDir), "hub link must not pin hub.endpoint")
+			linkPath := config.LinkPathForProject(globalDir)
+			entry, hub := readTestContext(t).LinkEntryFor(linkPath)
+			require.NotNil(t, entry, "hub link records a link entry for %s", linkPath)
+			assert.Equal(t, "prod", entry.Hub)
+			assert.Equal(t, config.NormalizeEndpoint(server.URL), hub.Endpoint)
+			assert.NotEmpty(t, entry.ID)
 		})
 	}
 }
@@ -219,7 +222,7 @@ func TestHubShadow_IgnoresContext(t *testing.T) {
 				hubEndpoint = srv.URL
 			}
 			shadow := findCommand(t, "hub", "shadow")
-			resolveInvocationTarget(shadow, ModeHuman)
+			require.NoError(t, resolveInvocationTarget(shadow, ModeHuman))
 			assert.Empty(t, hubSource, "the hook does not apply the context to hub shadow")
 
 			var runErr error
@@ -280,7 +283,7 @@ func TestCheckHubAvailability_ContextHubDoesNotRelink(t *testing.T) {
 	t.Chdir(root)
 	before := readFileT(t, settingsFile)
 
-	resolveInvocationTarget(findCommand(t, "list"), ModeHuman)
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	require.Equal(t, targetSourceContext, hubSource)
 	require.Empty(t, projectPath, "a directory project is not replaced by the context project")
 

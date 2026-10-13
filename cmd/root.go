@@ -6,6 +6,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -155,7 +156,9 @@ return an error instead of blocking.`,
 		// project chose them. It runs after every --global form is known
 		// and before the project requirement check, so a selected project
 		// satisfies it.
-		resolveInvocationTarget(cmd, mode)
+		if err := resolveInvocationTarget(cmd, mode); err != nil {
+			return err
+		}
 
 		if globalMode && projectPath == "" {
 			projectPath = "global"
@@ -235,7 +238,7 @@ return an error instead of blocking.`,
 
 		// Check for dev auth usage and warn if Hub is enabled
 		if !hubOnly {
-			printDevAuthWarningIfNeeded(projectPath)
+			printDevAuthWarningIfNeeded(cmd.ErrOrStderr(), projectPath)
 		}
 
 		// Hand the normalized root flag values to the command (see
@@ -475,7 +478,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&outputFormat, "format", "", "Output format (e.g., json)")
 
 	// Hub integration flags
-	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub API endpoint URL (overrides SCION_HUB_ENDPOINT)")
+	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub nickname or API endpoint URL (overrides SCION_HUB_ENDPOINT)")
+	_ = rootCmd.RegisterFlagCompletionFunc("hub", completeHubNames)
 	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Disable Hub integration for this invocation (local-only mode)")
 
 	// Confirmation and non-interactive flags
@@ -601,9 +605,11 @@ func IsNonInteractive() bool {
 	return nonInteractive
 }
 
-// printDevAuthWarningIfNeeded checks if dev auth is being used with Hub and prints a warning.
+// printDevAuthWarningIfNeeded checks if dev auth is being used with Hub and
+// prints a warning on stderr (the command's error writer), never on stdout,
+// so it cannot mix into JSON or other machine-read output.
 // This function is called on every command invocation via PersistentPreRunE.
-func printDevAuthWarningIfNeeded(projectPath string) {
+func printDevAuthWarningIfNeeded(stderr io.Writer, projectPath string) {
 	// Skip if --no-hub flag is set
 	if noHub {
 		return
@@ -658,8 +664,14 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 	}
 
 	// Dev auth is being used with Hub enabled - print warning to stderr
-	fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
-		util.Bold, util.Yellow, util.Reset)))
+	banner := fmt.Sprintf("\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
+		util.Bold, util.Yellow, util.Reset)
+	if f, ok := stderr.(*os.File); ok {
+		banner = util.ColorFor(f, banner)
+	} else {
+		banner = util.StripANSI(banner)
+	}
+	_, _ = fmt.Fprint(stderr, banner)
 }
 
 // checkAgentContainerContext detects when the CLI is running inside an agent

@@ -15,17 +15,21 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 )
 
 const readyTestInterval = 10 * time.Millisecond
@@ -400,5 +404,181 @@ func TestDaemonRegistryCheck_UsesGlobalDirNotCwdProject(t *testing.T) {
 	}
 	if len(targets) != 1 {
 		t.Fatalf("targets = %+v, want only the web port", targets)
+	}
+}
+
+// healthBodyServer serves body on /healthz and returns its port.
+func healthBodyServer(t *testing.T, body string) int {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	_, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+// runServerStatusJSON runs 'server status --json' and returns its answer.
+func runServerStatusJSON(t *testing.T) serverStatusInfo {
+	t.Helper()
+	savedJSON := serverStatusJSON
+	t.Cleanup(func() { serverStatusJSON = savedJSON })
+	serverStatusJSON = true
+	out := captureStdout(t, func() {
+		if err := runServerStatus(serverStatusCmd, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var info serverStatusInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		t.Fatalf("status output %q: %v", out, err)
+	}
+	return info
+}
+
+// markServerDaemonRunning makes the server daemon look running: its PID file
+// names this test process.
+func markServerDaemonRunning(t *testing.T, globalDir string) {
+	t.Helper()
+	if err := daemon.WritePIDComponent(serverDaemonComponent, globalDir, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestServerStatus_ProbesStartedWebAndBrokerPorts: 'server status' finds a
+// running daemon started with non-default --web-port and
+// --runtime-broker-port (its saved start args), not only one on 8080.
+func TestServerStatus_ProbesStartedWebAndBrokerPorts(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	t.Setenv("SCION_SERVER_MODE", "")
+	markServerDaemonRunning(t, globalDir)
+	webPort := healthBodyServer(t, `{"status":"healthy","hub":{"status":"healthy"}}`)
+	brokerPort := newFakeBrokerHealthServer(t, "healthy")
+	args := []string{"server", "start", "--foreground",
+		"--web-port=" + strconv.Itoa(webPort), "--runtime-broker-port=" + strconv.Itoa(brokerPort),
+		"--port=" + strconv.Itoa(unusedPort(t))}
+	if err := daemon.SaveArgs(serverDaemonComponent, globalDir, args); err != nil {
+		t.Fatal(err)
+	}
+
+	info := runServerStatusJSON(t)
+	if !info.WebRunning || !info.HubRunning {
+		t.Errorf("web and hub on web port %d not found: %+v", webPort, info)
+	}
+	if !info.BrokerRunning {
+		t.Errorf("broker on port %d not found: %+v", brokerPort, info)
+	}
+}
+
+// TestServerStatus_ProbesStartedHubPort: a standalone hub daemon started with a
+// non-default --port (web disabled) is found on that port, not only on 9810.
+func TestServerStatus_ProbesStartedHubPort(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	t.Setenv("SCION_SERVER_MODE", "")
+	markServerDaemonRunning(t, globalDir)
+	hubPort := healthBodyServer(t, `{"status":"healthy"}`)
+	args := []string{"server", "start", "--foreground", "--enable-web=false",
+		"--port=" + strconv.Itoa(hubPort), "--web-port=" + strconv.Itoa(unusedPort(t)),
+		"--runtime-broker-port=" + strconv.Itoa(unusedPort(t))}
+	if err := daemon.SaveArgs(serverDaemonComponent, globalDir, args); err != nil {
+		t.Fatal(err)
+	}
+
+	info := runServerStatusJSON(t)
+	if !info.HubRunning {
+		t.Errorf("hub on port %d not found: %+v", hubPort, info)
+	}
+	if info.WebRunning {
+		t.Errorf("web reported running with nothing on the web port: %+v", info)
+	}
+}
+
+// TestServerStatus_IgnoresSavedArgsWithoutDaemon: the saved start args of an
+// earlier daemon outlive 'server stop', so with no daemon running 'server
+// status' does not probe the ports they name.
+func TestServerStatus_IgnoresSavedArgsWithoutDaemon(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	t.Setenv("SCION_SERVER_MODE", "")
+	brokerPort := newFakeBrokerHealthServer(t, "healthy")
+	// Point the no-daemon path at an unused broker port, so a broker on the
+	// default port of the test machine does not answer.
+	writeGlobalSettings(t, globalDir, "schema_version: \"1\"\nserver:\n  broker:\n    port: "+strconv.Itoa(unusedPort(t))+"\n")
+	args := []string{"server", "start", "--foreground", "--runtime-broker-port=" + strconv.Itoa(brokerPort)}
+	if err := daemon.SaveArgs(serverDaemonComponent, globalDir, args); err != nil {
+		t.Fatal(err)
+	}
+
+	info := runServerStatusJSON(t)
+	if info.DaemonRunning {
+		t.Fatalf("no daemon PID was written, yet the daemon is reported running: %+v", info)
+	}
+	if info.BrokerRunning {
+		t.Errorf("broker found on port %d from the saved args of a daemon that is not running: %+v", brokerPort, info)
+	}
+}
+
+func TestServerStatusBaseURLs(t *testing.T) {
+	saveArgs := func(t *testing.T, globalDir string, extra ...string) {
+		t.Helper()
+		args := append([]string{"server", "start", "--foreground"}, extra...)
+		if err := daemon.SaveArgs(serverDaemonComponent, globalDir, args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allPorts := []string{"--web-port=18080", "--port=19810", "--runtime-broker-port=19800"}
+	tests := []struct {
+		name     string
+		settings string
+		args     []string // saved start args; nil saves none
+		running  bool
+		want     [3]string // web, hub, broker
+	}{
+		{"no saved args: defaults", "", nil, false,
+			[3]string{"http://127.0.0.1:8080", "http://127.0.0.1:9810", "http://127.0.0.1:9800"}},
+		{"running daemon: saved args set every port", "", allPorts, true,
+			[3]string{"http://127.0.0.1:18080", "http://127.0.0.1:19810", "http://127.0.0.1:19800"}},
+		// The args of an earlier daemon outlive 'server stop'; a foreground
+		// server started since then listens on the default ports.
+		{"saved args but no running daemon: defaults", "", allPorts, false,
+			[3]string{"http://127.0.0.1:8080", "http://127.0.0.1:9810", "http://127.0.0.1:9800"}},
+		{"saved args but no running daemon: settings ports",
+			"schema_version: \"1\"\nserver:\n  hub:\n    port: 19811\n  broker:\n    port: 19801\n", allPorts, false,
+			[3]string{"http://127.0.0.1:8080", "http://127.0.0.1:19811", "http://127.0.0.1:19801"}},
+		{"settings ports without saved args",
+			"schema_version: \"1\"\nserver:\n  hub:\n    port: 19811\n  broker:\n    port: 19801\n", nil, false,
+			[3]string{"http://127.0.0.1:8080", "http://127.0.0.1:19811", "http://127.0.0.1:19801"}},
+		{"running daemon: --host ::1", "", []string{"--host=::1"}, true,
+			[3]string{"http://[::1]:8080", "http://[::1]:9810", "http://127.0.0.1:9800"}},
+		{"hosted: settings hub host",
+			"schema_version: \"1\"\nserver:\n  mode: hosted\n  hub:\n    host: 192.0.2.10\n    port: 19812\n", nil, false,
+			[3]string{"http://192.0.2.10:8080", "http://192.0.2.10:19812", "http://127.0.0.1:9800"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, globalDir := brokerTestHome(t)
+			t.Setenv("SCION_SERVER_MODE", "")
+			if tt.settings != "" {
+				writeGlobalSettings(t, globalDir, tt.settings)
+			}
+			if tt.args != nil {
+				saveArgs(t, globalDir, tt.args...)
+			}
+			web, hub, broker := serverStatusBaseURLs(globalDir, tt.running)
+			if got := [3]string{web, hub, broker}; got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

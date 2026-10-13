@@ -41,6 +41,7 @@ func warnRemovedMode(source string) {
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,
+	"expose":                      true, // acts only as the calling agent (ptone/scion#4728)
 	"keys":                        true,
 	"list":                        true,
 	"logs":                        true,
@@ -51,6 +52,7 @@ var agentAllowed = map[string]bool{
 	"start":                       true,
 	"stop":                        true,
 	"suspend":                     true,
+	"unexpose":                    true, // acts only as the calling agent (ptone/scion#4728)
 	"version":                     true,
 	"whoami":                      true,
 	"global-flags":                true,
