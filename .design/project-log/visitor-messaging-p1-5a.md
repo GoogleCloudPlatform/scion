@@ -47,8 +47,7 @@
 - **Request shape (allow-list).** A visitor sends a text message only, to
   the one agent. The request may set `message` or `structured_message`;
   the structured message may set `msg`, `type` (instruction, chat or
-  reply), `thread_id` (the visitor's own DM only) and `recipient` (not a
-  group; the hub replaces it), plus `version`, `timestamp`, `sender` and
+  reply) and `recipient` (not a group; the hub replaces it), plus `version`, `timestamp`, `sender` and
   `sender_id`, which the hub validates or sets (it clears a visitor's
   timestamp). Every other field with a value, including `urgent`,
   `status` and any field added later, answers `400` with `details.field`
@@ -131,6 +130,18 @@
   on and off.
 - `pkg/messaging`, `pkg/messages`: the reserved-key strip, the new
   envelope and the legacy renderer for the four keys.
+
+## Thread ID removed from the visitor allow-list
+
+- The gate run found that a visitor's send with only `thread_id` (its own
+  DM key) fails the shared validation: `thread_id` requires `channel`, and
+  `channel` is not on the visitor allow-list. So a visitor's `thread_id`
+  could never succeed. Visitors send the same request shape as members,
+  with no visitor-only defaulting, so `thread_id` is now refused by name
+  like `channel`. This narrows the allow-list, consistent with "text
+  only". The shared validation is unchanged. The only client that sends
+  `thread_id` (the CLI `--thread-id`, deprecated) already requires
+  `--channel` with it.
 
 ## Follow-ups (part B and later)
 

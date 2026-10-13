@@ -1844,7 +1844,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// (visitorMessageRequestRefusal); every other field is refused before
 	// anything is looked up or written. The hub sets the timestamp.
 	if visitor, ok := GetIdentityFromContext(ctx).(*VisitorIdentity); ok && visitor != nil {
-		if field := visitorMessageRequestRefusal(&req, visitor.ID(), id); field != "" {
+		if field := visitorMessageRequestRefusal(&req); field != "" {
 			ValidationError(w, field+" is not available to visitors", map[string]interface{}{"field": field})
 			return
 		}

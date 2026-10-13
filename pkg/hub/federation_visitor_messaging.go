@@ -284,7 +284,6 @@ var visitorStructuredFields = map[string]bool{
 	// Checked by value in visitorMessageRequestRefusal.
 	"msg":       true,
 	"type":      true,
-	"thread_id": true,
 	"recipient": true, // a group recipient is refused; any other value is replaced by the target agent
 	// Validated by messaging.ValidateLegacyMessage (the one version).
 	"version": true,
@@ -295,15 +294,13 @@ var visitorStructuredFields = map[string]bool{
 }
 
 // visitorMessageRequestRefusal returns the name of the first field of req a
-// visitor may not use when messaging the agent agentID, or "" when req is a
-// direct text message the visitor may send. A visitor sends text only, to
-// the one agent, in the visitor's own DM with it: req may set only the
-// fields in visitorRequestFields and its structured message only those in
-// visitorStructuredFields, with a type in visitorMessageTypes, no group
-// recipient, and no thread other than that DM. A refused field is named by
-// its JSON name, prefixed with "structured_message." inside the structured
-// message.
-func visitorMessageRequestRefusal(req *MessageRequest, visitorID, agentID string) string {
+// visitor may not use, or "" when req is a direct text message the visitor
+// may send. A visitor sends text only, to the one target agent: req may set
+// only the fields in visitorRequestFields and its structured message only
+// those in visitorStructuredFields, with a type in visitorMessageTypes and
+// no group recipient. A refused field is named by its JSON name, prefixed
+// with "structured_message." inside the structured message.
+func visitorMessageRequestRefusal(req *MessageRequest) string {
 	if field := firstFieldOutside(req, visitorRequestFields); field != "" {
 		return field
 	}
@@ -314,14 +311,11 @@ func visitorMessageRequestRefusal(req *MessageRequest, visitorID, agentID string
 	if field := firstFieldOutside(sm, visitorStructuredFields); field != "" {
 		return "structured_message." + field
 	}
-	ownDM, _ := messages.DMConversationKey("agent", agentID, "user", visitorID)
 	switch {
 	case !visitorMessageTypes[sm.Type]:
 		return "structured_message.type"
 	case messages.IsGroupRecipient(sm.Recipient):
 		return "structured_message.recipient"
-	case sm.ThreadID != "" && (ownDM == "" || sm.ThreadID != ownDM):
-		return "structured_message.thread_id"
 	}
 	return ""
 }

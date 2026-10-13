@@ -501,8 +501,8 @@ func TestVisitorMessaging_OwnDMReadOnly(t *testing.T) {
 
 // A visitor sends a direct text message only: every request field outside
 // the allow-list is refused with a validation error naming it in
-// details.field, before anything is written; its own DM key as thread ID is
-// accepted, and a client timestamp is replaced by the hub's.
+// details.field, before anything is written (a thread ID too, its own DM key
+// included), and a client timestamp is replaced by the hub's.
 func TestVisitorMessaging_RequestFieldsLimited(t *testing.T) {
 	f := newVisitorMessagingFixture(t)
 	visitorID, token := f.visitor(t, "sub-hal", "hal@corp.example")
@@ -512,6 +512,15 @@ func TestVisitorMessaging_RequestFieldsLimited(t *testing.T) {
 		sm := &messages.StructuredMessage{Msg: "hi", Type: messages.TypeInstruction}
 		mut(sm)
 		return map[string]interface{}{"structured_message": sm}
+	}
+	assertRefused := func(field string, body interface{}) {
+		t.Helper()
+		rec := f.do(t, token, http.MethodPost, f.projectMessagePath(f.agent.Slug), body)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", field, rec.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, field+" is not available to visitors", resp.Error.Message, field)
+		assert.Equal(t, field, resp.Error.Details["field"], field)
 	}
 	for field, body := range map[string]interface{}{
 		"plain":                            map[string]interface{}{"message": "hi", "plain": true},
@@ -535,26 +544,21 @@ func TestVisitorMessaging_RequestFieldsLimited(t *testing.T) {
 		"structured_message.recipient":     structured(func(sm *messages.StructuredMessage) { sm.Recipient = "group[agent:helper,agent:sealed]" }),
 		"structured_message.channel":       structured(func(sm *messages.StructuredMessage) { sm.Channel = "web" }),
 		"structured_message.delivery_text": structured(func(sm *messages.StructuredMessage) { sm.DeliveryText = "spoofed" }),
-		"structured_message.thread_id":     structured(func(sm *messages.StructuredMessage) { sm.ThreadID = "my-thread" }),
+		"structured_message.thread_id":     structured(func(sm *messages.StructuredMessage) { sm.ThreadID = ownDM }),
 		"structured_message.conversation_id": structured(func(sm *messages.StructuredMessage) {
 			sm.ConversationID = tid("some-conversation")
 		}),
 	} {
-		rec := f.do(t, token, http.MethodPost, f.projectMessagePath(f.agent.Slug), body)
-		require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", field, rec.Body.String())
-		var resp ErrorResponse
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-		assert.Equal(t, field+" is not available to visitors", resp.Error.Message, field)
-		assert.Equal(t, field, resp.Error.Details["field"], field)
+		assertRefused(field, body)
 	}
+	// Any other thread ID is refused the same way.
+	assertRefused("structured_message.thread_id",
+		structured(func(sm *messages.StructuredMessage) { sm.ThreadID = "my-thread" }))
 	assert.Empty(t, f.dispatcher.getCalls(), "no refused request is dispatched")
 
 	const clientTimestamp = "2001-02-03T04:05:06Z"
 	rec := f.do(t, token, http.MethodPost, f.projectMessagePath(f.agent.Slug),
-		structured(func(sm *messages.StructuredMessage) {
-			sm.ThreadID = ownDM
-			sm.Timestamp = clientTimestamp
-		}))
+		structured(func(sm *messages.StructuredMessage) { sm.Timestamp = clientTimestamp }))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	calls := f.dispatcher.getCalls()
 	require.Len(t, calls, 1)
