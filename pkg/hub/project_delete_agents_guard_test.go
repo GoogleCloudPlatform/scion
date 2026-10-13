@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -135,25 +136,40 @@ func TestProjectDelete_ForceDeletesLiveAgents(t *testing.T) {
 	assert.Equal(t, 1, disp.deleteCalls, "force keeps the best-effort runtime delete")
 }
 
-// The refusal list is capped; truncated reports that more agents block.
+// The refusal list is capped; truncated reports that more agents block
+// than are listed, and is false when exactly the cap blocks.
 func TestProjectDelete_RefusalListCapped(t *testing.T) {
 	orig := projectDeleteBlockingAgentsLimit
 	projectDeleteBlockingAgentsLimit = 1
 	t.Cleanup(func() { projectDeleteBlockingAgentsLimit = orig })
 
-	srv, s := testServer(t)
-	ctx := context.Background()
-	srv.SetDispatcher(&deleteDispatcher{})
-	project, broker, _ := setupOnlineBrokerAgent(t, s, "pd-guard-cap")
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: tid("pd-guard-cap-2"), Slug: "pd-guard-cap-2", Name: "Cap 2",
-		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
-	}))
+	for _, tc := range []struct {
+		name          string
+		agents        int
+		wantTruncated bool
+	}{
+		{name: "more than the cap", agents: 2, wantTruncated: true},
+		{name: "exactly the cap", agents: 1, wantTruncated: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+			srv.SetDispatcher(&deleteDispatcher{})
+			project, broker, _ := setupOnlineBrokerAgent(t, s, "pd-guard-cap")
+			for i := 2; i <= tc.agents; i++ {
+				slug := fmt.Sprintf("pd-guard-cap-%d", i)
+				require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+					ID: tid(slug), Slug: slug, Name: slug,
+					ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+				}))
+			}
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
-	body := decodeProjectDeleteConflict(t, rec)
-	assert.Len(t, body.Error.Details.Agents, 1)
-	assert.True(t, body.Error.Details.Truncated)
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+			body := decodeProjectDeleteConflict(t, rec)
+			assert.Len(t, body.Error.Details.Agents, 1)
+			assert.Equal(t, tc.wantTruncated, body.Error.Details.Truncated)
+		})
+	}
 }
 
 // An actor without delete authority gets 403, not the agent list.

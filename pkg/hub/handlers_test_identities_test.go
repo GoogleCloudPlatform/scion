@@ -665,7 +665,9 @@ func TestTestIdentity_MemberFidelity(t *testing.T) {
 	require.True(t, rec.Code >= 200 && rec.Code < 300, "start agent: %d %s", rec.Code, rec.Body.String())
 
 	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/agents/"+agentID, nil)
-	require.True(t, rec.Code >= 200 && rec.Code < 300, "delete agent: %d %s", rec.Code, rec.Body.String())
+	// Exactly 204: a 202 leaves the agent live, and the project delete
+	// below would then be refused with 409 (ptone/scion#4811).
+	require.Equal(t, http.StatusNoContent, rec.Code, "delete agent must finish before the project delete: %s", rec.Body.String())
 
 	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/projects/"+projectID, nil)
 	require.True(t, rec.Code >= 200 && rec.Code < 300, "delete project: %d %s", rec.Code, rec.Body.String())
