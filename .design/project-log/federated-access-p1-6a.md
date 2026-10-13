@@ -66,3 +66,18 @@
   `federationTokenServerWithStoreFault` (installStoreFault right after the
   server is built) and `Arm()` where the store used to be swapped; the user
   stub and the audit-failing store delegate until armed.
+
+## pkg/hub test fixes for the federation token route (2026-10-13)
+
+- `requireExperiment` runs when New() registers routes, so every test
+  registry handed to New() must hold federation.project_visitors.
+  `routeRegistrationExperiments` (experiments_helpers_test.go) returns the
+  production definitions of such experiments; `testRegistry` and the
+  review-overdue test append them. Add a name there when another route is
+  gated at registration.
+- The route answers 404 while the OIDC provider is off, so the live
+  inventory fixture (used by the catalog live method check and the bearer
+  disposition matrix) installs a test OIDC key manager
+  (`installTestOIDCKeyManager`, moved out of `testOIDCServer`) and allows
+  one audience, which the federation.token.mint request body sends.
+- The route is listed in the route classification test map.
