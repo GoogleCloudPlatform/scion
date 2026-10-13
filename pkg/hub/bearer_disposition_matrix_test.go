@@ -119,6 +119,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the unscoped search covers only the projects the token can read instead of refusing the request, so a token without project:read gets 200 with no rows",
 		Pin:    "TestChatSearchToken_DMRowsNeedInboxRead",
 	},
+	{OperationID: "chat.conversation.send.dmuser", Method: "POST", Pattern: "/api/v1/chat/conversations/{id}/messages"}: {
+		Reason: "a send to a user needs read access to the peer user record for every caller, and that record has no hub target for a token, so the admitting token is refused by the peer read check",
+		Pin:    "TestChatHumanDirectMessage_RequiresHubBoundary",
+	},
 	{OperationID: "chat.attachment.upload.project", Method: "POST", Pattern: "/api/v1/chat/attachments"}: {
 		Reason: "the upload takes a multipart form, which the matrix body cannot express, and the matrix server configures no attachment store",
 		Pin:    "TestChatProjectUpload_RequiresInboxWriteAndProjectRead",
@@ -219,7 +223,6 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"chat.conversation.history.dm":           {"agent:read"},
 	"chat.conversation.send.topic":           {"project:read"},
 	"chat.conversation.send.dmagent":         {"agent:message"},
-	"chat.conversation.send.dmuser":          {"user:read"},
 	"chat.message.edit":                      {"project:read"},
 	"chat.message.delete":                    {"project:read"},
 	"chat.conversation.readstate.dm":         {"agent:read"},

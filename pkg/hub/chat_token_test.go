@@ -317,7 +317,11 @@ func TestChatDirectMessageToken_PeerAgentInsideBoundary(t *testing.T) {
 }
 
 // TestChatHumanDirectMessage_RequiresHubBoundary requires a token to hold a
-// hub boundary for a DM between two users: the DM has no project.
+// hub boundary for a DM between two users: the DM has no project. A send
+// also needs read access to the peer user record for every caller; a token
+// is refused that read while user records have no hub target for tokens,
+// so a token send to a user is refused even with inbox:write and
+// user:read.
 func TestChatHumanDirectMessage_RequiresHubBoundary(t *testing.T) {
 	f := newChatFixture(t)
 	key := f.dm(t, f.admin, "user", f.member)
@@ -334,6 +338,8 @@ func TestChatHumanDirectMessage_RequiresHubBoundary(t *testing.T) {
 	hubWriter := f.mint(t, f.admin, hubBoundary(), "inbox:write", "user:read")
 	assert.Equal(t, http.StatusOK, f.call(t, hubWriter, http.MethodPut, chatConversationPath(key, "pin"), map[string]bool{"pinned": true}).Code)
 	rec := f.call(t, hubWriter, http.MethodPost, chatConversationPath(key, "messages"), map[string]string{"content": "hello member"})
+	assert.Equal(t, http.StatusNotFound, rec.Code, "the peer user record has no hub target for a token: %s", rec.Body.String())
+	rec = f.session(t, f.admin, http.MethodPost, chatConversationPath(key, "messages"), map[string]string{"content": "hello member"})
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 	hubNoInbox := f.mint(t, f.admin, hubBoundary(), "user:read")
