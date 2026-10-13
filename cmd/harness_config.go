@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -252,6 +253,7 @@ By default this does not activate container-script provisioning. Use
 			if err != nil {
 				return fmt.Errorf("failed to load harness-config %q: %w", name, err)
 			}
+			printHarnessConfigWarnings(cmd.ErrOrStderr(), name, hcDir.Warnings)
 			h := harness.New(hcDir.Config.Harness)
 			plan, err := config.UpgradeHarnessConfig(targetDir, h, config.HarnessConfigUpgradeOptions{
 				DryRun:         dryRun,
@@ -324,6 +326,7 @@ the local directory: files deleted locally are removed from the Hub.`,
 		if err != nil {
 			return fmt.Errorf("harness-config %q not found: %w", name, err)
 		}
+		printHarnessConfigWarnings(cmd.ErrOrStderr(), name, hcDir.Warnings)
 
 		hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
 		if err != nil {
@@ -978,4 +981,13 @@ func init() {
 
 	// Flags for pull command
 	harnessConfigPullCmd.Flags().String("to", "", "Destination path for downloaded harness-config")
+}
+
+// printHarnessConfigWarnings writes a harness-config's load warnings (see
+// config.HarnessConfigDir.Warnings) to w, one "warning: <name>: ..." line
+// each. The command carries on; warnings are never fatal.
+func printHarnessConfigWarnings(w io.Writer, name string, warnings []string) {
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintf(w, "warning: %s: %s\n", name, warning)
+	}
 }

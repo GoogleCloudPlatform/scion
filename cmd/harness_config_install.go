@@ -98,6 +98,7 @@ func runHarnessConfigInstall(cmd *cobra.Command, args []string) error {
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
 		return fmt.Errorf("invalid harness-config name %q; name cannot contain path components or separators", name)
 	}
+	printHarnessConfigWarnings(cmd.ErrOrStderr(), name, hcDir.Warnings)
 
 	hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
 	if err != nil {
