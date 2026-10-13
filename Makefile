@@ -606,7 +606,9 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestScheduledStore_Postgres \
 	TestWebChatStore_Postgres_MessagesInOtherSchema \
 	TestWebChatStore_Postgres_ThreadMigrationsWaitForMessagesTable \
-	TestWebChatStore_Postgres_ThreadMigrationsRunOnce
+	TestWebChatStore_Postgres_ThreadMigrationsRunOnce \
+	TestUserPrefsThreadGroupsMarker_Postgres \
+	TestUserPrefsThreadGroupsMigratedAt_Postgres_PreExistingDB
 
 test-webchat-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \

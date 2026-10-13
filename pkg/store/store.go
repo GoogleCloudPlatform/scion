@@ -3226,6 +3226,16 @@ type ThreadGroupStore interface {
 	// group returns ErrNotFound and writes nothing.
 	SetThreadGroupMember(ctx context.Context, groupID, conversationID, addedBy string) error
 
+	// AddThreadGroupMemberIfUnfiled files a conversation into a thread group
+	// only if it is not in any thread group yet; a conversation that is
+	// already filed (in this or another group) is left where it is. It
+	// reports whether this call filed it. It relies on the unique
+	// conversation index, so concurrent callers file a conversation once.
+	// The group's existence is checked in the same transaction; a missing
+	// group returns ErrNotFound and writes nothing. The automatic migration
+	// of personal groups uses it (design section 5a, rule 3).
+	AddThreadGroupMemberIfUnfiled(ctx context.Context, groupID, conversationID, addedBy string) (bool, error)
+
 	// RemoveThreadGroupMember takes a conversation out of a thread group. It
 	// is idempotent: a conversation that is not in that group, or a group ID
 	// that matches no group (including a malformed one), is not an error.
