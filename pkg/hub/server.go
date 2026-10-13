@@ -966,6 +966,7 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 		query += "&projectId=" + url.QueryEscape(projectID)
 	}
 	query += deleteProjectPathQuery(ctx)
+	query += dispatchAgentIDQuery(ctx, "&")
 	if opts.RunID != "" {
 		query += "&runId=" + url.QueryEscape(opts.RunID)
 	}
@@ -998,7 +999,40 @@ func stopAgentQuery(ctx context.Context, projectID, runID string) string {
 		}
 		query += "runId=" + url.QueryEscape(runID)
 	}
+	if p := dispatchAgentIDQuery(ctx, ""); p != "" {
+		if query != "" {
+			query += "&"
+		}
+		query += p
+	}
 	return withRecordedRuntimeQuery(ctx, query)
+}
+
+// dispatchAgentIDKey carries the hub's agent ID for a broker stop or delete;
+// see withDispatchAgentID.
+type dispatchAgentIDKey struct{}
+
+// withDispatchAgentID attaches the hub's ID of the agent a broker stop or
+// delete is for (ptone/scion#2632). Both transports send it as the
+// api.AgentIDQueryParam query parameter; the broker uses it only to keep
+// the stop or delete from cancelling the in-flight start of a different
+// agent recreated under the same name. Like withRecordedRuntime it rides on
+// the context to keep the RuntimeBrokerClient interface unchanged; an empty
+// ID leaves ctx unchanged and the broker matches by name.
+func withDispatchAgentID(ctx context.Context, agentID string) context.Context {
+	if agentID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, dispatchAgentIDKey{}, agentID)
+}
+
+// dispatchAgentIDQuery returns sep + "agentId=<escaped>" when an agent ID
+// was attached with withDispatchAgentID, otherwise "".
+func dispatchAgentIDQuery(ctx context.Context, sep string) string {
+	if id, _ := ctx.Value(dispatchAgentIDKey{}).(string); id != "" {
+		return sep + api.AgentIDQueryParam + "=" + url.QueryEscape(id)
+	}
+	return ""
 }
 
 // withRunIDURL appends the runId query parameter to a start or restart
