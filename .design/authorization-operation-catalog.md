@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 204
+**Operations:** 208
 
 ## Table of Contents
 
@@ -34,7 +34,11 @@
 - [project.visitors.list](#projectvisitorslist) — List a project's visitor grants (federated accounts holding the project-visitor role)
 - [project.visitors.add](#projectvisitorsadd) — Grant a user of a trusted issuer visitor access to a project by email; creates the federated account in status pending when none exists
 - [project.visitors.update](#projectvisitorsupdate) — Replace the window (not before, expires at) of a project visitor grant
-- [project.visitors.remove](#projectvisitorsremove) — Revoke a project visitor grant; the visitor's next request is refused
+- [project.visitors.remove](#projectvisitorsremove) — Revoke a project visitor grant; the visitor's next request is refused. Revoking a binding a visitor rule created also excludes the visitor from that rule, so the rule does not bind them again
+- [project.visitors.rules.list](#projectvisitorsruleslist) — List a project's visitor rules (visitor access by issuer and email domain)
+- [project.visitors.rules.add](#projectvisitorsrulesadd) — Add a visitor rule: visitor access to a project for every user of a trusted issuer whose verified email is in a domain, bound per user on the user's first matching request
+- [project.visitors.rules.update](#projectvisitorsrulesupdate) — Replace the window (not before, expires at) of a project visitor rule and of every visitor binding it created
+- [project.visitors.rules.remove](#projectvisitorsrulesremove) — Remove a project visitor rule; every visitor binding it created and its exclusions are deleted in the same transaction, and grants by email are unchanged
 - [project.lifecycle.create](#projectlifecyclecreate) — Create a new project
 - [project.lifecycle.delete](#projectlifecycledelete) — Delete a project with cascading security state cleanup and atomic audit
 - [project.read](#projectread) — Read a single project's metadata by ID or slug
@@ -1332,7 +1336,7 @@
 
 **Domain:** project.visitors
 
-**Description:** Revoke a project visitor grant; the visitor's next request is refused
+**Description:** Revoke a project visitor grant; the visitor's next request is refused. Revoking a binding a visitor rule created also excludes the visitor from that rule, so the rule does not bind them again
 
 ### Entry Points
 
@@ -1370,6 +1374,194 @@
 
 - `pkg/hub:TestProjectVisitors_RevokeRefusesNextRequest`
 - `pkg/hub:TestProjectVisitors_WhoMayGrant`
+- `pkg/hub:TestProjectVisitorRules_RevokeOneVisitorExcludes`
+
+---
+
+## project.visitors.rules.list
+
+**Domain:** project.visitors
+
+**Description:** List a project's visitor rules (visitor access by issuer and email domain)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/visitors/rules` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `credential_insufficient`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitorRules_AddListRemove`
+
+---
+
+## project.visitors.rules.add
+
+**Domain:** project.visitors
+
+**Description:** Add a visitor rule: visitor access to a project for every user of a trusted issuer whose verified email is in a domain, bound per user on the user's first matching request
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/visitors/rules` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- The actor must hold every permission of the project-visitor role on the project (an unscoped local platform admin passes), as for a grant by email
+
+### Governance
+
+- **Kind:** peer_superior
+- Holders of project.manage_visitors (project owners and admins, and hub admins) add visitor rules; adding one also needs every permission of the project-visitor role on the project. The issuer must be trusted with allow_visitor_grants, and its allowed_emails and allowed_domains must admit the whole domain. The domain matches exactly (case-insensitive), with no wildcard or subdomain match.
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| visitor-rule-bindings-only | security | A rule binds only the project-visitor role, at the rule's project, to a federated account of the rule's issuer, tagged with the rule's ID and carrying its window (CreateVisitorRoleBinding) | Yes |
+
+### Audit
+
+- **Event Type:** `project_visitor_rule_add`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** rule_id, issuer, domain, not_before, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `principal_ineligible`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitorRules_AddListRemove`
+- `pkg/hub:TestProjectVisitorRules_AddRefusals`
+- `pkg/hub:TestProjectVisitorRules_AddNeedsEveryVisitorPermission`
+
+---
+
+## project.visitors.rules.update
+
+**Domain:** project.visitors
+
+**Description:** Replace the window (not before, expires at) of a project visitor rule and of every visitor binding it created
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/projects/{id}/visitors/rules/{ruleId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `change-authority`
+
+### Delegation
+
+- **Kind:** `conditional_on_increase`
+- Only a window change that extends the rule (an earlier or cleared start, or a later or cleared expiry) needs every permission of the project-visitor role on the project; shortening never does
+
+**Authority Evaluation:** `before_and_after`
+
+### Governance
+
+- **Kind:** peer_superior
+- Holders of project.manage_visitors (project owners and admins, and hub admins) shorten any visitor rule of the project; extending one also needs every permission of the project-visitor role on the project. The rule's bindings take the new window in the same transaction.
+
+### Audit
+
+- **Event Type:** `project_visitor_rule_update`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** rule_id, not_before, expires_at
+- **After Fields:** not_before, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitorRules_WindowHonoured`
+- `pkg/hub:TestProjectVisitorRules_AddNeedsEveryVisitorPermission`
+
+---
+
+## project.visitors.rules.remove
+
+**Domain:** project.visitors
+
+**Description:** Remove a project visitor rule; every visitor binding it created and its exclusions are deleted in the same transaction, and grants by email are unchanged
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/projects/{id}/visitors/rules/{ruleId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** peer_superior
+- Holders of project.manage_visitors (project owners and admins, and hub admins) remove any visitor rule of the project.
+
+### Audit
+
+- **Event Type:** `project_visitor_rule_remove`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** rule_id, issuer, domain, removed_visitor_ids
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitorRules_RemoveDeletesOnlyItsBindings`
+- `pkg/hub:TestProjectVisitorRules_AuditFailureLeavesNoChange`
 
 ---
 

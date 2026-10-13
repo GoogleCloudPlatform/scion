@@ -119,6 +119,10 @@ func entRoleBindingToStore(rb *ent.RoleBinding) *store.RoleBinding {
 	if rb.RoleDefinitionID != nil {
 		result.RoleDefinitionID = rb.RoleDefinitionID.String()
 	}
+	if rb.SourceRuleID != nil {
+		ruleID := rb.SourceRuleID.String()
+		result.SourceRuleID = &ruleID
+	}
 	return result
 }
 
@@ -614,6 +618,28 @@ func (r *RoleStore) UpdateVisitorRoleBindingWindow(ctx context.Context, id strin
 	return entRoleBindingToStore(updated), nil
 }
 
+// visitorBindingSourceRule checks the source rule ruleID of a visitor
+// binding at project scope projectID for the federated account u: the
+// rule must exist, be of that project and of the account's home issuer.
+// It returns the rule's ID, or ErrVisitorBindingRefused.
+func (r *RoleStore) visitorBindingSourceRule(ctx context.Context, ruleID, projectID string, u *ent.User) (uuid.UUID, error) {
+	ruleUID, err := uuid.Parse(ruleID)
+	if err != nil {
+		return uuid.Nil, store.ErrVisitorBindingRefused
+	}
+	rule, err := r.client.ProjectVisitorRule.Get(ctx, ruleUID)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return uuid.Nil, store.ErrVisitorBindingRefused
+		}
+		return uuid.Nil, mapError(err)
+	}
+	if rule.ProjectID != projectID || u.HomeIssuer == nil || *u.HomeIssuer != rule.Issuer {
+		return uuid.Nil, store.ErrVisitorBindingRefused
+	}
+	return rule.ID, nil
+}
+
 // isVisitorRole reports whether rd is the seeded project-visitor role: a
 // system role of that name, at project scope, that does not confer
 // membership. A custom role of the same name is not.
@@ -656,6 +682,11 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 	} else if !rd.ConfersMembership {
 		return nil, fmt.Errorf("%w: role %q", store.ErrNonMembershipRoleRefused, rd.Name)
 	}
+	// Only the visitor path records the visitor rule that created a
+	// binding.
+	if rb.SourceRuleID != nil && !visitor {
+		return nil, fmt.Errorf("%w: a source rule is set only on a visitor binding", store.ErrInvalidInput)
+	}
 
 	// Scope type must match the role definition's scope type.
 	if rb.ScopeType != string(rd.ScopeType) {
@@ -682,7 +713,9 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		return nil, fmt.Errorf("%w: system scope must have empty scope_id", store.ErrInvalidInput)
 	}
 
-	// Principal existence validation.
+	// Principal existence validation. sourceRuleUID is the checked
+	// SourceRuleID of a visitor binding (set in the user case below).
+	var sourceRuleUID *uuid.UUID
 	principalUID, err := parseUUID(rb.PrincipalID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid principal_id: %s", store.ErrInvalidInput, rb.PrincipalID)
@@ -702,6 +735,13 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		}
 		if !visitor && federated {
 			return nil, store.ErrFederatedAccountRefused
+		}
+		if visitor && rb.SourceRuleID != nil {
+			ruleUID, err := r.visitorBindingSourceRule(ctx, *rb.SourceRuleID, rb.ScopeID, u)
+			if err != nil {
+				return nil, err
+			}
+			sourceRuleUID = &ruleUID
 		}
 		exp, err := checkTestAdminSystemBinding(u, rb)
 		if err != nil {
@@ -772,7 +812,8 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		SetPrincipalID(rb.PrincipalID).
 		SetScopeType(rolebinding.ScopeType(rb.ScopeType)).
 		SetScopeID(rb.ScopeID).
-		SetNillableMembershipKind(membershipKind)
+		SetNillableMembershipKind(membershipKind).
+		SetNillableSourceRuleID(sourceRuleUID)
 
 	if rb.ID != "" {
 		uid, err := parseUUID(rb.ID)

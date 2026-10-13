@@ -3546,6 +3546,10 @@ type RoleBinding struct {
 	ExpiresAt        *time.Time `json:"expiresAt"` // Binding is inactive after this time (kernel evaluates)
 	CreatedBy        string     `json:"createdBy"`
 	CreatedAt        time.Time  `json:"createdAt"`
+	// SourceRuleID is set only on a project-visitor binding created by a
+	// project visitor rule (ProjectVisitorRule.ID); removing the rule
+	// deletes the binding. Only CreateVisitorRoleBinding sets it.
+	SourceRuleID *string `json:"sourceRuleId,omitempty"`
 }
 
 // ProjectMembership is a convenience view of role bindings scoped to a project.

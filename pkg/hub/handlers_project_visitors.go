@@ -37,6 +37,9 @@ import (
 //	PATCH  /api/v1/projects/{id}/visitors/{visitorId}  replace a grant's window
 //	DELETE /api/v1/projects/{id}/visitors/{visitorId}  revoke a grant
 //
+// The visitor rule routes (by email domain) live under /visitors/rules
+// (handlers_project_visitor_rules.go).
+//
 // {visitorId} is the federated account ID. Every route answers 404 while
 // the federation.project_visitors experiment is off, needs an interactive
 // session (or dev) credential, and needs project.manage_visitors on the
@@ -88,7 +91,18 @@ type ProjectVisitor struct {
 	NotBefore      *time.Time `json:"notBefore,omitempty"`
 	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`
 	CreatedAt      time.Time  `json:"createdAt"`
+	// Source is how the visitor holds the grant: "email" for a grant by
+	// email (POST /visitors), or "rule" for a binding a visitor rule
+	// created, whose ID is SourceRuleID.
+	Source       string `json:"source"`
+	SourceRuleID string `json:"sourceRuleId,omitempty"`
 }
+
+// Values of ProjectVisitor.Source.
+const (
+	projectVisitorSourceEmail = "email"
+	projectVisitorSourceRule  = "rule"
+)
 
 // ListProjectVisitorsResponse is the GET /visitors response.
 type ListProjectVisitorsResponse struct {
@@ -119,6 +133,11 @@ var (
 	errVisitorAccountRace = errors.New("federated account created concurrently")
 )
 
+// errVisitorRuleBindingWindow marks a window change of a binding a visitor
+// rule created: its window follows the rule's, so the update handler
+// answers it with 409.
+var errVisitorRuleBindingWindow = errors.New("the visitor's window follows its visitor rule")
+
 // errVisitorWindowNotAmplifiable marks a window change that extends a grant
 // by an actor who does not hold every project-visitor permission; the
 // update handler answers it with 403.
@@ -132,6 +151,10 @@ func (s *Server) handleProjectVisitors(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 	visitorID := strings.TrimPrefix(rest, "/")
+	if ruleRest, ok := strings.CutPrefix(visitorID, projectVisitorRulesSegment); ok && (ruleRest == "" || strings.HasPrefix(ruleRest, "/")) {
+		s.handleProjectVisitorRules(w, r, projectID, strings.TrimPrefix(ruleRest, "/"))
+		return
+	}
 	if strings.Contains(visitorID, "/") {
 		NotFound(w, "Project visitor")
 		return
@@ -164,7 +187,7 @@ func (s *Server) handleProjectVisitors(w http.ResponseWriter, r *http.Request, p
 	case r.Method == http.MethodPatch:
 		s.handleUpdateProjectVisitor(w, r, project, actor, visitorID)
 	default:
-		s.handleRemoveProjectVisitor(w, r, project, visitorID)
+		s.handleRemoveProjectVisitor(w, r, project, actor, visitorID)
 	}
 }
 
@@ -404,6 +427,9 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		if err != nil {
 			return err
 		}
+		if before.SourceRuleID != nil {
+			return errVisitorRuleBindingWindow
+		}
 		if !holdsAll && visitorWindowExtends(before.NotBefore, before.ExpiresAt, req.NotBefore, req.ExpiresAt) {
 			return errVisitorWindowNotAmplifiable
 		}
@@ -426,6 +452,10 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, visitorGrantNonAmplificationMessage, nil)
 		return
 	}
+	if errors.Is(err, errVisitorRuleBindingWindow) {
+		Conflict(w, "This visitor's access comes from a visitor rule; change the rule's window instead")
+		return
+	}
 	if err != nil {
 		writeVisitorItemError(w, err)
 		return
@@ -433,8 +463,11 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleRemoveProjectVisitor answers DELETE /visitors/{visitorId}.
-func (s *Server) handleRemoveProjectVisitor(w http.ResponseWriter, r *http.Request, project *store.Project, visitorID string) {
+// handleRemoveProjectVisitor answers DELETE /visitors/{visitorId}. Revoking
+// a binding a visitor rule created also records an exclusion of the
+// visitor from that rule, in the same transaction, so the rule does not
+// create the binding again; the rule's other visitors are unchanged.
+func (s *Server) handleRemoveProjectVisitor(w http.ResponseWriter, r *http.Request, project *store.Project, actor UserIdentity, visitorID string) {
 	ctx := r.Context()
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		u, rb, err := projectVisitorBinding(ctx, tx, project.ID, visitorID)
@@ -443,6 +476,11 @@ func (s *Server) handleRemoveProjectVisitor(w http.ResponseWriter, r *http.Reque
 		}
 		if err := tx.DeleteRoleBinding(ctx, rb.ID); err != nil {
 			return err
+		}
+		if rb.SourceRuleID != nil {
+			if err := tx.CreateProjectVisitorExclusion(ctx, *rb.SourceRuleID, u.ID, actor.ID()); err != nil {
+				return err
+			}
 		}
 		subject, err := federationSubjectOf(ctx, tx, u.ID)
 		if err != nil {
@@ -561,6 +599,11 @@ func projectVisitorView(u *store.User, rb *store.RoleBinding) ProjectVisitor {
 		NotBefore: rb.NotBefore,
 		ExpiresAt: rb.ExpiresAt,
 		CreatedAt: rb.CreatedAt,
+		Source:    projectVisitorSourceEmail,
+	}
+	if rb.SourceRuleID != nil {
+		v.Source = projectVisitorSourceRule
+		v.SourceRuleID = *rb.SourceRuleID
 	}
 	if u.FederatedEmail != nil {
 		v.Email = *u.FederatedEmail
@@ -608,6 +651,9 @@ func visitorAuditSummary(u *store.User, rb *store.RoleBinding, subject string) m
 	}
 	if subject != "" {
 		out["subject"] = subject
+	}
+	if v.SourceRuleID != "" {
+		out["source_rule_id"] = v.SourceRuleID
 	}
 	if v.NotBefore != nil {
 		out["not_before"] = v.NotBefore.UTC().Format(time.RFC3339)

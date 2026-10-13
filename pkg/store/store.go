@@ -248,6 +248,57 @@ type Store interface {
 	// account. It is safe to call on the store passed to WithTx.
 	LinkPendingFederatedUser(ctx context.Context, userID, issuer, subject, email string) (*User, error)
 
+	// CreateProjectVisitorRule creates a project visitor rule. It requires
+	// a ProjectID, an Issuer (normalized with NormalizeFederatedIssuer) and
+	// a Domain (normalized with NormalizeVisitorRuleDomain) that passes
+	// ValidVisitorRuleDomain, and, when both bounds are set, an ExpiresAt
+	// after NotBefore; it returns ErrInvalidInput otherwise. It generates
+	// the ID when empty and writes the normalized fields, the ID and
+	// CreatedAt back to rule. A second rule for the same (ProjectID,
+	// Issuer, Domain) returns ErrAlreadyExists. It is safe to call on the
+	// store passed to WithTx.
+	CreateProjectVisitorRule(ctx context.Context, rule *ProjectVisitorRule) error
+
+	// GetProjectVisitorRule returns the project visitor rule id, or
+	// ErrNotFound.
+	GetProjectVisitorRule(ctx context.Context, id string) (*ProjectVisitorRule, error)
+
+	// ListProjectVisitorRules returns the project visitor rules of
+	// projectID, oldest first.
+	ListProjectVisitorRules(ctx context.Context, projectID string) ([]*ProjectVisitorRule, error)
+
+	// ListActiveProjectVisitorRules returns the project visitor rules, of
+	// every project, for issuer and domain (both normalized before the
+	// lookup; the domain matches exactly) whose window contains at
+	// (ProjectVisitorRule.ActiveAt), oldest first.
+	ListActiveProjectVisitorRules(ctx context.Context, issuer, domain string, at time.Time) ([]*ProjectVisitorRule, error)
+
+	// UpdateProjectVisitorRuleWindow replaces the NotBefore and ExpiresAt
+	// of the project visitor rule id (nil clears a bound) and of every
+	// role binding the rule created (SourceRuleID), in one transaction,
+	// and returns the updated rule. A missing rule returns ErrNotFound. It
+	// is safe to call on the store passed to WithTx.
+	UpdateProjectVisitorRuleWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*ProjectVisitorRule, error)
+
+	// DeleteProjectVisitorRule deletes the project visitor rule id, every
+	// role binding it created (SourceRuleID) and its exclusions, in one
+	// transaction, and returns the deleted bindings. A binding with no
+	// SourceRuleID (a visitor grant by email) is never deleted. A missing
+	// rule returns ErrNotFound. It is safe to call on the store passed to
+	// WithTx.
+	DeleteProjectVisitorRule(ctx context.Context, id string) ([]*RoleBinding, error)
+
+	// CreateProjectVisitorExclusion records that the project visitor rule
+	// ruleID no longer binds the user userID, so the rule does not create
+	// that binding again. Recording an existing exclusion is not an error.
+	// A missing rule returns ErrNotFound. It is safe to call on the store
+	// passed to WithTx.
+	CreateProjectVisitorExclusion(ctx context.Context, ruleID, userID, createdBy string) error
+
+	// IsProjectVisitorExcluded reports whether the project visitor rule
+	// ruleID has an exclusion for the user userID.
+	IsProjectVisitorExcluded(ctx context.Context, ruleID, userID string) (bool, error)
+
 	// ListFixtureRootedResources returns the agents (soft-deleted ones
 	// included), schedules, groups and projects whose creation-time
 	// provenance stamp has fixture_root_id == rootID (ptone/scion#4240,
@@ -3306,8 +3357,11 @@ type RoleStore interface {
 	// ErrVisitorBindingRefused (a missing user is ErrNotFound). NotBefore
 	// and ExpiresAt are optional and stored as given. RoleDefinitionID may
 	// be empty, in which case the project-visitor role is resolved by
-	// name. Returns ErrAlreadyExists for a duplicate. It is safe to call
-	// on the store passed to WithTx.
+	// name. SourceRuleID, when set, names the project visitor rule that
+	// creates the binding: the rule must exist, be of the binding's
+	// project and of the account's home issuer (ErrVisitorBindingRefused
+	// otherwise). Returns ErrAlreadyExists for a duplicate. It is safe to
+	// call on the store passed to WithTx.
 	CreateVisitorRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
 
 	// ListVisitorRoleBindings returns the project-visitor bindings at the
