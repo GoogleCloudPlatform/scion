@@ -46,18 +46,18 @@ func TestReservedSocketsEmpty(t *testing.T) {
 func TestParsePolicy(t *testing.T) {
 	for _, raw := range []string{"", "  "} {
 		p, err := ParsePolicy(raw)
-		if err != nil || p.SSHDisabled || p.PortDenied(8462) || p.SocketDenied("/run/x.sock") {
+		if err != nil || p.SSHDisabled || p.PortDenied(9999) || p.SocketDenied("/run/x.sock") {
 			t.Errorf("ParsePolicy(%q) = %+v, %v; want no restriction", raw, p, err)
 		}
 	}
-	p, err := ParsePolicy(`{"disable_ssh":true,"deny_ports":[8462],"deny_sockets":["/run/x.sock","/srv/private"]}`)
+	p, err := ParsePolicy(`{"disable_ssh":true,"deny_ports":[9999],"deny_sockets":["/run/x.sock","/srv/private"]}`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !p.SSHDisabled {
 		t.Error("ssh not disabled")
 	}
-	for _, port := range []int{8462, 9810, 18380} {
+	for _, port := range []int{9999, 9810, 18380} {
 		if !p.PortDenied(port) {
 			t.Errorf("port %d allowed", port)
 		}

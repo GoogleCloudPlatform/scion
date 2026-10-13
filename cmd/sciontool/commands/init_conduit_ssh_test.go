@@ -452,10 +452,10 @@ func TestConduitPolicyEnv(t *testing.T) {
 		denied      []int
 		allowed     []int
 	}{
-		{name: "unset", allowed: []int{22, 8462}, denied: []int{9810}},
-		{name: "ports", raw: `{"deny_ports":[8462]}`, allowed: []int{22}, denied: []int{8462, 9810}},
-		{name: "ssh off", raw: `{"disable_ssh":true}`, sshDisabled: true, allowed: []int{8462}},
-		{name: "malformed", raw: `{"deny_ports":`, sshDisabled: true, denied: []int{22, 8462}},
+		{name: "unset", allowed: []int{22, 9999}, denied: []int{9810}},
+		{name: "ports", raw: `{"deny_ports":[9999]}`, allowed: []int{22}, denied: []int{9999, 9810}},
+		{name: "ssh off", raw: `{"disable_ssh":true}`, sshDisabled: true, allowed: []int{9999}},
+		{name: "malformed", raw: `{"deny_ports":`, sshDisabled: true, denied: []int{22, 9999}},
 		{name: "unknown field", raw: `{"allow_ports":[22]}`, sshDisabled: true, denied: []int{22}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

@@ -622,11 +622,11 @@ func TestBuildHubServerConfig_ConduitPolicy(t *testing.T) {
 	assert.Empty(t, sc.ConduitDenySockets)
 
 	cfg.Hub.Conduit.DisableSSH = true
-	cfg.Hub.Conduit.DenyPorts = []int{8462}
+	cfg.Hub.Conduit.DenyPorts = []int{9999}
 	cfg.Hub.Conduit.DenySockets = []string{"/run/x.sock"}
 	sc = buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
 	assert.True(t, sc.ConduitSSHDisabled)
-	assert.Equal(t, []int{8462}, sc.ConduitDenyPorts)
+	assert.Equal(t, []int{9999}, sc.ConduitDenyPorts)
 	assert.Equal(t, []string{"/run/x.sock"}, sc.ConduitDenySockets)
 }
 

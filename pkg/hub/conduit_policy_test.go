@@ -58,9 +58,9 @@ func TestAuthorizeConduitUserStream_SSHDisabled(t *testing.T) {
 // TestAuthorizeConduitTCPTarget_DenyPorts: deny wins over exposed and allowed.
 func TestAuthorizeConduitTCPTarget_DenyPorts(t *testing.T) {
 	f := newConduitFixture(t) // the agent exposes 3000
-	f.srv.config.ConduitTCPAllowedPorts = []int{8080, 8462}
-	f.srv.config.ConduitDenyPorts = []int{3000, 8462}
-	for port, ok := range map[int]bool{3000: false, 8462: false, 8080: true} {
+	f.srv.config.ConduitTCPAllowedPorts = []int{8080, 9999}
+	f.srv.config.ConduitDenyPorts = []int{3000, 9999}
+	for port, ok := range map[int]bool{3000: false, 9999: false, 8080: true} {
 		err := f.srv.authorizeConduitTCPTarget(f.agent, port)
 		if ok {
 			assert.NoError(t, err, "port %d", port)
@@ -78,12 +78,12 @@ func TestConduitAgentPolicy(t *testing.T) {
 	assert.Empty(t, s.conduitAgentPolicy())
 
 	s.config.ConduitSSHDisabled = true
-	s.config.ConduitDenyPorts = []int{8462}
+	s.config.ConduitDenyPorts = []int{9999}
 	s.config.ConduitDenySockets = []string{"/run/private"}
 	p, err := localpolicy.ParsePolicy(s.conduitAgentPolicy())
 	require.NoError(t, err)
 	assert.True(t, p.SSHDisabled)
-	assert.True(t, p.PortDenied(8462))
+	assert.True(t, p.PortDenied(9999))
 	assert.False(t, p.PortDenied(8463))
 	assert.True(t, p.SocketDenied("/run/private/a.sock"))
 }
@@ -111,7 +111,7 @@ func TestApplyAgentConduitPolicyOwnsTheVariable(t *testing.T) {
 
 // TestDispatchConduitPolicyEnv: covers create, start and restart.
 func TestDispatchConduitPolicyEnv(t *testing.T) {
-	const policy = `{"deny_ports":[8462]}`
+	const policy = `{"deny_ports":[9999]}`
 	paths := []struct {
 		name     string
 		dispatch func(context.Context, *HTTPAgentDispatcher, *store.Agent) error

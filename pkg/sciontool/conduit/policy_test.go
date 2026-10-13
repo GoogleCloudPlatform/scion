@@ -39,14 +39,14 @@ func TestAgentTCPPolicyDeniedPort(t *testing.T) {
 	key := newTestKey(t, "k1")
 	h := newFakeHub(t, key.public)
 	startAgent(t, h, func(o *Options) {
-		o.Policy = mustPolicy(t, `{"deny_ports":[8462]}`)
+		o.Policy = mustPolicy(t, `{"deny_ports":[9999]}`)
 		o.DialLocal = func(_ context.Context, _, addr string) (net.Conn, error) {
 			t.Errorf("DialLocal(%s) called for a denied port", addr)
 			return nil, net.ErrClosed
 		}
 	})
 	s := h.nextSession(t)
-	_, err := s.OpenStream(context.Background(), tcpOpen(t, key, s.Info(), "launch-1", 8462))
+	_, err := s.OpenStream(context.Background(), tcpOpen(t, key, s.Info(), "launch-1", 9999))
 	wantRefusal(t, err, core.CloseForbidden, reasonForbidden)
 }
 
@@ -72,12 +72,12 @@ func TestAgentSSHGetsPolicy(t *testing.T) {
 		HubURL: "http://hub.test", AgentID: "a", ProjectID: "p", NoPTY: true,
 		Token:  func() string { return "t" },
 		SSH:    ssh,
-		Policy: mustPolicy(t, `{"deny_ports":[8462]}`),
+		Policy: mustPolicy(t, `{"deny_ports":[9999]}`),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ssh.Policy.PortDenied(8462) {
+	if !ssh.Policy.PortDenied(9999) {
 		t.Fatal("SSH server did not get the agent's policy")
 	}
 }
