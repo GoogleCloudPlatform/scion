@@ -74,7 +74,14 @@ interface FakeHub {
   nextId: number;
   /** Answer the next request matching `method path-prefix` with this status. */
   failNext: { method: string; prefix: string; status: number } | null;
+  /** Hold the answer to the next request matching `method path-prefix` until `release()`. */
+  holdNext: { method: string; prefix: string } | null;
+  /** Fail every user-prefs GET (a 500). */
+  prefsDown: boolean;
 }
+
+/** Releases the request held by `hub.holdNext` (answered with the hub's state at release). */
+let release: () => void = () => {};
 
 let hub: FakeHub;
 
@@ -130,84 +137,97 @@ function json(body: unknown, status = 200): Promise<Response> {
 function serveHub(): void {
   apiFetchMock.mockImplementation((path: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
-    const fail = hub.failNext;
-    if (fail && fail.method === method && path.startsWith(fail.prefix)) {
-      hub.failNext = null;
-      return json({ error: { message: 'refused' } }, fail.status);
-    }
-    if (path === '/api/v1/chat/spaces') {
-      return json({
-        spaces: [
-          {
-            projectId: P,
-            projectName: 'Alpha',
-            projectSlug: 'alpha',
-            unreadCount: 0,
-            hasUnreadMention: false,
-          },
-        ],
+    const hold = hub.holdNext;
+    if (hold && hold.method === method && path.startsWith(hold.prefix)) {
+      hub.holdNext = null;
+      return new Promise<Response>((resolve) => {
+        release = () => resolve(answer(path, init));
       });
     }
-    if (path.startsWith('/api/v1/chat/spaces/')) return json({ threads: THREADS });
-    if (path === '/api/v1/chat/user-prefs') {
-      if (method === 'PUT') {
-        const body = JSON.parse(requestBodyText(init!.body)) as Record<string, string>;
-        hub.prefs[hub.user] = body;
+    return answer(path, init);
+  });
+}
+
+function answer(path: string, init?: RequestInit): Promise<Response> {
+  const method = init?.method ?? 'GET';
+  const fail = hub.failNext;
+  if (fail && fail.method === method && path.startsWith(fail.prefix)) {
+    hub.failNext = null;
+    return json({ error: { message: 'refused' } }, fail.status);
+  }
+  if (path === '/api/v1/chat/spaces') {
+    return json({
+      spaces: [
+        {
+          projectId: P,
+          projectName: 'Alpha',
+          projectSlug: 'alpha',
+          unreadCount: 0,
+          hasUnreadMention: false,
+        },
+      ],
+    });
+  }
+  if (path.startsWith('/api/v1/chat/spaces/')) return json({ threads: THREADS });
+  if (path === '/api/v1/chat/user-prefs') {
+    if (method === 'GET' && hub.prefsDown) return json({}, 500);
+    if (method === 'PUT') {
+      const body = JSON.parse(requestBodyText(init!.body)) as Record<string, string>;
+      hub.prefs[hub.user] = body;
+    }
+    return json(hub.prefs[hub.user] ?? {});
+  }
+  if (path === `/api/v1/thread-groups?projectId=${P}`) {
+    return json({ threadGroups: hub.groups.map(wire) });
+  }
+  if (path === '/api/v1/thread-groups' && method === 'POST') {
+    const body = JSON.parse(requestBodyText(init!.body)) as { projectId: string; name: string };
+    const key = body.name.trim().toLowerCase();
+    if (hub.groups.some((g) => g.name.trim().toLowerCase() === key)) {
+      return json({ error: { message: 'conflict' } }, 409);
+    }
+    const g = hubGroup(`srv-${hub.nextId++}`, body.name, []);
+    hub.groups.push(g);
+    return json(wire(g), 201);
+  }
+  const threadsMatch = /^\/api\/v1\/thread-groups\/([^/]+)\/threads(?:\/([^/]+))?$/.exec(path);
+  if (threadsMatch) {
+    const g = hub.groups.find((x) => x.id === decodeURIComponent(threadsMatch[1]!));
+    if (!g) return json({ error: { message: 'not found' } }, 404);
+    if (method === 'POST') {
+      const { threadId } = JSON.parse(requestBodyText(init!.body)) as { threadId: string };
+      for (const other of hub.groups) {
+        other.threads = other.threads.filter((t) => t.threadId !== threadId);
       }
-      return json(hub.prefs[hub.user] ?? {});
+      g.threads.push(hubThread(threadId));
+      return json(wire(g));
     }
-    if (path === `/api/v1/thread-groups?projectId=${P}`) {
-      return json({ threadGroups: hub.groups.map(wire) });
+    if (method === 'DELETE') {
+      const conv = decodeURIComponent(threadsMatch[2] ?? '');
+      g.threads = g.threads.filter((t) => t.conversationId !== conv);
+      return Promise.resolve(new Response(null, { status: 204 }));
     }
-    if (path === '/api/v1/thread-groups' && method === 'POST') {
-      const body = JSON.parse(requestBodyText(init!.body)) as { projectId: string; name: string };
-      const key = body.name.trim().toLowerCase();
-      if (hub.groups.some((g) => g.name.trim().toLowerCase() === key)) {
+  }
+  const groupMatch = /^\/api\/v1\/thread-groups\/([^/?]+)$/.exec(path);
+  if (groupMatch) {
+    const id = decodeURIComponent(groupMatch[1]!);
+    const g = hub.groups.find((x) => x.id === id);
+    if (!g) return json({ error: { message: 'not found' } }, 404);
+    if (method === 'PATCH') {
+      const { name } = JSON.parse(requestBodyText(init!.body)) as { name: string };
+      const key = name.trim().toLowerCase();
+      if (hub.groups.some((x) => x.id !== id && x.name.trim().toLowerCase() === key)) {
         return json({ error: { message: 'conflict' } }, 409);
       }
-      const g = hubGroup(`srv-${hub.nextId++}`, body.name, []);
-      hub.groups.push(g);
-      return json(wire(g), 201);
+      g.name = name;
+      return json(wire(g));
     }
-    const threadsMatch = /^\/api\/v1\/thread-groups\/([^/]+)\/threads(?:\/([^/]+))?$/.exec(path);
-    if (threadsMatch) {
-      const g = hub.groups.find((x) => x.id === decodeURIComponent(threadsMatch[1]!));
-      if (!g) return json({ error: { message: 'not found' } }, 404);
-      if (method === 'POST') {
-        const { threadId } = JSON.parse(requestBodyText(init!.body)) as { threadId: string };
-        for (const other of hub.groups) {
-          other.threads = other.threads.filter((t) => t.threadId !== threadId);
-        }
-        g.threads.push(hubThread(threadId));
-        return json(wire(g));
-      }
-      if (method === 'DELETE') {
-        const conv = decodeURIComponent(threadsMatch[2] ?? '');
-        g.threads = g.threads.filter((t) => t.conversationId !== conv);
-        return Promise.resolve(new Response(null, { status: 204 }));
-      }
+    if (method === 'DELETE') {
+      hub.groups = hub.groups.filter((x) => x.id !== id);
+      return Promise.resolve(new Response(null, { status: 204 }));
     }
-    const groupMatch = /^\/api\/v1\/thread-groups\/([^/?]+)$/.exec(path);
-    if (groupMatch) {
-      const id = decodeURIComponent(groupMatch[1]!);
-      const g = hub.groups.find((x) => x.id === id);
-      if (!g) return json({ error: { message: 'not found' } }, 404);
-      if (method === 'PATCH') {
-        const { name } = JSON.parse(requestBodyText(init!.body)) as { name: string };
-        const key = name.trim().toLowerCase();
-        if (hub.groups.some((x) => x.id !== id && x.name.trim().toLowerCase() === key)) {
-          return json({ error: { message: 'conflict' } }, 409);
-        }
-        g.name = name;
-        return json(wire(g));
-      }
-      if (method === 'DELETE') {
-        hub.groups = hub.groups.filter((x) => x.id !== id);
-        return Promise.resolve(new Response(null, { status: 204 }));
-      }
-    }
-    return json({});
-  });
+  }
+  return json({});
 }
 
 /** Requests the rail made, as "METHOD path". */
@@ -287,7 +307,15 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  hub = { user: 'user-a', prefs: {}, groups: [], nextId: 1, failNext: null };
+  hub = {
+    user: 'user-a',
+    prefs: {},
+    groups: [],
+    nextId: 1,
+    failNext: null,
+    holdNext: null,
+    prefsDown: false,
+  };
   serveHub();
 });
 
@@ -510,7 +538,7 @@ describe('project thread groups — flag on', () => {
     hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
     const el = await mountAs('user-a');
 
-    hub.failNext = { method: 'DELETE', prefix: '/api/v1/thread-groups/srv-1', status: 403 };
+    hub.failNext = { method: 'DELETE', prefix: '/api/v1/thread-groups/srv-1', status: 500 };
     await el.deleteGroup('srv-1', P);
     await settle(el);
 
@@ -562,6 +590,15 @@ describe('project thread groups — flag on', () => {
     await settle(railB);
     expect(railB.currentGroupThreadOrder(P, 'srv-1')).toEqual(orderB);
     expect(topLevel(railB)).toEqual(topB);
+
+    // A's in-group order survives A's own reload: the hub lists the members
+    // in the order they were added, and A's order comes from A's prefs.
+    hub.user = 'user-a';
+    await railA.reload();
+    await settle(railA);
+    expect(groupsOf(railA)).toEqual({ Shared: ['t1', 't2', 't3'] });
+    expect(railA.currentGroupThreadOrder(P, 'srv-1')).toEqual(['t3', 't1', 't2']);
+    expect(topLevel(railA)).toEqual(['[Shared]', 't4']);
   });
 
   it('migrated groups keep their top-level positions (5a rule 6)', async () => {
@@ -637,5 +674,184 @@ describe('project thread groups — flag on', () => {
     await el.reload();
     await settle(el);
     expect(renderedGroupNames(el)).toEqual(['Shared']);
+  });
+
+  it('a failed membership drag is undone; the thread stays ungrouped', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1', 't3'])];
+    const el = await mountAs('user-a');
+
+    hub.failNext = { method: 'POST', prefix: '/api/v1/thread-groups/srv-1/threads', status: 422 };
+    el.draggingThreadId = 't4';
+    await el.handleThreadDrop({ preventDefault: vi.fn() }, 't1', P);
+    await settle(el);
+
+    expect(showToastMock).toHaveBeenCalledWith('This group has reached its thread limit', 'warning');
+    expect(hub.groups[0]!.threads.map((t) => t.threadId)).toEqual(['t1', 't3']);
+    expect(groupsOf(el)).toEqual({ Shared: ['t1', 't3'] });
+    expect(topLevel(el)).toContain('t4');
+  });
+
+  it('a drag out of a group onto an ungrouped row removes it on the hub', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1', 't2'])];
+    const el = await mountAs('user-a');
+
+    el.draggingThreadId = 't1';
+    await el.handleThreadDrop({ preventDefault: vi.fn() }, 't4', P);
+    await settle(el);
+
+    expect(threadGroupRequests()).toContain('DELETE /api/v1/thread-groups/srv-1/threads/conv-t1');
+    expect(hub.groups[0]!.threads.map((t) => t.threadId)).toEqual(['t2']);
+    expect(groupsOf(el)).toEqual({ Shared: ['t2'] });
+    // Dropped just above t4, at the top level.
+    const order = topLevel(el);
+    expect(order.indexOf('t1')).toBe(order.indexOf('t4') - 1);
+  });
+
+  it('an event during an optimistic edit is applied, and the edit answer wins', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
+    const el = await mountAs('user-a');
+
+    hub.holdNext = { method: 'PATCH', prefix: '/api/v1/thread-groups/srv-1' };
+    const renaming = el.renameGroup('srv-1', 'Renamed', P);
+    await settle(el);
+    expect(groupsOf(el)).toEqual({ Renamed: ['t1'] });
+
+    // Meanwhile another user files t2 into the group.
+    hub.groups[0]!.threads.push(hubThread('t2'));
+    el.applyThreadGroupEvent(P, 'updated', wire(hub.groups[0]!));
+    expect(groupsOf(el)).toEqual({ Shared: ['t1', 't2'] });
+
+    release();
+    await renaming;
+    await settle(el);
+    expect(groupsOf(el)).toEqual({ Renamed: ['t1', 't2'] });
+  });
+
+  it('a failed edit is rolled back even while another edit in the space is in flight', async () => {
+    hub.groups = [hubGroup('srv-1', 'One', ['t1']), hubGroup('srv-2', 'Two', ['t2'])];
+    const el = await mountAs('user-a');
+
+    hub.holdNext = { method: 'POST', prefix: '/api/v1/thread-groups/srv-1/threads' };
+    const filing = el.moveThreadToGroup('t3', 'srv-1', P);
+    hub.failNext = { method: 'DELETE', prefix: '/api/v1/thread-groups/srv-2', status: 403 };
+    await el.deleteGroup('srv-2', P);
+    await settle(el);
+    expect(showToastMock).toHaveBeenCalledWith(
+      'You don’t have permission to change this space’s groups',
+      'warning'
+    );
+
+    release();
+    await filing;
+    await settle(el);
+
+    expect(groupsOf(el)).toEqual({ One: ['t1', 't3'], Two: ['t2'] });
+  });
+
+  it('a failed delete leaves the group where it was in the user’s order', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t2'])];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-1', 't2', 't3', 't4'] });
+    const el = await mountAs('user-a');
+    const putsBefore = prefsPuts().length;
+
+    hub.failNext = { method: 'DELETE', prefix: '/api/v1/thread-groups/srv-1', status: 403 };
+    await el.deleteGroup('srv-1', P);
+    await settle(el);
+
+    expect(prefsPuts().length).toBe(putsBefore);
+    expect(topLevel(el)).toEqual(['t1', '[Shared]', 't3', 't4']);
+  });
+
+  it('shows the hub’s message for a rejected group name', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', [])];
+    const el = await mountAs('user-a');
+
+    hub.failNext = { method: 'PATCH', prefix: '/api/v1/thread-groups/srv-1', status: 400 };
+    await el.renameGroup('srv-1', 'x'.repeat(101), P);
+    await settle(el);
+
+    expect(showToastMock).toHaveBeenCalledWith('refused', 'warning');
+    expect(renderedGroupNames(el)).toEqual(['Shared']);
+  });
+
+  it('a thread filed from the menu joins the end of the group in an ordered space', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t2'])];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-1', 't2', 't3', 't4'] });
+    const el = await mountAs('user-a');
+
+    await el.moveThreadToGroup('t1', 'srv-1', P);
+    await settle(el);
+
+    expect(el.currentGroupThreadOrder(P, 'srv-1')).toEqual(['t2', 't1']);
+    const order = JSON.parse(prefsPuts().at(-1)!.threadOrder)[P] as string[];
+    expect(order).toEqual(['srv-1', 't2', 't1', 't3', 't4']);
+  });
+
+  it('removing a member with no known conversation ID says so and sends nothing', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
+    hub.groups[0]!.threads[0]!.conversationId = '';
+    const el = await mountAs('user-a');
+
+    await el.removeThreadFromGroup('t1', P);
+    await settle(el);
+
+    expect(showToastMock).toHaveBeenCalledWith(
+      'Couldn’t remove the thread from the group',
+      'warning'
+    );
+    expect(threadGroupRequests().filter((r) => r.startsWith('DELETE'))).toEqual([]);
+    expect(groupsOf(el)).toEqual({ Shared: ['t1'] });
+  });
+
+  it('never saves preferences before they have loaded (personal groups survive)', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
+    hub.prefsDown = true;
+    const el = await mountAs('user-a');
+    const prefsGets = (): number =>
+      requests().filter((r) => r === 'GET /api/v1/chat/user-prefs').length;
+    const getsBefore = prefsGets();
+
+    await el.moveThread('t2', P, 1);
+    el.draggingThreadId = 't3';
+    await el.handleThreadDrop({ preventDefault: vi.fn() }, 't1', P);
+    await settle(el);
+
+    expect(prefsPuts()).toEqual([]);
+    expect(showToastMock).toHaveBeenCalledWith(
+      'Couldn’t save your sidebar order. Try again in a moment.',
+      'warning'
+    );
+    // The preferences are asked for again.
+    expect(prefsGets()).toBeGreaterThan(getsBefore);
+  });
+
+  it('writes back an absent personal groups document as empty, not "{}"', async () => {
+    hub.prefs['user-a'] = { spaceSortMode: 'alpha', threadSortMode: 'alpha', threadOrder: '{}' };
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
+    const el = await mountAs('user-a');
+
+    await el.moveThread('t2', P, 1);
+    await settle(el);
+
+    expect(prefsPuts().at(-1)!.threadGroups).toBe('');
+  });
+
+  it('reads the preferences again before saving an order after a new group arrived', async () => {
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 't2', 't3', 't4'] });
+    const el = await mountAs('user-a');
+    el._prefsRefreshDelayMs = 60_000;
+
+    // The migration writes its group's position into the stored order and
+    // publishes the group.
+    hub.groups = [hubGroup('srv-9', 'Migrated', ['t2'])];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-9', 't2', 't3', 't4'] });
+    el.applyThreadGroupEvent(P, 'created', wire(hub.groups[0]!));
+    await el.updateComplete;
+
+    await el.moveThread('t4', P, -1);
+    await settle(el);
+
+    const order = JSON.parse(prefsPuts().at(-1)!.threadOrder)[P] as string[];
+    expect(order).toEqual(['t1', 'srv-9', 't2', 't4', 't3']);
   });
 });

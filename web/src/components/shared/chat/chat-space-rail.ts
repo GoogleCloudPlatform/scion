@@ -131,7 +131,7 @@ export const PROJECT_THREAD_GROUPS_FLAG = 'hub.chat_thread_groups';
 interface ProjectThreadGroup {
   projectId: string;
   group: ThreadGroup;
-  /** Member thread (topic) ID to conversation ID. */
+  /** Member thread (topic) ID to conversation ID (members that have one). */
   conversationIds: Map<string, string>;
 }
 
@@ -153,7 +153,11 @@ function parseProjectThreadGroup(raw: unknown): ProjectThreadGroup | null {
       if (typeof m.threadId !== 'string' || !m.threadId) continue;
       if (conversationIds.has(m.threadId)) continue;
       threadIds.push(m.threadId);
-      conversationIds.set(m.threadId, typeof m.conversationId === 'string' ? m.conversationId : '');
+      // A member without a conversation ID stays a member; it is just not
+      // in the map, so removing it reloads the groups first.
+      if (typeof m.conversationId === 'string' && m.conversationId) {
+        conversationIds.set(m.threadId, m.conversationId);
+      }
     }
   }
   return {
@@ -376,15 +380,47 @@ async function readGroupResponse(res: Response): Promise<ProjectThreadGroup | nu
 
 /**
  * The stored personal `threadGroups` document exactly as the server sent
- * it, or undefined when it did not arrive as a string. With project thread
- * groups on, the rail writes this back byte for byte on every preferences
- * save: the hub clears the migration marker of a user whose stored
- * `thread_groups` changes (design section 5a), so even a re-serialisation
- * of the same groups would queue them for migration again.
+ * it: '' when the field is absent or null (the hub omits an empty value,
+ * and stores '' back as NULL), or undefined when it arrived as something
+ * other than a string. With project thread groups on, the rail writes this
+ * back byte for byte on every preferences save: the hub clears the
+ * migration marker of a user whose stored `thread_groups` changes (design
+ * section 5a), so even a re-serialisation of the same groups, or '{}' for
+ * none, would queue them for migration again.
  */
 function rawThreadGroups(payload: unknown): string | undefined {
   const value = (payload as { threadGroups?: unknown } | null | undefined)?.threadGroups;
+  if (value === undefined || value === null) return '';
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Toast copy for a failed group edit, by HTTP status. `fallback` covers
+ * any other status and a network failure. `hub400` shows the hub's own
+ * message for a 400 (its group-name rules), when it sends one.
+ */
+interface GroupErrorMessages {
+  fallback: string;
+  hub400?: boolean;
+  [status: number]: string;
+}
+
+/** Permission and missing-group copy shared by every group edit. */
+const GROUP_EDIT_403 = 'You don’t have permission to change this space’s groups';
+const GROUP_EDIT_404 = 'That group no longer exists';
+
+/** The toast for a failed group edit's answer (see `GroupErrorMessages`). */
+async function groupErrorMessage(res: Response, messages: GroupErrorMessages): Promise<string> {
+  if (res.status === 400 && messages.hub400) {
+    try {
+      const body = (await res.json()) as { error?: { message?: unknown } };
+      const message = body?.error?.message;
+      if (typeof message === 'string' && message) return message;
+    } catch {
+      // Not JSON: use the fallback.
+    }
+  }
+  return messages[res.status] ?? messages.fallback;
 }
 
 /** Viewport width at or below which the chat panels are separate screens. */
@@ -601,6 +637,28 @@ export class ScionChatSpaceRail extends LitElement {
   private _groupsMutationSeq = new Map<string, number>();
   /** Per space, the number of group edits awaiting the hub's answer. */
   private _groupsMutationsInFlight = new Map<string, number>();
+  /**
+   * Spaces owed a rollback reload after a failed group edit. A reload while
+   * another edit in the space awaits its answer would be dropped (see
+   * `commitProjectGroups`), so it runs when the last edit in the space ends
+   * (see `beginGroupMutation`).
+   */
+  private _groupsReconcile = new Set<string>();
+  /**
+   * With project groups on: a group this rail had not seen arrived by event
+   * in a space with an explicit order, so the stored `threadOrder` may have
+   * changed since it was read (the migration writes each migrated group's
+   * position into it, design section 5a rule 6). The next order save reads
+   * the preferences first (see `freshPrefsForOrder`), so it cannot write
+   * the migrated positions away; a debounced read also runs on its own.
+   */
+  private _prefsStale = false;
+  /** Bumped by every stale mark; a preferences read clears staleness only if none came during it. */
+  private _prefsStaleGen = 0;
+  /** The debounced preferences read after a stale mark. */
+  private _prefsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Delay of that read: the migration publishes its events around its own write. */
+  private _prefsRefreshDelayMs = 2000;
   /** Spaces with a groups-only load in flight (see `loadProjectGroups`). */
   private _groupsLoading = new Set<string>();
   /** Groups-only loads in flight, aborted on detach. */
@@ -1469,6 +1527,10 @@ export class ScionChatSpaceRail extends LitElement {
     this._threadAborts.clear();
     this._threadLoads.clear();
     this._threadLoadEpoch.clear();
+    if (this._prefsRefreshTimer) {
+      clearTimeout(this._prefsRefreshTimer);
+      this._prefsRefreshTimer = null;
+    }
     for (const controller of this._groupsAborts.values()) controller.abort();
     this._groupsAborts.clear();
     this._groupsLoading.clear();
@@ -2013,6 +2075,7 @@ export class ScionChatSpaceRail extends LitElement {
 
   /** Loads prefs; returns whether the load succeeded (used to gate pruning). */
   private async loadPrefs(): Promise<boolean> {
+    const staleGen = this._prefsStaleGen;
     try {
       const res = await apiFetch('/api/v1/chat/user-prefs');
       if (res.ok) {
@@ -2020,6 +2083,8 @@ export class ScionChatSpaceRail extends LitElement {
         this.prefs = parseRailPrefs(payload);
         this._threadGroupsRaw = rawThreadGroups(payload);
         this._prefsLoaded = true;
+        // Read after the last reason to think the stored order changed.
+        if (this._prefsStaleGen === staleGen) this._prefsStale = false;
         return true;
       }
       return false;
@@ -2035,6 +2100,15 @@ export class ScionChatSpaceRail extends LitElement {
    * defaults blank modes, so its answer can differ from the request.
    */
   async savePrefs(update: Partial<RailPrefs>): Promise<void> {
+    if (this.projectGroupsEnabled() && !this._prefsLoaded) {
+      // Never written blind with project groups on: a save from defaults
+      // would replace the stored personal groups (hidden, and restored when
+      // the flag is turned off) and the user's order. The change is
+      // dropped; the preferences are read again for the next one.
+      showToast('Couldn’t save your sidebar order. Try again in a moment.', 'warning');
+      void this.loadPrefs();
+      return;
+    }
     const previous = this.prefs;
     const newPrefs = { ...this.prefs, ...update };
     this.prefs = newPrefs;
@@ -2453,6 +2527,7 @@ export class ScionChatSpaceRail extends LitElement {
     this.dragOverThreadId = null;
     this.dragOverGroupId = null;
     if (!sourceId || sourceId === targetThreadId) return;
+    if (this.projectGroupsEnabled() && this._prefsStale) await this.freshPrefsForOrder();
 
     const groups = this.projectGroupsEnabled()
       ? this.projectGroups.get(projectId)
@@ -2489,7 +2564,7 @@ export class ScionChatSpaceRail extends LitElement {
         // The membership change goes to the hub; the drop position is this
         // user's order, saved alongside.
         const membership = targetGroup
-          ? this.addThreadToProjectGroup(sourceId, targetGroup.id, projectId)
+          ? this.addThreadToProjectGroup(sourceId, targetGroup.id, projectId, false)
           : this.removeThreadFromProjectGroup(sourceId, sourceGroup!.id, projectId);
         await Promise.all([
           membership,
@@ -2531,6 +2606,7 @@ export class ScionChatSpaceRail extends LitElement {
   /** Move a thread one slot up or down in its space. */
   private async moveThread(threadId: string, projectId: string, delta: -1 | 1): Promise<void> {
     if (!this.canReorderThreads()) return;
+    if (this.projectGroupsEnabled() && this._prefsStale) await this.freshPrefsForOrder();
 
     const groups = this.getGroups(projectId);
     const containingGroup = groups.find((g) => g.threadIds.includes(threadId));
@@ -2652,7 +2728,11 @@ export class ScionChatSpaceRail extends LitElement {
       // Project groups load per space, with its threads: until every space's
       // have loaded, an unloaded space's groups would all look stale. The
       // hidden personal groups stay valid too, so turning the flag off
-      // restores their collapse state with them.
+      // restores their collapse state with them. Spaces start collapsed, so
+      // in practice pruning is deferred until the user has opened every
+      // space; until then the stored list only grows, up to
+      // GROUP_COLLAPSE_STORAGE_LIMIT. Pruning nothing is the safe failure
+      // (a collapse ID does not say which space it belongs to).
       if (this.spaces.some((space) => !this.projectGroups.has(space.projectId))) return;
       for (const group of Object.values(this.prefs.threadGroups ?? {}).flat()) {
         validIds.add(group.id);
@@ -2824,6 +2904,12 @@ export class ScionChatSpaceRail extends LitElement {
       if (ended) return;
       ended = true;
       bump(-1);
+      // The last edit in the space has its answer: a failed edit's rollback
+      // reload can run now (see `groupRequest`). It starts after the last
+      // bump, so `commitProjectGroups` accepts it.
+      if (!this._groupsMutationsInFlight.has(projectId) && this._groupsReconcile.delete(projectId)) {
+        void this.loadProjectGroups(projectId);
+      }
     };
   }
 
@@ -2974,7 +3060,15 @@ export class ScionChatSpaceRail extends LitElement {
       this.removeProjectGroupLocally(space, pg.group.id);
     } else if (action === 'created' || action === 'updated') {
       if (this._deletedProjectGroupIds.has(pg.group.id)) return;
+      const isNew = !this.projectGroups.get(space)?.some((g) => g.id === pg.group.id);
       this.upsertProjectGroup(space, pg);
+      if (
+        isNew &&
+        this.hasExplicitOrder(space) &&
+        !this.prefs.threadOrder?.[space]?.includes(pg.group.id)
+      ) {
+        this.markPrefsStale();
+      }
     } else {
       return;
     }
@@ -2990,19 +3084,22 @@ export class ScionChatSpaceRail extends LitElement {
     projectId: string,
     path: string,
     init: RequestInit,
-    messages: { fallback: string; [status: number]: string }
+    messages: GroupErrorMessages
   ): Promise<Response | null> {
     const end = this.beginGroupMutation(projectId);
     try {
       const res = await apiFetch(path, init);
       if (res.ok) return res;
-      showToast(messages[res.status] ?? messages.fallback, 'warning');
+      // Owe the rollback before ending the edit, so the end below (or the
+      // end of the last other edit in flight) starts it.
+      this._groupsReconcile.add(projectId);
+      showToast(await groupErrorMessage(res, { 403: GROUP_EDIT_403, ...messages }), 'warning');
     } catch {
+      this._groupsReconcile.add(projectId);
       showToast(messages.fallback, 'warning');
     } finally {
       end();
     }
-    void this.loadProjectGroups(projectId);
     return null;
   }
 
@@ -3064,6 +3161,26 @@ export class ScionChatSpaceRail extends LitElement {
     return next;
   }
 
+  /** See `_prefsStale`. */
+  private markPrefsStale(): void {
+    this._prefsStale = true;
+    this._prefsStaleGen++;
+    if (this._prefsRefreshTimer) clearTimeout(this._prefsRefreshTimer);
+    this._prefsRefreshTimer = setTimeout(() => {
+      this._prefsRefreshTimer = null;
+      if (this.isConnected && this._prefsStale) void this.loadPrefs();
+    }, this._prefsRefreshDelayMs);
+  }
+
+  /**
+   * With project groups on, read the preferences again before an order
+   * change is computed if they may be stale (see `_prefsStale`).
+   */
+  private async freshPrefsForOrder(): Promise<void> {
+    if (!this.projectGroupsEnabled() || !this._prefsStale) return;
+    await this.loadPrefs();
+  }
+
   /** Save a space's `threadOrder` with project groups on (see `withHiddenPersonalIds`). */
   private async saveProjectThreadOrder(projectId: string, order: string[]): Promise<void> {
     await this.savePrefs({
@@ -3077,7 +3194,8 @@ export class ScionChatSpaceRail extends LitElement {
   /**
    * Create a project group, then file `threadId` into it. The group shows
    * once the hub has given it an ID. The group limit and name rules are
-   * the hub's; a duplicate name (409) or a full space (422) is reported.
+   * the hub's; a duplicate name (409), a rejected name (400, the hub's
+   * message) or a full space (422) is reported.
    */
   private async createProjectGroup(
     projectId: string,
@@ -3094,6 +3212,8 @@ export class ScionChatSpaceRail extends LitElement {
       },
       {
         fallback: 'Couldn’t create the group',
+        hub400: true,
+        404: 'Thread groups are not enabled on this hub',
         409: 'A group with that name already exists in this space',
         422: 'This space has reached its group limit',
       }
@@ -3106,6 +3226,7 @@ export class ScionChatSpaceRail extends LitElement {
     }
     const groupId = pg.group.id;
     this.upsertProjectGroup(projectId, pg);
+    if (this._prefsStale) await this.freshPrefsForOrder();
     const work: Promise<void>[] = [];
     // Only touch threadOrder for a space that already has its own snapshot
     // (see `hasExplicitOrder`), as with personal groups.
@@ -3120,28 +3241,49 @@ export class ScionChatSpaceRail extends LitElement {
       }
       work.push(this.saveProjectThreadOrder(projectId, order));
     }
-    if (threadId) work.push(this.addThreadToProjectGroup(threadId, groupId, projectId));
+    // The order above already places the thread.
+    if (threadId) work.push(this.addThreadToProjectGroup(threadId, groupId, projectId, false));
     await Promise.all(work);
   }
 
-  /** File a thread into a project group; the hub moves it out of any other group. */
+  /**
+   * File a thread into a project group; the hub moves it out of any other
+   * group. In a space with its own order the thread joins the end of the
+   * group, as with personal groups: unless the caller records the order
+   * itself (`recordOrder` false, a row drop), its ID moves to just after
+   * the group's last member in `threadOrder`.
+   */
   private async addThreadToProjectGroup(
     threadId: string,
     groupId: string,
-    projectId: string
+    projectId: string,
+    recordOrder = true
   ): Promise<void> {
     const groups = this.projectGroups.get(projectId) ?? [];
     const target = groups.find((g) => g.id === groupId);
     if (!target || target.threadIds.includes(threadId)) return;
+    if (recordOrder && this._prefsStale) await this.freshPrefsForOrder();
+    const members = this.currentGroupThreadOrder(projectId, groupId);
     this.setProjectGroups(
       projectId,
-      groups.map((g) => {
+      (this.projectGroups.get(projectId) ?? []).map((g) => {
         const filtered = g.threadIds.filter((id) => id !== threadId);
         return g.id === groupId
           ? { ...g, threadIds: [...filtered, threadId] }
           : { ...g, threadIds: filtered };
       })
     );
+    let orderSave: Promise<void> | null = null;
+    if (recordOrder && this.hasExplicitOrder(projectId)) {
+      const order = (this.prefs.threadOrder?.[projectId] ?? []).filter((id) => id !== threadId);
+      let at = -1;
+      for (const id of [groupId, ...members]) {
+        const k = order.indexOf(id);
+        if (k > at) at = k;
+      }
+      order.splice(at === -1 ? order.length : at + 1, 0, threadId);
+      orderSave = this.saveProjectThreadOrder(projectId, order);
+    }
     const res = await this.groupRequest(
       projectId,
       `/api/v1/thread-groups/${encodeURIComponent(groupId)}/threads`,
@@ -3152,10 +3294,25 @@ export class ScionChatSpaceRail extends LitElement {
       },
       {
         fallback: 'Couldn’t move the thread to the group',
+        404: GROUP_EDIT_404,
         422: 'This group has reached its thread limit',
       }
     );
     if (res) await this.applyGroupResponse(projectId, res);
+    if (orderSave) await orderSave;
+  }
+
+  /**
+   * Reload a space's groups to undo an optimistic change the hub never
+   * saw; deferred while an edit in the space awaits its answer (see
+   * `_groupsReconcile`).
+   */
+  private reconcileProjectGroups(projectId: string): void {
+    if (this._groupsMutationsInFlight.has(projectId)) {
+      this._groupsReconcile.add(projectId);
+    } else {
+      void this.loadProjectGroups(projectId);
+    }
   }
 
   /** Take a thread out of a project group (it becomes ungrouped). */
@@ -3170,7 +3327,13 @@ export class ScionChatSpaceRail extends LitElement {
       // groups for its conversation ID.
       await this.loadProjectGroups(projectId);
       conversationId = this._groupConversationIds.get(threadId);
-      if (!conversationId) return;
+      if (!conversationId) {
+        // Still unknown: nothing was sent. Say so, and undo any local move
+        // (a row drop has already shown the thread outside the group).
+        showToast('Couldn’t remove the thread from the group', 'warning');
+        this.reconcileProjectGroups(projectId);
+        return;
+      }
     }
     const groups = this.projectGroups.get(projectId) ?? [];
     const group = groups.find((g) => g.id === groupId);
@@ -3185,11 +3348,11 @@ export class ScionChatSpaceRail extends LitElement {
       projectId,
       `/api/v1/thread-groups/${encodeURIComponent(groupId)}/threads/${encodeURIComponent(conversationId)}`,
       { method: 'DELETE' },
-      { fallback: 'Couldn’t remove the thread from the group' }
+      { fallback: 'Couldn’t remove the thread from the group', 404: GROUP_EDIT_404 }
     );
   }
 
-  /** Rename a project group; a duplicate name (409) is reported and undone. */
+  /** Rename a project group; a duplicate (409) or rejected (400) name is reported and undone. */
   private async renameProjectGroup(
     groupId: string,
     name: string,
@@ -3211,6 +3374,8 @@ export class ScionChatSpaceRail extends LitElement {
       },
       {
         fallback: 'Couldn’t rename the group',
+        hub400: true,
+        404: GROUP_EDIT_404,
         409: 'A group with that name already exists in this space',
       }
     );
@@ -3220,32 +3385,33 @@ export class ScionChatSpaceRail extends LitElement {
   /**
    * Delete a project group; its threads become ungrouped and are kept. In
    * a space with its own order, the threads take the group's place, as
-   * with personal groups.
+   * with personal groups. The order is saved only once the hub has deleted
+   * the group, so a refused delete leaves the group where it was.
    */
   private async deleteProjectGroup(groupId: string, projectId: string): Promise<void> {
     const deleted = (this.projectGroups.get(projectId) ?? []).find((g) => g.id === groupId);
     if (!deleted) return;
     this._deletedProjectGroupIds.add(groupId);
     this.removeProjectGroupLocally(projectId, groupId);
-    let orderSave: Promise<void> | null = null;
-    if (this.hasExplicitOrder(projectId)) {
-      const order = [...(this.prefs.threadOrder?.[projectId] ?? [])];
-      const idx = order.indexOf(groupId);
-      if (idx !== -1) {
-        const existing = new Set(order);
-        existing.delete(groupId);
-        order.splice(idx, 1, ...deleted.threadIds.filter((id) => !existing.has(id)));
-      }
-      orderSave = this.saveProjectThreadOrder(projectId, order);
-    }
     const res = await this.groupRequest(
       projectId,
       `/api/v1/thread-groups/${encodeURIComponent(groupId)}`,
       { method: 'DELETE' },
-      { fallback: 'Couldn’t delete the group' }
+      { fallback: 'Couldn’t delete the group', 404: GROUP_EDIT_404 }
     );
-    if (!res) this._deletedProjectGroupIds.delete(groupId);
-    if (orderSave) await orderSave;
+    if (!res) {
+      this._deletedProjectGroupIds.delete(groupId);
+      return;
+    }
+    if (this._prefsStale) await this.freshPrefsForOrder();
+    if (!this.hasExplicitOrder(projectId)) return;
+    const order = [...(this.prefs.threadOrder?.[projectId] ?? [])];
+    const idx = order.indexOf(groupId);
+    if (idx === -1) return;
+    const existing = new Set(order);
+    existing.delete(groupId);
+    order.splice(idx, 1, ...deleted.threadIds.filter((id) => !existing.has(id)));
+    await this.saveProjectThreadOrder(projectId, order);
   }
 
   /** Handle dropping a thread onto a group header. */
