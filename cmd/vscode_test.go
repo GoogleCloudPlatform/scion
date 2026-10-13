@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -104,7 +105,7 @@ func TestVSCode_WritesBlockPinSettingsAndRunsCode(t *testing.T) {
 	assert.Contains(t, cfg, "--hub "+hub.endpoint(t)+" --project a --known-hosts "+p.knownHosts()+" --host-key-alias "+host+" b-c")
 	assert.Contains(t, cfg, "StrictHostKeyChecking yes\n")
 	assert.Equal(t, host+" "+mustNormKey(t, hub.agents[1].HostKey)+"\n", readTestFile(t, p.knownHosts()))
-	assert.JSONEq(t, `{"remote.SSH.configFile": "`+p.sshConfig()+`"}`, readTestFile(t, p.settings()))
+	assert.Equal(t, vscodeGolden(p), readTestFile(t, p.settings()))
 
 	for path, mode := range map[string]os.FileMode{
 		p.dir(): 0o700, filepath.Join(p.userData(), "User"): 0o700,
@@ -341,9 +342,56 @@ func TestVSCode_FolderAndArgs(t *testing.T) {
 	assert.False(t, commandRequiresProject(vscodeCmd))
 }
 
-// settings.json is created, merged when it is plain JSON, left alone when
-// it has comments and already holds the value, and otherwise refused with
-// the file and the key named.
+// vscodeGoldenSettings is settings.json as a fresh run writes it, with
+// @PATH@ for the scion ssh config path.
+const vscodeGoldenSettings = `{
+  "remote.SSH.configFile": "@PATH@",
+  "terminal.integrated.defaultProfile.linux": "Scion agent",
+  "terminal.integrated.profiles.linux": {
+    "Container shell": {
+      "args": [
+        "-c",
+        "exec \"${SHELL:-/bin/sh}\" -l"
+      ],
+      "icon": "server",
+      "overrideName": true,
+      "path": "/bin/sh"
+    },
+    "Scion agent": {
+      "args": [
+        "-c",
+        "tmux has-session -t scion 2\u003e/dev/null || exec \"${SHELL:-/bin/sh}\" -l; exec tmux new-session -t scion -s \"vsc-$$\" \; set-option -t \"vsc-$$\" destroy-unattached on \; set-option -t \"vsc-$$\" window-status-format '' \; select-window -t \"vsc-$$:agent\""
+      ],
+      "icon": "hubot",
+      "overrideName": true,
+      "path": "/bin/sh"
+    },
+    "Scion shell": {
+      "args": [
+        "-c",
+        "tmux has-session -t scion 2\u003e/dev/null || exec \"${SHELL:-/bin/sh}\" -l; exec tmux new-session -t scion -s \"vsc-$$\" \; set-option -t \"vsc-$$\" destroy-unattached on \; set-option -t \"vsc-$$\" window-status-format '' \; select-window -t \"vsc-$$:shell\""
+      ],
+      "icon": "terminal",
+      "overrideName": true,
+      "path": "/bin/sh"
+    },
+    "bash": null,
+    "sh": null,
+    "tmux": null,
+    "zsh": null
+  },
+  "terminal.integrated.sendKeybindingsToShell": true
+}
+`
+
+func vscodeGolden(p vscodePaths) string {
+	return strings.ReplaceAll(vscodeGoldenSettings, "@PATH@", p.sshConfig())
+}
+
+// settings.json: a fresh, empty or null file gets the golden content; a
+// plain JSON file is merged key by key and rewritten only on a change; a
+// file with comments is left alone when it already holds the managed
+// values, and otherwise refused with the file and the keys named.
 func TestEnsureVSCodeSettings(t *testing.T) {
 	setup := func(t *testing.T, content string) vscodePaths {
 		p := vscodePaths{home: t.TempDir()}
@@ -353,10 +401,10 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 		}
 		return p
 	}
-	t.Run("created", func(t *testing.T) {
+	t.Run("created with the golden content", func(t *testing.T) {
 		p := setup(t, "")
 		require.NoError(t, ensureVSCodeSettings(p))
-		assert.JSONEq(t, `{"remote.SSH.configFile": "`+p.sshConfig()+`"}`, readTestFile(t, p.settings()))
+		assert.Equal(t, vscodeGolden(p), readTestFile(t, p.settings()))
 	})
 	for name, content := range map[string]string{"empty": "", "whitespace": " \n\t\n", "null": "null\n"} {
 		t.Run(name+" counts as an empty object", func(t *testing.T) {
@@ -364,31 +412,128 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 			require.NoError(t, ensureSSHDir(p.home, filepath.Dir(p.settings())))
 			require.NoError(t, os.WriteFile(p.settings(), []byte(content), 0o600))
 			require.NoError(t, ensureVSCodeSettings(p))
-			assert.JSONEq(t, `{"remote.SSH.configFile": "`+p.sshConfig()+`"}`, readTestFile(t, p.settings()))
+			assert.Equal(t, vscodeGolden(p), readTestFile(t, p.settings()))
 		})
 	}
-	t.Run("plain JSON is merged", func(t *testing.T) {
-		p := setup(t, `{"editor.fontSize": 14, "remote.SSH.configFile": "/old"}`)
+	t.Run("a re-run is byte-identical", func(t *testing.T) {
+		p := setup(t, `{"editor.fontSize": 14.50, "terminal.integrated.profiles.linux": {"My shell": {"path": "/usr/bin/fish"}}}`)
 		require.NoError(t, ensureVSCodeSettings(p))
-		assert.JSONEq(t, `{"editor.fontSize": 14, "remote.SSH.configFile": "`+p.sshConfig()+`"}`, readTestFile(t, p.settings()))
+		first := readTestFile(t, p.settings())
+		fi1, err := os.Stat(p.settings())
+		require.NoError(t, err)
+		require.NoError(t, ensureVSCodeSettings(p))
+		assert.Equal(t, first, readTestFile(t, p.settings()))
+		fi2, err := os.Stat(p.settings())
+		require.NoError(t, err)
+		assert.True(t, os.SameFile(fi1, fi2), "an unchanged file is not replaced")
+		assert.Contains(t, first, `"editor.fontSize": 14.50`, "user numbers keep their form")
 	})
-	t.Run("comments with the value are kept", func(t *testing.T) {
+	t.Run("user keys and profiles kept, scion profiles reset", func(t *testing.T) {
+		p := setup(t, `{
+  "editor.fontSize": 14,
+  "remote.SSH.configFile": "/old",
+  "terminal.integrated.profiles.linux": {
+    "My shell": {"path": "/usr/bin/fish"},
+    "Scion agent": {"path": "/bin/bash", "args": ["-c", "echo edited"]},
+    "bash": {"path": "/bin/bash"}
+  }
+}`)
+		require.NoError(t, ensureVSCodeSettings(p))
+		got, err := decodeJSONObject([]byte(readTestFile(t, p.settings())))
+		require.NoError(t, err)
+		assert.Equal(t, json.Number("14"), got["editor.fontSize"])
+		assert.Equal(t, p.sshConfig(), got["remote.SSH.configFile"])
+		profiles := got["terminal.integrated.profiles.linux"].(map[string]any)
+		assert.Equal(t, map[string]any{"path": "/usr/bin/fish"}, profiles["My shell"], "a user profile is kept")
+		agent := profiles["Scion agent"].(map[string]any)
+		assert.Equal(t, []any{"-c", vscodeTmuxWindowCommand("agent")}, agent["args"], "edited Scion agent args are restored")
+		assert.Equal(t, "/bin/sh", agent["path"])
+		assert.Nil(t, profiles["bash"], "the auto-detected bash profile is hidden")
+		assert.Contains(t, profiles, "bash")
+		assert.Equal(t, "Scion agent", got["terminal.integrated.defaultProfile.linux"])
+		assert.Equal(t, true, got["terminal.integrated.sendKeybindingsToShell"])
+	})
+	t.Run("user default profile and keybinding choice kept on re-run", func(t *testing.T) {
+		p := setup(t, "")
+		require.NoError(t, ensureVSCodeSettings(p))
+		m, err := decodeJSONObject([]byte(readTestFile(t, p.settings())))
+		require.NoError(t, err)
+		m["terminal.integrated.defaultProfile.linux"] = "Container shell"
+		m["terminal.integrated.sendKeybindingsToShell"] = false
+		m["terminal.integrated.profiles.linux"].(map[string]any)["Scion agent"].(map[string]any)["args"] = []any{"-c", "echo edited"}
+		require.NoError(t, writeVSCodeSettings(p.settings(), m))
+
+		require.NoError(t, ensureVSCodeSettings(p))
+		got, err := decodeJSONObject([]byte(readTestFile(t, p.settings())))
+		require.NoError(t, err)
+		assert.Equal(t, "Container shell", got["terminal.integrated.defaultProfile.linux"])
+		assert.Equal(t, false, got["terminal.integrated.sendKeybindingsToShell"])
+		agent := got["terminal.integrated.profiles.linux"].(map[string]any)["Scion agent"].(map[string]any)
+		assert.Equal(t, []any{"-c", vscodeTmuxWindowCommand("agent")}, agent["args"])
+	})
+	t.Run("a non-object profiles value is replaced", func(t *testing.T) {
+		p := setup(t, `{"terminal.integrated.profiles.linux": "oops"}`)
+		require.NoError(t, ensureVSCodeSettings(p))
+		assert.Equal(t, vscodeGolden(p), readTestFile(t, p.settings()))
+	})
+	t.Run("comments with the managed values are kept", func(t *testing.T) {
 		p := vscodePaths{home: t.TempDir()}
-		content := "{\n  // mine\n  \"editor.fontSize\": 14,\n  /* scion */ \"remote.SSH.configFile\": \"" + p.sshConfig() + "\",\n}\n"
+		content := "// mine\n" + strings.Replace(vscodeGolden(p), "{\n", "{\n  /* scion */\n", 1)
 		require.NoError(t, ensureSSHDir(p.home, filepath.Dir(p.settings())))
 		require.NoError(t, os.WriteFile(p.settings(), []byte(content), 0o600))
 		require.NoError(t, ensureVSCodeSettings(p))
 		assert.Equal(t, content, readTestFile(t, p.settings()))
 	})
-	t.Run("comments without the value are refused", func(t *testing.T) {
+	t.Run("comments without the managed values are refused", func(t *testing.T) {
 		content := "{\n  // mine\n  \"remote.SSH.configFile\": \"/old\"\n}\n"
 		p := setup(t, content)
 		err := ensureVSCodeSettings(p)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), p.settings())
 		assert.Contains(t, err.Error(), "remote.SSH.configFile")
+		assert.Contains(t, err.Error(), "terminal.integrated.profiles.linux")
 		assert.Equal(t, content, readTestFile(t, p.settings()))
 	})
+}
+
+// The profile commands, decoded from a freshly written settings.json, are
+// exactly the agreed text, and each one parses as a POSIX shell command
+// (sh -n parses only; tmux is never run).
+func TestVSCodeTerminalProfileCommands(t *testing.T) {
+	assert.Equal(t, `exec "${SHELL:-/bin/sh}" -l`, vscodeLoginShell)
+	want := func(window string) string {
+		return `tmux has-session -t scion 2>/dev/null || exec "${SHELL:-/bin/sh}" -l; exec tmux new-session -t scion -s "vsc-$$" \; ` +
+			`set-option -t "vsc-$$" destroy-unattached on \; set-option -t "vsc-$$" window-status-format '' \; select-window -t "vsc-$$:` + window + `"`
+	}
+	p0 := vscodePaths{home: t.TempDir()}
+	require.NoError(t, ensureVSCodeSettings(p0))
+	written, err := decodeJSONObject([]byte(readTestFile(t, p0.settings())))
+	require.NoError(t, err)
+	profiles := written["terminal.integrated.profiles.linux"].(map[string]any)
+	commands := map[string]string{
+		"Scion agent":     want("agent"),
+		"Scion shell":     want("shell"),
+		"Container shell": `exec "${SHELL:-/bin/sh}" -l`,
+	}
+	for name, command := range commands {
+		p := profiles[name].(map[string]any)
+		assert.Equal(t, []any{"-c", command}, p["args"], name)
+		assert.Equal(t, "/bin/sh", p["path"], name)
+		assert.Equal(t, true, p["overrideName"], name)
+		assert.Equal(t, vscodeTerminalProfiles()[name], p, "%s: the file decodes to the managed profile", name)
+	}
+	for _, name := range []string{"tmux", "bash", "zsh", "sh"} {
+		v, ok := profiles[name]
+		assert.True(t, ok, name)
+		assert.Nil(t, v, name)
+	}
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("needs /bin/sh to parse the commands")
+	}
+	for name, command := range commands {
+		out, err := exec.Command("/bin/sh", "-n", "-c", command).CombinedOutput()
+		assert.NoError(t, err, "%s: %s", name, out)
+	}
 }
 
 func TestStripJSONComments(t *testing.T) {

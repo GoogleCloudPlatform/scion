@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -244,9 +245,6 @@ func vscodeMain(ctx context.Context, env *sshCommandEnv, ref, folder string, pru
 	if changed {
 		_, _ = fmt.Fprintln(env.stdout, vscodeRecreatedLine)
 	}
-	if err := ensureVSCodeSettings(p); err != nil {
-		return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
-	}
 	return launchVSCode(ctx, env, p, host, folder)
 }
 
@@ -260,9 +258,11 @@ type vscodeUpdate struct {
 	keep             map[string]bool
 }
 
-// updateVSCodeFiles applies u to ~/.scion/vscode/ssh_config and known_hosts
-// under an exclusive lock on the directory, so concurrent runs keep each
-// other's entries. It reports whether u.host had a different pin before.
+// updateVSCodeFiles applies u to ~/.scion/vscode/ssh_config and known_hosts,
+// after the managed keys of the user data settings.json
+// (ensureVSCodeSettings), all under one exclusive lock on the directory, so
+// concurrent runs keep each other's entries. It reports whether u.host had
+// a different pin before.
 func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) {
 	if err := ensureSSHDir(p.home, p.dir()); err != nil {
 		return false, fmt.Errorf("creating %s: %w", p.dir(), err)
@@ -272,6 +272,9 @@ func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) 
 		return false, err
 	}
 	defer unlock()
+	if err := ensureVSCodeSettings(p); err != nil {
+		return false, err
+	}
 
 	blocks := map[string]string{}
 	if data, rerr := os.ReadFile(p.sshConfig()); rerr == nil {
@@ -414,48 +417,155 @@ func renderVSCodeSSHConfig(blocks map[string]string) string {
 	return b.String()
 }
 
-// ensureVSCodeSettings makes the scion user data directory's settings.json
-// point remote.SSH.configFile at the scion-owned ssh config. A missing file
-// is created; a plain JSON file gets that one key set and keeps the others.
-// A file with comments is left as it is when it already holds the value,
-// and is an error otherwise: rewriting it would drop the comments.
+// Terminal settings scion vscode manages in its settings.json.
+const (
+	vscodeProfilesKey       = "terminal.integrated.profiles.linux"
+	vscodeDefaultProfileKey = "terminal.integrated.defaultProfile.linux"
+	vscodeSendKeysKey       = "terminal.integrated.sendKeybindingsToShell"
+	vscodeAgentProfile      = "Scion agent"
+	// vscodeLoginShell starts the container user's login shell. The
+	// Container shell profile and the fallback of the two Scion profiles
+	// both use it, so a change to it is one line.
+	vscodeLoginShell = `exec "${SHELL:-/bin/sh}" -l`
+	// vscodeTmuxGuard falls back to a login shell when the container has
+	// no tmux session scion.
+	vscodeTmuxGuard = `tmux has-session -t scion 2>/dev/null || ` + vscodeLoginShell + `; `
+)
+
+// vscodeTmuxWindowCommand is the command of a Scion terminal profile: a
+// tmux session grouped with the container's session scion, removed when
+// the terminal closes, showing only its own window in the status line,
+// with window selected.
+func vscodeTmuxWindowCommand(window string) string {
+	return vscodeTmuxGuard + `exec tmux new-session -t scion -s "vsc-$$" \; set-option -t "vsc-$$" destroy-unattached on \; ` +
+		`set-option -t "vsc-$$" window-status-format '' \; select-window -t "vsc-$$:` + window + `"`
+}
+
+// vscodeTerminalProfiles returns the profiles scion vscode owns in
+// terminal.integrated.profiles.linux, reset on every run. VS Code's
+// auto-detected tmux, bash, zsh and sh profiles are hidden (null).
+func vscodeTerminalProfiles() map[string]any {
+	profile := func(icon, command string) map[string]any {
+		return map[string]any{"path": "/bin/sh", "overrideName": true, "icon": icon, "args": []any{"-c", command}}
+	}
+	return map[string]any{
+		vscodeAgentProfile: profile("hubot", vscodeTmuxWindowCommand("agent")),
+		"Scion shell":      profile("terminal", vscodeTmuxWindowCommand("shell")),
+		"Container shell":  profile("server", vscodeLoginShell),
+		"tmux":             nil,
+		"bash":             nil,
+		"zsh":              nil,
+		"sh":               nil,
+	}
+}
+
+// mergeVSCodeSettings applies the managed keys to m, one by one:
+// remote.SSH.configFile and the scion-owned terminal profiles are set on
+// every run, other profiles in terminal.integrated.profiles.linux are kept,
+// the default profile and sendKeybindingsToShell are set only when absent,
+// and every other key is kept.
+func mergeVSCodeSettings(m map[string]any, configFile string) {
+	m[vscodeConfigFileSetting] = configFile
+	profiles, ok := m[vscodeProfilesKey].(map[string]any)
+	if !ok {
+		profiles = map[string]any{}
+	}
+	for name, p := range vscodeTerminalProfiles() {
+		profiles[name] = p
+	}
+	m[vscodeProfilesKey] = profiles
+	if _, ok := m[vscodeDefaultProfileKey]; !ok {
+		m[vscodeDefaultProfileKey] = vscodeAgentProfile
+	}
+	if _, ok := m[vscodeSendKeysKey]; !ok {
+		m[vscodeSendKeysKey] = true
+	}
+}
+
+// ensureVSCodeSettings applies the managed keys (mergeVSCodeSettings) to
+// the scion user data directory's settings.json. A missing, empty or null
+// file counts as an empty object. A plain JSON file is rewritten only when
+// a managed key changes, so a re-run leaves it byte-identical. A file with
+// comments is left as it is when it already holds the managed values, and
+// is an error otherwise: rewriting it would drop the comments. Callers hold
+// the vscode directory lock.
 func ensureVSCodeSettings(p vscodePaths) error {
-	want := p.sshConfig()
 	path := p.settings()
 	if err := ensureSSHDir(p.home, filepath.Dir(path)); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
 	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return writeVSCodeSettings(path, map[string]any{vscodeConfigFileSetting: want})
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("reading %s: %w", path, err)
 	}
 	if t := strings.TrimSpace(string(data)); t == "" || t == "null" {
-		return writeVSCodeSettings(path, map[string]any{vscodeConfigFileSetting: want})
-	}
-	var m map[string]any
-	if json.Unmarshal(data, &m) == nil && m != nil {
-		if m[vscodeConfigFileSetting] == want {
-			return nil
-		}
-		m[vscodeConfigFileSetting] = want
+		m := map[string]any{}
+		mergeVSCodeSettings(m, p.sshConfig())
 		return writeVSCodeSettings(path, m)
 	}
-	var withComments map[string]any
-	if json.Unmarshal(stripJSONComments(data), &withComments) == nil && withComments[vscodeConfigFileSetting] == want {
-		return nil
+	if m, err := decodeJSONObject(data); err == nil {
+		before, err := encodeVSCodeSettings(m)
+		if err != nil {
+			return err
+		}
+		mergeVSCodeSettings(m, p.sshConfig())
+		after, err := encodeVSCodeSettings(m)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(before, after) {
+			return nil
+		}
+		return writeVSCodeSettingsData(path, after)
 	}
-	return fmt.Errorf("%s is not plain JSON; set %s to %s in it, or remove the file", path, vscodeConfigFileSetting, want)
+	if m, err := decodeJSONObject(stripJSONComments(data)); err == nil {
+		before, berr := encodeVSCodeSettings(m)
+		mergeVSCodeSettings(m, p.sshConfig())
+		after, aerr := encodeVSCodeSettings(m)
+		if berr == nil && aerr == nil && bytes.Equal(before, after) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s is not plain JSON and lacks the scion vscode settings; set %s to %s and the scion terminal profiles (%s, %s, %s) in it, or remove the file",
+		path, vscodeConfigFileSetting, p.sshConfig(), vscodeProfilesKey, vscodeDefaultProfileKey, vscodeSendKeysKey)
+}
+
+// decodeJSONObject decodes data as one JSON object, keeping numbers as
+// written.
+func decodeJSONObject(data []byte) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		return nil, err
+	}
+	if m == nil || dec.More() {
+		return nil, errors.New("not a single JSON object")
+	}
+	return m, nil
+}
+
+// encodeVSCodeSettings renders m with sorted keys and two-space indent.
+func encodeVSCodeSettings(m map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(m); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func writeVSCodeSettings(path string, m map[string]any) error {
-	data, err := json.MarshalIndent(m, "", "  ")
+	data, err := encodeVSCodeSettings(m)
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(path, append(data, '\n'), sshFileMode); err != nil {
+	return writeVSCodeSettingsData(path, data)
+}
+
+func writeVSCodeSettingsData(path string, data []byte) error {
+	if err := writeFileAtomic(path, data, sshFileMode); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	return nil
