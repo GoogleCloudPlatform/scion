@@ -77,6 +77,7 @@ func clearedInline(cleared bool) *api.ScionConfig {
 // so the start re-derives them from the template, and stay removed on the
 // starts and restarts that follow.
 func TestApplyInlineConfigUpdate_ClearedFieldsRevertToInherited(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	srv, _ := newTestServerWithProvisionCapture()
 	projectDir := filepath.Join(t.TempDir(), ".scion")
 	agentName := "cleared-agent"
@@ -138,6 +139,7 @@ func TestApplyInlineConfigUpdate_NoClearedFieldsKeepsPreviousValues(t *testing.T
 // does not clear (fixed keys, whole collections, telemetry, unknown keys)
 // leaves the config as it was.
 func TestApplyInlineConfigUpdate_IgnoresUnclearablePaths(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	srv, _ := newTestServerWithProvisionCapture()
 	projectDir := filepath.Join(t.TempDir(), ".scion")
 	agentName := "ignored-agent"
@@ -442,5 +444,77 @@ func TestApplyInlineConfigUpdate_WorkspaceVolumeKeepsFirst(t *testing.T) {
 		if !reflect.DeepEqual(got.Volumes, want) {
 			t.Fatalf("after start #%d: volumes\n got: %+v\nwant: %+v", i+1, got.Volumes, want)
 		}
+	}
+}
+
+// clearedChainCase sets up an agent provisioned with max_turns 9 and
+// resources set inline, starts it, then clears both, and returns what the
+// start after the clear read.
+func clearedChainCase(t *testing.T, srv *Server, mgr *provisionCapturingManager, projectDir string, info api.AgentInfo) clearedStartObservation {
+	t.Helper()
+	agentName := "chain-agent"
+	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Harness: "claude"})
+	writeAgentInfo(t, projectDir, agentName, info)
+	obs := observeStarts(mgr, projectDir, agentName, cfgPath)
+	postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(`{"projectPath": %q, "inlineConfig": {"max_turns": 9, "resources": {"requests": {"cpu": "2"}}}}`, projectDir))
+	lastObservation(t, obs, 1)
+	postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(`{"projectPath": %q, "inlineConfig": {"cleared_fields": ["max_turns", "resources"]}}`, projectDir))
+	return lastObservation(t, obs, 2)
+}
+
+func writeTemplateFile(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scion-agent.yaml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStartAgent_ClearedLimitHydratedTemplateDefaultLayer: provisioning
+// layers the project's default template under a hydrated template, so a
+// limit the default sets and the cached template does not is the inherited
+// value; template resources are never introduced (templates may not set
+// resources), so a cleared resources is removed.
+func TestStartAgent_ClearedLimitHydratedTemplateDefaultLayer(t *testing.T) {
+	const hash = "sha256:" + "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	t.Setenv("HOME", t.TempDir())
+	srv, mgr := newTestServerWithProvisionCapture()
+	cache, err := templatecache.New(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.Put(hash, map[string][]byte{"scion-agent.yaml": []byte("resources:\n  requests:\n    cpu: \"4\"\n")}); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetTemplateCache(cache)
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	writeTemplateFile(t, filepath.Join(projectDir, "templates", "default"), "max_turns: 7\n")
+
+	o := clearedChainCase(t, srv, mgr, projectDir, api.AgentInfo{Template: "hub-tpl", TemplateHash: hash})
+	if o.file.MaxTurns != 7 || o.effective.MaxTurns != 7 {
+		t.Errorf("max_turns: file %d, effective %d; want the default layer's 7", o.file.MaxTurns, o.effective.MaxTurns)
+	}
+	if o.file.Resources != nil {
+		t.Errorf("resources = %+v, want removed (a template's resources are never introduced)", o.file.Resources)
+	}
+}
+
+// TestStartAgent_ClearedLimitUnresolvableTemplateKept: a by-name template
+// that no longer resolves leaves the cleared keys at their current value
+// (a clear never removes a limit), since GetAgent would then load the
+// persisted config alone.
+func TestStartAgent_ClearedLimitUnresolvableTemplateKept(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, mgr := newTestServerWithProvisionCapture()
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+
+	o := clearedChainCase(t, srv, mgr, projectDir, api.AgentInfo{Template: "gone"})
+	if o.file.MaxTurns != 9 || o.effective.MaxTurns != 9 {
+		t.Errorf("max_turns: file %d, effective %d; want the current 9 kept", o.file.MaxTurns, o.effective.MaxTurns)
+	}
+	if o.file.Resources == nil || o.file.Resources.Requests.CPU != "2" {
+		t.Errorf("resources = %+v, want the current value kept", o.file.Resources)
 	}
 }
