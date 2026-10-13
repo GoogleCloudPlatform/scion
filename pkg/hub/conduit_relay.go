@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -36,7 +34,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
-	"github.com/google/uuid"
 )
 
 // The hub's in-process conduit relay (design v2.4 §3.9: every hub process
@@ -252,17 +249,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 // processes must never share an id: a relay start supersedes any relay
 // registered under the same id.
 func ConduitInstanceID(configured string) string {
-	if configured != "" {
-		return configured
-	}
-	if pod := os.Getenv("POD_NAME"); pod != "" {
-		return pod
-	}
-	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
-	if h, err := os.Hostname(); err == nil && h != "" {
-		return h + "-" + suffix
-	}
-	return uuid.NewString()
+	return relay.InstanceID(configured)
 }
 
 // ConduitRelayFatal is closed or receives when the relay stops serving on

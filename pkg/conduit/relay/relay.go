@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1309,4 +1311,23 @@ func (r *Relay) evictObsoleteLaunchRows(ctx context.Context, p Principal) {
 		r.log.Info("Conduit: evicted a launch session made epoch-obsolete by a refused fallback admission; it will reconnect",
 			"session_id", s.SessionID, "principal_id", p.ID, "relay_instance_id", s.RelayInstanceID)
 	}
+}
+
+// InstanceID returns this process's relay instance id: the configured id,
+// else POD_NAME, else the host name plus a random per-process suffix (a
+// random id when there is no host name). Two live processes must never
+// share an id: a relay start supersedes any relay registered under the
+// same id.
+func InstanceID(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if pod := os.Getenv("POD_NAME"); pod != "" {
+		return pod
+	}
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h + "-" + suffix
+	}
+	return uuid.NewString()
 }
