@@ -163,6 +163,19 @@ var agentAllowed = map[string]bool{
 	"hub.test-identity.list":     true,
 	"hub.test-identity.delete":   true,
 	"hub.test-identity.teardown": true,
+	"hub.test-identity.web-code": true,
+
+	// Project thread groups (ptone/scion#4424, design section 4 and
+	// decision Q3): agents may list, read, create, rename and re-file
+	// threads. conversation.group.delete is deliberately absent: only
+	// users may delete a thread group, and the hub refuses an agent.
+	"conversation.group":        true,
+	"conversation.group.list":   true,
+	"conversation.group.get":    true,
+	"conversation.group.create": true,
+	"conversation.group.rename": true,
+	"conversation.group.add":    true,
+	"conversation.group.remove": true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

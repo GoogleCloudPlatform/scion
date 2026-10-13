@@ -35,6 +35,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
@@ -2793,28 +2794,26 @@ func (t *HarnessThinkingConfig) Validate() error {
 	return nil
 }
 
-// Ready strategies for HarnessReadyConfig.Strategy.
+// Ready strategies for HarnessReadyConfig.Strategy, shared with the
+// readiness readers in pkg/agent/state.
 const (
 	// ReadyStrategyHook means the harness is ready once the ready marker for
 	// the current run is written (by a session-start hook) plus the settle.
-	ReadyStrategyHook = "hook"
+	ReadyStrategyHook = state.ReadyStrategyHook
 	// ReadyStrategyDelay means the harness is ready once its tmux session has
 	// existed for the settle period.
-	ReadyStrategyDelay = "delay"
+	ReadyStrategyDelay = state.ReadyStrategyDelay
 )
 
-// Ready and delivery defaults and limits. The ready defaults equal the
-// runtime's current readiness constants (state.ReadySettleSession,
-// state.ReadyDeadline and the host's post-marker settle); a test in
-// pkg/agent pins them together. The delivery defaults reproduce the
-// historical hard-coded delivery: Enter, then two more Enters 300ms apart.
+// Ready and delivery limits and delivery defaults. The ready defaults are
+// state.DefaultReadySpec and the ready limits are pkg/agent/state's, the
+// same values the readiness readers fall back to and check. The delivery
+// defaults reproduce the historical hard-coded delivery: Enter, then two
+// more Enters 300ms apart.
 const (
-	defaultReadySettleDelay   = 8 * time.Second
-	defaultReadySettleHook    = 1500 * time.Millisecond
-	defaultReadyTimeout       = 90 * time.Second
-	maxReadySettle            = 60 * time.Second
-	minReadyTimeout           = 10 * time.Second
-	maxReadyTimeout           = 10 * time.Minute
+	maxReadySettle            = state.MaxReadySettle
+	minReadyTimeout           = state.MinReadyTimeout
+	maxReadyTimeout           = state.MaxReadyTimeout
 	defaultDeliverySubmitKey  = "Enter"
 	defaultDeliveryExtras     = 2
 	defaultDeliveryExtraDelay = 300 * time.Millisecond
@@ -2862,12 +2861,10 @@ type HarnessDeliveryConfig struct {
 }
 
 // DefaultReadySpec returns the ready spec used for strategy when no value is
-// configured. An unknown strategy gets the delay defaults.
+// configured. An unknown strategy gets the delay defaults. It is
+// state.DefaultReadySpec.
 func DefaultReadySpec(strategy string) ReadySpec {
-	if strategy == ReadyStrategyHook {
-		return ReadySpec{Strategy: ReadyStrategyHook, Settle: defaultReadySettleHook, Timeout: defaultReadyTimeout}
-	}
-	return ReadySpec{Strategy: ReadyStrategyDelay, Settle: defaultReadySettleDelay}
+	return state.DefaultReadySpec(strategy)
 }
 
 // DefaultDeliverySpec returns the delivery spec used when no value is
@@ -3285,6 +3282,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 3. Load in-repo project settings (.scion/settings.yaml)
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
+	dropInheritedHubProjectID(k, projectPath, effectiveProjectPath, globalDir)
 	if projectPath != "" && projectPath != globalDir {
 		migratedHub, err := loadSettingsFile(k, projectPath)
 		if err != nil {

@@ -143,8 +143,9 @@ type launchWaitOptions struct {
 	// not-found before any read has succeeded is retried briefly and, for
 	// an agent caller, reported as not readable
 	// (*launchStatusUnreadableError) rather than as a deletion. An agent
-	// caller's not-found before any read is reported as not readable even
-	// when Accepted is false, only without the retry.
+	// caller's not-found is reported as not readable even when Accepted is
+	// false (before any read, only without the retry), and also after a
+	// read, once the not-found has lasted through launchUnreadableGrace.
 	Accepted bool
 	// LaunchID is the accepted launch's ID, when the client holds one; it
 	// only names the launch in the not-readable message.
@@ -165,10 +166,12 @@ type launchWaitOptions struct {
 // (*launchWaitTimeoutError), or ctx is cancelled (*launchWaitInterruptedError).
 // Transient fetch errors (network, 5xx, 408, 429) are retried; other 4xx
 // answers end the wait with the Hub's error. The agent is reported deleted
-// only on a not-found after it has been read in this wait that persists for
-// launchUnreadableGrace, or on a user caller's not-found (after
-// launchUnreadableGrace when Accepted); see Accepted for a status that is
-// not readable. It never changes the agent.
+// only to a user caller: on a not-found after it has been read in this wait
+// that persists for launchUnreadableGrace, or on a not-found before any
+// read (after launchUnreadableGrace when Accepted). An agent caller's
+// not-found is reported as a status that is not readable
+// (*launchStatusUnreadableError), before or after a read; see Accepted. It
+// never changes the agent.
 func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Agent, error) {
 	interval := o.PollInterval
 	if interval <= 0 {
@@ -196,15 +199,15 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 				return false, nil
 			}
 		}
-		// A not-found after the agent has been read in this wait is
-		// reported as a deletion, which ends the start with a failure. A
-		// single not-found is not enough for that: it is confirmed by
+		// A not-found after the agent has been read in this wait ends the
+		// wait: for a user caller as a deletion, which fails the start, and
+		// for an agent caller as a status that is not readable (below). A
+		// single not-found is not enough for either: it is confirmed by
 		// retrying for launchUnreadableGrace, and any successful read in
-		// that window means the agent is still there and the wait goes on.
-		// If the wait budget runs out first, the not-found that lasted to
-		// the end of the wait is reported below as a deletion, not as a
-		// launch still in progress; only an interrupt is left to the wait
-		// loop.
+		// that window means the agent is still readable and the wait goes
+		// on. If the wait budget runs out first, the not-found that lasted
+		// to the end of the wait is reported below, not as a launch still
+		// in progress; only an interrupt is left to the wait loop.
 		if err != nil && last != nil && apiclient.IsNotFoundError(err) {
 			a, err = retryUnreadableStatus(fetchCtx, o.Get, err)
 			if err != nil && isUnreadableStatusError(err) && ctx.Err() != nil {
@@ -212,17 +215,22 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 			}
 		}
 		// An agent caller gets the same 404 for an agent it may not read as
-		// for a missing one, so before any read has succeeded a 404 does not
-		// mean the agent is gone, whether or not the start shows an accepted
-		// launch (Accepted only decides the retry above). After an accepted
-		// launch, an agent caller's 403 is reported the same way. A user
-		// caller is refused with 403, so a user's 404 is a definite
+		// for a missing one, so its 404 does not mean the agent is gone:
+		// not before any read has succeeded, whether or not the start shows
+		// an accepted launch (Accepted only decides the retry above), and
+		// not after a read either, since the Hub can refuse a later read
+		// that an earlier one passed (for example an authorization lookup
+		// that fails closed). After a read, the report says the agent may
+		// have been deleted (AfterRead). Before any read, after an
+		// accepted launch, an agent caller's 403 is reported the same way;
+		// after a read, its 403 keeps the Hub's refusal below.
+		// A user caller is refused with 403, so a user's 404 is a definite
 		// not-found and a user's 403 keeps the login hint below. This
 		// follows the Hub's read check: authorizeSingleAgentRead and
 		// writeAgentNotFound in pkg/hub/handlers_agents_core.go.
-		if err != nil && last == nil && config.IsHubManagedAgent() &&
-			(apiclient.IsNotFoundError(err) || (o.Accepted && apiclient.IsForbiddenError(err))) {
-			return true, &launchStatusUnreadableError{Agent: o.AgentName, LaunchID: o.LaunchID, Err: err}
+		if err != nil && config.IsHubManagedAgent() &&
+			(apiclient.IsNotFoundError(err) || (last == nil && o.Accepted && apiclient.IsForbiddenError(err))) {
+			return true, &launchStatusUnreadableError{Agent: o.AgentName, LaunchID: o.LaunchID, AfterRead: last != nil, Err: err}
 		}
 		if err != nil {
 			if apiclient.IsNotFoundError(err) {
@@ -453,13 +461,21 @@ func retryUnreadableStatus(ctx context.Context, get func(context.Context) (*hubc
 type launchStatusUnreadableError struct {
 	Agent    string
 	LaunchID string
-	Err      error
+	// AfterRead is true when the status was read earlier in the wait and
+	// then stopped being readable. That can also mean the agent was
+	// deleted, so the message does not say the launch continues.
+	AfterRead bool
+	Err       error
 }
 
 func (e *launchStatusUnreadableError) Error() string {
 	launch := ""
 	if e.LaunchID != "" {
 		launch = fmt.Sprintf(" (launch %s)", e.LaunchID)
+	}
+	if e.AfterRead {
+		return fmt.Sprintf("agent '%s': status no longer readable with this credential's scope%s; it may have been deleted, or the Hub refused the read",
+			e.Agent, launch)
 	}
 	return fmt.Sprintf("agent '%s': launch accepted; status not readable with this credential's scope%s; the launch continues on the Hub",
 		e.Agent, launch)
@@ -625,6 +641,9 @@ func acceptedLaunchNotFollowed(err error) (string, bool) {
 		launch := ""
 		if unreadable.LaunchID != "" {
 			launch = fmt.Sprintf(" (launch %s)", unreadable.LaunchID)
+		}
+		if unreadable.AfterRead {
+			return fmt.Sprintf("Its status is no longer readable with this credential's scope%s; it may have been deleted, or the Hub refused the read.", launch), true
 		}
 		return fmt.Sprintf("Its status is not readable with this credential's scope%s; the launch continues on the Hub.", launch), true
 	}
