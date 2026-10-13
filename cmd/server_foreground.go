@@ -2685,21 +2685,19 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		}
 	}
 
-	// Resolved once for service account minting and the Policy Troubleshooter.
-	gcpProjectID, gcpProjectErr := hub.ResolveGCPProjectID(ctx, cfg.Hub.GCPProjectID)
-
 	// Initialize GCP IAM admin client for minting service accounts.
 	// Non-fatal if GCP is not available — minting will be disabled.
 	gcpAdmin, adminErr := hub.NewIAMAdminClient(ctx)
 	if adminErr != nil {
 		log.Printf("GCP IAM admin not available (service account minting disabled): %v", adminErr)
 	} else {
-		if gcpProjectErr != nil {
-			log.Printf("GCP project ID not available (service account minting disabled): %v", gcpProjectErr)
+		// Resolve project ID for minting
+		if projectID, err := hub.ResolveGCPProjectID(cfg.Hub.GCPProjectID); err != nil {
+			log.Printf("GCP project ID not available (service account minting disabled): %v", err)
 		} else {
 			hubSrv.SetGCPServiceAccountAdmin(gcpAdmin)
-			hubSrv.SetGCPProjectID(gcpProjectID)
-			log.Printf("GCP service account minting configured (project: %s)", gcpProjectID)
+			hubSrv.SetGCPProjectID(projectID)
+			log.Printf("GCP service account minting configured (project: %s)", projectID)
 		}
 	}
 
@@ -2708,11 +2706,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// remains in place and denies when mode is "enforce" (fail-closed by
 	// construction). Requires a GCP project ID for quota/billing context and
 	// the GCP token generator for diagnostic messages.
-	if gcpProjectErr != nil {
-		log.Printf("Policy Troubleshooter: no GCP project ID available (actAs check will be unavailable): %v", gcpProjectErr)
+	ptProjectID, ptProjErr := hub.ResolveGCPProjectID(cfg.Hub.GCPProjectID)
+	if ptProjErr != nil {
+		log.Printf("Policy Troubleshooter: no GCP project ID available (actAs check will be unavailable): %v", ptProjErr)
 	} else {
 		ptClient, ptErr := policytroubleshooteriam.NewPolicyTroubleshooterClient(ctx,
-			option.WithQuotaProject(gcpProjectID),
+			option.WithQuotaProject(ptProjectID),
 		)
 		if ptErr != nil {
 			log.Printf("Policy Troubleshooter not available (actAs check will be unavailable; ensure Policy Troubleshooter API is enabled and Hub SA has serviceUsage.serviceUsageConsumer role): %v", ptErr)
@@ -2734,7 +2733,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			hubSrv.SetSAAssignChecker(cached)
 			hubSrv.SetHookIdentityChecker(cached)
 			// Both surfaces share one checker instance and one cache.
-			log.Printf("Policy Troubleshooter checker configured for actAs checks (quota project: %s)", gcpProjectID)
+			log.Printf("Policy Troubleshooter checker configured for actAs checks (quota project: %s)", ptProjectID)
 		}
 	}
 

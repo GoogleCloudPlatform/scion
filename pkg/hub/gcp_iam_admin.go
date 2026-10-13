@@ -174,35 +174,22 @@ func isEventualConsistencyError(err error) bool {
 		strings.Contains(errStr, "400")
 }
 
-// gcpProjectIDLookupTimeout keeps the client library's own retry budget.
-const gcpProjectIDLookupTimeout = 15 * time.Second
+// onGCE is metadata.OnGCE; a variable so tests can replace it.
+var onGCE = metadata.OnGCE
 
-var errNotOnGCP = errors.New("not running on GCP (no metadata server detected); set server.hub.gcp_project_id to configure a project explicitly")
-
-// Seams for tests. OnGCE takes no context on purpose: the library caches
-// its first answer, so a caller deadline must not pin a false negative.
-var (
-	gcpOnGCE             = metadata.OnGCE
-	gcpMetadataProjectID = metadata.ProjectIDWithContext
-)
-
-// ResolveGCPProjectID returns the project ID from config or, on GCP only,
-// auto-detects it from the metadata server.
-func ResolveGCPProjectID(ctx context.Context, configured string) (string, error) {
+// ResolveGCPProjectID returns the project ID from config or, on GCP, auto-detects
+// it from the metadata server. Off GCP the lookup would retry dial timeouts for
+// about 13s, so it is skipped.
+func ResolveGCPProjectID(configured string) (string, error) {
 	if configured != "" {
 		return configured, nil
 	}
-	if !gcpOnGCE() {
-		return "", errNotOnGCP
+	if !onGCE() {
+		return "", errors.New("not running on GCP; set server.hub.gcp_project_id to use a GCP project")
 	}
-	ctx, cancel := context.WithTimeout(ctx, gcpProjectIDLookupTimeout)
-	defer cancel()
-	projectID, err := gcpMetadataProjectID(ctx)
+	projectID, err := metadata.ProjectIDWithContext(context.Background())
 	if err != nil {
 		return "", fmt.Errorf("auto-detecting GCP project ID from metadata server: %w", err)
-	}
-	if projectID == "" {
-		return "", errors.New("auto-detecting GCP project ID from metadata server: empty project ID")
 	}
 	return projectID, nil
 }

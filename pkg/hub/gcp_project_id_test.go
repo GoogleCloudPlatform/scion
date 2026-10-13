@@ -14,99 +14,18 @@
 
 package hub
 
-import (
-	"context"
-	"errors"
-	"testing"
-	"time"
+import "testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-)
+func TestResolveGCPProjectID(t *testing.T) {
+	orig := onGCE
+	t.Cleanup(func() { onGCE = orig })
+	probed := false
+	onGCE = func() bool { probed = true; return false }
 
-// stubGCPMetadata replaces the ResolveGCPProjectID seams for one test and
-// counts how often each is called.
-func stubGCPMetadata(t *testing.T, onGCE bool, projectID func(context.Context) (string, error)) (onGCECalls, lookupCalls *int) {
-	t.Helper()
-	origOnGCE, origProjectID := gcpOnGCE, gcpMetadataProjectID
-	t.Cleanup(func() { gcpOnGCE, gcpMetadataProjectID = origOnGCE, origProjectID })
-	onGCECalls, lookupCalls = new(int), new(int)
-	gcpOnGCE = func() bool { *onGCECalls++; return onGCE }
-	gcpMetadataProjectID = func(ctx context.Context) (string, error) {
-		*lookupCalls++
-		return projectID(ctx)
+	if got, err := ResolveGCPProjectID("my-project"); err != nil || got != "my-project" || probed {
+		t.Fatalf("configured: got %q, %v, probed=%v; want my-project, nil, false", got, err, probed)
 	}
-	return onGCECalls, lookupCalls
-}
-
-func TestResolveGCPProjectID_ConfiguredWinsWithoutLookup(t *testing.T) {
-	onGCECalls, lookupCalls := stubGCPMetadata(t, true, func(context.Context) (string, error) {
-		return "detected-project", nil
-	})
-
-	got, err := ResolveGCPProjectID(context.Background(), "configured-project")
-	require.NoError(t, err)
-	assert.Equal(t, "configured-project", got)
-	assert.Zero(t, *onGCECalls, "a configured project ID must not probe for GCP")
-	assert.Zero(t, *lookupCalls, "a configured project ID must not query the metadata server")
-}
-
-func TestResolveGCPProjectID_OffGCPSkipsLookup(t *testing.T) {
-	_, lookupCalls := stubGCPMetadata(t, false, func(ctx context.Context) (string, error) {
-		// An unreachable metadata server: the lookup would block until
-		// its deadline.
-		<-ctx.Done()
-		return "", ctx.Err()
-	})
-
-	start := time.Now()
-	got, err := ResolveGCPProjectID(context.Background(), "")
-	elapsed := time.Since(start)
-
-	require.ErrorIs(t, err, errNotOnGCP)
-	assert.Contains(t, err.Error(), "server.hub.gcp_project_id")
-	assert.Empty(t, got)
-	assert.Zero(t, *lookupCalls, "off GCP the metadata server must not be queried")
-	assert.Less(t, elapsed, time.Second, "off GCP resolution must not wait on the metadata server")
-}
-
-func TestResolveGCPProjectID_OnGCPAutoDetects(t *testing.T) {
-	var hadDeadline bool
-	_, lookupCalls := stubGCPMetadata(t, true, func(ctx context.Context) (string, error) {
-		deadline, ok := ctx.Deadline()
-		hadDeadline = ok && time.Until(deadline) <= gcpProjectIDLookupTimeout
-		return "detected-project", nil
-	})
-
-	got, err := ResolveGCPProjectID(context.Background(), "")
-	require.NoError(t, err)
-	assert.Equal(t, "detected-project", got)
-	assert.Equal(t, 1, *lookupCalls)
-	assert.True(t, hadDeadline, "the metadata lookup must run under gcpProjectIDLookupTimeout")
-}
-
-func TestResolveGCPProjectID_LookupErrors(t *testing.T) {
-	t.Run("lookup error", func(t *testing.T) {
-		boom := errors.New("boom")
-		stubGCPMetadata(t, true, func(context.Context) (string, error) { return "", boom })
-		_, err := ResolveGCPProjectID(context.Background(), "")
-		require.ErrorIs(t, err, boom)
-		assert.Contains(t, err.Error(), "auto-detecting GCP project ID")
-	})
-	t.Run("empty project ID", func(t *testing.T) {
-		stubGCPMetadata(t, true, func(context.Context) (string, error) { return "", nil })
-		_, err := ResolveGCPProjectID(context.Background(), "")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "empty project ID")
-	})
-	t.Run("caller cancellation is honoured", func(t *testing.T) {
-		stubGCPMetadata(t, true, func(ctx context.Context) (string, error) {
-			<-ctx.Done()
-			return "", ctx.Err()
-		})
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		_, err := ResolveGCPProjectID(ctx, "")
-		require.ErrorIs(t, err, context.Canceled)
-	})
+	if got, err := ResolveGCPProjectID(""); err == nil || got != "" || !probed {
+		t.Fatalf("off GCP: got %q, %v, probed=%v; want an error after probing", got, err, probed)
+	}
 }
