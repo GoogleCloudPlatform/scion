@@ -32,8 +32,8 @@ import (
 )
 
 // Token kinds carried in the scion_token_kind claim of tokens signed with
-// the hub's OIDC key, so a receiving hub tells a user token from an agent
-// token by an explicit claim.
+// the hub's OIDC key, so a receiving hub tells a user access credential for
+// a peer hub from an agent identity token by an explicit claim.
 const (
 	tokenKindUser  = "user"
 	tokenKindAgent = "agent"
@@ -69,9 +69,9 @@ type federationTokenResponse struct {
 }
 
 // FederationUserTokenClaims are the claims of a user access credential for
-// a peer hub: a short-lived token, signed with the hub's OIDC key, that names one local
-// user for one peer hub. It never carries agent claims (project_id,
-// agent_name, ancestry, root_user).
+// a peer hub: a short-lived credential, signed with the hub's OIDC key,
+// that names one local user for one peer hub. It never carries agent
+// claims (project_id, agent_name, ancestry, root_user).
 type FederationUserTokenClaims struct {
 	jwt.Claims
 
@@ -90,12 +90,12 @@ func (s *Server) federationTokenHandler() http.HandlerFunc {
 
 // handleFederationToken handles POST /api/v1/auth/federation-token. It
 // issues a user access credential for a peer hub to the calling user, for
-// the requested audience. The caller must be a local human user with status active and a
-// stored email, authenticated by an interactive session or by a
-// hub-boundary user access token carrying federation_token:mint; every
-// other caller gets the same 403. The audience must be listed in
-// server.oidc.user_token_audiences. While the OIDC provider is not enabled
-// the route answers 404 for every caller.
+// the requested audience. The caller must be a local human user with
+// status active and a stored email, authenticated by an interactive
+// session or by a hub-boundary user access token carrying
+// federation_token:mint; every other caller gets the same 403. The
+// audience must be listed in server.oidc.user_token_audiences. While the
+// OIDC provider is not enabled the route answers 404 for every caller.
 func (s *Server) handleFederationToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -202,13 +202,13 @@ func (s *Server) handleFederationToken(w http.ResponseWriter, r *http.Request) {
 }
 
 // federationTokenCaller returns the stored user of a caller who may obtain
-// a user access credential for a peer hub: an interactive session, or a user access token
-// whose ceiling allows federation_token.mint on a hub boundary, of a user
-// whose stored kind is human, whose status is active and whose stored email
-// is not empty. Every other caller (dev, federation, agent, broker,
-// delegated, test fixture, a suspended or unknown user, a user with no
-// stored email) gets the same 403; no identity gets 401. It writes the
-// response and returns false on refusal.
+// a user access credential for a peer hub: an interactive session, or a
+// user access token whose ceiling allows federation_token.mint on a hub
+// boundary, of a user whose stored kind is human, whose status is active
+// and whose stored email is not empty. Every other caller (dev,
+// federation, agent, broker, delegated, test fixture, a suspended or
+// unknown user, a user with no stored email) gets the same 403; no
+// identity gets 401. It writes the response and returns false on refusal.
 func (s *Server) federationTokenCaller(w http.ResponseWriter, r *http.Request) (*store.User, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)

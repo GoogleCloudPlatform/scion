@@ -108,8 +108,8 @@ type OIDCIdentityTokenClaims struct {
 	Ancestry  []string `json:"ancestry"`
 	RootUser  string   `json:"root_user"`
 	// TokenKind is always "agent" on an agent identity token, so a
-	// receiving hub tells it from a user access credential for a peer hub ("user") by an
-	// explicit claim.
+	// receiving hub tells it from a user access credential for a peer hub
+	// ("user") by an explicit claim.
 	TokenKind string `json:"scion_token_kind"`
 }
 

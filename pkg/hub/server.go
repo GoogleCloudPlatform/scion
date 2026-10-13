@@ -2469,8 +2469,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 			"audience", cfg.TransportAudience)
 	}
 
-	// Settings for user access credentials for peer hubs are read at startup only; an invalid
-	// value fails startup rather than being ignored.
+	// Settings for user access credentials for peer hubs are read at
+	// startup only; an invalid value fails startup rather than being
+	// ignored.
 	if err := cfg.OIDCConfig.ValidateUserTokens(); err != nil {
 		return nil, fmt.Errorf("oidc: %w", err)
 	}
@@ -6574,8 +6575,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/auth/tokens", s.guarded("/api/v1/auth/tokens", s.handleTokens))
 	s.mux.HandleFunc("/api/v1/auth/tokens/", s.guarded("/api/v1/auth/tokens/", s.handleTokenByID))
 	s.mux.HandleFunc("/api/v1/auth/scopes", s.guarded("/api/v1/auth/scopes", s.handleAuthScopes))
-	// User access credentials for peer hubs: 404 while federation.project_visitors is off
-	// or the OIDC provider is not enabled (handlers_federation_token.go).
+	// User access credentials for peer hubs: 404 while
+	// federation.project_visitors is off or the OIDC provider is not
+	// enabled (handlers_federation_token.go).
 	s.mux.HandleFunc("POST /api/v1/auth/federation-token", s.guarded("POST /api/v1/auth/federation-token", s.federationTokenHandler()))
 	s.mux.HandleFunc("/api/v1/auth/providers", s.guarded("/api/v1/auth/providers", s.handleCLIAuthProviders))
 
