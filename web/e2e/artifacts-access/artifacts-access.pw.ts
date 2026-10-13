@@ -62,28 +62,37 @@ import {
   isGone,
   recordRequests,
   redactPath,
+  secretLikeStrings,
   type ReadState,
   type RequestRecord,
 } from './journey-lib.js';
 import {
   HEADER_CONTROLS,
   SELECTORS,
+  anyPageHeading,
   artifactsRow,
   artifactsRowAccess,
   editPublishButton,
+  escapeRegExp,
   grantRow,
+  grantRowControls,
+  grantRowPermission,
+  grantRowRemove,
   headerButton,
   headerTitle,
   historyCurrentBadge,
+  historyEditButton,
   historyPublishedBy,
   historyRow,
   homeGrantRow,
   newArtifactButton,
   notFoundHeading,
   ownerMeta,
+  permissionOption,
   publishSubmit,
   shareAddButton,
   shareCloseButton,
+  shareDialog,
   shareSuggestion,
   tab,
   uploadVersionButton,
@@ -110,9 +119,9 @@ const ENTRY_TEXT = [
 ].join('\n');
 const APPENDED_LINE = 'Appended by the grantee.';
 const R1B_REASON =
-  'NOT RUN: needs an agent-owned artifact (a broker and a publishing agent, the J4 ' +
-  'fixture: a drop-to-shell agent created from a member session, ptone/scion#4569); ' +
-  "main's harness has no runtime broker option. Rows frozen; run with the J4 fixture.";
+  'NOT RUN: needs an agent-owned artifact fixture (a broker and an agent that publishes, ' +
+  "created from a member session, ptone/scion#4569); main's e2e harness has no runtime " +
+  'broker option. Rows frozen; run them with that fixture.';
 
 /** One identity of the journey. */
 interface Identity {
@@ -150,6 +159,8 @@ interface PageSnapshot {
   hidden: HeaderControl[];
   /** History tab: Upload new version shown (null: not looked at). */
   uploadVersion: boolean | null;
+  /** History tab: Edit shown (single-version block only; null: not looked at). */
+  historyEdit: boolean | null;
 }
 
 type RowStatus = 'passed' | 'failed' | 'not run';
@@ -165,6 +176,8 @@ interface RowRecord {
   ui: Record<string, unknown>;
   api: ApiRecord[];
   errors: string[];
+  /** A leg of the row could not run: the row cannot pass (oracle rule 3). */
+  legNotRun?: string;
 }
 
 interface CapabilityFlags {
@@ -184,6 +197,10 @@ const journey: {
   artifact?: { id: string; title: string; ownerRefAtPublish?: string | undefined };
   /** Set when a precondition failure stops the remaining rows. */
   stopped?: string;
+  /** First line of a beforeAll failure (identities, projects, memberships). */
+  setupError?: string;
+  /** First line of an R1-A failure outside any row (e.g. the experiment toggle). */
+  testError?: string;
   rows: Record<string, RowRecord>;
   hardFailures: string[];
   findings: Array<{ id: string; text: string }>;
@@ -332,16 +349,128 @@ async function setExperiment(value: boolean | null): Promise<ExperimentState> {
   return readExperiment();
 }
 
-/** The row record of id, created on first use. */
-function rowRecord(id: string, role: string, title: string, graded = true): RowRecord {
-  journey.rows[id] ??= { id, role, title, graded, status: 'not run', ui: {}, api: [], errors: [] };
+/** A row of the spec's section 8: who acts, what it checks, whether it is graded. */
+interface RowSpec {
+  role: string;
+  title: string;
+  graded?: boolean;
+  /** Where the row runs (for the oracle row map); default the R1-A test. */
+  where?: 'a' | 'b' | 'cleanup';
+}
+
+/** Every row, declared once: it seeds the evidence and the oracle row map. */
+const ROWS: Record<string, RowSpec> = {
+  'R1-00a': {
+    role: 'owner',
+    title: 'experiment off: no Artifacts sidebar item, no project Artifacts segment',
+  },
+  'R1-00b': { role: 'owner', title: 'experiment off: /artifacts renders the 404 page' },
+  'R1-00c': {
+    role: 'admin CLI',
+    title: 'experiment off: the CLI names the hub.artifacts experiment',
+  },
+  'R1-01': { role: 'owner', title: 'smoke: New artifact publishes and lands on the artifact' },
+  'R1-02': {
+    role: 'owner',
+    title: 'owner sees Edit, Review, Share, Download, Upload new version and History Edit',
+  },
+  'R1-03a': { role: 'outsider', title: 'outsider gets the 404 page and no controls' },
+  'R1-03b': { role: 'outsider', title: 'outsider: no row in /artifacts' },
+  'R1-03c': {
+    role: 'outsider',
+    title: 'outsider: the same 404 page and answers as for a missing artifact',
+  },
+  'R1-04a': { role: 'member', title: 'member reads the artifact' },
+  'R1-04b': {
+    role: 'member',
+    title: 'member: no Edit, Review, Share, Grant review access, Upload new version, History Edit',
+  },
+  'R1-04c': { role: 'member', title: 'member: /artifacts row badged Project' },
+  'R1-05': {
+    role: 'padmin',
+    title: 'project admin reads; no Edit, Review, Share, Grant review access, Upload new version',
+  },
+  'R1-06a': { role: 'grantee', title: 'grantee before the grant: 404 page' },
+  'R1-06x': {
+    role: 'owner (searching for outsider)',
+    title: 'observation: people search for a user sharing no project with the owner',
+    graded: false,
+  },
+  'R1-06b': { role: 'owner', title: 'Share dialog: grantee added as Can edit' },
+  'R1-06c': {
+    role: 'grantee',
+    title: 'grantee after the grant: Edit, Review, Upload new version; no Share',
+  },
+  'R1-07a': { role: 'grantee', title: 'grantee: Edit, then Publish new version lands on v2' },
+  'R1-07b': { role: 'owner', title: 'owner after v2: still the owner; v2 published by the grantee' },
+  'R1-07c': { role: 'member', title: 'member after the grant and v2: still read-only' },
+  'R1-08': {
+    role: 'owner, member, padmin, grantee',
+    title: 'Grant review access hidden on a user-owned artifact',
+  },
+  'R1-B1': {
+    role: 'owner (delegating user)',
+    title: 'agent-owned: Grant review access visible; Share, Edit, Review hidden',
+    where: 'b',
+  },
+  'R1-B2': {
+    role: 'padmin',
+    title: 'agent-owned: Grant review access visible; Share hidden',
+    where: 'b',
+  },
+  'R1-B3': { role: 'member', title: 'agent-owned: Grant review access and Share hidden', where: 'b' },
+  'R1-B4': {
+    role: 'owner -> member',
+    title: 'Grant review access dialog gives Can review',
+    where: 'b',
+  },
+  'R1-B5': {
+    role: 'member',
+    title: 'review grantee sees Review only and saves a review; owner unchanged',
+    where: 'b',
+  },
+  'R1-09': {
+    role: '-',
+    title: 'cleanup by absence: artifact, memberships, both projects, identities; experiment reset',
+    where: 'cleanup',
+  },
+  'R1-10': {
+    role: '-',
+    title: 'evidence written after the cleanup; no traces, HAR, video, tokens, cookies or codes',
+    where: 'cleanup',
+  },
+};
+
+/** Reason a seeded row keeps when nothing reached it. */
+const NOT_REACHED = 'not reached';
+
+/** The row record of id (seeded from ROWS). */
+function rowRecord(id: string): RowRecord {
+  const spec = ROWS[id];
+  if (!spec) throw new Error(`row ${id} is not in the row table`);
+  journey.rows[id] ??= {
+    id,
+    role: spec.role,
+    title: spec.title,
+    graded: spec.graded ?? true,
+    status: 'not run',
+    reason: NOT_REACHED,
+    ui: {},
+    api: [],
+    errors: [],
+  };
   return journey.rows[id];
 }
 
+/** Seeds every row as "not run" (not reached), so none can go missing. */
+function seedRows(): void {
+  for (const id of Object.keys(ROWS)) rowRecord(id);
+}
+
 /** Marks rows "not run" with a reason (a failed precondition or a skip). */
-function notRun(ids: Array<[string, string, string]>, reason: string): void {
-  for (const [id, role, title] of ids) {
-    const r = rowRecord(id, role, title);
+function notRun(ids: string[], reason: string): void {
+  for (const id of ids) {
+    const r = rowRecord(id);
     r.status = 'not run';
     r.reason = reason;
   }
@@ -355,12 +484,10 @@ function notRun(ids: Array<[string, string, string]>, reason: string): void {
  */
 async function row(
   id: string,
-  role: string,
-  title: string,
   fn: (r: RowRecord) => Promise<void> | void,
-  opts: { requires?: string[]; graded?: boolean } = {}
+  opts: { requires?: string[] } = {}
 ): Promise<boolean> {
-  const r = rowRecord(id, role, title, opts.graded ?? true);
+  const r = rowRecord(id);
   if (journey.stopped) {
     r.status = 'not run';
     r.reason = journey.stopped;
@@ -372,11 +499,12 @@ async function row(
     r.reason = `needs ${blocked.join(', ')} to pass`;
     return false;
   }
+  delete r.reason;
   const info = test.info();
   const before = info.errors.length;
   let threw: unknown = null;
   try {
-    await test.step(`${id}: ${title}`, () => fn(r));
+    await test.step(`${id}: ${r.title}`, () => fn(r));
   } catch (err) {
     threw = err;
   }
@@ -388,7 +516,14 @@ async function row(
     // soft checks either.
     if (r.graded) journey.hardFailures.push(`${id}: ${firstLine(threw)}`);
   }
-  r.status = threw || softErrors.length > 0 ? 'failed' : 'passed';
+  if (threw || softErrors.length > 0) {
+    r.status = 'failed';
+  } else if (r.legNotRun) {
+    r.status = 'not run';
+    r.reason = r.legNotRun;
+  } else {
+    r.status = 'passed';
+  }
   return r.status === 'passed';
 }
 
@@ -396,6 +531,24 @@ async function row(
 function finding(id: string, text: string): void {
   journey.findings.push({ id, text });
   test.info().annotations.push({ type: 'FINDING', description: `${id}: ${text}` });
+}
+
+/**
+ * Reveals the project page's Files area: it renders as a placeholder and
+ * is replaced by the real section once scrolled into view
+ * (project-detail.ts:1407-1445). Waits until the placeholder is gone.
+ */
+async function revealFiles(page: Page): Promise<void> {
+  await page.locator(SELECTORS.projectPage).waitFor({ state: 'attached' });
+  const placeholder = page.locator(SELECTORS.filesPlaceholder);
+  const anyFiles = [
+    SELECTORS.filesPlaceholder,
+    SELECTORS.filesTabGroup,
+    SELECTORS.filesSegmentArtifacts,
+  ].join(', ');
+  await page.locator(anyFiles).first().waitFor({ state: 'attached' });
+  if ((await placeholder.count()) > 0) await placeholder.scrollIntoViewIfNeeded();
+  await expect(placeholder, 'Files placeholder replaced by the Files area').toHaveCount(0);
 }
 
 /** The identity's page, opened once. */
@@ -414,28 +567,28 @@ async function isShown(locator: ReturnType<Page['locator']>): Promise<boolean> {
 /**
  * Opens (or reloads) the artifact page as key and records what it shows:
  * the 404 page, or the header with each graded control visible or hidden,
- * and, with history, whether the History tab offers Upload new version.
+ * and, with history, whether the History tab offers Upload new version
+ * and Edit. opts.path opens another artifact page (a missing artifact).
  *
  * It waits for one of two positive anchors before reading anything: the
- * 404 heading, or the header title plus the markdown preview (rendered
- * only once the entry text loaded, which is also when Edit and Review are
- * decided). So a page that never rendered can never read as "hidden".
+ * 404 heading, or the header title plus the Version menu plus the markdown
+ * preview (rendered only once the entry text loaded, which is also when
+ * Edit and Review are decided). So a page that never rendered can never
+ * read as "hidden".
  */
 async function snapshotArtifactPage(
   key: IdentityKey,
   step: string,
-  opts: { history?: boolean } = {}
+  opts: { history?: boolean; path?: string } = {}
 ): Promise<PageSnapshot> {
   const page = await pageOf(key);
-  await page.goto(artifactPath(), { waitUntil: 'domcontentloaded' });
-  await page
-    .locator(`${SELECTORS.header} h1, ${SELECTORS.notFound} h1`)
-    .first()
-    .waitFor({ state: 'visible' });
+  await page.goto(opts.path ?? artifactPath(), { waitUntil: 'domcontentloaded' });
+  await anyPageHeading(page).waitFor({ state: 'visible' });
   const headerRendered = await isShown(headerTitle(page));
   const rendered404 = await isShown(notFoundHeading(page));
   let previewRendered = false;
   if (headerRendered) {
+    await page.locator(SELECTORS.versionMenu).waitFor({ state: 'visible' });
     await page.locator(SELECTORS.markdownFrame).waitFor({ state: 'attached' });
     previewRendered = true;
   }
@@ -446,10 +599,12 @@ async function snapshotArtifactPage(
     else hidden.push(control);
   }
   let uploadVersion: boolean | null = null;
+  let historyEdit: boolean | null = null;
   if (opts.history && headerRendered) {
     await tab(page, 'history').click();
     await historyRow(page, 1).waitFor({ state: 'visible' });
     uploadVersion = await isShown(uploadVersionButton(page));
+    historyEdit = await isShown(historyEditButton(page));
     await tab(page, 'preview').click();
   }
   const snap: PageSnapshot = {
@@ -470,6 +625,7 @@ async function snapshotArtifactPage(
     visible,
     hidden,
     uploadVersion,
+    historyEdit,
   };
   journey.snapshots.push(snap);
   return snap;
@@ -478,7 +634,12 @@ async function snapshotArtifactPage(
 /** Soft checks of a snapshot against the visible and hidden control sets. */
 function expectControls(
   snap: PageSnapshot,
-  want: { visible: HeaderControl[]; hidden: HeaderControl[]; uploadVersion?: boolean }
+  want: {
+    visible: HeaderControl[];
+    hidden: HeaderControl[];
+    uploadVersion?: boolean;
+    historyEdit?: boolean;
+  }
 ): void {
   expect.soft(snap.headerRendered, `${snap.as}: artifact header rendered`).toBe(true);
   expect.soft(snap.rendered404, `${snap.as}: no 404 page`).toBe(false);
@@ -495,6 +656,11 @@ function expectControls(
         `${snap.as}: Upload new version ${want.uploadVersion ? 'visible' : 'hidden'}`
       )
       .toBe(want.uploadVersion);
+  }
+  if (want.historyEdit !== undefined) {
+    expect
+      .soft(snap.historyEdit, `${snap.as}: History Edit ${want.historyEdit ? 'visible' : 'hidden'}`)
+      .toBe(want.historyEdit);
   }
 }
 
@@ -530,10 +696,6 @@ async function artifactsListAccess(key: IdentityKey): Promise<string | null> {
   const r = artifactsRow(page, journey.artifact!.title);
   if ((await r.count()) === 0) return null;
   return ((await artifactsRowAccess(r).textContent()) ?? '').replace(/\s+/g, ' ').trim();
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /** The owner's "Owner:" label as another identity would see it. */
@@ -641,61 +803,51 @@ async function addMember(
 }
 
 const TITLE_A = 'R1-A: artifact access per role, graded at the UI';
-const R1B_ROWS: Array<[string, string, string]> = [
-  [
-    'R1-B1',
-    'owner (delegating user)',
-    'agent-owned: Grant review access visible; Share, Edit, Review hidden',
-  ],
-  ['R1-B2', 'padmin', 'agent-owned: Grant review access visible; Share hidden'],
-  ['R1-B3', 'member', 'agent-owned: Grant review access and Share hidden'],
-  ['R1-B4', 'owner -> member', 'Grant review access dialog gives Can review'],
-  ['R1-B5', 'member', 'review grantee sees Review only and saves a review; owner unchanged'],
-];
+const R1B_IDS = Object.keys(ROWS).filter((id) => ROWS[id].where === 'b');
+const r1bTitle = (id: string): string => `${id}: agent-owned artifact`;
 const TITLE_CLEANUP = 'R1-09/R1-10: cleanup by absence, then the evidence';
 
-/** The rows of the spec's section 8 (R1-A) mapped to where they run here. */
-const ORACLE_ROW_MAP: Record<string, { test: string; note?: string }> = {
-  ...Object.fromEntries(
-    [
-      'R1-00a',
-      'R1-00b',
-      'R1-00c',
-      'R1-01',
-      'R1-02',
-      'R1-03a',
-      'R1-03b',
-      'R1-03c',
-      'R1-04a',
-      'R1-04b',
-      'R1-04c',
-      'R1-05',
-      'R1-06a',
-      'R1-06b',
-      'R1-06c',
-      'R1-07a',
-      'R1-07b',
-      'R1-07c',
-      'R1-08',
-    ].map((id) => [id, { test: TITLE_A, note: `evidence.rows["${id}"] (a test step)` }])
-  ),
-  'R1-06x': {
-    test: TITLE_A,
-    note: 'observation, not graded: evidence.rows["R1-06x"] and peopleSearch',
-  },
-  ...Object.fromEntries(
-    R1B_ROWS.map(([id]) => [id, { test: `${id}: agent-owned artifact`, note: R1B_REASON }])
-  ),
-  'R1-09': { test: TITLE_CLEANUP, note: 'the afterAll hook: evidence.cleanup' },
-  'R1-10': {
-    test: TITLE_CLEANUP,
-    note: 'the afterAll hook: evidence written after the cleanup; no traces, HAR, video or screenshots',
-  },
-};
+/** Every row mapped to the test that carries it. */
+const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = Object.fromEntries(
+  Object.entries(ROWS).map(([id, spec]) => {
+    if (spec.where === 'b') return [id, { test: r1bTitle(id), note: R1B_REASON }];
+    if (spec.where === 'cleanup') {
+      return [id, { test: TITLE_CLEANUP, note: `the afterAll hook: evidence.rows["${id}"]` }];
+    }
+    const kind = spec.graded === false ? 'observation, not graded' : 'a test step';
+    return [id, { test: TITLE_A, note: `evidence.rows["${id}"] (${kind})` }];
+  })
+);
+
+// ---- R1-B: agent-owned artifact (frozen rows, NOT RUN here) ------------
+// Declared before the serial R1-A group and outside it, so each body always
+// runs and records its reason, whatever happens to R1-A.
+test.describe('agent-owned artifact rows (R1-B, not run)', () => {
+  for (const id of R1B_IDS) {
+    test(r1bTitle(id), () => {
+      const spec = ROWS[id];
+      notRun([id], R1B_REASON);
+      test.info().annotations.push({
+        type: 'NOT RUN',
+        description: `${id} (${spec.role}): ${spec.title}`,
+      });
+      const results = (journey.evidence.results ??= {}) as Record<string, unknown>;
+      results[r1bTitle(id)] = {
+        status: 'not run',
+        skipReason: R1B_REASON,
+        annotations: annotationsOf(test.info().annotations),
+      };
+      test.skip(true, R1B_REASON);
+    });
+  }
+});
 
 test.describe.serial('artifact access per role (R1)', () => {
   // eslint-disable-next-line no-empty-pattern -- Playwright needs the fixtures argument
   test.afterEach(({}, testInfo) => {
+    if (testInfo.title === TITLE_A && testInfo.error?.message) {
+      journey.testError ??= firstLine(testInfo.error.message);
+    }
     const results = (journey.evidence.results ??= {}) as Record<string, unknown>;
     results[testInfo.title] = {
       status: testInfo.status,
@@ -706,76 +858,74 @@ test.describe.serial('artifact access per role (R1)', () => {
   });
 
   test.beforeAll(async ({ browser }) => {
-    const t = resolveTarget();
-    journey.target = t;
-    journey.evidence.oracleRowMap = ORACLE_ROW_MAP;
-    journey.evidence.target = {
-      mode: t.mode,
-      baseURL: t.baseURL,
-      hubId: t.hub?.hubId ?? null,
-      experimentToggle: !!adminToken(),
-    };
-    journey.evidence.fixture = {
-      broker: 'none (R1-A needs no broker, runtime or credentials)',
-      publishSurface: 'web New artifact dialog on the project page (File mode)',
-      projects: 'home (owner, member, padmin), side (owner, grantee); outsider in none',
-    };
-    journey.tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'scion-e2e-aa-')));
-    fs.chmodSync(journey.tmpDir, 0o700);
+    // Every row starts as "not run" (not reached), so none can go missing.
+    seedRows();
+    try {
+      const t = resolveTarget();
+      journey.target = t;
+      journey.evidence.oracleRowMap = ORACLE_ROW_MAP;
+      journey.evidence.target = {
+        mode: t.mode,
+        baseURL: t.baseURL,
+        hubId: t.hub?.hubId ?? null,
+        experimentToggle: !!adminToken(),
+      };
+      journey.evidence.fixture = {
+        broker: 'none (R1-A needs no broker, runtime or credentials)',
+        publishSurface: 'web New artifact dialog on the project page (File mode)',
+        projects: 'home (owner, member, padmin), side (owner, grantee); outsider in none',
+      };
+      journey.tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'scion-e2e-aa-')));
+      fs.chmodSync(journey.tmpDir, 0o700);
 
-    await setUpIdentities(() => browser.newContext({ baseURL: t.baseURL }));
+      await setUpIdentities(() => browser.newContext({ baseURL: t.baseURL }));
 
-    const fixtures: Record<string, unknown> = {};
-    journey.projects.home = await createProject(`e2e-r1-home-${suffix()}`);
-    journey.projects.side = await createProject(`e2e-r1-side-${suffix()}`);
-    await addMember('home', 'member', 'project-member', fixtures);
-    await addMember('home', 'padmin', 'project-admin', fixtures);
-    await addMember('side', 'grantee', 'project-member', fixtures);
-    journey.evidence.projects = {
-      home: { id: journey.projects.home },
-      side: { id: journey.projects.side },
-    };
-    journey.evidence.identities = Object.fromEntries(
-      IDENTITY_KEYS.map((key) => [
-        key,
-        {
-          id: who(key).id,
-          role: {
-            owner: 'artifact owner; owner of home and side',
-            member: 'home project-member, no grant',
-            padmin: 'home project-admin, no grant',
-            grantee: 'side project-member; not in home; gets Can edit through the UI',
-            outsider: 'no project, no grant',
-          }[key],
-        },
-      ])
-    );
-    journey.evidence.membershipFixtures = fixtures;
+      const fixtures: Record<string, unknown> = {};
+      journey.projects.home = await createProject(`e2e-r1-home-${suffix()}`);
+      journey.projects.side = await createProject(`e2e-r1-side-${suffix()}`);
+      await addMember('home', 'member', 'project-member', fixtures);
+      await addMember('home', 'padmin', 'project-admin', fixtures);
+      await addMember('side', 'grantee', 'project-member', fixtures);
+      journey.evidence.projects = {
+        home: { id: journey.projects.home },
+        side: { id: journey.projects.side },
+      };
+      journey.evidence.identities = Object.fromEntries(
+        IDENTITY_KEYS.map((key) => [
+          key,
+          {
+            id: who(key).id,
+            role: {
+              owner: 'artifact owner; owner of home and side',
+              member: 'home project-member, no grant',
+              padmin: 'home project-admin, no grant',
+              grantee: 'side project-member; not in home; gets Can edit through the UI',
+              outsider: 'no project, no grant',
+            }[key],
+          },
+        ])
+      );
+      journey.evidence.membershipFixtures = fixtures;
+    } catch (err) {
+      journey.setupError = `beforeAll: ${firstLine(err)}`;
+      throw err;
+    }
   });
 
   test(TITLE_A, async () => {
     const t = target();
 
     // ---- R1-00: hub.artifacts off ------------------------------------
-    const offRows: Array<[string, string, string]> = [
-      [
-        'R1-00a',
-        'owner',
-        'experiment off: no Artifacts sidebar item, no project Artifacts segment',
-      ],
-      ['R1-00b', 'owner', 'experiment off: /artifacts renders the 404 page'],
-      ['R1-00c', 'admin CLI', 'experiment off: the CLI names the hub.artifacts experiment'],
-    ];
     const experiment: Record<string, unknown> = {};
     journey.evidence.experiment = experiment;
     if (!adminToken()) {
       notRun(
-        offRows,
+        ['R1-00a', 'R1-00b', 'R1-00c'],
         'remote target without E2E_ARTIFACTS_TOGGLE_EXPERIMENT=1: the experiment is not toggled'
       );
     } else {
       experiment.before = await readExperiment();
-      await row(offRows[0][0], offRows[0][1], offRows[0][2], async (r) => {
+      await row('R1-00a', async (r) => {
         const before = experiment.before as ExperimentState;
         r.ui.experimentBefore = before;
         expect(before.override, 'no stored override of hub.artifacts before the run').toBeNull();
@@ -783,16 +933,17 @@ test.describe.serial('artifact access per role (R1)', () => {
         const page = await pageOf('owner');
         await page.goto(`/projects/${journey.projects.home}`, { waitUntil: 'domcontentloaded' });
         await page.locator(SELECTORS.navProjects).filter({ visible: true }).first().waitFor();
-        await page.locator(SELECTORS.projectPage).waitFor({ state: 'attached' });
-        // Mount the Files area when it exists (lazy, on scroll).
-        const placeholder = page.locator(SELECTORS.filesPlaceholder);
-        if ((await placeholder.count()) > 0) await placeholder.scrollIntoViewIfNeeded();
+        await revealFiles(page);
+        // Positive anchor of the revealed Files area (with artifacts off it
+        // shows its file tabs); only then is the segment's absence meaningful.
+        await expect(page.locator(SELECTORS.filesTabGroup), 'Files area revealed').toBeAttached();
+        r.ui.filesAnchor = 'files-tab-group attached, placeholder gone';
         r.ui.navArtifacts = await page.locator(SELECTORS.navArtifacts).count();
         r.ui.filesSegmentArtifacts = await page.locator(SELECTORS.filesSegmentArtifacts).count();
         expect.soft(r.ui.navArtifacts, 'no Artifacts sidebar item').toBe(0);
         expect.soft(r.ui.filesSegmentArtifacts, 'no Artifacts segment in Files').toBe(0);
       });
-      await row(offRows[1][0], offRows[1][1], offRows[1][2], async (r) => {
+      await row('R1-00b', async (r) => {
         const page = await pageOf('owner');
         await page.goto('/artifacts', { waitUntil: 'domcontentloaded' });
         r.ui.rendered404 = await notFoundHeading(page)
@@ -813,9 +964,9 @@ test.describe.serial('artifact access per role (R1)', () => {
       });
       const cliHub = t.hub;
       if (!cliHub) {
-        notRun([offRows[2]], 'remote target: no local CLI');
+        notRun(['R1-00c'], 'remote target: no local CLI');
       } else {
-        await row(offRows[2][0], offRows[2][1], offRows[2][2], (r) => {
+        await row('R1-00c', (r) => {
           const hub = cliHub;
           let exit: string;
           let hint = '';
@@ -849,16 +1000,12 @@ test.describe.serial('artifact access per role (R1)', () => {
     // ---- R1-01: smoke, the owner publishes through the web -------------
     const smoke: Record<string, unknown> = {};
     journey.evidence.smoke = smoke;
-    await row(
+    const smokePassed = await row(
       'R1-01',
-      'owner',
-      'smoke: New artifact publishes and lands on the artifact',
       async (r) => {
         const page = await pageOf('owner');
         await page.goto(`/projects/${journey.projects.home}`, { waitUntil: 'domcontentloaded' });
-        await page.locator(SELECTORS.projectPage).waitFor({ state: 'attached' });
-        const placeholder = page.locator(SELECTORS.filesPlaceholder);
-        if ((await placeholder.count()) > 0) await placeholder.scrollIntoViewIfNeeded();
+        await revealFiles(page);
         await expect(page.locator(SELECTORS.filesSegmentArtifacts)).toBeVisible();
         await page.locator(SELECTORS.filesSegmentArtifacts).click();
         await expect(page.locator(SELECTORS.artifactList)).toBeAttached();
@@ -930,22 +1077,26 @@ test.describe.serial('artifact access per role (R1)', () => {
         };
       }
     );
-    if (!journey.artifact) {
-      journey.stopped ??= 'not run: no artifact was published (R1-01 failed)';
+    // Oracle rule 3: a failed smoke stops every later graded row, whatever
+    // failed in it (cleanup still deletes a published artifact).
+    if (!smokePassed) {
+      const first = journey.rows['R1-01']?.errors[0] ?? 'no error recorded';
+      journey.stopped ??= `not run: smoke precondition failed (R1-01: ${first})`;
     }
 
     // ---- R1-02: the owner's view (control baseline) -------------------
     await row(
       'R1-02',
-      'owner',
-      'owner sees Edit, Review, Share, Download and Upload new version',
       async (r) => {
         const snap = await snapshotArtifactPage('owner', 'R1-02', { history: true });
         r.ui.snapshot = snap;
+        // Positive anchors for the hidden checks of later rows: the owner
+        // sees History's Upload new version and Edit on the same v1 page.
         expectControls(snap, {
           visible: ['Edit', 'Review', 'Share', 'Download'],
           hidden: ['Grant review access'],
           uploadVersion: true,
+          historyEdit: true,
         });
         expect.soft(snap.owner, 'owner label').toBe('Owner: You');
         expect.soft(snap.versionLabel, 'version menu').toContain('v1 (current)');
@@ -961,7 +1112,7 @@ test.describe.serial('artifact access per role (R1)', () => {
     );
 
     // ---- R1-03: outsider, non-disclosure ------------------------------
-    await row('R1-03a', 'outsider', 'outsider gets the 404 page and no controls', async (r) => {
+    await row('R1-03a', async (r) => {
       const snap = await snapshotArtifactPage('outsider', 'R1-03a');
       r.ui.snapshot = snap;
       expect.soft(snap.rendered404, 'outsider: 404 page').toBe(true);
@@ -981,7 +1132,7 @@ test.describe.serial('artifact access per role (R1)', () => {
         expect.soft(res.status, `outsider GET artifact${sub}`).toBe(404);
       }
     });
-    await row('R1-03b', 'outsider', 'outsider: no row in /artifacts', async (r) => {
+    await row('R1-03b', async (r) => {
       const access = await artifactsListAccess('outsider');
       r.ui.listRow = access;
       expect.soft(access, 'outsider: no /artifacts row').toBeNull();
@@ -995,10 +1146,22 @@ test.describe.serial('artifact access per role (R1)', () => {
     });
     await row(
       'R1-03c',
-      'outsider',
-      'outsider: the same 404 as for a missing artifact',
       async (r) => {
         const missing = crypto.randomUUID();
+        // UI half: the page of a missing artifact looks like R1-03a's.
+        const snap = await snapshotArtifactPage('outsider', 'R1-03c', {
+          path: `/projects/${journey.projects.home}/artifacts/${missing}`,
+        });
+        r.ui.missingSnapshot = snap;
+        r.ui.realSnapshot =
+          journey.snapshots.find((x) => x.as === 'outsider' && x.step === 'R1-03a') ?? null;
+        const page = await pageOf('outsider');
+        expect.soft(snap.rendered404, 'missing artifact: 404 page').toBe(true);
+        expect.soft(snap.headerRendered, 'missing artifact: no artifact header').toBe(false);
+        expect.soft(snap.visible, 'missing artifact: no header controls').toEqual([]);
+        expect.soft(await page.locator(SELECTORS.header).count(), 'no header element').toBe(0);
+        expect.soft(await tab(page, 'preview').count(), 'no tabs').toBe(0);
+        // API half: the same status and error code for each read.
         const pairs: Array<Record<string, unknown>> = [];
         for (const sub of ['', '/versions', `/versions/1/files/${ENTRY}`]) {
           const real = await api(
@@ -1025,7 +1188,7 @@ test.describe.serial('artifact access per role (R1)', () => {
     );
 
     // ---- R1-04: member (home-project reader) --------------------------
-    await row('R1-04a', 'member', 'member reads the artifact', async (r) => {
+    await row('R1-04a', async (r) => {
       const snap = await snapshotArtifactPage('member', 'R1-04', { history: true });
       r.ui.snapshot = snap;
       expectControls(snap, { visible: ['Download'], hidden: [] });
@@ -1042,8 +1205,6 @@ test.describe.serial('artifact access per role (R1)', () => {
     });
     await row(
       'R1-04b',
-      'member',
-      'member: no Edit, Review, Share, Grant review access, Upload new version',
       async (r) => {
         const snap = journey.snapshots.find((s) => s.as === 'member' && s.step === 'R1-04');
         if (!snap) throw new Error('no member snapshot (R1-04a did not reach the page)');
@@ -1052,6 +1213,7 @@ test.describe.serial('artifact access per role (R1)', () => {
           visible: [],
           hidden: ['Edit', 'Review', 'Share', 'Grant review access'],
           uploadVersion: false,
+          historyEdit: false,
         });
         const caps = await capabilities('member', r);
         expect.soft(caps.flags, 'member flags').toEqual({
@@ -1082,7 +1244,7 @@ test.describe.serial('artifact access per role (R1)', () => {
         expect.soft(grant.status, 'member grant probe').toBe(403);
       }
     );
-    await row('R1-04c', 'member', 'member: /artifacts row badged Project', async (r) => {
+    await row('R1-04c', async (r) => {
       const access = await artifactsListAccess('member');
       r.ui.listRow = access;
       expect.soft(access, 'member: /artifacts access badge').toBe('Project');
@@ -1097,8 +1259,6 @@ test.describe.serial('artifact access per role (R1)', () => {
     // ---- R1-05: project admin, no grant --------------------------------
     await row(
       'R1-05',
-      'padmin',
-      'project admin: no Edit, Review, Share, Grant review access, Upload new version',
       async (r) => {
         const snap = await snapshotArtifactPage('padmin', 'R1-05', { history: true });
         r.ui.snapshot = snap;
@@ -1106,7 +1266,16 @@ test.describe.serial('artifact access per role (R1)', () => {
           visible: ['Download'],
           hidden: ['Edit', 'Review', 'Share', 'Grant review access'],
           uploadVersion: false,
+          historyEdit: false,
         });
+        // The same reads as R1-04a.
+        expect.soft(snap.title, 'title').toBe(journey.artifact!.title);
+        expect.soft(snap.previewRendered, 'preview rendered').toBe(true);
+        expect.soft(snap.versionLabel, 'version menu').toContain('v1 (current)');
+        await expect
+          .soft(ownerMeta(await pageOf('padmin')), 'owner label names the owner')
+          .toHaveText(new RegExp(`^\\s*Owner: (${ownerLabels().map(escapeRegExp).join('|')})\\s*$`));
+        r.ui.ownerLabel = ((await ownerMeta(await pageOf('padmin')).textContent()) ?? '').trim();
         const caps = await capabilities('padmin', r);
         expect.soft(caps.status).toBe(200);
         expect.soft(caps.flags, 'padmin flags').toEqual({
@@ -1119,7 +1288,7 @@ test.describe.serial('artifact access per role (R1)', () => {
     );
 
     // ---- R1-06: people search, then the write grant through the UI -----
-    await row('R1-06a', 'grantee', 'grantee before the grant: 404 page', async (r) => {
+    await row('R1-06a', async (r) => {
       const snap = await snapshotArtifactPage('grantee', 'R1-06a');
       r.ui.snapshot = snap;
       expect.soft(snap.rendered404, 'grantee before the grant: 404 page').toBe(true);
@@ -1133,7 +1302,7 @@ test.describe.serial('artifact access per role (R1)', () => {
     const openShare = async (): Promise<void> => {
       await snapshotArtifactPage('owner', 'share');
       await headerButton(ownerPage, 'Share').click();
-      await expect(ownerPage.locator(SELECTORS.shareDialog)).toBeVisible();
+      await expect(shareDialog(ownerPage)).toBeVisible();
       await expect(homeGrantRow(ownerPage), 'grants loaded (home project row)').toBeVisible();
     };
     /** Types text into the people input and returns the search answer. */
@@ -1152,8 +1321,6 @@ test.describe.serial('artifact access per role (R1)', () => {
 
     await row(
       'R1-06x',
-      'owner (searching for outsider)',
-      'observation: people search for a user sharing no project with the owner',
       async (r) => {
         await openShare();
         const outsider = who('outsider');
@@ -1192,14 +1359,19 @@ test.describe.serial('artifact access per role (R1)', () => {
       { graded: false }
     );
 
-    await row('R1-06b', 'owner', 'Share dialog: grantee added as Can edit', async (r) => {
-      if (!(await ownerPage.locator(SELECTORS.shareDialog).isVisible())) await openShare();
+    await row('R1-06b', async (r) => {
+      if (!(await shareDialog(ownerPage).isVisible())) await openShare();
       const grantee = who('grantee');
+      // The dialog's label: Share “<title>” (artifact-share-dialog.ts:1003).
+      r.ui.dialogLabel = await shareDialog(ownerPage).getAttribute('label');
+      expect
+        .soft(r.ui.dialogLabel, 'Share dialog label')
+        .toBe(`Share “${journey.artifact!.title}”`);
       // The home project row: listed, "(home project)", no controls.
-      const home = homeGrantRow(ownerPage);
+      const homeControls = grantRowControls(homeGrantRow(ownerPage));
       r.ui.homeRowControls = {
-        selects: await home.locator('sl-select').count(),
-        buttons: await home.locator('sl-button').count(),
+        selects: await homeControls.selects.count(),
+        buttons: await homeControls.buttons.count(),
       };
       expect
         .soft(r.ui.homeRowControls, 'home project row has no controls')
@@ -1220,7 +1392,7 @@ test.describe.serial('artifact access per role (R1)', () => {
       await suggestion.click();
       const select = ownerPage.locator(SELECTORS.shareAddPermission);
       await select.click();
-      await select.locator('sl-option[value="write"]').click();
+      await permissionOption(select, 'write').click();
       await expect(select).toHaveJSProperty('value', 'write');
       const granted = ownerPage.waitForResponse(
         (q) =>
@@ -1243,22 +1415,16 @@ test.describe.serial('artifact access per role (R1)', () => {
       const grantRowLocator = grantRow(ownerPage, [grantee.displayName, grantee.email]);
       await expect(grantRowLocator, 'grant row for the grantee').toBeVisible();
       await expect
-        .soft(
-          grantRowLocator.locator('sl-select[aria-label="Permission"]'),
-          'grant row at Can edit'
-        )
+        .soft(grantRowPermission(grantRowLocator), 'grant row at Can edit')
         .toHaveJSProperty('value', 'write');
-      await expect
-        .soft(grantRowLocator.locator('sl-button', { hasText: 'Remove' }), 'grant row Remove')
-        .toBeVisible();
+      await expect.soft(grantRowRemove(grantRowLocator), 'grant row Remove').toBeVisible();
       r.ui.grantRowShown = true;
       await shareCloseButton(ownerPage).click();
+      await expect(shareDialog(ownerPage), 'Share dialog closed').toBeHidden();
     });
 
     await row(
       'R1-06c',
-      'grantee',
-      'grantee after the grant: Edit, Review, Upload new version; no Share',
       async (r) => {
         const snap = await snapshotArtifactPage('grantee', 'R1-06c', { history: true });
         r.ui.snapshot = snap;
@@ -1281,8 +1447,6 @@ test.describe.serial('artifact access per role (R1)', () => {
     // ---- R1-07: the grantee publishes v2; ownership unchanged ----------
     await row(
       'R1-07a',
-      'grantee',
-      'grantee: Edit, then Publish new version lands on v2',
       async (r) => {
         const page = await pageOf('grantee');
         await snapshotArtifactPage('grantee', 'R1-07a');
@@ -1329,8 +1493,6 @@ test.describe.serial('artifact access per role (R1)', () => {
 
     await row(
       'R1-07b',
-      'owner',
-      'owner after v2: still the owner; v2 published by the grantee',
       async (r) => {
         const snap = await snapshotArtifactPage('owner', 'R1-07b');
         r.ui.snapshot = snap;
@@ -1375,8 +1537,6 @@ test.describe.serial('artifact access per role (R1)', () => {
 
     await row(
       'R1-07c',
-      'member',
-      'member after the grant and v2: still read-only',
       async (r) => {
         const snap = await snapshotArtifactPage('member', 'R1-07c', { history: true });
         r.ui.snapshot = snap;
@@ -1384,6 +1544,7 @@ test.describe.serial('artifact access per role (R1)', () => {
           visible: ['Download'],
           hidden: ['Edit', 'Review', 'Share', 'Grant review access'],
           uploadVersion: false,
+          historyEdit: false,
         });
         const caps = await capabilities('member', r);
         expect.soft(caps.flags, 'member flags').toEqual({
@@ -1393,21 +1554,21 @@ test.describe.serial('artifact access per role (R1)', () => {
           canGrantReview: false,
         });
       },
-      { requires: ['R1-06b'] }
+      { requires: ['R1-06b', 'R1-07a'] }
     );
 
     // ---- R1-08: Grant review access hidden on a user-owned artifact ----
     await row(
       'R1-08',
-      'owner, member, padmin, grantee',
-      'Grant review access hidden on a user-owned artifact',
       async (r) => {
         const seen: Record<string, unknown> = {};
         const keys: IdentityKey[] =
           journey.rows['R1-06b']?.status === 'passed'
             ? ['owner', 'member', 'padmin', 'grantee']
             : ['owner', 'member', 'padmin'];
-        if (keys.length < 4) r.ui.note = 'grantee not checked: R1-06b did not pass (no grant)';
+        // Without the grant the grantee leg cannot run: the row records the
+        // other legs and ends "not run" (never passed) unless a leg failed.
+        if (keys.length < 4) r.legNotRun = 'grantee leg not run: needs R1-06b to pass';
         for (const key of keys) {
           const snap = await snapshotArtifactPage(key, 'R1-08');
           const caps = await capabilities(key, r);
@@ -1440,17 +1601,28 @@ test.describe.serial('artifact access per role (R1)', () => {
       }
     );
 
+    // Every identity still holds its own test identity session after the rows.
+    const identityChecks: Record<string, string> = {};
+    for (const key of IDENTITY_KEYS) {
+      const identity = journey.ids[key];
+      if (!identity) continue;
+      try {
+        await assertTestIdentity(identity.context.request, {
+          email: identity.email,
+          role: 'member',
+        });
+        identityChecks[key] = 'ok';
+      } catch (err) {
+        identityChecks[key] = firstLine(err);
+      }
+    }
+    journey.evidence.identityChecksAfterRows = identityChecks;
+    expect
+      .soft(Object.values(identityChecks), 'identities asserted after the rows')
+      .toEqual(Object.values(identityChecks).map(() => 'ok'));
+
     expect(journey.hardFailures, 'rows that could not be carried out').toEqual([]);
   });
-
-  // ---- R1-B: agent-owned artifact (frozen rows, NOT RUN here) ----------
-  for (const [id, role, title] of R1B_ROWS) {
-    test(`${id}: agent-owned artifact`, () => {
-      notRun([[id, role, title]], R1B_REASON);
-      test.info().annotations.push({ type: 'NOT RUN', description: `${id} (${role}): ${title}` });
-      test.skip(true, R1B_REASON);
-    });
-  }
 
   // ---- R1-09/R1-10: cleanup by absence, then the evidence --------------
   // eslint-disable-next-line no-empty-pattern -- Playwright needs the fixtures argument
@@ -1491,6 +1663,25 @@ test.describe.serial('artifact access per role (R1)', () => {
       }
     }
     cleanup.memberRemovals = removals;
+    // Each removed binding re-read by absence, before the projects go.
+    for (const name of ['home', 'side'] as const) {
+      const projectId = journey.projects[name];
+      const mine = journey.bindings.filter((b) => b.project === name);
+      if (!projectId || mine.length === 0) continue;
+      try {
+        const res = await api('owner', 'GET', `/api/v1/projects/${projectId}/members`);
+        const items =
+          ((res.body ?? {}) as { items?: Array<{ id: string; principalId?: string }> }).items ?? [];
+        for (const b of mine) {
+          const userId = journey.ids[b.key]?.id;
+          const present = items.some((i) => i.id === b.id || (!!userId && i.principalId === userId));
+          states[`binding ${b.key}@${name}`] =
+            res.status === 200 ? (present ? 'present' : 'absent') : 'unknown';
+        }
+      } catch (err) {
+        residue.push(`cleanup error (members of ${name}): ${firstLine(err)}`);
+      }
+    }
     const projectDeletes: Record<string, number | string> = {};
     for (const name of ['home', 'side'] as const) {
       const projectId = journey.projects[name];
@@ -1610,31 +1801,70 @@ test.describe.serial('artifact access per role (R1)', () => {
     for (const identity of Object.values(journey.ids)) await identity?.context.close();
     if (journey.tmpDir) fs.rmSync(journey.tmpDir, { recursive: true, force: true });
 
-    // Evidence only now, after the cleanup.
-    for (const [id, role, title] of R1B_ROWS) {
-      if (!journey.rows[id]) notRun([[id, role, title]], R1B_REASON);
+    // Rows nothing reached keep "not run", with the first hard failure as the cause.
+    const cause =
+      journey.setupError ?? journey.stopped ?? journey.hardFailures[0] ?? journey.testError;
+    for (const r of Object.values(journey.rows)) {
+      if (r.status === 'not run' && r.reason === NOT_REACHED && cause) {
+        r.reason = `${NOT_REACHED}: ${cause}`;
+      }
     }
+    notRun(
+      R1B_IDS.filter((id) => journey.rows[id]?.reason?.startsWith(NOT_REACHED)),
+      R1B_REASON
+    );
+
+    // R1-09: cleanup verified by absence.
+    const r09 = rowRecord('R1-09');
+    delete r09.reason;
+    r09.status = residue.length === 0 ? 'passed' : 'failed';
+    r09.errors = [...residue];
+    r09.ui = { final: cleanup.final };
+
+    // Evidence only now, after the cleanup.
     journey.evidence.artifact = journey.artifact
       ? { id: journey.artifact.id, ownerRefAtPublish: journey.artifact.ownerRefAtPublish ?? null }
       : null;
     journey.evidence.rows = journey.rows;
     journey.evidence.findings = journey.findings;
     journey.evidence.hardFailures = journey.hardFailures;
+    journey.evidence.setupError = journey.setupError ?? null;
+    journey.evidence.testError = journey.testError ?? null;
     journey.evidence.cleanup = { ...cleanup, residue };
     const results = (journey.evidence.results ??= {}) as Record<string, unknown>;
-    for (const title of [TITLE_A, ...R1B_ROWS.map(([id]) => `${id}: agent-owned artifact`)]) {
-      results[title] ??= { status: 'not run' };
+    results[TITLE_A] ??= { status: 'not run', skipReason: cause ?? null };
+    for (const id of R1B_IDS) {
+      results[r1bTitle(id)] ??= { status: 'not run', skipReason: R1B_REASON };
     }
     results[TITLE_CLEANUP] = {
-      status: 'this afterAll; see the Playwright report',
+      status: residue.length === 0 ? 'passed' : 'failed',
       residue: residue.length,
       annotations: annotationsOf(testInfo.annotations),
     };
-    const evidenceFile = testInfo.outputPath('artifacts-access-evidence.json');
-    fs.writeFileSync(evidenceFile, JSON.stringify(journey.evidence, null, 2));
+
+    // R1-10: the evidence holds nothing secret-shaped. Checked on the
+    // serialised evidence before it is written; the row goes in with it.
+    const r10 = rowRecord('R1-10');
+    delete r10.reason;
+    const leaks = secretLikeStrings(JSON.stringify(journey.evidence));
+    r10.status = leaks.length === 0 ? 'passed' : 'failed';
+    r10.ui = {
+      secretLikeMatches: leaks.length,
+      traces: 'off',
+      video: 'off',
+      screenshots: 'off',
+      har: 'not recorded',
+    };
+    r10.errors = leaks.map((l) => `secret-like string at offset ${l}`);
+    const body = JSON.stringify(journey.evidence, null, 2);
+    // The spec's path: one file in the suite's output dir, not a test's subdir.
+    const evidenceFile = path.join(testInfo.project.outputDir, 'artifacts-access-evidence.json');
+    fs.mkdirSync(path.dirname(evidenceFile), { recursive: true });
+    fs.writeFileSync(evidenceFile, body);
     console.info(`[journey] evidence: ${evidenceFile}`);
     console.info(`[journey] cleanup: ${JSON.stringify(journey.evidence.cleanup)}`);
 
+    expect(leaks, 'R1-10: no secret-like strings in the evidence').toEqual([]);
     expect(residue, 'R1-09: nothing left behind').toEqual([]);
   });
 });

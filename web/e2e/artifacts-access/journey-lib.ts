@@ -149,3 +149,16 @@ export function recordRequests(context: BrowserContext): RequestRecord[] {
   });
   return out;
 }
+
+/**
+ * Offsets of secret-shaped strings in text: a known token prefix at a word
+ * start followed by 8+ token characters, or a scion_<kind>_ token. Used to
+ * check the serialised evidence before it is written.
+ */
+export function secretLikeStrings(text: string): number[] {
+  const pattern =
+    /(?<![A-Za-z0-9])(?:tiwc_|scion_dev_|ghp_|gho_|github_pat_|sk-|ya29\.|eyJ)[A-Za-z0-9_\-.]{8,}|(?<![A-Za-z0-9])scion_[a-z]+_[A-Za-z0-9]{16,}/g;
+  const out: number[] = [];
+  for (const m of text.matchAll(pattern)) out.push(m.index ?? 0);
+  return out;
+}

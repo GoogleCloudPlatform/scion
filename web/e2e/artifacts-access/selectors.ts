@@ -23,9 +23,14 @@
 
 import type { Locator, Page } from '@playwright/test';
 
+/** Escapes text for use inside a RegExp. */
+export function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** An exact, whitespace-tolerant text match for a button label. */
 function exact(label: string): RegExp {
-  return new RegExp(`^\\s*${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`);
+  return new RegExp(`^\\s*${escapeRegExp(label)}\\s*$`);
 }
 
 export const SELECTORS = {
@@ -56,6 +61,12 @@ export const SELECTORS = {
   /** Project page (project-detail.ts:3084-3151). */
   projectPage: 'scion-page-project-detail',
   filesPlaceholder: 'scion-page-project-detail .files-section-placeholder',
+  /**
+   * The revealed Files area's tab group (project-detail.ts:3155): rendered
+   * when artifacts are off (or another segment is shown) and the project has
+   * file tabs, as a hub-managed project does (its workspace tab).
+   */
+  filesTabGroup: 'scion-page-project-detail .files-tab-group',
   filesSegmentArtifacts:
     'scion-page-project-detail sl-radio-group.files-segments sl-radio-button[value="artifacts"]',
   artifactList: 'scion-page-project-detail scion-artifact-list',
@@ -81,7 +92,8 @@ export const SELECTORS = {
     'scion-artifact-share-dialog section[aria-labelledby="people-heading"] > .row sl-button',
   /** Grant rows (artifact-share-dialog.ts:889-915). */
   shareGrantRow: 'scion-artifact-share-dialog section[aria-labelledby="people-heading"] .grant',
-  shareFooterButton: 'scion-artifact-share-dialog sl-dialog[open] sl-button[slot="footer"]',
+  /** Footer buttons: a div[slot="footer"] holds them (artifact-share-dialog.ts:1010-1036). */
+  shareFooterButton: 'scion-artifact-share-dialog sl-dialog[open] [slot="footer"] sl-button',
   /** Artifacts list page (components/pages/artifacts.ts:490). */
   artifactsPage: 'scion-page-artifacts',
   artifactsRow: 'scion-page-artifacts tbody tr.clickable',
@@ -184,7 +196,7 @@ export function homeGrantRow(page: Page): Locator {
 export function grantRow(page: Page, labels: string[]): Locator {
   const alternatives = labels
     .filter((l) => l !== '')
-    .map((l) => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .map(escapeRegExp)
     .join('|');
   return page
     .locator(SELECTORS.shareGrantRow)
@@ -195,6 +207,41 @@ export function grantRow(page: Page, labels: string[]): Locator {
 /** The Share dialog's footer close button (Done or Close). */
 export function shareCloseButton(page: Page): Locator {
   return page.locator(SELECTORS.shareFooterButton).filter({ hasText: /^\s*(Done|Close)\s*$/ });
+}
+
+/** The open Share dialog's label (`Share “<title>”` or "Grant review access"). */
+export function shareDialog(page: Page): Locator {
+  return page.locator(SELECTORS.shareDialog);
+}
+
+/** A grant row's Permission select (artifact-share-dialog.ts:905). */
+export function grantRowPermission(row: Locator): Locator {
+  return row.locator('sl-select[aria-label="Permission"]');
+}
+
+/** A grant row's Remove button (artifact-share-dialog.ts:908). */
+export function grantRowRemove(row: Locator): Locator {
+  return row.locator('sl-button').filter({ hasText: exact('Remove') });
+}
+
+/** Any select or button inside a grant row (the home row has none). */
+export function grantRowControls(row: Locator): { selects: Locator; buttons: Locator } {
+  return { selects: row.locator('sl-select'), buttons: row.locator('sl-button') };
+}
+
+/** An option of a Shoelace select by its value. */
+export function permissionOption(select: Locator, value: string): Locator {
+  return select.locator(`sl-option[value="${value}"]`);
+}
+
+/** The artifact page's own heading or the 404 page's: the page has rendered. */
+export function anyPageHeading(page: Page): Locator {
+  return page.locator(`${SELECTORS.header} h1, ${SELECTORS.notFound} h1`).first();
+}
+
+/** Edit on the History tab's single-version block (artifact-detail.ts:1597). */
+export function historyEditButton(page: Page): Locator {
+  return page.locator(`${SELECTORS.historyPanel} sl-button`).filter({ hasText: exact('Edit') });
 }
 
 /** A row of the /artifacts list by its title link. */
