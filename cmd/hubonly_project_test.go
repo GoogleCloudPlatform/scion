@@ -241,12 +241,12 @@ func TestHubOnlyProjectDescribe(t *testing.T) {
 	assert.Equal(t, tunnelclient.ExitAgentNotFound, tunnelclient.CodeOf(err))
 }
 
-// ssh and ssh-config take their project from the current context.
+// ssh, ssh-config and vscode take their project from the current context.
 func TestDefaultSSHCommandEnv_UsesContextProject(t *testing.T) {
 	setupContextTest(t)
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
 	writeHomeGlobalSettings(t, "project_id: "+hubOnlyLocalID+"\n")
-	for _, command := range []string{"ssh", "ssh-config"} {
+	for _, command := range []string{"ssh", "ssh-config", "vscode"} {
 		require.NoError(t, resolveInvocationTarget(findCommand(t, command), ModeHuman))
 		env, err := defaultSSHCommandEnv()
 		require.NoError(t, err)

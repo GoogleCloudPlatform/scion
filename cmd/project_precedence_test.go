@@ -15,12 +15,15 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -378,4 +381,83 @@ func TestResolveProjectIDByGitRemote_NilContext(t *testing.T) {
 		_, err := GetProjectID(nil)
 		assert.Error(t, err)
 	})
+}
+
+// TestLoadHubClient_ProjectFlagPrecedence drives "project messaging get",
+// a loadHubClient caller that reads the project ID from the returned
+// settings. With --global or --project <dir>, the request goes to that
+// project's own ID, not SCION_PROJECT_ID from the environment; without a
+// flag the environment still wins (ptone/scion#3251).
+//
+// The --project <dir> case sets the root --project state that loadHubClient
+// reads, as hub secret, hub env and the service account commands see it; it
+// is not a "project messaging --project" invocation, whose own --project
+// flag names a hub project ID or slug instead.
+func TestLoadHubClient_ProjectFlagPrecedence(t *testing.T) {
+	const (
+		envProjectID  = "env-project-id"
+		globalLocalID = "global-local-id"
+		dirLocalID    = "dir-local-id"
+	)
+	cases := []struct {
+		name string
+		// flag is the --project value; "dir" stands for a project
+		// directory created by the test.
+		flag   string
+		wantID string
+	}{
+		{name: "--global beats env", flag: "global", wantID: globalLocalID},
+		// Root --project state (hub secret, hub env, service accounts),
+		// not "project messaging --project".
+		{name: "--project dir beats env", flag: "dir", wantID: dirLocalID},
+		{name: "no flag, env wins", flag: "", wantID: envProjectID},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Every messaging-policy request is recorded, so an extra
+			// request cannot hide behind the one asserted on.
+			var (
+				mu          sync.Mutex
+				policyPaths []string
+			)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if strings.HasSuffix(r.URL.Path, "/messaging-policy") {
+					mu.Lock()
+					policyPaths = append(policyPaths, r.URL.Path)
+					mu.Unlock()
+				}
+				_ = json.NewEncoder(w).Encode(hubclient.ProjectMessagingPolicy{CrossProjectInbound: "none"})
+			}))
+			defer server.Close()
+
+			setupFlagPrecedenceHome(t, server.URL, globalLocalID, envProjectID)
+
+			flag := tc.flag
+			if flag == "dir" {
+				projectDir := filepath.Join(t.TempDir(), "proj")
+				scionDir := filepath.Join(projectDir, ".scion")
+				require.NoError(t, os.MkdirAll(scionDir, 0755))
+				require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"),
+					[]byte("project_id: "+dirLocalID+"\n"), 0644))
+				flag = projectDir
+			}
+			setProjectFlagForTest(t, flag)
+
+			origJSON, origProject := hubOutputJSON, projectMessagingProject
+			t.Cleanup(func() { hubOutputJSON, projectMessagingProject = origJSON, origProject })
+			hubOutputJSON, projectMessagingProject = true, ""
+
+			// RunE is called directly, so give the command the context
+			// cobra's Execute would set.
+			origCtx := projectMessagingGetCmd.Context()
+			t.Cleanup(func() { projectMessagingGetCmd.SetContext(origCtx) })
+			projectMessagingGetCmd.SetContext(context.Background())
+
+			require.NoError(t, projectMessagingGetCmd.RunE(projectMessagingGetCmd, nil))
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, []string{"/api/v1/projects/" + tc.wantID + "/messaging-policy"}, policyPaths)
+		})
+	}
 }
