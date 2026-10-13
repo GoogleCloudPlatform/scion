@@ -233,8 +233,20 @@ const r2 = {
   frameRequests: [] as FrameRequest[],
   /** Header reads still in flight (awaited before any session check). */
   pendingHeaderReads: [] as Array<Promise<void>>,
-  /** Requests from any page to the bundle's remote image host (host only kept). */
-  remoteHostHits: 0,
+  /**
+   * Requests from any page to the bundle's remote image host (host only
+   * kept), and how many of them the browser refused by CSP before any
+   * network use. Chromium emits a request event for a CSP-blocked load and
+   * then fails it with errorText 'csp'.
+   */
+  remoteHost: {
+    requests: 0,
+    cspBlocked: 0,
+    /** Any answer from the remote host (a response means it reached the network). */
+    responses: 0,
+    /** errorText of each failed remote request. */
+    failures: [] as string[],
+  },
   mints: [] as Mint[],
   /** Set when the markdown publish was refused: its rows are not run with this cause. */
   markdownRefused: undefined as string | undefined,
@@ -355,7 +367,7 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
   const records = new Map<Request, FrameRequest>();
   context.on('request', (req) => {
     if (!/^https?:/.test(req.url())) return;
-    if (new URL(req.url()).hostname === REMOTE_IMAGE_HOST) r2.remoteHostHits++;
+    if (new URL(req.url()).hostname === REMOTE_IMAGE_HOST) r2.remoteHost.requests++;
     if (!isBundleRequest(req)) return;
     let topLevelDocument: boolean;
     let frameUnavailable = false;
@@ -383,6 +395,9 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
   });
   context.on('response', (res) => {
     const rec = records.get(res.request());
+    if (/^https?:/.test(res.url()) && new URL(res.url()).hostname === REMOTE_IMAGE_HOST) {
+      r2.remoteHost.responses++;
+    }
     if (rec) {
       rec.status = res.status();
       if (!rec.cookieHeader.read) readCookieHeader(res.request(), rec);
@@ -424,6 +439,11 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
   context.on('requestfailed', (req) => {
     const rec = records.get(req);
     if (rec) rec.failed = true;
+    if (/^https?:/.test(req.url()) && new URL(req.url()).hostname === REMOTE_IMAGE_HOST) {
+      const errorText = req.failure()?.errorText ?? 'unknown';
+      r2.remoteHost.failures.push(errorText);
+      if (errorText === 'csp') r2.remoteHost.cspBlocked++;
+    }
   });
 }
 
@@ -794,7 +814,8 @@ async function markdownFacts(
       h1: (doc?.querySelector('h1')?.textContent ?? '').trim(),
       markerVisible: (doc?.body?.textContent ?? '').includes('Plain text marker r2-md-ok.'),
       hoverMarker: (doc?.body?.textContent ?? '').includes('hover marker'),
-      jsLinkText: !!jslink,
+      jsLinkAnchor: !!jslink,
+      jsLinkText: (doc?.body?.textContent ?? '').includes('js link'),
       jsLinkHref: jslink?.getAttribute('href') ?? null,
       img: img
         ? {
@@ -1325,8 +1346,17 @@ async function runMain(browser: Browser): Promise<void> {
       expect.soft(underView(css), 'css under the view path').toBe(true);
       expect.soft(underView(png), 'png under the view path').toBe(true);
       // Any request to the remote host, from any page of any identity (host only).
-      r.ui.remoteHostHits = r2.remoteHostHits;
-      expect.soft(r2.remoteHostHits, 'no request to the remote image host').toBe(0);
+      // A remote request counts only if the browser did not refuse it by CSP
+      // (errorText 'csp', before any network use); any answer from the host
+      // also counts, so the check can still fail.
+      const remoteNotBlocked = r2.remoteHost.requests - r2.remoteHost.cspBlocked;
+      r.ui.remoteHost = {
+        ...r2.remoteHost,
+        failures: [...r2.remoteHost.failures],
+        notBlocked: remoteNotBlocked,
+      };
+      expect.soft(remoteNotBlocked, 'no remote image request past CSP').toBe(0);
+      expect.soft(r2.remoteHost.responses, 'no answer from the remote image host').toBe(0);
     },
     { pre: preBundle }
   );
@@ -2081,7 +2111,8 @@ async function runMain(browser: Browser): Promise<void> {
         checks.frameRequestsSeen = session.total > 0;
         checks.headersAllRead = session.unread === 0;
         checks.noSessionBearing = session.bearing === 0;
-        checks.readOnly = caps.status === 200 && rec.canPublish === false;
+        // A reader's GET omits canPublish when it is false.
+        checks.readOnly = caps.status === 200 && rec.canPublish !== true;
         checks.minted = mint.status === 200;
       }),
     { pre: preV3 }
