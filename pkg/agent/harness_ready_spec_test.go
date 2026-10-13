@@ -352,8 +352,8 @@ func TestReadinessProbeScript_ReadsLine2(t *testing.T) {
 
 // TestRealTmuxTwoLineInitRunGatesOnMarkerAndSettle runs the real-tmux
 // delayed-reader scenario with a two-line init-run file: delivery waits for
-// the ready marker (written after 1s) and then line 2's settle (2s), not the
-// manager's (200ms).
+// the ready marker (written realTmuxMarkerDelay after the session starts)
+// and then line 2's settle (2s), not the manager's (200ms).
 func TestRealTmuxTwoLineInitRunGatesOnMarkerAndSettle(t *testing.T) {
 	const nonce = "0123456789abcdef"
 	spec := api.ReadySpec{Strategy: state.ReadyStrategyHook, Settle: 2 * time.Second, Timeout: 30 * time.Second}
@@ -363,8 +363,8 @@ func TestRealTmuxTwoLineInitRunGatesOnMarkerAndSettle(t *testing.T) {
 		Settle:         200 * time.Millisecond,
 		SettleFallback: 8 * time.Second,
 	})
-	if took < spec.Settle {
-		t.Errorf("message delivered %s after the send; want at least line 2's settle %s after the marker", took, spec.Settle)
+	if want := realTmuxMarkerDelay + spec.Settle; took < want {
+		t.Errorf("message delivered %s after the session started; want at least the marker delay plus line 2's settle, %s", took, want)
 	}
 }
 

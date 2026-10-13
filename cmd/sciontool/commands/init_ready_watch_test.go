@@ -390,12 +390,37 @@ func TestWatchHarnessReady_SpecDeadline(t *testing.T) {
 func TestWatchHarnessReady_MarkerSettleOutlastsDeadline(t *testing.T) {
 	f := newReadyWatchFixture(t)
 	nonce := "abc123"
-	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
+	start := time.Now()
+	cfg := f.cfg(nonce, state.ReadyModeHook, start)
 	cfg.Settle = 400 * time.Millisecond
 	cfg.Deadline = 100 * time.Millisecond
+	var reportedAt time.Time
+	inner := cfg.Report
+	cfg.Report = func(ctx context.Context, a state.Activity, m string) error {
+		reportedAt = time.Now()
+		return inner(ctx, a, m)
+	}
+	// Only the marker is written (no local hook write), so the watcher
+	// reports working itself.
 	afterFirstPoll(t, &cfg, func() { writeMarker(t, nonce) })
 	if got := watchHarnessReady(context.Background(), cfg); got != readyOutcomeHookMarker {
 		t.Fatalf("outcome = %s, want %s", got, readyOutcomeHookMarker)
+	}
+	fi, err := os.Stat(harnessReadyFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reportedAt.IsZero() {
+		t.Fatal("watcher did not report working")
+	}
+	if want := fi.ModTime().Add(cfg.Settle); reportedAt.Before(want) {
+		t.Errorf("reported at %v, before marker mtime + settle %v", reportedAt, want)
+	}
+	if deadline := start.Add(cfg.Deadline); !reportedAt.After(deadline) {
+		t.Errorf("reported at %v, not after the deadline %v; the settle should outlast it", reportedAt, deadline)
+	}
+	if r := f.reports(); !equalActivities(r, []state.Activity{state.ActivityWorking}) {
+		t.Errorf("hub reports = %v, want [working]", r)
 	}
 }
 

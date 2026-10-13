@@ -51,8 +51,9 @@ const readinessFileMaxBytes = 256
 // writeInitRunFile starts a new readiness run: it removes any init-run file
 // and ready marker left by an earlier run, then atomically writes a new
 // init-run file with a fresh nonce and the harness's ready spec (line 1 the
-// mode, line 2 the spec; see state.FormatInitRunSpec). It returns the nonce. Removing the stale marker first means a marker from
-// the previous run can never satisfy the runtime's readiness check.
+// mode, line 2 the spec; see state.FormatInitRunSpec). It returns the nonce.
+// Removing the stale marker first means a marker from the previous run can
+// never satisfy the runtime's readiness check.
 //
 // A failure to remove a stale file (other than it not existing) is logged at
 // Warn and is not fatal: a stale marker carries the previous run's nonce, so
