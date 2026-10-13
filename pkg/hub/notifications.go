@@ -401,7 +401,12 @@ func (nd *NotificationDispatcher) storeAndDispatchForAgent(ctx context.Context, 
 		}
 
 		// Channel registry is a fallback for deployments without a broker.
-		nd.dispatchToChannels(ctx, sub, notif, agent.ID, agent.Slug)
+		// With a broker configured the plugins already received the card
+		// above; dispatching here too delivered it twice (ptone/scion#2752).
+		// Matches the outbound-message path (deliveryUserDirect).
+		if nd.brokerProxy == nil {
+			nd.dispatchToChannels(ctx, sub, notif, agent.ID, agent.Slug)
+		}
 	default:
 		nd.log.Warn("Unknown subscriber type", "type", sub.SubscriberType)
 	}
