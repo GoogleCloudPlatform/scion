@@ -126,6 +126,17 @@ type idFixtures struct {
 	userScopeTemplateDel string
 	userHarnessConfig    string
 	userHarnessConfigDel string
+	// skillRegistryDel is a disposable skill registry for the delete
+	// entry, so the pin entries keep skillRegistry.
+	skillRegistryDel string
+	// skillFiles is a global skill with one published version
+	// (skillVersion, 1.0.0) holding one stored file, SKILL.md;
+	// templateFiles and harnessConfigFiles are global records holding one
+	// stored file each, README.md (seedLiveInventoryCatalogFiles).
+	skillFiles         string
+	skillVersion       string
+	templateFiles      string
+	harnessConfigFiles string
 	// delegation holds an agent delegation grant bound to agent, a
 	// disposable twin grant for the revoke entry, and an active delegated
 	// credential of the first grant (seedLiveInventoryDelegation).
@@ -330,6 +341,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	skillRegistry := &store.SkillRegistry{Name: "li-skill-registry", Endpoint: "https://example.invalid/registry", Type: store.SkillRegistryTypeHub, TrustLevel: store.SkillRegistryTrustTrusted, Status: store.SkillRegistryStatusActive, Created: now, Updated: now}
 	require.NoError(t, s.CreateSkillRegistry(ctx, skillRegistry))
 	f.skillRegistry = skillRegistry.ID
+	skillRegistryDel := &store.SkillRegistry{Name: "li-skill-registry-del", Endpoint: "https://example.invalid/registry-del", Type: store.SkillRegistryTypeHub, TrustLevel: store.SkillRegistryTrustTrusted, Status: store.SkillRegistryStatusActive, Created: now, Updated: now}
+	require.NoError(t, s.CreateSkillRegistry(ctx, skillRegistryDel))
+	f.skillRegistryDel = skillRegistryDel.ID
 
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.template, Name: "li-template", Slug: "li-template", Harness: "claude", Scope: store.TemplateScopeGlobal, Created: now, Updated: now}))
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.templateDel, Name: "li-template-del", Slug: "li-template-del", Harness: "claude", Scope: store.TemplateScopeGlobal, Created: now, Updated: now}))
@@ -515,6 +529,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// single-file artifact owned by the dev user, homed in f.project.
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
+	seedLiveInventoryCatalogFiles(t, ctx, s, artBlobs, &f)
 
 	// hub.conduit and hub.agent_delegation on too, so their
 	// experiment-gated routes are live: the registry above with both also
@@ -570,6 +585,45 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	return f
 }
 
+// seedLiveInventoryCatalogFiles creates the global catalog records whose
+// file routes the probes address: a skill with a published version 1.0.0
+// holding SKILL.md, and a template and a harness config holding README.md.
+// Each file is stored in blobs at the record's storage path.
+func seedLiveInventoryCatalogFiles(t *testing.T, ctx context.Context, s store.Store, blobs storage.Storage, f *idFixtures) {
+	t.Helper()
+	now := time.Now()
+	content := []byte("li\n")
+	sum := sha256.Sum256(content)
+	file := func(path string) []store.TemplateFile {
+		return []store.TemplateFile{{Path: path, Size: int64(len(content)), Hash: "sha256:" + hex.EncodeToString(sum[:]), Mode: "0644"}}
+	}
+	put := func(objectPath string) {
+		_, err := blobs.Upload(ctx, objectPath, bytes.NewReader(content), storage.UploadOptions{ContentType: "text/plain"})
+		require.NoError(t, err)
+	}
+
+	f.skillFiles = tid("li-skill-files")
+	skillPath := "li-catalog/skills/li-skill-files"
+	require.NoError(t, s.CreateSkill(ctx, &store.Skill{ID: f.skillFiles, Name: "li-skill-files", Slug: "li-skill-files", Scope: store.SkillScopeGlobal,
+		Status: "active", StoragePath: skillPath, Created: now, Updated: now}))
+	f.skillVersion = tid("li-skill-version")
+	require.NoError(t, s.CreateSkillVersion(ctx, &store.SkillVersion{ID: f.skillVersion, SkillID: f.skillFiles, Version: "1.0.0",
+		Status: store.SkillVersionStatusPublished, Files: file("SKILL.md"), Created: now}))
+	put(skillPath + "/1.0.0/SKILL.md")
+
+	f.templateFiles = tid("li-template-files")
+	templatePath := "li-catalog/templates/li-template-files"
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.templateFiles, Name: "li-template-files", Slug: "li-template-files", Harness: "claude",
+		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive, StoragePath: templatePath, Files: file("README.md"), Created: now, Updated: now}))
+	put(templatePath + "/README.md")
+
+	f.harnessConfigFiles = tid("li-hc-files")
+	hcPath := "li-catalog/harness-configs/li-hc-files"
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: f.harnessConfigFiles, Name: "li-hc-files", Slug: "li-hc-files", Harness: "claude",
+		Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive, StoragePath: hcPath, Files: file("README.md"), Created: now, Updated: now}))
+	put(hcPath + "/README.md")
+}
+
 // seedUserSkillInjection adds a user-scope injected skill for userID and
 // returns its ID.
 func seedUserSkillInjection(t *testing.T, ctx context.Context, s store.Store, userID string) string {
@@ -619,6 +673,7 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"user.admin.delete", "/api/v1/users/{id}"}:              {"id": f.userDel},
 		{"testidentity.delete", "/api/v1/test-identities/{id}"}:  {"id": f.testIdentityDel},
 		{"skill.delete", "/api/v1/skills/{id}"}:                  {"id": f.skillDel},
+		{"skill.register", "/api/v1/skill-registries/{id}"}:      {"id": f.skillRegistryDel},
 		{"template.delete", "/api/v1/templates/{id}"}:            {"id": f.templateDel},
 		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}: {"id": f.harnessConfigDel},
 		// User-scope branches address the caller's user-scope records; a
@@ -777,16 +832,45 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
 
 		// --- skill family ---
-		"/api/v1/skills/{id}": {"id": f.skill},
+		"/api/v1/skills/{id}":                          {"id": f.skill},
+		"/api/v1/skills/{id}/versions":                 {"id": f.skillFiles},
+		"/api/v1/skills/{id}/versions/{vid}":           {"id": f.skillFiles, "vid": f.skillVersion},
+		"/api/v1/skills/{id}/versions/{vid}/deprecate": {"id": f.skillFiles, "vid": f.skillVersion},
+		"/api/v1/skills/{id}/download":                 {"id": f.skillFiles},
+		"/api/v1/skills/{id}/resolve":                  {"id": f.skillFiles},
+		"/api/v1/skills/{id}/upload":                   {"id": f.skillFiles},
+		"/api/v1/skills/{id}/finalize":                 {"id": f.skillFiles},
+		"/api/v1/skills/{id}/files/{path}":             {"id": f.skillFiles, "path": "SKILL.md"},
 
 		// --- skill registry family ---
-		"/api/v1/skill-registries/{id}": {"id": f.skillRegistry},
+		"/api/v1/skill-registries/{id}":       {"id": f.skillRegistry},
+		"/api/v1/skill-registries/{id}/pin":   {"id": f.skillRegistry},
+		"/api/v1/skill-registries/{id}/pins":  {"id": f.skillRegistry},
+		"/api/v1/skill-registries/{id}/unpin": {"id": f.skillRegistry},
 
 		// --- template family ---
-		"/api/v1/templates/{id}": {"id": f.template},
+		"/api/v1/templates/{id}":              {"id": f.template},
+		"/api/v1/templates/{id}/download":     {"id": f.templateFiles},
+		"/api/v1/templates/{id}/validate":     {"id": f.templateFiles},
+		"/api/v1/templates/{id}/upload":       {"id": f.templateFiles},
+		"/api/v1/templates/{id}/finalize":     {"id": f.templateFiles},
+		"/api/v1/templates/{id}/files":        {"id": f.templateFiles},
+		"/api/v1/templates/{id}/files/{path}": {"id": f.templateFiles, "path": "README.md"},
+		"/api/v1/templates/{id}/clone":        {"id": f.template},
+		"/api/v1/templates/{id}/reimport":     {"id": f.template},
 
 		// --- harness config family ---
-		"/api/v1/harness-configs/{id}": {"id": f.harnessConfig},
+		"/api/v1/harness-configs/{id}":              {"id": f.harnessConfig},
+		"/api/v1/harness-configs/{id}/download":     {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/validate":     {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/image-status": {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/check-image":  {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/upload":       {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/finalize":     {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/files":        {"id": f.harnessConfigFiles},
+		"/api/v1/harness-configs/{id}/files/{path}": {"id": f.harnessConfigFiles, "path": "README.md"},
+		"/api/v1/harness-configs/{id}/clone":        {"id": f.harnessConfig},
+		"/api/v1/harness-configs/{id}/reimport":     {"id": f.harnessConfig},
 
 		// --- schedule family ---
 		"/api/v1/projects/{projectId}/scheduled-events/{id}": {"projectId": f.project, "id": f.scheduledEvent},
@@ -895,6 +979,8 @@ func queryOverrides(f idFixtures) map[string]string {
 		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
 		// handleConversationResolve 400s without a reference.
 		"/api/v1/conversations/resolve": "reference=conv:" + f.inbox.groupConversation,
+		// Skill file reads and writes name the version.
+		"/api/v1/skills/{id}/files/{path}": "version=1.0.0",
 	}
 }
 
@@ -959,6 +1045,26 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		{"template.user.import", "/api/v1/resources/discover"}:             {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
 		{"harnessconfig.user.import", "/api/v1/resources/import"}:          {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
 		{"harnessconfig.user.import", "/api/v1/resources/discover"}:        {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		// Global catalog and project-scope branches: valid bodies, so the
+		// probes reach the branch past body validation. A discovery or
+		// import source that is not a GitHub URL stops after the check.
+		{"skill.create", "/api/v1/skills"}:                              {"name": "li-project-skill", "scope": "project", "scopeId": f.project},
+		{"skill.create_global", "/api/v1/skills"}:                       {"name": "li-global-skill", "scope": "global"},
+		{"skill.discover.project", "/api/v1/skills/discover-directory"}: {"projectId": f.project, "sourceUrl": "https://example.invalid/li-skills"},
+		{"skill.discover.global", "/api/v1/skills/discover-directory"}:  {"sourceUrl": "https://example.invalid/li-skills"},
+		{"template.create", "/api/v1/templates"}:                        {"name": "li-created-template", "harness": "claude", "scope": "global"},
+		{"harnessconfig.create", "/api/v1/harness-configs"}:             {"name": "li-created-hc", "harness": "claude", "scope": "global"},
+		{"template.import.global", "/api/v1/resources/import"}:          {"kind": "template", "scope": "global", "sourceUrl": "https://example.invalid/li-global"},
+		{"template.import.global", "/api/v1/resources/discover"}:        {"kind": "template", "scope": "global", "sourceUrl": "https://example.invalid/li-global"},
+		{"template.import.project", "/api/v1/resources/import"}:         {"kind": "template", "scope": "project", "scopeId": f.project, "sourceUrl": "https://example.invalid/li-project"},
+		{"template.import.project", "/api/v1/resources/discover"}:       {"kind": "template", "scope": "project", "scopeId": f.project, "sourceUrl": "https://example.invalid/li-project"},
+		{"harnessconfig.import.global", "/api/v1/resources/import"}:     {"kind": "harness-config", "scope": "global", "sourceUrl": "https://example.invalid/li-global"},
+		{"harnessconfig.import.global", "/api/v1/resources/discover"}:   {"kind": "harness-config", "scope": "global", "sourceUrl": "https://example.invalid/li-global"},
+		{"harnessconfig.import.project", "/api/v1/resources/import"}:    {"kind": "harness-config", "scope": "project", "scopeId": f.project, "sourceUrl": "https://example.invalid/li-project"},
+		{"harnessconfig.import.project", "/api/v1/resources/discover"}:  {"kind": "harness-config", "scope": "project", "scopeId": f.project, "sourceUrl": "https://example.invalid/li-project"},
+		{"skill.resolve.local", "/api/v1/skills/resolve"}:               {"skills": []map[string]string{{"uri": "skill://li-skill-files"}}},
+		{"skill.resolve.github.project", "/api/v1/skills/resolve"}:      {"projectId": f.project, "skills": []map[string]string{{"uri": "gh://li-invalid"}}},
+		{"skill.resolve.github.public", "/api/v1/skills/resolve"}:       {"skills": []map[string]string{{"uri": "gh://li-invalid"}}},
 	}
 }
 

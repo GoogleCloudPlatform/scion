@@ -208,6 +208,24 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "hub.integrations.update", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/restart"}:               "handleAdminIntegrationByName splits the sub-path into at most three parts and the restart branch ignores the third, so a suffix restarts the integration as the bare path does",
 	{OperationID: "hub.integrations.install", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/install"}:              "handleAdminIntegrationByName splits the sub-path into at most three parts and the install branch ignores the third, so a suffix reaches the same install handling as the bare path",
 	{OperationID: "hub.integrations.install", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/update"}:               "handleAdminIntegrationByName splits the sub-path into at most three parts and a POST to update with a third part starts the same update as the bare path",
+	// handleSkillByID (skill_handlers.go) splits the path into at most
+	// three segments, so the action handlers below receive any trailing
+	// segment as part of the third one and ignore it, or treat it as a
+	// nested file path.
+	{OperationID: "skill.read", Method: "GET", Pattern: "/api/v1/skills/{id}/download"}:       "handleSkillByID passes the download action with a trailing segment to handleSkillDownload, which ignores it and answers as for the bare path",
+	{OperationID: "skill.read", Method: "GET", Pattern: "/api/v1/skills/{id}/resolve"}:        "handleSkillByID passes the resolve action with a trailing segment to handleSkillResolveSingle, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "POST", Pattern: "/api/v1/skills/{id}/upload"}:      "handleSkillByID passes the upload action with a trailing segment to handleSkillUpload, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "POST", Pattern: "/api/v1/skills/{id}/finalize"}:    "handleSkillByID passes the finalize action with a trailing segment to handleSkillFinalize, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "PUT", Pattern: "/api/v1/skills/{id}/files/{path}"}: "the file path may be nested, so the trailing segment names a file below {path}; the write is checked like the bare path and answers 409 for the published version",
+	// The batch resolve is reached through the skill ID segment "resolve",
+	// so a trailing segment is ignored the same way.
+	{OperationID: "skill.resolve.local", Method: "POST", Pattern: "/api/v1/skills/resolve"}:          "handleSkillByID sends any path whose first segment is \"resolve\" to handleSkillsResolve, which ignores the rest",
+	{OperationID: "skill.resolve.github.project", Method: "POST", Pattern: "/api/v1/skills/resolve"}: "same as skill.resolve.local above",
+	{OperationID: "skill.resolve.github.public", Method: "POST", Pattern: "/api/v1/skills/resolve"}:  "same as skill.resolve.local above",
+	// A template or harness config file path may be nested, so a trailing
+	// segment on a file write names a new file below {path}.
+	{OperationID: "template.update", Method: "PUT", Pattern: "/api/v1/templates/{id}/files/{path}"}:            "handleTemplateFiles takes everything after files/ as the file path, so the write creates the nested file",
+	{OperationID: "harnessconfig.update", Method: "PUT", Pattern: "/api/v1/harness-configs/{id}/files/{path}"}: "handleHarnessConfigFiles takes everything after files/ as the file path, so the write creates the nested file",
 }
 
 // catalogHTTPEntryPoints returns every (operationID, EntryPoint) pair in

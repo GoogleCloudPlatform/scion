@@ -445,11 +445,13 @@ func TestUserScopeImport_RequiresCreateSelector(t *testing.T) {
 	}
 }
 
-// TestUserScopeVariants_GlobalBranchRefusesTokens pins that the global
-// branches of the routes whose user-scope branch admits tokens refuse a
-// hub token of a super-admin holding the create selector: a global skill
-// create and a global resource import or discover.
-func TestUserScopeVariants_GlobalBranchRefusesTokens(t *testing.T) {
+// TestUserScopeVariants_GlobalBranchNeedsItsOwnSelector pins that the
+// global branches of the routes whose user-scope branch admits tokens need
+// their own selector: a hub token of a super-admin holding skill:create is
+// refused a global skill create, which needs skill:create_global, and a
+// global import or discovery of one kind is refused with the other kind's
+// create selector.
+func TestUserScopeVariants_GlobalBranchNeedsItsOwnSelector(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetStorage(newMockStorage("us-storage"))
 	adminID := tid("us-global-admin")
@@ -460,12 +462,12 @@ func TestUserScopeVariants_GlobalBranchRefusesTokens(t *testing.T) {
 	rec := callWithKey(t, srv, skillToken, http.MethodPost, "/api/v1/skills", CreateSkillRequest{Name: "us-global-skill", Scope: store.SkillScopeGlobal})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
-	for _, k := range []struct{ kind, selector string }{{"template", "template:create"}, {"harness-config", "harness_config:create"}} {
-		key := mintHubConfigToken(t, srv, adminID, hubBoundary(), k.selector)
+	for _, k := range []struct{ kind, otherSelector string }{{"template", "harness_config:create"}, {"harness-config", "template:create"}} {
+		key := mintHubConfigToken(t, srv, adminID, hubBoundary(), k.otherSelector)
 		body := map[string]string{"kind": k.kind, "scope": "global", "sourceUrl": "https://example.invalid/us-global"}
 		for _, path := range []string{"/api/v1/resources/import", "/api/v1/resources/discover"} {
 			rec := callWithKey(t, srv, key, http.MethodPost, path, body)
-			assert.Equal(t, http.StatusForbidden, rec.Code, "%s kind %s: %s", path, k.kind, rec.Body.String())
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s kind %s with %s: %s", path, k.kind, k.otherSelector, rec.Body.String())
 		}
 	}
 }
