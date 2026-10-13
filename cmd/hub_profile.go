@@ -70,6 +70,7 @@ var hubProfileAllowed = map[string]bool{
 	"hub.test-identity.list":     true,
 	"hub.test-identity.delete":   true,
 	"hub.test-identity.teardown": true,
+	"hub.test-identity.web-code": true,
 	"hub.projects":               true,
 	"hub.projects.info":          true,
 	"hub.projects.create":        true,
@@ -87,6 +88,18 @@ var hubProfileAllowed = map[string]bool{
 	"__completeNoDesc":           true,
 	// hub.test-identity.delegate is deliberately absent: the delegation
 	// routes take a human session, which a profile never uses.
+
+	// Agent commands (X3b): they act on a project on the target hub named
+	// with --project, through the profile client only
+	// (hub_profile_agents.go). message is deliberately absent: it names
+	// the sender from this agent's own identity on its own hub.
+	"create": true,
+	"start":  true,
+	"list":   true,
+	"stop":   true,
+	"delete": true,
+	"look":   true,
+	"logs":   true,
 }
 
 // hubProfileNoSession are the allowed commands that manage profiles
@@ -111,6 +124,7 @@ var hubProfileAgentRuntime = map[string]bool{
 	"hub.test-identity.list":     true,
 	"hub.test-identity.delete":   true,
 	"hub.test-identity.teardown": true,
+	"hub.test-identity.web-code": true,
 }
 
 // commandPath returns cmd's dot-separated path below the root.
@@ -166,14 +180,15 @@ func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
 		return err
 	}
 	if !hubProfileAllowed[path] {
-		return fmt.Errorf("'%s' is not available with a hub profile (%q): with a profile selected, only the target-hub commands run (hub status, hub profile, hub test-identity except delegate and web-code, hub projects, artifact publish/get/versions/delete); unset %s or drop --hub-profile to use it", cmd.CommandPath(), hubProfileName(), hubprofile.EnvHubProfile)
+		return fmt.Errorf("'%s' is not available with a hub profile (%q): with a profile selected, only the target-hub commands run (hub status, hub profile, hub test-identity except delegate, hub projects, artifact publish/get/versions/delete, and create, start, list, stop, delete, look and logs with --project); unset %s or drop --hub-profile to use it", cmd.CommandPath(), hubProfileName(), hubprofile.EnvHubProfile)
 	}
 	if hubEndpoint != "" || noHub {
 		return errors.New("--hub and --no-hub cannot be used with a hub profile: the profile names the hub")
 	}
-	if mode == ModeAgent && hubProfileAgentRuntime[path] && !hubProfileNoSession[path] {
+	if mode == ModeAgent && !hubProfileNoSession[path] {
 		// The session itself refuses the agent's own hub (hubprofile.Open);
-		// check here too, so the refusal comes before any work.
+		// check here too, for every command that opens one, so the refusal
+		// comes before any work.
 		if err := checkProfileNotOwnHub(hubProfileName()); err != nil {
 			return err
 		}
@@ -182,13 +197,14 @@ func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
 }
 
 // profileFlagIsOurs reports whether name on cmd is the profile flag of the
-// hub or artifact tree (not a same-named local flag) and was given.
+// hub or artifact tree or of an agent command that runs with a profile
+// (not a same-named local flag) and was given.
 func profileFlagIsOurs(cmd *cobra.Command, name string) bool {
 	f := cmd.Flags().Lookup(name)
 	if f == nil || !f.Changed {
 		return false
 	}
-	return f == hubCmd.PersistentFlags().Lookup(name) || f == artifactCmd.PersistentFlags().Lookup(name)
+	return f == hubCmd.PersistentFlags().Lookup(name) || f == artifactCmd.PersistentFlags().Lookup(name) || hubProfileAgentFlags[f]
 }
 
 // checkProfileNotOwnHub loads a profile and refuses it when its endpoint is
@@ -347,8 +363,8 @@ var (
 func init() {
 	rootCmd.PersistentFlags().StringVar(&hubProfileFlag, "hub-profile", "", "Target-hub profile to use (overrides SCION_HUB_PROFILE); see 'scion hub profile'")
 	// --as and --run apply only with a hub profile, and only to the command
-	// trees a profile can use (hub and artifact), so they do not appear on
-	// unrelated commands such as start or create.
+	// trees a profile can use (hub and artifact here; the agent commands in
+	// hub_profile_agents.go), so they do not appear on unrelated commands.
 	for _, c := range []*cobra.Command{hubCmd, artifactCmd} {
 		c.PersistentFlags().StringVar(&hubProfileAs, "as", "", "Only with a hub profile: act as this cached test identity of the run")
 		c.PersistentFlags().StringVar(&hubProfileRun, "run", "", "Only with a hub profile: the run label of cached test identities (overrides SCION_HUB_RUN)")

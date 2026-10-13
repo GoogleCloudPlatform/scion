@@ -306,6 +306,47 @@ func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *sto
 	return nil
 }
 
+// SetTemplateAgentConfig writes only the agent_config column of template id,
+// in one conditional UPDATE (WHERE id = ? AND content_hash = ? AND layout = ?
+// AND agent_config is empty), and keeps updated at its stored value (the
+// column has an update default). It reports whether a row was written.
+func (s *TemplateStore) SetTemplateAgentConfig(ctx context.Context, id string, cfg *api.ScionConfig, expected store.TemplateContentPrecondition) (bool, error) {
+	if cfg == nil {
+		return false, nil
+	}
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	current, err := s.client.Template.Get(ctx, uid)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+		return false, mapError(err)
+	}
+
+	hashMatches := enttemplate.ContentHashEQ(expected.ContentHash)
+	if expected.ContentHash == "" {
+		hashMatches = enttemplate.Or(enttemplate.ContentHashEQ(""), enttemplate.ContentHashIsNil())
+	}
+	layoutMatches := enttemplate.LayoutEQ(expected.Layout)
+	if expected.Layout == "" {
+		layoutMatches = enttemplate.Or(enttemplate.LayoutEQ(""), enttemplate.LayoutIsNil())
+	}
+	noSnapshot := enttemplate.Or(enttemplate.AgentConfigEQ(""), enttemplate.AgentConfigIsNil())
+
+	n, err := s.client.Template.Update().
+		Where(enttemplate.IDEQ(uid), hashMatches, layoutMatches, noSnapshot).
+		SetAgentConfig(marshalAgentConfig(cfg)).
+		SetUpdated(current.Updated).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}
+
 // DeleteTemplate removes a template by ID.
 func (s *TemplateStore) DeleteTemplate(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
