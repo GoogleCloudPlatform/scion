@@ -1,0 +1,6 @@
+NAME    TYPE      AGENTS  STATUS    WORKSPACE
+global  global    1       ok        -
+ext     external  0       orphaned  $HOME/missing
+gitcfg  git       2       ok        -
+legacy  git       1       ok        (git repo)
+orphan  git       0       orphaned  -
