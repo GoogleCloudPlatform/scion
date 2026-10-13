@@ -48,12 +48,14 @@ func signedRequest(t *testing.T, signer *HMACPeerAuth) *http.Request {
 	return req
 }
 
-func TestPeerSecretMinimumLength(t *testing.T) {
-	if _, err := NewHMACPeerAuthFromPeerSecret(HMACPeerAuthConfig{Secret: bytes.Repeat([]byte("a"), MinPeerSecretBytes-1), SelfID: "r"}); err == nil {
-		t.Fatalf("a %d-byte peer secret was accepted", MinPeerSecretBytes-1)
+// TestPeerSecretEmptyRefused: the constructor refuses an empty secret (the
+// strength rules are config.ValidatePeerSecret's, applied by callers).
+func TestPeerSecretEmptyRefused(t *testing.T) {
+	if _, err := NewHMACPeerAuthFromPeerSecret(HMACPeerAuthConfig{SelfID: "r"}); err == nil {
+		t.Fatal("an empty peer secret was accepted")
 	}
-	if _, err := NewHMACPeerAuthFromPeerSecret(HMACPeerAuthConfig{Secret: bytes.Repeat([]byte("ab"), MinPeerSecretBytes/2), SelfID: "r"}); err != nil {
-		t.Fatalf("a %d-byte peer secret: %v", MinPeerSecretBytes, err)
+	if _, err := NewHMACPeerAuthFromPeerSecret(HMACPeerAuthConfig{Secret: testPeerSecret, SelfID: "r"}); err != nil {
+		t.Fatalf("a valid peer secret: %v", err)
 	}
 }
 

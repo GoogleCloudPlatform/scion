@@ -110,3 +110,22 @@ func TestConduitPeerAuthUsesNormalizedPeerSecret(t *testing.T) {
 	assert.Contains(t, err.Error(), "server.hub.conduit.peer_secret must differ from the session secret")
 	assert.NotContains(t, err.Error(), independenceSessionSecret)
 }
+
+// TestConduitPeerAuthAppliesPeerSecretRules: hub peer auth applies the same
+// peer_secret rules as the startup check (one rule, one minimum).
+func TestConduitPeerAuthAppliesPeerSecretRules(t *testing.T) {
+	for name, secret := range map[string]string{
+		"31 octets":           independencePeerSecret[:31],
+		"few distinct octets": "abababababababababababababababababab",
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, config.ValidatePeerSecret(secret), "the startup check refuses it")
+			_, _, err := NewConduitPeerAuth(ConduitPeerAuthOptions{Mode: config.ConduitPeerAuthHMAC, SelfID: "hub", PeerSecret: secret})
+			require.Error(t, err, "peer auth refuses what the startup check refuses")
+			assert.Contains(t, err.Error(), "server.hub.conduit.peer_secret")
+		})
+	}
+	require.NoError(t, config.ValidatePeerSecret(independencePeerSecret[:32]))
+	_, _, err := NewConduitPeerAuth(ConduitPeerAuthOptions{Mode: config.ConduitPeerAuthHMAC, SelfID: "hub", PeerSecret: independencePeerSecret[:32]})
+	assert.NoError(t, err, "and accepts what it accepts")
+}

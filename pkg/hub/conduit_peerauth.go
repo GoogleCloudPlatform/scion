@@ -112,6 +112,9 @@ func NewConduitPeerAuth(o ConduitPeerAuthOptions) (relay.PeerAuth, string, error
 	peerSecret := config.NormalizePeerSecret(o.PeerSecret)
 	switch {
 	case peerSecret != "":
+		if err := config.ValidatePeerSecret(peerSecret); err != nil {
+			return nil, mode, fmt.Errorf("conduit peer auth (%s): %w", mode, err)
+		}
 		if o.SharedSecret != "" && o.SharedSecret == peerSecret {
 			return nil, mode, fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret must differ from the session secret", mode)
 		}

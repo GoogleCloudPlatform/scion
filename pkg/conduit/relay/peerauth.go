@@ -176,16 +176,15 @@ func NewHMACPeerAuthFromSecret(cfg HMACPeerAuthConfig) (*HMACPeerAuth, error) {
 // of the session secret: neither key can be derived from the other.
 const hmacPeerSecretKeyInfo = "scion conduit relay-peer secret hmac v1"
 
-// MinPeerSecretBytes is the shortest accepted dedicated relay-peer secret.
-const MinPeerSecretBytes = 32
-
 // NewHMACPeerAuthFromPeerSecret returns an HMACPeerAuth keyed with the HKDF
 // derivation, under its own label, of the dedicated relay-peer secret
-// cfg.Secret (at least MinPeerSecretBytes). Separate relays and hubs in
-// external-relay mode use it; they never hold the session secret.
+// cfg.Secret. Separate relays and hubs in external-relay mode use it; they
+// never hold the session secret. The secret's strength rules (normalization,
+// minimum length, distinct octets) are config.ValidatePeerSecret's, which
+// every caller applies first; here an empty secret is refused.
 func NewHMACPeerAuthFromPeerSecret(cfg HMACPeerAuthConfig) (*HMACPeerAuth, error) {
-	if len(cfg.Secret) < MinPeerSecretBytes {
-		return nil, fmt.Errorf("conduit relay: relay-peer secret shorter than %d bytes", MinPeerSecretBytes)
+	if len(cfg.Secret) == 0 {
+		return nil, errors.New("conduit relay: empty relay-peer secret")
 	}
 	key, err := hkdf.Key(sha256.New, cfg.Secret, nil, hmacPeerSecretKeyInfo, 32)
 	if err != nil {

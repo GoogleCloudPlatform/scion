@@ -223,15 +223,17 @@ func (s *Server) conduitRoutable() bool {
 // reason conduit_not_serving; the message tells the two cases apart.
 const (
 	conduitExternalNoRelayMsg   = "No conduit relay is available (external relay mode with no eligible relay)"
-	conduitExternalNoIngressMsg = "This hub does not serve conduit sessions in external relay mode; the ingress to the relays arrives in 6.2 a3"
+	conduitExternalNoIngressMsg = "This hub does not serve conduit sessions in external relay mode"
 )
 
 // refuseConduitExternal answers a conduit dial on a hub in external relay
-// mode: 503 unavailable with reason conduit_not_serving, after refreshing
-// the eligible-relay count. The hub stays up.
-func (s *Server) refuseConduitExternal(w http.ResponseWriter, r *http.Request, rt *conduitExternalRuntime) {
+// mode: 503 unavailable with reason conduit_not_serving. The message tells
+// whether any relay was eligible at the last count (refreshed every
+// conduitRelayRecheckPeriod); a dial never reads the registry. The hub
+// stays up.
+func (s *Server) refuseConduitExternal(w http.ResponseWriter, r *http.Request, _ *conduitExternalRuntime) {
 	msg := conduitExternalNoIngressMsg
-	if s.refreshConduitEligibleRelays(r.Context(), rt) <= 0 {
+	if s.conduitEligibleRelays.Load() <= 0 {
 		msg = conduitExternalNoRelayMsg
 	}
 	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, msg,

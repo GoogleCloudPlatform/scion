@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,6 +190,8 @@ func TestConduitExternal_DialRefusedNotServing(t *testing.T) {
 	ctx := context.Background()
 	_, err := f.reg.RegisterRelay(ctx, registry.RelayInstance{InstanceID: "relay-0", InternalEndpoint: "http://relay-0:9811"})
 	require.NoError(t, err)
+	// The count is refreshed on its period, not per dial.
+	f.srv.refreshConduitEligibleRelays(ctx, f.srv.conduitExternal.Load())
 	rec = dial()
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	_, msg, reason = conduitDialRefusal(t, rec)
@@ -248,4 +251,31 @@ func TestConduitExternal_ForgetAgentDeletesRelayRows(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, ps.Sessions, "session rows deleted")
 	assert.Zero(t, ps.CurrentEpoch, "epoch row deleted")
+}
+
+// TestConduitExternal_DialReadsNoStore: a conduit dial in external relay
+// mode is answered from the cached eligible-relay count; it never reads the
+// registry.
+func TestConduitExternal_DialReadsNoStore(t *testing.T) {
+	f := &externalFixture{conduitFixture: newConduitFixture(t)}
+	var reads atomic.Int64
+	counting := &registry.FaultStore{Inner: entadapter.NewConduitRegistryStore(enttest.NewClient(t)), Fault: func(_ context.Context, op string) error {
+		if op == registry.OpListRelays {
+			reads.Add(1)
+		}
+		return nil
+	}}
+	f.regStore = counting
+	f.reg = registry.New(counting, registry.Config{})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	require.NoError(t, f.srv.StartConduitExternal(ctx, externalOptions(t, f)))
+	before := reads.Load()
+	for i := 0; i < 3; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conduit", nil)
+		f.srv.handleConduit(rec, req)
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	}
+	assert.Equal(t, before, reads.Load(), "a dial reads no relay rows")
 }
