@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -127,7 +128,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 	// Manager.Start needs just as much on the async path as on the
 	// synchronous one.
 	deadline := receivedAt.Add(time.Duration(req.LaunchTimeoutSeconds) * time.Second)
-	runCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(-20*time.Second))
+	runCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(-scionrt.AsyncLaunchAdmissionSkew))
 
 	rec := newLaunchRecord(req.LaunchID, req.ID, store.LaunchKindCreate, s.resolveHubNameForLaunch(r), deadline, cancel)
 	rec.RunID = req.RunID

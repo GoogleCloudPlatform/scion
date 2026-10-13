@@ -3159,7 +3159,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	// Apply updated InlineConfig to scion-agent.json before starting.
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
-		s.applyInlineConfigUpdate(id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
+		s.applyInlineConfigUpdate(ctx, id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
 	}
 
 	// The hub is the source of truth for resume intent: when it sets
@@ -3267,7 +3267,7 @@ func restartAgentConfig(namesProject bool, harnessConfig, harnessConfigID, harne
 // sharedWorkspace branches the path: shared-workspace agents store
 // scion-agent.json externally (~/.scion.project-configs/<slug>__<uuid>/.scion/
 // agents/<name>/) so siblings cannot read it via /workspace.
-func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
+func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, projectPath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to resolve project dir", "agent", agentName, "error", err)
@@ -3304,6 +3304,18 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 	// so collapse references that name the same skill and destination.
 	merged := config.MergeScionConfig(&existing, inlineConfig)
 	merged.Skills = dedupeSkillReferences(merged.Skills)
+	merged.Volumes = dedupeVolumesByTarget(merged.Volumes)
+
+	// The merge above keeps the previous value of any field the inline
+	// config leaves empty, so a field cleared on the Hub would never reach
+	// the agent. Remove the paths the Hub lists as cleared, after the merge
+	// and before anything reads the config at start (ptone/scion#3906).
+	// MergeScionConfig itself stays non-zero-wins: provisioning and
+	// template layering depend on it. The list is never written to disk.
+	if inlineConfig != nil {
+		s.applyClearedFields(ctx, merged, projectPath, projectDir, agentName, inlineConfig.ClearedFields)
+	}
+	merged.ClearedFields = nil
 
 	// Write back
 	updated, err := json.MarshalIndent(merged, "", "  ")

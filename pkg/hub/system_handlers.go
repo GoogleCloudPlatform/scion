@@ -435,7 +435,6 @@ type OnboardingStatus struct {
 	IdentitySet         bool   `json:"identitySet"`
 	RuntimeOK           bool   `json:"runtimeOK"`
 	HarnessesSeeded     bool   `json:"harnessesSeeded"`
-	ImagesPresent       bool   `json:"imagesPresent"`
 	HasWorkspace        bool   `json:"hasWorkspace"`
 	Complete            bool   `json:"complete"`
 	EmbeddedBrokerID    string `json:"embeddedBrokerID,omitempty"`
@@ -487,9 +486,6 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 		}
 	}
 
-	// ImagesPresent: best-effort check — skip for now (optional per spec)
-	status.ImagesPresent = false
-
 	// HasWorkspace: at least one project in the store
 	if s.store != nil {
 		result, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1})
@@ -498,7 +494,7 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 		}
 	}
 
-	// Complete: all required steps done (ImagesPresent is optional)
+	// Complete: all required steps done
 	status.Complete = status.Initialized && status.IdentitySet && status.RuntimeOK && status.HarnessesSeeded
 
 	status.EmbeddedBrokerID = s.GetEmbeddedBrokerID()

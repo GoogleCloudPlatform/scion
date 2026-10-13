@@ -39,6 +39,9 @@ moved projects.
 Any running agent containers belonging to orphaned projects will be stopped
 and removed before the project config is deleted.
 
+A git project config with no agents and no recorded workspace path is shown
+as unverified by 'scion project list --local' and is never removed.
+
 Use 'scion project list' to see all projects and their status first.
 Use 'scion project reconnect' to fix a project whose workspace moved.`,
 	RunE: func(cmd *cobra.Command, args []string) error {

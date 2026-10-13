@@ -152,15 +152,30 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "workspace_handlers.go", function: "handleWorkspaceSyncToFinalize", symbol: "DispatchAgentCreate",
 		class: "guarded", reason: "workspace agent creation with project authorization"},
 
-	// notification_sweep.go: retryDispatch — guarded retry of previously
-	// authorized notification dispatch. The periodic sweep and the
-	// broker-connect drain (both via retryBatch) and the exported
-	// RetryDispatch wrapper reach the call only through retryDispatch,
-	// after its claim CAS and its re-lookup of the subscription,
-	// subscriber and watched agent.
+	// notification_sweep.go: retryDispatch — UNGUARDED notification retry.
+	// The periodic sweep and the broker-connect drain (both via retryBatch)
+	// and the exported RetryDispatch wrapper reach the call only through
+	// retryDispatch. It re-sends the same notification as notifications.go
+	// dispatchToAgent and shares that site's open item; a future guard must
+	// be added to both sites together.
 	{file: "notification_sweep.go", function: "retryDispatch", symbol: "dispatchWithBrokerRetry",
-		class: "guarded", reason: "retry of previously authorized notification dispatch"},
+		class: "exempt", reason: "UNGUARDED notification retry (F-RS6-08); shares dispatchToAgent's open item; guard both sites together; deferred to RS6/AH"},
 }
+
+// sharedClassificationSites pairs call sites that must carry the same
+// classification in effectCallSiteClassifications. A retry site re-sends
+// what its original send site sent, so the two change class together.
+var sharedClassificationSites = []struct {
+	site, sameAs effectCallSiteKey
+}{
+	{
+		site:   effectCallSiteKey{"notification_sweep.go", "retryDispatch", "dispatchWithBrokerRetry"},
+		sameAs: effectCallSiteKey{"notifications.go", "dispatchToAgent", "dispatchWithBrokerRetry"},
+	},
+}
+
+// effectCallSiteKey identifies one entry in effectCallSiteClassifications.
+type effectCallSiteKey struct{ file, function, symbol string }
 
 type effectCallSite struct {
 	file     string // base filename
