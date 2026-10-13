@@ -1668,6 +1668,14 @@
                 "maxLength": 253
               },
               "description": "Kubernetes only. Maps a lowercase GCP service account email to the Kubernetes ServiceAccount (KSA) bound to it via Workload Identity, for GCP identity mode 'assign' on this instance. Scion does not create, annotate or bind the KSA. Local operator policy: not part of the runtime target identity and never sent to the Hub."
+            },
+            "shared_dir_storage_class": {
+              "type": "string",
+              "description": "Kubernetes only. This instance's default storage class for shared-dir PVCs (must support ReadWriteMany). Takes the place of the profile and runtime entry value; a template or agent kubernetes.shared_dir_storage_class wins over it. Local operator policy: never sent to the Hub."
+            },
+            "shared_dir_size": {
+              "type": "string",
+              "description": "Kubernetes only. This instance's default size per shared-dir PVC, a positive Kubernetes quantity (e.g. 40Gi); unset means 10Gi. Takes the place of the profile and runtime entry value; a template or agent kubernetes.shared_dir_size wins over it. Local operator policy: never sent to the Hub."
             }
           },
           "if": { "properties": { "type": { "const": "docker" } } },
@@ -1678,7 +1686,9 @@
                 { "required": ["namespace"], "properties": { "namespace": { "minLength": 1 } } },
                 { "required": ["kubeconfig"], "properties": { "kubeconfig": { "minLength": 1 } } },
                 { "required": ["kubernetes_block_service_account"], "properties": { "kubernetes_block_service_account": { "minLength": 1 } } },
-                { "required": ["kubernetes_service_account_mappings"], "properties": { "kubernetes_service_account_mappings": { "minProperties": 1 } } }
+                { "required": ["kubernetes_service_account_mappings"], "properties": { "kubernetes_service_account_mappings": { "minProperties": 1 } } },
+                { "required": ["shared_dir_storage_class"], "properties": { "shared_dir_storage_class": { "minLength": 1 } } },
+                { "required": ["shared_dir_size"], "properties": { "shared_dir_size": { "minLength": 1 } } }
               ]
             }
           }

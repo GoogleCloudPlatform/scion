@@ -584,6 +584,8 @@ type RuntimeTargetConfig struct {
 	// See V1RuntimeTargetConfig.
 	KubernetesBlockServiceAccount    string            `json:"kubernetesBlockServiceAccount,omitempty" yaml:"kubernetesBlockServiceAccount,omitempty" koanf:"kubernetesBlockServiceAccount"`
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
+	SharedDirStorageClass            string            `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
+	SharedDirSize                    string            `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
 }
 
 // DatabaseConfig holds database connection settings.
