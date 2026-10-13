@@ -204,7 +204,36 @@ Controls the Runtime Broker service.
 | `container_hub_endpoint` | string | | Overrides `hub_endpoint` when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. `http://host.containers.internal:8080` for local development). |
 | `broker_token` | string | | Authentication token for the Hub. |
 | `auto_provide` | bool | `false` | Automatically add as provider for new projects. |
-| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. This release accepts one entry, requires the Hub in the same process, and is only read from `settings.yaml` (not `server.yaml`). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` with `type: docker` and an optional `display_name`. |
+| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. Read only from the global `settings.yaml` (not `server.yaml` or project settings). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters; it must be unique), `name` (the name registered with the Hub), and `runtime_target` (see [Flat instance runtime target](#flat-instance-runtime-target-serverbrokerinstancesruntime_target)). The `agent_defaults` key is reserved and refused in this release. |
+
+#### Flat instance runtime target (`server.broker.instances[].runtime_target`)
+
+The runtime target of one flat Runtime Broker instance, and the instance's own infrastructure defaults. A flat instance never uses Runtime Broker Profiles, so these fields take the place that a profile and its runtime entry hold for a regular Runtime Broker. Each default keeps its usual precedence: an agent's own value still wins over it, and an unset field falls back to the same global setting as before. All fields are local operator policy. They are read only from the global `settings.yaml` and are never sent to the Hub. Unknown keys and invalid values refuse startup with an error that names the settings path. A Kubernetes-only field on a `docker` instance is refused with `field not valid for runtime target type docker`.
+
+| Field | Type | Applies to | Description |
+| :--- | :--- | :--- | :--- |
+| `type` | string | both | `docker` or `kubernetes`. Required. |
+| `display_name` | string | both | Non-sensitive name shown in the UI. Default: the type. |
+| `context` | string | kubernetes | Context in the loaded kubeconfig. Default: its current context. |
+| `namespace` | string | kubernetes | Namespace for the instance's agents. Default: `SCION_K8S_NAMESPACE`, `POD_NAMESPACE`, the service account's namespace, else `default`. |
+| `kubeconfig` | string | kubernetes | Absolute path of the instance's own kubeconfig file, then its only configuration and credential source. Default: the process's normal kubeconfig loading. |
+| `kubernetes_block_service_account` | string | kubernetes | Kubernetes ServiceAccount for pods whose GCP identity mode resolves to `block`. |
+| `kubernetes_service_account_mappings` | map | kubernetes | GCP service account email to the Kubernetes ServiceAccount bound to it through Workload Identity, for GCP identity mode `assign`. |
+| `shared_dir_storage_class` | string | kubernetes | Default storage class for shared directory PVCs (must support ReadWriteMany). An agent's own `kubernetes.shared_dir_storage_class` wins. |
+| `shared_dir_size` | string | kubernetes | Default size of each shared directory PVC, a positive Kubernetes quantity such as `40Gi`. Default: `10Gi`. An agent's own `kubernetes.shared_dir_size` wins. |
+| `safe_to_evict` | bool | kubernetes | `false` adds the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods (on GKE Autopilot this requests extended run duration). `true` or unset adds nothing. An agent's own `kubernetes.safeToEvict`, `true` or `false`, wins. |
+| `priority_class_name` | string | kubernetes | Default PriorityClass of agent pods (DNS-1123 subdomain). The PriorityClass must already exist on the cluster. An agent's own `kubernetes.priorityClassName` wins. |
+| `gke` | bool | kubernetes | `true` turns on GKE mode for the instance. `false` or unset detects a GKE cluster automatically. |
+| `shared_dir_storage_backend` | string | both | `local` or `nfs`. Shared directory storage backend for the instance's new agents. Default: [`server.shared_dir_storage.backend`](#shared-directory-storage-servershared_dir_storage). |
+| `shared_dir_storage_backends` | map | both | Shared directory name to `local` or `nfs`, for the instance's new agents. A directory the map does not name uses `shared_dir_storage_backend`. |
+| `home_storage_backend` | string | kubernetes | `local` or `nfs`. Home storage of the instance's new agents. Default: [`server.home_storage.backend`](#agent-home-storage-serverhome_storage). The `nfs` backend still needs the `hub.k8s_nfs_home` experiment. |
+| `home_storage_leaf` | string | kubernetes | `pod` or `broker`: how the home directory is created on the export. Default: `server.home_storage.leaf`. |
+
+Notes on the storage backends:
+
+- **Recorded decisions are kept.** The backends apply only when an agent starts for the first time. An agent keeps the shared directory backends and the home storage it recorded then, even if the instance's settings change later.
+- **The nfs backend needs the global NFS block.** An instance that selects `nfs` for shared directories or for the home needs a complete [`server.shared_dir_storage.nfs`](#shared-directory-storage-servershared_dir_storage) block in the same file. Without one, startup is refused.
+- **Plugins read the global settings.** Plugins resolve a shared directory's host path from the global settings, not from an instance. At startup, a warning is logged for each instance whose backend differs from the global one. Set the same backend in the global settings to keep them in agreement.
 
 ### Database (`server.database`)
 
