@@ -23,7 +23,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,32 +32,25 @@ import (
 // and fixed message, keyed on the broker's status and code rather than on
 // Docker's wording, which the broker never sends (ptone/scion#3501).
 
-// brokerNameConflicts are the broker answers for an agent name still held by
-// a stopped container: 409 conflict with the agent.ErrContainerNameInUse
-// text (create, start, restart), and 409 name_in_use, the code the async
-// launch gives the same conflict.
-var brokerNameConflicts = []struct {
-	name string
-	code string
-}{
-	{name: "409 conflict", code: ErrCodeConflict},
-	{name: "409 name_in_use", code: api.LaunchCodeNameInUse},
-}
+// The broker answers create, start and restart for an agent name still held
+// by a stopped container with 409 conflict and the fixed text of
+// agent.ErrContainerNameInUse.
 
 // nameInUseMessage is the broker's fixed text for the conflict.
 var nameInUseMessage = agent.ErrContainerNameInUse.Error()
 
+// brokerNameConflictBody is the broker's 409 answer body for the conflict.
+func brokerNameConflictBody() string {
+	return brokerErrorBody(ErrCodeConflict, nameInUseMessage)
+}
+
 func TestDispatchCreateErrorResponse_BrokerNameConflictBecomes409(t *testing.T) {
-	for _, tc := range brokerNameConflicts {
-		t.Run(tc.name, func(t *testing.T) {
-			err := fakeBrokerCreateErr(t, http.StatusConflict, brokerErrorBody(tc.code, nameInUseMessage))
+	err := fakeBrokerCreateErr(t, http.StatusConflict, brokerNameConflictBody())
 
-			w := httptest.NewRecorder()
-			dispatchCreateErrorResponse(w, err, "")
+	w := httptest.NewRecorder()
+	dispatchCreateErrorResponse(w, err, "")
 
-			assertBrokerRefusalRelayed(t, w, http.StatusConflict, tc.code, nameInUseMessage)
-		})
-	}
+	assertBrokerRefusalRelayed(t, w, http.StatusConflict, ErrCodeConflict, nameInUseMessage)
 }
 
 // TestDispatchCreateErrorResponse_NameConflictKeyedOnStatusAndCode pins
@@ -106,21 +98,17 @@ func (*dockerWordingError) Error() string {
 }
 
 func TestCreateAgent_BrokerNameConflictBecomes409(t *testing.T) {
-	for _, tc := range brokerNameConflicts {
-		t.Run(tc.name, func(t *testing.T) {
-			createErr := fakeBrokerCreateErr(t, http.StatusConflict, brokerErrorBody(tc.code, nameInUseMessage))
-			disp := &failingCreateDispatcher{createErr: createErr}
-			srv, _, project := setupCreateAgentServer(t, disp)
+	createErr := fakeBrokerCreateErr(t, http.StatusConflict, brokerNameConflictBody())
+	disp := &failingCreateDispatcher{createErr: createErr}
+	srv, _, project := setupCreateAgentServer(t, disp)
 
-			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-				Name:      "create-name-conflict",
-				ProjectID: project.ID,
-				Task:      "some task",
-			})
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "create-name-conflict",
+		ProjectID: project.ID,
+		Task:      "some task",
+	})
 
-			assertBrokerRefusalRelayed(t, rec, http.StatusConflict, tc.code, nameInUseMessage)
-		})
-	}
+	assertBrokerRefusalRelayed(t, rec, http.StatusConflict, ErrCodeConflict, nameInUseMessage)
 }
 
 // TestCreateAgent_ExistingAgentStartBrokerNameConflictBecomes409 covers the
@@ -135,42 +123,38 @@ func TestCreateAgent_ExistingAgentStartBrokerNameConflictBecomes409(t *testing.T
 		{name: "stopped resume", phase: state.PhaseStopped, resume: true},
 		{name: "created", phase: state.PhaseCreated},
 	}
-	for _, tc := range brokerNameConflicts {
-		for _, ph := range phases {
-			t.Run(tc.name+"/"+ph.name, func(t *testing.T) {
-				startErr := fakeBrokerStartErr(t, http.StatusConflict, brokerErrorBody(tc.code, nameInUseMessage))
-				disp := &skillFailDispatcher{startErr: startErr}
-				srv, s, project := setupCreateAgentServer(t, disp)
-				existing := createLifecycleTestAgent(t, s, project, "existing-name-conflict", ph.phase)
+	for _, ph := range phases {
+		t.Run(ph.name, func(t *testing.T) {
+			startErr := fakeBrokerStartErr(t, http.StatusConflict, brokerNameConflictBody())
+			disp := &skillFailDispatcher{startErr: startErr}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			existing := createLifecycleTestAgent(t, s, project, "existing-name-conflict", ph.phase)
 
-				rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-					Name:      existing.Name,
-					ProjectID: project.ID,
-					Task:      "x",
-					Resume:    ph.resume,
-				})
-
-				require.True(t, disp.startCalled, "the existing agent must have been started")
-				assertBrokerRefusalRelayed(t, rec, http.StatusConflict, tc.code, nameInUseMessage)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name:      existing.Name,
+				ProjectID: project.ID,
+				Task:      "x",
+				Resume:    ph.resume,
 			})
-		}
+
+			require.True(t, disp.startCalled, "the existing agent must have been started")
+			assertBrokerRefusalRelayed(t, rec, http.StatusConflict, ErrCodeConflict, nameInUseMessage)
+		})
 	}
 }
 
 func TestAgentLifecycle_StartBrokerNameConflictBecomes409(t *testing.T) {
-	for _, tc := range brokerNameConflicts {
-		for _, action := range []string{"start", "restart"} {
-			t.Run(tc.name+"/"+action, func(t *testing.T) {
-				startErr := fakeBrokerStartErr(t, http.StatusConflict, brokerErrorBody(tc.code, nameInUseMessage))
-				disp := &skillFailDispatcher{startErr: startErr}
-				srv, s, project := setupCreateAgentServer(t, disp)
-				a := createLifecycleTestAgent(t, s, project, "lc-name-conflict-"+action, state.PhaseStopped)
+	for _, action := range []string{"start", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			startErr := fakeBrokerStartErr(t, http.StatusConflict, brokerNameConflictBody())
+			disp := &skillFailDispatcher{startErr: startErr}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			a := createLifecycleTestAgent(t, s, project, "lc-name-conflict-"+action, state.PhaseStopped)
 
-				rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/"+action, nil)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/"+action, nil)
 
-				assertBrokerRefusalRelayed(t, rec, http.StatusConflict, tc.code, nameInUseMessage)
-			})
-		}
+			assertBrokerRefusalRelayed(t, rec, http.StatusConflict, ErrCodeConflict, nameInUseMessage)
+		})
 	}
 }
 
@@ -189,28 +173,20 @@ func TestAgentLifecycle_StartBroker500WithNameInUseTextStays502(t *testing.T) {
 }
 
 func TestWorkspaceSyncToFinalize_BrokerNameConflictBecomes409(t *testing.T) {
-	for _, tc := range brokerNameConflicts {
-		t.Run(tc.name, func(t *testing.T) {
-			createErr := fakeBrokerCreateErr(t, http.StatusConflict, brokerErrorBody(tc.code, nameInUseMessage))
-			disp := &skillFailDispatcher{createErr: createErr}
-			srv, s, project := setupCreateAgentServer(t, disp)
-			srv.SetStorage(newMockStorage("test-bucket"))
-			a := createSiteAgent(t, s, project, "ws-name-conflict", state.PhaseProvisioning, store.RunIntentStopped)
+	createErr := fakeBrokerCreateErr(t, http.StatusConflict, brokerNameConflictBody())
+	disp := &skillFailDispatcher{createErr: createErr}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.SetStorage(newMockStorage("test-bucket"))
+	a := createSiteAgent(t, s, project, "ws-name-conflict", state.PhaseProvisioning, store.RunIntentStopped)
 
-			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/workspace/sync-to/finalize",
-				map[string]any{"manifest": map[string]any{"version": "1.0", "files": []any{}}})
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/workspace/sync-to/finalize",
+		map[string]any{"manifest": map[string]any{"version": "1.0", "files": []any{}}})
 
-			assertBrokerRefusalRelayed(t, rec, http.StatusConflict, tc.code, nameInUseMessage)
-		})
-	}
+	assertBrokerRefusalRelayed(t, rec, http.StatusConflict, ErrCodeConflict, nameInUseMessage)
 }
 
 func TestSubmitAgentEnv_BrokerNameConflictBecomes409(t *testing.T) {
-	for _, tc := range brokerNameConflicts {
-		t.Run(tc.name, func(t *testing.T) {
-			finalizeErr := fakeBrokerCreateErr(t, http.StatusConflict, brokerErrorBody(tc.code, nameInUseMessage))
-			rec := submitEnvWithFinalizeErr(t, "env-name-conflict", finalizeErr)
-			assertBrokerRefusalRelayed(t, rec, http.StatusConflict, tc.code, nameInUseMessage)
-		})
-	}
+	finalizeErr := fakeBrokerCreateErr(t, http.StatusConflict, brokerNameConflictBody())
+	rec := submitEnvWithFinalizeErr(t, "env-name-conflict", finalizeErr)
+	assertBrokerRefusalRelayed(t, rec, http.StatusConflict, ErrCodeConflict, nameInUseMessage)
 }

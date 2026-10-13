@@ -5826,9 +5826,9 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 
 // relayBrokerRefusal writes a broker 4xx refusal of a dispatch -- 422
 // harness_config_unusable, 403 forbidden, 400 validation_error or 409
-// conflict / name_in_use -- with the broker's status, code and message
-// instead of the generic 502, and reports whether it did. For any other
-// error it writes nothing and returns false.
+// conflict -- with the broker's status, code and message instead of the
+// generic 502, and reports whether it did. For any other error it writes
+// nothing and returns false.
 //
 // The 422 harness_config_unusable and 403 forbidden answers are the broker's
 // refusal of the harness-config a dispatch would run: its provisioner cannot
@@ -5847,8 +5847,7 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 // text. Its other 409 conflicts (a run holding the name, a create already in
 // progress, a refused re-provision) are conflicts for the caller to resolve
 // as well, so the status and code are keyed on, never the message text
-// (ptone/scion#3501). name_in_use is the code the broker gives the same
-// conflict on an asynchronous launch; it is accepted here too.
+// (ptone/scion#3501).
 func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	var se *brokerStatusError
 	if !errors.As(err, &se) {
@@ -5858,7 +5857,7 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	switch {
 	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
-	case se.StatusCode == http.StatusConflict && (code == ErrCodeConflict || code == api.LaunchCodeNameInUse):
+	case se.StatusCode == http.StatusConflict && code == ErrCodeConflict:
 	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:
 		// Harness-config policy is today the broker's only producer of a
 		// 403 "forbidden". If the broker ever sends 403 forbidden with a
