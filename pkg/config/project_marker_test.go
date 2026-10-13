@@ -333,6 +333,44 @@ func TestReadProjectID_FollowsSymlinkedMarker(t *testing.T) {
 	}
 }
 
+// TestWriteProjectID_WritesThroughSymlinkedMarker pins WriteProjectID to
+// writing through a project-id entry that is a symbolic link, as it always
+// has. Only project setup (writeProjectIDInDir) refuses a link leading out
+// of the directory, and leaves its destination unchanged.
+func TestWriteProjectID_WritesThroughSymlinkedMarker(t *testing.T) {
+	scionDir := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-id")
+	oldID := "550e8400-e29b-41d4-a716-446655440000"
+	newID := "6ba7b810-9dad-41d1-80b4-00c04fd430c8"
+	if err := os.WriteFile(outside, []byte(oldID+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(scionDir, "project-id")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if err := writeProjectIDInDir(scionDir, newID); err == nil {
+		t.Fatal("writeProjectIDInDir() followed a link leading out of the directory; want an error")
+	}
+	if got, _ := os.ReadFile(outside); string(got) != oldID+"\n" {
+		t.Fatalf("writeProjectIDInDir() changed the link destination to %q", got)
+	}
+
+	if err := WriteProjectID(scionDir, newID); err != nil {
+		t.Fatalf("WriteProjectID() error: %v", err)
+	}
+	if got, _ := os.ReadFile(outside); string(got) != newID+"\n" {
+		t.Fatalf("link destination = %q, want %q", got, newID+"\n")
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("project-id is no longer a symbolic link: %v, %v", info, err)
+	}
+}
+
 func TestReadProjectID_NotExist(t *testing.T) {
 	tmpDir := t.TempDir()
 	_, err := ReadProjectID(tmpDir)

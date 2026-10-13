@@ -498,12 +498,12 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 	switch {
 	case err == nil:
 		if opt.ProjectID != "" && existingID != opt.ProjectID {
-			if err := WriteProjectID(projectDir, opt.ProjectID); err != nil {
+			if err := writeProjectIDInDir(projectDir, opt.ProjectID); err != nil {
 				return fmt.Errorf("cannot initialize project: failed to write project-id: %w", err)
 			}
 		}
 	case os.IsNotExist(err):
-		if err := WriteProjectID(projectDir, opt.newProjectID()); err != nil {
+		if err := writeProjectIDInDir(projectDir, opt.newProjectID()); err != nil {
 			return fmt.Errorf("cannot initialize project: failed to write project-id: %w", err)
 		}
 	default:

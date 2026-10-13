@@ -307,10 +307,15 @@ func mkdirUnderProjectConfigs(dir string, perm os.FileMode) error {
 }
 
 // WriteProjectID writes a project-id file to a git project's .scion directory.
-// The file is written through an os.Root opened on projectDir, so a
-// project-id entry that is a symbolic link leading out of projectDir is
-// refused rather than followed.
 func WriteProjectID(projectDir string, projectID string) error {
+	return os.WriteFile(filepath.Join(projectDir, projectkeys.ProjectIDFile), []byte(projectID+"\n"), 0644)
+}
+
+// writeProjectIDInDir is WriteProjectID for project setup: the file is
+// written through an os.Root opened on projectDir, so a project-id entry
+// that is a symbolic link leading out of projectDir is refused rather than
+// followed.
+func writeProjectIDInDir(projectDir string, projectID string) error {
 	root, err := os.OpenRoot(projectDir)
 	if err != nil {
 		return err
