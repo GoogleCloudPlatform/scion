@@ -298,7 +298,11 @@ func TestImportCredential_BackendErrorFallsThrough(t *testing.T) {
 // TestFetchRemoteForImport_RepoKeyOnTheWire verifies end to end that a
 // template or harness-config import sends the repo-specific project secret,
 // stored through the real local secret backend, as the Bearer credential.
+// HOME is redirected so the fetched cache lands in a test-owned directory,
+// never in the real ~/.scion/cache/remote-templates, and is removed with it.
 func TestFetchRemoteForImport_RepoKeyOnTheWire(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 	projectID := skillDiscoverProject(t, srv, s, "ghcred", "fake-default-cred")
@@ -320,7 +324,9 @@ func TestFetchRemoteForImport_RepoKeyOnTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchRemoteForImport: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(cachePath) })
+	if !strings.HasPrefix(cachePath, home+string(os.PathSeparator)) {
+		t.Errorf("cache path %q is outside the test HOME %q", cachePath, home)
+	}
 	if capturedAuth != "Bearer fake-repo-cred" {
 		t.Errorf("Authorization header = %q, want the repo-specific credential", capturedAuth)
 	}
