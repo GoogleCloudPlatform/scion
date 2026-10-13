@@ -303,15 +303,53 @@ func RecordRunOwner(t RunOwnerTarget, runID string) error {
 // HostStateRootFor and the agent-dir resolution is logged by the caller
 // instead of being lost silently.
 func recordRunOwnerInAgentDir(t RunOwnerTarget, agentDir, runID string) error {
-	root, err := runOwnerRoot(t, runID)
+	root, err := agentDirRunOwnerRoot(t, agentDir, runID)
 	if err != nil {
 		return err
 	}
+	return writeRunOwner(root, t.AgentName, runID)
+}
+
+// recordLegacyRunOwnerInAgentDir is recordRunOwnerInAgentDir for the
+// transitional legacy copy (migrateLegacyRunOwner): it records runID only
+// when HostStateFile records no run, checked and written under one
+// UpdateHostState, so a run recorded meanwhile is never replaced by the
+// older legacy one. It reports whether HostStateFile records a run
+// afterwards.
+func recordLegacyRunOwnerInAgentDir(t RunOwnerTarget, agentDir, runID string) (bool, error) {
+	root, err := agentDirRunOwnerRoot(t, agentDir, runID)
+	if err != nil {
+		return false, err
+	}
+	err = UpdateHostState(root, t.AgentName, func(hs *HostState) error {
+		if hs.RunID != "" {
+			return errHostStateRunRecorded
+		}
+		hs.RunID = runID
+		return nil
+	})
+	if errors.Is(err, errHostStateRunRecorded) {
+		return true, nil
+	}
+	return err == nil, err
+}
+
+// errHostStateRunRecorded stops recordLegacyRunOwnerInAgentDir's update,
+// writing nothing, when HostStateFile already records a run.
+var errHostStateRunRecorded = errors.New("host state already records a run")
+
+// agentDirRunOwnerRoot checks runID and returns t's trusted root when its
+// agent dir is agentDir (errRunOwnerDirMismatch otherwise).
+func agentDirRunOwnerRoot(t RunOwnerTarget, agentDir, runID string) (string, error) {
+	root, err := runOwnerRoot(t, runID)
+	if err != nil {
+		return "", err
+	}
 	recordDir := filepath.Join(root, config.DotScion, "agents", t.AgentName)
 	if !sameDir(recordDir, agentDir) {
-		return fmt.Errorf("%w: %s, agent dir %s", errRunOwnerDirMismatch, recordDir, agentDir)
+		return "", fmt.Errorf("%w: %s, agent dir %s", errRunOwnerDirMismatch, recordDir, agentDir)
 	}
-	return writeRunOwner(root, t.AgentName, runID)
+	return root, nil
 }
 
 // runOwnerRoot checks runID and returns t's trusted root.
@@ -366,11 +404,12 @@ const maxLegacyAgentInfoSize = 64 << 10
 // keep their ptone/scion#2675 protection. It can be removed once such
 // agents have restarted.
 //
-// It is read only when HostStateFile records no run. Nothing writes it:
-// migrateLegacyRunOwner copies it into HostStateFile (from ProvisionAgent
-// without a run, and from updateSavedAgentInfo, which drops it from
-// agent-info.json only once HostStateFile records a run), so a host
-// rewrite of agent-info.json does not end the protection. Callers compare
+// It is read only when HostStateFile records no run. Nothing writes a new
+// value: migrateLegacyRunOwner copies it into HostStateFile (from
+// ProvisionAgent without a run, and from updateSavedAgentInfo), and both
+// drop it from agent-info.json only once HostStateFile records a run,
+// keeping it as read otherwise, so a host rewrite of agent-info.json does
+// not end the protection. Callers compare
 // it with the run they act on, so it can only keep files (a different run)
 // or change nothing (the same run): a missing, symlinked, unreadable,
 // oversized or invalid value gives "", as a missing record did before, and
@@ -407,41 +446,19 @@ func legacyAgentInfoRunID(projectPath, agentName string) string {
 	return info.RunID
 }
 
-// hostStateOwnRunID returns the run HostStateFile records for t, without
-// the legacy fallback.
-func hostStateOwnRunID(t RunOwnerTarget) (string, error) {
-	root, err := HostStateRootFor(t)
-	if err != nil {
-		return "", err
-	}
-	hs, err := ReadHostState(root, t.AgentName)
-	if err != nil {
-		return "", err
-	}
-	return hs.RunID, nil
-}
-
 // migrateLegacyRunOwner is transitional (ptone/scion#4771): when
-// HostStateFile records no run for t and agent-info.json still carries a
-// valid legacy runId (legacyAgentInfoRunID), it records that run in
-// HostStateFile with record. It reports whether HostStateFile records a
-// run afterwards (recorded is true when it already did) and the legacy
-// value it found ("" when there is none or it is invalid). The value
-// keeps the meaning it had: it can only keep files for another run.
-func migrateLegacyRunOwner(t RunOwnerTarget, record func(runID string) error) (recorded bool, legacy string, err error) {
+// agent-info.json still carries a valid legacy runId
+// (legacyAgentInfoRunID), it hands it to record, which records it in
+// HostStateFile only when HostStateFile records no run
+// (recordLegacyRunOwnerInAgentDir) and reports whether HostStateFile
+// records a run afterwards. migrateLegacyRunOwner returns that, and the
+// legacy value it found ("" when there is none or it is invalid). The
+// value keeps the meaning it had: it can only keep files for another run.
+func migrateLegacyRunOwner(t RunOwnerTarget, record func(runID string) (bool, error)) (recorded bool, legacy string, err error) {
 	legacy = legacyAgentInfoRunID(t.ProjectPath, t.AgentName)
 	if legacy == "" {
 		return false, "", nil
 	}
-	own, err := hostStateOwnRunID(t)
-	if err != nil {
-		return false, legacy, err
-	}
-	if own != "" {
-		return true, legacy, nil
-	}
-	if err := record(legacy); err != nil {
-		return false, legacy, err
-	}
-	return true, legacy, nil
+	recorded, err = record(legacy)
+	return recorded, legacy, err
 }

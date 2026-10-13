@@ -671,26 +671,33 @@ func TestRecordedRunOwner_LegacyAgentInfoRunID(t *testing.T) {
 }
 
 // updateSavedAgentInfo copies a runId an older broker left in
-// agent-info.json into the host state file before it drops it; where it
-// cannot (the record's dir is not the agent's own state dir), the value
+// agent-info.json into the host state file before it drops it, never
+// replacing a run the host state file already records; where it cannot
+// copy it (the record's dir is not the agent's own state dir), the value
 // stays in agent-info.json for the fallback read. An invalid value is
 // dropped.
 func TestUpdateSavedAgentInfo_LegacyRunID(t *testing.T) {
 	for _, tc := range []struct {
-		name, legacy       string
-		scionAgentJSON     bool
-		wantHost, wantInfo string
+		name, legacy, hostRun string
+		scionAgentJSON        bool
+		wantHost, wantInfo    string
 	}{
-		{"copied, then dropped", "run-old", true, "run-old", ""},
-		{"no agent state dir: kept", "run-old", false, "", "run-old"},
-		{"invalid: dropped", "a,b", true, "", ""},
+		{"copied, then dropped", "run-old", "", true, "run-old", ""},
+		{"host state run kept, legacy dropped", "run-old", "run-new", true, "run-new", ""},
+		{"no agent state dir: kept", "run-old", "", false, "", "run-old"},
+		{"invalid: dropped", "a,b", "", true, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Chdir(t.TempDir())
 			projectDir := filepath.Join(t.TempDir(), config.DotScion)
 			agentDir := filepath.Join(projectDir, "agents", ownerAgent)
 			mkdirOwnerDirs(t, agentDir)
 			if tc.scionAgentJSON {
 				writeOwnerFile(t, filepath.Join(agentDir, "scion-agent.json"), "{}")
+			}
+			if tc.hostRun != "" {
+				writeHostStateRun(t, projectDir, ownerAgent, tc.hostRun)
 			}
 			info := filepath.Join(config.GetAgentHomePath(projectDir, ownerAgent), "agent-info.json")
 			writeOwnerFile(t, info, `{"name":"dev","phase":"stopped","runId":"`+tc.legacy+`"}`)
@@ -704,5 +711,106 @@ func TestUpdateSavedAgentInfo_LegacyRunID(t *testing.T) {
 				t.Errorf("agent-info.json runId = %q, want %q", got, tc.wantInfo)
 			}
 		})
+	}
+}
+
+// The legacy copy never replaces a run the host state file records, even
+// when it is handed one after its caller's own read: the check and the
+// write are one update.
+func TestRecordLegacyRunOwnerInAgentDir_KeepsRecordedRun(t *testing.T) {
+	l := newOwnerLayout(t)
+	p := l.realProject(t, l.src, "repo")
+	target := RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent}
+	agentDir := filepath.Join(p, config.DotScion, "agents", ownerAgent)
+
+	recorded, err := recordLegacyRunOwnerInAgentDir(target, agentDir, "run-old")
+	if err != nil || !recorded {
+		t.Fatalf("copy into an empty host state = %v, %v; want recorded", recorded, err)
+	}
+	if got := hostStateRunFor(t, target); got != "run-old" {
+		t.Fatalf("host state run = %q, want run-old", got)
+	}
+	writeHostStateRun(t, p, ownerAgent, "run-new")
+	recorded, err = recordLegacyRunOwnerInAgentDir(target, agentDir, "run-old")
+	if err != nil || !recorded {
+		t.Fatalf("copy over a recorded run = %v, %v; want recorded (unchanged)", recorded, err)
+	}
+	if got := hostStateRunFor(t, target); got != "run-new" {
+		t.Errorf("host state run = %q, want run-new kept", got)
+	}
+	if _, err := recordLegacyRunOwnerInAgentDir(target, filepath.Join(l.src, "elsewhere"), "run-old"); !errors.Is(err, errRunOwnerDirMismatch) {
+		t.Errorf("copy for another agent dir = %v, want errRunOwnerDirMismatch", err)
+	}
+}
+
+// An empty project path is the nearest directory above the working
+// directory with a .scion entry, not followed, and the global project when
+// there is none. A marker found there that does not agree is refused, not
+// skipped.
+func TestHostStateRootFor_EmptyProjectPath(t *testing.T) {
+	t.Run("working project", func(t *testing.T) {
+		l := newOwnerLayout(t)
+		p := l.realProject(t, l.src, "repo")
+		sub := filepath.Join(p, "sub", "dir")
+		mkdirOwnerDirs(t, sub)
+		t.Chdir(sub)
+		if got, err := HostStateRootFor(RunOwnerTarget{AgentName: ownerAgent}); err != nil || got != p {
+			t.Fatalf("root = %s, %v; want %s", got, err, p)
+		}
+	})
+	t.Run("no project above: the global project", func(t *testing.T) {
+		l := newOwnerLayout(t)
+		mkdirOwnerDirs(t, filepath.Join(l.global, "agents", ownerAgent))
+		for dir := l.src; ; dir = filepath.Dir(dir) {
+			if _, err := os.Lstat(filepath.Join(dir, config.DotScion)); err == nil {
+				t.Skipf("a .scion entry above the temp dir (%s) would be the working project", dir)
+			}
+			if filepath.Dir(dir) == dir {
+				break
+			}
+		}
+		t.Chdir(l.src)
+		if got, err := HostStateRootFor(RunOwnerTarget{AgentName: ownerAgent}); err != nil || got != l.home {
+			t.Fatalf("root = %s, %v; want the global project's %s", got, err, l.home)
+		}
+	})
+	t.Run("marker above that does not agree", func(t *testing.T) {
+		l := newOwnerLayout(t)
+		p := l.markerProject(t, l.src, "plain", ownerHubID, "plain")
+		t.Chdir(p)
+		if got, err := HostStateRootFor(RunOwnerTarget{AgentName: ownerAgent}); !errors.Is(err, errHostStateRootRefused) {
+			t.Fatalf("root = %s, %v; want a refusal (no hub identity for a marker)", got, err)
+		}
+	})
+}
+
+// The writer used by callers that hold the agent's dir (Provision,
+// ProvisionAgent) writes only when the record's dir is that agent dir: a
+// different dir, or a missing one, is an error and nothing is written.
+func TestRecordRunOwnerInAgentDir(t *testing.T) {
+	l := newOwnerLayout(t)
+	p := l.realProject(t, l.src, "repo")
+	target := RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID}
+	agentDir := filepath.Join(p, config.DotScion, "agents", ownerAgent)
+
+	other := filepath.Join(l.external("repo", ownerHubID), config.DotScion, "agents", ownerAgent)
+	mkdirOwnerDirs(t, other)
+	if err := recordRunOwnerInAgentDir(target, other, "run-1"); !errors.Is(err, errRunOwnerDirMismatch) {
+		t.Fatalf("record for another agent dir = %v, want errRunOwnerDirMismatch", err)
+	}
+	if files := hostStateFilesUnder(t, filepath.Dir(l.home)); len(files) != 0 {
+		t.Fatalf("host state files written on a dir mismatch: %v", files)
+	}
+
+	if err := recordRunOwnerInAgentDir(target, agentDir, "run-1"); err != nil {
+		t.Fatalf("record for the agent dir: %v", err)
+	}
+	if got := hostStateRunFor(t, target); got != "run-1" {
+		t.Fatalf("recorded run = %q, want run-1", got)
+	}
+
+	missing := RunOwnerTarget{ProjectPath: p, AgentName: "gone"}
+	if err := recordRunOwnerInAgentDir(missing, filepath.Join(p, config.DotScion, "agents", "gone"), "run-1"); err == nil {
+		t.Fatal("record for a missing agent dir succeeded; want an error the caller logs")
 	}
 }

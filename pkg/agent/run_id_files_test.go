@@ -88,17 +88,17 @@ func TestProvisionAgent_RecordsRunID(t *testing.T) {
 	}
 }
 
-// A provision without a run (reincarnate, provision-only) keeps the owner
-// of a legacy agent, whose run is still only in agent-info.json: it is
-// copied into the host state file before the agent-info.json rewrite drops
-// it, so a delete for another run keeps the files (ptone/scion#4771).
-func TestProvisionAgent_CopiesLegacyRunOwner(t *testing.T) {
+// legacyProvisionedAgent provisions "dev" and then makes it a legacy
+// agent: no host state record (or hostRun, when set), and legacyRun as the
+// runId of its agent-info.json. It returns the project's .scion dir and
+// the agent-info.json path.
+func legacyProvisionedAgent(t *testing.T, legacyRun, hostRun string) (string, string) {
+	t.Helper()
 	projectScionDir := provisionRunIDFixture(t)
-	ctx := api.ContextWithRunID(context.Background(), "run-new")
+	ctx := api.ContextWithRunID(context.Background(), "run-first")
 	if _, _, _, err := ProvisionAgent(ctx, "dev", "default", "", "", projectScionDir, "", "", "", ""); err != nil {
 		t.Fatalf("ProvisionAgent: %v", err)
 	}
-	// Make it a legacy agent: no host state record, runId in agent-info.json.
 	root, err := HostStateRootFor(RunOwnerTarget{ProjectPath: projectScionDir, AgentName: "dev"})
 	if err != nil {
 		t.Fatal(err)
@@ -106,11 +106,22 @@ func TestProvisionAgent_CopiesLegacyRunOwner(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, config.DotScion, "agents", "dev", HostStateFile)); err != nil {
 		t.Fatal(err)
 	}
+	if hostRun != "" {
+		writeHostStateRun(t, projectScionDir, "dev", hostRun)
+	}
 	info := filepath.Join(config.GetAgentHomePath(projectScionDir, "dev"), "agent-info.json")
-	if err := os.WriteFile(info, []byte(`{"name":"dev","phase":"stopped","runId":"run-legacy"}`), 0o644); err != nil {
+	if err := os.WriteFile(info, []byte(`{"name":"dev","phase":"stopped","runId":"`+legacyRun+`"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return projectScionDir, info
+}
 
+// A provision without a run (reincarnate, provision-only) keeps the owner
+// of a legacy agent, whose run is still only in agent-info.json: it is
+// copied into the host state file before the agent-info.json rewrite drops
+// it, so a delete for another run keeps the files (ptone/scion#4771).
+func TestProvisionAgent_CopiesLegacyRunOwner(t *testing.T) {
+	projectScionDir, info := legacyProvisionedAgent(t, "run-legacy", "")
 	if _, _, _, err := ProvisionAgent(context.Background(), "dev", "default", "", "", projectScionDir, "", "", "", ""); err != nil {
 		t.Fatalf("ProvisionAgent without a run: %v", err)
 	}
@@ -125,6 +136,48 @@ func TestProvisionAgent_CopiesLegacyRunOwner(t *testing.T) {
 	}
 	if !filesRemovedByDeleteOf("dev", projectScionDir, "run-legacy") {
 		t.Error("a delete for the legacy owner's run would leave its files")
+	}
+}
+
+// The copy never replaces a run the host state file already records: the
+// recorded run stays the owner, and the legacy value is dropped.
+func TestProvisionAgent_LegacyRunOwnerDoesNotReplaceRecordedRun(t *testing.T) {
+	projectScionDir, info := legacyProvisionedAgent(t, "run-old", "run-new")
+	if _, _, _, err := ProvisionAgent(context.Background(), "dev", "default", "", "", projectScionDir, "", "", "", ""); err != nil {
+		t.Fatalf("ProvisionAgent without a run: %v", err)
+	}
+	if got := hostStateRun(t, projectScionDir, "dev"); got != "run-new" {
+		t.Fatalf("host state run = %q, want run-new kept", got)
+	}
+	if got := agentInfoRunID(t, info); got != "" {
+		t.Errorf("agent-info.json runId = %q, want none", got)
+	}
+	if filesRemovedByDeleteOf("dev", projectScionDir, "run-old") {
+		t.Error("a delete for the legacy run would remove run-new's files")
+	}
+}
+
+// When the copy fails (here the host state file's name is taken by a
+// directory), the agent-info.json rewrite keeps the legacy value as it was
+// read, and the owner reads as unknown, so a delete for another run keeps
+// the files.
+func TestProvisionAgent_KeepsLegacyRunOwnerWhenCopyFails(t *testing.T) {
+	projectScionDir, info := legacyProvisionedAgent(t, "run-legacy", "")
+	root, err := HostStateRootFor(RunOwnerTarget{ProjectPath: projectScionDir, AgentName: "dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, config.DotScion, "agents", "dev", HostStateFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := ProvisionAgent(context.Background(), "dev", "default", "", "", projectScionDir, "", "", "", ""); err != nil {
+		t.Fatalf("ProvisionAgent without a run: %v", err)
+	}
+	if got := agentInfoRunID(t, info); got != "run-legacy" {
+		t.Errorf("agent-info.json runId = %q, want run-legacy kept after the failed copy", got)
+	}
+	if filesRemovedByDeleteOf("dev", projectScionDir, "run-other") {
+		t.Error("a delete for another run would remove the legacy owner's files")
 	}
 }
 

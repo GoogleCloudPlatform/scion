@@ -2428,20 +2428,29 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		SharedWorkspace: sharedWorkspace,
 	}
 	// Transitional (ptone/scion#4771): the agent-info.json rewrite below
-	// drops a runId an older broker left there, so a provision without a
-	// run (reincarnate, provision-only) first copies it into the host
-	// state file (migrateLegacyRunOwner), keeping the owner base carried
-	// over.
+	// would drop a runId an older broker left there, so a provision
+	// without a run (reincarnate, provision-only) first copies it into the
+	// host state file (migrateLegacyRunOwner, which never replaces a run
+	// already recorded), keeping the owner base carried over. When the
+	// copy does not succeed, the rewrite keeps the value as it was read.
 	if runID := api.RunIDFromContext(ctx); runID != "" {
 		if err := recordRunOwnerInAgentDir(ownerTarget, agentDir, runID); err != nil {
 			slog.Warn("Provision: failed to record the run in the host state file; a delete for this run may leave the agent's files behind",
 				"agent", agentName, "run_id", runID, "error", err)
 		}
-	} else if _, _, err := migrateLegacyRunOwner(ownerTarget, func(legacy string) error {
-		return recordRunOwnerInAgentDir(ownerTarget, agentDir, legacy)
-	}); err != nil {
-		slog.Warn("Provision: failed to copy the legacy run ID into the host state file; a delete for another run may remove the agent's files",
-			"agent", agentName, "error", err)
+	} else {
+		recorded, legacy, err := migrateLegacyRunOwner(ownerTarget, func(legacy string) (bool, error) {
+			return recordLegacyRunOwnerInAgentDir(ownerTarget, agentDir, legacy)
+		})
+		if err != nil {
+			slog.Warn("Provision: failed to copy the legacy run ID into the host state file; keeping it in agent-info.json",
+				"agent", agentName, "error", err)
+		}
+		if legacy != "" && !recorded {
+			// Not copied: keep it as it was read, as updateSavedAgentInfo
+			// does, for the legacy fallback read.
+			info.RunID = legacy
+		}
 	}
 
 	// Now attach Info to the config object for return and for writing agent-info.json
@@ -2876,15 +2885,18 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 	// when the copy fails, the value is left in place for the legacy
 	// fallback read; it is never written here.
 	ownerTarget := RunOwnerTarget{ProjectPath: projectPath, AgentName: agentName}
-	ownerRecorded, legacyRun, migrateErr := migrateLegacyRunOwner(ownerTarget, func(runID string) error {
+	ownerRecorded, legacyRun, migrateErr := migrateLegacyRunOwner(ownerTarget, func(runID string) (bool, error) {
 		agentDir := config.ResolveAgentDir(projectDir, agentName)
 		if fi, err := os.Stat(filepath.Join(agentDir, "scion-agent.json")); err != nil || !fi.Mode().IsRegular() {
-			return fmt.Errorf("%w: %s holds no scion-agent.json", errRunOwnerDirMismatch, agentDir)
+			return false, fmt.Errorf("%w: %s holds no scion-agent.json", errRunOwnerDirMismatch, agentDir)
 		}
-		return recordRunOwnerInAgentDir(ownerTarget, agentDir, runID)
+		return recordLegacyRunOwnerInAgentDir(ownerTarget, agentDir, runID)
 	})
 	if migrateErr != nil {
-		slog.Info("Did not copy the legacy agent-info.json run ID into the host state file; keeping it in agent-info.json",
+		// Expected on every update of such an agent until it next starts
+		// (for example a hub-managed marker project, which this caller
+		// cannot resolve without the hub project ID), so not a warning.
+		slog.Debug("Did not copy the legacy agent-info.json run ID into the host state file; keeping it in agent-info.json",
 			"agent", agentName, "error", migrateErr)
 	}
 	keepLegacyRun := legacyRun != "" && !ownerRecorded
