@@ -303,7 +303,7 @@ func containsString(list []string, want string) bool {
 // agreement across every PrincipalKind constant plus an unknown value.
 func RelationshipPrincipalKind(kind string) string {
 	switch kind {
-	case "user", "dev", "federated_user":
+	case "user", "dev", "federated_user", "visitor":
 		return "user"
 	case "agent", "federated_agent":
 		return "agent"

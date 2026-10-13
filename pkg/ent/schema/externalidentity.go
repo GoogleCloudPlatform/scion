@@ -89,6 +89,13 @@ func (ExternalIdentity) Indexes() []ent.Index {
 			Unique(),
 		// Index for looking up all bindings for a given user.
 		index.Fields("user_id"),
+		// At most one federation binding per account, so concurrent links
+		// of one account cannot both succeed. Partial: other providers may
+		// bind several subjects to one user.
+		index.Fields("user_id").
+			Unique().
+			StorageKey("externalidentity_user_id_federation").
+			Annotations(entsql.IndexWhere("provider = 'federation'")),
 	}
 }
 
