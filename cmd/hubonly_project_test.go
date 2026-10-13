@@ -149,7 +149,10 @@ func TestResolveHubOnlyProject(t *testing.T) {
 			name: "--global gives no project: neither the global hub.projectId nor the context",
 			setup: func(t *testing.T) {
 				writeHomeGlobalSettings(t, "hub:\n  projectId: global-hub-id\n")
+				// The root hook sets projectPath to global for --global
+				// before RunE.
 				globalMode = true
+				projectPath = "global"
 			},
 			want:    hubOnlyProject{},
 			wantHub: ctxTestHub,
@@ -158,6 +161,12 @@ func TestResolveHubOnlyProject(t *testing.T) {
 			name:    "--project global names a hub project",
 			setup:   func(t *testing.T) { projectPath = "global" },
 			want:    hubOnlyProject{ref: "global", label: "global", source: hubOnlySourceFlag},
+			wantHub: ctxTestHub,
+		},
+		{
+			name:    "--project home names a hub project",
+			setup:   func(t *testing.T) { projectPath = "home" },
+			want:    hubOnlyProject{ref: "home", label: "home", source: hubOnlySourceFlag},
 			wantHub: ctxTestHub,
 		},
 		{
