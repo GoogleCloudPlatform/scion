@@ -31,6 +31,13 @@ type testCA struct {
 
 func newTestCA(t *testing.T) *testCA {
 	t.Helper()
+	return newNamedTestCA(t, "otlptls-test-ca")
+}
+
+// newNamedTestCA is newTestCA with the given subject common name, so two
+// CAs in one test have distinct subjects.
+func newNamedTestCA(t *testing.T, cn string) *testCA {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +45,7 @@ func newTestCA(t *testing.T) *testCA {
 	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "otlptls-test-ca"},
+		Subject:               pkix.Name{CommonName: cn},
 		NotBefore:             now.Add(-time.Hour),
 		NotAfter:              now.Add(time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
@@ -106,18 +113,40 @@ func pairFiles(t *testing.T, ca *testCA, serial int64) (caFile, certFile, keyFil
 	return caFile, certFile, keyFile
 }
 
-// presentedSerial calls the config's client certificate callback, as a TLS
-// handshake does, and returns the serial of the certificate it presents.
-func presentedSerial(t *testing.T, cfg *tls.Config) int64 {
+// certificateRequest returns a realistic TLS 1.3 certificate request that
+// accepts the test client certificates (ECDSA P-256), optionally limited to
+// the given acceptable CA subjects.
+func certificateRequest(acceptableCAs ...[]byte) *tls.CertificateRequestInfo {
+	return &tls.CertificateRequestInfo{
+		Version:          tls.VersionTLS13,
+		SignatureSchemes: []tls.SignatureScheme{tls.ECDSAWithP256AndSHA256, tls.PSSWithSHA256},
+		AcceptableCAs:    acceptableCAs,
+	}
+}
+
+// presentedCert calls the config's client certificate callback with cri, as
+// a TLS handshake does, and returns what it presents.
+func presentedCert(t *testing.T, cfg *tls.Config, cri *tls.CertificateRequestInfo) *tls.Certificate {
 	t.Helper()
 	if cfg.GetClientCertificate == nil {
 		t.Fatal("GetClientCertificate is not set")
 	}
-	cert, err := cfg.GetClientCertificate(&tls.CertificateRequestInfo{})
+	cert, err := cfg.GetClientCertificate(cri)
 	if err != nil {
 		t.Fatalf("GetClientCertificate: %v", err)
 	}
-	if cert == nil || len(cert.Certificate) == 0 {
+	if cert == nil {
+		t.Fatal("GetClientCertificate returned nil; crypto/tls needs an empty certificate to send none")
+	}
+	return cert
+}
+
+// presentedSerial returns the serial of the certificate presented for a
+// request that accepts it.
+func presentedSerial(t *testing.T, cfg *tls.Config) int64 {
+	t.Helper()
+	cert := presentedCert(t, cfg, certificateRequest())
+	if len(cert.Certificate) == 0 {
 		t.Fatal("GetClientCertificate returned no certificate")
 	}
 	leaf, err := x509.ParseCertificate(cert.Certificate[0])
@@ -291,5 +320,29 @@ func TestParseHeaders(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestLoadClientConfig_PresentsOnlyAcceptableCert checks that the reload
+// callback keeps crypto/tls's selection: the certificate is presented when
+// the server's acceptable CAs include its issuer, and no certificate is sent
+// when they do not.
+func TestLoadClientConfig_PresentsOnlyAcceptableCert(t *testing.T) {
+	ca := newTestCA(t)
+	other := newNamedTestCA(t, "otlptls-other-ca")
+	caFile, certFile, keyFile := pairFiles(t, ca, 40)
+	cfg, err := LoadClientConfig(caFile, certFile, keyFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	accepted := presentedCert(t, cfg, certificateRequest(ca.cert.RawSubject))
+	if len(accepted.Certificate) == 0 {
+		t.Fatal("no certificate presented although the acceptable CAs include its issuer")
+	}
+
+	refused := presentedCert(t, cfg, certificateRequest(other.cert.RawSubject))
+	if len(refused.Certificate) != 0 {
+		t.Fatal("a certificate was presented although the acceptable CAs do not include its issuer")
 	}
 }

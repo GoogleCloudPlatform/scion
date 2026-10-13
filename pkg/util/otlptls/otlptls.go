@@ -42,7 +42,9 @@ var (
 // established keeps the certificate it was opened with until it reconnects.
 // If the pair cannot be read during a handshake (for example a rotation that
 // has replaced the certificate but not yet the key), the last pair that
-// loaded is used.
+// loaded is used. As with Certificates alone, the certificate is only
+// presented when the server's certificate request accepts it (acceptable
+// CAs and signature schemes); otherwise no client certificate is sent.
 func LoadClientConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 
@@ -99,16 +101,28 @@ func (p *clientKeyPair) load() (tls.Certificate, error) {
 	return cert, nil
 }
 
-// get is the tls.Config.GetClientCertificate callback. It returns the pair
-// on disk, or the last pair that loaded when the files cannot be read.
-func (p *clientKeyPair) get(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+// get is the tls.Config.GetClientCertificate callback. It selects the
+// current pair (see current) and, like crypto/tls does when it walks
+// Certificates, presents it only if the server's request accepts it;
+// otherwise it sends no client certificate.
+func (p *clientKeyPair) get(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	cert := p.current()
+	if cri != nil && cri.SupportsCertificate(cert) != nil {
+		return new(tls.Certificate), nil
+	}
+	return cert, nil
+}
+
+// current returns the pair on disk, or the last pair that loaded when the
+// files cannot be read.
+func (p *clientKeyPair) current() *tls.Certificate {
 	cert, err := p.load()
 	p.mu.Lock()
 	if err == nil {
 		p.failing = false
 		p.last = &cert
 		p.mu.Unlock()
-		return &cert, nil
+		return &cert
 	}
 	// Warn once per failure streak: the server log bridge exports slog
 	// records, so a warning per handshake would feed itself. The decision
@@ -121,7 +135,7 @@ func (p *clientKeyPair) get(*tls.CertificateRequestInfo) (*tls.Certificate, erro
 	if warn {
 		slog.Warn("OTLP client certificate reload failed; using the last loaded certificate", "error", err)
 	}
-	return last, nil
+	return last
 }
 
 // ParseHeaders decodes the OTLP headers setting, a JSON object of header
