@@ -297,7 +297,8 @@ func TestBrokerDispatchDrain_StopsClaimingOnceShutdownBegins(t *testing.T) {
 		}))
 	}
 
-	// The drain reads its pending rows, then waits on the gate.
+	// The drain waits on the gate inside its ListPendingDispatch call,
+	// before it reads its pending rows; it reads them after release.
 	require.True(t, srv.brokerWork.goTracked(func(workCtx context.Context) {
 		srv.reconcileBroker(workCtx, brokerID)
 	}))
