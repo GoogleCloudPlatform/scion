@@ -785,11 +785,20 @@ jobs:
         with:
           persist-credentials: false
 
+      # One Go cache for every shard (and the shard integration Postgres
+      # jobs): the shards build the same dependencies, with the same tags
+      # apart from the hubshard ones, which select only pkg/hub test files.
+      # Only the first shard saves it (the Save step's if:), so the shards
+      # do not race to save one key. Its trim drops the other shards' own
+      # pkg/hub test builds (about 30 s each to recompile), which a PR
+      # rebuilds anyway whenever it changes pkg/hub or anything pkg/hub
+      # imports; one cache instead of six saves about 3.4 GB of the repo's
+      # 10 GB cache budget (ptone/scion#4251).
       - name: Setup Go
         id: go
         uses: ./.github/actions/setup-go-cache
         with:
-          workload: hub-shard-${{ matrix.shard }}
+          workload: hub-shard
 
       # SQLite-enabled (no build tag besides the shard's). The Postgres
       # variables are not set here, so the Postgres tests skip, as they did
@@ -839,7 +848,10 @@ jobs:
           SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-hub-postgres-default SHARD="$SHARD"
 
+      # The first shard only (see Setup Go). No status function in the if:,
+      # so the implicit success() still keeps a failed shard from saving.
       - name: Save Go cache
+        if: ${{ matrix.shard == fromJSON(needs.hub-shard-plan.outputs.shards)[0] }}
         uses: ./.github/actions/save-go-cache
         with:
           key: ${{ steps.go.outputs.cache-key }}
@@ -896,12 +908,12 @@ jobs:
           container: ${{ job.services.postgres.id }}
 
       - name: Setup Go
-        # Restores its shard's cache (pkg/hub's dependencies); saves none,
-        # to keep the repo cache budget for the hub-shard jobs.
+        # Restores the shards' shared cache (pkg/hub's dependencies); saves
+        # none, to keep the repo cache budget for the hub-shard cache.
         id: go
         uses: ./.github/actions/setup-go-cache
         with:
-          workload: hub-shard-${{ matrix.shard }}
+          workload: hub-shard
 
       - name: Run pkg/hub shard integration Postgres tests
         env:
@@ -1180,6 +1192,11 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # golangci-lint-action caches only golangci-lint's own analysis cache
+      # (~/.cache/golangci-lint), not GOCACHE, which golangci-lint's
+      # package loading (go list) fills: 4.2 GB on a cold run.
+      # With this cache restored, golangci-lint took 584-776 s on main
+      # (7 runs) against 818-1062 s without it (4 runs), so it stays.
       - name: Setup Go
         id: go
         uses: ./.github/actions/setup-go-cache

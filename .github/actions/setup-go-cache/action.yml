@@ -1,5 +1,5 @@
-# Sets up Go and restores this workload's Go module and build cache
-# (ptone/scion#4251, option F phase 1). Pair it with
+# Sets up Go and restores this workload's Go module download cache and
+# build cache (ptone/scion#4251, option F). Pair it with
 # ./.github/actions/save-go-cache as the job's last step.
 #
 # Why not setup-go's own cache: it keys every job on go.sum alone, and saves
@@ -13,7 +13,16 @@
 # - restore-keys fall back to the same workload's newest cache (same go.sum
 #   first, then any), so the first run of a day starts from yesterday's;
 # - only pushes to main save (save-go-cache), so PRs restore main's caches
-#   and write none.
+#   and write none;
+# - of the module cache, only $GOMODCACHE/cache/download (the module zips,
+#   .mod and .info files) is cached, not the extracted module tree: go
+#   extracts a module from its cached zip when a build first needs it
+#   (unzipping pkg/hub's 174 module zips, 164 MB, takes about 11 s), while
+#   caching the 1.1 GB tree they extract to would add about 140 MB
+#   compressed to every workload's cache, on top of the zips.
+#
+# Several jobs can share one workload (the pkg/hub shards): give them the
+# same workload name, and save from only one of them (see save-go-cache).
 #
 #   - name: Setup Go
 #     id: go
@@ -27,10 +36,10 @@
 #       key: ${{ steps.go.outputs.cache-key }}
 #       cache-hit: ${{ steps.go.outputs.cache-hit }}
 name: Setup Go with a per-workload cache
-description: actions/setup-go without its cache, plus a restore of this workload's Go module and build cache.
+description: actions/setup-go without its cache, plus a restore of this workload's Go module download cache and build cache.
 inputs:
   workload:
-    description: The cache's workload name, fixed per job (and per matrix value where the builds differ).
+    description: The cache's workload name, fixed per job (and per matrix value where the builds differ; jobs with the same builds can share one).
     required: true
   go-version-file:
     description: Passed to actions/setup-go.
@@ -71,7 +80,7 @@ runs:
           echo "prefix-sum=${prefix}${GO_SUM_HASH}-"
           echo "key=${prefix}${GO_SUM_HASH}-$(date -u +%Y%m%d)"
           echo "gocache=$(go env GOCACHE)"
-          echo "gomodcache=$(go env GOMODCACHE)"
+          echo "gomoddownload=$(go env GOMODCACHE)/cache/download"
         } >> "$GITHUB_OUTPUT"
 
     - name: Restore the Go cache
@@ -80,7 +89,7 @@ runs:
       with:
         # save-go-cache must list the same paths, in the same order.
         path: |
-          ${{ steps.key.outputs.gomodcache }}
+          ${{ steps.key.outputs.gomoddownload }}
           ${{ steps.key.outputs.gocache }}
         key: ${{ steps.key.outputs.key }}
         restore-keys: |
