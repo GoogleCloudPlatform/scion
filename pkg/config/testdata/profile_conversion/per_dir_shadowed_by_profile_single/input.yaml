@@ -1,0 +1,20 @@
+# The profile's single backend (nfs) shadows the runtime entry's per-dir
+# entry for x, so legacy agents of batch put dir x on nfs. The instance must
+# not carry {x: local}: that would put dir x on local.
+schema_version: "1"
+server:
+  shared_dir_storage:
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: share-1
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+    shared_dir_storage_backends:
+      x: local
+profiles:
+  batch:
+    runtime: cluster
+    shared_dir_storage_backend: nfs

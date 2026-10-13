@@ -1,0 +1,11 @@
+server:
+  broker:
+    instances:
+      - key: k8s-prod-agents
+        name: k8s-prod-agents
+        runtime_target:
+          type: kubernetes
+          context: prod
+          namespace: agents
+          priority_class_name: high
+          shared_dir_size: 30Gi

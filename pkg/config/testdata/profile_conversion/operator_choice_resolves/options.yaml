@@ -1,0 +1,10 @@
+choices:
+  - target_group: k8s-agents
+    field: image_registry
+    chosen_profile: fast
+  - target_group: k8s-agents
+    field: profiles.*.shared_dir_storage_backend
+    chosen_profile: template:batch
+  - target_group: k8s-agents
+    field: clone_depth
+    chosen_profile: slow

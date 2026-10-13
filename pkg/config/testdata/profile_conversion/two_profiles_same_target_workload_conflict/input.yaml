@@ -1,0 +1,28 @@
+schema_version: "1"
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+profiles:
+  fast:
+    runtime: cluster
+    image_registry: reg.example/team
+    resources:
+      requests:
+        cpu: "1"
+    harness_overrides:
+      claude:
+        image: claude:fast
+        env:
+          TOKEN: SENSITIVE-A
+  slow:
+    runtime: cluster
+    image_registry: reg.example/team
+    resources:
+      requests:
+        cpu: "4"
+    harness_overrides:
+      claude:
+        image: claude:slow
+        env:
+          TOKEN: SENSITIVE-B

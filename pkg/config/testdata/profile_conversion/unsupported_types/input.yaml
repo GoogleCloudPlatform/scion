@@ -1,0 +1,35 @@
+schema_version: "1"
+runtimes:
+  pod:
+    type: podman
+  apple:
+    type: container
+  run:
+    type: cloudrun
+  runi:
+    type: cloudrun-instances
+  runs:
+    type: cloudrun-sandbox
+  sub:
+    type: substrate
+  dock:
+    type: docker
+    substrate: {}
+profiles:
+  p-podman:
+    runtime: pod
+  p-container:
+    runtime: apple
+  p-cloudrun:
+    runtime: run
+  p-instances:
+    runtime: runi
+  p-sandbox:
+    runtime: runs
+  p-substrate:
+    runtime: sub
+  p-docker-substrate:
+    runtime: dock
+  p-implicit:
+    runtime: podman
+  p-none: {}

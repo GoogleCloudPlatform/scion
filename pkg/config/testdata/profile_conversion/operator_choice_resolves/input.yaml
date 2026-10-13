@@ -1,0 +1,21 @@
+schema_version: "1"
+server:
+  shared_dir_storage:
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: share-1
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+profiles:
+  fast:
+    runtime: cluster
+    image_registry: reg.example/fast
+    shared_dir_storage_backend: nfs
+    clone_depth: full
+  slow:
+    runtime: cluster
+    image_registry: reg.example/slow
+    shared_dir_storage_backend: local

@@ -1,0 +1,17 @@
+server:
+  broker:
+    instances:
+      - key: k8s-agents
+        name: k8s-agents
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+        agent_defaults:
+          image_registry: reg.example/slow
+      - key: k8s-agents-fast
+        name: k8s-agents-fast
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+        agent_defaults:
+          image_registry: reg.example/fast

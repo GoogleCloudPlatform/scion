@@ -1,0 +1,22 @@
+server:
+  broker:
+    instances:
+      - key: k8s-a
+        name: k8s-a
+        runtime_target:
+          type: kubernetes
+          namespace: a
+          safe_to_evict: false
+        agent_defaults:
+          clone_depth: full
+      - key: k8s-b
+        name: k8s-b
+        runtime_target:
+          type: kubernetes
+          namespace: b
+          safe_to_evict: false
+      - key: k8s-c
+        name: k8s-c
+        runtime_target:
+          type: kubernetes
+          namespace: c

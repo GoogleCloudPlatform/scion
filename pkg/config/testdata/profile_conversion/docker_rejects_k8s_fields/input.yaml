@@ -1,0 +1,11 @@
+schema_version: "1"
+runtimes:
+  local:
+    type: docker
+    namespace: n
+    safe_to_evict: false
+profiles:
+  dev:
+    runtime: local
+    shared_dir_size: 40Gi
+    home_storage_backend: local

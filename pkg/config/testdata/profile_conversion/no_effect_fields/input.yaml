@@ -1,0 +1,12 @@
+schema_version: "1"
+runtimes:
+  local:
+    type: docker
+    host: unix:///var/run/docker.sock
+    env:
+      A: b
+    sync: rsync
+profiles:
+  dev:
+    runtime: local
+    default_template: researcher

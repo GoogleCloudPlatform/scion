@@ -1,0 +1,13 @@
+# An unknown key under an instance's agent_defaults is a strict-load error
+# naming its settings path.
+schema_version: "1"
+server:
+  broker:
+    instances:
+      - key: k8s-agents
+        name: k8s-agents
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+        agent_defaults:
+          templat: researcher

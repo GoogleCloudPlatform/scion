@@ -1,0 +1,60 @@
+schema_version: "1"
+server:
+  shared_dir_storage:
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: share-1
+active_profile: full
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+    shared_dir_size: 10Gi
+profiles:
+  full:
+    runtime: cluster
+    default_template: researcher
+    default_harness_config: claude
+    image_registry: registry.example/team
+    volumes:
+      - source: /srv/data
+        target: /data
+        read_only: true
+    resources:
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    harness_overrides:
+      claude:
+        image: claude:2
+        image_pull_policy: IfNotPresent
+        user: agent
+        auth_selected_type: vertex-ai
+        env:
+          REGION: us-west1
+          API_TOKEN: ""
+        volumes:
+          - source: /srv/cache
+            target: /cache
+        resources:
+          limits:
+            memory: 8Gi
+    secrets:
+      - key: API_TOKEN
+        description: the API token
+        type: environment
+    clone_depth: full
+    shared_dir_storage_class: standard-rwx
+    shared_dir_size: 40Gi
+    safe_to_evict: true
+    shared_dir_storage_backend: nfs
+    shared_dir_storage_backends:
+      cache: local
+    home_storage_backend: local
+    home_storage_leaf: pod
+    kubernetes_service_account_mappings:
+      agent@proj.iam.gserviceaccount.com: ksa-agent
+    kubernetes_block_service_account: zero-priv
+    env:
+      OLD: value

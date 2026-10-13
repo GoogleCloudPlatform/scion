@@ -1,0 +1,47 @@
+{
+  "profile_map": {
+    "fast": "k8s-agents",
+    "slow": "k8s-agents"
+  },
+  "findings": [
+    {
+      "code": "profile_conflict_resolved",
+      "severity": "notice",
+      "path": "profiles.*.clone_depth",
+      "profiles": [
+        "fast",
+        "slow"
+      ],
+      "message_contains": [
+        "instance k8s-agents takes profile slow's clone_depth",
+        "slow: unset"
+      ]
+    },
+    {
+      "code": "profile_conflict_resolved",
+      "severity": "notice",
+      "path": "profiles.*.image_registry",
+      "profiles": [
+        "fast",
+        "slow"
+      ],
+      "message_contains": [
+        "instance k8s-agents takes profile fast's image_registry",
+        "fast: reg.example/fast from profiles.fast.image_registry"
+      ]
+    },
+    {
+      "code": "profile_conflict_resolved",
+      "severity": "notice",
+      "path": "profiles.*.shared_dir_storage_backend",
+      "profiles": [
+        "fast",
+        "slow"
+      ],
+      "message_contains": [
+        "stays unset on instance k8s-agents and template batch sets it",
+        "no template is generated"
+      ]
+    }
+  ]
+}

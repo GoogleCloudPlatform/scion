@@ -1,0 +1,25 @@
+schema_version: "1"
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: a
+    safe_to_evict: false
+    gke: false
+  other:
+    type: kubernetes
+    namespace: b
+    safe_to_evict: true
+  third:
+    type: kubernetes
+    namespace: c
+profiles:
+  rt-false:
+    runtime: cluster
+    clone_depth: full
+    shared_dir_storage_backends: {}
+    image_registry: ""
+  profile-false:
+    runtime: other
+    safe_to_evict: false
+  unset:
+    runtime: third
