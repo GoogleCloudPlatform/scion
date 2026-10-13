@@ -532,9 +532,9 @@ describe('share dialog', () => {
     const select = home.querySelector('sl-select') as (HTMLElement & { value: string }) | null;
     expect(select).not.toBeNull();
     expect(select!.value).toBe('read');
-    expect(Array.from(select!.querySelectorAll('sl-option')).map((o) => o.getAttribute('value'))).toEqual(
-      ['read', 'write']
-    );
+    expect(
+      Array.from(select!.querySelectorAll('sl-option')).map((o) => o.getAttribute('value'))
+    ).toEqual(['read', 'write']);
     expect(home.querySelector('sl-button')).toBeNull();
     choose(select!, 'write');
     await settle(el);
@@ -554,14 +554,16 @@ describe('share dialog', () => {
     const el = await mount();
     const row = $$(el, '.grant')[1];
     expect(row.querySelector('sl-select')!.hasAttribute('disabled')).toBe(true);
-    expect(row.textContent).toContain('Cross-project sharing is off: this grant can be removed but not changed');
+    expect(row.textContent).toContain(
+      'Cross-project sharing is off: this grant can be removed but not changed'
+    );
     const remove = button(el, 'Remove', row);
     expect(remove.hasAttribute('disabled')).toBe(false);
     remove.click();
     await settle(el);
-    expect(s.calls.some((c) => c.method === 'DELETE' && c.url === `${BASE}/grants/g-platform`)).toBe(
-      true
-    );
+    expect(
+      s.calls.some((c) => c.method === 'DELETE' && c.url === `${BASE}/grants/g-platform`)
+    ).toBe(true);
   });
 
   it('lets a grant to another project change while cross-project sharing is on', async () => {
