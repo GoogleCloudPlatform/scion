@@ -71,6 +71,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	gcputil "github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/web"
@@ -1011,7 +1012,7 @@ func warnShadowedBrokerEnv(ctx context.Context, w brokerEnvShadowWarner) {
 // initServerLogging initializes all logging subsystems and returns cleanup functions.
 func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *slog.Logger, messageLogger *slog.Logger, err error) {
 	useGCP := parseBoolEnv("SCION_LOG_GCP")
-	if os.Getenv("K_SERVICE") != "" {
+	if cloudrunenv.IsService() {
 		useGCP = true
 	}
 	if !hostedMode && os.Getenv("SCION_LOG_GCP") == "" {
@@ -1306,7 +1307,7 @@ func hostedHAGuardsRequired(cfg *config.GlobalConfig) bool {
 // isHADeployment returns true when the configuration indicates a multi-instance
 // (Cloud Run / HA) deployment rather than a single-instance GCE VM.
 func isHADeployment(cfg *config.GlobalConfig) bool {
-	if os.Getenv("K_SERVICE") != "" {
+	if cloudrunenv.IsService() {
 		return true
 	}
 	if strings.EqualFold(cfg.Database.Driver, "postgres") {
