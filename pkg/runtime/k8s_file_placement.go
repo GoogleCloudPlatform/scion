@@ -245,7 +245,7 @@ func (r *KubernetesRuntime) placeK8sHomeFiles(ctx context.Context, namespace, po
 	for _, p := range placements {
 		targets = append(targets, p.Target)
 	}
-	runtimeLog.Info("Placing files in agent home", "agent", config.Name, "phase", "home-files", "targets", targets)
+	runtimeLog().Info("Placing files in agent home", "agent", config.Name, "phase", "home-files", "targets", targets)
 	script := k8sFilePlacementScript(util.GetHomeDir(config.UnixUsername), placements)
 	if _, err := r.execInPod(ctx, namespace, podName, []string{"sh", "-c", script}); err != nil {
 		return fmt.Errorf("failed to place files in agent home: %w", err)
