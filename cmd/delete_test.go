@@ -42,6 +42,7 @@ type deleteTestState struct {
 	autoConfirm    bool
 	deleteStopped  bool
 	deleteForce    bool
+	deleteSelf     bool
 }
 
 func saveDeleteTestState() deleteTestState {
@@ -53,6 +54,7 @@ func saveDeleteTestState() deleteTestState {
 		autoConfirm:    autoConfirm,
 		deleteStopped:  deleteStopped,
 		deleteForce:    deleteForce,
+		deleteSelf:     deleteSelf,
 	}
 }
 
@@ -64,6 +66,7 @@ func (s deleteTestState) restore() {
 	autoConfirm = s.autoConfirm
 	deleteStopped = s.deleteStopped
 	deleteForce = s.deleteForce
+	deleteSelf = s.deleteSelf
 }
 
 // createAgentDir creates a minimal agent directory at <projectDir>/agents/<name>
