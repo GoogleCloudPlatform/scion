@@ -141,7 +141,7 @@ function serveHub(): void {
     if (hold && hold.method === method && path.startsWith(hold.prefix)) {
       hub.holdNext = null;
       return new Promise<Response>((resolve) => {
-        release = () => resolve(answer(path, init));
+        release = (): void => resolve(answer(path, init));
       });
     }
     return answer(path, init);
