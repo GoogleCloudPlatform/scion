@@ -280,7 +280,7 @@ func TestRelayServerConfigValidateHidesCredentials(t *testing.T) {
 	}
 }
 
-// TestValidatePeerSecretOctets (design §3.9, lead ruling): peer_secret is
+// TestValidatePeerSecretOctets (design §3.9): peer_secret is
 // raw octets. At least 32 of them after removing exactly one trailing
 // newline, counted as octets (not characters), and at least 16 distinct.
 func TestValidatePeerSecretOctets(t *testing.T) {
