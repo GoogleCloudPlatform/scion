@@ -873,7 +873,7 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 			"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "live-inventory",
 		},
 		{"agent.delegation.exchange", "/api/v1/agents/{id}/delegations/{grantId}/exchange"}: {"audience": "scion-hub"},
-		// Federation user token: an allowed audience, so an admitted caller
+		// User access credential for a peer hub: an allowed audience, so an admitted caller
 		// gets 200 instead of a body 400 (seedLiveInventoryFixtures allows
 		// it).
 		{"federation.token.mint", "/api/v1/auth/federation-token"}: {"audience": liveInventoryFederationAudience},

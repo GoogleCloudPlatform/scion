@@ -66,7 +66,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/auth/invite/redeem": "authenticated", // Invite redemption — requires user session
 	"/api/v1/auth/admin-status":  "authenticated", // Admin status check — requires valid session
 	"/api/v1/auth/scopes":        "authenticated", // Auth scopes — requires valid session
-	// Federation user token for a peer hub — session or UAT with federation_token:mint; 404 while the experiment is off
+	// User access credential for a peer hub — session or UAT with federation_token:mint; 404 while the experiment is off
 	"POST /api/v1/auth/federation-token": "authenticated",
 
 	// ── Authorization ──────────────────────────────────────────────────

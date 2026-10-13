@@ -88,19 +88,19 @@ type AuthService interface {
 	FederationToken(ctx context.Context, req *FederationTokenRequest) (*FederationTokenResponse, error)
 }
 
-// FederationTokenRequest is the request for a federation user token.
+// FederationTokenRequest is the request for a user access credential for a peer hub.
 type FederationTokenRequest struct {
 	// Audience is the peer hub's issuer URL.
 	Audience string `json:"audience"`
 }
 
-// FederationTokenResponse is a federation user token and its expiry.
+// FederationTokenResponse is a user access credential for a peer hub and its expiry.
 type FederationTokenResponse struct {
 	Token     string    `json:"token"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// FederationToken obtains a federation user token. Issuance is not
+// FederationToken obtains a user access credential for a peer hub. Issuance is not
 // idempotent, so the request is never retried.
 func (s *authService) FederationToken(ctx context.Context, req *FederationTokenRequest) (*FederationTokenResponse, error) {
 	resp, err := s.c.postNoRetry(ctx, "/api/v1/auth/federation-token", req, nil)
