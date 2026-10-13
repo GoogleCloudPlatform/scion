@@ -2329,7 +2329,7 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 		// the global project's id with an empty slug (see
 		// isGlobalDirProjectID); it still gets no external dir.
 		if in.ProjectSlug == "" && !config.IsGlobalProjectDir(in.ProjectPath) {
-			s.agentLifecycleLog.Warn("Hub-managed project dispatch has no project slug; not writing a .scion marker",
+			s.agentLifecycleLog.Info("Hub-managed project dispatch has no project slug; not writing a .scion marker",
 				"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath)
 			return
 		}

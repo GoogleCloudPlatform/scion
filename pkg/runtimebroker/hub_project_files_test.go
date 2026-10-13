@@ -33,9 +33,6 @@ const hubFilesProjectID = "a46b3dcd-0000-4000-8000-000000000001"
 func newHubFilesTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	srv := newTestServerForStartContext(t, DefaultServerConfig())
-	t.Setenv("SCION_PROJECT_ID", "")
-	t.Setenv("SCION_PROJECT", "")
-	t.Setenv("SCION_PROJECT_PATH", "")
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
@@ -61,9 +58,9 @@ func projectConfigEntries(t *testing.T, home string) []string {
 	return names
 }
 
-// newLinkedCheckout creates <tmp>/repo/.scion as a directory (a linked
+// newHubFilesCheckout creates <tmp>/repo/.scion as a directory (a linked
 // project's own config) and returns the repo root and its .scion dir.
-func newLinkedCheckout(t *testing.T) (repo, dotScion string) {
+func newHubFilesCheckout(t *testing.T) (repo, dotScion string) {
 	t.Helper()
 	repo = filepath.Join(t.TempDir(), "repo")
 	dotScion = filepath.Join(repo, config.DotScion)
@@ -82,7 +79,7 @@ func TestRecordHubProjectFiles_LinkedCheckoutWritesNothing(t *testing.T) {
 	for _, slug := range []string{"", "repo"} {
 		t.Run("slug "+slug, func(t *testing.T) {
 			srv, home := newHubFilesTestServer(t)
-			_, dotScion := newLinkedCheckout(t)
+			_, dotScion := newHubFilesCheckout(t)
 
 			srv.recordHubProjectFiles(context.Background(), startContextInputs{
 				Name:        "a1",
@@ -108,7 +105,7 @@ func TestRecordHubProjectFiles_LinkedCheckoutWritesNothing(t *testing.T) {
 // The same dispatch through buildStartContext, the path agent start takes.
 func TestBuildStartContext_LinkedCheckoutWritesNoMarkerOrExternalDir(t *testing.T) {
 	srv, home := newHubFilesTestServer(t)
-	_, dotScion := newLinkedCheckout(t)
+	_, dotScion := newHubFilesCheckout(t)
 
 	_, _ = srv.buildStartContext(context.Background(), startContextInputs{
 		Name:        "a1",
@@ -180,7 +177,7 @@ func TestRecordHubProjectFiles_HubManagedUnchanged(t *testing.T) {
 // project ID and creates its external dirs.
 func TestRecordHubProjectFiles_GitProjectRootUnchanged(t *testing.T) {
 	srv, home := newHubFilesTestServer(t)
-	repo, dotScion := newLinkedCheckout(t)
+	repo, dotScion := newHubFilesCheckout(t)
 
 	srv.recordHubProjectFiles(context.Background(), startContextInputs{
 		Name:        "a1",
@@ -222,33 +219,27 @@ func TestRecordHubProjectFiles_GlobalEmptySlugMarkerNoExternalDir(t *testing.T) 
 	}
 }
 
-func TestIsOwnProjectConfigDir(t *testing.T) {
-	_, home := newHubFilesTestServer(t)
-	repo, dotScion := newLinkedCheckout(t)
-	globalDir := filepath.Join(home, config.GlobalDir)
-	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+// A provider path <repo>/.scion that no longer exists, with no slug: the
+// .scion directory is not recreated and no marker or external dir is written.
+func TestRecordHubProjectFiles_MissingProviderScionDirWritesNothing(t *testing.T) {
+	srv, home := newHubFilesTestServer(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	markerParent := t.TempDir()
-	markerFile := filepath.Join(markerParent, config.DotScion)
-	if err := os.WriteFile(markerFile, []byte("project-id: x\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	dotScion := filepath.Join(repo, config.DotScion)
 
-	for _, tc := range []struct {
-		name string
-		path string
-		want bool
-	}{
-		{"linked checkout .scion dir", dotScion, true},
-		{"linked checkout .scion dir with trailing slash", dotScion + string(filepath.Separator), true},
-		{"repo root", repo, false},
-		{"global dir", globalDir, false},
-		{"marker file", markerFile, false},
-		{"missing .scion", filepath.Join(t.TempDir(), config.DotScion), false},
-	} {
-		if got := isOwnProjectConfigDir(tc.path); got != tc.want {
-			t.Errorf("%s: isOwnProjectConfigDir(%q) = %v, want %v", tc.name, tc.path, got, tc.want)
-		}
+	srv.recordHubProjectFiles(context.Background(), startContextInputs{
+		Name:        "a1",
+		ProjectPath: dotScion,
+		ProjectID:   hubFilesProjectID,
+		Operation:   opCreate,
+	})
+
+	if _, err := os.Lstat(dotScion); !os.IsNotExist(err) {
+		t.Errorf("missing provider .scion was recreated (lstat err %v)", err)
+	}
+	if got := projectConfigEntries(t, home); len(got) != 0 {
+		t.Errorf("missing provider .scion created project-configs entries %v", got)
 	}
 }
