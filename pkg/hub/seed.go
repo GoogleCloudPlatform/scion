@@ -52,6 +52,10 @@ type BuiltInRole struct {
 	ScopeType   string
 	Revision    int
 	Permissions []string
+	// NoMembership marks a role whose bindings do not make the principal
+	// a project member (RoleDefinition.ConfersMembership false). It is
+	// set only on project-visitor.
+	NoMembership bool
 }
 
 // builtInRoleRevisionKey returns the hub-setting key used to track the last
@@ -143,14 +147,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    8, // R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    9, // R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    7, // R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    8, // R8: project.manage_visitors; R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
@@ -159,6 +163,18 @@ func BuiltInRoles() []BuiltInRole {
 			ScopeType:   store.RoleScopeProject,
 			Revision:    5, // R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
+		},
+		{
+			// project-visitor: the grant given to a federated account
+			// (ptone/scion#4603). It is not membership (NoMembership), it
+			// is bound only by the store's CreateVisitorRoleBinding, and
+			// it carries no project.read.
+			Name:         store.ProjectRoleVisitor,
+			Description:  "Federated visitor who may message and list the project's agents; not a project member",
+			ScopeType:    store.RoleScopeProject,
+			Revision:     1,
+			Permissions:  projectVisitorPermissionIDs(),
+			NoMembership: true,
 		},
 
 		// ── Agent roles (system-scoped, used for agent JWT scope mapping) ─
@@ -346,6 +362,9 @@ func projectOwnerPermissionIDs() []string {
 		"project.delete",
 		"project.list",
 		"project.manage",
+		// project.manage_visitors: grant and revoke visitor access for
+		// federated accounts (owners and admins, not members).
+		"project.manage_visitors",
 		"project.read",
 		"project.secret_read",
 		// Project owners hold project.set_messaging_policy; the messaging
@@ -429,6 +448,7 @@ func projectAdminPermissionIDs() []string {
 		// Project management (no delete, no hub-level create/clone/register)
 		"project.list",
 		"project.manage",
+		"project.manage_visitors",
 		"project.read",
 		"project.secret_read",
 		"project.update",
@@ -501,6 +521,19 @@ func projectMemberCuratedPermissionIDs() []string {
 		"template.create",
 		"template.list",
 		"template.read",
+	}
+}
+
+// projectVisitorPermissionIDs returns the permission set for the
+// project-visitor role: message the project's agents, and list and read
+// them. It holds no project.read and nothing that creates or changes a
+// resource. Agent list and read responses for a visitor are to be limited
+// to name, slug and status by a later change (ptone/scion#4603).
+func projectVisitorPermissionIDs() []string {
+	return []string{
+		"agent.list",
+		"agent.message",
+		"agent.read",
 	}
 }
 
@@ -700,12 +733,14 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 			return 0, false
 		}
 		// Role does not exist — create it.
+		confers := !role.NoMembership
 		rd := &store.RoleDefinition{
-			Name:        role.Name,
-			Description: role.Description,
-			ScopeType:   role.ScopeType,
-			Permissions: role.Permissions,
-			System:      true,
+			Name:              role.Name,
+			Description:       role.Description,
+			ScopeType:         role.ScopeType,
+			Permissions:       role.Permissions,
+			System:            true,
+			ConfersMembership: &confers,
 		}
 		if _, err := s.CreateRoleDefinition(ctx, rd); err != nil {
 			slog.Warn("failed to seed role definition",
@@ -720,7 +755,18 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 		return 0, false
 	}
 
-	// Role exists — check if reconciliation is needed.
+	// Role exists. A role that must not confer membership is only ever
+	// created by this seed, so an existing row of that name that is not a
+	// system role, or that confers membership, is a custom role an
+	// operator created first: leave it alone (its bindings stay
+	// membership), and the store refuses visitor grants of it.
+	if role.NoMembership && (!existing.System || existing.ConfersProjectMembership()) {
+		slog.Warn("a role definition with a built-in role's name exists and is not the built-in role; leaving it unchanged",
+			"name", role.Name, "system", existing.System)
+		return 0, false
+	}
+
+	// Check if reconciliation is needed.
 	applied := getAppliedBuiltInRoleMarker(ctx, s, role.Name)
 	if applied.Revision > role.Revision {
 		// Stored revision is higher (a newer build re-revisioned the role):

@@ -86,7 +86,8 @@ type EffectiveMembershipResult struct {
 // active-time checks.
 //
 // Membership means holding any active project-scoped role binding, built-in
-// (owner/admin/member) or custom, either directly or via an effective group.
+// (owner/admin/member) or custom, of a role that confers membership (not
+// project-visitor), either directly or via an effective group.
 // This matches ProjectMembershipEvidence. A group-bound owner role is the one
 // exception: groups never confer owner, and such a binding is ignored. An
 // owner counts as a member; ownership does not permit piercing a target's
@@ -151,8 +152,13 @@ func checkEffectiveMembership(ctx context.Context, st store.Store, authz *AuthzS
 		if rdErr != nil {
 			return EffectiveMembershipResult{Err: rdErr}
 		}
-		// Any active project binding confers membership; Role tracks only
-		// the built-in tier.
+		// A role that does not confer membership (project-visitor) is
+		// ignored.
+		if !rd.ConfersProjectMembership() {
+			continue
+		}
+		// Any other active project binding confers membership; Role
+		// tracks only the built-in tier.
 		isMember = true
 		if store.IsBuiltInProjectMembershipRole(rd.Name) {
 			bestRole = higherProjectRole(bestRole, rd.Name)
@@ -187,8 +193,12 @@ func checkEffectiveMembership(ctx context.Context, st store.Store, authz *AuthzS
 			if rdErr != nil {
 				return EffectiveMembershipResult{Err: rdErr}
 			}
-			// Groups can only confer admin or member, never owner.
-			if rd.Name == store.ProjectRoleOwner {
+			// Groups can only confer admin or member, never owner, and a
+			// role that does not confer membership is ignored. That second
+			// check is defensive: the store binds such a role only to a user
+			// principal (CreateVisitorRoleBinding), so no group binding of
+			// one is written today.
+			if rd.Name == store.ProjectRoleOwner || !rd.ConfersProjectMembership() {
 				continue
 			}
 			isMember = true

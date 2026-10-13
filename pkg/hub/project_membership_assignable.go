@@ -56,8 +56,9 @@ type AssignableProjectRole struct {
 
 // AssignableRoles lists every project-scoped role definition (the built-in
 // membership roles first in tier order, then custom roles by name) with
-// whether actor may newly grant it in projectID. System-scoped roles are
-// never listed. The result is principal-agnostic: principal-type
+// whether actor may newly grant it in projectID. System-scoped roles, and
+// roles that do not confer membership (project-visitor), are never listed.
+// The result is principal-agnostic: principal-type
 // eligibility (owner is user-only; admin is user or group; custom roles are
 // user or group) is left to the client, as on the PUT it depends on the
 // target principal.
@@ -79,7 +80,9 @@ func (svc *ProjectMembershipService) AssignableRoles(ctx context.Context, actor 
 	}
 	var roles []*store.RoleDefinition
 	for _, rd := range all {
-		if rd != nil && rd.ScopeType == store.RoleScopeProject {
+		// A role that does not confer membership (project-visitor) is
+		// not a member role and is granted only through the visitor path.
+		if rd != nil && rd.ScopeType == store.RoleScopeProject && rd.ConfersProjectMembership() {
 			roles = append(roles, rd)
 		}
 	}
