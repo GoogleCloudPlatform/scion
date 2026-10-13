@@ -3061,3 +3061,32 @@ func TestUpdateVersionedSetting_LegacyHubProjectKeyParity(t *testing.T) {
 		{name: "legacy-hub-key", file: "settings.yaml", content: "schema_version: \"1\"\n# hub\nhub:\n  " + legacy + ": p1 # legacy\n  endpoint: https://e\n"},
 	})
 }
+
+// TestLoadSettings_GlobalLegacyHubKeyDoesNotLeak checks the legacy key name
+// in the global file: it is migrated to hub.project_id when the global
+// layer loads, and must not leak into a project either.
+func TestLoadSettings_GlobalLegacyHubKeyDoesNotLeak(t *testing.T) {
+	legacy := hubGroveIDRename[0].legacy
+	globalDir := setupHubIDScopeHome(t, "  "+legacy+": \""+scopeGlobalHubID+"\"\n")
+	scionDir, _ := setupHubIDScopeSplitProject(t, filepath.Dir(globalDir))
+
+	s, err := LoadSettings(scionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.GetHubProjectID(); got != "" {
+		t.Errorf("project GetHubProjectID() = %q, want empty (no leak from global)", got)
+	}
+	if s.ProjectID != scopeLocalID {
+		t.Errorf("project ProjectID = %q, want %q", s.ProjectID, scopeLocalID)
+	}
+
+	// The global project still sees its own (migrated) value.
+	g, err := LoadSettings(globalDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := g.GetHubProjectID(); got != scopeGlobalHubID {
+		t.Errorf("global GetHubProjectID() = %q, want %q", got, scopeGlobalHubID)
+	}
+}
