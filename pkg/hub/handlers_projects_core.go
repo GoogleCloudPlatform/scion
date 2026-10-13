@@ -1991,7 +1991,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// directories exist. Only the embedded broker shares the hub's
 		// filesystem; other brokers manage their own.
 		if localPath != "" && s.isEmbeddedBroker(broker.ID) {
-			scionDir := filepath.Join(localPath, ".scion")
+			scionDir := linkedProjectScionDir(localPath)
 			if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 				s.projectsLogger().Warn("failed to initialize .scion in linked project",
 					"project_id", project.ID, "localPath", localPath, "error", err.Error())
