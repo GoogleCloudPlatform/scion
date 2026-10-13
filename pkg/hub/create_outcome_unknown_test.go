@@ -513,11 +513,11 @@ func TestTunnelRequest_ConnectionLostIsUnknownOutcome(t *testing.T) {
 	}
 }
 
-// crossNodeFixture is a server whose HTTP dispatcher reaches a broker
+// ownerDispatchFixture is a server whose HTTP dispatcher reaches a broker
 // through mockClient, recording the credentials it mints, with an agent to
 // dispatch, as the node owning the broker connection runs a cross-node
 // dispatch (execDispatchCreate, execDispatchFinalizeEnv).
-func crossNodeFixture(t *testing.T, name string, client *mockRuntimeBrokerClient) (*Server, store.Store, *fakeMintingTokenGenerator, *store.Agent) {
+func ownerDispatchFixture(t *testing.T, name string, client *mockRuntimeBrokerClient) (*Server, store.Store, *fakeMintingTokenGenerator, *store.Agent) {
 	t.Helper()
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -551,7 +551,7 @@ func TestExecDispatchCreate_UnknownOutcomeKeepsCredential(t *testing.T) {
 				client := &mockRuntimeBrokerClient{createWithGatherFunc: func(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 					return nil, nil, failErr
 				}}
-				srv, s, gen, agent := crossNodeFixture(t, "owner-"+op, client)
+				srv, s, gen, agent := ownerDispatchFixture(t, "owner-"+op, client)
 				d := store.BrokerDispatch{AgentID: agent.ID, Op: op}
 				var err error
 				if op == "create" {
