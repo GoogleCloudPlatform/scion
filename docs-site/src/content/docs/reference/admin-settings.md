@@ -329,5 +329,6 @@ The admin UI provides structured feedback on save:
 | **400** `validation_failed` | Inline per-section validation errors |
 | **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button |
 | **409** `legacy_server_yaml` | Shows the message: the server config still comes from a deprecated `server.yaml`; move it under `server:` in `settings.yaml`, remove `server.yaml`, then save again. Nothing was saved |
+| **422** `validation_error` | A duration-valued key, including one nested in a map, does not parse as a duration (for example `"5 minutes"`); `details.field` names the full key path. `""` or `null` clears the key. Nothing was saved |
 | **422** `layer0_rejected` | Safety-net notice on hosted Hubs (should not occur with layer-aware UI) |
 | **422** `unclassified_keys_rejected` / `unpersisted_keys_rejected` / `hub_owned_keys_rejected` / `unsaved_keys_rejected` | Shows the message and the offending keys; nothing was saved |

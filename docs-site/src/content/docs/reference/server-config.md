@@ -855,6 +855,8 @@ When running with a postgres database, operational settings (Layer-1) can be con
 
 Most server settings can be overridden via environment variables using the `SCION_SERVER_` prefix. Write each path segment in upper case and drop the underscores inside a multi-word field name: `read_timeout` becomes `READTIMEOUT`, not `READ_TIMEOUT`. A name that the Hub does not recognise is ignored and logged as a warning at startup, with a suggested spelling where one exists. An exported but empty `SCION_SERVER_*` or `SCION_SEED_*` variable is treated as unset, so it never overrides a configured value. Each key's working variable is listed as `x-env-var` in the [settings schema](https://github.com/GoogleCloudPlatform/scion/blob/main/pkg/config/schemas/settings-v1.schema.json).
 
+A value that does not parse for its key (for example `SCION_SERVER_HUB_READTIMEOUT=thirty`, or a string where `settings.yaml` expects a number) is ignored for that key only: the key falls back to its default, or stays unset, and a warning naming the key (never the value) is logged once. Every other key still applies, so one bad value no longer turns off unrelated Hub features.
+
 There are two exceptions to the pattern:
 
 - The broker's listener settings under `server.broker` use the `RUNTIMEBROKER` segment, for example `server.broker.port` -> `SCION_SERVER_RUNTIMEBROKER_PORT`.

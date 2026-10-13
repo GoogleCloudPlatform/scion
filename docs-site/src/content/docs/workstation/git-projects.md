@@ -238,7 +238,7 @@ If you already have a local checkout linked to the Hub via `scion hub link`, be 
 
 On the local workstation Hub, a git project that `scion hub link` (or the automatic link) creates gets workspace mode `worktree-per-agent`, so new agents get a git worktree of your checkout, as in local mode. A project that already existed on the Hub keeps its mode.
 
-For clone-based provisioning you need a `GITHUB_TOKEN` secret set on the project for clone-based provisioning, just like a project created from a URL.
+For clone-based provisioning you need a `GITHUB_TOKEN` secret set on the project, just like a project created from a URL.
 
 To temporarily fall back to local worktree mode outside the Hub entirely:
 
