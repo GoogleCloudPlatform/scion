@@ -68,7 +68,7 @@ func TestListArtifactsPassesOptions(t *testing.T) {
 	assert.Contains(t, got, "Report")
 	assert.Contains(t, got, "v2")
 	assert.Contains(t, got, "shared")
-	assert.Contains(t, got, "More artifacts follow; use --all to list them.")
+	assert.Contains(t, got, "More artifacts follow; use --all to list them, or --cursor c1 for the next page.")
 }
 
 // TestListArtifactsAllFollowsCursor: --all follows nextCursor to the last
@@ -200,5 +200,53 @@ func TestArtifactGrantsAddRemove(t *testing.T) {
 	assert.Nil(t, fresh.put)
 	assert.Empty(t, fresh.removed)
 	assert.False(t, fresh.listed)
-	assert.True(t, strings.HasPrefix(testArtifactRef, "scion://artifact/"))
+
+	// --remove is checked after trimming: a blank id is refused.
+	err := artifactGrants(context.Background(), fresh, &out, testArtifactRef, grantsOptions{Remove: "   "})
+	assert.ErrorContains(t, err, "--remove needs a grant id")
+	assert.Empty(t, fresh.removed)
+}
+
+// TestListArtifactsStartsAtCursor: --cursor starts the list at that page.
+func TestListArtifactsStartsAtCursor(t *testing.T) {
+	svc := &listPagesService{pages: []hubclient.ArtifactListResponse{
+		{Artifacts: []hubclient.ArtifactListItem{listItem("a2", "Two", "owned", 1)}},
+	}}
+	var out bytes.Buffer
+	require.NoError(t, listArtifacts(context.Background(), svc, &out, listArtifactsParams{Options: hubclient.ListArtifactsOptions{Cursor: "c1"}}))
+	require.Len(t, svc.calls, 1)
+	assert.Equal(t, "c1", svc.calls[0].Cursor)
+}
+
+// TestListArtifactsSafeOutput: titles and other text from the hub cannot
+// carry terminal escape sequences or break the table: control characters
+// are replaced before printing.
+func TestListArtifactsSafeOutput(t *testing.T) {
+	evil := listItem("a1", "Report\x1b]52;c;aGk=\x07\nb1  Fake  v9  owned", "shared\x1b[2K", 1)
+	svc := &listPagesService{pages: []hubclient.ArtifactListResponse{{Artifacts: []hubclient.ArtifactListItem{evil}}}}
+	var out bytes.Buffer
+	require.NoError(t, listArtifacts(context.Background(), svc, &out, listArtifactsParams{}))
+	got := out.String()
+	assert.NotContains(t, got, "\x1b")
+	assert.NotContains(t, got, "\x07")
+	assert.Equal(t, 2, strings.Count(got, "\n"), "one header and one row: %q", got)
+	assert.Contains(t, got, "Report\uFFFD]52;c;aGk=\uFFFD\uFFFDb1")
+}
+
+// TestArtifactGrantsSafeOutput: grant ids and subjects from the hub are
+// printed without control characters.
+func TestArtifactGrantsSafeOutput(t *testing.T) {
+	svc := &evilGrantsService{}
+	var out bytes.Buffer
+	require.NoError(t, artifactGrants(context.Background(), svc, &out, testArtifactRef, grantsOptions{}))
+	assert.NotContains(t, out.String(), "\x1b")
+	assert.Contains(t, out.String(), "user:u1\uFFFD[31m")
+}
+
+type evilGrantsService struct{ hubclient.ArtifactService }
+
+func (evilGrantsService) ListGrants(context.Context, string) (*hubclient.ArtifactGrantList, error) {
+	return &hubclient.ArtifactGrantList{Grants: []hubclient.ArtifactGrant{
+		{ID: "g1\x1b]8;;https://example.com\x07", SubjectKind: "principal", SubjectRef: "user:u1\x1b[31m", Permission: "read"},
+	}}, nil
 }

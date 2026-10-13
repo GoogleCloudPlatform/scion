@@ -44,6 +44,7 @@ func TestResolveBundleLink(t *testing.T) {
 		{"index.html", "#top", "", false},
 		{"index.html", "?q=1", "", false},
 		{"index.html", "../outside.html", "../outside.html", true},
+		{"index.html", "a%zz.html", "a%zz.html", true},
 		{"docs/page.html", "../../x.html", "../x.html", true},
 	} {
 		got, ok := resolveBundleLink(tc.from, tc.link)

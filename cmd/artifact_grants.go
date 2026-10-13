@@ -44,7 +44,10 @@ var artifactGrantsCmd = &cobra.Command{
 A grant gives a user, an agent or a project read, write or admin access to
 the artifact; a user can also be given review (publish reviews only).
 Only the artifact's owner, or a user it granted admin, can see or change
-its grants. Agents cannot manage grants.
+its grants. On an artifact owned by an agent, the user who delegated to
+the agent and the home project's owners and admins (and super-admins)
+may also add a review grant for a user who can already read it, and
+nothing else; they cannot list the grants. Agents cannot manage grants.
 
 Subjects are written user:<id>, agent:<id> or project:<id>. Adding a grant
 for a subject that already has one changes its permission.
@@ -124,6 +127,11 @@ func artifactGrants(ctx context.Context, svc hubclient.ArtifactService, out io.W
 	if err != nil {
 		return err
 	}
+	removeSet := opts.Remove != ""
+	opts.Remove = strings.TrimSpace(opts.Remove)
+	if removeSet && opts.Remove == "" {
+		return errors.New("--remove needs a grant id")
+	}
 	switch {
 	case opts.Add != "" && opts.Remove != "":
 		return errors.New("--add and --remove cannot be used together")
@@ -145,16 +153,16 @@ func artifactGrants(ctx context.Context, svc hubclient.ArtifactService, out io.W
 		if opts.JSON {
 			return writeJSONTo(out, g)
 		}
-		_, _ = fmt.Fprintf(out, "Granted %s %s on %s (grant %s)\n", grantSubjectText(*g), g.Permission, artifacts.FormatRef(id, 0), g.ID)
+		_, _ = fmt.Fprintf(out, "Granted %s %s on %s (grant %s)\n", safeText(grantSubjectText(*g)), safeText(g.Permission), artifacts.FormatRef(id, 0), safeText(g.ID))
 		return nil
 	case opts.Remove != "":
-		if err := svc.DeleteGrant(ctx, id, strings.TrimSpace(opts.Remove)); err != nil {
+		if err := svc.DeleteGrant(ctx, id, opts.Remove); err != nil {
 			return fmt.Errorf("remove grant: %w%s", err, grantsErrorHint(err))
 		}
 		if opts.JSON {
-			return writeJSONTo(out, map[string]string{"removed": strings.TrimSpace(opts.Remove)})
+			return writeJSONTo(out, map[string]string{"removed": opts.Remove})
 		}
-		_, _ = fmt.Fprintf(out, "Removed grant %s from %s\n", strings.TrimSpace(opts.Remove), artifacts.FormatRef(id, 0))
+		_, _ = fmt.Fprintf(out, "Removed grant %s from %s\n", safeText(opts.Remove), artifacts.FormatRef(id, 0))
 		return nil
 	}
 	list, err := svc.ListGrants(ctx, id)
@@ -178,13 +186,14 @@ func artifactGrants(ctx context.Context, svc hubclient.ArtifactService, out io.W
 		if g.Home {
 			subject += " (home project)"
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", g.ID, subject, g.Permission, clitime.Format(g.CreatedAt, clitime.Minute))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", safeText(g.ID), safeText(subject), safeText(g.Permission), clitime.Format(g.CreatedAt, clitime.Minute))
 	}
 	return tw.Flush()
 }
 
 // grantsErrorHint explains the grants routes' refusals: they serve the
-// artifact's administrators only, and answer 404 to anyone else.
+// artifact's administrators only, and answer 403 to other readers of the
+// artifact and 404 to non-readers.
 func grantsErrorHint(err error) string {
 	if h := artifactErrorHint(err, false); h != "" {
 		return h + "\nOnly the artifact's owner, or a user it granted admin, can see or change its grants."

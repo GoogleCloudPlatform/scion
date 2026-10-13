@@ -33,10 +33,13 @@ func TestUnknownSubcommandHelpError(t *testing.T) {
 		{"artifact", "--help", "nosuch"},
 		{"hub", "nosuch", "--help"},
 		{"config", "nosuch", "--help"},
+		{"artifact", "--format", "json", "nosuch", "--help"},
+		{"--project", "x", "artifact", "nosuch", "-h"},
+		{"artifact", "--yes", "nosuch", "--help"},
 	} {
 		err := unknownSubcommandHelpError(rootCmd, args)
 		if assert.Error(t, err, "%q", args) {
-			assert.Contains(t, err.Error(), `unknown command "nosuch" for "scion `+args[0]+`"`, "%q", args)
+			assert.Contains(t, err.Error(), `unknown command "nosuch" for "scion `, "%q", args)
 		}
 	}
 	for _, args := range [][]string{
@@ -56,6 +59,13 @@ func TestUnknownSubcommandHelpError(t *testing.T) {
 		{"artifact", "nosuch"},
 		{"artifact", "nosuch", "--", "--help"},
 		{"nosuch", "--help"},
+		{"artifact", "--format", "json", "--help"},
+		{"--project", "x", "artifact", "--help"},
+		{"-g", "x", "artifact", "-h"},
+		{"artifact", "--format=json", "--help"},
+		{"artifact", "--debug", "--help"},
+		{"hub", "--hub", "https://hub.example", "--help"},
+		{"artifact", "list", "--format", "json", "--help"},
 	} {
 		assert.NoError(t, unknownSubcommandHelpError(rootCmd, args), "%q", args)
 	}
@@ -119,4 +129,32 @@ func TestUnknownSubcommandHelpCLI(t *testing.T) {
 	// The agent-mode case (a subcommand the mode removed) is covered by
 	// TestUnknownSubcommandHelpErrorScope: the child process clears every
 	// inherited SCION_ variable, SCION_CLI_MODE included.
+}
+
+// TestPositionalArgs: flags and their values are removed the way cobra's
+// stripFlags removes them: a flag that takes a value consumes the next
+// argument, a boolean does not, "--name=value" is one argument, and "--"
+// ends the flags. --help and -h are booleans.
+func TestPositionalArgs(t *testing.T) {
+	cmd := &cobra.Command{Use: "g"}
+	cmd.Flags().StringP("name", "n", "", "")
+	cmd.Flags().BoolP("all", "a", false, "")
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"--name", "v", "x"}, []string{"x"}},
+		{[]string{"-n", "v", "x"}, []string{"x"}},
+		{[]string{"--name=v", "x"}, []string{"x"}},
+		{[]string{"--all", "x"}, []string{"x"}},
+		{[]string{"-a", "x"}, []string{"x"}},
+		{[]string{"--help", "x"}, []string{"x"}},
+		{[]string{"-h", "x"}, []string{"x"}},
+		{[]string{"--unknown", "v", "x"}, []string{"x"}},
+		{[]string{"x", "--", "y"}, []string{"x"}},
+		{[]string{"--name"}, nil},
+		{[]string{"-", "x"}, []string{"x"}},
+	} {
+		assert.Equal(t, tc.want, positionalArgs(cmd, tc.args), "%q", tc.args)
+	}
 }

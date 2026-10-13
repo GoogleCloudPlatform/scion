@@ -17,6 +17,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -35,22 +36,28 @@ import (
 // It returns an error only when every one of these holds, so every other
 // help path is unchanged: args ask for help (--help or -h, before any
 // "--"); the command args resolve to has subcommands and is Runnable; at
-// least one positional argument is left over; and the command's own Args
-// validator rejects those arguments with an error other than pflag.ErrHelp
-// (which the groups use for "help" and for no arguments). A command that
-// accepts positional arguments passes its validator and is untouched.
+// least one positional argument is left once flags and their values are
+// removed (Find returns the leftover arguments with their flags); and the
+// command's own Args validator rejects those positional arguments with an
+// error other than pflag.ErrHelp (which the groups use for "help" and for
+// no arguments). A command that accepts positional arguments passes its
+// validator and is untouched.
 func unknownSubcommandHelpError(root *cobra.Command, args []string) error {
 	if !helpRequested(args) {
 		return nil
 	}
 	target, rest, err := root.Find(args)
-	if err != nil || target == nil || len(rest) == 0 || !target.HasSubCommands() || !target.Runnable() {
+	if err != nil || target == nil || !target.HasSubCommands() || !target.Runnable() {
 		return nil
 	}
-	if verr := target.ValidateArgs(rest); verr == nil || errors.Is(verr, pflag.ErrHelp) {
+	positional := positionalArgs(target, rest)
+	if len(positional) == 0 {
 		return nil
 	}
-	return fmt.Errorf("unknown command %q for %q", rest[0], target.CommandPath())
+	if verr := target.ValidateArgs(positional); verr == nil || errors.Is(verr, pflag.ErrHelp) {
+		return nil
+	}
+	return fmt.Errorf("unknown command %q for %q", positional[0], target.CommandPath())
 }
 
 // helpRequested reports whether args hold --help or -h before a "--"
@@ -65,4 +72,51 @@ func helpRequested(args []string) bool {
 		}
 	}
 	return false
+}
+
+// positionalArgs returns the positional arguments of args for cmd: args
+// with flags and their values removed, up to a "--" terminator. It follows
+// cobra's own stripFlags (which Find uses but does not export): a long flag
+// written "--name value" or a short flag "-n value" consumes the next
+// argument unless the flag is a boolean (or has another no-value default);
+// "--name=value" and combined short flags consume nothing more. Flags are
+// looked up among cmd's own and inherited flags; --help and -h are
+// booleans, though cobra registers the help flag only when the command
+// runs. It reads the flag sets and parses nothing.
+func positionalArgs(cmd *cobra.Command, args []string) []string {
+	local, inherited := cmd.Flags(), cmd.InheritedFlags()
+	lookup := func(name string) *pflag.Flag {
+		if f := local.Lookup(name); f != nil {
+			return f
+		}
+		return inherited.Lookup(name)
+	}
+	lookupShort := func(name string) *pflag.Flag {
+		if f := local.ShorthandLookup(name); f != nil {
+			return f
+		}
+		return inherited.ShorthandLookup(name)
+	}
+	takesValue := func(f *pflag.Flag) bool { return f == nil || f.NoOptDefVal == "" }
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return out
+		case a == "--help" || a == "-h":
+		case strings.HasPrefix(a, "--") && !strings.Contains(a, "="):
+			if takesValue(lookup(a[2:])) {
+				i++
+			}
+		case strings.HasPrefix(a, "-") && len(a) == 2 && a != "-":
+			if takesValue(lookupShort(a[1:])) {
+				i++
+			}
+		case strings.HasPrefix(a, "-"):
+		case a != "":
+			out = append(out, a)
+		}
+	}
+	return out
 }

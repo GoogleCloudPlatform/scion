@@ -55,7 +55,9 @@ every href or src that does not name a file of that version, and exits
 with an error if it finds one. A link that starts with "/" or climbs above
 the bundle's top folder is reported too: it leaves the view. Links with a
 scheme (https:, mailto:, data:, ...), links to another host, and links to
-a fragment of the same page are not checked.
+a fragment of the same page are not checked, and a link that cannot be
+parsed is reported. A <base href> in a page is not taken into account:
+links are resolved against the page's own folder.
 
 Examples:
   scion artifact view scion://artifact/5f1c2d3e-...
@@ -99,7 +101,7 @@ type viewResult struct {
 	ExpiresAt    time.Time    `json:"expiresAt"`
 	RemoteImages bool         `json:"remoteImages,omitempty"`
 	Checked      bool         `json:"checked"`
-	HTMLFiles    int          `json:"htmlFiles,omitempty"`
+	HTMLFiles    int          `json:"htmlFiles"`
 	Broken       []brokenLink `json:"broken"`
 }
 
@@ -156,7 +158,7 @@ func viewArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.Wri
 }
 
 func printViewResult(out io.Writer, res viewResult) {
-	_, _ = fmt.Fprintf(out, "%s\n", res.URL)
+	_, _ = fmt.Fprintf(out, "%s\n", safeText(res.URL))
 	_, _ = fmt.Fprintf(out, "View of %s, valid until %s\n", res.Ref, clitime.Format(res.ExpiresAt, clitime.Minute))
 	if res.RemoteImages {
 		_, _ = fmt.Fprintln(out, "Note: the entry references remote images, which the view does not load.")
@@ -170,7 +172,7 @@ func printViewResult(out io.Writer, res viewResult) {
 	}
 	_, _ = fmt.Fprintf(out, "Checked %d HTML file(s): %d relative link(s) name no file of the version:\n", res.HTMLFiles, len(res.Broken))
 	for _, b := range res.Broken {
-		_, _ = fmt.Fprintf(out, "  %s: %s=%q\n", b.File, b.Attribute, b.Target)
+		_, _ = fmt.Fprintf(out, "  %s: %s=%q\n", safeText(b.File), b.Attribute, b.Target)
 	}
 }
 
@@ -274,12 +276,17 @@ func relativeLinks(doc []byte) []htmlLink {
 // resolveBundleLink resolves link, found in the file at from, to the path
 // within the version it names. ok is false for links that are not
 // checked: links with a scheme, links to another host, and fragment-only
-// or query-only links. A link that starts with "/" or climbs above the
+// or query-only links. A link that cannot be parsed is returned as written,
+// and is reported. A link that starts with "/" or climbs above the
 // bundle's top folder leaves the view, so it is returned as a path no file
 // has ("/..." or "../..."), and is reported.
 func resolveBundleLink(from, link string) (string, bool) {
 	u, err := url.Parse(link)
-	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" || strings.HasPrefix(link, "//") {
+	if err != nil {
+		// Reported as written: a browser cannot follow it either.
+		return link, true
+	}
+	if u.Scheme != "" || u.Host != "" || u.Opaque != "" || strings.HasPrefix(link, "//") {
 		return "", false
 	}
 	p := u.Path

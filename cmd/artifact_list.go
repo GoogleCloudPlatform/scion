@@ -37,6 +37,7 @@ var (
 	artifactListQuery         string
 	artifactListLimit         int
 	artifactListAll           bool
+	artifactListCursor        string
 )
 
 var artifactListCmd = &cobra.Command{
@@ -52,7 +53,7 @@ one page is printed; a following page is announced on the last line.
 Examples:
   scion artifact list
   scion artifact list --mine
-  scion artifact list --project <project-id> --shared
+  scion artifact list --project-id <project-id> --shared
   scion artifact list --query report --all`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -70,6 +71,7 @@ Examples:
 				Limit:         artifactListLimit,
 				Scope:         artifactListProject,
 				Shared:        artifactListShared,
+				Cursor:        artifactListCursor,
 			},
 			All:  artifactListAll,
 			JSON: isJSONOutput(),
@@ -85,6 +87,7 @@ func init() {
 	artifactListCmd.Flags().StringVar(&artifactListQuery, "query", "", "Only artifacts whose title or key contains this text")
 	artifactListCmd.Flags().IntVar(&artifactListLimit, "limit", 0, "Page size (default: the hub's)")
 	artifactListCmd.Flags().BoolVar(&artifactListAll, "all", false, "Follow every page instead of printing one")
+	artifactListCmd.Flags().StringVar(&artifactListCursor, "cursor", "", "Start at this page (the nextCursor of a previous --format json list)")
 	artifactCmd.AddCommand(artifactListCmd)
 }
 
@@ -141,21 +144,21 @@ func listArtifacts(ctx context.Context, svc hubclient.ArtifactService, out io.Wr
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "REF\tTITLE\tVERSION\tACCESS\tUPDATED")
 	for _, a := range items {
-		access := a.Access
+		access := safeText(a.Access)
 		if access == "" {
 			access = "-"
 		}
 		if a.ReviewPending {
 			access += ", review pending"
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\tv%d\t%s\t%s\n", artifacts.FormatRef(a.ID, 0), a.Title, a.CurrentSeq, access,
+		_, _ = fmt.Fprintf(tw, "%s\t%s\tv%d\t%s\t%s\n", safeText(artifacts.FormatRef(a.ID, 0)), safeText(a.Title), a.CurrentSeq, access,
 			clitime.Format(a.UpdatedAt, clitime.Minute))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
 	if next != "" {
-		_, _ = fmt.Fprintln(out, "More artifacts follow; use --all to list them.")
+		_, _ = fmt.Fprintf(out, "More artifacts follow; use --all to list them, or --cursor %s for the next page.\n", safeText(next))
 	}
 	return nil
 }
