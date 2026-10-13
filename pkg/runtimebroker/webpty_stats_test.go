@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -29,11 +30,12 @@ import (
 // runtime, in both places a broker reports it: the static capabilities sent
 // at registration and on every heartbeat (StaticCapabilities and the
 // StaticCapabilityNames registration list), and GET /api/v1/info. The two
-// must agree, and must follow what the PTY attach path can actually serve:
-// docker, podman and the Apple container CLI through "<name> exec -it",
-// kubernetes through the client-go exec, cloudrun-sandbox through the
-// sandbox binary; not cloudrun (no exec primitive on the PTY path) and not
-// substrate (opts out of attach).
+// must agree, and must follow what the PTY attach path is known to serve:
+// docker and podman through "<name> exec -it", kubernetes through the
+// client-go exec, cloudrun-sandbox through the sandbox binary. Every other
+// runtime reports false: cloudrun (no exec primitive on the PTY path),
+// substrate (opts out of attach), the Apple container runtime (not on the
+// allow-list), a runtime this broker does not know, and no runtime at all.
 func TestWebPTYCapability_PerRuntime(t *testing.T) {
 	tests := []struct {
 		name string
@@ -42,14 +44,18 @@ func TestWebPTYCapability_PerRuntime(t *testing.T) {
 	}{
 		{"docker", runtime.NewDockerRuntime(), true},
 		{"podman", &runtime.PodmanRuntime{}, true},
-		{"container", &runtime.AppleContainerRuntime{}, true},
+		{"container", &runtime.AppleContainerRuntime{}, false},
 		{"kubernetes", &runtime.KubernetesRuntime{}, true},
 		{"cloudrun-sandbox", &runtime.CloudRunSandboxRuntime{}, true},
 		{"cloudrun", &runtime.CloudRunRuntime{}, false},
 		{"substrate", &runtime.SubstrateRuntime{}, false},
+		// A runtime the allow-list does not know defaults to false, even
+		// one whose name matches a supported runtime.
+		{"some-future-runtime", &runtime.MockRuntime{NameFunc: func() string { return "some-future-runtime" }}, false},
+		{"docker", &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, false},
 	}
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/%T", tc.name, tc.rt), func(t *testing.T) {
 			if got := tc.rt.Name(); got != tc.name {
 				t.Fatalf("precondition: runtime Name() = %q, want %q", got, tc.name)
 			}
@@ -79,6 +85,17 @@ func TestWebPTYCapability_PerRuntime(t *testing.T) {
 				t.Errorf("/api/v1/info capabilities.webPty = %v, want %v for %s", resp.Capabilities.WebPTY, tc.want, tc.name)
 			}
 		})
+	}
+}
+
+// TestWebPTYCapability_NilRuntime pins that a broker with no runtime yet
+// reports no web terminal, in both the static capabilities and their names.
+func TestWebPTYCapability_NilRuntime(t *testing.T) {
+	if StaticCapabilities(nil).WebPTY {
+		t.Error("StaticCapabilities(nil).WebPTY = true, want false")
+	}
+	if slices.Contains(StaticCapabilityNames(nil), "webPty") {
+		t.Errorf("StaticCapabilityNames(nil) = %v, want no webPty", StaticCapabilityNames(nil))
 	}
 }
 

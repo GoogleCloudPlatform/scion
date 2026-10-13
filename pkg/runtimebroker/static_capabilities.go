@@ -51,25 +51,30 @@ func StaticCapabilities(rt scionrt.Runtime) *hubclient.BrokerCapabilities {
 // source for the WebPTY capability, used by both StaticCapabilities and the
 // info handler.
 //
-// The PTY path picks its exec primitive from the runtime name: the client-go
-// SPDY exec for kubernetes, the sandbox binary for cloudrun-sandbox, and
-// "<name> exec -it" for every other runtime (docker, podman, the Apple
-// container CLI). So the answer is:
-//   - false when rt opts out of interactive attach (HasAttachSupport), as
-//     substrate does: both PTY handlers refuse it before the upgrade;
-//   - false for cloudrun, whose instances are reached through the Cloud Run
-//     exec connector rather than a local CLI, so the PTY path has no exec
-//     primitive for it;
-//   - true otherwise. A nil rt follows HasAttachSupport's default
-//     (missing capability means supported), matching Attach.
+// It is an allow-list of the runtime implementations the PTY path is known
+// to serve, so a runtime added later reports false until it is added here:
+//   - docker and podman: "<name> exec -it ... tmux attach-session" under a
+//     local PTY (startDockerExec);
+//   - kubernetes: the client-go SPDY exec bridged to the WebSocket
+//     (runK8sExec);
+//   - cloudrun-sandbox: the sandbox binary's exec under a local PTY
+//     (startCloudRunSandboxExec).
+//
+// Everything else reports false, including a nil rt, cloudrun (its
+// instances are reached through the Cloud Run exec connector, which the PTY
+// path does not use) and substrate (no attach primitive: the direct-connect
+// handler refuses it with a 501 before the WebSocket upgrade, and the
+// control-channel handler closes the stream before starting an exec
+// session). The type check is on the runtime implementation itself, so
+// profile aliases (k8s, remote, local) resolve to the same answer as the
+// runtime they construct.
 func webPTYSupported(rt scionrt.Runtime) bool {
-	if !scionrt.HasAttachSupport(rt) {
+	switch rt.(type) {
+	case *scionrt.DockerRuntime, *scionrt.PodmanRuntime, *scionrt.KubernetesRuntime, *scionrt.CloudRunSandboxRuntime:
+		return scionrt.HasAttachSupport(rt)
+	default:
 		return false
 	}
-	if rt != nil && rt.Name() == "cloudrun" {
-		return false
-	}
-	return true
 }
 
 // StaticCapabilityNames is StaticCapabilities as the capability names the
