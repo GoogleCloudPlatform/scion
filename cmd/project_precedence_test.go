@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -446,6 +447,12 @@ func TestLoadHubClient_ProjectFlagPrecedence(t *testing.T) {
 			origJSON, origProject := hubOutputJSON, projectMessagingProject
 			t.Cleanup(func() { hubOutputJSON, projectMessagingProject = origJSON, origProject })
 			hubOutputJSON, projectMessagingProject = true, ""
+
+			// RunE is called directly, so give the command the context
+			// cobra's Execute would set.
+			origCtx := projectMessagingGetCmd.Context()
+			t.Cleanup(func() { projectMessagingGetCmd.SetContext(origCtx) })
+			projectMessagingGetCmd.SetContext(context.Background())
 
 			require.NoError(t, projectMessagingGetCmd.RunE(projectMessagingGetCmd, nil))
 			mu.Lock()
