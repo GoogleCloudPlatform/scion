@@ -38,9 +38,11 @@ var detectionCases = []struct {
 // the "service" and "instance" cases.
 func TestIsService(t *testing.T) {
 	for _, tc := range detectionCases {
-		if got := IsServiceFrom(envOf(tc.env)); got != tc.wantService {
-			t.Errorf("%s: IsServiceFrom = %v, want %v", tc.name, got, tc.wantService)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsServiceFrom(envOf(tc.env)); got != tc.wantService {
+				t.Errorf("IsServiceFrom = %v, want %v", got, tc.wantService)
+			}
+		})
 	}
 	t.Setenv(ServiceEnv, "scion-hub")
 	if !IsService() {
@@ -56,9 +58,11 @@ func TestIsService(t *testing.T) {
 // the "neither set" and "instance" cases.
 func TestIsInstance(t *testing.T) {
 	for _, tc := range detectionCases {
-		if got := IsInstanceFrom(envOf(tc.env)); got != tc.wantInstance {
-			t.Errorf("%s: IsInstanceFrom = %v, want %v", tc.name, got, tc.wantInstance)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsInstanceFrom(envOf(tc.env)); got != tc.wantInstance {
+				t.Errorf("IsInstanceFrom = %v, want %v", got, tc.wantInstance)
+			}
+		})
 	}
 	t.Setenv(InstanceEnv, "scion-broker")
 	if !IsInstance() {
@@ -74,9 +78,11 @@ func TestIsInstance(t *testing.T) {
 // "both set" cases.
 func TestServiceName(t *testing.T) {
 	for _, tc := range detectionCases {
-		if got := ServiceNameFrom(envOf(tc.env)); got != tc.wantName {
-			t.Errorf("%s: ServiceNameFrom = %q, want %q", tc.name, got, tc.wantName)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ServiceNameFrom(envOf(tc.env)); got != tc.wantName {
+				t.Errorf("ServiceNameFrom = %q, want %q", got, tc.wantName)
+			}
+		})
 	}
 	t.Setenv(ServiceEnv, "scion-hub")
 	if got := ServiceName(); got != "scion-hub" {
