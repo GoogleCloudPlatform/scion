@@ -251,7 +251,7 @@ func readHostStateBytes(d *hostStateDir) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("host state file %s: %w", path, err)
