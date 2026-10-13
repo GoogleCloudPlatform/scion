@@ -24,7 +24,7 @@ scion server start
 ```
 
 This command performs several actions simultaneously:
-1.  **Starts the Hub**: Binds a local API and Web server (defaulting to port 8080), and, on the first start, adds itself to your list of hubs as `local` (`Registered hub 'local' (http://127.0.0.1:8080); rename with 'scion hub rename'.`), so CLI commands find it.
+1.  **Starts the Hub**: Binds a local API and Web server (defaulting to port 8080), and, on the first start, adds itself to your list of hubs as `local` (`Registered hub 'local' (http://127.0.0.1:8080); rename with 'scion hub rename'.`) and makes it the current hub, unless another hub is already current or your global settings name another hub in `hub.endpoint`.
 2.  **Starts a Broker**: Binds a local broker interface to execute containers.
 3.  **Links Them**: Automatically registers the local broker with the local hub.
 

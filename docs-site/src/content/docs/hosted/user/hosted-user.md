@@ -9,16 +9,16 @@ description: Connecting your CLI to a Scion Hub to dispatch agents, share projec
 
 ## Connecting to a Hub
 
-To connect your local CLI to a team Hub, add it to your list of hubs and select it:
-
 ### Configuration
+
+To connect your local CLI to a team Hub, add it to your list of hubs and select it:
 
 ```bash
 scion hub add team https://scion.yourcompany.com
 scion use --hub team
 ```
 
-There is no separate switch to turn the Hub on. An existing `hub.endpoint` setting appears automatically as a named hub.
+There is no separate switch to turn the Hub on. An existing `hub.endpoint` in your global settings is added once to the hub list as a named hub. Inside a project directory, the directory's hub link and any `hub.endpoint` in its settings or your global settings still take precedence over the selected hub; pass `--hub team` there, or remove the old `hub.endpoint`.
 
 **Note:** In workstation mode, `scion server start` adds the local hub (`http://127.0.0.1:8080`) to the list as `local`.
 
