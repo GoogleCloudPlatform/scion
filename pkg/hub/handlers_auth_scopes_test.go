@@ -146,12 +146,10 @@ func TestHandleAuthScopes_NonAdmin(t *testing.T) {
 	}
 }
 
-// TestHandleAuthScopes_NonUserIdentity pins the parameterless catalog's
-// backward compatibility: any authenticated identity, not only a user, gets
-// it -- exactly as before this endpoint gained per-project eligibility.
-// Eligibility itself is a per-user computation (CanMintSelector requires a
-// local user principal), so a non-user identity requesting it gets 401
-// instead of a partial or crafted response.
+// TestHandleAuthScopes_NonUserIdentity pins that the selector catalog and
+// the per-project eligibility admit only the credentials the
+// user.self.scopes catalog operation declares: an agent identity, whose
+// credential is an agent JWT, is refused both.
 func TestHandleAuthScopes_NonUserIdentity(t *testing.T) {
 	srv, _ := testServer(t)
 	handler := srv.guarded("/api/v1/auth/scopes", srv.handleAuthScopes)
@@ -160,27 +158,24 @@ func TestHandleAuthScopes_NonUserIdentity(t *testing.T) {
 		ProjectID: tid("authscopes-agent-identity-project"),
 	}}
 
-	t.Run("catalog with no params succeeds for a non-user identity", func(t *testing.T) {
+	t.Run("catalog with no params refuses an agent identity", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/scopes", nil)
 		req = req.WithContext(contextWithIdentity(req.Context(), agent))
 
 		rr := httptest.NewRecorder()
 		handler(rr, req)
 
-		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-		var resp AuthScopesResponse
-		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-		assert.NotEmpty(t, resp.Scopes)
+		assert.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
 	})
 
-	t.Run("eligibility with projectId requires a user identity", func(t *testing.T) {
+	t.Run("eligibility with projectId refuses an agent identity", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/scopes?projectId="+tid("authscopes-agent-identity-project"), nil)
 		req = req.WithContext(contextWithIdentity(req.Context(), agent))
 
 		rr := httptest.NewRecorder()
 		handler(rr, req)
 
-		assert.Equal(t, http.StatusUnauthorized, rr.Code, rr.Body.String())
+		assert.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
 	})
 }
 

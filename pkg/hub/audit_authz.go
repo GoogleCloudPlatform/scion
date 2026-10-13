@@ -336,8 +336,9 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Only the credentials the user.self.explain catalog operation
-	// declares are admitted, for self and cross-principal explains alike.
-	// A user access token explains through its own ceiling and boundary.
+	// declares are admitted here; a cross-principal explain is checked
+	// again against hub.audit.explain below. A user access token explains
+	// through its own ceiling and boundary.
 	token, credentialOK := selfReadCredential(ctx, identity, "user.self.explain")
 	if !credentialOK {
 		refuseSelfReadCredential(w, r, identity, "hub")
@@ -373,6 +374,15 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 			Permission: "hub.audit.read",
 		})
 		isSuperAdmin = decision.Allowed
+	}
+
+	// An explain for another principal admits only the credentials the
+	// hub.audit.explain catalog operation declares.
+	if isCrossPrincipal {
+		if _, ok := selfReadCredential(ctx, identity, "hub.audit.explain"); !ok {
+			refuseSelfReadCredential(w, r, identity, "hub")
+			return
+		}
 	}
 
 	// Non-admin cannot explain for a different principal.

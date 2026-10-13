@@ -637,11 +637,12 @@ func TestSelfIdentityReadsToken_AnyTokenReads(t *testing.T) {
 }
 
 // TestSelfReads_UnknownCredentialKindRefused pins the credential rule of
-// admin-status, the caller's groups and explain: an interactive session is
-// admitted; an unknown kind, a user access token kind without a token
-// identity, a broker acting for the user, a hub delivery credential, a
-// workload delegation and a federation credential are refused; an agent
-// JWT is refused on admin-status and the caller's groups.
+// the caller's own profile, the selector catalog, admin-status, the
+// caller's groups and explain: an interactive session is admitted; an
+// unknown kind, a user access token kind without a token identity, a
+// broker acting for the user, a hub delivery credential, a workload
+// delegation and a federation credential are refused; an agent JWT is
+// refused on the selector catalog, admin-status and the caller's groups.
 func TestSelfReads_UnknownCredentialKindRefused(t *testing.T) {
 	srv, s := testServer(t)
 	user := seedRoleUser(t, s, tid("ig-kind-user"), "", true)
@@ -654,6 +655,8 @@ func TestSelfReads_UnknownCredentialKindRefused(t *testing.T) {
 		body     string
 		agentJWT bool // whether the row admits an agent JWT
 	}{
+		{"profile", srv.handleAuthMe, http.MethodGet, "/api/v1/auth/me", "", true},
+		{"scopes", srv.handleAuthScopes, http.MethodGet, "/api/v1/auth/scopes", "", false},
 		{"admin-status", srv.handleAuthAdminStatus, http.MethodGet, "/api/v1/auth/admin-status", "", false},
 		{"my groups", srv.handleMyGroups, http.MethodGet, "/api/v1/users/me/groups", "", false},
 		{"explain", srv.handleAuthzExplain, http.MethodPost, "/api/v1/authz/explain", explainBody, true},
@@ -686,7 +689,8 @@ func TestSelfReads_UnknownCredentialKindRefused(t *testing.T) {
 // credential rule admits exactly the request credential kinds the catalog
 // operation declares: a session JWT names an interactive session and a
 // dev credential, a scoped token names a user access token, and an agent
-// JWT is declared only on the caller's own explain.
+// JWT is declared only on the caller's own profile and explain. An explain
+// for another principal admits no agent JWT.
 func TestSelfReadCredential_FollowsCatalogCredentials(t *testing.T) {
 	kinds := []CredentialKind{
 		CredentialKindInteractive, CredentialKindDev, CredentialKindUAT, CredentialKindAgentJWT,
@@ -697,6 +701,9 @@ func TestSelfReadCredential_FollowsCatalogCredentials(t *testing.T) {
 		"user.self.adminstatus": {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT},
 		"user.self.groups":      {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT},
 		"user.self.explain":     {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT, CredentialKindAgentJWT},
+		"user.self.profile":     {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT, CredentialKindAgentJWT},
+		"user.self.scopes":      {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT},
+		"hub.audit.explain":     {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT},
 	}
 	for op, admitted := range want {
 		for _, kind := range kinds {
@@ -715,7 +722,8 @@ func TestSelfReadCredential_FollowsCatalogCredentials(t *testing.T) {
 // TestGovernanceReadsToken_ProjectBoundaryRefused pins at request level
 // that a project-boundary credential carrying role:read,
 // role_binding:read and access_constraint:read is refused on every role,
-// permission registry, role binding and access constraint read: their
+// permission registry, role binding and access constraint read, while a
+// hub-boundary credential with the same selectors reads each one: their
 // targets are hub-level records.
 func TestGovernanceReadsToken_ProjectBoundaryRefused(t *testing.T) {
 	m := newBearerMatrixFixture(t)
@@ -723,6 +731,8 @@ func TestGovernanceReadsToken_ProjectBoundaryRefused(t *testing.T) {
 	selectors := []string{"role:read", "role_binding:read", "access_constraint:read"}
 	credential := NewScopedUserIdentityWithBoundaryAndDecoration(adminUser, projectBoundary(m.ids.project),
 		selectors, tid("ig-gov-project-cred"), bearerCeiling(t, selectors...), nil)
+	hubCredential := NewScopedUserIdentityWithBoundaryAndDecoration(adminUser, hubBoundary(),
+		selectors, tid("ig-gov-hub-cred"), bearerCeiling(t, selectors...), nil)
 	for _, path := range []string{
 		"/api/v1/admin/roles",
 		"/api/v1/admin/roles/" + m.ids.roleDefinition,
@@ -737,5 +747,25 @@ func TestGovernanceReadsToken_ProjectBoundaryRefused(t *testing.T) {
 	} {
 		rec := doRequestAsIdentity(t, m.srv, credential, http.MethodGet, path, nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "GET %s: %s", path, rec.Body.String())
+		rec = doRequestAsIdentity(t, m.srv, hubCredential, http.MethodGet, path, nil)
+		assert.Equal(t, http.StatusOK, rec.Code, "hub boundary GET %s: %s", path, rec.Body.String())
 	}
+}
+
+// TestCrossPrincipalExplain_AgentJWTRefusedAtCredentialCheck pins that an
+// explain for another principal admits only the credentials the
+// hub.audit.explain catalog operation declares: an agent JWT is refused at
+// the credential check, before the hub.audit.read decision.
+func TestCrossPrincipalExplain_AgentJWTRefusedAtCredentialCheck(t *testing.T) {
+	srv, s := testServer(t)
+	user := seedRoleUser(t, s, tid("ig-xexplain-user"), "", true)
+	other := seedRoleUser(t, s, tid("ig-xexplain-other"), "", true)
+	body := `{"resource":{"type":"user","id":"` + other.ID() + `"},"action":"read","principalId":"` + other.ID() + `"}`
+	rec := igRequestWithCredential(srv.handleAuthzExplain, user, CredentialKindAgentJWT, http.MethodPost, "/api/v1/authz/explain", body)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "without hub.audit.read", "refused at the credential check, not the hub.audit.read decision")
+
+	self := `{"resource":{"type":"user","id":"` + user.ID() + `"},"action":"read"}`
+	rec = igRequestWithCredential(srv.handleAuthzExplain, user, CredentialKindAgentJWT, http.MethodPost, "/api/v1/authz/explain", self)
+	assert.NotEqual(t, http.StatusForbidden, rec.Code, "the caller's own explain admits an agent JWT: %s", rec.Body.String())
 }

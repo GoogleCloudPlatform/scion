@@ -731,11 +731,22 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, AuthLogoutResponse{Success: true})
 }
 
-// handleAuthMe handles GET /api/v1/auth/me. Any token reads its holder's
-// own profile.
+// handleAuthMe handles GET /api/v1/auth/me. Only the credentials the
+// user.self.profile catalog operation declares are admitted (an
+// interactive session, a dev credential, a user access token and an agent
+// JWT); any token reads its holder's own profile.
 func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	if _, ok := selfReadCredential(r.Context(), identity, "user.self.profile"); !ok {
+		refuseSelfReadCredential(w, r, identity, "user")
 		return
 	}
 	// Check for agent identity first — agent tokens don't implement UserIdentity
@@ -2232,6 +2243,18 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
+	// Only the credentials the user.self.scopes catalog operation declares
+	// are admitted: an interactive session, a dev credential and a user
+	// access token.
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	if _, ok := selfReadCredential(r.Context(), identity, "user.self.scopes"); !ok {
+		refuseSelfReadCredential(w, r, identity, "user")
+		return
+	}
 
 	boundary, handled := parseAuthScopesBoundary(w, r)
 	if handled {
@@ -2243,9 +2266,7 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 	var eligByScope map[string]SelectorEligibility
 	if boundary != nil {
 		// Eligibility is a per-user computation (CanMintSelector requires a
-		// local user principal); the parameterless catalog below has no
-		// such requirement and stays available to any authenticated
-		// identity, exactly as before this endpoint gained eligibility.
+		// local user principal).
 		user := GetUserIdentityFromContext(r.Context())
 		if user == nil {
 			Unauthorized(w)
