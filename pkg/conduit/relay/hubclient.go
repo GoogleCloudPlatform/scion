@@ -223,6 +223,9 @@ var forwardedCredentialHeaders = []string{
 	"X-Scion-Agent-Token",
 	"X-Scion-Run-Id",
 	"X-Api-Key",
+	// The IAP assertion is a signed JWT the hub verifies (signature,
+	// issuer, audience, expiry); it is the one X-Goog-* header that crosses.
+	"X-Goog-Iap-Jwt-Assertion",
 	"X-Scion-Broker-Id",
 	"X-Scion-Timestamp",
 	"X-Scion-Nonce",
@@ -239,9 +242,11 @@ var brokerSignedHeaders = map[string]bool{"Content-Type": true}
 
 // neverForwardedHeader reports a header that never crosses to the hub
 // whatever list names it: proxy identity and addressing headers, cookies
-// and every X-Goog-* header.
+// and every X-Goog-* header but the signed IAP assertion.
 func neverForwardedHeader(k string) bool {
 	switch {
+	case k == "X-Goog-Iap-Jwt-Assertion":
+		return false
 	case strings.HasPrefix(k, "X-Forwarded-"), strings.HasPrefix(k, "X-Goog-"):
 		return true
 	}

@@ -110,10 +110,10 @@ func TestRelayAdmit_ForwardedHeadersDefaultDeny(t *testing.T) {
 
 	spoofed := map[string]string{
 		"X-Forwarded-User-Id": cf.owner.ID(), "X-Forwarded-User-Email": "owner@conduit.test", "X-Forwarded-For": "10.0.0.1",
-		"Forwarded": "for=10.0.0.1", "X-Real-Ip": "10.0.0.1", "Cookie": "session=x", "X-Goog-Iap-Jwt-Assertion": "x.y.z",
+		"Forwarded": "for=10.0.0.1", "X-Real-Ip": "10.0.0.1", "Cookie": "session=x", "X-Goog-Authenticated-User-Email": "accounts.google.com:owner@conduit.test",
 		"Content-Type": "application/json",
 	}
-	signedList := "X-Forwarded-User-Id;X-Forwarded-User-Email;X-Forwarded-For;Forwarded;X-Real-Ip;Cookie;X-Goog-Iap-Jwt-Assertion;Content-Type"
+	signedList := "X-Forwarded-User-Id;X-Forwarded-User-Email;X-Forwarded-For;Forwarded;X-Real-Ip;Cookie;X-Goog-Authenticated-User-Email;Content-Type"
 	for _, broker := range []bool{false, true} {
 		h := http.Header{}
 		for k, v := range spoofed {

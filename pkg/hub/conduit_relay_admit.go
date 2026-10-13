@@ -152,6 +152,12 @@ func (s *Server) writeRelayAdmission(w http.ResponseWriter, r *http.Request, a c
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "This credential cannot open sessions held by a separate relay", nil)
 		return
 	}
+	if c.AuthType == AuthTypeProxy && !s.relayIAPPinned() {
+		// A relay-forwarded proxy credential is accepted only as a Google
+		// IAP assertion verified against Google's issuer and keys.
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "This credential cannot open sessions held by a separate relay", nil)
+		return
+	}
 	switch p.Kind {
 	case registry.PrincipalAgent:
 		// Every later operation re-checks this agent token's status and
@@ -205,8 +211,27 @@ func (s *Server) writeRelayAdmission(w http.ResponseWriter, r *http.Request, a c
 }
 
 // relayUserAuthTypes are the user credential kinds a separate relay's
-// session may be admitted with.
-var relayUserAuthTypes = map[string]bool{AuthTypeJWT: true, AuthTypeUAT: true, AuthTypeDevToken: true}
+// session may be admitted with. Proxy is only ever an IAP assertion here:
+// the forwarded-header allowlist keeps the trusted-proxy identity headers
+// out, and relayIAPPinned requires the IAP authenticator. Its session's
+// credential expiry is fixed at admission (proxy_session_max_age) and no
+// re-check or re-issue moves it.
+var relayUserAuthTypes = map[string]bool{AuthTypeJWT: true, AuthTypeUAT: true, AuthTypeDevToken: true, AuthTypeProxy: true}
+
+// conduitRelayIAPJWKSURL is the IAP key endpoint a relay-forwarded IAP
+// assertion must be verified against (tests point it at a local server).
+var conduitRelayIAPJWKSURL = DefaultIAPJWKSURL
+
+// relayIAPPinned reports whether the hub's proxy authenticator is the IAP
+// one, with a configured audience and Google's IAP issuer and keys: the
+// only proxy credential a relay-forwarded handshake is admitted with. The
+// generic JWT proxy authenticator, a custom issuer or key endpoint, and the
+// trusted-proxy header path are refused.
+func (s *Server) relayIAPPinned() bool {
+	iap, ok := s.authConfig.ProxyAuthenticator.(*IAPAuthenticator)
+	return ok && iap != nil && iap.Audience != "" &&
+		iap.resolveIssuer() == DefaultIAPIssuer && iap.resolveJWKSURL() == conduitRelayIAPJWKSURL
+}
 
 // relayServesHost reports whether host (as the dialer sent it) is the host
 // of the relay's registered public endpoint. A relay without one serves no

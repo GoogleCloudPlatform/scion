@@ -200,7 +200,7 @@ Until the production gates of the separate relay are met, it runs on development
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `hub_internal_url` | string | | Base URL (`http(s)://host:port`) of the hub internal API the relay calls for admission, RPCs and re-checks. Any hub replica serves it, so it may be a load-balanced internal address; it must be reachable only inside the cluster or VPC. Layer 0; restart required. Env: `SCION_SERVER_RELAY_HUBINTERNALURL` (or `SCION_SERVER_RELAY_HUB_INTERNAL_URL`). |
-| `public_url` | string | | The relay's own public URL, recorded as its `relay_instances.public_endpoint`. Layer 0; restart required. Env: `SCION_SERVER_RELAY_PUBLICURL` (or `SCION_SERVER_RELAY_PUBLIC_URL`). |
+| `public_url` | string | | The relay's own public URL, recorded as its `relay_instances.public_endpoint`. A user authenticated by Google IAP is admitted through a relay only with the hub's own IAP configuration (`auth.proxy.iap` with its audience, Google's issuer and key endpoint), so clients must reach the hub's IAP backend; trusted-proxy identity headers are never accepted from a relay. Layer 0; restart required. Env: `SCION_SERVER_RELAY_PUBLICURL` (or `SCION_SERVER_RELAY_PUBLIC_URL`). |
 
 ### Broker Settings (`server.broker`)
 
