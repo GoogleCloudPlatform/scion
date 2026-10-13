@@ -124,10 +124,13 @@ var SecurityMutationSymbols = map[string]string{
 	"RevokeAgentCredentialsByAgent": "revoke-authority",
 
 	// Agent delegation (.design/agent-delegation.md §18.2): grant issuance,
-	// delegated credential exchange, and grant revocation.
+	// delegated credential exchange, grant and credential revocation, and
+	// the purge of expired credential rows.
 	"CreateAgentDelegationGrant":     "issue-credential",
 	"CreateAgentDelegatedCredential": "mint-credential",
 	"RevokeAgentDelegationGrant":     "revoke-authority",
+	"RevokeAgentDelegatedCredential": "revoke-authority",
+	"PurgeAgentDelegatedCredentials": "delete-resource",
 
 	// Secret operations
 	"CreateSecret":               "create-resource",
@@ -193,6 +196,7 @@ var Catalog = concatOperations(
 	materialOperations,
 	testIdentityOperations,
 	agentDelegationOperations,
+	agentDelegationManagementOperations,
 )
 
 // EntryPointExemptions documents routes and entry points that do not map to
@@ -324,13 +328,18 @@ var EntryPointExemptions = []EntryPointExemption{
 // Organized by source file for reviewability.
 var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
-	// Agent delegation (.design/agent-delegation.md): issuance, exchange,
-	// and the hub's own revocation of a grant whose issuer is a reserved
-	// platform identity.
+	// Agent delegation (.design/agent-delegation.md): issuance, exchange
+	// (with the supersede of credentials past the per-grant cap), grant and
+	// credential revocation, the hub's own revocation of a grant whose
+	// issuer is a reserved platform identity, and the credential purge job.
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_agent_delegation.go", Function: "handleCreateAgentDelegation", Symbol: "CreateAgentDelegationGrant", OperationID: "agent.delegation.create"},
 	{File: "pkg/hub/handlers_agent_delegation.go", Function: "handleExchangeAgentDelegation", Symbol: "CreateAgentDelegatedCredential", OperationID: "agent.delegation.exchange"},
 	{File: "pkg/hub/agent_delegation.go", Function: "revokeAgentDelegationGrantBySystem", Symbol: "RevokeAgentDelegationGrant", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Hub-initiated revocation of a grant whose issuer is a reserved platform identity, with its mutation audit in the same transaction; it only narrows access", Scope: "pkg/hub/agent_delegation.go"}},
+	{File: "pkg/hub/handlers_agent_delegation.go", Function: "handleExchangeAgentDelegation", Symbol: "RevokeAgentDelegatedCredential", OperationID: "agent.delegation.exchange"},
+	{File: "pkg/hub/handlers_agent_delegation_manage.go", Function: "handleRevokeAgentDelegation", Symbol: "RevokeAgentDelegationGrant", OperationID: "agent.delegation.revoke"},
+	{File: "pkg/hub/handlers_agent_delegation_manage.go", Function: "handleRevokeAgentDelegatedCredential", Symbol: "RevokeAgentDelegatedCredential", OperationID: "agent.delegation.credential.revoke"},
+	{File: "pkg/hub/handlers_agent_delegation_manage.go", Function: "agentDelegatedCredentialPurgeHandler", Symbol: "PurgeAgentDelegatedCredentials", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Scheduled deletion of delegated credential rows whose expiry is more than the retention period in the past; such a credential is already refused at use, so the deletion changes no authorization outcome", Scope: "pkg/hub/handlers_agent_delegation_manage.go"}},
 	// -----------------------------------------------------------------------
 	// pkg/hub/project_membership_service.go — RS1 bounded domain service
 	// Mutations moved from handlers to the service in RS1. Handlers now

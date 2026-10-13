@@ -478,6 +478,12 @@ type adtFaults struct {
 	audit  error
 	revoke error
 	grant  error
+	// beforeGrantLock runs inside the transaction, on the transaction's
+	// store, just before LockAgentDelegationGrant; afterGrantLock may
+	// change the row the lock returns. Together they end a grant between
+	// a handler's checks and its write.
+	beforeGrantLock func(ctx context.Context, tx store.Store, id string) error
+	afterGrantLock  func(g *store.AgentDelegationGrant)
 }
 
 // adtFaultStore is the switch-gated store wrapper the agent delegation
@@ -553,6 +559,20 @@ func (t *adtFaultTx) CreateAgentDelegatedCredential(ctx context.Context, c *stor
 	t.parent.credentialHashes = append(t.parent.credentialHashes, c.KeyHash)
 	t.parent.mu.Unlock()
 	return err
+}
+
+func (t *adtFaultTx) LockAgentDelegationGrant(ctx context.Context, id string) (*store.AgentDelegationGrant, error) {
+	f := t.parent.active()
+	if f != nil && f.beforeGrantLock != nil {
+		if err := f.beforeGrantLock(ctx, t.Store, id); err != nil {
+			return nil, err
+		}
+	}
+	g, err := t.Store.LockAgentDelegationGrant(ctx, id)
+	if err == nil && f != nil && f.afterGrantLock != nil {
+		f.afterGrantLock(g)
+	}
+	return g, err
 }
 
 func (t *adtFaultTx) RevokeAgentDelegationGrant(ctx context.Context, id, revokedBy, reason, auditID string, at time.Time) (bool, error) {

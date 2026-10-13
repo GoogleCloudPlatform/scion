@@ -776,7 +776,9 @@ export interface AgentEditability {
 /**
  * The agent PATCH response's disposition: the wire keys whose value the
  * request changed, grouped by when each edit takes effect. An unchanged
- * echo is in no list.
+ * echo is in no list, except gcp_identity, which is listed under applied
+ * whenever the request records a service-account assignment, the current
+ * account included.
  */
 export interface AgentUpdateDisposition {
   /** Keys that take effect at the next container creation (or at once, for metadata). */

@@ -224,13 +224,14 @@ harness_configs:
   test-harness:
     harness: test-harness
 `
-	// Template sets memory only.
+	// The template tier sets memory only. A template's own resources key is
+	// an environment key that agents ignore (ptone/scion#4524), so the value
+	// comes from the inline (request) config, merged directly above the
+	// template chain in the same tier.
 	const templateJSON = `{
-		"default_harness_config": "test-harness",
-		"resources": {
-			"limits": {"memory": "8Gi"}
-		}
+		"default_harness_config": "test-harness"
 	}`
+	inline := &api.ScionConfig{Resources: &api.ResourceSpec{Limits: api.ResourceList{Memory: "8Gi"}}}
 
 	projectScionDir := hubDefaultsFixture(t, settingsYAML, templateJSON)
 
@@ -248,7 +249,7 @@ harness_configs:
 	})
 
 	_, _, cfg, err := ProvisionAgent(ctx, "res-agent", "limits-tpl", "", "test-harness",
-		projectScionDir, "", "", "", "")
+		projectScionDir, "", "", "", "", inline)
 	if err != nil {
 		t.Fatalf("ProvisionAgent: %v", err)
 	}
@@ -270,7 +271,7 @@ harness_configs:
 	}
 	// Memory is the (template, hub) rank in the other direction.
 	if cfg.Resources.Limits.Memory != "8Gi" {
-		t.Errorf("Limits.Memory: want 8Gi from the template, got %q", cfg.Resources.Limits.Memory)
+		t.Errorf("Limits.Memory: want 8Gi from the template tier (inline), got %q", cfg.Resources.Limits.Memory)
 	}
 }
 

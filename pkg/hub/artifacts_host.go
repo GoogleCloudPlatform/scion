@@ -130,17 +130,30 @@ func (h *artifactHost) Permits(ctx context.Context, scopeRef, permission string)
 // still work for an agent whose chain allows artifact reads in its own
 // project.
 func (h *artifactHost) agentChainAllows(ctx context.Context, agent *agentIdentityWrapper, perm permissions.Permission) bool {
+	ok, err := h.agentChainAllowsErr(ctx, agent, perm)
+	return err == nil && ok
+}
+
+// agentChainAllowsErr is agentChainAllows with the chain walk's lookup
+// error returned instead of taken for a refusal. It is the one place the
+// artifact chain walk is made: agentChainAllows (a caller's credential)
+// and the send-time recipient check (recipientSubject.Permits, which must
+// stay silent on a failure) both use it.
+func (h *artifactHost) agentChainAllowsErr(ctx context.Context, agent *agentIdentityWrapper, perm permissions.Permission) (bool, error) {
 	if h.server == nil || h.server.authzService == nil {
-		return false
+		return false, nil
 	}
 	project := agent.ProjectID()
 	if project == "" || agent.ID() == "" {
-		return false
+		return false, nil
 	}
 	resource := Resource{Type: permissions.ResourceArtifact, ParentType: permissions.ResourceProject, ParentID: project}
 	allowed, _, err := h.server.authzService.walkDelegationChainWithCause(ctx, resource, Action(perm.Action), perm.ID,
 		agent.ID(), AncestryIsHubAttested(agent), store.RoleScopeProject, project, nil, nil)
-	return err == nil && allowed
+	if err != nil {
+		return false, err
+	}
+	return allowed, nil
 }
 
 // Authorize reports whether the caller may exercise permission on artifacts
