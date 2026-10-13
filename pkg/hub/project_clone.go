@@ -557,10 +557,11 @@ func (s *Server) cloneProjectHarnessConfigs(ctx context.Context, srcProjectID st
 			}
 			createErr = s.commitHarnessConfigFiles(ctx, newHC, srcHC.Files, harnessConfigCommitOpts{create: true})
 		} else {
-			// No stored content to derive from: keep the manifest as the
-			// source had it, with no derived config.
-			newHC.Files = srcHC.Files
-			newHC.ContentHash = srcHC.ContentHash
+			// No stored content to copy and derive from: create the row
+			// without files, pending, as a harness-config clone does. Files
+			// and their hash are written only by the commit path, and a
+			// manifest copied here would list objects the clone never got.
+			newHC.Status = store.HarnessConfigStatusPending
 			createErr = s.store.CreateHarnessConfig(ctx, newHC)
 		}
 

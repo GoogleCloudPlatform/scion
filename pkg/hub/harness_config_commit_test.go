@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -549,32 +550,53 @@ func TestHarnessConfigClone_ReDerivesFromCopiedFiles(t *testing.T) {
 	assertDerivedFrom(t, clone, deriveFullYAML)
 }
 
-// Acceptance 7: project clone re-derives each harness-config.
+// Acceptance 7: project clone re-derives each harness-config. A source
+// without stored content gets an empty pending row: files and their hash are
+// written only by the commit path (ts4a-rev #1).
 func TestProjectCloneHarnessConfigs_ReDerivesFromCopiedFiles(t *testing.T) {
-	srv, s, stor := newCommitTestServer(t)
-	ctx := context.Background()
-	srcProject := api.NewUUID()
-	srcHC := &store.HarnessConfig{
-		ID: api.NewUUID(), Name: deriveHCName, Slug: deriveHCName, Harness: "claude",
-		Scope: store.HarnessConfigScopeProject, ScopeID: srcProject, Status: store.HarnessConfigStatusActive,
-		StoragePath: storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeProject, srcProject, deriveHCName),
-		Config:      &store.HarnessConfigData{Image: "stale/image:0"},
+	for _, tc := range []struct {
+		name        string
+		storagePath bool
+	}{
+		{"stored content", true},
+		{"no storage path", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, stor := newCommitTestServer(t)
+			ctx := context.Background()
+			srcProject := api.NewUUID()
+			srcHC := &store.HarnessConfig{
+				ID: api.NewUUID(), Name: deriveHCName, Slug: deriveHCName, Harness: "claude",
+				Scope: store.HarnessConfigScopeProject, ScopeID: srcProject, Status: store.HarnessConfigStatusActive,
+				Config: &store.HarnessConfigData{Image: "stale/image:0"},
+			}
+			if tc.storagePath {
+				srcHC.StoragePath = storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeProject, srcProject, deriveHCName)
+				_, err := stor.Upload(ctx, srcHC.StoragePath+"/config.yaml", strings.NewReader(deriveFullYAML), storage.UploadOptions{})
+				require.NoError(t, err)
+			}
+			srcHC.Files = []store.TemplateFile{{Path: "config.yaml", Size: int64(len(deriveFullYAML)), Hash: commitFileHash(deriveFullYAML)}}
+			srcHC.ContentHash = computeContentHash(srcHC.Files)
+			require.NoError(t, s.CreateHarnessConfig(ctx, srcHC))
+
+			clone := &store.Project{ID: api.NewUUID()}
+			var rollback []func()
+			require.NoError(t, srv.cloneProjectHarnessConfigs(ctx, srcProject, clone, &rollback))
+
+			got, err := s.GetHarnessConfigBySlug(ctx, deriveHCName, store.HarnessConfigScopeProject, clone.ID)
+			require.NoError(t, err)
+			assert.NotEqual(t, srcHC.ID, got.ID)
+			if tc.storagePath {
+				assert.Equal(t, srcHC.ContentHash, got.ContentHash)
+				assertDerivedFrom(t, got, deriveFullYAML)
+				return
+			}
+			assert.Empty(t, got.Files, "no manifest is copied without its objects")
+			assert.Empty(t, got.ContentHash)
+			assert.Nil(t, got.Config, "Config is never copied")
+			assert.Equal(t, store.HarnessConfigStatusPending, got.Status)
+		})
 	}
-	_, err := stor.Upload(ctx, srcHC.StoragePath+"/config.yaml", strings.NewReader(deriveFullYAML), storage.UploadOptions{})
-	require.NoError(t, err)
-	srcHC.Files = []store.TemplateFile{{Path: "config.yaml", Size: int64(len(deriveFullYAML)), Hash: commitFileHash(deriveFullYAML)}}
-	srcHC.ContentHash = computeContentHash(srcHC.Files)
-	require.NoError(t, s.CreateHarnessConfig(ctx, srcHC))
-
-	clone := &store.Project{ID: api.NewUUID()}
-	var rollback []func()
-	require.NoError(t, srv.cloneProjectHarnessConfigs(ctx, srcProject, clone, &rollback))
-
-	got, err := s.GetHarnessConfigBySlug(ctx, deriveHCName, store.HarnessConfigScopeProject, clone.ID)
-	require.NoError(t, err)
-	assert.NotEqual(t, srcHC.ID, got.ID)
-	assert.Equal(t, srcHC.ContentHash, got.ContentHash)
-	assertDerivedFrom(t, got, deriveFullYAML)
 }
 
 // The hub's TZ read follows config.yaml: an agent created against a
@@ -624,4 +646,110 @@ func TestHarnessConfigBootstrap_RetriesOnceOnConflict(t *testing.T) {
 	got := globalHC(t, s, deriveHCName)
 	assert.Equal(t, computeContentHash(rec.Files), got.ContentHash)
 	assertDerivedFrom(t, got, deriveFullYAML)
+}
+
+// hcConflictStore fails UpdateHarnessConfigContent with a conflict while its
+// switch is armed, counting the attempts. onConflict, when set, runs on the
+// first armed attempt through the inner store (another commit landing).
+type hcConflictStore struct {
+	store.Store
+	fault      *storeFaultSwitch
+	mu         sync.Mutex
+	calls      int
+	onConflict func(ctx context.Context, inner store.Store, hc *store.HarnessConfig)
+}
+
+func (w *hcConflictStore) UpdateHarnessConfigContent(ctx context.Context, hc *store.HarnessConfig, expected store.HarnessConfigContentPrecondition) error {
+	if !w.fault.Active() {
+		return w.Store.UpdateHarnessConfigContent(ctx, hc, expected)
+	}
+	w.mu.Lock()
+	w.calls++
+	first := w.calls == 1
+	w.mu.Unlock()
+	if first && w.onConflict != nil {
+		w.onConflict(ctx, w.Store, hc)
+	}
+	return store.ErrHarnessConfigConflict
+}
+
+func (w *hcConflictStore) attempts() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.calls
+}
+
+func newCommitTestServerWithConflicts(t *testing.T) (*Server, store.Store, *hcConflictStore, *storeFaultSwitch) {
+	t.Helper()
+	srv, s := testServer(t)
+	w, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *hcConflictStore {
+		return &hcConflictStore{Store: inner, fault: f}
+	})
+	srv.SetStorage(&copyingMockStorage{mockStorage: newMockStorage("test-bucket")})
+	return srv, s, w, fault
+}
+
+// The hub-side retry bound (ts4a-rev #4): bootstrap retries a lost
+// compare-and-swap once; a second conflict is an error, the config is
+// skipped (startup does not fail), and there is no third attempt.
+func TestHarnessConfigBootstrap_SecondConflictSkipsWithoutThirdAttempt(t *testing.T) {
+	srv, s, w, fault := newCommitTestServerWithConflicts(t)
+	ctx := context.Background()
+	dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveBareYAML})
+	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
+	before := globalHC(t, s, deriveHCName)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, deriveHCName, "config.yaml"), []byte(deriveFullYAML), 0o644))
+	fault.Arm()
+	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir), "startup does not fail")
+	assert.Equal(t, 2, w.attempts(), "one retry, no third attempt")
+
+	after := globalHC(t, s, deriveHCName)
+	assert.Equal(t, before.ContentHash, after.ContentHash)
+	assertDerivedFrom(t, after, deriveBareYAML)
+}
+
+// OnHashMatch re-derive: when the re-read row no longer has the directory's
+// content hash, another writer replaced the content and the re-derive is
+// skipped without a second attempt (ts4a-rev #4).
+func TestHarnessConfigOnHashMatch_SkipsWhenContentReplaced(t *testing.T) {
+	srv, s, w, fault := newCommitTestServerWithConflicts(t)
+	ctx := context.Background()
+	dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveFullYAML})
+	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
+	row := globalHC(t, s, deriveHCName)
+	// Stale derived fields with unchanged content: the next bootstrap
+	// takes the OnHashMatch re-derive.
+	row.Config = &store.HarnessConfigData{Image: "stale/image:0"}
+	require.NoError(t, setHarnessConfigContentForTest(ctx, s, row))
+
+	w.onConflict = func(ctx context.Context, inner store.Store, hc *store.HarnessConfig) {
+		other, err := inner.GetHarnessConfig(ctx, hc.ID)
+		require.NoError(t, err)
+		other.ContentHash = "sha256:replaced"
+		require.NoError(t, inner.UpdateHarnessConfigContent(ctx, other, store.HarnessConfigContentPrecondition{ContentHash: row.ContentHash}))
+	}
+	fault.Arm()
+	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
+	assert.Equal(t, 1, w.attempts(), "replaced content: no retry")
+	assert.Equal(t, "sha256:replaced", globalHC(t, s, deriveHCName).ContentHash, "the other writer's commit stays")
+}
+
+// Repair retries a lost compare-and-swap once; a second conflict is logged
+// and skipped (nil), with no third attempt and the row unchanged
+// (ts4a-rev #4).
+func TestHarnessConfigRepair_SecondConflictSkips(t *testing.T) {
+	srv, s, w, fault := newCommitTestServerWithConflicts(t)
+	ctx := context.Background()
+	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveFullYAML)
+	_, err := srv.GetStorage().Upload(ctx, hc.StoragePath+"/config.yaml", strings.NewReader(deriveBareYAML), storage.UploadOptions{})
+	require.NoError(t, err)
+
+	fault.Arm()
+	require.NoError(t, srv.syncHarnessConfigFromStorage(ctx, HarnessConfigRepairRef{ID: hc.ID}))
+	assert.Equal(t, 2, w.attempts(), "one retry, no third attempt")
+
+	after := globalHC(t, s, deriveHCName)
+	assert.Equal(t, hc.ContentHash, after.ContentHash)
+	assertDerivedFrom(t, after, deriveFullYAML)
 }

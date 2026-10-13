@@ -692,8 +692,8 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 		outputImage = pushImage
 	}
 
-	// Update the harness config's image in the DB so agents
-	// pick up the newly-built image instead of the stale upstream reference.
+	// Record the newly-built image on the harness config (BuiltImage), so
+	// the image status display and checks show it.
 	if err := syncBuiltImage(ctx, e.store, logger, hc, outputImage); err != nil {
 		log.Error("Failed to sync built image back to store", "error", err)
 		_, _ = fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
