@@ -78,6 +78,22 @@ agents for audit, so keep generated files deterministic.
 Validated on load against the settings-v1 JSON schema (`scion` will refuse an
 invalid bundle). Fields, grouped by concern:
 
+**Compatibility with older Scion binaries.** Hubs, brokers and CLIs validate
+config.yaml against the schema built into their own binary, and they may be
+older than the bundle. An unknown key at the **top level** of config.yaml is
+therefore a warning, not an error: the binary ignores it and loads the rest
+(the hub shows the warning on import and refresh, the broker logs it, the CLI
+prints it). An unknown key **inside** a known block (`auth:`, `ready:`, and so
+on) is still an error. So:
+
+- Put new behaviour in a **new top-level block**, not in a new key inside an
+  existing block, or older binaries will reject the whole bundle.
+- A new field must be **safe to ignore**: a binary that does not know it runs
+  as if the block were absent, so its defaults must match that behaviour.
+- Add the field to the schema in the same change as the bundles that use it.
+  CI loads every bundled config.yaml and fails on any warning, so a top-level
+  typo cannot land in `harnesses/`.
+
 ### Identity
 
 | Field | Meaning |
