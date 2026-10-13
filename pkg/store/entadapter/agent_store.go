@@ -414,6 +414,27 @@ func (s *AgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, err
 	return entAgentToStore(a), nil
 }
 
+// GetAgentRunState implements store.AgentStore.GetAgentRunState: one
+// primary-key read of run_id and deleted_at.
+func (s *AgentStore) GetAgentRunState(ctx context.Context, id string) (store.AgentRunState, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return store.AgentRunState{}, err
+	}
+	row, err := s.client.Agent.Query().
+		Where(agent.IDEQ(uid)).
+		Select(agent.FieldRunID, agent.FieldDeletedAt).
+		Only(ctx)
+	if err != nil {
+		return store.AgentRunState{}, mapError(err)
+	}
+	rs := store.AgentRunState{RunID: row.RunID}
+	if row.DeletedAt != nil {
+		rs.DeletedAt = *row.DeletedAt
+	}
+	return rs, nil
+}
+
 // GetAgentBySlug retrieves an agent by its slug within a project.
 func (s *AgentStore) GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error) {
 	projectUID, err := parseUUID(projectID)

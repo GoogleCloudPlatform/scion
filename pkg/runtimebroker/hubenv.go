@@ -25,6 +25,7 @@ import (
 	gcemetadata "cloud.google.com/go/compute/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 const redactedEnvValue = "<redacted>"
@@ -435,7 +436,7 @@ func cloudrunSandboxHubEndpoint(hubListenPort int) (string, error) {
 // from a standalone CRI instance.
 func cloudrunInstancesHubEndpoint(ctx context.Context) (string, error) {
 	return resolveCloudRunServiceURL(
-		os.Getenv("K_SERVICE"),
+		cloudrunenv.ServiceName(),
 		func() (string, error) { return gcemetadata.NumericProjectIDWithContext(ctx) },
 		func() (string, error) { return gcemetadata.ZoneWithContext(ctx) },
 	)

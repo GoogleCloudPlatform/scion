@@ -84,16 +84,13 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	// unless forwarded. appendDaemonBoolFlag omits them when unset.
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "no-auto-migrate", noAutoMigrate)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-login", enableTestLogin)
-	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-identities", enableTestIdentities)
-	// Test admin tier flags (string values): forwarded when given, so the
-	// child runs the same gate. validateTestAdminFlagsEarly already refused
-	// --production (which the re-exec would otherwise turn into --hosted)
-	// and the super-admin flag in this parent.
-	if cmd.Flags().Changed(testAdminIdentitiesFlag) {
-		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testAdminIdentitiesFlag, enableTestAdminIdentities))
-	}
-	if cmd.Flags().Changed(testSuperAdminIdentitiesFlag) {
-		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testSuperAdminIdentitiesFlag, enableTestSuperAdminIdentities))
+	// --test-mode (string value): forwarded verbatim when given, so the
+	// child resolves the same level and runs the same gate.
+	// validateTestModeFlagsEarly already refused the removed flags,
+	// super-admin and --production with a level (which the re-exec would
+	// otherwise turn into --hosted) in this parent.
+	if cmd.Flags().Changed(testModeFlag) {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testModeFlag, testModeValue))
 	}
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-debug-endpoints", enableDebugEndpoints)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "simulate-remote-broker", simulateRemoteBroker)
@@ -178,7 +175,7 @@ func resolveDaemonServerMode(cmd *cobra.Command) error {
 	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
 		return err
 	}
-	return validateTestAdminFlagsEarly(cmd)
+	return validateTestModeFlagsEarly(cmd)
 }
 
 // runServerStartOrDaemon handles the server start command. By default it launches
@@ -1160,7 +1157,7 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		if token := readDevTokenFile(globalDir); token != "" {
 			fmt.Println()
 			fmt.Println("Developer token (for CLI authentication):")
-			fmt.Printf("  export SCION_DEV_TOKEN=%s\n", token)
+			fmt.Printf("  %s\n", devTokenExportHint(devTokenFilePath("", globalDir)))
 		}
 	}
 	fmt.Println()

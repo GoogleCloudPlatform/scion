@@ -25,8 +25,9 @@
 #
 # test-identity-session is the exception: it runs against the real Go hub
 # binary (a throwaway member-level test hub started by its global setup,
-# ptone/scion#4240). Only that job sets up Go (go.mod version, the same
-# setup-go module cache as ci.yml) and builds the binary (make build) and
+# ptone/scion#4240). Only that job sets up Go (go.mod version, with
+# setup-go's built-in cache; ci.yml uses per-job caches instead, see
+# .github/actions/setup-go-cache) and builds the binary (make build) and
 # the web assets (npm run build) before the suite runs.
 #
 # Not covered here:

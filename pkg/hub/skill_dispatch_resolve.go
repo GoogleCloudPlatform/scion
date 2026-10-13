@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -192,40 +191,17 @@ func (s *Server) dispatchSkillRefs(ctx context.Context, agent *store.Agent) []ap
 	return refs
 }
 
-// templateSkillRefs reads the skills declared in a Hub template's
-// scion-agent.yaml (or scion-agent.json). Best-effort: any failure yields no
-// refs, and the broker resolves whatever the Hub did not cover.
+// templateSkillRefs returns the skills declared in a Hub template's
+// scion-agent.yaml (or scion-agent.json), from the template's job config
+// (its stripped AgentConfig snapshot, derived once when the row has none;
+// ptone/scion#4222) rather than from storage. Best-effort: any failure
+// yields no refs, and the broker resolves whatever the Hub did not cover.
 func (s *Server) templateSkillRefs(ctx context.Context, templateID string) []api.SkillReference {
-	tmpl, err := s.store.GetTemplate(ctx, templateID)
-	if err != nil || tmpl == nil {
+	jc := s.templateJobConfigByID(ctx, templateID)
+	if jc == nil {
 		return nil
 	}
-	stor := s.GetStorage()
-	if stor == nil || tmpl.StoragePath == "" {
-		return nil
-	}
-	for _, name := range []string{"scion-agent.yaml", "scion-agent.yml", "scion-agent.json"} {
-		entry, found := templateFileByPath(tmpl.Files, name)
-		if !found {
-			continue
-		}
-		data, err := readDispatchTemplateFile(ctx, stor, templateObjectPath(tmpl, entry))
-		if err != nil {
-			if !errors.Is(err, storage.ErrNotFound) {
-				slog.WarnContext(ctx, "dispatch skill pre-resolution: failed to read template config",
-					"template_id", templateID, "file", name, "error", err)
-			}
-			return nil
-		}
-		cfg, err := config.ParseScionAgentConfig(name, data)
-		if err != nil {
-			slog.WarnContext(ctx, "dispatch skill pre-resolution: failed to parse template config",
-				"template_id", templateID, "file", name, "error", err)
-			return nil
-		}
-		return cfg.Skills
-	}
-	return nil
+	return jc.Skills
 }
 
 // readDispatchTemplateFile downloads a template file, reading at most
