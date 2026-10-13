@@ -405,6 +405,9 @@ interface GroupErrorMessages {
   [status: number]: string;
 }
 
+/** Toast when a sidebar order cannot be saved because the preferences could not be read. */
+const SAVE_ORDER_FAILED = 'Couldn’t save your sidebar order. Try again in a moment.';
+
 /** Permission and missing-group copy shared by every group edit. */
 const GROUP_EDIT_403 = 'You don’t have permission to change this space’s groups';
 const GROUP_EDIT_404 = 'That group no longer exists';
@@ -2110,15 +2113,18 @@ export class ScionChatSpaceRail extends LitElement {
       // would replace the stored personal groups (hidden, and restored when
       // the flag is turned off) and the user's order. The change is
       // dropped; the preferences are read again for the next one.
-      showToast('Couldn’t save your sidebar order. Try again in a moment.', 'warning');
+      showToast(SAVE_ORDER_FAILED, 'warning');
       void this.loadPrefs();
       return;
     }
     // The one place every write goes through: never send a `threadOrder`
     // map that may predate the migration's write (see `_prefsStale`). The
     // thread-order paths read first themselves, since they compute their
-    // order from the preferences before calling this.
-    if (this.projectGroupsEnabled() && this._prefsStale) await this.loadPrefs();
+    // order from the preferences before calling this. Fails closed: if the
+    // read fails, nothing is written.
+    if (this.projectGroupsEnabled() && this._prefsStale && !(await this.freshPrefsForOrder())) {
+      return;
+    }
     const previous = this.prefs;
     const newPrefs = { ...this.prefs, ...update };
     this.prefs = newPrefs;
@@ -2537,7 +2543,9 @@ export class ScionChatSpaceRail extends LitElement {
     this.dragOverThreadId = null;
     this.dragOverGroupId = null;
     if (!sourceId || sourceId === targetThreadId) return;
-    if (this.projectGroupsEnabled() && this._prefsStale) await this.freshPrefsForOrder();
+    if (this.projectGroupsEnabled() && this._prefsStale && !(await this.freshPrefsForOrder())) {
+      return;
+    }
 
     const groups = this.projectGroupsEnabled()
       ? this.projectGroups.get(projectId)
@@ -2574,7 +2582,10 @@ export class ScionChatSpaceRail extends LitElement {
         // The membership change goes to the hub, and the drop shows at once
         // (`updatedGroups`, optimistically). The drop position is this
         // user's order: it is saved only once the hub has accepted the
-        // change, so a refused move leaves the order as it was.
+        // change, so a refused move leaves the order as it was. It is saved
+        // as a move (just before the target row) applied to the order as it
+        // is then, not as a snapshot from the drop, so a reorder made during
+        // the round trip is kept (see `saveDropPosition`).
         const accepted = targetGroup
           ? await this.addThreadToProjectGroup(
               sourceId,
@@ -2589,12 +2600,7 @@ export class ScionChatSpaceRail extends LitElement {
               projectId,
               updatedGroups
             );
-        if (accepted) {
-          await this.saveProjectThreadOrder(
-            projectId,
-            this.expandGroupMembers(topLevelOrder, updatedGroups)
-          );
-        }
+        if (accepted) await this.saveDropPosition(projectId, sourceId, targetThreadId);
         return;
       }
       await this.saveThreadOrder(projectId, topLevelOrder, updatedGroups);
@@ -2631,7 +2637,9 @@ export class ScionChatSpaceRail extends LitElement {
   /** Move a thread one slot up or down in its space. */
   private async moveThread(threadId: string, projectId: string, delta: -1 | 1): Promise<void> {
     if (!this.canReorderThreads()) return;
-    if (this.projectGroupsEnabled() && this._prefsStale) await this.freshPrefsForOrder();
+    if (this.projectGroupsEnabled() && this._prefsStale && !(await this.freshPrefsForOrder())) {
+      return;
+    }
 
     const groups = this.getGroups(projectId);
     const containingGroup = groups.find((g) => g.threadIds.includes(threadId));
@@ -3209,15 +3217,44 @@ export class ScionChatSpaceRail extends LitElement {
 
   /**
    * With project groups on, read the preferences again before an order
-   * change is computed if they may be stale (see `_prefsStale`).
+   * change is computed if they may be stale (see `_prefsStale`). Resolves
+   * to false, after a toast, if they are stale and cannot be read: the
+   * caller must then not save (fail closed).
    */
-  private async freshPrefsForOrder(): Promise<void> {
-    if (!this.projectGroupsEnabled() || !this._prefsStale) return;
-    await this.loadPrefs();
+  private async freshPrefsForOrder(): Promise<boolean> {
+    if (!this.projectGroupsEnabled() || !this._prefsStale) return true;
+    if (await this.loadPrefs()) return true;
+    showToast(SAVE_ORDER_FAILED, 'warning');
+    return false;
+  }
+
+  /**
+   * Record a row drop accepted by the hub: `sourceId` just before
+   * `targetId`, in the space's order as it is now (preferences read again
+   * first if stale). Without an explicit order, the order on screen (with
+   * each group's members, see `expandGroupMembers`) becomes the snapshot,
+   * as for any drag.
+   */
+  private async saveDropPosition(
+    projectId: string,
+    sourceId: string,
+    targetId: string
+  ): Promise<void> {
+    if (!(await this.freshPrefsForOrder())) return;
+    const base = this.hasExplicitOrder(projectId)
+      ? [...(this.prefs.threadOrder?.[projectId] ?? [])]
+      : this.expandGroupMembers(
+          this.currentTopLevelOrder(projectId),
+          this.freezeOtherGroupOrders(projectId, this.getGroups(projectId), new Set())
+        );
+    await this.saveProjectThreadOrder(projectId, this.insertAdjacent(base, sourceId, targetId));
   }
 
   /** Save a space's `threadOrder` with project groups on (see `withHiddenPersonalIds`). */
   private async saveProjectThreadOrder(projectId: string, order: string[]): Promise<void> {
+    // The other spaces' orders are spread from `this.prefs`: read them
+    // first if they may be stale, for any caller (see `_prefsStale`).
+    if (!(await this.freshPrefsForOrder())) return;
     await this.savePrefs({
       threadOrder: {
         ...(this.prefs.threadOrder ?? {}),
@@ -3269,7 +3306,7 @@ export class ScionChatSpaceRail extends LitElement {
     // Only touch threadOrder for a space that already has its own snapshot
     // (see `hasExplicitOrder`), as with personal groups.
     if (!this.hasExplicitOrder(projectId)) return;
-    if (this._prefsStale) await this.freshPrefsForOrder();
+    if (!(await this.freshPrefsForOrder())) return;
     const order = [...(this.prefs.threadOrder?.[projectId] ?? [])].filter((id) => id !== groupId);
     const idx = filed && threadId ? order.indexOf(threadId) : -1;
     if (idx !== -1) {
@@ -3301,7 +3338,6 @@ export class ScionChatSpaceRail extends LitElement {
     const target = groups.find((g) => g.id === groupId);
     if (!target) return false;
     if (target.threadIds.includes(threadId)) return true;
-    const members = this.currentGroupThreadOrder(projectId, groupId);
     this.setProjectGroups(
       projectId,
       optimistic ??
@@ -3329,7 +3365,11 @@ export class ScionChatSpaceRail extends LitElement {
     if (!res) return false;
     await this.applyGroupResponse(projectId, res);
     if (recordOrder && this.hasExplicitOrder(projectId)) {
-      if (this._prefsStale) await this.freshPrefsForOrder();
+      if (!(await this.freshPrefsForOrder())) return true;
+      // The group's members as they are now, after the round trip.
+      const members = this.currentGroupThreadOrder(projectId, groupId).filter(
+        (id) => id !== threadId
+      );
       const order = (this.prefs.threadOrder?.[projectId] ?? []).filter((id) => id !== threadId);
       let at = -1;
       for (const id of [groupId, ...members]) {
@@ -3367,14 +3407,16 @@ export class ScionChatSpaceRail extends LitElement {
     optimistic?: ThreadGroup[]
   ): Promise<boolean> {
     let conversationId = this._groupConversationIds.get(threadId);
+    let lookedUp = false;
     if (!conversationId) {
       // Filed a moment ago and the hub's answer is not in yet: read the
       // groups for its conversation ID.
       await this.loadProjectGroups(projectId);
+      lookedUp = true;
       conversationId = this._groupConversationIds.get(threadId);
       if (!conversationId) {
-        // Still unknown: nothing was sent. Say so, and undo any local move
-        // (a row drop has already shown the thread outside the group).
+        // Still unknown: nothing was sent, and nothing was shown yet. Say
+        // so; the reconcile is a no-op unless something else changed.
         showToast('Couldn’t remove the thread from the group', 'warning');
         this.reconcileProjectGroups(projectId);
         return false;
@@ -3383,9 +3425,11 @@ export class ScionChatSpaceRail extends LitElement {
     const groups = this.projectGroups.get(projectId) ?? [];
     const group = groups.find((g) => g.id === groupId);
     if (!group || !group.threadIds.includes(threadId)) return true;
+    // After a lookup the groups were just read: `optimistic` predates that
+    // read, so the default change is applied to the fresh state instead.
     this.setProjectGroups(
       projectId,
-      optimistic ??
+      (lookedUp ? undefined : optimistic) ??
         groups.map((g) =>
           g.id === groupId ? { ...g, threadIds: g.threadIds.filter((id) => id !== threadId) } : g
         )
@@ -3450,7 +3494,7 @@ export class ScionChatSpaceRail extends LitElement {
       this._deletedProjectGroupIds.delete(groupId);
       return;
     }
-    if (this._prefsStale) await this.freshPrefsForOrder();
+    if (!(await this.freshPrefsForOrder())) return;
     if (!this.hasExplicitOrder(projectId)) return;
     const order = [...(this.prefs.threadOrder?.[projectId] ?? [])];
     const idx = order.indexOf(groupId);

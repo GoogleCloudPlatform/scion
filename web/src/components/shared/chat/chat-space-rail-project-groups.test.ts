@@ -1022,4 +1022,73 @@ describe('project thread groups — flag on', () => {
 
     expect(el._prefsStale).toBe(true);
   });
+
+  it('a reorder made while a row drop awaits the hub is kept', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t2'])];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-1', 't2', 't3', 't4'] });
+    const el = await mountAs('user-a');
+
+    // Drop t4 onto t2 (into the group, above t2); hold the hub's answer.
+    hub.holdNext = { method: 'POST', prefix: '/api/v1/thread-groups/srv-1/threads' };
+    el.draggingThreadId = 't4';
+    const dropping = el.handleThreadDrop({ preventDefault: vi.fn() }, 't2', P);
+    await settle(el);
+    // Meanwhile the user moves t3 above the group.
+    await el.moveThread('t3', P, -1);
+    await settle(el);
+    expect(topLevel(el)).toEqual(['t1', 't3', '[Shared]']);
+
+    release();
+    await dropping;
+    await settle(el);
+
+    // Both the nudge and the drop position are kept.
+    expect(topLevel(el)).toEqual(['t1', 't3', '[Shared]']);
+    expect(el.currentGroupThreadOrder(P, 'srv-1')).toEqual(['t4', 't2']);
+    const order = JSON.parse(prefsPuts().at(-1)!.threadOrder)[P] as string[];
+    expect(order).toEqual(['t1', 't3', 'srv-1', 't4', 't2']);
+  });
+
+  it('a row drop accepted after a stale mark saves on fresh preferences', async () => {
+    hub.secondSpace = true;
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t2'])];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-1', 't2', 't3', 't4'], [Q]: ['t1'] });
+    const el = await mountAs('user-a');
+    el._prefsRefreshDelayMs = 60_000;
+
+    hub.holdNext = { method: 'POST', prefix: '/api/v1/thread-groups/srv-1/threads' };
+    el.draggingThreadId = 't4';
+    const dropping = el.handleThreadDrop({ preventDefault: vi.fn() }, 't2', P);
+    await settle(el);
+    // During the round trip the migration writes Q's order and publishes.
+    const migratedQ = ['t1', 'srv-q'];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-1', 't2', 't3', 't4'], [Q]: migratedQ });
+    el.applyThreadGroupEvent(Q, 'created', { ...wire(hubGroup('srv-q', 'Q group', [])), projectId: Q });
+
+    release();
+    await dropping;
+    await settle(el);
+
+    const put = JSON.parse(prefsPuts().at(-1)!.threadOrder) as Record<string, string[]>;
+    expect(put[Q]).toEqual(migratedQ);
+    expect(put[P]).toEqual(['t1', 'srv-1', 't4', 't2', 't3']);
+  });
+
+  it('saves nothing while stale preferences cannot be read', async () => {
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 't2', 't3', 't4'] });
+    const el = await mountAs('user-a');
+    el._prefsRefreshDelayMs = 60_000;
+
+    el.applyThreadGroupEvent(P, 'created', wire(hubGroup('srv-9', 'New', [])));
+    hub.prefsDown = true;
+    await el.moveThread('t4', P, -1);
+    await el.applySpaceOrder([P]);
+    await settle(el);
+
+    expect(prefsPuts()).toEqual([]);
+    expect(showToastMock).toHaveBeenCalledWith(
+      'Couldn’t save your sidebar order. Try again in a moment.',
+      'warning'
+    );
+  });
 });
