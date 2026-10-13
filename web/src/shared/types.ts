@@ -467,6 +467,76 @@ export function isAgentRunning(agent: Agent): boolean {
 }
 
 /**
+ * The client-facing view of an agent's current or most recent async launch
+ * (store.AgentLaunch, pkg/store/launch_view.go). The hub sends it on agent
+ * reads and on SSE `created` and `status` events. It is absent when the
+ * agent has never had an async launch, as after a synchronous create.
+ */
+export interface AgentLaunch {
+  id: string;
+  /**
+   * The launch's own state. It stays `active` while a failed or stopped
+   * create winds down, after the agent has left the in-flight phases.
+   */
+  state: 'active' | 'ended';
+  /**
+   * The hub's in-flight predicate (store.Agent.IsInFlight): the launch is
+   * active and the agent is still in a pre-running phase. It is not the same
+   * as `state === 'active'`; it is false in every phase an incomplete create
+   * can be in.
+   */
+  active: boolean;
+  /** create | start | restart. Only `create` launches are async today. */
+  kind: string;
+  /** The last step the broker reported, e.g. `claim` or `launching`. */
+  step?: string;
+  /** Failure code, e.g. `runtime_error`, `launch_timeout`, `broker_lost`. */
+  error?: string;
+  /** succeeded | running_observed | failed | timed_out | lost | not_launched | superseded */
+  endReason?: string;
+  /** Present only while the launch is active. */
+  deadline?: string;
+  remainingSeconds?: number;
+}
+
+/** The agent fields the launch predicates read. */
+export interface AgentLaunchFields {
+  phase?: AgentPhase;
+  launch?: AgentLaunch;
+}
+
+/**
+ * Whether the hub is still launching the agent asynchronously. The hub
+ * computes this as `launch.active` from its in-flight predicate
+ * (store.Agent.IsInFlight), which already includes the phase check.
+ */
+export function isAgentLaunching(agent: AgentLaunchFields): boolean {
+  return agent.launch?.active === true;
+}
+
+/**
+ * Whether the agent is an async create that did not complete, mirroring the
+ * hub's incomplete-create predicate (store.Agent.IsIncompleteCreate). The
+ * hub refuses a start or resume of such an agent with 409
+ * `agent_create_incomplete`; the way out is to delete it and create it again.
+ */
+export function isIncompleteCreate(agent: AgentLaunchFields): boolean {
+  const launch = agent.launch;
+  if (!launch || launch.kind !== 'create') return false;
+  switch (agent.phase) {
+    case 'suspended':
+    case 'stopping':
+    case 'stopped':
+    case 'error':
+      // The hub's wind-down arm is LaunchState == "active", which reaches
+      // the web as `state`; `active` is always false in these phases.
+      return launch.state === 'active' || !!launch.error;
+    default:
+      return false;
+  }
+}
+
+/**
  * Confirmation copy shown before a best-effort resume of an error-phase
  * agent (POST /start with `{ forceResume: true }`). The agent's home
  * directory and harness session are usually still intact even after a host
@@ -809,6 +879,8 @@ export interface Agent {
   detail?: AgentDetail;
   taskSummary?: string;
   message?: string;
+  /** The async launch view; absent when the agent never had one. */
+  launch?: AgentLaunch;
   lastSeen?: string;
   lastActivityEvent?: string;
   // Backend sends "created"/"updated"; legacy frontend code uses "createdAt"/"updatedAt".
