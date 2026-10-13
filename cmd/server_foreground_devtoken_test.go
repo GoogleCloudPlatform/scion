@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -149,6 +150,7 @@ func TestDevTokenStartupHint_ConfiguredToken(t *testing.T) {
 	assert.NotContains(t, logged, "run:")
 	assert.NotContains(t, logged, "SCION_DEV_TOKEN=")
 	assert.NotContains(t, logged, "scion_dev_")
+	assert.NotContains(t, logged, strings.TrimPrefix(fixtureDevToken, "scion_dev_"), "no part of the value, not even its suffix")
 }
 
 // TestLogWorkstationReadyBanner_DevTokenPath checks the workstation startup

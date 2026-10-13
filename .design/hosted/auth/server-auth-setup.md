@@ -119,7 +119,7 @@ To authenticate CLI commands, run:
   export SCION_DEV_TOKEN=$(cat '/home/user/.scion/dev-token')
 ```
 
-The path is the configured `server.auth.dev_token_file`, or `~/.scion/dev-token` by default. If the token is set directly with `server.auth.dev_token`, the output names that setting instead.
+The path is the configured `server.auth.dev_token_file`, or `~/.scion/dev-token` by default. If the token is set directly with `server.auth.dev_token` (or the `SCION_SERVER_AUTH_DEVTOKEN` environment variable), there is no file: the output is a plain message saying where the token is set; it is not a command and does not include the value.
 
 ### 2.5 Client Token Resolution
 
