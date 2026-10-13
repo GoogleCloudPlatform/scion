@@ -245,6 +245,27 @@ func TestBackgroundSubagentWait_SafetyNetReleasesStaleOwner(t *testing.T) {
 	}
 }
 
+// A status write of a held status (here completed) replaces a wait that a
+// background sub-agent holds. The owner's later answer and its SubagentStop
+// then change nothing: completed is kept, with no notification marker and no
+// owner list, and no Hub update is sent.
+func TestBackgroundSubagentWait_HeldWriteThenOwnerEvents(t *testing.T) {
+	sh, hh, sent := claudeHubSetup(t)
+	bgHeldAfterStop(t, sh, hh, sent, parentHeldSubA)
+	require.NoError(t, sh.UpdateActivity(state.ActivityCompleted, ""))
+
+	for _, event := range []*hooks.Event{
+		parentHeldSub(t, "PostToolUse", "Bash", parentHeldSubA),
+		bgSubagentStop(t, parentHeldSubA),
+	} {
+		got, info := parentHeldStep(t, sh, hh, sent, event)
+		assert.Equal(t, string(state.ActivityCompleted), info["activity"], "after %s", event.Name)
+		assert.NotContains(t, info, activitySourceKey, "after %s", event.Name)
+		assert.NotContains(t, info, notificationWaitAgentsKey, "after %s", event.Name)
+		assert.Empty(t, got, "no hub update after %s", event.Name)
+	}
+}
+
 // Waits with no owner list behave as before: the parent's tool-start clears
 // an agent-set wait and an owner-less notification wait, and the parent's
 // Stop clears an owner-less notification wait.
