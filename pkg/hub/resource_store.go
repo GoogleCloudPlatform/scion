@@ -145,6 +145,21 @@ func (rs *ResourceStore) reconcileStorage(ctx context.Context, stor storage.Stor
 	reconcileResourceStorage(ctx, stor, storagePath, name, keep, rs.srv.resourceLog, rs.pers.Label())
 }
 
+// reconcileAfterCommitter is an optional resourcePersistence extension: the
+// shared store reconciles storage only after the persistence's Update has
+// committed the manifest, and not at all when it fails. harnessConfigPersistence
+// implements it (ptone/scion#4219): a bootstrap or import whose commit loses
+// the compare-and-swap (or is refused) must not reconcile storage to its own
+// directory while the row keeps another commit's manifest.
+type reconcileAfterCommitter interface {
+	reconcileAfterCommit()
+}
+
+func (rs *ResourceStore) reconcilesAfterCommit() bool {
+	_, ok := rs.pers.(reconcileAfterCommitter)
+	return ok
+}
+
 // checkDir runs the persistence's optional pre-upload check.
 func (rs *ResourceStore) checkDir(ctx context.Context, dir string, files []transfer.FileInfo) error {
 	if c, ok := rs.pers.(preUploadChecker); ok {
@@ -277,9 +292,12 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 
 	// Reconcile storage: drop objects no longer in the manifest so removed files
 	// don't linger. (Harness-configs gain it by routing through the shared
-	// path — a removed-file cleanup fix. Templates store blobs, which the
-	// blob garbage collector removes instead.)
-	rs.reconcileStorage(ctx, stor, storagePath, existing.Name, written)
+	// path — a removed-file cleanup fix — and reconcile only after their
+	// commit succeeded, below. Templates store blobs, which the blob garbage
+	// collector removes instead.)
+	if !rs.reconcilesAfterCommit() {
+		rs.reconcileStorage(ctx, stor, storagePath, existing.Name, written)
+	}
 
 	newHash := computeContentHash(uploaded)
 	changed := newHash != existing.ContentHash
@@ -299,6 +317,9 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	existing.Status = resourceStatusActive
 	if err := p.Update(ctx, existing, dir); err != nil {
 		return false, err
+	}
+	if rs.reconcilesAfterCommit() {
+		rs.reconcileStorage(ctx, stor, storagePath, existing.Name, written)
 	}
 
 	p.PostFinalize(ctx, existing, dir)
@@ -617,6 +638,10 @@ type harnessConfigPersistence struct {
 	harness string
 	model   *store.HarnessConfig
 }
+
+// reconcileAfterCommit marks harnessConfigPersistence as a
+// reconcileAfterCommitter.
+func (p *harnessConfigPersistence) reconcileAfterCommit() {}
 
 func (p *harnessConfigPersistence) Kind() storage.ResourceKind {
 	return storage.ResourceKindHarnessConfig

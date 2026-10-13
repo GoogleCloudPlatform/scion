@@ -695,18 +695,46 @@ func newCommitTestServerWithConflicts(t *testing.T) (*Server, store.Store, *hcCo
 func TestHarnessConfigBootstrap_SecondConflictSkipsWithoutThirdAttempt(t *testing.T) {
 	srv, s, w, fault := newCommitTestServerWithConflicts(t)
 	ctx := context.Background()
-	dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveBareYAML})
+	dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveBareYAML, "extra.txt": "x"})
 	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
 	before := globalHC(t, s, deriveHCName)
+	require.Len(t, before.Files, 2)
 
+	// The new directory drops extra.txt. A bootstrap that loses the
+	// compare-and-swap must not reconcile storage to its directory: the row
+	// keeps the other commit's manifest, which still lists extra.txt.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, deriveHCName, "config.yaml"), []byte(deriveFullYAML), 0o644))
+	require.NoError(t, os.Remove(filepath.Join(dir, deriveHCName, "extra.txt")))
 	fault.Arm()
 	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir), "startup does not fail")
 	assert.Equal(t, 2, w.attempts(), "one retry, no third attempt")
 
 	after := globalHC(t, s, deriveHCName)
 	assert.Equal(t, before.ContentHash, after.ContentHash)
+	assert.Len(t, after.Files, 2)
 	assertDerivedFrom(t, after, deriveBareYAML)
+	exists, err := srv.GetStorage().Exists(ctx, after.StoragePath+"/extra.txt")
+	require.NoError(t, err)
+	assert.True(t, exists, "a lost commit must not reconcile away a file the row still lists")
+}
+
+// A bootstrap whose commit succeeds reconciles storage after the row write:
+// an object under the storage path that no manifest lists is removed.
+func TestHarnessConfigBootstrap_ReconcilesAfterSuccessfulCommit(t *testing.T) {
+	srv, s, _ := newCommitTestServer(t)
+	ctx := context.Background()
+	dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveBareYAML})
+	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
+	row := globalHC(t, s, deriveHCName)
+	_, err := srv.GetStorage().Upload(ctx, row.StoragePath+"/stray.txt", strings.NewReader("stray"), storage.UploadOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, deriveHCName, "config.yaml"), []byte(deriveFullYAML), 0o644))
+	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
+	assertDerivedFrom(t, globalHC(t, s, deriveHCName), deriveFullYAML)
+	exists, err := srv.GetStorage().Exists(ctx, row.StoragePath+"/stray.txt")
+	require.NoError(t, err)
+	assert.False(t, exists, "the reconcile still runs after a successful commit")
 }
 
 // OnHashMatch re-derive: when the re-read row no longer has the directory's
