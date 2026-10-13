@@ -891,8 +891,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("Configured: %v\n", settings.IsHubConfigured())
 
-	// Show project_id from top-level setting (where it's now stored)
-	fmt.Printf("Project ID: %s\n", valueOrNone(settings.ProjectID))
+	fmt.Printf("Project ID: %s\n", hubStatusProjectID(settings, target))
 	if settings.Hub != nil {
 		fmt.Printf("Broker ID:  %s\n", valueOrNone(settings.Hub.BrokerID))
 	}
@@ -1012,6 +1011,18 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// hubStatusProjectID returns the value of the Project ID line of hub status.
+// Outside a project directory with a project selected with 'scion use', it
+// is that project's hub ID, marked as the current context, as in the
+// Project Context section. Otherwise it is the project_id of the resolved
+// settings.
+func hubStatusProjectID(settings *config.Settings, t useTarget) string {
+	if t.ProjectSource == useSourceContext && t.ProjectID != "" {
+		return t.ProjectID + " (current context)"
+	}
+	return valueOrNone(settings.ProjectID)
 }
 
 // printProjectContext prints information about the current project's registration and available brokers.
