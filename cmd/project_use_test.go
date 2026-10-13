@@ -72,6 +72,8 @@ func setupUseTest(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	setupContextTest(t)
 	restoreAllSilenceUsage(t)
 	t.Cleanup(func() { rootCmd.SetArgs(nil) })
+	// No terminal: 'scion use' never prompts in these tests.
+	withTerminal(t, false)
 	srv, calls := useFakeHub(t)
 	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+srv.URL+"\n")
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
@@ -91,7 +93,7 @@ func runScion(t *testing.T, args ...string) (string, string, error) {
 	}
 	outputFormat = ""
 	for _, c := range []*cobra.Command{useCmd, projectUseCmd} {
-		for _, name := range []string{"clear", "force"} {
+		for _, name := range []string{"clear", "force", "refresh"} {
 			if f := c.Flags().Lookup(name); f != nil {
 				f.Changed = false
 				_ = f.Value.Set(f.DefValue)
@@ -101,7 +103,13 @@ func runScion(t *testing.T, args ...string) (string, string, error) {
 	if f := rootCmd.PersistentFlags().Lookup("format"); f != nil {
 		f.Changed = false
 	}
-	for _, c := range []*cobra.Command{hubAddCmd, hubListCmd, hubRenameCmd, hubRemoveCmd, hubAuthLoginCmd} {
+	for _, name := range []string{"yes", "non-interactive"} {
+		if f := rootCmd.PersistentFlags().Lookup(name); f != nil {
+			f.Changed = false
+			_ = f.Value.Set(f.DefValue)
+		}
+	}
+	for _, c := range []*cobra.Command{hubAddCmd, hubListCmd, hubRenameCmd, hubRemoveCmd, hubAuthLoginCmd, projectListCmd} {
 		c.Flags().VisitAll(func(f *pflag.Flag) {
 			f.Changed = false
 			_ = f.Value.Set(f.DefValue)
@@ -172,7 +180,7 @@ func TestUseSelectProject_NotFound(t *testing.T) {
 	srv, _ := setupUseTest(t)
 	_, _, err := runScion(t, "use", "nope")
 	require.Error(t, err)
-	assert.Equal(t, "project 'nope' not found on the hub at "+srv.URL, err.Error())
+	assert.Equal(t, "project 'nope' not found on hubs: "+srv.URL, err.Error())
 	_, statErr := os.Stat(filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml"))
 	assert.True(t, os.IsNotExist(statErr), "nothing is saved on a failed lookup")
 }
@@ -191,8 +199,8 @@ func TestUseSelectProject_Ambiguous(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(stdout), &got))
 	assert.Equal(t, "ambiguous", got["error"])
 	assert.Equal(t, []interface{}{
-		map[string]interface{}{"endpoint": srv.URL, "id": "id-1", "slug": "dupe-1"},
-		map[string]interface{}{"endpoint": srv.URL, "id": "id-2", "slug": "dupe-2"},
+		map[string]interface{}{"hub": "", "endpoint": srv.URL, "id": "id-1", "slug": "dupe-1"},
+		map[string]interface{}{"hub": "", "endpoint": srv.URL, "id": "id-2", "slug": "dupe-2"},
 	}, got["candidates"])
 	_, statErr := os.Stat(filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml"))
 	assert.True(t, os.IsNotExist(statErr))
@@ -474,7 +482,11 @@ func TestUseSelectProject_UsesCommandContext(t *testing.T) {
 	setupUseTest(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := runUseSelect(ctx, io.Discard, io.Discard, "foo")
+	c := &cobra.Command{}
+	c.SetContext(ctx)
+	c.SetOut(io.Discard)
+	c.SetErr(io.Discard)
+	err := runUseSelect(c, "foo")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
 	_, statErr := os.Stat(filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml"))

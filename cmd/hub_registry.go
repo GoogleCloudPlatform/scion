@@ -137,9 +137,20 @@ func updateHubRegistry(fn func(*config.CLIContext) error) error {
 }
 
 // hubResponds checks the health of the hub at endpoint within
-// hubHealthTimeout, with the transport of the hub's own entry only.
-var hubResponds = func(endpoint string) error {
-	client, err := hubclient.New(endpoint, hubclient.WithTimeout(hubHealthTimeout), hubEntryTransportAuth(endpoint))
+// hubHealthTimeout. It sends no user credential. With fanOut (a check of
+// hubs the user did not name, such as 'hub list --check'), only the
+// transport of the hub's own entry applies, never the environment's (see
+// fanOutTransport).
+var hubResponds = func(endpoint string, fanOut bool) error {
+	opts := []hubclient.Option{hubclient.WithTimeout(hubHealthTimeout)}
+	if fanOut {
+		src, mode, err := fanOutTransport(endpoint)
+		if err != nil {
+			return err
+		}
+		opts = append(opts, hubclient.WithTransportAuth(src, mode))
+	}
+	client, err := hubclient.New(endpoint, opts...)
 	if err != nil {
 		return err
 	}
@@ -191,12 +202,21 @@ func hubAuthToken(endpoint string, info authInfo) string {
 }
 
 // hubAccepts asks the hub at endpoint, with an authenticated identity call
-// within hubHealthTimeout, whether it accepts token. Like hubResponds, it
-// uses only the transport of the hub's own entry. ok reports whether the
-// hub answered: a hub that rejects the token (401) answers with accepted
-// false, while any other failure is not an answer.
-var hubAccepts = func(endpoint, token string) (accepted, ok bool) {
-	client, err := hubclient.New(endpoint, hubclient.WithTimeout(hubHealthTimeout), hubEntryTransportAuth(endpoint), hubclient.WithBearerToken(token))
+// within hubHealthTimeout, whether it accepts token. Like hubResponds, with
+// fanOut only the transport of the hub's own entry applies (see
+// fanOutTransport). ok reports whether the hub answered: a hub that rejects
+// the token (401) answers with accepted false, while any other failure is
+// not an answer.
+var hubAccepts = func(endpoint, token string, fanOut bool) (accepted, ok bool) {
+	opts := []hubclient.Option{hubclient.WithTimeout(hubHealthTimeout), hubclient.WithBearerToken(token)}
+	if fanOut {
+		src, mode, err := fanOutTransport(endpoint)
+		if err != nil {
+			return false, false
+		}
+		opts = append(opts, hubclient.WithTransportAuth(src, mode))
+	}
+	client, err := hubclient.New(endpoint, opts...)
 	if err != nil {
 		return false, false
 	}
@@ -246,7 +266,9 @@ func hubAdd(out, stderr io.Writer, name, url string, use bool) error {
 		return err
 	}
 
-	healthErr := hubResponds(endpoint)
+	// The hub the user named: as before, transport auth from the
+	// environment applies.
+	healthErr := hubResponds(endpoint, false)
 	info := hubAuthFor(endpoint)
 	if isJSONOutput() {
 		return outputJSON(hubAddJSON{
@@ -293,14 +315,22 @@ func hubList(out, stderr io.Writer, check bool) error {
 	var reachable []bool
 	var verified []*bool
 	if check {
+		settings, err := config.LoadSettings(useSettingsPath())
+		if err != nil {
+			settings = &config.Settings{}
+		}
 		reachable = make([]bool, len(names))
 		verified = make([]*bool, len(names))
 		var wg sync.WaitGroup
 		for i, name := range names {
+			endpoint := c.Hubs[name].Endpoint
+			// Every hub but the effective one is checked with only its
+			// own entry's transport.
+			fanOut := !hubGetsFullChain(settings, endpoint, false)
 			wg.Add(1)
-			go func(i int, endpoint string) {
+			go func(i int, endpoint string, fanOut bool) {
 				defer wg.Done()
-				reachable[i] = hubResponds(endpoint) == nil
+				reachable[i] = hubResponds(endpoint, fanOut) == nil
 				if !reachable[i] {
 					return
 				}
@@ -308,10 +338,10 @@ func hubList(out, stderr io.Writer, check bool) error {
 				if token == "" {
 					return
 				}
-				if accepted, ok := hubAccepts(endpoint, token); ok {
+				if accepted, ok := hubAccepts(endpoint, token, fanOut); ok {
 					verified[i] = &accepted
 				}
-			}(i, c.Hubs[name].Endpoint)
+			}(i, endpoint, fanOut)
 		}
 		wg.Wait()
 	}

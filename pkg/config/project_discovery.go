@@ -49,6 +49,13 @@ type ProjectInfo struct {
 	WorkspacePath string        `json:"workspace_path,omitempty"`
 	Status        ProjectStatus `json:"status"`
 	AgentCount    int           `json:"agent_count"`
+	// HubProjectID is the hub project UUID of a project linked to a hub
+	// (hub.projectId in its settings), or "". It is not part of the JSON
+	// shape of the machine-local project list.
+	HubProjectID string `json:"-"`
+	// HubEndpoint is the normalised hub endpoint a linked project's
+	// settings resolve to (its own settings over the global ones), or "".
+	HubEndpoint string `json:"-"`
 	// agentsPath overrides the default agents directory derivation.
 	// Used for legacy git projects where agents are a sibling of .scion/.
 	agentsPath string
@@ -73,6 +80,7 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 
 	var projects []ProjectInfo
 	seenSlugs := make(map[string]bool)
+	globalHubProjectID := ""
 
 	// 1. Global project
 	globalDir := filepath.Join(home, GlobalDir)
@@ -86,6 +94,8 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 		pi.AgentCount = countAgents(filepath.Join(globalDir, "agents"))
 		if settings, err := LoadSettings(globalDir); err == nil {
 			pi.ProjectID = settings.ProjectID
+			pi.setHubLink(settings)
+			globalHubProjectID = pi.HubProjectID
 		}
 		projects = append(projects, pi)
 		seenSlugs["global"] = true
@@ -95,7 +105,32 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 	projectConfigsDir := filepath.Join(home, GlobalDir, ProjectConfigsDir)
 	projects = scanConfigDir(projects, projectConfigsDir, seenSlugs)
 
+	// A project's merged settings carry the global hub.projectId when the
+	// project sets none of its own; that is the global project's link, not
+	// this project's.
+	if globalHubProjectID != "" {
+		for i := range projects {
+			if projects[i].Type != ProjectTypeGlobal && projects[i].HubProjectID == globalHubProjectID {
+				projects[i].HubProjectID, projects[i].HubEndpoint = "", ""
+			}
+		}
+	}
+
 	return projects, nil
+}
+
+// setHubLink records the hub project a project's settings link it to. A
+// project with no hub.projectId, or with hub.linked explicitly false, is not
+// linked.
+func (g *ProjectInfo) setHubLink(s *Settings) {
+	if s == nil || s.Hub == nil || s.Hub.ProjectID == "" {
+		return
+	}
+	if s.Hub.Linked != nil && !*s.Hub.Linked {
+		return
+	}
+	g.HubProjectID = s.Hub.ProjectID
+	g.HubEndpoint = NormalizeEndpoint(s.Hub.Endpoint)
 }
 
 // scanConfigDir is a helper for DiscoverProjects to scan a directory for project configs.
@@ -173,6 +208,7 @@ func projectInfoFromExternal(configPath, dirName, slug string) ProjectInfo {
 	if err == nil {
 		pi.ProjectID = settings.ProjectID
 		pi.WorkspacePath = settings.WorkspacePath
+		pi.setHubLink(settings)
 	}
 
 	pi.AgentCount = countAgents(filepath.Join(configPath, "agents"))
@@ -206,6 +242,10 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 		if vs.ProjectType == string(ProjectTypeShadow) {
 			if vs.Hub != nil && vs.Hub.ProjectID != "" {
 				pi.ProjectID = vs.Hub.ProjectID
+				if vs.Hub.Linked == nil || *vs.Hub.Linked {
+					pi.HubProjectID = vs.Hub.ProjectID
+					pi.HubEndpoint = NormalizeEndpoint(vs.Hub.Endpoint)
+				}
 			}
 			pi.Type = ProjectTypeShadow
 			pi.WorkspacePath = vs.WorkspacePath
@@ -219,6 +259,7 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 
 	if settings, err := LoadSettings(configPath); err == nil {
 		pi.ProjectID = settings.ProjectID
+		pi.setHubLink(settings)
 	}
 	pi.AgentCount = countAgents(agentsDir)
 	if pi.ProjectID == "" {

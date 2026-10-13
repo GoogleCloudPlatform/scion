@@ -60,6 +60,8 @@ func setupRegistryTest(t *testing.T) {
 	setupContextTest(t)
 	restoreAllSilenceUsage(t)
 	t.Cleanup(func() { rootCmd.SetArgs(nil) })
+	// No terminal: 'scion use' never prompts in these tests.
+	withTerminal(t, false)
 }
 
 // closedHubURL returns the URL of a hub that does not respond.
@@ -531,7 +533,7 @@ func TestHubRegistry_AddUseListRename(t *testing.T) {
 	stdout, _, err := runScion(t, "use", "--hub", "prod")
 	require.NoError(t, err)
 	assert.Equal(t, "Now using hub 'prod' ("+srv.URL+").\n"+
-		"No project selected on hub 'prod'; run 'scion use <project>'.\n", stdout)
+		"No project selected on hub 'prod'; run 'scion use <project>' or 'scion project list --hub prod'.\n", stdout)
 
 	stdout, _, err = runScion(t, "hub", "list")
 	require.NoError(t, err)
@@ -560,7 +562,7 @@ func TestUseSwitchHub_RestoresProject(t *testing.T) {
 	stdout, _, err := runScion(t, "use", "--hub", "staging")
 	require.NoError(t, err)
 	assert.Equal(t, "Now using hub 'staging' (https://staging.example.com).\n"+
-		"No project selected on hub 'staging'; run 'scion use <project>'.\n", stdout)
+		"No project selected on hub 'staging'; run 'scion use <project>' or 'scion project list --hub staging'.\n", stdout)
 	assert.Equal(t, "staging", readTestContext(t).CurrentHub)
 
 	stdout, _, err = runScion(t, "project", "use", "--hub", "prod")
@@ -578,7 +580,7 @@ func TestUseSwitchHub_URL(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Registered hub 'hub' (https://hub.example.com); rename with 'scion hub rename'.\n"+
 		"Now using hub 'hub' (https://hub.example.com).\n"+
-		"No project selected on hub 'hub'; run 'scion use <project>'.\n"+
+		"No project selected on hub 'hub'; run 'scion use <project>' or 'scion project list --hub hub'.\n"+
 		"Not logged in to hub 'hub'. Run: scion hub auth login --hub hub\n", stdout)
 	c := readTestContext(t)
 	assert.Equal(t, "hub", c.CurrentHub)
@@ -1081,10 +1083,10 @@ func TestHubList_CheckRemoteHubGetsNoDevToken(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 	origResponds, origAccepts := hubResponds, hubAccepts
 	t.Cleanup(func() { hubResponds, hubAccepts = origResponds, origAccepts })
-	hubResponds = func(string) error { return nil }
+	hubResponds = func(string, bool) error { return nil }
 	var called []string
 	var mu sync.Mutex
-	hubAccepts = func(endpoint, token string) (bool, bool) {
+	hubAccepts = func(endpoint, token string, fanOut bool) (bool, bool) {
 		mu.Lock()
 		defer mu.Unlock()
 		called = append(called, endpoint)
@@ -1150,20 +1152,22 @@ func headersCarry(hs []http.Header, s string) bool {
 	return false
 }
 
-// TestHubList_CheckSendsOnlyEntryTransport: 'hub add' and 'hub list
-// --check' reach hubs other than the effective one, so each hub gets only
-// the transport auth of its own entry, never the one from the environment.
+// TestHubList_CheckSendsOnlyEntryTransport: 'hub list --check' reaches
+// hubs other than the effective one, so each of them gets only the
+// transport auth of its own entry, never the one from the environment; the
+// effective hub keeps the full chain.
 func TestHubList_CheckSendsOnlyEntryTransport(t *testing.T) {
 	setupRegistryTest(t)
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 	t.Setenv("SCION_TRANSPORT_TOKEN", "env-transport-tok")
 	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", filepath.Join(t.TempDir(), "transport-token"))
 	t.Setenv("SCION_TRANSPORT_MODE", "iap")
-	origSource := hubEntryTransportSource
-	t.Cleanup(func() { hubEntryTransportSource = origSource })
+	origGCE, origADC := transportauth.IsOnGCEFunc, fanOutADCSource
+	t.Cleanup(func() { transportauth.IsOnGCEFunc, fanOutADCSource = origGCE, origADC })
+	transportauth.IsOnGCEFunc = func() bool { return false }
 	var audiences []string
 	var mu sync.Mutex
-	hubEntryTransportSource = func(audience string) (transportauth.TokenSource, error) {
+	fanOutADCSource = func(audience string) (transportauth.TokenSource, error) {
 		mu.Lock()
 		audiences = append(audiences, audience)
 		mu.Unlock()
@@ -1173,23 +1177,25 @@ func TestHubList_CheckSendsOnlyEntryTransport(t *testing.T) {
 	}
 	plain, plainSeen := transportCheckHub(t, "scion_dev_test")
 	guarded, guardedSeen := transportCheckHub(t, "scion_dev_test")
+	current, currentSeen := transportCheckHub(t, "scion_dev_test")
 	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
-		if err := c.AddHub("guarded", guarded.URL); err != nil {
-			return err
+		for name, url := range map[string]string{"plain": plain.URL, "guarded": guarded.URL, "current": current.URL} {
+			if err := c.AddHub(name, url); err != nil {
+				return err
+			}
 		}
 		c.Hubs["guarded"].Transport = &config.HubTransportConfig{Mode: "iap", Audience: "entry-aud"}
+		c.CurrentHub = "current"
 		return nil
 	}))
 
-	_, _, err := runScion(t, "hub", "add", "plain", plain.URL)
-	require.NoError(t, err)
 	stdout, _, err := runScion(t, "hub", "list", "--check")
 	require.NoError(t, err)
 	assert.Regexp(t, `guarded .* dev\s+yes\s+yes\n`, stdout)
 	assert.Regexp(t, `plain .* dev\s+yes\s+yes\n`, stdout)
 
 	p := plainSeen()
-	require.Len(t, p["/healthz"], 2, "hub add and hub list --check each check health")
+	require.Len(t, p["/healthz"], 1)
 	require.Len(t, p["/api/v1/auth/me"], 1)
 	assert.False(t, headersCarry(p["/healthz"], "env-transport-tok"), "the health check never sends the environment's transport token")
 	assert.False(t, headersCarry(p["/api/v1/auth/me"], "env-transport-tok"), "the identity call never sends the environment's transport token")
@@ -1202,6 +1208,10 @@ func TestHubList_CheckSendsOnlyEntryTransport(t *testing.T) {
 		assert.Equal(t, "Bearer entry-transport-tok", h.Get("Proxy-Authorization"), "the entry's transport, in the entry's mode")
 	}
 	assert.False(t, headersCarry(append(g["/healthz"], g["/api/v1/auth/me"]...), "env-transport-tok"))
+
+	cur := currentSeen()
+	require.Len(t, cur["/api/v1/auth/me"], 1)
+	assert.True(t, headersCarry(append(cur["/healthz"], cur["/api/v1/auth/me"]...), "env-transport-tok"), "the effective hub keeps the environment's transport")
 	mu.Lock()
 	defer mu.Unlock()
 	assert.NotEmpty(t, audiences)

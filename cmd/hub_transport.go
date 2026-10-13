@@ -15,13 +15,8 @@
 package cmd
 
 import (
-	"os"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
-	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // hubTransportSettings returns the transport-layer auth settings (IAP,
@@ -53,32 +48,4 @@ func hubEntryTransport(endpoint string) *config.HubTransportConfig {
 		return nil
 	}
 	return h.Transport
-}
-
-// hubEntryTransportSource returns the transport token source for the
-// audience of a hub list entry: the metadata server on GCE (unless it is
-// redirected), otherwise application default credentials.
-var hubEntryTransportSource = func(audience string) (transportauth.TokenSource, error) {
-	if transportauth.IsOnGCEFunc() && !transportauth.IsMetadataRedirected(os.Getenv(transportauth.EnvMetadataMode)) {
-		return transportauth.NewMetadataSource(audience), nil
-	}
-	return adcsource.New(audience)
-}
-
-// hubEntryTransportAuth returns the transport auth option for the hub list
-// checks ('hub add', 'hub list --check'), which reach hubs other than the
-// effective one. They use the transport of the hub's own entry and nothing
-// else: transport auth from the environment belongs to the effective hub
-// and is never inherited, and without an entry transport they use none.
-func hubEntryTransportAuth(endpoint string) hubclient.Option {
-	t := hubEntryTransport(endpoint)
-	if t == nil || t.Audience == "" {
-		return hubclient.WithTransportAuth(nil, transportauth.HeaderAuthorization)
-	}
-	src, err := hubEntryTransportSource(t.Audience)
-	if err != nil {
-		util.Debugf("No transport credential for hub %s: %v", endpoint, err)
-		return hubclient.WithTransportAuth(nil, transportauth.HeaderAuthorization)
-	}
-	return hubclient.WithTransportAuth(src, transportauth.ModeFromString(t.Mode))
 }
