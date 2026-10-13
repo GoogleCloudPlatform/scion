@@ -1361,6 +1361,21 @@ func TestTestAdminPolicy_ProjectRolesStayGrantable(t *testing.T) {
 		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
 			map[string]any{"name": "tsa-pr-psecret-" + generateID()[:8], "scopeType": "project", "permissions": []string{"agent.read", "secret.use"}})
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s project-scope custom role with secret.use: %s", who, rec.Body.String())
+		// project.manage_visitors (held by project-owner and project-admin)
+		// is grantable at project scope too. The test hub-admin does not hold
+		// it, so the ordinary CanDelegate ceiling refuses that kind first
+		// (not the test-admin policy; see the direct cases below).
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
+			map[string]any{"name": "tsa-pr-pvis-" + generateID()[:8], "scopeType": "project", "permissions": []string{"project.manage_visitors"}})
+		if who == "test_super_admin" {
+			assert.Less(t, rec.Code, 300, "%s project-scope custom role with project.manage_visitors: %s", who, rec.Body.String())
+		} else {
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s project-scope custom role with project.manage_visitors: %s", who, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "test-admin policy", "%s: the ceiling refuses, not the test-admin policy", who)
+		}
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
+			map[string]any{"name": "tsa-pr-svis-" + generateID()[:8], "scopeType": "system", "permissions": []string{"project.manage_visitors"}})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s system-scope custom role with project.manage_visitors: %s", who, rec.Body.String())
 		// Set-complete, not any-match: one of the four together with
 		// another deny-classified permission is still refused.
 		for _, extra := range []string{"secret.use", "hub.config.update"} {
@@ -1398,6 +1413,8 @@ func TestTestAdminPolicy_ProjectRolesStayGrantable(t *testing.T) {
 			{"project membership of project-owner", GrantDescriptor{Type: GrantTypeProjectMembership, RoleDefinitionID: ownerRD, ScopeType: store.RoleScopeProject, ScopeID: projectID}, true},
 			{"project-scope custom role mixing the four with secret.use", GrantDescriptor{Type: GrantTypeCustomRole, CustomRolePermissions: append([]string{"secret.use"}, delegationPerms...), ScopeType: store.RoleScopeProject}, false},
 			{"project-scope custom role mixing one of the four with hub.config.update", GrantDescriptor{Type: GrantTypeCustomRole, CustomRolePermissions: []string{agentDelegationReadPermission, "hub.config.update"}, ScopeType: store.RoleScopeProject}, false},
+			{"project-scope custom role with project.manage_visitors", GrantDescriptor{Type: GrantTypeCustomRole, CustomRolePermissions: []string{"project.manage_visitors"}, ScopeType: store.RoleScopeProject}, true},
+			{"system-scope custom role with project.manage_visitors", GrantDescriptor{Type: GrantTypeCustomRole, CustomRolePermissions: []string{"project.manage_visitors"}, ScopeType: store.RoleScopeSystem}, false},
 			{"project-admin role named with a system scope", GrantDescriptor{Type: GrantTypeRoleBinding, RoleDefinitionID: adminRD, ScopeType: store.RoleScopeSystem}, false},
 			{"system role holding the four named with a project scope", GrantDescriptor{Type: GrantTypeRoleBinding, RoleDefinitionID: sysRole.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID}, false},
 		} {
@@ -1553,4 +1570,57 @@ func TestTestAdminPolicy_GroupWithProjectRoleRefused(t *testing.T) {
 	human := taUser(t, s, "tsa-gpr-human-member", store.SystemRoleHubMember)
 	rec := doRequestWithToken(t, srv, taTokenFor(t, srv, issuer), http.MethodPost, path, map[string]any{"memberType": "user", "memberId": human.ID, "role": "member"})
 	assert.Less(t, rec.Code, 300, "human super-admin adds the member: %s", rec.Body.String())
+}
+
+// Visitor grants (ptone/scion#4603) have no route yet: the store binds the
+// project-visitor role only through CreateVisitorRoleBinding, which no
+// handler calls. A test admin's attempt to bind it through the general
+// role binding route is refused, and nothing is created. The cause is the
+// store's rule (ErrNonMembershipRoleRefused on the general path), not the
+// test-admin policy: the visitor role's permissions are allow-classified.
+// A test hub is not federated (A0 gate), so it has no federated accounts
+// to grant visitor access to.
+func TestTestAdminPolicy_VisitorBindingRefused(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-vis-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "tsa-vis-iss2", store.SystemRoleSuperAdmin)
+	kinds := map[string]TestAdminIdentityTokenResponse{
+		"test_super_admin": tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin),
+		"test_hub_admin":   tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin),
+	}
+	owner := taUser(t, s, "tsa-vis-owner", store.SystemRoleHubMember)
+	projectID := tid("tsa-vis-project")
+	taProject(t, s, projectID, owner.ID)
+	visitorRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleVisitor, store.RoleScopeProject)
+	require.NoError(t, err)
+	hasVisitor := func(userID string) bool {
+		bs, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+		require.NoError(t, err)
+		for _, b := range bs {
+			if b.RoleDefinitionID == visitorRD.ID {
+				return true
+			}
+		}
+		return false
+	}
+
+	for who, k := range kinds {
+		u := taUser(t, s, "tsa-vis-target-"+who, store.SystemRoleHubMember)
+		rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/role-bindings",
+			map[string]any{"roleDefinitionId": visitorRD.ID, "principalType": "user", "principalId": u.ID, "scopeType": "project", "scopeId": projectID})
+		assert.GreaterOrEqual(t, rec.Code, 400, "%s binds project-visitor: %s", who, rec.Body.String())
+		assert.False(t, hasVisitor(u.ID), "%s created no visitor binding", who)
+		// The test-admin policy admits the visitor role's permissions.
+		refusal := srv.authzService.refuseTestAdminDeniedGrant(ctx, tsaIdentity(t, s, k.Identity.ID), GrantDescriptor{Type: GrantTypeRoleBinding,
+			RoleDefinitionID: visitorRD.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID})
+		assert.Nil(t, refusal, "%s: the visitor role holds no deny-classified permission", who)
+	}
+
+	// The cause, named: the store's general path refuses the role.
+	u := taUser(t, s, "tsa-vis-store-target", store.SystemRoleHubMember)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: visitorRD.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: u.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test"})
+	assert.ErrorIs(t, err, store.ErrNonMembershipRoleRefused)
+	assert.False(t, hasVisitor(u.ID))
 }

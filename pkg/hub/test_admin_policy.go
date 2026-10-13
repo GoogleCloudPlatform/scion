@@ -115,6 +115,11 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"project.set_messaging_policy": testAdminPolicyAllow,
 	"project.clone":                testAdminPolicyAllow,
 	"project.list":                 testAdminPolicyAllow,
+	// Visitor access for federated accounts (ptone/scion#4603): deny. A
+	// test hub is not federated (A0 gate), like federation.project_visitors.
+	// Still grantable at project scope (testAdminGrantableAtProjectScope):
+	// the built-in project-owner and project-admin roles hold it.
+	"project.manage_visitors": testAdminPolicyDeny,
 	// project.secret_read is the project secret read gate of the agent
 	// material path (material_runtime.go), held inside the built-in
 	// project-owner and project-admin roles. Allow, on two grounds: (1) no
@@ -277,12 +282,13 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 // an admin-kind test identity may still grant through a project-scope
 // grant (a project role binding, project membership or a project-scope
 // custom role), while it can never exercise them itself (decide step 0c
-// stays deny). They are the agent delegation grant management
-// permissions, which the built-in project-owner and project-admin roles
-// hold. Granted on a project they reach only grants bounded to that
-// project, which every project owner already manages, so a test admin
-// keeps appointing project owners and admins. At hub scope they reach any
-// user's grants and stay refused. No other deny entry is exempt:
+// stays deny). They are the permissions the built-in project-owner and
+// project-admin roles hold that are deny for a test admin: the agent
+// delegation grant management permissions and project.manage_visitors.
+// Granted on a project they reach only that project (grants bounded to
+// it; its visitor grants), which every project owner already manages, so
+// a test admin keeps appointing project owners and admins. At hub scope
+// they stay refused. No other deny entry is exempt:
 // project.secret_read and every other project-held deny permission is
 // refused at every scope. The census pins every member as deny-classified
 // and held by a built-in project role.
@@ -291,6 +297,7 @@ var testAdminGrantableAtProjectScope = map[string]bool{
 	"agent.delegation.credential.revoke": true,
 	"agent.delegation.list":              true,
 	"agent.delegation.read":              true,
+	"project.manage_visitors":            true,
 }
 
 // testAdminGrantRefuses reports whether an admin-kind test identity is
