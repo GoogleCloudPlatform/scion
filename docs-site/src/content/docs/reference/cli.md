@@ -1182,6 +1182,7 @@ Publishes files as artifacts and fetches them by reference (`scion://artifact/<i
 
 - `scion artifact publish <file|folder>`: Publish a file or folder in the current project; prints its reference, version and web page URL.
     - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
+    - With `--review <ref>`, when the Hub refuses the review because it changes text outside its marks, the CLI prints each differing region of each file. A region that differs only in whitespace is labelled `(whitespace only)` and shows tabs as `→`, trailing spaces as `·` and line ends as `⏎`; a change to the final newline is named, and an empty side prints `(no lines)`. See [Reviews](/scion/reference/artifacts/#reviews).
 - `scion artifact get <ref>`: Write an artifact's entry file to stdout, or with `--out` the file or the whole bundle.
     - Flags: `--out`, `-o <path>` (a file, an existing directory for a single file, or the directory a bundle is written into), `--force` (replace files that already exist under `--out`).
 - `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`. Discarded versions (a rejected or stale review, or an upload not finished in time) are listed among them by number with their reason, so gaps in the numbering are explained.

@@ -53,7 +53,8 @@ const (
 // its parent. Lines are 1-based line numbers in the parent; ParentLines and
 // CleanLines count the lines the region spans on each side. Parent and
 // Clean quote the start of each side, cut at MaxExcerptBytes on a UTF-8
-// boundary; Truncated reports a cut.
+// boundary; Truncated reports a cut. WhitespaceOnly and FinalNewline are
+// decided on the whole of both sides, not on the excerpts.
 type Hunk struct {
 	Line        int    `json:"line"`
 	ParentLines int    `json:"parent_lines"`
@@ -61,7 +62,20 @@ type Hunk struct {
 	Parent      string `json:"parent"`
 	Clean       string `json:"clean"`
 	Truncated   bool   `json:"truncated,omitempty"`
+	// WhitespaceOnly is true when the two sides differ only in spaces,
+	// tabs and line breaks (ptone/scion#4578).
+	WhitespaceOnly bool `json:"whitespace_only,omitempty"`
+	// FinalNewline, on the hunk that holds the last line, is FinalNewlineAdded
+	// or FinalNewlineRemoved when only one text ends with a newline.
+	FinalNewline string `json:"final_newline,omitempty"`
 }
+
+// Hunk.FinalNewline values: the clean text adds or removes the newline the
+// parent ends with.
+const (
+	FinalNewlineAdded   = "added"
+	FinalNewlineRemoved = "removed"
+)
 
 // Diff compares two normalised texts line by line and returns the regions
 // that differ, or nil when they are equal. It runs in linear time: it trims
@@ -85,8 +99,13 @@ func Diff(parent, clean []byte) []Hunk {
 	}
 	pm := pl[pre : len(pl)-suf]
 	cm := cl[pre : len(cl)-suf]
+	// When only one text ends with a newline the last lines differ, so suf
+	// is 0 and the hunk that reaches the end of the middles holds them.
+	fn := finalNewline(parent, clean)
 	if len(pm) != len(cm) {
-		return []Hunk{newHunk(pre+1, pm, cm)}
+		h := newHunk(pre+1, pm, cm)
+		h.FinalNewline = fn
+		return []Hunk{h}
 	}
 	var hunks []Hunk
 	for i := 0; i < len(pm); {
@@ -102,7 +121,11 @@ func Diff(parent, clean []byte) []Hunk {
 			hunks[len(hunks)-1].Truncated = true
 			break
 		}
-		hunks = append(hunks, newHunk(pre+i+1, pm[i:j], cm[i:j]))
+		h := newHunk(pre+i+1, pm[i:j], cm[i:j])
+		if j == len(pm) && suf == 0 {
+			h.FinalNewline = fn
+		}
+		hunks = append(hunks, h)
 		i = j
 	}
 	return hunks
@@ -120,7 +143,65 @@ func splitLines(b []byte) [][]byte {
 func newHunk(line int, p, c [][]byte) Hunk {
 	ps, pt := excerpt(p)
 	cs, ct := excerpt(c)
-	return Hunk{Line: line, ParentLines: len(p), CleanLines: len(c), Parent: ps, Clean: cs, Truncated: pt || ct}
+	return Hunk{Line: line, ParentLines: len(p), CleanLines: len(c), Parent: ps, Clean: cs, Truncated: pt || ct,
+		WhitespaceOnly: whitespaceOnly(p, c)}
+}
+
+// finalNewline reports how clean changes the newline parent ends with:
+// FinalNewlineAdded, FinalNewlineRemoved, or "" when both or neither end
+// with one.
+func finalNewline(parent, clean []byte) string {
+	pn, cn := bytes.HasSuffix(parent, []byte("\n")), bytes.HasSuffix(clean, []byte("\n"))
+	switch {
+	case cn && !pn:
+		return FinalNewlineAdded
+	case pn && !cn:
+		return FinalNewlineRemoved
+	}
+	return ""
+}
+
+// whitespaceOnly reports whether the lines p and c hold the same text once
+// every space, tab, CR and LF is removed. It reads each byte once and
+// allocates nothing.
+func whitespaceOnly(p, c [][]byte) bool {
+	var pr, cr byteReader
+	pr.lines, cr.lines = p, c
+	for {
+		pb, pok := pr.nextNonSpace()
+		cb, cok := cr.nextNonSpace()
+		if !pok || !cok {
+			return pok == cok
+		}
+		if pb != cb {
+			return false
+		}
+	}
+}
+
+// byteReader walks the bytes of a run of lines.
+type byteReader struct {
+	lines [][]byte
+	line  int
+	off   int
+}
+
+// nextNonSpace returns the next byte that is not a space, tab, CR or LF,
+// and false at the end.
+func (r *byteReader) nextNonSpace() (byte, bool) {
+	for r.line < len(r.lines) {
+		l := r.lines[r.line]
+		for r.off < len(l) {
+			b := l[r.off]
+			r.off++
+			if b != ' ' && b != '\t' && b != '\r' && b != '\n' {
+				return b, true
+			}
+		}
+		r.line++
+		r.off = 0
+	}
+	return 0, false
 }
 
 // excerpt joins lines up to MaxExcerptBytes, cutting on a rune boundary.
