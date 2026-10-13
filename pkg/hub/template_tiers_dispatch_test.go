@@ -451,7 +451,9 @@ func TestTemplateJobConfig_ExcludesEnvironmentKeys(t *testing.T) {
 	require.NotNil(t, jc)
 	assert.Empty(t, jc.Image)
 	assert.Nil(t, jc.Telemetry)
-	assert.Equal(t, map[string]string{"SNAP_PLAIN": "snap"}, jc.Env, "reserved env keys are stripped")
+	// Only the SCION_ namespace is reserved in template env (ptone/scion#4524);
+	// other keys, OTEL_* included, are the job's own and are kept.
+	assert.Equal(t, map[string]string{"SNAP_PLAIN": "snap", "OTEL_SNAP": "snap"}, jc.Env, "reserved (SCION_) env keys are stripped")
 	assert.Len(t, jc.Secrets, 1, "job keys are kept")
 
 	assert.Equal(t, "snap-image:v1", f.template.AgentConfig.Image, "the snapshot itself is not modified")
