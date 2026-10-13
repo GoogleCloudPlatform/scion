@@ -999,11 +999,14 @@ export class ScionTerminalPane extends LitElement {
     this.updateFrontmost();
   }
 
-  /** Explicit lifetime boundary. Navigation is reserved for the legacy adapter. */
-  dispose(reason: 'explicit' | 'navigation' = 'explicit'): void {
+  /**
+   * Explicit lifetime boundary: closes the bound session explicitly (sending
+   * the tmux detach key) and releases the pane.
+   */
+  dispose(): void {
     if (this.disposed) return;
     try {
-      this.session?.close(reason);
+      this.session?.close('explicit');
     } finally {
       this.cleanup();
     }
