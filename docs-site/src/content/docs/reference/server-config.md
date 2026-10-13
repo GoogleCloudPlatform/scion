@@ -991,7 +991,7 @@ The endpoint resolved above (or `server.hub.agent_endpoint`, if set — see belo
 
 #### The hub a Runtime Broker reports to
 
-A Runtime Broker sends its heartbeat and control channel to `server.broker.hub_endpoint` (`SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). On a combo server whose broker runs next to the Hub, the broker uses the Hub's localhost address when that setting is unset. A broker-only server falls back to the CLI's `hub.endpoint` (deprecated, see below). `scion runtime-broker register` and `join` save `server.broker.hub_endpoint` when it is unset, except on a host that runs a local workstation Hub, and never write `hub.endpoint`.
+A Runtime Broker sends its heartbeat and control channel to `server.broker.hub_endpoint` (`SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). On a combo server whose Runtime Broker runs next to the Hub, the Runtime Broker uses the Hub's localhost address when that setting is unset. A server that runs only a Runtime Broker falls back to the CLI's `hub.endpoint` (deprecated, see below). `scion runtime-broker register` and `join` save `server.broker.hub_endpoint` when it is unset, except on a host that runs a local workstation Hub, and never write `hub.endpoint`.
 
 #### Deprecated fallback to the CLI's hub endpoint
 
