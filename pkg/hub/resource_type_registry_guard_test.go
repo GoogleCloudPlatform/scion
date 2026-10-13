@@ -230,11 +230,12 @@ func enclosingFuncBody(f *ast.File, n ast.Node) *ast.BlockStmt {
 // variable obj in body. ok is false when body writes obj in a form the
 // guard does not follow: obj's address is taken, obj is assigned inside a
 // function literal, by a compound, defining or multi-value assignment, or
-// as a range variable.
+// as a range variable. A parenthesised operand, as in (x) = v or &(x),
+// is the same variable.
 func varWrites(body *ast.BlockStmt, obj *ast.Object) (rhs []ast.Expr, ok bool) {
 	ok = true
 	is := func(e ast.Expr) bool {
-		id, isIdent := e.(*ast.Ident)
+		id, isIdent := ast.Unparen(e).(*ast.Ident)
 		return isIdent && id.Obj == obj
 	}
 	var walk func(n ast.Node, inClosure bool)
@@ -903,6 +904,59 @@ func neverAssigned() {
 	var unset string
 	_ = Resource{Type: unset}
 }
+
+func parenAssigned() {
+	var viaParen string
+	viaParen = "agent"
+	(viaParen) = pick()
+	_ = Resource{Type: viaParen}
+}
+
+func parenAddressTaken() {
+	var viaParenAddr string
+	viaParenAddr = "agent"
+	p := &(viaParenAddr)
+	_ = p
+	_ = Resource{Type: viaParenAddr}
+}
+
+func parenRange(names []string) {
+	var viaParenRange string
+	viaParenRange = "agent"
+	for _, (viaParenRange) = range names {
+	}
+	_ = Resource{Type: viaParenRange}
+}
+
+func compoundAssigned() {
+	var viaCompound string
+	viaCompound = "agent"
+	viaCompound += "_suffix"
+	_ = Resource{Type: viaCompound}
+}
+
+func redeclared() {
+	var viaDefine string
+	viaDefine = "agent"
+	viaDefine, err := "agent", error(nil)
+	_ = err
+	_ = Resource{Type: viaDefine}
+}
+
+func multiValue() {
+	var viaMulti string
+	viaMulti = "agent"
+	viaMulti, _ = pick2()
+	_ = Resource{Type: viaMulti}
+}
+
+func rangeAssigned(names []string) {
+	var viaRange string
+	viaRange = "agent"
+	for _, viaRange = range names {
+	}
+	_ = Resource{Type: viaRange}
+}
 `
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "sample.go", src, 0)
@@ -916,6 +970,13 @@ func neverAssigned() {
 		"sample.go: viaAddr",
 		"sample.go: viaClosure",
 		"sample.go: unset",
+		"sample.go: viaParen",
+		"sample.go: viaParenAddr",
+		"sample.go: viaParenRange",
+		"sample.go: viaCompound",
+		"sample.go: viaDefine",
+		"sample.go: viaMulti",
+		"sample.go: viaRange",
 	}, scan.unresolved, "a written helper parameter or an unfollowed local variable must be unresolved")
 	assert.Len(t, scan.found, 2)
 	assert.Equal(t, []string{
