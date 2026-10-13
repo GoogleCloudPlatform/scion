@@ -237,13 +237,14 @@ func TestAgentDelete_SnapshotCheckGuardsDispatchShortcuts(t *testing.T) {
 func TestAgentDelete_PinnedPlacementReadFailureNeverFinalizes(t *testing.T) {
 	boom := errors.New("injected broker read failure")
 	for _, tc := range []struct {
-		name  string
-		phase string
-		prior string
-		query string
+		name      string
+		phase     string
+		prior     string
+		query     string
+		wantPhase string // the prior phase the rollback restores
 	}{
-		{"force", string(state.PhaseStopping), `{"phase":"running","activity":"working"}`, "?force=true"},
-		{"best-effort", string(state.PhaseCreated), `{"phase":"created"}`, ""},
+		{"force", string(state.PhaseStopping), `{"phase":"running","activity":"working"}`, "?force=true", string(state.PhaseRunning)},
+		{"best-effort", string(state.PhaseCreated), `{"phase":"created"}`, "", string(state.PhaseCreated)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -275,11 +276,14 @@ func TestAgentDelete_PinnedPlacementReadFailureNeverFinalizes(t *testing.T) {
 			f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(faulty, client, false, slog.Default()))
 
 			rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID+tc.query, nil)
-			require.GreaterOrEqual(t, rec.Code, 400, "never a success: %s", rec.Body.String())
+			require.Equal(t, http.StatusBadGateway, rec.Code, "the rollback's runtime_error, never a success: %s", rec.Body.String())
 			assert.Equal(t, 0, client.count(), "nothing is sent")
 			got := mustGetAgent(t, f.s, a.ID)
 			assert.True(t, got.DeletedAt.IsZero(), "the row is not finalized")
-			assert.NotEqual(t, store.DeletionStateFinalizing, got.DeletionState)
+			assert.Equal(t, store.DeletionStateFailed, got.DeletionState, "rolled back, not left deleting or abandoned")
+			assert.Equal(t, store.DeletionCodeRuntimeError, got.DeletionCode)
+			assert.Equal(t, tc.wantPhase, got.Phase, "the prior phase is restored")
+			assert.Equal(t, store.RunIntentStopped, got.RunIntent, "the stop intent the abandoned engine recorded stays")
 			assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.legacy.ID), "the reservation is kept")
 		})
 	}
