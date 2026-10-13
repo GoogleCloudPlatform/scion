@@ -2500,9 +2500,9 @@ type replaceReadErrStore struct {
 }
 
 func (s replaceReadErrStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	return s.lockoutReadErrStore.Store.WithTx(ctx, func(tx store.Store) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
 		inner := s
-		inner.lockoutReadErrStore.Store = tx
+		inner.Store = tx
 		return fn(inner)
 	})
 }
