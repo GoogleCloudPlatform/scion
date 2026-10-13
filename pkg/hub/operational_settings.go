@@ -160,10 +160,14 @@ type Layer1Snapshot struct {
 
 	// Endpoints
 	// PublicURL is, in a DB-backed snapshot, the server.hub.public_url an
-	// admin saved in a managed endpoints row, else the bootstrap value
-	// without the SCION_SEED_* layer (settings.yaml and the environment). A
-	// seed value, which startup ignores, is never used (ptone/scion#4826).
-	// The endpoint in effect is Server.HubEndpoints.
+	// admin saved in a managed endpoints row, else a bootstrap value. When
+	// the server has set the unseeded bootstrap (SetUnseededBootstrap, as
+	// startup does), that value comes from the merge without the
+	// SCION_SEED_* layer (settings.yaml and the environment), so a seed
+	// value, which startup ignores, is excluded (ptone/scion#4826). When it
+	// is unset (tests, embedded servers), the full bootstrap merge, seed
+	// layer included, is used. The endpoint in effect is
+	// Server.HubEndpoints.
 	PublicURL string
 	// HubName is the configured hub_name. "" does NOT mean "leave alone":
 	// ApplySnapshot resets the running name (and the GCP secret label) to
