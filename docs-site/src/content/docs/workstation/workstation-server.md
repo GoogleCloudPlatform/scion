@@ -27,6 +27,9 @@ This command performs several actions simultaneously:
 1.  **Starts the Hub**: Binds a local API and Web server (defaulting to port 8080).
 2.  **Starts a Broker**: Binds a local broker interface to execute containers.
 3.  **Links Them**: Automatically registers the local broker with the local hub.
+4.  **Adds the Hub to your hub list**: Registers the local Hub as `local` in `~/.scion/context.yaml`, and makes it the current Hub when no Hub is current and your global settings name no other Hub (see [Working with several Hubs](/scion/hosted/user/hosted-user/#working-with-several-hubs)). It no longer writes `hub.endpoint` to your global settings.
+
+**Listen addresses.** `--host` sets the listen address of the Hub API and web server only. The Runtime Broker stays on `127.0.0.1` unless `server.broker.host` is set to another address (`0.0.0.0` counts as unset), so exposing the dashboard on your network does not expose the broker.
 
 `scion server start` returns only after the started components answer their `/healthz` endpoints (the web port, which also serves the Hub API, and the broker port when the broker starts; without an image registry the server starts without the broker, and start waits only for the web port), so a command run right after it, such as `scion hub link`, can reach the server. If they do not answer within about 30 seconds, the command exits non-zero and says which component did not answer. The server is left running in that case; check the log and `scion server status`. If the server process exits during startup, the command says so at once. `scion server restart` waits the same way.
 

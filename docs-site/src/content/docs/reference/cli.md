@@ -1364,6 +1364,7 @@ Manages Scion server components (Hub and Broker).
         - `--enable-hub`: Enable the Hub server component.
         - `--enable-runtime-broker`: Enable the Runtime Broker component.
         - `--port <int>`: Port to listen on.
+        - `--host <addr>`: Listen address of the Hub API and web server (default `0.0.0.0`). The Runtime Broker listener is set by `server.broker.host` instead; in workstation mode it defaults to `127.0.0.1`, and `0.0.0.0` counts as unset.
         - `--db <string>`: Database driver/connection.
         - `--dev-auth`: Enable dev-auth authentication.
         - `--debug`: Set the server's default log level to `debug`. It changes logging only; see [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level).
