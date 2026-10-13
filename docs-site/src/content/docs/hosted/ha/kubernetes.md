@@ -52,7 +52,7 @@ The Runtime Broker's heartbeat lists agents on each runtime with its own deadlin
 
 ### Agent-Level Kubernetes Configuration
 
-Per-agent or per-template Kubernetes settings in `~/.scion/settings.yaml`:
+Per-agent Kubernetes settings in `~/.scion/settings.yaml`:
 
 ```yaml
 kubernetes:
@@ -64,9 +64,7 @@ kubernetes:
                                         # identity mode "assign": a value set
                                         # here directly on the create/start
                                         # request is rejected if it names a
-                                        # different KSA than the mapping; a
-                                        # template-only value is silently
-                                        # overridden by the mapping instead.
+                                        # different KSA than the mapping.
   runtimeClassName: gvisor             # sandboxed runtime (gVisor, Kata, etc.)
   priorityClassName: scion-agent-priority  # overrides the runtime-level default, if any
   safeToEvict: false                   # ask the autoscaler not to evict the pod (see below)
@@ -103,7 +101,7 @@ You can set them in three places. Each key is resolved separately, and the first
 
 If none of them sets a key, the cluster's default StorageClass and `10Gi` are used.
 
-An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, a template cannot reset it to the cluster default; name the class explicitly instead.
+An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, an agent cannot reset it to the cluster default; name the class explicitly instead.
 
 `shared_dir_size` must be a positive Kubernetes quantity such as `10Gi` or `1Ti`. Settings validation and the admin settings API reject other values, and an agent start fails with an error naming the key that holds the bad value.
 
@@ -127,7 +125,7 @@ profiles:
     # shared_dir_storage_class: premium-rwx
 ```
 
-A template or agent can still override this for itself:
+An agent can still override this for itself:
 
 ```yaml
 kubernetes:
@@ -266,7 +264,7 @@ globalDefault: false
 description: "Priority class for Scion agent pods"
 ```
 
-Then reference it by name, either as a runtime-level default or per template/agent (the per-template value wins if both are set):
+Then reference it by name, either as a runtime-level default or per agent (the per-agent value wins if both are set):
 
 ```yaml
 runtimes:
@@ -326,7 +324,7 @@ metadata:
 
 The setting is opt-in, and only `false` has an effect. Leaving it unset, or setting it to `true`, adds no annotation; that is the default behaviour.
 
-You can set it on a runtime, on a profile, or on a template or agent:
+You can set it on a runtime, on a profile, or on an agent:
 
 ```yaml
 # settings.yaml — runtime default
@@ -604,7 +602,7 @@ Nothing is filtered out: accounts with an `unknown` state are still listed, with
 
 The check uses the report, which the broker builds from its global settings. A project whose own settings point a profile at a different runtime entry or runtime type should also map the GSA explicitly on that profile (the profile's `kubernetes_service_account_mappings` in the broker's global settings), so the report lists it.
 
-**Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A `serviceAccountName` set only in a template is overridden by the mapping.
+**Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A template's `kubernetes:` block, `serviceAccountName` included, is ignored.
 
 **Dispatch errors.** Each of these fails the dispatch before any pod is created:
 
@@ -918,7 +916,7 @@ Tar sync includes retry with exponential backoff (1s, 2s, 4s — up to 3 retries
 | RuntimeClassName | Supported |
 | ServiceAccountName | Supported |
 | PriorityClassName | Supported (runtime default and per-agent override; the class must already exist on the cluster) |
-| Safe-to-evict annotation | Supported (opt-in `safe_to_evict: false` on a runtime or profile, or `safeToEvict: false` on a template/agent) |
+| Safe-to-evict annotation | Supported (opt-in `safe_to_evict: false` on a runtime or profile, or `safeToEvict: false` on an agent) |
 | NodeSelector | Supported |
 | Tolerations | Supported |
 | ImagePullPolicy | Supported (Always, IfNotPresent, Never) |
