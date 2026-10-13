@@ -4702,7 +4702,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (!project?.id) {
       return html`<span class="read-only-value hub-export-project">None resolved</span>
-        <span class="hint">${project?.detail ?? ''}</span>`;
+        <span class="hint">${project?.detail ?? ''}</span>
+        <span class="hint hub-export-project-remedy"
+          >Set SCION_SERVER_HUB_GCPPROJECTID or run on Google Cloud. Not editable here.</span
+        >`;
     }
     return html`<span class="read-only-value hub-export-project"
         ><code>${project.id}</code> (source: ${project.source})</span

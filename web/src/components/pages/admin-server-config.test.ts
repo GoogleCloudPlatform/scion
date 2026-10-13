@@ -4846,6 +4846,9 @@ describe('hub observability export switches', () => {
     );
     expect(query(element, '.hub-export-project')!.textContent).toContain('None resolved');
     expect(shadowText(element)).toContain('server.hub.gcp_project_id is not set');
+    expect(query(element, '.hub-export-project-remedy')!.textContent).toContain(
+      'Set SCION_SERVER_HUB_GCPPROJECTID or run on Google Cloud.'
+    );
   });
 
   it('marks an env-set switch with the env badge', async () => {

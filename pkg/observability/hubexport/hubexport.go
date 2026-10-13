@@ -27,7 +27,8 @@
 //     when SCION_TRACING_ENABLED is set as well.
 //
 // The export project is server.hub.gcp_project_id when the operator set it
-// (env or settings file), else the project of the GCP metadata server.
+// (SCION_SERVER_HUB_GCPPROJECTID or a legacy server.yaml), else the
+// project of the GCP metadata server.
 //
 // The package has no dependency on the hub server, so the rules are tested
 // on their own.
