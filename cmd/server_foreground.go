@@ -870,7 +870,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Printf("Web UI: http://%s:%d", displayHost, webPort)
 		}
 		if devAuthToken != "" {
-			log.Printf("Developer token: export SCION_DEV_TOKEN=%s", devAuthToken)
+			log.Printf("Developer token: %s", devTokenStartupHint(cfg, globalDir))
 		}
 	}
 
@@ -1809,11 +1809,36 @@ func initDevAuth(cfg *config.GlobalConfig, globalDir string) (string, error) {
 	_ = os.Setenv("SCION_DEV_TOKEN", devAuthToken)
 	_ = os.Setenv("SCION_AUTH_TOKEN", devAuthToken)
 
-	log.Printf("Developer token: %s", devAuthToken)
 	log.Printf("To authenticate CLI commands, run:")
-	log.Printf("  export SCION_DEV_TOKEN=%s", devAuthToken)
+	log.Printf("  %s", devTokenStartupHint(cfg, globalDir))
 
 	return devAuthToken, nil
+}
+
+// devTokenStartupHint returns what startup output shows for the dev token:
+// the command that loads it from its file, so the output prints the dev
+// token file path instead of its value. A token set directly in the server
+// settings has no file, so the hint names the setting instead.
+func devTokenStartupHint(cfg *config.GlobalConfig, globalDir string) string {
+	if cfg.Auth.Token != "" {
+		return "set by server.auth.dev_token in the server settings"
+	}
+	return devTokenExportHint(devTokenFilePath(cfg.Auth.TokenFile, globalDir))
+}
+
+// devTokenFilePath returns the file the server keeps its dev token in: the
+// configured token file, or <globalDir>/dev-token by default.
+func devTokenFilePath(configured, globalDir string) string {
+	if configured != "" {
+		return configured
+	}
+	return filepath.Join(globalDir, "dev-token")
+}
+
+// devTokenExportHint returns the shell command that exports the dev token
+// stored at path.
+func devTokenExportHint(path string) string {
+	return "export SCION_DEV_TOKEN=$(cat " + path + ")"
 }
 
 // loadServerSettings loads the settings the server's hub and broker use,
