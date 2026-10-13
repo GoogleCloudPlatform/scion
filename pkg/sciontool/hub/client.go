@@ -1135,8 +1135,8 @@ const (
 // base, doubling each attempt) capped at limit. It is the delay the refresh
 // loop gets from the shared backoff helper after that many failures. Unlike
 // the helper-free version it replaced, it returns base when limit < base and
-// the helper's default base when base <= 0; the loop reaches neither case
-// (its base is always positive and its limit at least its base).
+// starts from the helper's default base when base <= 0; the loop reaches
+// neither case (its base is always positive and its limit at least its base).
 func tokenRefreshBackoff(consecutiveFailures int, base, limit time.Duration) time.Duration {
 	b := newTokenRefreshBackoff(base, limit)
 	d := b.Failure()
