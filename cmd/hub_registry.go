@@ -75,8 +75,9 @@ only for a hub on a loopback address.
 
 --check also checks whether each hub responds (REACHABLE) and whether it
 accepts the CLI's credential for it (VERIFIED: yes, no, or - when it was
-not checked). Each hub is sent only its own credential: its login, or the
-dev token for a loopback hub. Other tokens are never sent.`,
+not checked). Each hub is sent only its own credential (its login, or the
+dev token for a loopback hub) and only the transport auth of its own entry.
+Tokens from the environment are never sent.`,
 	Args: cobra.NoArgs,
 	RunE: runHubList,
 }
@@ -136,9 +137,9 @@ func updateHubRegistry(fn func(*config.CLIContext) error) error {
 }
 
 // hubResponds checks the health of the hub at endpoint within
-// hubHealthTimeout.
+// hubHealthTimeout, with the transport of the hub's own entry only.
 var hubResponds = func(endpoint string) error {
-	client, err := hubclient.New(endpoint, hubclient.WithTimeout(hubHealthTimeout))
+	client, err := hubclient.New(endpoint, hubclient.WithTimeout(hubHealthTimeout), hubEntryTransportAuth(endpoint))
 	if err != nil {
 		return err
 	}
@@ -195,11 +196,12 @@ func hubAuthToken(endpoint string, info authInfo) string {
 }
 
 // hubAccepts asks the hub at endpoint, with an authenticated identity call
-// within hubHealthTimeout, whether it accepts token. ok reports whether the
+// within hubHealthTimeout, whether it accepts token. Like hubResponds, it
+// uses only the transport of the hub's own entry. ok reports whether the
 // hub answered: a hub that rejects the token (401) answers with accepted
 // false, while any other failure is not an answer.
 var hubAccepts = func(endpoint, token string) (accepted, ok bool) {
-	client, err := hubclient.New(endpoint, hubclient.WithTimeout(hubHealthTimeout), hubclient.WithBearerToken(token))
+	client, err := hubclient.New(endpoint, hubclient.WithTimeout(hubHealthTimeout), hubEntryTransportAuth(endpoint), hubclient.WithBearerToken(token))
 	if err != nil {
 		return false, false
 	}

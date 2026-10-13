@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1096,4 +1097,114 @@ func TestHubList_CheckRemoteHubGetsNoDevToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.Regexp(t, `remote .* none\s+yes\s+-\n`, stdout)
 	assert.Empty(t, called, "no credential is sent to a remote hub")
+}
+
+// transportCheckHub is a fake hub that answers health checks and accepts
+// the identity call only with the bearer token accept. It records the path
+// and the headers of every request.
+func transportCheckHub(t *testing.T, accept string) (*httptest.Server, func() map[string][]http.Header) {
+	t.Helper()
+	var mu sync.Mutex
+	seen := map[string][]http.Header{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.URL.Path] = append(seen[r.URL.Path], r.Header.Clone())
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.URL.Path == "/api/v1/auth/me" && r.Header.Get("Authorization") == "Bearer "+accept:
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "u1", "email": "alice@example.com"})
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{"code": "unauthorized", "message": "invalid token"},
+			})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() map[string][]http.Header {
+		mu.Lock()
+		defer mu.Unlock()
+		out := map[string][]http.Header{}
+		for k, v := range seen {
+			out[k] = append([]http.Header(nil), v...)
+		}
+		return out
+	}
+}
+
+// headersCarry reports whether any of hs has a header value containing s.
+func headersCarry(hs []http.Header, s string) bool {
+	for _, h := range hs {
+		for _, values := range h {
+			for _, v := range values {
+				if strings.Contains(v, s) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// TestHubList_CheckSendsOnlyEntryTransport: 'hub add' and 'hub list
+// --check' reach hubs other than the effective one, so each hub gets only
+// the transport auth of its own entry, never the one from the environment.
+func TestHubList_CheckSendsOnlyEntryTransport(t *testing.T) {
+	setupRegistryTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	t.Setenv("SCION_TRANSPORT_TOKEN", "env-transport-tok")
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", filepath.Join(t.TempDir(), "transport-token"))
+	t.Setenv("SCION_TRANSPORT_MODE", "iap")
+	origSource := hubEntryTransportSource
+	t.Cleanup(func() { hubEntryTransportSource = origSource })
+	var audiences []string
+	var mu sync.Mutex
+	hubEntryTransportSource = func(audience string) (transportauth.TokenSource, error) {
+		mu.Lock()
+		audiences = append(audiences, audience)
+		mu.Unlock()
+		src := transportauth.NewInjectedSource()
+		src.SetToken("entry-transport-tok", time.Now().Add(time.Hour))
+		return src, nil
+	}
+	plain, plainSeen := transportCheckHub(t, "scion_dev_test")
+	guarded, guardedSeen := transportCheckHub(t, "scion_dev_test")
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		if err := c.AddHub("guarded", guarded.URL); err != nil {
+			return err
+		}
+		c.Hubs["guarded"].Transport = &config.HubTransportConfig{Mode: "iap", Audience: "entry-aud"}
+		return nil
+	}))
+
+	_, _, err := runScion(t, "hub", "add", "plain", plain.URL)
+	require.NoError(t, err)
+	stdout, _, err := runScion(t, "hub", "list", "--check")
+	require.NoError(t, err)
+	assert.Regexp(t, `guarded .* dev\s+yes\s+yes\n`, stdout)
+	assert.Regexp(t, `plain .* dev\s+yes\s+yes\n`, stdout)
+
+	p := plainSeen()
+	require.Len(t, p["/healthz"], 2, "hub add and hub list --check each check health")
+	require.Len(t, p["/api/v1/auth/me"], 1)
+	assert.False(t, headersCarry(p["/healthz"], "env-transport-tok"), "the health check never sends the environment's transport token")
+	assert.False(t, headersCarry(p["/api/v1/auth/me"], "env-transport-tok"), "the identity call never sends the environment's transport token")
+	assert.False(t, headersCarry(p["/healthz"], "entry-transport-tok"), "a hub without an entry transport gets none")
+
+	g := guardedSeen()
+	require.Len(t, g["/healthz"], 1)
+	require.Len(t, g["/api/v1/auth/me"], 1)
+	for _, h := range append(g["/healthz"], g["/api/v1/auth/me"]...) {
+		assert.Equal(t, "Bearer entry-transport-tok", h.Get("Proxy-Authorization"), "the entry's transport, in the entry's mode")
+	}
+	assert.False(t, headersCarry(append(g["/healthz"], g["/api/v1/auth/me"]...), "env-transport-tok"))
+	mu.Lock()
+	defer mu.Unlock()
+	assert.NotEmpty(t, audiences)
+	for _, a := range audiences {
+		assert.Equal(t, "entry-aud", a)
+	}
 }
