@@ -381,15 +381,23 @@ func TestUATEnforcement_NoPolicyScopesExist(t *testing.T) {
 		}
 	})
 
-	t.Run("no role UAT scopes", func(t *testing.T) {
+	// Role definitions and role bindings have read selectors only; no
+	// selector creates, changes or deletes them.
+	t.Run("role UAT scopes are read only", func(t *testing.T) {
 		for scope := range validScopes {
-			assert.NotContains(t, scope, "role:", "ValidUATScopes must not include any role:* entries, found: %s", scope)
+			if scope == "role:read" {
+				continue
+			}
+			assert.NotContains(t, scope, "role:", "ValidUATScopes must not include a role:* entry other than role:read, found: %s", scope)
 		}
 	})
 
-	t.Run("no role_binding UAT scopes", func(t *testing.T) {
+	t.Run("role_binding UAT scopes are read only", func(t *testing.T) {
 		for scope := range validScopes {
-			assert.NotContains(t, scope, "role_binding:", "ValidUATScopes must not include any role_binding:* entries, found: %s", scope)
+			if scope == "role_binding:read" {
+				continue
+			}
+			assert.NotContains(t, scope, "role_binding:", "ValidUATScopes must not include a role_binding:* entry other than role_binding:read, found: %s", scope)
 		}
 	})
 }
