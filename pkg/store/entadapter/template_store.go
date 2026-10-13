@@ -319,12 +319,12 @@ func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *sto
 // is kept, instead of being rolled back to the value read
 // (ptone/scion#4674). As in DeactivateDelegationEdgeGuarded (see
 // rawStoredText), updated is compared as the exact stored value: on SQLite
-// the column is TEXT, and the
-// stored form (Go's time.String text, possibly with a monotonic-clock
-// suffix or a non-UTC offset) never equals a bound time.Time read back from
-// it, so the raw text is read first and bound as a string; on Postgres the
-// timestamptz value read compares as an instant. Any ent write between that
-// read and the UPDATE bumps updated, so the UPDATE matches no row.
+// the column is TEXT, and the stored form (Go's time.String text, possibly
+// with a monotonic-clock suffix or a non-UTC offset) never equals a bound
+// time.Time read back from it, so the raw text is read first and bound as a
+// string; on Postgres the timestamptz value read compares as an instant. Any
+// ent write between that read and the UPDATE bumps updated, so the UPDATE
+// matches no row.
 func (s *TemplateStore) SetTemplateAgentConfig(ctx context.Context, id string, cfg *api.ScionConfig, expected store.TemplateContentPrecondition) (bool, error) {
 	if cfg == nil {
 		return false, nil

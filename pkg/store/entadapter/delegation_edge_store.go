@@ -386,9 +386,10 @@ func (s *DelegationEdgeStore) ListAllDelegationEdgesForDelegate(ctx context.Cont
 // WHERE as a compare-and-swap: on SQLite the raw text, bound as a string
 // against the column (rawStoredText, storedTextEQ; shared with
 // TemplateStore.SetTemplateAgentConfig); on Postgres the timestamptz value,
-// which compares as an instant. The raw read runs before the typed read, on the same (possibly
-// transaction-bound) client, so any ent write between them bumps updated
-// and changes the stored value, and the UPDATE matches no row.
+// which compares as an instant. The raw read runs before the typed read, on
+// the same (possibly transaction-bound) client, so any ent write between
+// them bumps updated and changes the stored value, and the UPDATE matches no
+// row.
 //
 // A missing edge returns ErrNotFound. A guard with both Unrecorded and
 // Recorded set, an empty cause or an empty opID returns ErrInvalidInput.
