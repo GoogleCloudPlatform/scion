@@ -109,6 +109,11 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	if opts.PeerAuth == nil {
 		return errors.New("conduit external relay mode: no relay-peer authenticator configured")
 	}
+	// Every relay-to-hub call records its nonce in the shared replay store;
+	// without one the hub internal API would refuse every call.
+	if opts.replayStore == nil && s.relayPeerReplayStoreFor(&conduitExternalRuntime{}) == nil {
+		return errors.New("conduit external relay mode: no shared relay-peer replay store (no database client)")
+	}
 	st := opts.Store
 	if st == nil {
 		s.mu.RLock()

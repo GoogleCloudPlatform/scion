@@ -73,7 +73,8 @@ func startRelayOpsHub(t *testing.T, srv *Server, st store.Store) *relayOpsFixtur
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	srv.config.SharedSigningSecret = testRelaySessionSecret
-	require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{InstanceID: "hub-ext", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now())}))
+	require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{InstanceID: "hub-ext", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now()),
+		replayStore: testReplayStore(t)}))
 	f.relayGen = f.registerRelay(t, "relay-0")
 	f.internal = httptest.NewServer(srv.ConduitInternalHandler())
 	t.Cleanup(f.internal.Close)

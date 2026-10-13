@@ -57,7 +57,9 @@ func newExternalHub(t *testing.T, replay relayPeerReplayStore) *httptest.Server 
 	f.regStore = entadapter.NewConduitRegistryStore(enttest.NewClient(t))
 	f.reg = registry.New(f.regStore, registry.Config{})
 	opts := externalOptions(t, f)
-	opts.replayStore = replay
+	if replay != nil {
+		opts.replayStore = replay
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	f.srv.config.SharedSigningSecret = testRelaySessionSecret

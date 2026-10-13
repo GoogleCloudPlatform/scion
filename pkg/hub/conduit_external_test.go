@@ -52,7 +52,15 @@ func externalOptions(t *testing.T, f *externalFixture) ConduitExternalOptions {
 	t.Helper()
 	auth, err := relay.NewHMACPeerAuthFromPeerSecret(relay.HMACPeerAuthConfig{Secret: append([]byte(nil), externalPeerSecret...), SelfID: "hub-ext"})
 	require.NoError(t, err)
-	return ConduitExternalOptions{InstanceID: "hub-ext", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now())}
+	return ConduitExternalOptions{InstanceID: "hub-ext", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now()),
+		replayStore: testReplayStore(t)}
+}
+
+// testReplayStore is a shared relay-peer replay store for a test hub: test
+// servers have no database client of their own to build one from.
+func testReplayStore(t *testing.T) relayPeerReplayStore {
+	t.Helper()
+	return NewNonceCacheStore(enttest.NewClient(t))
 }
 
 // externalRelayAuth is the relay-peer authenticator of a relay calling the
@@ -120,6 +128,12 @@ func TestConduitExternal_StartChecks(t *testing.T) {
 	noAuth.PeerAuth = nil
 	f.srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.Error(t, f.srv.StartConduitExternal(ctx, noAuth))
+
+	// A test server has no database client: without a replay store the
+	// start is refused, since every relay-to-hub call would be refused.
+	noReplay := externalOptions(t, f)
+	noReplay.replayStore = nil
+	require.ErrorContains(t, f.srv.StartConduitExternal(ctx, noReplay), "replay store")
 
 	f.srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.NoError(t, f.srv.StartConduitExternal(ctx, externalOptions(t, f)))

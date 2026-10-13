@@ -113,11 +113,13 @@ func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
 	w.hubB.conduitGrants = newConduitGrantKeys(keys, cf.clock.Now)
 
 	regStore := entadapter.NewConduitRegistryStore(enttest.NewClient(t))
+	replay := testReplayStore(t) // shared by both hubs, as the database is
 	for id, srv := range map[string]*Server{"hub-a": cf.srv, "hub-b": w.hubB} {
 		srv.config.SharedSigningSecret = testRelaySessionSecret
 		require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{
 			InstanceID: id, PeerAuth: externalRelayAuth(t, id), Store: regStore,
 			Registry: registry.New(regStore, registry.Config{}), Clock: clock.NewFake(time.Now()),
+			replayStore: replay,
 		}))
 	}
 	internalA := httptest.NewServer(cf.srv.ConduitInternalHandler())
