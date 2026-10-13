@@ -24,27 +24,21 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 )
 
-// TestNewKeyRetryBackoff pins the grant-key retry policy: keyRetryMin
-// doubling to keyRetryMax, both bounded by the interval, no jitter, and
-// Reset returns to the first delay.
-func TestNewKeyRetryBackoff(t *testing.T) {
-	tests := []struct {
-		interval time.Duration
-		want     []time.Duration
-	}{
-		{KeyRefreshInterval, []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute}},
-		{45 * time.Second, []time.Duration{30 * time.Second, 45 * time.Second, 45 * time.Second}},
-		{10 * time.Second, []time.Duration{10 * time.Second, 10 * time.Second}},
-	}
-	for _, tt := range tests {
-		b := newKeyRetryBackoff(tt.interval)
-		for round := 0; round < 2; round++ {
-			for i, w := range tt.want {
-				if got := b.Failure(); got != w {
-					t.Fatalf("interval %v, round %d, failure %d: got %v, want %v", tt.interval, round, i+1, got, w)
-				}
-			}
-			b.Reset()
+// TestNewKeyRetryBackoffReset: for each interval, Reset after the delay
+// has reached its cap returns to the first delay, min(keyRetryMin,
+// interval). TestKeyRetryBackoff pins the delay sequences themselves.
+func TestNewKeyRetryBackoffReset(t *testing.T) {
+	for _, interval := range []time.Duration{KeyRefreshInterval, 45 * time.Second, 10 * time.Second} {
+		b := newKeyRetryBackoff(interval)
+		for i := 0; i < 8; i++ {
+			b.Failure()
+		}
+		if got, want := b.Failure(), min(keyRetryMax, interval); got != want {
+			t.Fatalf("interval %v: capped delay %v, want %v", interval, got, want)
+		}
+		b.Reset()
+		if got, want := b.Failure(), min(keyRetryMin, interval); got != want {
+			t.Fatalf("interval %v: after Reset got %v, want %v", interval, got, want)
 		}
 	}
 }
