@@ -279,13 +279,7 @@ func (s *Server) authorizeDMPeer(ctx context.Context, user UserIdentity, key str
 		if peer.Status == store.UserStatusSuspended {
 			return dmPeerRefused(ctx, user, key, "DM peer user is suspended")
 		}
-		// A user access token reads the peer through the hub-level user
-		// record, so it needs user:read on a hub boundary.
-		peerResource := userResource(peer)
-		if IsScopedUserIdentity(user) {
-			peerResource = hubScopedResource("user", peer.ID)
-		}
-		if !s.authzService.CheckAccess(ctx, user, peerResource, ActionRead).Allowed {
+		if !s.authzService.CheckAccess(ctx, user, userResource(peer), ActionRead).Allowed {
 			return dmPeerRefused(ctx, user, key, "sender may not read the DM peer user")
 		}
 		return nil
