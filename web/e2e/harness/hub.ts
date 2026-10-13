@@ -116,7 +116,7 @@ export const HARNESS_OWNED_ENV: readonly string[] = [
 /**
  * Prefixes of environment keys StartHubOptions.env may not set either: the
  * test mode and test identity settings stay with the harness (the
- * --enable-test-identities flag and the marker).
+ * --test-mode flag and the marker).
  */
 export const HARNESS_OWNED_ENV_PREFIXES: readonly string[] = [
   'SCION_SERVER_HUB_TEST',

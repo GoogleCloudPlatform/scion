@@ -17,13 +17,14 @@
  * binary. The stand-in is a Node script that records each invocation (argv
  * and the environment keys the checks read) as one JSON line, answers
  * `server test-infra mark`, and for `server start` serves a healthy
- * /healthz and prints a dev token, like the real hub.
+ * /healthz, writes a dev token file and prints its path, like the real
+ * hub.
  *
  * Checked:
  * - with testIdentities and runtimeBroker, the test infrastructure marker
  *   is written to the same database before the server starts, and the
  *   server runs the co-located broker on loopback with --auto-provide
- *   next to --enable-test-identities;
+ *   next to --test-mode=member:<hub id> and the hub class "test";
  * - StartHubOptions.env reaches the hub process;
  * - env may not set a harness-owned key (hub id, hub class, HOME, broker
  *   host, test mode and test identity settings): startHub throws and runs
@@ -68,12 +69,14 @@ if (argv[0] === 'server' && argv[1] === 'test-infra') {
 }
 if (argv[0] === 'server' && argv[1] === 'start') {
   const port = Number(argv[argv.indexOf('--web-port') + 1]);
+  const tokenFile = process.env.HARNESS_SELFTEST_LOG + '.dev-token';
+  fs.writeFileSync(tokenFile, 'scion_dev_0123456789abcdef\\n', { mode: 0o600 });
   http
     .createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'healthy' }));
     })
-    .listen(port, '127.0.0.1', () => console.log('SCION_DEV_TOKEN=scion_dev_0123456789abcdef'));
+    .listen(port, '127.0.0.1', () => console.log("export SCION_DEV_TOKEN=$(cat '" + tokenFile + "')"));
   process.on('SIGTERM', () => process.exit(0));
 } else {
   process.exit(2);
@@ -143,7 +146,8 @@ test('runtimeBroker with testIdentities marks the database before the server sta
   expect(start.env.SCION_SERVER_HUB_HUBID).toBe(state.hubId);
 
   // Test identities stay on, with the co-located broker on loopback.
-  expect(start.argv).toContain('--enable-test-identities');
+  expect(start.argv).toContain(`--test-mode=member:${String(state.hubId)}`);
+  expect(start.env.SCION_SERVER_HUB_CLASS).toBe('test');
   expect(start.argv).not.toContain('--enable-test-login');
   expect(start.argv).toContain('--enable-runtime-broker');
   expect(start.argv).not.toContain('--enable-runtime-broker=false');
