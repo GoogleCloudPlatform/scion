@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -28,6 +29,12 @@ import (
 
 // fixtureDevToken is a made-up dev token value used only by these tests.
 const fixtureDevToken = "scion_dev_fixture0123456789abcdef"
+
+// wantDevTokenExport is the line startup output must show for the dev token
+// file at path (path must not contain a single quote).
+func wantDevTokenExport(path string) string {
+	return `export SCION_DEV_TOKEN="$(cat '` + path + `')"`
+}
 
 // captureDevTokenLog redirects the standard logger to a buffer for the test.
 func captureDevTokenLog(t *testing.T) *bytes.Buffer {
@@ -87,9 +94,9 @@ func TestInitDevAuth_LogsTokenFilePath(t *testing.T) {
 			require.Equal(t, fixtureDevToken, token)
 
 			logged := out.String()
-			assert.Contains(t, logged, "export SCION_DEV_TOKEN=$(cat "+wantPath+")")
+			assert.Contains(t, logged, wantDevTokenExport(wantPath))
 			assert.NotContains(t, logged, "scion_dev_")
-			assert.Contains(t, devTokenStartupHint(cfg, globalDir), "export SCION_DEV_TOKEN=$(cat "+wantPath+")")
+			assert.Contains(t, devTokenStartupHint(cfg, globalDir), wantDevTokenExport(wantPath))
 		})
 	}
 }
@@ -109,7 +116,7 @@ func TestInitDevAuth_GeneratedTokenNotLogged(t *testing.T) {
 	require.NotEmpty(t, token)
 
 	logged := out.String()
-	assert.Contains(t, logged, "export SCION_DEV_TOKEN=$(cat "+filepath.Join(globalDir, "dev-token")+")")
+	assert.Contains(t, logged, wantDevTokenExport(filepath.Join(globalDir, "dev-token")))
 	assert.NotContains(t, logged, token)
 	assert.NotContains(t, logged, "scion_dev_")
 }
@@ -132,4 +139,36 @@ func TestDevTokenStartupHint_ConfiguredToken(t *testing.T) {
 	assert.NotContains(t, hint, "scion_dev_")
 	assert.Contains(t, hint, "server.auth.dev_token")
 	assert.NotContains(t, out.String(), "scion_dev_")
+}
+
+// TestLogWorkstationReadyBanner_DevTokenPath checks the workstation startup
+// banner: it shows the dev token file path, not the token value.
+func TestLogWorkstationReadyBanner_DevTokenPath(t *testing.T) {
+	globalDir := t.TempDir()
+	cfg := &config.GlobalConfig{}
+	cfg.Auth.Enabled = true
+
+	out := captureDevTokenLog(t)
+	logWorkstationReadyBanner(cfg, globalDir, true, 8080, fixtureDevToken)
+
+	logged := out.String()
+	assert.Contains(t, logged, "Developer token: "+wantDevTokenExport(filepath.Join(globalDir, "dev-token")))
+	assert.NotContains(t, logged, "scion_dev_")
+}
+
+// TestDevTokenExportHint_ShellSafe checks that the printed command works in
+// a POSIX shell for a path with a space and a single quote in it.
+func TestDevTokenExportHint_ShellSafe(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "it's a dir")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	path := filepath.Join(dir, "dev-token")
+	require.NoError(t, os.WriteFile(path, []byte(fixtureDevToken+"\n"), 0o600))
+
+	hint := devTokenExportHint(path)
+	assert.NotContains(t, hint, "scion_dev_")
+
+	// Evaluate the printed command in sh and print the exported value.
+	got, err := exec.Command("sh", "-c", hint+` && printf '%s' "$SCION_DEV_TOKEN"`).Output()
+	require.NoError(t, err)
+	assert.Equal(t, fixtureDevToken, string(got))
 }

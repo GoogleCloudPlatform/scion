@@ -861,17 +861,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 	// 15. Print startup banner
 	if !hostedMode {
-		log.Println("Scion server ready (workstation mode)")
-		if enableWeb {
-			displayHost := cfg.Hub.Host
-			if displayHost == "0.0.0.0" || displayHost == "" {
-				displayHost = "127.0.0.1"
-			}
-			log.Printf("Web UI: http://%s:%d", displayHost, webPort)
-		}
-		if devAuthToken != "" {
-			log.Printf("Developer token: %s", devTokenStartupHint(cfg, globalDir))
-		}
+		logWorkstationReadyBanner(cfg, globalDir, enableWeb, webPort, devAuthToken)
 	}
 
 	// 16. Wait for either an error or context cancellation
@@ -1815,6 +1805,22 @@ func initDevAuth(cfg *config.GlobalConfig, globalDir string) (string, error) {
 	return devAuthToken, nil
 }
 
+// logWorkstationReadyBanner logs the workstation-mode startup banner. The
+// dev token line shows its file path, not its value.
+func logWorkstationReadyBanner(cfg *config.GlobalConfig, globalDir string, webEnabled bool, port int, devAuthToken string) {
+	log.Println("Scion server ready (workstation mode)")
+	if webEnabled {
+		displayHost := cfg.Hub.Host
+		if displayHost == "0.0.0.0" || displayHost == "" {
+			displayHost = "127.0.0.1"
+		}
+		log.Printf("Web UI: http://%s:%d", displayHost, port)
+	}
+	if devAuthToken != "" {
+		log.Printf("Developer token: %s", devTokenStartupHint(cfg, globalDir))
+	}
+}
+
 // devTokenStartupHint returns what startup output shows for the dev token:
 // the command that loads it from its file, so the output prints the dev
 // token file path instead of its value. A token set directly in the server
@@ -1836,9 +1842,17 @@ func devTokenFilePath(configured, globalDir string) string {
 }
 
 // devTokenExportHint returns the shell command that exports the dev token
-// stored at path.
+// stored at path. The path is single-quoted, so it may contain spaces or
+// shell metacharacters.
 func devTokenExportHint(path string) string {
-	return "export SCION_DEV_TOKEN=$(cat " + path + ")"
+	return `export SCION_DEV_TOKEN="$(cat ` + shellSingleQuote(path) + `)"`
+}
+
+// shellSingleQuote quotes s for a POSIX shell: it is wrapped in single
+// quotes, and each single quote inside it is written as an escaped quote
+// between two quoted parts.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // loadServerSettings loads the settings the server's hub and broker use,

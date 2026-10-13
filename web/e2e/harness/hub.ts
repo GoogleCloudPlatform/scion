@@ -84,13 +84,35 @@ export interface StartHubOptions {
 /** Acknowledgement flag of `scion server test-infra mark`. */
 const TEST_INFRA_MARK_ACK = '--i-understand-this-hub-can-mint-super-admins';
 
-/** The dev token pattern, for capture and for redaction in logs. */
-const DEV_TOKEN_PATTERN = /SCION_DEV_TOKEN=(scion_dev_[0-9a-f]+)/;
+/**
+ * The hub prints the dev token file path, not the token value:
+ * `export SCION_DEV_TOKEN="$(cat '<path>')"`, with the path single-quoted
+ * for a POSIX shell. Group 1 is the quoted body; see unquoteShellSingle.
+ */
+const DEV_TOKEN_FILE_PATTERN = /SCION_DEV_TOKEN="\$\(cat '((?:[^']|'\\'')*)'\)"/;
+/** Any dev token value, for redaction in logs. */
 const DEV_TOKEN_ANY = /scion_dev_[0-9a-f]+/g;
 
 /** Hub log lines are echoed with any dev token redacted. */
 function redact(line: string): string {
   return line.replace(DEV_TOKEN_ANY, 'scion_dev_<redacted>');
+}
+
+/** Undoes the hub's single quoting: each '\'' in the body is one quote. */
+function unquoteShellSingle(body: string): string {
+  return body.replace(/'\\''/g, "'");
+}
+
+/** Reads the dev token from the file the hub printed; throws if it is empty. */
+function readDevTokenFile(file: string): string {
+  if (!fs.existsSync(file)) {
+    throw new Error(`Dev token file ${file}, printed by the hub, does not exist.`);
+  }
+  const token = fs.readFileSync(file, 'utf8').trim();
+  if (!token) {
+    throw new Error(`Dev token file ${file} is empty.`);
+  }
+  return token;
 }
 
 /** Path of the hub binary the harness builds and runs. */
@@ -269,20 +291,22 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     env,
   });
 
-  // Capture the dev token from hub startup logs
-  let devToken = '';
-  // Token is scion_dev_ followed by hex; stop before any trailing quote/brace.
-  const devTokenPattern = DEV_TOKEN_PATTERN;
+  // Capture the dev token file path from hub startup logs; the token is
+  // read from that file once the hub is healthy.
+  let devTokenFile = '';
+  const captureDevTokenFile = (line: string) => {
+    const match = line.match(DEV_TOKEN_FILE_PATTERN);
+    if (match) {
+      devTokenFile = unquoteShellSingle(match[1]);
+    }
+  };
 
-  // Log hub output for debugging and capture dev token
+  // Log hub output for debugging and capture the dev token file path
   hubProcess.stdout?.on('data', (data: Buffer) => {
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
       console.log(`[hub:stdout] ${redact(line)}`);
-      const match = line.match(devTokenPattern);
-      if (match) {
-        devToken = match[1];
-      }
+      captureDevTokenFile(line);
     }
   });
 
@@ -290,6 +314,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
       console.log(`[hub:stderr] ${redact(line)}`);
+      captureDevTokenFile(line);
     }
   });
 
@@ -304,11 +329,14 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   // Wait for health
   await waitForHealth(baseURL);
 
-  if (!devToken) {
+  if (!devTokenFile) {
     throw new Error(
-      'Failed to capture dev token from hub output. ' + 'Ensure the hub is started with --dev-auth.'
+      'Failed to capture the dev token file path from hub output. ' +
+        'Ensure the hub is started with --dev-auth.'
     );
   }
+  // A relative path is relative to the hub's working directory.
+  const devToken = readDevTokenFile(path.resolve(homeDir ?? WORKSPACE_ROOT, devTokenFile));
 
   console.log(`[hub] Dev token captured.`);
 

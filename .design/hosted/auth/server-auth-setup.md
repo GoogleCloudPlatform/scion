@@ -111,19 +111,15 @@ When the server starts with development authentication enabled:
 2. If not, check for an existing token file at `~/.scion/dev-token`
 3. If no file exists, generate a new cryptographically secure token
 4. Store the token in `~/.scion/dev-token` with `0600` permissions
-5. Log the token to stdout for easy copy/paste
+5. Log the command that loads the token from its file. Startup output shows the dev token file path instead of its value.
 
 **Startup Log Output:**
 ```
-Scion Hub API starting on :9810
-WARNING: Development authentication enabled - not for production use
-Dev token: scion_dev_a1b2c3d4e5f6789012345678901234567890abcd
-
 To authenticate CLI commands, run:
-  export SCION_DEV_TOKEN=scion_dev_a1b2c3d4e5f6789012345678901234567890abcd
-
-Or the token has been saved to: ~/.scion/dev-token
+  export SCION_DEV_TOKEN="$(cat '/home/user/.scion/dev-token')"
 ```
+
+The path is the configured `server.auth.dev_token_file`, or `~/.scion/dev-token` by default. If the token is set directly with `server.auth.dev_token`, the output names that setting instead.
 
 ### 2.5 Client Token Resolution
 
