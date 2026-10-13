@@ -157,6 +157,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Server secrets are now in memory; remove them from the process env
+	// before anything below can start a child process. On macOS the
+	// container runtime probe during logging setup above runs earlier.
+	scrubServerSecretEnv()
 	// Apply server.log_level (settings or SCION_SERVER_LOGLEVEL) at setting
 	// precedence. The level filter and the cloud, request and message
 	// handlers built by initServerLogging follow the shared level state, so
@@ -2207,17 +2211,18 @@ func resolveHubNameFromEnv() string {
 }
 
 // resolveSessionSecret resolves the deployment-wide session secret from the
-// --session-secret flag, falling back to the SCION_SERVER_SESSION_SECRET env
-// var (then SESSION_SECRET for compatibility). The same value backs both the
-// web session cookie store and the hub JWT signing keys so that all replicas
-// behind the load balancer agree.
+// --session-secret flag, falling back to the value scrubServerSecretEnv read
+// at startup, then to the SCION_SERVER_SESSION_SECRET env var (then the
+// deprecated SESSION_SECRET). The same value backs both the web session cookie
+// store and the hub JWT signing keys so that all replicas behind the load
+// balancer agree.
 func resolveSessionSecret() string {
 	secret := webSessionSecret
 	if secret == "" {
-		secret = os.Getenv("SCION_SERVER_SESSION_SECRET")
+		secret = capturedSessionSecret
 	}
 	if secret == "" {
-		secret = os.Getenv("SESSION_SECRET")
+		secret = sessionSecretFromEnv()
 	}
 	if secret == "" && hostedMode {
 		slog.Warn("No session secret configured in hosted mode! Replicas will not be able to share sessions or agree on JWT signing keys, leading to login loops.")
