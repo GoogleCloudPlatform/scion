@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -2945,10 +2946,44 @@ func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
+	// Flush the contents before the rename, so a crash cannot leave a
+	// truncated file under the final name (#4821).
+	if err := agentInfoFileSync(tmp); err != nil {
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	// Sync the parent directory so the rename itself survives a crash.
+	return agentInfoDirSync(filepath.Dir(path))
+}
+
+// Test seams for writeAgentInfoFile's disk syncs.
+var (
+	// agentInfoFileSync flushes the temp file's contents to disk.
+	agentInfoFileSync = func(f *os.File) error { return f.Sync() }
+	// agentInfoDirSync flushes the directory entry for the rename.
+	agentInfoDirSync = syncAgentInfoDir
+)
+
+// syncAgentInfoDir fsyncs dir. Windows cannot fsync a directory, so it is
+// a no-op there.
+func syncAgentInfoDir(dir string) error {
+	if goruntime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
 }
 
 // provisionedWorktreeStateFile is the broker-owned file that persists the
