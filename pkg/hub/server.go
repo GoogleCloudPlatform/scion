@@ -1451,7 +1451,7 @@ type RemoteAgentConfig struct {
 	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 
 	// TelemetryPolicy is the project's enforced telemetry on/off
-	// (scion.io/telemetry-enabled), sent only to a broker that reports
+	// (projectSettingTelemetryEnabled), sent only to a broker that reports
 	// TemplateTiers. The broker applies it last, above the agent's config
 	// and the requester's SCION_TELEMETRY_ENABLED flag (ptone/scion#4218).
 	// Nil = no policy.
