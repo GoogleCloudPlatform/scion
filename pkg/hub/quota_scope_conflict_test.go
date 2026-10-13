@@ -244,7 +244,7 @@ func TestReserve_SimultaneousAandB_OneWinsOtherConflicts(t *testing.T) {
 	base, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	bs := &insertBarrierStore{Store: base}
-	def := seedLimit(t, bs, scopeTestLimit, 10)
+	def := seedLimit(t, bs, scopeTestLimit, 1000) // above the 40 rows the iterations leave active
 	replica1 := &QuotaService{store: bs, logger: slog.Default()}
 	replica2 := &QuotaService{store: bs, logger: slog.Default()}
 
