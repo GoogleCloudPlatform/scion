@@ -51,6 +51,10 @@ type startContext struct {
 	TemplateSlug string
 	Manager      agent.Manager
 
+	// ownedStart is the flat instance's ownership mirror installed for
+	// Opts.RunID (installOwnedStart), or nil when none was installed.
+	ownedStart *ownedStart
+
 	// RuntimeType is the runtime type this dispatch resolved to through
 	// resolveExistingAgentManager (dispatchRuntimeType; pinned to the
 	// found-on runtime on restart), which can differ from the broker's
@@ -1163,16 +1167,18 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// re-run this same check after their own, later resolution.
 	downgradeUnverifiedHubDefaultPassthrough(env, envCls, gcpMetadataMode, requireLocalRuntime, dispatchRuntimeType)
 
+	var owned *ownedStart
 	if s.ownership != nil {
 		// Mirror every runtime object the start creates into the record;
 		// a mirroring failure stops further creates (Checkpoint) and is
 		// checked again when Start returns (completeOwnedStart).
-		s.installOwnedStart(&opts, ownedProjectID, ownedAgentID)
+		owned = s.installOwnedStart(&opts, ownedProjectID, ownedAgentID)
 	}
 	sc := &startContext{
 		Opts:                        opts,
 		TemplateSlug:                templateSlug,
 		Manager:                     mgr,
+		ownedStart:                  owned,
 		RuntimeType:                 dispatchRuntimeType,
 		EnvClassifications:          envCls,
 		ProvisionedWorktreeRepoRoot: provisionedWorktreeRoot,

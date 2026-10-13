@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -159,33 +161,35 @@ func TestDeleteAgent_RuntimeRunMismatch_RunCheckedStopLeavesNewRun(t *testing.T)
 	assertUntouched(t, scionB, "dev", infoB)
 }
 
-// A soft delete that loses the race: the mark written before the runtime
-// call is undone when the runtime reports a run mismatch, so the newer
-// run's agent-info.json keeps its phase and has no deletedAt.
-func TestDeleteAgent_RuntimeRunMismatch_UndoesSoftDeleteMark(t *testing.T) {
+// A soft delete that loses the race writes no soft-delete mark (this test
+// replaces markAgentSoftDeleted, so it must not call t.Parallel): the
+// runtime reports a run mismatch, nothing was deleted, and the newer run's
+// agent-info.json keeps its phase and earlier deletedAt.
+func TestDeleteAgent_RuntimeRunMismatch_NoSoftDeleteMark(t *testing.T) {
 	rt := newNameHeldRuntime("run-new")
 	mgr := &k8sStyleManager{real: agent.NewManager(rt)}
 	srv, home := newCleanupTestServer(t, mgr)
 	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
 	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
 
-	// An agent soft-deleted before keeps its earlier deletedAt across
-	// restarts; the undo must bring that value back, not clear it.
 	prior := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	if err := agent.UpdateAgentDeletedAt("dev", scionB, prior); err != nil {
 		t.Fatal(err)
 	}
 
+	marks := countSoftDeleteMarks(t)
+
 	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
-	st, ok := agent.GetAgentDeleteState("dev", scionB)
-	if !ok {
-		t.Fatal("agent-info.json unreadable")
+	// Zero calls, not only the final state: a mark written and then
+	// undone would leave the same file.
+	if n := marks(); n != 0 {
+		t.Errorf("soft-delete mark written %d times on a run mismatch", n)
 	}
-	if st.Phase != "running" || !st.DeletedAt.Equal(prior) {
-		t.Errorf("soft-delete mark not undone: phase %q deletedAt %v, want running and %v", st.Phase, st.DeletedAt, prior)
+	if phase, deletedAt := readDeleteMark(t, scionB, "dev"); phase != "running" || !deletedAt.Equal(prior) {
+		t.Errorf("soft-delete mark written on a run mismatch: phase %q deletedAt %v, want running and %v", phase, deletedAt, prior)
 	}
 	if !rt.stillPresent() {
 		t.Error("run-new's entry was deleted")
@@ -289,9 +293,11 @@ func TestClassifyStartError_RunConflict(t *testing.T) {
 	assertNoRunConflictLeak(t, msg)
 }
 
-// Any other runtime failure after the soft-delete mark (nothing confirmed
-// deleted) also undoes the mark; the delete answers with a runtime error.
-func TestDeleteAgent_RuntimeFailure_UndoesSoftDeleteMark(t *testing.T) {
+// A runtime delete failure (nothing confirmed deleted, the container may
+// still run) writes no soft-delete mark; the delete answers with a runtime
+// error. This test replaces markAgentSoftDeleted, so it must not call
+// t.Parallel.
+func TestDeleteAgent_RuntimeFailure_NoSoftDeleteMark(t *testing.T) {
 	rt := newNameHeldRuntime("run-old")
 	rt.DeleteFunc = func(context.Context, runtime.RunRef) error { return fmt.Errorf("apiserver unavailable") }
 	mgr := &k8sStyleManager{real: agent.NewManager(rt)}
@@ -299,40 +305,35 @@ func TestDeleteAgent_RuntimeFailure_UndoesSoftDeleteMark(t *testing.T) {
 	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
 	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
 
+	marks := countSoftDeleteMarks(t)
+
 	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&softDelete=true&deletedAt=2026-10-03T00:00:00Z")
 	if rec.Code < 500 {
 		t.Fatalf("expected a 5xx, got %d: %s", rec.Code, rec.Body.String())
 	}
-	st, _ := agent.GetAgentDeleteState("dev", scionB)
-	if st.Phase != "running" || !st.DeletedAt.IsZero() {
-		t.Errorf("soft-delete mark not undone: phase %q deletedAt %v", st.Phase, st.DeletedAt)
+	// Zero calls, not only the final state: a mark written and then
+	// undone would leave the same file.
+	if n := marks(); n != 0 {
+		t.Errorf("soft-delete mark written %d times although the runtime delete failed", n)
+	}
+	if phase, deletedAt := readDeleteMark(t, scionB, "dev"); phase != "running" || !deletedAt.IsZero() {
+		t.Errorf("soft-delete mark left although the runtime delete failed: phase %q deletedAt %v", phase, deletedAt)
 	}
 }
 
-// The undo changes nothing unless agent-info.json still shows the mark:
-// a phase a newer start wrote after the snapshot is kept.
-func TestRestoreAgentDeleteState_OnlyUndoesOwnMark(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
-	snap := agent.AgentDeleteState{Phase: "stopped"}
-
-	if err := agent.RestoreAgentDeleteState("dev", scionB, snap); err != nil {
-		t.Fatal(err)
+// readDeleteMark returns the Phase and DeletedAt of the agent's
+// agent-info.json.
+func readDeleteMark(t *testing.T, scionDir, agentName string) (string, time.Time) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(config.GetAgentHomePath(scionDir, agentName), "agent-info.json"))
+	if err != nil {
+		t.Fatalf("read agent-info.json: %v", err)
 	}
-	if st, _ := agent.GetAgentDeleteState("dev", scionB); st.Phase != "running" {
-		t.Errorf("restore overwrote a newer phase: %q", st.Phase)
+	var info api.AgentInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		t.Fatalf("parse agent-info.json: %v", err)
 	}
-
-	if err := agent.UpdateAgentConfig("dev", scionB, "deleted", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := agent.RestoreAgentDeleteState("dev", scionB, snap); err != nil {
-		t.Fatal(err)
-	}
-	if st, _ := agent.GetAgentDeleteState("dev", scionB); st.Phase != "stopped" {
-		t.Errorf("restore did not undo the mark: %q", st.Phase)
-	}
+	return info.Phase, info.DeletedAt
 }
 
 // errIdentityRunConflict is an ErrRunConflict wrapped the way the Kubernetes
@@ -388,18 +389,21 @@ func TestRestart_NameInUse_409(t *testing.T) {
 
 // filesFailManager deletes the runtime entry successfully and then fails
 // file cleanup before removing anything, as DeleteAgentFiles does on a
-// registry error.
+// registry error (wrapped in agent.ErrAgentFilesDelete, as deleteResolved
+// does).
 type filesFailManager struct{ k8sStyleManager }
 
 func (m *filesFailManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	if _, err := m.k8sStyleManager.DeleteTarget(ctx, agentName, ref, false, projectPath, removeBranch); err != nil {
 		return false, err
 	}
-	return false, errors.New("delete: FindBranchForAgent for dev: registry I/O error")
+	return false, fmt.Errorf("%w: %w", agent.ErrAgentFilesDelete, errors.New("delete: FindBranchForAgent for dev: registry I/O error"))
 }
 
 // Regression (P2 review round 3, B1): when the runtime delete succeeded and
-// only file cleanup failed, the soft-delete mark stays: the pod is gone.
+// only file cleanup failed, the soft-delete mark is written: the pod is gone.
+// This guards existing behaviour (main keeps the mark here too): it fails
+// if the post-delete mark stops accepting agent.ErrAgentFilesDelete.
 func TestDeleteAgent_FilesFailureAfterRuntimeDelete_KeepsMark(t *testing.T) {
 	rt := newNameHeldRuntime("run-old")
 	mgr := &filesFailManager{k8sStyleManager{real: agent.NewManager(rt)}}
@@ -414,8 +418,8 @@ func TestDeleteAgent_FilesFailureAfterRuntimeDelete_KeepsMark(t *testing.T) {
 	if rt.stillPresent() {
 		t.Fatal("runtime entry not deleted; the test premise does not hold")
 	}
-	if st, _ := agent.GetAgentDeleteState("dev", scionB); st.Phase != "deleted" {
-		t.Errorf("runtime delete succeeded but the soft-delete mark was undone: phase %q deletedAt %v", st.Phase, st.DeletedAt)
+	if phase, deletedAt := readDeleteMark(t, scionB, "dev"); phase != "deleted" {
+		t.Errorf("runtime delete succeeded but no soft-delete mark was written: phase %q deletedAt %v", phase, deletedAt)
 	}
 }
 

@@ -545,6 +545,11 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 		if err != nil {
 			return nil, fmt.Errorf("%w: user %s", store.ErrNotFound, rb.PrincipalID)
 		}
+		// A federated account receives no role binding through the
+		// general path.
+		if string(u.Kind) == store.UserKindFederated {
+			return nil, store.ErrFederatedAccountRefused
+		}
 		exp, err := checkTestAdminSystemBinding(u, rb)
 		if err != nil {
 			return nil, err
