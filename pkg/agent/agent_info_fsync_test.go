@@ -29,11 +29,34 @@ import (
 // duration of the test.
 func stubAgentInfoSyncs(t *testing.T, fileSync func(*os.File) error, dirSync func(*os.File) error) {
 	t.Helper()
-	origFile, origDir := agentInfoFileSync, agentInfoDirSync
+	origFile, origDir, origOpen := agentInfoFileSync, agentInfoDirSync, agentInfoDirOpen
 	t.Cleanup(func() {
-		agentInfoFileSync, agentInfoDirSync = origFile, origDir
+		agentInfoFileSync, agentInfoDirSync, agentInfoDirOpen = origFile, origDir, origOpen
 	})
 	agentInfoFileSync, agentInfoDirSync = fileSync, dirSync
+}
+
+// recordAgentInfoDirOpens wraps the dir-open seam (already saved by
+// stubAgentInfoSyncs) so the test can check which directories
+// syncAgentInfoDir opened.
+func recordAgentInfoDirOpens(t *testing.T) *[]string {
+	t.Helper()
+	var opened []string
+	open := agentInfoDirOpen
+	agentInfoDirOpen = func(dir string) (*os.File, error) {
+		opened = append(opened, dir)
+		return open(dir)
+	}
+	return &opened
+}
+
+// checkAgentInfoDirOpens checks that syncAgentInfoDir opened dir once,
+// through the seam.
+func checkAgentInfoDirOpens(t *testing.T, opened *[]string, dir string) {
+	t.Helper()
+	if len(*opened) != 1 || (*opened)[0] != dir {
+		t.Errorf("dir opens = %q, want exactly [%q] through agentInfoDirOpen", *opened, dir)
+	}
 }
 
 // TestWriteAgentInfoFileSyncsContentsBeforeRename checks that the temp
@@ -92,10 +115,12 @@ func TestWriteAgentInfoFileSyncsParentDirAfterRename(t *testing.T) {
 		finalAtSync, _ = os.ReadFile(path)
 		return nil
 	})
+	opened := recordAgentInfoDirOpens(t)
 
 	if err := writeProvisionedWorktreeRepoRoot(dir, "/repo"); err != nil {
 		t.Fatalf("writeProvisionedWorktreeRepoRoot: %v", err)
 	}
+	checkAgentInfoDirOpens(t, opened, dir)
 	if calls != 1 {
 		t.Fatalf("dir sync calls = %d, want 1", calls)
 	}
@@ -146,11 +171,13 @@ func TestWriteAgentInfoFileReturnsDirSyncError(t *testing.T) {
 	path := filepath.Join(dir, "agent-info.json")
 	errSync := &os.PathError{Op: "sync", Path: dir, Err: syscall.EIO}
 	stubAgentInfoSyncs(t, func(f *os.File) error { return f.Sync() }, func(*os.File) error { return errSync })
+	opened := recordAgentInfoDirOpens(t)
 
 	err := writeAgentInfoFile(path, []byte(`{"new":true}`), 0o644)
 	if !errors.Is(err, syscall.EIO) {
 		t.Fatalf("writeAgentInfoFile error = %v, want it to wrap %v", err, errSync)
 	}
+	checkAgentInfoDirOpens(t, opened, dir)
 	if !errors.Is(err, ErrAgentInfoNotDurable) {
 		t.Errorf("writeAgentInfoFile error = %v, want it to wrap ErrAgentInfoNotDurable", err)
 	}
@@ -192,5 +219,67 @@ func TestWriteAgentInfoFileIgnoresUnsupportedDirSync(t *testing.T) {
 				t.Errorf("final contents = %q, want the new contents", got)
 			}
 		})
+	}
+}
+
+// TestWriteAgentInfoFileSkipsDirSyncWhenOpenFails checks that a parent
+// directory that cannot be opened after the rename is skipped, as in
+// pkg/config's syncDir: no error, no dir sync, new content in place.
+func TestWriteAgentInfoFileSkipsDirSyncWhenOpenFails(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("Windows cannot fsync a directory")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent-info.json")
+	var syncCalls int
+	stubAgentInfoSyncs(t, func(f *os.File) error { return f.Sync() }, func(*os.File) error {
+		syncCalls++
+		return nil
+	})
+	var opened []string
+	agentInfoDirOpen = func(d string) (*os.File, error) {
+		opened = append(opened, d)
+		return nil, &os.PathError{Op: "open", Path: d, Err: syscall.EACCES}
+	}
+
+	if err := writeAgentInfoFile(path, []byte(`{"new":true}`), 0o644); err != nil {
+		t.Fatalf("writeAgentInfoFile error = %v, want nil when the parent dir cannot be opened", err)
+	}
+	checkAgentInfoDirOpens(t, &opened, dir)
+	if syncCalls != 0 {
+		t.Errorf("dir sync calls = %d, want 0 after a failed open", syncCalls)
+	}
+	if got, _ := os.ReadFile(path); string(got) != `{"new":true}` {
+		t.Errorf("final contents = %q, want the new contents", got)
+	}
+}
+
+// TestWriteAgentInfoFileRenameErrorNotWrapped checks that a rename failure
+// (the target is a non-empty directory) is returned without
+// ErrAgentInfoNotDurable, since the target was left untouched.
+func TestWriteAgentInfoFileRenameErrorNotWrapped(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent-info.json")
+	if err := os.MkdirAll(filepath.Join(path, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var dirSyncCalls int
+	stubAgentInfoSyncs(t, func(f *os.File) error { return f.Sync() }, func(*os.File) error {
+		dirSyncCalls++
+		return nil
+	})
+
+	err := writeAgentInfoFile(path, []byte(`{"new":true}`), 0o644)
+	if err == nil {
+		t.Fatal("writeAgentInfoFile error = nil, want the rename failure")
+	}
+	if errors.Is(err, ErrAgentInfoNotDurable) {
+		t.Errorf("rename error %v wraps ErrAgentInfoNotDurable, want it unwrapped", err)
+	}
+	if dirSyncCalls != 0 {
+		t.Errorf("dir sync calls = %d, want 0 after a failed rename", dirSyncCalls)
+	}
+	if fi, serr := os.Stat(filepath.Join(path, "child")); serr != nil || !fi.IsDir() {
+		t.Errorf("target directory changed: stat child = %v, %v", fi, serr)
 	}
 }

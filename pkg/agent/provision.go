@@ -2984,6 +2984,8 @@ var (
 	// agentInfoDirSync flushes the parent directory, opened by
 	// syncAgentInfoDir, after the rename.
 	agentInfoDirSync = func(d *os.File) error { return d.Sync() }
+	// agentInfoDirOpen opens the parent directory for that sync.
+	agentInfoDirOpen = openAgentInfoDir
 )
 
 // syncAgentInfoDir fsyncs dir, as pkg/config's syncDir does. Windows cannot
@@ -2995,7 +2997,7 @@ func syncAgentInfoDir(dir string) error {
 	if goruntime.GOOS == "windows" {
 		return nil
 	}
-	d, err := openAgentInfoDir(dir)
+	d, err := agentInfoDirOpen(dir)
 	if err != nil {
 		return nil
 	}

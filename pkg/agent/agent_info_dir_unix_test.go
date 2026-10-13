@@ -26,8 +26,9 @@ import (
 )
 
 // TestOpenAgentInfoDirRefusesNonDirectory checks that the dir-sync open
-// fails fast with ENOTDIR on a FIFO or a regular file rather than blocking
-// or opening it.
+// refuses a FIFO or a regular file with ENOTDIR (O_DIRECTORY), without
+// hanging, and opens a real directory. It does not pin O_NONBLOCK or
+// O_CLOEXEC; those flags are checked by review.
 func TestOpenAgentInfoDirRefusesNonDirectory(t *testing.T) {
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "fifo")
