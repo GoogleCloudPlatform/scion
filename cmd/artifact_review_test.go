@@ -127,23 +127,24 @@ func TestUnmarkedChangesReportShowsWhitespace(t *testing.T) {
 	var details map[string]any
 	require.NoError(t, json.Unmarshal(raw, &details))
 	got := unmarkedChangesReport(&apiclient.APIError{Code: artifacts.CodeUnmarkedChanges, Details: details})
-	assert.Equal(t, "The review changes text outside CriticMarkup marks (compared with every mark rejected):\n"+
-		"  plan.md (modified)\n"+
-		"    line 2 (whitespace only):\n"+
-		"      - foo⏎\n"+
-		"      + foo··⏎\n"+
-		"    line 4 (whitespace only):\n"+
-		"      - →x⏎\n"+
-		"      - end⏎\n"+
-		"      +   x⏎\n"+
-		"      + end\n"+
-		"      (removes the final newline)\n"+
-		"  notes.md (modified)\n"+
-		"    line 2:\n"+
-		"      - b\n"+
-		"      + new\n"+
-		"      + b\n"+
-		"      + \n", got)
+	want := "The review changes text outside CriticMarkup marks (compared with every mark rejected):\n" +
+		"  plan.md (modified)\n" +
+		"    line 2 (whitespace only):\n" +
+		"      - foo⏎\n" +
+		"      + foo··⏎\n" +
+		"    line 4 (whitespace only):\n" +
+		"      - →x⏎\n" +
+		"      - end⏎\n" +
+		"      +   x⏎\n" +
+		"      + end\n" +
+		"      (removes the final newline)\n" +
+		"  notes.md (modified)\n" +
+		"    line 2:\n" +
+		"      - b\n" +
+		"      + new\n" +
+		"      + b\n" +
+		"      + \n"
+	assert.Equal(t, want, got)
 	added := critic.Diff([]byte("a\nb\n"), []byte("a\n\nb\n"))
 	raw, err = json.Marshal(map[string]any{"files": []artifacts.UnmarkedFile{{Path: "x.md", Change: artifacts.ChangeModified, Hunks: added}}})
 	require.NoError(t, err)
