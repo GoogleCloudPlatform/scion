@@ -170,10 +170,11 @@ const drainPlacementConflictCode = "placement_conflict"
 // a pinned agent, requirePinnedPlacement, and the row must have been queued
 // for the agent's own Runtime Broker (rows are drained per Runtime Broker
 // but executed against the agent's current one). It returns the refusal,
-// or nil to execute the row. Unpinned agents keep today's path, and so do
-// rows with no agent or whose agent row is gone, or that cannot be read
-// now: their executor answers as before, and the dispatcher's own backstop
-// still runs.
+// or nil to execute the row. Rows of unpinned agents, rows with no agent,
+// and rows whose agent row is gone or cannot be read now are left to their
+// executor and the dispatcher's own placement backstop (which refuses an
+// unpinned agent on a flat Runtime Broker with the executor's
+// "dispatch <op>: ..." error, not a placement_conflict row).
 func (s *Server) drainPlacementRefusal(ctx context.Context, d store.BrokerDispatch) *PlacementConflictError {
 	if d.AgentID == "" {
 		return nil

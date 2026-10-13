@@ -177,21 +177,45 @@ func TestEnvGatherRecreate_PlacementRefusalNotOverriddenByForce(t *testing.T) {
 
 // --- drain -------------------------------------------------------------------
 
-// A queued stop of a pinned agent whose placement is inconsistent is
-// settled failed with placement_conflict and not dispatched; the agent's
-// stop_queued state and its reservation are left as they are.
+// A stop queued while the agent's Runtime Broker was offline (the real
+// queueOfflineStop row: intent, run and superseded claim in its args), whose
+// pinned agent's placement became inconsistent before the drain, is settled
+// failed with placement_conflict and not dispatched. The queued stop's claim
+// is never taken, and the agent keeps stop_queued, the offline-stop message
+// and its reservation (design §3.3).
 func TestDrain_PlacementConflictKeepsStopQueuedAndReservation(t *testing.T) {
 	ctx := context.Background()
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	a := f.stalePinnedAgentWith(t, "stale-drain", string(state.PhaseRunning), func(a *store.Agent) {
-		a.ContainerStatus = containerStatusStopQueued
-	})
-	require.Equal(t, containerStatusStopQueued, a.ContainerStatus)
-	reserveBrokerSlot(t, f.s, f.legacy, a.ID)
-	row := &store.BrokerDispatch{ID: tid("drain-stop-" + t.Name()), BrokerID: a.RuntimeBrokerID, AgentID: a.ID, Op: "stop"}
-	require.NoError(t, f.s.InsertBrokerDispatch(ctx, row))
+	a := f.pinnedAgent(t, "queued-stop", string(state.PhaseRunning))
+	_, err := f.s.SetAgentRunID(ctx, a.ID, "run-q", nil)
+	require.NoError(t, err)
+	reserveBrokerSlot(t, f.s, f.flat, a.ID)
 
-	f.srv.ReconcileBroker(ctx, a.RuntimeBrokerID)
+	// Stop with the Runtime Broker offline: the stop is queued.
+	require.NoError(t, f.s.UpdateRuntimeBrokerHeartbeat(ctx, f.flat.ID, store.BrokerStatusOffline))
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/stop", nil)
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	rows, err := f.s.ListPendingDispatch(ctx, f.flat.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	row := rows[0]
+	require.Equal(t, "stop", row.Op)
+	args, err := UnmarshalStopArgs(row.Args)
+	require.NoError(t, err)
+	require.NotNil(t, args.IntentAt, "a real queued stop carries its intent")
+	queued := mustGetAgent(t, f.s, a.ID)
+	require.Equal(t, containerStatusStopQueued, queued.ContainerStatus)
+	require.Equal(t, offlineStopMessage, queued.Message)
+	require.Equal(t, string(state.PhaseStopped), queued.Phase)
+
+	// The placement becomes inconsistent before the drain (as an older
+	// binary moving runtime_broker_id would do).
+	queued.RuntimeBrokerID = f.legacy.ID
+	require.NoError(t, f.s.UpdateAgent(ctx, queued))
+	before := mustGetAgent(t, f.s, a.ID)
+	require.False(t, before.PinValid())
+
+	f.srv.ReconcileBroker(ctx, f.flat.ID)
 
 	failed, err := f.s.GetBrokerDispatch(ctx, row.ID)
 	require.NoError(t, err)
@@ -204,8 +228,34 @@ func TestDrain_PlacementConflictKeepsStopQueuedAndReservation(t *testing.T) {
 
 	got := mustGetAgent(t, f.s, a.ID)
 	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "stop_queued is kept")
-	assert.Equal(t, a.Phase, got.Phase)
-	assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.legacy.ID), "the reservation is kept")
+	assert.Equal(t, offlineStopMessage, got.Message, "the offline-stop message is kept")
+	assert.Equal(t, before.Phase, got.Phase)
+	assert.Equal(t, before.StartClaimID, got.StartClaimID, "the queued stop's claim is never taken")
+	assert.Equal(t, before.RunIntent, got.RunIntent)
+	assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.flat.ID), "the reservation is kept")
+}
+
+// An unpinned agent keeps today's drain: a row queued for another Runtime
+// Broker than the agent's own still executes against the agent's current
+// one (the placement guard applies to pinned agents only).
+func TestDrain_UnpinnedAgentRowOfAnotherRuntimeBrokerExecutes(t *testing.T) {
+	ctx := context.Background()
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	a := f.unpinnedAgentOn(t, "unpinned-drain", f.legacy.ID, string(state.PhaseRunning))
+	other := &store.RuntimeBroker{ID: tid("drain-other-legacy"), Name: "drain-other-legacy", Slug: "drain-other-legacy",
+		Status: store.BrokerStatusOnline, Endpoint: "http://drain-other.invalid"}
+	require.NoError(t, f.s.CreateRuntimeBroker(ctx, other))
+	row := &store.BrokerDispatch{ID: tid("drain-unpinned-" + t.Name()), BrokerID: other.ID, AgentID: a.ID, Op: "stop"}
+	require.NoError(t, f.s.InsertBrokerDispatch(ctx, row))
+
+	f.srv.ReconcileBroker(ctx, other.ID)
+
+	done, err := f.s.GetBrokerDispatch(ctx, row.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStateDone, done.State, "error: %q", done.Error)
+	assert.False(t, strings.HasPrefix(done.Error, drainPlacementConflictCode), "error: %q", done.Error)
+	assert.True(t, f.client.stopCalled, "the stop is dispatched as today")
+	assert.Equal(t, f.legacy.ID, f.client.lastBrokerID, "against the agent's current Runtime Broker")
 }
 
 // A row queued for another Runtime Broker than the pinned agent's own is
