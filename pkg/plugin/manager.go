@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	goplugin "github.com/hashicorp/go-plugin"
@@ -42,6 +43,11 @@ type Manager struct {
 	mu              sync.RWMutex
 	logger          *slog.Logger
 	brokerCallbacks *HostCallbacksForwarder // lazily-wired host callbacks for broker plugins
+
+	// stopping is set once the owner starts shutting down (BeginShutdown or
+	// Shutdown). From then on a plugin process exit is expected and is not
+	// logged as an error (ptone/scion#4869).
+	stopping atomic.Bool
 
 	// NewGRPCBrokerAdapter creates a GRPCBrokerClient for a given plugin entry.
 	// Injected at startup to avoid an import cycle with pkg/plugin/grpcbroker.
@@ -247,7 +253,7 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 			},
 			Plugins: pluginMap,
 			Cmd:     exec.Command(dp.Path),
-			Logger:  newHclogAdapter(m.logger),
+			Logger:  newHclogAdapter(m.logger, m.stopping.Load),
 		})
 	}
 
@@ -348,7 +354,7 @@ func (m *Manager) loadSelfManagedPlugin(dp DiscoveredPlugin, protocolVersion uin
 				return &selfManagedRunner{id: dp.Name}, nil
 			},
 		},
-		Logger: newHclogAdapter(m.logger),
+		Logger: newHclogAdapter(m.logger, m.stopping.Load),
 	})
 }
 
@@ -886,10 +892,20 @@ func (m *Manager) InstallPlugin(name, repoPath, pluginsDir, configFile string) e
 	return m.LoadOne(PluginTypeBroker, name, PluginEntry{Path: targetPath, ConfigFile: configFile}, pluginsDir)
 }
 
+// BeginShutdown records that the owner has started shutting down, before
+// Shutdown runs. From then on a plugin process exit, for example from the
+// SIGTERM that a service manager sends to every process of the service,
+// is expected and logs at INFO instead of ERROR (ptone/scion#4869). It is
+// safe to call more than once and from any goroutine.
+func (m *Manager) BeginShutdown() {
+	m.stopping.Store(true)
+}
+
 // Shutdown kills all plugin processes gracefully.
 // Self-managed plugins are disconnected but their processes are not terminated.
 // gRPC adapters are closed (connection terminated, remote process unaffected).
 func (m *Manager) Shutdown() {
+	m.stopping.Store(true)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
