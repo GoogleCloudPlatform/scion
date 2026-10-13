@@ -612,3 +612,33 @@ func TestStopAgent_RunScopedCancelHonoursAgentID(t *testing.T) {
 		})
 	}
 }
+
+// Item 2 x flat ownership (GCP#3463): an async create whose registration is
+// cancelled while buildStartContext runs (a stop, delete or newer start of
+// the name) is refused at handoff with 409 start_cancelled, before the
+// launch is accepted. beginAsyncLaunch then reports the create as not
+// accepted, so createAgent's deferred release frees the ownership mirror
+// buildStartContext installed, and the same slug can be created again.
+func TestFlatAsyncCreate_HandoffRefusalReleasesOwnershipMirror(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	const name = "async-handoff-409"
+	buildStartContextProbe(t, name, func() {
+		f.srv.launchRegistry.CancelLocalFor(launchKey{ProjectID: flatTestProjectID, Slug: name}, "", "")
+	})
+
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents", flatAsyncCreateBody(f, name, nil))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
+	}
+	if code := errorCodeOf(t, w); code != api.BrokerErrCodeStartCancelled {
+		t.Fatalf("error code = %q, want %q", code, api.BrokerErrCodeStartCancelled)
+	}
+	if n := ownedStartCount(f.srv); n != 0 {
+		t.Fatalf("%d ownership mirror(s) left after the handoff refusal, want 0", n)
+	}
+	if n := f.mgr.StartCalls(); n != 0 {
+		t.Fatalf("Start calls = %d after a refused async create, want 0", n)
+	}
+	testHookCreateBeforeBuildStartContext = nil
+	assertMirrorReleasedAndSlugReusable(t, f, name)
+}
