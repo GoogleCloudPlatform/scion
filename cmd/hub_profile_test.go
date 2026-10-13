@@ -69,6 +69,7 @@ func TestHubProfileGate_UnlistedCommandsRefused(t *testing.T) {
 	profileGateEnv(t, "t1")
 	refused := []string{
 		"whoami", "message", "resume", "suspend", "reincarnate", "attach", "keys", "schedule.create",
+		"expose", "unexpose", "doctor", "hub.add", "hub.list", "hub.rename", "hub.remove",
 		"hub.enable", "hub.link", "hub.secret", "hub.auth.login", "hub.token", "hub.env",
 		"hub.test-identity.delegate.create", "hub.test-identity.delegate.list", "hub.test-identity.delegate.revoke",
 		"artifact.share", "templates.import", "server", "clean", "sync", "config.set", "project.list",
