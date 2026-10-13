@@ -30,6 +30,7 @@ import (
 // resetServerFlags resets the package-level server flag variables to their
 // cobra default values so tests don't leak state.
 func resetServerFlags() {
+	serverRole = serverRoleHub
 	enableHub = false
 	enableRuntimeBroker = false
 	enableWeb = false
