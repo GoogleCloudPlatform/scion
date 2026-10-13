@@ -3899,6 +3899,13 @@ type QuotaStore interface {
 	// The record is retained for auditing. Matches on limit_definition_id and resource_id.
 	ReleaseReservation(ctx context.Context, limitDefinitionID, resourceID string) error
 
+	// ReleaseReservationByID releases one reservation by its ID, in a
+	// single conditional write: only while that row is still active. It
+	// returns ErrNotFound when the row is missing or already released, so a
+	// caller acting on an earlier read never releases a newer reservation
+	// of the same resource.
+	ReleaseReservationByID(ctx context.Context, reservationID string) error
+
 	// ReleaseReservationsByResource releases all reservations for a given resource ID.
 	ReleaseReservationsByResource(ctx context.Context, resourceID string) error
 

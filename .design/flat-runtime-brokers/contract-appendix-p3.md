@@ -264,6 +264,17 @@ The API stays as it is, plus one new error code:
 - **New:** a typed 409 with code `broker_reservation_scope_conflict` when an agent that already holds capacity on one Runtime Broker is admitted on another ("agent <id> already holds capacity on Runtime Broker <A>; it cannot be admitted on <B>"). The existing reservation is kept and no new one is made. Store failures stay 500 (P3.3).
 - There are no profile rows and no host-wide or profile capacity scopes.
 
+### Erratum E-FC11-1 (accepted 2026-10-13)
+
+In FC11, a pinned agent's active reservation whose scope differs from its Runtime Broker is "never moved or backfilled, and not released while the agent holds capacity (counted phase or stop_queued); once it holds none, the normal release rule applies". This replaces "never moved, released or backfilled".
+
+Binding points for the release:
+
+1. A stale sweep observation must not release capacity that a concurrent start just re-reserved: the release is store-conditional on the reservation row the sweep read.
+2. A release never touches the saved pin and never authorizes a move.
+3. The next start still passes the pinned-placement check and reserves on the valid instance; an inconsistent pin is still refused.
+4. No automatic transfer or backfill.
+
 ## Not frozen
 
 P4 is free to choose: the Hub transport of FC4, web and CLI presentation, flat-awareness of `/api/v1/info`, health-summary and GCP service-account status display of the runtime target, and the `hub.*` → `server.broker.*` key move. Sequence P4 settings-file edits after the P3.1 schema changes merge, to avoid schema conflicts.

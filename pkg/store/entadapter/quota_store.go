@@ -440,6 +440,30 @@ func (q *QuotaStore) ReleaseReservation(ctx context.Context, limitDefinitionID, 
 	return nil
 }
 
+// ReleaseReservationByID releases the reservation with reservationID while
+// it is still active, in one conditional write; store.ErrNotFound when no
+// active row has that ID.
+func (q *QuotaStore) ReleaseReservationByID(ctx context.Context, reservationID string) error {
+	uid, err := parseUUID(reservationID)
+	if err != nil {
+		return err
+	}
+	n, err := q.client.UsageReservation.Update().
+		Where(
+			usagereservation.IDEQ(uid),
+			usagereservation.ReleasedAtIsNil(),
+		).
+		SetReleasedAt(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 // ReleaseReservationsByResource releases all reservations for a given resource ID.
 func (q *QuotaStore) ReleaseReservationsByResource(ctx context.Context, resourceID string) error {
 	now := time.Now()

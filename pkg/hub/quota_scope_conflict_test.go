@@ -426,6 +426,29 @@ func pinnedQuotaAgent(t *testing.T, s store.Store, broker *store.RuntimeBroker, 
 	return got
 }
 
+// pinnedQuotaAgentWith is pinnedQuotaAgent with mutate applied before the
+// store write.
+func pinnedQuotaAgentWith(t *testing.T, s store.Store, broker *store.RuntimeBroker, project *store.Project, name string, phase state.Phase, mutate func(*store.Agent)) *store.Agent {
+	t.Helper()
+	a := &store.Agent{
+		ID:                      tid("agent-" + name),
+		Slug:                    name,
+		Name:                    name,
+		ProjectID:               project.ID,
+		RuntimeBrokerID:         broker.ID,
+		Phase:                   string(phase),
+		PinnedRuntimeBrokerID:   broker.ID,
+		PinnedRuntimeTargetID:   "target-" + name,
+		PinnedRuntimeTargetType: "docker",
+	}
+	mutate(a)
+	require.NoError(t, s.CreateAgent(context.Background(), a))
+	got, err := s.GetAgent(context.Background(), a.ID)
+	require.NoError(t, err)
+	require.True(t, got.IsPinned())
+	return got
+}
+
 func TestReassert_DifferentScopeNotOverwritten(t *testing.T) {
 	srv, s := testServer(t)
 	conflicts := scopeConflictCounter(t, srv.quotaService)
@@ -455,6 +478,10 @@ func TestReassert_DifferentScopeNotOverwritten(t *testing.T) {
 	assert.EqualValues(t, 1, conflicts(scopeConflictSiteReassert))
 }
 
+// TestSweep_PinnedScopeConflictReportedNotMoved: a pinned agent that still
+// holds capacity (a counted phase, or a stop queued for an offline broker)
+// keeps its row on another broker; the sweep reports it and neither
+// releases, moves nor backfills it (contract erratum E-FC11-1).
 func TestSweep_PinnedScopeConflictReportedNotMoved(t *testing.T) {
 	srv, s := testServer(t)
 	conflicts := scopeConflictCounter(t, srv.quotaService)
@@ -466,10 +493,11 @@ func TestSweep_PinnedScopeConflictReportedNotMoved(t *testing.T) {
 
 	running := pinnedQuotaAgent(t, s, brokerB, projectB, "sweep-running", state.PhaseRunning)
 	runningRow := seedBrokerRow(t, s, def.ID, brokerA.ID, running.ID, old)
-	// A stopped pinned agent's old row would be released by the phase rule;
-	// on another broker it is reported and kept.
-	stopped := pinnedQuotaAgent(t, s, brokerB, projectB, "sweep-stopped", state.PhaseStopped)
-	stoppedRow := seedBrokerRow(t, s, def.ID, brokerA.ID, stopped.ID, old)
+	queued := pinnedQuotaAgentWith(t, s, brokerB, projectB, "sweep-stop-queued", state.PhaseStopped, func(a *store.Agent) {
+		a.ContainerStatus = containerStatusStopQueued
+	})
+	require.True(t, agentHoldsBrokerCapacity(queued), "a queued stop holds capacity")
+	queuedRow := seedBrokerRow(t, s, def.ID, brokerA.ID, queued.ID, old)
 	// A pinned agent whose row is on a broker that is not listed (deleted):
 	// the backfill on B reports it and writes nothing.
 	orphaned := pinnedQuotaAgent(t, s, brokerB, projectB, "sweep-orphaned", state.PhaseRunning)
@@ -484,7 +512,7 @@ func TestSweep_PinnedScopeConflictReportedNotMoved(t *testing.T) {
 	for _, tc := range []struct {
 		agent *store.Agent
 		row   *store.UsageReservation
-	}{{running, runningRow}, {stopped, stoppedRow}, {orphaned, orphanedRow}} {
+	}{{running, runningRow}, {queued, queuedRow}, {orphaned, orphanedRow}} {
 		got := activeReservation(t, s, def.ID, tc.agent.ID)
 		require.NotNil(t, got, "%s: the conflicting row is not released", tc.agent.Slug)
 		assert.Equal(t, tc.row.ID, got.ID, "%s: not moved or replaced", tc.agent.Slug)
@@ -492,7 +520,7 @@ func TestSweep_PinnedScopeConflictReportedNotMoved(t *testing.T) {
 	}
 	assert.Nil(t, activeReservation(t, s, def.ID, unpinned.ID), "control: the unpinned agent's stale row is released")
 	assert.Zero(t, brokerReservationCount(t, s, brokerB.ID), "nothing is backfilled on B")
-	assert.EqualValues(t, 2, conflicts(scopeConflictSiteSweep), "running and stopped, on listed broker A")
+	assert.EqualValues(t, 2, conflicts(scopeConflictSiteSweep), "running and stop-queued, on listed broker A")
 	assert.EqualValues(t, 1, conflicts(scopeConflictSiteBackfill), "orphaned, on an unlisted broker")
 }
 
@@ -782,4 +810,141 @@ func TestSweep_UnpinnedCountedAgentBackfillConflictReported(t *testing.T) {
 		assert.EqualValues(t, pass, conflicts(scopeConflictSiteBackfill), "pass %d", pass)
 		assert.Zero(t, conflicts(scopeConflictSiteSweep), "pass %d: unpinned rows are not a sweep conflict", pass)
 	}
+}
+
+// TestSweep_PinnedConflictWithoutCapacityReleasedThenStartSucceeds is the
+// stuck case of contract erratum E-FC11-1: a stopped or errored pinned
+// agent whose row on another broker is past the grace holds no capacity, so
+// the sweep releases the row. The release touches neither the pin nor the
+// agent's Runtime Broker and writes nothing on B; the next start passes the
+// placement check and reserves on the agent's own broker.
+func TestSweep_PinnedConflictWithoutCapacityReleasedThenStartSucceeds(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &quotaLifecycleDispatcher{}
+	srv.SetDispatcher(disp)
+	conflicts := scopeConflictCounter(t, srv.quotaService)
+	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "stuck-a")
+	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "stuck-b")
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	old := time.Now().Add(-2 * reconcileMinReservationAge)
+
+	stopped := pinnedQuotaAgent(t, s, brokerB, projectB, "stuck-stopped", state.PhaseStopped)
+	seedBrokerRow(t, s, def.ID, brokerA.ID, stopped.ID, old)
+	errored := pinnedQuotaAgent(t, s, brokerB, projectB, "stuck-error", state.PhaseError)
+	seedBrokerRow(t, s, def.ID, brokerA.ID, errored.ID, old)
+
+	// Before the sweep the start is refused by the scope conflict.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+stopped.ID+"/start", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+
+	for _, a := range []*store.Agent{stopped, errored} {
+		assert.Nil(t, activeReservation(t, s, def.ID, a.ID), "%s: the row on A is released", a.Slug)
+		got, err := s.GetAgent(context.Background(), a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, a.Placement(), got.Placement(), "%s: pin and Runtime Broker untouched", a.Slug)
+		assert.Equal(t, a.PinnedRuntimeBrokerID, got.PinnedRuntimeBrokerID, "%s", a.Slug)
+	}
+	assert.Zero(t, brokerReservationCount(t, s, brokerB.ID), "nothing is transferred or backfilled to B")
+	assert.Zero(t, conflicts(scopeConflictSiteSweep), "released, not reported")
+
+	for _, a := range []*store.Agent{stopped, errored} {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", a.Slug, rec.Body.String())
+		held := activeReservation(t, s, def.ID, a.ID)
+		require.NotNil(t, held, "%s: the start reserved", a.Slug)
+		assert.Equal(t, brokerB.ID, held.ScopeID, "%s: on its own broker", a.Slug)
+	}
+	assert.EqualValues(t, 2, disp.startCount.Load())
+}
+
+// A released conflict authorizes nothing: an agent whose pin names another
+// Runtime Broker than the one it is assigned to is still refused at start
+// after the sweep released its row, and no reservation is made.
+func TestSweep_ReleasedConflictStalePinStillRefused(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &quotaLifecycleDispatcher{}
+	srv.SetDispatcher(disp)
+	brokerA, projectA := newQuotaTestBrokerAndProject(t, s, "stalepin-a")
+	brokerB, _ := newQuotaTestBrokerAndProject(t, s, "stalepin-b")
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+
+	agent := pinnedQuotaAgent(t, s, brokerA, projectA, "stalepin-x", state.PhaseStopped)
+	seedBrokerRow(t, s, def.ID, brokerA.ID, agent.ID, time.Now().Add(-2*reconcileMinReservationAge))
+	agent.RuntimeBrokerID = brokerB.ID // the pin still names A
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	agent, err = s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.True(t, agent.IsPinned())
+	require.False(t, agent.PinValid())
+
+	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+	require.Nil(t, activeReservation(t, s, def.ID, agent.ID), "the row on A is released")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	assert.Equal(t, ErrCodeRuntimeTargetPinStale, resp.Error.Code)
+	assert.Nil(t, activeReservation(t, s, def.ID, agent.ID), "no reservation on either broker")
+	assert.Zero(t, disp.startCount.Load())
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, agent.Placement(), got.Placement(), "the pin is untouched")
+	assert.Equal(t, brokerA.ID, got.PinnedRuntimeBrokerID)
+}
+
+// reReserveAfterReadStore runs reReserve once, right after the sweep's batch
+// read of the agents holding rows (so the sweep acts on a stale
+// observation), as a start that re-reserved in that window would.
+type reReserveAfterReadStore struct {
+	store.Store
+	agentID   string
+	reReserve func()
+	done      bool
+}
+
+func (r *reReserveAfterReadStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
+	out, err := r.Store.GetAgentsByIDs(ctx, ids)
+	if !r.done {
+		for _, id := range ids {
+			if id == r.agentID {
+				r.done = true
+				r.reReserve()
+				break
+			}
+		}
+	}
+	return out, err
+}
+
+// The sweep's release is conditional on the row it read: a start that
+// re-reserved between the sweep's read and its release holds a new row, and
+// that slot is not freed.
+func TestSweep_StaleObservationDoesNotReleaseAReReservedSlot(t *testing.T) {
+	srv, s := testServer(t)
+	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "rerez-a")
+	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "rerez-b")
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	agent := pinnedQuotaAgent(t, s, brokerB, projectB, "rerez-x", state.PhaseStopped)
+	seedBrokerRow(t, s, def.ID, brokerA.ID, agent.ID, time.Now().Add(-2*reconcileMinReservationAge))
+
+	var fresh *store.UsageReservation
+	srv.store = &reReserveAfterReadStore{Store: s, agentID: agent.ID, reReserve: func() {
+		// The old row goes and a start reserves on the agent's own broker.
+		require.NoError(t, s.ReleaseReservation(context.Background(), def.ID, agent.ID))
+		fresh = seedBrokerRow(t, s, def.ID, brokerB.ID, agent.ID, time.Time{})
+	}}
+
+	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+
+	require.NotNil(t, fresh, "the start re-reserved during the pass")
+	held := activeReservation(t, s, def.ID, agent.ID)
+	require.NotNil(t, held, "the re-reserved slot is not freed by the stale observation")
+	assert.Equal(t, fresh.ID, held.ID)
+	assert.Equal(t, brokerB.ID, held.ScopeID)
 }

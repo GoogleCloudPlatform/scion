@@ -59,7 +59,9 @@ type QuotaService struct {
 // Sites of a reservation scope conflict, the site attribute of
 // scion.hub.quota.reservation_scope_conflict.
 const (
-	// scopeConflictSiteReserve: Reserve refused a request (HTTP 409).
+	// scopeConflictSiteReserve: Reserve refused a request, from any caller
+	// (409 at the HTTP boundary; also the observed-phase re-reserve and the
+	// move worker).
 	scopeConflictSiteReserve = "reserve"
 	// scopeConflictSiteReassert: a restart's re-assert found the agent's
 	// reservation on another broker and left it.
@@ -150,7 +152,9 @@ func (qs *QuotaService) lockForScope(limitName, scopeType, scopeID string) *sync
 var ErrReservationScopeConflict = errors.New("quota: resource holds an active reservation in another scope")
 
 // ErrCodeBrokerReservationScopeConflict is the API error code of a request
-// refused with a ReservationScopeConflictError (HTTP 409).
+// refused with a ReservationScopeConflictError (HTTP 409). It is defined
+// here with the error it names rather than in pkg/hub/apierr, as other
+// feature-local codes are (access_constraint.go).
 const ErrCodeBrokerReservationScopeConflict = "broker_reservation_scope_conflict"
 
 // ReservationScopeConflictError is returned by Reserve for a broker-scoped

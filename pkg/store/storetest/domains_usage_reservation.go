@@ -52,9 +52,10 @@ func newBrokerReservation(limitDefID, brokerID, resourceID string) *store.UsageR
 	}
 }
 
-// UsageReservationConformance checks GetActiveReservation and the typed
-// unique violation of CreateUsageReservation (store.ErrActiveReservationExists)
-// on whichever backend factory selects.
+// UsageReservationConformance checks GetActiveReservation, the typed unique
+// violation of CreateUsageReservation (store.ErrActiveReservationExists) and
+// the conditional ReleaseReservationByID on whichever backend factory
+// selects.
 func UsageReservationConformance(t *testing.T, factory Factory) {
 	t.Helper()
 	ctx := context.Background()
@@ -128,6 +129,29 @@ func UsageReservationConformance(t *testing.T, factory Factory) {
 			got, err := s.GetActiveReservation(ctx, def, resource)
 			require.NoError(t, err)
 			assert.Equal(t, brokerB, got.ScopeID)
+		})
+
+		t.Run("release by ID releases only that active row", func(t *testing.T) {
+			s := factory(t)
+			def := seedReservationLimit(t, ctx, s)
+			brokerA, brokerB, resource := uuid.NewString(), uuid.NewString(), uuid.NewString()
+
+			first, err := s.CreateUsageReservation(ctx, newBrokerReservation(def, brokerA, resource))
+			require.NoError(t, err)
+			require.NoError(t, s.ReleaseReservationByID(ctx, first.ID))
+			_, err = s.GetActiveReservation(ctx, def, resource)
+			assert.ErrorIs(t, err, store.ErrNotFound)
+
+			// A newer reservation of the same resource is untouched by a
+			// release of the earlier row, which is already released.
+			second, err := s.CreateUsageReservation(ctx, newBrokerReservation(def, brokerB, resource))
+			require.NoError(t, err)
+			assert.ErrorIs(t, s.ReleaseReservationByID(ctx, first.ID), store.ErrNotFound)
+			got, err := s.GetActiveReservation(ctx, def, resource)
+			require.NoError(t, err)
+			assert.Equal(t, second.ID, got.ID)
+
+			assert.ErrorIs(t, s.ReleaseReservationByID(ctx, uuid.NewString()), store.ErrNotFound)
 		})
 
 		t.Run("limits are independent", func(t *testing.T) {

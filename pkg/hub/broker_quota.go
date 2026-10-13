@@ -268,10 +268,12 @@ func (s *Server) reconcileBrokerQuotaOnPhaseChange(ctx context.Context, agent *s
 //     cap-enforced path used at start/resume). Covers legacy agents created
 //     before max_agents_per_broker existed, which hold no reservation at all.
 //   - Scope conflicts: a pinned agent whose active reservation is on a broker
-//     other than its Runtime Broker is neither released, moved nor
-//     backfilled; it is reported (log and metric, sites "sweep" and
-//     "backfill") in each pass that reads it, and shown with scopeConflict
-//     on the admin usage view. A pass that cannot load a listed broker's
+//     other than its Runtime Broker is never moved or backfilled, and is not
+//     released while the agent holds capacity (agentHoldsBrokerCapacity);
+//     once it holds none, the release rule above applies (contract erratum
+//     E-FC11-1). While it is kept it is reported (log and metric, sites
+//     "sweep" and "backfill") in each pass that reads it, and shown with
+//     scopeConflict on the admin usage view. A pass that cannot load a listed broker's
 //     agents skips that broker, so its conflicts are reported on a later
 //     pass. An
 //     unpinned agent's row on another broker is released by the phase rule
@@ -365,16 +367,28 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 				released++
 				continue
 			}
-			if agent.IsPinned() && agent.RuntimeBrokerID != res.ScopeID {
-				// A pinned agent's row on another broker: report it, never
-				// release or move it.
-				s.reportBrokerScopeConflict(scopeConflictSiteSweep, agent, res.ScopeID)
-				conflicts++
+			if !agentHoldsBrokerCapacity(agent) && time.Since(res.CreatedAt) >= reconcileMinReservationAge {
+				// No container to protect, wherever the row is: release.
+				// For a pinned agent's row on another broker this is not a
+				// move; its next start reserves on its own broker. The
+				// release is conditional on this row: a start that
+				// re-reserved since this pass read it holds a new row,
+				// which is left alone.
+				if err := s.store.ReleaseReservationByID(ctx, res.ID); err != nil {
+					if !errors.Is(err, store.ErrNotFound) {
+						s.agentLifecycleLog.Warn("quota reconcile: failed to release reservation",
+							"agent_id", agent.ID, "reservation_id", res.ID, "error", err)
+					}
+					continue
+				}
+				released++
 				continue
 			}
-			if !agentHoldsBrokerCapacity(agent) && time.Since(res.CreatedAt) >= reconcileMinReservationAge {
-				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
-				released++
+			if agent.IsPinned() && agent.RuntimeBrokerID != res.ScopeID {
+				// A pinned agent that holds capacity, with its row on another
+				// broker: report it, never release or move it.
+				s.reportBrokerScopeConflict(scopeConflictSiteSweep, agent, res.ScopeID)
+				conflicts++
 			}
 		}
 
