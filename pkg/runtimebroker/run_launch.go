@@ -518,7 +518,7 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 // cleanupLaunchResources deletes the runtime resources the launch recorded
 // (design §3.8.4), on a fresh context: ctx' may already be done.
 func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), scionrt.AsyncLaunchCleanupBudget)
 	defer cancel()
 	handles := rec.HandlesSnapshot()
 	if err := mgr.CleanupLaunch(cleanupCtx, handles); err != nil {
@@ -538,7 +538,7 @@ func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
 // still be able to retry its failed{launch_timeout} report after ctx' itself
 // has expired.
 func terminalContext(deadline time.Time) (context.Context, context.CancelFunc) {
-	ttl := time.Until(deadline.Add(10 * time.Minute))
+	ttl := time.Until(deadline.Add(scionrt.AsyncLaunchReportTTL))
 	if ttl < 0 {
 		ttl = 0
 	}

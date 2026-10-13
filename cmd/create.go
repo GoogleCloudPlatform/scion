@@ -51,6 +51,12 @@ The agent is provisioned but not started, even when a task is given. Run
 		agentName := api.Slugify(args[0])
 		task := strings.TrimSpace(strings.Join(args[1:], " "))
 
+		// A target-hub profile refuses the flags that need local state
+		// before anything else (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
+			return err
+		}
+
 		if err := validateHarnessAuthFlag(harnessAuthFlag); err != nil {
 			return asUsageError(err)
 		}
@@ -77,22 +83,15 @@ The agent is provisioned but not started, even when a task is given. Run
 			return err
 		}
 
-		if hubCtx != nil {
-			return createAgentViaHub(hubCtx, agentName, task)
+		// Load inline config if --config was specified (needed for both
+		// local and Hub paths).
+		inlineCfg, err := loadCreateInlineConfig()
+		if err != nil {
+			return err
 		}
 
-		// Load inline config if --config was specified
-		var inlineCfg *api.ScionConfig
-		if inlineConfigPath != "" {
-			var inlineConfigDir string
-			var loadErr error
-			inlineCfg, inlineConfigDir, loadErr = loadInlineConfig(inlineConfigPath)
-			if loadErr != nil {
-				return loadErr
-			}
-			if loadErr := resolveInlineConfigContent(inlineCfg, inlineConfigDir); loadErr != nil {
-				return loadErr
-			}
+		if hubCtx != nil {
+			return createAgentViaHub(hubCtx, agentName, task, inlineCfg)
 		}
 
 		// Local mode
@@ -344,7 +343,26 @@ func writeHubCreateText(w io.Writer, agentName string, resp *hubclient.CreateAge
 	_, _ = io.WriteString(w, b.String())
 }
 
-func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error {
+// loadCreateInlineConfig loads the --config file, if one was given, and
+// resolves its file:// content fields. It returns nil without --config.
+func loadCreateInlineConfig() (*api.ScionConfig, error) {
+	if inlineConfigPath == "" {
+		return nil, nil
+	}
+	cfg, configDir, err := loadInlineConfig(inlineConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := resolveInlineConfigContent(cfg, configDir); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// createAgentViaHub provisions the agent through the Hub. inlineCfg is the
+// --config file's config (nil without --config); it is sent as the request
+// config, as startAgentViaHub does, so the Hub stores it with the agent.
+func createAgentViaHub(hubCtx *HubContext, agentName string, task string, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the project ID for this project
@@ -407,7 +425,14 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	// Wire --service-account flag into the GCP identity assignment.
 	applyServiceAccountFlag(req, serviceAccountFlag)
 
-	if agentImage != "" {
+	// The inline config from --config is the base; CLI flags override
+	// specific fields (ptone/scion#4012).
+	if inlineCfg != nil {
+		req.Config = inlineCfg
+		if agentImage != "" {
+			req.Config.Image = agentImage
+		}
+	} else if agentImage != "" {
 		req.Config = &api.ScionConfig{
 			Image: agentImage,
 		}

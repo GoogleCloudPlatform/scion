@@ -316,11 +316,11 @@ export class ScionPageTemplateDetail extends LitElement {
               ></span>`
             : ''}
           ${this.renderSourceUrl(t.sourceUrl)}
-          ${t.config?.messageMode
+          ${t.agentConfig?.message_mode
             ? html`<span>
                 Mode:
                 <scion-message-mode-badge
-                  mode=${t.config.messageMode}
+                  mode=${t.agentConfig.message_mode}
                   size="small"
                 ></scion-message-mode-badge>
               </span>`
