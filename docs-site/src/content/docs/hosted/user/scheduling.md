@@ -141,6 +141,7 @@ Use these commands to manage schedules and events in your project:
 * **Cleanup obligation**: Recurring schedules fire indefinitely until paused or deleted. Always delete them when the task or project they serve is completed.
 * **Check before creating**: Run `scion schedule list` to check for existing schedules before creating new ones. Duplicate schedules will deliver duplicate messages.
 * **Command mismatch**: `cancel` is strictly for one-shot events. `pause` and `delete` are strictly for recurring schedules. Using the wrong command on a schedule type will return an error.
+* **Event retention**: The Hub deletes scheduled events that are no longer pending (fired, failed or cancelled, including the fires listed by `scion schedule history`) once they are older than 7 days, whatever its soft-delete retention. Hubs running with the default soft-delete retention now purge these events too; audit data is kept in logging.
 
 ---
 
