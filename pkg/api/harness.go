@@ -17,6 +17,7 @@ package api
 import (
 	"context"
 	"embed"
+	"time"
 )
 
 // Harness interface defines the methods a harness must implement
@@ -92,4 +93,36 @@ type TelemetrySettingsApplier interface {
 // this interface and continue using inline MCP config in their home/ files.
 type MCPSettingsApplier interface {
 	ApplyMCPSettings(agentHome string, mcpServers map[string]MCPServerConfig) error
+}
+
+// DeliverySpec is the resolved form of a harness-config delivery block: how a
+// message is submitted once it has been pasted into the harness's terminal.
+// It is a plain value type so it can later be carried into the container.
+// Resolve it with config.HarnessConfigEntry.ResolvedDelivery, which applies
+// the defaults.
+type DeliverySpec struct {
+	// SubmitKeys are tmux key names sent after the paste, one send-keys call
+	// per entry. They are also sent once, alone, for an empty message.
+	SubmitKeys []string
+	// ExtraSubmits is how many more times SubmitKeys is sent after the first
+	// submit.
+	ExtraSubmits int
+	// ExtraSubmitDelay is the wait before each extra submit.
+	ExtraSubmitDelay time.Duration
+}
+
+// ReadySpec is the resolved form of a harness-config ready block: how the
+// harness's readiness for a pasted message is decided. A harness is ready at
+// signal time plus Settle; Timeout is the deadline from launch and applies
+// only to strategies that wait for a signal. Resolve it with
+// config.HarnessConfigEntry.ResolvedReady, which applies the defaults.
+type ReadySpec struct {
+	// Strategy is "hook" (signal is the ready marker for the run) or "delay"
+	// (signal is tmux session creation).
+	Strategy string
+	// Settle is the wait after the signal before the harness counts as ready.
+	Settle time.Duration
+	// Timeout is the deadline from launch for the hook strategy; zero for
+	// delay.
+	Timeout time.Duration
 }
