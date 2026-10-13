@@ -306,6 +306,10 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.CallExpr:
+				// A LISTEN names ConduitChannel and nothing else.
+				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Exec" && len(n.Args) >= 2 && listensOn(n.Args[1]) != "" && listensOn(n.Args[1]) != "ConduitChannel" {
+					bad = append(bad, fmt.Sprintf("%s LISTENs on %s (only ConduitChannel)", e.Name(), listensOn(n.Args[1])))
+				}
 				// The settings query names only the experiments section.
 				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SectionEQ" {
 					sectionFilters++
@@ -314,6 +318,11 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 					}
 				}
 			case *ast.ValueSpec:
+				for i, name := range n.Names {
+					if name.Name == "ConduitChannel" && (i >= len(n.Values) || !isString(n.Values[i], "scion_ev_conduit")) {
+						bad = append(bad, fmt.Sprintf("%s: ConduitChannel is not \"scion_ev_conduit\"", e.Name()))
+					}
+				}
 				for i, name := range n.Names {
 					if name.Name == "experimentsSection" && (i >= len(n.Values) || !isString(n.Values[i], "experiments")) {
 						bad = append(bad, fmt.Sprintf("%s: experimentsSection is not \"experiments\"", e.Name()))
@@ -342,6 +351,10 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 			case *ast.BasicLit:
 				if n.Kind == token.STRING {
 					v, _ := strconv.Unquote(n.Value)
+					// The relay LISTENs on the conduit channel only.
+					if strings.Contains(v, "scion_ev_") && v != "scion_ev_conduit" {
+						bad = append(bad, fmt.Sprintf("%s names the event channel %q (only scion_ev_conduit)", e.Name(), v))
+					}
 					low := strings.ToLower(v)
 					for _, w := range []string{"token", "secret", "credential", "api_key", "apikey", "signing"} {
 						if strings.Contains(low, w) {
@@ -357,6 +370,47 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 		}
 	}
 	return bad
+}
+
+// listensOn returns what a LISTEN statement expression names: "" when e is
+// not a LISTEN, "ConduitChannel" when it is "LISTEN " plus an expression
+// using only that identifier, and the expression's text otherwise.
+func listensOn(e ast.Expr) string {
+	if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+		v, _ := strconv.Unquote(lit.Value)
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(v)), "LISTEN") {
+			return v
+		}
+		return ""
+	}
+	bin, ok := e.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.ADD {
+		return ""
+	}
+	lit, ok := bin.X.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return ""
+	}
+	v, _ := strconv.Unquote(lit.Value)
+	if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(v)), "LISTEN") {
+		return ""
+	}
+	idents := map[string]bool{}
+	ast.Inspect(bin.Y, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			idents[id.Name] = true
+		}
+		return true
+	})
+	if idents["ConduitChannel"] {
+		for name := range idents {
+			if name != "ConduitChannel" && name != "pgx" && name != "Identifier" && name != "Sanitize" {
+				return "an expression using " + name
+			}
+		}
+		return "ConduitChannel"
+	}
+	return "a channel other than ConduitChannel"
 }
 
 func isIdent(e ast.Expr, name string) bool {
@@ -513,6 +567,22 @@ func TestRelayImportCheckCatchesViolations(t *testing.T) {
 		},
 		"relaydb redefines the experiments section": {
 			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nconst experimentsSection = \"server\"\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb listens on the global channel": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nconst ch = \"scion_ev_global\"\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb listens on a project channel": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nconst ch = \"scion_ev_g_p1\"\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb LISTENs on another identifier": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nfunc g(c *x) { c.Exec(nil, \"LISTEN \"+other) }\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb redefines the conduit channel": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nconst ConduitChannel = \"elsewhere\"\n"},
 			check: func(s *importScan) []string { return s.relayDBViolations(t) },
 		},
 		"relaydb names a secret": {

@@ -28,10 +28,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// GlobalChannel is the PostgreSQL channel every hub event is notified on
-// (the hub's event publisher also notifies per-project channels). A hub
-// test keeps it equal to the hub's.
-const GlobalChannel = "scion_ev_global"
+// ConduitChannel is the dedicated PostgreSQL channel the hub notifies the
+// subjects a relay acts on, with identifier-only payloads. The relay
+// LISTENs on it alone, never on the hub's global channel. A hub test keeps
+// it equal to the hub's.
+const ConduitChannel = "scion_ev_conduit"
 
 // Listener is a LISTEN source for a fixed set of hub event subjects. It
 // reads only the subject of each notification, never its data, and
@@ -60,7 +61,7 @@ type envelope struct {
 	Subject string `json:"subject"`
 }
 
-// StartListener connects and LISTENs on GlobalChannel, delivering the
+// StartListener connects and LISTENs on ConduitChannel, delivering the
 // events whose subject matches one of patterns. It reconnects on its own
 // after a connection loss.
 func StartListener(ctx context.Context, dsn string, patterns []string, log *slog.Logger) (*Listener, error) {
@@ -150,8 +151,8 @@ func (l *Listener) listenOnce() error {
 		return err
 	}
 	defer func() { _ = conn.Close(context.Background()) }()
-	if _, err := conn.Exec(l.ctx, "LISTEN "+pgx.Identifier{GlobalChannel}.Sanitize()); err != nil {
-		return fmt.Errorf("LISTEN %s: %w", GlobalChannel, err)
+	if _, err := conn.Exec(l.ctx, "LISTEN "+pgx.Identifier{ConduitChannel}.Sanitize()); err != nil {
+		return fmt.Errorf("LISTEN %s: %w", ConduitChannel, err)
 	}
 	l.mu.Lock()
 	fns := make([]func(), 0, len(l.onListen))

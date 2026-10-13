@@ -19,8 +19,8 @@
 //   - the conduit registry store;
 //   - an allowlisted settings reader, which today reads hub.conduit and
 //     nothing else;
-//   - on PostgreSQL, a LISTEN source that delivers only the hub event
-//     subjects it is given;
+//   - on PostgreSQL, a LISTEN source on the hub's conduit channel only,
+//     delivering only the hub event subjects it is given;
 //   - a close function.
 //
 // It reads no token, credential or secret table and never migrates the

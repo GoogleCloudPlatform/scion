@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -31,8 +32,8 @@ import (
 
 // TestSeparateRelayEventContract: a separate relay, which does not import
 // this package, re-checks on exactly the hub's revocation subjects, re-reads
-// hub.conduit on the hub's settings event, and LISTENs on the channel the
-// hub notifies every event on.
+// hub.conduit on the hub's settings event, and LISTENs on the conduit
+// channel, where the hub publishes exactly the subjects the relay acts on.
 func TestSeparateRelayEventContract(t *testing.T) {
 	want := append(append([]string(nil), conduitAuthzEventPatterns...), conduitBrokerChangedSubject)
 	got := append([]string(nil), relayserver.RevocationSubjects...)
@@ -40,12 +41,19 @@ func TestSeparateRelayEventContract(t *testing.T) {
 	sort.Strings(got)
 	assert.Equal(t, want, got)
 	assert.Equal(t, settingsUpdatedSubject, relayserver.SettingsUpdatedSubject)
-	assert.Equal(t, pgGlobalChannel, relaydb.GlobalChannel)
+
+	relayActsOn := append(append([]string(nil), relayserver.RevocationSubjects...), relayserver.SettingsUpdatedSubject)
+	published := conduitChannelSubjects()
+	sort.Strings(relayActsOn)
+	sort.Strings(published)
+	assert.Equal(t, relayActsOn, published, "the conduit channel carries exactly what the relay acts on")
+	assert.Equal(t, pgConduitChannel, relaydb.ConduitChannel)
+	assert.NotEqual(t, pgGlobalChannel, relaydb.ConduitChannel)
 }
 
 // TestSeparateRelayListenerReceivesHubEvents: the relay's LISTEN source
-// delivers the hub publisher's revocation and settings events and nothing
-// else. Needs SCION_TEST_POSTGRES_DSN.
+// delivers the hub publisher's revocation and settings events, from the
+// conduit channel, and nothing else. Needs SCION_TEST_POSTGRES_DSN.
 func TestSeparateRelayListenerReceivesHubEvents(t *testing.T) {
 	dsn := os.Getenv("SCION_TEST_POSTGRES_DSN")
 	if dsn == "" {
@@ -74,6 +82,19 @@ func TestSeparateRelayListenerReceivesHubEvents(t *testing.T) {
 	case <-listening:
 	case <-ctx.Done():
 		t.Fatal("the relay listener never listened")
+	}
+
+	// A lost LISTEN connection reconnects and re-runs the listen hooks,
+	// which re-check everything (a notice missed meanwhile is covered).
+	conn, err := pgx.Connect(ctx, dsn)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close(context.Background()) }()
+	_, err = conn.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE 'LISTEN%scion_ev_conduit%' AND pid <> pg_backend_pid()`)
+	require.NoError(t, err)
+	select {
+	case <-listening:
+	case <-ctx.Done():
+		t.Fatal("the relay listener did not reconnect")
 	}
 
 	pub.PublishRaw("agent.a1.status", map[string]string{"x": "y"}) // not delivered
