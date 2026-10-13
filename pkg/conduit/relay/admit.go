@@ -96,7 +96,10 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 	}
 	// Keys before the insert: a target that cannot verify grants is
 	// useless, and failing here consumes no epoch.
-	keys, err := r.cfg.GrantKeys(ctx)
+	keys, err := p.GrantKeys, error(nil)
+	if keys == nil {
+		keys, err = r.cfg.GrantKeys(ctx)
+	}
 	if err != nil {
 		r.log.Warn("Conduit admission refused: grant keys unavailable", "error", err)
 		return nil, reject(conduit.CloseRelayTimeout, ReasonGrantKeysUnavailable, "")

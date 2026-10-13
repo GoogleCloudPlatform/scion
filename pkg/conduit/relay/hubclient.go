@@ -26,6 +26,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
 // The hub internal API (design §3.9 "Authorization: the relay is
@@ -190,6 +192,25 @@ type HubAdmitResponse struct {
 	TokenRunID       string    `json:"token_run_id,omitempty"`
 	TokenRunEnforce  bool      `json:"token_run_enforce,omitempty"`
 	CredentialExpiry time.Time `json:"credential_expiry,omitzero"`
+	// GrantKeys are the hub's grant verification public keys, sent to the
+	// dialer in Welcome.
+	GrantKeys []HubGrantKey `json:"grant_keys"`
+}
+
+// HubGrantKey is one grant verification public key (Welcome.grant_keys).
+type HubGrantKey struct {
+	KID          string `json:"kid"`
+	PublicKey    []byte `json:"public_key"`
+	NotAfterUnix int64  `json:"not_after_unix"`
+}
+
+// WelcomeGrantKeys converts keys to Welcome.grant_keys.
+func WelcomeGrantKeys(keys []HubGrantKey) []*conduitv1.GrantKey {
+	out := make([]*conduitv1.GrantKey, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, &conduitv1.GrantKey{Kid: k.KID, PublicKey: append([]byte(nil), k.PublicKey...), NotAfterUnix: k.NotAfterUnix})
+	}
+	return out
 }
 
 // forwardedCredentialHeaders are the dialer headers a relay passes to Admit

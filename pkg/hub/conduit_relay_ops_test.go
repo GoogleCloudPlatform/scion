@@ -198,6 +198,7 @@ func TestRelayAdmit_SameOutcomeAsInProcess(t *testing.T) {
 	wantExp, err := cf.srv.userTokenService.GetTokenExpiry(jwt)
 	require.NoError(t, err)
 	assert.Equal(t, wantExp.Unix(), resp.CredentialExpiry.Unix(), "a user JWT's own expiry, as conduitCredentialExpiry reads it")
+	assert.NotEmpty(t, resp.GrantKeys, "the grant keys for the dialer's Welcome")
 
 	key, row, err := cf.srv.uatService.CreateToken(rs4MintContext(cf.owner.ID()), cf.owner.ID(), "relay", cf.agent.ProjectID, []string{store.UATScopeAgentPortAccess}, nil)
 	require.NoError(t, err)

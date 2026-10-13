@@ -111,6 +111,10 @@ type Principal struct {
 	// asking the hub to admit the dialer, so the hub binds its admission to
 	// exactly this session.
 	SessionID string
+	// GrantKeys, when set, are this session's Welcome.grant_keys in place
+	// of Config.GrantKeys (a separate relay gets them from the hub with the
+	// admission).
+	GrantKeys []*conduitv1.GrantKey
 }
 
 // TokenRunBinding compares the run an agent's credential was issued for
@@ -230,8 +234,11 @@ type Relay struct {
 	log *slog.Logger
 	clk clock.Clock
 
-	mu       sync.Mutex
-	state    relayState
+	mu    sync.Mutex
+	state relayState
+	// paused refuses new admissions while the relay keeps running
+	// (SetAdmitting).
+	paused   bool
 	gen      int64
 	endpoint string // registered internal endpoint ("" if unaddressable)
 	sessions map[string]*entry
@@ -1214,14 +1221,58 @@ func (r *Relay) serving() bool {
 }
 
 // admissionState returns the generation and the state admission sees (a
-// killed relay reports stateStopped).
+// killed relay reports stateStopped; a paused one stateDraining).
 func (r *Relay) admissionState() (int64, relayState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.killed {
 		return r.gen, stateStopped
 	}
+	if r.paused && r.state == stateServing {
+		return r.gen, stateDraining
+	}
 	return r.gen, r.state
+}
+
+// Admitting reports whether the relay admits new sessions.
+func (r *Relay) Admitting() bool {
+	_, st := r.admissionState()
+	return st == stateServing
+}
+
+// SetAdmitting stops or resumes admission while the relay keeps running
+// (design §3.9: the conduit experiment turned off at run time). Stopping
+// refuses new sessions (4503 draining), marks the relay row draining so no
+// hub picks this relay, and drains every open session with GoAway; the
+// sessions end by their drain deadline. Resuming admits again and clears
+// the row's draining flag. It is a no-op when nothing changes.
+func (r *Relay) SetAdmitting(admitting bool) {
+	r.mu.Lock()
+	if r.paused == !admitting || r.state != stateServing || r.killed {
+		r.mu.Unlock()
+		return
+	}
+	r.paused = !admitting
+	gen := r.gen
+	var entries []*entry
+	if !admitting {
+		entries = r.snapshotLocked()
+	}
+	r.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), deleteTimeout)
+	if err := r.cfg.Registry.SetRelayDraining(ctx, r.cfg.InstanceID, gen, !admitting); err != nil {
+		r.log.Warn("Conduit: updating the relay row's draining flag failed", "admitting", admitting, "error", err)
+	}
+	cancel()
+	if admitting {
+		r.log.Info("Conduit relay admission resumed")
+		return
+	}
+	r.log.Info("Conduit relay admission stopped; draining open sessions", "sessions", len(entries))
+	for _, e := range entries {
+		r.goAway(e, r.drainOptions(e))
+	}
 }
 
 // evictObsoleteLaunchRows deletes the agent's non-draining launch_id rows

@@ -147,6 +147,13 @@ func (s *Server) writeRelayAdmission(w http.ResponseWriter, r *http.Request, a c
 			c.CredentialID, c.ScopeProject, c.Scopes = scoped.CredentialID(), scoped.Boundary().ProjectID, scoped.ScopedScopes()
 		}
 	}
+	keys, err := s.conduitWelcomeGrantKeys(r.Context())
+	if err != nil {
+		slog.Warn("Conduit relay admission refused: grant keys unavailable", "error", err)
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Grant keys are temporarily unavailable",
+			map[string]interface{}{"reason": relay.ReasonGrantKeysUnavailable})
+		return
+	}
 	setAdmissionLifetime(&c, now)
 	token, err := s.mintAdmissionToken(c)
 	if err != nil {
@@ -164,6 +171,9 @@ func (s *Server) writeRelayAdmission(w http.ResponseWriter, r *http.Request, a c
 		AgentGeneration: p.Agent.Generation,
 		TokenRunID:      c.TokenRunID,
 		TokenRunEnforce: c.TokenRunEnforce,
+	}
+	for _, k := range keys {
+		resp.GrantKeys = append(resp.GrantKeys, relay.HubGrantKey{KID: k.GetKid(), PublicKey: k.GetPublicKey(), NotAfterUnix: k.GetNotAfterUnix()})
 	}
 	if c.CredentialExpiry > 0 {
 		resp.CredentialExpiry = time.Unix(c.CredentialExpiry, 0).UTC()
