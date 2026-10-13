@@ -32,23 +32,17 @@ import (
 // agent-info.json, so a delete or failure cleanup for a different run can
 // leave the files of an agent recreated under the same name alone.
 
-// provisionRunIDFixture sets up a machine and a non-git project and returns
-// the project's .scion dir.
+// provisionRunIDFixture sets up a machine and a project and returns the
+// project's .scion dir. The machine and project are startTZFixture's: a
+// global "default" template and test-harness config, and a project whose
+// .scion is a directory. (config.InitProject on a non-git dir would write a
+// .scion marker instead, and a marker project without a hub project ID has
+// no host state root, so no run would be recorded.)
 func provisionRunIDFixture(t *testing.T) string {
 	t.Helper()
 	mockRuntimeForTest(t)
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-	t.Setenv("HOME", tmpDir)
-	if err := config.InitMachine(getTestHarnesses()); err != nil {
-		t.Fatalf("InitMachine failed: %v", err)
-	}
-	projectDir := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	if err := config.InitProject(projectScionDir, getTestHarnesses()); err != nil {
-		t.Fatalf("InitProject failed: %v", err)
-	}
-	t.Chdir(projectDir)
+	projectScionDir, _ := startTZFixture(t, "", `""`)
+	t.Chdir(filepath.Dir(projectScionDir))
 	return projectScionDir
 }
 
