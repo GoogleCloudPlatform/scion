@@ -80,7 +80,7 @@ A useful rule of thumb:
 - **Local git repo, parallel agents, one shared history** → **Worktree-per-agent**.
 - **Hub-managed git project, or agents that need fully independent checkouts** → **Clone-per-agent**.
 
-Note that the same git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`.
+Note that the same git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`. Linking a git checkout to the local workstation Hub creates the project in that mode.
 
 ## Setting the mode on a Hub project
 

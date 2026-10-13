@@ -236,7 +236,9 @@ Or create a Pull Request directly from the branch on GitHub.
 
 If you already have a local checkout linked to the Hub via `scion hub link`, be aware that **the workspace strategy changes**. Once linked, even if the broker machine has the repository on disk, agents use clone-based provisioning by default, unless the project is configured for worktree-per-agent mode (requires git 2.48+ on the broker).
 
-This means you need a `GITHUB_TOKEN` secret set on the project for clone-based provisioning, just like a project created from a URL.
+On the local workstation Hub, a git project that `scion hub link` (or the automatic link) creates gets workspace mode `worktree-per-agent`, so new agents get a git worktree of your checkout, as in local mode. A project that already existed on the Hub keeps its mode.
+
+For clone-based provisioning you need a `GITHUB_TOKEN` secret set on the project for clone-based provisioning, just like a project created from a URL.
 
 To temporarily fall back to local worktree mode outside the Hub entirely:
 

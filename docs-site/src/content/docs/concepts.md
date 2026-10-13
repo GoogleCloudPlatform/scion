@@ -135,7 +135,7 @@ When a Hub manages a git-based project and worktree-per-agent mode is not select
 - SSH credentials on the host are not used; a `GITHUB_TOKEN` is required.
 - This strategy is consistent across all broker machines, whether or not the repo exists locally.
 
-This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`.
+This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`. Linking a git checkout to the local workstation Hub creates the project in that mode.
 
 **Worktree-per-agent (Hub-managed git projects):** the broker provisions a shared base clone and gives each agent its own worktree over it, the same mount shape as the local-mode case, gated on the broker's git version being 2.48 or later; the broker falls back to clone-per-agent if worktree provisioning is not possible. See the [About Workspaces](/scion/local/workspace/) guide for details.
 
