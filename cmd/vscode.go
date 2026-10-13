@@ -212,7 +212,7 @@ func vscodeMain(ctx context.Context, env *sshCommandEnv, ref, folder string, pru
 	if err != nil {
 		return tunnelclient.Errorf(tunnelclient.ExitError, "agent %s/%s has an invalid SSH host key: %v", entry.projectSlug, entry.agentSlug, err)
 	}
-	block, err := renderSSHHostBlockKnown(env.exe, hub.hubArg, hub.label, entry.projectSlug, entry.agentSlug, vscodeKnownHostsRef)
+	block, err := renderSSHHostBlockPinned(env.exe, hub.hubArg, hub.label, entry.projectSlug, entry.agentSlug, vscodeKnownHostsRef, p.knownHosts())
 	if err != nil {
 		return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
 	}

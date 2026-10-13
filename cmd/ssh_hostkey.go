@@ -42,6 +42,20 @@ const sshHubRequestTimeout = 15 * time.Second
 // the pinned known-hosts line.
 const sshRecreatedHint = "agent was recreated; run scion ssh-config --write"
 
+// sshVSCodeRecreatedHint is printed, with the hub endpoint, project and
+// agent the ProxyCommand pins, when the pin in a scion vscode known-hosts
+// file no longer matches. It is a command scion vscode accepts as is,
+// independent of the current context.
+const sshVSCodeRecreatedHint = "agent was recreated; run scion vscode --hub %s --project %s %s"
+
+// sshPinSource names where the host-key hint finds an agent's pin: the
+// known-hosts file and the key in it that a Host block uses. The zero value
+// means the ssh-config files for the hub.
+type sshPinSource struct {
+	knownHosts string // absolute path
+	alias      string // HostKeyAlias
+}
+
 // sshHubConn is one hub's REST access for the ssh commands. The hub client
 // and the raw transport share one HTTP client and one user bearer token.
 // The token comes from getHubAccessToken, which never yields an agent token.
@@ -181,6 +195,13 @@ func (h *sshHubConn) resolveSSHProjectID(ctx context.Context, project string) (i
 // recreated hint to stderr and returns nil, so ssh goes on to report the
 // mismatch itself. A missing agent returns exit 4 promptly.
 func checkSSHHostKeyPin(ctx context.Context, stderr io.Writer, home, endpoint, token, project, agent string) error {
+	return checkSSHHostKeyPinIn(ctx, stderr, home, endpoint, token, project, agent, sshPinSource{})
+}
+
+// checkSSHHostKeyPinIn is checkSSHHostKeyPin with the pin read from pin,
+// or from the ssh-config files when pin is the zero value. It only prints
+// a hint: it never accepts, refuses or writes a pin.
+func checkSSHHostKeyPinIn(ctx context.Context, stderr io.Writer, home, endpoint, token, project, agent string, pin sshPinSource) error {
 	// The endpoint as given must be a plain origin before it is normalized.
 	if _, err := sshEndpointURL(endpoint); err != nil {
 		return tunnelclient.Errorf(tunnelclient.ExitUsage, "%v", err)
@@ -206,8 +227,33 @@ func checkSSHHostKeyPin(ctx context.Context, stderr io.Writer, home, endpoint, t
 	if current == "" {
 		return nil
 	}
+	if pin.knownHosts != "" {
+		checkPinnedSSHHostKeyFile(stderr, pin, endpoint, projectSlug, agent, current)
+		return nil
+	}
 	checkPinnedSSHHostKey(stderr, sshPaths{home: home}, normalized, projectSlug, agent, current)
 	return nil
+}
+
+// checkPinnedSSHHostKeyFile compares current with the pin for pin.alias in
+// pin.knownHosts and prints the scion vscode recreated hint when they
+// differ. It reports whether it printed the hint. A missing file or pin is
+// not a mismatch.
+func checkPinnedSSHHostKeyFile(stderr io.Writer, pin sshPinSource, endpoint, projectSlug, agentSlug, current string) bool {
+	pins, err := readKnownHosts(pin.knownHosts)
+	if err != nil {
+		return false
+	}
+	pinned, ok := pins[pin.alias]
+	if !ok {
+		return false
+	}
+	want, err := normalizeSSHHostKey(current)
+	if err != nil || want == pinned {
+		return false
+	}
+	_, _ = fmt.Fprintf(stderr, sshVSCodeRecreatedHint+"\n", endpoint, projectSlug, agentSlug)
+	return true
 }
 
 // checkPinnedSSHHostKey compares current with the pinned known-hosts line
@@ -254,6 +300,12 @@ const sshHostKeyHintTimeout = 5 * time.Second
 // request, a missing known-hosts file) is ignored, and the tunnel always
 // continues, so ssh itself refuses a changed key.
 func tunnelSSHHostKeyHint(cmd *cobra.Command, ssh bool, endpoint, project, agent string) {
+	tunnelSSHHostKeyHintIn(cmd, ssh, endpoint, project, agent, sshPinSource{})
+}
+
+// tunnelSSHHostKeyHintIn is tunnelSSHHostKeyHint with the pin read from
+// pin (see checkSSHHostKeyPinIn).
+func tunnelSSHHostKeyHintIn(cmd *cobra.Command, ssh bool, endpoint, project, agent string, pin sshPinSource) {
 	if !ssh || project == "" {
 		return
 	}
@@ -271,5 +323,5 @@ func tunnelSSHHostKeyHint(cmd *cobra.Command, ssh bool, endpoint, project, agent
 	}
 	ctx, cancel := context.WithTimeout(ctx, sshHostKeyHintTimeout)
 	defer cancel()
-	_ = checkSSHHostKeyPin(ctx, cmd.ErrOrStderr(), home, endpoint, token, project, agent)
+	_ = checkSSHHostKeyPinIn(ctx, cmd.ErrOrStderr(), home, endpoint, token, project, agent, pin)
 }

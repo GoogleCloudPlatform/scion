@@ -98,10 +98,10 @@ func TestVSCode_WritesBlockPinSettingsAndRunsCode(t *testing.T) {
 
 	cfg := readTestFile(t, p.sshConfig())
 	assert.True(t, strings.HasPrefix(cfg, vscodeHeader+"\n"))
-	want, err := renderSSHHostBlockKnown(sshTestExe, hub.endpoint(t), label, "a", "b-c", "~/.scion/vscode/known_hosts")
+	want, err := renderSSHHostBlockPinned(sshTestExe, hub.endpoint(t), label, "a", "b-c", "~/.scion/vscode/known_hosts", p.knownHosts())
 	require.NoError(t, err)
 	assert.Contains(t, cfg, want)
-	assert.Contains(t, cfg, "--hub "+hub.endpoint(t)+" --project a b-c")
+	assert.Contains(t, cfg, "--hub "+hub.endpoint(t)+" --project a --known-hosts "+p.knownHosts()+" --host-key-alias "+host+" b-c")
 	assert.Contains(t, cfg, "StrictHostKeyChecking yes\n")
 	assert.Equal(t, host+" "+mustNormKey(t, hub.agents[1].HostKey)+"\n", readTestFile(t, p.knownHosts()))
 	assert.JSONEq(t, `{"remote.SSH.configFile": "`+p.sshConfig()+`"}`, readTestFile(t, p.settings()))
