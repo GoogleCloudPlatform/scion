@@ -1275,3 +1275,37 @@ func TestHandleAgentDirWithoutConfig_UnreadableUntrackedDirIsKept(t *testing.T) 
 		t.Errorf("error = %v, want the could-not-check conflict", err)
 	}
 }
+
+// A link inside the removed dir that points to a file outside it is removed
+// with the dir, and the target's mode is left unchanged.
+func TestRemoveAgentDirAndPruneWorktrees_LinkTargetModeUnchanged(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "outside.txt")
+	if err := os.WriteFile(target, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(base, "agents", "a")
+	if err := os.MkdirAll(filepath.Join(agentDir, "workspace"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(agentDir, "workspace", "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	removeAgentDirAndPruneWorktrees(agentDir, "", false)
+
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("expected the link to be removed (lstat err=%v)", err)
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("expected the link target to remain: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("link target mode = %v, want 0600", got)
+	}
+}

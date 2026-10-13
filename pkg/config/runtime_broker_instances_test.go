@@ -435,6 +435,14 @@ func TestRuntimeBrokerInstances_SchemaMatchesValidator(t *testing.T) {
 		"k8s bad ksa":       {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubernetes_service_account_mappings: {agent@proj.iam.gserviceaccount.com: Bad_KSA}}}"), false},
 		"docker block sa":   {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, kubernetes_block_service_account: zero-priv}}"), false},
 		"docker mappings":   {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, kubernetes_service_account_mappings: {agent@proj.iam.gserviceaccount.com: ksa-agent}}}"), false},
+		"k8s shared dir":    {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_storage_class: rwx, shared_dir_size: 40Gi}}"), true},
+		"k8s bad size":      {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_size: 40GB}}"), false},
+		"k8s numeric size":  {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_size: 40}}"), false},
+		"docker sd class":   {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, shared_dir_storage_class: rwx}}"), false},
+		"docker sd size":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, shared_dir_size: 40Gi}}"), false},
+		"reserved target":   {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, gke: true}}"), false},
+		"reserved entry":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {image_registry: r}}"), false},
+		"unknown target":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, bogus: 1}}"), false},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

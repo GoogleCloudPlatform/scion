@@ -471,27 +471,30 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	defer retryCancel()
 
 	if err := dispatchWithBrokerRetry(retryCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
-		nd.log.Error("Failed to dispatch notification to agent",
-			"subscriberID", sub.SubscriberID, "error", err)
-	} else {
-		nd.log.Info("Notification dispatched to agent",
-			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "brokerID", subscriber.RuntimeBrokerID)
-		// Log to dedicated message audit log
-		if nd.messageLog != nil {
-			logAttrs := []any{
-				"agent_id", subscriber.ID,
-				"agent_name", subscriber.Name,
-				"project_id", subscriber.ProjectID,
-				"notification_id", notif.ID,
-				// The record was written before dispatch; this outcome
-				// line carries no record fields or content.
-				logging.AttrLogKind, logging.LogKindEvent,
-			}
-			nd.messageLog.Debug("notification message dispatched", logAttrs...)
-		}
+		nd.log.Error("Failed to dispatch notification to agent; notification NOT dispatched",
+			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
+		// Do NOT mark as dispatched: the notification was not delivered.
+		// The periodic dispatch sweep picks it up after its grace period
+		// and retries it (see RetryDispatch for what bounds the retries).
+		return
 	}
 
-	// Mark dispatched regardless of success (best-effort)
+	nd.log.Info("Notification dispatched to agent",
+		"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "brokerID", subscriber.RuntimeBrokerID)
+	// Log to dedicated message audit log
+	if nd.messageLog != nil {
+		logAttrs := []any{
+			"agent_id", subscriber.ID,
+			"agent_name", subscriber.Name,
+			"project_id", subscriber.ProjectID,
+			"notification_id", notif.ID,
+			// The record was written before dispatch; this outcome
+			// line carries no record fields or content.
+			logging.AttrLogKind, logging.LogKindEvent,
+		}
+		nd.messageLog.Debug("notification message dispatched", logAttrs...)
+	}
+
 	if err := nd.store.MarkNotificationDispatched(ctx, notif.ID); err != nil {
 		nd.log.Error("Failed to mark notification dispatched", "notificationID", notif.ID, "error", err)
 	}

@@ -80,12 +80,6 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	case "init":
 		// Both top-level init and project init don't require existing project
 		return false
-	case "shadow", "unshadow":
-		// hub shadow/unshadow create/remove the project marker — they must
-		// run in a directory with no existing project.
-		if parentName == "hub" {
-			return false
-		}
 	case "migrate-names", "migrate":
 		// hub secret migrate-names (GCP SM name migration) and hub secret
 		// migrate (DB -> GCP SM value migration) operate directly against

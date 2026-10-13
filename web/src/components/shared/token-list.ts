@@ -502,7 +502,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'test_identity:issue',
     label: 'test_identity:issue',
     description:
-      'Issue short-lived synthetic member or viewer test identities (only when the hub runs with --enable-test-identities)',
+      'Issue short-lived synthetic member or viewer test identities (only when the hub runs with --test-mode=member or above)',
     resource: 'test_identity',
     isAlias: false,
   },
@@ -510,7 +510,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'test_identity:issue_admin',
     label: 'test_identity:issue_admin',
     description:
-      'Issue short-lived test identities holding an expiring hub-admin role (only on hubs started with the test admin gate); held only by super-admin',
+      'Issue short-lived test identities holding an expiring hub-admin role (only on hubs started with --test-mode=admin); held only by super-admin',
     resource: 'test_identity',
     isAlias: false,
   },

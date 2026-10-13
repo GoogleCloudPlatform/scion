@@ -155,7 +155,7 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 	}
 	rctx, cancel := context.WithTimeout(ctx, sshHubRequestTimeout)
 	defer cancel()
-	entry, err := hub.conn.resolveSSHTarget(rctx, ref, env.settingsProjectID)
+	entry, err := hub.conn.resolveSSHTarget(rctx, ref, env.project)
 	if err != nil {
 		return nil, nil, err
 	}
