@@ -311,6 +311,12 @@ func runHubList(cmd *cobra.Command, args []string) error {
 func hubList(out, stderr io.Writer, check bool) error {
 	c := loadUseContext(stderr)
 	names := c.HubNames()
+	// How the CLI authenticates to each hub, computed once from local state
+	// and used for the check, the AUTH column and the JSON.
+	infos := make([]authInfo, len(names))
+	for i, name := range names {
+		infos[i] = hubAuthFor(c.Hubs[name].Endpoint)
+	}
 
 	var reachable []bool
 	var verified []*bool
@@ -334,7 +340,7 @@ func hubList(out, stderr io.Writer, check bool) error {
 				if !reachable[i] {
 					return
 				}
-				token := hubAuthToken(endpoint, hubAuthFor(endpoint))
+				token := hubAuthToken(endpoint, infos[i])
 				if token == "" {
 					return
 				}
@@ -349,7 +355,7 @@ func hubList(out, stderr io.Writer, check bool) error {
 	rows := make([]hubListJSON, 0, len(names))
 	for i, name := range names {
 		h := c.Hubs[name]
-		info := hubAuthFor(h.Endpoint)
+		info := infos[i]
 		row := hubListJSON{
 			Current:  name == c.CurrentHub,
 			Name:     name,
@@ -376,12 +382,12 @@ func hubList(out, stderr io.Writer, check bool) error {
 		header += "\tREACHABLE\tVERIFIED"
 	}
 	_, _ = fmt.Fprintln(w, header)
-	for _, row := range rows {
+	for i, row := range rows {
 		mark := ""
 		if row.Current {
 			mark = "*"
 		}
-		line := fmt.Sprintf("%s\t%s\t%s\t%s", mark, row.Name, row.Endpoint, hubAuthLabel(hubAuthFor(row.Endpoint)))
+		line := fmt.Sprintf("%s\t%s\t%s\t%s", mark, row.Name, row.Endpoint, hubAuthLabel(infos[i]))
 		if check {
 			line += "\t" + yesNo(*row.Reachable) + "\t" + verifiedLabel(row.Verified)
 		}
