@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -99,6 +100,12 @@ func runScion(t *testing.T, args ...string) (string, string, error) {
 	}
 	if f := rootCmd.PersistentFlags().Lookup("format"); f != nil {
 		f.Changed = false
+	}
+	for _, c := range []*cobra.Command{hubAddCmd, hubListCmd, hubRenameCmd, hubRemoveCmd, hubAuthLoginCmd} {
+		c.Flags().VisitAll(func(f *pflag.Flag) {
+			f.Changed = false
+			_ = f.Value.Set(f.DefValue)
+		})
 	}
 	var err error
 	stdout, stderr := captureStdoutStderr(t, func() {
@@ -196,7 +203,7 @@ func TestUseSelectProject_NotLoggedIn(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "")
 	_, _, err := runScion(t, "use", "foo")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "scion hub auth login --hub-url "+srv.URL)
+	assert.Contains(t, err.Error(), "Log in with: scion hub auth login --hub "+srv.URL)
 	assert.Zero(t, calls.Load(), "no hub call without a credential")
 }
 
@@ -204,8 +211,8 @@ func TestUseSelectProject_NoHub(t *testing.T) {
 	setupUseTest(t)
 	writeHomeGlobalSettings(t, "")
 	_, _, err := runScion(t, "use", "foo")
-	require.Error(t, err)
-	assert.Equal(t, noHubSelectedError, err.Error())
+	require.ErrorIs(t, err, errHubNotConfigured)
+	assert.Equal(t, "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'.", err.Error())
 }
 
 func TestUseSelectProject_InDirectoryProjectNotes(t *testing.T) {

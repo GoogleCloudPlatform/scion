@@ -256,6 +256,18 @@ type ProjectSettings struct {
 	DefaultAgentRole string `json:"defaultAgentRole,omitempty"`
 }
 
+// ProjectGCPIdentityDefaultsUpdate is a partial project settings PUT body
+// that carries only the default GCP identity fields. A nil field is left out
+// of the body and keeps its stored value; a pointer to "" (or to an empty
+// map) is sent and clears the field. ProjectSettings cannot express this,
+// because its string fields drop "" (omitempty) and a full ProjectSettings
+// round trip would resend every other setting.
+type ProjectGCPIdentityDefaultsUpdate struct {
+	Mode                      *string            `json:"defaultGCPIdentityMode,omitempty"`
+	ServiceAccountID          *string            `json:"defaultGCPIdentityServiceAccountID,omitempty"`
+	ServiceAccountIDByProfile *map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile,omitempty"`
+}
+
 // ResolvedHubDefault reports whether a hub-level default exists for a project
 // setting, in the GET /api/v1/projects/{id}/settings/resolved response.
 //

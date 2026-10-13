@@ -221,6 +221,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/users/me/injected-skills/", RouteID: "users.me.injectedSkills.byId",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/users/me/delegations": {
+		Pattern: "/api/v1/users/me/delegations", RouteID: "users.me.delegations",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/users/me/terminal-workspace": {
 		Pattern: "/api/v1/users/me/terminal-workspace", RouteID: "users.me.terminalWorkspace",
 		Classification: RouteAuthenticated,
@@ -1107,6 +1111,29 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "POST /api/v1/test-identities/admin/revoke-all", RouteID: "testIdentities.admin.revokeAll",
 		Classification: RouteHubAdmin,
 		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	// Workload-bound issuer delegations (phase X2): test_identity.issue at
+	// hub scope from an interactive session only (no PAT, agent or
+	// workload credential). The handlers further require a live human
+	// user row and limit list and revoke to the grantor or an unscoped
+	// platform admin session.
+	"POST /api/v1/test-identity-delegations": {
+		Pattern: "POST /api/v1/test-identity-delegations", RouteID: "testIdentityDelegations.create",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	"GET /api/v1/test-identity-delegations": {
+		Pattern: "GET /api/v1/test-identity-delegations", RouteID: "testIdentityDelegations.list",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	"DELETE /api/v1/test-identity-delegations/{id}": {
+		Pattern: "DELETE /api/v1/test-identity-delegations/{id}", RouteID: "testIdentityDelegations.revoke",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		SessionOnly: authzop.ReasonCredentialManagement,
 	},
 

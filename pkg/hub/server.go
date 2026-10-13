@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -183,8 +184,15 @@ type ServerConfig struct {
 	AgentRunScope AgentRunScope
 	// BrokerAuthConfig holds configuration for Runtime Broker HMAC authentication.
 	BrokerAuthConfig BrokerAuthConfig
-	// HubEndpoint is the public endpoint URL for this Hub (used in broker join responses).
+	// HubEndpoint is the operator endpoint URL for this Hub: resolved at
+	// startup from the environment, startup flags and settings.yaml, never
+	// from the settings database.
 	HubEndpoint string
+	// HubEndpoints, when set, holds the operator and public endpoints the
+	// caller resolved at startup (ResolveHubEndpoints), including a
+	// server.hub.public_url saved in the settings database. When nil, both
+	// are HubEndpoint. hubEndpointUses decides which one each use gets.
+	HubEndpoints *HubEndpoints
 	// AgentEndpoint optionally overrides HubEndpoint for the sole purpose of
 	// the SCION_HUB_ENDPOINT value injected into dispatched agents (see
 	// HTTPAgentDispatcher.SetAgentEndpoint). Every other use of HubEndpoint
@@ -372,6 +380,18 @@ type ServerConfig struct {
 	// DEC-8), or the reason there is none. Without a usable key, test
 	// identity web sessions are unavailable; the member tier is unaffected.
 	TestIdentityWebSessionKey TestIdentityWebSessionKey
+	// TestIdentityWorkloadIssuers is the startup allowlist of workload
+	// subjects a human issuer may pin a test identity issuer delegation to
+	// (server.hub.test_identities.workload_issuers, ptone/scion#4240 phase
+	// X2). New validates it (config.ValidateTestIdentityWorkloadIssuers, a
+	// resolved HubID, and an issuer audience distinct from every other
+	// configured token audience) and refuses to build a Server otherwise.
+	// It is accepted only while EnableTestIdentities is true; it is never
+	// writable through the API.
+	TestIdentityWorkloadIssuers []config.TestIdentityWorkloadIssuer
+	// TestIdentityWorkloadValidator verifies workload Google ID tokens.
+	// Nil means the production Google validator; tests set a fake.
+	TestIdentityWorkloadValidator GoogleCredentialValidator
 	// TestAdminGate is the validated test admin tier gate
 	// (--enable-test-admin-identities, ptone/scion#4240 phase A0). cmd's
 	// validateTestAdminIdentities builds it; New re-checks it, verifies
@@ -1622,6 +1642,17 @@ type Server struct {
 	// co-located registration so callers can report it distinctly.
 	embeddedBrokerPending chan struct{}
 	embeddedBrokerRegErr  string
+	// embeddedFlat records the co-located flat Runtime Broker instances
+	// (several may share this process, ptone/scion#3272): the activated
+	// Runtime Broker IDs, each instance's refusal by instance key, and the
+	// instance keys startup expects an outcome for before releasing
+	// waiters (ExpectEmbeddedFlatInstances).
+	embeddedFlatIDs      map[string]bool
+	embeddedFlatByKey    map[string]string // instance key -> activated Runtime Broker ID
+	embeddedFlatFailures map[string]string
+	embeddedFlatOutcomes map[string]bool
+	embeddedFlatExpected []string
+
 	// inProcessPluginBrokers holds the ids of the message-broker plugin
 	// records this process provisioned itself (RegisterInProcessPluginBroker).
 	// The test admin tier admits those ids; it never trusts a stored
@@ -1769,6 +1800,10 @@ type Server struct {
 	// testIdentityWeb is the test identity web session state (WS1): the
 	// marker cookie codec built from the hub-local key, fixed in New.
 	testIdentityWeb testIdentityWebState
+	// workloadIssuer is the workload-bound issuer delegation state
+	// (test_identity_workload_issuer.go), fixed at startup. Nil when no
+	// workload issuer is configured.
+	workloadIssuer *workloadIssuerAuthenticator
 
 	// testAdminGate is the immutable test admin tier gate captured by New
 	// (test_admin_gate.go). It has no setter: testAdminTierEnabled reads
@@ -2128,6 +2163,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateTestAdminGateConfig(cfg, s != nil); err != nil {
 		return nil, err
 	}
+	// Workload issuer allowlist and issuer audience (X2): refuse a
+	// malformed allowlist, an admin-tier entry, a missing hub id, or an
+	// issuer audience shared with another accepted token audience.
+	if err := validateTestIdentityWorkloadIssuers(cfg); err != nil {
+		return nil, err
+	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -2413,6 +2454,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.testIdentityWeb = newTestIdentityWebState(cfg.TestIdentityWebSessionKey)
 	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
+	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() })
+	if srv.workloadIssuer != nil && !cfg.EnableTestIdentities {
+		slog.Warn("Test identity workload issuers are configured but test identities are off; workload delegation stays unavailable")
+	}
 
 	// Store transport token minter if configured
 	if cfg.TransportMinter != nil {
@@ -2428,7 +2473,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if cfg.OIDCConfig.Enabled {
 		oidcIssuerURL := cfg.OIDCConfig.IssuerURL
 		if oidcIssuerURL == "" {
-			oidcIssuerURL = cfg.HubEndpoint
+			oidcIssuerURL = hubEndpointsFromConfig(cfg).For(HubEndpointForOIDCIssuer)
 		}
 		if oidcIssuerURL == "" {
 			return nil, fmt.Errorf("OIDC is enabled but no issuer URL configured (set oidc.issuer_url or hub.endpoint)")
@@ -2794,6 +2839,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// Agent delegated credentials (scion_adt_ bearers); refused while
 		// hub.agent_delegation is off.
 		DelegatedAgentAuth: srv.authenticateDelegatedAgentCredential,
+
+		// Workload-bound issuer delegations (test identities phase X2).
+		WorkloadIssuer: srv.workloadIssuer,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {
@@ -3427,6 +3475,94 @@ func (s *Server) EmbeddedBrokerRegistrationFailed(err error) {
 	s.resolveEmbeddedBrokerPendingLocked()
 }
 
+// ExpectEmbeddedFlatInstances records the instance keys of the co-located
+// flat Runtime Broker instances this process hosts. With it, waiters on a
+// pending co-located registration are released only once every listed
+// instance has an outcome (activated or refused), so a waiter is never told
+// "not embedded" for an instance still being activated. Without it the
+// first outcome releases them (one instance).
+func (s *Server) ExpectEmbeddedFlatInstances(keys []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.embeddedFlatExpected = append([]string(nil), keys...)
+	s.resolveEmbeddedFlatPendingLocked()
+}
+
+// recordEmbeddedFlatActivated records an activated co-located flat
+// instance. Callers must hold s.mu.
+func (s *Server) recordEmbeddedFlatActivatedLocked(key, brokerID string) {
+	if s.embeddedFlatIDs == nil {
+		s.embeddedFlatIDs = map[string]bool{}
+		s.embeddedFlatByKey = map[string]string{}
+	}
+	s.embeddedFlatIDs[brokerID] = true
+	s.embeddedFlatByKey[key] = brokerID
+	delete(s.embeddedFlatFailures, key)
+	s.markEmbeddedFlatOutcomeLocked(key)
+}
+
+// EmbeddedFlatInstanceFailed records that the co-located flat instance key
+// was not activated, or stopped serving after activation (any refusal:
+// configuration, identity, unresolved ownership, registration,
+// acknowledgement, or its services failing to start). An instance recorded as
+// embedded stops being embedded. Every recorded refusal is reported through
+// the co-located registration failure (health and admin summary), so one
+// refused instance is visible even when its siblings activated.
+func (s *Server) EmbeddedFlatInstanceFailed(key string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id, ok := s.embeddedFlatByKey[key]; ok {
+		delete(s.embeddedFlatIDs, id)
+		delete(s.embeddedFlatByKey, key)
+	}
+	if s.embeddedFlatFailures == nil {
+		s.embeddedFlatFailures = map[string]string{}
+	}
+	msg := "unknown error"
+	if err != nil {
+		msg = err.Error()
+	}
+	s.embeddedFlatFailures[key] = msg
+	keys := make([]string, 0, len(s.embeddedFlatFailures))
+	for k := range s.embeddedFlatFailures {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) == 1 && len(s.embeddedFlatExpected) <= 1 {
+		s.embeddedBrokerRegErr = msg
+	} else {
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("instance %q: %s", k, s.embeddedFlatFailures[k]))
+		}
+		s.embeddedBrokerRegErr = strings.Join(parts, "; ")
+	}
+	s.markEmbeddedFlatOutcomeLocked(key)
+}
+
+func (s *Server) markEmbeddedFlatOutcomeLocked(key string) {
+	if s.embeddedFlatOutcomes == nil {
+		s.embeddedFlatOutcomes = map[string]bool{}
+	}
+	s.embeddedFlatOutcomes[key] = true
+	s.resolveEmbeddedFlatPendingLocked()
+}
+
+// resolveEmbeddedFlatPendingLocked releases waiters once every expected
+// flat instance has an outcome (or, with no expectation recorded, on the
+// first outcome). Callers must hold s.mu.
+func (s *Server) resolveEmbeddedFlatPendingLocked() {
+	if len(s.embeddedFlatOutcomes) == 0 {
+		return
+	}
+	for _, k := range s.embeddedFlatExpected {
+		if !s.embeddedFlatOutcomes[k] {
+			return
+		}
+	}
+	s.resolveEmbeddedBrokerPendingLocked()
+}
+
 // resolveEmbeddedBrokerPendingLocked releases waiters on a pending co-located
 // registration. Callers must hold s.mu.
 func (s *Server) resolveEmbeddedBrokerPendingLocked() {
@@ -3443,9 +3579,43 @@ var embeddedBrokerWaitTimeout = 15 * time.Second
 // embeddedBrokerState describes the Hub's embedded broker for callers that
 // need to explain a negative isEmbeddedBroker result.
 type embeddedBrokerState struct {
-	id      string // recorded embedded broker ID, "" if none
-	regErr  string // non-empty when co-located registration failed
-	pending bool   // registration still outstanding after the wait
+	id      string          // the embedded broker ID when there is exactly one, "" otherwise
+	ids     map[string]bool // every embedded broker ID (legacy or co-located flat instances)
+	regErr  string          // non-empty when co-located registration failed
+	pending bool            // registration still outstanding after the wait
+}
+
+// has reports whether brokerID is an embedded broker of this process.
+func (st embeddedBrokerState) has(brokerID string) bool {
+	return brokerID != "" && st.ids[brokerID]
+}
+
+// sortedIDs returns the embedded broker IDs, sorted.
+func (st embeddedBrokerState) sortedIDs() []string {
+	ids := make([]string, 0, len(st.ids))
+	for id := range st.ids {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// embeddedBrokerStateLocked snapshots the embedded broker state. Callers
+// must hold s.mu.
+func (s *Server) embeddedBrokerStateLocked() embeddedBrokerState {
+	st := embeddedBrokerState{ids: map[string]bool{}, regErr: s.embeddedBrokerRegErr, pending: s.embeddedBrokerPending != nil}
+	if s.embeddedBrokerID != "" {
+		st.ids[s.embeddedBrokerID] = true
+	}
+	for id := range s.embeddedFlatIDs {
+		st.ids[id] = true
+	}
+	if len(st.ids) == 1 {
+		for id := range st.ids {
+			st.id = id
+		}
+	}
+	return st
 }
 
 // waitForEmbeddedBroker returns the embedded broker state, first waiting up to
@@ -3466,11 +3636,7 @@ func (s *Server) waitForEmbeddedBroker(ctx context.Context) embeddedBrokerState 
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return embeddedBrokerState{
-		id:      s.embeddedBrokerID,
-		regErr:  s.embeddedBrokerRegErr,
-		pending: s.embeddedBrokerPending != nil,
-	}
+	return s.embeddedBrokerStateLocked()
 }
 
 // embeddedBrokerSnapshot returns the current embedded broker state without
@@ -3489,11 +3655,7 @@ func (s *Server) waitForEmbeddedBroker(ctx context.Context) embeddedBrokerState 
 func (s *Server) embeddedBrokerSnapshot() embeddedBrokerState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return embeddedBrokerState{
-		id:      s.embeddedBrokerID,
-		regErr:  s.embeddedBrokerRegErr,
-		pending: s.embeddedBrokerPending != nil,
-	}
+	return s.embeddedBrokerStateLocked()
 }
 
 // SetStatelessEmbeddedBrokerID records a co-located broker whose runtime
@@ -3516,11 +3678,28 @@ func (s *Server) SetRuntimeReloadFunc(fn func() bool) {
 	s.runtimeReloadFunc = fn
 }
 
-// GetEmbeddedBrokerID returns the co-located broker ID, if any.
+// GetEmbeddedBrokerID returns the co-located broker ID when this process
+// has exactly one embedded broker, "" otherwise (none, or several
+// co-located flat instances: see GetEmbeddedBrokerIDs).
 func (s *Server) GetEmbeddedBrokerID() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.embeddedBrokerID
+	return s.embeddedBrokerStateLocked().id
+}
+
+// GetEmbeddedBrokerIDs returns every embedded broker ID of this process,
+// sorted.
+func (s *Server) GetEmbeddedBrokerIDs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.embeddedBrokerStateLocked().sortedIDs()
+}
+
+// hasEmbeddedBroker reports whether this process has any embedded broker.
+func (s *Server) hasEmbeddedBroker() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.embeddedBrokerStateLocked().ids) > 0
 }
 
 // GetStatelessEmbeddedBrokerID returns the embedded stateless broker ID, if any.
@@ -3538,7 +3717,10 @@ func (s *Server) GetStatelessEmbeddedBrokerID() string {
 func (s *Server) isEmbeddedBroker(brokerID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.embeddedBrokerID != "" && s.embeddedBrokerID == brokerID
+	if brokerID == "" {
+		return false
+	}
+	return s.embeddedBrokerID == brokerID || s.embeddedFlatIDs[brokerID]
 }
 
 // SetStorage sets the storage backend for template files.
@@ -4299,10 +4481,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	}
 
 	// Set Hub endpoint if configured
-	if s.config.HubEndpoint != "" {
-		dispatcher.SetHubEndpoint(s.config.HubEndpoint)
+	if agentHubEndpoint := s.HubEndpointFor(HubEndpointForAgents); agentHubEndpoint != "" {
+		dispatcher.SetHubEndpoint(agentHubEndpoint)
 		if s.config.Debug {
-			slog.Debug("Dispatcher hub endpoint configured", "endpoint", s.config.HubEndpoint)
+			slog.Debug("Dispatcher hub endpoint configured", "endpoint", agentHubEndpoint)
 		}
 	} else if s.config.Debug {
 		slog.Warn("No hub.endpoint configured - agents won't know how to reach Hub")
@@ -4318,7 +4500,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	if s.config.AgentEndpoint != "" {
 		dispatcher.SetAgentEndpoint(s.config.AgentEndpoint)
 		slog.Info("server.hub.agent_endpoint is set: agents on every broker attached to this Hub, including remote brokers, will report to this URL instead of the hub's regular endpoint",
-			"agent_endpoint", s.config.AgentEndpoint, "hub_endpoint", s.config.HubEndpoint)
+			"agent_endpoint", s.config.AgentEndpoint, "hub_endpoint", s.HubEndpointFor(HubEndpointForAgents))
 	}
 
 	// Set Hub name so agent log entries carry the hub label.
@@ -5801,6 +5983,12 @@ func (s *Server) registerSchedulerHandlers() {
 	// Hourly: an expired token is already refused at join, so this only
 	// keeps the table from collecting rows.
 	s.scheduler.RegisterRecurringSingleton("broker-join-token-cleanup", 60, store.LockBrokerJoinTokenCleanup, s.brokerJoinTokenCleanupHandler())
+	// Hourly: an expired or revoked delegated credential is already
+	// refused at use; this deletes its row once the retention period after
+	// its expiry has passed (.design/agent-delegation.md §18.1). Not gated
+	// by hub.agent_delegation, so rows issued before the experiment was
+	// turned off are still cleaned up.
+	s.scheduler.RegisterRecurringSingleton("agent-delegated-credential-purge", 60, store.LockAgentDelegatedCredentialPurge, s.agentDelegatedCredentialPurgeHandler(time.Now))
 	// Not a singleton: this instance can only self-heal the providers of
 	// brokers it personally holds a live local control-channel socket for
 	// (see brokerProviderSelfHealHandler), so every instance must run it.
@@ -6480,6 +6668,10 @@ func (s *Server) registerRoutes() {
 		s.handleUserMeInjectedSkillByID(w, r, entryID)
 	}))
 
+	// Agent delegation grants the caller issued (.design/agent-delegation.md
+	// §7); session only, and available while hub.agent_delegation is off.
+	s.mux.HandleFunc("/api/v1/users/me/delegations", s.guarded("/api/v1/users/me/delegations", s.handleUserMeDelegations))
+
 	// User-scoped terminal workspace persistence (/users/me/terminal-workspace)
 	s.mux.HandleFunc("/api/v1/users/me/terminal-workspace", s.guarded("/api/v1/users/me/terminal-workspace", s.handleUserMeTerminalWorkspace))
 
@@ -6661,6 +6853,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin", s.handleIssueTestAdminIdentity)))
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin/revoke-all", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin/revoke-all", s.handleRevokeAllTestAdminIdentities)))
 	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
+	// Workload-bound issuer delegations (phase X2), behind the same flag.
+	s.mux.HandleFunc("POST /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identity-delegations", s.handleCreateTestIdentityDelegation)))
+	s.mux.HandleFunc("GET /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identity-delegations", s.handleListTestIdentityDelegations)))
+	s.mux.HandleFunc("DELETE /api/v1/test-identity-delegations/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identity-delegations/{id}", s.handleRevokeTestIdentityDelegation)))
 
 	// Telegram account linking endpoints
 	s.mux.HandleFunc("/api/v1/telegram/link", s.guarded("/api/v1/telegram/link", s.handleTelegramLink))

@@ -142,6 +142,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/templates":        "authenticated", // User-scoped templates
 	"/api/v1/users/me/templates/":       "authenticated", // User-scoped template by ID
 
+	// ── Agent delegation grants the caller issued ──────────────────────
+	"/api/v1/users/me/delegations": "authenticated", // GET: caller's issued grants; session/dev credential only (requireSessionCredentialFor)
+
 	// ── User-scoped terminal workspace ─────────────────────────────────
 	"/api/v1/users/me/terminal-workspace": "authenticated", // GET/PUT: caller's own list; session/dev credential only (requireSessionCredentialFor)
 
@@ -295,6 +298,9 @@ var routeAuthzManifest = map[string]string{
 	"DELETE /api/v1/test-identities/{id}":              "authenticated", // Delete a test identity
 	"POST /api/v1/test-identities/admin":               "authenticated", // Issue an admin-kind test identity
 	"POST /api/v1/test-identities/admin/revoke-all":    "authenticated", // Revoke every admin-kind test identity
+	"POST /api/v1/test-identity-delegations":           "authenticated", // Create a workload issuer delegation (session only)
+	"GET /api/v1/test-identity-delegations":            "authenticated", // List workload issuer delegations (session only)
+	"DELETE /api/v1/test-identity-delegations/{id}":    "authenticated", // Revoke a workload issuer delegation (session only)
 
 	// ── Platform account linking ───────────────────────────────────────
 	"/api/v1/telegram/link":        "authenticated", // Telegram account linking

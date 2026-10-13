@@ -31,6 +31,14 @@ import (
 func TestMain(m *testing.M) {
 	pinProcessUTC = func() {}
 	clearAmbientScionEnv()
+	// The CLI imports the global settings' hub.endpoint into
+	// ~/.scion/context.yaml the first time it reads the context, and that
+	// import writes the file. Most cmd tests run the root command without
+	// an isolated HOME, so with the import on they would write the real
+	// user's context.yaml, and tests that write a global hub.endpoint would
+	// change behaviour. Tests of the import turn it back on with a temp
+	// HOME (enableGlobalHubImport). This is the only place it is turned off.
+	importGlobalHubSettings = false
 	teardown := integrationTestSetup()
 	code := m.Run()
 	teardown()

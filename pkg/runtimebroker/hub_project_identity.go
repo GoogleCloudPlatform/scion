@@ -189,11 +189,22 @@ func recordHubProjectIdentity(projectPath, slug, projectID string, inUse func() 
 // The starting agent is matched by agentKey, as in newProjectAgentsInUse,
 // because AgentInfo.ID can be empty or a pod name. A listing failure counts
 // as in use.
+//
+// A flat Runtime Broker instance lists only its own objects, so for one
+// the project also counts as in use while another instance of this host
+// sharing its workspace lock service has live agents in it (or cannot say).
+// That check counts every agent the other instance has not deleted,
+// including stopped ones: their records stay until the agent is deleted, so
+// stopping such an agent does not clear it.
 func (s *Server) otherProjectAgentsInUse(ctx context.Context, projectID, agentID string) (bool, error) {
-	if s.manager == nil {
+	if s.ownership != nil && s.locks().projectInUseByOthers(s, projectID) {
 		return true, nil
 	}
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true", "scion.project_id": projectID})
+	mgr := s.currentManager()
+	if mgr == nil {
+		return true, nil
+	}
+	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true", "scion.project_id": projectID})
 	if err != nil {
 		return true, err
 	}
@@ -258,7 +269,17 @@ func (s *Server) projectAgentIDs(ctx context.Context, projectID string) (map[str
 // closed). It is otherProjectAgentsInUse with a set of excluded agents. A
 // listing failure counts as in use. Without a manager no agents are known,
 // so it reports false.
+//
+// For a flat Runtime Broker instance, which lists only its own objects, the
+// project also counts as in use while another instance of this host sharing
+// its workspace lock service has live agents in it (or cannot say), as in
+// otherProjectAgentsInUse. A project delete is refused while another
+// instance has agents in the project, so any such agent seen later is a new
+// one.
 func (s *Server) newProjectAgentsInUse(ctx context.Context, projectID string, known map[string]bool) (bool, error) {
+	if s.ownership != nil && s.locks().projectInUseByOthers(s, projectID) {
+		return true, nil
+	}
 	if s.manager == nil {
 		// A broker without a manager runs no agents, so none can be in use.
 		return false, nil
