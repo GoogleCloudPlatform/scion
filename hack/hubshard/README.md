@@ -139,11 +139,12 @@ builds only.
 ## Blank imports (driver registration)
 
 A blank import is a dependency without a symbol: a file that blank-imports
-`github.com/mattn/go-sqlite3` registers the `sqlite3` `database/sql`
-driver, and another file that only calls `sql.Open("sqlite3", ...)` relies
-on it without referencing anything the first file declares. The use graph
-has no edge between them, so a shard without an importing file would
-compile and then fail at run time (`sql: unknown driver "sqlite3"`).
+a `database/sql` driver package (for example `modernc.org/sqlite`, which
+registers `sqlite`) registers the driver, and another file that only calls
+`sql.Open("sqlite", ...)` relies on it without referencing anything the
+first file declares. The use graph has no edge between them, so a shard
+without an importing file would compile and then fail at run time
+(`sql: unknown driver "sqlite"`).
 
 So the overlay also holds generated, untagged
 `pkg/hub/zz_hubshard_drivers*_test.go` files that blank-import every

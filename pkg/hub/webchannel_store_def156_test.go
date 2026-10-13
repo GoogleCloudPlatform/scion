@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -23,7 +25,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/google/uuid"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,7 +38,7 @@ import (
 // The caller controls when backfills run and in what order.
 func newDEF156TestStore(t *testing.T) (*sqliteWebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Create conversations table (Ent-managed in production).
 	_, err := db.Exec(conversationsTableDDL)
@@ -63,7 +64,7 @@ CREATE TABLE IF NOT EXISTS messages (
 )`)
 	require.NoError(t, err)
 
-	s := NewWebChatStore(db, "sqlite3").(*sqliteWebChatStore)
+	s := NewWebChatStore(db, "sqlite").(*sqliteWebChatStore)
 	require.NoError(t, s.Init())
 	return s, db
 }

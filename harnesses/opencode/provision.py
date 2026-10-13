@@ -93,7 +93,8 @@ AUTH = sh.AuthSpec(
 # ---------------------------------------------------------------------------
 
 _VERTEX_PROJECT_VARS = ("GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT")
-_VERTEX_LOCATION_VARS = ("GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION")
+# Shared precedence LOCATION > REGION (ptone/scion#4719), then VERTEX_LOCATION.
+_VERTEX_LOCATION_VARS = sh.vertex_location_keys(include_ml_region=False, fallback=("VERTEX_LOCATION",))
 
 
 def _has_vertex(ctx: sh.ProvisionContext) -> bool:
@@ -131,6 +132,11 @@ def _vertex_env_overlay(ctx: sh.ProvisionContext) -> dict[str, str]:
     env_keys = ctx.env_keys
     project_key = next((k for k in _VERTEX_PROJECT_VARS if k in env_keys), "")
     location_key = next((k for k in _VERTEX_LOCATION_VARS if k in env_keys), "")
+    if location_key in (sh.VERTEX_LOCATION_KEY, sh.VERTEX_REGION_KEY):
+        sh.warn_vertex_location_conflict(
+            lambda k: ctx.read_secret(k, env_fallback=True) if k in env_keys else "",
+            ctx.warn,
+        )
 
     env: dict[str, str] = {}
     if project_key:
