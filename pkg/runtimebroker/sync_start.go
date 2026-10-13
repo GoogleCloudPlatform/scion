@@ -40,11 +40,10 @@ import (
 const defaultCreateSupersedeWait = 15 * time.Second
 
 // defaultSyncStartMaxDuration bounds a synchronous create's start once it
-// runs detached from the request (see bind). It is longer than the
-// Kubernetes runtime's own 10 minute wait for the pod to become ready
-// (waitForPodReady), plus provisioning, so it only ends a start that is
-// stuck, never a slow cold start (ptone/scion#4817).
-const defaultSyncStartMaxDuration = 15 * time.Minute
+// runs detached from the request (see bind). It is the bound the hub sizes
+// its unconfirmed-create holds from (api.SyncStartCeiling), so it must not
+// be changed here alone.
+const defaultSyncStartMaxDuration = api.SyncStartCeiling
 
 // createSupersedeRetryAfter is the Retry-After, in seconds, sent with the
 // prior_start_in_progress 503.
@@ -93,9 +92,8 @@ type syncStart struct {
 	registry        *launchRegistry
 	// ctx is done once the registration has been cancelled (stop, delete,
 	// newer start). It is a cancellation signal only; see bind. It does not
-	// follow the request: a caller that stops waiting (the hub's dispatch
-	// timeout and its cancel frame, or a dropped HTTP request) must not
-	// cancel a start that is already running (ptone/scion#4817).
+	// follow the request, so the request ending never cancels a start that
+	// has begun (see bind).
 	ctx context.Context
 	// reqCtx is the create request's own context. Until the start runs,
 	// the request ending still ends the create (see cancelled); the start
@@ -187,14 +185,20 @@ func (s *Server) beginCreateRegistration(ctx context.Context, req CreateAgentReq
 // ctx's cancellation: it is cancelled only when this registration is (a
 // stop, delete or newer start of the name), or after maxDuration.
 //
-// A caller that stops waiting, such as the hub when its dispatch timeout
-// fires on a slow cold start, therefore does not cancel the start. If it
-// did, the runtime would treat the start as abandoned and remove what it
-// had created (the Kubernetes runtime deletes the pod and its Secrets),
-// although the hub may still record the agent (ptone/scion#4817). The
-// start runs on and the hub settles the agent from its later reports; a
-// hub that instead gives the create up sends a delete, which cancels the
-// start through the registration.
+// The request ending (the hub's synchronous dispatch timeout and its
+// control-channel cancel frame, the control channel closing, a hub
+// restart, or a dropped HTTP request) therefore does not cancel a start
+// that has begun. A cancelled start is one the runtime treats as abandoned
+// and removes what it created (the Kubernetes runtime deletes the pod and
+// its Secrets), and the broker removes the agent's files; the request
+// ending says only that the caller stopped waiting, not that the agent is
+// unwanted (ptone/scion#4817).
+//
+// A hub that gives the create up still tears it down by sending a delete,
+// which cancels the start through the registration. Only together with the
+// hub keeping the agent on its own dispatch timeout (rather than rolling
+// the create back) does a slow start survive that timeout; on its own,
+// this keeps the start when the hub's rollback delete never arrives.
 func (ss *syncStart) bind(ctx context.Context, maxDuration time.Duration) (context.Context, func()) {
 	if maxDuration <= 0 {
 		maxDuration = defaultSyncStartMaxDuration
@@ -210,7 +214,8 @@ func (ss *syncStart) bind(ctx context.Context, maxDuration time.Duration) (conte
 // cancelled reports whether this create must not go on to start: a stop or
 // delete of the agent, or a newer start of the name, reached the
 // registration, or the request itself has ended. It is checked only before
-// the start runs; once bound, a start ends only with the registration (see
+// the start runs (after buildStartContext, at handOff, and immediately
+// before bind); once bound, a start ends only with the registration (see
 // bind).
 func (ss *syncStart) cancelled() bool {
 	return ss.ctx.Err() != nil || (ss.reqCtx != nil && ss.reqCtx.Err() != nil)
@@ -269,6 +274,10 @@ func (ss *syncStart) ownsName() bool {
 // testHookCreateBeforeBuildStartContext, when set (tests only), runs in
 // createAgent immediately before buildStartContext.
 var testHookCreateBeforeBuildStartContext func(req CreateAgentRequest)
+
+// testHookSyncCreateBeforeBind, when set (tests only), runs in createAgent
+// immediately before the last cancelled check ahead of bind.
+var testHookSyncCreateBeforeBind func(req CreateAgentRequest)
 
 // testHookSyncStartFinish, when set (tests only), runs at the start of
 // syncStart.finish.

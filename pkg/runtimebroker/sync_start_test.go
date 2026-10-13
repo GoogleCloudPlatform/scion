@@ -492,11 +492,14 @@ func TestSyncCreate_RequestCancelDoesNotCancelStart(t *testing.T) {
 	}
 }
 
-// With the start detached from the request, the hub's explicit delete is
-// what ends it: an older hub that gives the create up on its dispatch
-// timeout sends DispatchAgentDelete (projectId, runId and agentId as below),
-// which must still cancel the start, so the runtime's abandoned-start
-// cleanup and the broker's file cleanup run as before.
+// With the start detached from the request, an explicit delete is what
+// ends it. A hub that rolls the create back on its dispatch timeout (the
+// current hub does) sends DispatchAgentDelete with projectId, runId and
+// agentId as below; it must still cancel the start, so the runtime's
+// abandoned-start cleanup and the broker's file cleanup run as before. This
+// also passes without the detach (the request cancel alone ends the start
+// there); it guards that the delete keeps reaching a start whose request
+// has ended.
 func TestSyncCreate_DeleteCancelsStartAfterRequestEnded(t *testing.T) {
 	srv, mgr, projectPath, agentDir := newSyncStartTestServer(t)
 
