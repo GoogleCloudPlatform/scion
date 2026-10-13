@@ -33,10 +33,15 @@ step() {
 		return 2
 		;;
 	esac
-	local left=$((HUB_SHARD_DEADLINE - $(date +%s) - 60))
+	# 10#: a value with leading zeros is decimal, not octal.
+	local left=$((10#$HUB_SHARD_DEADLINE - $(date +%s) - 60))
 	if [ "$left" -le 0 ]; then
 		echo "ERROR: HUB_SHARD_DEADLINE leaves no time for: $*" >&2
 		return 124
+	fi
+	if ! command -v timeout >/dev/null 2>&1; then
+		echo "ERROR: HUB_SHARD_DEADLINE is set but timeout(1) is not on PATH" >&2
+		return 127
 	fi
 	timeout "${left}s" "$@"
 }
