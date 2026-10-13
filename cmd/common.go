@@ -1537,6 +1537,15 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		if apiErr, ok := asIncompleteCreate(err); ok {
 			return incompleteCreateError(agentName, apiErr)
 		}
+		// A create that failed in transport (for example the client
+		// timeout) may still be running on the Hub, which carries on
+		// without the client: say so when the agent now exists
+		// (ptone/scion#4007). Nothing is deleted here.
+		if unknownErr := createOutcomeUnknownError(agentName, err, func(ctx context.Context) (*hubclient.Agent, error) {
+			return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
+		}); unknownErr != nil {
+			return wrapHubError(unknownErr)
+		}
 		printDeleteInProgressWarnings(os.Stderr, err)
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
 	}
@@ -1575,7 +1584,9 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			envGatherAgentID = resp.EnvGather.AgentID
 		}
 
-		// cleanupProvisioningAgent removes a partially-created agent from the Hub.
+		// cleanupProvisioningAgent removes a partially-created agent from the
+		// Hub. It runs only through cleanup, which skips it once the env has
+		// been submitted: the submit is where the Hub launches the agent.
 		cleanupProvisioningAgent := func() {
 			if envGatherAgentID == "" {
 				return
@@ -1592,8 +1603,12 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			}
 		}
 
+		cleanup := &envGatherCleanup{del: cleanupProvisioningAgent}
+
 		// Install a signal handler so Ctrl+C during interactive prompting
-		// still cleans up the provisioning agent instead of leaving it orphaned.
+		// still cleans up the provisioning agent instead of leaving it
+		// orphaned. Once the env has been submitted the agent may be
+		// starting, so it is left alone.
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -1602,22 +1617,34 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		go func() {
 			select {
 			case <-sigCh:
-				fmt.Fprintln(os.Stderr, "\nInterrupted. Cleaning up provisioning agent...")
-				cleanupProvisioningAgent()
+				if cleanup.submitted.Load() {
+					fmt.Fprintf(os.Stderr, "\nInterrupted after the env was submitted; agent '%s' may be starting and was not deleted.\n", agentName)
+				} else {
+					fmt.Fprintln(os.Stderr, "\nInterrupted. Cleaning up provisioning agent...")
+					cleanup.cleanupIfUnsubmitted()
+				}
 				os.Exit(130) // 128 + SIGINT(2)
 			case <-envGatherDone:
 				// Normal completion — goroutine exits.
 			}
 		}()
 
-		submitResp, err := gatherAndSubmitEnv(ctx, hubCtx, projectID, resp)
+		submitResp, err := gatherAndSubmitEnvGuarded(ctx, hubCtx, projectID, resp, cleanup)
 
 		// Stop the signal handler and goroutine now that env-gather is done.
 		signal.Stop(sigCh)
 		close(envGatherDone)
 
 		if err != nil {
-			cleanupProvisioningAgent()
+			// Delete only when nothing was submitted or the Hub definitely
+			// refused the submit; otherwise the launch may be running on
+			// the Hub, so report that instead (ptone/scion#4007).
+			if !envGatherCleanupSafe(err) {
+				return wrapHubError(envSubmitOutcomeUnknownError(agentName, err, func(ctx context.Context) (*hubclient.Agent, error) {
+					return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
+				}))
+			}
+			cleanup.cleanupAfterFailure(err)
 			return fmt.Errorf("env-gather failed: %w", err)
 		}
 		// Replace response with the finalized one
@@ -2125,6 +2152,13 @@ const (
 // gatherAndSubmitEnv handles the env-gather flow: checks the local environment
 // for missing keys and submits gathered values back to the Hub.
 func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, projectID string, resp *hubclient.CreateAgentResponse) (*hubclient.CreateAgentResponse, error) {
+	return gatherAndSubmitEnvGuarded(ctx, hubCtx, projectID, resp, nil)
+}
+
+// gatherAndSubmitEnvGuarded is gatherAndSubmitEnv that marks cleanup
+// submitted just before the env submit is sent. A submit failure is
+// returned as an *envSubmitError.
+func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectID string, resp *hubclient.CreateAgentResponse, cleanup *envGatherCleanup) (*hubclient.CreateAgentResponse, error) {
 	gather := resp.EnvGather
 	agentID := gather.AgentID
 	if agentID == "" && resp.Agent != nil {
@@ -2287,12 +2321,13 @@ func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, projectID strin
 
 	statusf("Submitting %d gathered environment variable(s)...\n", len(gatheredEnv))
 
-	// Submit gathered env to Hub
+	// Submit gathered env to Hub. From here the Hub may launch the agent.
+	cleanup.markSubmitted()
 	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(ctx, agentID, &hubclient.SubmitEnvRequest{
 		Env: gatheredEnv,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to submit gathered env: %w", err)
+		return nil, &envSubmitError{err: err}
 	}
 
 	if debugMode {
