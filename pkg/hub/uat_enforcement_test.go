@@ -966,7 +966,13 @@ func TestValidUATScopes_Completeness(t *testing.T) {
 
 	t.Run("excludes authority-escalation scopes", func(t *testing.T) {
 		excludedPrefixes := []string{"policy:", "role:", "role_binding:", "quota:", "hub:"}
+		// Role definition and role binding reads are the only selectors
+		// of those resources; no selector creates, changes or deletes them.
+		readOnly := map[string]bool{"role:read": true, "role_binding:read": true}
 		for scope := range validScopes {
+			if readOnly[scope] {
+				continue
+			}
 			for _, prefix := range excludedPrefixes {
 				assert.False(t, strings.HasPrefix(scope, prefix),
 					"ValidUATScopes must not include %s (authority-escalation scope)", scope)

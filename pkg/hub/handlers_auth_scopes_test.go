@@ -210,20 +210,16 @@ func TestHandleAuthScopes_ContainsNewScopes(t *testing.T) {
 		"template:read", "template:create", "template:list", "template:update", "template:delete",
 		"harness_config:read", "harness_config:create", "harness_config:list", "harness_config:update", "harness_config:delete",
 		"group:read", "group:create", "group:list", "group:update", "group:delete", "group:addMember", "group:removeMember",
-		"user:read",
+		"user:read", "user:list",
 		"broker:read", "broker:list",
 		"gcp_service_account:read", "gcp_service_account:list", "gcp_service_account:verify", "gcp_service_account:assign",
+		"role:read", "role_binding:read", "access_constraint:read", "hub_audit:read",
 	}
 
 	for _, scope := range expectedNewScopes {
 		if !scopeIDs[scope] {
 			t.Errorf("expected scope %q not found in response", scope)
 		}
-	}
-
-	// user.list is Reserved, so its scope is not offered.
-	if scopeIDs["user:list"] {
-		t.Errorf("scope %q of a Reserved permission is offered", "user:list")
 	}
 
 	// Verify existing agent/project scopes still present

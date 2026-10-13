@@ -111,6 +111,7 @@ export function relationshipBadgeText(scope: string): string {
  * Human-friendly labels for resource type groups in the scope selector.
  */
 const RESOURCE_TYPE_LABELS: Record<string, string> = {
+  access_constraint: 'Access Constraint',
   agent: 'Agent',
   artifact: 'Artifact',
   broker: 'Broker',
@@ -119,6 +120,8 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
   harness_config: 'Harness Config',
   hub: 'Hub',
   project: 'Project',
+  role: 'Role',
+  role_binding: 'Role Binding',
   skill: 'Skill',
   template: 'Template',
   test_identity: 'Test Identity',
@@ -138,6 +141,13 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
  * them on submit.
  */
 const FALLBACK_SCOPES: ScopeOption[] = [
+  {
+    value: 'access_constraint:read',
+    label: 'access_constraint:read',
+    description: 'Read access constraints',
+    resource: 'access_constraint',
+    isAlias: false,
+  },
   {
     value: 'agent:attach',
     label: 'agent:attach',
@@ -530,6 +540,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'hub_audit:read',
+    label: 'hub_audit:read',
+    description: 'Explain authorization decisions for other principals and read effective access',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
     value: 'hub_github_app:read',
     label: 'hub_github_app:read',
     description: 'Read GitHub app configuration',
@@ -584,6 +601,20 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'project:update',
     description: 'Update projects',
     resource: 'project',
+    isAlias: false,
+  },
+  {
+    value: 'role:read',
+    label: 'role:read',
+    description: 'Read role definitions',
+    resource: 'role',
+    isAlias: false,
+  },
+  {
+    value: 'role_binding:read',
+    label: 'role_binding:read',
+    description: 'Read role bindings',
+    resource: 'role_binding',
     isAlias: false,
   },
   {
@@ -738,6 +769,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'user:read',
     label: 'user:read',
     description: 'Read users',
+    resource: 'user',
+    isAlias: false,
+  },
+  {
+    value: 'user:list',
+    label: 'user:list',
+    description: 'List users',
     resource: 'user',
     isAlias: false,
   },

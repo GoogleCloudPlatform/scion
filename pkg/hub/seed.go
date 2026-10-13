@@ -93,7 +93,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    5, // R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
+			Revision:    6, // R6: add user.list, which the user list checks (ptone/scion#2124); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
@@ -202,8 +202,8 @@ func BuiltInRoles() []BuiltInRole {
 // every hub member via the hasAdminView handler pattern.
 func hubMemberPermissionIDs() []string {
 	return []string{
-		// User directory (read-only)
-		// user.list is Reserved: no route checks it (ptone/scion#4229).
+		// User directory (read-only). user.list is not granted: a token
+		// lists users only with user:list, which only super-admin holds.
 		"user.read",
 		// Group directory (read-only)
 		"group.read",
@@ -814,8 +814,9 @@ func hubAdminPermissionIDs() []string {
 	// Explicit set of permission IDs included in the hub-admin role.
 	// This set is a product decision; changes require architect or sponsor review.
 	included := map[string]bool{
-		// User management (not suspend/promote — those remain super-admin-only)
-		// user.list is Reserved: no route checks it (ptone/scion#4229).
+		// User management (not suspend/promote — those remain super-admin-only).
+		// user.list is not granted: a token lists users only with user:list,
+		// which only super-admin holds.
 		"user.read":   true,
 		"user.update": true,
 		"user.invite": true,

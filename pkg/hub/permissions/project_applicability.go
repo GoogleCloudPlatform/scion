@@ -242,6 +242,12 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// hub-level resource.
 	"broker.create": {BoundaryKindHub},
 
+	// Role definition, role binding and access constraint reads are
+	// hub-only: a token reads them through the hub-level admin routes,
+	// which list every scope's records.
+	"role.read": {BoundaryKindHub}, "role_binding.read": {BoundaryKindHub},
+	"access_constraint.read": {BoundaryKindHub},
+
 	// Self-scoped permissions. inbox.* may be selected on either boundary;
 	// a project token sees only its boundary project's records.
 	// user_skill_injection.update is hub-only, because a user's injected
@@ -271,6 +277,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"hub.integrations.read": {BoundaryKindHub}, "hub.integrations.update": {BoundaryKindHub},
 	"hub.teams_manifest.read": {BoundaryKindHub}, "hub.diagnostics.read": {BoundaryKindHub},
 	"hub.github_app.read": {BoundaryKindHub}, "hub.github_app.update": {BoundaryKindHub},
+	"hub.audit.read": {BoundaryKindHub},
 }
 
 // SelectorAllowedBoundaries returns the reviewed boundary kinds for a single
@@ -426,6 +433,11 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// broker.create targets the hub-level broker collection only.
 	"broker.create": {TargetClassKindHubResource},
 
+	// Role definition, role binding and access constraint reads target
+	// the hub-level records.
+	"role.read": {TargetClassKindHubResource}, "role_binding.read": {TargetClassKindHubResource},
+	"access_constraint.read": {TargetClassKindHubResource},
+
 	// Self-scoped permissions.
 	"inbox.read": {TargetClassKindSelf}, "inbox.write": {TargetClassKindSelf},
 	"user_skill_injection.update": {TargetClassKindSelf},
@@ -450,6 +462,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"hub.integrations.read": {TargetClassKindHubResource}, "hub.integrations.update": {TargetClassKindHubResource},
 	"hub.teams_manifest.read": {TargetClassKindHubResource}, "hub.diagnostics.read": {TargetClassKindHubResource},
 	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
+	"hub.audit.read": {TargetClassKindHubResource},
 }
 
 // SupportedTargetClassesFor returns the reviewed classes for permissionID.

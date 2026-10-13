@@ -130,6 +130,12 @@ var expectedSelectorRegistry = map[string][]string{
 	"scheduled_event:list":   {"scheduled_event.list"},
 	"scheduled_event:read":   {"scheduled_event.read"},
 	"scheduled_event:update": {"scheduled_event.update"},
+
+	// Identity governance reads and hub audit (hub boundary only).
+	"role:read":              {"role.read"},
+	"role_binding:read":      {"role_binding.read"},
+	"access_constraint:read": {"access_constraint.read"},
+	"hub_audit:read":         {"hub.audit.read"},
 }
 
 func TestValidateSelectorRegistry_PinnedSnapshot(t *testing.T) {
@@ -559,7 +565,7 @@ func TestReservedIDs_MatchesReservedRows(t *testing.T) {
 	}
 	for _, id := range []string{
 		"artifact.update", "artifact.delete",
-		"hub.federation.read", "hub.federation.update", "hub.teams_manifest.update", "user.list",
+		"hub.federation.read", "hub.federation.update", "hub.teams_manifest.update",
 		"agent.log_append",
 	} {
 		if !slices.Contains(got, id) {
