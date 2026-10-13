@@ -31,9 +31,10 @@ import (
 // harness-config (it has a command, so it resolves to the config's own
 // harness rather than Generic) and checks the container gets
 // SCION_HARNESS_READY with the config's resolved ready spec, on the first
-// start and on a resume. The broker's value overwrites one in the template's
-// env (first start) and one in the caller-supplied env, StartOptions.Env
-// (resume).
+// start and on a resume. The resume step proves the broker's value
+// overwrites one in the caller-supplied env (StartOptions.Env). The value in
+// the template's env never reaches the container: SCION_-prefixed template
+// keys are reserved and dropped, which the first start checks.
 func TestRunAgent_SetsHarnessReadyEnv(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -106,6 +107,11 @@ profiles:
 				if len(values) != 1 {
 					t.Fatalf("%s: %s values = %q, want exactly one", step, state.HarnessReadyEnv, values)
 				}
+				for k := range captured.FallbackEnv {
+					if k == state.HarnessReadyEnv {
+						t.Errorf("%s: %s in FallbackEnv; reserved template keys must be dropped", step, k)
+					}
+				}
 				got, err := state.ParseReadySpecEnv(values[0])
 				if err != nil {
 					t.Fatalf("%s: %s = %q does not parse: %v", step, state.HarnessReadyEnv, values[0], err)
@@ -120,7 +126,7 @@ profiles:
 			}); err != nil {
 				t.Fatalf("create Start: %v", err)
 			}
-			check("create (template env)")
+			check("create (template env dropped)")
 
 			captured = runtime.RunConfig{}
 			if _, err := mgr.Start(context.Background(), api.StartOptions{

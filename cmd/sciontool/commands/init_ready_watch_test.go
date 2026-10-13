@@ -392,8 +392,10 @@ func TestWatchHarnessReady_MarkerSettleOutlastsDeadline(t *testing.T) {
 	nonce := "abc123"
 	start := time.Now()
 	cfg := f.cfg(nonce, state.ReadyModeHook, start)
-	cfg.Settle = 400 * time.Millisecond
-	cfg.Deadline = 100 * time.Millisecond
+	// The first poll must land before the deadline; 300ms leaves room for
+	// a scheduler or GC stall on a loaded runner.
+	cfg.Settle = time.Second
+	cfg.Deadline = 300 * time.Millisecond
 	var reportedAt time.Time
 	inner := cfg.Report
 	cfg.Report = func(ctx context.Context, a state.Activity, m string) error {
