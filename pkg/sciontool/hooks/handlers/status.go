@@ -114,11 +114,11 @@ const activitySourceSubagentEnd = "subagent-end"
 // own wait is recorded in parentWaitKey, leaves that wait). A sibling
 // sub-agent and the parent's own tool activity leave it in place: the
 // parent's tool-start, its tool-end (for example its Agent tool returning for
-// another sub-agent) and its Stop. A background sub-agent keeps running after the parent's turn
-// ends, so its question outlives the parent's Stop. A wait with no list
-// behaves as before: any tool-start, tool-end or agent-end clears it. The
-// parent's Stop also drops the list when it reports that no background work
-// is in flight (see reportsNoBackgroundWork).
+// another sub-agent) and its Stop. A background sub-agent keeps running after
+// the parent's turn ends, so its question outlives the parent's Stop. A wait
+// with no list behaves as before: any tool-start, tool-end or agent-end
+// clears it. The parent's Stop also drops the list when it reports that no
+// background work is in flight (see reportsNoBackgroundWork).
 //
 // What still clears a listed wait: the parent's next prompt (Claude Code
 // takes a prompt only when no question dialog is open), session start, any
@@ -362,8 +362,8 @@ func (h *StatusHandler) endTurnWithNoBackgroundWork(activity state.Activity) err
 			restoreParentWait(info)
 			dropped = true
 		}
-		if blocks, _ := stickyBlocksUpdate(info, clearNotificationWaiting, ""); blocks {
-			return dropped
+		if blocks, released := stickyBlocksUpdate(info, clearNotificationWaiting, ""); blocks {
+			return dropped || released
 		}
 		applyActivity(info, activity, "")
 		return true
