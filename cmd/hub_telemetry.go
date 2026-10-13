@@ -41,9 +41,14 @@ type hubTelemetryIdentity struct {
 // newHubTelemetryIdentity reads the hub ID, hub name and instance ID from
 // src. Build it after the operational settings are applied, so the hub name
 // is the applied one rather than the startup configuration's
-// (ptone/scion#4903). The hub always assigns an instance ID; if it ever comes
-// back empty, one UUID is generated here and shared by both signals, rather
-// than letting metrics and tracing each fall back to a different one.
+// (ptone/scion#4903). The name is then fixed for the life of the process:
+// OpenTelemetry resource attributes cannot change once the providers are
+// built, so a hub_name renamed at runtime reaches log records (through
+// hub.ApplySnapshot) but not metrics or traces until the next restart.
+//
+// The hub always assigns an instance ID; if it ever comes back empty, one
+// UUID is generated here and shared by both signals, rather than letting
+// metrics and tracing each fall back to a different one.
 func newHubTelemetryIdentity(src hubTelemetrySource) hubTelemetryIdentity {
 	id := hubTelemetryIdentity{hubID: src.HubID(), hubName: src.HubName(), instanceID: src.InstanceID()}
 	if id.instanceID == "" {

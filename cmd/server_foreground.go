@@ -2990,10 +2990,6 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	snap := ops.Snapshot()
 	hub.ApplySnapshot(hubSrv, snap)
 	hub.ApplyMaintenanceFromSnapshot(hubSrv, snap)
-	// Log handlers were built in initServerLogging, before the stored
-	// settings were loaded; label their records with the applied hub name
-	// (ptone/scion#4903).
-	logging.SetHubName(hubSrv.HubName())
 
 	hubSrv.SetOperationalSettings(ops)
 

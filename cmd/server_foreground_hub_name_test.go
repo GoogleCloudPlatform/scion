@@ -16,16 +16,11 @@ package cmd
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
-	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -44,69 +39,40 @@ func TestWarnNonConformingHubName(t *testing.T) {
 	}
 }
 
-// TestInitOperationalSettings_TelemetryAndLogsUseAppliedHubName checks the
-// hub name in the metrics identity and in log records is the one applied
-// from the stored operational settings, not the startup configuration's
-// (ptone/scion#4903). When the two match nothing changes.
-func TestInitOperationalSettings_TelemetryAndLogsUseAppliedHubName(t *testing.T) {
-	for _, tc := range []struct {
-		name, startup, stored, want string
-	}{
-		{name: "stored differs", startup: "startup-hub", stored: "applied-hub", want: "applied-hub"},
-		{name: "stored matches", startup: "startup-hub", stored: "startup-hub", want: "startup-hub"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Cleanup(func() { logging.SetHubName("") })
-			ctx := context.Background()
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			globalDir := filepath.Join(home, ".scion")
-			if err := os.MkdirAll(globalDir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			// A node-level override would win over the stored value.
-			t.Setenv("SCION_SERVER_HUB_HUBNAME", "")
-			if err := os.Unsetenv("SCION_SERVER_HUB_HUBNAME"); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("SCION_SEED_SERVER_HUB_HUBNAME", tc.stored)
+// logHubLabel logs one record through a GCPHandler built with startup, as
+// initServerLogging builds it before settings load, and returns the record's
+// "hub" label.
+func logHubLabel(t *testing.T, startup string) any {
+	t.Helper()
+	var buf bytes.Buffer
+	h := logging.NewGCPHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}, "scion-hub", startup)
+	slog.New(h).Info("m")
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("decode log record: %v", err)
+	}
+	labels, _ := rec[logging.GCPKeyLabels].(map[string]any)
+	return labels["hub"]
+}
 
-			cfg := &config.GlobalConfig{}
-			st := newTestStore(t)
-			srv, err := hub.New(hub.ServerConfig{HubName: tc.startup}, st)
-			if err != nil {
-				t.Fatalf("hub.New: %v", err)
-			}
-			if err := initOperationalSettings(ctx, cfg, srv, st, globalDir); err != nil {
-				t.Fatalf("initOperationalSettings: %v", err)
-			}
-			if got := srv.HubName(); got != tc.want {
-				t.Fatalf("applied HubName() = %q, want %q", got, tc.want)
-			}
+// TestApplySnapshot_RenameUpdatesLogHubLabel checks a hub_name applied after
+// startup (admin save or cross-replica propagation, both through
+// ApplySnapshot) reaches log records, since the hub's own log queries filter
+// on the applied name (ptone/scion#4903).
+func TestApplySnapshot_RenameUpdatesLogHubLabel(t *testing.T) {
+	t.Cleanup(func() { logging.SetHubName("") })
+	srv := &hub.Server{}
 
-			// Metrics identity, as runServer builds it after initHubServer.
-			id := newHubTelemetryIdentity(srv)
-			res, err := hubmetrics.NewResource(ctx, id.metricsOptions()...)
-			if err != nil {
-				t.Fatalf("metrics resource: %v", err)
-			}
-			if got := resourceAttr(res, hubmetrics.HubNameAttribute); got != tc.want {
-				t.Errorf("metrics %s = %q, want %q", hubmetrics.HubNameAttribute, got, tc.want)
-			}
+	hub.ApplySnapshot(srv, hub.Layer1Snapshot{HubName: "first-hub"})
+	if got := logHubLabel(t, "startup-hub"); got != "first-hub" {
+		t.Fatalf("after first apply: hub label = %v, want first-hub", got)
+	}
 
-			// Log records from a handler built with the startup name, as
-			// initServerLogging builds them before settings load.
-			var buf bytes.Buffer
-			h := logging.NewGCPHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}, "scion-hub", tc.startup)
-			slog.New(h).Info("m")
-			var rec map[string]any
-			if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
-				t.Fatalf("decode log record: %v", err)
-			}
-			labels, _ := rec[logging.GCPKeyLabels].(map[string]any)
-			if got := labels["hub"]; got != tc.want {
-				t.Errorf("log record hub label = %v, want %q", got, tc.want)
-			}
-		})
+	hub.ApplySnapshot(srv, hub.Layer1Snapshot{HubName: "renamed-hub"})
+	if got := srv.HubName(); got != "renamed-hub" {
+		t.Fatalf("HubName() = %q, want renamed-hub", got)
+	}
+	if got := logHubLabel(t, "startup-hub"); got != "renamed-hub" {
+		t.Errorf("after rename: hub label = %v, want renamed-hub", got)
 	}
 }
