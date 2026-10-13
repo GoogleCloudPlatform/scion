@@ -2220,7 +2220,7 @@ func (svc *ProjectMembershipService) MigrateMultiRoleBindings(ctx context.Contex
 }
 
 // refuseTestAdminNewOwner refuses an ownership transfer to an admin-kind
-// test identity (403), reading the kind through kindForPrincipal (the row's
+// test identity or a federated account (403), reading the kind through kindForPrincipal (the row's
 // own classification when no authorization service is wired). A read
 // error or an unrecognized kind refuses too.
 func (svc *ProjectMembershipService) refuseTestAdminNewOwner(ctx context.Context, newOwner *store.User) *MembershipDecision {
@@ -2233,6 +2233,9 @@ func (svc *ProjectMembershipService) refuseTestAdminNewOwner(ctx context.Context
 	}
 	if err != nil || k.isTestAdmin() {
 		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: testAdminGranteeReasonRefused, HTTPStatus: 403}
+	}
+	if k.isFederated() {
+		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: federatedGranteeReasonRefused, HTTPStatus: 403}
 	}
 	return nil
 }

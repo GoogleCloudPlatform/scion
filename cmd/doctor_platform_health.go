@@ -448,6 +448,9 @@ func healthSummaryTestIdentityLine(h hubclient.HealthSummaryHub) (string, bool) 
 		return "", false
 	}
 	line := "Enabled on this Hub: " + strings.Join(on, ", ")
+	if h.TestMode != "" && h.TestMode != "off" {
+		line = fmt.Sprintf("Enabled on this Hub (--test-mode=%s): %s", h.TestMode, strings.Join(on, ", "))
+	}
 	if h.LiveTestAdminIdentities != nil {
 		line += fmt.Sprintf(" (%d live admin test identities)", *h.LiveTestAdminIdentities)
 	}
