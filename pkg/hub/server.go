@@ -6664,6 +6664,10 @@ func (s *Server) registerRoutes() {
 
 	// Principal resolution endpoints (Phase 4)
 	s.mux.HandleFunc("/api/v1/users/me/groups", s.guarded("/api/v1/users/me/groups", s.handleMyGroups))
+	// A project visitor's own visitor grants (ptone/scion#4603).
+	s.mux.HandleFunc("/api/v1/users/me/visitor-grants", s.guarded("/api/v1/users/me/visitor-grants", s.handleUserMeVisitorGrants))
+	// A project visitor's own DMs with agents (ptone/scion#4603).
+	s.mux.HandleFunc("/api/v1/users/me/visitor-dms", s.guarded("/api/v1/users/me/visitor-dms", s.handleUserMeVisitorDMs))
 	s.mux.HandleFunc("/api/v1/principals/", s.guarded("/api/v1/principals/", s.handlePrincipalRoutes))
 
 	// User-scoped injected-skills endpoints (/users/me/...)

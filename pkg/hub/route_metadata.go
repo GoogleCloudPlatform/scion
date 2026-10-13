@@ -83,7 +83,7 @@ type RouteMetadata struct {
 	// the pattern serves. On a subtree pattern (one ending in "/") a
 	// listed method admits a visitor only on the sub-paths
 	// visitorAdmittedSubRoutes lists for the pattern and method, and only
-	// for a target the visitor may message (admitVisitorSubRoute).
+	// when the sub-route's per-request check passes (admitVisitorSubRoute).
 	VisitorMethods []string
 }
 
@@ -225,6 +225,20 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/users/me/groups": {
 		Pattern: "/api/v1/users/me/groups", RouteID: "users.me.groups",
 		Classification: RouteAuthenticated,
+	},
+	// A project visitor's own visitor grants (handleUserMeVisitorGrants):
+	// GET only, and only for a visitor; any other identity gets 404.
+	"/api/v1/users/me/visitor-grants": {
+		Pattern: "/api/v1/users/me/visitor-grants", RouteID: "users.me.visitorGrants",
+		Classification: RouteAuthenticated,
+		VisitorMethods: []string{http.MethodGet},
+	},
+	// A project visitor's own DMs with agents (handleUserMeVisitorDMs):
+	// GET only, and only for a visitor; any other identity gets 404.
+	"/api/v1/users/me/visitor-dms": {
+		Pattern: "/api/v1/users/me/visitor-dms", RouteID: "users.me.visitorDMs",
+		Classification: RouteAuthenticated,
+		VisitorMethods: []string{http.MethodGet},
 	},
 	"/api/v1/principals/": {
 		Pattern: "/api/v1/principals/", RouteID: "principals.byId",
@@ -380,9 +394,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/projects/", RouteID: "projects.byId",
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
-		// A visitor may only send a message: POST
-		// {projectId}/agents/{agentId}/message (visitorAdmittedSubRoutes).
-		VisitorMethods: []string{http.MethodPost},
+		// A visitor may only send a message (POST
+		// {projectId}/agents/{agentId}/message) and list and read the
+		// project's agents in the visitor view (GET {projectId}/agents and
+		// GET {projectId}/agents/{agentId}); see visitorAdmittedSubRoutes.
+		VisitorMethods: []string{http.MethodGet, http.MethodPost},
 	},
 
 	// -------------------------------------------------------------------------

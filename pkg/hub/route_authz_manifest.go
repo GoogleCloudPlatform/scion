@@ -136,6 +136,10 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/groups": "authenticated", // My groups
 	"/api/v1/principals/":     "authenticated", // Principal routes
 
+	// ── Project visitor's own grants ───────────────────────────────────
+	"/api/v1/users/me/visitor-grants": "authenticated", // Own visitor grants (visitor only; 404 for anyone else)
+	"/api/v1/users/me/visitor-dms":    "authenticated", // Own DMs with agents (visitor only; 404 for anyone else)
+
 	// ── User-scoped injected skills ────────────────────────────────────
 	"/api/v1/users/me/injected-skills":  "authenticated", // List/create user injected skills
 	"/api/v1/users/me/injected-skills/": "authenticated", // User injected skill by ID

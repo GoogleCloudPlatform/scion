@@ -244,6 +244,8 @@ var EntryPointExemptions = []EntryPointExemption{
 	// Cross-project messaging — inline authorization.
 	{Pattern: "/api/v1/metrics/session/", Kind: ExemptionAuthenticationOnly, Reason: "Session metrics, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/groups", Kind: ExemptionAuthenticationOnly, Reason: "List own group memberships, self-service", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/users/me/visitor-grants", Kind: ExemptionAuthenticationOnly, Reason: "List a project visitor's own visitor grants, self-service; any other caller gets 404", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/users/me/visitor-dms", Kind: ExemptionAuthenticationOnly, Reason: "List a project visitor's own DMs with agents it may message, self-service; any other caller gets 404", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/principals/", Kind: ExemptionAuthenticationOnly, Reason: "Resolve principal display name, self-service", Owner: "route_metadata.go"},
 	{Pattern: "GET /api/v1/users/me/injected-skills", Kind: ExemptionAuthenticationOnly, Reason: "List own injected skills, self-service; the writes are catalogued as user.skillinjection.update", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/templates", Kind: ExemptionAuthenticationOnly, Reason: "Manage own templates, self-service; a federated caller is refused on writes (requireProfileWriter)", Owner: "route_metadata.go"},

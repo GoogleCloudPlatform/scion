@@ -259,10 +259,13 @@ type visitorRouteMethod struct {
 var expectedVisitorRouteMethods = []visitorRouteMethod{
 	{"/api/v1/auth/me", http.MethodGet}, // own profile, read-only
 	{"/api/v1/auth/me", http.MethodHead},
-	{"/api/v1/projects/", http.MethodPost},           // send a message to an agent
-	{"/api/v1/agents/", http.MethodPost},             // send a message to an agent
-	{"/api/v1/chat/conversations/", http.MethodGet},  // own DM history and read marker
-	{"/api/v1/chat/conversations/", http.MethodPost}, // own DM read marker
+	{"/api/v1/projects/", http.MethodPost},              // send a message to an agent
+	{"/api/v1/projects/", http.MethodGet},               // list and read the project's agents (visitor view)
+	{"/api/v1/users/me/visitor-grants", http.MethodGet}, // own visitor grants
+	{"/api/v1/users/me/visitor-dms", http.MethodGet},    // own DMs with agents
+	{"/api/v1/agents/", http.MethodPost},                // send a message to an agent
+	{"/api/v1/chat/conversations/", http.MethodGet},     // own DM history and read marker
+	{"/api/v1/chat/conversations/", http.MethodPost},    // own DM read marker
 }
 
 // visitorRefusedProfileRoutes are the profile write routes reachable by a
