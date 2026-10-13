@@ -1219,6 +1219,37 @@ scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my
 
 - `scion tunnel status [--json]`: Show the open tunnels of your running `scion tunnel` processes: the Hub endpoint, the credential identity (kind, subject and scope, never the secret), the session IDs and the open tunnels. With `--hub`, only tunnels to that Hub are shown. Reads local state only and never prompts.
 
+### `scion ssh`
+
+Open an SSH session to an agent with your system `ssh` client. The connection runs through `scion tunnel --ssh --stdio` as the `ProxyCommand`, and the agent's host key is taken from the Hub, so no keys or `known_hosts` entries need to be set up first. Same requirements as [`scion tunnel`](#scion-tunnel) with `--ssh`.
+
+**Usage:** `scion ssh [flags] <agent> [<command>...]`
+
+- `<agent>` is an agent in the current project, `<project>/<agent>`, or the only agent with that name across all projects. The Hub and project are resolved as for `scion tunnel`, including the project selected with `scion use`.
+- Flags for `scion ssh` (such as `--hub` and `--project`) go before the agent. Everything after the agent is the remote command and is passed to `ssh` unchanged, flags included.
+- The command never prompts for authentication, registration or sync. It returns the remote command's exit status, or `255` for a local or connection failure (including a usage or flag error), with the reason on one stderr line.
+
+```bash
+scion ssh my-agent
+```
+
+```bash
+scion ssh my-agent git status
+```
+
+### `scion ssh-config`
+
+Print or install SSH Host blocks for reaching agents through `scion tunnel`, for example for VS Code Remote-SSH or plain `ssh`.
+
+**Usage:** `scion ssh-config [<agent>] [--write]`
+
+- Each agent gets a Host named `scion.<hub>.<project>.<agent>` whose `ProxyCommand` runs `scion tunnel` with the Hub and project pinned, and whose host key is pinned in a known-hosts file kept by Scion.
+- With no agent, every agent the Hub lists across all projects is included. With an agent, only that agent's block is updated.
+- Without `--write`, the files are printed to stdout and nothing is written. With `--write`, the blocks are installed in `~/.ssh/config.d/scion-<hub>`, the host keys in `~/.scion/ssh/known_hosts-<hub>`, and one `Include` line is added at the top of `~/.ssh/config`. Regenerating without an agent removes the blocks of agents that are no longer listed; if the listing fails or is incomplete, nothing is written.
+- Exit codes: `0` success, `1` other error, `3` no usable or refused credential, `4` agent not found, `5` not permitted, `6` Hub unreachable or unavailable.
+
+Tunnel streams opened this way are re-checked with the same authorization as when the tunnel was opened, and close when your access is withdrawn.
+
 ### `scion vscode`
 
 Open VS Code Remote-SSH on an agent's `/workspace` through the Hub, without editing `~/.ssh/config`. It sits alongside `scion ssh-config` and does not replace it. Requires the `hub.conduit` [experiment](/scion/reference/experiments/) on the Hub. Not available in agent mode.

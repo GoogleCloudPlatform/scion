@@ -187,7 +187,15 @@ The local listener binds to `127.0.0.1` only. The tunnel stays open until you st
 
 `sciontool` in the agent runs an embedded SSH server that is reachable only through a Conduit tunnel; it never listens on a network port. It offers a shell, `exec`, `sftp` and forwarding to the agent's loopback addresses (except [the reserved ports](#2-infrastructure-reserved-ports-denylist)) and Unix sockets. Unlike a TCP tunnel, SSH forwarding does not require the port to be exposed or allow-listed. Remote forwarding, agent forwarding and X11 are refused. Every session runs as the container user, whatever user name you give. The Hub authorizes the tunnel, so the SSH connection itself needs no key.
 
-Use `scion tunnel --ssh --stdio` as an ssh `ProxyCommand`:
+The simplest way in is `scion ssh`, which runs your system `ssh` through the tunnel with the agent's host key taken from the Hub:
+
+```bash
+scion ssh my-agent
+```
+
+To use plain `ssh`, `scp` or an editor's Remote-SSH, install Host blocks for your agents with `scion ssh-config --write`; each agent is then reachable as `scion.<hub>.<project>.<agent>`. See [`scion ssh`](/scion/reference/cli/#scion-ssh) and [`scion ssh-config`](/scion/reference/cli/#scion-ssh-config).
+
+You can also use `scion tunnel --ssh --stdio` as an ssh `ProxyCommand` directly:
 
 ```bash
 ssh -o ProxyCommand="scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my-agent" scion@my-agent
