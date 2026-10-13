@@ -131,6 +131,9 @@ type launchCtx struct {
 	mgr             agent.Manager
 	key             launchKey
 	sharedWorkspace bool
+	// owned is the flat instance's ownership mirror for this run, handed
+	// over when the launch was accepted (nil on a legacy Runtime Broker).
+	owned *ownedStart
 	// downloadWorkspaceFromGCS, when set, replaces Server.downloadWorkspaceFromGCS
 	// for this launch. Always nil in production (beginAsyncLaunch never sets
 	// it); tests use it to control how long the download step takes without
@@ -150,6 +153,17 @@ type launchCtx struct {
 // receivedAt + LaunchTimeoutSeconds - 20s), built by the caller
 // (beginAsyncLaunch) before this goroutine starts.
 func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx) {
+	// A flat instance's ownership mirror, handed over when the launch was
+	// accepted, is released when the launch ends, on every return before
+	// Start (for example claim errors and local cancels, gate and keepalive
+	// aborts, the superseded wait's timeout, and marker and download
+	// failures). Start's own completion consumes the mirror first
+	// (completeOwnedStart), which makes this a no-op, and every path that
+	// started Start waits for it to return before runLaunch does. Only this
+	// launch's own mirror is released, never one a later start installed
+	// under the same run ID. Deferred first so it runs after every other
+	// deferred step.
+	defer s.releaseOwnedMirror(lc.opts.RunID, lc.owned)
 	defer rec.cancel() // ctx' must not outlive runLaunch on any path
 	defer s.launchRegistry.Finish(lc.key, rec)
 	defer removeLaunchMarkerIfMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID)

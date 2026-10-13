@@ -493,7 +493,7 @@ func homeBootstrapFiles(homeDir, containerHome string) ([]bootstrapFile, error) 
 		if len(logged) > maxLoggedSkipped {
 			logged = logged[:maxLoggedSkipped]
 		}
-		runtimeLog.Info("substrate: skipped non-regular home entries during bootstrap", "count", len(skipped), "paths", logged)
+		runtimeLog().Info("substrate: skipped non-regular home entries during bootstrap", "count", len(skipped), "paths", logged)
 	}
 	return files, nil
 }

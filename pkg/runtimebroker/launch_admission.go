@@ -44,12 +44,19 @@ const minAsyncLaunchTimeoutSeconds = 20
 // create's registration (ss) over to the launch, accepts it and continues
 // it in runLaunch.
 //
+// It reports whether it accepted the launch. Every refusal writes its error
+// response and returns false; only the path that starts runLaunch returns
+// true. A flat instance's caller releases its ownership mirror unless the
+// launch was accepted, because only then does runLaunch own the mirror;
+// owned is that mirror (nil on a legacy Runtime Broker), which runLaunch
+// releases when it ends.
+//
 // Nothing captured in the launchCtx passed to runLaunch, nor runLaunch
 // itself, retains r or any value derived from *http.Request: everything it
 // needs (the resolved hub connection name, opts, the request body already
 // decoded into req) is plain data copied out here, in this synchronous
 // handler goroutine, before go runLaunch starts (design §7 P1b-1 B-6).
-func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx context.Context, req CreateAgentRequest, opts api.StartOptions, mgr agent.Manager, ss *syncStart, attempt *dispatchAttempt, markAttemptFailed func(int, string), span trace.Span, receivedAt time.Time) {
+func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx context.Context, req CreateAgentRequest, opts api.StartOptions, mgr agent.Manager, ss *syncStart, owned *ownedStart, attempt *dispatchAttempt, markAttemptFailed func(int, string), span trace.Span, receivedAt time.Time) bool {
 	// The GCS download itself runs in runLaunch (design §3.1), but its
 	// directory check only reads the filesystem, so an invalid workspace
 	// directory is answered here with the same 400 the synchronous path
@@ -62,7 +69,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 			span.SetStatus(codes.Error, err.Error())
 			markAttemptFailed(http.StatusBadRequest, attemptMsg)
 			BadRequest(w, httpMessage)
-			return
+			return false
 		}
 		// Likewise a broker with no bucket for the upload refuses here with
 		// the synchronous path's 422, before accepting a launch that could
@@ -71,7 +78,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 			span.SetStatus(codes.Error, errWorkspaceStorageUnconfigured.Error())
 			markAttemptFailed(http.StatusUnprocessableEntity, "storage bucket not configured")
 			writeWorkspaceStorageUnconfigured(w)
-			return
+			return false
 		}
 	}
 
@@ -84,7 +91,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		if d, ok := harnessPolicyRefusalFrom(err); ok {
 			markAttemptFailed(d.HTTPStatus, d.detail())
 			s.writeHarnessPolicyRefusal(w, d, "create agent", req.ID, nil)
-			return
+			return false
 		}
 		if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
@@ -93,7 +100,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 			s.agentLifecycleLog.Warn("Agent create failed: preflight: template or harness-config not found",
 				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
-			return
+			return false
 		}
 		markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		// Fixed text, as the synchronous create gives for a Manager.Start
@@ -102,7 +109,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		s.agentLifecycleLog.Error("Agent create failed: preflight",
 			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
 		RuntimeError(w, runtimeOpError(opCreateAgent, err).Error())
-		return
+		return false
 	}
 
 	key := ss.key
@@ -133,7 +140,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 	if !ss.handOff(rec) {
 		cancel()
 		s.writeCreateRegistrationError(w, span, req, errCreateStartCancelled, markAttemptFailed)
-		return
+		return false
 	}
 
 	resp := CreateAgentResponse{
@@ -157,6 +164,8 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		mgr:             mgr,
 		key:             key,
 		sharedWorkspace: opts.SharedWorkspace,
+		owned:           owned,
 	}
 	go s.runLaunch(runCtx, rec, lc)
+	return true
 }

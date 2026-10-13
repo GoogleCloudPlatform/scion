@@ -378,6 +378,12 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		// The hub selected with 'scion use' never links or registers a
 		// project that is already linked to a hub.
 		HubFromContext: hubSource == targetSourceContext,
+		// A project registered or linked on the hub selected with 'scion
+		// use' gets a link entry, so it stays on that hub after a hub
+		// switch. Both writers are stderr: this runs before commands that
+		// print JSON on stdout. (The context hub always has an entry, so
+		// no new-hub line is printed here.)
+		RecordLink: contextLinkRecorder(os.Stderr, os.Stderr),
 		// On the local workstation hub, link an unregistered project
 		// without prompting; a remote hub keeps the prompt.
 		AutoLinkLocal: true,

@@ -54,11 +54,24 @@ type MaintenanceExecutor interface {
 	Run(ctx context.Context, logger io.Writer, params map[string]string) error
 }
 
+// HubSettingSectionUpdateAvailable is the hub_settings section key used to
+// store the latest detected release update for the admin UI.
+const HubSettingSectionUpdateAvailable = "system.update_available"
+
 // SecretMigrationExecutor migrates hub-scoped secrets from the legacy fixed "hub" scope ID
 // to the per-instance hub ID namespace in GCP Secret Manager.
 type SecretMigrationExecutor struct {
 	store         store.Store
 	secretBackend secret.SecretBackend
+}
+
+// NewSecretMigrationExecutor returns a SecretMigrationExecutor that reads
+// secrets from s and migrates them in backend.
+func NewSecretMigrationExecutor(s store.Store, backend secret.SecretBackend) *SecretMigrationExecutor {
+	return &SecretMigrationExecutor{
+		store:         s,
+		secretBackend: backend,
+	}
 }
 
 // SecretMigrationResult holds the outcome of a secret migration run.
@@ -167,6 +180,25 @@ type PullImagesExecutor struct {
 	harnesses  []string // harness names (e.g., "claude", "antigravity")
 }
 
+// PullImagesOptions configures a PullImagesExecutor. Zero values are kept
+// as-is; Run applies its own defaults.
+type PullImagesOptions struct {
+	RuntimeBin string   // "docker", "podman", or "container"
+	Registry   string   // image registry prefix
+	Tag        string   // image tag (default "latest")
+	Harnesses  []string // harness names (e.g., "claude", "antigravity")
+}
+
+// NewPullImagesExecutor returns a PullImagesExecutor configured from opts.
+func NewPullImagesExecutor(opts PullImagesOptions) *PullImagesExecutor {
+	return &PullImagesExecutor{
+		runtimeBin: opts.RuntimeBin,
+		registry:   opts.Registry,
+		tag:        opts.Tag,
+		harnesses:  opts.Harnesses,
+	}
+}
+
 func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
 	log := logging.Subsystem("hub.maintenance.pull-images")
 
@@ -242,6 +274,25 @@ type RebuildServerExecutor struct {
 	repoBranch  string // git branch to checkout before building (empty = stay on current)
 	binaryDest  string // install path (e.g., /usr/local/bin/scion)
 	serviceName string // systemd service name (e.g., "scion-hub")
+}
+
+// RebuildServerOptions configures a RebuildServerExecutor. Zero values are
+// kept as-is; Run applies its own defaults.
+type RebuildServerOptions struct {
+	RepoPath    string // path to scion source checkout
+	RepoBranch  string // git branch to checkout before building (empty = stay on current)
+	BinaryDest  string // install path (e.g., /usr/local/bin/scion)
+	ServiceName string // systemd service name (e.g., "scion-hub")
+}
+
+// NewRebuildServerExecutor returns a RebuildServerExecutor configured from opts.
+func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor {
+	return &RebuildServerExecutor{
+		repoPath:    opts.RepoPath,
+		repoBranch:  opts.RepoBranch,
+		binaryDest:  opts.BinaryDest,
+		serviceName: opts.ServiceName,
+	}
 }
 
 func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
@@ -367,6 +418,21 @@ type RebuildWebExecutor struct {
 	repoBranch string // git branch to checkout before building (empty = stay on current)
 }
 
+// RebuildWebOptions configures a RebuildWebExecutor. Zero values are kept
+// as-is; Run applies its own checks.
+type RebuildWebOptions struct {
+	RepoPath   string // path to scion source checkout
+	RepoBranch string // git branch to checkout before building (empty = stay on current)
+}
+
+// NewRebuildWebExecutor returns a RebuildWebExecutor configured from opts.
+func NewRebuildWebExecutor(opts RebuildWebOptions) *RebuildWebExecutor {
+	return &RebuildWebExecutor{
+		repoPath:   opts.RepoPath,
+		repoBranch: opts.RepoBranch,
+	}
+}
+
 func (e *RebuildWebExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
 	log := logging.Subsystem("hub.maintenance.rebuild-web")
 
@@ -440,6 +506,14 @@ type RebuildContainerBinariesExecutor struct {
 	repoPath string
 }
 
+// NewRebuildContainerBinariesExecutor returns a
+// RebuildContainerBinariesExecutor that builds from the checkout at repoPath.
+func NewRebuildContainerBinariesExecutor(repoPath string) *RebuildContainerBinariesExecutor {
+	return &RebuildContainerBinariesExecutor{
+		repoPath: repoPath,
+	}
+}
+
 func (e *RebuildContainerBinariesExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
 	log := logging.Subsystem("hub.maintenance.rebuild-container-binaries")
 
@@ -478,6 +552,30 @@ type BuildHarnessConfigImageExecutor struct {
 	registry   string
 	tag        string
 	gcpProject string
+}
+
+// BuildHarnessConfigImageOptions configures a BuildHarnessConfigImageExecutor.
+// Zero values are kept as-is; Run applies its own defaults.
+type BuildHarnessConfigImageOptions struct {
+	Store      store.Store
+	Storage    storage.Storage
+	RuntimeBin string
+	Registry   string
+	Tag        string
+	GCPProject string
+}
+
+// NewBuildHarnessConfigImageExecutor returns a BuildHarnessConfigImageExecutor
+// configured from opts.
+func NewBuildHarnessConfigImageExecutor(opts BuildHarnessConfigImageOptions) *BuildHarnessConfigImageExecutor {
+	return &BuildHarnessConfigImageExecutor{
+		store:      opts.Store,
+		storage:    opts.Storage,
+		runtimeBin: opts.RuntimeBin,
+		registry:   opts.Registry,
+		tag:        opts.Tag,
+		gcpProject: opts.GCPProject,
+	}
 }
 
 func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
@@ -1369,6 +1467,25 @@ type BinaryUpdateExecutor struct {
 	githubRepo  string      // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
 	channel     string      // release channel override (empty = detect from current version)
 	store       store.Store // optional — used to clear system.update_available on success
+}
+
+// BinaryUpdateOptions configures a BinaryUpdateExecutor. Zero values are kept
+// as-is; Run applies its own defaults.
+type BinaryUpdateOptions struct {
+	ServiceName string      // systemd service name (e.g., "scion-hub")
+	GitHubRepo  string      // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
+	Channel     string      // release channel override (empty = detect from current version)
+	Store       store.Store // optional — used to clear system.update_available on success
+}
+
+// NewBinaryUpdateExecutor returns a BinaryUpdateExecutor configured from opts.
+func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
+	return &BinaryUpdateExecutor{
+		serviceName: opts.ServiceName,
+		githubRepo:  opts.GitHubRepo,
+		channel:     opts.Channel,
+		store:       opts.Store,
+	}
 }
 
 func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
