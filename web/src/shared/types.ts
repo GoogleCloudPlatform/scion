@@ -776,7 +776,9 @@ export interface AgentEditability {
 /**
  * The agent PATCH response's disposition: the wire keys whose value the
  * request changed, grouped by when each edit takes effect. An unchanged
- * echo is in no list.
+ * echo is in no list, except gcp_identity, which is listed under applied
+ * whenever the request records a service-account assignment, the current
+ * account included.
  */
 export interface AgentUpdateDisposition {
   /** Keys that take effect at the next container creation (or at once, for metadata). */
@@ -948,6 +950,17 @@ export interface TemplateConfig {
 }
 
 /**
+ * The job keys the frontend reads from a template's agentConfig: the hub's
+ * read-only snapshot of the template's own scion-agent.yaml (keys in
+ * scion-agent.yaml spelling). The hub reads a template's job keys from it
+ * (ptone/scion#4222). Partial subset of the Go `api.ScionConfig`.
+ */
+export interface TemplateAgentConfig {
+  model?: string;
+  message_mode?: MessageMode;
+}
+
+/**
  * Template information from the Hub API
  */
 export interface Template {
@@ -967,6 +980,8 @@ export interface Template {
   sourceUrl?: string;
   files?: TemplateFileInfo[];
   config?: TemplateConfig;
+  /** Read-only snapshot of the template's own scion-agent.yaml; see TemplateAgentConfig. */
+  agentConfig?: TemplateAgentConfig;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;

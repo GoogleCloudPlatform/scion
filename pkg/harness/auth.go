@@ -17,6 +17,7 @@ package harness
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -65,11 +66,7 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 			lookup("GCP_PROJECT"),
 			lookup("ANTHROPIC_VERTEX_PROJECT_ID"),
 		),
-		GoogleCloudRegion: util.FirstNonEmpty(
-			lookup("GOOGLE_CLOUD_REGION"),
-			lookup("CLOUD_ML_REGION"),
-			lookup("GOOGLE_CLOUD_LOCATION"),
-		),
+		GoogleCloudRegion:    resolveVertexLocation(lookup),
 		GoogleAppCredentials: lookup("GOOGLE_APPLICATION_CREDENTIALS"),
 		GCPMetadataMode:      lookup("SCION_METADATA_MODE"),
 	}
@@ -101,6 +98,29 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 	}
 
 	return auth
+}
+
+// resolveVertexLocation returns the Vertex AI location in the shared
+// precedence order GOOGLE_CLOUD_LOCATION > GOOGLE_CLOUD_REGION >
+// CLOUD_ML_REGION (ptone/scion#4719); the harness provisioners
+// (harnesses/scion_harness.py resolve_vertex_location) use the same order.
+// When GOOGLE_CLOUD_LOCATION and GOOGLE_CLOUD_REGION are both set and differ,
+// it warns once. The container runtime then sets both variables to the
+// returned value (ContainerScriptHarness.ResolveAuth).
+func resolveVertexLocation(lookup func(string) string) string {
+	location := lookup("GOOGLE_CLOUD_LOCATION")
+	region := lookup("GOOGLE_CLOUD_REGION")
+	if location != "" && region != "" && location != region {
+		warnVertexLocationConflict(location, region)
+	}
+	return util.FirstNonEmpty(location, region, lookup("CLOUD_ML_REGION"))
+}
+
+// warnVertexLocationConflict reports a GOOGLE_CLOUD_LOCATION /
+// GOOGLE_CLOUD_REGION conflict. It is a variable so tests can observe it.
+var warnVertexLocationConflict = func(location, region string) {
+	slog.Warn("GOOGLE_CLOUD_LOCATION and GOOGLE_CLOUD_REGION differ; using GOOGLE_CLOUD_LOCATION",
+		"GOOGLE_CLOUD_LOCATION", location, "GOOGLE_CLOUD_REGION", region)
 }
 
 // HostCredentialFile is a harness-declared credential file found in a home

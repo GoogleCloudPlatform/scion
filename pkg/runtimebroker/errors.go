@@ -101,6 +101,11 @@ const (
 	// it, not (yet) the hub or the CLI.
 	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
 
+	// ErrCodeLocalWorktreeRefused marks a refused local-worktree dispatch
+	// for a linked checkout (resolveLinkedCheckout); see
+	// api.BrokerErrCodeLocalWorktreeRefused.
+	ErrCodeLocalWorktreeRefused = api.BrokerErrCodeLocalWorktreeRefused
+
 	// ErrCodeStaleDispatch marks a delete refused because it arrived after
 	// the deadline the hub sent with it (notAfter, ptone/scion#2906): the
 	// hub's claim on the delete may have lapsed, so acting could remove an

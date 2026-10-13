@@ -83,6 +83,7 @@ var wantEditTier = map[string]EditTier{
 	"config.config_dir":                EditTierImmutable,
 	"config.detached":                  EditTierImmutable,
 	"config.hub":                       EditTierImmutable,
+	"config.message_mode":              EditTierImmutable,
 }
 
 // wantSessionSensitive lists the keys a resume applies but whose effect on
@@ -418,7 +419,7 @@ func TestAgentUpdateDisposition(t *testing.T) {
 			Name: "n", Labels: map[string]string{"a": "1"}, Annotations: map[string]string{}, TaskSummary: "t",
 			AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeBlock}},
 		}
-		got := agentUpdateDisposition(before, after, nil, nil, false)
+		got := agentUpdateDisposition(before, after, nil, nil, false, false)
 		for name, l := range map[string][]string{"applied": got.Applied, "held": got.Held, "heldForReincarnate": got.HeldForReincarnate} {
 			require.NotNil(t, l, "%s is an empty list, not null", name)
 			assert.Empty(t, l, name)
@@ -430,10 +431,20 @@ func TestAgentUpdateDisposition(t *testing.T) {
 			Name: "renamed", Labels: map[string]string{"a": "2"}, Annotations: map[string]string{"k": "v"}, TaskSummary: "t2",
 			AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModePassthrough}},
 		}
-		got := agentUpdateDisposition(before, after, []string{"config.model"}, []string{"config.system_prompt"}, true)
+		got := agentUpdateDisposition(before, after, []string{"config.model"}, []string{"config.system_prompt"}, true, false)
 		assert.Equal(t, []string{"annotations", "config.model", "explicitTimezone", "gcp_identity", "labels", "name", "taskSummary"}, got.Applied)
 		assert.Empty(t, got.Held)
 		assert.Equal(t, []string{"config.system_prompt"}, got.HeldForReincarnate)
+	})
+
+	t.Run("a recorded assignment lists gcp_identity on an echo", func(t *testing.T) {
+		assign := &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: "sa-1"}
+		before := agentPatchSnapshotOf(&store.Agent{AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: assign}})
+		id := *assign
+		after := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &id}}
+		assert.Equal(t, []string{"gcp_identity"}, agentUpdateDisposition(before, after, nil, nil, false, true).Applied)
+		assert.Empty(t, agentUpdateDisposition(before, after, nil, nil, false, false).Applied,
+			"an echo with no assignment write is in no list")
 	})
 }
 

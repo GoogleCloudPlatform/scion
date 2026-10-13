@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -222,4 +223,69 @@ func fetchHubAgents(ctx context.Context, endpoint string, settings *config.Setti
 	}
 
 	return names, nil
+}
+
+// loadCompletionContext reads context.yaml for shell completion, or
+// returns nil inside an agent (which never uses the hub list) or when the
+// file cannot be read. Completion never writes the file and never prints.
+func loadCompletionContext() *config.CLIContext {
+	if contextDisabled(resolveMode()) {
+		return nil
+	}
+	c, err := config.LoadCLIContext()
+	if err != nil {
+		return nil
+	}
+	return c
+}
+
+// completeHubNames completes --hub with the nicknames in the hub list.
+func completeHubNames(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	c := loadCompletionContext()
+	if c == nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var names []string
+	for _, name := range c.HubNames() {
+		if strings.HasPrefix(name, toComplete) {
+			names = append(names, name)
+		}
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeUseProjects completes 'scion use <project>' and 'scion project
+// use <project>' with the slugs in the known-project list, offline. With
+// --hub, only that hub's projects are offered.
+func completeUseProjects(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	c := loadCompletionContext()
+	if c == nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	// Completion runs without the persistent pre-run, so hubEndpoint holds
+	// the raw --hub value: a nickname or a URL.
+	hubName := ""
+	if hubEndpoint != "" {
+		hubName, _ = c.LookupHub(hubEndpoint)
+		if hubName == "" {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+	}
+	var slugs []string
+	seen := map[string]bool{}
+	for _, p := range c.Projects {
+		if p.Slug == "" || seen[p.Slug] || !strings.HasPrefix(p.Slug, toComplete) {
+			continue
+		}
+		if hubName != "" && p.Hub != hubName {
+			continue
+		}
+		seen[p.Slug] = true
+		slugs = append(slugs, p.Slug)
+	}
+	sort.Strings(slugs)
+	return slugs, cobra.ShellCompDirectiveNoFileComp
 }

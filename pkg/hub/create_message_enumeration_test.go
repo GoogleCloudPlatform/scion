@@ -18,7 +18,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -112,10 +111,12 @@ func TestCreateMessageEnumeration(t *testing.T) {
 	fset := token.NewFileSet()
 
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards CreateMessage call sites, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards CreateMessage call sites.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards CreateMessage call sites, which identity.go and identity_credential.go do not contain.
-	entries, err := os.ReadDir(hubDir)
+	// scanned through guardScanSubdirs; guards CreateMessage call sites.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards CreateMessage call sites.
+	entries, err := readGuardScanDirs(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)
 	}

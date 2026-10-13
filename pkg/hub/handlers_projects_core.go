@@ -1266,7 +1266,7 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 	// Write hub connection settings into the seeded settings file.
 	settingsUpdates := map[string]string{
 		"hub.enabled":   "true",
-		"hub.endpoint":  s.config.HubEndpoint,
+		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
 		"hub.projectId": project.ID,
 		"project_id":    project.ID,
 	}
@@ -1326,7 +1326,7 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	// Write hub connection settings
 	settingsUpdates := map[string]string{
 		"hub.enabled":   "true",
-		"hub.endpoint":  s.config.HubEndpoint,
+		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
 		"hub.projectId": project.ID,
 		"project_id":    project.ID,
 	}
@@ -1989,12 +1989,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// For linked projects (local directory) on the embedded broker,
 		// initialize the .scion directory structure so agents and templates
 		// directories exist. Only the embedded broker shares the hub's
-		// filesystem; other brokers manage their own.
+		// filesystem; other brokers manage their own. The broker's global
+		// directory is left to global init.
 		if localPath != "" && s.isEmbeddedBroker(broker.ID) {
-			scionDir := filepath.Join(localPath, ".scion")
-			if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
-				s.projectsLogger().Warn("failed to initialize .scion in linked project",
-					"project_id", project.ID, "localPath", localPath, "error", err.Error())
+			if scionDir, ok := linkedProjectInitDir(localPath); ok {
+				if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+					s.projectsLogger().Warn("failed to initialize .scion in linked project",
+						"project_id", project.ID, "localPath", localPath, "error", err.Error())
+				}
 			}
 		}
 

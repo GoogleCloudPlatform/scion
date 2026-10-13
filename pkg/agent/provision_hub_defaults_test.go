@@ -308,13 +308,14 @@ harness_configs:
 // TestProvision_HubAgentDefaults_ContextValueSurvivesProvisioning is a SMOKE
 // TEST, NOT A PIN. Read this before trusting it.
 //
-// It does not — and structurally cannot — pin the defensive copy at
-// provision.go (the `base := *hd.Resources` copy in the hub agent_defaults
-// block). Review proved that by deleting the copy and watching this stay
-// green. The reason is the `finalScionCfg = updatedCfg` reload near the end of
-// ProvisionAgent: it reloads
-// finalScionCfg from disk before returning, so the pointer this test inspects
-// can never be the aliased one no matter what the merge did. Asserting on the
+// It does not — and structurally cannot — pin the defensive copy in
+// resolveEnvironmentResources (agent_environment.go, the `base := *hd.Resources`
+// copy of the hub agent_defaults tier). Review proved that by deleting the
+// copy and watching this stay green. The reason is the reload near the end of
+// ProvisionAgent: it reloads finalScionCfg from disk and re-attaches copies
+// of the effective environment values (environmentOf) before returning, so
+// the pointer this test inspects can never be the aliased one no matter what
+// the merge did. Asserting on the
 // written scion-agent.json does not help either — that file is marshalled from
 // the config and re-read, which launders the aliasing the same way. Anything
 // downstream of the reload is incapable of failing on this property.

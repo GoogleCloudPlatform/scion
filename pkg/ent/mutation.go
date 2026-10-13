@@ -67832,6 +67832,7 @@ type RoleDefinitionMutation struct {
 	permissions          *[]string
 	appendpermissions    []string
 	system               *bool
+	confers_membership   *bool
 	created              *time.Time
 	updated              *time.Time
 	clearedFields        map[string]struct{}
@@ -68169,6 +68170,42 @@ func (m *RoleDefinitionMutation) ResetSystem() {
 	m.system = nil
 }
 
+// SetConfersMembership sets the "confers_membership" field.
+func (m *RoleDefinitionMutation) SetConfersMembership(b bool) {
+	m.confers_membership = &b
+}
+
+// ConfersMembership returns the value of the "confers_membership" field in the mutation.
+func (m *RoleDefinitionMutation) ConfersMembership() (r bool, exists bool) {
+	v := m.confers_membership
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConfersMembership returns the old "confers_membership" field's value of the RoleDefinition entity.
+// If the RoleDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RoleDefinitionMutation) OldConfersMembership(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConfersMembership is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConfersMembership requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConfersMembership: %w", err)
+	}
+	return oldValue.ConfersMembership, nil
+}
+
+// ResetConfersMembership resets all changes to the "confers_membership" field.
+func (m *RoleDefinitionMutation) ResetConfersMembership() {
+	m.confers_membership = nil
+}
+
 // SetCreated sets the "created" field.
 func (m *RoleDefinitionMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -68329,7 +68366,7 @@ func (m *RoleDefinitionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RoleDefinitionMutation) Fields() []string {
-	fields := make([]string, 0, 7)
+	fields := make([]string, 0, 8)
 	if m.name != nil {
 		fields = append(fields, roledefinition.FieldName)
 	}
@@ -68344,6 +68381,9 @@ func (m *RoleDefinitionMutation) Fields() []string {
 	}
 	if m.system != nil {
 		fields = append(fields, roledefinition.FieldSystem)
+	}
+	if m.confers_membership != nil {
+		fields = append(fields, roledefinition.FieldConfersMembership)
 	}
 	if m.created != nil {
 		fields = append(fields, roledefinition.FieldCreated)
@@ -68369,6 +68409,8 @@ func (m *RoleDefinitionMutation) Field(name string) (ent.Value, bool) {
 		return m.Permissions()
 	case roledefinition.FieldSystem:
 		return m.System()
+	case roledefinition.FieldConfersMembership:
+		return m.ConfersMembership()
 	case roledefinition.FieldCreated:
 		return m.Created()
 	case roledefinition.FieldUpdated:
@@ -68392,6 +68434,8 @@ func (m *RoleDefinitionMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldPermissions(ctx)
 	case roledefinition.FieldSystem:
 		return m.OldSystem(ctx)
+	case roledefinition.FieldConfersMembership:
+		return m.OldConfersMembership(ctx)
 	case roledefinition.FieldCreated:
 		return m.OldCreated(ctx)
 	case roledefinition.FieldUpdated:
@@ -68439,6 +68483,13 @@ func (m *RoleDefinitionMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSystem(v)
+		return nil
+	case roledefinition.FieldConfersMembership:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConfersMembership(v)
 		return nil
 	case roledefinition.FieldCreated:
 		v, ok := value.(time.Time)
@@ -68532,6 +68583,9 @@ func (m *RoleDefinitionMutation) ResetField(name string) error {
 		return nil
 	case roledefinition.FieldSystem:
 		m.ResetSystem()
+		return nil
+	case roledefinition.FieldConfersMembership:
+		m.ResetConfersMembership()
 		return nil
 	case roledefinition.FieldCreated:
 		m.ResetCreated()
@@ -87413,6 +87467,8 @@ type UserMutation struct {
 	purpose                         *string
 	issuance_id                     *string
 	issuer_credential_id            *string
+	federated_email                 *string
+	home_issuer                     *string
 	issuer_delegation_id            *string
 	clearedFields                   map[string]struct{}
 	owned_groups                    map[uuid.UUID]struct{}
@@ -88351,6 +88407,104 @@ func (m *UserMutation) ResetIssuerCredentialID() {
 	delete(m.clearedFields, user.FieldIssuerCredentialID)
 }
 
+// SetFederatedEmail sets the "federated_email" field.
+func (m *UserMutation) SetFederatedEmail(s string) {
+	m.federated_email = &s
+}
+
+// FederatedEmail returns the value of the "federated_email" field in the mutation.
+func (m *UserMutation) FederatedEmail() (r string, exists bool) {
+	v := m.federated_email
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFederatedEmail returns the old "federated_email" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldFederatedEmail(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFederatedEmail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFederatedEmail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFederatedEmail: %w", err)
+	}
+	return oldValue.FederatedEmail, nil
+}
+
+// ClearFederatedEmail clears the value of the "federated_email" field.
+func (m *UserMutation) ClearFederatedEmail() {
+	m.federated_email = nil
+	m.clearedFields[user.FieldFederatedEmail] = struct{}{}
+}
+
+// FederatedEmailCleared returns if the "federated_email" field was cleared in this mutation.
+func (m *UserMutation) FederatedEmailCleared() bool {
+	_, ok := m.clearedFields[user.FieldFederatedEmail]
+	return ok
+}
+
+// ResetFederatedEmail resets all changes to the "federated_email" field.
+func (m *UserMutation) ResetFederatedEmail() {
+	m.federated_email = nil
+	delete(m.clearedFields, user.FieldFederatedEmail)
+}
+
+// SetHomeIssuer sets the "home_issuer" field.
+func (m *UserMutation) SetHomeIssuer(s string) {
+	m.home_issuer = &s
+}
+
+// HomeIssuer returns the value of the "home_issuer" field in the mutation.
+func (m *UserMutation) HomeIssuer() (r string, exists bool) {
+	v := m.home_issuer
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHomeIssuer returns the old "home_issuer" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldHomeIssuer(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHomeIssuer is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHomeIssuer requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHomeIssuer: %w", err)
+	}
+	return oldValue.HomeIssuer, nil
+}
+
+// ClearHomeIssuer clears the value of the "home_issuer" field.
+func (m *UserMutation) ClearHomeIssuer() {
+	m.home_issuer = nil
+	m.clearedFields[user.FieldHomeIssuer] = struct{}{}
+}
+
+// HomeIssuerCleared returns if the "home_issuer" field was cleared in this mutation.
+func (m *UserMutation) HomeIssuerCleared() bool {
+	_, ok := m.clearedFields[user.FieldHomeIssuer]
+	return ok
+}
+
+// ResetHomeIssuer resets all changes to the "home_issuer" field.
+func (m *UserMutation) ResetHomeIssuer() {
+	m.home_issuer = nil
+	delete(m.clearedFields, user.FieldHomeIssuer)
+}
+
 // SetIssuerDelegationID sets the "issuer_delegation_id" field.
 func (m *UserMutation) SetIssuerDelegationID(s string) {
 	m.issuer_delegation_id = &s
@@ -88728,7 +88882,7 @@ func (m *UserMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserMutation) Fields() []string {
-	fields := make([]string, 0, 19)
+	fields := make([]string, 0, 21)
 	if m.email != nil {
 		fields = append(fields, user.FieldEmail)
 	}
@@ -88783,6 +88937,12 @@ func (m *UserMutation) Fields() []string {
 	if m.issuer_credential_id != nil {
 		fields = append(fields, user.FieldIssuerCredentialID)
 	}
+	if m.federated_email != nil {
+		fields = append(fields, user.FieldFederatedEmail)
+	}
+	if m.home_issuer != nil {
+		fields = append(fields, user.FieldHomeIssuer)
+	}
 	if m.issuer_delegation_id != nil {
 		fields = append(fields, user.FieldIssuerDelegationID)
 	}
@@ -88830,6 +88990,10 @@ func (m *UserMutation) Field(name string) (ent.Value, bool) {
 		return m.IssuanceID()
 	case user.FieldIssuerCredentialID:
 		return m.IssuerCredentialID()
+	case user.FieldFederatedEmail:
+		return m.FederatedEmail()
+	case user.FieldHomeIssuer:
+		return m.HomeIssuer()
 	case user.FieldIssuerDelegationID:
 		return m.IssuerDelegationID()
 	}
@@ -88877,6 +89041,10 @@ func (m *UserMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldIssuanceID(ctx)
 	case user.FieldIssuerCredentialID:
 		return m.OldIssuerCredentialID(ctx)
+	case user.FieldFederatedEmail:
+		return m.OldFederatedEmail(ctx)
+	case user.FieldHomeIssuer:
+		return m.OldHomeIssuer(ctx)
 	case user.FieldIssuerDelegationID:
 		return m.OldIssuerDelegationID(ctx)
 	}
@@ -89014,6 +89182,20 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetIssuerCredentialID(v)
 		return nil
+	case user.FieldFederatedEmail:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFederatedEmail(v)
+		return nil
+	case user.FieldHomeIssuer:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHomeIssuer(v)
+		return nil
 	case user.FieldIssuerDelegationID:
 		v, ok := value.(string)
 		if !ok {
@@ -89099,6 +89281,12 @@ func (m *UserMutation) ClearedFields() []string {
 	if m.FieldCleared(user.FieldIssuerCredentialID) {
 		fields = append(fields, user.FieldIssuerCredentialID)
 	}
+	if m.FieldCleared(user.FieldFederatedEmail) {
+		fields = append(fields, user.FieldFederatedEmail)
+	}
+	if m.FieldCleared(user.FieldHomeIssuer) {
+		fields = append(fields, user.FieldHomeIssuer)
+	}
 	if m.FieldCleared(user.FieldIssuerDelegationID) {
 		fields = append(fields, user.FieldIssuerDelegationID)
 	}
@@ -89148,6 +89336,12 @@ func (m *UserMutation) ClearField(name string) error {
 		return nil
 	case user.FieldIssuerCredentialID:
 		m.ClearIssuerCredentialID()
+		return nil
+	case user.FieldFederatedEmail:
+		m.ClearFederatedEmail()
+		return nil
+	case user.FieldHomeIssuer:
+		m.ClearHomeIssuer()
 		return nil
 	case user.FieldIssuerDelegationID:
 		m.ClearIssuerDelegationID()
@@ -89213,6 +89407,12 @@ func (m *UserMutation) ResetField(name string) error {
 		return nil
 	case user.FieldIssuerCredentialID:
 		m.ResetIssuerCredentialID()
+		return nil
+	case user.FieldFederatedEmail:
+		m.ResetFederatedEmail()
+		return nil
+	case user.FieldHomeIssuer:
+		m.ResetHomeIssuer()
 		return nil
 	case user.FieldIssuerDelegationID:
 		m.ResetIssuerDelegationID()

@@ -754,8 +754,9 @@ scion hub env set --scope hub --always GOOGLE_CLOUD_REGION=<region>
 ```
 
 (`GOOGLE_CLOUD_LOCATION` is an accepted alternative to
-`GOOGLE_CLOUD_REGION`.) Without this, agent create fails before it reaches
-the pod, with `2 required environment variable(s) are missing:
+`GOOGLE_CLOUD_REGION`; if both are set, `GOOGLE_CLOUD_LOCATION` wins.)
+Without this, agent create fails before it reaches the pod, with
+`2 required environment variable(s) are missing:
 GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION`.
 
 ### GCP identity: Block vs Passthrough

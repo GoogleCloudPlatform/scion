@@ -445,6 +445,15 @@ func (s *GroupStore) AddGroupMember(ctx context.Context, member *store.GroupMemb
 
 	switch member.MemberType {
 	case store.GroupMemberTypeUser:
+		// A federated account is never a group member (including the
+		// canonical hub-members group).
+		federated, err := isFederatedUser(ctx, s.client, memberUID)
+		if err != nil {
+			return err
+		}
+		if federated {
+			return store.ErrFederatedAccountRefused
+		}
 		create := s.client.GroupMembership.Create().
 			SetGroupID(groupUID).
 			SetUserID(memberUID).

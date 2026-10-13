@@ -45,6 +45,24 @@ The database always wins for Layer-1 keys. Bootstrap values are used as initial 
 
 This applies to `SCION_SERVER_*` too. On a Layer-1 key it is only the top of the bootstrap merge: it changes the seed (which a seeded section re-syncs from at restart) and the fallback, and it never overrides a value an admin has saved. The admin UI marks such keys (see [Visual Indicators](#visual-indicators)), and the variable is deprecated for Layer-1 keys (see [`SCION_SERVER_*` Deprecation for Layer-1](#scion_server_-deprecation-for-layer-1)).
 
+### `server.hub.public_url`: environment first
+
+`server.hub.public_url` is the one Layer-1 key where an operator setting on the node ranks above the database. The Hub resolves it once at startup, in this order:
+
+1. **Operator pin.** If `SCION_SERVER_HUB_ENDPOINT`, `SCION_SERVER_BASE_URL` or the `--base-url` flag is set, the Hub uses its operator-configured endpoint, resolved as described in [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution). A value saved in the database is not used.
+2. **Database.** Otherwise a value an admin saved through the admin API or UI is used, even when `settings.yaml` also sets one. A stale bootstrap file therefore does not override a value managed in the UI. Rows the Hub seeds from bootstrap material at startup do not count as saved values, and a save that leaves the Public URL unchanged (or sends back the value shown) does not store it. A public URL stored by a save in an earlier release stays in effect until an admin clears it.
+3. **File.** Otherwise the `settings.yaml` value applies, then the existing fallbacks.
+
+The endpoint resolved this way is the Hub endpoint everywhere it is used: the URL dispatched agents receive (unless `server.hub.agent_endpoint` is set), invite links, chat-bridge settings, the `hub.endpoint` written into hub-managed project settings, the broker join response, the OIDC issuer default and the `cloudrun_invoker` transport audience default.
+
+- **Restart required.** A save is stored at once and listed in the save report's `pending_restart`. The Hub picks it up at the next restart.
+- **Validation.** A value saved in the database must be an absolute URL of the form `scheme://host[:port]`: `https`, or `http` only for `localhost` or a loopback address; a host; no user credentials, query, fragment or path. A trailing `/` is removed. The admin API rejects anything else with `422 validation_error` naming `server.hub.public_url`. At startup an invalid database value is logged as an error and not used; the operator-configured endpoint applies instead. Values from the environment, flags and `settings.yaml` keep their existing handling.
+- **Startup log.** The Hub logs one line with the operator-configured endpoint and its source, and one line with the endpoint in effect and its source (`env`, `flag`, `database`, `file`, or a fallback such as `localhost`). When a database value replaces a `settings.yaml` value, it logs that too.
+- **Audit.** A change to the stored value, by a save or a section reset, is recorded as a `hub_setting_update` audit record with the actor and the old and new values, before it is written. If the record cannot be written, the change is not made. If the write then fails, a `hub_setting_update_not_applied` record follows.
+- **Admin UI.** When an operator setting pins the endpoint, the Public URL field is read-only and names the setting that pins it. Otherwise the field is editable and shows the saved value or, with none saved, the `settings.yaml` or environment value; it never shows a seed value, which startup does not use. An **In effect** hint next to it shows the endpoint in effect and its source (the admin API reports it in `public_url_status`).
+
+The environment variable for this key is `SCION_SERVER_HUB_ENDPOINT`, and its seed variable is `SCION_SEED_SERVER_HUB_ENDPOINT`. Startup does not use the seed variable to resolve the endpoint, so the admin UI does not show its value as the field value. The spellings `SCION_SERVER_HUB_PUBLICURL` and `SCION_SEED_SERVER_HUB_PUBLICURL` are no longer read; the Hub warns about them at startup and names the replacement. Because the environment pins this key, `SCION_SERVER_HUB_ENDPOINT` is not part of the `SCION_SERVER_*` deprecation for Layer-1 keys.
+
 ### Hot reload vs restart
 
 - **Layer-1:** a save applies without a restart. The serving node applies it immediately, and other replicas pick it up through the settings event (within about 2 seconds), with a 60-second poll as a backstop. A few Layer-1 keys take effect only after a restart. The schema endpoint (`GET /api/v1/admin/server-config/schema`) lists them per section in `restart_required`: today `server.hub.public_url` and `server.github_app.app_id`.
@@ -159,7 +177,7 @@ Seeds re-sync on restart for sections that haven't been admin-edited (seeded sec
 | Setting | Seed Environment Variable |
 |---------|--------------------------|
 | `server.hub.admin_emails` | `SCION_SEED_SERVER_HUB_ADMINEMAILS` |
-| `server.hub.public_url` | `SCION_SEED_SERVER_HUB_PUBLICURL` |
+| `server.hub.public_url` | `SCION_SEED_SERVER_HUB_ENDPOINT` |
 | `server.auth.user_access_mode` | `SCION_SEED_SERVER_AUTH_USERACCESSMODE` |
 | `server.auth.authorized_domains` | `SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS` |
 | `server.auth.default_user_role` | `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE` |

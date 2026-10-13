@@ -71,6 +71,20 @@ func (_c *RoleDefinitionCreate) SetNillableSystem(v *bool) *RoleDefinitionCreate
 	return _c
 }
 
+// SetConfersMembership sets the "confers_membership" field.
+func (_c *RoleDefinitionCreate) SetConfersMembership(v bool) *RoleDefinitionCreate {
+	_c.mutation.SetConfersMembership(v)
+	return _c
+}
+
+// SetNillableConfersMembership sets the "confers_membership" field if the given value is not nil.
+func (_c *RoleDefinitionCreate) SetNillableConfersMembership(v *bool) *RoleDefinitionCreate {
+	if v != nil {
+		_c.SetConfersMembership(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *RoleDefinitionCreate) SetCreated(v time.Time) *RoleDefinitionCreate {
 	_c.mutation.SetCreated(v)
@@ -167,6 +181,10 @@ func (_c *RoleDefinitionCreate) defaults() {
 		v := roledefinition.DefaultSystem
 		_c.mutation.SetSystem(v)
 	}
+	if _, ok := _c.mutation.ConfersMembership(); !ok {
+		v := roledefinition.DefaultConfersMembership
+		_c.mutation.SetConfersMembership(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := roledefinition.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -201,6 +219,9 @@ func (_c *RoleDefinitionCreate) check() error {
 	}
 	if _, ok := _c.mutation.System(); !ok {
 		return &ValidationError{Name: "system", err: errors.New(`ent: missing required field "RoleDefinition.system"`)}
+	}
+	if _, ok := _c.mutation.ConfersMembership(); !ok {
+		return &ValidationError{Name: "confers_membership", err: errors.New(`ent: missing required field "RoleDefinition.confers_membership"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "RoleDefinition.created"`)}
@@ -263,6 +284,10 @@ func (_c *RoleDefinitionCreate) createSpec() (*RoleDefinition, *sqlgraph.CreateS
 	if value, ok := _c.mutation.System(); ok {
 		_spec.SetField(roledefinition.FieldSystem, field.TypeBool, value)
 		_node.System = value
+	}
+	if value, ok := _c.mutation.ConfersMembership(); ok {
+		_spec.SetField(roledefinition.FieldConfersMembership, field.TypeBool, value)
+		_node.ConfersMembership = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(roledefinition.FieldCreated, field.TypeTime, value)
@@ -412,6 +437,18 @@ func (u *RoleDefinitionUpsert) UpdateSystem() *RoleDefinitionUpsert {
 	return u
 }
 
+// SetConfersMembership sets the "confers_membership" field.
+func (u *RoleDefinitionUpsert) SetConfersMembership(v bool) *RoleDefinitionUpsert {
+	u.Set(roledefinition.FieldConfersMembership, v)
+	return u
+}
+
+// UpdateConfersMembership sets the "confers_membership" field to the value that was provided on create.
+func (u *RoleDefinitionUpsert) UpdateConfersMembership() *RoleDefinitionUpsert {
+	u.SetExcluded(roledefinition.FieldConfersMembership)
+	return u
+}
+
 // SetUpdated sets the "updated" field.
 func (u *RoleDefinitionUpsert) SetUpdated(v time.Time) *RoleDefinitionUpsert {
 	u.Set(roledefinition.FieldUpdated, v)
@@ -556,6 +593,20 @@ func (u *RoleDefinitionUpsertOne) SetSystem(v bool) *RoleDefinitionUpsertOne {
 func (u *RoleDefinitionUpsertOne) UpdateSystem() *RoleDefinitionUpsertOne {
 	return u.Update(func(s *RoleDefinitionUpsert) {
 		s.UpdateSystem()
+	})
+}
+
+// SetConfersMembership sets the "confers_membership" field.
+func (u *RoleDefinitionUpsertOne) SetConfersMembership(v bool) *RoleDefinitionUpsertOne {
+	return u.Update(func(s *RoleDefinitionUpsert) {
+		s.SetConfersMembership(v)
+	})
+}
+
+// UpdateConfersMembership sets the "confers_membership" field to the value that was provided on create.
+func (u *RoleDefinitionUpsertOne) UpdateConfersMembership() *RoleDefinitionUpsertOne {
+	return u.Update(func(s *RoleDefinitionUpsert) {
+		s.UpdateConfersMembership()
 	})
 }
 
@@ -872,6 +923,20 @@ func (u *RoleDefinitionUpsertBulk) SetSystem(v bool) *RoleDefinitionUpsertBulk {
 func (u *RoleDefinitionUpsertBulk) UpdateSystem() *RoleDefinitionUpsertBulk {
 	return u.Update(func(s *RoleDefinitionUpsert) {
 		s.UpdateSystem()
+	})
+}
+
+// SetConfersMembership sets the "confers_membership" field.
+func (u *RoleDefinitionUpsertBulk) SetConfersMembership(v bool) *RoleDefinitionUpsertBulk {
+	return u.Update(func(s *RoleDefinitionUpsert) {
+		s.SetConfersMembership(v)
+	})
+}
+
+// UpdateConfersMembership sets the "confers_membership" field to the value that was provided on create.
+func (u *RoleDefinitionUpsertBulk) UpdateConfersMembership() *RoleDefinitionUpsertBulk {
+	return u.Update(func(s *RoleDefinitionUpsert) {
+		s.UpdateConfersMembership()
 	})
 }
 

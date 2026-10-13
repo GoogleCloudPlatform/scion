@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -37,9 +36,9 @@ import (
 // (ptone/scion#3274 amendment r6).
 func TestDispatch_FlatProfileFreeAssignSkipsHubPrecheck(t *testing.T) {
 	ctx := context.Background()
-	for _, op := range flatPrecheckOps(ctx) {
+	for _, op := range precheckOps(ctx) {
 		t.Run(op.name, func(t *testing.T) {
-			d, m, a, s := flatPrecheckDispatcher(t, func(a *store.Agent) {
+			d, m, a, s := precheckDispatcher(t, precheckGSA, false, func(a *store.Agent) {
 				a.AppliedConfig.Profile = ""
 			})
 			// The flat row is created with its runtime target; the
@@ -50,7 +49,7 @@ func TestDispatch_FlatProfileFreeAssignSkipsHubPrecheck(t *testing.T) {
 			broker := &store.RuntimeBroker{
 				ID: tid("flat-k8s"), Name: "flat-k8s", Slug: "flat-k8s", Endpoint: "http://localhost:9801",
 				Status:         store.BrokerStatusOnline,
-				Profiles:       []store.BrokerProfile{flatPrecheckProfile(time.Now())},
+				Profiles:       []store.BrokerProfile{precheckProfile(time.Now())},
 				DefaultProfile: "gke",
 				RuntimeTarget:  &api.RuntimeTargetDescriptor{ID: "flat-k8s-target", Type: "kubernetes"},
 			}
@@ -73,111 +72,5 @@ func TestDispatch_FlatProfileFreeAssignSkipsHubPrecheck(t *testing.T) {
 			assert.False(t, isIdentity, "no Hub identity refusal: %v", err)
 			assert.True(t, op.called(m), "the broker is called and decides")
 		})
-	}
-}
-
-// The helpers below are this file's own, so the file uses only pkg/hub
-// code and untagged test helpers and compiles in every pkg/hub test shard
-// (see hack/hubshard). They mirror the per-profile precheck test helpers.
-
-// Copied from gcp_identity_dispatch_precheck_test.go: the precheckGSA and precheckOther constants
-// (same values); de-duplicate after ptone/scion#4562.
-const (
-	flatPrecheckGSA   = "agent@example-project.iam.gserviceaccount.com"
-	flatPrecheckOther = "other@example-project.iam.gserviceaccount.com"
-)
-
-// flatPrecheckProfile is a Kubernetes profile with a recent, complete
-// report that maps only flatPrecheckOther. Copied from gcp_identity_dispatch_precheck_test.go:
-// precheckProfile (identical body); de-duplicate after ptone/scion#4562.
-func flatPrecheckProfile(now time.Time) store.BrokerProfile {
-	at := now.Add(-time.Minute)
-	return store.BrokerProfile{
-		Name: "gke",
-		Type: "kubernetes",
-		ServiceAccountMappings: []store.BrokerProfileSAMapping{
-			{GSA: flatPrecheckOther, KSA: "other-ksa", Namespace: "agents", Source: api.BrokerKSASourceMapped},
-		},
-		MappingsReported:      true,
-		MappingsComplete:      true,
-		MappingsHash:          "h1",
-		MappingsReportedAt:    &at,
-		MappingsReportVersion: api.BrokerSAReportVersion,
-	}
-}
-
-// flatPrecheckDispatcher returns a dispatcher on a fresh store with a legacy
-// Runtime Broker that reports flatPrecheckProfile, and an unsaved agent
-// assigned to it in GCP identity mode assign for flatPrecheckGSA. Copied
-// from gcp_identity_dispatch_precheck_test.go: precheckDispatcher, specialised to the only
-// call this file makes (gsa = precheckGSA, persist = false), with
-// precheckAssign inlined; otherwise identical. De-duplicate after
-// ptone/scion#4562.
-func flatPrecheckDispatcher(t *testing.T, mutate ...func(a *store.Agent)) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent, store.Store) {
-	t.Helper()
-	ctx := context.Background()
-	memStore := createTestStore(t)
-	broker := &store.RuntimeBroker{
-		ID:       tid("host-1"),
-		Name:     "broker-a",
-		Slug:     "broker-a",
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-		Profiles: []store.BrokerProfile{flatPrecheckProfile(time.Now())},
-	}
-	require.NoError(t, memStore.CreateRuntimeBroker(ctx, broker))
-	mockClient := &mockRuntimeBrokerClient{}
-	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	agent := &store.Agent{
-		ID:              tid("agent-1"),
-		Name:            "test-agent",
-		Slug:            "test-agent",
-		ProjectID:       tid("project-1"),
-		RuntimeBrokerID: tid("host-1"),
-		AppliedConfig: &store.AgentAppliedConfig{
-			HarnessConfig: "claude",
-			Profile:       "gke",
-			GCPIdentity:   &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign, ServiceAccountEmail: flatPrecheckGSA},
-		},
-	}
-	for _, m := range mutate {
-		m(agent)
-	}
-	return dispatcher, mockClient, agent, memStore
-}
-
-// flatPrecheckOp is one dispatch path that runs the identity precheck, and
-// how to tell that it reached the Runtime Broker. Copied from
-// gcp_identity_dispatch_precheck_test.go: precheckOp (identical fields); de-duplicate after
-// ptone/scion#4562.
-type flatPrecheckOp struct {
-	name   string
-	run    func(d *HTTPAgentDispatcher, a *store.Agent) error
-	called func(m *mockRuntimeBrokerClient) bool
-}
-
-// flatPrecheckOps lists the dispatch paths. Copied from
-// gcp_identity_dispatch_precheck_test.go: precheckOps (identical entries); de-duplicate after
-// ptone/scion#4562.
-func flatPrecheckOps(ctx context.Context) []flatPrecheckOp {
-	return []flatPrecheckOp{
-		{"create", func(d *HTTPAgentDispatcher, a *store.Agent) error {
-			_, err := d.DispatchAgentCreate(ctx, a)
-			return err
-		}, func(m *mockRuntimeBrokerClient) bool { return m.createCalled }},
-		{"create with gather", func(d *HTTPAgentDispatcher, a *store.Agent) error {
-			_, err := d.DispatchAgentCreateWithGather(ctx, a)
-			return err
-		}, func(m *mockRuntimeBrokerClient) bool { return m.createCalled }},
-		{"finalize env", func(d *HTTPAgentDispatcher, a *store.Agent) error {
-			_, err := d.DispatchFinalizeEnv(ctx, a, nil)
-			return err
-		}, func(m *mockRuntimeBrokerClient) bool { return m.createCalled }},
-		{"provision", func(d *HTTPAgentDispatcher, a *store.Agent) error { return d.DispatchAgentProvision(ctx, a) },
-			func(m *mockRuntimeBrokerClient) bool { return m.createCalled }},
-		{"start", func(d *HTTPAgentDispatcher, a *store.Agent) error { return d.DispatchAgentStart(ctx, a, "task", false) },
-			func(m *mockRuntimeBrokerClient) bool { return m.startCalled }},
-		{"restart", func(d *HTTPAgentDispatcher, a *store.Agent) error { return d.DispatchAgentRestart(ctx, a) },
-			func(m *mockRuntimeBrokerClient) bool { return m.restartCalled }},
 	}
 }

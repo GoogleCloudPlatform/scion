@@ -69,12 +69,20 @@ func TestAutoMigrate_FreshPostgres_ThenIdempotent(t *testing.T) {
 		t.Skip("SCION_TEST_POSTGRES_URL not set (or built without -tags integration); skipping Postgres-only regression test")
 	}
 
-	// NewClient creates a brand-new, empty schema and calls entc.AutoMigrate
-	// on it internally (enttest_postgres.go:158) — this alone is the exact
-	// fresh-database scenario that crashed in production. NewClient calls
-	// t.Fatalf on migration failure, so reaching the next line already
-	// proves the first, fresh-database migration succeeded.
-	client := NewClient(t)
+	// NewEmptySchemaURL creates a brand-new, empty schema. NewClient would
+	// not do here: it provisions its schema by replaying the schema snapshot
+	// rather than running entc.AutoMigrate (schema_snapshot_postgres.go).
+	// Running AutoMigrate on the empty schema is the exact fresh-database
+	// scenario that crashed in production.
+	dsn := NewEmptySchemaURL(t)
+	client, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1})
+	if err != nil {
+		t.Fatalf("opening postgres ent client: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if err := entc.AutoMigrate(context.Background(), client); err != nil {
+		t.Fatalf("first AutoMigrate run against a fresh, empty schema failed: %v", err)
+	}
 
 	// Re-running migration against the now-populated schema must also
 	// succeed: idempotence. (This does not, by itself, exercise the UPDATE

@@ -158,7 +158,10 @@ func TestCreateAgent_CapturesTimezone(t *testing.T) {
 		noTmplReq bool
 	}{
 		{name: "request config env", reqEnv: map[string]string{"TZ": "Europe/Paris"}, tmplEnv: map[string]string{"TZ": "Asia/Tokyo"}, hcTZ: "America/Denver", wantPin: "Europe/Paris"},
-		{name: "template env beats harness config", tmplEnv: map[string]string{"TZ": "Asia/Tokyo"}, hcTZ: "America/Denver", wantPin: "Asia/Tokyo"},
+		// A template cannot set TZ (a hub-only key, ptone/scion#4524), and the
+		// hub no longer copies template env (ptone/scion#4222).
+		{name: "template TZ ignored, harness config applies", tmplEnv: map[string]string{"TZ": "Asia/Tokyo"}, hcTZ: "America/Denver", wantPin: "America/Denver"},
+		{name: "template TZ alone pins nothing", tmplEnv: map[string]string{"TZ": "Asia/Tokyo"}, wantPin: ""},
 		{name: "harness config", hcTZ: "America/Denver", wantPin: "America/Denver"},
 		{name: "no TZ anywhere", wantPin: ""},
 		{name: "no template, request env", reqEnv: map[string]string{"TZ": "Asia/Kathmandu"}, noTmplReq: true, wantPin: "Asia/Kathmandu"},
@@ -226,7 +229,9 @@ func (r *tzTemplateStore) GetTemplateBySlug(_ context.Context, slug, _, _ string
 }
 
 // TestDispatchAgentEventHandler_CapturesTimezone covers writer (a) on the
-// scheduled-spawn create path (AC8).
+// scheduled-spawn create path (AC8): a template's TZ is not a create-time
+// TZ (ptone/scion#4222, ptone/scion#4524), so nothing is pinned and no TZ
+// reaches the env records.
 func TestDispatchAgentEventHandler_CapturesTimezone(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
@@ -245,7 +250,7 @@ func TestDispatchAgentEventHandler_CapturesTimezone(t *testing.T) {
 	created := findMockAgent(ms, "sched-tz")
 	require.NotNil(t, created)
 	require.NotNil(t, created.AppliedConfig)
-	assert.Equal(t, "Asia/Kathmandu", created.AppliedConfig.ExplicitTimezone)
+	assert.Empty(t, created.AppliedConfig.ExplicitTimezone, "a template TZ is not pinned")
 	assert.Empty(t, legacyEnvTZ(created.AppliedConfig))
 }
 
@@ -704,9 +709,11 @@ func updateTZTemplateEnv(t *testing.T, s store.Store, slug string, env map[strin
 	require.NoError(t, setTemplateContentForTest(ctx, s, tmpl))
 }
 
-// TestCreateAgent_TemplateTZUnaffectedByLaterTemplateEdit covers AC9: a
-// template TZ is captured as a pin on create, and a later edit of the
-// template's TZ does not move the agent, on start or on reincarnate.
+// TestCreateAgent_TemplateTZUnaffectedByLaterTemplateEdit: a template TZ is
+// ignored (a hub-only key a template cannot set, ptone/scion#4524; the hub
+// no longer copies template env, ptone/scion#4222), so the agent is not
+// pinned and follows the hub default, before and after a template edit, on
+// start and on reincarnate.
 func TestCreateAgent_TemplateTZUnaffectedByLaterTemplateEdit(t *testing.T) {
 	ctx := context.Background()
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
@@ -722,31 +729,31 @@ func TestCreateAgent_TemplateTZUnaffectedByLaterTemplateEdit(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	agent, err := s.GetAgent(ctx, resp.Agent.ID)
 	require.NoError(t, err)
-	require.Equal(t, "Europe/Paris", agent.AppliedConfig.ExplicitTimezone, "the template TZ is captured as a pin")
+	require.Empty(t, agent.AppliedConfig.ExplicitTimezone, "a template TZ is not captured as a pin")
 	assert.Empty(t, legacyEnvTZ(agent.AppliedConfig))
 
 	updateTZTemplateEnv(t, s, "tz-tmpl", map[string]string{"TZ": "Asia/Tokyo"})
 
 	agent, err = s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "Europe/Paris", agent.AppliedConfig.ExplicitTimezone, "the stored pin is unchanged")
-	assert.Equal(t, agentTZ{TZ: "Europe/Paris", Source: TZSourceExplicit}, srv.agentTZ(ctx, agent))
+	assert.Empty(t, agent.AppliedConfig.ExplicitTimezone, "still no pin")
 
 	d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
 	d.SetHubAgentDefaultsProvider(srv.hubAgentDefaults)
 	startEnv, err := d.buildStartEnv(ctx, agent, "test", mintSiteStart)
 	require.NoError(t, err)
-	assert.Equal(t, "Europe/Paris", startEnv.env["TZ"], "a start sends the pinned zone")
+	assert.Equal(t, "America/Denver", startEnv.env["TZ"], "a start sends the hub default zone, not the template's")
 
 	fresh, _, err := srv.buildFreshAppliedConfig(ctx, agent, project, "")
 	require.NoError(t, err)
-	assert.Equal(t, "Europe/Paris", fresh.ExplicitTimezone, "reincarnate carries the pin over the edited template")
+	assert.Empty(t, fresh.ExplicitTimezone, "reincarnate does not pin the edited template's zone either")
 	assert.Empty(t, legacyEnvTZ(fresh))
 }
 
-// TestReincarnate_TemplateTZ covers the AC9 reincarnate bullets with a
-// template that carries TZ: an unpinned agent stays unpinned, and an agent
-// with no pin re-derives the current template zone as a pin.
+// TestReincarnate_TemplateTZ covers reincarnate with a template that
+// carries TZ: an unpinned agent stays unpinned, and an agent with no pin
+// stays unpinned too, because a template TZ is ignored (ptone/scion#4222,
+// ptone/scion#4524).
 func TestReincarnate_TemplateTZ(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -756,7 +763,7 @@ func TestReincarnate_TemplateTZ(t *testing.T) {
 		wantUnpinned bool
 	}{
 		{name: "unpinned template agent stays unpinned", unpinned: true, wantUnpinned: true},
-		{name: "no pin re-derives the current template zone", wantPin: "Asia/Tokyo"},
+		{name: "no pin does not take the template zone", wantPin: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())

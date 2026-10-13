@@ -55,6 +55,7 @@ func (m *MockHarness) Provision(ctx context.Context, agentName, agentDir, agentH
 }
 func (m *MockHarness) GetInterruptKey() string                                        { return "C-c" }
 func (m *MockHarness) GetInterruptSequence() []string                                 { return nil }
+func (m *MockHarness) DeliverySpec() api.DeliverySpec                                 { return api.DeliverySpec{} }
 func (m *MockHarness) GetHarnessEmbedsFS() (embed.FS, string)                         { return embed.FS{}, "" }
 func (m *MockHarness) InjectAgentInstructions(agentHome string, content []byte) error { return nil }
 func (m *MockHarness) InjectSystemPrompt(agentHome string, content []byte) error      { return nil }

@@ -164,6 +164,11 @@ type fakeTGServerV2 struct {
 	chatMemberMaxInFlight int
 	// failSetWebhook makes setWebhook fail with a Telegram error.
 	failSetWebhook bool
+	// failDeleteWebhook makes deleteWebhook fail with a Telegram error.
+	failDeleteWebhook bool
+	// deleteWebhookCalls and getUpdatesCalls count those requests.
+	deleteWebhookCalls int
+	getUpdatesCalls    int
 }
 
 // chatMemberStats returns the getChatMember call count and peak concurrency.
@@ -273,6 +278,9 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
 		case "/bottest-token/getUpdates":
+			f.mu.Lock()
+			f.getUpdatesCalls++
+			f.mu.Unlock()
 			json.NewEncoder(w).Encode(apiResponse{
 				OK:     true,
 				Result: mustJSONRawV2(t, []Update{}),
@@ -299,9 +307,17 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 
 		case "/bottest-token/deleteWebhook":
 			f.mu.Lock()
-			f.webhookURL = ""
-			f.webhookSecret = ""
+			f.deleteWebhookCalls++
+			fail := f.failDeleteWebhook
+			if !fail {
+				f.webhookURL = ""
+				f.webhookSecret = ""
+			}
 			f.mu.Unlock()
+			if fail {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 500, Description: "Internal Server Error"})
+				return
+			}
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
 		case "/bottest-token/getChatMember":
@@ -2405,6 +2421,12 @@ func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
 			e.tgSrv.failSetWebhook = true
 			e.tgSrv.mu.Unlock()
 		}, "failed to set webhook", true, true},
+		{"deleteWebhook rejected on switch to poll", func(cfg map[string]string, e env) {
+			cfg["inbound_mode"] = "poll"
+			e.tgSrv.mu.Lock()
+			e.tgSrv.failDeleteWebhook = true
+			e.tgSrv.mu.Unlock()
+		}, "failed to delete webhook", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tgSrv := newFakeTGServerV2(t)
