@@ -982,10 +982,9 @@ func TestSubstrateRun_BootstrapPathRejectedLogsCodeAndPath(t *testing.T) {
 	fa.bootstrapStatus = http.StatusUnprocessableEntity
 	fa.bootstrapBody = "bootstrap_path_symlink: bootstrap file " + strconv.Quote(rejectedPath) + " rejected: path traverses a symlink\n"
 
-	// runtimeLog is slog.Default() with a "subsystem" attr (see common.go),
-	// which by default bridges to the stdlib "log" package — the same
-	// capture pattern common_test.go's TestRunSimpleCommand_NoSecretsInDebugLog
-	// uses.
+	// runtimeLog() resolves slog.Default() at each call (see common.go). The
+	// default handler bridges to the stdlib "log" package, so capturing the
+	// stdlib log output captures the runtime log line.
 	var buf bytes.Buffer
 	origWriter := log.Writer()
 	origFlags := log.Flags()

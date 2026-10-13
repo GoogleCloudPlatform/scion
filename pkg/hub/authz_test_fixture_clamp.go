@@ -156,6 +156,9 @@ func (k principalKind) isHuman() bool { return k.Found && k.Kind == store.UserKi
 // isTestAdmin reports whether the principal is an admin-kind test identity.
 func (k principalKind) isTestAdmin() bool { return k.Found && store.IsTestAdminKind(k.Kind) }
 
+// isFederated reports whether the principal is a federated account.
+func (k principalKind) isFederated() bool { return k.Found && k.Kind == store.UserKindFederated }
+
 // isTestIdentity reports whether the principal is any test identity kind.
 func (k principalKind) isTestIdentity() bool {
 	return k.Found && (k.Kind == store.UserKindTestFixture || store.IsTestAdminKind(k.Kind))
@@ -178,6 +181,8 @@ func classifyUserKind(u *store.User) (principalKind, error) {
 		return principalKind{Found: true, Kind: store.UserKindHuman}, nil
 	case store.UserKindTestFixture, store.UserKindTestHubAdmin, store.UserKindTestSuperAdmin:
 		return principalKind{Found: true, Kind: u.Kind, ExpiresAt: u.ExpiresAt}, nil
+	case store.UserKindFederated:
+		return principalKind{Found: true, Kind: u.Kind}, nil
 	}
 	return principalKind{}, fmt.Errorf("%w: user %s", errUnknownPrincipalKind, u.ID)
 }

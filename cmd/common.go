@@ -378,6 +378,12 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		// The hub selected with 'scion use' never links or registers a
 		// project that is already linked to a hub.
 		HubFromContext: hubSource == targetSourceContext,
+		// A project registered or linked on the hub selected with 'scion
+		// use' gets a link entry, so it stays on that hub after a hub
+		// switch. Both writers are stderr: this runs before commands that
+		// print JSON on stdout. (The context hub always has an entry, so
+		// no new-hub line is printed here.)
+		RecordLink: contextLinkRecorder(os.Stderr, os.Stderr),
 		// On the local workstation hub, link an unregistered project
 		// without prompting; a remote hub keeps the prompt.
 		AutoLinkLocal: true,
@@ -1196,6 +1202,11 @@ func printHubWorkspaceSource(project *hubclient.Project) {
 	if project.Labels[store.LabelWorkspaceMode] == store.WorkspaceModeShared {
 		fmt.Fprintf(os.Stderr, "Using hub, shared workspace for repo %s\n", project.GitRemote)
 		fmt.Fprintf(os.Stderr, "  (agents mount the project's shared workspace on the runtime broker; no per-agent clone)\n")
+		return
+	}
+	if project.Labels[store.LabelWorkspaceMode] == store.WorkspaceModeWorktreePerAgent {
+		fmt.Fprintf(os.Stderr, "Using hub, git worktree per agent for repo %s\n", project.GitRemote)
+		fmt.Fprintf(os.Stderr, "  (for a checkout linked on this machine, each agent gets a worktree of it under .scion/agents/<name>/workspace; otherwise the runtime broker makes per-agent worktrees of its own clone)\n")
 		return
 	}
 	cloneURL := util.ResolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
