@@ -165,9 +165,9 @@ func (s *Server) projectKubernetesProfileMappings(ctx context.Context, projectID
 // Brokers contract), so they are never read as "nothing mapped".
 func (s *Server) brokerKubernetesProfileMappings(brokers []*store.RuntimeBroker) []kubernetesProfileMappings {
 	var out []kubernetesProfileMappings
-	embeddedID := s.embeddedBrokerSnapshot().id
+	embeddedState := s.embeddedBrokerSnapshot()
 	for _, broker := range brokers {
-		embedded := embeddedID != "" && broker.ID == embeddedID
+		embedded := embeddedState.has(broker.ID)
 		// The embedded broker's live settings, loaded at most once and only
 		// when a profile that could be Kubernetes is reached.
 		var live *config.VersionedSettings

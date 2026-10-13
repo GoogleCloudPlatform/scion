@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -22,7 +24,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -402,7 +403,7 @@ VALUES
 
 func TestPromoteDM_EmptyConversationID_PreservesExisting(t *testing.T) {
 	// Use a store WITHOUT the conversations table so ConversationID stays empty.
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Messages table WITH conversation_id column.
 	_, err := db.Exec(`
@@ -425,7 +426,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	require.NoError(t, err)
 
 	// NO conversations table — hasConversationsTable() will return false.
-	s := NewWebChatStore(db, "sqlite3")
+	s := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s.Init())
 
 	ctx := context.Background()
@@ -476,7 +477,7 @@ func TestPromoteDM_NoConversationID_SkipsDualWrite(t *testing.T) {
 	// conversations table is ABSENT, ConversationID stays empty and no
 	// conversation row is created. A future reader should not infer that
 	// production takes this path.
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Messages table only — NO conversations table.
 	_, err := db.Exec(`
@@ -498,7 +499,7 @@ CREATE TABLE IF NOT EXISTS messages (
 `)
 	require.NoError(t, err)
 
-	s := NewWebChatStore(db, "sqlite3")
+	s := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s.Init())
 
 	ctx := context.Background()
@@ -539,13 +540,13 @@ VALUES ('msg-10', 'proj-1', 'user:bob', 'user-2', 'agent:helper', 'agent-2', 'we
 // ---------------------------------------------------------------------------
 
 func TestBackfillTopicConversations_CreatesConversations(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Create conversations table first.
 	_, err := db.Exec(conversationsTableDDL)
 	require.NoError(t, err)
 
-	s := NewWebChatStore(db, "sqlite3")
+	s := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s.Init())
 
 	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano)
@@ -572,7 +573,7 @@ func TestBackfillTopicConversations_CreatesConversations(t *testing.T) {
 	require.NoError(t, err)
 
 	// Re-init triggers migrations including backfill.
-	s2 := NewWebChatStore(db, "sqlite3")
+	s2 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s2.Init())
 
 	// Verify all topics now have conversation_id and matching conversation rows.
@@ -590,12 +591,12 @@ func TestBackfillTopicConversations_CreatesConversations(t *testing.T) {
 }
 
 func TestBackfillTopicConversations_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	_, err := db.Exec(conversationsTableDDL)
 	require.NoError(t, err)
 
-	s := NewWebChatStore(db, "sqlite3")
+	s := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s.Init())
 
 	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339Nano)
@@ -611,7 +612,7 @@ func TestBackfillTopicConversations_Idempotent(t *testing.T) {
 	// Reset migration marker and re-run.
 	_, err = db.Exec("DELETE FROM webchat_migrations WHERE name = 'topic_conversation_backfill'")
 	require.NoError(t, err)
-	s2 := NewWebChatStore(db, "sqlite3")
+	s2 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s2.Init())
 
 	convID1 := getTopicConvID(t, db, "topic-idem")
@@ -621,7 +622,7 @@ func TestBackfillTopicConversations_Idempotent(t *testing.T) {
 	// Reset and run again — should produce no duplicates.
 	_, err = db.Exec("DELETE FROM webchat_migrations WHERE name = 'topic_conversation_backfill'")
 	require.NoError(t, err)
-	s3 := NewWebChatStore(db, "sqlite3")
+	s3 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s3.Init())
 
 	convID2 := getTopicConvID(t, db, "topic-idem")
@@ -646,7 +647,7 @@ func TestBackfillTopicConversations_SkipsWithoutConversationsTable(t *testing.T)
 	// Reset and re-run — should not fail even without conversations table.
 	_, err := db.Exec("DELETE FROM webchat_migrations WHERE name = 'topic_conversation_backfill'")
 	require.NoError(t, err)
-	s2 := NewWebChatStore(db, "sqlite3")
+	s2 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s2.Init())
 
 	// Topic should still have no conversation_id.
@@ -762,12 +763,12 @@ func TestCreateTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {
 	// openTestMemorySQLite pins MaxOpenConns=1, the production SQLite pool
 	// constraint. If hasConversationsTable() were called inside a tx, this
 	// would deadlock.
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	_, err := db.Exec(conversationsTableDDL)
 	require.NoError(t, err)
 
-	s := NewWebChatStore(db, "sqlite3")
+	s := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s.Init())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -790,12 +791,12 @@ func TestCreateTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {
 // hasConversationsTable() is called twice (auto-gen check + shouldDualWrite)
 // but both precede BeginTx, so no ambient-pool contention under the tx.
 func TestCreateTopic_AutoGen_UTX1_NoDeadlock(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3") // MaxOpenConns=1
+	db := openTestMemorySQLite(t, "sqlite") // MaxOpenConns=1
 
 	_, err := db.Exec(conversationsTableDDL)
 	require.NoError(t, err)
 
-	s := NewWebChatStore(db, "sqlite3")
+	s := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s.Init())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -818,12 +819,12 @@ func TestCreateTopic_AutoGen_UTX1_NoDeadlock(t *testing.T) {
 }
 
 func TestEnsureGeneralTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3") // MaxOpenConns=1
+	db := openTestMemorySQLite(t, "sqlite") // MaxOpenConns=1
 
 	_, err := db.Exec(conversationsTableDDL)
 	require.NoError(t, err)
 
-	s := NewWebChatStore(db, "sqlite3")
+	s := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s.Init())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -834,7 +835,7 @@ func TestEnsureGeneralTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {
 }
 
 func TestPromoteDM_DualWrite_UTX1_NoDeadlock(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3") // MaxOpenConns=1
+	db := openTestMemorySQLite(t, "sqlite") // MaxOpenConns=1
 
 	_, err := db.Exec(conversationsTableDDL)
 	require.NoError(t, err)
@@ -859,7 +860,7 @@ CREATE TABLE IF NOT EXISTS messages (
 `)
 	require.NoError(t, err)
 
-	s := NewWebChatStore(db, "sqlite3")
+	s := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s.Init())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

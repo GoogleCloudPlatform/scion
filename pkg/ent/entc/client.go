@@ -120,10 +120,9 @@ func withUTCTimezone(dsn string) string {
 // Location back to the caller. See tz-refactor design §2.1.2.
 //
 // Registered by OpenSQLite, OpenSQLiteReadOnly and openPostgres. Exported so
-// a caller that builds an *ent.Client around some other driver — for example
-// a test harness that must keep working under the "no_sqlite" build tag,
-// where modernc (and so OpenSQLite's "_timezone" option) is unavailable —
-// can still register it directly with client.Use(entc.UTCTimeHook).
+// a caller that builds an *ent.Client around its own *sql.DB, rather than
+// through those openers, can register it directly with
+// client.Use(entc.UTCTimeHook). No caller in this module does so today.
 //
 // What it does not cover, because a mutation hook never sees these:
 //   - predicate arguments, e.g. a bare time.Now() passed to a generated

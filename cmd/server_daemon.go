@@ -99,9 +99,8 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "simulate-remote-broker", simulateRemoteBroker)
 	// Only forward --host when explicitly set. The parent never loads config, so
 	// hubHost holds a default here; forwarding it unconditionally would make the
-	// child treat --host as changed and clobber a config-file host (and skip the
-	// workstation loopback default for the runtime broker). Unset → the child
-	// derives its own default (127.0.0.1 in workstation mode).
+	// child treat --host as changed and clobber a config-file host. Unset → the
+	// child derives its own default (127.0.0.1 in workstation mode).
 	if cmd.Flags().Changed("host") {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--host=%s", hubHost))
 	}
@@ -1117,18 +1116,12 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 			displayHost = "127.0.0.1"
 		}
 
-		// Auto-configure hub.endpoint so that `scion hub` commands work
-		// immediately after workstation-mode start.
-		hubEndpoint := fmt.Sprintf("http://%s:%d", displayHost, wPort)
-		if vs, err := config.LoadSingleFileVersioned(globalDir); err == nil {
-			if vs.GetHubEndpoint() == "" {
-				if err := config.UpdateVersionedSetting(globalDir, "hub.endpoint", hubEndpoint); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure hub endpoint: %v\n", err)
-				} else {
-					fmt.Printf("Configured hub endpoint: %s (run 'scion hub status' to verify)\n", hubEndpoint)
-				}
-			}
-		}
+		// Register the local hub in the hub list, so that `scion hub`
+		// commands work immediately after workstation-mode start (see
+		// registerLocalHub for when it becomes the current hub). No
+		// hub.endpoint is written: the server advertises its loopback
+		// endpoint without one.
+		registerLocalHub(os.Stdout, os.Stderr, fmt.Sprintf("http://%s:%d", displayHost, wPort))
 
 		// Wait for the server before asking the hub for its onboarding
 		// status. The Hub API is mounted on the web port in workstation mode.

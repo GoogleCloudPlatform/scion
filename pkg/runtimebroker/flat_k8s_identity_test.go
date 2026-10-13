@@ -38,14 +38,22 @@ func TestFlatInstanceStart_NoKubernetesIdentityOnDockerTarget(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true, activeProfile: "batch"})
+			// The existing agent's ownership record, its project ID and its
+			// agent ID, as a flat instance's start requires them (the
+			// existing-agent arrangement of the other flat start tests).
+			f.seedOwnedAgent(t)
+			env := map[string]string{"SCION_AGENT_ID": flatTestAgentID}
+			for k, v := range tc.env {
+				env[k] = v
+			}
 			body, err := json.Marshal(map[string]any{
 				"expectedRuntimeTargetId": f.identity.RuntimeTarget.ID,
-				"resolvedEnv":             tc.env,
+				"resolvedEnv":             env,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start", string(body))
+			w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery, string(body))
 			if w.Code != http.StatusAccepted {
 				t.Fatalf("status = %d, want 202: %s", w.Code, w.Body.String())
 			}

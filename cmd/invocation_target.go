@@ -15,21 +15,31 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/spf13/cobra"
 )
 
-// targetSourceContext marks a hub endpoint or project that
-// resolveInvocationTarget took from the current context ('scion use').
-const targetSourceContext = "context"
+const (
+	// targetSourceContext marks a hub endpoint or project that
+	// resolveInvocationTarget took from the current context ('scion use').
+	targetSourceContext = "context"
+	// targetSourceDirectory marks a hub endpoint that
+	// resolveInvocationTarget took from the link entry of the directory
+	// project ('scion hub link').
+	targetSourceDirectory = "directory"
+)
 
 var (
-	// hubSource is targetSourceContext when resolveInvocationTarget set
-	// hubEndpoint from the current context, and "" otherwise.
+	// hubSource records where resolveInvocationTarget took hubEndpoint
+	// from: targetSourceContext or targetSourceDirectory. It is "" when
+	// hubEndpoint is the --hub flag (or empty).
 	hubSource string
 	// projectSource is targetSourceContext when resolveInvocationTarget set
 	// projectPath from the current context, and "" otherwise.
@@ -37,6 +47,9 @@ var (
 	// contextProjectID is the hub project UUID resolveInvocationTarget
 	// injected as projectPath, or "".
 	contextProjectID string
+	// hubFlagName is the hub nickname given with --hub, which
+	// resolveInvocationTarget replaced by its endpoint in hubEndpoint, or "".
+	hubFlagName string
 	// contextWarned records that resolveInvocationTarget already warned
 	// about an unreadable context.yaml in this invocation.
 	contextWarned bool
@@ -134,14 +147,83 @@ var contextIgnoredCommands = map[string]bool{
 	"scion hub shadow": true,
 }
 
+// importGlobalHubSettings turns on the one-time import of the global
+// settings' hub.endpoint into the hub list when the context is read. It is
+// always on in the CLI; only the cmd tests' TestMain turns it off (see
+// there).
+var importGlobalHubSettings = true
+
+// loadInvocationContext reads context.yaml for this invocation, after the
+// one-time import of the global settings' hub configuration. A failure to
+// save the import is a warning on stderr: the returned context holds it
+// anyway.
+func loadInvocationContext(stderr io.Writer) (*config.CLIContext, error) {
+	if !importGlobalHubSettings {
+		return config.LoadCLIContext()
+	}
+	c, err := config.LoadCLIContextImported(useHubBaseName)
+	if errors.Is(err, config.ErrCLIContextImport) {
+		_, _ = fmt.Fprintf(stderr, "Warning: %v\n", err)
+		return c, nil
+	}
+	return c, err
+}
+
+// isHubNickname reports whether a --hub value names a hub entry rather
+// than a URL. A URL always contains "://"; a nickname never contains ':'
+// or '/'. Other values are left as they are.
+func isHubNickname(v string) bool {
+	return !strings.Contains(v, "://") && config.ValidHubName(v)
+}
+
+// unknownHubError is the error for a --hub nickname that has no entry.
+func unknownHubError(name string, c *config.CLIContext) error {
+	names := c.HubNames()
+	if len(names) == 0 {
+		return fmt.Errorf("unknown hub '%s': no hubs are registered; add one with 'scion hub add <name> <url>', or pass the hub URL", name)
+	}
+	return fmt.Errorf("unknown hub '%s'; registered hubs: %s", name, strings.Join(names, ", "))
+}
+
+// resolveHubNickname replaces a --hub nickname in hubEndpoint with that
+// entry's endpoint, and records the nickname in hubFlagName. A URL is left
+// as it is: one that is not registered is used for this invocation only.
+func resolveHubNickname(c *config.CLIContext) error {
+	if !isHubNickname(hubEndpoint) {
+		return nil
+	}
+	h := c.Hubs[hubEndpoint]
+	if h == nil {
+		return unknownHubError(hubEndpoint, c)
+	}
+	if h.Endpoint == "" {
+		return hubWithoutEndpointError(hubEndpoint)
+	}
+	hubFlagName = hubEndpoint
+	hubEndpoint = h.Endpoint
+	return nil
+}
+
+// hubWithoutEndpointError is the error for a nickname whose hub entry has
+// no endpoint (a hand-edited context.yaml). Using it would silently drop
+// the --hub choice.
+func hubWithoutEndpointError(name string) error {
+	return fmt.Errorf("hub '%s' has no endpoint; remove it with 'scion hub remove %s' and add it again with 'scion hub add %s <url>'", name, name, name)
+}
+
 // resolveInvocationTarget fills the hub endpoint and the project of this
-// invocation from the current context ('scion use') where nothing more
-// specific chose them. It only fills empty values and never overrides a
-// flag. The precedence is: flags, then the environment, then the directory
-// project, then the current context, then the global settings.
+// invocation from the hub list and the current context ('scion use') where
+// nothing more specific chose them. It only fills empty values and never
+// overrides a flag. The precedence is: flags, then the environment, then
+// the directory project (its link entry, then its settings), then the
+// current context, then the global settings.
 //
-//   - Hub: set from the current hub when neither --hub nor
-//     SCION_HUB_ENDPOINT/SCION_HUB_URL is set and there is no filesystem
+//   - --hub: a hub nickname is replaced by its entry's endpoint; an unknown
+//     nickname is an error that lists the registered names. When the
+//     directory project is linked to another hub, a warning says so.
+//   - Hub: set from the filesystem project's link entry ('scion hub link')
+//     when neither --hub nor SCION_HUB_ENDPOINT/SCION_HUB_URL is set.
+//     Otherwise set from the current hub when there is no filesystem
 //     project, or its merged settings have no endpoint.
 //   - Project: set to the hub UUID of the project remembered for the
 //     effective hub, when no --project, no --global and no filesystem
@@ -149,31 +231,56 @@ var contextIgnoredCommands = map[string]bool{
 //     than the slug because it can never be mistaken for a local directory.
 //
 // It records hubSource and projectSource. A context file that cannot be
-// read is a warning, and the invocation proceeds without it.
-func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
+// read is a warning, and the invocation proceeds without it, unless --hub
+// is a nickname, which then cannot be resolved.
+func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 	hubSource = ""
 	projectSource = ""
 	contextProjectID = ""
 	contextWarned = false
-	if contextDisabled(mode) || contextSkippedSubtrees[topLevelName(cmd)] || contextIgnoredCommands[cmd.CommandPath()] {
-		return
+	hubFlagName = ""
+	if contextDisabled(mode) || contextSkippedSubtrees[topLevelName(cmd)] {
+		return nil
 	}
 	// --no-hub turns the hub off, and a context project is a hub project.
 	// Remove this check together with the --no-hub flag.
 	if noHub {
-		return
+		return nil
 	}
-	ctx, err := config.LoadCLIContext()
+	// The commands that ignore the context read it only to resolve an
+	// explicit --hub nickname.
+	ignored := contextIgnoredCommands[cmd.CommandPath()]
+	if ignored && !isHubNickname(hubEndpoint) {
+		return nil
+	}
+	ctx, err := loadInvocationContext(cmd.ErrOrStderr())
 	if err != nil {
+		if isHubNickname(hubEndpoint) {
+			return fmt.Errorf("cannot look up hub '%s': %w", hubEndpoint, err)
+		}
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: ignoring the current context: %v\n", err)
 		contextWarned = true
-		return
+		return nil
+	}
+	// An explicit nickname is an explicit --hub, also for the commands
+	// that otherwise ignore the context.
+	if err := resolveHubNickname(ctx); err != nil {
+		return err
+	}
+	if ignored {
+		return nil
+	}
+	// config subcommands act on local settings files, never on a hub
+	// project, so they never get an injected project (they still see the
+	// context hub). commandRequiresProject alone does not exempt them.
+	projectScoped := projectPath == "" && !globalMode && commandRequiresProject(cmd) && !commandInSubtree(cmd, "config")
+	if projectScoped && hubFlagEndpoint() != "" {
+		warnHubFlagMismatch(cmd.ErrOrStderr(), ctx)
 	}
 	// Without hub entries the context can fill nothing: skip the project
-	// walk and settings load below, so users who never ran 'scion use' pay
-	// nothing.
+	// walk and settings load below.
 	if len(ctx.Hubs) == 0 {
-		return
+		return nil
 	}
 	envHub, _ := envHubEndpoint()
 	// The filesystem project is looked up at most once, and only when a
@@ -188,6 +295,13 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
 		return inDir
 	}
 
+	if hubEndpoint == "" && envHub == "" && inFilesystemProject() {
+		if _, h := ctx.LinkEntryFor(config.LinkPathForProject(dir)); h != nil {
+			hubEndpoint = h.Endpoint
+			hubSource = targetSourceDirectory
+		}
+	}
+
 	if h := ctx.CurrentHubEntry(); h != nil && h.Endpoint != "" && hubEndpoint == "" && envHub == "" {
 		if !inFilesystemProject() || mergedHubEndpoint(dir) == "" {
 			hubEndpoint = h.Endpoint
@@ -195,10 +309,7 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
 		}
 	}
 
-	// config subcommands act on local settings files, never on a hub
-	// project, so they never get an injected project (they still see the
-	// context hub). commandRequiresProject alone does not exempt them.
-	if projectPath == "" && !globalMode && commandRequiresProject(cmd) && !commandInSubtree(cmd, "config") {
+	if projectScoped {
 		effectiveHub := hubEndpoint
 		if effectiveHub == "" {
 			effectiveHub = envHub
@@ -209,17 +320,67 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) {
 			contextProjectID = p.ID
 		}
 	}
+	return nil
 }
 
 // hubFlagEndpoint returns the --hub flag value: hubEndpoint, unless
-// resolveInvocationTarget filled it from the current context. Code that
-// persists "the endpoint given with --hub" must use this, so a hub selected
-// with 'scion use' is never written into settings.
+// resolveInvocationTarget filled it from the current context or from a
+// link entry. Code that persists "the endpoint given with --hub" must use
+// this, so a hub from the hub list is never written into settings.
 func hubFlagEndpoint() string {
-	if hubSource == targetSourceContext {
+	if hubSource != "" {
 		return ""
 	}
 	return hubEndpoint
+}
+
+// directoryLinkedHub returns the endpoint of the hub the walked directory
+// project is linked to, and that hub's nickname ("" when it has none): its
+// link entry, or else, for a project linked before link entries existed,
+// the hub.endpoint in its own settings. It returns "" when there is no
+// walked project or it is not linked.
+func directoryLinkedHub(c *config.CLIContext) (endpoint, name string) {
+	dir, ok := walkedProject()
+	if !ok {
+		return "", ""
+	}
+	if p, h := c.LinkEntryFor(config.LinkPathForProject(dir)); h != nil {
+		return h.Endpoint, p.Hub
+	}
+	if linked := hubsync.ProjectLinkedSetting(dir, false); linked == nil || !*linked {
+		return "", ""
+	}
+	ep, scope := fileHubEndpoint(dir, false)
+	if scope != "project" {
+		return "", ""
+	}
+	name, _ = c.HubByEndpoint(ep)
+	return ep, name
+}
+
+// describeHub returns a hub for messages: "'name' (endpoint)", or the
+// endpoint alone when the hub has no nickname.
+func describeHub(name, endpoint string) string {
+	if name == "" {
+		return endpoint
+	}
+	return fmt.Sprintf("'%s' (%s)", name, endpoint)
+}
+
+// warnHubFlagMismatch warns when --hub selects a hub other than the one
+// the walked directory project is linked to: the project's ID is sent to
+// the --hub hub, where it most likely does not exist.
+func warnHubFlagMismatch(stderr io.Writer, c *config.CLIContext) {
+	dirHub, dirName := directoryLinkedHub(c)
+	if dirHub == "" || config.NormalizeEndpoint(dirHub) == config.NormalizeEndpoint(hubEndpoint) {
+		return
+	}
+	flagName := hubFlagName
+	if flagName == "" {
+		flagName, _ = c.HubByEndpoint(hubEndpoint)
+	}
+	_, _ = fmt.Fprintf(stderr, "Warning: this directory is linked to hub %s, but --hub selects %s; the directory's project may not exist there.\n",
+		describeHub(dirName, config.NormalizeEndpoint(dirHub)), describeHub(flagName, config.NormalizeEndpoint(hubEndpoint)))
 }
 
 // persistHubFlagEndpoint saves the --hub flag value as hub.endpoint in the

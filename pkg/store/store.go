@@ -200,6 +200,41 @@ type Store interface {
 	// spans the user and role-binding sub-stores.
 	CreateTestAdminUser(ctx context.Context, user *User, roleDefinitionID string) (*RoleBinding, error)
 
+	// CreateFederatedUser creates a federated account: a local user row
+	// for a user of a trusted external issuer. It is the only store path
+	// that writes UserKindFederated. It requires Kind UserKindFederated,
+	// a non-empty HomeIssuer with a host and a FederatedEmail containing
+	// "@", Status UserStatusPending or UserStatusActive, an empty Email
+	// and an empty or viewer Role, and none of the test identity or
+	// invite fields; it returns ErrInvalidInput otherwise. It generates
+	// the ID when empty, normalizes HomeIssuer (NormalizeFederatedIssuer)
+	// and FederatedEmail (NormalizeFederatedEmail), sets Role to viewer
+	// and Email to FederatedSyntheticEmail, and writes them back to user.
+	// A second account for the same (HomeIssuer, FederatedEmail) returns
+	// ErrAlreadyExists.
+	CreateFederatedUser(ctx context.Context, user *User) error
+
+	// GetFederatedUserByEmail returns the federated account of
+	// (homeIssuer, federatedEmail), both normalized before the lookup,
+	// or ErrNotFound.
+	GetFederatedUserByEmail(ctx context.Context, homeIssuer, federatedEmail string) (*User, error)
+
+	// LinkFederatedIdentity records that the (issuer, subject) pair of
+	// the trusted issuer is the federated account userID: an
+	// ExternalIdentityBinding with Provider FederationIdentityProvider and
+	// the lower-cased email. The account must be UserKindFederated with
+	// HomeIssuer equal to the normalized issuer, and must not be linked
+	// already (ErrInvalidInput otherwise); a pair linked to any account
+	// returns ErrAlreadyExists, as does the later of two concurrent links
+	// of one account. It does not change the account's status.
+	LinkFederatedIdentity(ctx context.Context, userID, issuer, subject, email string) (*ExternalIdentityBinding, error)
+
+	// GetFederatedUserBySubject resolves the (issuer, subject) pair of a
+	// trusted issuer to its federated account through the binding
+	// LinkFederatedIdentity wrote. It returns ErrNotFound when the pair
+	// is not linked, or when the linked row is not UserKindFederated.
+	GetFederatedUserBySubject(ctx context.Context, issuer, subject string) (*User, error)
+
 	// ListFixtureRootedResources returns the agents (soft-deleted ones
 	// included), schedules, groups and projects whose creation-time
 	// provenance stamp has fixture_root_id == rootID (ptone/scion#4240,
@@ -1719,7 +1754,10 @@ type UserStore interface {
 	// skipped. The returned map is keyed by user ID.
 	GetUsersByIDs(ctx context.Context, ids []string) (map[string]*User, error)
 
-	// GetUserByEmail retrieves a user by email.
+	// GetUserByEmail retrieves a user by email. It never returns a
+	// federated account (UserKindFederated), even for its synthetic
+	// address: those are found only by GetFederatedUserByEmail and
+	// GetFederatedUserBySubject.
 	// Returns ErrNotFound if the user doesn't exist.
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 
@@ -1748,12 +1786,14 @@ type UserStore interface {
 	// the user does not exist.
 	LockUserRow(ctx context.Context, id string, exclusive bool) error
 
-	// ListUsers returns users matching the filter criteria.
+	// ListUsers returns users matching the filter criteria. Federated
+	// accounts (UserKindFederated) are never listed.
 	ListUsers(ctx context.Context, filter UserFilter, opts ListOptions) (*ListResult[User], error)
 
 	// IsUserInvitedOrActive returns true if a User record exists with the
 	// given email and status in ("invited", "active"). Used by the
 	// invite_only authorization gate as a replacement for IsEmailAllowListed.
+	// A federated account never matches.
 	IsUserInvitedOrActive(ctx context.Context, email string) (bool, error)
 
 	// IncrementSessionGeneration atomically increments the user's
@@ -3633,6 +3673,56 @@ type AgentDelegationStore interface {
 	// UpdateAgentDelegatedCredentialLastSeen sets the credential's
 	// last_seen_at. Callers treat a failure as best effort.
 	UpdateAgentDelegatedCredentialLastSeen(ctx context.Context, id string, at time.Time) error
+
+	// ListAgentDelegationGrants returns the grants that match filter,
+	// newest first. At least one of filter.AgentID and filter.IssuerUserID
+	// must be set; an empty filter returns ErrInvalidInput.
+	ListAgentDelegationGrants(ctx context.Context, filter AgentDelegationGrantFilter) ([]*AgentDelegationGrant, error)
+
+	// CountActiveAgentDelegationGrants counts the grants that match filter
+	// and are active at now: not revoked and expiring after now. The same
+	// filter rule as ListAgentDelegationGrants applies.
+	CountActiveAgentDelegationGrants(ctx context.Context, filter AgentDelegationGrantFilter, now time.Time) (int, error)
+
+	// LockAgentDelegationIssuer serializes grant issuance for one issuer.
+	// On PostgreSQL it runs SELECT ... FOR UPDATE on the user row; on
+	// SQLite, which serializes writes, it is a plain existence check. It
+	// must run inside WithTx, before the per-issuer grant count. Returns
+	// ErrNotFound if the user does not exist.
+	LockAgentDelegationIssuer(ctx context.Context, userID string) error
+
+	// LockAgentDelegationGrant serializes credential issuance and
+	// revocation for one grant, the same way, on the grant row, and
+	// returns the grant as read under the lock. Returns ErrNotFound if
+	// the grant does not exist.
+	LockAgentDelegationGrant(ctx context.Context, id string) (*AgentDelegationGrant, error)
+
+	// GetAgentDelegatedCredential returns the delegated credential with
+	// id, or ErrNotFound.
+	GetAgentDelegatedCredential(ctx context.Context, id string) (*AgentDelegatedCredential, error)
+
+	// ListActiveAgentDelegatedCredentials returns the credentials of the
+	// given grants that are active at now (not revoked and expiring after
+	// now), oldest first.
+	ListActiveAgentDelegatedCredentials(ctx context.Context, grantIDs []string, now time.Time) ([]*AgentDelegatedCredential, error)
+
+	// RevokeAgentDelegatedCredential revokes the credential with id, with
+	// reason. The update is conditional on revoked_at being NULL: a
+	// credential that is already revoked is left unchanged and reports
+	// revoked=false. Returns ErrNotFound if the credential does not exist.
+	RevokeAgentDelegatedCredential(ctx context.Context, id, reason string, at time.Time) (revoked bool, err error)
+
+	// PurgeAgentDelegatedCredentials deletes every delegated credential
+	// whose expiry is before expiredBefore, revoked or not, and returns
+	// the number deleted. Grants are never purged.
+	PurgeAgentDelegatedCredentials(ctx context.Context, expiredBefore time.Time) (int, error)
+}
+
+// AgentDelegationGrantFilter selects agent delegation grants by bound
+// agent, by issuer, or both.
+type AgentDelegationGrantFilter struct {
+	AgentID      string
+	IssuerUserID string
 }
 
 // =============================================================================

@@ -162,7 +162,7 @@ class AuthResolutionTest(unittest.TestCase):
 _VERTEX_ENV_KEYS = [
     "VERTEX_PROJECT_ID", "VERTEX_REGION", "VERTEX_CREDENTIALS_PATH",
     "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION",
-    "GOOGLE_APPLICATION_CREDENTIALS",
+    "CLOUD_ML_REGION", "GOOGLE_APPLICATION_CREDENTIALS",
 ]
 
 
@@ -290,9 +290,9 @@ class VertexAIProvisionTest(unittest.TestCase):
 
 
 class VertexRegionFallbackTest(unittest.TestCase):
-    """Test VERTEX_REGION → GOOGLE_CLOUD_REGION → GOOGLE_CLOUD_LOCATION → us-central1."""
+    """Test VERTEX_REGION → GOOGLE_CLOUD_LOCATION → GOOGLE_CLOUD_REGION → us-central1."""
 
-    def _region(self, env_overrides: dict[str, str]) -> str:
+    def _region_and_warnings(self, env_overrides: dict[str, str]) -> tuple[str, list[str]]:
         with tempfile.TemporaryDirectory() as tmp, clean_vertex_env():
             bundle = os.path.join(tmp, "bundle")
             os.makedirs(os.path.join(bundle, "inputs"))
@@ -308,19 +308,40 @@ class VertexRegionFallbackTest(unittest.TestCase):
                 env_secret_files[k] = path
 
             ctx = _make_ctx(bundle, env_vars=list(env_overrides), env_secret_files=env_secret_files)
-            return provision._build_vertex_env(ctx).get("VERTEX_REGION", "")
+            warnings: list[str] = []
+            ctx.warn = warnings.append
+            return provision._build_vertex_env(ctx).get("VERTEX_REGION", ""), warnings
+
+    def _region(self, env_overrides: dict[str, str]) -> str:
+        return self._region_and_warnings(env_overrides)[0]
 
     def test_vertex_region_preferred(self) -> None:
-        self.assertEqual(
-            self._region({"VERTEX_REGION": "europe-west1", "GOOGLE_CLOUD_REGION": "asia-east1"}),
-            "europe-west1",
-        )
+        region, warnings = self._region_and_warnings({
+            "VERTEX_REGION": "europe-west1",
+            "GOOGLE_CLOUD_LOCATION": "us-west1",
+            "GOOGLE_CLOUD_REGION": "asia-east1",
+        })
+        self.assertEqual(region, "europe-west1")
+        # VERTEX_REGION decides, so the LOCATION/REGION conflict is not reported.
+        self.assertEqual(warnings, [])
 
-    def test_google_cloud_region_second(self) -> None:
+    def test_google_cloud_location_wins_over_region_with_warning(self) -> None:
+        region, warnings = self._region_and_warnings({
+            "GOOGLE_CLOUD_LOCATION": "us-west1",
+            "GOOGLE_CLOUD_REGION": "asia-east1",
+        })
+        self.assertEqual(region, "us-west1")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("GOOGLE_CLOUD_REGION", warnings[0])
+
+    def test_google_cloud_region_alone(self) -> None:
         self.assertEqual(self._region({"GOOGLE_CLOUD_REGION": "asia-east1"}), "asia-east1")
 
-    def test_google_cloud_location_third(self) -> None:
+    def test_google_cloud_location_alone(self) -> None:
         self.assertEqual(self._region({"GOOGLE_CLOUD_LOCATION": "us-west1"}), "us-west1")
+
+    def test_cloud_ml_region_not_read(self) -> None:
+        self.assertEqual(self._region({"CLOUD_ML_REGION": "europe-west4"}), "us-central1")
 
     def test_default_us_central1(self) -> None:
         self.assertEqual(self._region({}), "us-central1")

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -284,6 +285,46 @@ func ShowMatchingProjectsPrompt(projectName string, matches []ProjectMatch, next
 		}
 
 		return ProjectChoiceLink, matches[choice-1].ID, nil
+	}
+}
+
+// ChooseOption shows title and the numbered options, and asks the user to
+// pick one. It returns the index of the chosen option, or -1 when the user
+// cancels ('c', or the end of input). An invalid answer is asked again.
+// Without a terminal it does not read stdin and returns ErrNoTerminal:
+// there is no default to pick, so the caller reports the choice instead.
+func ChooseOption(title string, options []string) (int, error) {
+	if len(options) == 0 {
+		return -1, errors.New("no options to choose from")
+	}
+	if !stdinIsTerminal() {
+		return -1, ErrNoTerminal
+	}
+	_, _ = fmt.Fprintln(promptOut, title)
+	for i, o := range options {
+		_, _ = fmt.Fprintf(promptOut, "  %d) %s\n", i+1, o)
+	}
+	reader := bufio.NewReader(promptIn)
+	for {
+		_, _ = fmt.Fprintf(promptOut, "Enter choice 1-%d (or 'c' to cancel): ", len(options))
+		input, err := reader.ReadString('\n')
+		atEnd := err != nil
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "" && atEnd {
+			_, _ = fmt.Fprintln(promptOut)
+			return -1, nil
+		}
+		if input == "c" || input == "cancel" {
+			return -1, nil
+		}
+		n, convErr := strconv.Atoi(input)
+		if convErr == nil && n >= 1 && n <= len(options) {
+			return n - 1, nil
+		}
+		_, _ = fmt.Fprintf(promptOut, "Invalid choice. Please enter 1-%d.\n", len(options))
+		if atEnd {
+			return -1, nil
+		}
 	}
 }
 

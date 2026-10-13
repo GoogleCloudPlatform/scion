@@ -16,11 +16,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auth"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -94,6 +97,11 @@ already has hub settings, or with an explicit --global=false. An existing
 hub.endpoint is never overwritten. If hub mode is off, an interactive login
 offers to enable it (in the same settings); otherwise run 'scion hub enable'.
 
+--hub-url and --hub accept a hub nickname ('scion hub list'). A hub URL
+given with either flag that is not in the hub list yet is added to it after
+a successful login, with a nickname derived from its host; it does not
+become the current hub.
+
 Example:
   scion hub auth login
   scion hub auth login --hub-url https://hub.example.com
@@ -117,67 +125,140 @@ func init() {
 	hubAuthCmd.AddCommand(hubAuthLogoutCmd)
 
 	// Flags for login command
-	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Hub server URL; takes precedence over --hub, SCION_HUB_ENDPOINT, hub.endpoint in settings and SCION_HUB_URL")
+	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Hub nickname or server URL; takes precedence over --hub, SCION_HUB_ENDPOINT, hub.endpoint in settings and SCION_HUB_URL")
 	hubAuthLoginCmd.Flags().BoolVar(&hubAuthNoBrowser, "no-browser", false, "Use device flow instead of opening a browser")
 	hubAuthLoginCmd.Flags().String("provider", "", "OAuth provider to use (google or github)")
 }
 
 func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 	// Resolve hub URL: --hub-url, --hub, SCION_HUB_ENDPOINT, settings, SCION_HUB_URL.
-	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
+	// Both flags accept a hub nickname.
+	hubURLFlag, err := hubAuthURLFlag(hubAuthHubURL)
+	if err != nil {
+		return err
+	}
+	hubURL := resolveHubAuthURL(hubURLFlag, hubEndpoint, os.Getenv, settingsHubEndpoint)
 	if hubURL == "" {
 		return fmt.Errorf("hub URL not specified, use --hub-url, --hub, SCION_HUB_ENDPOINT, hub.endpoint in settings or SCION_HUB_URL")
 	}
 
 	fmt.Printf("Authenticating with Hub at %s\n", hubURL)
 
-	// Create hub client (unauthenticated for initial OAuth)
-	client, err := hubclient.New(hubURL, hubclient.WithTimeout(30*time.Second))
-	if err != nil {
-		return fmt.Errorf("failed to create Hub client: %w", err)
-	}
-
-	var tokenResp *hubclient.CLITokenResponse
 	provider, err := cmd.Flags().GetString("provider")
 	if err != nil {
 		return fmt.Errorf("failed to read provider flag: %w", err)
+	}
+	tokenResp, err := hubAuthLoginFlow(cmd, hubURL, provider)
+	if err != nil {
+		return err
+	}
+	return finishHubAuthLogin(cmd, hubURL, tokenResp)
+}
+
+// hubAuthLoginFlow runs the OAuth login to the hub at hubURL: the browser
+// flow, or the device flow with --no-browser or in a headless environment.
+// It returns the token and stores nothing. extra adds client options, such
+// as the transport auth for a hub the CLI picked itself.
+func hubAuthLoginFlow(cmd *cobra.Command, hubURL, provider string, extra ...hubclient.Option) (*hubclient.CLITokenResponse, error) {
+	// Create hub client (unauthenticated for initial OAuth)
+	opts := append([]hubclient.Option{hubclient.WithTimeout(30 * time.Second)}, extra...)
+	client, err := hubclient.New(hubURL, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Hub client: %w", err)
 	}
 
 	if hubAuthNoBrowser || util.IsHeadlessEnvironment() {
 		provider, err := resolveExplicitDeviceFlowProvider(cmd.Context(), client.Auth(), provider)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// Device authorization flow for headless environments
 		deviceAuth := newDeviceFlowAuth(client.Auth(), provider)
-		tokenResp, err = deviceAuth.Authenticate(cmd.Context())
+		tokenResp, err := deviceAuth.Authenticate(cmd.Context())
 		if err != nil {
-			return fmt.Errorf("device flow authentication failed: %w", err)
+			return nil, fmt.Errorf("device flow authentication failed: %w", err)
 		}
-	} else {
-		// Browser-based OAuth flow
-		tokenResp, err = runBrowserAuthFlow(cmd, client, provider)
-		if err != nil {
-			return err
-		}
+		return tokenResp, nil
 	}
+	// Browser-based OAuth flow
+	return runBrowserAuthFlow(cmd, client, provider)
+}
 
+// finishHubAuthLogin completes a successful login: it stores the
+// credential, adds a URL given explicitly with --hub-url or --hub to the
+// hub list, and records the endpoint in settings where that applies.
+func finishHubAuthLogin(cmd *cobra.Command, hubURL string, tokenResp *hubclient.CLITokenResponse) error {
 	if err := storeTokenAndPrintResult(hubURL, tokenResp); err != nil {
 		return err
+	}
+	if loginHubURLGivenExplicitly() {
+		registerLoginHub(cmd.OutOrStdout(), cmd.ErrOrStderr(), hubURL)
 	}
 	recordLoginEndpoint(cmd, hubURL)
 	return nil
 }
 
+// loginHubURLGivenExplicitly reports whether 'hub auth login' got its hub
+// as a URL in --hub-url or --hub (not as a nickname, and not from the
+// environment, settings or the current context). Only such a URL is added
+// to the hub list.
+func loginHubURLGivenExplicitly() bool {
+	if hubAuthHubURL != "" {
+		return !isHubNickname(hubAuthHubURL)
+	}
+	return hubFlagEndpoint() != "" && hubFlagName == ""
+}
+
+// registerLoginHub adds a hub entry for hubURL, after a successful login,
+// when no entry has that endpoint. The nickname is derived from the host
+// and printed. It does not change the current hub. A failure is a warning:
+// the login itself succeeded.
+func registerLoginHub(out, stderr io.Writer, hubURL string) {
+	if contextDisabled(resolveMode()) {
+		return
+	}
+	if err := config.ValidateHubURL(hubURL); err != nil {
+		_, _ = fmt.Fprintf(stderr, "Warning: could not add %s to the hub list: %v\n", hubURL, err)
+		return
+	}
+	var name string
+	var created bool
+	err := config.UpdateCLIContext(func(c *config.CLIContext) error {
+		name, created = c.EnsureHub(hubURL, useHubBaseName(hubURL))
+		if !created {
+			return errLoginHubKnown
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, errLoginHubKnown):
+	case err != nil:
+		_, _ = fmt.Fprintf(stderr, "Warning: could not add %s to the hub list: %v\n", hubURL, err)
+	case created:
+		printRegisteredHub(out, name, config.NormalizeEndpoint(hubURL))
+	}
+}
+
+// errLoginHubKnown stops the context update of registerLoginHub when the
+// hub already has an entry, so the file is not rewritten.
+var errLoginHubKnown = errors.New("hub already registered")
+
 // recordLoginEndpoint makes a successful login usable by the rest of the
 // CLI. When the hub came from the current context ('scion use'; no
-// --hub-url, --hub or environment variable chose it), the settings are left
-// alone: the context already targets that hub, and writing it to the global
-// hub.endpoint would make the workstation server advertise it. Otherwise
+// --hub-url, --hub or environment variable chose it), or from the link
+// entry of the directory project, the settings are left alone: the hub
+// list already targets that hub, and writing it to the global hub.endpoint
+// would make the workstation server advertise it. Otherwise
 // persistLoginEndpointForInvocation saves the endpoint as before.
 func recordLoginEndpoint(cmd *cobra.Command, hubURL string) {
 	if hubAuthHubURL == "" && hubSource == targetSourceContext {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Logged in to %s (current hub, selected with 'scion use'); settings unchanged.\n", hubURL)
+		return
+	}
+	// The hub of a linked directory comes from its link entry in the hub
+	// list, so it is not written to settings either.
+	if hubAuthHubURL == "" && hubSource == targetSourceDirectory {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Logged in to %s (the hub this directory is linked to); settings unchanged.\n", hubURL)
 		return
 	}
 	persistLoginEndpointForInvocation(cmd, hubURL)

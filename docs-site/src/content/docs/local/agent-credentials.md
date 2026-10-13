@@ -214,7 +214,7 @@ Uses Google Cloud's Vertex AI endpoints with Application Default Credentials (AD
 - **Assigned GCP Identity**: If the agent is assigned a Hub-managed GCP Service Account via metadata emulation, Vertex AI will automatically use it. This is the recommended and most secure approach.
 - **ADC JSON file**: On a workstation, your host file at `~/.config/gcloud/application_default_credentials.json` is used when `auto_inject_gcloud_adc: true` is set in your global settings. Otherwise, you can upload an ADC file via the `gcloud-adc` file secret or specify the `GOOGLE_APPLICATION_CREDENTIALS` environment variable pointing to a custom credential file.
 - `GOOGLE_CLOUD_PROJECT`: Your Google Cloud project ID.
-- `GOOGLE_CLOUD_REGION`: The region (e.g., `us-east5`). Required for Claude, optional but recommended for Gemini. `CLOUD_ML_REGION` and `GOOGLE_CLOUD_LOCATION` are accepted as alternatives.
+- `GOOGLE_CLOUD_REGION`: The region (e.g., `us-east5`). Required for Claude, optional but recommended for Gemini. `GOOGLE_CLOUD_LOCATION` and `CLOUD_ML_REGION` are accepted as alternatives. If more than one is set, Scion uses them in this order: `GOOGLE_CLOUD_LOCATION`, then `GOOGLE_CLOUD_REGION`, then `CLOUD_ML_REGION`. It prints a warning when `GOOGLE_CLOUD_LOCATION` and `GOOGLE_CLOUD_REGION` are both set to different values. Hermes checks `VERTEX_REGION` first. Hermes, Antigravity and OpenCode do not read `CLOUD_ML_REGION` directly (OpenCode also accepts `VERTEX_LOCATION`, last).
 
 **Workstation Setup:**
 ```bash

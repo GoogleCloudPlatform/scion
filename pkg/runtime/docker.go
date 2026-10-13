@@ -292,7 +292,7 @@ func (r *DockerRuntime) execListWithRetry(ctx context.Context) ([]byte, error) {
 
 		jitter := 1 + dockerListJitter*(2*rand.Float64()-1)
 		sleep := time.Duration(float64(backoff) * jitter)
-		runtimeLog.Debug("docker ps failed, retrying", "attempt", attempt, "max_attempts", dockerListMaxAttempts, "backoff", sleep, "error", err)
+		runtimeLog().Debug("docker ps failed, retrying", "attempt", attempt, "max_attempts", dockerListMaxAttempts, "backoff", sleep, "error", err)
 
 		timer := time.NewTimer(sleep)
 		select {
