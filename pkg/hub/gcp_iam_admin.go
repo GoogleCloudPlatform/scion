@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -173,15 +174,54 @@ func isEventualConsistencyError(err error) bool {
 		strings.Contains(errStr, "400")
 }
 
+// gcpProjectIDLookupTimeout bounds the metadata server project ID lookup in
+// ResolveGCPProjectID. It only applies once metadata.OnGCE has said the
+// process runs on GCP (or GCE_METADATA_HOST is set), so it is a backstop, not
+// what keeps startup fast off GCP. It is long enough to keep the client
+// library's own retry budget (six attempts with backoff, about 13s when every
+// dial times out), which covers a metadata server that is still starting,
+// such as the GKE Workload Identity server right after a pod starts. It cuts
+// off an endpoint that accepts connections but never answers (each attempt
+// may otherwise wait for the 5s HTTP client timeout).
+const gcpProjectIDLookupTimeout = 15 * time.Second
+
+// errNotOnGCP is returned by ResolveGCPProjectID when no project ID is
+// configured and the process does not appear to run on GCP.
+var errNotOnGCP = errors.New("not running on GCP (no metadata server detected); set server.hub.gcp_project_id to configure a project explicitly")
+
+// Seams for tests. gcpOnGCE deliberately takes no context: the library
+// caches its answer for the whole process (sync.Once), so a short caller
+// deadline must not be able to pin a false negative for later callers. It
+// is self-bounded: off GCP it returns on the first answer from a DNS lookup
+// of metadata.google.internal or an HTTP probe of the metadata IP (2s dial,
+// 5s overall timeout); it trusts GCE_METADATA_HOST; and it waits longer
+// only when the DMI product name says the machine is a Google VM.
+var (
+	gcpOnGCE             = metadata.OnGCE
+	gcpMetadataProjectID = metadata.ProjectIDWithContext
+)
+
 // ResolveGCPProjectID returns the project ID from config or auto-detects it
-// from the GCE metadata server.
-func ResolveGCPProjectID(configured string) (string, error) {
+// from the GCE metadata server. A configured project ID always wins and
+// skips detection. Detection is only attempted when the process appears to
+// run on GCP (metadata.OnGCE), and the lookup is bounded by
+// gcpProjectIDLookupTimeout, so a host without a reachable metadata server
+// does not stall startup.
+func ResolveGCPProjectID(ctx context.Context, configured string) (string, error) {
 	if configured != "" {
 		return configured, nil
 	}
-	projectID, err := metadata.ProjectIDWithContext(context.Background())
+	if !gcpOnGCE() {
+		return "", errNotOnGCP
+	}
+	ctx, cancel := context.WithTimeout(ctx, gcpProjectIDLookupTimeout)
+	defer cancel()
+	projectID, err := gcpMetadataProjectID(ctx)
 	if err != nil {
 		return "", fmt.Errorf("auto-detecting GCP project ID from metadata server: %w", err)
+	}
+	if projectID == "" {
+		return "", errors.New("auto-detecting GCP project ID from metadata server: empty project ID")
 	}
 	return projectID, nil
 }
