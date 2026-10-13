@@ -51,8 +51,8 @@ func linkedProjectScionDir(localPath string) string {
 // linked-project init. It skips paths isBrokerGlobalDirPath matches. Because
 // the embedded broker shares the hub's filesystem, it also skips this
 // process's own global directory and the home directory that contains it
-// (config.IsGlobalProjectDir, which resolves symbolic links), which covers
-// homes outside the shapes that check recognizes.
+// (config.IsGlobalProjectDir, resolving symbolic links). This covers homes
+// outside the shapes that check recognizes.
 func linkedProjectInitDir(localPath string) (string, bool) {
 	if isBrokerGlobalDirPath(localPath) {
 		return "", false
