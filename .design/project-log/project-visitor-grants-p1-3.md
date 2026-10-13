@@ -1,7 +1,7 @@
 # Project visitor grants by email and first contact (phase 1, item 3, part A)
 
 **Date:** 2026-10-13
-**Branch:** scion/mmr-fed-p1-3 (stacked on scion/mmr-fed-p1-2)
+**Stacked on:** the project-visitor role change
 **Tracked in:** ptone/scion#4603
 
 ## What changed
@@ -26,14 +26,16 @@
   checks: experiment (404 while `federation.project_visitors` is off),
   method (405), interactive session or dev credential
   (`requireSessionCredentialFor`, `GOV_PENDING`), project, then
-  `project.manage_visitors` on the project. Grant and window change also
+  `project.manage_visitors` on the project (project owners and admins;
+  `hub-admin` revision 8 adds it, so hub admins can list and revoke on any
+  project). Grant and window change also
   apply non-amplification (the actor holds every permission of the
   `project-visitor` role on the project; an unscoped local platform admin
   passes, as in `CanDelegate`).
 - **Grant.** Issuer must be trusted with `allow_visitor_grants` and a user
   or hub type; the email (lower-cased) must pass `allowed_emails` and
   `allowed_domains`; otherwise 400 with `details.field` and a neutral
-  message. One transaction finds or creates the pending federated account,
+  message (an invalid window names `expiresAt`). One transaction finds or creates the pending federated account,
   binds the role (`CreateVisitorRoleBinding`) and writes
   `project_visitor_grant`. A repeated grant is 409 (decision: conflict, not
   idempotent; change the window with PATCH). A suspended account gets 409.
@@ -53,6 +55,16 @@
   is refused with 403 at the auth middleware; pending never acts as a
   visitor until first contact activates it. A grant is refused for a
   suspended account.
+- **Issuer check on every request.** An active account acts as a visitor
+  only while the hub accepts visitors from its issuer
+  (`visitorGrantIssuer`: trusted, user or hub type, `allow_visitor_grants`
+  on). Otherwise the auth middleware answers 403 with the uniform refusal
+  message, never the plain federated user identity. The configuration is
+  read per request, so a reload applies to the next request. Grants and
+  accounts are kept; turning the flag back on restores access with no
+  grant change. List, grant and window responses carry `issuerAccepted`
+  (hub and hubclient), and `scion project visitors list` marks a visitor
+  whose issuer is not accepted.
 - **Authorization catalog.** Operations `project.visitors.list`, `.add`,
   `.update`, `.remove` (all session only, `GOV_PENDING`). The item 2
   deferred entries for `project.manage_visitors` are gone; its registry row
@@ -64,7 +76,8 @@
 - **CLI.** `scion project visitors list | add --issuer --email [--expires]
   | remove <email|id> [--issuer] | extend <email|id> --expires`, through
   `hubclient.ProjectVisitors`. Not in `agentAllowed` (human mode only).
-  `--domain` is not offered (domain grants are part B).
+  `--domain` is not offered (domain grants are part B). `list`, `add` and
+  `extend` take `--json` (or the global `--format json`).
 - Visitors are still refused on every route by the route guard; nothing
   here opens a route to a visitor.
 
@@ -81,9 +94,13 @@ binding gets an exclusion row instead).
 
 ## Follow-ups
 
-- Turning `allow_visitor_grants` off stops new grants and new first
-  contacts, but an already linked visitor keeps resolving; whether the flag
-  should also stop linked visitors at the request path is open.
+- Done: turning `allow_visitor_grants` off now also refuses already
+  linked visitors at the request path (see "Issuer check on every
+  request").
+- A hub admin can list and revoke visitor grants on any project, but can
+  grant or change a window only when it also holds every
+  `project-visitor` permission on the project (non-amplification). Whether
+  hub admins should grant without that is open.
 - A pending account whose last grant is revoked stays (pending); first
   contact still links it, with no grant.
 - Admin tooling to suspend a federated account does not exist yet.
