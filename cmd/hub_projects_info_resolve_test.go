@@ -36,6 +36,10 @@ import (
 type fakeProjectsHub struct {
 	projects []hubclient.Project
 
+	// agentsRemain makes a DELETE without force=true answer 409 conflict
+	// listing an agent, as the hub does while agents remain.
+	agentsRemain bool
+
 	mu       sync.Mutex
 	requests []string
 	deletes  []string
@@ -75,6 +79,11 @@ func (f *fakeProjectsHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, p := range f.projects {
 			if p.ID == id {
 				if r.Method == http.MethodDelete {
+					if f.agentsRemain && r.URL.Query().Get("force") != "true" {
+						w.WriteHeader(http.StatusConflict)
+						_, _ = w.Write([]byte(`{"error":{"code":"conflict","message":"cannot delete","details":{"agents":[{"id":"a-1","slug":"worker","deletionState":"failed"}],"truncated":true}}}`))
+						return
+					}
 					f.mu.Lock()
 					f.deletes = append(f.deletes, id)
 					f.mu.Unlock()

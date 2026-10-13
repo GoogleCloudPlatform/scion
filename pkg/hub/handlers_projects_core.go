@@ -3385,9 +3385,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		http.Error(w, "deletion service not configured", http.StatusInternalServerError)
 		return
 	}
+	// force=true deletes the project even while agents remain whose
+	// runtime deletion is not confirmed (ptone/scion#4811).
 	req := ProjectDeleteRequest{
 		ProjectID: id,
 		Actor:     userIdentity,
+		Force:     r.URL.Query().Get("force") == "true",
 	}
 	result, decision := s.deletionService.Delete(ctx, req)
 	if decision != nil {

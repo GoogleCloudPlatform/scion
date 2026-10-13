@@ -1398,10 +1398,12 @@ func TestRS3_ProjectDeleteCascadeUATsSchedulesCredentials(t *testing.T) {
 		ExpiresAt:    time.Now().Add(24 * time.Hour),
 	}))
 
-	// Delete the project.
+	// Delete the project. The agent is live, so the delete is forced
+	// (ptone/scion#4811).
 	req := ProjectDeleteRequest{
 		ProjectID: projectID,
 		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+		Force:     true,
 	}
 	ctx = setTestIdentity(ctx, req.Actor)
 

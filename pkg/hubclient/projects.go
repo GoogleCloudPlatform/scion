@@ -40,8 +40,9 @@ type ProjectService interface {
 	// Update updates project metadata.
 	Update(ctx context.Context, projectID string, req *UpdateProjectRequest) (*Project, error)
 
-	// Delete removes a project and all its agents.
-	Delete(ctx context.Context, projectID string) error
+	// Delete removes a project and its agent records. Without opts.Force
+	// the hub refuses (409) while the project has agents not yet deleted.
+	Delete(ctx context.Context, projectID string, opts *DeleteProjectOptions) error
 
 	// ListAgents returns agents in a project.
 	ListAgents(ctx context.Context, projectID string, opts *ListAgentsOptions) (*ListAgentsResponse, error)
@@ -287,9 +288,21 @@ func (s *projectService) Update(ctx context.Context, projectID string, req *Upda
 	return apiclient.DecodeRequired[Project](resp)
 }
 
-// Delete removes a project and all its agents.
-func (s *projectService) Delete(ctx context.Context, projectID string) error {
+// DeleteProjectOptions configures project deletion.
+type DeleteProjectOptions struct {
+	// Force deletes the project even while it has agents whose runtime
+	// deletion is not confirmed. Without it the hub refuses such a delete
+	// with 409 conflict, listing the agents in the error details.
+	Force bool
+}
+
+// Delete removes a project and its agent records. Without opts.Force the
+// hub refuses while the project has agents that are not deleted yet.
+func (s *projectService) Delete(ctx context.Context, projectID string, opts *DeleteProjectOptions) error {
 	path := "/api/v1/projects/" + projectID
+	if opts != nil && opts.Force {
+		path += "?force=true"
+	}
 	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
 		return err

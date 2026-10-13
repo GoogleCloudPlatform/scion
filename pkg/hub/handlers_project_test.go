@@ -886,9 +886,10 @@ func TestDeleteProject_DeleteAgents_DispatchesToBroker(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
-	// Delete project — agents are always cascade-deleted
+	// Delete project with force — live agents are cascade-deleted
+	// (without force the delete is refused, ptone/scion#4811)
 	rec := doRequest(t, srv, http.MethodDelete,
-		"/api/v1/projects/"+project.ID, nil)
+		"/api/v1/projects/"+project.ID+"?force=true", nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify dispatcher was called for both agents
@@ -914,8 +915,9 @@ func TestDeleteProject_AlwaysCascadeDeletesAgents(t *testing.T) {
 
 	project, _, _ := setupOnlineBrokerAgent(t, s, "project-nodelflag")
 
-	// Delete project without explicit deleteAgents param — agents should still be deleted
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+	// Delete project without explicit deleteAgents param — with force,
+	// agents should still be deleted (ptone/scion#4811)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"?force=true", nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Dispatcher should have been called (cascade delete is always on)

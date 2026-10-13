@@ -79,6 +79,11 @@ func NewProjectDeletionService(
 type ProjectDeleteRequest struct {
 	ProjectID string
 	Actor     UserIdentity
+	// Force deletes the project even while it has agents whose runtime
+	// deletion is not confirmed (see checkProjectAgentsDeletedTx): their
+	// records are removed with the project and their runtime deletes are
+	// dispatched best-effort afterwards.
+	Force bool
 }
 
 // ProjectDeleteDecision captures the authorization/governance outcome.
@@ -156,7 +161,9 @@ const (
 //  5. Checks credential ceiling (session JWT only, no scoped UAT/agent).
 //  6. Acquires the project membership lock for serialization.
 //  7. Re-evaluates authority under lock (TOCTOU closure).
-//  8. Locks the project's agent rows (PostgreSQL: FOR UPDATE, by ID).
+//  8. Locks the project's agent rows (PostgreSQL: FOR UPDATE, by ID) and,
+//     unless req.Force, refuses with 409 while any agent's runtime
+//     deletion is not confirmed.
 //  9. Performs security-relevant cascading deletes within the transaction.
 //  10. Deletes the project row.
 //  11. Writes the atomic audit record.
@@ -291,6 +298,13 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		if err := tx.LockProjectAgents(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project agents for deletion: %w", err)
 		}
+		// 8b. Refuse while agents remain whose runtime deletion is not
+		// confirmed, unless forced (ptone/scion#4811).
+		if !req.Force {
+			if err := checkProjectAgentsDeletedTx(ctx, tx, req.ProjectID); err != nil {
+				return err
+			}
+		}
 
 		// 9. Cascade security-relevant state within the transaction.
 		cascadeSummary, err := svc.cascadeSecurityState(ctx, tx, req.ProjectID)
@@ -329,6 +343,10 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 	})
 
 	if txErr != nil {
+		var agentsErr *projectHasAgentsDeleteError
+		if errors.As(txErr, &agentsErr) {
+			return nil, agentsErr.decision()
+		}
 		// Governance denial re-evaluated under lock.
 		var gdErr *governanceDenialError
 		if errors.As(txErr, &gdErr) {

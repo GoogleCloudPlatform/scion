@@ -208,3 +208,40 @@ func TestProjectsCreate_WorkspaceModeInBody(t *testing.T) {
 		})
 	}
 }
+
+// TestProjectsDelete_ForceQuery checks Delete sends force=true only when
+// DeleteProjectOptions.Force is set (ptone/scion#4811).
+func TestProjectsDelete_ForceQuery(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		opts      *DeleteProjectOptions
+		wantQuery string
+	}{
+		{name: "nil", opts: nil, wantQuery: ""},
+		{name: "zero value", opts: &DeleteProjectOptions{}, wantQuery: ""},
+		{name: "force", opts: &DeleteProjectOptions{Force: true}, wantQuery: "force=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath, gotQuery string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete {
+					t.Errorf("unexpected method %s", r.Method)
+				}
+				gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			client, _ := New(server.URL)
+			if err := client.Projects().Delete(context.Background(), "p1", tc.opts); err != nil {
+				t.Fatalf("Delete failed: %v", err)
+			}
+			if gotPath != "/api/v1/projects/p1" {
+				t.Errorf("path = %q, want /api/v1/projects/p1", gotPath)
+			}
+			if gotQuery != tc.wantQuery {
+				t.Errorf("query = %q, want %q", gotQuery, tc.wantQuery)
+			}
+		})
+	}
+}

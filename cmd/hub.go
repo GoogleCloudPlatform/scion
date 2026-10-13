@@ -151,7 +151,11 @@ var hubProjectsDeleteCmd = &cobra.Command{
 	Long: `Delete a project from the Hub.
 
 This will remove the project and all associated broker provider relationships.
-All agents within the project will be stopped and deleted.
+
+The Hub refuses to delete a project that still has agents (including agents
+whose delete failed) and lists them; delete those agents first. With --force
+the project is deleted anyway: its agent records are removed and the Hub asks
+the runtime brokers to delete the agents, logging any failure.
 
 The project can be given by name or by project ID (UUID). If no project
 is provided, the current project is used.
@@ -167,7 +171,10 @@ Examples:
   scion hub projects delete 0b9a4c1e-2f3d-4e5a-8b6c-7d8e9f0a1b2c
 
   # Delete without confirmation
-  scion hub projects delete my-project -y`,
+  scion hub projects delete my-project -y
+
+  # Delete even though agents remain
+  scion hub projects delete my-project --force`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runHubProjectsDelete,
 }
@@ -300,6 +307,9 @@ Examples:
 	RunE: runHubUnlink,
 }
 
+// hubProjectsDeleteForce is `scion hub projects delete --force`.
+var hubProjectsDeleteForce bool
+
 var (
 	hubProjectCreateSlug   string
 	hubProjectCreateName   string
@@ -385,6 +395,7 @@ func init() {
 	hubProjectsInfoCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
 	hubProjectsDeleteCmd.Flags().BoolVarP(&autoConfirm, "yes", "y", false, "Answer Yes to the confirmation prompt (required to confirm when stdin is not a terminal)")
 	hubProjectsDeleteCmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes (answers Yes to every confirmation), errors on ambiguous prompts")
+	hubProjectsDeleteCmd.Flags().BoolVar(&hubProjectsDeleteForce, "force", false, "Delete the project even while it has agents that are not deleted yet; their records are removed and runtime deletes are best-effort")
 	// Project create flags
 	hubProjectCreateCmd.Flags().StringVar(&hubProjectCreateSlug, "slug", "", "Override the auto-derived slug")
 	hubProjectCreateCmd.Flags().StringVar(&hubProjectCreateName, "name", "", "Human-friendly display name (defaults to repo name)")
@@ -1554,8 +1565,12 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("deletion cancelled")
 	}
 
-	// Delete the project (always cascade-deletes all agents)
-	if err := client.Projects().Delete(ctx, project.ID); err != nil {
+	// Delete the project. Without --force the hub refuses while agents
+	// remain (409 conflict listing them).
+	if err := client.Projects().Delete(ctx, project.ID, &hubclient.DeleteProjectOptions{Force: hubProjectsDeleteForce}); err != nil {
+		if msg, ok := projectHasAgentsMessage(err); ok {
+			return errors.New(msg)
+		}
 		return fmt.Errorf("failed to delete project: %w", err)
 	}
 
@@ -3051,4 +3066,34 @@ func hubProjectGitSourceLabels(gitURL, defaultBranch string) map[string]string {
 // URL cannot be sanitized unambiguously.
 func hubProjectCloneURLLabel(gitURL string) string {
 	return util.HTTPSCloneURL(gitURL)
+}
+
+// projectHasAgentsMessage formats the hub's 409 refusal of a project delete
+// whose agents remain (details.agents), listing the agents and the --force
+// hint. ok is false for any other error.
+func projectHasAgentsMessage(err error) (string, bool) {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
+		return "", false
+	}
+	agents, ok := apiErr.Details["agents"].([]interface{})
+	if !ok || len(agents) == 0 {
+		return "", false
+	}
+	var b strings.Builder
+	b.WriteString("failed to delete project: it still has agents that are not deleted:")
+	for _, raw := range agents {
+		a, _ := raw.(map[string]interface{})
+		slug, _ := a["slug"].(string)
+		id, _ := a["id"].(string)
+		fmt.Fprintf(&b, "\n  - %s (%s)", slug, id)
+		if st, _ := a["deletionState"].(string); st != "" {
+			fmt.Fprintf(&b, ", delete %s", st)
+		}
+	}
+	if truncated, _ := apiErr.Details["truncated"].(bool); truncated {
+		b.WriteString("\n  - ... and more")
+	}
+	b.WriteString("\nDelete these agents first, or use --force to delete the project anyway (agent runtime deletes are then best-effort).")
+	return b.String(), true
 }
