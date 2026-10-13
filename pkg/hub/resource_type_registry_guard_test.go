@@ -337,7 +337,8 @@ func varWrites(body *ast.BlockStmt, obj *ast.Object) (rhs []ast.Expr, ok bool) {
 // a Resource constructor passed to ComputeCapabilities, every value
 // built in that constructor, or in a package-level Resource constructor
 // it calls (followed transitively), is recorded. A constructor that
-// reaches no resolved value is reported in unfollowed. A helper argument
+// reaches no resolved value, or an x.Type assignment the scan does not
+// follow, is reported in unfollowed. A helper argument
 // is never resolved through the helper parameter form; such an argument
 // is unresolved.
 //
@@ -355,6 +356,11 @@ func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File
 	// function, the Resource constructors it calls.
 	ctorSites := map[string][]string{}
 	ctorCalls := map[string]map[string]bool{}
+	// skippedTypeWrites holds, for each package-level function, the
+	// x.Type assignments the scan does not follow because x is not
+	// declared in the file as a Resource, such as r := otherCtor()
+	// followed by r.Type = expr.
+	skippedTypeWrites := map[string][]string{}
 	// helperLits holds the Resource literals passed to
 	// ComputeCapabilities, recorded at the call.
 	helperLits := map[*ast.CompositeLit]bool{}
@@ -623,6 +629,10 @@ func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File
 					}
 					x, ok := sel.X.(*ast.Ident)
 					if !ok || !declaredAsResource(x) {
+						if curFn != "" {
+							skippedTypeWrites[curFn] = append(skippedTypeWrites[curFn],
+								posOf(lhs)+": "+types.ExprString(lhs))
+						}
 						continue
 					}
 					switch {
@@ -688,8 +698,13 @@ func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File
 
 	// Follow each Resource constructor passed to ComputeCapabilities,
 	// and the package-level constructors it calls, to the values they
-	// build. Fail closed: a constructor that reaches no resolved value
-	// is reported in unfollowed and its calls are not counted.
+	// build. Fail closed: a constructor that reaches no resolved value,
+	// or reaches an x.Type assignment the scan does not follow, is
+	// reported in unfollowed and its calls are not counted. A Resource
+	// literal with no Type key, such as the Resource{} the nil guards
+	// of harnessConfigResource and gcpServiceAccountResource return, is
+	// not a value: it has type "", for which every helper returns no
+	// actions, and the constructor's typed literal is what is checked.
 	ctors := make([]string, 0, len(ctorSites))
 	for c := range ctorSites {
 		ctors = append(ctors, c)
@@ -709,6 +724,19 @@ func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File
 			}
 		}
 		sites := strings.Join(ctorSites[c], ", ")
+		reached := make([]string, 0, len(reach))
+		for fn := range reach {
+			reached = append(reached, fn)
+		}
+		sort.Strings(reached)
+		skipped := false
+		for _, fn := range reached {
+			for _, w := range skippedTypeWrites[fn] {
+				scan.unfollowed = append(scan.unfollowed,
+					c+", called at "+sites+": Type write not followed at "+w)
+				skipped = true
+			}
+		}
 		n := 0
 		for _, l := range scan.found {
 			if l.fn == "" || !reach[l.fn] {
@@ -725,6 +753,9 @@ func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File
 		}
 		if n == 0 {
 			scan.unfollowed = append(scan.unfollowed, c+", called at "+sites)
+			continue
+		}
+		if skipped {
 			continue
 		}
 		scan.helperTagged[capabilityResourceHelper] += len(ctorSites[c])
@@ -777,8 +808,11 @@ func unknownResourceTypeLiterals(found []resourceTypeLiteral, known map[string]b
 // missingActionMapEntries returns, as "pos: helper: map: type", each
 // helper value whose type has no entry in the action map that helper
 // reads. A value built by a Resource constructor is followed by its
-// constructor and call sites. A value the guard cannot resolve is on
-// unresolvedResourceTypeValues instead and is not checked here.
+// constructor and call sites. A value the guard cannot resolve is not
+// checked here. A helper argument that is unresolved fails
+// TestResourceTypeLiterals_AllInRegistry through its helperUnresolved
+// check, so no unresolvedResourceTypeValues pin exempts one; a value in
+// a followed constructor that is unresolved is on that pin list.
 func missingActionMapEntries(values []resourceTypeLiteral, resourceActions, scopeActions map[string][]Action) []string {
 	var bad []string
 	for _, v := range values {
@@ -911,7 +945,10 @@ func TestResourceTypeLiterals_AllInRegistry(t *testing.T) {
 
 	// Action-map check. Each helper must read at least one resolved
 	// value, so a renamed helper cannot leave the check with nothing to
-	// check, and each helper call must resolve or be unresolved.
+	// check, and each helper call must resolve. perHelper counts values
+	// (a constructor call can reach several, and one constructor value
+	// serves all its calls); helperTagged and helperUnresolved count
+	// calls.
 	perHelper := map[string]int{}
 	for _, v := range helperValues {
 		perHelper[v.helper]++
@@ -921,6 +958,10 @@ func TestResourceTypeLiterals_AllInRegistry(t *testing.T) {
 			"no %s argument resolved to a type; the action-map check has nothing to check", method)
 		assert.Equal(t, helperCalls[method], helperTagged[method]+helperUnresolved[method],
 			"each %s call must resolve to a type or be in unresolvedResourceTypeValues", method)
+		assert.Zero(t, helperUnresolved[method],
+			"a %s argument is unresolved, so its type cannot be checked against "+
+				"the action map. Pass a string literal, a permissions constant or "+
+				"a Resource constructor the guard can follow", method)
 	}
 	t.Logf("capability helper type values: ComputeCapabilities=%d ComputeCapabilitiesBatch=%d ComputeScopeCapabilities=%d",
 		perHelper["ComputeCapabilities"], perHelper["ComputeCapabilitiesBatch"], perHelper["ComputeScopeCapabilities"])
@@ -1083,8 +1124,8 @@ func sampleResource() Resource { return Resource{Type: "agent"} }
 // ComputeCapabilities, and ScopeActions for the last argument of
 // ComputeScopeCapabilities. The scopeType argument and a Resource literal
 // passed to no helper are not checked. A constructor is followed into the
-// constructors it calls, and a constructor that builds no resolved type
-// is reported.
+// constructors it calls. A constructor that builds no resolved type, or
+// sets Type in a form the scan does not follow, is reported.
 func TestCapabilityHelperTypes_DetectsMissingActionMapEntry(t *testing.T) {
 	const src = `package hub
 
@@ -1118,6 +1159,13 @@ func emptyResource() Resource { return Resource{} }
 func g(a *AuthzService) {
 	_ = a.ComputeCapabilities(nil, nil, emptyResource())
 	_ = a.ComputeCapabilities(nil, nil, a.methodResource())
+	_ = a.ComputeCapabilities(nil, nil, overriddenResource())
+}
+
+func overriddenResource() Resource {
+	r := innerResource()
+	r.Type = pickType()
+	return r
 }
 `
 	fset := token.NewFileSet()
@@ -1137,15 +1185,18 @@ func g(a *AuthzService) {
 		`sample.go:15: ComputeCapabilitiesBatch: ResourceActions: "scope_type"`,
 		`sample.go:21: ComputeCapabilities: ResourceActions: "scope_type" (outerResource, called at sample.go:11, sample.go:12)`,
 	}, missingActionMapEntries(scan.helperValues, resourceActions, scopeActions))
-	assert.Len(t, scan.helperValues, 10, "the plain literal at line 13 must not be a helper value")
+	require.Len(t, scan.helperValues, 11, "the plain literal at line 13 must not be a helper value")
 	assert.Equal(t, `innerResource via outerResource, called at sample.go:11, sample.go:12`,
-		scan.helperValues[len(scan.helperValues)-1].site, "a constructor is followed into the constructors it calls")
-	assert.Equal(t, []string{"emptyResource, called at sample.go:31"}, scan.unfollowed,
-		"a constructor that builds no resolved type must be reported")
+		scan.helperValues[9].site, "a constructor is followed into the constructors it calls")
+	assert.Equal(t, []string{
+		"emptyResource, called at sample.go:31",
+		"overriddenResource, called at sample.go:33: Type write not followed at sample.go:38: r.Type",
+	}, scan.unfollowed,
+		"a constructor that builds no resolved type, or sets Type in a form the scan does not follow, must be reported")
 	assert.Equal(t, []string{"sample.go: a.methodResource()"}, scan.unresolved,
 		"a method call passed to ComputeCapabilities must be unresolved")
 	assert.Equal(t, map[string]int{
-		"ComputeCapabilities":      7,
+		"ComputeCapabilities":      8,
 		"ComputeCapabilitiesBatch": 3,
 		"ComputeScopeCapabilities": 2,
 	}, scan.helperCalls)
@@ -1153,7 +1204,7 @@ func g(a *AuthzService) {
 		"ComputeCapabilities":      5,
 		"ComputeCapabilitiesBatch": 3,
 		"ComputeScopeCapabilities": 2,
-	}, scan.helperTagged, "the unfollowed constructor call must not be counted")
+	}, scan.helperTagged, "the unfollowed constructor calls must not be counted")
 	assert.Equal(t, map[string]int{"ComputeCapabilities": 1}, scan.helperUnresolved)
 	assert.Equal(t, []string{
 		`sample.go:99: no action map for helper "Unknown"`,
