@@ -151,6 +151,54 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the branch is selected by scope=user and kind=harness-config in the request body, and the test server configures no resource storage",
 		Pin:    "TestUserScopeImport_RequiresCreateSelector",
 	},
+	{OperationID: "artifact.update", Method: "PATCH", Pattern: "/api/v1/artifacts/{id}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.grant.list", Method: "GET", Pattern: "/api/v1/artifacts/{id}/grants"}: {
+		Reason: "the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.grant.put", Method: "POST", Pattern: "/api/v1/artifacts/{id}/grants"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403 (the review-grant path refuses it with the same 403)",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.grant.delete", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}/grants/{grantId}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.link.list", Method: "GET", Pattern: "/api/v1/artifacts/{id}/links"}: {
+		Reason: "the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.link.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/links"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.link.revoke", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}/links/{linkId}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.delete", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 and nothing is deleted; with artifact:read added, the super-admin is not the owner or an admin grantee, and the custodian clause also needs project.manage within the token's own limits, so it would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/versions"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.upload", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.finalize", Method: "POST", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/finalize"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.view", Method: "POST", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/view"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
 	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestArtifactsListUserAccessTokensAreBounded",

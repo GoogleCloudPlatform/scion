@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -47,17 +49,84 @@ func isValidTemplateScope(scope string) bool {
 
 // CreateTemplateRequest is the request body for creating a template.
 type CreateTemplateRequest struct {
-	Name         string                `json:"name"`
-	Slug         string                `json:"slug,omitempty"`
-	DisplayName  string                `json:"displayName,omitempty"`
-	Description  string                `json:"description,omitempty"`
-	Harness      string                `json:"harness,omitempty"`
-	Scope        string                `json:"scope"`
-	ScopeID      string                `json:"scopeId,omitempty"`
-	ProjectID    string                `json:"projectId,omitempty"` // Deprecated: use ScopeID
-	Config       *store.TemplateConfig `json:"config,omitempty"`
-	BaseTemplate string                `json:"baseTemplate,omitempty"`
-	Files        []FileUploadRequest   `json:"files,omitempty"`
+	Name         string              `json:"name"`
+	Slug         string              `json:"slug,omitempty"`
+	DisplayName  string              `json:"displayName,omitempty"`
+	Description  string              `json:"description,omitempty"`
+	Harness      string              `json:"harness,omitempty"`
+	Scope        string              `json:"scope"`
+	ScopeID      string              `json:"scopeId,omitempty"`
+	ProjectID    string              `json:"projectId,omitempty"` // Deprecated: use ScopeID
+	BaseTemplate string              `json:"baseTemplate,omitempty"`
+	Files        []FileUploadRequest `json:"files,omitempty"`
+
+	// Config and Image are not settable (ptone/scion#4223); they are
+	// decoded only so a body that carries them is refused
+	// (refuseTemplateConfigFields).
+	Config json.RawMessage `json:"config,omitempty"`
+	Image  json.RawMessage `json:"image,omitempty"`
+}
+
+// UpdateTemplateRequest is the request body of a template PUT. A PUT
+// replaces only the template's metadata; every other field keeps its stored
+// value (ptone/scion#4223). Content and what is derived from it change only
+// through the upload/finalize and file APIs.
+type UpdateTemplateRequest struct {
+	Name        string `json:"name"`
+	Slug        string `json:"slug,omitempty"`
+	DisplayName string `json:"displayName,omitempty"`
+	Description string `json:"description,omitempty"`
+
+	// Config and Image are refused, as on create.
+	Config json.RawMessage `json:"config,omitempty"`
+	Image  json.RawMessage `json:"image,omitempty"`
+}
+
+// Error codes for template fields the API no longer writes
+// (ptone/scion#4223).
+const (
+	ErrCodeTemplateConfigInFile      = "template_config_in_file"
+	ErrCodeTemplateImageNotSupported = "template_image_not_supported"
+	templateConfigInFileMessage      = "template config is not settable through the API; set it in scion-agent.yaml"
+	templateImageNotSupportedMessage = "template image is not settable through the API; image comes from the harness-config or settings"
+)
+
+// carriesJSONValue reports whether a decoded body field holds a value: it is
+// present and not null. An empty string counts as absent, so a client that
+// round-trips a template's empty "image" is not refused.
+func carriesJSONValue(raw json.RawMessage) bool {
+	v := bytes.TrimSpace(raw)
+	return len(v) > 0 && !bytes.Equal(v, []byte("null")) && !bytes.Equal(v, []byte(`""`))
+}
+
+// refuseTemplateConfigFields writes a 400 and returns true when a template
+// create or PUT body carries config or image (ptone/scion#4223). A
+// template's job config comes from its scion-agent.yaml; its image from the
+// harness-config or settings.
+func refuseTemplateConfigFields(w http.ResponseWriter, config, image json.RawMessage) bool {
+	if carriesJSONValue(config) {
+		writeError(w, http.StatusBadRequest, ErrCodeTemplateConfigInFile, templateConfigInFileMessage, nil)
+		return true
+	}
+	if carriesJSONValue(image) {
+		writeError(w, http.StatusBadRequest, ErrCodeTemplateImageNotSupported, templateImageNotSupportedMessage, nil)
+		return true
+	}
+	return false
+}
+
+// applyTemplateMetadataUpdate returns a copy of existing with req's metadata
+// (name, slug, display name, description) applied and UpdatedBy set. Every
+// other field, including the derived, content, storage, scope, ownership,
+// inheritance and provenance fields, keeps its stored value.
+func applyTemplateMetadataUpdate(existing *store.Template, req *UpdateTemplateRequest, updatedBy string) store.Template {
+	updated := *existing
+	updated.Name = req.Name
+	updated.Slug = req.Slug
+	updated.DisplayName = req.DisplayName
+	updated.Description = req.Description
+	updated.UpdatedBy = updatedBy
+	return updated
 }
 
 // FileUploadRequest describes a file to upload.
@@ -282,6 +351,9 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
+	}
 
 	// Validate required fields
 	if req.Name == "" {
@@ -345,14 +417,6 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate MessageMode in template config if specified.
-	if req.Config != nil && req.Config.MessageMode != "" {
-		if !store.IsValidMessageMode(req.Config.MessageMode) {
-			ValidationError(w, "invalid template message mode: "+req.Config.MessageMode, nil)
-			return
-		}
-	}
-
 	if err := validateUploadFilePaths(req.Files); err != nil {
 		if !writeInvalidFilePathError(w, err) {
 			ValidationError(w, "files are invalid", nil)
@@ -368,7 +432,6 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		DisplayName:  req.DisplayName,
 		Description:  req.Description,
 		Harness:      req.Harness,
-		Config:       req.Config,
 		Scope:        req.Scope,
 		ScopeID:      scopeID,
 		ProjectID:    scopeID, // Keep for backwards compat
@@ -547,59 +610,24 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
-	var template store.Template
-	if err := readJSON(r, &template); err != nil {
+	var req UpdateTemplateRequest
+	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
-
-	// Validate MessageMode in template config if specified.
-	if template.Config != nil && template.Config.MessageMode != "" {
-		if !store.IsValidMessageMode(template.Config.MessageMode) {
-			ValidationError(w, "invalid template message mode: "+template.Config.MessageMode, nil)
-			return
-		}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
 	}
 
-	// Preserve immutable fields from the existing record. The store's
-	// UpdateTemplate unconditionally Set()s every column, so any field not
-	// pinned here is overwritten with the request body's value — or its
-	// zero value if the body omits it.
-	//
-	// Group 1 — identity and authz state: without these a caller could
-	// reparent a template to a different scope or claim ownership.
-	// Scope reparenting requires its own endpoint with dual-scope
-	// authorization; it is not supported through the update body.
-	template.ID = existing.ID
-	template.Created = existing.Created
-	template.CreatedBy = existing.CreatedBy
-	template.Scope = existing.Scope
-	template.ScopeID = existing.ScopeID
-	template.OwnerID = existing.OwnerID
-	// Group 2 — content and storage state: these are managed by the
-	// upload/finalize workflow and must not be writable through the
-	// update body.
-	template.ProjectID = existing.ProjectID
-	template.StoragePath = existing.StoragePath
-	template.StorageBucket = existing.StorageBucket
-	template.StorageURI = existing.StorageURI
-	template.Layout = existing.Layout
-	template.Files = existing.Files
-	template.ContentHash = existing.ContentHash
-	template.AgentConfig = existing.AgentConfig // derived; set only by the commit path
-	// Harness and DefaultHarnessConfig are derived from the files too. The
-	// store's UpdateTemplate does not write any content column
-	// (ptone/scion#4221); pinning them here keeps the response truthful.
-	template.Harness = existing.Harness
-	template.DefaultHarnessConfig = existing.DefaultHarnessConfig
-	template.Status = existing.Status
-	template.BaseTemplate = existing.BaseTemplate
-	template.SourceURL = existing.SourceURL
-	// Group 3 — audit trail: derived from the authenticated caller,
-	// not trusted from the request body. The deref is safe: authorize
-	// (line 497) returns false on nil identity, so reaching here
-	// guarantees GetIdentityFromContext(ctx) != nil.
-	template.UpdatedBy = GetIdentityFromContext(ctx).ID()
+	// A PUT replaces only the metadata. Everything else keeps its stored
+	// value (applyTemplateMetadataUpdate): identity, scope and ownership
+	// (scope reparenting needs its own endpoint with dual-scope
+	// authorization), the files and what is derived from them (managed by
+	// the upload/finalize workflow), storage, inheritance, provenance and
+	// the creation audit fields. UpdatedBy comes from the authenticated
+	// caller; the deref is safe because authorize above returns false on a
+	// nil identity.
+	template := applyTemplateMetadataUpdate(existing, &req, GetIdentityFromContext(ctx).ID())
 	if template.Slug == "" {
 		template.Slug = api.Slugify(template.Name)
 	}
