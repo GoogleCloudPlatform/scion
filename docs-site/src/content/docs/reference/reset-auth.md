@@ -39,8 +39,9 @@ and `failed_by_code`, the count of failures per code. A failure that carries no 
 | `runtime_unavailable` | The agent's broker does not have its runtime available. | Retry later. |
 | `internal_error` | The new token could not be recorded. | Retry. |
 
-For the `delegation_*` codes the entry also holds `cause`, the deny cause. For these codes and
-`agent_not_in_standing`, `error` is a plain reason; the raw error is written to the Hub log only.
+For the `delegation_*` codes the entry also holds `cause`, the deny cause. For these codes,
+`agent_not_in_standing` and `internal_error`, `error` is a fixed plain reason; the raw error is
+written to the Hub log only.
 
 ## Scope re-issue
 
