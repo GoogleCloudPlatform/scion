@@ -337,6 +337,6 @@ func TestProjectList_RefreshNamesRefusedHub(t *testing.T) {
 	_, stderr, err := runScion(t, "project", "list", "--refresh")
 	require.NoError(t, err)
 	assert.Contains(t, stderr, "Warning: not refreshed: prod: login refused")
-	assert.Positive(t, prod.lists.Load(), "the refusing hub was asked")
+	assert.NotEmpty(t, prod.authHeaders(), "the refusing hub was asked")
 	assert.Positive(t, staging.lists.Load())
 }

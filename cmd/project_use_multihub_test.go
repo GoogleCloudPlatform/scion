@@ -994,7 +994,7 @@ func TestUseMultiHub_NotFoundNamesRefusedHub(t *testing.T) {
 		_, _, err := runScion(t, args...)
 		require.EqualError(t, err, want, "%v", args)
 	}
-	assert.Positive(t, prod.lists.Load(), "the refusing hub was asked")
+	assert.NotEmpty(t, prod.authHeaders(), "the refusing hub was asked")
 
 	// When another hub has the project, the refusing hub is named in the
 	// warning.
