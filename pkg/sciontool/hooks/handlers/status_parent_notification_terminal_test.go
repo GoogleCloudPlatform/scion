@@ -100,8 +100,11 @@ func requireParentNotification(t *testing.T, event *hooks.Event) {
 }
 
 // A parent Notification leaves limits_exceeded and crashed unchanged:
-// agent-info.json is byte for byte the same, it has no notification marker,
-// and the Hub gets no update.
+// agent-info.json is not rewritten (same file, same bytes), it has no
+// notification marker, and the Hub gets no update. Each subtest then sends
+// the parent's prompt-submit, a new-work event that the Hub handler reports
+// from any status (including a terminal one), to show that the Hub was live
+// and that the empty result came from the guard.
 func TestParentNotificationTerminal_TerminalKept(t *testing.T) {
 	for _, d := range parentNotificationDialects() {
 		for _, held := range []state.Activity{state.ActivityLimitsExceeded, state.ActivityCrashed} {
@@ -113,6 +116,8 @@ func TestParentNotificationTerminal_TerminalKept(t *testing.T) {
 				parentHeldHold(t, sh, string(held))
 				before, err := os.ReadFile(sh.StatusPath)
 				require.NoError(t, err)
+				beforeFI, err := os.Stat(sh.StatusPath)
+				require.NoError(t, err)
 
 				got, info := parentHeldStep(t, sh, hh, sent, event)
 				assert.Equal(t, string(held), info["activity"], "the terminal status is kept")
@@ -120,7 +125,17 @@ func TestParentNotificationTerminal_TerminalKept(t *testing.T) {
 				assert.Empty(t, got, "no hub update")
 				after, err := os.ReadFile(sh.StatusPath)
 				require.NoError(t, err)
-				assert.Equal(t, string(before), string(after), "agent-info.json is not written")
+				assert.Equal(t, string(before), string(after), "agent-info.json content unchanged")
+				afterFI, err := os.Stat(sh.StatusPath)
+				require.NoError(t, err)
+				// Every write renames a new file into place, so the same
+				// file means no write happened.
+				assert.True(t, os.SameFile(beforeFI, afterFI), "agent-info.json is not rewritten")
+
+				// Hub-live control: the parent's prompt-submit is reported.
+				got, info = parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "UserPromptSubmit", ""))
+				assert.Equal(t, string(state.ActivityThinking), info["activity"], "control: prompt-submit starts new work")
+				assert.Equal(t, []string{parentHeldThinking}, got, "control: the Hub is live")
 			})
 		}
 	}
