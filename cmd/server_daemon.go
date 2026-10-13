@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -270,9 +269,15 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 	fmt.Printf("PID file: %s\n", daemon.GetPIDPathComponent(serverDaemonComponent, globalDir))
 	fmt.Println()
 
-	// Print quickstart info for workstation mode
+	// Print quickstart info for workstation mode. The server settings name
+	// the dev token file the child uses; if they cannot be loaded, the
+	// quickstart falls back to the default file, as the child does.
 	if !hostedMode {
-		printWorkstationQuickstart(settingsMissingBeforeStart, globalDir, hubHost, webPort, enableWeb, enableDevAuth, enableHub, enableRuntimeBroker)
+		serverCfg, err := config.LoadGlobalConfig(serverConfigPathFromArgs(daemonArgs))
+		if err != nil {
+			serverCfg = nil
+		}
+		printWorkstationQuickstart(settingsMissingBeforeStart, globalDir, serverCfg, hubHost, webPort, enableWeb, enableDevAuth, enableHub, enableRuntimeBroker)
 	}
 
 	fmt.Println("Use 'scion server stop' to stop the daemon.")
@@ -1106,7 +1111,16 @@ func quickstartReadyMessage(ready bool, lastHealth healthProbeResponse) (msg str
 // global settings file was absent before the daemon started (see
 // quickstartWebPath). When the co-located broker was skipped for lack of an
 // image registry, it prints the fix next to the URL.
-func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir string, host string, wPort int, webEnabled, devAuth, hubEnabled, brokerEnabled bool) {
+//
+// serverCfg is the server configuration the daemon child loads; its dev
+// token settings decide which token file the quickstart shows. A nil
+// serverCfg means the default settings.
+func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir string, serverCfg *config.GlobalConfig, host string, wPort int, webEnabled, devAuth, hubEnabled, brokerEnabled bool) {
+	if serverCfg == nil {
+		serverCfg = &config.GlobalConfig{}
+	}
+	tokenFile := devTokenFilePath(serverCfg.Auth.TokenFile, globalDir)
+
 	if webEnabled {
 		displayHost := host
 		if displayHost == "0.0.0.0" || displayHost == "" {
@@ -1128,7 +1142,7 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		msg, serverUp := quickstartReadyMessage(quickstartWaitReady(displayHost, wPort, quickstartReadyTimeout))
 		status, statusErr := onboardingStatusResult{}, errOnboardingStatusNotAsked
 		if serverUp && hubEnabled {
-			status, statusErr = quickstartOnboardingStatus(baseURL, readDevTokenFile(globalDir))
+			status, statusErr = quickstartOnboardingStatus(baseURL, readDevTokenFile(tokenFile))
 		}
 		if statusErr != nil {
 			slog.Debug("Onboarding status unavailable; using the settings-file signal", "error", statusErr)
@@ -1153,20 +1167,20 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 	}
 
 	if devAuth {
-		// Read the dev token from the token file (written by the daemon child process)
-		if token := readDevTokenFile(globalDir); token != "" {
-			fmt.Println()
-			fmt.Println("Developer token (for CLI authentication):")
-			fmt.Printf("  %s\n", devTokenExportHint(devTokenFilePath("", globalDir)))
-		}
+		// Show where the server keeps its dev token: the configured token
+		// file (which the server creates if it does not exist yet), or a
+		// plain note when the token is set in the settings. Never the value.
+		fmt.Println()
+		fmt.Println("Developer token (for CLI authentication):")
+		fmt.Printf("  %s\n", devTokenStartupHint(serverCfg, globalDir))
 	}
 	fmt.Println()
 }
 
-// readDevTokenFile returns the workstation dev token the daemon child wrote
-// to <globalDir>/dev-token, or "" if there is none.
-func readDevTokenFile(globalDir string) string {
-	data, err := os.ReadFile(filepath.Join(globalDir, "dev-token"))
+// readDevTokenFile returns the dev token stored in the file at path, or ""
+// if there is none.
+func readDevTokenFile(path string) string {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
