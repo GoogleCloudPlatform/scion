@@ -31,7 +31,7 @@ var (
 	hubAuthFederationTokenJSON     bool
 )
 
-// hubAuthFederationTokenCmd obtains a federation user token. It is a
+// hubAuthFederationTokenCmd obtains a user access credential for a peer hub. It is a
 // human-mode command: hub.auth is not in agentAllowed (cmd/cli_mode.go).
 var hubAuthFederationTokenCmd = &cobra.Command{
 	Use:   "federation-token --audience URL",
@@ -73,7 +73,7 @@ func init() {
 	_ = hubAuthFederationTokenCmd.MarkFlagRequired("audience")
 }
 
-// runHubAuthFederationToken requests a federation user token for audience
+// runHubAuthFederationToken requests a user access credential for the peer hub at audience
 // and writes it to out: the bare token followed by a newline, or with
 // jsonOut the token and its expiry as JSON.
 func runHubAuthFederationToken(ctx context.Context, auth hubclient.AuthService, audience string, jsonOut bool, out io.Writer) error {
