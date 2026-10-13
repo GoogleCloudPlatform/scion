@@ -4459,6 +4459,10 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// held for it.
 		provision, cleared := reincarnateOnlyConfigEdits(rawFields, cfg, old.InlineConfig)
 		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canViewAgentEnv(ctx, s, agent))
+		// The broker's start-time merge keeps a previous value the inline
+		// config leaves empty; the cleared paths it sends with each start
+		// let the broker remove them (ptone/scion#3906).
+		merged.ClearedFields = nextClearedFields(old.InlineConfig, cfg, rawFields, cleared, canViewAgentEnv(ctx, s, agent))
 		warnings = append(warnings, reincarnateOnlyEditWarnings(provision, cleared)...)
 		warnings = append(warnings, removedEntriesWarnings(removed)...)
 		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)
