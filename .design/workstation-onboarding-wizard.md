@@ -88,6 +88,13 @@ The authoritative computation lives server-side in a new
 | `identitySet` | new identity fields on `V1AuthConfig` (W2) are non-default (not `dev@localhost`) | user has named themselves |
 | `hasWorkspace` | `store.ListProjects` returns ≥1 project | at least one project exists |
 
+> **Implementation note (ptone/scion#4640):** `imagesPresent` was never implemented
+> (the handler hard-coded it to `false`) and has been removed from the shipped
+> `OnboardingStatus`. Image readiness is reported per harness-config instead, through
+> `imageStatus` and the `check-image` / `image-status` harness-config endpoints, which is
+> what the onboarding page renders. References to `imagesPresent` below describe the
+> original proposal.
+
 `needsOnboarding = !initialized || !harnessesSeeded || !hasWorkspace` (the hard
 minimum). Soft-incomplete fields (no images, default identity) don't *force* the wizard
 but pre-select the resume step.

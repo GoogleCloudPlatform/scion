@@ -34,6 +34,7 @@ const hostedUserGuide = {
 		{ label: 'Pre-Start Hooks', slug: 'hosted/user/pre-start-hooks' },
 		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
+		{ label: 'Using Artifacts', slug: 'hosted/user/artifacts' },
 		{ label: 'Scheduling & Events', slug: 'hosted/user/scheduling' },
 		{ label: 'Scheduled Chat Messages', slug: 'hosted/user/scheduled-send' },
 		{ label: 'External Channels', slug: 'hosted/user/external-channels' },

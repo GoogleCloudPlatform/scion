@@ -810,7 +810,7 @@ Manages the Scion workspace (Project).
 - `scion project list` (alias `ls`): List the projects on all registered hubs, each with its hub, merged with the project directories on this machine (a linked directory shows its local path; an unlinked one shows hub `-`). Offline unless `--refresh` is given.
     - Flags: `--hub <hub>` (only that hub's projects; a nickname or URL), `--refresh` (fetch the project list of each logged-in hub, or of `--hub`, first), `--local` (list the project directories on this machine instead, with their type, agent count, status and workspace path).
     - Scripts that parse `scion project list` should use `scion project list --local`, which keeps the earlier output, JSON included.
-- `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned projects before cleaning up.
+- `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned projects before cleaning up. A git project configuration with no agents and no recorded workspace path shows as `unverified` in `scion project list --local` and is never removed.
 - `scion project status [project]` (alias `health`): Show agent status for a project from the Hub: counts per lifecycle phase and per activity, a per-agent table (template, harness, phase, activity), and troubleshooting hints for blocked, stalled, or errored agents. Uses the current project when no name is given.
     - Flags: `--all` (report across all projects on the Hub), `--json` (JSON output).
 - `scion project service-accounts` (alias `sa`): Manage GCP service accounts registered for the project.
@@ -1144,8 +1144,10 @@ Open a tunnel from your machine to a port inside an agent, or to the agent's SSH
     - `--local-port <int>`: Local port to listen on. Default: a random free port.
     - `--ssh`: Reach the agent's SSH service instead of a port.
     - `--stdio`: Carry the tunnel on stdin and stdout instead of a local listener, for use as an ssh `ProxyCommand`.
+    - `--known-hosts <path>`: With `--ssh`, the absolute path of the known-hosts file holding the agent's pinned host key, for the host-key hint only. Requires `--host-key-alias`. Written into Host blocks by `scion vscode`.
+    - `--host-key-alias <host>`: With `--ssh`, the name of the pin in `--known-hosts` (the Host block's `HostKeyAlias`). Requires `--known-hosts`.
 
-By default the tunnel listens on `127.0.0.1` and prints the address it forwards to stderr. `--hub` and `--project` make the command independent of the working directory. The command never prompts. Exit codes: `0` success, `1` other error, `2` usage error, `3` no usable credential or identity changed, `4` agent not found, `5` not permitted, `6` Hub unreachable or unavailable, `7` tunnel closed by policy, `8` tunnel limit reached, `9` agent not running, `10` agent unreachable, `11` Hub does not support tunnels, `130` interrupted, `143` terminated.
+By default the tunnel listens on `127.0.0.1` and prints the address it forwards to stderr. `--hub` and `--project` make the command independent of the working directory. The command never prompts. Exit codes: `0` success, `1` other error, `2` usage error, `3` no usable credential or identity changed, `4` agent not found, `5` not permitted, `6` Hub unreachable or unavailable, `7` tunnel closed by policy, `8` tunnel limit reached, `9` agent not running, `10` agent unreachable, `11` Hub does not support tunnels, `130` interrupted, `143` terminated. With `--ssh`, the command prints a one-line hint when the agent's host key no longer matches its pin. Without `--known-hosts` it reads the `scion ssh-config` pins. The hint never changes host-key verification: ssh's `StrictHostKeyChecking` and the Host block's `UserKnownHostsFile` remain the only check.
 
 ```bash
 scion tunnel my-agent --port 5173
@@ -1154,6 +1156,25 @@ scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my
 ```
 
 - `scion tunnel status [--json]`: Show the open tunnels of your running `scion tunnel` processes: the Hub endpoint, the credential identity (kind, subject and scope, never the secret), the session IDs and the open tunnels. With `--hub`, only tunnels to that Hub are shown. Reads local state only and never prompts.
+
+### `scion vscode`
+
+Open VS Code Remote-SSH on an agent's `/workspace` through the Hub, without editing `~/.ssh/config`. It sits alongside `scion ssh-config` and does not replace it. Requires the `hub.conduit` [experiment](/scion/reference/experiments/) on the Hub. Not available in agent mode.
+
+**Usage:** `scion vscode <agent> [--path <dir>] [--prune]`
+
+- **Flags:**
+    - `--path <dir>`: Remote folder to open. Default: `/workspace`.
+    - `--prune`: Also remove the Host blocks and pins of this Hub's agents that no longer exist, from a complete listing only. The agent named is still written and opened; with an incomplete listing nothing is changed and VS Code is not started.
+
+The Hub and project are resolved as for `scion tunnel`, including the project selected with `scion use`. Each run writes the agent's Host block and pinned host key into `~/.scion/vscode/ssh_config` and `~/.scion/vscode/known_hosts` and keeps every other agent's entries. Its ProxyCommand passes `--known-hosts` and `--host-key-alias`, so a recreated agent is reported with the command that refreshes it: `scion vscode --hub <endpoint> --project <project> <agent>`. It checks the agent with one SSH tunnel, then runs `code --user-data-dir ~/.scion/vscode/user-data --remote ssh-remote+scion.<hub-label>.<project>.<agent> <path>`, where `<hub-label>` is the label a `scion ssh-config` include file already records for this Hub, or else one derived from the Hub's host name that no other Hub's entries use. That user data directory's `settings.json` sets `remote.SSH.configFile`, which is application-scoped and cannot be set per profile; your own VS Code settings are never changed, and extensions are shared. The command never prompts. Exit codes are those of `scion tunnel`; `1` when `code` is missing or fails to start, or when the user data `settings.json` has comments and does not already hold the managed values (the error names the file).
+
+Terminals in these windows open in the agent's tmux session: the default `Scion agent` profile joins it with the `agent` window selected, `Scion shell` selects the `shell` window, and `Container shell` is a plain login shell; VS Code's auto-detected `tmux`, `bash`, `zsh` and `sh` profiles are hidden. Switch windows with `Ctrl-b n`. Closing a terminal leaves no extra tmux session behind, and switching windows does not move the web terminal. If the agent has no tmux session, the Scion profiles open a login shell instead. The scion profiles in that `settings.json` are reset on every run; a default terminal or keybinding choice you make there is kept.
+
+```bash
+scion vscode my-agent
+scion vscode my-project/my-agent --path /workspace/web
+```
 
 ### `scion expose` / `scion unexpose`
 
