@@ -20,7 +20,10 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectvisitorexclusion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectvisitorrule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
@@ -46,6 +49,38 @@ func entProjectVisitorRuleToStore(r *ent.ProjectVisitorRule) *store.ProjectVisit
 		CreatedBy: r.CreatedBy,
 		CreatedAt: r.CreatedAt,
 	}
+}
+
+// lockProjectVisitorRules returns the rules matching where, read FOR
+// UPDATE on Postgres, so that a rule binding being created in another
+// transaction (which reads its rule FOR SHARE, see
+// RoleStore.visitorBindingSourceRule) either commits first, and its
+// binding is then visible here, or waits and then sees this transaction's
+// change. SQLite serializes writes, so a plain read gives the same order.
+// Call it inside a transaction, before touching the rules' bindings.
+func (c *CompositeStore) lockProjectVisitorRules(ctx context.Context, where ...predicate.ProjectVisitorRule) ([]*ent.ProjectVisitorRule, error) {
+	q := c.client.ProjectVisitorRule.Query().Where(where...)
+	if c.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	rules, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return rules, nil
+}
+
+// lockProjectVisitorRule is lockProjectVisitorRules for the rule id; a
+// missing rule returns store.ErrNotFound.
+func (c *CompositeStore) lockProjectVisitorRule(ctx context.Context, id uuid.UUID) error {
+	rules, err := c.lockProjectVisitorRules(ctx, projectvisitorrule.IDEQ(id))
+	if err != nil {
+		return err
+	}
+	if len(rules) == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // CreateProjectVisitorRule creates a project visitor rule (see
@@ -172,6 +207,9 @@ func (c *CompositeStore) UpdateProjectVisitorRuleWindow(ctx context.Context, id 
 		if !ok {
 			return fmt.Errorf("update project visitor rule window: unexpected transactional store %T", tx)
 		}
+		if err := txc.lockProjectVisitorRule(ctx, uid); err != nil {
+			return err
+		}
 		ruleUpdate := txc.client.ProjectVisitorRule.UpdateOneID(uid)
 		bindingUpdate := txc.client.RoleBinding.Update().
 			Where(rolebinding.SourceRuleIDEQ(uid))
@@ -218,8 +256,8 @@ func (c *CompositeStore) DeleteProjectVisitorRule(ctx context.Context, id string
 		if !ok {
 			return fmt.Errorf("delete project visitor rule: unexpected transactional store %T", tx)
 		}
-		if _, err := txc.client.ProjectVisitorRule.Get(ctx, uid); err != nil {
-			return mapError(err)
+		if err := txc.lockProjectVisitorRule(ctx, uid); err != nil {
+			return err
 		}
 		rbs, err := txc.client.RoleBinding.Query().
 			Where(rolebinding.SourceRuleIDEQ(uid)).
@@ -251,6 +289,104 @@ func (c *CompositeStore) DeleteProjectVisitorRule(ctx context.Context, id string
 		return nil, err
 	}
 	return deleted, nil
+}
+
+// DeleteProjectVisitorRulesByProject deletes every visitor rule of a
+// project, the bindings they created and their exclusions, in one
+// transaction (see store.Store.DeleteProjectVisitorRulesByProject).
+func (c *CompositeStore) DeleteProjectVisitorRulesByProject(ctx context.Context, projectID string) (int, error) {
+	if projectID == "" {
+		return 0, fmt.Errorf("%w: a project ID is required", store.ErrInvalidInput)
+	}
+	deleted := 0
+	err := c.WithTx(ctx, func(tx store.Store) error {
+		txc, ok := tx.(*CompositeStore)
+		if !ok {
+			return fmt.Errorf("delete project visitor rules: unexpected transactional store %T", tx)
+		}
+		rules, err := txc.lockProjectVisitorRules(ctx, projectvisitorrule.ProjectIDEQ(projectID))
+		if err != nil {
+			return err
+		}
+		if len(rules) == 0 {
+			return nil
+		}
+		ids := make([]uuid.UUID, len(rules))
+		for i, r := range rules {
+			ids[i] = r.ID
+		}
+		if _, err := txc.client.RoleBinding.Delete().
+			Where(rolebinding.SourceRuleIDIn(ids...)).
+			Exec(ctx); err != nil {
+			return mapError(err)
+		}
+		if _, err := txc.client.ProjectVisitorExclusion.Delete().
+			Where(projectvisitorexclusion.RuleIDIn(ids...)).
+			Exec(ctx); err != nil {
+			return mapError(err)
+		}
+		n, err := txc.client.ProjectVisitorRule.Delete().
+			Where(projectvisitorrule.IDIn(ids...)).
+			Exec(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		deleted = n
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+// DeleteInactiveVisitorGrant deletes a visitor grant by email that is not
+// active at a time (see store.Store.DeleteInactiveVisitorGrant).
+func (c *CompositeStore) DeleteInactiveVisitorGrant(ctx context.Context, bindingID string, at time.Time) (bool, error) {
+	uid, err := uuid.Parse(bindingID)
+	if err != nil {
+		return false, nil
+	}
+	rd, err := c.visitorRoleDefinition(ctx)
+	if err != nil {
+		return false, err
+	}
+	removed := false
+	err = c.WithTx(ctx, func(tx store.Store) error {
+		txc, ok := tx.(*CompositeStore)
+		if !ok {
+			return fmt.Errorf("delete inactive visitor grant: unexpected transactional store %T", tx)
+		}
+		// FOR UPDATE on Postgres: a concurrent window change of the grant
+		// either commits first, and the check below sees its window, or
+		// waits and then finds the grant removed.
+		q := txc.client.RoleBinding.Query().Where(rolebinding.IDEQ(uid))
+		if txc.client.Driver().Dialect() == dialect.Postgres {
+			q = q.ForUpdate()
+		}
+		rb, err := q.Only(ctx)
+		if ent.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return mapError(err)
+		}
+		if rb.RoleDefinitionID == nil || *rb.RoleDefinitionID != rd.ID || rb.SourceRuleID != nil {
+			return nil
+		}
+		if roleBindingActiveAt(rb, at) {
+			return nil
+		}
+		if err := txc.client.RoleBinding.DeleteOneID(uid).Exec(ctx); err != nil {
+			return mapError(err)
+		}
+		removed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return removed, nil
 }
 
 // CreateProjectVisitorExclusion records an exclusion of a user from a rule

@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectvisitorrule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -620,24 +621,44 @@ func (r *RoleStore) UpdateVisitorRoleBindingWindow(ctx context.Context, id strin
 
 // visitorBindingSourceRule checks the source rule ruleID of a visitor
 // binding at project scope projectID for the federated account u: the
-// rule must exist, be of that project and of the account's home issuer.
-// It returns the rule's ID, or ErrVisitorBindingRefused.
-func (r *RoleStore) visitorBindingSourceRule(ctx context.Context, ruleID, projectID string, u *ent.User) (uuid.UUID, error) {
+// rule must exist, be of that project and of the account's home issuer,
+// and be active now (ProjectVisitorRule.ActiveAt). It returns the rule,
+// whose window the binding takes, or ErrVisitorBindingRefused.
+//
+// On Postgres the rule row is read FOR SHARE, so in a transaction the
+// rule cannot be removed or have its window changed until the binding
+// commits: DeleteProjectVisitorRule and UpdateProjectVisitorRuleWindow
+// take the row FOR UPDATE before they touch bindings, so they either wait
+// for this binding and then include it, or run first, and this read then
+// sees the removed rule or the new window. SQLite serializes writes, so a
+// plain read gives the same order.
+func (r *RoleStore) visitorBindingSourceRule(ctx context.Context, ruleID, projectID string, u *ent.User) (*ent.ProjectVisitorRule, error) {
 	ruleUID, err := uuid.Parse(ruleID)
 	if err != nil {
-		return uuid.Nil, store.ErrVisitorBindingRefused
+		return nil, store.ErrVisitorBindingRefused
 	}
-	rule, err := r.client.ProjectVisitorRule.Get(ctx, ruleUID)
+	q := r.client.ProjectVisitorRule.Query().Where(projectvisitorrule.IDEQ(ruleUID))
+	if r.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForShare()
+	}
+	rule, err := q.Only(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
-			return uuid.Nil, store.ErrVisitorBindingRefused
+			return nil, store.ErrVisitorBindingRefused
 		}
-		return uuid.Nil, mapError(err)
+		return nil, mapError(err)
 	}
 	if rule.ProjectID != projectID || u.HomeIssuer == nil || *u.HomeIssuer != rule.Issuer {
-		return uuid.Nil, store.ErrVisitorBindingRefused
+		return nil, store.ErrVisitorBindingRefused
 	}
-	return rule.ID, nil
+	nowFn := r.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	if !entProjectVisitorRuleToStore(rule).ActiveAt(nowFn()) {
+		return nil, store.ErrVisitorBindingRefused
+	}
+	return rule, nil
 }
 
 // isVisitorRole reports whether rd is the seeded project-visitor role: a
@@ -737,11 +758,18 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 			return nil, store.ErrFederatedAccountRefused
 		}
 		if visitor && rb.SourceRuleID != nil {
-			ruleUID, err := r.visitorBindingSourceRule(ctx, *rb.SourceRuleID, rb.ScopeID, u)
+			rule, err := r.visitorBindingSourceRule(ctx, *rb.SourceRuleID, rb.ScopeID, u)
 			if err != nil {
 				return nil, err
 			}
+			ruleUID := rule.ID
 			sourceRuleUID = &ruleUID
+			// A rule's binding carries the rule's current window, read
+			// in this transaction, whatever window the caller passed.
+			stored := *rb
+			stored.NotBefore = rule.NotBefore
+			stored.ExpiresAt = rule.ExpiresAt
+			rb = &stored
 		}
 		exp, err := checkTestAdminSystemBinding(u, rb)
 		if err != nil {

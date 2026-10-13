@@ -336,7 +336,10 @@ func visitorDomainAllowedByIssuer(cfg config.TrustedIssuerConfig, domain string)
 	}
 	if len(cfg.AllowedEmails) > 0 {
 		for _, pattern := range cfg.AllowedEmails {
-			p := strings.ToLower(strings.TrimSpace(pattern))
+			// Normalized exactly as matchesAllowedEmails does (lower
+			// case only), so a pattern admits a rule only when it also
+			// admits each email of the domain.
+			p := strings.ToLower(pattern)
 			if strings.HasPrefix(p, "*") && strings.HasSuffix("@"+domain, p[1:]) {
 				return true
 			}

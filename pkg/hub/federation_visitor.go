@@ -32,6 +32,10 @@ import (
 // The auth middleware answers it with 403 (visitorAccountRefusedMessage).
 var errFederatedVisitorRefused = errors.New("federated account may not act")
 
+// errNoVisitorRuleBound rolls back a first contact that created an account
+// for visitor rules when none of them binds it any more.
+var errNoVisitorRuleBound = errors.New("no visitor rule binds the new account")
+
 // visitorAccountRefusedMessage is the 403 message of a request refused by
 // errFederatedVisitorRefused.
 const visitorAccountRefusedMessage = "This account may not access this hub"
@@ -232,8 +236,14 @@ func (s *Server) linkPendingVisitor(ctx context.Context, fu *FederatedUserIdenti
 		if err := tx.CreateMutationAudit(ctx, visitorLinkedAuditRecord(ctx, u.ID, store.UserStatusPending, string(after))); err != nil {
 			return err
 		}
-		if err := bindVisitorRules(ctx, tx, u, fu.Subject(), rules); err != nil {
+		bound, err := bindVisitorRules(ctx, tx, u, fu.Subject(), rules)
+		if err != nil {
 			return err
+		}
+		if pending == nil && bound == 0 {
+			// The account was created for rules that no longer bind it
+			// (removed or ended since they were read): keep nothing.
+			return errNoVisitorRuleBound
 		}
 		linked = u
 		return nil
@@ -244,6 +254,9 @@ func (s *Server) linkPendingVisitor(ctx context.Context, fu *FederatedUserIdenti
 			return nil, nil
 		}
 		return u, rerr
+	}
+	if errors.Is(err, errNoVisitorRuleBound) {
+		return nil, nil
 	}
 	if errors.Is(err, store.ErrInvalidInput) {
 		// The account stopped being pending or changed between the read
@@ -260,8 +273,10 @@ func (s *Server) linkPendingVisitor(ctx context.Context, fu *FederatedUserIdenti
 // applyVisitorRules binds the active, linked federated account u to every
 // project whose active visitor rule matches the verified email of fu
 // (visitorTokenEmail, activeVisitorRulesForEmail) and where u has no
-// project-visitor binding and no exclusion from that rule. The bindings
-// and their audit records are one transaction. Nothing is written when
+// exclusion from that rule and no project-visitor binding, or only an
+// inactive visitor grant by email, which the rule binding replaces
+// (missingVisitorRules). The bindings and their audit records are one
+// transaction. Nothing is written when
 // nothing is missing, which is the case on almost every request. A failure
 // is logged and does not refuse the request: the account keeps the
 // bindings it has, and the next request tries again (a concurrent request
@@ -279,7 +294,7 @@ func (s *Server) applyVisitorRules(ctx context.Context, fu *FederatedUserIdentit
 	if len(rules) == 0 {
 		return
 	}
-	missing, err := missingVisitorRules(ctx, s.store, u.ID, rules)
+	missing, err := missingVisitorRules(ctx, s.store, u.ID, rules, time.Now())
 	if err != nil {
 		slog.Warn("visitor rules lookup failed", "user_id", u.ID, "error", err)
 		return
@@ -288,18 +303,30 @@ func (s *Server) applyVisitorRules(ctx context.Context, fu *FederatedUserIdentit
 		return
 	}
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
-		return bindVisitorRules(ctx, tx, u, fu.Subject(), missing)
+		_, err := bindVisitorRules(ctx, tx, u, fu.Subject(), rules)
+		return err
 	})
 	if err != nil {
 		slog.Warn("visitor rule binding failed", "user_id", u.ID, "error", err)
 	}
 }
 
+// visitorRuleBinding is a rule that would bind a federated account on the
+// rule's project, and the inactive visitor grant by email of the account
+// on that project that the rule binding replaces, or nil.
+type visitorRuleBinding struct {
+	rule     *store.ProjectVisitorRule
+	replaces *store.RoleBinding
+}
+
 // missingVisitorRules returns the rules, of distinct projects, that would
-// bind the federated account userID: those of a project where it has no
-// project-visitor binding (of any source), and that have no exclusion for
-// it. The first rule of a project wins (rules arrive oldest first).
-func missingVisitorRules(ctx context.Context, st store.Store, userID string, rules []*store.ProjectVisitorRule) ([]*store.ProjectVisitorRule, error) {
+// bind the federated account userID at now: those that have no exclusion
+// for it, of a project where it has no project-visitor binding, or only a
+// visitor grant by email whose window does not contain now (expired, or
+// not started yet), which the rule binding replaces. An active grant by
+// email, and a binding of another rule, are kept and the rule is skipped.
+// The first rule of a project wins (rules arrive oldest first).
+func missingVisitorRules(ctx context.Context, st store.Store, userID string, rules []*store.ProjectVisitorRule, now time.Time) ([]visitorRuleBinding, error) {
 	if len(rules) == 0 {
 		return nil, nil
 	}
@@ -313,16 +340,24 @@ func missingVisitorRules(ctx context.Context, st store.Store, userID string, rul
 	if err != nil {
 		return nil, err
 	}
-	bound := make(map[string]bool, len(bindings))
+	existing := make(map[string]*store.RoleBinding, len(bindings))
 	for _, b := range bindings {
 		if b.RoleDefinitionID == rd.ID {
-			bound[b.ScopeID] = true
+			existing[b.ScopeID] = b
 		}
 	}
-	var out []*store.ProjectVisitorRule
+	taken := make(map[string]bool, len(rules))
+	var out []visitorRuleBinding
 	for _, rule := range rules {
-		if bound[rule.ProjectID] {
+		if taken[rule.ProjectID] {
 			continue
+		}
+		var replaces *store.RoleBinding
+		if b, ok := existing[rule.ProjectID]; ok {
+			if b.SourceRuleID != nil || visitorGrantActiveAt(b, now) {
+				continue
+			}
+			replaces = b
 		}
 		excluded, err := st.IsProjectVisitorExcluded(ctx, rule.ID, userID)
 		if err != nil {
@@ -331,24 +366,61 @@ func missingVisitorRules(ctx context.Context, st store.Store, userID string, rul
 		if excluded {
 			continue
 		}
-		bound[rule.ProjectID] = true
-		out = append(out, rule)
+		taken[rule.ProjectID] = true
+		out = append(out, visitorRuleBinding{rule: rule, replaces: replaces})
 	}
 	return out, nil
 }
 
+// visitorGrantActiveAt reports whether the window of the binding rb
+// contains now, by the authorization kernel's rule (evaluateActivation):
+// an unset bound is unbounded, NotBefore is inclusive and ExpiresAt is
+// exclusive.
+func visitorGrantActiveAt(rb *store.RoleBinding, now time.Time) bool {
+	if rb.NotBefore != nil && now.Before(*rb.NotBefore) {
+		return false
+	}
+	if rb.ExpiresAt != nil && !now.Before(*rb.ExpiresAt) {
+		return false
+	}
+	return true
+}
+
 // bindVisitorRules creates, in tx, a project-visitor binding of the
 // federated account u for each rule of rules that missingVisitorRules
-// (read in tx) still reports missing, tagged with the rule's ID and
-// carrying its window, and a visitor_linked audit record naming the rule
-// for each. A binding the account already has, whatever its source, is
-// left as it is.
-func bindVisitorRules(ctx context.Context, tx store.Store, u *store.User, subject string, rules []*store.ProjectVisitorRule) error {
-	missing, err := missingVisitorRules(ctx, tx, u.ID, rules)
+// (read in tx) still reports missing, tagged with the rule's ID, and a
+// visitor_linked audit record naming the rule for each. The store gives
+// the binding the rule's window as it is in tx. It returns the number of
+// bindings created.
+//
+// An inactive visitor grant by email on the rule's project is deleted
+// first (DeleteInactiveVisitorGrant) and the audit record names it
+// (replaced_binding_id); when the grant has become active in the meantime
+// it is kept and the rule is skipped. A rule the store refuses because it
+// was removed, or is no longer active, since it was read is skipped; if a
+// grant was already deleted for it, the error is returned so the
+// transaction keeps the grant. A binding the account already has,
+// whatever its source, is otherwise left as it is.
+func bindVisitorRules(ctx context.Context, tx store.Store, u *store.User, subject string, rules []*store.ProjectVisitorRule) (int, error) {
+	now := time.Now()
+	missing, err := missingVisitorRules(ctx, tx, u.ID, rules, now)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	for _, rule := range missing {
+	bound := 0
+	for _, m := range missing {
+		rule := m.rule
+		replacedID := ""
+		if m.replaces != nil {
+			removed, err := tx.DeleteInactiveVisitorGrant(ctx, m.replaces.ID, now)
+			if err != nil {
+				return 0, err
+			}
+			if !removed {
+				continue
+			}
+			replacedID = m.replaces.ID
+		}
 		ruleID := rule.ID
 		rb, err := tx.CreateVisitorRoleBinding(ctx, &store.RoleBinding{
 			PrincipalType: store.RoleBindingPrincipalUser,
@@ -360,25 +432,34 @@ func bindVisitorRules(ctx context.Context, tx store.Store, u *store.User, subjec
 			CreatedBy:     rule.CreatedBy,
 			SourceRuleID:  &ruleID,
 		})
-		if err != nil {
-			return err
+		if errors.Is(err, store.ErrVisitorBindingRefused) && replacedID == "" {
+			continue
 		}
-		after, err := json.Marshal(map[string]string{
+		if err != nil {
+			return 0, err
+		}
+		summary := map[string]string{
 			"issuer":     rule.Issuer,
 			"email":      federatedEmailOf(u),
 			"subject":    subject,
 			"rule_id":    rule.ID,
 			"project_id": rule.ProjectID,
 			"binding_id": rb.ID,
-		})
+		}
+		if replacedID != "" {
+			summary["replaced_binding_id"] = replacedID
+			summary["replaced"] = "inactive visitor grant by email"
+		}
+		after, err := json.Marshal(summary)
 		if err != nil {
-			return fmt.Errorf("visitor link audit summary: %w", err)
+			return 0, fmt.Errorf("visitor link audit summary: %w", err)
 		}
 		if err := tx.CreateMutationAudit(ctx, visitorLinkedAuditRecord(ctx, u.ID, "", string(after))); err != nil {
-			return err
+			return 0, err
 		}
+		bound++
 	}
-	return nil
+	return bound, nil
 }
 
 // federatedEmailOf returns the federated email of the account u, or "".

@@ -276,17 +276,38 @@ type Store interface {
 	// UpdateProjectVisitorRuleWindow replaces the NotBefore and ExpiresAt
 	// of the project visitor rule id (nil clears a bound) and of every
 	// role binding the rule created (SourceRuleID), in one transaction,
-	// and returns the updated rule. A missing rule returns ErrNotFound. It
+	// and returns the updated rule. The rule row is locked before the
+	// bindings are changed, so a rule binding created concurrently either
+	// is changed too or takes the new window. A missing rule returns ErrNotFound. It
 	// is safe to call on the store passed to WithTx.
 	UpdateProjectVisitorRuleWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*ProjectVisitorRule, error)
 
 	// DeleteProjectVisitorRule deletes the project visitor rule id, every
 	// role binding it created (SourceRuleID) and its exclusions, in one
 	// transaction, and returns the deleted bindings. A binding with no
-	// SourceRuleID (a visitor grant by email) is never deleted. A missing
+	// SourceRuleID (a visitor grant by email) is never deleted. The rule
+	// row is locked before the bindings are deleted, so a rule binding
+	// created concurrently is either deleted too or refused. A missing
 	// rule returns ErrNotFound. It is safe to call on the store passed to
 	// WithTx.
 	DeleteProjectVisitorRule(ctx context.Context, id string) ([]*RoleBinding, error)
+
+	// DeleteProjectVisitorRulesByProject deletes every project visitor
+	// rule of projectID, every role binding they created (SourceRuleID)
+	// and their exclusions, in one transaction, and returns the number of
+	// rules deleted. Project deletion calls it, so no rule of a deleted
+	// project binds anyone afterwards. It is safe to call on the store
+	// passed to WithTx.
+	DeleteProjectVisitorRulesByProject(ctx context.Context, projectID string) (int, error)
+
+	// DeleteInactiveVisitorGrant deletes the project-visitor binding
+	// bindingID when it is a visitor grant by email (no SourceRuleID) whose
+	// window does not contain at (expired, or not started yet), and
+	// reports whether it deleted it. Any other binding, an active grant
+	// and a missing binding are left alone and return false. The binding
+	// is read and checked in the same transaction as the delete. It is
+	// safe to call on the store passed to WithTx.
+	DeleteInactiveVisitorGrant(ctx context.Context, bindingID string, at time.Time) (bool, error)
 
 	// CreateProjectVisitorExclusion records that the project visitor rule
 	// ruleID no longer binds the user userID, so the rule does not create
@@ -3359,8 +3380,11 @@ type RoleStore interface {
 	// be empty, in which case the project-visitor role is resolved by
 	// name. SourceRuleID, when set, names the project visitor rule that
 	// creates the binding: the rule must exist, be of the binding's
-	// project and of the account's home issuer (ErrVisitorBindingRefused
-	// otherwise). Returns ErrAlreadyExists for a duplicate. It is safe to
+	// project and of the account's home issuer, and be active now
+	// (ErrVisitorBindingRefused otherwise); the binding then takes the
+	// rule's window, read in the same transaction, in place of NotBefore
+	// and ExpiresAt. Create a rule binding inside WithTx, so the rule
+	// cannot change before the binding commits. Returns ErrAlreadyExists for a duplicate. It is safe to
 	// call on the store passed to WithTx.
 	CreateVisitorRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
 

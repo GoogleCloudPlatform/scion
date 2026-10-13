@@ -133,6 +133,15 @@ var (
 	errVisitorAccountRace = errors.New("federated account created concurrently")
 )
 
+// errVisitorGrantedByRule marks a grant by email to an account that is
+// already a visitor of the project through a visitor rule; the add
+// handler answers it with 409 and visitorGrantedByRuleMessage.
+var errVisitorGrantedByRule = errors.New("the account is already a visitor of this project through a visitor rule")
+
+// visitorGrantedByRuleMessage is the 409 message of a grant by email to a
+// person who is already a visitor of the project through a visitor rule.
+const visitorGrantedByRuleMessage = "That email already has access to this project through a visitor rule; to keep access independently of the rule, remove the visitor, then grant the email again"
+
 // errVisitorRuleBindingWindow marks a window change of a binding a visitor
 // rule created: its window follows the rule's, so the update handler
 // answers it with 409.
@@ -288,6 +297,8 @@ func (s *Server) handleAddProjectVisitor(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusCreated, visitor)
 	case errors.Is(err, errVisitorAlreadyGranted):
 		Conflict(w, "That email is already a visitor of this project for that issuer; change the grant's window instead")
+	case errors.Is(err, errVisitorGrantedByRule):
+		Conflict(w, visitorGrantedByRuleMessage)
 	case errors.Is(err, errVisitorAccountSuspended):
 		Conflict(w, "That visitor account is suspended")
 	case errors.Is(err, errVisitorAccountRace):
@@ -325,6 +336,14 @@ func (s *Server) grantProjectVisitor(ctx context.Context, projectID, actorID, is
 		}
 		if u.Status == store.UserStatusSuspended {
 			return errVisitorAccountSuspended
+		}
+		if _, existing, err := projectVisitorBinding(ctx, tx, projectID, u.ID); err == nil {
+			if existing.SourceRuleID != nil {
+				return errVisitorGrantedByRule
+			}
+			return errVisitorAlreadyGranted
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
 		}
 		rb, err := tx.CreateVisitorRoleBinding(ctx, &store.RoleBinding{
 			PrincipalType: store.RoleBindingPrincipalUser,
@@ -466,7 +485,8 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 // handleRemoveProjectVisitor answers DELETE /visitors/{visitorId}. Revoking
 // a binding a visitor rule created also records an exclusion of the
 // visitor from that rule, in the same transaction, so the rule does not
-// create the binding again; the rule's other visitors are unchanged.
+// create the binding again; the rule's other visitors are unchanged. When
+// the rule no longer exists the binding is removed with no exclusion.
 func (s *Server) handleRemoveProjectVisitor(w http.ResponseWriter, r *http.Request, project *store.Project, actor UserIdentity, visitorID string) {
 	ctx := r.Context()
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
@@ -478,7 +498,10 @@ func (s *Server) handleRemoveProjectVisitor(w http.ResponseWriter, r *http.Reque
 			return err
 		}
 		if rb.SourceRuleID != nil {
-			if err := tx.CreateProjectVisitorExclusion(ctx, *rb.SourceRuleID, u.ID, actor.ID()); err != nil {
+			// A binding whose rule no longer exists is still removed;
+			// with no rule there is nothing to exclude the visitor from.
+			err := tx.CreateProjectVisitorExclusion(ctx, *rb.SourceRuleID, u.ID, actor.ID())
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return err
 			}
 		}
