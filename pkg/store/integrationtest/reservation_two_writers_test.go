@@ -154,10 +154,15 @@ func parseWorkerRows(out string) map[int]string {
 // reservation test. At the shared start time it inserts a broker-scoped
 // reservation in its scope for each resource and reports, per resource,
 // CREATED, RETRY (the winner is in its scope) or CONFLICT <winner scope>.
+//
+// Run normally (no SCION_TEST_WORKER_DSN) it returns at once and passes
+// rather than skipping: make test-store-postgres-integrationtest fails on
+// any "--- SKIP" line other than the older worker entrypoints it lists by
+// name.
 func TestWorker_ReservationWriter(t *testing.T) {
 	dsn := os.Getenv("SCION_TEST_WORKER_DSN")
 	if dsn == "" {
-		t.Skip("worker entrypoint; launched only by a parent multi-process test")
+		return
 	}
 	limitID := os.Getenv("SCION_TEST_WORKER_LIMIT")
 	scope := os.Getenv("SCION_TEST_WORKER_SCOPE")
