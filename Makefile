@@ -546,7 +546,8 @@ test-launch-store-postgres: test-store-postgres
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
 	$(MEMBERSHIP_LOSS_POSTGRES_TESTS) \
-	$(TEST_IDENTITY_POSTGRES_TESTS)
+	$(TEST_IDENTITY_POSTGRES_TESTS) \
+	TestHubInternal_ReplayAcrossHubReplicas
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
@@ -626,7 +627,8 @@ test-webchat-postgres:
 CONDUIT_AUTHZ_POSTGRES_TESTS := TestConduitAuthzPostgres_NotifyAcrossNodes \
 	TestConduitAuthzPostgres_UserSuspendDeleteAndTokenRevoke \
 	TestConduitAuthzPostgres_ListenGapResync \
-	TestConduitAuthzPostgres_BulkRevocation
+	TestConduitAuthzPostgres_BulkRevocation \
+	TestSeparateRelayListenerReceivesHubEvents
 
 test-conduit-authz-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
