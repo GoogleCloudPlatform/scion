@@ -159,6 +159,11 @@ type Layer1Snapshot struct {
 	DefaultGCPIdentityServiceAccountID string
 
 	// Endpoints
+	// PublicURL is, in a DB-backed snapshot, the server.hub.public_url an
+	// admin saved in a managed endpoints row, or "" when none is saved. It
+	// is not the endpoint in effect: that is resolved at startup
+	// (Server.HubEndpoints) and may come from settings.yaml or the
+	// environment (ptone/scion#4826).
 	PublicURL string
 	// HubName is the configured hub_name. "" does NOT mean "leave alone":
 	// ApplySnapshot resets the running name (and the GCP secret label) to
@@ -385,6 +390,7 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	for name, ss := range o.cache {
 		dbSections[name] = ss.Value
 	}
+	endpoints, hasEndpoints := o.cache["endpoints"]
 	o.mu.RUnlock()
 
 	// Build the merged koanf: bootstrap fallback, overlaid by DB sections.
@@ -438,13 +444,12 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 		snap.HubName = o.bootstrapKoanf.String("server.hub.hub_name")
 	}
 
-	// public_url keeps its bootstrap value the same way: a managed endpoints
-	// row carries it only after an admin sets it, and with none stored the
-	// hub resolves its endpoint from the bootstrap material at startup
-	// (StoredPublicURL), so that is the value in effect (ptone/scion#3905).
-	if snap.PublicURL == "" && o.bootstrapKoanf != nil {
-		snap.PublicURL = o.bootstrapKoanf.String(config.PublicURLKey)
-	}
+	// public_url is the value an admin saved, or "": a seeded endpoints row
+	// and the bootstrap material may hold a SCION_SEED_* value that startup
+	// ignores (StoredPublicURL), so neither is shown as the field value.
+	// The value in effect is reported separately (PublicURLStatus); echo
+	// detection compares against this saved value only (ptone/scion#4826).
+	snap.PublicURL = managedPublicURL(endpoints, hasEndpoints)
 
 	// Map-of-objects sections (runtimes, profiles, harness_configs): extract
 	// directly from DB docs or bootstrap koanf rather than going through the

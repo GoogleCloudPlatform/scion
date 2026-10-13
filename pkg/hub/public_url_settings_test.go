@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -112,15 +113,16 @@ func newBootstrapPublicURLServer(t *testing.T, fileURL string, seeded bool) (*Se
 // TestPutServerConfigDB_BootstrapPublicURLNotStored checks that a settings
 // save never stores the bootstrap public URL as a saved value: not when it
 // saves another endpoints field, and not when it echoes the public URL the
-// GET view shows, either on the first save or on a second save once the
-// endpoints row is managed. A later settings.yaml change then still takes
-// effect at startup (ptone/scion#3905, ptone/scion#4707).
+// GET view shows (empty, since nothing is saved), either on the first save
+// or on a second save once the endpoints row is managed. A later
+// settings.yaml change then still takes effect at startup
+// (ptone/scion#3905, ptone/scion#4707, ptone/scion#4826).
 func TestPutServerConfigDB_BootstrapPublicURLNotStored(t *testing.T) {
 	const fileURL = "http://hub.internal:8080" // a file value the database rule would reject
 	for _, seeded := range []bool{true, false} {
 		for name, body := range map[string]string{
 			"sibling field only": `{"server":{"hub":{"monitoring_dashboard_url":"https://dash.example.com/d"}}}`,
-			"echoed public URL":  `{"server":{"hub":{"public_url":"` + fileURL + `","monitoring_dashboard_url":"https://dash.example.com/d"}}}`,
+			"echoed GET view":    `{"server":{"hub":{"public_url":"","monitoring_dashboard_url":"https://dash.example.com/d"}}}`,
 			"image registry":     `{"image_registry":"registry.example.com"}`,
 		} {
 			t.Run(fmt.Sprintf("seeded=%v/%s", seeded, name), func(t *testing.T) {
@@ -138,11 +140,11 @@ func TestPutServerConfigDB_BootstrapPublicURLNotStored(t *testing.T) {
 				assert.NotContains(t, report.AppliedKeys, config.PublicURLKey)
 				_, err = ops.Refresh(context.Background())
 				require.NoError(t, err)
-				assert.Equal(t, fileURL, getPublicURL(t, srv, ops), "GET keeps showing the value in effect")
+				assert.Empty(t, getPublicURL(t, srv, ops), "GET shows no saved value, not the bootstrap value")
 
 				// A second save, now on the managed endpoints row, echoes the
-				// public URL GET shows. It is still an echo, not a saved value.
-				rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"`+fileURL+`"}}}`)
+				// public URL GET shows. It is still not a saved value.
+				rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"`+getPublicURL(t, srv, ops)+`"}}}`)
 				require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 				row, err = fake.GetHubSetting(context.Background(), "endpoints")
 				require.NoError(t, err)
@@ -154,7 +156,7 @@ func TestPutServerConfigDB_BootstrapPublicURLNotStored(t *testing.T) {
 				assert.NotContains(t, report.AppliedKeys, config.PublicURLKey)
 				_, err = ops.Refresh(context.Background())
 				require.NoError(t, err)
-				assert.Equal(t, fileURL, getPublicURL(t, srv, ops), "GET keeps showing the value in effect")
+				assert.Empty(t, getPublicURL(t, srv, ops), "GET still shows no saved value")
 
 				stored, err := StoredPublicURL(context.Background(), fake)
 				require.NoError(t, err)
@@ -272,9 +274,10 @@ func TestGetServerConfigDB_PinnedPublicURLKeepsSiblingsSuperseded(t *testing.T) 
 }
 
 // TestPutServerConfigDB_ClearedPublicURLNotSuperseded checks that clearing
-// a saved public URL leaves the bootstrap value in effect: GET shows it, it
-// is no longer reported as superseded, and the save reports the change as
-// pending a restart (ptone/scion#3905).
+// a saved public URL leaves the bootstrap value in effect: GET shows an
+// empty field (no saved value), the public URL is no longer reported as
+// superseded, and the save reports the change as pending a restart
+// (ptone/scion#3905, ptone/scion#4826).
 func TestPutServerConfigDB_ClearedPublicURLNotSuperseded(t *testing.T) {
 	const bootURL, savedURL = "https://file.example.com", "https://saved.example.com"
 	srv, ops := newManagedPublicURLServer(t, bootURL, savedURL, "")
@@ -287,7 +290,7 @@ func TestPutServerConfigDB_ClearedPublicURLNotSuperseded(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.False(t, publicURLSuperseded(getServerConfigDB(t, srv, ops)), "a cleared public URL supersedes nothing")
-	assert.Equal(t, bootURL, getPublicURL(t, srv, ops), "GET shows the bootstrap value now in effect")
+	assert.Empty(t, getPublicURL(t, srv, ops), "GET shows no saved value; the bootstrap value is in effect but is not the field value")
 }
 
 // publicURLAuditFixture is a DB-mode server with a SQLite store for audit
@@ -489,4 +492,100 @@ func TestPublicURLWrites_StoreErrorRecordsNotApplied(t *testing.T) {
 		"":                        "https://saved.example.com",
 	}, pairs)
 	assert.Equal(t, map[string]bool{gcpIAMSurfaceSave: true, gcpIAMSurfaceReset: true}, surfaces)
+}
+
+// newSeedOnlyPublicURLServer boots a DB-mode server whose hub endpoint is
+// supplied only as a seed value (SCION_SEED_SERVER_HUB_ENDPOINT=seedURL),
+// with the bootstrap material loaded as startup loads it. With seeded true,
+// the endpoints row is seeded from that bootstrap, as syncHubSettings seeds
+// it at every start; otherwise there is no row. The endpoints are resolved
+// as startup resolves them: the stored value (StoredPublicURL) over the
+// operator endpoint operator, which a seed value does not set.
+func newSeedOnlyPublicURLServer(t *testing.T, seedURL, operator string, seeded bool) (*Server, *fakeHubSettingStore, *OperationalSettings, *settingsAuditStore) {
+	t.Helper()
+	ctx := context.Background()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_SERVER_HUB_ENDPOINT", "")
+	t.Setenv("SCION_SEED_SERVER_HUB_ENDPOINT", seedURL)
+	bootK := config.LoadBootstrapKoanf()
+	require.Equal(t, seedURL, bootK.String(config.PublicURLKey), "the seed value is bootstrap material")
+
+	fake := newFakeHubSettingStore()
+	if seeded {
+		doc, err := opsettings.ExtractSectionFromKoanf(bootK, "endpoints")
+		require.NoError(t, err)
+		require.Equal(t, seedURL, publicURLFromSectionDoc(doc), "the seeded row carries the seed value")
+		_, err = fake.UpsertHubSetting(ctx, "endpoints", doc, "seed", -1, "seeded")
+		require.NoError(t, err)
+	}
+	ops := NewOperationalSettings(fake, bootK, emptyKoanf())
+	_, err := ops.Refresh(ctx)
+	require.NoError(t, err)
+
+	stored, err := StoredPublicURL(ctx, fake)
+	require.NoError(t, err)
+	require.Empty(t, stored, "startup ignores the seed value")
+	endpoints, _ := resolveForTest(t, HubEndpoints{Operator: operator, OperatorSource: "localhost"}, stored)
+
+	audits := &settingsAuditStore{}
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, ""), store: audits}
+	srv.config.HubEndpoints = &endpoints
+	srv.SetOperationalSettings(ops)
+	return srv, fake, ops, audits
+}
+
+// TestServerConfigDB_SeedOnlyPublicURL checks a hub whose endpoint is
+// supplied only as a seed value, which startup ignores: GET shows an empty
+// public_url field and the endpoint in effect in public_url_status; saving
+// the empty field stores nothing; saving the seed value is a change, not an
+// echo, so it is stored, recorded and reported as pending a restart, and GET
+// then shows it as the saved value (ptone/scion#4826).
+func TestServerConfigDB_SeedOnlyPublicURL(t *testing.T) {
+	const seedURL = "https://seed.example.com"
+	const operator = "http://localhost:8080"
+	for _, seeded := range []bool{true, false} {
+		t.Run(fmt.Sprintf("seeded=%v", seeded), func(t *testing.T) {
+			srv, fake, ops, audits := newSeedOnlyPublicURLServer(t, seedURL, operator, seeded)
+
+			resp := getServerConfigDB(t, srv, ops)
+			require.NotNil(t, resp.Server)
+			require.NotNil(t, resp.Server.Hub)
+			assert.Empty(t, resp.Server.Hub.PublicURL, "the field does not show the seed value")
+			require.NotNil(t, resp.PublicURLStatus)
+			assert.Equal(t, PublicURLStatus{Effective: operator, Source: "localhost"}, *resp.PublicURLStatus,
+				"the in-effect hint shows the endpoint startup resolved")
+
+			// Saving the field as GET shows it (empty) stores nothing.
+			rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"","monitoring_dashboard_url":"https://dash.example.com/d"}}}`)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			got, _ := storedEndpointsPublicURL(t, fake)
+			assert.Empty(t, got, "no public URL is stored")
+			assert.Empty(t, audits.records(), "no public URL change is recorded")
+			report := saveReport(t, rr)
+			assert.NotContains(t, report.PendingRestart, config.PublicURLKey, "the endpoint in effect does not change")
+			_, err := ops.Refresh(context.Background())
+			require.NoError(t, err)
+			assert.Empty(t, getPublicURL(t, srv, ops))
+
+			// Saving the seed value is a change: it is not the saved value.
+			rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"`+seedURL+`"}}}`)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			got, ok := storedEndpointsPublicURL(t, fake)
+			require.True(t, ok)
+			assert.Equal(t, seedURL, got, "the seed value is stored as a saved value")
+			recs := audits.records()
+			require.Len(t, recs, 1, "the change is recorded")
+			assert.Empty(t, recs[0].BeforeSummary)
+			assert.Equal(t, seedURL, recs[0].AfterSummary)
+			report = saveReport(t, rr)
+			assert.Equal(t, []string{config.PublicURLKey}, report.PendingRestart, "the endpoint in effect changes at the next start")
+			_, err = ops.Refresh(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, seedURL, getPublicURL(t, srv, ops), "a saved value shows")
+
+			stored, err := StoredPublicURL(context.Background(), fake)
+			require.NoError(t, err)
+			assert.Equal(t, seedURL, stored, "startup now uses the saved value")
+		})
+	}
 }
