@@ -157,8 +157,11 @@ type agentCredentialLastSeenSpawnKey struct{}
 // interval. The write is best effort (5s timeout, error ignored) and never
 // affects the request; a failed write leaves the row old, so the next
 // request writes again. Concurrent requests at the interval boundary may
-// each write; that is acceptable.
+// each write; that is acceptable. A nil store or credential writes nothing.
 func touchAgentCredentialLastSeen(ctx context.Context, creds store.AgentCredentialStore, cred *store.AgentCredential, now time.Time) {
+	if creds == nil || cred == nil {
+		return
+	}
 	if !agentCredentialLastSeenDue(cred.LastSeenAt, now) {
 		return
 	}

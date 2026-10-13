@@ -178,3 +178,22 @@ func TestAgentTokenVerify_LastSeenWriteFailureRetried(t *testing.T) {
 	f.verify(t)
 	assert.Equal(t, 2, f.rec.writes(), "no write within the interval after the retry")
 }
+
+// TestTouchAgentCredentialLastSeen_NilWritesNothing: a nil store or a nil
+// credential writes nothing and does not panic.
+func TestTouchAgentCredentialLastSeen_NilWritesNothing(t *testing.T) {
+	spawned := 0
+	ctx := context.WithValue(context.Background(), agentCredentialLastSeenSpawnKey{}, func(write func()) {
+		spawned++
+		write()
+	})
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	rec := &credLastSeenRecorder{}
+	assert.NotPanics(t, func() {
+		touchAgentCredentialLastSeen(ctx, nil, &store.AgentCredential{ID: "cred-1"}, now)
+		touchAgentCredentialLastSeen(ctx, rec, nil, now)
+		touchAgentCredentialLastSeen(ctx, nil, nil, now)
+	})
+	assert.Zero(t, spawned, "no write was started")
+	assert.Zero(t, rec.writes())
+}
