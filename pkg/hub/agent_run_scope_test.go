@@ -312,7 +312,7 @@ var recordNothing credRecord = func() *string { return nil }
 func TestAgentTokenRefusedIsByteIdentical(t *testing.T) {
 	srv, s, _, project := setupCredentialTestServer(t)
 	ctx := context.Background()
-	srv.authConfig.AgentRunScope = testRunScopeChecker(agentRunScopeEnforce, time.Now().Add(-time.Hour), s)
+	enforceRunScopeForRefusals(srv, s)
 	h := srv.Handler()
 
 	type cause struct {

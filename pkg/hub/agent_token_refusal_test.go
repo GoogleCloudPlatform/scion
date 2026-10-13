@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,12 +45,20 @@ type agentTokenRefusalCase struct {
 	runHeader string
 }
 
-// agentTokenRefusalCases enforces run scope on srv and stores an agent and
-// a token for each refusal cause UnifiedAuthMiddleware answers.
+// enforceRunScopeForRefusals enforces run scope on srv, with legacy_until
+// passed. Call it before srv.Handler(): the handler copies the auth config.
+func enforceRunScopeForRefusals(srv *Server, s store.Store) {
+	srv.authConfig.AgentRunScope = testRunScopeChecker(agentRunScopeEnforce, time.Now().Add(-time.Hour), s)
+}
+
+// agentTokenRefusalCases stores an agent and a token for each refusal
+// cause UnifiedAuthMiddleware answers. The run-scope cases are refused
+// only when the caller's handler enforces run scope
+// (enforceRunScopeForRefusals).
 func agentTokenRefusalCases(t *testing.T, srv *Server, s store.Store, project *store.Project) []agentTokenRefusalCase {
 	t.Helper()
+	require.NotNil(t, srv.authConfig.AgentRunScope, "run scope is not enforced")
 	ctx := context.Background()
-	srv.authConfig.AgentRunScope = testRunScopeChecker(agentRunScopeEnforce, time.Now().Add(-time.Hour), s)
 	var cases []agentTokenRefusalCase
 
 	// bound stores an agent and a token bound to its current run.
@@ -132,6 +141,7 @@ func serveAuditRoute(h http.Handler, set func(*http.Request)) rawResponse {
 // authentication are kept and nothing authentication set is.
 func TestUniformRefusalResponsesOnAuditRoute(t *testing.T) {
 	srv, s, _, project := setupCredentialTestServer(t)
+	enforceRunScopeForRefusals(srv, s)
 	cases := agentTokenRefusalCases(t, srv, s, project)
 	h := withTestOuterHeader(srv.Handler())
 
@@ -196,6 +206,7 @@ func TestAgentTokenRefusalCauseIsLogged(t *testing.T) {
 	srv, s, _, project := setupCredentialTestServer(t)
 	logs := &captureHandler{}
 	srv.authConfig.Logger = slog.New(logs)
+	enforceRunScopeForRefusals(srv, s)
 	cases := agentTokenRefusalCases(t, srv, s, project)
 	h := srv.Handler()
 
@@ -219,7 +230,7 @@ func TestAgentTokenRefusalCauseIsLogged(t *testing.T) {
 		dh := DevAuthMiddleware(testDevToken, srv.config.DevUserConfig)(http.NotFoundHandler())
 		rec := agentRequest(t, dh, http.MethodGet, "/api/v1/agents/any", "not-a-token", "")
 		assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
-		assert.Contains(t, buf.String(), "msg=\""+agentTokenRefusedLogMessage+"\" cause=header_not_validated")
+		assertOneRefusalLogLine(t, buf.String(), "header_not_validated")
 	})
 
 	for _, marker := range []bool{true, false} {
@@ -233,7 +244,22 @@ func TestAgentTokenRefusalCauseIsLogged(t *testing.T) {
 			rec := httptest.NewRecorder()
 			srv.handleAgentTokenRefresh(rec, req, agentID)
 			assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
-			assert.Contains(t, buf.String(), "msg=\""+agentTokenRefusedLogMessage+"\" cause=refresh_revoked")
+			assertOneRefusalLogLine(t, buf.String(), "refresh_revoked")
 		})
 	}
+}
+
+// assertOneRefusalLogLine asserts that text-handler output holds exactly
+// one refused-token record, and that it carries cause.
+func assertOneRefusalLogLine(t *testing.T, out, cause string) {
+	t.Helper()
+	msg := "msg=\"" + agentTokenRefusedLogMessage + "\""
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, msg) {
+			lines = append(lines, line)
+		}
+	}
+	require.Len(t, lines, 1, out)
+	assert.Contains(t, lines[0], msg+" cause="+cause)
 }
