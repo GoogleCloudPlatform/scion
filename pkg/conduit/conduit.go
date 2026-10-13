@@ -179,6 +179,20 @@ type Resizable interface {
 	Resizes() <-chan WindowSize
 }
 
+// FeatureStreamRenewal is the Hello capabilities feature of a target that
+// enforces stream authorization deadlines and accepts renewal grants
+// (design v2.21.16 §3.5, "Target-side deadlines").
+const FeatureStreamRenewal = "stream_renewal"
+
+// StreamRenewer is implemented by every Stream the relay side opens toward
+// a target, local or bridged to another relay. Renew sends the hub's
+// renewal for the stream, AuthRefresh{stream_id, credential}, toward the
+// target, where credential is a renewal grant. Only the relay side sends
+// renewals.
+type StreamRenewer interface {
+	Renew(credential []byte) error
+}
+
 // SessionInfo describes a session. Field values use the canonical strings
 // of contracts §2.
 type SessionInfo struct {

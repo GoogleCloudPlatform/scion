@@ -15,6 +15,7 @@
 package conduit
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -120,6 +121,14 @@ type Config struct {
 	StreamHandler StreamHandler
 	// RPCHandler serves inbound RPCs. Nil answers 501.
 	RPCHandler RPCHandler
+	// OnStreamRenewal receives, on the dialer (target) side, each
+	// AuthRefresh{stream_id} the relay sends: the hub's renewal for one
+	// stream (design §3.5), with credential holding the renewal grant
+	// (empty for a notice that carries none). ctx is the session's
+	// context (WelcomeFromContext works on it). It is called from the
+	// session's frame reader, in arrival order, and must not block. Nil
+	// ignores renewals.
+	OnStreamRenewal func(ctx context.Context, streamID uint32, credential []byte)
 
 	// Interceptor, if set, sees every frame (test seam for fault
 	// injection; see Interceptor).

@@ -1307,10 +1307,14 @@ const reasonBadFrame = "bad_frame"
 func (s *session) handleAuthRefresh(ar *conduitv1.AuthRefresh) {
 	if s.adm == nil {
 		// Only the relay side validates credentials. On the target side,
-		// an AuthRefresh{stream_id} is the hub's renewal notice for a
-		// stream it holds the deadline of (design §3.5): it is accepted
-		// and needs no action, and a notice for a stream that already
-		// ended is ignored. Stream lifetime never depends on it.
+		// an AuthRefresh{stream_id} is the hub's renewal for one of the
+		// target's streams (design §3.5). It goes to
+		// Config.OnStreamRenewal, which decides whether it moves that
+		// stream's deadline; without the hook, or without a stream id,
+		// it is ignored.
+		if id := ar.GetStreamId(); id != 0 && s.cfg.OnStreamRenewal != nil {
+			s.cfg.OnStreamRenewal(s.ctx, id, ar.GetCredential())
+		}
 		return
 	}
 	if id := ar.GetStreamId(); id != 0 {
