@@ -1362,6 +1362,14 @@ type StartOptions struct {
 	// start's cleanup: the runtime then skips its own start cleanup and
 	// leaves the reported resources to the caller. Set both hooks together.
 	OnResourceCreated func(ResourceHandle)
+	// Progress, when set, is called by the runtime when an async launch
+	// reaches a new step (a LaunchStep* value) between resource-creating
+	// calls, e.g. while a pod is scheduled or its container is created
+	// (design wave 3 §3 E-b, ptone/scion#4670). message is fixed text for
+	// the step and never carries runtime detail. The hook must not block:
+	// the runtime calls it inline. Nil (the synchronous path) means no
+	// progress is reported.
+	Progress func(step, message string)
 
 	// ObserveResourceCreated, when set, is also called after each true
 	// create of a launch resource (on the synchronous path as well). It
