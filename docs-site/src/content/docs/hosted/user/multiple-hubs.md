@@ -250,6 +250,20 @@ Logged in to http://127.0.0.1:8080 (the hub this directory is linked to); settin
 
 Agents never use the hub list or the current context. The CLI ignores `~/.scion/context.yaml` in agent mode, inside agent containers and in hub-managed agents, and the file is never copied into a container. Inside a container, the hub comes from `SCION_HUB_ENDPOINT` and the project from the agent's own settings. `scion use` and the `scion hub add`, `list`, `rename` and `remove` commands refuse to run inside an agent.
 
+## Moving from `scion hub shadow`
+
+`scion hub shadow` and `scion hub unshadow` have been removed; `scion use` replaces them and works from any directory without a marker file. Running `scion hub shadow` now fails with:
+
+```text
+'scion hub shadow' was removed; run 'scion use <project>' to work with a hub project from any directory
+```
+
+Directories created by `scion hub shadow` still work: commands run in them still target their hub project. Each command run in such a directory prints a notice on stderr, for example:
+
+```text
+This directory is a shadow of hub project 'Web frontend'; 'scion hub shadow' was removed. Delete ./.scion and run 'scion use web' (works from any directory). 'scion project prune' then cleans up its settings.
+```
+
 ## The server's own hub endpoint
 
 The hub list is CLI configuration only. A Scion server or Runtime Broker takes its hub endpoints from server-scoped settings:
