@@ -717,6 +717,14 @@
           "enum": ["key", "sequence"],
           "description": "Which interrupt method to use: key (single interrupt_key) or sequence (interrupt_sequence array)."
         },
+        "ready": {
+          "$ref": "#/$defs/harnessReady",
+          "description": "How the harness's readiness for a pasted message is decided: ready = signal time + settle."
+        },
+        "delivery": {
+          "$ref": "#/$defs/harnessDelivery",
+          "description": "How a message is submitted after it is pasted into the harness's terminal."
+        },
         "instructions_file": {
           "type": "string",
           "description": "Harness-native file that receives agent instructions."
@@ -763,6 +771,56 @@
           "type": "object",
           "description": "Optional hook dialect metadata.",
           "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessReady": {
+      "type": "object",
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["hook", "delay"],
+          "description": "hook: the signal is the ready marker written for this run by a session-start hook. delay: the signal is tmux session creation. Default delay."
+        },
+        "settle": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$",
+          "description": "Go duration to wait after the signal before the harness counts as ready, 0 to 60s. Default 8s for delay, 1.5s for hook."
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$",
+          "description": "Go duration deadline from launch for the hook strategy, 10s to 10m. Default 90s. Not allowed with strategy delay."
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessDelivery": {
+      "type": "object",
+      "properties": {
+        "submit_keys": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^(?:[^-;\\s\\x00-\\x1f\\x7f]|[^-\\s\\x00-\\x1f\\x7f][^\\s\\x00-\\x1f\\x7f]*[^;\\s\\x00-\\x1f\\x7f])$"
+          },
+          "description": "tmux key names sent after the paste, one send-keys call each. Also sent once, alone, for an empty message. A key must not start with '-' or end with ';'. Default [Enter]."
+        },
+        "extra_submits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5,
+          "description": "How many more times submit_keys is sent after the first submit. Default 2."
+        },
+        "extra_submit_delay": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$",
+          "description": "Go duration to wait before each extra submit, 0 to 5s. Default 300ms."
         }
       },
       "additionalProperties": false
@@ -1239,7 +1297,7 @@
         },
         "class": {
           "type": "string",
-          "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the test admin identity gate (--enable-test-admin-identities). Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
+          "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the --test-mode gate: every level other than off requires \"test\". Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
           "x-env-var": "SCION_SERVER_HUB_CLASS"
         },
         "test_identities": {
@@ -2115,6 +2173,18 @@
           "type": "string",
           "description": "Path to a PEM-encoded CA bundle used to verify the OTLP endpoint certificate.",
           "x-env-var": "SCION_OTEL_CA_FILE",
+          "x-since": "1"
+        },
+        "cert_file": {
+          "type": "string",
+          "description": "Path, inside the agent container, to a PEM-encoded client certificate for OTLP mTLS. Must be set together with key_file. Cannot be set when tls.enabled is false.",
+          "x-env-var": "SCION_OTEL_CERT_FILE",
+          "x-since": "1"
+        },
+        "key_file": {
+          "type": "string",
+          "description": "Path, inside the agent container, to the PEM-encoded private key for cert_file. Must be set together with cert_file. Cannot be set when tls.enabled is false.",
+          "x-env-var": "SCION_OTEL_KEY_FILE",
           "x-since": "1"
         }
       },
