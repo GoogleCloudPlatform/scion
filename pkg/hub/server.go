@@ -6788,21 +6788,23 @@ func (s *Server) registerRoutes() {
 	// leaving a live API behind a hidden UI. This is a startup-time gate:
 	// flipping the toggle requires a hub restart (same as the message broker).
 	if s.nativeChatEnabled() {
+		// chatRoute refuses every credential the chat routes do not accept
+		// (chatCredentialAllowed) before the handler runs.
 		// Chat thread prefs (Phase 3 — visibility mode persistence)
-		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.handleChatPrefs))
+		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.chatRoute(s.handleChatPrefs)))
 
 		// Wave-2 chat endpoints (conversation REST API)
-		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.handleChatSpaces))
-		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.handleChatSpaceRoutes))
-		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.handleChatConversationRoutes))
-		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.handleChatTopicRoutes))
-		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.handleChatDMs))
-		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.handleChatUnreadCount))
-		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.handleChatUserPrefs))
-		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.handleChatPresence))
-		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.handleChatSearch))
-		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.handleChatAttachments))
-		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.handleChatAttachmentByID))
+		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.chatRoute(s.handleChatSpaces)))
+		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.chatRoute(s.handleChatSpaceRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.chatRoute(s.handleChatConversationRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.chatRoute(s.handleChatTopicRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.chatRoute(s.handleChatDMs)))
+		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.chatRoute(s.handleChatUnreadCount)))
+		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
+		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
+		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
+		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatRoute(s.handleChatAttachments)))
+		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatRoute(s.handleChatAttachmentByID)))
 	}
 
 	// WebSocket control channel endpoint for Runtime Brokers

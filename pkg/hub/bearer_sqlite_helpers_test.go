@@ -77,6 +77,8 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	// addresses the super-admin's records in the fixture project.
 	ids.inbox = seedInboxRecords(t, ctx, s, adminID, ids.project, ids.agent)
 	ids.userSkillInjection = seedUserSkillInjection(t, ctx, s, adminID)
+	// The chat routes likewise address the super-admin's own chat records.
+	ids.chat = seedChatRecords(t, ctx, s, srv.webChatStore, adminID, ids.project, ids.chatTopic, ids.agent, ids.user)
 
 	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
 }
@@ -218,7 +220,9 @@ func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key str
 		params = patternOverrides(m.ids)[ep.Pattern]
 	}
 	path := substituteLiveInventoryParams(ep.Pattern, params)
-	if q, ok := queryOverrides(m.ids)[ep.Pattern]; ok {
+	if q, ok := bearerMatrixQueryOverrides(m.ids)[overrideKey{id, ep.Pattern}]; ok {
+		path += "?" + q
+	} else if q, ok := queryOverrides(m.ids)[ep.Pattern]; ok {
 		path += "?" + q
 	}
 	var body []byte
@@ -271,6 +275,33 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		{"inbox.notification.template.create", "/api/v1/notifications/templates"}: {
 			"name": f.inbox.createConversations + "-template", "triggerActivities": []string{"COMPLETED"}, "projectId": f.project,
 		},
+		// Chat writes with bodies the handlers accept.
+		{"chat.prefs.update", "/api/v1/chat/prefs"}:                                    {"visibility_mode": "conversation"},
+		{"chat.thread.create", "/api/v1/chat/spaces/{id}/threads"}:                     {"name": "bdm thread"},
+		{"chat.space.emoji.update", "/api/v1/chat/spaces/{id}/emoji"}:                  {"emoji": "x"},
+		{"chat.conversation.send.topic", "/api/v1/chat/conversations/{id}/messages"}:   {"content": "bdm thread message"},
+		{"chat.conversation.send.dmagent", "/api/v1/chat/conversations/{id}/messages"}: {"content": "bdm agent message"},
+		{"chat.conversation.send.dmuser", "/api/v1/chat/conversations/{id}/messages"}:  {"content": "bdm user message"},
+		{"chat.message.edit", "/api/v1/chat/conversations/{id}/messages/{messageId}"}:  {"content": "bdm edited"},
+		{"chat.conversation.markread.topic", "/api/v1/chat/conversations/{id}/read"}:   {"messageId": f.chat.topicMessage},
+		{"chat.conversation.markread.dm", "/api/v1/chat/conversations/{id}/read"}:      {"messageId": f.chat.dmMessage},
+		{"chat.conversation.mute.topic", "/api/v1/chat/conversations/{id}/mute"}:       {"muted": true},
+		{"chat.conversation.mute.dm", "/api/v1/chat/conversations/{id}/mute"}:          {"muted": true},
+		{"chat.conversation.pin.topic", "/api/v1/chat/conversations/{id}/pin"}:         {"pinned": true},
+		{"chat.conversation.pin.dm", "/api/v1/chat/conversations/{id}/pin"}:            {"pinned": true},
+		{"chat.presence.update", "/api/v1/chat/presence"}:                              {"projectIds": []string{f.project}},
+		{"chat.userprefs.update", "/api/v1/chat/user-prefs"}:                           {"spaceSortMode": "alpha"},
+	}
+}
+
+// bearerMatrixQueryOverrides holds per-operation query strings, for
+// entry points that share a pattern and are told apart by the query (the
+// chat search variants).
+func bearerMatrixQueryOverrides(f idFixtures) map[overrideKey]string {
+	return map[overrideKey]string{
+		{"chat.search.topic", "/api/v1/chat/search"}:   "q=chat&key=" + f.chatTopic,
+		{"chat.search.project", "/api/v1/chat/search"}: "q=chat&projectId=" + f.project,
+		{"chat.search.dm", "/api/v1/chat/search"}:      "q=chat&key=" + f.chat.dmAgent,
 	}
 }
 

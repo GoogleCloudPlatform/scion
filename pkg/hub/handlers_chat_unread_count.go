@@ -61,6 +61,12 @@ func (s *Server) handleChatUnreadCount(w http.ResponseWriter, r *http.Request) {
 		Forbidden(w)
 		return
 	}
+	// The count reads the caller's own read state: a token needs
+	// inbox:read. Its thread count covers the spaces it can read, and its
+	// DM count only the DMs it may read (chatTokenDMVisible).
+	if _, ok := s.requireChatSelector(w, r, permInboxRead); !ok {
+		return
+	}
 
 	resp, err := s.chatUnreadCount(r.Context(), GetIdentityFromContext(r.Context()), user.ID())
 	if err != nil {
@@ -109,9 +115,17 @@ func (s *Server) chatUnreadCount(ctx context.Context, identity Identity, userID 
 	if err != nil {
 		return resp, err
 	}
+	token := chatToken(ctx)
+	var tokenCheck *selfScopeCheck
+	if token != nil {
+		tokenCheck = s.newSelfScopeCheck(ctx, token, permInboxRead)
+	}
 	dmKeys := make([]string, 0, len(dms))
 	for _, dm := range dms {
 		if dm.PeerKind == "agent" && deletedPeers[dm.PeerID] {
+			continue
+		}
+		if token != nil && !s.chatTokenDMVisible(ctx, token, tokenCheck, dm.ConversationKey) {
 			continue
 		}
 		dmKeys = append(dmKeys, dm.ConversationKey)

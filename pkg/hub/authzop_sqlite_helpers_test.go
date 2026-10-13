@@ -130,6 +130,58 @@ type idFixtures struct {
 	// the dev user's here, the matrix super-admin's in the bearer
 	// disposition matrix.
 	inbox inboxRecords
+	// chat holds the caller's own native chat records (seedChatRecords):
+	// the dev user's here, the matrix super-admin's in the bearer
+	// disposition matrix.
+	chat chatRecords
+}
+
+// chatRecords are native chat records of one user: a second thread of the
+// fixture project (for the delete entry), a DM with an agent of that
+// project and a DM with another user, messages the user wrote in the
+// fixture thread (one for edit, one for delete, one more), and a message
+// in the agent DM.
+type chatRecords struct {
+	topicDel           string
+	dmAgent            string
+	dmUser             string
+	topicMessage       string
+	topicMessageEdit   string
+	topicMessageDelete string
+	dmMessage          string
+}
+
+// seedChatRecords creates chatRecords for userID: topicID is the fixture
+// thread of projectID, agentID an agent of projectID, peerUserID another
+// active user.
+func seedChatRecords(t *testing.T, ctx context.Context, s store.Store, wcs WebChatStore, userID, projectID, topicID, agentID, peerUserID string) chatRecords {
+	t.Helper()
+	at := time.Now().UTC().Add(-time.Minute)
+	r := chatRecords{topicDel: uuid.NewString()}
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: r.topicDel, ProjectID: projectID, Name: "chat-del-" + r.topicDel[:8],
+		CreatedBy: userID, CreatedAt: at, LastActivityAt: at,
+	}))
+	var err error
+	r.dmAgent, err = messages.DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, err)
+	r.dmUser, err = messages.DMConversationKey("user", userID, "user", peerUserID)
+	require.NoError(t, err)
+
+	message := func(threadID, projectOfRow string, offset time.Duration) string {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID: id, ProjectID: projectOfRow, Sender: "user:" + userID, SenderID: userID,
+			Recipient: "chat", Msg: "chat record " + id[:8], Type: "chat",
+			Channel: "web", ThreadID: threadID, CreatedAt: at.Add(offset),
+		}))
+		return id
+	}
+	r.topicMessageEdit = message(topicID, projectID, time.Second)
+	r.topicMessageDelete = message(topicID, projectID, 2*time.Second)
+	r.topicMessage = message(topicID, projectID, 3*time.Second)
+	r.dmMessage = message(r.dmAgent, projectID, 4*time.Second)
+	return r
 }
 
 // seedInboxRecords creates inboxRecords for userID in projectID; agentID
@@ -524,6 +576,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
+	f.chat = seedChatRecords(t, ctx, s, srv.webChatStore, DevUserID, f.project, f.chatTopic, f.agent, f.user)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
 	f.delegation = seedLiveInventoryDelegation(t, ctx, s, f.agent, f.project)
 
@@ -577,23 +630,37 @@ type overrideKey struct {
 // patternOverrides gives its pattern.
 func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 	return map[overrideKey]map[string]string{
-		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                         {"id": f.agentDel},
-		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                     {"id": f.projectDel},
-		{"group.delete", "/api/v1/groups/{id}"}:                                   {"id": f.groupDel},
-		{"user.admin.delete", "/api/v1/users/{id}"}:                               {"id": f.userDel},
-		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                   {"id": f.testIdentityDel},
-		{"skill.delete", "/api/v1/skills/{id}"}:                                   {"id": f.skillDel},
-		{"template.delete", "/api/v1/templates/{id}"}:                             {"id": f.templateDel},
-		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                  {"id": f.harnessConfigDel},
-		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:              {"id": f.gcpSADel},
-		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                    {"id": f.roleDefinitionDel},
-		{"quota.update", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
-		{"quota.delete", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
-		{"quota.update", "/api/v1/admin/entitlements/{id}"}:                       {"id": f.entitlementUD},
-		{"quota.delete", "/api/v1/admin/entitlements/{id}"}:                       {"id": f.entitlementUD},
-		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
-		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
-		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
+		// Chat: the DM variants address the caller's DMs; topic delete
+		// takes the disposable second thread; message delete its own
+		// message.
+		{"chat.topic.delete", "/api/v1/chat/topics/{id}"}:                               {"id": f.chat.topicDel},
+		{"chat.conversation.history.dm", "/api/v1/chat/conversations/{id}/messages"}:    {"id": f.chat.dmAgent},
+		{"chat.conversation.send.dmagent", "/api/v1/chat/conversations/{id}/messages"}:  {"id": f.chat.dmAgent},
+		{"chat.conversation.send.dmuser", "/api/v1/chat/conversations/{id}/messages"}:   {"id": f.chat.dmUser},
+		{"chat.conversation.readstate.dm", "/api/v1/chat/conversations/{id}/read"}:      {"id": f.chat.dmAgent},
+		{"chat.conversation.markread.dm", "/api/v1/chat/conversations/{id}/read"}:       {"id": f.chat.dmAgent},
+		{"chat.conversation.markunread.dm", "/api/v1/chat/conversations/{id}/unread"}:   {"id": f.chat.dmAgent},
+		{"chat.conversation.mute.dm", "/api/v1/chat/conversations/{id}/mute"}:           {"id": f.chat.dmAgent},
+		{"chat.conversation.pin.dm", "/api/v1/chat/conversations/{id}/pin"}:             {"id": f.chat.dmAgent},
+		{"chat.conversation.typing.dm", "/api/v1/chat/conversations/{id}/typing"}:       {"id": f.chat.dmAgent},
+		{"chat.message.delete", "/api/v1/chat/conversations/{id}/messages/{messageId}"}: {"id": f.chatTopic, "messageId": f.chat.topicMessageDelete},
+		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                               {"id": f.agentDel},
+		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                           {"id": f.projectDel},
+		{"group.delete", "/api/v1/groups/{id}"}:                                         {"id": f.groupDel},
+		{"user.admin.delete", "/api/v1/users/{id}"}:                                     {"id": f.userDel},
+		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                         {"id": f.testIdentityDel},
+		{"skill.delete", "/api/v1/skills/{id}"}:                                         {"id": f.skillDel},
+		{"template.delete", "/api/v1/templates/{id}"}:                                   {"id": f.templateDel},
+		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                        {"id": f.harnessConfigDel},
+		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:                    {"id": f.gcpSADel},
+		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                          {"id": f.roleDefinitionDel},
+		{"quota.update", "/api/v1/admin/limits/{id}"}:                                   {"id": f.limitUD},
+		{"quota.delete", "/api/v1/admin/limits/{id}"}:                                   {"id": f.limitUD},
+		{"quota.update", "/api/v1/admin/entitlements/{id}"}:                             {"id": f.entitlementUD},
+		{"quota.delete", "/api/v1/admin/entitlements/{id}"}:                             {"id": f.entitlementUD},
+		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:           {"id": f.accessConstraintUD},
+		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:           {"id": f.accessConstraintUD},
+		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}:       {"id": f.project, "memberId": f.projectMembershipUpdate},
 		// Grant revoke and grant read share their pattern; revoke takes
 		// the disposable twin grant.
 		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
@@ -804,9 +871,20 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/admin/maintenance/migrations/{id}/run": {"id": f.maintenanceOpKey},
 
 		// --- chat family ---
-		"/api/v1/chat/spaces/{id}/threads":         {"id": f.project},
-		"/api/v1/chat/topics/{id}":                 {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/messages": {"id": f.chatTopic},
+		"/api/v1/chat/spaces/{id}/threads":                     {"id": f.project},
+		"/api/v1/chat/spaces/{id}/members":                     {"id": f.project},
+		"/api/v1/chat/spaces/{id}/read":                        {"id": f.project},
+		"/api/v1/chat/spaces/{id}/emoji":                       {"id": f.project},
+		"/api/v1/chat/topics/{id}":                             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages":             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages/{messageId}": {"id": f.chatTopic, "messageId": f.chat.topicMessageEdit},
+		"/api/v1/chat/conversations/{id}/read":                 {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/unread":               {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/mute":                 {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/pin":                  {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/typing":               {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/interagent":           {"id": f.chat.dmAgent},
+		"/api/v1/chat/conversations/{id}/promote":              {"id": f.chat.dmAgent},
 
 		// --- integrations family ---
 		"/api/v1/admin/integrations/{name}":         {"name": f.integrationName},

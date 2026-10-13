@@ -103,6 +103,34 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the operation needs project:update and project:clone, and a token passes project.clone on a project only when its holder is a member of it; the matrix's super-admin token carries one selector and is not a member of the fixture project",
 		Pin:    "TestSetTemplate_RequiresUpdateAndCloneOnTheProject",
 	},
+	{OperationID: "chat.space.list", Method: "GET", Pattern: "/api/v1/chat/spaces"}: {
+		Reason: "the space list filters projects by project:read instead of refusing the request, so a token without the selector gets 200 with no spaces",
+		Pin:    "TestChatSpacesToken_FilteredToBoundary",
+	},
+	{OperationID: "chat.unreadcount.read", Method: "GET", Pattern: "/api/v1/chat/unread-count"}: {
+		Reason: "the count covers only the conversations inside the token boundary instead of refusing the request, so a project token for another project gets 200",
+		Pin:    "TestChatUnreadCountToken_FilteredToBoundary",
+	},
+	{OperationID: "chat.dm.list", Method: "GET", Pattern: "/api/v1/chat/dms"}: {
+		Reason: "the DM list keeps only the DMs the token may read instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestChatDMListToken_FilteredToBoundary",
+	},
+	{OperationID: "chat.search.unscoped", Method: "GET", Pattern: "/api/v1/chat/search"}: {
+		Reason: "the unscoped search covers only the projects the token can read instead of refusing the request, so a token without project:read gets 200 with no rows",
+		Pin:    "TestChatSearchToken_DMRowsNeedInboxRead",
+	},
+	{OperationID: "chat.attachment.upload.project", Method: "POST", Pattern: "/api/v1/chat/attachments"}: {
+		Reason: "the upload takes a multipart form, which the matrix body cannot express, and the matrix server configures no attachment store",
+		Pin:    "TestChatProjectUpload_RequiresInboxWriteAndProjectRead",
+	},
+	{OperationID: "chat.attachment.upload.noproject", Method: "POST", Pattern: "/api/v1/chat/attachments"}: {
+		Reason: "the upload takes a multipart form, which the matrix body cannot express, and the matrix server configures no attachment store",
+		Pin:    "TestChatProjectlessUpload_RequiresHubBoundary",
+	},
+	{OperationID: "chat.attachment.download.project", Method: "GET", Pattern: "/api/v1/chat/attachments/{id}"}: {
+		Reason: "the matrix server configures no attachment store, so every caller gets 503 before the attachment is looked up",
+		Pin:    "TestChatAttachmentDownloadToken_ProjectFileNeedsProjectRead",
+	},
 	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestArtifactsListUserAccessTokensAreBounded",
@@ -182,6 +210,67 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"inbox.conversation.resolve":             {"project:read"},
 	"inbox.notification.subscription.create": {"project:read"},
 	"inbox.notification.template.create":     {"project:read"},
+	"chat.prefs.read":                        {"agent:read"},
+	"chat.prefs.update":                      {"agent:read"},
+	"chat.thread.create":                     {"project:read"},
+	"chat.space.markread":                    {"project:read"},
+	"chat.topic.update":                      {"project:read"},
+	"chat.topic.delete":                      {"project:read"},
+	"chat.conversation.history.dm":           {"agent:read"},
+	"chat.conversation.send.topic":           {"project:read"},
+	"chat.conversation.send.dmagent":         {"agent:message"},
+	"chat.conversation.send.dmuser":          {"user:read"},
+	"chat.message.edit":                      {"project:read"},
+	"chat.message.delete":                    {"project:read"},
+	"chat.conversation.readstate.dm":         {"agent:read"},
+	"chat.conversation.markread.topic":       {"project:read"},
+	"chat.conversation.markread.dm":          {"agent:read"},
+	"chat.conversation.markunread.topic":     {"project:read"},
+	"chat.conversation.markunread.dm":        {"agent:read"},
+	"chat.conversation.mute.topic":           {"project:read"},
+	"chat.conversation.mute.dm":              {"agent:read"},
+	"chat.conversation.pin.topic":            {"project:read"},
+	"chat.conversation.pin.dm":               {"agent:read"},
+	"chat.conversation.typing.topic":         {"project:read"},
+	"chat.conversation.typing.dm":            {"agent:read"},
+	"chat.presence.update":                   {"project:read"},
+	"chat.search.dm":                         {"agent:read"},
+	"chat.conversation.promote":              {"project:read", "agent:read"},
+}
+
+// bearerMatrixNotFoundRefusals lists the non-GET admit rows whose route
+// answers every refused caller as a missing record (404), as the chat
+// conversation routes do. On these rows a 404 counts as a refusal, and,
+// as for a GET, only when the admitting token gets a 2xx on the same
+// target.
+var bearerMatrixNotFoundRefusals = map[liveInventoryKey]string{
+	{"chat.conversation.send.topic", http.MethodPost, "/api/v1/chat/conversations/{id}/messages"}:     "a send the sender may not make is answered as Thread not found",
+	{"chat.conversation.send.dmagent", http.MethodPost, "/api/v1/chat/conversations/{id}/messages"}:   "a send the sender may not make is answered as Thread not found",
+	{"chat.conversation.markread.topic", http.MethodPost, "/api/v1/chat/conversations/{id}/read"}:     "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.markread.dm", http.MethodPost, "/api/v1/chat/conversations/{id}/read"}:        "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.markunread.topic", http.MethodPost, "/api/v1/chat/conversations/{id}/unread"}: "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.markunread.dm", http.MethodPost, "/api/v1/chat/conversations/{id}/unread"}:    "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.mute.topic", http.MethodPut, "/api/v1/chat/conversations/{id}/mute"}:          "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.mute.dm", http.MethodPut, "/api/v1/chat/conversations/{id}/mute"}:             "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.pin.topic", http.MethodPut, "/api/v1/chat/conversations/{id}/pin"}:            "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.pin.dm", http.MethodPut, "/api/v1/chat/conversations/{id}/pin"}:               "a conversation the caller may not use is answered as Thread not found",
+}
+
+// bearerMatrixRefusedAt reports whether status refuses a token on the
+// entry point: bearerMatrixRefused, or a 404 on a row listed in
+// bearerMatrixNotFoundRefusals.
+func bearerMatrixRefusedAt(key liveInventoryKey, method string, status int) bool {
+	if _, ok := bearerMatrixNotFoundRefusals[key]; ok && status == http.StatusNotFound {
+		return true
+	}
+	return bearerMatrixRefused(method, status)
+}
+
+func bearerMatrixRefusalAt(key liveInventoryKey, method string) string {
+	if _, ok := bearerMatrixNotFoundRefusals[key]; ok {
+		return "403 or 404"
+	}
+	return bearerMatrixRefusal(method)
 }
 
 // TestBearerDispositionMatrix_CatalogEntryPoints drives real tokens through
@@ -256,8 +345,8 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			refusedWith404 := false
 			unrelated := m.mint(t, hubBoundary(), []string{bearerMatrixUnrelatedSelector(sel)})
 			ceilingRec := m.request(t, e, unrelated)
-			if !bearerMatrixRefused(ep.Method, ceilingRec.Code) {
-				t.Errorf("%s: a token without %s got %d, want %s: %s", label, sel, ceilingRec.Code, bearerMatrixRefusal(ep.Method), ceilingRec.Body.String())
+			if !bearerMatrixRefusedAt(e.key(), ep.Method, ceilingRec.Code) {
+				t.Errorf("%s: a token without %s got %d, want %s: %s", label, sel, ceilingRec.Code, bearerMatrixRefusalAt(e.key(), ep.Method), ceilingRec.Body.String())
 			} else if ceilingRec.Code == http.StatusNotFound {
 				refusedWith404 = true
 			}
@@ -279,8 +368,8 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 				if rec.Code == http.StatusNotFound {
 					refusedWith404 = true
 				}
-				if !bearerMatrixRefused(ep.Method, rec.Code) {
-					t.Errorf("%s: a project token for %s got %d, want %s: %s", label, boundProject, rec.Code, bearerMatrixRefusal(ep.Method), rec.Body.String())
+				if !bearerMatrixRefusedAt(e.key(), ep.Method, rec.Code) {
+					t.Errorf("%s: a project token for %s got %d, want %s: %s", label, boundProject, rec.Code, bearerMatrixRefusalAt(e.key(), ep.Method), rec.Body.String())
 				}
 			} else if hubOnly {
 				t.Logf("%s: a project token for %s with %s cannot be minted; the boundary is enforced at mint", label, boundProject, sel)
@@ -524,6 +613,17 @@ func TestBearerMatrixExclusions_NotStaleAndPinned(t *testing.T) {
 		}
 		if want.Status < 500 || strings.TrimSpace(want.Reason) == "" {
 			t.Errorf("positive server error row %v needs a 5xx status and a reason", key)
+		}
+	}
+	for key, reason := range bearerMatrixNotFoundRefusals {
+		if !admitRows[key] || key.Method == http.MethodGet {
+			t.Errorf("stale not-found refusal row %v: no non-GET catalog entry point with an admit disposition", key)
+		}
+		if _, excluded := bearerMatrixExclusions[key]; excluded {
+			t.Errorf("not-found refusal row %v is also excluded from the matrix", key)
+		}
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("not-found refusal row %v needs a reason", key)
 		}
 	}
 	for _, spec := range authzop.Catalog {

@@ -251,8 +251,6 @@ var EntryPointExemptions = []EntryPointExemption{
 	// read access was checked; the artifact service verifies the
 	// capability on every request and never uses a session here.
 	{Pattern: "/api/v1/artifacts/view/", Kind: ExemptionPublicEndpoint, Reason: "Artifact view capability (minted on POST /api/v1/artifacts/{id}/versions/{seq}/view after artifact.read; HMAC over artifact, version and expiry, verified by the artifact service on every GET/HEAD), experiment-gated", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/chat/user-prefs", Kind: ExemptionAuthenticationOnly, Reason: "Chat preferences, self-service; a federated caller is refused on PUT (requireProfileWriter)", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/chat/presence", Kind: ExemptionAuthenticationOnly, Reason: "Chat presence, self-service; a federated caller is refused (requireProfileWriter)", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link", Kind: ExemptionInternalOnly, Reason: "Chat account link registration, broker-authenticated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link/verify", Kind: ExemptionAuthenticationOnly, Reason: "Account linking verification, self-service; a federated caller is refused (requireProfileWriter)", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link/status", Kind: ExemptionInternalOnly, Reason: "Chat account link status, broker-authenticated", Owner: "route_metadata.go"},
