@@ -1834,9 +1834,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	// revokeAgentCredentialsBestEffort's doc comment.
 	issued := false
 	defer func() {
-		// An unknown outcome keeps the credential: the broker may still be
-		// starting the agent with it (ptone/scion#4817; isUnknownDispatchOutcome).
-		if err != nil && issued && !isUnknownDispatchOutcome(err) {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -2139,9 +2140,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	// deferredCreateWithGather fallback, does go through this defer.
 	issued := false
 	defer func() {
-		// An unknown outcome keeps the credential: the broker may still be
-		// starting the agent with it (ptone/scion#4817; isUnknownDispatchOutcome).
-		if err != nil && issued && !isUnknownDispatchOutcome(err) {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -2325,9 +2327,10 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	// non-error needs-still-missing case).
 	issued := false
 	defer func() {
-		// An unknown outcome keeps the credential: the broker may still be
-		// starting the agent with it (ptone/scion#4817; isUnknownDispatchOutcome).
-		if err != nil && issued && !isUnknownDispatchOutcome(err) {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()

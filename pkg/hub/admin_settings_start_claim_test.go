@@ -66,12 +66,20 @@ func TestPutServerConfigDB_StartClaimSettingsValidated(t *testing.T) {
 		`{"server": {"hub": {"start_claim_lease_ttl": "soon"}}}`,
 		`{"server": {"hub": {"start_claim_lease_ttl": "10s"}}}`,
 		`{"server": {"hub": {"start_max_duration": "5m"}}}`,
-		`{"server": {"hub": {"start_unconfirmed_hold": "10m"}}}`,
 		`{"server": {"hub": {"start_create_unconfirmed_hold": "20m"}}}`,
-		`{"server": {"hub": {"start_create_unconfirmed_hold": "5m"}}}`,
 	} {
 		if rr := putStartClaimConfigDB(t, srv, ops, body); rr.Code != http.StatusUnprocessableEntity {
 			t.Errorf("%s: status %d, want 422: %s", body, rr.Code, rr.Body.String())
+		}
+	}
+	// A hold an earlier release accepted, now below the minimum, still
+	// saves: it is raised to the minimum when applied (ptone/scion#4817).
+	for _, body := range []string{
+		`{"server": {"hub": {"start_unconfirmed_hold": "13m"}}}`,
+		`{"server": {"hub": {"start_create_unconfirmed_hold": "5m"}}}`,
+	} {
+		if rr := putStartClaimConfigDB(t, srv, ops, body); rr.Code != http.StatusOK {
+			t.Errorf("%s: status %d, want 200: %s", body, rr.Code, rr.Body.String())
 		}
 	}
 	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_max_duration": "15m"}}}`); rr.Code != http.StatusOK {

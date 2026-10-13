@@ -2806,7 +2806,9 @@ func (s *Server) createAgentInProject(
 					"agent", agent.Name, "broker", agent.RuntimeBrokerID)
 				// The create runs under its start claim; the dispatch is bounded
 				// by syncDispatch, derived from the claim's context.
-				created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+				// An unknown outcome keeps the agent (keepUnknownOutcomeStart),
+				// so the dispatch keeps the credential it mints on one.
+				created, err := s.createUnderClaim(withKeepCredentialOnUnknownOutcome(ctx), agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
 					err = syncDispatch(ctx, func(dctx context.Context) error {
 						out, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
 						return err
@@ -2841,7 +2843,7 @@ func (s *Server) createAgentInProject(
 					// dispatch deadline, or no answer to a sent request):
 					// keep it for the start-claim reaper instead of
 					// rolling it back (ptone/scion#4817).
-					s.keepUnknownOutcomeStart(ctx, w, agent, string(createStageDispatchEnvGather), err, createAudit.ID, true, dispatchWarns.Warnings())
+					s.keepUnknownOutcomeStart(ctx, w, agent, createStageDispatchEnvGather, err, createAudit.ID, true, dispatchWarns.Warnings())
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -2895,7 +2897,9 @@ func (s *Server) createAgentInProject(
 			} else {
 				// The create runs under its start claim; the dispatch is bounded
 				// by syncDispatch, derived from the claim's context.
-				created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+				// An unknown outcome keeps the agent (keepUnknownOutcomeStart),
+				// so the dispatch keeps the credential it mints on one.
+				created, err := s.createUnderClaim(withKeepCredentialOnUnknownOutcome(ctx), agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
 					err = syncDispatch(ctx, func(dctx context.Context) error {
 						out, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
 						return err
@@ -2930,7 +2934,7 @@ func (s *Server) createAgentInProject(
 					// dispatch deadline, or no answer to a sent request):
 					// keep it for the start-claim reaper instead of
 					// rolling it back (ptone/scion#4817).
-					s.keepUnknownOutcomeStart(ctx, w, agent, string(createStageDispatch), err, createAudit.ID, true, dispatchWarns.Warnings())
+					s.keepUnknownOutcomeStart(ctx, w, agent, createStageDispatch, err, createAudit.ID, true, dispatchWarns.Warnings())
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -3563,7 +3567,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	ctx, dispatchWarns := withDispatchWarnings(ctx)
 	// The finalize starts the agent: it runs under a start claim, its
 	// dispatch bounded by syncDispatch, derived from the claim's context.
-	finalized, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+	// An unknown outcome keeps the agent (keepUnknownOutcomeStart), so the
+	// dispatch keeps the credential it mints on one.
+	finalized, err := s.createUnderClaim(withKeepCredentialOnUnknownOutcome(ctx), agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
 		err = syncDispatch(ctx, func(dctx context.Context) error {
 			out, err = dispatcher.DispatchFinalizeEnv(dctx, agent, req.Env)
 			return err
@@ -3582,7 +3588,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		// start-claim reaper (the finalize never deletes the row) and say
 		// the outcome is unknown, not that the finalize failed
 		// (ptone/scion#4817).
-		s.keepUnknownOutcomeStart(ctx, w, agent, "env_finalize", err, "", false, dispatchWarns.Warnings())
+		s.keepUnknownOutcomeStart(ctx, w, agent, createStageEnvFinalize, err, "", false, dispatchWarns.Warnings())
 		return
 	}
 	if err != nil {

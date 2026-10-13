@@ -85,24 +85,44 @@ func (c StartClaimSettings) Holds() store.StartClaimHolds {
 // each out-of-range value replaced by its default, plus one warning per
 // replaced non-zero value.
 func (c StartClaimSettings) normalized() (StartClaimSettings, []string) {
+	c, hard, soft := c.normalize()
+	return c, append(hard, soft...)
+}
+
+// normalize is normalized with its warnings split: hard ones replace a
+// value that is invalid in any configuration (a PUT refuses it), soft ones
+// raise an unconfirmed hold that an earlier release accepted but that is
+// below today's minimum (api.SyncStartCeiling grew the minimums,
+// ptone/scion#4817). A configuration written for an earlier release keeps
+// working: such a hold is raised to the minimum, with a warning, and never
+// refused.
+func (c StartClaimSettings) normalize() (StartClaimSettings, []string, []string) {
 	d := DefaultStartClaimSettings()
-	var warns []string
+	var hard, soft []string
 	check := func(name string, v *time.Duration, def time.Duration, ok bool, rule string) {
 		if *v == 0 {
 			*v = def
 			return
 		}
 		if !ok {
-			warns = append(warns, fmt.Sprintf("%s %s is out of range (%s); using default %s", name, *v, rule, def))
+			hard = append(hard, fmt.Sprintf("%s %s is out of range (%s); using default %s", name, *v, rule, def))
 			*v = def
+		}
+	}
+	raise := func(name string, v *time.Duration, min time.Duration) {
+		if *v > 0 && *v < min {
+			soft = append(soft, fmt.Sprintf("%s %s is below the minimum %s (the runtime broker's start bound); using %s", name, *v, min, min))
+			*v = min
 		}
 	}
 	check("start_claim_lease_ttl", &c.LeaseTTL, d.LeaseTTL,
 		c.LeaseTTL >= minStartClaimLeaseTTL && c.LeaseTTL <= maxStartClaimLeaseTTL, "30s to 5m")
 	check("start_max_duration", &c.MaxDuration, d.MaxDuration,
 		c.MaxDuration >= minStartMaxDuration, "at least 11m")
+	raise("start_unconfirmed_hold", &c.UnconfirmedHold, minStartUnconfirmedHold)
 	check("start_unconfirmed_hold", &c.UnconfirmedHold, d.UnconfirmedHold,
 		c.UnconfirmedHold >= minStartUnconfirmedHold, "at least "+minStartUnconfirmedHold.String())
+	raise("start_create_unconfirmed_hold", &c.CreateUnconfirmedHold, minStartCreateUnconfirmedHold)
 	check("start_create_unconfirmed_hold", &c.CreateUnconfirmedHold, d.CreateUnconfirmedHold,
 		c.CreateUnconfirmedHold >= minStartCreateUnconfirmedHold && c.CreateUnconfirmedHold <= c.UnconfirmedHold,
 		minStartCreateUnconfirmedHold.String()+" up to start_unconfirmed_hold")
@@ -110,7 +130,7 @@ func (c StartClaimSettings) normalized() (StartClaimSettings, []string) {
 	if c.CreateUnconfirmedHold > c.UnconfirmedHold {
 		c.CreateUnconfirmedHold = c.UnconfirmedHold
 	}
-	return c, warns
+	return c, hard, soft
 }
 
 // parseStartClaimSettings parses the four duration strings of a settings
@@ -179,8 +199,10 @@ func validateStartClaimSettingStrings(base StartClaimSettings, d opsettings.Life
 	// already been replaced by its default, so it must not fail a PUT.
 	base, _ = base.normalized()
 	c, _ := parseStartClaimSettings(base, d.StartClaimLeaseTTL, d.StartMaxDuration, d.StartUnconfirmedHold, d.StartCreateUnconfirmedHold)
-	if _, warns := c.normalized(); len(warns) > 0 {
-		return errors.New(warns[0])
+	// A hold below today's minimum is raised, not refused (normalize's
+	// soft warnings): a configuration from an earlier release still saves.
+	if _, hard, _ := c.normalize(); len(hard) > 0 {
+		return errors.New(hard[0])
 	}
 	return nil
 }

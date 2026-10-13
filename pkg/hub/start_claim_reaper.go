@@ -183,22 +183,39 @@ func (s *Server) reapUnconfirmedStartClaim(ctx context.Context, a *store.Agent, 
 	inFlight := obs.InFlight
 	gone := obs.State == store.ObservedAbsent || obs.State == store.ObservedPresentTerminal
 	if gone && !inFlight && !obs.ObservedAt.Before(a.StartClaimUnconfirmedAt.Add(unconfirmedObservationLag)) {
+		// Revoked before the release, while the claim still refuses
+		// other starts, so the revoke cannot reach a newer start's
+		// credential.
+		s.revokeUnconfirmedCreateCredential(ctx, a)
 		release("runtime shows nothing running")
 		if a.Phase == string(state.PhaseCreated) && a.RunIntent == store.RunIntentRunning && a.RunIntentAt != nil {
 			s.settleFailedProvisionedStart(ctx, a.ID, *a.RunIntentAt, provisionedStartNotCompletedMessage)
-		}
-		if a.StartClaimKind == store.StartClaimCreate {
-			// A create whose dispatch outcome was unknown keeps its
-			// credential for a start that may still come up
-			// (isUnknownDispatchOutcome). Nothing came up: revoke it, as a
-			// failed create or a delete would (ptone/scion#4817).
-			revokeAgentCredentialsBestEffort(ctx, s.store, a.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 		return
 	}
 	if exp, ok := holds.HoldExpiry(a); ok && !now.Before(exp) && (obs.State == store.ObservedPresentRunning || inFlight) {
 		s.stopUnconfirmedStart(ctx, a.ID, a.StartClaimID)
 	}
+}
+
+// revokeUnconfirmedCreateCredential revokes the credential of a create
+// whose start claim a is about to be released because nothing came up. A
+// create whose dispatch outcome was unknown kept its credential for a
+// start that might still come up (keepUnknownOutcomeStart); nothing did,
+// so it is revoked, as a failed create or a delete would
+// (ptone/scion#4817). It acts only on a create claim, and only while that
+// same claim (a.StartClaimID) is still held unconfirmed: while it is, no
+// other start can claim the agent and mint a credential, so the revoke
+// reaches only this create's.
+func (s *Server) revokeUnconfirmedCreateCredential(ctx context.Context, a *store.Agent) {
+	if a.StartClaimKind != store.StartClaimCreate || a.StartClaimID == "" {
+		return
+	}
+	cur, err := s.store.GetAgent(ctx, a.ID)
+	if err != nil || cur.StartClaimID != a.StartClaimID || cur.StartClaimState != store.StartClaimUnconfirmed {
+		return
+	}
+	revokeAgentCredentialsBestEffort(ctx, s.store, a.ID, agentCredentialRevokeReasonCreateFailed)
 }
 
 // reaperTarget is the target the reaper reads an agent's observation on:

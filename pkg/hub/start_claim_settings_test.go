@@ -30,24 +30,27 @@ func TestStartClaimSettings_Normalize(t *testing.T) {
 	assert.Empty(t, warns)
 
 	cases := []struct {
-		name string
-		in   StartClaimSettings
-		want StartClaimSettings
+		name     string
+		in       StartClaimSettings
+		want     StartClaimSettings
+		wantWarn bool
 	}{
-		{"lease too short", StartClaimSettings{LeaseTTL: 10 * time.Second}, d},
-		{"lease too long", StartClaimSettings{LeaseTTL: 10 * time.Minute}, d},
-		{"lease ok", StartClaimSettings{LeaseTTL: 30 * time.Second}, StartClaimSettings{LeaseTTL: 30 * time.Second, MaxDuration: d.MaxDuration, UnconfirmedHold: d.UnconfirmedHold, CreateUnconfirmedHold: d.CreateUnconfirmedHold}},
-		{"max below pod-ready bound", StartClaimSettings{MaxDuration: 10 * time.Minute}, d},
-		{"hold below start budget", StartClaimSettings{UnconfirmedHold: minStartUnconfirmedHold - time.Second}, d},
-		{"hold at start budget", StartClaimSettings{UnconfirmedHold: minStartUnconfirmedHold}, StartClaimSettings{LeaseTTL: d.LeaseTTL, MaxDuration: d.MaxDuration, UnconfirmedHold: minStartUnconfirmedHold, CreateUnconfirmedHold: d.CreateUnconfirmedHold}},
-		{"create hold too short", StartClaimSettings{CreateUnconfirmedHold: minStartCreateUnconfirmedHold - time.Second}, d},
-		{"create hold above hold", StartClaimSettings{CreateUnconfirmedHold: d.UnconfirmedHold + time.Minute}, d},
+		{"lease too short", StartClaimSettings{LeaseTTL: 10 * time.Second}, d, true},
+		{"lease too long", StartClaimSettings{LeaseTTL: 10 * time.Minute}, d, true},
+		{"lease ok", StartClaimSettings{LeaseTTL: 30 * time.Second}, StartClaimSettings{LeaseTTL: 30 * time.Second, MaxDuration: d.MaxDuration, UnconfirmedHold: d.UnconfirmedHold, CreateUnconfirmedHold: d.CreateUnconfirmedHold}, false},
+		{"max below pod-ready bound", StartClaimSettings{MaxDuration: 10 * time.Minute}, d, true},
+		// An earlier release's hold below today's minimum is raised to the
+		// minimum, with a warning (ptone/scion#4817).
+		{"hold below start budget is raised", StartClaimSettings{UnconfirmedHold: 13 * time.Minute}, StartClaimSettings{LeaseTTL: d.LeaseTTL, MaxDuration: d.MaxDuration, UnconfirmedHold: minStartUnconfirmedHold, CreateUnconfirmedHold: d.CreateUnconfirmedHold}, true},
+		{"hold at start budget", StartClaimSettings{UnconfirmedHold: minStartUnconfirmedHold}, StartClaimSettings{LeaseTTL: d.LeaseTTL, MaxDuration: d.MaxDuration, UnconfirmedHold: minStartUnconfirmedHold, CreateUnconfirmedHold: d.CreateUnconfirmedHold}, false},
+		{"create hold below minimum is raised", StartClaimSettings{CreateUnconfirmedHold: 5 * time.Minute}, StartClaimSettings{LeaseTTL: d.LeaseTTL, MaxDuration: d.MaxDuration, UnconfirmedHold: d.UnconfirmedHold, CreateUnconfirmedHold: minStartCreateUnconfirmedHold}, true},
+		{"create hold above hold", StartClaimSettings{CreateUnconfirmedHold: d.UnconfirmedHold + time.Minute}, d, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, warns := tc.in.normalized()
 			assert.Equal(t, tc.want, got)
-			if tc.want == d {
+			if tc.wantWarn {
 				assert.Len(t, warns, 1)
 			} else {
 				assert.Empty(t, warns)
@@ -70,12 +73,15 @@ func TestStartClaimSettings_HoldsCoverSyncStartCeiling(t *testing.T) {
 	assert.GreaterOrEqual(t, minStartUnconfirmedHold, minStartCreateUnconfirmedHold, "the create hold minimum fits under the hold minimum")
 	assert.GreaterOrEqual(t, d.CreateUnconfirmedHold, minStartCreateUnconfirmedHold)
 	assert.GreaterOrEqual(t, d.UnconfirmedHold, d.CreateUnconfirmedHold)
-	assert.GreaterOrEqual(t, runAdoptionQuietPeriod(), api.SyncStartCeiling+syncDispatchTimeout, "run adoption quiet period")
+	assert.Equal(t, api.SyncStartCeiling+2*syncDispatchTimeout, runAdoptionQuietPeriod(), "run adoption quiet period")
 
-	// The old 5m create hold is out of range: replaced by the default.
-	got, warns := StartClaimSettings{CreateUnconfirmedHold: 5 * time.Minute}.normalized()
-	assert.Equal(t, d.CreateUnconfirmedHold, got.CreateUnconfirmedHold)
-	assert.Len(t, warns, 1)
+	// The old 5m create hold and 13m hold are raised to the minimums, with
+	// a warning each, and do not fail validation (a soft warning).
+	got, hard, soft := StartClaimSettings{UnconfirmedHold: 13 * time.Minute, CreateUnconfirmedHold: 5 * time.Minute}.normalize()
+	assert.Equal(t, minStartUnconfirmedHold, got.UnconfirmedHold)
+	assert.Equal(t, minStartCreateUnconfirmedHold, got.CreateUnconfirmedHold)
+	assert.Empty(t, hard)
+	assert.Len(t, soft, 2)
 }
 
 func TestStartClaimSettings_ApplySnapshot(t *testing.T) {
