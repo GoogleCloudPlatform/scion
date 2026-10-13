@@ -2710,7 +2710,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		// A git project records its repo root, so that project discovery
 		// can tell its config from an orphaned one.
 		if err := config.RecordGitWorkspace(resolvedPath); err != nil {
-			util.Debugf("Failed to record the workspace path: %v", err)
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to record the workspace path: %v\n", err)
 		}
 	}
 

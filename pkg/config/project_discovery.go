@@ -286,14 +286,15 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 	}
 
 	// A git project config is orphaned only on positive evidence: a
-	// recorded workspace that is gone or no longer resolves to this config.
+	// recorded workspace (an absolute path) that is gone or no longer
+	// resolves to this config.
 	// A config with agents is never orphaned (its repo may have moved). A
 	// workspace found by slug alone (readWorkspaceMarkerForSlug) can show
 	// that the config is in use, but never that it is not: another repo
 	// with the same slug may own that workspace.
 	switch {
 	case pi.AgentCount > 0:
-	case recorded != "":
+	case filepath.IsAbs(recorded):
 		if !gitWorkspaceResolvesTo(recorded, configPath) {
 			pi.Status = ProjectStatusOrphaned
 		}
@@ -309,21 +310,19 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 // settings record workspacePath, belongs to a git project. Settings written
 // by init, hub link or the lazy heal say so with project_type: git. A config
 // with a workspace path but no project_type (written before project_type
-// was recorded) is a git one when the workspace holds a .scion directory,
-// and is healed by recording project_type: git; when the workspace is gone
-// it is treated as an external project, as before.
+// was recorded) is a git one when the workspace, an absolute path, holds a
+// .scion directory; the CLI records project_type for it when it next
+// resolves the project there (RecordGitWorkspace). When the workspace is
+// gone it is treated as an external project, as before.
 func isGitProjectConfig(configPath, workspacePath string) bool {
 	if vs, err := LoadVersionedSettings(configPath); err == nil && vs != nil && vs.ProjectType != "" {
 		return vs.ProjectType == string(ProjectTypeGit)
 	}
-	info, err := os.Stat(filepath.Join(workspacePath, DotScion))
-	if err != nil || !info.IsDir() {
+	if !filepath.IsAbs(workspacePath) {
 		return false
 	}
-	if gitWorkspaceResolvesTo(workspacePath, configPath) {
-		_ = setProjectTypeGit(configPath)
-	}
-	return true
+	info, err := os.Stat(filepath.Join(workspacePath, DotScion))
+	return err == nil && info.IsDir()
 }
 
 // gitWorkspaceResolvesTo reports whether the git workspace at workspacePath
@@ -331,8 +330,13 @@ func isGitProjectConfig(configPath, workspacePath string) bool {
 // a .scion directory through its project-id file and the workspace's slug
 // (GetGitProjectExternalConfigDir), a .scion marker file as in
 // isValidWorkspace. The settings project_id is not compared: hub link can
-// record one that differs from the repo's project-id file.
+// record one that differs from the repo's project-id file. A relative
+// workspacePath (only a hand edit writes one) is no evidence either way and
+// reports false.
 func gitWorkspaceResolvesTo(workspacePath, configPath string) bool {
+	if !filepath.IsAbs(workspacePath) {
+		return false
+	}
 	markerPath := filepath.Join(workspacePath, DotScion)
 	info, err := os.Stat(markerPath)
 	if err != nil {

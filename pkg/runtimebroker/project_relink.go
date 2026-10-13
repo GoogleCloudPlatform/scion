@@ -111,9 +111,10 @@ func (e *projectRelinkError) Error() string {
 //   - the earlier project config directory's .scion/settings.yaml records
 //     workspace_path naming this workspace (compared exactly after
 //     filepath.Clean, without resolving symlinks). A missing or different
-//     value means no move; nothing else stands in for it. Projects set up
-//     with a .scion marker file record it; git projects do not, so they
-//     still fail the identity check.
+//     value means no move; nothing else stands in for it.
+//   - the workspace's .scion is a marker file. A git project (a .scion
+//     directory with a project-id file) is never re-linked, whether or not
+//     its config records workspace_path, and still fails the identity check.
 //
 // It then moves <slug>__<old id8> to <slug>__<new id8> and rewrites the
 // marker to hubProjectID. It refuses, with a projectRelinkError and both
@@ -163,6 +164,9 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 	skip := func(reason string) error {
 		log.Info("project re-link: not carrying the agent over to the current project ID", "reason", reason)
 		return nil
+	}
+	if ident.Marker == nil {
+		return skip("the workspace is a git project (a .scion directory), which is never re-linked")
 	}
 	if !isCanonicalUUID(ident.ID) {
 		return skip("the marker's project ID is not a canonical UUID")

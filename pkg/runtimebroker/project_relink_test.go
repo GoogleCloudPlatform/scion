@@ -234,6 +234,42 @@ func TestRelink_GitProjectWithoutWorkspacePathConflicts(t *testing.T) {
 	assertAbsent(t, f.newRoot)
 }
 
+// TestRelink_GitProjectRecordingWorkspacePathNotMoved: a git project whose
+// earlier project config directory records this workspace as
+// workspace_path (as init, hub link and the CLI now write) is still not
+// moved, its project-id file is not rewritten, and the start still gets the
+// 409.
+func TestRelink_GitProjectRecordingWorkspacePathNotMoved(t *testing.T) {
+	f := newRelinkFixture(t)
+	if err := os.Remove(f.dotScion); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(f.dotScion, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteProjectID(f.dotScion, relinkOldID); err != nil {
+		t.Fatal(err)
+	}
+	writeRelinkSettings(t, filepath.Join(f.oldRoot, config.DotScion), f.root)
+	if err := f.relink(""); err != nil {
+		t.Fatalf("relink: %v", err)
+	}
+	if id, err := config.ReadProjectID(f.dotScion); err != nil || id != relinkOldID {
+		t.Fatalf("project-id = %q, %v", id, err)
+	}
+	assertState(t, f.oldRoot)
+	assertAbsent(t, f.newRoot)
+	w := f.start(t)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "verifies the project identity") {
+		t.Fatalf("expected 409 identity mismatch, got %d: %s", w.Code, w.Body.String())
+	}
+	if id, err := config.ReadProjectID(f.dotScion); err != nil || id != relinkOldID {
+		t.Fatalf("project-id after start = %q, %v", id, err)
+	}
+	assertState(t, f.oldRoot)
+	assertAbsent(t, f.newRoot)
+}
+
 // TestRelink_WorkspacePathAnchor: the move happens only when the earlier
 // project config directory's settings.yaml records this workspace.
 func TestRelink_WorkspacePathAnchor(t *testing.T) {

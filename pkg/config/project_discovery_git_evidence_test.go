@@ -40,6 +40,13 @@ type gitEvidenceFixture struct {
 // directories in the external config.
 func newGitEvidenceFixture(t *testing.T, settings string, agents int) gitEvidenceFixture {
 	t.Helper()
+	return newNamedGitEvidenceFixture(t, "myrepo", settings, agents)
+}
+
+// newNamedGitEvidenceFixture is newGitEvidenceFixture for a repo directory
+// named name.
+func newNamedGitEvidenceFixture(t *testing.T, name, settings string, agents int) gitEvidenceFixture {
+	t.Helper()
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID", "SCION_PROJECT"} {
 		if _, ok := os.LookupEnv(e); ok {
 			t.Setenv(e, "")
@@ -53,9 +60,10 @@ func newGitEvidenceFixture(t *testing.T, settings string, agents int) gitEvidenc
 	t.Setenv("HOME", home)
 	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
 
-	repo := filepath.Join(home, "src", "myrepo")
+	repo := filepath.Join(home, "src", name)
 	inRepo := filepath.Join(repo, DotScion)
 	require.NoError(t, os.MkdirAll(inRepo, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0o755))
 	require.NoError(t, WriteProjectID(inRepo, gitEvidenceProjectID))
 	configDir, err := GetGitProjectExternalConfigDir(inRepo)
 	require.NoError(t, err)
@@ -78,12 +86,13 @@ func (f gitEvidenceFixture) discover(t *testing.T) ProjectInfo {
 	t.Helper()
 	projects, err := DiscoverProjects()
 	require.NoError(t, err)
+	name := filepath.Base(f.repo)
 	for _, p := range projects {
-		if p.Name == "myrepo" {
+		if p.Name == name {
 			return p
 		}
 	}
-	t.Fatalf("project myrepo not discovered in %+v", projects)
+	t.Fatalf("project %s not discovered in %+v", name, projects)
 	return ProjectInfo{}
 }
 
@@ -173,19 +182,33 @@ func TestGitEvidence_MissingWorkspaceWithAgentsStaysOK(t *testing.T) {
 	assert.NotContains(t, orphanedNames(t), "myrepo")
 }
 
-func TestGitEvidence_WorkspacePathWithoutTypeRoutedAsGitAndHealed(t *testing.T) {
+func TestGitEvidence_WorkspacePathWithoutTypeRoutedAsGit(t *testing.T) {
 	f := newGitEvidenceFixture(t, "", 0)
-	require.NoError(t, os.WriteFile(filepath.Join(f.configDir, "settings.yaml"),
-		[]byte("schema_version: \"1\"\nworkspace_path: "+f.repo+"\n"), 0o644))
+	settingsPath := filepath.Join(f.configDir, "settings.yaml")
+	require.NoError(t, os.WriteFile(settingsPath, []byte("schema_version: \"1\"\nworkspace_path: "+f.repo+"\n"), 0o644))
 
 	p := f.discover(t)
 	assert.Equal(t, ProjectTypeGit, p.Type)
 	assert.Equal(t, ProjectStatusOK, p.Status)
-
 	vs, err := LoadSingleFileVersioned(f.configDir)
+	require.NoError(t, err)
+	assert.Empty(t, vs.ProjectType, "discovery does not write settings")
+
+	// The CLI's record fills in project_type next to the matching root.
+	require.NoError(t, RecordGitWorkspace(f.inRepo))
+	vs, err = LoadSingleFileVersioned(f.configDir)
 	require.NoError(t, err)
 	assert.Equal(t, "git", vs.ProjectType)
 	assert.Equal(t, f.repo, vs.WorkspacePath)
+}
+
+func TestGitEvidence_RelativeRecordedPathIsNoEvidence(t *testing.T) {
+	f := newGitEvidenceFixture(t, "schema_version: \"1\"\nproject_type: git\nworkspace_path: src/gone\n", 0)
+
+	p := f.discover(t)
+	assert.Equal(t, ProjectTypeGit, p.Type)
+	assert.Equal(t, ProjectStatusUnverified, p.Status)
+	assert.NotContains(t, orphanedNames(t), "myrepo")
 }
 
 func TestGitEvidence_ExternalProjectUnchanged(t *testing.T) {
@@ -251,15 +274,87 @@ func TestRecordGitWorkspace_WritesOnceAndIsIdempotent(t *testing.T) {
 	assert.True(t, info.ModTime().Equal(past), "a second record rewrote the file")
 }
 
-func TestRecordGitWorkspace_KeepsExistingPath(t *testing.T) {
-	other := filepath.Join(t.TempDir(), "elsewhere")
-	f := newGitEvidenceFixture(t, "schema_version: \"1\"\nworkspace_path: "+other+"\n", 0)
+func TestRecordGitWorkspace_MovedRepoReplacesStalePath(t *testing.T) {
+	stale := filepath.Join(t.TempDir(), "old", "myrepo")
+	f := newGitEvidenceFixture(t, "schema_version: \"1\"\nproject_type: git\nworkspace_path: "+stale+"\n", 0)
+	require.Equal(t, ProjectStatusOrphaned, f.discover(t).Status, "precondition: the stale record orphans the config")
 
 	require.NoError(t, RecordGitWorkspace(f.inRepo))
 	vs, err := LoadSingleFileVersioned(f.configDir)
 	require.NoError(t, err)
-	assert.Equal(t, other, vs.WorkspacePath)
-	assert.Empty(t, vs.ProjectType, "project_type is written only next to this repo's root")
+	assert.Equal(t, f.repo, vs.WorkspacePath)
+	assert.Equal(t, ProjectStatusOK, f.discover(t).Status)
+	assert.NotContains(t, orphanedNames(t), "myrepo")
+}
+
+func TestRecordGitWorkspace_KeepsLiveOtherClone(t *testing.T) {
+	f := newGitEvidenceFixture(t, "", 0)
+	// A second live clone with the same basename and project-id resolves to
+	// the same config; the path recorded first is kept.
+	clone := filepath.Join(f.home, "other", "myrepo")
+	require.NoError(t, os.MkdirAll(filepath.Join(clone, ".git"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(clone, DotScion), 0o755))
+	require.NoError(t, WriteProjectID(filepath.Join(clone, DotScion), gitEvidenceProjectID))
+	require.NoError(t, os.WriteFile(filepath.Join(f.configDir, "settings.yaml"), []byte(recordedSettings(clone)), 0o644))
+
+	require.NoError(t, RecordGitWorkspace(f.inRepo))
+	vs, err := LoadSingleFileVersioned(f.configDir)
+	require.NoError(t, err)
+	assert.Equal(t, clone, vs.WorkspacePath)
+}
+
+func TestRecordGitWorkspace_SkipsWorktrees(t *testing.T) {
+	// The repo is named "workspace", like an agent worktree directory, so
+	// the worktree's .scion resolves to the repo's own config.
+	f := newNamedGitEvidenceFixture(t, "workspace", "schema_version: \"1\"\n", 0)
+	settingsPath := filepath.Join(f.configDir, "settings.yaml")
+	before, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+
+	worktree := filepath.Join(f.inRepo, "agents", "a1", "workspace")
+	require.NoError(t, os.MkdirAll(filepath.Join(worktree, DotScion), 0o755))
+	require.NoError(t, WriteProjectID(filepath.Join(worktree, DotScion), gitEvidenceProjectID))
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: x\n"), 0o644))
+	ext, err := GetGitProjectExternalConfigDir(filepath.Join(worktree, DotScion))
+	require.NoError(t, err)
+	require.Equal(t, f.configDir, ext, "precondition: the worktree resolves to the repo's config")
+	require.NoError(t, RecordGitWorkspace(filepath.Join(worktree, DotScion)))
+
+	// A linked worktree outside any .scion (a .git file) is skipped too.
+	linked := filepath.Join(f.home, "trees", "workspace")
+	require.NoError(t, os.MkdirAll(filepath.Join(linked, DotScion), 0o755))
+	require.NoError(t, WriteProjectID(filepath.Join(linked, DotScion), gitEvidenceProjectID))
+	require.NoError(t, os.WriteFile(filepath.Join(linked, ".git"), []byte("gitdir: x\n"), 0o644))
+	require.NoError(t, RecordGitWorkspace(filepath.Join(linked, DotScion)))
+
+	after, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after))
+
+	// The repo's own root is recorded.
+	require.NoError(t, RecordGitWorkspace(f.inRepo))
+	vs, err := LoadSingleFileVersioned(f.configDir)
+	require.NoError(t, err)
+	assert.Equal(t, f.repo, vs.WorkspacePath)
+}
+
+func TestFindProjectRoot_LeavesLegacySettingsUntouched(t *testing.T) {
+	legacy := "harnesses:\n  claude:\n    image: example\n"
+	f := newGitEvidenceFixture(t, legacy, 0)
+	healedGitWorkspaces.Delete(f.inRepo)
+	t.Cleanup(func() { healedGitWorkspaces.Delete(f.inRepo) })
+	t.Chdir(f.repo)
+
+	_, ok := FindProjectRoot()
+	require.True(t, ok)
+	got, err := os.ReadFile(filepath.Join(f.configDir, "settings.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, legacy, string(got))
+	entries, err := os.ReadDir(f.configDir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.NotContains(t, e.Name(), "bak", "no migration backup is written")
+	}
 }
 
 func TestRecordGitWorkspace_NoSettingsFileIsNoop(t *testing.T) {
