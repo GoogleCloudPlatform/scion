@@ -120,10 +120,17 @@ func notificationChannelConfigs(channels []config.V1NotificationChannelConfig) [
 // NewChannelRegistryFromSettings builds a notification channel registry from
 // the settings form of the channels. It returns nil when there are none.
 func NewChannelRegistryFromSettings(channels []config.V1NotificationChannelConfig) *ChannelRegistry {
+	r, _ := newChannelRegistryFromSettings(channels)
+	return r
+}
+
+// newChannelRegistryFromSettings is NewChannelRegistryFromSettings that also
+// returns the indexes of the channels it skipped (ptone/scion#4466).
+func newChannelRegistryFromSettings(channels []config.V1NotificationChannelConfig) (*ChannelRegistry, []int) {
 	if len(channels) == 0 {
-		return nil
+		return nil, nil
 	}
-	return NewChannelRegistry(notificationChannelConfigs(channels), logging.Subsystem("hub.notification-channels"))
+	return newChannelRegistry(notificationChannelConfigs(channels), logging.Subsystem("hub.notification-channels"))
 }
 
 // currentChannelRegistry returns the notification channel registry in use,
@@ -161,11 +168,7 @@ func (s *Server) applyNotificationChannels(channels []config.V1NotificationChann
 	if st.applied && reflect.DeepEqual(st.channels, channels) {
 		return false
 	}
-	var registry *ChannelRegistry
-	var skipped []int
-	if len(channels) > 0 {
-		registry, skipped = newChannelRegistry(notificationChannelConfigs(channels), logging.Subsystem("hub.notification-channels"))
-	}
+	registry, skipped := newChannelRegistryFromSettings(channels)
 	s.SetChannelRegistry(registry)
 	st.applied = true
 	st.channels = append([]config.V1NotificationChannelConfig(nil), channels...)
@@ -176,8 +179,8 @@ func (s *Server) applyNotificationChannels(channels []config.V1NotificationChann
 // Reasons a federation configuration was not installed by ApplySnapshot.
 // They name no configured value.
 const (
-	federationSkipInvalid       = "The federation settings failed validation; the previous federation configuration is still in use."
-	federationSkipBuildFailed   = "The federation settings could not be applied; the previous federation configuration is still in use."
+	federationSkipInvalid       = "The federation settings failed validation and are not in use."
+	federationSkipBuildFailed   = "The federation settings could not be applied and are not in use."
 	federationSkipTestAdminTier = "Federation is not in use while the test admin tier is on."
 )
 

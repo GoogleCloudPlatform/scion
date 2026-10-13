@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -153,8 +154,22 @@ func TestPutServerConfigDB_FederationRebuildErrorReportedSkipped(t *testing.T) {
 	}
 	assert.Same(t, previous, srv.federationAuth.Load(), "the previous authenticator stays in use")
 
+	// A buildable configuration is installed and its changed key is
+	// applied again. A hub issuer with an https URL and an expected
+	// audience builds without network I/O.
+	rr = putHubNameServerConfigDB(t, srv, ops, `{"federation":{"enabled":true,"trusted_issuers":[
+		{"issuer_url":"https://issuer-4466.example.com","expected_audience":"https://hub.example.com"}]}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	rep = skippedReport(t, rr.Body.Bytes())
+	assert.Equal(t, []string{"server.federation.trusted_issuers"}, rep.AppliedKeys)
+	assert.Empty(t, rep.Skipped)
+	installed := srv.federationAuth.Load()
+	require.NotNil(t, installed)
+	assert.NotSame(t, previous, installed, "the new authenticator is in use")
+
 	// Turning federation off applies.
-	rr = putHubNameServerConfigDB(t, srv, ops, `{"federation":{"enabled":false,"trusted_issuers":[{"issuer_url":"http://issuer-4466.example.com"}]}}`)
+	rr = putHubNameServerConfigDB(t, srv, ops, `{"federation":{"enabled":false,"trusted_issuers":[
+		{"issuer_url":"https://issuer-4466.example.com","expected_audience":"https://hub.example.com"}]}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	rep = skippedReport(t, rr.Body.Bytes())
 	assert.Equal(t, []string{"server.federation.enabled"}, rep.AppliedKeys)
@@ -174,4 +189,23 @@ func TestApplySnapshot_RecordsFederationSkipReason(t *testing.T) {
 
 	ApplySnapshot(srv, Layer1Snapshot{FederationConfig: &config.FederationConfig{Enabled: false}})
 	assert.Empty(t, srv.layer1ApplySkips().FederationReason)
+
+	// While the test admin tier is on, a federation configuration is
+	// never installed.
+	tier := &Server{testAdminGate: testAdminGate{hubAdmin: true}}
+	ApplySnapshot(tier, Layer1Snapshot{FederationConfig: &config.FederationConfig{Enabled: true}})
+	assert.Equal(t, federationSkipTestAdminTier, tier.layer1ApplySkips().FederationReason)
+	assert.Nil(t, tier.federationAuth.Load())
+}
+
+// newChannelRegistry returns the indexes of the channels it skipped, both
+// for an unknown type and for a channel that fails validation.
+func TestNewChannelRegistry_ReturnsSkippedIndexes(t *testing.T) {
+	reg, skipped := newChannelRegistry([]ChannelConfig{
+		{Type: "carrier-pigeon"},
+		{Type: "slack", Params: map[string]string{"webhook_url": "https://hooks.slack.com/services/T0/B0/okay"}},
+		{Type: "slack", Params: map[string]string{"webhook_url": "https://not-slack.example.com/"}},
+	}, slog.New(slog.DiscardHandler))
+	assert.Equal(t, []int{0, 2}, skipped)
+	assert.Equal(t, 1, reg.Len())
 }
