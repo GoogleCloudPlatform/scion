@@ -342,8 +342,13 @@ func hubLoginCommand(c *config.CLIContext, endpoint string) string {
 	return "scion hub auth login --hub " + endpoint
 }
 
-// useAuthLine is the human "Auth:" text.
+// useAuthLine is the human "Auth:" text. Bare 'scion use' makes no network
+// calls, so a dev token, which works only on the server that wrote it, is
+// shown as not verified.
 func useAuthLine(info authInfo, loginCmd string) string {
+	if info.IsDevAuth {
+		return fmt.Sprintf("%s (%s), not verified; run 'scion hub status' to check", info.Method, info.Source)
+	}
 	switch info.MethodType {
 	case "none":
 		return fmt.Sprintf("not logged in; run '%s'", loginCmd)
@@ -383,7 +388,7 @@ func runUseShow(out, stderr io.Writer) error {
 		if err != nil {
 			settings = &config.Settings{}
 		}
-		info = getAuthInfo(settings, t.HubEndpoint)
+		info = scopeDevAuth(getAuthInfo(settings, t.HubEndpoint), t.HubEndpoint)
 	}
 
 	if isJSONOutput() {
@@ -599,7 +604,7 @@ func runUseSwitch(out, stderr io.Writer) error {
 	if err != nil {
 		settings = &config.Settings{}
 	}
-	if getAuthInfo(settings, endpoint).MethodType == "none" {
+	if scopeDevAuth(getAuthInfo(settings, endpoint), endpoint).MethodType == "none" {
 		_, _ = fmt.Fprintf(out, "Not logged in to hub '%s'. Run: scion hub auth login --hub %s\n", name, name)
 	}
 	if envHub, envName := envHubEndpoint(); envHub != "" && !sameHubURL(envHub, endpoint) {
