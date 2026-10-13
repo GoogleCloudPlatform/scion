@@ -387,7 +387,7 @@ func TestNewManagerWiresReadinessWait(t *testing.T) {
 
 // TestBufferedFlush_PastesOnlyAfterReady checks that a buffered message
 // returns to the sender at once and is pasted only after the harness is
-// ready, with Enter x3 unchanged.
+// ready, then submitted with three pasted CRs (submitArgvs).
 func TestBufferedFlush_PastesOnlyAfterReady(t *testing.T) {
 	var ready atomic.Bool
 	rt := newFakeReadyRuntime(func(int) (string, error) { return hookProbe(ready.Load()), nil })
@@ -410,7 +410,7 @@ func TestBufferedFlush_PastesOnlyAfterReady(t *testing.T) {
 
 	waitFor(t, 2*time.Second, func() bool {
 		_, cmds := rt.snapshot()
-		return countPrefix(cmds, "tmux send-keys -t scion:0 Enter") == 3
+		return countSubmits(cmds) == 3
 	})
 	_, cmds := rt.snapshot()
 	var tail []string
@@ -419,7 +419,7 @@ func TestBufferedFlush_PastesOnlyAfterReady(t *testing.T) {
 			tail = append(tail, c)
 		}
 	}
-	if len(tail) != 5 || !strings.HasPrefix(tail[0], "tmux load-buffer") || !strings.HasPrefix(tail[1], "tmux paste-buffer") {
+	if len(tail) != 8 || !strings.HasPrefix(tail[0], "tmux load-buffer") || !strings.HasPrefix(tail[1], "tmux paste-buffer") || countSubmits(tail) != 3 {
 		t.Fatalf("unexpected delivery sequence %q", tail)
 	}
 	if cmds[len(cmds)-len(tail)-1] != "probe" {
@@ -448,7 +448,7 @@ func TestBufferedFlush_WaitOncePerFlushNotPerRetry(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return loads.Load() == 2 })
 	waitFor(t, 2*time.Second, func() bool {
 		_, cmds := rt.snapshot()
-		return countPrefix(cmds, "tmux send-keys -t scion:0 Enter") == 3
+		return countSubmits(cmds) == 3
 	})
 	if probes, _ := rt.snapshot(); probes != 2 {
 		t.Fatalf("probes = %d, want 2 (one wait, not one per retry)", probes)
@@ -506,6 +506,11 @@ func TestManagerClose_SkipsReadinessWait(t *testing.T) {
 }
 
 func containsPrefix(cmds []string, prefix string) bool { return countPrefix(cmds, prefix) > 0 }
+
+// countSubmits counts the pasted-CR submits (submitArgvs) in a command log.
+func countSubmits(cmds []string) int {
+	return countPrefix(cmds, "tmux paste-buffer -t scion:0 -d -b "+submitBufferPrefix+"-")
+}
 
 func countPrefix(cmds []string, prefix string) int {
 	n := 0
