@@ -1049,7 +1049,7 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// probes reach the branch past body validation. A discovery or
 		// import source that is not a GitHub URL stops after the check.
 		{"skill.create", "/api/v1/skills"}:                              {"name": "li-project-skill", "scope": "project", "scopeId": f.project},
-		{"skill.create_global", "/api/v1/skills"}:                       {"name": "li-global-skill", "scope": "global"},
+		{"skill.global.create", "/api/v1/skills"}:                       {"name": "li-global-skill", "scope": "global"},
 		{"skill.discover.project", "/api/v1/skills/discover-directory"}: {"projectId": f.project, "sourceUrl": "https://example.invalid/li-skills"},
 		{"skill.discover.global", "/api/v1/skills/discover-directory"}:  {"sourceUrl": "https://example.invalid/li-skills"},
 		{"template.create", "/api/v1/templates"}:                        {"name": "li-created-template", "harness": "claude", "scope": "global"},

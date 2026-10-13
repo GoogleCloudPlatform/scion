@@ -584,7 +584,7 @@ var catalogResourceOperations = []OperationSpec{
 	// =====================================================================
 
 	{
-		ID:          "skill.create_global",
+		ID:          "skill.global.create",
 		Domain:      "skill",
 		Description: "Create a skill in the global catalog (global or core scope). The check is skill.create_global on a collection-level request at the hub scope, so a user access token needs skill:create_global on a hub boundary",
 		EntryPoints: []EntryPoint{
