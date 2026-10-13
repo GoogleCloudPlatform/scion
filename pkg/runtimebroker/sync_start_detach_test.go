@@ -88,6 +88,9 @@ func TestSyncCreate_RequestEndsDuringSupersedeWait_409(t *testing.T) {
 	if ran.Load() {
 		t.Error("Start ran for a create whose request ended during the supersede wait")
 	}
+	if rec := registryRecord(srv, key); rec != old {
+		t.Errorf("registry holds %+v after the refused create, want the earlier start's record back", rec)
+	}
 }
 
 // The request ending while buildStartContext runs ends a synchronous create
@@ -178,7 +181,7 @@ func TestAsyncCreate_RequestEndsBeforeHandoff_409(t *testing.T) {
 // blocks until its context is done, then ends the create's request. It
 // returns a channel that receives the Start context's error when Start
 // returns. The request having ended, only an explicit cancel can end the
-// start.
+// start. The create's handler is joined at test end.
 func detachedStart(t *testing.T, srv *Server, mgr *startFuncManager, projectPath string) <-chan error {
 	t.Helper()
 	started := make(chan struct{})
@@ -191,10 +194,33 @@ func detachedStart(t *testing.T, srv *Server, mgr *startFuncManager, projectPath
 	}
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	t.Cleanup(cancelReq)
-	go createSyncCtx(reqCtx, srv, "agent-a-id", projectPath, "")
+	createDone := make(chan struct{})
+	go func() {
+		defer close(createDone)
+		createSyncCtx(reqCtx, srv, "agent-a-id", projectPath, "")
+	}()
+	joinOnCleanup(t, createDone, "agent A's create")
 	waitSignal(t, started, "agent A's start")
 	cancelReq()
 	return ended
+}
+
+// joinOnCleanup waits at test end, bounded, for done, so a handler or
+// Shutdown started by the test has returned before t.Cleanup removes its
+// temporary directories. A test that has already failed does not wait (the
+// goroutine may be held by the fault under test).
+func joinOnCleanup(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if t.Failed() {
+			return
+		}
+		select {
+		case <-done:
+		case <-time.After(syncStartTestTimeout):
+			t.Errorf("%s did not return", what)
+		}
+	})
 }
 
 // wantStartEnded waits for a detached start to end with context.Canceled.
@@ -216,7 +242,12 @@ func TestSyncCreate_StopCancelsStartAfterRequestEnded(t *testing.T) {
 	mgr.agents = []api.AgentInfo{{ID: "c-1", Name: "same-name", Phase: "running"}}
 	ended := detachedStart(t, srv, mgr, projectPath)
 
-	go agentAction(srv, "stop")
+	stopDone := make(chan struct{})
+	go func() {
+		defer close(stopDone)
+		agentAction(srv, "stop")
+	}()
+	joinOnCleanup(t, stopDone, "the stop")
 	wantStartEnded(t, ended, "a stop")
 }
 
@@ -241,6 +272,11 @@ func TestSyncCreate_ShutdownCancelsStartAfterRequestEnded(t *testing.T) {
 	srv, mgr, projectPath, _ := newSyncStartTestServer(t)
 	ended := detachedStart(t, srv, mgr, projectPath)
 
-	go func() { _ = srv.Shutdown(context.Background()) }()
+	shutDone := make(chan struct{})
+	go func() {
+		defer close(shutDone)
+		_ = srv.Shutdown(context.Background())
+	}()
+	joinOnCleanup(t, shutDone, "Shutdown")
 	wantStartEnded(t, ended, "broker shutdown")
 }
