@@ -1601,18 +1601,20 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	// project's GitHub App token, so the caller must be authorized for the
 	// project — otherwise anyone could borrow another project's installation to
 	// read its private repositories. An empty ProjectID resolves anonymously
-	// (no token minted) and needs no check. Evaluated once, up front, and only
-	// when the request actually contains a gh:// URI.
+	// (no token minted). Evaluated once, up front, and only when the request
+	// actually contains a gh:// URI.
 	ghProjectAllowed := true
 	ghDeniedMessage := "you do not have permission to resolve GitHub skills for this project"
-	if req.ProjectID != "" && hasGitHubSkillRef(req.Skills) {
-		ghProjectAllowed = s.canUseProjectGitHubToken(ctx, req.ProjectID)
-	} else if hasGitHubSkillRef(req.Skills) {
-		// With no ProjectID the Hub fetches public repositories and writes
-		// its resolution cache on the caller's behalf: a user access token
-		// needs skill:read on a hub boundary.
-		ghProjectAllowed = s.tokenMayResolvePublicGitHubSkills(r)
-		ghDeniedMessage = "you do not have permission to resolve GitHub skills"
+	if hasGitHubSkillRef(req.Skills) {
+		if req.ProjectID != "" {
+			ghProjectAllowed = s.canUseProjectGitHubToken(ctx, req.ProjectID)
+		} else {
+			// With no ProjectID the Hub fetches public repositories and
+			// writes its resolution cache on the caller's behalf: a user
+			// access token needs skill:read on a hub boundary.
+			ghProjectAllowed = s.tokenMayResolvePublicGitHubSkills(r)
+			ghDeniedMessage = "you do not have permission to resolve GitHub skills"
+		}
 	}
 
 	// Per-request memo for (owner,repo,ref,tokenScope) → commitSHA.

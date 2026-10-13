@@ -347,8 +347,8 @@ func TestSkillCreateGlobal_PermissionRegistered(t *testing.T) {
 	}
 	assert.True(t, found, "skill.create_global should exist in the permissions registry")
 	assert.NotContains(t, permissions.UATManageScopesFor(permissions.ResourceSkill), "skill:create_global")
-	boundaries, reviewed := permissions.SelectorAllowedBoundaries("skill.create_global")
-	assert.True(t, reviewed)
+	boundaries, ok := permissions.SelectorAllowedBoundaries("skill.create_global")
+	assert.True(t, ok)
 	assert.Equal(t, []permissions.BoundaryKind{permissions.BoundaryKindHub}, boundaries)
 }
 
