@@ -195,6 +195,8 @@ ssh -o ProxyCommand="scion tunnel --stdio --ssh --hub https://hub.example.com --
 
 Each agent run generates its own SSH host key. The agent reports it to the Hub, which returns it as `sshHostKey` in the agent's details (`GET /api/v1/agents/:id`), so you can pin it in `known_hosts`.
 
+The Hub operator can turn the SSH server off, and deny particular ports and Unix sockets to every tunnel and to SSH forwarding (see [`disable_ssh`, `deny_ports` and `deny_sockets`](/scion/reference/server-config/#conduit-serverhubconduit)). A refused SSH tunnel exits with code 5 (not permitted).
+
 ---
 
 ## Settings & Administration
