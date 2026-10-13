@@ -87,10 +87,24 @@
   gets). That decision returns no error; any store or authorization fault
   inside it is a denial, so the agent is left out.
 
+## Fix round 2
+
+- Decided: visitors never reach a deleted agent. `visitorTargetAgent`
+  refuses a deleted agent on every form (project, by-ID, DM key), so the
+  send, the DM history read and the read marker give the uniform refusal,
+  as for an unknown agent. The own-DM list skips a DM whose agent is
+  deleted. Members are unchanged.
+- The direct `visitorMayReadAgent` call in the deleted-agent test now uses
+  the granted visitor, so the admission check alone is pinned (before, the
+  identity had no grant and was refused anyway).
+
 ## Follow-ups
 
 - Decided: the bridge's agent cards use `?messageable=true` on the visitor
   agent list (added below), so the bridge never probes by sending.
+- Members: the member send path (`handleAgentMessage`, and the project
+  form's ID fallback) also reaches a deleted agent. Whether members should
+  be refused too is a separate question for upstream.
 - The own-DM list reads every conversation the visitor participates in,
   with no paging. That is fine for visitors with few DMs; add paging if it
   grows.
