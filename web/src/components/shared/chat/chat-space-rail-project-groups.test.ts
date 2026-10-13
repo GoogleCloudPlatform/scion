@@ -78,7 +78,11 @@ interface FakeHub {
   holdNext: { method: string; prefix: string } | null;
   /** Fail every user-prefs GET (a 500). */
   prefsDown: boolean;
+  /** Also list a second space, Q (collapsed; its threads and groups are not loaded). */
+  secondSpace: boolean;
 }
+
+const Q = 'p-b';
 
 /** Releases the request held by `hub.holdNext` (answered with the hub's state at release). */
 let release: () => void = () => {};
@@ -165,6 +169,17 @@ function answer(path: string, init?: RequestInit): Promise<Response> {
           unreadCount: 0,
           hasUnreadMention: false,
         },
+        ...(hub.secondSpace
+          ? [
+              {
+                projectId: Q,
+                projectName: 'Bravo',
+                projectSlug: 'bravo',
+                unreadCount: 0,
+                hasUnreadMention: false,
+              },
+            ]
+          : []),
       ],
     });
   }
@@ -315,6 +330,7 @@ beforeEach(() => {
     failNext: null,
     holdNext: null,
     prefsDown: false,
+    secondSpace: false,
   };
   serveHub();
 });
@@ -676,22 +692,38 @@ describe('project thread groups — flag on', () => {
     expect(renderedGroupNames(el)).toEqual(['Shared']);
   });
 
-  it('a failed membership drag is undone; the thread stays ungrouped', async () => {
+  it('a failed membership drag is undone, with the thread and its order where they were', async () => {
     hub.groups = [hubGroup('srv-1', 'Shared', ['t1', 't3'])];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t4', 'srv-1', 't1', 't3', 't2'] });
     const el = await mountAs('user-a');
+    const putsBefore = prefsPuts().length;
 
     hub.failNext = { method: 'POST', prefix: '/api/v1/thread-groups/srv-1/threads', status: 422 };
     el.draggingThreadId = 't4';
     await el.handleThreadDrop({ preventDefault: vi.fn() }, 't1', P);
     await settle(el);
 
-    expect(showToastMock).toHaveBeenCalledWith(
-      'This group has reached its thread limit',
-      'warning'
-    );
+    expect(showToastMock).toHaveBeenCalledWith('This group has reached its thread limit', 'warning');
     expect(hub.groups[0]!.threads.map((t) => t.threadId)).toEqual(['t1', 't3']);
     expect(groupsOf(el)).toEqual({ Shared: ['t1', 't3'] });
-    expect(topLevel(el)).toContain('t4');
+    // No order was saved for the refused move: t4 is still first.
+    expect(prefsPuts().length).toBe(putsBefore);
+    expect(topLevel(el)).toEqual(['t4', '[Shared]', 't2']);
+  });
+
+  it('a thread filed from the menu and refused keeps its place in the order', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t2'])];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-1', 't2', 't3', 't4'] });
+    const el = await mountAs('user-a');
+    const putsBefore = prefsPuts().length;
+
+    hub.failNext = { method: 'POST', prefix: '/api/v1/thread-groups/srv-1/threads', status: 403 };
+    await el.moveThreadToGroup('t1', 'srv-1', P);
+    await settle(el);
+
+    expect(prefsPuts().length).toBe(putsBefore);
+    expect(groupsOf(el)).toEqual({ Shared: ['t2'] });
+    expect(topLevel(el)).toEqual(['t1', '[Shared]', 't3', 't4']);
   });
 
   it('a drag out of a group onto an ungrouped row removes it on the hub', async () => {
@@ -826,6 +858,18 @@ describe('project thread groups — flag on', () => {
     );
     // The preferences are asked for again.
     expect(prefsGets()).toBeGreaterThan(getsBefore);
+
+    // Once they load, saving works again and the stored personal groups
+    // document goes back byte for byte.
+    const personalDoc = JSON.stringify({ [P]: [{ id: 'g-personal', name: 'Mine', threadIds: [] }] });
+    hub.prefs['user-a'] = { ...personalPrefs({}), threadGroups: personalDoc };
+    hub.prefsDown = false;
+    await el.reload();
+    await settle(el);
+    await el.moveThread('t2', P, 1);
+    await settle(el);
+    expect(prefsPuts()).toHaveLength(1);
+    expect(prefsPuts()[0]!.threadGroups).toBe(personalDoc);
   });
 
   it('writes back an absent personal groups document as empty, not "{}"', async () => {
@@ -856,5 +900,115 @@ describe('project thread groups — flag on', () => {
 
     const order = JSON.parse(prefsPuts().at(-1)!.threadOrder)[P] as string[];
     expect(order).toEqual(['t1', 'srv-9', 't2', 't4', 't3']);
+  });
+
+  it('a rollback read dropped by a later edit is read again', async () => {
+    hub.groups = [hubGroup('srv-1', 'One', ['t1']), hubGroup('srv-2', 'Two', ['t2'])];
+    const el = await mountAs('user-a');
+
+    // The rename is refused (409); hold the rollback read it owes.
+    hub.holdNext = { method: 'GET', prefix: '/api/v1/thread-groups?projectId=' };
+    await el.renameGroup('srv-1', 'Two', P);
+    await settle(el);
+    // The refused name still shows while the rollback read is held.
+    expect(el.getGroups(P).map((g: any) => g.name)).toEqual(['Two', 'Two']);
+
+    // Another edit starts and ends before the held read answers: that read
+    // is dropped, and the rollback must be read again.
+    await el.renameGroup('srv-2', 'Deux', P);
+    release();
+    await settle(el);
+
+    expect(groupsOf(el)).toEqual({ One: ['t1'], Deux: ['t2'] });
+  });
+
+  it('a refused edit is rolled back when a create with a thread follows it', async () => {
+    hub.groups = [hubGroup('srv-1', 'One', ['t1']), hubGroup('srv-2', 'Two', ['t2'])];
+    hub.nextId = 3;
+    const el = await mountAs('user-a');
+
+    hub.holdNext = { method: 'PATCH', prefix: '/api/v1/thread-groups/srv-1' };
+    const renaming = el.renameGroup('srv-1', 'Two', P); // will be refused (409)
+    await settle(el);
+    const creating = el.createGroup(P, 'X', 't3');
+    release();
+    await Promise.all([renaming, creating]);
+    await settle(el);
+
+    expect(showToastMock).toHaveBeenCalledWith(
+      'A group with that name already exists in this space',
+      'warning'
+    );
+    expect(groupsOf(el)).toEqual({ One: ['t1'], Two: ['t2'], X: ['t3'] });
+  });
+
+  it('interleaved edits with a failure end at the hub’s state', async () => {
+    hub.groups = [hubGroup('srv-1', 'One', ['t1']), hubGroup('srv-2', 'Two', ['t2'])];
+    const el = await mountAs('user-a');
+
+    hub.holdNext = { method: 'POST', prefix: '/api/v1/thread-groups/srv-1/threads' };
+    const a = el.moveThreadToGroup('t3', 'srv-1', P); // held
+    const b = el.renameGroup('srv-2', 'one', P); // refused at once (409)
+    const c = el.moveThreadToGroup('t4', 'srv-2', P); // accepted
+    await Promise.all([b, c]);
+    await settle(el);
+    release();
+    await a;
+    await settle(el);
+
+    expect(groupsOf(el)).toEqual({ One: ['t1', 't3'], Two: ['t2', 't4'] });
+    expect(groupsOf(el)).toEqual(
+      Object.fromEntries(hub.groups.map((g) => [g.name, g.threads.map((t) => t.threadId)]))
+    );
+  });
+
+  it('a new group for a space whose groups are not loaded makes the next save read first', async () => {
+    hub.secondSpace = true;
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 't2', 't3', 't4'], [Q]: ['t1', 't2'] });
+    const el = await mountAs('user-a');
+    el._prefsRefreshDelayMs = 60_000;
+    expect(el.projectGroups.has(Q)).toBe(false);
+
+    // The migration writes Q's group position and publishes the group.
+    const migratedQ = ['t1', 'srv-q', 't2'];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 't2', 't3', 't4'], [Q]: migratedQ });
+    el.applyThreadGroupEvent(Q, 'created', { ...wire(hubGroup('srv-q', 'Q group', [])), projectId: Q });
+
+    await el.moveThread('t4', P, -1);
+    await settle(el);
+
+    expect(JSON.parse(prefsPuts().at(-1)!.threadOrder)[Q]).toEqual(migratedQ);
+  });
+
+  it('a space drag after a stale mark reads the preferences first', async () => {
+    hub.secondSpace = true;
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 't2'], [Q]: ['t1'] });
+    const el = await mountAs('user-a');
+    el._prefsRefreshDelayMs = 60_000;
+
+    const migratedQ = ['t1', 'srv-q'];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 't2'], [Q]: migratedQ });
+    el.applyThreadGroupEvent(Q, 'created', { ...wire(hubGroup('srv-q', 'Q group', [])), projectId: Q });
+
+    await el.applySpaceOrder([Q, P]);
+    await settle(el);
+
+    const put = prefsPuts().at(-1)!;
+    expect(JSON.parse(put.threadOrder)[Q]).toEqual(migratedQ);
+    expect(JSON.parse(put.spaceOrder)).toEqual([Q, P]);
+  });
+
+  it('an update for a shown group the stored order does not record marks prefs stale', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t2'])];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 't2', 't3', 't4'] });
+    const el = await mountAs('user-a');
+    el._prefsRefreshDelayMs = 60_000;
+    expect(el._prefsStale).toBe(false);
+
+    // The migration reused the group another user created (rule 2) and
+    // wrote it into this user's order (rule 6).
+    el.applyThreadGroupEvent(P, 'updated', wire(hubGroup('srv-1', 'Shared', ['t2', 't3'])));
+
+    expect(el._prefsStale).toBe(true);
   });
 });
