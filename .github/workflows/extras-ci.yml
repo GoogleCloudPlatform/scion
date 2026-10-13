@@ -137,11 +137,14 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: '${{ matrix.module }}/go.mod'
-          cache: true
-          # Key the cache on the module's own go.sum. Without this, setup-go
-          # hashes the root go.sum, so a change to this module's go.sum never
-          # changed its key (ptone/scion#4251).
-          cache-dependency-path: '${{ matrix.module }}/go.sum'
+          # No Go cache (ptone/scion#4251). This workflow runs only on pull
+          # requests, and setup-go's cache saved a fresh, PR-scoped cache per
+          # module on every run: about 5.4 GB of the repo's 10 GB cache
+          # budget per PR touching extras/, evicting ci.yml's main caches.
+          # Cold, these jobs take 0.5-5 min (the a2a PostgreSQL job about 9),
+          # well under ci.yml's run on the same PR, so they are off the
+          # critical path.
+          cache: false
 
       - name: Build
         working-directory: ${{ matrix.module }}
@@ -249,9 +252,8 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'extras/scion-a2a-bridge/go.mod'
-          cache: true
-          # The module's own go.sum (see build-and-test above).
-          cache-dependency-path: 'extras/scion-a2a-bridge/go.sum'
+          # No Go cache (see build-and-test above).
+          cache: false
 
       - name: Run Integration Tests
         working-directory: extras/scion-a2a-bridge
