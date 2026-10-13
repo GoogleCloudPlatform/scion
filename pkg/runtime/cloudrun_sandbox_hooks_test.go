@@ -518,3 +518,72 @@ func TestCloudRunSandboxDeleteResource_OtherKind(t *testing.T) {
 	wantDeletes(t, env.log, 0)
 	wantEntryOf(t, env.state, "run-a")
 }
+
+// -----------------------------------------------------------------------
+// ObserveResourceCreated only (a synchronous start on a flat broker)
+// -----------------------------------------------------------------------
+
+// Fault check S12: the sandbox handle bypasses launchHooks.created, so an
+// ObserveResourceCreated-only caller never sees it (S12b: the observer
+// makes the runtime skip its own synchronous cleanup). With only
+// ObserveResourceCreated set (no OnResourceCreated, so the hooks are not
+// active), every start reports exactly one handle {sandbox, dev, run-a} to
+// the observer, and the runtime keeps its synchronous cleanup: a
+// successful start deletes nothing; a killed `run` is deleted by the
+// runtime itself (one `delete --force`, no entry left), so the journal's
+// later cleanup (DeleteResource) finds nothing and deletes nothing more; a
+// self-failed `run` deletes nothing and leaves no entry, and the cleanup
+// deletes nothing either.
+func TestCloudRunSandboxHooks_ObserverOnlySyncStart(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		sc          startScripts
+		wantErr     bool
+		runtimeDels int
+	}{
+		{"success", startScripts{}, false, 0},
+		{"run killed", startScripts{run: blockUntilKilled}, true, 1},
+		{"self-failed", startScripts{run: `echo "sandbox dev already exists" >&2; exit 1`}, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, env := newStartingRuntime(t, tc.sc)
+			cfg := startingCfg(t, "run-a")
+			var mu sync.Mutex
+			var observed []api.ResourceHandle
+			cfg.ObserveResourceCreated = func(h api.ResourceHandle) {
+				mu.Lock()
+				defer mu.Unlock()
+				observed = append(observed, h)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errc := runSandboxAsync(ctx, rt, cfg)
+			if tc.sc.run == blockUntilKilled {
+				waitForFile(t, env.mark)
+				cancel()
+			}
+			if err := recvErr(t, errc, "Run"); (err != nil) != tc.wantErr {
+				t.Fatalf("Run = %v, want error %v", err, tc.wantErr)
+			}
+			mu.Lock()
+			got := append([]api.ResourceHandle(nil), observed...)
+			mu.Unlock()
+			if want := []api.ResourceHandle{sandboxHandle("run-a")}; !reflect.DeepEqual(got, want) {
+				t.Errorf("observed handles = %+v, want %+v", got, want)
+			}
+			wantDeletes(t, env.log, tc.runtimeDels)
+			if !tc.wantErr {
+				return
+			}
+			if e := fileEntry(t, env.state); e != nil {
+				t.Errorf("entry after the failed start = %+v, want none", e)
+			}
+			// The journal's cleanup of the observed handle (CleanupLaunch ->
+			// DeleteResource) finds no entry and deletes nothing more.
+			if err := rt.DeleteResource(context.Background(), sandboxHandle("run-a")); err != nil {
+				t.Errorf("DeleteResource = %v, want nil", err)
+			}
+			wantDeletes(t, env.log, tc.runtimeDels)
+		})
+	}
+}
