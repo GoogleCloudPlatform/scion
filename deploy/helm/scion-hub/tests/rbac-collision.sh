@@ -546,7 +546,7 @@ notes_has_disclosure() { # notes_has_disclosure <release> <namespace> [extra arg
 if [ "$(notes_has_disclosure "$R41" team-alpha-production)" = yes ]; then
   pass "(n) a release whose cluster-scoped name changed gets the orphan disclosure in NOTES"
 else
-  fail "(n) a release whose name changed got NO orphan disclosure. Its old ClusterRoleBinding is still in the cluster with cluster-wide secrets and pods/exec authority, and nothing tells the operator it is there."
+  fail "(n) a release whose name changed got NO orphan disclosure. Its old ClusterRoleBinding may still be in the cluster (it remains on the rendered-manifest path, and on the helm path when the delete did not happen), and nothing tells the operator it is there."
 fi
 if [ "$(notes_has_disclosure myhub team-alpha-production)" = no ]; then
   pass "(n) a release whose name did NOT change gets no disclosure (there is no orphan to report)"
