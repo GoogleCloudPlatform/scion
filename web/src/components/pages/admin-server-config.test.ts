@@ -3280,6 +3280,9 @@ describe('scion-page-admin-server-config', () => {
     }
 
     it('a pinned public URL is not listed as superseded by database settings', async () => {
+      // While a setting pins the public URL, the hub leaves it out of
+      // superseded_keys (computeSupersededKeys); the page shows the list
+      // as the hub sends it (ptone/scion#4707).
       element = await createComponent(
         createFetchHandler(
           makeBaseConfig({
@@ -3289,7 +3292,7 @@ describe('scion-page-admin-server-config', () => {
               source: 'env',
               pinned_by: 'SCION_SERVER_HUB_ENDPOINT',
             },
-            superseded_keys: supersededPublicUrl,
+            superseded_keys: { endpoints: [{ key: 'image_registry', source: 'yaml' }] },
           })
         )
       );

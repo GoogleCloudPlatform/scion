@@ -405,10 +405,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	hydrated := templateHydrated(provenance, finalScionCfg)
 	// templateUnresolvable is true only when a named template could not be
 	// found at all (renamed or deleted since the agent was created) — not
-	// when there is simply no template name to resolve. It gates the
-	// recorded-image/pull-policy fallback below, so a restart of an agent
-	// whose template disappeared doesn't silently drop to Hub settings or
-	// the file default the way an empty templateChain otherwise would.
+	// when there is simply no template name to resolve. It gates the legacy
+	// recorded template snapshot tier below (the template image and pull
+	// policy recorded for an agent provisioned before ptone/scion#4524), so
+	// a restart of such an agent whose template disappeared keeps that
+	// recorded value instead of dropping to Hub settings or the file
+	// default, as an agent with no template name does.
 	templateUnresolvable := false
 	templateName := ""
 	if opts.Template != "" && filepath.IsAbs(opts.Template) {
@@ -457,6 +459,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// order (ptone/scion#1799).
 	var fileImage, settingsImage, profileOverrideImage string
 	var filePullPolicy, settingsPullPolicy, profileOverridePullPolicy string
+	// The harness-config file's and settings harness_configs volumes are
+	// environment values applied here on every start, never persisted
+	// (ptone/scion#4561).
+	var fileVolumes, settingsVolumes []api.VolumeMount
 	if harnessConfigName != "" {
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
 			if hcDir.Config.Image != "" {
@@ -464,6 +470,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				util.Debugf("image resolution: on-disk harness-config image=%s path=%s", fileImage, hcDir.Path)
 			}
 			filePullPolicy = hcDir.Config.ImagePullPolicy
+			fileVolumes = hcDir.Config.Volumes
 			if hcDir.Config.User != "" {
 				unixUsername = hcDir.Config.User
 			}
@@ -525,12 +532,37 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					settingsPullPolicy = settings.HarnessConfigs[harnessConfigName].ImagePullPolicy
 				}
 			}
+			settingsVolumes = hConfig.Volumes
 			if hConfig.User != "" {
 				unixUsername = hConfig.User
 			}
 		} else {
 			util.Debugf("image resolution: settings harness-config %q not found", harnessConfigName)
 		}
+	}
+
+	// Environment values (ptone/scion#4561): image, kubernetes, resources
+	// and volumes come from settings, not from the persisted agent config,
+	// which holds only the requester's own values (inline config) and the
+	// provisioned workspace mount. They are read from scion-agent.json on
+	// disk rather than from finalScionCfg, which on a first start is the
+	// config ProvisionAgent returned with every tier already merged in, so
+	// a first start and a restart see the same agent values. ownEnv is also
+	// what the scion-agent.json rewrites below persist. The image and pull
+	// policy are resolved separately (pickImage / pickPullPolicy below);
+	// volumes and resources are applied here.
+	ownEnv := environmentOf(finalScionCfg)
+	if persisted, ok := readPersistedAgentEnvironment(agentDir); ok {
+		ownEnv = persisted
+	}
+	if finalScionCfg != nil {
+		envProfile := opts.Profile
+		if envProfile == "" && finalScionCfg.Info != nil {
+			envProfile = finalScionCfg.Info.Profile
+		}
+		finalScionCfg = withEnvironment(finalScionCfg, ownEnv.clone())
+		finalScionCfg.Volumes = mergeEnvironmentVolumes(settingsVolumes, fileVolumes, ownEnv.Volumes)
+		applyEnvironmentResources(ctx, finalScionCfg, settings, envProfile, harnessConfigName)
 	}
 
 	// Telemetry tiers applied per start: broker settings telemetry < hub
@@ -1476,7 +1508,7 @@ authDone:
 			finalScionCfg = &api.ScionConfig{}
 		}
 		finalScionCfg.AuthSelectedType = opts.HarnessAuth
-		cfgData, marshalErr := json.MarshalIndent(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
 		}
@@ -1487,7 +1519,7 @@ authDone:
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
 		// Active corruption repair: clear the corrupted value and rewrite.
 		finalScionCfg.AuthSelectedType = ""
-		cfgData, marshalErr := json.MarshalIndent(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal repaired agent config: %w", marshalErr)
 		}
@@ -2484,6 +2516,7 @@ authDone:
 		// §3.8.4); nil on the synchronous path.
 		Checkpoint:        opts.Checkpoint,
 		OnResourceCreated: opts.OnResourceCreated,
+		Progress:          opts.Progress,
 		// Observes every created resource (flat instance ownership
 		// records) without changing cleanup ownership.
 		ObserveResourceCreated: opts.ObserveResourceCreated,
@@ -2501,26 +2534,15 @@ authDone:
 		// dropCheckedSharedDirs saves the record; nothing reads it after this.
 		_ = dropCheckedSharedDirs(agentDir, sharedDirRecord, passed, opts.Name)
 	}
-	id, err := m.Runtime.Run(ctx, runCfg)
-	if err != nil {
-		// Provisioning writes agent-info.json in "created" state before the
-		// runtime launch. If the launch itself fails, keep the provisioned
-		// workspace but flip the local state to "error" so list/status do not
-		// report a phantom created agent forever.
-		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
-			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
-		}
-		return nil, classifyLaunchRuntimeError(err, resolvedImage)
-	}
-	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
-		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
-	if recordAfterCreate {
-		if err := SetSavedRunID(opts.Name, opts.ProjectPath, runID); err != nil {
-			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
-				"agent", opts.Name, "run_id", runID, "error", err)
-		}
-	}
-
+	// Record the running phase, runtime and profile before the container
+	// starts rather than after it: some runtimes do not let the host write
+	// files in the container (ptone/scion#4766). Once up, the container
+	// reports its own phase (sciontool init writes "running"). This covers
+	// only the running-phase write: the "error" write on a failed launch
+	// below, and the run ID record after the create when the pre-start
+	// List failed (recordAfterCreate, moving in ptone/scion#4771), still
+	// write agent-info.json after Run.
+	//
 	// Phase is always "running" here, for both a fresh start and a resume:
 	// state.Phase has no "resumed" value, and a non-standard phase string
 	// confuses readers that only understand the canonical lifecycle phases
@@ -2530,6 +2552,29 @@ authDone:
 	status := string(state.PhaseRunning)
 	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
 		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
+	}
+	id, err := m.Runtime.Run(ctx, runCfg)
+	if err != nil {
+		// agent-info.json was set to "running" above, before the runtime
+		// launch. If the launch itself fails, keep the provisioned
+		// workspace but flip the local state to "error" so list/status do not
+		// report a phantom agent forever. This write comes after Run, so on a
+		// runtime whose Run fails after creating the container it may run
+		// while the container exists; tracked in ptone/scion#4815.
+		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
+			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
+		}
+		return nil, classifyLaunchRuntimeError(err, resolvedImage)
+	}
+	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
+		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
+	// This write runs while the container may be up; it moves out of
+	// agent-info.json in ptone/scion#4771.
+	if recordAfterCreate {
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, runID); err != nil {
+			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", runID, "error", err)
+		}
 	}
 
 	// Fetch fresh info and verify the container is actually running

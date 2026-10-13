@@ -84,8 +84,10 @@ func NewStatusHandler() *StatusHandler {
 }
 
 // activitySourceKey is the agent-info.json field that records which path set
-// the current activity. Only the Notification path writes it, with the value
-// activitySourceNotification; every other activity or phase write removes it.
+// the current activity. The Notification path writes it with the value
+// activitySourceNotification, and the release of a sub-agent-held wait on the
+// last owner's SubagentStop writes activitySourceSubagentEnd; every other
+// activity or phase write removes it.
 // That lets tool-end and agent-end clear a waiting_for_input that a harness
 // prompt (permission or elicitation dialog) set, once the prompt is answered,
 // while a waiting_for_input the agent set itself (sciontool status ask_user)
@@ -96,15 +98,32 @@ const activitySourceKey = "activitySource"
 // activitySourceNotification marks an activity set by a Notification event.
 const activitySourceNotification = "notification"
 
+// activitySourceSubagentEnd marks the working activity written when the last
+// owner's SubagentStop released a sub-agent-held wait. Only the HubHandler
+// reads it, to report that release (see HubHandler.Handle); every other
+// reader of activitySourceKey checks it only next to waiting_for_input.
+const activitySourceSubagentEnd = "subagent-end"
+
 // notificationWaitAgentsKey is the agent-info.json field that lists the
 // sub-agents (by agent_id) whose question holds a notification-set
 // waiting_for_input. It exists only next to the activitySource marker: every
 // write that is not a notification write removes both. While the list is not
 // empty, a sub-agent event clears only its own entry, and the wait stays until
-// the last listed sub-agent's question is answered. A sibling sub-agent and
-// the parent's tool-end (for example the parent's Agent tool returning for
-// another sub-agent) leave it in place. A wait with no list behaves as before:
-// any tool-end or agent-end clears it.
+// the last listed sub-agent's question is answered or that sub-agent ends
+// (its SubagentStop then clears the wait to working). A sibling sub-agent and
+// the parent's own tool activity leave it in place: the parent's tool-start,
+// its tool-end (for example its Agent tool returning for another sub-agent)
+// and its Stop. A background sub-agent keeps running after the parent's turn
+// ends, so its question outlives the parent's Stop. A wait with no list
+// behaves as before: any tool-start, tool-end or agent-end clears it.
+//
+// What still clears a listed wait: the parent's next prompt (Claude Code
+// takes a prompt only when no question dialog is open), session start, any
+// phase write, and any explicit status write (sciontool status). That is the
+// bound for an owner that never sends an end event. The accepted cost: inside
+// a running turn, such a stale owner keeps waiting_for_input through the
+// parent's tool activity until the next prompt, session start or status
+// write.
 //
 // Every add, remove and clear of the list is part of one locked update of
 // agent-info.json (see update), so hook processes that fire at the same
@@ -113,9 +132,7 @@ const activitySourceNotification = "notification"
 // unlocked, and then a change can be lost. The effect is bounded. A lost
 // entry lets that question be cleared early, as any tool-end did before. A
 // lost removal can hold the wait longer than before: until the stale owner's
-// SubagentStop plus the parent's Agent tool-end, or at the latest the
-// parent's next Stop, prompt or tool-start (an interrupted turn with no Stop
-// waits for the next prompt).
+// SubagentStop, or at the latest the bound above.
 const notificationWaitAgentsKey = "notificationWaitAgents"
 
 // maxNotificationWaitAgents caps notificationWaitAgentsKey. Past the cap, a
@@ -138,9 +155,10 @@ type eventResult struct {
 // Handle processes an event and updates the agent status.
 func (h *StatusHandler) Handle(event *hooks.Event) error {
 	// A sub-agent that ends no longer holds a question open. Its entry is
-	// removed from the notification wait's owner list; the activity is left
-	// alone, so the parent's tool-end for that sub-agent then clears the wait
-	// if no other sub-agent still holds it.
+	// removed from the notification wait's owner list, and when it was the
+	// last owner the wait is cleared to working. A background sub-agent's
+	// SubagentStop can come after the parent's turn has ended, with no
+	// parent tool-end left to clear the wait.
 	if event.Name == hooks.EventSubagentEnd && isSubagentEvent(event) {
 		return h.releaseNotificationWaitOwner(subagentID(event))
 	}
@@ -177,6 +195,8 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 			// parent's session, not a status the parent set. Record it as
 			// notification-set and owned by the sub-agent, so the
 			// sub-agent's own tool-end (the user answered) clears it.
+			// blocked, completed, limits_exceeded and crashed are kept,
+			// with no owner recorded (see setWaitingFromNotificationFor).
 			if isSubagentEvent(event) {
 				return h.setWaitingFromNotificationFor(subagentID(event))
 			}
@@ -186,29 +206,32 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 		// Tool-start clears waiting_for_input of either kind (the user has
 		// responded) and keeps every other held status: completed (tools may
 		// fire after task_completed as wrap-up), blocked, limits_exceeded and
-		// crashed. The HubHandler reports executing only when this write
-		// happened, so the Hub and the local status agree.
+		// crashed. A wait that sub-agents hold is kept: the parent can run
+		// tools while a background sub-agent's question is open. The
+		// HubHandler reports executing only when this write happened, so the
+		// Hub and the local status agree.
 		return h.updateActivityIfNotSticky(result.activity, event.Data.ToolName, clearAnyWaiting, "")
 	}
 
 	// Notification event: set waiting_for_input directly (sticky), marked as
 	// set by a notification so tool-end or agent-end can clear it. A
-	// sub-agent's Notification is owned by that sub-agent.
+	// sub-agent's Notification is owned by that sub-agent. A Notification
+	// never replaces limits_exceeded or crashed (see
+	// setWaitingFromNotificationFor).
 	if event.Name == hooks.EventNotification {
 		return h.setWaitingFromNotificationFor(subagentID(event))
 	}
 
 	// Tool-end and agent-end: the harness prompt that a Notification reported
-	// has been answered (the tool ran) or the turn is over (no prompt can be
-	// open at turn end), so a notification-set waiting_for_input is cleared.
+	// has been answered (the tool ran) or the turn is over (no prompt of the
+	// parent's can be open at turn end), so a notification-set
+	// waiting_for_input is cleared.
 	// Every other sticky activity, including an agent-set waiting_for_input,
 	// is kept. A wait that sub-agents hold is cleared only by their own
-	// events, or by the parent's agent-end (the turn is over).
-	if event.Name == hooks.EventToolEnd {
+	// events: the parent's agent-end keeps it, since a background sub-agent
+	// can still be asking after the parent's turn is over.
+	if event.Name == hooks.EventToolEnd || event.Name == hooks.EventAgentEnd {
 		return h.updateActivityIfNotSticky(result.activity, "", clearNotificationWaiting, subagentID(event))
-	}
-	if event.Name == hooks.EventAgentEnd {
-		return h.updateActivityIfNotSticky(result.activity, "", clearTurnEndWaiting, subagentID(event))
 	}
 
 	// All other events (model-end, etc.): update activity only if current
@@ -220,11 +243,26 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 // Notification event and, when owner (a sub-agent's agent_id) is not empty,
 // adds owner to the wait's owner list. A waiting_for_input the agent set
 // itself is left unchanged: a harness prompt must not turn it into a
-// notification-set wait that the prompt's answer would then clear. The
-// owner list change is part of the same locked update.
+// notification-set wait that the prompt's answer would then clear. A
+// sub-agent's question (owner not empty) also leaves blocked, completed,
+// limits_exceeded and crashed unchanged and records no owner (see
+// isHeldNonWaitingActivity). The parent's own Notification (owner empty)
+// leaves the terminal statuses limits_exceeded and crashed unchanged: a
+// notification is informational and must not clear how the agent ended. It
+// still replaces blocked and completed, since for some harnesses (for
+// example opencode and muse-code) the Notification is the question that
+// asks the user. The check and the write are one locked update, as is the
+// owner list change.
 func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 	return h.update(func(info map[string]interface{}) bool {
 		if isAgentSetWaiting(info) {
+			return false
+		}
+		current, _ := info["activity"].(string)
+		if owner != "" && isHeldNonWaitingActivity(current) {
+			return false
+		}
+		if state.Activity(current).IsTerminal() {
 			return false
 		}
 
@@ -247,8 +285,10 @@ func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 }
 
 // releaseNotificationWaitOwner removes owner from the owner list of a
-// notification-set waiting_for_input. The activity is not changed. Nothing is
-// written when owner is not listed. It is one locked update.
+// notification-set waiting_for_input. When owner was the last entry, the wait
+// is cleared to working, marked with activitySourceSubagentEnd so the
+// HubHandler reports it. Nothing is written when owner is not listed. It is
+// one locked update.
 func (h *StatusHandler) releaseNotificationWaitOwner(owner string) error {
 	return h.update(func(info map[string]interface{}) bool {
 		if !isNotificationWaiting(info) {
@@ -258,9 +298,22 @@ func (h *StatusHandler) releaseNotificationWaitOwner(owner string) error {
 		if !removed {
 			return false
 		}
+		if len(remaining) == 0 {
+			applyActivity(info, state.ActivityWorking, "")
+			info[activitySourceKey] = activitySourceSubagentEnd
+			return true
+		}
 		setNotificationWaitOwners(info, remaining)
 		return true
 	})
+}
+
+// isHeldNonWaitingActivity reports whether activity is a held status other
+// than waiting_for_input: blocked, completed, limits_exceeded or crashed. A
+// sub-agent's question must not replace it, the same statuses a parent
+// tool-start keeps.
+func isHeldNonWaitingActivity(activity string) bool {
+	return isStickyActivity(activity) && activity != string(state.ActivityWaitingForInput)
 }
 
 // isNotificationWaiting reports whether info holds a waiting_for_input that a
@@ -456,16 +509,14 @@ const (
 	// clearNone keeps every sticky activity.
 	clearNone waitingClear = iota
 	// clearNotificationWaiting clears waiting_for_input only when a
-	// Notification set it (tool-end, and a sub-agent's tool-start or
-	// prompt). A wait that sub-agents hold is cleared only once the last of
-	// them has had its own event; the parent's tool-end keeps it.
+	// Notification set it (tool-end, agent-end, and a sub-agent's tool-start
+	// or prompt). A wait that sub-agents hold is cleared only once the last
+	// of them has had its own event; the parent's tool-end and agent-end
+	// keep it.
 	clearNotificationWaiting
-	// clearTurnEndWaiting is clearNotificationWaiting for agent-end: the
-	// parent's turn is over, so no prompt can still be open and a wait that
-	// sub-agents hold is cleared too.
-	clearTurnEndWaiting
-	// clearAnyWaiting clears any waiting_for_input (tool-start: the user has
-	// responded and the agent is running a tool).
+	// clearAnyWaiting clears any waiting_for_input (the parent's tool-start:
+	// the user has responded and the agent is running a tool), except a
+	// wait that sub-agents hold.
 	clearAnyWaiting
 )
 
@@ -486,8 +537,10 @@ func stickyBlocksUpdate(info map[string]interface{}, clear waitingClear, subagen
 	}
 	switch clear {
 	case clearAnyWaiting:
-		return false, false
-	case clearNotificationWaiting, clearTurnEndWaiting:
+		// Only the parent's tool-start uses this rule. It keeps a wait
+		// that sub-agents hold.
+		return isNotificationWaiting(info) && len(notificationWaitOwners(info)) > 0, false
+	case clearNotificationWaiting:
 		if !isNotificationWaiting(info) {
 			return true, false
 		}
@@ -496,9 +549,9 @@ func stickyBlocksUpdate(info map[string]interface{}, clear waitingClear, subagen
 			return false, false
 		}
 		if subagent == "" {
-			// The parent's own event: agent-end clears the wait, tool-end
-			// keeps a wait that sub-agents hold.
-			return clear != clearTurnEndWaiting, false
+			// The parent's own tool-end or agent-end keeps a wait that
+			// sub-agents hold.
+			return true, false
 		}
 		remaining, removed := removeString(owners, subagent)
 		if !removed {
@@ -635,7 +688,8 @@ func isClaudeUserWaitTool(event *hooks.Event) bool {
 // tool-start event that must not clear a status the parent agent holds. A
 // sub-agent's ExitPlanMode or AskUserQuestion tool-start is excluded: the
 // user is being asked, so it still sets waiting_for_input (recorded as
-// notification-set, see Handle).
+// notification-set, see Handle), unless the agent holds blocked, completed,
+// limits_exceeded or crashed (see setWaitingFromNotificationFor).
 func isHeldSubagentEvent(event *hooks.Event) bool {
 	if !isSubagentEvent(event) || isClaudeUserWaitTool(event) {
 		return false

@@ -50,10 +50,6 @@ func (m *mockTemplateService) Create(ctx context.Context, req *hubclient.CreateT
 	return nil, nil
 }
 
-func (m *mockTemplateService) Update(ctx context.Context, templateID string, req *hubclient.UpdateTemplateRequest) (*hubclient.Template, error) {
-	return nil, nil
-}
-
 func (m *mockTemplateService) Delete(ctx context.Context, templateID string) error {
 	return nil
 }
@@ -70,7 +66,7 @@ func (m *mockTemplateService) RequestUploadURLs(ctx context.Context, templateID 
 	return nil, nil
 }
 
-func (m *mockTemplateService) Finalize(ctx context.Context, templateID string, manifest *hubclient.TemplateManifest, expectedContentHash string) (*hubclient.Template, error) {
+func (m *mockTemplateService) Finalize(ctx context.Context, templateID string, manifest *hubclient.TemplateManifest, expectedContentHash, uploadID string) (*hubclient.Template, error) {
 	return nil, nil
 }
 

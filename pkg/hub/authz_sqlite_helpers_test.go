@@ -31,7 +31,6 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
@@ -1108,15 +1107,18 @@ type faultStore struct {
 	userID               string // when set, only GetUser(userID) fails
 }
 
-// parseHubProduction parses the non-test Go files of this package.
+// parseHubProduction parses the non-test Go files of this package and of its
+// guardScanSubdirs.
 func parseHubProduction(t *testing.T) (*token.FileSet, []*ast.File) {
 	t.Helper()
 	fset := token.NewFileSet()
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards provenance-chain and scope-ceiling callers, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards provenance-chain and scope-ceiling callers.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards provenance-chain and scope-ceiling callers, which identity.go and identity_credential.go do not contain.
-	paths, err := filepath.Glob("*.go")
+	// scanned through guardScanSubdirs; guards provenance-chain and scope-ceiling callers.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards provenance-chain and scope-ceiling callers.
+	paths, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	var files []*ast.File
 	for _, p := range paths {

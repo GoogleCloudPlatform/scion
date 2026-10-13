@@ -416,13 +416,18 @@ func (s *Server) sectionHasBootstrapValues(ops *OperationalSettings, sectionName
 
 // computeSupersededKeys returns, for each managed section, the bootstrap-material
 // keys whose merged value differs from the DB value. This tells the admin which
-// deployment-config values their explicit DB writes are overriding.
+// deployment-config values their explicit DB writes are overriding. When the
+// unseeded bootstrap is set (SetUnseededBootstrap, as startup does), the
+// endpoints public_url is compared with its value from that merge instead,
+// since startup never applies a seed value for the hub endpoint
+// (ptone/scion#4865).
 func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]SupersededKey {
 	ops.mu.RLock()
 	cacheSnap := make(map[string]sectionState, len(ops.cache))
 	for name, ss := range ops.cache {
 		cacheSnap[name] = ss
 	}
+	unseededPublicURL, hasUnseededPublicURL := ops.unseededPublicURL, ops.hasUnseededPublicURL
 	ops.mu.RUnlock()
 
 	if ops.bootstrapKoanf == nil {
@@ -463,6 +468,19 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 				// pinned badge says so (ptone/scion#3905).
 				continue
 			}
+			keySeedEnvK := seedEnvK
+			if sec.Name == "endpoints" && key == "public_url" && hasUnseededPublicURL {
+				// Startup's endpoint resolution ignores a seed value, so
+				// compare with the value from the layers it reads, and do
+				// not attribute the key to the seed layer
+				// (ptone/scion#4826, ptone/scion#4865). Without such a
+				// value, the saved one supersedes nothing.
+				if unseededPublicURL == "" {
+					continue
+				}
+				bootstrapVal = unseededPublicURL
+				keySeedEnvK = nil
+			}
 			dbVal, exists := dbMap[key]
 			if !exists && bootstrapAppliesWhenAbsent(sec.Name, key) {
 				// The DB row does not override this key; the bootstrap
@@ -476,7 +494,7 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 				}
 				superseded = append(superseded, SupersededKey{
 					Key:    koanfPath,
-					Source: detectKeySource(seedEnvK, serverEnvK, sec.Name, key),
+					Source: detectKeySource(keySeedEnvK, serverEnvK, sec.Name, key),
 				})
 			}
 		}
@@ -873,7 +891,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// (applyRunningValuesForUnsetKeys) leaves the key unset: it is neither
 	// written nor reported (ptone/scion#3904).
 	echoedRunning := s.echoedRunningValueKeys(r.Context(), ops, &req.ServerConfigUpdateRequest)
-	// An echo of the public URL in effect is not stored either, so a
+	// An echo of the public URL GET shows is not stored either, so a
 	// bootstrap value never becomes a saved value (ptone/scion#3905).
 	if echoedPublicURL(ops, &req.ServerConfigUpdateRequest) {
 		echoedRunning[config.PublicURLKey] = true
@@ -1400,6 +1418,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			beforeDocs[secName] = doc
 		}
 	}
+	// The saved public URL before the write, for the report below.
+	publicURLSavedBefore := storedManagedPublicURL(ops)
 
 	applied := make(map[string]int64)
 	var unchanged []string // sections whose write was skipped (unchangedManagedRow)
@@ -1514,13 +1534,15 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	for sec := range written {
 		writtenDocs[sec] = sectionDocs[sec]
 	}
-	// A row without public_url leaves the bootstrap value in effect, so the
-	// report compares that value, not its absence (ptone/scion#3905).
-	if doc, ok := beforeDocs["endpoints"]; ok {
-		beforeDocs["endpoints"] = publicURLInEffectDoc(ops, doc)
-	}
+	// Without a saved public URL the operator endpoint is in effect, so the
+	// report compares that value, not the absence of a saved one; a seeded
+	// row's public_url is not a saved value (ptone/scion#3905,
+	// ptone/scion#4826). Written endpoints docs are managed rows.
+	operatorEndpoint := s.HubEndpoints().Operator
 	if doc, ok := writtenDocs["endpoints"]; ok {
-		writtenDocs["endpoints"] = publicURLInEffectDoc(ops, doc)
+		before := beforeDocs["endpoints"]
+		beforeDocs["endpoints"] = publicURLInEffectDoc(before, publicURLSavedBefore, operatorEndpoint)
+		writtenDocs["endpoints"] = publicURLInEffectDoc(doc, publicURLFromSectionDoc(doc), operatorEndpoint)
 	}
 	keyReport := reportSavedKeys(beforeDocs, writtenDocs)
 

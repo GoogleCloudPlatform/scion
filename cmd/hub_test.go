@@ -353,115 +353,58 @@ func TestGetHubEnabledScope_DefaultWhenNothingSet(t *testing.T) {
 	assert.False(t, scope.Enabled)
 }
 
+// hubStatusScope returns hub status's endpoint scope for the current
+// invocation state, as runHubStatus computes it.
+func hubStatusScope(isGlobal bool) hubEndpointScope {
+	return getHubEndpointScope(isGlobal, describeUseTarget(&config.CLIContext{}))
+}
+
 func TestGetHubEndpointScope_FromProject(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	setupContextTest(t)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
+	root := makeDirProject(t, "https://project-hub.example.com")
 
-	// Save original hubEndpoint and restore after test
-	origHubEndpoint := hubEndpoint
-	hubEndpoint = ""
-	defer func() { hubEndpoint = origHubEndpoint }()
-
-	// Create project settings with hub.endpoint
-	projectDir := filepath.Join(tmpDir, "project-scion")
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
-		[]byte("hub:\n  endpoint: https://project-hub.example.com\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	settings := &config.Settings{
-		Hub: &config.HubClientConfig{Endpoint: "https://project-hub.example.com"},
-	}
-
-	scope := getHubEndpointScope(projectDir, false, settings)
-	assert.Equal(t, "project", scope.Source)
+	scope := hubStatusScope(false)
+	assert.Equal(t, "project_settings", scope.Source)
+	dotScion, err := filepath.EvalSymlinks(filepath.Join(root, ".scion"))
+	require.NoError(t, err)
+	assert.Equal(t, "project settings: "+displayProjectDir(dotScion), scope.Label)
 	assert.False(t, scope.Inherited)
 	assert.Equal(t, "https://project-hub.example.com", scope.Endpoint)
 }
 
 func TestGetHubEndpointScope_InheritedFromGlobal(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	setupContextTest(t)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: https://global-hub.example.com\n")
+	makeDirProject(t, "")
 
-	origHubEndpoint := hubEndpoint
-	hubEndpoint = ""
-	defer func() { hubEndpoint = origHubEndpoint }()
-
-	// Create global settings with hub.endpoint
-	globalDir := filepath.Join(tmpDir, ".scion")
-	if err := os.MkdirAll(globalDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"),
-		[]byte("hub:\n  endpoint: https://global-hub.example.com\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create project settings WITHOUT hub.endpoint
-	projectDir := filepath.Join(tmpDir, "project-scion")
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
-		[]byte("runtime: docker\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	settings := &config.Settings{
-		Hub: &config.HubClientConfig{Endpoint: "https://global-hub.example.com"},
-	}
-
-	scope := getHubEndpointScope(projectDir, false, settings)
-	assert.Equal(t, "global", scope.Source)
+	scope := hubStatusScope(false)
+	assert.Equal(t, "global_settings", scope.Source)
+	assert.Equal(t, "global settings", scope.Label)
 	assert.True(t, scope.Inherited)
 	assert.Equal(t, "https://global-hub.example.com", scope.Endpoint)
 }
 
 func TestGetHubEndpointScope_FromEnv(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	setupContextTest(t)
 	t.Setenv("SCION_HUB_ENDPOINT", "https://env-hub.example.com")
+	makeDirProject(t, "")
 
-	origHubEndpoint := hubEndpoint
-	hubEndpoint = ""
-	defer func() { hubEndpoint = origHubEndpoint }()
-
-	// Create empty global dir
-	globalDir := filepath.Join(tmpDir, ".scion")
-	if err := os.MkdirAll(globalDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create project settings WITHOUT hub.endpoint
-	projectDir := filepath.Join(tmpDir, "project-scion")
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	settings := &config.Settings{}
-
-	scope := getHubEndpointScope(projectDir, false, settings)
+	scope := hubStatusScope(false)
 	assert.Equal(t, "env", scope.Source)
+	assert.Equal(t, "SCION_HUB_ENDPOINT", scope.Label)
 	assert.True(t, scope.Inherited)
 }
 
 func TestGetHubEndpointScope_FromFlag(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setupContextTest(t)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
-
-	origHubEndpoint := hubEndpoint
 	hubEndpoint = "https://flag-hub.example.com"
-	defer func() { hubEndpoint = origHubEndpoint }()
 
-	settings := &config.Settings{}
-
-	scope := getHubEndpointScope("/some/path", false, settings)
+	scope := hubStatusScope(false)
 	assert.Equal(t, "flag", scope.Source)
+	assert.Equal(t, "--hub flag", scope.Label)
 	assert.False(t, scope.Inherited)
 	assert.Equal(t, "https://flag-hub.example.com", scope.Endpoint)
 }

@@ -127,7 +127,7 @@ type AuthConfig struct {
 	// AgentRunScope checks the run an agent token was issued for. Nil when
 	// server.auth.agent_run_scope is off: the check is then not run.
 	AgentRunScope *agentRunScopeChecker
-	// TestIdentitiesEnabled mirrors --enable-test-identities. The JWT arm's
+	// TestIdentitiesEnabled mirrors --test-mode (member or above). The JWT arm's
 	// per-request user-row block refuses every test-fixture row while it is
 	// false, and an expired one while it is true (testFixtureRejection).
 	// When it is true a UserStore is required: without one the row block

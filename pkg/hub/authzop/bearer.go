@@ -150,6 +150,9 @@ const (
 	// BearerTargetConversationRecord is a conversation's project, read
 	// from the conversation record.
 	BearerTargetConversationRecord BearerTarget = "conversation_record"
+	// BearerTargetThreadGroupRecord is a chat thread group's project, read
+	// from the thread group record (ptone/scion#4424).
+	BearerTargetThreadGroupRecord BearerTarget = "thread_group_record"
 )
 
 var validBearerTargets = map[BearerTarget]bool{
@@ -164,6 +167,7 @@ var validBearerTargets = map[BearerTarget]bool{
 	BearerTargetProjectQuery:       true,
 	BearerTargetSelfRecord:         true,
 	BearerTargetConversationRecord: true,
+	BearerTargetThreadGroupRecord:  true,
 }
 
 // BearerSelfFilter is the result filter an admit_self operation applies.

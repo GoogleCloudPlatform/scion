@@ -44,7 +44,7 @@ var autoExposeAllowlistExemptKeys = map[string]bool{
 // migration (see resolveMaintenanceExecutor, key
 // "auto-expose-env-normalize") and touches no other env key.
 //
-// An agent whose project or template lookup fails is skipped with a WARN and
+// An agent whose project lookup fails is skipped with a WARN and
 // left as it was, so a later run retries it; a skipped agent never loses a
 // tier. Values are never logged, only agent IDs and counts. Every write goes
 // through an optimistic-lock retry that re-applies the normalization to the
@@ -155,10 +155,11 @@ func (e *AutoExposeEnvNormalizeExecutor) normalizeWithRetry(ctx context.Context,
 
 // autoExposeSources are the tiers normalizeAutoExposeEnv re-derives
 // SCION_AUTO_EXPOSE_PORTS from: the agent's project (nil when it has none or
-// it no longer exists) and its applied template's env (nil without one).
+// it no longer exists). The template is not a tier: the hub no longer copies
+// template env into the agent (ptone/scion#4222), and SCION_* is a reserved
+// key a template cannot set (ptone/scion#4524).
 type autoExposeSources struct {
-	project     *store.Project
-	templateEnv map[string]string
+	project *store.Project
 }
 
 // needsAutoExposeNormalization reports whether ac carries a
@@ -181,11 +182,10 @@ func needsAutoExposeNormalization(ac *store.AgentAppliedConfig) bool {
 // normalizeAutoExposeEnv rewrites a stamped SCION_AUTO_EXPOSE_PORTS into the
 // shape the create pipeline produces today, and reports whether it changed
 // ac. It runs only when needsAutoExposeNormalization holds. The stamp leaves
-// InlineConfig.Env and AppliedConfig.Env (neither copy is explicit), the
-// template value is filled as resolveDerivedConfig's template-env fill does,
-// and resolveAutoExposeEnv applies the project tier. Without a project or
-// template value the key stays absent and the hub default reaches the agent
-// through HubAgentDefaults at dispatch, below harness-config env.
+// InlineConfig.Env and AppliedConfig.Env (neither copy is explicit), and
+// resolveAutoExposeEnv applies the project tier. Without a project value the
+// key stays absent and the hub default reaches the agent through
+// HubAgentDefaults at dispatch, below harness-config env.
 //
 // The stamp is not moved into AppliedConfig.Env: that map is the broker's
 // top env tier, while InlineConfig.Env sits below harness-config env, so a
@@ -202,23 +202,15 @@ func normalizeAutoExposeEnv(ac *store.AgentAppliedConfig, src *autoExposeSources
 	var project *store.Project
 	if src != nil {
 		project = src.project
-		if v, ok := src.templateEnv[api.EnvAutoExposePorts]; ok {
-			if ac.Env == nil {
-				ac.Env = make(map[string]string)
-			}
-			ac.Env[api.EnvAutoExposePorts] = v
-		}
 	}
 	resolveAutoExposeEnv(ac, project, explicitEnvOf(ac))
 	return true
 }
 
-// autoExposeSourcesFor loads the project and template tiers for agent. The
-// template is resolved by the agent's template reference, as reincarnate
-// does (resolveTemplateRef), so a template re-pushed under a new ID is still
-// found. A project or template that no longer exists contributes nothing, as
-// at reincarnate; any other lookup error is returned so the caller skips the
-// agent rather than dropping a tier.
+// autoExposeSourcesFor loads the project tier for agent. A project that no
+// longer exists contributes nothing, as at reincarnate; any other lookup
+// error is returned so the caller skips the agent rather than dropping a
+// tier.
 func (e *AutoExposeEnvNormalizeExecutor) autoExposeSourcesFor(ctx context.Context, agent *store.Agent) (*autoExposeSources, error) {
 	src := &autoExposeSources{}
 	if agent.ProjectID != "" {
@@ -235,15 +227,6 @@ func (e *AutoExposeEnvNormalizeExecutor) autoExposeSourcesFor(ctx context.Contex
 			e.projectCache[agent.ProjectID] = project
 		}
 		src.project = project
-	}
-	if agent.Template != "" {
-		tmpl, err := resolveTemplateRef(ctx, e.Store, agent.Template, agent.ProjectID)
-		if err != nil {
-			return nil, fmt.Errorf("resolve template %s: %w", agent.Template, err)
-		}
-		if tmpl != nil && tmpl.Config != nil {
-			src.templateEnv = tmpl.Config.Env
-		}
 	}
 	return src, nil
 }

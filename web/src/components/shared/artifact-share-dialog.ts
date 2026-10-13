@@ -114,6 +114,9 @@ export function expiryWarning(linksCutShort: number, grantsRemoved: number): str
   return parts.join(' and ');
 }
 
+/** The permissions the home project's grant may have (the API refuses admin). */
+const HOME_GRANT_PERMISSIONS: readonly GrantPermission[] = ['read', 'write'];
+
 @customElement('scion-artifact-share-dialog')
 export class ScionArtifactShareDialog extends LitElement {
   @property({ type: Object }) artifact: Artifact | null = null;
@@ -860,7 +863,8 @@ export class ScionArtifactShareDialog extends LitElement {
   private renderPermissionSelect(
     value: GrantPermission,
     disabled: boolean,
-    onChange: (p: GrantPermission) => void
+    onChange: (p: GrantPermission) => void,
+    options: readonly GrantPermission[] = SELECTABLE_PERMISSIONS
   ): TemplateResult {
     return html`<sl-select
       size="small"
@@ -870,9 +874,7 @@ export class ScionArtifactShareDialog extends LitElement {
       @sl-change=${(e: Event): void =>
         onChange((e.target as HTMLInputElement).value as GrantPermission)}
     >
-      ${SELECTABLE_PERMISSIONS.map(
-        (p) => html`<sl-option value=${p}>${PERMISSION_LABELS[p]}</sl-option>`
-      )}
+      ${options.map((p) => html`<sl-option value=${p}>${PERMISSION_LABELS[p]}</sl-option>`)}
     </sl-select>`;
   }
 
@@ -886,12 +888,24 @@ export class ScionArtifactShareDialog extends LitElement {
       who = kind ? this.label(kind, ref) : g.subjectRef;
     }
     if (g.home) {
+      // The home project's grant may be read or write, never admin
+      // (ptone/scion#4582); it is never removed here.
       return html`<div class="grant">
         <sl-icon name="folder"></sl-icon>
         <span class="who"><strong>${who}</strong> <span class="muted">(home project)</span></span>
-        <span class="muted">${PERMISSION_LABELS[g.permission]}</span>
+        ${this.renderPermissionSelect(
+          g.permission,
+          !!this.busyId,
+          (p) => {
+            void this.changePermission(g, p);
+          },
+          HOME_GRANT_PERMISSIONS
+        )}
       </div>`;
     }
+    // While cross-project sharing is off, a grant to another project can
+    // still be removed but not changed (ptone/scion#4586).
+    const locked = isScope && !this.crossProjectSharing;
     return html`<div class="grant">
       <sl-icon name=${isScope ? 'folder' : 'person'}></sl-icon>
       <span class="who">
@@ -899,10 +913,15 @@ export class ScionArtifactShareDialog extends LitElement {
         ${isScope && this.crossProjectSharing
           ? html`<small>Cross-project sharing is on for this hub</small>`
           : nothing}
+        ${locked
+          ? html`<small
+              >Cross-project sharing is off: this grant can be removed but not changed</small
+            >`
+          : nothing}
       </span>
       ${g.permission === 'review'
         ? html`<span class="muted">${PERMISSION_LABELS.review}</span>`
-        : this.renderPermissionSelect(g.permission, !!this.busyId, (p) => {
+        : this.renderPermissionSelect(g.permission, !!this.busyId || locked, (p) => {
             void this.changePermission(g, p);
           })}
       <sl-button

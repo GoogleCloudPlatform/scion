@@ -212,6 +212,17 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				// Already terminal — preserve as-is
 			}
 		}
+		// A runtime that reports "starting" is authoritative: its start
+		// has not been confirmed (for example, one interrupted by a
+		// crash), so agent-info.json's phase — "created" from
+		// provisioning, or a previous run's "stopped", "error" or
+		// "running" — must not replace it. Otherwise list and the
+		// broker heartbeat would report a live start as stopped or as
+		// running (ptone/scion#4756).
+		if runtimePhase == string(state.PhaseStarting) {
+			agents[i].Phase = string(state.PhaseStarting)
+			agents[i].Activity = ""
+		}
 	}
 
 	for _, gp := range projectsToScan {

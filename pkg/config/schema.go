@@ -175,6 +175,7 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 			errs = append(errs, ValidationError{Path: "server.home_storage", Message: err.Error()})
 		}
 		errs = append(errs, RuntimeBrokerInstanceDuplicateKeys(vs.Server.Broker.Instances)...)
+		errs = append(errs, RuntimeBrokerInstanceSharedDirSizes(vs.Server.Broker.Instances)...)
 	}
 	return errs, nil
 }

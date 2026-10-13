@@ -83,29 +83,38 @@ func TestTestInfraMark_WritesMarkerAndAuditRow(t *testing.T) {
 func TestTestAdminGate_ReadsMarkerFromConfiguredStore(t *testing.T) {
 	_, client := tiaMarkDB(t)
 	ctx := context.Background()
-	hubCfg := hub.ServerConfig{HubID: tiaCmdHubID, EnableTestIdentities: true}
+	hubCfg := hub.ServerConfig{HubID: tiaCmdHubID}
 	gateCfg := &config.GlobalConfig{}
 	gateCfg.Hub.HubClass = config.HubClassTest
 
-	t.Cleanup(func() { testAdminFlagSet, enableTestAdminIdentities, enableHub = false, "", false })
-	testAdminFlagSet, enableTestAdminIdentities, enableHub = true, tiaCmdHubID, true
+	t.Cleanup(func() { testModeLevel, testModeHubID, enableHub = "", "", false })
+	testModeLevel, testModeHubID, enableHub = hub.TestModeAdmin, tiaCmdHubID, true
 
 	// No marker yet.
-	_, err := validateTestAdminIdentities(testAdminGateInputsFor(ctx, gateCfg, hubCfg, true, client))
+	_, err := resolveTestMode(testModeInputsFor(ctx, gateCfg, hubCfg, true, client))
 	assert.ErrorIs(t, err, hub.ErrTestAdminMarkerAbsent)
 
 	// A marker for another hub.
 	_, err = testinfra.Mark(ctx, client, testinfra.MarkInput{HubID: "another-hub", Operator: "op"})
 	require.NoError(t, err)
-	_, err = validateTestAdminIdentities(testAdminGateInputsFor(ctx, gateCfg, hubCfg, true, client))
+	_, err = resolveTestMode(testModeInputsFor(ctx, gateCfg, hubCfg, true, client))
 	assert.ErrorIs(t, err, hub.ErrTestAdminMarkerHubMismatch)
 
 	// This hub's marker.
 	_, client2 := tiaMarkDB(t)
 	_, err = testinfra.Mark(ctx, client2, testinfra.MarkInput{HubID: tiaCmdHubID, Operator: "op"})
 	require.NoError(t, err)
-	gate, err := validateTestAdminIdentities(testAdminGateInputsFor(ctx, gateCfg, hubCfg, true, client2))
+	res, err := resolveTestMode(testModeInputsFor(ctx, gateCfg, hubCfg, true, client2))
 	require.NoError(t, err)
-	assert.True(t, gate.HubAdmin)
-	assert.Equal(t, tiaCmdHubID, gate.MarkerHubID)
+	assert.True(t, res.TestAdminGate.HubAdmin)
+	assert.Equal(t, tiaCmdHubID, res.TestAdminGate.MarkerHubID)
+
+	// The member level reads the same marker.
+	testModeLevel = hub.TestModeMember
+	_, err = resolveTestMode(testModeInputsFor(ctx, gateCfg, hubCfg, true, client))
+	assert.ErrorIs(t, err, hub.ErrTestAdminMarkerHubMismatch)
+	res, err = resolveTestMode(testModeInputsFor(ctx, gateCfg, hubCfg, true, client2))
+	require.NoError(t, err)
+	assert.True(t, res.EnableTestIdentities)
+	assert.False(t, res.TestAdminGate.HubAdmin)
 }
