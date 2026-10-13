@@ -369,7 +369,7 @@ func TestPrintWorkstationQuickstart_SettingsToken(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "dev-token"), []byte("scion_dev_stale\n"), 0600))
 	cfg := &config.GlobalConfig{Auth: config.DevAuthConfig{Enabled: true, Token: fixtureDevToken}}
 
-	stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
+	rec := stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
 	output := captureStdout(t, func() {
 		printWorkstationQuickstart(false, dir, cfg, "127.0.0.1", 8080, true, true, true, true)
 	})
@@ -378,6 +378,55 @@ func TestPrintWorkstationQuickstart_SettingsToken(t *testing.T) {
 	assert.Contains(t, output, "server.auth.dev_token", "the note names the setting")
 	assert.NotContains(t, output, "SCION_DEV_TOKEN=$(cat", "should not show a file command")
 	assert.NotContains(t, output, "scion_dev_", "should not print the dev token value")
+	assert.Equal(t, fixtureDevToken, rec.statusToken, "status call uses the settings token")
+}
+
+// TestPrintWorkstationQuickstart_RelativeTokenFile: the daemon child runs in
+// the global directory, so a relative server.auth.dev_token_file is shown
+// and read from there, not from the directory 'server start' was run in.
+func TestPrintWorkstationQuickstart_RelativeTokenFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(t.TempDir())
+	prevGlobal := globalMode
+	t.Cleanup(func() { globalMode = prevGlobal })
+	globalMode = false
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "tokens"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tokens", "dev-token"), []byte(fixtureDevToken+"\n"), 0600))
+	cfg := &config.GlobalConfig{Auth: config.DevAuthConfig{Enabled: true, TokenFile: filepath.Join("tokens", "dev-token")}}
+
+	rec := stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
+	output := captureStdout(t, func() {
+		printWorkstationQuickstart(false, dir, cfg, "127.0.0.1", 8080, true, true, true, true)
+	})
+
+	assert.Contains(t, output, wantDevTokenExport(filepath.Join(dir, "tokens", "dev-token")), "should show the file under the global directory")
+	assert.NotContains(t, output, "scion_dev_", "should not print the dev token value")
+	assert.Equal(t, fixtureDevToken, rec.statusToken, "status call reads the file under the global directory")
+}
+
+// TestPrintWorkstationQuickstart_RelativeTokenFileGlobal: with --global the
+// daemon child changes to the home directory, so a relative token file is
+// shown and read from there.
+func TestPrintWorkstationQuickstart_RelativeTokenFileGlobal(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(t.TempDir())
+	prevGlobal := globalMode
+	t.Cleanup(func() { globalMode = prevGlobal })
+	globalMode = true
+	cfg := &config.GlobalConfig{Auth: config.DevAuthConfig{Enabled: true, TokenFile: filepath.Join("tokens", "dev-token")}}
+
+	// stubQuickstartProbes points HOME at a fresh temp dir.
+	rec := stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
+	home := os.Getenv("HOME")
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "tokens"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "tokens", "dev-token"), []byte(fixtureDevToken+"\n"), 0600))
+	output := captureStdout(t, func() {
+		printWorkstationQuickstart(false, dir, cfg, "127.0.0.1", 8080, true, true, true, true)
+	})
+
+	assert.Contains(t, output, wantDevTokenExport(filepath.Join(home, "tokens", "dev-token")), "should show the file under the home directory")
+	assert.NotContains(t, output, "scion_dev_", "should not print the dev token value")
+	assert.Equal(t, fixtureDevToken, rec.statusToken, "status call reads the file under the home directory")
 }
 
 func TestPrintWorkstationQuickstart_NoWeb(t *testing.T) {

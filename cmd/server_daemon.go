@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -1119,7 +1120,7 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 	if serverCfg == nil {
 		serverCfg = &config.GlobalConfig{}
 	}
-	tokenFile := devTokenFilePath(serverCfg.Auth.TokenFile, globalDir)
+	tokenFile := daemonDevTokenFilePath(serverCfg.Auth.TokenFile, globalDir)
 
 	if webEnabled {
 		displayHost := host
@@ -1142,7 +1143,14 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		msg, serverUp := quickstartReadyMessage(quickstartWaitReady(displayHost, wPort, quickstartReadyTimeout))
 		status, statusErr := onboardingStatusResult{}, errOnboardingStatusNotAsked
 		if serverUp && hubEnabled {
-			status, statusErr = quickstartOnboardingStatus(baseURL, readDevTokenFile(tokenFile))
+			// The token is sent only to the local server's status endpoint,
+			// never printed: the settings token if one is set, else the
+			// token file's contents.
+			statusToken := serverCfg.Auth.Token
+			if statusToken == "" {
+				statusToken = readDevTokenFile(tokenFile)
+			}
+			status, statusErr = quickstartOnboardingStatus(baseURL, statusToken)
 		}
 		if statusErr != nil {
 			slog.Debug("Onboarding status unavailable; using the settings-file signal", "error", statusErr)
@@ -1172,9 +1180,37 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		// plain note when the token is set in the settings. Never the value.
 		fmt.Println()
 		fmt.Println("Developer token (for CLI authentication):")
-		fmt.Printf("  %s\n", devTokenStartupHint(serverCfg, globalDir))
+		hint := devTokenExportHint(tokenFile)
+		if serverCfg.Auth.Token != "" {
+			hint = devTokenStartupHint(serverCfg, globalDir)
+		}
+		fmt.Printf("  %s\n", hint)
 	}
 	fmt.Println()
+}
+
+// daemonDevTokenFilePath returns the dev token file the daemon child uses
+// (see devTokenFilePath). The child opens a relative configured path from
+// its working directory (see daemonChildDir), so the path is resolved
+// against that directory here, not against the directory 'server start'
+// was run in.
+func daemonDevTokenFilePath(configured, globalDir string) string {
+	if configured != "" && !filepath.IsAbs(configured) {
+		return filepath.Join(daemonChildDir(globalDir), configured)
+	}
+	return devTokenFilePath(configured, globalDir)
+}
+
+// daemonChildDir returns the working directory of the daemon child:
+// daemon.StartComponent starts it in globalDir, and with --global it
+// changes to the home directory (runServerStart).
+func daemonChildDir(globalDir string) string {
+	if globalMode {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return home
+		}
+	}
+	return globalDir
 }
 
 // readDevTokenFile returns the dev token stored in the file at path, or ""
