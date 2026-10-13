@@ -42,7 +42,9 @@ func loadHubClient() (*config.Settings, hubclient.Client, error) {
 		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
-	settings, err := config.LoadSettings(resolvedPath)
+	// An explicit --project or --global wins over SCION_PROJECT_ID in the
+	// environment (ptone/scion#3251).
+	settings, err := loadSettingsForTarget(resolvedPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load settings: %w", err)
 	}

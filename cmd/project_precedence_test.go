@@ -379,3 +379,58 @@ func TestResolveProjectIDByGitRemote_NilContext(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+// TestLoadHubClient_ProjectFlagPrecedence drives "project messaging get",
+// a loadHubClient caller that reads the project ID from the returned
+// settings. With --global or --project <dir>, the request goes to that
+// project's own ID, not SCION_PROJECT_ID from the environment; without a
+// flag the environment still wins (ptone/scion#3251).
+func TestLoadHubClient_ProjectFlagPrecedence(t *testing.T) {
+	const (
+		envProjectID  = "env-project-id"
+		globalLocalID = "global-local-id"
+		dirLocalID    = "dir-local-id"
+	)
+	cases := []struct {
+		name string
+		// flag is the --project value; "dir" stands for a project
+		// directory created by the test.
+		flag   string
+		wantID string
+	}{
+		{name: "--global beats env", flag: "global", wantID: globalLocalID},
+		{name: "--project dir beats env", flag: "dir", wantID: dirLocalID},
+		{name: "no flag, env wins", flag: "", wantID: envProjectID},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				gotPath = r.URL.Path
+				_ = json.NewEncoder(w).Encode(hubclient.ProjectMessagingPolicy{CrossProjectInbound: "none"})
+			}))
+			defer server.Close()
+
+			setupFlagPrecedenceHome(t, server.URL, globalLocalID, envProjectID)
+
+			flag := tc.flag
+			if flag == "dir" {
+				projectDir := filepath.Join(t.TempDir(), "proj")
+				scionDir := filepath.Join(projectDir, ".scion")
+				require.NoError(t, os.MkdirAll(scionDir, 0755))
+				require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"),
+					[]byte("project_id: "+dirLocalID+"\n"), 0644))
+				flag = projectDir
+			}
+			setProjectFlagForTest(t, flag)
+
+			origJSON, origProject := hubOutputJSON, projectMessagingProject
+			t.Cleanup(func() { hubOutputJSON, projectMessagingProject = origJSON, origProject })
+			hubOutputJSON, projectMessagingProject = true, ""
+
+			require.NoError(t, projectMessagingGetCmd.RunE(projectMessagingGetCmd, nil))
+			assert.Equal(t, "/api/v1/projects/"+tc.wantID+"/messaging-policy", gotPath)
+		})
+	}
+}
