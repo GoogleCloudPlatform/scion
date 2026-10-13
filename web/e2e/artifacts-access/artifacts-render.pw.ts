@@ -65,6 +65,7 @@ import {
   EXPERIMENT,
   NOT_REACHED,
   createJourney,
+  fullMessage,
   isShown,
   type Identity,
   type RowRecord,
@@ -196,6 +197,9 @@ const j = createJourney<Key>({
   rows: ROWS,
   remotePrefix: 'E2E_R2',
   purpose: 'e2e artifact render',
+  // Full error messages can name a view URL (a bearer capability) in their
+  // call logs; it never reaches the evidence.
+  redactError: (text) => redactViews(text),
 });
 
 /** One request made by an HTML bundle document (frame or top-level view). */
@@ -351,7 +355,7 @@ function redactViews(text: string): string {
 function viewInfo(
   url: string | null | undefined,
   id: string
-): { viewSeq: number | null; viewIdMatches: boolean; entry: string | null } {
+): { viewSeq: number | 'nan' | null; viewIdMatches: boolean; entry: string | null } {
   if (!url) return { viewSeq: null, viewIdMatches: false, entry: null };
   const pathname = new URL(url, 'http://x').pathname;
   if (!pathname.startsWith(VIEW_PREFIX)) {
@@ -360,10 +364,19 @@ function viewInfo(
   const [cap, ...rest] = pathname.slice(VIEW_PREFIX.length).split('/');
   const parts = (cap ?? '').split('.');
   return {
-    viewSeq: parts.length >= 4 ? Number(parts[1]) : null,
+    viewSeq: parts.length >= 4 ? seqOrNaN(parts[1]) : null,
     viewIdMatches: parts[0] === id,
     entry: rest.join('/') || null,
   };
+}
+
+/**
+ * A capability's seq as a number, or 'nan' when it is not numeric (null
+ * means "not a view URL", so the two stay distinct in the evidence).
+ */
+function seqOrNaN(raw: string | undefined): number | 'nan' {
+  const n = Number(raw);
+  return Number.isNaN(n) ? 'nan' : n;
 }
 
 /** The capability segment of a view URL (in memory only). */
@@ -629,6 +642,19 @@ async function readProbe(target: Frame | Page): Promise<Record<string, unknown>>
   throw new Error('probe not done');
 }
 
+/** Resolves to the promise's value, or to fallback after ms (the timer is cleared). */
+async function withTimeout<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<F>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  try {
+    return await Promise.race([p, late]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /**
  * Diagnostics of the bundle frame at one leg of a row: how many frame
  * elements match, the seq the frame's src names against the one expected,
@@ -640,15 +666,13 @@ async function frameDiag(
   selector: string,
   expectedSeq: number
 ): Promise<Record<string, unknown>> {
-  const out: Record<string, unknown> = {
-    expectedSeq,
-    pagePath: redactPath(new URL(page.url()).pathname),
-  };
+  const out: Record<string, unknown> = { expectedSeq };
   try {
+    out.pagePath = redactPath(new URL(page.url()).pathname);
     // Every frame element the test's locator matches: the seq its src names.
     const elements = page.locator(RENDER_SELECTORS.htmlFrame);
     const count = await elements.count();
-    const srcSeqs: Array<number | null> = [];
+    const srcSeqs: Array<number | 'nan' | null> = [];
     for (let i = 0; i < count; i++) {
       const src = await elements.nth(i).getAttribute('src', { timeout: 2_000 });
       srcSeqs.push(viewInfo(src, bundleId()).viewSeq);
@@ -660,9 +684,14 @@ async function frameDiag(
     const views = page.frames().filter((f) => f.url().includes(VIEW_PREFIX));
     const frames: Array<Record<string, unknown>> = [];
     for (const f of views) {
-      const seen = await f
-        .evaluate((sel) => document.querySelector(sel)?.textContent?.trim() ?? null, selector)
-        .catch(() => 'unreadable');
+      // Bounded: a frame stuck mid-navigation must not hold up the journey.
+      const seen = await withTimeout(
+        f
+          .evaluate((sel) => document.querySelector(sel)?.textContent?.trim() ?? null, selector)
+          .catch(() => 'unreadable'),
+        2_500,
+        'timeout'
+      );
       const info = viewInfo(f.url(), bundleId());
       frames.push({ urlSeq: info.viewSeq, entry: info.entry, seen });
     }
@@ -1184,6 +1213,14 @@ test.describe.serial('artifact page view and render (R2)', () => {
     if (refusal) {
       j.state.setupError = `beforeAll: ${refusal}`;
       throw new Error(refusal);
+    }
+    // Error-text redaction self-test: a full Playwright message naming a view
+    // URL (a goto call log, a strict-mode iframe preview) keeps no capability.
+    const redaction = errorRedactionSelfTest();
+    j.state.evidence.errorRedactionSelfTest = redaction;
+    if (!redaction.ok) {
+      j.state.setupError = 'beforeAll: error redaction self-test failed';
+      throw new Error('error redaction self-test failed');
     }
     // The frame-request classifier's self-test: a wrong class refuses the run.
     const selfTest = classifierSelfTest();
@@ -2841,6 +2878,35 @@ async function runCleanup(testInfo: {
   expect(leaks, 'R2-19: no secret-like strings in the evidence').toEqual([]);
   expect(capabilityLeaks, 'R2-19: no view capabilities in the evidence').toBe(0);
   expect(residue, 'R2-18: nothing left behind').toEqual([]);
+}
+
+/**
+ * Checks that error text kept in the evidence is redacted: two synthetic
+ * Playwright messages (a page.goto timeout call log and a strict-mode
+ * iframe preview) each name a view capability before redaction and none
+ * after. The samples themselves are never written to the evidence.
+ */
+function errorRedactionSelfTest(): { ok: boolean; cases: Array<{ name: string; ok: boolean }> } {
+  const cap = '3d547973-a268-4edc-aea6-7fdd85c6b068.1.1791930136.abcdefghijklmnopqrstuvwxyz0123';
+  const samples = [
+    {
+      name: 'goto call log',
+      text:
+        'page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to ' +
+        `"http://127.0.0.1:1234${VIEW_PREFIX}${cap}/index.html", waiting until "load"`,
+    },
+    {
+      name: 'strict-mode iframe preview',
+      text:
+        'strict mode violation: locator resolved to 2 elements:\n' +
+        `  1) <iframe src="${VIEW_PREFIX}${cap.slice(0, 20)}…" sandbox="allow-scripts"></iframe>`,
+    },
+  ];
+  const cases = samples.map((c) => {
+    const kept = redactViews(fullMessage(c.text));
+    return { name: c.name, ok: capabilityLike(c.text) > 0 && capabilityLike(kept) === 0 };
+  });
+  return { ok: cases.every((c) => c.ok), cases };
 }
 
 /**

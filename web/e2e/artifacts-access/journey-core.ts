@@ -181,6 +181,11 @@ export interface JourneyOptions<K extends string> {
   remotePrefix: string;
   /** Purpose label of issued identities, e.g. "e2e artifact render". */
   purpose: string;
+  /**
+   * Redacts secrets (e.g. bearer URLs) from error text before it is kept in
+   * the evidence or the hard-failure list. Identity when unset.
+   */
+  redactError?: (text: string) => string;
 }
 
 /**
@@ -204,6 +209,11 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
     findings: [] as Array<{ id: string; text: string }>,
     evidence: {} as Record<string, unknown>,
   };
+
+  /** The journey's error redactor (identity when none is given). */
+  function redact(text: string): string {
+    return opts.redactError ? opts.redactError(text) : text;
+  }
 
   function target(): NonNullable<typeof state.target> {
     if (!state.target) throw new Error('journey target not set up');
@@ -378,11 +388,13 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
     // diagnosis, without terminal colour codes and capped in length.
     const softErrors = info.errors
       .slice(before)
-      .map((e) => (generic ? generic : fullMessage(e.message ?? '')));
+      .map((e) => (generic ? generic : redact(fullMessage(e.message ?? ''))));
     r.errors.push(...softErrors);
     if (threw) {
-      const msg = generic ?? firstLine(threw);
-      r.errors.push(generic ?? fullMessage(threw instanceof Error ? threw.message : String(threw)));
+      const msg = generic ?? redact(firstLine(threw));
+      r.errors.push(
+        generic ?? redact(fullMessage(threw instanceof Error ? threw.message : String(threw)))
+      );
       if (r.graded) state.hardFailures.push(`${id}: ${msg}`);
     }
     if (threw || softErrors.length > 0) {
