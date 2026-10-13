@@ -539,8 +539,11 @@ func decodeJSONObject(data []byte) (map[string]any, error) {
 	if err := dec.Decode(&m); err != nil {
 		return nil, err
 	}
-	if m == nil || dec.More() {
-		return nil, errors.New("not a single JSON object")
+	if m == nil {
+		return nil, errors.New("not a JSON object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("data after the JSON object")
 	}
 	return m, nil
 }

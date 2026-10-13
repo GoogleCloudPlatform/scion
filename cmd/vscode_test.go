@@ -324,6 +324,27 @@ func TestVSCode_CodeMissingOrFailing(t *testing.T) {
 	})
 }
 
+// A commented settings.json without the managed values stops the run
+// with exit 1 before ssh_config or known_hosts is written, and code is not
+// run; the settings file is left as it was.
+func TestVSCode_CommentedSettingsStopBeforeSSHFiles(t *testing.T) {
+	_, env, fake := newVSCodeTest(t)
+	p := vscodePaths{home: env.home}
+	content := "{\n  // mine\n  \"editor.fontSize\": 14\n}\n"
+	require.NoError(t, ensureSSHDir(env.home, filepath.Dir(p.settings())))
+	require.NoError(t, os.WriteFile(p.settings(), []byte(content), 0o600))
+
+	err := vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false)
+	assert.Equal(t, tunnelclient.ExitError, tunnelclient.CodeOf(err), "%v", err)
+	assert.Contains(t, err.Error(), p.settings())
+	for _, path := range []string{p.sshConfig(), p.knownHosts()} {
+		_, statErr := os.Stat(path)
+		assert.True(t, errors.Is(statErr, os.ErrNotExist), "%s must not be written", path)
+	}
+	assert.Empty(t, fake.runs)
+	assert.Equal(t, content, readTestFile(t, p.settings()))
+}
+
 // --path chooses the folder; it must be absolute.
 func TestVSCode_FolderAndArgs(t *testing.T) {
 	_, env, fake := newVSCodeTest(t)
@@ -360,7 +381,7 @@ const vscodeGoldenSettings = `{
     "Scion agent": {
       "args": [
         "-c",
-        "tmux has-session -t scion 2>/dev/null || exec \"${SHELL:-/bin/sh}\" -l; exec tmux new-session -t scion -s \"vsc-$$\" \; set-option -t \"vsc-$$\" destroy-unattached on \; set-option -t \"vsc-$$\" window-status-format '' \; select-window -t \"vsc-$$:agent\""
+        "tmux has-session -t scion 2>/dev/null || exec \"${SHELL:-/bin/sh}\" -l; exec tmux new-session -t scion -s \"vsc-$$\" \\; set-option -t \"vsc-$$\" destroy-unattached on \\; set-option -t \"vsc-$$\" window-status-format '' \\; select-window -t \"vsc-$$:agent\""
       ],
       "icon": "hubot",
       "overrideName": true,
@@ -369,7 +390,7 @@ const vscodeGoldenSettings = `{
     "Scion shell": {
       "args": [
         "-c",
-        "tmux has-session -t scion 2>/dev/null || exec \"${SHELL:-/bin/sh}\" -l; exec tmux new-session -t scion -s \"vsc-$$\" \; set-option -t \"vsc-$$\" destroy-unattached on \; set-option -t \"vsc-$$\" window-status-format '' \; select-window -t \"vsc-$$:shell\""
+        "tmux has-session -t scion 2>/dev/null || exec \"${SHELL:-/bin/sh}\" -l; exec tmux new-session -t scion -s \"vsc-$$\" \\; set-option -t \"vsc-$$\" destroy-unattached on \\; set-option -t \"vsc-$$\" window-status-format '' \\; select-window -t \"vsc-$$:shell\""
       ],
       "icon": "terminal",
       "overrideName": true,
@@ -484,6 +505,19 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 		require.NoError(t, ensureVSCodeSettings(p))
 		assert.Equal(t, content, readTestFile(t, p.settings()))
 	})
+	for name, content := range map[string]string{
+		"a stray closing bracket": "{\"editor.fontSize\": 14}]\n",
+		"a stray closing brace":   "{\"editor.fontSize\": 14}}\n",
+		"a second object":         "{\"a\": 1} {\"b\": 2}\n",
+	} {
+		t.Run(name+" after the object is refused", func(t *testing.T) {
+			p := setup(t, content)
+			err := ensureVSCodeSettings(p)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), p.settings())
+			assert.Equal(t, content, readTestFile(t, p.settings()), "the file is not rewritten")
+		})
+	}
 	t.Run("comments without the managed values are refused", func(t *testing.T) {
 		content := "{\n  // mine\n  \"remote.SSH.configFile\": \"/old\"\n}\n"
 		p := setup(t, content)
