@@ -123,10 +123,16 @@ export function errorCode(body: unknown): string | null {
 /** Longest error message kept in a row's evidence. */
 const MAX_ERROR_CHARS = 2000;
 
-/** An error message for the evidence: colour codes removed, length capped. */
+/**
+ * An error message for the evidence: colour codes removed, everything from
+ * Playwright's "Call log:" section on dropped (an API request's call log
+ * lists request and response headers, including cookies), length capped.
+ */
 export function fullMessage(message: string): string {
   // eslint-disable-next-line no-control-regex -- strips terminal colour codes
-  const plain = message.replace(/\u001b\[[0-9;]*m/g, '');
+  const coloured = message.replace(/\u001b\[[0-9;]*m/g, '');
+  const callLog = coloured.search(/(^|\n)\s*Call log:/);
+  const plain = callLog >= 0 ? `${coloured.slice(0, callLog)}\n[call log dropped]` : coloured;
   return plain.length > MAX_ERROR_CHARS ? `${plain.slice(0, MAX_ERROR_CHARS)}…` : plain;
 }
 
@@ -213,6 +219,11 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
   /** The journey's error redactor (identity when none is given). */
   function redact(text: string): string {
     return opts.redactError ? opts.redactError(text) : text;
+  }
+
+  /** Error text exactly as row() keeps it in the evidence. */
+  function keptError(text: string): string {
+    return redact(fullMessage(text));
   }
 
   function target(): NonNullable<typeof state.target> {
@@ -388,13 +399,11 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
     // diagnosis, without terminal colour codes and capped in length.
     const softErrors = info.errors
       .slice(before)
-      .map((e) => (generic ? generic : redact(fullMessage(e.message ?? ''))));
+      .map((e) => (generic ? generic : keptError(e.message ?? '')));
     r.errors.push(...softErrors);
     if (threw) {
       const msg = generic ?? redact(firstLine(threw));
-      r.errors.push(
-        generic ?? redact(fullMessage(threw instanceof Error ? threw.message : String(threw)))
-      );
+      r.errors.push(generic ?? keptError(threw instanceof Error ? threw.message : String(threw)));
       if (r.graded) state.hardFailures.push(`${id}: ${msg}`);
     }
     if (threw || softErrors.length > 0) {
@@ -606,6 +615,7 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
 
   return {
     state,
+    keptError,
     target,
     resolveTarget,
     who,

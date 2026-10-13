@@ -65,7 +65,6 @@ import {
   EXPERIMENT,
   NOT_REACHED,
   createJourney,
-  fullMessage,
   isShown,
   type Identity,
   type RowRecord,
@@ -672,13 +671,18 @@ async function frameDiag(
     // Every frame element the test's locator matches: the seq its src names.
     const elements = page.locator(RENDER_SELECTORS.htmlFrame);
     const count = await elements.count();
-    const srcSeqs: Array<number | 'nan' | null> = [];
-    for (let i = 0; i < count; i++) {
-      const src = await elements.nth(i).getAttribute('src', { timeout: 2_000 });
-      srcSeqs.push(viewInfo(src, bundleId()).viewSeq);
-    }
     out.matchingFrames = count;
+    // Per element, so one detaching mid-navigation keeps the rest.
+    const srcSeqs: Array<number | 'nan' | 'unreadable' | null> = [];
     out.srcSeqs = srcSeqs;
+    for (let i = 0; i < count; i++) {
+      try {
+        const src = await elements.nth(i).getAttribute('src', { timeout: 2_000 });
+        srcSeqs.push(viewInfo(src, bundleId()).viewSeq);
+      } catch {
+        srcSeqs.push('unreadable');
+      }
+    }
     // Every frame on the page showing a view: the seq its URL names and the
     // text of the checked element in it.
     const views = page.frames().filter((f) => f.url().includes(VIEW_PREFIX));
@@ -1387,7 +1391,7 @@ async function runMain(browser: Browser): Promise<void> {
     }
   });
   if (!smokePassed) {
-    const first = j.state.rows['R2-01']?.errors[0] ?? 'no error recorded';
+    const first = firstLine(j.state.rows['R2-01']?.errors[0] ?? 'no error recorded');
     j.state.stopped ??= `not run: smoke precondition failed (R2-01: ${first})`;
   }
 
@@ -2902,9 +2906,21 @@ function errorRedactionSelfTest(): { ok: boolean; cases: Array<{ name: string; o
         `  1) <iframe src="${VIEW_PREFIX}${cap.slice(0, 20)}…" sandbox="allow-scripts"></iframe>`,
     },
   ];
+  // Checked through the journey's own kept-error path (the one row() uses).
   const cases = samples.map((c) => {
-    const kept = redactViews(fullMessage(c.text));
+    const kept = j.keptError(c.text);
     return { name: c.name, ok: capabilityLike(c.text) > 0 && capabilityLike(kept) === 0 };
+  });
+  // An API request's call log lists the request and response headers.
+  const marker = 'r2selftestcookievalue';
+  const apiLog =
+    'apiRequestContext.fetch: socket hang up\nCall log:\n' +
+    '  - → GET http://127.0.0.1:1234/api/v1/x\n' +
+    `    cookie: scion_sess=${marker}\n  - ← 200 OK\n    set-cookie: scion_sess=${marker}; Path=/`;
+  const keptApi = j.keptError(apiLog);
+  cases.push({
+    name: 'API call log with cookie headers',
+    ok: apiLog.includes(marker) && !keptApi.includes(marker) && !/cookie:/i.test(keptApi),
   });
   return { ok: cases.every((c) => c.ok), cases };
 }
