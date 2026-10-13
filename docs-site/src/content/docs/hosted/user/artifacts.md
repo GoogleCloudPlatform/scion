@@ -300,7 +300,7 @@ While `hub.artifacts` is off:
 - **CLI:** every artifact request answers `404`. `scion artifact publish` adds a hint that the experiment may be off; `get` lists it among the possible causes.
 - **Check.** Inside an agent, `scion whoami --full` lists the experiments that are on now. A Hub admin turns the experiment on under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)).
 
-If the experiment is on but artifacts are disabled in the Hub's settings, the web pages still appear, but every artifact request behind them, and every artifact command in the CLI, answers `404`. Ask a Hub admin to check the Hub's `artifacts` settings.
+If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every artifact command in the CLI, answers `404` (ptone/scion#4932). Ask a Hub admin to check the Hub's `artifacts` settings.
 
 ### A review is refused
 
