@@ -28,9 +28,9 @@ import (
 )
 
 // Tests for the run that owns an agent's files (ptone/scion#2675): it is
-// recorded as runId in agent-info.json, so a delete or failure cleanup for
-// a different run can leave the files of an agent recreated under the same
-// name alone.
+// recorded in the host-owned host state file (ptone/scion#4771), never in
+// agent-info.json, so a delete or failure cleanup for a different run can
+// leave the files of an agent recreated under the same name alone.
 
 // provisionRunIDFixture sets up a machine and a non-git project and returns
 // the project's .scion dir.
@@ -62,21 +62,28 @@ func TestProvisionAgent_RecordsRunID(t *testing.T) {
 	if _, _, _, err := ProvisionAgent(ctx, "dev", "default", "", "", projectScionDir, "", "", "", ""); err != nil {
 		t.Fatalf("ProvisionAgent: %v", err)
 	}
-	if got := GetSavedRunID("dev", projectScionDir); got != "run-1" {
+	if got := hostStateRun(t, projectScionDir, "dev"); got != "run-1" {
 		t.Fatalf("recorded run = %q, want run-1", got)
+	}
+	info := filepath.Join(config.GetAgentHomePath(projectScionDir, "dev"), "agent-info.json")
+	if _, err := os.Stat(info); err != nil {
+		t.Fatalf("ProvisionAgent wrote no agent-info.json: %v", err)
+	}
+	if got := agentInfoRunID(t, info); got != "" {
+		t.Errorf("agent-info.json runId = %q, want none: the run is recorded in the host state file", got)
 	}
 
 	if _, _, _, err := ProvisionAgent(context.Background(), "dev", "default", "", "", projectScionDir, "", "", "", ""); err != nil {
 		t.Fatalf("ProvisionAgent without a run: %v", err)
 	}
-	if got := GetSavedRunID("dev", projectScionDir); got != "run-1" {
+	if got := hostStateRun(t, projectScionDir, "dev"); got != "run-1" {
 		t.Errorf("a provision without a run changed the recorded run to %q, want run-1 kept", got)
 	}
 
 	if _, _, _, err := ProvisionAgent(context.Background(), "fresh", "default", "", "", projectScionDir, "", "", "", ""); err != nil {
 		t.Fatalf("ProvisionAgent fresh: %v", err)
 	}
-	if got := GetSavedRunID("fresh", projectScionDir); got != "" {
+	if got := hostStateRun(t, projectScionDir, "fresh"); got != "" {
 		t.Errorf("a provision-only agent records run %q, want none", got)
 	}
 }
@@ -91,15 +98,16 @@ func TestStart_RecordsRunIDBeforeContainer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			projectScionDir, agentDir := startTZFixture(t, "", `""`)
 			// An agent provisioned earlier by run-1.
-			if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"),
-				[]byte(`{"name":"tz-agent","phase":"stopped","runId":"run-1"}`), 0o644); err != nil {
+			info := filepath.Join(agentDir, "home", "agent-info.json")
+			if err := os.WriteFile(info, []byte(`{"name":"tz-agent","phase":"stopped"}`), 0o644); err != nil {
 				t.Fatal(err)
 			}
+			writeHostStateRun(t, projectScionDir, "tz-agent", "run-1")
 			var atRun, labelled string
 			rt := &runtime.MockRuntime{
 				ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
 				RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
-					atRun = GetSavedRunID("tz-agent", projectScionDir)
+					atRun = hostStateRun(t, projectScionDir, "tz-agent")
 					labelled = cfg.Labels[api.LabelRunID]
 					return "mock-id", nil
 				},
@@ -122,8 +130,11 @@ func TestStart_RecordsRunIDBeforeContainer(t *testing.T) {
 			if atRun != labelled {
 				t.Errorf("recorded run when the container was created = %q, want the labelled %q", atRun, labelled)
 			}
-			if got := GetSavedRunID("tz-agent", projectScionDir); got != labelled {
+			if got := hostStateRun(t, projectScionDir, "tz-agent"); got != labelled {
 				t.Errorf("recorded run after Start = %q, want %q", got, labelled)
+			}
+			if got := agentInfoRunID(t, info); got != "" {
+				t.Errorf("agent-info.json runId = %q after Start, want none", got)
 			}
 		})
 	}
@@ -136,10 +147,7 @@ func TestStart_RecordsRunIDBeforeContainer(t *testing.T) {
 // is an unreadable scion-agent.json, after the pre-clean.
 func TestStart_FailureAfterPreCleanRecordsNewRun(t *testing.T) {
 	projectScionDir, agentDir := startTZFixture(t, "", `""`)
-	if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"),
-		[]byte(`{"name":"tz-agent","phase":"stopped","runId":"run-1"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeHostStateRun(t, projectScionDir, "tz-agent", "run-1")
 	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{not json`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +177,7 @@ func TestStart_FailureAfterPreCleanRecordsNewRun(t *testing.T) {
 	if len(deleted) != 1 || deleted[0] != "cid-run-1" {
 		t.Fatalf("pre-clean deletes = %v, want the previous run's cid-run-1", deleted)
 	}
-	if got := GetSavedRunID("tz-agent", projectScionDir); got != "run-2" {
+	if got := hostStateRun(t, projectScionDir, "tz-agent"); got != "run-2" {
 		t.Errorf("recorded run after the failed start = %q, want run-2 (the run the hub keeps)", got)
 	}
 }
@@ -177,11 +185,8 @@ func TestStart_FailureAfterPreCleanRecordsNewRun(t *testing.T) {
 // The pre-clean failing leaves the previous run recorded: the start returns
 // before acting, and the hub swaps back to the run that still exists.
 func TestStart_PreCleanFailureKeepsPreviousRun(t *testing.T) {
-	projectScionDir, agentDir := startTZFixture(t, "", `""`)
-	if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"),
-		[]byte(`{"name":"tz-agent","phase":"stopped","runId":"run-1"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	projectScionDir, _ := startTZFixture(t, "", `""`)
+	writeHostStateRun(t, projectScionDir, "tz-agent", "run-1")
 	rt := &runtime.MockRuntime{
 		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{{Name: "tz-agent", ContainerID: "cid-run-1", RunID: "run-1", Phase: "stopped"}}, nil
@@ -193,7 +198,7 @@ func TestStart_PreCleanFailureKeepsPreviousRun(t *testing.T) {
 	}); err == nil {
 		t.Fatal("Start succeeded although the pre-clean failed")
 	}
-	if got := GetSavedRunID("tz-agent", projectScionDir); got != "run-1" {
+	if got := hostStateRun(t, projectScionDir, "tz-agent"); got != "run-1" {
 		t.Errorf("recorded run = %q, want run-1 kept", got)
 	}
 }
@@ -219,11 +224,8 @@ func TestProvision_CreateRecordsProvisionOwner(t *testing.T) {
 		}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			projectScionDir, agentDir := startTZFixture(t, "", `""`)
-			if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"),
-				[]byte(`{"name":"tz-agent","phase":"stopped","runId":"run-ghost"}`), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			projectScionDir, _ := startTZFixture(t, "", `""`)
+			writeHostStateRun(t, projectScionDir, "tz-agent", "run-ghost")
 			rt := &runtime.MockRuntime{ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
 				if tc.listErr {
 					return nil, errors.New("runtime unavailable")
@@ -236,7 +238,7 @@ func TestProvision_CreateRecordsProvisionOwner(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("Provision: %v", err)
 			}
-			got := GetSavedRunID("tz-agent", projectScionDir)
+			got := hostStateRun(t, projectScionDir, "tz-agent")
 			blocked := tc.listErr
 			for _, e := range tc.entries {
 				if e.Labels["scion.project_id"] == "" {
@@ -256,18 +258,43 @@ func TestProvision_CreateRecordsProvisionOwner(t *testing.T) {
 	}
 }
 
-func TestSetSavedRunID_NoAgentInfoIsNoop(t *testing.T) {
-	projectScionDir := filepath.Join(t.TempDir(), ".scion")
-	if err := os.MkdirAll(filepath.Join(projectScionDir, "agents", "dev"), 0o755); err != nil {
+// A start whose project has no trusted root for the host state file (here
+// a symlinked .scion) records no run and carries on, as a failed
+// agent-info.json record did: the container is still created, and nothing
+// is written through the refused root or into agent-info.json.
+func TestStart_RefusedRootStillStarts(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	info := filepath.Join(agentDir, "home", "agent-info.json")
+	if err := os.WriteFile(info, []byte(`{"name":"tz-agent","phase":"stopped"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetSavedRunID("dev", projectScionDir, "run-1"); err != nil {
-		t.Fatalf("SetSavedRunID: %v", err)
+	linked := filepath.Join(filepath.Dir(filepath.Dir(projectScionDir)), "linked-project")
+	if err := os.MkdirAll(linked, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(config.GetAgentHomePath(projectScionDir, "dev")); !os.IsNotExist(err) {
-		t.Errorf("SetSavedRunID created agent files for an agent with no agent-info.json (stat err %v)", err)
+	if err := os.Symlink(projectScionDir, filepath.Join(linked, config.DotScion)); err != nil {
+		t.Fatal(err)
 	}
-	if got := GetSavedRunID("dev", projectScionDir); got != "" {
-		t.Errorf("GetSavedRunID = %q, want none", got)
+	ran := false
+	rt := &runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+		RunFunc: func(context.Context, runtime.RunConfig) (string, error) {
+			ran = true
+			return "mock-id", nil
+		},
+	}
+	if _, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+		Name: "tz-agent", ProjectPath: linked, BrokerMode: true, NoAuth: true, RunID: "run-2",
+	}); err != nil {
+		t.Fatalf("Start with a refused host state root: %v", err)
+	}
+	if !ran {
+		t.Fatal("Start did not create the container")
+	}
+	if _, err := os.Lstat(filepath.Join(agentDir, HostStateFile)); !os.IsNotExist(err) {
+		t.Errorf("a host state file was written through the refused root (lstat err %v)", err)
+	}
+	if got := agentInfoRunID(t, info); got != "" {
+		t.Errorf("agent-info.json runId = %q, want none", got)
 	}
 }

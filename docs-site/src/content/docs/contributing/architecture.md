@@ -83,6 +83,7 @@ An **Agent** is an isolated container running an LLM harness. Each agent has:
 | :--- | :--- |
 | **Home directory** | Mounted at `/home/<user>` inside the container. Contains harness config, credentials, and a per-agent `agent-info.json`. |
 | **Workspace** | Mounted at `/workspace`. Typically a dedicated git worktree to prevent merge conflicts between concurrent agents. |
+| **Host state** | `agents/<name>/host-state.json` in the agent directory, outside the home and workspace mounts. Holds state only the host needs, such as the run that owns the agent's files (used by run-scoped deletes and failure cleanups), so the host and the container need not share a writable home. |
 | **Template** | The blueprint that seeded the agent's home directory and configuration. |
 | **Harness** | The LLM-specific adapter (Claude, Gemini, OpenCode, Codex, or Generic). |
 
@@ -268,7 +269,7 @@ scion start <name> --task "..." [--template claude] [--profile docker-local]
    c. Merges configuration: `template base → template → settings (harness/profile) → agent overrides`.
    d. Creates a git worktree at `agents/<name>/workspace/` on a new branch (slugified agent name).
    e. Runs harness-specific provisioning (`harness.Provision()`).
-   f. Writes `scion-agent.json` and `agent-info.json`.
+   f. Writes `scion-agent.json` and `agent-info.json`, and records the starting run in `host-state.json` in the agent directory.
 4. **Image resolution**: Resolves the container image from settings/template/CLI override. Pulls if not present.
 5. **Container launch** (`runtime.Run`):
    a. Builds container run arguments (volumes, env vars, labels, resource limits).
