@@ -42,7 +42,7 @@ var stripExemptions = map[stripSiteKey]string{
 	{"notifications.go", "dispatchToAgent"}:                           "hub-built notification fan-out; no client metadata",
 	{"server.go", "messageEventHandler"}:                              "scheduled message; messages.NewSystemMessage carries no client metadata",
 	{"reconcile.go", "deliverMessage"}:                                "dead code: assigned at server.go but never invoked in production (msg_containment_callsite_test.go)",
-	{"notification_sweep.go", "RetryDispatch"}:                        "hub-built notification fan-out retry; no client metadata",
+	{"notification_sweep.go", "retryDispatch"}:                        "hub-built notification fan-out retry; no client metadata",
 }
 
 // TestReservedKeyStripCoverage requires every dispatchWithBrokerRetry /

@@ -71,6 +71,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	gcputil "github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/web"
@@ -323,7 +324,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	config.MigrateLegacyGlobalLayoutOnce(globalDir, config.NewSlogReporter())
 
 	// 8. Initialize store
-	if err := validateTestAdminRequiresHub(enableHub); err != nil {
+	if err := validateTestModeRequiresHub(enableHub); err != nil {
 		return err
 	}
 	var s store.Store
@@ -1011,7 +1012,7 @@ func warnShadowedBrokerEnv(ctx context.Context, w brokerEnvShadowWarner) {
 // initServerLogging initializes all logging subsystems and returns cleanup functions.
 func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *slog.Logger, messageLogger *slog.Logger, err error) {
 	useGCP := parseBoolEnv("SCION_LOG_GCP")
-	if os.Getenv("K_SERVICE") != "" {
+	if cloudrunenv.IsService() {
 		useGCP = true
 	}
 	if !hostedMode && os.Getenv("SCION_LOG_GCP") == "" {
@@ -1222,9 +1223,9 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
 		return nil, err
 	}
-	// Test admin tier: the flag-only checks (G3, G5) run before anything
-	// else is reconciled; the full gate runs at hub construction.
-	if err := validateTestAdminFlagsEarly(cmd); err != nil {
+	// Test mode: the flag-only checks (removed flags, G3, G5) run before
+	// anything else is reconciled; the full gate runs at hub construction.
+	if err := validateTestModeFlagsEarly(cmd); err != nil {
 		return nil, err
 	}
 
@@ -1306,7 +1307,7 @@ func hostedHAGuardsRequired(cfg *config.GlobalConfig) bool {
 // isHADeployment returns true when the configuration indicates a multi-instance
 // (Cloud Run / HA) deployment rather than a single-instance GCE VM.
 func isHADeployment(cfg *config.GlobalConfig) bool {
-	if os.Getenv("K_SERVICE") != "" {
+	if cloudrunenv.IsService() {
 		return true
 	}
 	if strings.EqualFold(cfg.Database.Driver, "postgres") {
@@ -2587,8 +2588,23 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			cfg.Auth.Transport.Mode, audience, cfg.Auth.Transport.PlatformAuthSA)
 	}
 
-	// Hub-issued test identities: a startup-only switch, off by default.
-	hubCfg.EnableTestIdentities = enableTestIdentities
+	// Hub-issued test identities (--test-mode, off by default): every
+	// precondition of the requested level is checked here and any unmet one
+	// refuses startup with a named error. hub.New re-checks the result and
+	// verifies the signing key sources (G7) before capturing the immutable
+	// gate, and writes the resolved level through the test admin audit
+	// sink.
+	testMode, err := resolveTestMode(testModeInputsFor(ctx, cfg, hubCfg, s != nil, entClient))
+	if err != nil {
+		return nil, err
+	}
+	hubCfg.EnableTestIdentities = testMode.EnableTestIdentities
+	hubCfg.TestAdminGate = testMode.TestAdminGate
+	hubCfg.TestMode = testMode.TestMode
+	if testMode.EnableTestIdentities {
+		slog.Warn("Test identity issuance is ENABLED (--test-mode). Holders of test_identity.issue can create short-lived synthetic users on this hub. Use on test hubs only; MUST NOT be enabled in production!",
+			"test_mode", string(testMode.TestMode.Level), "preconditions", testMode.TestMode.Preconditions)
+	}
 	// Workload issuer allowlist (server.hub.test_identities.workload_issuers,
 	// phase X2): startup config only. A malformed list or an admin-tier
 	// entry refuses startup; hub.New re-checks it with the issuer audience
@@ -2598,20 +2614,8 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			return nil, err
 		}
 		hubCfg.TestIdentityWorkloadIssuers = issuers
-		log.Printf("Test identity workload issuers configured: %d (accepted only with --enable-test-identities)", len(issuers))
+		log.Printf("Test identity workload issuers configured: %d (accepted only with --test-mode=member or above)", len(issuers))
 	}
-	if enableTestIdentities {
-		slog.Warn("Test identity issuance is ENABLED (--enable-test-identities). Holders of test_identity.issue can create short-lived synthetic member and viewer users on this hub. Use on test hubs only; MUST NOT be enabled in production!")
-	}
-
-	// Test admin tier gate (G1-G8, G10): refuses startup with a named
-	// error on any failure. hub.New re-checks it and verifies the signing
-	// key sources (G7) before capturing the immutable gate.
-	testAdminGate, err := validateTestAdminIdentities(testAdminGateInputsFor(ctx, cfg, hubCfg, s != nil, entClient))
-	if err != nil {
-		return nil, err
-	}
-	hubCfg.TestAdminGate = testAdminGate
 
 	// Test identity web sessions (WS1): the hub-local key from the test
 	// infrastructure marker. A missing or unusable key only leaves web
@@ -2908,6 +2912,9 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 
 	// --- Create OperationalSettings, Refresh, and apply ---
 	ops := hub.NewOperationalSettings(settingStore, bootstrapKoanf, envKoanf)
+	// The admin view shows a public URL from the layers startup's endpoint
+	// resolution reads, not a seed value (ptone/scion#4826).
+	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(serverConfigPath))
 
 	changed, err := ops.Refresh(ctx)
 	if err != nil {

@@ -30,10 +30,11 @@ import (
 )
 
 // Flat Runtime Broker profile resolution (.design/flat-runtime-brokers-contract.md
-// section 10): a flat instance skips the Runtime Broker Profile tier,
-// including the active_profile fallback, while non-profile defaults (the
-// settings harness config, top-level image registry) still apply. Legacy
-// resolution is unchanged.
+// section 10; .design/flat-runtime-brokers/contract-appendix-p3.md FC5): a
+// flat instance skips the Runtime Broker Profile tier, including the
+// active_profile fallback, and its own instance policy takes that tier's
+// rung, while non-profile defaults (the settings harness config, top-level
+// image registry) still apply. Legacy resolution is unchanged.
 
 // The active profile carries distinctive resources and harness overrides;
 // the settings-level harness config carries a non-profile default.
@@ -51,6 +52,8 @@ runtimes:
 profiles:
   batch:
     runtime: docker
+    shared_dir_storage_class: profile-rwx
+    shared_dir_size: 77Gi
     resources:
       requests:
         memory: 7777Mi
@@ -108,8 +111,15 @@ func runEnv(cfg runtime.RunConfig) map[string]string {
 	return out
 }
 
+// flatTestPolicy is the policy of a flat Kubernetes instance whose
+// shared-dir defaults differ from the active profile's.
+func flatTestPolicy() *config.FlatInstancePolicy {
+	return config.NewFlatInstancePolicy(config.V1RuntimeBrokerInstanceConfig{Key: "k8s-1", Name: "k8s-1",
+		RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "kubernetes", SharedDirStorageClass: "instance-rwx", SharedDirSize: "40Gi"}})
+}
+
 func flatCtx() context.Context {
-	return config.WithProfileResolution(context.Background(), config.ProfileResolutionFlatInstance)
+	return config.WithFlatInstancePolicy(context.Background(), flatTestPolicy())
 }
 
 func assertNoProfileTier(t *testing.T, cfg runtime.RunConfig) {
@@ -177,6 +187,52 @@ func TestFlatProfileResolution_ProvisionSkipsProfileTier(t *testing.T) {
 	assert.Equal(t, "from-settings-harness-config", legacyCfg.Env["GLOBAL_HC_ENV"])
 }
 
+// TestFlatProfileResolution_StartUsesInstanceSharedDirDefaults: on a flat
+// instance the shared-dir PVC defaults are the instance's runtime_target
+// values, not dropped and not the active profile's; legacy resolution still
+// applies the active profile's. The instance value is a default at the
+// profile's rung: an agent's own kubernetes.shared_dir_* still wins over it.
+func TestFlatProfileResolution_StartUsesInstanceSharedDirDefaults(t *testing.T) {
+	r := newFlatResolutionRun(t)
+	r.mgr = NewManager(&runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			r.runs = append(r.runs, cfg)
+			return "mock-id", nil
+		},
+	})
+	start := func(ctx context.Context, name string, inline *api.ScionConfig) runtime.RunConfig {
+		t.Helper()
+		_, err := r.mgr.Start(ctx, api.StartOptions{
+			Name:         name,
+			ProjectPath:  r.fixture.projectScionDir,
+			NoAuth:       true,
+			Env:          map[string]string{"SCION_AGENT_ID": "agent-" + name, "SCION_PROJECT_ID": "pid-flat"},
+			SharedDirs:   []api.SharedDir{{Name: "scratchpad"}},
+			InlineConfig: inline,
+		})
+		require.NoError(t, err)
+		return r.runs[len(r.runs)-1]
+	}
+
+	flat := start(flatCtx(), "flat-sd", nil)
+	require.NotNil(t, flat.Kubernetes, "the instance's shared-dir defaults reach the run config")
+	assert.Equal(t, "instance-rwx", flat.Kubernetes.SharedDirStorageClass)
+	assert.Equal(t, "40Gi", flat.Kubernetes.SharedDirSize)
+
+	legacy := start(context.Background(), "legacy-sd", nil)
+	require.NotNil(t, legacy.Kubernetes)
+	assert.Equal(t, "profile-rwx", legacy.Kubernetes.SharedDirStorageClass, "legacy resolution applies the active profile")
+	assert.Equal(t, "77Gi", legacy.Kubernetes.SharedDirSize)
+
+	// The agent's own value wins over the instance default; the field it
+	// leaves unset still takes the instance value.
+	own := start(flatCtx(), "flat-sd-own", &api.ScionConfig{Kubernetes: &api.KubernetesConfig{SharedDirSize: "60Gi"}})
+	require.NotNil(t, own.Kubernetes)
+	assert.Equal(t, "60Gi", own.Kubernetes.SharedDirSize, "the agent's kubernetes.shared_dir_size outranks the instance default")
+	assert.Equal(t, "instance-rwx", own.Kubernetes.SharedDirStorageClass, "an unset agent class takes the instance default")
+}
+
 func TestForProfileResolution_DoesNotMutateSettings(t *testing.T) {
 	vs := &config.VersionedSettings{ActiveProfile: "batch", ImageRegistry: "registry.example/global",
 		Profiles: map[string]config.V1ProfileConfig{"batch": {Runtime: "docker", ImageRegistry: "registry.example/profile"}}}
@@ -186,6 +242,15 @@ func TestForProfileResolution_DoesNotMutateSettings(t *testing.T) {
 	assert.Equal(t, "registry.example/global", view.ResolveImageRegistry(""), "the non-profile default still applies")
 	assert.Equal(t, "registry.example/profile", vs.ResolveImageRegistry(""), "legacy resolution still uses the active profile")
 	assert.Same(t, vs, vs.ForProfileResolution(config.ProfileResolutionLegacy))
+
+	flatView := vs.ForFlatInstance(flatTestPolicy())
+	assert.Equal(t, "batch", vs.ActiveProfile, "the loaded settings are not modified")
+	assert.Empty(t, flatView.ActiveProfile)
+	assert.Empty(t, flatView.Profiles)
+	assert.Equal(t, "registry.example/global", flatView.ResolveImageRegistry(""), "the non-profile default still applies")
+	_, size := flatView.ResolveSharedDirDefaults("")
+	assert.Equal(t, "40Gi", size, "the instance policy takes the profile tier's rung")
+	assert.Same(t, vs, vs.ForFlatInstance(nil))
 }
 
 // TestFlatProfileResolution_ProvisionedImageSkipsProfileTier: the image the

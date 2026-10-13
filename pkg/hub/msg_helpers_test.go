@@ -152,11 +152,13 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "workspace_handlers.go", function: "handleWorkspaceSyncToFinalize", symbol: "DispatchAgentCreate",
 		class: "guarded", reason: "workspace agent creation with project authorization"},
 
-	// notification_sweep.go: RetryDispatch — UNGUARDED notification retry.
-	// Re-sends the same notification as notifications.go dispatchToAgent and
-	// shares that site's open item; a future guard must be added to both
-	// sites together.
-	{file: "notification_sweep.go", function: "RetryDispatch", symbol: "dispatchWithBrokerRetry",
+	// notification_sweep.go: retryDispatch — UNGUARDED notification retry.
+	// The periodic sweep and the broker-connect drain (both via retryBatch)
+	// and the exported RetryDispatch wrapper reach the call only through
+	// retryDispatch. It re-sends the same notification as notifications.go
+	// dispatchToAgent and shares that site's open item; a future guard must
+	// be added to both sites together.
+	{file: "notification_sweep.go", function: "retryDispatch", symbol: "dispatchWithBrokerRetry",
 		class: "exempt", reason: "UNGUARDED notification retry (F-RS6-08); shares dispatchToAgent's open item; guard both sites together; deferred to RS6/AH"},
 }
 
@@ -167,7 +169,7 @@ var sharedClassificationSites = []struct {
 	site, sameAs effectCallSiteKey
 }{
 	{
-		site:   effectCallSiteKey{"notification_sweep.go", "RetryDispatch", "dispatchWithBrokerRetry"},
+		site:   effectCallSiteKey{"notification_sweep.go", "retryDispatch", "dispatchWithBrokerRetry"},
 		sameAs: effectCallSiteKey{"notifications.go", "dispatchToAgent", "dispatchWithBrokerRetry"},
 	},
 }

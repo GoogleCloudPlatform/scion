@@ -1,0 +1,14 @@
+# Legacy settings of the flat_40gi example: one Kubernetes runtime entry with
+# a 20Gi shared-dir default and one profile on it that raises it to 40Gi.
+# The profile value wins, so legacy agents get 40Gi shared-dir PVCs.
+schema_version: "1"
+active_profile: batch
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+    shared_dir_size: 20Gi
+profiles:
+  batch:
+    runtime: cluster
+    shared_dir_size: 40Gi
