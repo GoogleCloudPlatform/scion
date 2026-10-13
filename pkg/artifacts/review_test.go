@@ -231,6 +231,9 @@ func TestReviewRejectsUnmarkedChanges(t *testing.T) {
 	if rec := f.do(&userU, http.MethodGet, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", f.id, seq), nil, nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("discarded version readable: %d", rec.Code)
 	}
+	if got := mustVersion(t, f, seq).FailReason; got != FailReasonUnmarkedChanges {
+		t.Fatalf("discard reason %q, want %q", got, FailReasonUnmarkedChanges)
+	}
 	if files, err := f.store.ListFiles(context.Background(), mustVersion(t, f, seq).ID); err != nil || len(files) != 0 {
 		t.Fatalf("discarded manifest kept: %v %v", files, err)
 	}
@@ -343,6 +346,9 @@ func TestReviewStale(t *testing.T) {
 	if f.current() != 3 || f.state(seq) != VersionStateFailed {
 		t.Fatalf("current %d state %q", f.current(), f.state(seq))
 	}
+	if got := mustVersion(t, f, seq).FailReason; got != FailReasonStaleReview {
+		t.Fatalf("discard reason %q, want %q", got, FailReasonStaleReview)
+	}
 }
 
 // staleBaseStore makes FinalizeVersion report that the current version
@@ -365,6 +371,9 @@ func TestReviewStaleAfterCheck(t *testing.T) {
 	}
 	if f.current() != 1 || f.state(seq) != VersionStateFailed {
 		t.Fatalf("current %d state %q", f.current(), f.state(seq))
+	}
+	if got := mustVersion(t, f, seq).FailReason; got != FailReasonStaleReview {
+		t.Fatalf("discard reason %q, want %q", got, FailReasonStaleReview)
 	}
 }
 
@@ -621,6 +630,9 @@ func TestReviewBase(t *testing.T) {
 		}
 		if f.current() != 1 || f.state(seq) != VersionStateFailed {
 			t.Fatalf("current %d state %q", f.current(), f.state(seq))
+		}
+		if got := mustVersion(t, f, seq).FailReason; got != FailReasonNewerPublishPending {
+			t.Fatalf("discard reason %q, want %q", got, FailReasonNewerPublishPending)
 		}
 		// Once v2 is published, it is current; the review never shadowed it.
 		for _, p := range pend.Upload.Required {

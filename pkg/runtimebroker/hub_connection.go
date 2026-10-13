@@ -228,7 +228,7 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 	// Start heartbeat service if enabled.
 	if server.config.HeartbeatEnabled && hc.HubClient != nil && hc.BrokerID != "" {
 		if !hasValidCredentials {
-			slog.Warn("Skipping heartbeat for connection: no valid credentials", "name", hc.Name)
+			slog.Warn("Not registered with the Hub; heartbeats are off for this connection. Run scion broker register", "name", hc.Name)
 		} else {
 			interval := server.config.HeartbeatInterval
 			if interval <= 0 {
@@ -645,14 +645,39 @@ func buildHubClientOpts(creds *brokercredentials.BrokerCredentials, secretKey []
 	return opts
 }
 
+// HubClientForCredentials builds the Hub client a connection with creds
+// uses: HMAC authentication with the credentials' secret and their transport
+// auth (IAP or Cloud Run invoker), exactly as createHubConnection builds it.
+// A flat instance's host uses it for the remote activation validation, so
+// the validation authenticates the same way the instance's connection will.
+func HubClientForCredentials(creds *brokercredentials.BrokerCredentials) (hubclient.Client, error) {
+	if creds == nil || creds.SecretKey == "" {
+		return nil, fmt.Errorf("hub credentials have no secret")
+	}
+	secretKey, err := base64.StdEncoding.DecodeString(creds.SecretKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode secret key: %w", err)
+	}
+	opts := []hubclient.Option{hubclient.WithHMACAuth(creds.BrokerID, secretKey)}
+	src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience, adcsource.New)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve transport auth: %w", err)
+	}
+	if src != nil {
+		opts = append(opts, hubclient.WithTransportAuth(src, mode))
+	}
+	return hubclient.New(creds.HubEndpoint, opts...)
+}
+
 // newHeartbeatService builds the heartbeat service for one hub connection.
 // A flat instance's service is in flat mode (HeartbeatService.flat).
 func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brokerID, hubEndpoint string, interval time.Duration) *HeartbeatService {
+	mgr, rt := s.defaultPair()
 	hb := NewHeartbeatService(
 		client,
 		brokerID,
 		interval,
-		s.manager,
+		mgr,
 		s.buildProjectFilterForHub(hubEndpoint),
 		logging.Subsystem("broker.heartbeat"),
 	)
@@ -665,6 +690,6 @@ func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brok
 	hb.defaultProfile = s.defaultProfile
 	hb.flat = s.isFlat()
 	hb.SetVersion(s.version)
-	hb.SetDefaultRuntime(s.runtime)
+	hb.SetDefaultRuntime(rt)
 	return hb
 }

@@ -100,7 +100,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    6, // R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
+			Revision:    7, // R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -143,14 +143,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    7, // R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    8, // R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    6, // R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    7, // R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
@@ -318,6 +318,14 @@ func projectOwnerPermissionIDs() []string {
 		"agent.set_message_mode",
 		"agent.stop_all",
 		"agent.update",
+		// Agent delegation grant management (.design/agent-delegation.md
+		// §7, §18.5). Held on the project, it covers only grants bounded to
+		// this project; a hub-bounded grant on an agent in the project is
+		// out of reach.
+		"agent.delegation.credential.revoke",
+		"agent.delegation.list",
+		"agent.delegation.read",
+		"agent.delegation.revoke",
 		// GCP service account management (project-scoped). Lets a project
 		// owner assign project-scoped service accounts in the project
 		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
@@ -398,6 +406,14 @@ func projectAdminPermissionIDs() []string {
 		"agent.read",
 		"agent.stop_all",
 		"agent.update",
+		// Agent delegation grant management (.design/agent-delegation.md
+		// §7, §18.5). Held on the project, it covers only grants bounded to
+		// this project; a hub-bounded grant on an agent in the project is
+		// out of reach.
+		"agent.delegation.credential.revoke",
+		"agent.delegation.list",
+		"agent.delegation.read",
+		"agent.delegation.revoke",
 		// GCP service account management (project-scoped). Lets a project
 		// admin assign project-scoped service accounts in the project
 		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
@@ -874,6 +890,13 @@ func hubAdminPermissionIDs() []string {
 		// operators who are not super-admins can manage them via the web UI.
 		"access_constraint.read":  true,
 		"access_constraint.admin": true,
+		// Agent delegation grant management, for any grant
+		// (.design/agent-delegation.md §7, §18.5). Not issuance, not
+		// exchange.
+		"agent.delegation.revoke":            true,
+		"agent.delegation.credential.revoke": true,
+		"agent.delegation.list":              true,
+		"agent.delegation.read":              true,
 	}
 
 	var ids []string

@@ -971,10 +971,11 @@ func TestProjectUAT_AttachRecheckedOnEachHandshake(t *testing.T) {
 // project-admin grant agent.port_access (opening a member's already-exposed
 // ports); project-member does not.
 func TestProjectRoles_AttachAndPortAccessLockIn(t *testing.T) {
-	// R6/R6/R5 added artifact.read and artifact.create.
+	// R6/R6/R5 added artifact.read and artifact.create; R8/R7 added agent
+	// delegation grant management for project-bounded grants.
 	revisions := map[string]int{
-		store.ProjectRoleOwner:  7,
-		store.ProjectRoleAdmin:  6,
+		store.ProjectRoleOwner:  8,
+		store.ProjectRoleAdmin:  7,
 		store.ProjectRoleMember: 5,
 	}
 	portAccess := map[string]bool{

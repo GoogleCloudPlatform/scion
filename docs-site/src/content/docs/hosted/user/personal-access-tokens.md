@@ -19,7 +19,7 @@ credential.
 
 A user access token is a scoped, revocable bearer token linked to your user account, used for
 non-interactive authentication. Unlike a full OAuth session, a UAT is **scoped to a single
-project** (or, for a [hub-bound token](#hub-bound-tokens-api-only), to the projects you can
+project** (or, for a [hub-bound token](#hub-bound-tokens), to the projects you can
 reach) and carries a specific set of action permissions, so a token minted for CI can do only
 what CI needs.
 
@@ -29,7 +29,7 @@ must migrate to `scion_pat_*` tokens.
 ## Scoping and permissions
 
 Every token has a boundary (a single project, or the hub for a
-[hub-bound token](#hub-bound-tokens-api-only)) and an explicit list of **scopes** (action
+[hub-bound token](#hub-bound-tokens)) and an explicit list of **scopes** (action
 permissions). Available scopes:
 
 | Scope | Grants |
@@ -147,7 +147,8 @@ scion hub token create \
   --expires 90d
 ```
 
-- `--project` (required) — the project name or ID the token is scoped to.
+- `--project` (required unless `--boundary hub`) — the project name or ID the token is scoped to.
+- `--boundary` — `project` (the default) or `hub`. See [Hub-bound tokens](#hub-bound-tokens).
 - `--name` (required) — a human-readable label.
 - `--scopes` (required) — a comma-separated list of the scopes above.
 - `--expires` — a duration (`90m`, `2h`, `30d`, `1y`) or an RFC 3339 date
@@ -170,11 +171,20 @@ written. If a requested scope is denied, the Hub returns `403` with error code
 nothing is created. Run `scion hub token scopes --project <project>` to see the full picture
 before retrying.
 
-### Hub-bound tokens (API only)
+### Hub-bound tokens
 
 A token can instead carry a **hub boundary**, which lets one token work across every project you
-can reach. The CLI and the web UI's **Create Token** form always mint project tokens; mint a
-hub token through the API by sending
+can reach, and is the only boundary that can select hub-level scopes such as `hub_health:read`
+and `broker:read`. Mint one with the CLI by passing `--boundary hub` and no `--project`:
+
+```bash
+scion hub token create --boundary hub \
+  --name health-check \
+  --scopes hub_health:read,broker:read,agent:list \
+  --expires 30d
+```
+
+The web UI's **Create Token** form always mints project tokens. Through the API, send
 `"boundary": {"kind": "hub"}` instead of `projectId` to `POST /api/v1/auth/tokens`. A missing
 boundary never means hub: a request that names neither `projectId` nor `boundary` is rejected
 with `400` (`details.reason` `boundary_required`). A hub boundary that also names a project, or a

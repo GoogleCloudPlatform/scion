@@ -223,6 +223,17 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	// very drop SCION_HOST_UID/GID above exists to trigger.
 	delete(env, "SCION_KEEPID_UID")
 
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only keys no source above set, never a suppressed key.
+	emitted := make(map[string]bool, len(env))
+	for k := range env {
+		emitted[k] = true
+	}
+	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
+		k, v, _ := strings.Cut(e, "=")
+		env[k] = v
+	}
+
 	return env
 }
 
@@ -289,6 +300,11 @@ func substrateSecretCandidates(cfg RunConfig) map[string]string {
 		if k, v, ok := strings.Cut(e, "="); ok {
 			add("cfg_env", k, v)
 		}
+	}
+	// Template env fallback values (ptone/scion#4524) go into the bootstrap
+	// env without riding cfg.Env; keep them in the redaction set as before.
+	for k, v := range cfg.FallbackEnv {
+		add("fallback_env", k, v)
 	}
 
 	if cfg.ResolvedAuth != nil {

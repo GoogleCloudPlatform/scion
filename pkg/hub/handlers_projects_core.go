@@ -1266,7 +1266,7 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 	// Write hub connection settings into the seeded settings file.
 	settingsUpdates := map[string]string{
 		"hub.enabled":   "true",
-		"hub.endpoint":  s.config.HubEndpoint,
+		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
 		"hub.projectId": project.ID,
 		"project_id":    project.ID,
 	}
@@ -1326,7 +1326,7 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	// Write hub connection settings
 	settingsUpdates := map[string]string{
 		"hub.enabled":   "true",
-		"hub.endpoint":  s.config.HubEndpoint,
+		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
 		"hub.projectId": project.ID,
 		"project_id":    project.ID,
 	}
@@ -3626,7 +3626,7 @@ func isDirectChildOfAny(target string, roots []string) bool {
 // this removes the local directory as well. Only a single direct child of the
 // projects root is removed. An absent directory is not an error.
 func (s *Server) removeEmbeddedBrokerProjectDir(slug, removedPath string) {
-	if s.GetEmbeddedBrokerID() == "" {
+	if !s.hasEmbeddedBroker() {
 		return
 	}
 	if err := validateProjectSlug(slug); err != nil {

@@ -48,7 +48,7 @@ func newHubNameDBServer(t *testing.T, bootstrapHubName string) (*Server, *fakeHu
 	_, err = ops.Refresh(context.Background())
 	require.NoError(t, err)
 
-	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, ""), store: &settingsAuditStore{}}
 	srv.SetOperationalSettings(ops)
 	return srv, fakeStore, ops
 }
@@ -300,13 +300,13 @@ func TestServerConfigDB_Endpoints_SeededBaseEnvGuard(t *testing.T) {
 		return srv, fakeStore, ops
 	}
 
-	// No env override: public_url and image_registry carry forward; the
-	// seeded hub_name does not (it is bootstrap material).
+	// No env override: image_registry carries forward; the seeded hub_name
+	// and public_url do not (they are bootstrap material, ptone/scion#3905).
 	srv, fakeStore, ops := newSrv(nil)
 	rr := putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":"new-hub"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	row, _ := endpointsRow(t, fakeStore)
-	assert.Equal(t, opsettings.EndpointsSettings{PublicURL: "https://seed.example.com", ImageRegistry: "seed.example.com", HubName: "new-hub"}, row)
+	assert.Equal(t, opsettings.EndpointsSettings{ImageRegistry: "seed.example.com", HubName: "new-hub"}, row)
 
 	// Both keys env-overridden on this node: neither is carried.
 	srv, fakeStore, ops = newSrv(map[string]interface{}{
@@ -336,8 +336,8 @@ func TestServerConfigDB_Endpoints_NoRowBaseFromSnapshot(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	row, origin := endpointsRow(t, fakeStore)
 	assert.Equal(t, "managed", origin)
-	assert.Equal(t, opsettings.EndpointsSettings{PublicURL: "https://boot.example.com", ImageRegistry: "admin.example.com"}, row,
-		"bootstrap public_url carries forward; the bootstrap hub_name is not written")
+	assert.Equal(t, opsettings.EndpointsSettings{ImageRegistry: "admin.example.com"}, row,
+		"neither the bootstrap public_url nor the bootstrap hub_name is written (ptone/scion#3905)")
 }
 
 // endpointsRaceStore simulates another replica writing the endpoints row
