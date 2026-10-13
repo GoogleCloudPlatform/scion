@@ -561,38 +561,6 @@ describe('create mode: auto-expose ports', () => {
   });
 });
 
-describe('create mode: other inline config summary', () => {
-  it('is absent when none is set', async () => {
-    const el = await mount();
-    expect(el.shadowRoot!.querySelector('[data-testid="other-inline-config"]')).toBeNull();
-  });
-
-  it('lists volumes, skills, MCP servers, services and kubernetes when set', async () => {
-    const el = await mount({
-      otherInlineConfig: {
-        source: 'from the template',
-        config: {
-          volumes: [{ target: '/data' }],
-          skills: [{ uri: 'gs://s/a', as: 'a' }],
-          mcp_servers: { search: { transport: 'stdio' } },
-          services: [{ name: 'db', command: ['pg'] }],
-          kubernetes: { namespace: 'x' },
-        },
-      },
-    });
-    const summary = el.shadowRoot!.querySelector('[data-testid="other-inline-config"]')!;
-    expect(summary.textContent).toContain('from the template');
-    const items = Array.from(summary.querySelectorAll('li')).map((li) => li.textContent!.trim());
-    expect(items).toEqual([
-      'Volumes: 1 mount',
-      'Skills: a',
-      'MCP servers: search',
-      'Services: db',
-      'Kubernetes settings',
-    ]);
-  });
-});
-
 describe('create mode: resources', () => {
   it('shows project defaults per sub-field as placeholders and sends only typed ones', async () => {
     const el = await mount({

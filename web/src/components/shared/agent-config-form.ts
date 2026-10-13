@@ -447,27 +447,6 @@ export interface AgentConfigChangeDetail {
   touched: string[];
 }
 
-/** Other inline config a new or existing agent carries, shown read-only. */
-export interface AgentOtherInlineConfig {
-  config: Pick<AgentInlineConfig, 'volumes' | 'skills' | 'mcp_servers' | 'services' | 'kubernetes'>;
-  /** Where it comes from, e.g. "from the template". */
-  source: string;
-}
-
-/** One line per kind of other inline config that is set; empty when none is. */
-export function otherInlineConfigLines(c: AgentOtherInlineConfig['config'] | undefined): string[] {
-  if (!c) return [];
-  const lines: string[] = [];
-  const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
-  if (c.volumes?.length) lines.push(`Volumes: ${n(c.volumes.length, 'mount', 'mounts')}`);
-  if (c.skills?.length) lines.push(`Skills: ${c.skills.map((s) => s.as || s.uri).join(', ')}`);
-  const mcp = Object.keys(c.mcp_servers ?? {});
-  if (mcp.length) lines.push(`MCP servers: ${mcp.join(', ')}`);
-  if (c.services?.length) lines.push(`Services: ${c.services.map((s) => s.name).join(', ')}`);
-  if (c.kubernetes && Object.keys(c.kubernetes).length > 0) lines.push('Kubernetes settings');
-  return lines;
-}
-
 @customElement('scion-agent-config-form')
 export class ScionAgentConfigForm extends LitElement {
   /** 'create' renders every field as editable now; 'edit' follows editability. */
@@ -499,9 +478,6 @@ export class ScionAgentConfigForm extends LitElement {
 
   /** The GCP identity picker's state, owned by the page. */
   @property({ attribute: false }) gcpIdentity: GcpIdentityState | null = null;
-
-  /** Other inline config that is set (volumes, skills, MCP, services, kubernetes). */
-  @property({ attribute: false }) otherInlineConfig: AgentOtherInlineConfig | null = null;
 
   @state() private drafts: Record<string, FieldDraft> = {};
   @state() private resourceDrafts: Record<string, string> = {};
@@ -1426,21 +1402,6 @@ export class ScionAgentConfigForm extends LitElement {
     `;
   }
 
-  private renderOtherInlineConfig() {
-    const lines = otherInlineConfigLines(this.otherInlineConfig?.config);
-    if (lines.length === 0) return nothing;
-    return html`<section class="other" data-testid="other-inline-config">
-      <h3>
-        <sl-icon name="info-circle"></sl-icon>
-        Other inline config (${this.otherInlineConfig!.source})
-      </h3>
-      <p class="other-help">Also applied to this agent; not editable in this form.</p>
-      <ul>
-        ${lines.map((l) => html`<li>${l}</li>`)}
-      </ul>
-    </section>`;
-  }
-
   override render() {
     const groups = AGENT_CONFIG_TABS.map((t) => ({
       ...t,
@@ -1462,7 +1423,6 @@ export class ScionAgentConfigForm extends LitElement {
             `
           )}
         </sl-tab-group>
-        ${this.renderOtherInlineConfig()}
       `;
     }
     return html`
@@ -1477,7 +1437,6 @@ export class ScionAgentConfigForm extends LitElement {
             </section>
           `
         )}
-      ${this.renderOtherInlineConfig()}
     `;
   }
 
@@ -1518,8 +1477,7 @@ export class ScionAgentConfigForm extends LitElement {
     .group {
       margin-bottom: 1.25rem;
     }
-    .group h3,
-    .other h3 {
+    .group h3 {
       font-size: var(--sl-font-size-medium);
       margin: 0 0 0.75rem;
       display: flex;
@@ -1591,8 +1549,7 @@ export class ScionAgentConfigForm extends LitElement {
     .status,
     .hint,
     .inherited,
-    .override-note,
-    .other-help {
+    .override-note {
       margin-top: 0.25rem;
       font-size: var(--sl-font-size-small);
       color: var(--sl-color-neutral-600);
@@ -1610,15 +1567,6 @@ export class ScionAgentConfigForm extends LitElement {
     .clear-note,
     .override-note {
       color: var(--sl-color-warning-700, #b45309);
-    }
-    .other {
-      border-top: 1px solid var(--sl-color-neutral-200);
-      padding-top: 0.75rem;
-    }
-    .other ul {
-      margin: 0.25rem 0 0;
-      padding-left: 1.25rem;
-      font-size: var(--sl-font-size-small);
     }
   `;
 }

@@ -194,8 +194,8 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 		// Env gets its own map, never req.Config.Env itself: ac.InlineConfig
 		// below IS req.Config, so sharing the map would let every later
 		// AppliedConfig.Env writer (the project auto-expose tier, the
-		// post-dispatch resolved-env merge) leak into
-		// InlineConfig.Env, which holds the requester's explicit keys only.
+		// post-dispatch resolved-env merge) leak into InlineConfig.Env,
+		// which holds the requester's explicit keys only.
 		ac.Env = maps.Clone(req.Config.Env)
 		ac.Model = req.Config.Model
 		ac.ThinkingLevel = req.Config.ThinkingLevel
@@ -450,10 +450,10 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 			"agent", agent.Name, "agent_id", agent.ID, "profile", dropped, "runtime_broker_id", agent.PinnedRuntimeBrokerID)
 	}
 
-	// Template model and thinking-level rungs — after the request and project tiers, before the
-	// hub default (ptone/scion#4222): request > project > template > hub.
-	// The model is a job key read from the template's job config (its
-	// stripped AgentConfig snapshot).
+	// Template model and thinking-level rungs — after the request and
+	// project tiers, before the hub default (ptone/scion#4222): request >
+	// project > template > hub. The model is a job key read from the
+	// template's job config (its stripped AgentConfig snapshot).
 	//
 	// Thinking level is a job key too and takes the same rung
 	// (ptone/scion#4223), so the hub default_thinking_level fills only when
@@ -515,13 +515,13 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 //
 // For context, not as a substitute for reusing deriveAgentConfig: the
 // resulting per-field precedence differs by field, because of *where* each
-// tier is applied. Model and ThinkingLevel are request > project > template
-// > hub, all four applied by deriveAgentConfig before this function runs. HarnessConfig is
-// request > project > template > hub, because deriveAgentConfig fills the
-// harness-config rung (request > project annotation > template) before
-// applyProjectDefaults/applyHubAgentDefaults run — so the hub-wide
-// default_harness_config only applies when the request, the project
-// annotation and the template all left the slot empty.
+// tier is applied. Model and ThinkingLevel are request > project >
+// template > hub, all four applied by deriveAgentConfig before this function
+// runs. HarnessConfig is request > project > template > hub, because
+// deriveAgentConfig fills the harness-config rung (request > project
+// annotation > template) before applyProjectDefaults/applyHubAgentDefaults
+// run — so the hub-wide default_harness_config only applies when the
+// request, the project annotation and the template all left the slot empty.
 // applyHubAgentDefaults reports whether it supplied HarnessConfig via its
 // bool return; it does not set the ctx flag itself — the caller does that by
 // wrapping ctx with withHubDefaultHarnessConfig, and this function reads

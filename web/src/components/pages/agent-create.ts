@@ -56,7 +56,7 @@ import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
-import type { AgentOtherInlineConfig, ScionAgentConfigForm } from '../shared/agent-config-form.js';
+import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
 import '../shared/agent-config-form.js';
 import '../shared/status-badge.js';
 
@@ -154,12 +154,6 @@ export class ScionPageAgentCreate extends LitElement {
       projectSettings: this.projectSettings,
       hubSettings: this.hubSettings,
     });
-  }
-
-  /** Template-supplied inline config the form does not edit, shown read-only. */
-  private get otherInlineConfig(): AgentOtherInlineConfig | null {
-    const kubernetes = this.selectedTemplate?.config?.kubernetes;
-    return kubernetes ? { config: { kubernetes }, source: 'from the template' } : null;
   }
 
   private get form(): ScionAgentConfigForm | null {
@@ -1019,7 +1013,6 @@ export class ScionPageAgentCreate extends LitElement {
             mode="create"
             .placeholders=${this.placeholders}
             .gcpIdentity=${this.gcp}
-            .otherInlineConfig=${this.otherInlineConfig}
             ?branchAvailable=${!!this.selectedProject?.gitRemote &&
             !isSharedWorkspace(this.selectedProject)}
             ?disabled=${this.submitting}
