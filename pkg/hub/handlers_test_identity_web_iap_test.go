@@ -254,7 +254,9 @@ func TestTIWebIAP_ProxyWithoutDriversStartsWithWebSessionsUnavailable(t *testing
 	cfg := testServerConfig()
 	cfg.AuthMode = "proxy"
 	cfg.ProxyAuth = iap.auth
+	cfg.HubID = tiaHubID
 	cfg.EnableTestIdentities = true
+	cfg.TestMode = TestModeConfig{Level: TestModeMember, HubID: tiaHubID, HubClass: config.HubClassTest, MarkerHubID: tiaHubID, MarkerClass: config.HubClassTest}
 	cfg.TestIdentityWebSessionKey = TestIdentityWebSessionKey{Key: tiWebKey(t)}
 	srv, st, err := tiaNewServer(t, cfg)
 	require.NoError(t, err, "no startup refusal")
