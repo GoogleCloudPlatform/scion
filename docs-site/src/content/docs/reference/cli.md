@@ -914,6 +914,8 @@ Removes the scion project configuration from the current project or global locat
 - **Flags:**
     - `--skip-hub-check`: Skip Hub connectivity check before removing.
 
+In a git repository, `scion clean` removes the repository's `.scion` but leaves the project's external configuration under `~/.scion`. That configuration then shows as orphaned in `scion project list --local`; remove it with `scion project prune`. The `.gitignore` entries that scion added are left in place.
+
 ### `scion config`
 
 View and modify configuration settings.
