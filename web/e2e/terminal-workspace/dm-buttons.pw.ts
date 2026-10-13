@@ -20,8 +20,6 @@ interface ChatSetupOptions {
   agentHasProject?: boolean;
   /** Whether to navigate to the DM. Default true. */
   navigateToDM?: boolean;
-  /** Whether to enable the terminal workspace flag. Default true. */
-  terminalWorkspace?: boolean;
 }
 
 /**
@@ -41,21 +39,15 @@ interface ChatSetupOptions {
  * the property is set, exactly as it does in the real application.
  */
 async function setupChat(page: Page, opts: ChatSetupOptions = {}): Promise<void> {
-  const { agentHasProject = true, navigateToDM = true, terminalWorkspace = true } = opts;
+  const { agentHasProject = true, navigateToDM = true } = opts;
 
   const agentProjectId = agentHasProject ? projectId : '';
 
   await installEventSourceStub(page);
-  // Feature flags: native_chat ON (default), terminal workspace
-  await page.addInitScript(
-    ({ tw }) => {
-      window.__SCION_FEATURES__ = {
-        'web.native_chat': true,
-        'web.terminal_workspace': tw,
-      };
-    },
-    { tw: terminalWorkspace }
-  );
+  // Feature flags: native_chat ON (default)
+  await page.addInitScript(() => {
+    window.__SCION_FEATURES__ = { 'web.native_chat': true };
+  });
 
   // Auth
   await page.route('**/auth/me', (route) =>
@@ -326,23 +318,6 @@ test.describe('DM header navigation icons (#1702)', () => {
     await expect(page).toHaveURL(/\/agents\/graph\?project=/);
     expect(page.url()).toContain(`project=${encodeURIComponent(projectId)}`);
     expect(page.url()).toContain(`&focus=${encodeURIComponent(agentId)}`);
-  });
-
-  test('terminal button navigates to legacy route when workspace flag is OFF', async ({ page }) => {
-    // Unit-level setup: v2AgentMembers injected directly, not loaded via API
-    await setupChat(page, { terminalWorkspace: false });
-
-    const terminalBtn = page.locator('sl-icon-button[name="terminal"][label="Open terminal"]');
-    await expect(terminalBtn).toBeVisible({ timeout: 10000 });
-
-    // With the terminal workspace flag OFF, href should be the legacy route
-    const href = await terminalBtn.getAttribute('href');
-    expect(href).toBe(`/agents/${agentId}/terminal`);
-
-    // Click the terminal button — it dispatches a nav-click event that the
-    // router handles, navigating to the legacy terminal route
-    await terminalBtn.click();
-    await expect(page).toHaveURL(`/agents/${agentId}/terminal`);
   });
 
   test('graph button absent when agent has no projectId', async ({ page }) => {

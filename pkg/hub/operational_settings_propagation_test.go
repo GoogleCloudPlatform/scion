@@ -592,7 +592,7 @@ func TestSubscription_ExperimentsPropagatedAcrossReplicas(t *testing.T) {
 	ops.SetEventPublisher(fakeEP)
 	_, _ = ops.Refresh(context.Background())
 
-	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	srv := &Server{maintenance: NewMaintenanceState(false, ""), experiments: productionRegistryWithFixture(t)}
 	srv.SetOperationalSettings(ops)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -600,12 +600,12 @@ func TestSubscription_ExperimentsPropagatedAcrossReplicas(t *testing.T) {
 	ops.StartPropagation(ctx, srv)
 	defer ops.StopPropagation()
 
-	if !srv.experimentEnabled("web.terminal_workspace") {
-		t.Fatal("expected web.terminal_workspace=true (registry default) before any write")
+	if !srv.experimentEnabled(fixtureWebDefaultOn) {
+		t.Fatal("expected web.fixture_default_on=true (registry default) before any write")
 	}
 
 	// Another replica writes an override directly through the store.
-	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"web.terminal_workspace":false}}`))
+	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"web.fixture_default_on":false}}`))
 	fakeEP.injectEvent(settingsUpdatedSubject, SettingsUpdatedEvent{Section: "experiments", Revision: 1})
 
 	deadline := time.After(5 * time.Second)
@@ -615,7 +615,7 @@ func TestSubscription_ExperimentsPropagatedAcrossReplicas(t *testing.T) {
 			t.Fatal("timed out waiting for the experiments override to propagate")
 		default:
 		}
-		if !srv.experimentEnabled("web.terminal_workspace") {
+		if !srv.experimentEnabled(fixtureWebDefaultOn) {
 			return // success
 		}
 		time.Sleep(50 * time.Millisecond)

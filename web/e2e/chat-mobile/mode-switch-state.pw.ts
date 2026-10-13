@@ -54,14 +54,8 @@ function threadMessages(): Record<string, unknown>[] {
   }));
 }
 
-/** Extra mocks: terminal workspace on, a UUID user, one attachable agent. */
+/** Extra mocks: a UUID user, one attachable agent. */
 async function modeSwitchMocks(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = {
-      ...(window.__SCION_FEATURES__ ?? {}),
-      'web.terminal_workspace': true,
-    };
-  });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: '99999999-9999-4999-8999-999999999999', email: 'u@example.test' } })
   );

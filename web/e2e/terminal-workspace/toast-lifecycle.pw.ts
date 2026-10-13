@@ -47,10 +47,6 @@ async function setupDashboard(
   const { inviteStats403 = true, agents403 = false } = overrides;
 
   await installEventSourceStub(page);
-  // Feature flags
-  await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-  });
 
   // Auth
   await page.route('**/auth/me', (route) =>
@@ -145,9 +141,6 @@ async function setupTerminal(page: Page): Promise<{
   }> = [];
 
   await installEventSourceStub(page);
-  await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-  });
 
   // Auth
   await page.route('**/auth/me', (route) =>

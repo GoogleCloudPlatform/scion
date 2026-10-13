@@ -49,7 +49,7 @@ const (
 var validStages = map[Stage]bool{StageAlpha: true, StageBeta: true}
 
 // NamePattern is the required shape of an experiment name, e.g.
-// "web.terminal_workspace" or "hub.foo.bar". pkg/config/opsettings uses the
+// "web.agent_edit" or "hub.foo.bar". pkg/config/opsettings uses the
 // same pattern in its JSON schema for the "experiments" section, and pkg/hub
 // uses ValidName to apply the identical rule to admin PUT payloads.
 const NamePattern = `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`
@@ -64,12 +64,12 @@ const reviewByLayout = "2006-01-02"
 
 // Experiment describes one hub-wide feature flag.
 type Experiment struct {
-	// Name is the stable identifier, e.g. "web.terminal_workspace". It must
+	// Name is the stable identifier, e.g. "web.agent_edit". It must
 	// match NamePattern. "web." is the convention for UI-only gates, "hub."
 	// for anything that gates server behaviour (Layers is the source of
 	// truth; the prefix is only a readability aid).
 	Name string
-	// Title is a short UI label, e.g. "Persistent terminal workspace".
+	// Title is a short UI label, e.g. "Edit agent".
 	Title string
 	// Description is one or two sentences shown in the Experiments tab.
 	Description string
@@ -209,17 +209,6 @@ var compiled = []Experiment{
 		ReviewBy:    "2026-11-30",
 	},
 	{
-		Name:        "web.terminal_workspace",
-		Title:       "Persistent terminal workspace",
-		Description: "Opens agent terminals in the persistent /terminals workspace instead of the legacy single-terminal page.",
-		Default:     true,
-		Layers:      []Layer{LayerWeb},
-		Stage:       StageBeta,
-		Issue:       "ptone/scion#1662",
-		Owner:       "web",
-		ReviewBy:    "2026-12-31",
-	},
-	{
 		Name:        "web.gcs_links",
 		Title:       "gs:// link previews",
 		Description: "Linkifies a gs://bucket/object URI an agent posts in chat and lets the viewer fetch and preview that object through the hub. Gates both the linkifier (LayerWeb) and the GET /api/v1/gcs/object endpoint itself (LayerServer): the endpoint also requires a configured GCP token generator, so this experiment alone does not make links fetchable on a hub without one.",
@@ -314,6 +303,8 @@ var compiled = []Experiment{
 var compiledRetired = []string{
 	"web.access_boundaries_read",
 	"web.access_boundaries_authoring",
+	// Graduated: the terminal workspace is always on (ptone/scion#4917).
+	"web.terminal_workspace",
 }
 
 // Registry is an immutable, validated set of experiments. It is the only way
@@ -398,6 +389,18 @@ func (r *Registry) Lookup(name string) (Experiment, bool) {
 
 // IsRetired reports whether name was retired and must never resolve again.
 func (r *Registry) IsRetired(name string) bool { return r.retired[name] }
+
+// Retired returns every retired name in sorted order. The returned slice is
+// a copy. Tests use it to check that a stored override for any retired name
+// is ignored and pruned, without naming each retired experiment.
+func (r *Registry) Retired() []string {
+	out := make([]string, 0, len(r.retired))
+	for name := range r.retired {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // defaultRegistry builds the production registry exactly once.
 var defaultRegistry = sync.OnceValue(func() *Registry {

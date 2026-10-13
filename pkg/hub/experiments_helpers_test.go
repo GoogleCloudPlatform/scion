@@ -52,3 +52,21 @@ func testRegistry(t *testing.T) *experiments.Registry {
 	}
 	return reg
 }
+
+// fixtureWebDefaultOn is a web-only, default-on experiment that exists only
+// in tests. The generic experiments API tests use it instead of a production
+// experiment, so retiring a production experiment never touches them.
+const fixtureWebDefaultOn = "web.fixture_default_on"
+
+// productionRegistryWithFixture returns the production registry (every
+// active and retired name) plus fixtureWebDefaultOn.
+func productionRegistryWithFixture(t *testing.T) *experiments.Registry {
+	t.Helper()
+	prod := experiments.Default()
+	active := append(prod.All(), testExperiment(fixtureWebDefaultOn, true, experiments.LayerWeb))
+	reg, err := experiments.NewRegistry(active, prod.Retired())
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	return reg
+}

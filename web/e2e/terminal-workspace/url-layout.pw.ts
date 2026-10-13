@@ -36,7 +36,6 @@ const ALL_AGENTS: Record<string, AgentFixture> = {
 
 async function setup(
   page: Page,
-  enabled = true,
   agents: Record<string, AgentFixture> = ALL_AGENTS
 ): Promise<{
   readonly attaches: number;
@@ -47,12 +46,6 @@ async function setup(
   let closes = 0;
   const sent: string[] = [];
   await installEventSourceStub(page);
-  await page.addInitScript(
-    ({ enabled: feat }) => {
-      window.__SCION_FEATURES__ = { 'web.terminal_workspace': feat };
-    },
-    { enabled }
-  );
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
   );
@@ -375,7 +368,7 @@ test('E: back/forward navigation restores layout state from URL', async ({ page 
 });
 
 // =========================================================================
-// Test Scenario F: Direct single route compatibility and flag-off
+// Test Scenario F: Direct single route compatibility
 // =========================================================================
 test('F: direct single route works without layout params', async ({ page }) => {
   const socket = await setup(page);
@@ -392,19 +385,6 @@ test('F: direct single route works without layout params', async ({ page }) => {
 
   // Pane should display the agent
   await expect.poll(() => visiblePaneCount(page)).toBe(1);
-});
-
-test('F: feature flag off — layout params are ignored, legacy page renders', async ({ page }) => {
-  const socket = await setup(page, false);
-
-  // Navigate to a URL with layout params while flag is off
-  await page.goto(`/terminals?lv=1&lp=four&s0=${agentA}&s1=${agentB}&s2=${agentC}&s3=${agentD}`);
-
-  // Layout params should be ignored — no workspace root should render
-  expect(await page.locator('#terminal-workspace').count()).toBe(0);
-
-  // No WebSocket connections (flag is off, workspace not enabled)
-  expect(socket.attaches).toBe(0);
 });
 
 // =========================================================================

@@ -42,7 +42,7 @@ import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
-import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../utils/feature-flags.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { apiFetch } from '../../client/api.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
@@ -76,19 +76,6 @@ import {
 /** Appends a shortcut hint to a tooltip label, e.g. "Chat · ⌘2". */
 function withHint(label: string, hint: { label: string } | null): string {
   return hint ? `${label} · ${hint.label}` : label;
-}
-
-/**
- * The view modes the mode switch offers besides Dashboard, or null when
- * neither Chat nor Terminal is on and the switch is not shown at all. The
- * switch, the narrow-layout menu and the keyboard shortcuts all read this,
- * so a shortcut only ever reaches a mode the switch shows.
- */
-function offeredViewModes(): { chat: boolean; terminals: boolean } | null {
-  const chat = isFeatureEnabled(NATIVE_CHAT_FLAG);
-  const terminals = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
-  if (!chat && !terminals) return null;
-  return { chat, terminals };
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,13 +1009,10 @@ export class ScionHeader extends LitElement {
   /**
    * Inline segmented control for switching between Dashboard / Chat /
    * Terminal modes. Used in the wide center column (with labels) and in
-   * the compact tier (icon-only via CSS). Returns nothing when no
-   * alternative modes are feature-flagged on.
+   * the compact tier (icon-only via CSS).
    */
-  private renderModeSwitch(): TemplateResult | typeof nothing {
-    const offered = offeredViewModes();
-    if (!offered) return nothing;
-    const { chat: chatEnabled, terminals: terminalsEnabled } = offered;
+  private renderModeSwitch(): TemplateResult {
+    const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
 
     const isChat = this.isChatView();
     const isTerminal = this.isTerminalView();
@@ -1073,23 +1057,19 @@ export class ScionHeader extends LitElement {
               </sl-tooltip>
             `
           : ''}
-        ${terminalsEnabled
-          ? html`
-              <sl-tooltip content=${withHint(terminalsLabel, terminalsHint)}>
-                <button
-                  class=${isTerminal ? 'active' : ''}
-                  @click=${(): void => {
-                    void this.handleModeSwitch('terminals');
-                  }}
-                  aria-label=${terminalsLabel}
-                  aria-keyshortcuts=${terminalsHint?.aria ?? nothing}
-                >
-                  <sl-icon name="terminal"></sl-icon>
-                  <span class="mode-label">Terminal</span>
-                </button>
-              </sl-tooltip>
-            `
-          : ''}
+        <sl-tooltip content=${withHint(terminalsLabel, terminalsHint)}>
+          <button
+            class=${isTerminal ? 'active' : ''}
+            @click=${(): void => {
+              void this.handleModeSwitch('terminals');
+            }}
+            aria-label=${terminalsLabel}
+            aria-keyshortcuts=${terminalsHint?.aria ?? nothing}
+          >
+            <sl-icon name="terminal"></sl-icon>
+            <span class="mode-label">Terminal</span>
+          </button>
+        </sl-tooltip>
       </div>
     `;
   }
@@ -1100,12 +1080,9 @@ export class ScionHeader extends LitElement {
 
   /**
    * Dropdown for switching between Dashboard / Chat / Terminal modes.
-   * Returns nothing when no alternative modes are feature-flagged on.
    */
-  private renderModeDropdown(): TemplateResult | typeof nothing {
-    const offered = offeredViewModes();
-    if (!offered) return nothing;
-    const { chat: chatEnabled, terminals: terminalsEnabled } = offered;
+  private renderModeDropdown(): TemplateResult {
+    const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
 
     const { icon, label } = this.getCurrentMode();
     const isChat = this.isChatView();
@@ -1152,20 +1129,16 @@ export class ScionHeader extends LitElement {
                 </sl-menu-item>
               `
             : ''}
-          ${terminalsEnabled
-            ? html`
-                <sl-menu-item value="terminals" ?checked=${isTerminal}>
-                  <sl-icon slot="prefix" name="terminal"></sl-icon>
-                  Terminal
-                  ${this.terminalSessionCount > 0
-                    ? html`<span slot="suffix" class="count-badge"
-                        >${this.terminalSessionCount}</span
-                      >`
-                    : ''}
-                  ${this.renderMenuShortcutHint('terminals')}
-                </sl-menu-item>
-              `
-            : ''}
+          <sl-menu-item value="terminals" ?checked=${isTerminal}>
+            <sl-icon slot="prefix" name="terminal"></sl-icon>
+            Terminal
+            ${this.terminalSessionCount > 0
+              ? html`<span slot="suffix" class="count-badge"
+                  >${this.terminalSessionCount}</span
+                >`
+              : ''}
+            ${this.renderMenuShortcutHint('terminals')}
+          </sl-menu-item>
         </sl-menu>
       </sl-dropdown>
     `;
@@ -1621,10 +1594,7 @@ export class ScionHeader extends LitElement {
 
   /** Whether the mode switch currently offers `mode`. */
   private isModeOffered(mode: ViewModeTarget): boolean {
-    const offered = offeredViewModes();
-    if (!offered) return false;
-    if (mode === 'chat') return offered.chat;
-    if (mode === 'terminals') return offered.terminals;
+    if (mode === 'chat') return isFeatureEnabled(NATIVE_CHAT_FLAG);
     return true;
   }
 

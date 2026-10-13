@@ -22,9 +22,9 @@ import { setPreferredTimeZone } from '../../utils/time.js';
 
 function makeEntry(overrides: Record<string, unknown> = {}) {
   return {
-    name: 'web.terminal_workspace',
-    title: 'Persistent terminal workspace',
-    description: 'Opens agent terminals in the persistent workspace.',
+    name: 'web.fixture_flag',
+    title: 'Fixture experiment',
+    description: 'Used only in admin-experiments tests.',
     layers: ['web'],
     stage: 'beta',
     default: true,
@@ -167,9 +167,9 @@ describe('scion-admin-experiments', () => {
     await activate(element);
 
     const text = shadowText(element);
-    expect(text).toContain('Persistent terminal workspace');
-    expect(text).toContain('web.terminal_workspace');
-    expect(text).toContain('Opens agent terminals');
+    expect(text).toContain('Fixture experiment');
+    expect(text).toContain('web.fixture_flag');
+    expect(text).toContain('Used only in admin-experiments tests');
     const link = query(element, 'a[href*="github.com"]');
     expect(link?.getAttribute('href')).toBe('https://github.com/ptone/scion/issues/1662');
     const switchEl = query(element, 'sl-switch');
@@ -182,9 +182,7 @@ describe('scion-admin-experiments', () => {
     // shadow boundaries, so this only checks the slotted text is present;
     // `web/e2e/experiments.spec.ts` asserts the real accessible name via
     // `getByRole('switch', { name })` against the real browser.
-    expect(switchEl?.querySelector('.sr-only')?.textContent).toBe(
-      'Enable Persistent terminal workspace'
-    );
+    expect(switchEl?.querySelector('.sr-only')?.textContent).toBe('Enable Fixture experiment');
   });
 
   it('renders a row without layer badges instead of throwing when layers is missing', async () => {
@@ -199,7 +197,7 @@ describe('scion-admin-experiments', () => {
     element = await createElement();
     await activate(element);
 
-    expect(shadowText(element)).toContain('Persistent terminal workspace');
+    expect(shadowText(element)).toContain('Fixture experiment');
     expect(query(element, 'sl-badge[variant="primary"]')).toBeNull();
   });
 
@@ -390,7 +388,7 @@ describe('scion-admin-experiments', () => {
       if (init?.method === 'PUT') {
         const body = JSON.parse(init.body as string);
         expect(body).toEqual({
-          overrides: { 'web.terminal_workspace': false },
+          overrides: { 'web.fixture_flag': false },
           expected_revision: 1,
         });
         return Promise.resolve(
@@ -422,7 +420,7 @@ describe('scion-admin-experiments', () => {
   });
 
   it('a toggle on a second row made after the first write resolves carries the revision the first write returned', async () => {
-    const rowA = makeEntry({ name: 'web.terminal_workspace' });
+    const rowA = makeEntry({ name: 'web.fixture_flag' });
     const rowB = makeEntry({
       name: 'hub.test_gate',
       title: 'Test gate',
@@ -443,15 +441,13 @@ describe('scion-admin-experiments', () => {
           expected_revision: number;
         };
         putBodies.push(body);
-        if ('web.terminal_workspace' in body.overrides) {
+        if ('web.fixture_flag' in body.overrides) {
           return Promise.resolve(
             jsonResponse(
               makeResponse({
                 revision: 2,
                 experiments: [rowA, rowB].map((e) =>
-                  e.name === 'web.terminal_workspace'
-                    ? { ...e, override: false, enabled: false }
-                    : e
+                  e.name === 'web.fixture_flag' ? { ...e, override: false, enabled: false } : e
                 ),
               })
             )
@@ -493,7 +489,7 @@ describe('scion-admin-experiments', () => {
     // revision the first write's response returned (2), not the
     // original-GET revision (1) both rows started with.
     expect(putBodies).toEqual([
-      { overrides: { 'web.terminal_workspace': false }, expected_revision: 1 },
+      { overrides: { 'web.fixture_flag': false }, expected_revision: 1 },
       { overrides: { 'hub.test_gate': false }, expected_revision: 2 },
     ]);
     // Neither write reverted (no error banner, both rows show "overridden"),

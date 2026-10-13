@@ -18,39 +18,30 @@
  * Central terminal-opening helpers.
  *
  * All list, detail, project, graph, tree and chat entry points use these
- * functions so that every agent-terminal action reaches the retained workspace
- * via the coordinator when the terminal-workspace feature flag is enabled,
- * and falls back to the legacy route when it is not.
+ * functions so that every agent-terminal action reaches the retained terminal
+ * workspace via the coordinator.
  *
  * Navigation is dispatched through the `nav-click` custom event that the
  * client-side router already listens for.  This avoids a circular import
  * between entry-point components and main.ts.
  */
 
-import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
-
 /**
- * Return the terminal URL path for an agent.
- *
- * When the terminal workspace is enabled, returns `/terminals/{agentId}` so
- * that the coordinator handles ownership and session reuse.  Otherwise returns
- * the legacy `/agents/{agentId}/terminal` standalone route.
+ * Return the terminal URL path for an agent: `/terminals/{agentId}`, so that
+ * the terminal workspace coordinator handles ownership and session reuse.
  *
  * Use this as the `href` value on links and buttons to preserve real hrefs,
  * accessible names, keyboard activation, modified-click targets, and download
  * semantics.
  */
 export function terminalHref(agentId: string): string {
-  return isFeatureEnabled(TERMINAL_WORKSPACE_FLAG)
-    ? `/terminals/${agentId}`
-    : `/agents/${agentId}/terminal`;
+  return `/terminals/${agentId}`;
 }
 
 /**
  * Programmatically open a terminal for the given agent.
  *
- * Routes through the workspace coordinator when the terminal workspace is
- * enabled, or navigates to the legacy standalone terminal page otherwise.
+ * Routes through the terminal workspace coordinator.
  *
  * This dispatches a `nav-click` event that the router in `main.ts` handles,
  * avoiding a direct import of `navigateTo` and the circular dependency that

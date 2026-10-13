@@ -72,7 +72,7 @@ func newTestServerWithFailingUpsert(t *testing.T, failSection string) (*Server, 
 	t.Helper()
 	base := newBareTestStore(t)
 	wrapped := &failingUpsertStore{Store: base, failSection: failSection}
-	srv := newTestServerFromStore(t, wrapped, nil)
+	srv := newTestServerFromStore(t, wrapped, productionRegistryWithFixture(t))
 	return srv, wrapped
 }
 
@@ -166,7 +166,7 @@ func newTestServerWithErroringGet(t *testing.T, failSection string) *Server {
 	t.Helper()
 	base := newBareTestStore(t)
 	wrapped := &erroringGetStore{Store: base, failSection: failSection}
-	return newTestServerFromStore(t, wrapped, nil)
+	return newTestServerFromStore(t, wrapped, productionRegistryWithFixture(t))
 }
 
 // refreshOps re-reads the store into the cache after a test writes a row
@@ -217,7 +217,7 @@ func grantSystemPermissions(t *testing.T, s store.Store, userID, roleName string
 // --- GET /api/v1/experiments ---
 
 func TestHandleExperiments_FullChain(t *testing.T) {
-	srv, _ := testServerWithOps(t, nil)
+	srv, _ := testServerWithOps(t, productionRegistryWithFixture(t))
 
 	t.Run("real credential returns the resolved map", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodGet, "/api/v1/experiments", nil)
@@ -228,8 +228,8 @@ func TestHandleExperiments_FullChain(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if v, ok := body.Experiments["web.terminal_workspace"]; !ok || !v {
-			t.Errorf("expected web.terminal_workspace=true, got %v (present=%v)", v, ok)
+		if v, ok := body.Experiments[fixtureWebDefaultOn]; !ok || !v {
+			t.Errorf("expected web.fixture_default_on=true, got %v (present=%v)", v, ok)
 		}
 	})
 
@@ -285,7 +285,7 @@ func TestHandleExperiments_FullChain(t *testing.T) {
 // --- GET /api/v1/admin/experiments ---
 
 func TestHandleAdminExperiments_NoRowDefaults(t *testing.T) {
-	srv, _ := testServerWithOps(t, nil)
+	srv, _ := testServerWithOps(t, productionRegistryWithFixture(t))
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/experiments", nil)
 	if rec.Code != http.StatusOK {
@@ -303,12 +303,12 @@ func TestHandleAdminExperiments_NoRowDefaults(t *testing.T) {
 	}
 	var found *adminExperimentEntry
 	for i := range body.Experiments {
-		if body.Experiments[i].Name == "web.terminal_workspace" {
+		if body.Experiments[i].Name == fixtureWebDefaultOn {
 			found = &body.Experiments[i]
 		}
 	}
 	if found == nil {
-		t.Fatal("expected web.terminal_workspace in the listing")
+		t.Fatal("expected web.fixture_default_on in the listing")
 	}
 	if !found.Default || found.Override != nil || !found.Enabled {
 		t.Errorf("expected default=true, override=nil, enabled=true, got default=%v override=%v enabled=%v",
@@ -317,7 +317,7 @@ func TestHandleAdminExperiments_NoRowDefaults(t *testing.T) {
 }
 
 func TestHandleAdminExperiments_AuthorizationMatrix(t *testing.T) {
-	srv, s := testServerWithOps(t, nil)
+	srv, s := testServerWithOps(t, productionRegistryWithFixture(t))
 
 	withPerm := createTestUser(t, s, "exp-with-perm", "exp-with-perm@test.com")
 	grantSystemPermissions(t, s, withPerm.ID, "test-experiments-holder", []string{"hub.experiments.update"})
@@ -375,12 +375,12 @@ func TestAdminExperimentsRouteMetadataExists(t *testing.T) {
 // --- PUT /api/v1/admin/experiments ---
 
 func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
-	srv, s := testServerWithOps(t, nil)
+	srv, s := testServerWithOps(t, productionRegistryWithFixture(t))
 	ctx := context.Background()
 
 	t.Run("missing expected_revision is rejected", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}})
+			map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: false}})
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -391,7 +391,7 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 
 	t.Run("stale expected_revision is a conflict", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 999})
+			map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: false}, "expected_revision": 999})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -403,7 +403,7 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 	var lastRevision int64
 	t.Run("successful write returns 200 and increases the revision, and persists without a restart", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 0})
+			map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: false}, "expected_revision": 0})
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -434,9 +434,9 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 
 		// override and enabled must reflect the stored override, not the
 		// registry default, in both the PUT response and a later admin GET.
-		putEntry := findEntry(body, "web.terminal_workspace")
+		putEntry := findEntry(body, fixtureWebDefaultOn)
 		if putEntry == nil {
-			t.Fatal("expected web.terminal_workspace in the PUT response")
+			t.Fatal("expected web.fixture_default_on in the PUT response")
 		}
 		if putEntry.Override == nil || *putEntry.Override != false {
 			t.Errorf("expected override=false in the PUT response, got %v", putEntry.Override)
@@ -450,9 +450,9 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 		if err := json.Unmarshal(get.Body.Bytes(), &getBody); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		getEntry := findEntry(getBody, "web.terminal_workspace")
+		getEntry := findEntry(getBody, fixtureWebDefaultOn)
 		if getEntry == nil {
-			t.Fatal("expected web.terminal_workspace in the admin GET response")
+			t.Fatal("expected web.fixture_default_on in the admin GET response")
 		}
 		if getEntry.Override == nil || *getEntry.Override != false {
 			t.Errorf("expected override=false in the admin GET response, got %v", getEntry.Override)
@@ -467,14 +467,14 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 		if err := json.Unmarshal(exp.Body.Bytes(), &expBody); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if expBody.Experiments["web.terminal_workspace"] {
-			t.Error("expected web.terminal_workspace=false after the PUT")
+		if expBody.Experiments[fixtureWebDefaultOn] {
+			t.Error("expected web.fixture_default_on=false after the PUT")
 		}
 	})
 
 	t.Run("null for a registered name resets it to the default", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": nil}, "expected_revision": lastRevision})
+			map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: nil}, "expected_revision": lastRevision})
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -484,12 +484,12 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 		}
 		var found *adminExperimentEntry
 		for i := range body.Experiments {
-			if body.Experiments[i].Name == "web.terminal_workspace" {
+			if body.Experiments[i].Name == fixtureWebDefaultOn {
 				found = &body.Experiments[i]
 			}
 		}
 		if found == nil {
-			t.Fatal("expected web.terminal_workspace in the listing")
+			t.Fatal("expected web.fixture_default_on in the listing")
 		}
 		if found.Override != nil {
 			t.Errorf("expected override=nil after resetting to the default, got %v", *found.Override)
@@ -503,8 +503,8 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 		if err := json.Unmarshal(exp.Body.Bytes(), &expBody); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if !expBody.Experiments["web.terminal_workspace"] {
-			t.Error("expected web.terminal_workspace=true (the default) after resetting to the default")
+		if !expBody.Experiments[fixtureWebDefaultOn] {
+			t.Error("expected web.fixture_default_on=true (the default) after resetting to the default")
 		}
 	})
 }
@@ -573,13 +573,13 @@ func TestHandleAdminExperiments_ServerLayerOverrideReflectedInEnabled(t *testing
 // force deterministically. Calling the function directly with a revision
 // that does not match the cache reproduces exactly that condition.
 func TestBuildAdminExperimentsResponseAfterWrite_FallbackAttribution(t *testing.T) {
-	srv, _ := testServerWithOps(t, nil)
+	srv, _ := testServerWithOps(t, productionRegistryWithFixture(t))
 
 	// Establish a cached snapshot attributed to a different, distinguishable
 	// writer at a known revision, so the assertions below can tell the
 	// fallback's caller/now values apart from anything the snapshot holds.
 	put := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-		map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 0})
+		map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: false}, "expected_revision": 0})
 	if put.Code != http.StatusOK {
 		t.Fatalf("setup PUT expected 200, got %d: %s", put.Code, put.Body.String())
 	}
@@ -609,7 +609,7 @@ func TestBuildAdminExperimentsResponseAfterWrite_FallbackAttribution(t *testing.
 	})
 
 	t.Run("no row also falls back to the caller and now", func(t *testing.T) {
-		emptySrv, _ := testServerWithOps(t, nil) // fresh server: no row, Present=false
+		emptySrv, _ := testServerWithOps(t, productionRegistryWithFixture(t)) // fresh server: no row, Present=false
 		before := time.Now()
 		resp := emptySrv.buildAdminExperimentsResponseAfterWrite(map[string]bool{}, 1, "caller@example.com", emptySrv.GetOperationalSettings())
 		after := time.Now()
@@ -624,19 +624,19 @@ func TestBuildAdminExperimentsResponseAfterWrite_FallbackAttribution(t *testing.
 }
 
 func TestHandleAdminExperiments_StaleReplica(t *testing.T) {
-	srv, s := testServerWithOps(t, nil)
+	srv, s := testServerWithOps(t, productionRegistryWithFixture(t))
 	ctx := context.Background()
 
 	// A second replica writes directly through the store, bypassing srv's
 	// cache. srv's cache still believes revision 0 (no row).
 	if _, err := s.UpsertHubSetting(ctx, "experiments",
-		json.RawMessage(`{"overrides":{"web.terminal_workspace":false}}`), "other-replica", 0, "managed"); err != nil {
+		json.RawMessage(`{"overrides":{"web.fixture_default_on":false}}`), "other-replica", 0, "managed"); err != nil {
 		t.Fatalf("UpsertHubSetting: %v", err)
 	}
 
 	t.Run("PUT with the cache's stale revision is a conflict", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": true}, "expected_revision": 0})
+			map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: true}, "expected_revision": 0})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -647,7 +647,7 @@ func TestHandleAdminExperiments_StaleReplica(t *testing.T) {
 
 	t.Run("PUT with the store's current revision succeeds", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": true}, "expected_revision": 1})
+			map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: true}, "expected_revision": 1})
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -658,7 +658,7 @@ func TestHandleAdminExperiments_StoreRace(t *testing.T) {
 	srv, _ := newTestServerWithFailingUpsert(t, "experiments")
 
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-		map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 0})
+		map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: false}, "expected_revision": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409 from a store race, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -676,7 +676,7 @@ func TestHandleAdminExperiments_StoreReadError(t *testing.T) {
 
 	t.Run("PUT", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 0})
+			map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: false}, "expected_revision": 0})
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -713,7 +713,7 @@ func TestHandleAdminExperiments_NilOperationalSettings(t *testing.T) {
 		body   string
 	}{
 		{"GET", http.MethodGet, ""},
-		{"PUT", http.MethodPut, `{"overrides":{"web.terminal_workspace":false},"expected_revision":0}`},
+		{"PUT", http.MethodPut, `{"overrides":{"web.fixture_default_on":false},"expected_revision":0}`},
 		{"DELETE", http.MethodDelete, `{"expected_revision":0}`},
 	}
 	for _, tt := range tests {
@@ -765,7 +765,7 @@ func TestHandleAdminExperiments_ReviewOverdueField(t *testing.T) {
 }
 
 func TestHandleAdminExperiments_NameValidation(t *testing.T) {
-	srv, _ := testServerWithOps(t, nil)
+	srv, _ := testServerWithOps(t, productionRegistryWithFixture(t))
 
 	tests := []struct {
 		name       string
@@ -780,7 +780,7 @@ func TestHandleAdminExperiments_NameValidation(t *testing.T) {
 		{"false for retired name", map[string]interface{}{"web.access_boundaries_read": false}, http.StatusBadRequest, "validation_failed", "web.access_boundaries_read"},
 		{"null for pattern-valid unknown name is accepted (no-op)", map[string]interface{}{"hub.future_thing": nil}, http.StatusOK, "", ""},
 		{"null for pattern-invalid key", map[string]interface{}{"not a valid name": nil}, http.StatusBadRequest, "validation_failed", "not a valid name"},
-		{"non-boolean value", map[string]interface{}{"web.terminal_workspace": "nope"}, http.StatusBadRequest, "validation_failed", ""},
+		{"non-boolean value", map[string]interface{}{fixtureWebDefaultOn: "nope"}, http.StatusBadRequest, "validation_failed", ""},
 		{"empty overrides", map[string]interface{}{}, http.StatusBadRequest, "validation_failed", ""},
 	}
 	for _, tt := range tests {
@@ -807,7 +807,7 @@ func TestHandleAdminExperiments_NameValidation(t *testing.T) {
 }
 
 func TestHandleAdminExperiments_KeyRetentionAndUnknownOverrides(t *testing.T) {
-	srv, s := testServerWithOps(t, nil)
+	srv, s := testServerWithOps(t, productionRegistryWithFixture(t))
 	ctx := context.Background()
 
 	// Seed a row with a retired key, a pattern-valid unknown key, and a
@@ -838,7 +838,7 @@ func TestHandleAdminExperiments_KeyRetentionAndUnknownOverrides(t *testing.T) {
 
 	t.Run("a PUT prunes retired and pattern-invalid keys and preserves the unknown key", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 1})
+			map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: false}, "expected_revision": 1})
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -897,8 +897,99 @@ func TestHandleAdminExperiments_KeyRetentionAndUnknownOverrides(t *testing.T) {
 			t.Errorf("expected hub.future_thing removed, got %v", after.UnknownOverrides)
 		}
 		for _, e := range after.Experiments {
-			if e.Name == "web.terminal_workspace" && (e.Override == nil || *e.Override != false) {
-				t.Error("web.terminal_workspace override must be unchanged by the unrelated removal")
+			if e.Name == fixtureWebDefaultOn && (e.Override == nil || *e.Override != false) {
+				t.Error("web.fixture_default_on override must be unchanged by the unrelated removal")
+			}
+		}
+	})
+}
+
+// TestRetiredExperimentOverrides_StoredAtStartup covers every retired name in
+// the production registry (ptone/scion#4917): a hub whose stored experiments
+// document still holds overrides for retired names starts normally, ignores
+// them on every read, and prunes them on the next admin write. It iterates
+// Registry.Retired(), so retiring an experiment needs no new test here.
+func TestRetiredExperimentOverrides_StoredAtStartup(t *testing.T) {
+	reg := experiments.Default()
+	retired := reg.Retired()
+	if len(retired) == 0 {
+		t.Skip("the production registry has no retired names")
+	}
+
+	// Seed the stored document before the server exists, as on a hub that
+	// was upgraded past the retirement. Alternate true/false so neither
+	// value is special-cased.
+	s := newBareTestStore(t)
+	overrides := make(map[string]bool, len(retired))
+	for i, name := range retired {
+		overrides[name] = i%2 == 0
+	}
+	seed, err := json.Marshal(map[string]interface{}{"overrides": overrides})
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if _, err := s.UpsertHubSetting(context.Background(), "experiments", seed, "seed", 0, "managed"); err != nil {
+		t.Fatalf("UpsertHubSetting: %v", err)
+	}
+	srv := newTestServerFromStore(t, s, reg)
+
+	t.Run("GET /api/v1/experiments omits retired names", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/experiments", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var body experimentsResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		for _, name := range retired {
+			if _, ok := body.Experiments[name]; ok {
+				t.Errorf("retired name %s must not be served", name)
+			}
+		}
+	})
+
+	t.Run("admin GET is healthy and lists no retired name", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/experiments", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var body adminExperimentsResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.Malformed {
+			t.Error("a stored retired name must not make the document malformed")
+		}
+		for _, name := range retired {
+			if _, ok := body.UnknownOverrides[name]; ok {
+				t.Errorf("retired name %s must not appear in unknown_overrides", name)
+			}
+			if findEntry(body, name) != nil {
+				t.Errorf("retired name %s must not be listed as an experiment", name)
+			}
+		}
+	})
+
+	t.Run("an admin PUT prunes every retired name", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
+			map[string]interface{}{"overrides": map[string]interface{}{"hub.future_thing": nil}, "expected_revision": 1})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		raw, err := s.GetHubSetting(context.Background(), "experiments")
+		if err != nil {
+			t.Fatalf("GetHubSetting: %v", err)
+		}
+		var doc struct {
+			Overrides map[string]bool `json:"overrides"`
+		}
+		if err := json.Unmarshal(raw.Value, &doc); err != nil {
+			t.Fatalf("unmarshal stored doc: %v", err)
+		}
+		for _, name := range retired {
+			if _, ok := doc.Overrides[name]; ok {
+				t.Errorf("retired name %s must be pruned from the stored document", name)
 			}
 		}
 	})
@@ -1023,7 +1114,7 @@ func TestHandleAdminExperiments_MalformedRow(t *testing.T) {
 }
 
 func TestHandleAdminExperiments_HealthyRowDeleteChecks(t *testing.T) {
-	srv, s := testServerWithOps(t, nil)
+	srv, s := testServerWithOps(t, productionRegistryWithFixture(t))
 	ctx := context.Background()
 
 	t.Run("DELETE on a healthy row without expected_revision is rejected", func(t *testing.T) {
@@ -1070,13 +1161,13 @@ func TestHandleAdminExperiments_HealthyRowDeleteChecks(t *testing.T) {
 		// registered override written through the handler, so the reset-all
 		// clears both kinds of stored entry.
 		put := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 0})
+			map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: false}, "expected_revision": 0})
 		var putBody adminExperimentsResponse
 		if err := json.Unmarshal(put.Body.Bytes(), &putBody); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
 		if _, err := s.UpsertHubSetting(ctx, "experiments",
-			json.RawMessage(`{"overrides":{"web.terminal_workspace":false,"hub.future_thing":false}}`),
+			json.RawMessage(`{"overrides":{"web.fixture_default_on":false,"hub.future_thing":false}}`),
 			"seed", putBody.Revision, "managed"); err != nil {
 			t.Fatalf("UpsertHubSetting: %v", err)
 		}
@@ -1136,11 +1227,11 @@ func TestHandleAdminExperiments_HealthyRowDeleteChecks(t *testing.T) {
 // --- Generic section-reset rejection (ptone/scion#2217) ---
 
 func TestHandleAdminServerConfigSectionReset_RejectsExperiments(t *testing.T) {
-	srv, s := testServerWithOps(t, nil)
+	srv, s := testServerWithOps(t, productionRegistryWithFixture(t))
 	srv.dbDriver = "postgres" // unlock the postgres-only generic-reset route for this test
 
 	put := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
-		map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 0})
+		map[string]interface{}{"overrides": map[string]interface{}{fixtureWebDefaultOn: false}, "expected_revision": 0})
 	if put.Code != http.StatusOK {
 		t.Fatalf("setup PUT expected 200, got %d: %s", put.Code, put.Body.String())
 	}

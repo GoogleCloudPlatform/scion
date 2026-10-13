@@ -7,9 +7,6 @@ const agentB = '22222222-2222-4222-8222-222222222222';
 test('direct legacy load and history retain the deployment base', async ({ page }) => {
   let attaches = 0;
   await installEventSourceStub(page);
-  await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-  });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
   );
@@ -43,9 +40,6 @@ test('direct legacy load and history retain the deployment base', async ({ page 
 test('bare /terminals restore keeps the deployment base in the URL', async ({ page }) => {
   let attaches = 0;
   await installEventSourceStub(page);
-  await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-  });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
   );

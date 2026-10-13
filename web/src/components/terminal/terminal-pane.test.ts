@@ -611,7 +611,7 @@ describe('initial-load preflight refusal', () => {
 });
 
 describe('bind-after-mount still arms frontmost', () => {
-  it('a pane mounted before open() (the legacy page order) still auto-reconnects on a retriable close', async () => {
+  it('a pane mounted before open() still auto-reconnects on a retriable close', async () => {
     const registry2 = new TerminalSessionRegistry(
       {
         hubUrl: window.location.origin,
@@ -620,8 +620,8 @@ describe('bind-after-mount still arms frontmost', () => {
       zeroJitter
     );
     const page2 = document.createElement('scion-terminal-pane');
-    // connectedCallback runs with no session bound yet — the exact order that
-    // pages/terminal.ts uses (mount the shell, then open()).
+    // connectedCallback runs with no session bound yet: mount the shell,
+    // then open().
     document.body.append(page2);
     try {
       page2.open(registry2, agentId);
@@ -644,6 +644,50 @@ describe('bind-after-mount still arms frontmost', () => {
       page2.dispose();
       page2.remove();
     }
+  });
+});
+
+// Ported from the deleted legacy page adapter tests (ptone/scion#4917): they
+// exercised the pane through pages/terminal.ts, and now drive it directly.
+describe('reconnect and metadata through the pane', () => {
+  it('reconnect keeps the old terminal on denial and resets only after a new socket opens', async () => {
+    await mountConnected();
+    const socket = FakeSocket.instances[0];
+    socket.readyState = 3;
+    // The pane is frontmost, so a retriable close attempts automatically;
+    // the denial has to be queued before the close fires.
+    fetcher
+      .mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'running' }))
+      .mockResolvedValueOnce(json({}, 403));
+    socket.onclose?.({ code: 1006 });
+    await vi.waitFor(() => expect(page.shadowRoot?.textContent).toContain('permission'));
+    expect(terminal.instances[0].dispose).not.toHaveBeenCalled();
+    expect(terminal.instances[0].reset).not.toHaveBeenCalled();
+
+    // The automatic attempt failed (403 is terminal, not retriable), which
+    // blocks further auto-attempts, so a manual click is required.
+    fetcher.mockResolvedValue(json({ id: agentId, name: 'test', phase: 'running' }));
+    page.shadowRoot?.querySelector<HTMLButtonElement>('.reconnect-btn')?.click();
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+    expect(terminal.instances[0].reset).not.toHaveBeenCalled();
+    FakeSocket.instances[1].open();
+    FakeSocket.instances[1].data(); // confirms the reconnect attempt live
+    expect(terminal.instances[0].reset).toHaveBeenCalledTimes(1);
+    expect(terminal.instances).toHaveLength(1);
+  });
+
+  it('connection notifications do not overwrite metadata refreshed by pane controls', async () => {
+    await mountConnected();
+    FakeEventSource.instances[0].onopen?.();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+    const controls = page as unknown as { refreshAgentData(): Promise<void>; sendResize(): void };
+    fetcher.mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'stopped' }));
+    await controls.refreshAgentData();
+    controls.sendResize();
+    await page.updateComplete;
+    expect(page.shadowRoot?.querySelector('scion-status-badge')?.getAttribute('status')).toBe(
+      'stopped'
+    );
   });
 });
 

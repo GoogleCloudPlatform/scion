@@ -86,27 +86,20 @@ export interface SetupResult {
 export async function setup(
   page: Page,
   opts: {
-    enabled?: boolean;
     agents?: Record<string, AgentFixture>;
     nativeChatEnabled?: boolean;
   } = {}
 ): Promise<SetupResult> {
-  const { enabled = true, agents = defaultAgents, nativeChatEnabled = true } = opts;
+  const { agents = defaultAgents, nativeChatEnabled = true } = opts;
 
   let attaches = 0;
   let closes = 0;
   const sent: string[] = [];
 
   await installEventSourceStub(page);
-  await page.addInitScript(
-    ({ enabled: e }) => {
-      window.__SCION_FEATURES__ = {
-        'web.terminal_workspace': e,
-        'web.native_chat': true,
-      };
-    },
-    { enabled }
-  );
+  await page.addInitScript(() => {
+    window.__SCION_FEATURES__ = { 'web.native_chat': true };
+  });
 
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })

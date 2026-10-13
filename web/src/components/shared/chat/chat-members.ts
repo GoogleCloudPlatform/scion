@@ -35,7 +35,6 @@ import { ACTIVITY_DISPLAY, stateLabel } from '../../../shared/agent-state-displa
 import { apiFetch } from '../../../client/api.js';
 import { navigateTo } from '../../../client/main.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../../client/open-terminal.js';
-import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../../utils/feature-flags.js';
 import { touchMenuItemStyles } from '../touch-styles.js';
 import { RECENT_USERS_LIMIT } from '../../../client/user-directory.js';
 import { LongPressController, type LongPressPoint } from './long-press.js';
@@ -55,65 +54,6 @@ import { DisplayZoneController } from '../../../utils/display-zone-controller.js
 
 /** Ages under this are shown relative; older ones as an absolute date. */
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-
-/** Popup window geometry for a terminal. Roughly 80x24 at a comfortable size. */
-const TERMINAL_POPOUT_WIDTH = 1024;
-const TERMINAL_POPOUT_HEIGHT = 700;
-
-/**
- * Open an agent's terminal in its own window (legacy mode only).
- *
- * When the terminal workspace feature flag is enabled, callers must use
- * {@link openTerminal} instead so all terminal opens join the singleton
- * coordinator and reuse a retained session.
- *
- * The window is *named per agent*, which is the whole point: clicking the same
- * agent again focuses the window that is already open instead of spawning
- * another one. Six agents means six windows, not one window per click - the
- * tab pile-up that made this control painful in the first place.
- *
- * Note the deliberate absence of `noopener`: a named window cannot be reused
- * or focused if the opener is severed, and the target is our own same-origin
- * route. Falls back to in-app navigation when a popup blocker intervenes, so
- * the control always does something.
- */
-function openTerminalPopout(agentId: string): void {
-  const features = [
-    'popup=yes',
-    `width=${TERMINAL_POPOUT_WIDTH}`,
-    `height=${TERMINAL_POPOUT_HEIGHT}`,
-    'resizable=yes',
-    'scrollbars=yes',
-  ].join(',');
-
-  const path = `/agents/${agentId}/terminal`;
-  const base = import.meta.env.BASE_URL;
-  const url = base && base !== '/' ? base.replace(/\/$/, '') + path : path;
-
-  const win = window.open(url, `scion-term-${agentId}`, features);
-  if (win) {
-    win.focus();
-    return;
-  }
-  navigateTo(`/agents/${agentId}/terminal`);
-}
-
-/**
- * Open a terminal for the given agent through the appropriate path.
- *
- * When the terminal workspace is enabled, routes through the singleton
- * coordinator so all entry points converge on one owner/session.  Chat source
- * state remains intact because the route outlet is hidden, not destroyed.
- *
- * When the workspace is disabled, falls back to the legacy popup behaviour.
- */
-function openTerminalFromChat(agentId: string): void {
-  if (isFeatureEnabled(TERMINAL_WORKSPACE_FLAG)) {
-    openTerminal(agentId);
-  } else {
-    openTerminalPopout(agentId);
-  }
-}
 
 /**
  * Statuses that represent a settled agent. Entering one of these is the end of
@@ -1056,7 +996,7 @@ export class ScionChatMembers extends LitElement {
                   return;
                 }
                 e.preventDefault();
-                openTerminalFromChat(a.id);
+                openTerminal(a.id);
               }}
             >
               <sl-icon name="terminal" style="font-size: var(--chat-fs-base);"></sl-icon>
