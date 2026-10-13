@@ -631,6 +631,12 @@ class CodexPluginInstaller(scion_harness.PluginInstaller):
         # codex refuses to run when CODEX_HOME does not exist ("failed to
         # resolve CODEX_HOME"); images ship ~/.codex, but never rely on it.
         os.makedirs(self.codex_home, exist_ok=True)
+        # The marketplace lists every desired plugin before their bundles are
+        # mirrored (mirror_bundle runs per plugin in the install loop). codex
+        # 0.162.1 tolerates a listed bundle that does not exist yet:
+        # marketplace add, plugin add of another plugin, plugin list and mcp
+        # list all succeed; only adding that plugin fails ("missing
+        # plugin.json"), and reconcile retries it next start.
         self.write_marketplace([p.name for p in desired])
         if not desired or self.marketplace_registered():
             return

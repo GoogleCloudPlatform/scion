@@ -266,3 +266,39 @@ func TestSnapshotRestoreManyPlugins(t *testing.T) {
 		}
 	}
 }
+
+func TestStartAgentPluginsWarning(t *testing.T) {
+	newHC := func(c api.CapabilityField) api.Harness {
+		return &capsHarness{caps: api.HarnessAdvancedCapabilities{AgentPlugins: c}}
+	}
+	yes := newHC(api.CapabilityField{Support: api.SupportPartial})
+	absent := newHC(api.CapabilityField{})
+	no := newHC(api.CapabilityField{Support: api.SupportNo, Reason: "r"})
+	cases := []struct {
+		name               string
+		recordHas, include bool
+		h                  api.Harness
+		want               string
+	}{
+		{"no plugins recorded", false, true, absent, ""},
+		{"no plugins recorded, gate off", false, false, yes, ""},
+		{"gate off", true, false, yes, "agent_plugins: ignored: experiment hub.agent_plugins is off; previously installed plugins are removed"},
+		{"supported", true, true, yes, ""},
+		{"capability absent", true, true, absent, `agent_plugins: harness-config "hc" predates Agent Plugins support; plugins staged but not installed (reinstall it with scion harness-config install --force)`},
+		{"capability no", true, true, no, `agent_plugins: harness "hc" does not support Agent Plugins; plugins staged but not installed (r)`},
+	}
+	for _, c := range cases {
+		if got := startAgentPluginsWarning(c.recordHas, c.include, "hc", c.h); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// capsHarness is an api.Harness whose only meaningful method is
+// AdvancedCapabilities.
+type capsHarness struct {
+	api.Harness
+	caps api.HarnessAdvancedCapabilities
+}
+
+func (c *capsHarness) AdvancedCapabilities() api.HarnessAdvancedCapabilities { return c.caps }

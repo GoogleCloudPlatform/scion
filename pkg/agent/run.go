@@ -1030,15 +1030,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if err := writeAgentHome(ctx, func() error { return restoreControlPlaneInputs(agentDir, agentHome, includePlugins) }); err != nil {
 				return nil, fmt.Errorf("restage harness inputs: %w", err)
 			}
-			if recordHasAgentPlugins(agentDir) {
-				var msg string
-				switch {
-				case !includePlugins:
-					msg = "agent_plugins: ignored: experiment hub.agent_plugins is off; previously installed plugins are removed"
-				case agentPluginsCapabilityMissing(h):
-					msg = unsupportedAgentPluginsMessage(harnessConfigName, h)
-				}
-				if msg != "" && !slices.Contains(warnings, msg) {
+			if msg := startAgentPluginsWarning(recordHasAgentPlugins(agentDir), includePlugins, harnessConfigName, h); msg != "" {
+				if !slices.Contains(warnings, msg) {
 					slog.Warn(msg, "agent", opts.Name)
 					warnings = append(warnings, msg)
 				}

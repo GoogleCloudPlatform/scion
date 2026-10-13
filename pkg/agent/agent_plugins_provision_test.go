@@ -133,10 +133,16 @@ func TestProvisionAgent_AgentPluginsGateOnStagesAndRecords(t *testing.T) {
 		t.Errorf("manifest does not name the plugin index (err %v)", err)
 	}
 
-	// Turning the experiment off: the next start restores no plugins.
+	// Turning the experiment off: the next start restores no plugins and
+	// says so.
 	e.disableLocalAgentPlugins(t)
-	if _, err := policyTestManager(nil).Start(context.Background(), api.StartOptions{Name: "plugged", ProjectPath: e.scion, HarnessConfig: "hc-plugins", NoAuth: true}); err != nil {
+	info, err := policyTestManager(nil).Start(context.Background(), api.StartOptions{Name: "plugged", ProjectPath: e.scion, HarnessConfig: "hc-plugins", NoAuth: true})
+	if err != nil {
 		t.Fatalf("Start (off): %v", err)
+	}
+	gateOff := "agent_plugins: ignored: experiment hub.agent_plugins is off; previously installed plugins are removed"
+	if n := countWarning(info.Warnings, gateOff); n != 1 {
+		t.Errorf("start warnings = %v, want %q once", info.Warnings, gateOff)
 	}
 	for _, rel := range []string{"plugins.json", "plugins"} {
 		if _, err := os.Lstat(filepath.Join(inputs, rel)); !os.IsNotExist(err) {
@@ -198,5 +204,61 @@ func TestProvisionAgent_AgentPluginsRequiredFailureFailsProvision(t *testing.T) 
 	_, _, _, err := ProvisionAgent(context.Background(), "broken", "plug", "", "hc-plugins", e.scion, "", "", "", "")
 	if err == nil || !strings.Contains(err.Error(), `agent plugins: template plug: plugin dir "plugins/missing" not found or is a symlink`) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func countWarning(ws []string, want string) int {
+	n := 0
+	for _, w := range ws {
+		if w == want {
+			n++
+		}
+	}
+	return n
+}
+
+// A start that switches to a harness-config without the capability warns,
+// and the bundle is still restored for a later switch back.
+func TestStart_AgentPluginsHarnessSwitchWarns(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-plugins", policyTestScriptedPlugins)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	e.pluginTemplate(t)
+	e.enableLocalAgentPlugins(t)
+	provisionWithWarnings(t, e, "switch", "hc-plugins")
+
+	info, err := policyTestManager(nil).Start(context.Background(), api.StartOptions{Name: "switch", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	want := `agent_plugins: harness-config "hc-scripted" predates Agent Plugins support; plugins staged but not installed (reinstall it with scion harness-config install --force)`
+	if n := countWarning(info.Warnings, want); n != 1 {
+		t.Errorf("start warnings = %v, want %q once", info.Warnings, want)
+	}
+	home := config.GetAgentHomePath(e.scion, "switch")
+	if _, err := os.Stat(filepath.Join(stagedInputsDir(home), "plugins.json")); err != nil {
+		t.Errorf("plugins not restored after the switch: %v", err)
+	}
+}
+
+// Inline-only agent_plugins (no template declares any) are reported, not
+// silently ignored.
+func TestProvisionAgent_InlineOnlyAgentPluginsWarn(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-plugins", policyTestScriptedPlugins)
+	inline := &api.ScionConfig{AgentPlugins: []api.AgentPluginReference{{Path: "plugins/x"}}}
+	provision := func(name string) []string {
+		ctx, c := withTemplateEnvWarnings(context.Background())
+		if _, _, _, err := ProvisionAgent(ctx, name, "", "", "hc-plugins", e.scion, "", "", "", "", inline); err != nil {
+			t.Fatalf("ProvisionAgent: %v", err)
+		}
+		return agentPluginWarnings(c.Warnings())
+	}
+	if got := provision("inline-off"); !slices.Equal(got, []string{"agent_plugins: ignored: experiment hub.agent_plugins is off"}) {
+		t.Errorf("gate off: warnings = %v", got)
+	}
+	e.enableLocalAgentPlugins(t)
+	if got := provision("inline-on"); !slices.Equal(got, []string{`agent_plugins: entry "plugins/x" ignored: only template-relative paths are supported`}) {
+		t.Errorf("gate on: warnings = %v", got)
 	}
 }

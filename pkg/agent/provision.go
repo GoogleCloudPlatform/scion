@@ -2085,7 +2085,17 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Step 3c: Stage agent plugins (hub.agent_plugins). Bundles are staged
 	// into inputs/plugins/ even when this harness cannot install them, so a
 	// later harness-config switch at Start works without a re-provision.
-	if hasAgentPlugins(chain) {
+	templatePlugins := hasAgentPlugins(chain)
+	if !templatePlugins && inlineCfg != nil && len(inlineCfg.AgentPlugins) > 0 {
+		// Only the inline config declares agent_plugins: nothing to stage,
+		// but say why it is ignored.
+		if !agentPluginsEnabled(ctx, settings) {
+			addStartWarning(ctx, "agent_plugins: ignored: experiment hub.agent_plugins is off")
+		} else {
+			warnInlineAgentPlugins(ctx, inlineCfg, nil)
+		}
+	}
+	if templatePlugins {
 		switch {
 		case !agentPluginsEnabled(ctx, settings):
 			addStartWarning(ctx, "agent_plugins: ignored: experiment hub.agent_plugins is off")

@@ -176,6 +176,23 @@ func unsupportedAgentPluginsMessage(harnessName string, h api.Harness) string {
 	return fmt.Sprintf("agent_plugins: harness %q does not support Agent Plugins; plugins staged but not installed (%s)", harnessName, reason)
 }
 
+// startAgentPluginsWarning is the start warning about agent plugins for a
+// start of a container-script harness, or "": recordHas reports a staged
+// plugin index in the control-plane record, includePlugins the gate for this
+// start, and h the harness the start resolved (which may differ from the one
+// provisioned, after a --harness-config switch).
+func startAgentPluginsWarning(recordHas, includePlugins bool, harnessName string, h api.Harness) string {
+	switch {
+	case !recordHas:
+		return ""
+	case !includePlugins:
+		return "agent_plugins: ignored: experiment hub.agent_plugins is off; previously installed plugins are removed"
+	case agentPluginsCapabilityMissing(h):
+		return unsupportedAgentPluginsMessage(harnessName, h)
+	}
+	return ""
+}
+
 // isContainerScriptHarness reports whether h installs from staged inputs.
 func isContainerScriptHarness(h api.Harness) bool {
 	_, ok := h.(*harness.ContainerScriptHarness)

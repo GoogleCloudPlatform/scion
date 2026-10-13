@@ -2314,11 +2314,20 @@ def _write_agent_plugins_status(
     state: dict[str, dict[str, Any]],
     skipped: list[dict[str, str]],
     removed: list[str],
+    desired: list[AgentPlugin],
 ) -> None:
+    """status-<harness>.json. installed: desired plugins installed at the
+    desired digest. stale: other Scion-installed plugins still in place (an
+    older version kept after a failed upgrade, or a removal deferred to the
+    next start)."""
+    want = {p.name: p.digest for p in desired}
+    installed = sorted(n for n, rec in state.items() if want.get(n) == rec.get("digest"))
+    stale = sorted(n for n in state if n not in installed)
     atomic_write_json(os.path.join(agent_plugins_dir(), f"status-{harness}.json"), {
         "harness": harness,
         "cli_version": None if cli_version is None else format_semver(cli_version),
-        "installed": sorted(state),
+        "installed": installed,
+        "stale": stale,
         "skipped": skipped,
         "removed": removed,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -2386,7 +2395,7 @@ def _reconcile_agent_plugins(
     pending = [p for p in desired if not present(p)]
     extra = sorted(n for n in state if n not in desired_names)
     if not pending and not extra:
-        _write_agent_plugins_status(harness, None, state, [], [])
+        _write_agent_plugins_status(harness, None, state, [], [], desired)
         return
 
     version = installer.detect_version()
@@ -2398,7 +2407,7 @@ def _reconcile_agent_plugins(
         ctx.warn(msg)
         _write_agent_plugins_status(
             harness, version, state,
-            [{"name": p.name, "reason": msg} for p in pending], [],
+            [{"name": p.name, "reason": msg} for p in pending], [], desired,
         )
         return
 
@@ -2476,7 +2485,7 @@ def _reconcile_agent_plugins(
         _save_agent_plugins_state(harness, state)
         ctx.info(f"agent plugin {p.name}: installed")
 
-    _write_agent_plugins_status(harness, version, state, skipped, removed)
+    _write_agent_plugins_status(harness, version, state, skipped, removed, desired)
 
 
 # ---------------------------------------------------------------------------

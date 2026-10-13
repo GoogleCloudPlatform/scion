@@ -2749,6 +2749,21 @@ class TestAgentPluginsReconcile(unittest.TestCase):
         self.assertIn("removing the previous version failed", warn.call_args_list[0][0][0])
         self.assertEqual(self.env.state()["a"]["digest"], "d2")
 
+    def test_status_separates_stale_versions(self):
+        self.env.stage({"a": "d1", "b": "d1"})
+        inst = _FakeInstaller()
+        sh.reconcile_agent_plugins(self.env.ctx, inst)
+        self.assertEqual((self.env.status()["installed"], self.env.status()["stale"]), (["a", "b"], []))
+        # a's upgrade fails entirely: the old version stays, reported stale.
+        self.env.stage({"a": "d2", "b": "d1"})
+        inst.fail_uninstall = {"a"}
+        inst.fail_install = {"a"}
+        sh.reconcile_agent_plugins(self.env.ctx, inst)
+        st = self.env.status()
+        self.assertEqual(st["installed"], ["b"])
+        self.assertEqual(st["stale"], ["a"])
+        self.assertEqual([s["name"] for s in st["skipped"]], ["a"])
+
     def test_missing_native_install_is_reinstalled(self):
         self.env.stage({"a": "d1"})
         inst = _FakeInstaller()
