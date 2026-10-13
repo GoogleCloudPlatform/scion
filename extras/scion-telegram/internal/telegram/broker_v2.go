@@ -95,11 +95,11 @@ type TelegramBrokerV2 struct {
 	// two loops never run at once.
 	pollCancel context.CancelFunc
 	pollDone   chan struct{}
-	// lastOffset is the last update ID confirmed for the bot offsetBotID.
-	// Only the running poll loop reads or writes them; loops never overlap,
-	// and each starts after the previous one has exited.
-	lastOffset  int64
-	offsetBotID int64
+	// lastOffsets maps a bot ID to the last update ID handled for that bot.
+	// Update IDs are per bot, so each bot resumes from its own offset. Only
+	// the running poll loop reads or writes it; loops never overlap, and
+	// each starts after the previous one has exited.
+	lastOffsets map[int64]int64
 
 	sentIDs   map[string]time.Time
 	sentIDsMu sync.Mutex
@@ -151,8 +151,11 @@ type TelegramBrokerV2 struct {
 //
 // The fields below active are set under b.mu before b.mu is released by
 // the Configure that created the generation, and are not changed after.
-// Handlers get the generation under b.mu (acquireGen), so they read these
-// fields without b.mu.
+// Some are set after the poll loop or webhook server has started, so
+// handlers must obtain g under b.mu, through acquireGen, acquireGenLocked
+// or acquireGenIfCurrent, and may then read these fields without b.mu. The
+// poll loop receives g from startPolling under b.mu and reads only api and
+// botID before it acquires g.
 type configGen struct {
 	active sync.WaitGroup
 
@@ -2071,18 +2074,19 @@ func (b *TelegramBrokerV2) stopPolling() {
 // (prev) to exit. A reconfigure replaces the configuration under b.mu and
 // restarts the loop; updates this loop fetched are handled with g only.
 //
-// The update offset carries over from the previous loop when it polled the
-// same bot (also with a rotated credential). For a different bot it starts
-// again: update IDs are per bot, and the old bot's offset would make the new
-// bot's earlier updates look confirmed.
+// The update offset is kept per bot: the loop resumes from the last update
+// handled for its bot (also with a rotated credential), and from the start
+// for a bot not polled before. Carrying another bot's offset would make
+// this bot's earlier updates look confirmed. Keeping the offset of a bot
+// that was switched away from means its handled but not yet confirmed
+// updates are not handled again when it returns.
 func (b *TelegramBrokerV2) pollLoop(ctx context.Context, g *configGen, prev <-chan struct{}, done chan struct{}) {
 	defer close(done)
 	if prev != nil {
 		<-prev
 	}
-	if b.offsetBotID != g.botID {
-		b.lastOffset = 0
-		b.offsetBotID = g.botID
+	if b.lastOffsets == nil {
+		b.lastOffsets = make(map[int64]int64)
 	}
 
 	for {
@@ -2092,7 +2096,7 @@ func (b *TelegramBrokerV2) pollLoop(ctx context.Context, g *configGen, prev <-ch
 		default:
 		}
 
-		updates, err := b.getUpdatesV2(ctx, g.api, b.lastOffset+1, longPollTimeout)
+		updates, err := b.getUpdatesV2(ctx, g.api, b.lastOffsets[g.botID]+1, longPollTimeout)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -2108,7 +2112,7 @@ func (b *TelegramBrokerV2) pollLoop(ctx context.Context, g *configGen, prev <-ch
 
 		// Stop between updates once cancelled or once g is no longer the
 		// current configuration: the next loop fetches the rest of the batch
-		// again (for the same bot), as lastOffset has not passed them. An
+		// again (for the same bot), as its offset has not passed them. An
 		// update being handled when the loop is stopped (for example by a
 		// reconfigure) still finishes with g; see handlePolledUpdate.
 		for _, update := range updates {
@@ -2119,7 +2123,7 @@ func (b *TelegramBrokerV2) pollLoop(ctx context.Context, g *configGen, prev <-ch
 			if !ok {
 				return
 			}
-			b.lastOffset = update.UpdateID
+			b.lastOffsets[g.botID] = update.UpdateID
 			b.handlePolledUpdate(ctx, g, update)
 			release()
 		}

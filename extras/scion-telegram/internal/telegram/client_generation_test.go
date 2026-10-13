@@ -33,7 +33,7 @@ import (
 
 // Tests for the API client and update offset across reconfigures: handlers
 // keep the client of the configuration they started under, and the update
-// offset starts again when the bot changes.
+// offset is kept per bot.
 
 // genTelegram is a fake Telegram API for several bot credentials. Each
 // credential maps to a bot ID; several credentials may belong to one bot.
@@ -239,27 +239,27 @@ func TestV2_Reconfigure_PolledHandlerKeepsItsClient(t *testing.T) {
 		"the handler must not switch to the new configuration's client")
 }
 
-// dmUpdate is a private-chat message; the broker answers it with a help
+// dmUpdateFrom is a private-chat message; the broker answers it with a help
 // text through the client of the configuration handling it.
-func dmUpdate(id, chatID int64) Update {
+func dmUpdateFrom(id, chatID int64) Update {
 	return Update{UpdateID: id, Message: &TGMessage{MessageID: id, From: &TGUser{ID: chatID},
 		Chat: TGChat{ID: chatID, Type: "private"}, Text: "hello"}}
 }
 
-// A reconfigure to a different bot starts the update offset again: the new
-// bot's first getUpdates does not carry the old bot's offset, and the new
-// bot's pending update (with an ID below that offset) is handled.
+// A reconfigure to a bot not polled before starts that bot's update offset
+// from the beginning: its first getUpdates does not carry the old bot's
+// offset, and its pending update (with an ID below that offset) is handled.
 func TestV2_Reconfigure_OtherBotResetsUpdateOffset(t *testing.T) {
 	f := newGenTelegram(t, map[string]int64{"bot-a-token": 100, "bot-b-token": 200})
 	b := NewV2(slog.Default())
 	defer b.Close()
 	require.NoError(t, b.Configure(genPollConfig(t, f, "bot-a-token")))
-	f.queue(100, dmUpdate(500, 41))
+	f.queue(100, dmUpdateFrom(500, 41))
 	require.NoError(t, b.Subscribe("scion.project.proj-1.>"))
 	require.Eventually(t, func() bool { return len(f.sentTo("bot-a-token")) == 1 },
 		5*time.Second, 10*time.Millisecond, "bot A's update must be handled")
 
-	f.queue(200, dmUpdate(7, 42))
+	f.queue(200, dmUpdateFrom(7, 42))
 	require.NoError(t, b.Configure(genPollConfig(t, f, "bot-b-token")))
 
 	require.Eventually(t, func() bool { return len(f.offsetsOf("bot-b-token")) > 0 },
@@ -280,7 +280,7 @@ func TestV2_Reconfigure_SameBotKeepsUpdateOffset(t *testing.T) {
 	b := NewV2(slog.Default())
 	defer b.Close()
 	require.NoError(t, b.Configure(genPollConfig(t, f, "old-token")))
-	f.queue(100, dmUpdate(500, 41))
+	f.queue(100, dmUpdateFrom(500, 41))
 	require.NoError(t, b.Subscribe("scion.project.proj-1.>"))
 	require.Eventually(t, func() bool { return len(f.sentTo("old-token")) == 1 },
 		5*time.Second, 10*time.Millisecond, "the update must be handled")
@@ -291,10 +291,49 @@ func TestV2_Reconfigure_SameBotKeepsUpdateOffset(t *testing.T) {
 	assert.Equal(t, int64(501), f.offsetsOf("new-token")[0],
 		"the same bot's offset must carry over to the new credential")
 
-	f.queue(100, dmUpdate(501, 43))
+	f.queue(100, dmUpdateFrom(501, 43))
 	require.Eventually(t, func() bool { return len(f.sentTo("new-token")) == 1 },
 		5*time.Second, 10*time.Millisecond, "the next update must be handled")
 	assert.Equal(t, []int64{43}, f.sentTo("new-token"),
 		"the handled update must not be fetched again")
 	assert.Equal(t, []int64{41}, f.sentTo("old-token"))
+}
+
+// Switching from bot A to bot B and back resumes A from A's own offset. A's
+// last handled update, which the switch left unconfirmed at Telegram, is not
+// handled again.
+func TestV2_Reconfigure_BackToEarlierBotResumesItsOffset(t *testing.T) {
+	f := newGenTelegram(t, map[string]int64{"bot-a-token": 100, "bot-b-token": 200})
+	b := NewV2(slog.Default())
+	defer b.Close()
+	require.NoError(t, b.Configure(genPollConfig(t, f, "bot-a-token")))
+	entered, gate := holdGroupHandler(t, b)
+	f.queue(100, Update{UpdateID: 500, Message: plainGroupMessage(456, "hi")})
+	require.NoError(t, b.Subscribe("scion.project.proj-1.>"))
+	waitSignal(t, entered, "bot A's handler to reach the hub")
+	_, aDone := pollState(b)
+
+	// Switch to bot B while update 500 is being handled. A's loop exits
+	// after the handler without polling again, so Telegram still holds 500
+	// as unconfirmed.
+	require.NoError(t, b.Configure(genPollConfig(t, f, "bot-b-token")))
+	close(gate)
+	waitSignal(t, aDone, "bot A's poll loop to exit")
+	require.Equal(t, []int64{-200}, f.sentTo("bot-a-token"), "update 500 must be handled once")
+	aPolls := len(f.offsetsOf("bot-a-token"))
+	require.Eventually(t, func() bool { return len(f.offsetsOf("bot-b-token")) > 0 },
+		5*time.Second, 10*time.Millisecond, "the broker must poll bot B")
+
+	require.NoError(t, b.Configure(genPollConfig(t, f, "bot-a-token")))
+	require.Eventually(t, func() bool { return len(f.offsetsOf("bot-a-token")) > aPolls },
+		5*time.Second, 10*time.Millisecond, "the broker must poll bot A again")
+	assert.Equal(t, int64(501), f.offsetsOf("bot-a-token")[aPolls],
+		"bot A must resume from its own offset")
+
+	f.queue(100, dmUpdateFrom(501, 43))
+	require.Eventually(t, func() bool { return len(f.sentTo("bot-a-token")) >= 2 },
+		5*time.Second, 10*time.Millisecond, "bot A's next update must be handled")
+	assert.Equal(t, []int64{-200, 43}, f.sentTo("bot-a-token"),
+		"update 500 must not be handled again")
+	assert.Empty(t, f.sentTo("bot-b-token"))
 }
