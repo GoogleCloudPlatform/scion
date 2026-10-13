@@ -373,7 +373,7 @@ func sandboxDeleteOutputForLog(out string) string {
 func newSandboxDeleteOutput() *os.File {
 	f, err := os.CreateTemp("", "scion-sandbox-delete-*")
 	if err != nil {
-		runtimeLog.Warn("cloudrun-sandbox: cannot capture delete output", "error", err)
+		runtimeLog().Warn("cloudrun-sandbox: cannot capture delete output", "error", err)
 		return nil
 	}
 	_ = os.Remove(f.Name())
@@ -1444,10 +1444,10 @@ func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string) err
 	switch result := classifySandboxDelete(ctx, out, err, false); result {
 	case sandboxDeleteDeleted:
 	case sandboxDeleteGone:
-		runtimeLog.Info("cloudrun-sandbox: delete --force found the sandbox already gone",
+		runtimeLog().Info("cloudrun-sandbox: delete --force found the sandbox already gone",
 			"sandbox", id, "output", sandboxDeleteOutputForLog(out))
 	default:
-		runtimeLog.Warn("cloudrun-sandbox: delete --force failed",
+		runtimeLog().Warn("cloudrun-sandbox: delete --force failed",
 			"sandbox", id, "result", result.String(), "error", err, "output", sandboxDeleteOutputForLog(out))
 		return fmt.Errorf("cloudrun-sandbox: delete --force failed: %w", err)
 	}
