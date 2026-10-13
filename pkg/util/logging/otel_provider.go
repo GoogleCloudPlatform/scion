@@ -14,7 +14,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -51,7 +50,11 @@ func NewLoggerProvider(ctx context.Context, config OTelConfig) (log.LoggerProvid
 		if config.SkipTLSVerify || config.CAFile != "" || config.CertFile != "" || config.KeyFile != "" {
 			return nil, nil, fmt.Errorf("plaintext OTLP transport conflicts with TLS verification or client certificate options")
 		}
-		opts = append(opts, otlploggrpc.WithDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())))
+		// An explicit credentials option: otlploggrpc applies its own
+		// transport credentials after any dial option (default TLS), so a
+		// plaintext dial option would be overridden. This also takes
+		// priority over the OTEL_EXPORTER_OTLP_*CERTIFICATE variables.
+		opts = append(opts, otlploggrpc.WithTLSCredentials(insecure.NewCredentials()))
 	} else if config.SkipTLSVerify || config.CAFile != "" || config.CertFile != "" || config.KeyFile != "" {
 		// With no TLS option set the exporter keeps its default TLS setup
 		// (system roots, and the standard OTEL_EXPORTER_OTLP_* variables).

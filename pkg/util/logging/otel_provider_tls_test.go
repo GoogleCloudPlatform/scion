@@ -149,26 +149,58 @@ func (s *recordingLogsServer) snapshot() []exportCall {
 	return append([]exportCall(nil), s.calls...)
 }
 
-// startMTLSCollector starts an OTLP logs gRPC server that requires a client
-// certificate signed by the test CA, and returns its address.
-func startMTLSCollector(t *testing.T, pki *bridgePKI) (string, *recordingLogsServer) {
+// startCollector starts an OTLP logs gRPC server with the given server
+// options on 127.0.0.1 and returns its address.
+func startCollector(t *testing.T, opts ...grpc.ServerOption) (string, *recordingLogsServer) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverTLS := &tls.Config{
-		Certificates: []tls.Certificate{pki.serverCert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    pki.caPool,
-		MinVersion:   tls.VersionTLS12,
-	}
 	rec := &recordingLogsServer{}
-	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(serverTLS)))
+	server := grpc.NewServer(opts...)
 	collogspb.RegisterLogsServiceServer(server, rec)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	return listener.Addr().String(), rec
+}
+
+// startMTLSCollector starts a collector that requires a client certificate
+// signed by the test CA.
+func startMTLSCollector(t *testing.T, pki *bridgePKI) (string, *recordingLogsServer) {
+	t.Helper()
+	return startCollector(t, grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{pki.serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    pki.caPool,
+		MinVersion:   tls.VersionTLS12,
+	})))
+}
+
+// startTLSCollector starts a collector with server-side TLS only (no client
+// certificate required), using the test CA's server certificate.
+func startTLSCollector(t *testing.T, pki *bridgePKI) (string, *recordingLogsServer) {
+	t.Helper()
+	return startCollector(t, grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{pki.serverCert},
+		MinVersion:   tls.VersionTLS12,
+	})))
+}
+
+// clearSDKOTLPEnv unsets the standard OTEL_EXPORTER_OTLP_* variables the
+// exporter reads, so the surrounding environment cannot leak in.
+func clearSDKOTLPEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_INSECURE", "OTEL_EXPORTER_OTLP_LOGS_INSECURE",
+		"OTEL_EXPORTER_OTLP_CERTIFICATE", "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", "OTEL_EXPORTER_OTLP_LOGS_CLIENT_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_CLIENT_KEY", "OTEL_EXPORTER_OTLP_LOGS_CLIENT_KEY",
+		"OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+	} {
+		t.Setenv(name, "")
+	}
 }
 
 // emitAndFlush emits one record through lp and flushes it to the collector.
@@ -321,4 +353,62 @@ func TestInitOTelLogging_BadHeadersIgnored(t *testing.T) {
 		t.Fatal("expected a LoggerProvider despite the malformed headers value")
 	}
 	cleanup()
+}
+
+// TestNewLoggerProvider_NoTLSOptionKeepsSDKDefault checks that with no TLS
+// option set the log bridge adds no credentials option of its own, so the
+// exporter's default TLS setup still applies, including the standard
+// OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE variable. Here that variable is the
+// only source of the test CA: an explicit credentials option (system roots)
+// would make the handshake fail.
+func TestNewLoggerProvider_NoTLSOptionKeepsSDKDefault(t *testing.T) {
+	pki := newBridgePKI(t)
+	addr, rec := startTLSCollector(t, pki)
+	clearSDKOTLPEnv(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE", pki.caFile)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	lp, cleanup, err := NewLoggerProvider(ctx, OTelConfig{Endpoint: addr})
+	if err != nil {
+		t.Fatalf("NewLoggerProvider: %v", err)
+	}
+	defer cleanup()
+	emitAndFlush(t, lp, 5*time.Second)
+
+	if calls := rec.snapshot(); len(calls) == 0 {
+		t.Fatal("collector received no export: the SDK default TLS setup (OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE) was not used")
+	}
+}
+
+// TestInitOTelLogging_InsecureOneSelectsPlaintext checks that
+// SCION_OTEL_INSECURE is parsed like the other boolean settings: "1"
+// selects plaintext, so a plaintext collector is reached.
+func TestInitOTelLogging_InsecureOneSelectsPlaintext(t *testing.T) {
+	addr, rec := startCollector(t)
+	clearSDKOTLPEnv(t)
+	t.Setenv(EnvOTelLogEnable, "true")
+	t.Setenv(EnvOTelEndpoint, addr)
+	t.Setenv(EnvOTelInsecure, "1")
+	t.Setenv(EnvOTelSkipTLSVerify, "")
+	t.Setenv(EnvOTelCAFile, "")
+	t.Setenv(EnvOTelCertFile, "")
+	t.Setenv(EnvOTelKeyFile, "")
+	t.Setenv(EnvOTelHeaders, "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	lp, cleanup, err := InitOTelLogging(ctx, OTelConfig{})
+	if err != nil {
+		t.Fatalf("InitOTelLogging: %v", err)
+	}
+	if lp == nil {
+		t.Fatal("expected a LoggerProvider")
+	}
+	defer cleanup()
+	emitAndFlush(t, lp, 5*time.Second)
+
+	if calls := rec.snapshot(); len(calls) == 0 {
+		t.Fatal("plaintext collector received no export: SCION_OTEL_INSECURE=1 did not select plaintext")
+	}
 }
