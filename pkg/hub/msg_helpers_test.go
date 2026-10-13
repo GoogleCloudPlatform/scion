@@ -152,11 +152,28 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "workspace_handlers.go", function: "handleWorkspaceSyncToFinalize", symbol: "DispatchAgentCreate",
 		class: "guarded", reason: "workspace agent creation with project authorization"},
 
-	// notification_sweep.go: RetryDispatch — guarded retry of previously
-	// authorized notification dispatch.
+	// notification_sweep.go: RetryDispatch — UNGUARDED notification retry.
+	// Re-sends the same notification as notifications.go dispatchToAgent and
+	// shares that site's open item; a future guard must be added to both
+	// sites together.
 	{file: "notification_sweep.go", function: "RetryDispatch", symbol: "dispatchWithBrokerRetry",
-		class: "guarded", reason: "retry of previously authorized notification dispatch"},
+		class: "exempt", reason: "UNGUARDED notification retry (F-RS6-08); shares dispatchToAgent's open item; guard both sites together; deferred to RS6/AH"},
 }
+
+// sharedClassificationSites pairs call sites that must carry the same
+// classification in effectCallSiteClassifications. A retry site re-sends
+// what its original send site sent, so the two change class together.
+var sharedClassificationSites = []struct {
+	site, sameAs effectCallSiteKey
+}{
+	{
+		site:   effectCallSiteKey{"notification_sweep.go", "RetryDispatch", "dispatchWithBrokerRetry"},
+		sameAs: effectCallSiteKey{"notifications.go", "dispatchToAgent", "dispatchWithBrokerRetry"},
+	},
+}
+
+// effectCallSiteKey identifies one entry in effectCallSiteClassifications.
+type effectCallSiteKey struct{ file, function, symbol string }
 
 type effectCallSite struct {
 	file     string // base filename
