@@ -6,6 +6,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -118,6 +119,22 @@ return an error instead of blocking.`,
 		mode := resolveMode()
 		configureDebugOutput(mode, debugMode)
 
+		// Target-hub profiles (ptone/scion#4240): refuse commands outside
+		// the profile allow-list, and apply the agent-mode target rule.
+		if err := checkHubProfileGate(cmd, mode); err != nil {
+			return err
+		}
+		if hubProfileSelected() {
+			// A profile names its hub: no local project, settings, registry
+			// or agent-container hub checks apply, and none are read.
+			if mode == ModeAgent {
+				nonInteractive = true
+				autoConfirm = true
+			}
+			cmd.SetContext(cliutil.WithRootOptions(cmd.Context(), snapshotRootOptions()))
+			return nil
+		}
+
 		// Detect agent container context without a reachable Hub endpoint.
 		// SCION_HOST_UID is set by the runtime when launching agent containers.
 		// If present but no non-localhost Hub endpoint is configured, the CLI
@@ -221,7 +238,7 @@ return an error instead of blocking.`,
 
 		// Check for dev auth usage and warn if Hub is enabled
 		if !hubOnly {
-			printDevAuthWarningIfNeeded(projectPath)
+			printDevAuthWarningIfNeeded(cmd.ErrOrStderr(), projectPath)
 		}
 
 		// Hand the normalized root flag values to the command (see
@@ -276,8 +293,9 @@ func Execute() {
 			tempProjectPath = "global"
 		}
 	}
-	// Hub-only commands skip it: their --project is not a directory.
-	if !hubOnlyCommands[topLevelName(target)] {
+	// Hub-only commands skip it: their --project is not a directory. So do
+	// hub profile invocations, which never read local project settings.
+	if !hubOnlyCommands[topLevelName(target)] && !hubProfileRequested() {
 		settings, _ := config.LoadSettings(tempProjectPath)
 		if settings != nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
 			autoHelp = *settings.CLI.AutoHelp
@@ -461,6 +479,7 @@ func init() {
 
 	// Hub integration flags
 	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub nickname or API endpoint URL (overrides SCION_HUB_ENDPOINT)")
+	_ = rootCmd.RegisterFlagCompletionFunc("hub", completeHubNames)
 	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Disable Hub integration for this invocation (local-only mode)")
 
 	// Confirmation and non-interactive flags
@@ -586,9 +605,11 @@ func IsNonInteractive() bool {
 	return nonInteractive
 }
 
-// printDevAuthWarningIfNeeded checks if dev auth is being used with Hub and prints a warning.
+// printDevAuthWarningIfNeeded checks if dev auth is being used with Hub and
+// prints a warning on stderr (the command's error writer), never on stdout,
+// so it cannot mix into JSON or other machine-read output.
 // This function is called on every command invocation via PersistentPreRunE.
-func printDevAuthWarningIfNeeded(projectPath string) {
+func printDevAuthWarningIfNeeded(stderr io.Writer, projectPath string) {
 	// Skip if --no-hub flag is set
 	if noHub {
 		return
@@ -643,8 +664,14 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 	}
 
 	// Dev auth is being used with Hub enabled - print warning to stderr
-	fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
-		util.Bold, util.Yellow, util.Reset)))
+	banner := fmt.Sprintf("\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
+		util.Bold, util.Yellow, util.Reset)
+	if f, ok := stderr.(*os.File); ok {
+		banner = util.ColorFor(f, banner)
+	} else {
+		banner = util.StripANSI(banner)
+	}
+	_, _ = fmt.Fprint(stderr, banner)
 }
 
 // checkAgentContainerContext detects when the CLI is running inside an agent
