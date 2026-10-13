@@ -35,8 +35,8 @@ import (
 
 // The tests in this file use the production SQLite driver (modernc, "sqlite").
 // It stores a bound time.Time as time.Time.String() text, which is the source
-// of the bugs they cover; the mattn driver used by older webchat tests does
-// not, and so hides them.
+// of the bugs they cover. (Webchat tests once used mattn/go-sqlite3, which
+// does not, and so hid them; ptone/scion#4694 removed it.)
 
 // newModerncWebChatStore opens a webchat store on a fresh in-memory modernc
 // database without the ent schema.

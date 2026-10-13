@@ -38,6 +38,7 @@ func TestCredentialKindsAliasCanonicalContract(t *testing.T) {
 		CredentialKindBroker,
 		CredentialKindDev,
 		CredentialKindDelegatedAgent,
+		CredentialKindWorkloadDelegation,
 	}
 	if want := credentialmeta.Kinds(); !reflect.DeepEqual(serverKinds, want) {
 		t.Fatalf("server credential kinds = %v, canonical kinds = %v", serverKinds, want)

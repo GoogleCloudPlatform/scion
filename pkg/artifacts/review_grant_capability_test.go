@@ -128,7 +128,7 @@ func TestCanGrantReviewNeedsHostSupport(t *testing.T) {
 }
 
 // TestCanGrantReviewMatchesGrantRoute: for every case, the capabilities on
-// GET are exactly what POST /{id}/grants decides for a user write grant
+// GET are exactly what POST /{id}/grants decides for a user review grant
 // from the same caller: it succeeds when canManage or canGrantReview is
 // true and is refused with 403 otherwise, and the two are never both true.
 // It fails if the field's check and the route's check diverge.
@@ -144,7 +144,7 @@ func TestCanGrantReviewMatchesGrantRoute(t *testing.T) {
 			if resp.CanManage && resp.CanGrantReview {
 				t.Errorf("canManage and canGrantReview both true")
 			}
-			post := f.postGrantBody(tc.caller, id, reviewBody(SubjectPrincipal, reviewerID, GrantWrite))
+			post := f.postGrantBody(tc.caller, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))
 			granted := post.Code == http.StatusCreated || post.Code == http.StatusOK
 			if !granted && post.Code != http.StatusForbidden {
 				t.Fatalf("POST /grants: %d %s", post.Code, post.Body.String())

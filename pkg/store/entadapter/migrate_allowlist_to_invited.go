@@ -61,7 +61,7 @@ func (c *CompositeStore) MigrateAllowListToInvitedUsers(ctx context.Context) err
 
 		// Check if a User with this email already exists.
 		existing, err := c.client.User.Query().
-			Where(user.EmailEqualFold(email)).
+			Where(user.EmailEqualFold(email), notFederated()).
 			Only(ctx)
 		if err == nil {
 			// User exists — optionally backfill invited_by / invite_note if not already set.

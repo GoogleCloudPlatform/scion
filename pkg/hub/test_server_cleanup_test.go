@@ -359,7 +359,7 @@ func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
 }
 
 // TestLeakGuardReportsUnclosedStore checks that the package-exit leak guard
-// (leak_guard_helpers_test.go) sees an unclosed store and names it in its
+// (internal/hubtestutil/leak_guard.go) sees an unclosed store and names it in its
 // failure output, and passes again once the store is closed.
 func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 	// Record the matching goroutines that are already running (for example
@@ -367,11 +367,19 @@ func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 	// ID and leave them out of every check below. Comparing totals instead
 	// is racy: one of them exiting after the baseline cancels out the new
 	// store's goroutine and the guard wrongly passes (ptone/scion#4635).
-	baseline := scanLeakedGoroutines(nil).ids
+	baseline := scanLeakedGoroutines(nil).IDs
+	testID := currentGoroutineID(t)
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
 	}
+	// sql.OpenDB starts the store's connectionOpener with a go statement,
+	// and nothing in newTestStore waits for it to run. Until it first
+	// runs, its stack shows only OpenDB's gowrap frame, so the guard
+	// cannot see it yet and a scan taken now can wrongly pass
+	// (ptone/scion#4900). Wait until every connectionOpener OpenDB started
+	// on this goroutine is running before checking the guard.
+	awaitStoreConnectionOpener(t, testID)
 	var out bytes.Buffer
 	if checkLeaksExcluding(&out, 0, 0, false, baseline) {
 		t.Fatalf("leak guard passed with an open store; output:\n%s", out.String())
@@ -386,6 +394,44 @@ func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 	}
 }
 
+// awaitStoreConnectionOpener waits until at least one goroutine created by
+// database/sql.OpenDB on goroutine creator is running connectionOpener and
+// none of them is still waiting to start. The first store a process opens
+// also builds the shared template through a second OpenDB on the same
+// goroutine, so seeing one running opener alone does not mean the new
+// store's is running. It finds them with this file's own stack parser
+// rather than the guard's scan, so a guard that fails to match the store's
+// goroutine still fails the guard check that follows.
+func awaitStoreConnectionOpener(t *testing.T, creator int64) {
+	t.Helper()
+	const opener = "database/sql.(*DB).connectionOpener"
+	var created []string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		created = created[:0]
+		found := false
+		for _, g := range liveGoroutines() {
+			if g.parent != creator || !strings.Contains(g.stack, "created by database/sql.OpenDB") {
+				continue
+			}
+			if strings.Contains(g.stack, opener) {
+				found = true
+				continue
+			}
+			created = append(created, g.stack)
+		}
+		if found && len(created) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			sort.Strings(created)
+			t.Fatalf("the %s goroutines (created by database/sql.OpenDB in goroutine %d) are not all running after 5s (running opener seen: %t); goroutines OpenDB created on it that are not running it:\n\n%s",
+				opener, creator, found, strings.Join(created, "\n\n"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestLeakGuardScanNeverExcludesUnparsedID checks that a stack block
 // without a parsable "goroutine N" header is never recorded as a baseline
 // ID, so it cannot cause a later unparsed block to be skipped.
@@ -396,11 +442,11 @@ func TestLeakGuardScanNeverExcludesUnparsedID(t *testing.T) {
 	parsed := "goroutine 7 [select]:\n" + sig + "(...)"
 
 	base := scanStacks([]byte(first+"\n\n"+parsed), nil)
-	if base.total != 2 || len(base.ids) != 1 || !base.ids["7"] {
-		t.Fatalf("baseline scan: total=%d ids=%v, want total=2 ids={7}", base.total, base.ids)
+	if base.Total != 2 || len(base.IDs) != 1 || !base.IDs["7"] {
+		t.Fatalf("baseline scan: total=%d ids=%v, want total=2 ids={7}", base.Total, base.IDs)
 	}
-	got := scanStacks([]byte(first+"\n\n"+second+"\n\n"+parsed), base.ids)
-	if got.total != 2 {
-		t.Fatalf("scan with baseline excluded: total=%d, want 2 (both unparsed blocks counted, goroutine 7 excluded)", got.total)
+	got := scanStacks([]byte(first+"\n\n"+second+"\n\n"+parsed), base.IDs)
+	if got.Total != 2 {
+		t.Fatalf("scan with baseline excluded: total=%d, want 2 (both unparsed blocks counted, goroutine 7 excluded)", got.Total)
 	}
 }

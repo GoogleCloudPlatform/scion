@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -145,6 +146,7 @@ type fakeTGServerV2 struct {
 	answeredCallbacks []answerCallbackQueryRequest
 	nextSendMessageID int64
 	webhookURL        string
+	webhookSecret     string
 	// chatMembers maps chatID → userID → member status for getChatMember.
 	chatMembers map[int64]map[int64]string
 	// failChatMember makes getChatMember fail with a server error for
@@ -160,6 +162,13 @@ type fakeTGServerV2 struct {
 	chatMemberDelay       time.Duration
 	chatMemberInFlight    int
 	chatMemberMaxInFlight int
+	// failSetWebhook makes setWebhook fail with a Telegram error.
+	failSetWebhook bool
+	// failDeleteWebhook makes deleteWebhook fail with a Telegram error.
+	failDeleteWebhook bool
+	// deleteWebhookCalls and getUpdatesCalls count those requests.
+	deleteWebhookCalls int
+	getUpdatesCalls    int
 }
 
 // chatMemberStats returns the getChatMember call count and peak concurrency.
@@ -269,6 +278,9 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
 		case "/bottest-token/getUpdates":
+			f.mu.Lock()
+			f.getUpdatesCalls++
+			f.mu.Unlock()
 			json.NewEncoder(w).Encode(apiResponse{
 				OK:     true,
 				Result: mustJSONRawV2(t, []Update{}),
@@ -281,14 +293,31 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 				return
 			}
 			f.mu.Lock()
-			f.webhookURL = req.URL
+			fail := f.failSetWebhook
+			if !fail {
+				f.webhookURL = req.URL
+				f.webhookSecret = req.SecretToken
+			}
 			f.mu.Unlock()
+			if fail {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 400, Description: "Bad Request: bad webhook"})
+				return
+			}
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
 		case "/bottest-token/deleteWebhook":
 			f.mu.Lock()
-			f.webhookURL = ""
+			f.deleteWebhookCalls++
+			fail := f.failDeleteWebhook
+			if !fail {
+				f.webhookURL = ""
+				f.webhookSecret = ""
+			}
 			f.mu.Unlock()
+			if fail {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 500, Description: "Internal Server Error"})
+				return
+			}
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
 		case "/bottest-token/getChatMember":
@@ -2152,6 +2181,72 @@ func TestV2_Configure_WebhookMode_MissingURL(t *testing.T) {
 	assert.Contains(t, err.Error(), "webhook_url is required")
 }
 
+func TestV2_Configure_WebhookMode_MissingSecret(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config map[string]string
+	}{
+		{"absent", map[string]string{}},
+		{"empty", map[string]string{"webhook_secret": ""}},
+		{"absent standalone HA", map[string]string{"skip_set_webhook": "true"}},
+		{"empty standalone HA", map[string]string{"skip_set_webhook": "true", "webhook_secret": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tgSrv := newFakeTGServerV2(t)
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+
+			b := NewV2(slog.Default())
+			defer b.Close()
+
+			cfg := map[string]string{
+				"bot_token":      "test-token",
+				"api_base_url":   tgSrv.srv.URL,
+				"db_path":        dbPath,
+				"inbound_mode":   "webhook",
+				"webhook_url":    "https://example.com/telegram/webhook",
+				"webhook_listen": ":0",
+			}
+			for k, v := range tc.config {
+				cfg[k] = v
+			}
+
+			err := b.Configure(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), `webhook_secret is required when inbound_mode is "webhook"`)
+			assert.Nil(t, b.webhookServer, "webhook listener must not start without a secret")
+
+			tgSrv.mu.Lock()
+			assert.Empty(t, tgSrv.webhookURL, "setWebhook must not be called without a secret")
+			tgSrv.mu.Unlock()
+		})
+	}
+}
+
+func TestV2_Configure_WebhookMode_StandaloneHAWithSecret(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":        "test-token",
+		"api_base_url":     tgSrv.srv.URL,
+		"db_path":          dbPath,
+		"inbound_mode":     "webhook",
+		"webhook_url":      "https://example.com/telegram/webhook",
+		"webhook_listen":   ":0",
+		"webhook_secret":   "test-secret",
+		"skip_set_webhook": "true",
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, b.webhookServer)
+
+	tgSrv.mu.Lock()
+	assert.Empty(t, tgSrv.webhookURL, "standalone HA mode must not call setWebhook from Configure")
+	tgSrv.mu.Unlock()
+}
+
 func TestV2_Configure_InvalidInboundMode(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -2167,6 +2262,289 @@ func TestV2_Configure_InvalidInboundMode(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid inbound_mode")
+}
+
+// newRejectingTGServer returns a Telegram API stand-in that rejects every
+// call and counts the calls it receives.
+func newRejectingTGServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":401,"description":"Unauthorized"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+// An invalid config fails before any Telegram API call (bot identity lookup,
+// command registration, setWebhook).
+func TestV2_Configure_InvalidConfigMakesNoAPICalls(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		config  map[string]string
+		wantErr string
+	}{
+		{"invalid inbound_mode", map[string]string{"inbound_mode": "push"}, "invalid inbound_mode"},
+		{"webhook without url", map[string]string{
+			"inbound_mode":   "webhook",
+			"webhook_secret": "test-secret",
+		}, "webhook_url is required"},
+		{"webhook without secret", map[string]string{
+			"inbound_mode": "webhook",
+			"webhook_url":  "https://example.com/telegram/webhook",
+		}, "webhook_secret is required"},
+		// Regression guard: agent_cache_ttl was already checked before any
+		// API call on main.
+		{"invalid agent_cache_ttl", map[string]string{"agent_cache_ttl": "soon"}, "invalid agent_cache_ttl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, calls := newRejectingTGServer(t)
+
+			b := NewV2(slog.Default())
+			defer b.Close()
+
+			cfg := map[string]string{
+				"bot_token":      "test-token",
+				"api_base_url":   srv.URL,
+				"db_path":        filepath.Join(t.TempDir(), "test.db"),
+				"webhook_listen": ":0",
+			}
+			for k, v := range tc.config {
+				cfg[k] = v
+			}
+
+			err := b.Configure(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Zero(t, calls.Load(), "Configure must not call the Telegram API with an invalid config")
+		})
+	}
+}
+
+// captureOpenedStores records the SQLite stores Configure opens from now
+// until the test ends.
+func captureOpenedStores(t *testing.T) *[]Store {
+	t.Helper()
+	var opened []Store
+	orig := openSQLiteStore
+	openSQLiteStore = func(dbPath string) (Store, error) {
+		s, err := orig(dbPath)
+		if err == nil {
+			opened = append(opened, s)
+		}
+		return s, err
+	}
+	t.Cleanup(func() { openSQLiteStore = orig })
+	return &opened
+}
+
+// reserveFreeAddr returns a 127.0.0.1 address that was free a moment ago.
+func reserveFreeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	return addr
+}
+
+// postWebhookUpdate sends a no-op update to a webhook server and returns the
+// response status.
+func postWebhookUpdate(t *testing.T, addr, secret string) (int, error) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+webhookPath,
+		strings.NewReader(`{"update_id":1}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(secretTokenHeader, secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// validWebhookConfig returns a webhook-mode config against the fake API.
+func validWebhookConfig(t *testing.T, tgSrv *fakeTGServerV2) map[string]string {
+	t.Helper()
+	return map[string]string{
+		"bot_token":      "test-token",
+		"api_base_url":   tgSrv.srv.URL,
+		"hub_url":        "http://hub.test",
+		"db_path":        filepath.Join(t.TempDir(), "test.db"),
+		"inbound_mode":   "webhook",
+		"webhook_url":    "https://example.com/telegram/webhook",
+		"webhook_listen": "127.0.0.1:0",
+		"webhook_secret": "test-secret",
+	}
+}
+
+// A reconfigure that fails, after a valid webhook-mode configure, leaves the
+// running configuration in place: the earlier webhook server keeps serving
+// against the store, which stays open, and Telegram's webhook registration
+// is not changed. A store the failed reconfigure opened is closed again.
+func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
+	type env struct {
+		tgSrv                            *fakeTGServerV2
+		rejectingURL, busyAddr, freeAddr string
+	}
+	for _, tc := range []struct {
+		name       string
+		mutate     func(cfg map[string]string, e env)
+		wantErr    string
+		opensStore bool
+		// releasesAddr: the reconfigure bound e.freeAddr and must release it.
+		releasesAddr bool
+	}{
+		{"missing webhook secret", func(cfg map[string]string, _ env) {
+			delete(cfg, "webhook_secret")
+		}, "webhook_secret is required", false, false},
+		{"missing webhook url", func(cfg map[string]string, _ env) {
+			cfg["webhook_url"] = ""
+		}, "webhook_url is required", false, false},
+		{"invalid inbound mode", func(cfg map[string]string, _ env) {
+			cfg["inbound_mode"] = "push"
+		}, "invalid inbound_mode", false, false},
+		{"bot token rejected", func(cfg map[string]string, e env) {
+			cfg["api_base_url"] = e.rejectingURL
+		}, "failed to validate bot token", true, false},
+		{"webhook listen address in use", func(cfg map[string]string, e env) {
+			cfg["webhook_listen"] = e.busyAddr
+		}, "failed to start webhook server", true, false},
+		{"setWebhook rejected", func(cfg map[string]string, e env) {
+			cfg["webhook_listen"] = e.freeAddr
+			e.tgSrv.mu.Lock()
+			e.tgSrv.failSetWebhook = true
+			e.tgSrv.mu.Unlock()
+		}, "failed to set webhook", true, true},
+		{"deleteWebhook rejected on switch to poll", func(cfg map[string]string, e env) {
+			cfg["inbound_mode"] = "poll"
+			e.tgSrv.mu.Lock()
+			e.tgSrv.failDeleteWebhook = true
+			e.tgSrv.mu.Unlock()
+		}, "failed to delete webhook", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tgSrv := newFakeTGServerV2(t)
+			rejecting, _ := newRejectingTGServer(t)
+			busy, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			defer busy.Close()
+
+			b := NewV2(slog.Default())
+			defer b.Close()
+
+			cfg := validWebhookConfig(t, tgSrv)
+			require.NoError(t, b.Configure(cfg))
+			server, store, api := b.webhookServer, b.store, b.api
+			require.NotNil(t, server)
+			// Reserved after the good Configure, so its bind cannot take it.
+			freeAddr := reserveFreeAddr(t)
+
+			bad := make(map[string]string, len(cfg))
+			for k, v := range cfg {
+				bad[k] = v
+			}
+			bad["hub_url"] = "http://other-hub.test"
+			bad["webhook_url"] = "https://example.com/telegram/other-webhook"
+			tc.mutate(bad, env{tgSrv: tgSrv, rejectingURL: rejecting.URL, busyAddr: busy.Addr().String(), freeAddr: freeAddr})
+
+			opened := captureOpenedStores(t)
+			err = b.Configure(bad)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+
+			assert.Same(t, server, b.webhookServer, "the earlier webhook server must stay in place")
+			assert.Same(t, store, b.store, "the store must not be replaced")
+			assert.Same(t, api, b.api, "the API client must not be replaced")
+			assert.Equal(t, "http://hub.test", b.hubURL)
+			assert.Equal(t, "webhook", b.inboundMode)
+
+			tgSrv.mu.Lock()
+			assert.Equal(t, "https://example.com/telegram/webhook", tgSrv.webhookURL,
+				"a failed reconfigure must not change the webhook registration")
+			tgSrv.mu.Unlock()
+
+			link := &GroupLink{ChatID: -300, ProjectID: "proj-1", LinkedAt: time.Now().UTC(), Active: true}
+
+			// The store the webhook handlers use is still open.
+			require.NoError(t, b.store.SaveGroupLink(context.Background(), link))
+
+			// A store the failed reconfigure opened is closed again.
+			if tc.opensStore {
+				require.Len(t, *opened, 1)
+				assert.Error(t, (*opened)[0].SaveGroupLink(context.Background(), link),
+					"a failed reconfigure must close the store it opened")
+			} else {
+				assert.Empty(t, *opened, "an invalid config must not open a store")
+			}
+
+			// A listener the failed reconfigure bound is released again.
+			if tc.releasesAddr {
+				ln, err := net.Listen("tcp", freeAddr)
+				require.NoError(t, err, "a failed reconfigure must release the listener it bound")
+				require.NoError(t, ln.Close())
+			}
+
+			// The earlier webhook server still accepts updates.
+			status, err := postWebhookUpdate(t, server.actualAddr, "test-secret")
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusOK, status)
+		})
+	}
+}
+
+// A reconfigure on the same listen address (the hub configures twice) keeps
+// the running webhook server and applies the new secret.
+func TestV2_Reconfigure_SameListenAddressKeepsServer(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	cfg := validWebhookConfig(t, tgSrv)
+	require.NoError(t, b.Configure(cfg))
+	server := b.webhookServer
+
+	cfg["webhook_secret"] = "rotated-secret"
+	require.NoError(t, b.Configure(cfg))
+	assert.Same(t, server, b.webhookServer)
+
+	status, err := postWebhookUpdate(t, server.actualAddr, "rotated-secret")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, status)
+
+	status, err = postWebhookUpdate(t, server.actualAddr, "test-secret")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusUnauthorized, status, "the old secret must no longer be accepted")
+}
+
+// A reconfigure on a new listen address serves the new address and stops the
+// old server.
+func TestV2_Reconfigure_NewListenAddressSwitchesServer(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	cfg := validWebhookConfig(t, tgSrv)
+	require.NoError(t, b.Configure(cfg))
+	oldAddr := b.webhookServer.actualAddr
+
+	cfg["webhook_listen"] = reserveFreeAddr(t)
+	require.NoError(t, b.Configure(cfg))
+	newAddr := b.webhookServer.actualAddr
+	assert.NotEqual(t, oldAddr, newAddr)
+
+	status, err := postWebhookUpdate(t, newAddr, "test-secret")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, status)
+
+	waitRetired(t, b) // the old server is stopped in the background
+	_, err = postWebhookUpdate(t, oldAddr, "test-secret")
+	assert.Error(t, err, "the old webhook server must be stopped")
 }
 
 func TestV2_Configure_DefaultPollMode(t *testing.T) {
@@ -2201,6 +2579,7 @@ func TestV2_WebhookMode_PollingDoesNotStart(t *testing.T) {
 		"inbound_mode":   "webhook",
 		"webhook_url":    "https://example.com/telegram/webhook",
 		"webhook_listen": ":0",
+		"webhook_secret": "test-secret",
 	})
 	require.NoError(t, err)
 
@@ -2316,6 +2695,7 @@ func TestV2_WebhookMode_Close(t *testing.T) {
 		"inbound_mode":   "webhook",
 		"webhook_url":    "https://example.com/telegram/webhook",
 		"webhook_listen": ":0",
+		"webhook_secret": "test-secret",
 	})
 	require.NoError(t, err)
 

@@ -42,6 +42,7 @@ type ImageDeleteRequest struct {
 }
 
 func (s *Server) handleImageStatus(w http.ResponseWriter, r *http.Request) {
+	defRT := s.currentRuntime()
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return
@@ -61,14 +62,14 @@ func (s *Server) handleImageStatus(w http.ResponseWriter, r *http.Request) {
 
 	if shortImage != "" {
 		state := &ImageEntityState{}
-		exists, err := s.runtime.ImageExists(ctx, shortImage)
+		exists, err := defRT.ImageExists(ctx, shortImage)
 		if err != nil {
 			RuntimeError(w, fmt.Sprintf("failed to check image %q: %v", shortImage, err))
 			return
 		}
 		state.Exists = exists
 		if exists {
-			if hash, err := s.runtime.ImageID(ctx, shortImage); err == nil {
+			if hash, err := defRT.ImageID(ctx, shortImage); err == nil {
 				state.Hash = hash
 			}
 		}
@@ -77,14 +78,14 @@ func (s *Server) handleImageStatus(w http.ResponseWriter, r *http.Request) {
 
 	if longImage != "" {
 		state := &ImageEntityState{}
-		exists, err := s.runtime.ImageExists(ctx, longImage)
+		exists, err := defRT.ImageExists(ctx, longImage)
 		if err != nil {
 			RuntimeError(w, fmt.Sprintf("failed to check image %q: %v", longImage, err))
 			return
 		}
 		state.Exists = exists
 		if exists {
-			if hash, err := s.runtime.ImageID(ctx, longImage); err == nil {
+			if hash, err := defRT.ImageID(ctx, longImage); err == nil {
 				state.Hash = hash
 			}
 		}
@@ -95,6 +96,7 @@ func (s *Server) handleImageStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
+	defRT := s.currentRuntime()
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
 		return
@@ -111,7 +113,7 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	if err := s.runtime.PullImage(ctx, req.Image); err != nil {
+	if err := defRT.PullImage(ctx, req.Image); err != nil {
 		RuntimeError(w, fmt.Sprintf("failed to pull image %q: %v", req.Image, err))
 		return
 	}
@@ -120,6 +122,7 @@ func (s *Server) handleImagePull(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImageDeleteLocal(w http.ResponseWriter, r *http.Request) {
+	defRT := s.currentRuntime()
 	if r.Method != http.MethodDelete {
 		MethodNotAllowed(w, http.MethodDelete)
 		return
@@ -137,7 +140,7 @@ func (s *Server) handleImageDeleteLocal(w http.ResponseWriter, r *http.Request) 
 
 	ctx := r.Context()
 
-	exists, err := s.runtime.ImageExists(ctx, req.Image)
+	exists, err := defRT.ImageExists(ctx, req.Image)
 	if err != nil {
 		RuntimeError(w, fmt.Sprintf("failed to check image %q: %v", req.Image, err))
 		return
@@ -147,7 +150,7 @@ func (s *Server) handleImageDeleteLocal(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := s.runtime.RemoveImage(ctx, req.Image); err != nil {
+	if err := defRT.RemoveImage(ctx, req.Image); err != nil {
 		RuntimeError(w, fmt.Sprintf("failed to remove image %q: %v", req.Image, err))
 		return
 	}

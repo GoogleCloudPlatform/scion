@@ -199,7 +199,11 @@ scion message @tech-lead --body-file - < ./review-notes.md
 
 For `--body-file` and stdin, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
 
-A successful send to an agent prints `Message accepted for agent '<name>'`. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it. It does not mean the agent has read it. A send to an agent that is reincarnating prints a separate notice that the message was saved for catch-up. See [`scion message`](/scion/reference/cli/#scion-message-or-msg) for what each status means.
+A successful send to an agent prints `Message accepted for agent '<name>'`. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it. It does not mean the agent has read it. A send to an agent that is reincarnating prints a separate notice that the message was saved for catch-up.
+
+**Messages to an agent that is still starting.** Until its harness accepts input, an agent's activity is `initializing` (shown as "starting"). Messages sent in that window, from the CLI, web chat or a DM, are accepted and held by the agent's runtime. They are pasted once the harness reports it is ready, or after at most 90 seconds, so early messages are not lost. An `--interrupt` sent in that window is delivered as an ordinary message. To wait for readiness before you send, start the agent with [`scion start --wait-ready`](/scion/reference/cli/#scion-start-or-run).
+
+See [`scion message`](/scion/reference/cli/#scion-message-or-msg) for what each status means.
 
 ### Message Formatting
 
@@ -284,6 +288,8 @@ scion conversation leave "#sprint-planning"
 ```
 
 A direct conversation registers both participants, so DMs you send or receive appear in `scion conversation list`.
+
+An agent post into a group conversation or thread (by `conv:<id>` or thread ID) that @mentions no agent is delivered to the conversation's default agent, if the sender may message it. When the post reaches no agent, the response sets `no_agent_woken` and `scion message` prints a one-line notice.
 
 For full flag details, see the [CLI Reference](/scion/reference/cli/#scion-conversation-alias-conv).
 

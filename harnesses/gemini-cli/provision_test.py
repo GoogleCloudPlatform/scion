@@ -198,5 +198,85 @@ class VertexAuthSelectionTest(unittest.TestCase):
             _select_vertex(["GOOGLE_CLOUD_PROJECT"])
 
 
+class VertexEnvOverlayTest(unittest.TestCase):
+    # Gemini reads only GOOGLE_CLOUD_LOCATION, so every accepted region key
+    # must reach it (ptone/scion#4672). LOCATION wins over REGION, with a
+    # warning when they differ (ptone/scion#4719).
+    def _overlay(self, env: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+        warnings: list[str] = []
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            overlay = provision._build_env_overlay("vertex-ai", "", warnings.append)
+        return overlay, warnings
+
+    def _location(self, env: dict[str, str]) -> str:
+        return self._overlay(env)[0].get("GOOGLE_CLOUD_LOCATION", "")
+
+    def test_cloud_ml_region_alone_sets_location(self) -> None:
+        self.assertEqual(
+            self._location({"GOOGLE_CLOUD_PROJECT": "p", "CLOUD_ML_REGION": "europe-west4"}),
+            "europe-west4",
+        )
+
+    def test_only_region_sets_location(self) -> None:
+        overlay, warnings = self._overlay({"GOOGLE_CLOUD_PROJECT": "p", "GOOGLE_CLOUD_REGION": "us-central1"})
+        self.assertEqual(overlay["GOOGLE_CLOUD_LOCATION"], "us-central1")
+        self.assertEqual(warnings, [])
+
+    def test_only_location(self) -> None:
+        overlay, warnings = self._overlay({"GOOGLE_CLOUD_PROJECT": "p", "GOOGLE_CLOUD_LOCATION": "us-east5"})
+        self.assertEqual(overlay["GOOGLE_CLOUD_LOCATION"], "us-east5")
+        self.assertNotIn("GOOGLE_CLOUD_REGION", overlay)
+        self.assertEqual(warnings, [])
+
+    def test_both_equal_no_warning(self) -> None:
+        overlay, warnings = self._overlay({
+            "GOOGLE_CLOUD_PROJECT": "p",
+            "GOOGLE_CLOUD_LOCATION": "us-east5",
+            "GOOGLE_CLOUD_REGION": "us-east5",
+        })
+        self.assertEqual(overlay["GOOGLE_CLOUD_LOCATION"], "us-east5")
+        self.assertEqual(warnings, [])
+
+    def test_both_differ_location_wins_with_warning(self) -> None:
+        overlay, warnings = self._overlay({
+            "GOOGLE_CLOUD_PROJECT": "p",
+            "GOOGLE_CLOUD_LOCATION": "us-east5",
+            "GOOGLE_CLOUD_REGION": "us-central1",
+        })
+        self.assertEqual(overlay["GOOGLE_CLOUD_LOCATION"], "us-east5")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("GOOGLE_CLOUD_LOCATION", warnings[0])
+        self.assertIn("GOOGLE_CLOUD_REGION", warnings[0])
+
+    def test_neither_omits_location(self) -> None:
+        overlay, warnings = self._overlay({"GOOGLE_CLOUD_PROJECT": "p"})
+        self.assertNotIn("GOOGLE_CLOUD_LOCATION", overlay)
+        self.assertEqual(warnings, [])
+
+    def test_empty_keys_are_omitted(self) -> None:
+        overlay, _ = self._overlay({})
+        self.assertEqual(overlay, {})
+        overlay, _ = self._overlay({
+            "GOOGLE_CLOUD_PROJECT": "",
+            "GOOGLE_CLOUD_REGION": "",
+            "GOOGLE_CLOUD_LOCATION": "us-east5",
+        })
+        self.assertEqual(overlay, {"GOOGLE_CLOUD_LOCATION": "us-east5"})
+
+    def test_location_and_region_keep_precedence_over_cloud_ml_region(self) -> None:
+        self.assertEqual(
+            self._location({
+                "GOOGLE_CLOUD_LOCATION": "us-east5",
+                "GOOGLE_CLOUD_REGION": "us-central1",
+                "CLOUD_ML_REGION": "europe-west4",
+            }),
+            "us-east5",
+        )
+        self.assertEqual(
+            self._location({"GOOGLE_CLOUD_REGION": "us-central1", "CLOUD_ML_REGION": "europe-west4"}),
+            "us-central1",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

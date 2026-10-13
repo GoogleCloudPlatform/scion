@@ -431,9 +431,46 @@ func (oneVersionService) Get(context.Context, string) (*hubclient.ArtifactRespon
 	return &hubclient.ArtifactResponse{Artifact: hubclient.Artifact{CurrentSeq: 1}}, nil
 }
 
-func (oneVersionService) ListVersions(context.Context, string) ([]hubclient.ArtifactVersion, error) {
+func (oneVersionService) ListVersionHistory(context.Context, string) ([]hubclient.ArtifactVersion, []hubclient.ArtifactDiscardedVersion, error) {
 	at := time.Date(2026, 10, 6, 18, 20, 0, 0, time.UTC)
-	return []hubclient.ArtifactVersion{{Seq: 1, Kind: "publish", CreatedAt: at, CreatedByKind: "agent", FileCount: 1}}, nil
+	return []hubclient.ArtifactVersion{{Seq: 1, Kind: "publish", CreatedAt: at, CreatedByKind: "agent", FileCount: 1}}, nil, nil
+}
+
+// gapService serves ready versions 4 and 1 and discarded versions 3 and 2.
+type gapService struct{ hubclient.ArtifactService }
+
+func (gapService) Get(context.Context, string) (*hubclient.ArtifactResponse, error) {
+	return &hubclient.ArtifactResponse{Artifact: hubclient.Artifact{CurrentSeq: 4}}, nil
+}
+
+func (gapService) ListVersionHistory(context.Context, string) ([]hubclient.ArtifactVersion, []hubclient.ArtifactDiscardedVersion, error) {
+	at := time.Date(2026, 10, 6, 18, 20, 0, 0, time.UTC)
+	return []hubclient.ArtifactVersion{
+			{Seq: 4, Kind: "publish", CreatedAt: at, CreatedByKind: "agent", CreatedByRef: "ag", FileCount: 1, Note: "fourth"},
+			{Seq: 1, Kind: "publish", CreatedAt: at, CreatedByKind: "agent", CreatedByRef: "ag", FileCount: 1, Note: "first"},
+		}, []hubclient.ArtifactDiscardedVersion{
+			{Seq: 3, State: "failed", Reason: "discarded", CreatedAt: at},
+			{Seq: 2, State: "failed", Reason: "unmarked_changes", CreatedAt: at},
+		}, nil
+}
+
+// TestArtifactVersionsListsDiscarded: discarded versions appear among the
+// ready ones by number, with only their reason, so gaps are explained.
+func TestArtifactVersionsListsDiscarded(t *testing.T) {
+	clitime.SetZone(time.UTC)
+	t.Cleanup(func() { clitime.SetZone(nil) })
+	ref := "scion://artifact/5f1c2d3e-0000-4000-8000-000000000001"
+	var out bytes.Buffer
+	require.NoError(t, listArtifactVersions(context.Background(), gapService{}, &out, ref))
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	require.Len(t, lines, 5, out.String())
+	assert.True(t, strings.HasPrefix(lines[1], "* "+ref+"@4"), lines[1])
+	assert.True(t, strings.HasPrefix(lines[2], "  "+ref+"@3"), lines[2])
+	assert.Regexp(t, `discarded\s+2026-10-06 18:20 UTC\s+-\s+-\s+-\s+discarded: no reason recorded$`, lines[2])
+	assert.True(t, strings.HasPrefix(lines[3], "  "+ref+"@2"), lines[3])
+	assert.True(t, strings.HasSuffix(lines[3], "discarded: the review changed text outside its marks"), lines[3])
+	assert.True(t, strings.HasPrefix(lines[4], "  "+ref+"@1"), lines[4])
+	assert.Contains(t, lines[4], "first")
 }
 
 // TestArtifactVersionsShowsZone: the PUBLISHED column carries a zone.

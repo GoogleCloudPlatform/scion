@@ -19,7 +19,8 @@ Playwright specs. Artifacts land in `test-results/` and `playwright-report/`
 ```
 global-setup.ts          ← Playwright calls this before any spec
   ├─ hub.ts              ← Builds web + Go binary, starts hub on ephemeral port
-  ├─ auth.ts             ← Creates authenticated sessions via test-login
+  ├─ auth.ts             ← Creates authenticated sessions via test-login,
+  │                         and redeems test identity web-login codes
   └─ seed.ts             ← Seeds groups, users, role bindings via the real API
 smoke.spec.ts            ← Proves the loop: login → navigate → assert → axe
 global-teardown.ts       ← Kills the hub, cleans up temp files
@@ -107,6 +108,93 @@ test.describe('Viewer restrictions', () => {
   // ...
 });
 ```
+
+## Test identity browser sessions
+
+A *test identity* is a short-lived synthetic member or viewer user that a
+test hub issues (ptone/scion#4240). A browser context can hold a hub web
+session as a test identity without test-login: the runner issues the
+identity and mints a single-use **web-login code** with the CLI, and the
+harness redeems the code in the browser context.
+
+The hub must run with test identities enabled at the member level and
+carry the test infrastructure marker (`scion server test-infra mark`),
+which holds the hub-local key for these sessions. `startHub()` does both
+with `testIdentities: true`:
+
+```typescript
+import { startHub, runScionCLI } from './harness/hub.js';
+
+const state = await startHub({ testLogin: false, testIdentities: true, stateFile });
+```
+
+That throwaway hub gets a random hub id, a temp database marked before
+start, and a private HOME and `SCION_*`-free environment under its temp
+dir. `runScionCLI(state, args)` runs the CLI against it as the dev-auth
+admin (the issuer). The `test-identity-session` suite
+(`e2e/test-identity-session/`, run in the Web E2E workflow) is the
+reference use.
+
+### Flow
+
+```typescript
+import { assertTestIdentity, redeemTestIdentity } from './harness/auth.js';
+
+// 1. Issue (out of the browser). The token file is not needed for the
+//    browser path; delete it.
+const issued = JSON.parse(
+  runScionCLI(state, ['hub', 'test-identity', 'issue', '--out', tokenFile, '--json'])
+);
+// 2. Mint a code into a new 0600 file in a task-owned temp dir, resolved with
+//    fs.realpathSync (no symlinked directory in the path).
+runScionCLI(state, ['hub', 'test-identity', 'web-code', issued.identity.id, '--out', codeFile]);
+
+// 3. Redeem in a fresh context, before any navigation.
+const context = await browser.newContext({ baseURL: state.baseURL });
+await redeemTestIdentity(context, { codeFile }); // reads, redeems, removes codeFile
+await assertTestIdentity(context.request, { email: issued.identity.email, role: 'member' });
+
+// 4. Journeys; assert the identity again after each.
+const page = await context.newPage();
+await page.goto('/', { waitUntil: 'domcontentloaded' });
+// ...
+await assertTestIdentity(page, { email: issued.identity.email });
+
+// 5. Teardown: close pages, delete the identity; /auth/me then answers 401.
+```
+
+### Helpers
+
+| Function | What it does |
+| --- | --- |
+| `redeemTestIdentity(context, opts)` | `POST /auth/test-identity/redeem` with `{code}` from `opts.code` or `opts.codeFile`; expects 204 and leaves the session cookie in the context. With `codeFile`, the file is read and removed after a successful redeem. `opts.baseURL` defaults to the context's baseURL. `opts.proxyAuthorization` is sent as `Proxy-Authorization` (IAP-fronted hubs). Any other answer throws with the status and the hub error code only, never a body. |
+| `assertTestIdentity(target, {email, role?})` | `target` is a page or a request context. Reads `GET /auth/me` and fails on an email mismatch, on a role mismatch when `role` is given, or when the session is not a test identity session; also checks that `GET /api/v1/auth/me` answers for the same email. Returns `{email, role, expiresAt}`. |
+| `withTracingPaused(context, fn)` | Runs `fn` with trace recording paused (used by the redeem). |
+
+### Rules
+
+- The code is valid for **5 minutes** and can be redeemed **once**. A new
+  code replaces an unredeemed earlier one.
+- **Traces:** the redeem pauses trace recording (it ends the current trace
+  chunk without saving it and starts a new one), so no trace holds the
+  redeem request or its `Set-Cookie`. Actions in the same context before
+  the redeem are dropped from the trace; redeem first.
+- A trace or HAR recorded **after** the redeem holds the session cookie
+  (every later request sends it). Treat such artifacts as sensitive until
+  the identity is deleted or expires, and do not enable `recordHar` on a
+  context that redeems (HAR recording is not paused).
+- `--out` of `web-code` must not have a symlinked directory anywhere in its
+  path, including system temp dirs on macOS (`/var` is a symlink there).
+  Resolve a temp dir first: `fs.realpathSync(fs.mkdtempSync(...))`.
+- Keep the code out of URLs, logs, screenshots and argv: pass `codeFile`,
+  not the code. The CLI never prints the code.
+- Write no `storageState` of a test identity session to a shared path.
+- Use `domcontentloaded` (SSE keeps connections open).
+- After teardown, the first request with the ended session answers 401
+  and clears it; with `--dev-auth`, a later request without a session is
+  logged in as the dev admin again. Close the pages before deleting the
+  identity, and check `/auth/me` once.
+- test-login (`createSession()`) is unchanged for the main suite.
 
 ## Seeding test data
 

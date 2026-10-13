@@ -421,7 +421,7 @@ func TestChatSearchDMAuthz(t *testing.T) {
 	dbp, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok, "test store must expose DB()")
 	db := dbp.DB()
-	wcs := NewWebChatStore(db, "sqlite3")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 

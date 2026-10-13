@@ -40,8 +40,8 @@ import (
 func generalTopicServer(t *testing.T) (*Server, store.Store, WebChatStore) {
 	t.Helper()
 	srv, s := testServer(t)
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	return srv, s, wcs

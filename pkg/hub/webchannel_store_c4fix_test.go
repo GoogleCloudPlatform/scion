@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -187,9 +186,9 @@ func sqliteMigrationRecorded(db *sql.DB, name string) bool {
 // TestC4Fix_SQLite_FreshDB verifies that on a brand-new database, Init
 // succeeds and the conversation_id column and unique index both exist.
 func TestC4Fix_SQLite_FreshDB(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init(), "Init on fresh DB must succeed")
 
 	require.True(t, sqliteColumnExists(db, "webchat_topic", "conversation_id"),
@@ -206,7 +205,7 @@ func TestC4Fix_SQLite_FreshDB(t *testing.T) {
 // three prior migrations recorded). Init must succeed, add the column, create
 // the index, and record the migration.
 func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Seed the DB with the pre-existing schema (no conversation_id column).
 	_, err := db.Exec(preExistingSQLiteSchemaSQL)
@@ -218,7 +217,7 @@ func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
 	require.False(t, sqliteIndexExists(db, "idx_webchat_topic_conversation"),
 		"precondition: idx_webchat_topic_conversation must not exist before Init")
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init(), "Init on pre-existing DB must succeed")
 
 	require.True(t, sqliteColumnExists(db, "webchat_topic", "conversation_id"),
@@ -231,9 +230,9 @@ func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
 
 // TestC4Fix_SQLite_Idempotent verifies Init can be called twice without error.
 func TestC4Fix_SQLite_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init(), "first Init must succeed")
 	require.NoError(t, store.Init(), "second Init must succeed (idempotent)")
 
@@ -246,12 +245,12 @@ func TestC4Fix_SQLite_Idempotent(t *testing.T) {
 // TestC4Fix_SQLite_PreExistingDB_Idempotent verifies that Init on a
 // pre-existing DB is idempotent: the second call succeeds cleanly.
 func TestC4Fix_SQLite_PreExistingDB_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	_, err := db.Exec(preExistingSQLiteSchemaSQL)
 	require.NoError(t, err)
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init(), "first Init on pre-existing DB must succeed")
 	require.NoError(t, store.Init(), "second Init on pre-existing DB must succeed")
 }

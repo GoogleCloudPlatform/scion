@@ -217,6 +217,7 @@ export function buildFixture() {
         testHubAdmin: false,
         testSuperAdmin: false,
         testIdentityWebSessions: false,
+        testIssuerAudience: '',
       },
     },
     '/api/v1/chat/spaces': { status: 200, body: { spaces: [] } },

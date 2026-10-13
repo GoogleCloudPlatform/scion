@@ -185,6 +185,9 @@ var agentEditFields = []agentEditField{
 	{Key: "config.config_dir", Tier: EditTierImmutable, LockedReason: editReasonInternal},
 	{Key: "config.detached", Tier: EditTierImmutable, LockedReason: editReasonInternal},
 	{Key: "config.hub", Tier: EditTierImmutable, LockedReason: editReasonInternal},
+	// A template key: the hub reads it from the template's snapshot at
+	// create (ptone/scion#4222). An agent's mode is the top-level messageMode.
+	{Key: "config.message_mode", Tier: EditTierImmutable, LockedReason: "Set the agent's message mode with messageMode."},
 }
 
 // agentEditFieldByKey indexes agentEditFields by wire key.
@@ -546,8 +549,9 @@ func isNilable(v reflect.Value) bool {
 // edit takes effect, not by where it is stored: a provision-rendered key,
 // or a cleared container key, is written to the agent's inline config now
 // but takes effect only at the next reincarnation. A key sent with its
-// current value is in no list. Every list is sorted and is an empty list,
-// never null.
+// current value is in no list, except gcp_identity, which is applied
+// whenever the PATCH records a service-account assignment, the current
+// account included. Every list is sorted and is an empty list, never null.
 type AgentUpdateDisposition struct {
 	// Applied lists the keys whose edit takes effect at the next container
 	// creation (start, restart, resume or reincarnation), or at once for

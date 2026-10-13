@@ -16,7 +16,6 @@ package config
 
 import (
 	"fmt"
-	"runtime"
 	"testing"
 )
 
@@ -122,28 +121,74 @@ func TestDetectLocalRuntime_DockerFallback(t *testing.T) {
 	}
 }
 
-func TestDetectLocalRuntime_ContainerOnDarwin(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("container runtime is only checked on macOS")
+// mockGOOS overrides the operating system seen by runtime detection.
+func mockGOOS(t *testing.T, goos string) {
+	t.Helper()
+	orig := hostGOOS
+	t.Cleanup(func() {
+		hostGOOS = orig
+		resetDetectLocalRuntimeCache()
+	})
+	resetDetectLocalRuntimeCache()
+	hostGOOS = func() string { return goos }
+}
+
+func TestDetectLocalRuntime_DarwinOrder(t *testing.T) {
+	tests := []struct {
+		name      string
+		available map[string]bool
+		want      string
+	}{
+		{"all three prefers podman", map[string]bool{"podman": true, "docker": true, "container": true}, "podman"},
+		{"docker and container prefers docker", map[string]bool{"docker": true, "container": true}, "docker"},
+		{"podman and container prefers podman", map[string]bool{"podman": true, "container": true}, "podman"},
+		{"only container", map[string]bool{"container": true}, "container"},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockGOOS(t, "darwin")
+			mockRuntimeDetectionMulti(t, tt.available)
 
-	// container is second preference after podman; make only container available
-	mockRuntimeDetection(t, "container")
+			got, err := DetectLocalRuntime()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("DetectLocalRuntime() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
-	result, err := DetectLocalRuntime()
+func TestDetectAllLocalRuntimes_DarwinOrder(t *testing.T) {
+	mockGOOS(t, "darwin")
+	mockRuntimeDetectionMulti(t, map[string]bool{"podman": true, "docker": true, "container": true})
+
+	got := DetectAllLocalRuntimes()
+	want := []string{"podman", "docker", "container"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("DetectAllLocalRuntimes() = %v, want %v", got, want)
+	}
+}
+
+func TestDetectLocalRuntime_LinuxOrder(t *testing.T) {
+	mockGOOS(t, "linux")
+	mockRuntimeDetectionMulti(t, map[string]bool{"podman": true, "docker": true, "container": true})
+
+	got, err := DetectLocalRuntime()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != "container" {
-		t.Errorf("expected container, got %s", result)
+	if got != "podman" {
+		t.Errorf("DetectLocalRuntime() = %q, want podman", got)
+	}
+	if all := DetectAllLocalRuntimes(); fmt.Sprint(all) != fmt.Sprint([]string{"podman", "docker"}) {
+		t.Errorf("DetectAllLocalRuntimes() = %v, want [podman docker]", all)
 	}
 }
 
 func TestDetectLocalRuntime_ContainerSkippedOnLinux(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("this test verifies container is skipped on non-darwin")
-	}
-
+	mockGOOS(t, "linux")
 	// Only make container available; on Linux it should be skipped
 	mockRuntimeDetection(t, "container")
 
@@ -154,23 +199,26 @@ func TestDetectLocalRuntime_ContainerSkippedOnLinux(t *testing.T) {
 }
 
 func TestDetectLocalRuntime_NoRuntime(t *testing.T) {
-	mockRuntimeDetectionNone(t)
-
-	_, err := DetectLocalRuntime()
-	if err == nil {
-		t.Fatal("expected error when no runtime is available")
+	tests := []struct {
+		goos string
+		want string
+	}{
+		{"darwin", "no supported container runtime found: install podman, docker, or container (Apple Virtualization)"},
+		{"linux", "no supported container runtime found: install podman or docker"},
 	}
+	for _, tt := range tests {
+		t.Run(tt.goos, func(t *testing.T) {
+			mockGOOS(t, tt.goos)
+			mockRuntimeDetectionNone(t)
 
-	// Error message should mention install instructions
-	errMsg := err.Error()
-	if runtime.GOOS == "darwin" {
-		if errMsg != "no supported container runtime found: install podman, container (Apple Virtualization), or docker" {
-			t.Errorf("unexpected error message for darwin: %s", errMsg)
-		}
-	} else {
-		if errMsg != "no supported container runtime found: install podman or docker" {
-			t.Errorf("unexpected error message for linux: %s", errMsg)
-		}
+			_, err := DetectLocalRuntime()
+			if err == nil {
+				t.Fatal("expected error when no runtime is available")
+			}
+			if err.Error() != tt.want {
+				t.Errorf("unexpected error message for %s: %s", tt.goos, err.Error())
+			}
+		})
 	}
 }
 

@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // Well-known secret name and env var for GCP telemetry credentials.
@@ -748,6 +749,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("-e", fmt.Sprintf("SCION_START_CMD=%s", tmuxCmd))
 	}
 
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only keys no source above emitted, never a suppressed key. Docker
+	// keeps the last -e for a key, so nothing may be added after this.
+	for _, e := range FallbackEnvEntries(config.FallbackEnv, config.SuppressedFallbackKeys, envKeysOfArgs(args)) {
+		addArg("-e", e)
+	}
+
 	args = append(args, config.Image)
 
 	if len(fuseMounts) > 0 {
@@ -1071,8 +1079,16 @@ func appendContainerResourceArgs(args []string, resources *api.ResourceSpec) ([]
 	return args, nil
 }
 
-// runtimeLog is the structured logger for runtime command execution.
-var runtimeLog = slog.Default().With(slog.String("subsystem", "runtime"))
+// runtimeLog returns the structured logger for the runtime subsystem.
+//
+// It resolves slog.Default() at each call rather than once at package init:
+// a package-level logger would capture the init-time handler, so a later
+// slog.SetDefault (logging setup, --debug, SCION_LOG_LEVEL) would never reach
+// runtime log lines, and those lines would lose their structured attributes
+// (#1339).
+func runtimeLog() *slog.Logger {
+	return logging.Subsystem("runtime")
+}
 
 // isExitError reports whether err (possibly wrapped by runSimpleCommand's
 // fmt.Errorf) contains an *exec.ExitError, meaning the command executed but
@@ -1107,7 +1123,7 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 	// Log the command name and argument count only — never the argument values.
 	// On this tier, secrets travel in argv (--env KEY=VALUE), so logging the
 	// full command string would write credentials to logs.  See #127 / P5.
-	runtimeLog.Debug("Executing command", "cmd", command, "argc", len(args))
+	runtimeLog().Debug("Executing command", "cmd", command, "argc", len(args))
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, command, args...)
 	out, err := cmd.CombinedOutput()
@@ -1116,7 +1132,7 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 		logCommandFailure(ctx, command, len(args), elapsed, out)
 		return string(out), fmt.Errorf("%s failed: %w", command, err)
 	}
-	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
+	runtimeLog().Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
 	return strings.TrimSpace(string(out)), nil
 }
 
@@ -1132,10 +1148,10 @@ func logCommandFailure(ctx context.Context, command string, argc int, elapsed ti
 		// No "output" key at all — matches this function's doc comment
 		// ("omitted"), not a placeholder value that would still need its own
 		// audit for leaking anything.
-		runtimeLog.Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed)
+		runtimeLog().Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed)
 		return
 	}
-	runtimeLog.Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed, "output", strings.TrimSpace(string(out)))
+	runtimeLog().Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed, "output", strings.TrimSpace(string(out)))
 }
 
 // runSimpleCommandWithStdin is runSimpleCommand's counterpart for callers
@@ -1145,7 +1161,7 @@ func logCommandFailure(ctx context.Context, command string, argc int, elapsed ti
 func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command string, args ...string) (string, error) {
 	// Log the command name and argument count only — see runSimpleCommand
 	// comment above. The stdin payload is never logged.
-	runtimeLog.Debug("Executing command with stdin", "cmd", command, "argc", len(args))
+	runtimeLog().Debug("Executing command with stdin", "cmd", command, "argc", len(args))
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Stdin = stdin
@@ -1155,7 +1171,7 @@ func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command str
 		logCommandFailure(ctx, command, len(args), elapsed, out)
 		return string(out), fmt.Errorf("%s failed: %w", command, err)
 	}
-	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
+	runtimeLog().Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
 	return strings.TrimSpace(string(out)), nil
 }
 
@@ -1196,12 +1212,12 @@ func rollbackCancelledCreate(command, containerName, runID string) {
 	if runID != "" {
 		ids, err := containersWithRunID(cleanupCtx, command, apple, runID)
 		if err != nil {
-			runtimeLog.Warn("Failed to roll back cancelled create: could not list the run's containers; nothing removed",
+			runtimeLog().Warn("Failed to roll back cancelled create: could not list the run's containers; nothing removed",
 				"cmd", command, "container", containerName, "run_id", runID, "error", err)
 			return
 		}
 		if len(ids) == 0 {
-			runtimeLog.Debug("Cancelled create left no container of its run", "cmd", command, "container", containerName, "run_id", runID)
+			runtimeLog().Debug("Cancelled create left no container of its run", "cmd", command, "container", containerName, "run_id", runID)
 			return
 		}
 		targets = ids
@@ -1213,7 +1229,7 @@ func rollbackCancelledCreate(command, containerName, runID string) {
 			continue
 		}
 		if out, err := runSimpleCommand(cleanupCtx, command, "rm", "-f", target); err != nil {
-			runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", target, "run_id", runID, "error", err, "output", strings.TrimSpace(out))
+			runtimeLog().Warn("Failed to roll back cancelled create", "cmd", command, "container", target, "run_id", runID, "error", err, "output", strings.TrimSpace(out))
 		}
 	}
 }
@@ -1262,18 +1278,18 @@ func appleKillAndRemove(ctx context.Context, command, id string) {
 		}
 		select {
 		case <-ctx.Done():
-			runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", id, "error", ctx.Err(), "output", strings.TrimSpace(out))
+			runtimeLog().Warn("Failed to roll back cancelled create", "cmd", command, "container", id, "error", ctx.Err(), "output", strings.TrimSpace(out))
 			return
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", id, "error", err, "output", strings.TrimSpace(out))
+	runtimeLog().Warn("Failed to roll back cancelled create", "cmd", command, "container", id, "error", err, "output", strings.TrimSpace(out))
 }
 
 func runInteractiveCommand(command string, args ...string) error {
 	// Log command name and argument count only — see runSimpleCommand comment
 	// and #127 / P5 for rationale.
-	runtimeLog.Debug("Executing interactive command", "cmd", command, "argc", len(args))
+	runtimeLog().Debug("Executing interactive command", "cmd", command, "argc", len(args))
 	cmd := exec.Command(command, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -1301,7 +1317,7 @@ func WriteRuntimeDebugFile(config RunConfig, command string, args []string) {
 	fmt.Fprintf(&buf, " [%d args redacted — may contain credentials, see #127]\n", len(args))
 
 	if err := os.WriteFile(debugPath, []byte(buf.String()), 0644); err != nil {
-		runtimeLog.Debug("Failed to write runtime debug file", "path", debugPath, "error", err)
+		runtimeLog().Debug("Failed to write runtime debug file", "path", debugPath, "error", err)
 	}
 }
 
@@ -1412,12 +1428,12 @@ func DockerSupportsHostGateway(ctx context.Context, command string) bool {
 	defer cancel()
 	out, err := runSimpleCommand(probeCtx, command, "version", "--format", "{{.Server.Version}}")
 	if err != nil {
-		runtimeLog.Debug("Unable to probe Docker server version for host-gateway support", "error", err)
+		runtimeLog().Debug("Unable to probe Docker server version for host-gateway support", "error", err)
 		return true
 	}
 	major, minor, ok := parseDockerServerVersion(strings.TrimSpace(out))
 	if !ok {
-		runtimeLog.Debug("Unable to parse Docker server version for host-gateway support", "version", out)
+		runtimeLog().Debug("Unable to parse Docker server version for host-gateway support", "version", out)
 		return true
 	}
 	// host-gateway requires Docker Engine >= 20.10.
@@ -1839,7 +1855,7 @@ func appendSharedDirGroupArgs(args []string, config RunConfig, runtimeName strin
 		return args
 	}
 	if !supported {
-		runtimeLog.Warn("shared dir groups are not supported on this runtime; the agent starts without them "+
+		runtimeLog().Warn("shared dir groups are not supported on this runtime; the agent starts without them "+
 			"and may be unable to modify files other agents create in its nfs shared dirs",
 			"runtime", runtimeName, "gids", groups)
 		return args

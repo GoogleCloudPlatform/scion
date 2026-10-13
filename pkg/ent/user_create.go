@@ -259,6 +259,48 @@ func (_c *UserCreate) SetNillableIssuerCredentialID(v *string) *UserCreate {
 	return _c
 }
 
+// SetFederatedEmail sets the "federated_email" field.
+func (_c *UserCreate) SetFederatedEmail(v string) *UserCreate {
+	_c.mutation.SetFederatedEmail(v)
+	return _c
+}
+
+// SetNillableFederatedEmail sets the "federated_email" field if the given value is not nil.
+func (_c *UserCreate) SetNillableFederatedEmail(v *string) *UserCreate {
+	if v != nil {
+		_c.SetFederatedEmail(*v)
+	}
+	return _c
+}
+
+// SetHomeIssuer sets the "home_issuer" field.
+func (_c *UserCreate) SetHomeIssuer(v string) *UserCreate {
+	_c.mutation.SetHomeIssuer(v)
+	return _c
+}
+
+// SetNillableHomeIssuer sets the "home_issuer" field if the given value is not nil.
+func (_c *UserCreate) SetNillableHomeIssuer(v *string) *UserCreate {
+	if v != nil {
+		_c.SetHomeIssuer(*v)
+	}
+	return _c
+}
+
+// SetIssuerDelegationID sets the "issuer_delegation_id" field.
+func (_c *UserCreate) SetIssuerDelegationID(v string) *UserCreate {
+	_c.mutation.SetIssuerDelegationID(v)
+	return _c
+}
+
+// SetNillableIssuerDelegationID sets the "issuer_delegation_id" field if the given value is not nil.
+func (_c *UserCreate) SetNillableIssuerDelegationID(v *string) *UserCreate {
+	if v != nil {
+		_c.SetIssuerDelegationID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *UserCreate) SetID(v uuid.UUID) *UserCreate {
 	_c.mutation.SetID(v)
@@ -582,6 +624,18 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.IssuerCredentialID(); ok {
 		_spec.SetField(user.FieldIssuerCredentialID, field.TypeString, value)
 		_node.IssuerCredentialID = &value
+	}
+	if value, ok := _c.mutation.FederatedEmail(); ok {
+		_spec.SetField(user.FieldFederatedEmail, field.TypeString, value)
+		_node.FederatedEmail = &value
+	}
+	if value, ok := _c.mutation.HomeIssuer(); ok {
+		_spec.SetField(user.FieldHomeIssuer, field.TypeString, value)
+		_node.HomeIssuer = &value
+	}
+	if value, ok := _c.mutation.IssuerDelegationID(); ok {
+		_spec.SetField(user.FieldIssuerDelegationID, field.TypeString, value)
+		_node.IssuerDelegationID = &value
 	}
 	if nodes := _c.mutation.OwnedGroupsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -942,6 +996,15 @@ func (u *UserUpsertOne) UpdateNewValues() *UserUpsertOne {
 		}
 		if _, exists := u.create.mutation.IssuerCredentialID(); exists {
 			s.SetIgnore(user.FieldIssuerCredentialID)
+		}
+		if _, exists := u.create.mutation.FederatedEmail(); exists {
+			s.SetIgnore(user.FieldFederatedEmail)
+		}
+		if _, exists := u.create.mutation.HomeIssuer(); exists {
+			s.SetIgnore(user.FieldHomeIssuer)
+		}
+		if _, exists := u.create.mutation.IssuerDelegationID(); exists {
+			s.SetIgnore(user.FieldIssuerDelegationID)
 		}
 	}))
 	return u
@@ -1380,6 +1443,15 @@ func (u *UserUpsertBulk) UpdateNewValues() *UserUpsertBulk {
 			}
 			if _, exists := b.mutation.IssuerCredentialID(); exists {
 				s.SetIgnore(user.FieldIssuerCredentialID)
+			}
+			if _, exists := b.mutation.FederatedEmail(); exists {
+				s.SetIgnore(user.FieldFederatedEmail)
+			}
+			if _, exists := b.mutation.HomeIssuer(); exists {
+				s.SetIgnore(user.FieldHomeIssuer)
+			}
+			if _, exists := b.mutation.IssuerDelegationID(); exists {
+				s.SetIgnore(user.FieldIssuerDelegationID)
 			}
 		}
 	}))

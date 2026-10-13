@@ -57,7 +57,7 @@ import (
 //     populateAgentConfig/resolveDerivedConfig — so every derived slot is
 //     recomputed against the current catalog exactly the way create computes
 //     it, per-field precedence included (see deriveAgentConfig's doc
-//     comment: Model is request > project > hub > template, HarnessConfig is
+//     comment: Model is request > project > template > hub, HarnessConfig is
 //     request > project > template > hub).
 //
 // Returns the fresh config, any warnings to surface on the plan (e.g. the
@@ -95,6 +95,11 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 			resolvedTemplate = tmpl
 		}
 	}
+	// templateEnv is a legacy read-only filter: its keys are used only to
+	// DROP residue an older hub merged into a legacy agent's env (see
+	// legacyCreateInputsFromAppliedConfig). No template env value is copied
+	// into the fresh config (ptone/scion#4222). Retire or rekey it when the
+	// template row's config column goes (ptone/scion#4224).
 	var templateEnv map[string]string
 	if resolvedTemplate != nil && resolvedTemplate.Config != nil {
 		templateEnv = resolvedTemplate.Config.Env
@@ -196,9 +201,9 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	// Do NOT alias Image/Model/Env to InlineConfig's backing map (design
 	// §3.3 A1 addendum 2, rule 3): InlineConfig is a fresh, independent copy,
 	// and Env gets its own clone (as buildAppliedConfig does on create), so
-	// resolveDerivedConfig's template-env merge and auto-expose project tier
-	// below cannot write through to CreateInputs.InlineConfig.Env or leave the
-	// new InlineConfig carrying merged values it didn't have explicitly.
+	// the auto-expose project tier below cannot write through to
+	// CreateInputs.InlineConfig.Env or leave the new InlineConfig carrying
+	// derived values it didn't have explicitly.
 	if createInputs.InlineConfig != nil {
 		fresh.InlineConfig = deepCopyScionConfig(createInputs.InlineConfig)
 		fresh.Image = fresh.InlineConfig.Image
@@ -434,7 +439,7 @@ func dispatchImageRegistry(dispatcher AgentDispatcher) string {
 //     still owns this key" errs toward template freshness — reincarnate's
 //     whole purpose — at the cost of resetting a genuinely explicit
 //     per-agent override that happens to share a name with a template key.
-//     Each dropped key is surfaced in the plan with its old and new value.
+//     Each dropped key is surfaced in the plan by name only.
 //     Keys InlineConfig.Env has that templateEnv does NOT define are kept as
 //     explicit, but flagged: they may equally be a stale default the
 //     requester never asked for, left over from an earlier version of the
@@ -474,16 +479,18 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, template
 
 			var dropped, kept []string
 			for k := range inline.Env {
-				if newVal, definedByTemplate := templateEnv[k]; definedByTemplate {
+				if _, definedByTemplate := templateEnv[k]; definedByTemplate {
 					// Never surface the OLD value (design §3.4 Amendment
 					// A3.9). It came from a
 					// legacy agent's live InlineConfig.Env, which is
 					// indistinguishable-by-inspection from an explicit
 					// per-agent override — and that override could be a
 					// secret that merely happens to share a key name with a
-					// template default. The new value is the template's own
-					// current default, not user data, so it is safe to show.
-					dropped = append(dropped, fmt.Sprintf("%s (new=%q)", k, newVal))
+					// template default. No new value is shown either: the
+					// hub no longer copies template env into the agent; the
+					// template's own file supplies it on the broker
+					// (ptone/scion#4222).
+					dropped = append(dropped, k)
 					delete(inline.Env, k)
 				} else {
 					kept = append(kept, k)
@@ -492,7 +499,7 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, template
 			if len(dropped) > 0 {
 				sort.Strings(dropped)
 				warnings = append(warnings, fmt.Sprintf(
-					"dropped %d env key(s) assumed template-derived (now redefined by the current template): %s",
+					"dropped %d env key(s) assumed template-derived (the template supplies them from its own file): %s",
 					len(dropped), strings.Join(dropped, ", ")))
 			}
 			if len(kept) > 0 {

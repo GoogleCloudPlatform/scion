@@ -29,6 +29,14 @@ type hubScopeResolver func(*cobra.Command, *config.Settings) (string, string, er
 // loadHubClient returns the resolved settings alongside the client for callers
 // that need project or endpoint metadata after client construction.
 func loadHubClient() (*config.Settings, hubclient.Client, error) {
+	// A hub profile names the hub: no local project settings are read.
+	if hubProfileSelected() {
+		client, err := getHubClient(nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &config.Settings{}, client, nil
+	}
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)

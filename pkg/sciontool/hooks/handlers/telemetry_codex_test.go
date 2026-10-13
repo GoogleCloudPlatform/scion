@@ -32,6 +32,7 @@ import (
 // one, while its real tool-start/tool-end events keep recording (D4: the
 // gate is narrow to usage).
 func TestTelemetryHandler_CodexNativeUsageSuppressesHookModelEnd(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_HARNESS", "codex")
 	t.Setenv("SCION_USAGE_SOURCE", "native")
 

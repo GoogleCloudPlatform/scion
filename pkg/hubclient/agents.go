@@ -935,6 +935,16 @@ type OutboundMessageResult struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// DefaultAgentResult reports the delivery of a group post to the
+	// conversation's default agent. Set only for a group post that
+	// @mentioned no agent, in a conversation with a default agent.
+	DefaultAgentResult *messages.MentionResult `json:"default_agent_result,omitempty"`
+	// WokenAgents lists the agents a group post reached, through
+	// @mentions or the conversation's default agent.
+	WokenAgents []string `json:"woken_agents,omitempty"`
+	// NoAgentWoken is true when a group post reached no agent. Always
+	// false for other sends, and on hubs that predate this field.
+	NoAgentWoken bool `json:"no_agent_woken,omitempty"`
 	// ArtifactWarning is set when artifact references the message named
 	// were not attached. Empty on hubs that predate this field.
 	ArtifactWarning string `json:"artifact_warning,omitempty"`

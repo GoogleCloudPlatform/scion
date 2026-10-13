@@ -221,6 +221,11 @@ run "fresh_gke_hub_plans_clean" {
   }
 
   assert {
+    condition     = output.chart_values.cloudsql.privateIp == true
+    error_message = "chart_values.cloudsql.privateIp must be true: the Cloud SQL instance has no public IP, so the proxy must connect over the private IP."
+  }
+
+  assert {
     condition = (
       output.chart_values.serviceAccount.name == "scion-hub" &&
       output.chart_values.runtime.namespace == "tfha-gke-h3" &&
@@ -230,10 +235,72 @@ run "fresh_gke_hub_plans_clean" {
     error_message = "KSA, namespaces and agent image registry are not as designed."
   }
 
+  # Workspace share: the hub mounts and advertises exactly the share
+  # agent_runtime_k8s built.
+  assert {
+    condition = (
+      output.chart_values.workspaceStorage.nfs.enabled &&
+      output.chart_values.workspaceStorage.nfs.shareId == var.hub_name &&
+      output.chart_values.workspaceStorage.nfs.export == module.agent_runtime_k8s.nfs_export &&
+      output.chart_values.workspaceStorage.nfs.export == "/scion/tfha-gke-h3" &&
+      output.chart_values.workspaceStorage.nfs.server == "10.0.0.2" &&
+      output.chart_values.workspaceStorage.nfs.pvName == module.agent_runtime_k8s.pvc_name &&
+      output.chart_values.workspaceStorage.nfs.subpathRoot == "projects"
+    )
+    error_message = "workspaceStorage.nfs must use shareId = hub_name, the agent-runtime export and claim, and the shared Filestore server."
+  }
+
+  assert {
+    condition     = try(output.chart_values.config.extra.server.workspace_storage, null) == null
+    error_message = "config.extra must not carry server.workspace_storage."
+  }
+
+  assert {
+    condition = output.nfs_workspace == {
+      share_id   = "tfha-gke-h3"
+      export     = "/scion/tfha-gke-h3"
+      pv_name    = "tfha-gke-h3-nfs"
+      mount_path = "/mnt/scion-nfs/tfha-gke-h3"
+    }
+    error_message = "nfs_workspace must report shareId = hub_name, the agent-runtime export and claim, and mount_path <mount_root>/<share_id>."
+  }
+
+  assert {
+    condition = (
+      module.agent_runtime_k8s.nfs_owner.uid == 1000 &&
+      module.agent_runtime_k8s.nfs_owner.gid == 1000 &&
+      output.chart_values.hub.securityContext.runAsUser == 1000 &&
+      output.chart_values.hub.securityContext.runAsGroup == 1000
+    )
+    error_message = "by default the export owner and the hub's runAsUser/runAsGroup must both be 1000:1000."
+  }
+
   # RBAC is owned by the chart, not agent-runtime-k8s.
   assert {
     condition     = output.hub_rbac_created_by_terraform == false
     error_message = "create_hub_rbac must be false for hub-gke: the chart owns the hub's RBAC."
+  }
+
+  # Defaults add nothing: no test-runner module, null outputs, and no
+  # test-identities chart value.
+  assert {
+    condition     = length(module.hub_test_runner) == 0
+    error_message = "test_runner defaults to disabled and must create nothing."
+  }
+
+  assert {
+    condition = (
+      output.test_runner_uat_email == null &&
+      output.test_runner_uat_unique_id == null &&
+      output.test_runner_issuer_email == null &&
+      output.test_runner_issuer_unique_id == null
+    )
+    error_message = "test-runner outputs must be null while test_runner is disabled."
+  }
+
+  assert {
+    condition     = !contains(keys(output.chart_values.hub), "testIdentities")
+    error_message = "test_identities_enabled defaults to false and must leave hub.testIdentities out of the chart values."
   }
 }
 
@@ -378,5 +445,272 @@ run "newer_gke_minor_passes" {
   assert {
     condition     = output.neg_zones == tolist(["us-central1-a"])
     error_message = "a newer control plane must plan cleanly."
+  }
+}
+
+# nfs_uid/nfs_gid reach both the export owner (agent_runtime_k8s) and the
+# hub's runAsUser/runAsGroup (hub_gke).
+run "nfs_ids_reach_both_modules" {
+  command = plan
+
+  variables {
+    nfs_uid = 2001
+    nfs_gid = 2002
+  }
+
+  assert {
+    condition = (
+      module.agent_runtime_k8s.nfs_owner.uid == 2001 &&
+      module.agent_runtime_k8s.nfs_owner.gid == 2002 &&
+      output.chart_values.hub.securityContext.runAsUser == 2001 &&
+      output.chart_values.hub.securityContext.runAsGroup == 2002
+    )
+    error_message = "nfs_uid/nfs_gid must set both agent_runtime_k8s's export owner and hub_gke's runAsUser/runAsGroup."
+  }
+}
+
+# The agent-runtime outputs stand in for a wiring that went wrong; the real
+# module derives all of them from hub_name and share_path. An empty server or
+# a relative export never reaches these preconditions: hub-gke's nfs variable
+# validations refuse them first, and modules/hub-gke/tests covers those.
+run "share_id_not_agent_namespace_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-other"
+      pv_name          = "tfha-gke-h3-nfs"
+      pvc_name         = "tfha-gke-h3-nfs"
+      nfs_export       = "/scion/tfha-gke-h3"
+      nfs_init_job_id  = "tfha-other/tfha-other-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [output.nfs_workspace]
+}
+
+run "share_id_not_export_segment_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-gke-h3"
+      pv_name          = "tfha-gke-h3-nfs"
+      pvc_name         = "tfha-gke-h3-nfs"
+      nfs_export       = "/scion/tfha-other"
+      nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [output.nfs_workspace]
+}
+
+run "claim_not_share_id_derived_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-gke-h3"
+      pv_name          = "tfha-other-nfs"
+      pvc_name         = "tfha-other-nfs"
+      nfs_export       = "/scion/tfha-gke-h3"
+      nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [output.nfs_workspace]
+}
+
+# The claim agent pods mount (pv_name, which hub-gke renders as pvName) is not
+# the claim agent_runtime_k8s created (pvc_name), though pvc_name itself is
+# "<shareId>-nfs".
+run "pv_name_not_claim_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-gke-h3"
+      pv_name          = "tfha-other-nfs"
+      pvc_name         = "tfha-gke-h3-nfs"
+      nfs_export       = "/scion/tfha-gke-h3"
+      nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [output.nfs_workspace]
+}
+
+# --- Test-runner identities (modules/hub-test-runner) ---
+#
+# All emails are fake. Override targets carry the [0] instance key: overrides
+# match the module instance's address, and an unkeyed target does not match
+# a counted module. Each enabled run overrides the module's IAM-policy read
+# with an iamcredentials DATA_READ audit config; the precondition itself is
+# covered by the module's own tests (a child module's precondition cannot be
+# named in a root test's expect_failures). For the same reason the
+# impersonator validations, which live only in the module, are tested there.
+
+run "test_runner_enabled_adds_the_module" {
+  command = plan
+
+  variables {
+    test_runner = {
+      enabled       = true
+      impersonators = ["serviceAccount:orchestrator@example-project.iam.gserviceaccount.com"]
+    }
+  }
+
+  override_data {
+    target = module.hub_test_runner[0].data.google_project_iam_policy.this
+    values = {
+      policy_data = "{\"auditConfigs\":[{\"service\":\"iamcredentials.googleapis.com\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\"}]}]}"
+    }
+  }
+
+  assert {
+    condition     = length(module.hub_test_runner) == 1
+    error_message = "test_runner.enabled must create the module once."
+  }
+
+  # Role and scope only: each grant's account is derived from the accounts'
+  # computed name and email, resolved in test_runner_outputs_pass_through.
+  assert {
+    condition = [for g in module.hub_test_runner[0].iam_grants : "${g.role}|${g.resource}"] == [
+      "roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "roles/iap.httpsResourceAccessor|backend_service:tfha-gke-h3-hub-backend",
+    ]
+    error_message = "the module must grant token creation twice and IAP on this hub's backend service."
+  }
+
+  assert {
+    condition     = !module.hub_test_runner[0].alerts_enabled
+    error_message = "no alert objects without notification channels."
+  }
+
+  # Enabling test-runner identities does not by itself turn on test identities.
+  assert {
+    condition     = !contains(keys(output.chart_values.hub), "testIdentities")
+    error_message = "test_runner must not change the chart values."
+  }
+}
+
+run "test_runner_alerts_with_channels" {
+  command = plan
+
+  variables {
+    test_runner = {
+      enabled                     = true
+      impersonators               = ["serviceAccount:orchestrator@example-project.iam.gserviceaccount.com"]
+      alert_notification_channels = ["projects/example-project/notificationChannels/1234567890"]
+    }
+  }
+
+  override_data {
+    target = module.hub_test_runner[0].data.google_project_iam_policy.this
+    values = {
+      policy_data = "{\"auditConfigs\":[{\"service\":\"allServices\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\"}]}]}"
+    }
+  }
+
+  assert {
+    condition     = module.hub_test_runner[0].alerts_enabled
+    error_message = "notification channels must create the alert objects."
+  }
+}
+
+# Against the MOCK providers only, targeted at the module: resolves the
+# accounts' computed email and unique_id so the pass-through outputs can be
+# checked. The target leaves out the global address (prevent_destroy).
+run "test_runner_outputs_pass_through" {
+  command = apply
+
+  plan_options {
+    target = [module.hub_test_runner]
+  }
+
+  variables {
+    test_runner = {
+      enabled       = true
+      impersonators = ["serviceAccount:orchestrator@example-project.iam.gserviceaccount.com"]
+    }
+  }
+
+  override_data {
+    target = module.hub_test_runner[0].data.google_project_iam_policy.this
+    values = {
+      policy_data = "{\"auditConfigs\":[{\"service\":\"iamcredentials.googleapis.com\",\"auditLogConfigs\":[{\"logType\":\"DATA_READ\"}]}]}"
+    }
+  }
+
+  override_resource {
+    target = module.hub_test_runner[0].google_service_account.uat
+    values = {
+      name      = "projects/tfha-test-project/serviceAccounts/tfha-gke-h3-uat@tfha-test-project.iam.gserviceaccount.com"
+      email     = "tfha-gke-h3-uat@tfha-test-project.iam.gserviceaccount.com"
+      unique_id = "100000000000000000001"
+    }
+  }
+
+  override_resource {
+    target = module.hub_test_runner[0].google_service_account.issuer
+    values = {
+      name      = "projects/tfha-test-project/serviceAccounts/tfha-gke-h3-issuer@tfha-test-project.iam.gserviceaccount.com"
+      email     = "tfha-gke-h3-issuer@tfha-test-project.iam.gserviceaccount.com"
+      unique_id = "100000000000000000002"
+    }
+  }
+
+  assert {
+    condition = (
+      output.test_runner_uat_email == "tfha-gke-h3-uat@tfha-test-project.iam.gserviceaccount.com" &&
+      output.test_runner_uat_unique_id == "100000000000000000001" &&
+      output.test_runner_issuer_email == "tfha-gke-h3-issuer@tfha-test-project.iam.gserviceaccount.com" &&
+      output.test_runner_issuer_unique_id == "100000000000000000002"
+    )
+    error_message = "the root must pass through both accounts' email and unique_id."
+  }
+
+  # account comes from each grant resource (token-creator: service_account_id;
+  # IAP: member), so this proves the IAP grant is for -uat only.
+  assert {
+    condition = [for g in module.hub_test_runner[0].iam_grants : "${g.account}|${g.role}|${g.resource}"] == [
+      "uat|roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "issuer|roles/iam.serviceAccountOpenIdTokenCreator|service_account",
+      "uat|roles/iap.httpsResourceAccessor|backend_service:tfha-gke-h3-hub-backend",
+    ]
+    error_message = "the module must grant token creation on both accounts and IAP on this hub's backend service for -uat only."
+  }
+}
+
+# --- Test identities chart value ---
+
+run "test_identities_enabled_reaches_the_chart" {
+  command = plan
+
+  variables {
+    test_identities_enabled = true
+  }
+
+  assert {
+    condition     = output.chart_values.hub.testIdentities.enabled == true
+    error_message = "test_identities_enabled = true must set the chart's hub.testIdentities.enabled."
+  }
+
+  assert {
+    condition     = length(module.hub_test_runner) == 0
+    error_message = "test identities alone must not create test-runner identities."
   }
 }

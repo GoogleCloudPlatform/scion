@@ -77,7 +77,7 @@ func ValidateRunID(runID string) error {
 // validateRunIDLabel is ValidateRunID with the offending value logged.
 func validateRunIDLabel(runID string) error {
 	if err := ValidateRunID(runID); err != nil {
-		runtimeLog.Warn("Refusing a run ID that is not a valid label value",
+		runtimeLog().Warn("Refusing a run ID that is not a valid label value",
 			"run_id", runID, "errors", strings.Join(k8svalidation.IsValidLabelValue(runID), "; "))
 		return err
 	}
@@ -100,14 +100,14 @@ func (e *opaqueRunScopeError) Unwrap() error { return e.cause }
 // returns ErrRunConflict with only its fixed text, so errors.Is still
 // matches and no namespace, object name or run ID reaches a client.
 func runConflictError(reason string, logArgs ...any) error {
-	runtimeLog.Warn(reason, logArgs...)
+	runtimeLog().Warn(reason, logArgs...)
 	return &opaqueRunScopeError{msg: ErrRunConflict.Error(), cause: ErrRunConflict}
 }
 
 // opaqueStartError logs msg with the identifying details and the cause,
 // and returns an error with only msg as its text.
 func opaqueStartError(msg string, cause error, logArgs ...any) error {
-	runtimeLog.Warn(msg, append(logArgs, "error", cause)...)
+	runtimeLog().Warn(msg, append(logArgs, "error", cause)...)
 	return &opaqueRunScopeError{msg: msg, cause: cause}
 }
 
@@ -242,7 +242,7 @@ func (r *KubernetesRuntime) staleOtherRunFilter(currentRun string) perRunFilter 
 		if objRun == "" || objRun == currentRun || !r.staleRunObject(obj) {
 			return false
 		}
-		runtimeLog.Info("Removing a stale per-run object of another run",
+		runtimeLog().Info("Removing a stale per-run object of another run",
 			"kind", kind, "name", obj.GetName(), "namespace", obj.GetNamespace(),
 			"object_run_id", objRun, "run_id", currentRun,
 			"created", obj.GetCreationTimestamp().UTC().Format(time.RFC3339),
@@ -273,7 +273,7 @@ func (r *KubernetesRuntime) deleteRun(ctx context.Context, namespace, podName, r
 		return err
 	}
 	warn := func(kind, name string, err error) {
-		runtimeLog.Warn("Failed to delete per-agent object of a run",
+		runtimeLog().Warn("Failed to delete per-agent object of a run",
 			"kind", kind, "name", name, "agent", podName, "namespace", namespace, "run_id", runID, "error", err)
 	}
 	pods := r.Client.Clientset.CoreV1().Pods(namespace)
@@ -283,14 +283,14 @@ func (r *KubernetesRuntime) deleteRun(ctx context.Context, namespace, podName, r
 		return nil
 	}
 	if err != nil {
-		runtimeLog.Warn("Run-scoped delete could not read the pod",
+		runtimeLog().Warn("Run-scoped delete could not read the pod",
 			"pod", podName, "namespace", namespace, "run_id", runID, "error", err)
 		return &opaqueRunScopeError{msg: "failed to read the agent pod", cause: err}
 	}
 
 	podRun := pod.Labels[api.LabelRunID]
 	if !k8sRunMatches(podRun, runID) {
-		runtimeLog.Info("Delete left a pod of another run untouched",
+		runtimeLog().Info("Delete left a pod of another run untouched",
 			"pod", podName, "namespace", namespace, "run_id", runID, "pod_run_id", podRun)
 		return fmt.Errorf("pod %s/%s belongs to run %q, not %q: %w", namespace, podName, podRun, runID, ErrRunMismatch)
 	}
@@ -310,7 +310,7 @@ func (r *KubernetesRuntime) deleteRun(ctx context.Context, namespace, podName, r
 	case err == nil, k8serrors.IsNotFound(err):
 		return nil
 	case k8serrors.IsConflict(err):
-		runtimeLog.Info("Delete left a pod recreated under the same name untouched",
+		runtimeLog().Info("Delete left a pod recreated under the same name untouched",
 			"pod", podName, "namespace", namespace, "run_id", runID, "uid", pod.UID)
 		return fmt.Errorf("pod %s/%s was replaced before it could be deleted: %w", namespace, podName, ErrRunMismatch)
 	default:
@@ -397,7 +397,7 @@ func (r *KubernetesRuntime) preCleanForRun(ctx context.Context, namespace, podNa
 	}
 
 	warn := func(kind, name string, err error) {
-		runtimeLog.Warn("Failed to delete stale per-agent object before start",
+		runtimeLog().Warn("Failed to delete stale per-agent object before start",
 			"kind", kind, "name", name, "agent", podName, "namespace", namespace, "run_id", runID, "error", err)
 	}
 	// Every per-agent object Run creates carries scion.agent (see
@@ -480,7 +480,7 @@ func (r *KubernetesRuntime) removePreviousPodForRun(ctx context.Context, namespa
 		return nil
 	}
 	bound := nfsHomeTerminationBound(pod, hs)
-	runtimeLog.Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace,
+	runtimeLog().Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace,
 		"run_id", runID, "bound", bound.String(), "phase", "home-wait")
 	if err := r.waitForPodTermination(ctx, namespace, podName, pod.UID, bound); err != nil {
 		// The visible text keeps the documented retryable code

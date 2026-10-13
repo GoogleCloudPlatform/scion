@@ -85,6 +85,7 @@ var knownInertServerEnvNames = map[string]string{
 	"SCION_SERVER_BROKER_BROKERTOKEN":                   "SCION_SERVER_BROKER_BROKER_TOKEN",
 	"SCION_SERVER_BROKER_AUTOPROVIDE":                   "SCION_SERVER_BROKER_AUTO_PROVIDE",
 	"SCION_SERVER_HUB_PUBLIC_URL":                       "SCION_SERVER_HUB_ENDPOINT",
+	"SCION_SERVER_HUB_PUBLICURL":                        "SCION_SERVER_HUB_ENDPOINT",
 	// Named by an old storage-migration error message.
 	"SCION_SERVER_HUB_ID": "SCION_SERVER_HUB_HUBID",
 	// The server.log_level spelling is SCION_SERVER_LOGLEVEL; nothing sets
@@ -94,6 +95,14 @@ var knownInertServerEnvNames = map[string]string{
 	"SCION_SERVER_LOGFORMAT":  "",
 	// server.env binds in VersionedSettings, but nothing reads it.
 	"SCION_SERVER_ENV": "",
+}
+
+// knownInertSeedEnvNames maps SCION_SEED_* names that set nothing to the
+// spelling that does, where the segment-collapse heuristic cannot find it.
+var knownInertSeedEnvNames = map[string]string{
+	// server.hub.public_url is set by the HUB_ENDPOINT spelling
+	// (ptone/scion#3905).
+	"SCION_SEED_SERVER_HUB_PUBLICURL": "SCION_SEED_SERVER_HUB_ENDPOINT",
 }
 
 // knownInertServerEnvNotes adds a short explanation to the warning for
@@ -132,9 +141,6 @@ type UnmatchedEnvName struct {
 // values only seed Layer-1 settings.
 //
 // Known gaps (accepted but still without effect at the hub):
-//   - SCION_SERVER_HUB_PUBLICURL maps to the Layer-1 server.hub.public_url,
-//     which only feeds the admin server-config view; the hub's endpoint is
-//     GlobalConfig Hub.Endpoint (SCION_SERVER_HUB_ENDPOINT).
 //   - SCION_SERVER_OIDCLOGIN_* binds GlobalConfig only on the settings.yaml
 //     path; on the legacy server.yaml path the oidcLogin.* defaults shadow
 //     it (ptone/scion#3038).
@@ -174,6 +180,10 @@ func FindUnmatchedSettingsEnv(environ []string, isLayer1 func(string) bool) []Un
 				Suggestion: suggestEnvName(name, serverEnvPrefix, func(n string) bool { return serverEnvMatches(n, isLayer1) }),
 			})
 		case strings.HasPrefix(name, seedEnvPrefix):
+			if s, ok := knownInertSeedEnvNames[name]; ok {
+				out = append(out, UnmatchedEnvName{Name: name, Suggestion: s})
+				continue
+			}
 			if seedEnvMatches(name, isLayer1) {
 				continue
 			}
@@ -279,7 +289,7 @@ func seedEnvMatches(name string, isLayer1 func(string) bool) bool {
 	if rest == "" {
 		return false
 	}
-	return isLayer1(envKeyToOpsettingsKey(rest))
+	return isLayer1(seedEnvToOpsettingsKey(rest))
 }
 
 // suggestEnvName proposes a matching spelling for an unmatched name: first

@@ -100,8 +100,9 @@ entirely from the browser — no config files to edit.
 *"Telegram requires setup to operate — Enter your Bot Token below to get started."*
 
 4. In the **Secrets** section, find **Bot Token** (marked **Required**) and paste the token
-   from Step 1. There is an optional **Webhook Secret** field — leave it blank for a typical
-   workstation setup (see the note on inbound mode below).
+   from Step 1. There is also a **Webhook Secret** field. Leave it blank for a typical
+   workstation setup in `poll` mode (see the note on inbound mode below). It is required
+   if you set **Inbound Mode** to `webhook`.
 5. In the **Configuration** section:
    - Leave **Inbound Mode** set to its default, `poll`.
    - **Registration URL** (`register_url`): (Optional) Enter a public-facing URL (e.g., `https://scion.example.com`) used for user-facing registration links. If left empty, it defaults to the internal `hub_url`. This is useful when the Hub is behind an authentication proxy, or when mobile devices or external users need to register.
@@ -109,8 +110,10 @@ entirely from the browser — no config files to edit.
    :::tip[Poll vs. webhook on a workstation]
    `poll` (long-polling) is the right choice for Workstation mode: your local Hub reaches
    out to Telegram, so **no public HTTPS URL is required**. `webhook` mode needs Telegram
-   to reach your machine from the internet and is meant for hosted deployments. Stick with
-   `poll` and you can ignore the Webhook URL / Webhook Listen fields.
+   to reach your machine from the internet and is meant for hosted deployments. In `webhook`
+   mode, both Webhook URL and Webhook Secret are required, and the plugin refuses to start
+   without them. Stick with `poll` and you can ignore the Webhook URL, Webhook Listen and
+   Webhook Secret fields.
    :::
 6. Click **Save Configuration**.
 

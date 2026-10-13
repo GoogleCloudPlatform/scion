@@ -66,6 +66,16 @@ module "gke_autopilot" {
   release_channel            = var.gke_release_channel
   master_authorized_networks = var.gke_master_authorized_networks
   deletion_protection        = var.deletion_protection
+
+  # The cluster is created after the services that attach to the VPC: an
+  # Autopilot cluster created while those attachments were still being added
+  # has come up without ever provisioning nodes. Do not remove this to
+  # parallelise the apply.
+  create_after = [
+    module.network.psa_connection,
+    module.filestore.instance,
+    module.cloudsql_instance.instance,
+  ]
 }
 
 module "artifact_registry" {
@@ -76,6 +86,28 @@ module "artifact_registry" {
   name_prefix = var.name_prefix
 
   depends_on = [module.project_services]
+}
+
+# --- iamcredentials data-access audit logs (opt-in) ---
+#
+# Logs every token minted through iamcredentials.googleapis.com
+# (GenerateIdToken, GenerateAccessToken, SignJwt, ...). modules/hub-test-runner
+# refuses to grant token creation without it. Audit configs are project-level,
+# so this root owns it once rather than each hub.
+#
+# google_project_iam_audit_config is authoritative for this one service: it
+# replaces any audit config for iamcredentials.googleapis.com set outside
+# Terraform (including exempted members). Other services' audit configs and
+# all IAM bindings are untouched.
+resource "google_project_iam_audit_config" "iamcredentials" {
+  count = var.iamcredentials_data_access_logs ? 1 : 0
+
+  project = var.project_id
+  service = "iamcredentials.googleapis.com"
+
+  audit_log_config {
+    log_type = "DATA_READ"
+  }
 }
 
 # --- Destroy guardrail ---
