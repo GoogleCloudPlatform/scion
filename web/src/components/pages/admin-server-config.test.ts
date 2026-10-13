@@ -3164,6 +3164,212 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── Public URL pinned state (ptone/scion#3905) ──
+
+  describe('Public URL field (ptone/scion#3905)', () => {
+    function field(el: HTMLElement): Element {
+      const label = queryAll(el, 'label').find((l) => l.textContent?.trim() === 'Public URL');
+      expect(label).toBeTruthy();
+      return label!.closest('.form-field')!;
+    }
+
+    function withStatus(tier: string, status: Record<string, unknown>) {
+      return makeBaseConfig({ settings_tier: tier, public_url_status: status });
+    }
+
+    it.each([
+      ['db', 'SCION_SERVER_HUB_ENDPOINT'],
+      ['db', '--base-url'],
+      ['db', 'SCION_SERVER_BASE_URL'],
+    ])('is read-only and names the pinning setting (%s mode, %s)', async (tier, pin) => {
+      element = await createComponent(
+        createFetchHandler(
+          withStatus(tier, { effective: 'https://env.example.com', source: 'env', pinned_by: pin })
+        )
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')).toBeNull();
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain(`Set by ${pin}`);
+      expect(f.querySelector('.read-only-value')?.textContent).toContain('https://env.example.com');
+      expect(f.querySelector('.public-url-in-effect')).toBeNull();
+    });
+
+    it('a pinned public URL is not sent on save', async () => {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(
+          withStatus('db', {
+            effective: 'https://env.example.com',
+            source: 'env',
+            pinned_by: 'SCION_SERVER_HUB_ENDPOINT',
+          }),
+          {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          }
+        )
+      );
+      (element as any).hubPublicUrl = 'https://other.example.com';
+      (element as any).hubMonitoringDashboardUrl = 'https://dash.example.com/d';
+      await (element as any).updateComplete;
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const body = captured as Record<string, unknown> | null;
+      expect(body).not.toBeNull();
+      const hub = ((body!.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
+        string,
+        unknown
+      >;
+      expect(hub).not.toHaveProperty('public_url');
+    });
+
+    it('is editable when not pinned and shows the value in effect and its source', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          withStatus('db', { effective: 'https://db.example.com', source: 'database' })
+        )
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')?.getAttribute('value')).toBe('https://hub.example.com');
+      expect(f.querySelector('.read-only-badge')).toBeNull();
+      const hint = f.querySelector('.public-url-in-effect')?.textContent ?? '';
+      expect(hint).toContain('https://db.example.com');
+      expect(hint).toContain('from database');
+    });
+
+    it('is read-only in file mode when SCION_SERVER_HUB_ENDPOINT sets it', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: ['server.hub.public_url'] }))
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')).toBeNull();
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain(
+        'Set via environment variable'
+      );
+    });
+
+    it('is editable when the hub reports no status', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(field(element).querySelector('sl-input')).not.toBeNull();
+    });
+
+    const supersededPublicUrl = {
+      endpoints: [
+        { key: 'server.hub.public_url', source: 'server_env' },
+        { key: 'image_registry', source: 'yaml' },
+      ],
+    };
+
+    function panelText(el: HTMLElement): string {
+      return query(el, '.superseded-panel')?.textContent ?? '';
+    }
+
+    async function clickSave(el: HTMLElement): Promise<void> {
+      const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      expect(saveBtn).toBeTruthy();
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (el as any).updateComplete;
+    }
+
+    it('a pinned public URL is not listed as superseded by database settings', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            public_url_status: {
+              effective: 'https://env.example.com',
+              source: 'env',
+              pinned_by: 'SCION_SERVER_HUB_ENDPOINT',
+            },
+            superseded_keys: supersededPublicUrl,
+          })
+        )
+      );
+      expect(panelText(element)).not.toContain('Public URL');
+      expect(panelText(element)).toContain('Image Registry');
+      expect(field(element).querySelector('.superseded-badge')).toBeNull();
+    });
+
+    it('an unpinned public URL the database value supersedes is listed', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            public_url_status: { effective: 'https://file.example.com', source: 'file' },
+            superseded_keys: supersededPublicUrl,
+          })
+        )
+      );
+      expect(panelText(element)).toContain('Public URL');
+      expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
+    });
+
+    it('the Superseded badge goes away after the public URL is cleared', async () => {
+      const cfg = makeBaseConfig({
+        settings_tier: 'db',
+        public_url_status: { effective: 'https://file.example.com', source: 'file' },
+        superseded_keys: { endpoints: [{ key: 'server.hub.public_url', source: 'yaml' }] },
+      }) as Record<string, any>;
+      cfg.server.hub.public_url = 'https://saved.example.com';
+      element = await createComponent(
+        createFetchHandler(cfg, {
+          putHandler: () => {
+            // After the clear the hub reports the bootstrap value in effect
+            // and nothing superseded.
+            delete cfg.superseded_keys;
+            cfg.server.hub.public_url = 'https://file.example.com';
+            return {
+              status: 200,
+              body: { reload: { applied_keys: [], pending_restart: ['server.hub.public_url'] } },
+            };
+          },
+        })
+      );
+      expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
+
+      (element as any).hubPublicUrl = '';
+      await (element as any).updateComplete;
+      await clickSave(element);
+
+      expect(field(element).querySelector('.superseded-badge')).toBeNull();
+      expect(query(element, '.superseded-panel')).toBeNull();
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(
+        'https://file.example.com'
+      );
+    });
+
+    it('an echo save keeps the value in effect and reports no pending restart', async () => {
+      const cfg = makeBaseConfig({
+        settings_tier: 'db',
+        public_url_status: { effective: 'https://hub.example.com', source: 'file' },
+      }) as Record<string, any>;
+      let sent: unknown;
+      element = await createComponent(
+        createFetchHandler(cfg, {
+          putHandler: (body) => {
+            sent = (body.server as Record<string, any> | undefined)?.hub?.public_url;
+            return { status: 200, body: { reload: { applied_keys: [], pending_restart: [] } } };
+          },
+        })
+      );
+      await clickSave(element);
+
+      expect(sent).toBe('https://hub.example.com');
+      expect(query(element, '.pending-restart')).toBeNull();
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(
+        'https://hub.example.com'
+      );
+    });
+  });
+
   // ── Structured save errors at the field/section (ptone/scion#3923) ──
 
   describe('Structured save errors shown at the field and section (ptone/scion#3923)', () => {

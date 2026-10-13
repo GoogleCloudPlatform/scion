@@ -61,6 +61,8 @@ var projectUseCmd = &cobra.Command{
 	Long:  projectUseLong,
 	Args:  cobra.MaximumNArgs(1),
 	RunE:  runProjectUse,
+	// Completes known project slugs from the hub list, offline.
+	ValidArgsFunction: completeUseProjects,
 }
 
 // useCmd is the top-level 'scion use', an alias of 'scion project use'.
@@ -72,6 +74,8 @@ var useCmd = &cobra.Command{
 	Long:  projectUseLong,
 	Args:  cobra.MaximumNArgs(1),
 	RunE:  runProjectUse,
+	// Completes known project slugs from the hub list, offline.
+	ValidArgsFunction: completeUseProjects,
 }
 
 func addProjectUseFlags(c *cobra.Command) {
@@ -179,6 +183,8 @@ func describeUseTarget(c *config.CLIContext) useTarget {
 	switch {
 	case hubSource == targetSourceContext:
 		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceContext, "current context"
+	case hubSource == targetSourceDirectory:
+		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceDirectory, "directory link"
 	case hubEndpoint != "":
 		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceFlag, "--hub flag"
 	case envHub != "":
