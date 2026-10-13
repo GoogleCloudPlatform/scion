@@ -37,7 +37,7 @@ The chat composer's paperclip offers both **Upload file** and **Attach artifactâ
 | Versions | None | Every publish under the same key adds a version |
 | Who can read it | Everyone with access to the project (see [Messaging](/scion/hosted/user/messaging/)) | The owner, the home project and the people and projects it is shared with |
 | Review | No | Yes, with suggestion and comment marks |
-| Outside the project | No | Grants to other people and projects, and share links |
+| Sharing on its own | No; it goes where the message goes | Grants to other people and projects, and share links |
 | Folders and HTML sites | No | Yes; HTML renders in a sandboxed frame |
 
 Use a **chat attachment** for a quick, one-off file in a conversation, such as a screenshot or a log excerpt. Use an **artifact** for anything that will change, be reviewed, be read from another runtime broker, or be shared beyond the project: a design document, a report, a small HTML site.
