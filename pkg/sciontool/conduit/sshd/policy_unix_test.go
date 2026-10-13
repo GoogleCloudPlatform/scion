@@ -76,8 +76,9 @@ func TestDirectTCPIPPolicy(t *testing.T) {
 }
 
 // TestStreamlocalPolicy: a denied socket, a socket below a denied
-// directory and a symbolic link to a denied socket are refused as
-// prohibited; a socket elsewhere is forwarded.
+// directory, a symbolic link to a denied socket, a path through a linked
+// directory, and a socket named by an entry that is itself written through
+// a link are refused as prohibited; a socket elsewhere is forwarded.
 func TestStreamlocalPolicy(t *testing.T) {
 	dir := shortTempDir(t)
 	listen := func(path string) {
@@ -88,25 +89,29 @@ func TestStreamlocalPolicy(t *testing.T) {
 		}
 		echoServer(t, l)
 	}
-	if err := os.Mkdir(filepath.Join(dir, "priv"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, d := range []string{"priv", "real"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ok := filepath.Join(dir, "ok.sock")
 	denied := filepath.Join(dir, "d.sock")
 	inDir := filepath.Join(dir, "priv", "p.sock")
-	link := filepath.Join(dir, "l.sock")
-	for _, p := range []string{ok, denied, inDir} {
+	aliased := filepath.Join(dir, "real", "a.sock")
+	for _, p := range []string{ok, denied, inDir, aliased} {
 		listen(p)
 	}
-	if err := os.Symlink(denied, link); err != nil {
-		t.Fatal(err)
+	links := map[string]string{
+		filepath.Join(dir, "l.sock"):  denied,
+		filepath.Join(dir, "dirlink"): filepath.Join(dir, "priv"),
+		filepath.Join(dir, "alias"):   filepath.Join(dir, "real"),
 	}
-	// The temp dir may itself sit behind a symbolic link (macOS /var).
-	real, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatal(err)
+	for link, target := range links {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
 	}
-	cfg := policyConfig(t, `{"deny_sockets":["`+filepath.Join(real, "d.sock")+`","`+filepath.Join(real, "priv")+`","`+denied+`","`+filepath.Join(dir, "priv")+`"]}`)
+	cfg := policyConfig(t, `{"deny_sockets":["`+denied+`","`+filepath.Join(dir, "priv")+`","`+filepath.Join(dir, "alias", "a.sock")+`"]}`)
 	client := serve(t, cfg, "scion")
 
 	c, err := client.Dial("unix", ok)
@@ -115,7 +120,7 @@ func TestStreamlocalPolicy(t *testing.T) {
 	}
 	roundTrip(t, c, "allowed")
 	_ = c.Close()
-	for _, p := range []string{denied, inDir, link} {
+	for _, p := range []string{denied, inDir, filepath.Join(dir, "l.sock"), filepath.Join(dir, "dirlink", "p.sock"), aliased} {
 		_, err := client.Dial("unix", p)
 		wantOpenRefused(t, err, ssh.Prohibited)
 	}

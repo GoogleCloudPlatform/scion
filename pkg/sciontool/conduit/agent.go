@@ -157,8 +157,9 @@ type Options struct {
 	// kind. New validates it.
 	SSH *sshd.Config
 	// Policy is the operator's restriction of stream destinations
-	// (localpolicy.EnvPolicy). With SSHDisabled, SSH is ignored. SSH
-	// forwarding applies SSH.Policy, which the caller sets.
+	// (localpolicy.EnvPolicy). With SSHDisabled, SSH is ignored;
+	// otherwise New sets SSH.Policy to it, so SSH forwarding applies the
+	// same policy as the TCP stream kind.
 	Policy localpolicy.Policy
 	// OnSession is called after each admitted session's grant keys are
 	// installed. Optional.
@@ -239,6 +240,7 @@ func New(opts Options) (*Agent, error) {
 		opts.SSH = nil
 	}
 	if opts.SSH != nil {
+		opts.SSH.Policy = opts.Policy
 		if err := opts.SSH.Validate(); err != nil {
 			return nil, err
 		}

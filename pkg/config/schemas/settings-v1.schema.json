@@ -1454,14 +1454,14 @@
             "deny_ports": {
               "type": "array",
               "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
-              "description": "Agent-local ports no conduit stream may reach: TCP streams (scion tunnel --port, the port proxy) and SSH direct-tcpip forwarding. It wins over exposed ports and tcp_allowed_ports. The hub refuses TCP grants to these ports, and agents refuse them too. An SSH shell is not restricted by it; use disable_ssh for that. The env var takes a comma-separated list.",
+              "description": "Agent-local ports no tunnel may reach: TCP streams (scion tunnel --port), the port proxy (over conduit or the port-forward tunnel) and SSH direct-tcpip forwarding. It wins over exposed ports and tcp_allowed_ports. The hub refuses these ports, and agents refuse them too. It restricts forwarding only: a shell or attached terminal in the agent is not restricted by it. The env var takes a comma-separated list.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_DENYPORTS",
               "x-since": "1"
             },
             "deny_sockets": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Agent-local Unix socket paths SSH direct-streamlocal forwarding may not reach. An entry also covers every path below it, so a directory denies the sockets in it, and '/' denies all. Entries are clean absolute paths without commas. An SSH shell is not restricted by it; use disable_ssh for that. The env var takes a comma-separated list.",
+              "description": "Agent-local Unix socket paths SSH direct-streamlocal forwarding may not reach. An entry also covers every path below it, so a directory denies the sockets in it, and '/' denies all. Symbolic links in the request and in the entries are followed. Entries are clean absolute paths without commas. It restricts forwarding only: a shell or attached terminal in the agent is not restricted by it. The env var takes a comma-separated list.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_DENYSOCKETS",
               "x-since": "1"
             },

@@ -128,10 +128,10 @@ type ServerConfig struct {
 	// ConduitSSHDisabled refuses ssh streams to agents and tells agents
 	// not to serve them (server.hub.conduit.disable_ssh).
 	ConduitSSHDisabled bool
-	// ConduitDenyPorts are agent-local ports no Conduit stream may reach
-	// (server.hub.conduit.deny_ports). The hub refuses tcp grants to
-	// them, ahead of exposed and allow-listed ports; agents also refuse
-	// them for SSH forwarding.
+	// ConduitDenyPorts are agent-local ports no tunnel may reach
+	// (server.hub.conduit.deny_ports). The hub refuses tcp grants and port
+	// proxy requests to them, ahead of exposed and allow-listed ports;
+	// agents also refuse them for SSH forwarding.
 	ConduitDenyPorts []int
 	// ConduitDenySockets are agent-local Unix socket paths SSH forwarding
 	// may not reach (server.hub.conduit.deny_sockets). Only agents can

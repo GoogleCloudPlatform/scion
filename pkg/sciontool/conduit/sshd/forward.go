@@ -226,14 +226,10 @@ func (c *Config) handleStreamlocal(ctx context.Context, nc ssh.NewChannel) {
 	splice(ctx, ch, conn)
 }
 
-// socketPolicy applies the operator's socket deny-list to path and, when
-// it resolves, to the path its symbolic links lead to, so a link to a
-// denied socket is refused too.
+// socketPolicy applies the operator's socket deny-list to path,
+// following symbolic links (localpolicy.Policy.SocketDeniedOnDisk).
 func (c *Config) socketPolicy(path string) error {
-	if c.Policy.SocketDenied(path) {
-		return fmt.Errorf("socket %s is denied by the operator policy", path)
-	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path && c.Policy.SocketDenied(resolved) {
+	if c.Policy.SocketDeniedOnDisk(path) {
 		return fmt.Errorf("socket %s is denied by the operator policy", path)
 	}
 	return nil

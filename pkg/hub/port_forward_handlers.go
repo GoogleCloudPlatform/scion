@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -397,6 +398,18 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 				"The requested port is not exposed on this agent.")
 		} else {
 			NotFound(w, "Port")
+		}
+		return
+	}
+	// Checked here, not only in the conduit grant: the port-forward tunnel
+	// below serves agents without a conduit session even while conduit is
+	// on, and its sciontool end knows no operator policy.
+	if slices.Contains(s.config.ConduitDenyPorts, exposed.Port) {
+		if isBrowserRequest(r) {
+			writeProxyErrorHTML(w, http.StatusForbidden, "Port Not Available",
+				"The operator does not allow access to this port.")
+		} else {
+			Forbidden(w)
 		}
 		return
 	}

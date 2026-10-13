@@ -91,6 +91,9 @@ func TestParsePolicy(t *testing.T) {
 		`{"deny_sockets":["/a/../b"]}`,
 		`{"allow_ports":[22]}`,
 		`{"disable_ssh":false} {}`,
+		`null`,
+		`{"disable_ssh":true}}`,
+		`{"disable_ssh":true}]`,
 	} {
 		p, err := ParsePolicy(raw)
 		if err == nil || !strings.Contains(err.Error(), EnvPolicy) {

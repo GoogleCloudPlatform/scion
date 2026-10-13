@@ -1652,8 +1652,8 @@ type V1ServerHubConduitConfig struct {
 	// sftp and SSH forwarding); other conduit streams keep working.
 	// Default false.
 	DisableSSH bool `json:"disable_ssh,omitempty" yaml:"disable_ssh,omitempty" koanf:"disable_ssh"`
-	// DenyPorts lists agent-local ports no conduit stream may reach (TCP
-	// streams and SSH direct-tcpip), whatever is exposed or allowed.
+	// DenyPorts lists agent-local ports no tunnel may reach (TCP streams,
+	// the port proxy and SSH direct-tcpip), whatever is exposed or allowed.
 	DenyPorts []int `json:"deny_ports,omitempty" yaml:"deny_ports,omitempty" koanf:"deny_ports"`
 	// DenySockets lists agent-local Unix socket paths, or directories
 	// whose sockets, SSH direct-streamlocal may not reach.

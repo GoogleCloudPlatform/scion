@@ -94,8 +94,8 @@ type HubConduitConfig struct {
 	// sftp and SSH forwarding) while the rest of conduit keeps working.
 	// The hub refuses ssh streams and tells agents not to serve them.
 	DisableSSH bool `json:"disableSsh,omitempty" yaml:"disableSsh,omitempty" koanf:"disableSsh"`
-	// DenyPorts lists agent-local ports no conduit stream may reach: TCP
-	// streams and SSH direct-tcpip. It wins over exposed ports and
+	// DenyPorts lists agent-local ports no tunnel may reach: TCP streams,
+	// the port proxy and SSH direct-tcpip. It wins over exposed ports and
 	// TCPAllowedPorts.
 	DenyPorts []int `json:"denyPorts,omitempty" yaml:"denyPorts,omitempty" koanf:"denyPorts"`
 	// DenySockets lists agent-local Unix socket paths, or directories

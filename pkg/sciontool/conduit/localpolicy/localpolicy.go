@@ -26,7 +26,10 @@ package localpolicy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -83,14 +86,21 @@ func ParsePolicy(raw string) (Policy, error) {
 	if strings.TrimSpace(raw) == "" {
 		return Policy{}, nil
 	}
-	var doc PolicyDoc
+	var docp *PolicyDoc
 	dec := json.NewDecoder(bytes.NewReader([]byte(raw)))
 	dec.DisallowUnknownFields()
-	err := dec.Decode(&doc)
-	if err == nil && dec.More() {
-		err = fmt.Errorf("trailing data")
+	err := dec.Decode(&docp)
+	if err == nil && docp == nil {
+		err = errors.New("not an object")
 	}
 	if err == nil {
+		if _, terr := dec.Token(); terr != io.EOF {
+			err = errors.New("trailing data")
+		}
+	}
+	var doc PolicyDoc
+	if err == nil {
+		doc = *docp
 		err = doc.validate()
 	}
 	if err != nil {
@@ -123,12 +133,53 @@ func (p Policy) PortDenied(port int) bool {
 }
 
 // SocketDenied reports whether path (clean and absolute) is reserved or
-// denied by p: equal to a denied entry or below it.
+// denied by p: equal to a denied entry or below it. It compares paths as
+// written; SocketDeniedOnDisk also follows symbolic links.
 func (p Policy) SocketDenied(path string) bool {
 	if p.denyAll || IsReservedSocket(path) {
 		return true
 	}
+	return underAny(path, p.denySockets)
+}
+
+// SocketDeniedOnDisk is SocketDenied applied to path and to the path its
+// symbolic links resolve to, against the denied entries as written and as
+// resolved, so neither a link in the request (/tmp/l -> /run/x.sock) nor
+// one in an entry (/var/run -> /run) lets an alias through. A path that
+// cannot be resolved for a reason other than not existing is denied.
+// Resolution happens before the connection is made, so a link swapped in
+// between is not seen; the policy guards forwarding, not a shell.
+func (p Policy) SocketDeniedOnDisk(path string) bool {
+	if p.SocketDenied(path) {
+		return true
+	}
+	if len(p.denySockets) == 0 {
+		return false
+	}
+	paths := []string{path}
+	switch resolved, err := filepath.EvalSymlinks(path); {
+	case err == nil:
+		paths = append(paths, resolved)
+	case !errors.Is(err, fs.ErrNotExist):
+		return true
+	}
+	entries := slices.Clone(p.denySockets)
 	for _, e := range p.denySockets {
+		if r, err := filepath.EvalSymlinks(e); err == nil && r != e {
+			entries = append(entries, r)
+		}
+	}
+	for _, q := range paths {
+		if underAny(q, entries) {
+			return true
+		}
+	}
+	return false
+}
+
+// underAny reports whether path equals one of entries or lies below it.
+func underAny(path string, entries []string) bool {
+	for _, e := range entries {
 		if e == "/" || path == e || strings.HasPrefix(path, e+"/") {
 			return true
 		}

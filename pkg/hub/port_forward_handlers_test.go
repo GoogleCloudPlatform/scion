@@ -193,6 +193,23 @@ func TestAgentPortProxyNoTunnelReturns503(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
+// TestAgentPortProxyDeniedPortReturns403: a port on
+// server.hub.conduit.deny_ports is refused before any proxy path is chosen,
+// including the port-forward tunnel, whose agent end applies no policy.
+func TestAgentPortProxyDeniedPortReturns403(t *testing.T) {
+	srv, s := testServer(t)
+	srv.config.ConduitDenyPorts = []int{3000}
+	agent, token := createPortForwardAgent(t, srv, s)
+
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port": 3000,
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	rec = doAgentTokenRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/3000/proxy/", nil, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
 func TestProxyErrorContentNegotiation(t *testing.T) {
 	srv, s := testServer(t)
 	agent, token := createPortForwardAgent(t, srv, s)

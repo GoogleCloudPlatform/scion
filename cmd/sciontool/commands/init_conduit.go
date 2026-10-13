@@ -220,8 +220,8 @@ var conduitSSHFirstReportWait = 5 * time.Second
 // prepareConduitSSH builds the conduit SSH server's configuration and
 // makes the first attempt to report its host key, before the harness
 // starts. It returns nil, building and reporting nothing, unless enabled
-// (conduit not disabled), the hub serves conduit and policy allows ssh;
-// the server applies policy to forwarding. The caller checks
+// (conduit not disabled), the hub serves conduit and policy allows ssh.
+// The caller checks
 // that a hub client is configured and port forwarding is not disabled.
 // A first report that does not succeed within conduitSSHFirstReportWait
 // continues in the background (reportSSHHostKey). The first host key
@@ -239,7 +239,6 @@ func prepareConduitSSH(r sshHostKeyReporter, enabled bool, policy localpolicy.Po
 		log.Error("Conduit: SSH server unavailable (%v); not offering ssh streams", err)
 		return nil
 	}
-	ssh.Policy = policy
 	key := sshd.AuthorizedKey(ssh.HostKey)
 	ctx, cancel := context.WithTimeout(context.Background(), conduitSSHFirstReportWait)
 	err = r.ReportSSHHostKey(ctx, key)

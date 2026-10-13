@@ -42,6 +42,7 @@ var safeEnvLogKeys = map[string]struct{}{
 	"SCION_PROJECT_ID":        {},
 	"SCION_PROJECT_PATH":      {},
 	"SCION_HUB_EXPERIMENTS":   {},
+	"SCION_CONDUIT_POLICY":    {},
 	"SCION_HUB_ENDPOINT":      {},
 	"SCION_HUB_URL":           {},
 	"SCION_TELEMETRY_ENABLED": {},

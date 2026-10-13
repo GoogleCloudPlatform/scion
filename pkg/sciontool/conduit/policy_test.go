@@ -68,3 +68,21 @@ func TestAgentSSHDisabledByPolicy(t *testing.T) {
 	_, err := s.OpenStream(context.Background(), sshOpen(t, key, s.Info(), grant.StreamKindSSH))
 	wantRefusal(t, err, core.CloseProtocolError, reasonUnsupportedKind)
 }
+
+// TestAgentSSHGetsPolicy: New hands the agent's policy to the SSH server,
+// so its forwarding applies the same deny-list as the TCP stream kind.
+func TestAgentSSHGetsPolicy(t *testing.T) {
+	ssh := testSSHConfig(t)
+	_, err := New(Options{
+		HubURL: "http://hub.test", AgentID: "a", ProjectID: "p", NoPTY: true,
+		Token:  func() string { return "t" },
+		SSH:    ssh,
+		Policy: mustPolicy(t, `{"deny_ports":[8462]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ssh.Policy.PortDenied(8462) {
+		t.Fatal("SSH server did not get the agent's policy")
+	}
+}
