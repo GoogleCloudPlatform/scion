@@ -1613,11 +1613,11 @@
             },
             "shared_dir_storage_class": {
               "type": "string",
-              "description": "Kubernetes only. This instance's default storage class for shared-dir PVCs (must support ReadWriteMany). Takes the place of the profile and runtime entry value; a template or agent kubernetes.shared_dir_storage_class wins over it. Local operator policy: never sent to the Hub."
+              "description": "Kubernetes only. This instance's default storage class for shared-dir PVCs (must support ReadWriteMany). Takes the place of the profile and runtime entry value; an agent's own kubernetes.shared_dir_storage_class wins over it. Local operator policy: never sent to the Hub."
             },
             "shared_dir_size": {
               "type": "string",
-              "description": "Kubernetes only. This instance's default size per shared-dir PVC, a positive Kubernetes quantity (e.g. 40Gi); unset means 10Gi. Takes the place of the profile and runtime entry value; a template or agent kubernetes.shared_dir_size wins over it. Local operator policy: never sent to the Hub."
+              "description": "Kubernetes only. This instance's default size per shared-dir PVC, a positive Kubernetes quantity (e.g. 40Gi); unset means 10Gi. Takes the place of the profile and runtime entry value; an agent's own kubernetes.shared_dir_size wins over it. Local operator policy: never sent to the Hub."
             },
             "gke": {
               "type": "boolean",

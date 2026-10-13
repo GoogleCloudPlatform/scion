@@ -232,7 +232,7 @@ The runtime target of one flat Runtime Broker instance, and the instance's own i
 Notes on the storage backends:
 
 - **Recorded decisions are kept.** The backends apply only when an agent starts for the first time. An agent keeps the shared directory backends and the home storage it recorded then, even if the instance's settings change later.
-- **The nfs backend needs the global NFS block.** An instance that selects `nfs` for shared directories or for the home needs a complete [`server.shared_dir_storage.nfs`](#shared-directory-storage-servershared_dir_storage) block in the same file. Without one, startup is refused.
+- **The nfs backend needs the global NFS block.** An instance that selects `nfs` for shared directories or for the home needs a complete [`server.shared_dir_storage.nfs`](#shared-directory-storage-servershared_dir_storage) block in the same file. Without one, startup is refused, as for any other invalid entry: none of the process's instances start until the settings are fixed.
 - **Plugins read the global settings.** Plugins resolve a shared directory's host path from the global settings, not from an instance. At startup, a warning is logged for each instance whose backend differs from the global one. Set the same backend in the global settings to keep them in agreement.
 
 ### Database (`server.database`)

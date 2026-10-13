@@ -1820,15 +1820,16 @@ type V1RuntimeTargetConfig struct {
 	// SharedDirStorageClass and SharedDirSize are this Kubernetes
 	// instance's defaults for the ReadWriteMany PVCs backing project shared
 	// dirs: the flat counterparts of the runtime entry and profile settings
-	// of the same name, at the same rung (a template's or agent's
-	// kubernetes block wins over them). Local operator policy: never part
+	// of the same name, at the same rung (the agent's own kubernetes
+	// block wins over them). Local operator policy: never part
 	// of the persisted target identity. Kubernetes only.
 	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
 	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
 	// GKE forces GKE mode on this Kubernetes instance's runtime; false
 	// means auto-detect, as for the runtime entry's gke. PriorityClassName
-	// is the instance's default pod spec.priorityClassName, below a
-	// template's or agent's kubernetes.priorityClassName. Kubernetes only.
+	// is the instance's default pod spec.priorityClassName, below the
+	// agent's own (inline or persisted) kubernetes.priorityClassName.
+	// Kubernetes only.
 	GKE               bool   `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
 	PriorityClassName string `json:"priority_class_name,omitempty" yaml:"priority_class_name,omitempty" koanf:"priority_class_name"`
 	// SafeToEvict is the instance's safe_to_evict default: nil is unset,

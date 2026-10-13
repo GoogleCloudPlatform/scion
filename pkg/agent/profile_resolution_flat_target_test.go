@@ -74,9 +74,10 @@ func flatStorageOpts(f sharedDirStorageRunFixture, agent, agentID string, shared
 // the agent gets, and records, the instance's local home, not the active
 // profile's NFS home.
 func TestFlatPolicy_HomeStorageNoSharedDirs(t *testing.T) {
-	f := newSharedDirStorageRunFixture(t)
+	// Read the fixture before the run fixture changes the working directory.
 	settings, err := os.ReadFile(filepath.Join("..", "config", "testdata", "profile_conversion", "home_storage_no_shared_dirs", "settings.yaml"))
 	require.NoError(t, err)
+	f := newSharedDirStorageRunFixture(t)
 	f.writeRawGlobalSettings(t, string(settings))
 	policy := flatPolicies(t)["k8s"]
 	require.NotNil(t, policy)
@@ -261,7 +262,7 @@ server:
 }
 
 // --- Source scan: settings loads on the start, provision and reprovision
-// paths (B3). ---
+// paths. ---
 
 // nonForSettingsLoaders are the pkg/config settings loaders that return
 // the loaded settings without the request's view, so a flat instance's
