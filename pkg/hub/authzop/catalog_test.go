@@ -235,8 +235,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// List permissions covered by the corresponding read operation
 		// but registered as distinct permission IDs in the registry.
 		"agent.list":               "List subset of agent.read operation",
-		"skill.list":               "List subset of skill.read operation",
-		"template.list":            "List subset of template.read operation",
 		"harness_config.list":      "List subset of harnessconfig.read operation",
 		"group.list":               "List subset of group.read operation",
 		"gcp_service_account.list": "List subset of gcp.identity.read operation",
@@ -280,9 +278,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// checked by testAdminIssuer, whose issuance answers 404 until the
 		// admin tier's policy phase (A2) adds its operation.
 		"test_identity.issue_super_admin": "Reserved in the permission registry until admin tier phase A2 (ptone/scion#4240): test super-admin issuance is refused",
-
-		// Global catalog permissions — handler-enforced, not a standalone route.
-		"skill.create_global": "Handler-enforced via globalWriteAction in skill_handlers.go; catalog operation deferred to Phase 2 (ptone/scion#1713)",
 
 		// Agent token scopes — not route-enforced
 		"agent.status_update":  "Agent token scope, not route-enforced",
