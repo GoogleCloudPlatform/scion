@@ -25,6 +25,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -373,9 +375,12 @@ func tiTransportCheck(census map[string]map[string][]tiCall, fn string) token.Po
 //   - every isReservedPlatformIdentity call is inside one of the unified
 //     isTransportIdentity predicates, so every site that refuses the
 //     platform service account refuses driver principals too;
-//   - every CreateUser call is in a function that runs a transport check
-//     before it, or in a helper whose every caller does, or is the one
-//     listed exemption.
+//   - every call of a user-creating store method (CreateUser,
+//     CreateFederatedUser and any other Create*User method of a pkg/store
+//     interface) is in a function that runs a transport check before it,
+//     or in a helper whose every caller does, or is the one listed
+//     exemption; the test identity creators instead take only an email
+//     the handler generates in the test identity domain before the call.
 //
 // It also keeps the ingress lists explicit: proxy assertions are verified
 // only at API Step 3a, on the web fresh path and by the binding/redeem
@@ -389,7 +394,43 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 	assert.Equal(t, []string{"isTransportIdentity -", "isTransportIdentity -", "isTransportIdentity -", "isTransportIdentity -"},
 		tiPairs(census, "isReservedPlatformIdentity"), "isReservedPlatformIdentity callers")
 
-	// 2. Every CreateUser call site.
+	// 2. Every call site of a user-creating store method. The method set is
+	// read from the pkg/store interfaces, so a new Create*User method is
+	// listed here before its first pkg/hub caller can pass.
+	userCreator := regexp.MustCompile(`^Create[A-Za-z]*User$`)
+	storeCreators := tiStoreUserCreators(t, userCreator)
+	assert.Equal(t, []string{"CreateFederatedUser", "CreateTestAdminUser", "CreateTestFixtureUser", "CreateUser"},
+		storeCreators, "user-creating pkg/store methods")
+	// The test identity creators take only an email the handler generates
+	// in the test identity domain, never a request or configured email:
+	// the store method, its only pkg/hub caller and the email generator
+	// that caller runs before the create.
+	generatedEmail := map[string][2]string{
+		"CreateTestFixtureUser": {"handleCreateTestIdentity", "newTestIdentityEmail"},
+		"CreateTestAdminUser":   {"handleIssueTestAdminIdentity", "newTestAdminEmail"},
+	}
+	for method, want := range generatedEmail {
+		got := map[string]bool{}
+		for _, pair := range tiPairs(census, method) {
+			got[strings.Fields(pair)[0]] = true
+		}
+		assert.Equal(t, map[string]bool{want[0]: true}, got, "every function that calls %s", method)
+		gen, create := tiFirstCallOf(census, want[1], want[0]), tiFirstCallOf(census, method, want[0])
+		assert.True(t, gen != token.NoPos && gen < create, "%s generates the email with %s (%v) before %s (%v)",
+			want[0], want[1], fset.Position(gen), method, fset.Position(create))
+	}
+	checked := map[string]bool{}
+	for _, m := range storeCreators {
+		checked[m] = true
+	}
+	for name := range census {
+		if userCreator.MatchString(name) {
+			checked[name] = true
+		}
+	}
+	for m := range generatedEmail {
+		delete(checked, m)
+	}
 	exempt := map[string]string{
 		"seedDevUser": "seeds the config-fixed dev pseudo-user (DevUserID); no request input reaches it",
 	}
@@ -399,25 +440,25 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		"provisionNewUser":    {"Resolve"},
 	}
 	creators := map[string]bool{}
-	for _, pair := range tiPairs(census, "CreateUser") {
-		creators[strings.Fields(pair)[0]] = true
+	for m := range checked {
+		for _, pair := range tiPairs(census, m) {
+			creators[strings.Fields(pair)[0]] = true
+		}
 	}
 	assert.Equal(t, map[string]bool{
 		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true, "handleAdminUserInviteBulk": true,
 		"createPendingUserTx": true, "provisionNewUser": true, "provisionUser": true, "handleTestLogin": true,
 		"seedDevUser": true, "proxyAuthMiddleware": true, "handleOAuthCallback": true,
-	}, creators, "every function that calls CreateUser")
+	}, creators, "every function that calls CreateUser, CreateFederatedUser or another checked Create*User method")
 	for fn := range creators {
 		if reason, ok := exempt[fn]; ok {
 			t.Logf("exempt: %s (%s)", fn, reason)
 			continue
 		}
 		create := token.NoPos
-		for _, cs := range census["CreateUser"] {
-			for _, c := range cs {
-				if c.fn == fn && (create == token.NoPos || c.pos < create) {
-					create = c.pos
-				}
+		for m := range checked {
+			if p := tiFirstCallOf(census, m, fn); p != token.NoPos && (create == token.NoPos || p < create) {
+				create = p
 			}
 		}
 		if callers, ok := helperCallers[fn]; ok {
@@ -437,7 +478,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 			continue
 		}
 		check := tiTransportCheck(census, fn)
-		assert.True(t, check != token.NoPos && check < create, "%s checks a transport identity (%v) before CreateUser (%v)", fn, fset.Position(check), fset.Position(create))
+		assert.True(t, check != token.NoPos && check < create, "%s checks a transport identity (%v) before creating a user (%v)", fn, fset.Position(check), fset.Position(create))
 	}
 
 	// 3. Proxy assertions.
@@ -496,6 +537,45 @@ func tiFuncCalls(census map[string]map[string][]tiCall, fn string) []string {
 	for _, c := range census[fn]["-"] {
 		out = append(out, c.fn+" -")
 	}
+	return out
+}
+
+// tiStoreUserCreators returns the sorted, de-duplicated method names
+// matching re declared in the interfaces of pkg/store's non-test files.
+func tiStoreUserCreators(t *testing.T, re *regexp.Regexp) []string {
+	t.Helper()
+	dir := filepath.Join("..", "store")
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	seen := map[string]bool{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		require.NoError(t, err, name)
+		ast.Inspect(f, func(n ast.Node) bool {
+			it, ok := n.(*ast.InterfaceType)
+			if !ok {
+				return true
+			}
+			for _, m := range it.Methods.List {
+				for _, id := range m.Names {
+					if re.MatchString(id.Name) {
+						seen[id.Name] = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
 	return out
 }
 
