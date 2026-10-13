@@ -70,21 +70,24 @@ func structJSONFields(typ reflect.Type) (names, problems []string) {
 }
 
 // TestStructJSONFieldsDuplicateName checks that structJSONFields reports two
-// fields with the same JSON name and names both Go fields.
+// fields with the same JSON name and names both Go fields. The struct type is
+// built with reflect.StructOf so that no struct literal in this package
+// repeats a json tag, which go vet's structtag check reports.
 func TestStructJSONFieldsDuplicateName(t *testing.T) {
-	type dup struct {
-		First  bool `json:"same"`
-		Second bool `json:"same,omitempty"`
-		Other  bool `json:"other"`
-	}
-	names, problems := structJSONFields(reflect.TypeOf(dup{}))
+	boolType := reflect.TypeOf(false)
+	dup := reflect.StructOf([]reflect.StructField{
+		{Name: "First", Type: boolType, Tag: `json:"same"`},
+		{Name: "Second", Type: boolType, Tag: `json:"same,omitempty"`},
+		{Name: "Other", Type: boolType, Tag: `json:"other"`},
+	})
+	names, problems := structJSONFields(dup)
 	if len(problems) != 1 {
 		t.Fatalf("problems = %q, want exactly one", problems)
 	}
-	for _, want := range []string{"dup.First", "dup.Second", `"same"`} {
-		if !strings.Contains(problems[0], want) {
-			t.Errorf("problem %q does not name %s", problems[0], want)
-		}
+	// dup is an unnamed type, so typ.Name() is empty in the message.
+	want := `.First and .Second both use JSON name "same"`
+	if problems[0] != want {
+		t.Errorf("problem = %q, want %q", problems[0], want)
 	}
 	if got := strings.Join(names, ","); got != "same,other" {
 		t.Errorf("names = %q, want \"same,other\"", got)
