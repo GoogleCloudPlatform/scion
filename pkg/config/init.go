@@ -33,17 +33,17 @@ import (
 )
 
 // isGitRepoFunc is a package-level variable for testing. It reports whether
-// the current directory is inside a git work tree and returns an error
-// matching util.ErrGitDubiousOwnership when git refuses the repository
-// because of its ownership. Defaults to util.CheckGitRepoDir("").
-var isGitRepoFunc = func() (bool, error) { return util.CheckGitRepoDir("") }
+// dir (the current directory when dir is empty) is inside a git work tree and
+// returns an error matching util.ErrGitDubiousOwnership when git refuses the
+// repository because of its ownership. Defaults to util.CheckGitRepoDir.
+var isGitRepoFunc = util.CheckGitRepoDir
 
 // OverrideIsGitRepo replaces the git-repo detection function used by InitProject.
 // It returns a restore function that must be called to reset the override.
 // This is intended for use in tests outside the config package.
 func OverrideIsGitRepo(fn func() bool) func() {
 	orig := isGitRepoFunc
-	isGitRepoFunc = func() (bool, error) { return fn(), nil }
+	isGitRepoFunc = func(string) (bool, error) { return fn(), nil }
 	return func() { isGitRepoFunc = orig }
 }
 
@@ -302,17 +302,46 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 		opt = opts[0]
 	}
 
+	// The layout follows the directory being initialized: the current
+	// directory in the CLI form (empty targetDir), otherwise the directory
+	// that will contain targetDir. If that directory does not exist, the
+	// check reports "not a git repository" and the external layout is used,
+	// deliberately.
+	checkDir := ""
+	if targetDir != "" {
+		// Clean first so a trailing separator does not shift the
+		// directory checked here or the Lstat below.
+		targetDir = filepath.Clean(targetDir)
+		checkDir = filepath.Dir(targetDir)
+	}
+
 	// isGitRepoFunc always reports false alongside an error.
-	isGit, gitErr := isGitRepoFunc()
+	isGit, gitErr := isGitRepoFunc(checkDir)
 	if gitErr != nil {
-		// Only the current-directory form (empty targetDir) refuses here: the
-		// git check inspects the current directory, which in that form is the
-		// directory being initialized. With an explicit targetDir the current
-		// directory need not be related to the target, so keep the previous
-		// behaviour and treat the refusal as "not a git repository".
+		// Only the current-directory form (empty targetDir) refuses here.
+		// With an explicit targetDir keep the previous behaviour and treat
+		// the refusal as "not a git repository".
 		if targetDir == "" && errors.Is(gitErr, util.ErrGitDubiousOwnership) {
 			// Returned unwrapped: callers add their own context.
 			return gitErr
+		}
+	}
+
+	if targetDir != "" {
+		if info, err := os.Lstat(targetDir); err == nil {
+			// A symbolic link at an explicit target (for example one
+			// committed to the repository) is refused rather than
+			// followed, so the project is always written at targetDir.
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("cannot initialize project: %s is a symbolic link; replace it with a directory or remove it", targetDir)
+			}
+			// An explicit target that is already a regular file is an
+			// existing project marker (for example one committed to the
+			// repository): keep using it through the external layout
+			// rather than replacing it.
+			if info.Mode().IsRegular() {
+				isGit = false
+			}
 		}
 	}
 
@@ -328,8 +357,10 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 		}
 	}
 
-	// Enforce .scion/agents/ in .gitignore for git repos
-	if isGit {
+	// Enforce .scion/agents/ in .gitignore for git repos initialized from
+	// the current directory. An explicit target leaves the repository's
+	// .gitignore untouched.
+	if isGit && targetDir == "" {
 		root, err := util.RepoRoot()
 		if err == nil {
 			if err := EnsureScionGitignore(root); err != nil {
@@ -461,21 +492,23 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 	}
 
 	// Ensure project-id file exists for split storage, recording
-	// opt.ProjectID when set.
-	existingID, err := ReadProjectID(projectDir)
+	// opt.ProjectID when set. The read, like the writes below, goes through
+	// an os.Root on projectDir so project setup stays inside the project
+	// directory.
+	existingID, err := readProjectIDInDir(projectDir)
 	switch {
 	case err == nil:
 		if opt.ProjectID != "" && existingID != opt.ProjectID {
-			if err := WriteProjectID(projectDir, opt.ProjectID); err != nil {
-				return fmt.Errorf("failed to write project-id: %w", err)
+			if err := writeProjectIDInDir(projectDir, opt.ProjectID); err != nil {
+				return fmt.Errorf("cannot initialize project: failed to write project-id: %w", err)
 			}
 		}
 	case os.IsNotExist(err):
-		if err := WriteProjectID(projectDir, opt.newProjectID()); err != nil {
-			return fmt.Errorf("failed to write project-id: %w", err)
+		if err := writeProjectIDInDir(projectDir, opt.newProjectID()); err != nil {
+			return fmt.Errorf("cannot initialize project: failed to write project-id: %w", err)
 		}
 	default:
-		return fmt.Errorf("failed to read project-id: %w", err)
+		return fmt.Errorf("cannot initialize project: failed to read project-id: %w", err)
 	}
 
 	// Seed settings.yaml in the external config dir (machine-specific, not committed)
@@ -510,14 +543,16 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 		}
 	}
 
-	// Create in-repo agents dir for git worktrees only
-	if err := os.MkdirAll(filepath.Join(projectDir, "agents"), 0755); err != nil {
-		return fmt.Errorf("failed to create agents directory: %w", err)
+	// Create in-repo agents dir for git worktrees only. Like the project-id
+	// file above, it is created through an os.Root on projectDir so project
+	// setup writes stay inside the project directory.
+	if err := mkdirAllInDir(projectDir, "agents", 0755); err != nil {
+		return fmt.Errorf("cannot initialize project: failed to create agents directory: %w", err)
 	}
 
 	// Create in-repo templates dir — lives in-repo so project templates can be committed
-	if err := os.MkdirAll(filepath.Join(projectDir, "templates"), 0755); err != nil {
-		return fmt.Errorf("failed to create templates directory: %w", err)
+	if err := mkdirAllInDir(projectDir, "templates", 0755); err != nil {
+		return fmt.Errorf("cannot initialize project: failed to create templates directory: %w", err)
 	}
 
 	return nil
