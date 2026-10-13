@@ -275,7 +275,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
 		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
-		"project.manage_visitors":      "Held by project owner and admin roles; the visitor grant routes that check it are added separately (ptone/scion#4603)",
 
 		// Admin test identities: the super-admin kind's capability is
 		// checked by testAdminIssuer, whose issuance answers 404 until the

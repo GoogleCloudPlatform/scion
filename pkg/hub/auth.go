@@ -157,7 +157,8 @@ type AuthConfig struct {
 	// (Server.resolveFederatedVisitor). It returns (nil, nil) to keep the
 	// verified identity, which it does for every identity that is not a
 	// linked active account and whenever the federation.project_visitors
-	// experiment is off. An error answers 503. Nil keeps every verified
+	// experiment is off. errFederatedVisitorRefused (a suspended account)
+	// answers 403; any other error answers 503. Nil keeps every verified
 	// identity.
 	ResolveFederatedVisitor func(ctx context.Context, identity FederatedIdentity) (*VisitorIdentity, error)
 	// WorkloadIssuer is the workload-bound issuer delegation arm's startup
@@ -378,6 +379,11 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// identity unchanged.
 				if cfg.ResolveFederatedVisitor != nil {
 					visitor, vErr := cfg.ResolveFederatedVisitor(ctx, identity)
+					if errors.Is(vErr, errFederatedVisitorRefused) {
+						writeError(w, http.StatusForbidden, ErrCodeForbidden,
+							visitorAccountRefusedMessage, nil)
+						return
+					}
 					if vErr != nil {
 						log.Error("Federation visitor lookup failed", "issuer", identity.IssuerURL(), "error", vErr)
 						writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,

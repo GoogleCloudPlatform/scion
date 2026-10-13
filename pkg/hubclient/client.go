@@ -120,6 +120,9 @@ type Client interface {
 	// ProjectPreStartHooks returns a ProjectPreStartHookService scoped to a project.
 	ProjectPreStartHooks(projectID string) ProjectPreStartHookService
 
+	// ProjectVisitors returns a ProjectVisitorService scoped to a project.
+	ProjectVisitors(projectID string) ProjectVisitorService
+
 	// HubPreStartHooks returns the hub-scoped pre-start hook service.
 	HubPreStartHooks() HubPreStartHookService
 

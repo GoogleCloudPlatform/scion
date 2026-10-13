@@ -41,6 +41,7 @@ const (
 	projectSubRouteCatalogImport     projectSubRouteKind = "catalog-import"
 	projectSubRouteWorkspace         projectSubRouteKind = "workspace"
 	projectSubRouteGitHub            projectSubRouteKind = "github"
+	projectSubRouteVisitors          projectSubRouteKind = "visitors"
 )
 
 // projectSubRouteTable lists every first path segment after
@@ -81,6 +82,7 @@ var projectSubRouteTable = map[string]projectSubRouteKind{
 	"github-status":            projectSubRouteGitHub,
 	"github-permissions":       projectSubRouteGitHub,
 	"git-identity":             projectSubRouteGitHub,
+	"visitors":                 projectSubRouteVisitors,
 }
 
 // projectSubRouteListed reports whether subPath (the path after

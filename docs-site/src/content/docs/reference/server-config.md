@@ -810,7 +810,7 @@ Configuration for inbound OIDC-based federation authentication.
 | `allowed_emails` | list of strings | | Restrict user tokens to specific email claims (supports wildcards e.g. `*@example.com`). |
 | `allowed_domains` | list of strings | | Google issuer only. Restrict **user** principals presenting an [external bearer token](/scion/hosted/single-node/auth/#external-bearer-tokens-google-credential-pass-through) to these email domains (exact, case-insensitive, no wildcards or subdomain matching). The Hub sign-in policy still applies. Never consulted for service accounts. |
 | `allowed_gcp_projects` | list of strings | | Google issuer only. Admit **service-account** principals whose GCP project ID (parsed from the service account email) is listed. Empty admits no service accounts. Distinct from `allowed_projects`, which matches Scion project IDs. |
-| `allow_visitor_grants` | bool | `false` | `issuer_type` `user` or `hub` only. Lets project owners and admins grant visitor access to users of this issuer, by email, while the `federation.project_visitors` experiment is on. The email must also pass `allowed_emails`. When `false`, the Hub refuses visitor grants for the issuer. |
+| `allow_visitor_grants` | bool | `false` | `issuer_type` `user` or `hub` only. Lets project owners and admins grant visitor access to users of this issuer, by email, while the `federation.project_visitors` experiment is on. The email must also pass `allowed_emails` and `allowed_domains`. A granted user's first request from this issuer with that email (present, and verified where the token carries `email_verified`) links the grant to the token's subject. When `false`, the Hub refuses visitor grants for the issuer and links no new visitor. |
 
 ### OIDC Login (`server.oidc_login`)
 

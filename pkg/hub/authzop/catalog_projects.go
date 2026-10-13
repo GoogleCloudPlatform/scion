@@ -173,6 +173,120 @@ var projectOperations = []OperationSpec{
 	},
 
 	// =====================================================================
+	// Domain: project.visitors — visitor grants for federated accounts
+	// (ptone/scion#4603). Every entry point answers 404 while the
+	// federation.project_visitors experiment is off.
+	// =====================================================================
+	{
+		ID:          "project.visitors.list",
+		Domain:      "project.visitors",
+		Description: "List a project's visitor grants (federated accounts holding the project-visitor role)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.manage_visitors",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialCredentialInsufficient},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestProjectVisitors_AddListRemove"}},
+		Bearer:           SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "project.visitors.add",
+		Domain:      "project.visitors",
+		Description: "Grant a user of a trusted issuer visitor access to a project by email; creates the federated account in status pending when none exists",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors", Method: "POST"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT},
+		ResourceResolver:      "project-from-url",
+		BasePermission:        "project.manage_visitors",
+		Effects:               []SecurityEffect{EffectGrantAuthority},
+		DelegationKind:        DelegationNonAmplification,
+		DelegationDescription: "The actor must hold every permission of the project-visitor role on the project (an unscoped local platform admin passes)",
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Holders of project.manage_visitors (project owners and admins) grant visitor access; a visitor holds no management authority. The issuer must be trusted with allow_visitor_grants and the email must pass its allowed_emails and allowed_domains.",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		Invariants: []Invariant{
+			{ID: "visitor-role-only", Description: "The grant binds only the project-visitor role, at project scope, to a federated account (CreateVisitorRoleBinding)", Kind: InvariantSecurity, FailClosed: true},
+		},
+		AuditObligation: &AuditObligation{
+			EventType:     "project_visitor_grant",
+			ContextFields: []string{"actor_id", "project_id"},
+			AfterFields:   []string{"visitor_id", "issuer", "email", "not_before", "expires_at"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialPrincipalIneligible, DenialConflict},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestProjectVisitors_AddListRemove"}},
+		Bearer:      SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "project.visitors.update",
+		Domain:      "project.visitors",
+		Description: "Replace the window (not before, expires at) of a project visitor grant",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors/{visitorId}", Method: "PATCH"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT},
+		ResourceResolver:      "project-from-url",
+		BasePermission:        "project.manage_visitors",
+		Effects:               []SecurityEffect{EffectChangeAuthority},
+		DelegationKind:        DelegationConditionalIncrease,
+		DelegationDescription: "A window change can extend the grant, so the actor must hold every permission of the project-visitor role on the project, as for a grant",
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Holders of project.manage_visitors (project owners and admins) change any visitor grant of the project.",
+		},
+		AuthorityEval: AuthorityEvalBeforeAndAfter,
+		AuditObligation: &AuditObligation{
+			EventType:     "project_visitor_update",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"visitor_id", "not_before", "expires_at"},
+			AfterFields:   []string{"not_before", "expires_at"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialResourceNotFound},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestProjectVisitors_WindowHonoured"}},
+		Bearer:      SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "project.visitors.remove",
+		Domain:      "project.visitors",
+		Description: "Revoke a project visitor grant; the visitor's next request is refused",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors/{visitorId}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.manage_visitors",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Holders of project.manage_visitors (project owners and admins) revoke any visitor grant of the project.",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "project_visitor_revoke",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"visitor_id", "issuer", "email", "subject"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialResourceNotFound},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestProjectVisitors_RevokeRefusesNextRequest"}},
+		Bearer:      SessionOnly(ReasonGovernancePending),
+	},
+
+	// =====================================================================
 	// Domain: project — project lifecycle
 	// =====================================================================
 	{

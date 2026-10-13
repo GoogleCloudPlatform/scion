@@ -102,7 +102,6 @@ var pendingNonRouteRows = map[string]string{
 	"env_var.deliver":         "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"skill_injection.deliver": "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"gcp_service_account.use": "decision rules exist; token mint checks the per-account token scope (ptone/scion#4171)",
-	"project.manage_visitors": "held by project owner and admin roles; the visitor grant routes that check it are added separately (ptone/scion#4603)",
 }
 
 // parseNonTestGoFiles parses the non-test Go files in dir.

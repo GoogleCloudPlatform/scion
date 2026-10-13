@@ -183,10 +183,9 @@ func TestFederatedVisitor_OtherCasesKeepFederatedUserIdentity(t *testing.T) {
 	f.account(t, "unlinked@corp.com", store.UserStatusActive, "")
 
 	for name, tc := range map[string]struct{ subject, email string }{
-		"pending account":   {"sub-pending", "pending@corp.com"},
-		"suspended account": {"sub-suspended", "suspended@corp.com"},
-		"no link":           {"sub-unlinked", "unlinked@corp.com"},
-		"unknown subject":   {"sub-nobody", "nobody@corp.com"},
+		"pending account": {"sub-pending", "pending@corp.com"},
+		"no link":         {"sub-unlinked", "unlinked@corp.com"},
+		"unknown subject": {"sub-nobody", "nobody@corp.com"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			identity, credential, code := f.identityThroughMiddleware(t, f.userToken(t, tc.subject, tc.email))
@@ -197,6 +196,14 @@ func TestFederatedVisitor_OtherCasesKeepFederatedUserIdentity(t *testing.T) {
 			assert.Equal(t, CredentialKindFederation, credential.Kind)
 		})
 	}
+
+	// A suspended account is refused outright (the status policy), not
+	// downgraded to the verified identity.
+	t.Run("suspended account", func(t *testing.T) {
+		identity, _, code := f.identityThroughMiddleware(t, f.userToken(t, "sub-suspended", "suspended@corp.com"))
+		assert.Equal(t, http.StatusForbidden, code)
+		assert.Nil(t, identity, "the handler never runs")
+	})
 
 	t.Run("hub issuer agent token", func(t *testing.T) {
 		claims := validFederationClaims(visitorTestHubIssuer, visitorTestAudience)

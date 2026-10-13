@@ -292,6 +292,9 @@ func (m *mockProdHubClient) UserInjectedSkills() hubclient.InjectedSkillsService
 func (m *mockProdHubClient) ProjectPreStartHooks(projectID string) hubclient.ProjectPreStartHookService {
 	return nil
 }
+func (m *mockProdHubClient) ProjectVisitors(projectID string) hubclient.ProjectVisitorService {
+	return nil
+}
 func (m *mockProdHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }
 func (m *mockProdHubClient) Artifacts() hubclient.ArtifactService               { return nil }
 func (m *mockProdHubClient) TestIdentities() hubclient.TestIdentityService      { return nil }

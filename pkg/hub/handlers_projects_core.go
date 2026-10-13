@@ -2227,6 +2227,13 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Project visitor grants (ptone/scion#4603):
+	// …/visitors and …/visitors/{visitorId}.
+	if rest, ok := strings.CutPrefix(subPath, "visitors"); ok && (rest == "" || strings.HasPrefix(rest, "/")) {
+		s.handleProjectVisitors(w, r, projectID, rest)
+		return
+	}
+
 	// RS1: Atomic ownership transfer endpoint.
 	if subPath == "transfer-ownership" {
 		s.handleTransferOwnership(w, r, projectID)

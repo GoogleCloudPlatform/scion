@@ -847,6 +847,15 @@ Manages the Scion workspace (Project).
     - `set [project]`: Set the inbound messaging policy.
         - Flags: `--policy <string>` (one of `none`, `members`, `all`), `--revision <int>` (required, optimistic concurrency revision).
     - `get [project]`: Show the current messaging policy and revision.
+- `scion project visitors`: Grant users of a trusted issuer visitor access to a project by email (experimental: needs the `federation.project_visitors` experiment, an issuer with `allow_visitor_grants`, project owner or admin, and an interactive session). Not available in agent mode.
+    - `list`: List the project's visitors with email, issuer, status (`pending` until the visitor's first request, then `active`, or `suspended`) and expiry.
+    - `add`: Grant visitor access.
+        - Flags: `--issuer <url>` (required, a trusted issuer URL), `--email <email>` (required), `--expires <duration>` (optional, for example `30d`).
+    - `remove <email or id>`: Revoke a visitor's access; the next request is refused.
+        - Flags: `--issuer <url>` (when the email is a visitor from more than one issuer).
+    - `extend <email or id>`: Set a new expiry.
+        - Flags: `--expires <duration>` (required), `--issuer <url>`.
+    - Flags: `--project <id or slug>`.
 
 ### `scion service-accounts`
 
