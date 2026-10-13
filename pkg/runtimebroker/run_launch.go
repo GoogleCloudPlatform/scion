@@ -180,7 +180,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	defer sender.WaitKeepaliveStopped()
 	defer sender.StopKeepalive()
 
-	currentStep := "claim"
+	currentStep := api.LaunchStepClaim
 
 	// Step 1: claim, synchronous, before anything touches the runtime. The
 	// keepalive is already running (started above), so its answers can end
@@ -200,7 +200,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		default:
 			// ctx' expired without any answer: follow the failure rule
 			// (step 7) with failed{hub_unreachable}.
-			s.failLaunch(ctx, sender, rec, lc, false, currentStep, "hub_unreachable", "claim: hub unreachable")
+			s.failLaunch(ctx, sender, rec, lc, false, currentStep, api.LaunchCodeHubUnreachable, "claim: hub unreachable")
 			return
 		}
 	}
@@ -228,7 +228,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	}
 	// The claim has been applied: any failure from here on is reported
 	// under the launching step (design §3.9).
-	currentStep = "launching"
+	currentStep = api.LaunchStepLaunching
 
 	// Step 2: write the shared marker (create launches only). There is no
 	// superseded launch to wait for here: the create already registered
@@ -247,7 +247,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			s.agentLifecycleLog.Error("runLaunch: failed to write launch marker; failing the launch rather than risk undeletable files",
 				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
 				"launch_id", rec.ID, "error", err)
-			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", runtimeOpError("write launch marker", err).Error())
+			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, runtimeOpError("write launch marker", err).Error())
 			return
 		}
 	}
@@ -276,7 +276,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		// too: admission (beginAsyncLaunch) normally answers those with the
 		// sync 400/422, and one only found here reports the same text,
 		// under runtime_error.
-		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", dlMessage)
+		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, dlMessage)
 		return
 	}
 	lc.opts = opts
@@ -287,6 +287,15 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	// buildStartContext) runs first.
 	lc.opts.Checkpoint = chainCheckpoint(lc.opts.Checkpoint, sender.Checkpoint)
 	lc.opts.OnResourceCreated = rec.AddHandle
+	// The non-blocking step hook (design wave 3 §3 E-b): the runtime
+	// records each step it reaches, and the progress poster reports the
+	// latest one to the Hub at most once per progressInterval.
+	lc.opts.Progress = sender.Progress
+	sender.StartProgress(ctx)
+	// Deferred after the keepalive's stop/wait pair, so it runs before
+	// them: StopKeepalive closes the channel the poster also exits on.
+	defer sender.WaitProgressStopped()
+	defer sender.StopKeepalive()
 	if sender.IsAborted() {
 		s.handleKeepaliveAbort(sender, rec, lc)
 		return
@@ -363,7 +372,12 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			}
 			return
 		}
-		code, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName)
+		// Only now, after the keepalive/progress abort checks above and the
+		// local-cancel check, is the error classified: a stop, delete or
+		// superseding start that removed the pod must never be reported as
+		// pod_disrupted (each cancels ctx' before deleting anything, and
+		// the Hub's own answer arrives as an abort).
+		code, step, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName, sender.LastStep())
 		// message is fixed text for the client (ptone/scion#3113); the
 		// full error reaches only the broker's own log.
 		s.agentLifecycleLog.Error("runLaunch: agent start failed", append([]any{
@@ -372,9 +386,9 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		if sender.CheckpointUnreachable() {
 			// A pre-create checkpoint blocked until ctx' expired with no
 			// definitive Hub answer (design §3.8.2: failed{hub_unreachable}).
-			code, message = "hub_unreachable", "checkpoint: hub unreachable"
+			code, message = api.LaunchCodeHubUnreachable, "checkpoint: hub unreachable"
 		}
-		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, code, message)
+		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, step, code, message)
 		return
 	}
 
@@ -402,7 +416,8 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			ContainerStatus: sr.info.ContainerStatus,
 			RunID:           sr.info.RunID,
 
-			WorkspacePlacement: sr.info.WorkspacePlacement,
+			HarnessConfigSource: sr.info.HarnessConfigSource,
+			WorkspacePlacement:  sr.info.WorkspacePlacement,
 		}
 	}
 	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", info)
@@ -550,25 +565,96 @@ func terminalContext(deadline time.Time) (context.Context, context.CancelFunc) {
 const (
 	// LaunchErrCodeHarnessConfigPolicy: the harness-config policy refused
 	// the launch (the synchronous paths answer 403 forbidden).
-	LaunchErrCodeHarnessConfigPolicy = "harness_config_policy"
+	LaunchErrCodeHarnessConfigPolicy = api.LaunchCodeHarnessConfigPolicy
 	// LaunchErrCodeAgentStateUnavailable: the agent's broker-side state
 	// directory is unavailable (config.ErrAgentStateDirUnavailable).
-	LaunchErrCodeAgentStateUnavailable = "agent_state_unavailable"
+	LaunchErrCodeAgentStateUnavailable = api.LaunchCodeAgentStateUnavailable
 	// LaunchErrCodeAgentStateConflict: the agent's broker-side state exists
 	// but cannot be used as recorded, e.g. an unusable image provenance
 	// record (config.ErrAgentStateConflict).
-	LaunchErrCodeAgentStateConflict = "agent_state_conflict"
+	LaunchErrCodeAgentStateConflict = api.LaunchCodeAgentStateConflict
 )
 
-// classifyStartError maps a Manager.Start failure to a launch error code
-// (design §3.9; full progress/error-code detail is P3 scope). ctx having
-// already expired (DeadlineExceeded) takes precedence: that is ctx', so it
-// means the launch ran out of its budget, which is launch_timeout regardless
-// of the error Start happened to return when it unwound.
-func classifyStartError(ctx context.Context, err error, templateSlug string) (code, message string) {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "launch_timeout", "launch timed out before the agent started"
+// launchFailureText is the fixed report text for each launch code a
+// runtime.LaunchFailure can carry (design wave 3 §3 E-d). classifyStartError
+// appends only the runtime's reason enum, never the error's own text, which
+// names the image reference, pod and namespace (ptone/scion#3113).
+var launchFailureText = map[string]string{
+	api.LaunchCodeImagePullFailed:     "the agent image could not be pulled",
+	api.LaunchCodeInvalidImage:        "the agent image reference is not valid",
+	api.LaunchCodeContainerConfig:     "the agent container could not be configured",
+	api.LaunchCodeCrashLoop:           "the agent container keeps crashing on start",
+	api.LaunchCodeInitContainerFailed: "an init container of the agent pod failed",
+	api.LaunchCodeUnschedulable:       "the agent pod cannot be scheduled",
+	api.LaunchCodePodDisrupted:        "the agent pod was preempted, evicted or deleted while starting",
+	api.LaunchCodeLaunchTimeout:       "launch timed out waiting for the agent pod to be ready",
+}
+
+// maxLaunchReasonLen bounds the runtime reason a failure message carries.
+const maxLaunchReasonLen = 64
+
+// launchReasonEnum returns reason when it looks like a runtime reason enum
+// (ASCII letters and digits, e.g. "ImagePullBackOff"), else "": anything else
+// may be free text and is never reported.
+func launchReasonEnum(reason string) string {
+	if reason == "" || len(reason) > maxLaunchReasonLen {
+		return ""
 	}
+	for _, c := range reason {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return ""
+		}
+	}
+	return reason
+}
+
+// classifyStartError maps a Manager.Start failure to a launch error code,
+// the step the launch failed in, and the report text (design §3.9; wave 3
+// §3 E-d). lastStep is the latest step the launch reached
+// (launchSender.LastStep); the step is a typed failure's own step, else
+// lastStep, else launching. ctx having already expired (DeadlineExceeded)
+// takes precedence: that is ctx', so it means the launch ran out of its
+// budget, which is launch_timeout regardless of the error Start happened to
+// return when it unwound.
+func classifyStartError(ctx context.Context, err error, templateSlug, lastStep string) (code, step, message string) {
+	step = lastStep
+	if step == "" {
+		step = api.LaunchStepLaunching
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if step == api.LaunchStepAwaitingCapacity {
+			// A GKE launch still waiting for node capacity (OQ-E2).
+			return api.LaunchCodeLaunchTimeout, step, "timed out waiting for node capacity"
+		}
+		return api.LaunchCodeLaunchTimeout, step, "launch timed out before the agent started"
+	}
+	code, message = classifyStartErrorCode(err, templateSlug)
+	if code != "" {
+		return code, step, message
+	}
+	var lf *scionrt.LaunchFailure
+	if errors.As(err, &lf) {
+		if text, ok := launchFailureText[lf.Code]; ok {
+			if lf.Step != "" {
+				step = lf.Step
+			}
+			if reason := launchReasonEnum(lf.Reason); reason != "" {
+				text += " (" + reason + ")"
+			}
+			return lf.Code, step, text
+		}
+	}
+	// The same fixed text the synchronous create returns for a
+	// Manager.Start failure (runtimeOpError): the raw error routinely
+	// embeds a container ID, pod name, namespace, image reference or file
+	// path. The full error is logged by runLaunch.
+	return api.LaunchCodeRuntimeError, step, runtimeOpError(opCreateAgent, err).Error()
+}
+
+// classifyStartErrorCode is classifyStartError's cases that do not depend on
+// the launch step or a runtime-typed failure. It returns "" when none
+// matches.
+func classifyStartErrorCode(err error, templateSlug string) (code, message string) {
 	if d, ok := harnessPolicyRefusalFrom(err); ok {
 		return LaunchErrCodeHarnessConfigPolicy, d.Message
 	}
@@ -581,12 +667,12 @@ func classifyStartError(ctx context.Context, err error, templateSlug string) (co
 		// Fixed text, as on the synchronous create, start and restart
 		// paths: a wrapped error can carry runtime detail (container name,
 		// backend message) the client has no entitlement to see.
-		return "name_in_use", agent.ErrContainerNameInUse.Error()
+		return api.LaunchCodeNameInUse, agent.ErrContainerNameInUse.Error()
 	case isRunNameConflict(err):
 		// Another live run holds the agent name, and the runtime deleted
 		// nothing of it (ptone/scion#2550). Fixed text: the wrapped error
 		// names the namespace, object and the other run's ID.
-		return "name_in_use", scionrt.ErrRunConflict.Error()
+		return api.LaunchCodeNameInUse, scionrt.ErrRunConflict.Error()
 	case errors.As(err, &skillErr):
 		// A required skill could not be resolved: the same code a
 		// synchronous create or start returns, with the error naming the
@@ -598,16 +684,12 @@ func classifyStartError(ctx context.Context, err error, templateSlug string) (co
 		// but not err's own text, which can name broker filesystem paths
 		// or a content hash (ptone/scion#3113; see notFoundResourceText).
 		// The full error is logged by runLaunch.
-		return "template_not_found", notFoundMessage(opCreateAgent, err, templateSlug)
+		return api.LaunchCodeTemplateNotFound, notFoundMessage(opCreateAgent, err, templateSlug)
 	case errors.Is(err, config.ErrAgentStateDirUnavailable):
 		return LaunchErrCodeAgentStateUnavailable, err.Error()
 	case errors.Is(err, config.ErrAgentStateConflict):
 		return LaunchErrCodeAgentStateConflict, err.Error()
 	default:
-		// The same fixed text the synchronous create returns for a
-		// Manager.Start failure (runtimeOpError): the raw error routinely
-		// embeds a container ID, pod name, namespace, image reference or
-		// file path. The full error is logged by runLaunch.
-		return "runtime_error", runtimeOpError(opCreateAgent, err).Error()
+		return "", ""
 	}
 }

@@ -532,7 +532,8 @@ step, §5.2, must be complete; the button is disabled otherwise).
   (`local-docker` / `local-podman`).
 - **Progress (D4):** builds are long-running, so unlike per-image pull pills, the build
   step **streams raw build log lines** into a **collapsible log panel**, over the same
-  `/events` SSE stream under a `system.images.<jobId>` subject (event payloads carry a
+  `/events` SSE stream under the requesting user's `user.<requesterId>.images.<jobId>`
+  subject, which only that user's sessions may subscribe to (event payloads carry a
   `line` field; terminal event carries `status:"done"|"error"`). One build job at a time
   (`409` if already running), mirroring the pull job (§7.3).
 - **Endpoint:** `POST /system/images/build { "target": "common", "force": false }` →
@@ -606,8 +607,9 @@ step, §5.2, must be complete; the button is disabled otherwise).
 2. **Pull progress → per-image (D4).** v1 ships per-image status pills; parsed
    layer-level progress (`PullImageStream`) is a later enhancement. Local builds stream
    raw log lines (§7.6).
-3. **SSE channel → shared `/events` stream** with a `system.images.<jobId>` subject (no
-   dedicated endpoint), reusing `SSEClient` reconnection/backoff.
+3. **SSE channel → shared `/events` stream** (no dedicated endpoint), reusing `SSEClient`
+   reconnection/backoff. Pull progress uses a `system.images.<jobId>` subject; build log
+   lines use the requesting user's `user.<requesterId>.images.<jobId>` subject.
 4. **Status caching → `sessionStorage`.** Cache the "setup complete" result in
    `sessionStorage` and clear it on wizard completion; re-fetch `/system/status` on a
    fresh session. (Cross-tab invalidation is unnecessary for a single-user workstation.)

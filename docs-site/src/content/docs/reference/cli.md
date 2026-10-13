@@ -156,17 +156,23 @@ and its status is not readable with this credential's scope, and exits 0 like a
 timeout (1 with `--attach`); the launch continues on the Hub. When the Hub has
 already finished the start and you wait with `--attach`, there is no retry: an
 agent launcher's 404 gives the same not-readable report at once, and exits 1.
-The agent is reported as deleted only on a 404 after its status was read that
-persists through a 5-second retry (or until the wait ends, if that is sooner),
-or, for a user's login, on a 404 before that: after the 5-second retry while
-the Hub is still launching the agent, and at once otherwise. If the agent's
-create did not complete (for example the image could not be pulled), the error
-shows the stored template and task. Delete the agent and create it again
+An agent launcher's 404 after the status was read is retried for 5 seconds (or
+until the wait ends, if that is sooner). If it lasts, `start` reports that the
+status is no longer readable and that the agent may have been deleted or the
+Hub refused the read: the Hub answers an agent with 404 both for an agent that
+is gone and for a read it refuses, so a launcher cannot tell the two apart.
+This exits 0 when the Hub accepted the launch, and 1 with `--attach` or when
+it did not. The agent is reported as deleted only for a user's login: on a 404
+after its status was read that persists through the 5-second retry (or until
+the wait ends, if that is sooner), or on a 404 before that, after the 5-second
+retry while the Hub is still launching the agent, and at once otherwise. If the
+agent's create did not complete (for example the image could not be pulled), the
+error shows the stored template and task. Delete the agent and create it again
 (`scion delete <agent-name>`, then `scion start` with the same template and
 task). If soft-delete retention is enabled on the Hub, the name stays reserved
 until the agent is deleted with force=true or purged; until then, use a new
-name. With `--format json`, `--attach` after a workspace upload attaches
-without printing the JSON result.
+name. With `--format json`, `--attach` after a workspace upload attaches without
+printing the JSON result.
 
 #### Long tasks and task files
 
@@ -344,7 +350,7 @@ Sends a message to a running agent or user.
     - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
         - **Constraints:** Cannot be combined with `--in` or `--at`.
         - **Requirements:** Requires Hub mode (`scion hub enable`). If run in local mode, the command will fail with an error suggesting you include file contents directly in the message text. If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
-        - **Undelivered attachments:** If the Hub cannot read an attached file (for example, it was staged on a different Runtime Broker's host than the Hub's), the message is still delivered without it, and the command prints `Warning: attachment <path> was not delivered: <reason>` on stderr for each such file. With `--format json`, the warnings are in the result's `attachment_warnings` field instead.
+        - **Undelivered attachments:** When an agent sends the message and the Hub cannot read an attached file (for example, it was staged on a different Runtime Broker's host than the Hub's), the message is still delivered without it, and the command prints `Warning: attachment <path> was not delivered: <reason>` on stderr for each such file. With `--format json`, the warnings are in the result's `attachment_warnings` field instead. Messages sent by a human from the CLI do not report undelivered attachments yet.
     - `--artifact <ref>`: Reference a published artifact, `scion://artifact/<id>` or `scion://artifact/<id>@<seq>` (repeatable, at most 10). The reference is added to the message text, and an agent recipient's message ends with one line per artifact showing how to fetch it (`Artifact: v2 - scion artifact get <ref>`, or `current` for an unpinned reference). The Hub attaches only artifacts the sender can read and prints a warning for the rest; a recipient still needs its own access to read an artifact. See [Artifacts](/scion/reference/artifacts/#artifacts-in-messages).
         - **Constraints:** Cannot be combined with `--in` or `--at`, or used with `group[...]` recipients.
         - **Requirements:** Requires Hub mode with the `hub.artifacts` experiment on.
@@ -1226,7 +1232,7 @@ scion unexpose 8080
 
 ### `scion artifact`
 
-Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode, except `share` and `delete`. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
+Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode, except `share`, `grants` and `delete`. An unknown subcommand is an error, also with `--help`: `scion artifact nosuch --help` exits non-zero with `unknown command`, as do `scion hub nosuch --help` and `scion config nosuch --help`. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
 
 - `scion artifact publish <file|folder>`: Publish a file or folder in the current project; prints its reference, version and web page URL.
     - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
@@ -1234,8 +1240,14 @@ Publishes files as artifacts and fetches them by reference (`scion://artifact/<i
 - `scion artifact get <ref>`: Write an artifact's entry file to stdout, or with `--out` the file or the whole bundle.
     - Flags: `--out`, `-o <path>` (a file, an existing directory for a single file, or the directory a bundle is written into), `--force` (replace files that already exist under `--out`).
 - `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`. Discarded versions (a rejected or stale review, or an upload not finished in time) are listed among them by number with their reason, so gaps in the numbering are explained.
+- `scion artifact list`: List the artifacts you can read, newest first: those you own, those shared with you, and those homed in projects whose artifacts you may read. Each line shows the reference, title, current version, why you see it (`owned`, `project` or `shared`) and when it last changed; one page is printed unless `--all` is given.
+    - Flags: `--mine` (only artifacts you own), `--project-id <id>` (only artifacts homed in, or shared with, that project), `--shared` (only those shared with you, or with `--project-id` with that project, from elsewhere), `--review-pending`, `--query <text>` (title or key), `--limit <n>` (page size), `--all` (follow every page), `--cursor <c>` (start at the page a previous `--format json` list returned as `nextCursor`).
+- `scion artifact view <ref>`: Print a short-lived link that shows a version whose entry is HTML, the way the web UI shows it, and when it expires (30 minutes unless the Hub says otherwise). It never opens a browser. A version whose entry is not HTML has no view. In agent mode it prints the version and the expiry but not the link; `--show-link` prints the link too. In human mode the link is always printed.
+    - Flags: `--show-link` (print the link in agent mode too), `--check` (also read the version's HTML files and report every `href` or `src` that names no file of the version, including links that start with `/` or climb above the bundle's top folder, and exit non-zero if there is one; links with a scheme, to another host or to a fragment of the same page are not checked, and a link that cannot be parsed is reported; a `<base href>` is not taken into account).
 - `scion artifact share <ref>`: Create a share link and print it, with its expiry and the command that revokes it. The link is shown only once. Only the artifact's owner or a user with an admin grant can share it; not available in agent mode, and the Hub refuses agents. See [Share links](/scion/reference/artifacts/#share-links).
     - Flags: `--ttl <n>h|<n>d` (link lifetime; default: the Hub's, 7 days unless changed; a lifetime above the Hub's maximum, 30 days unless changed, is rejected, not shortened), `--list` (list the active links instead), `--revoke <link-id>` (revoke one instead).
+- `scion artifact grants <ref>`: List an artifact's grants (id, subject, permission, created), or add, change or remove one. Only the artifact's owner or a user with an admin grant can see or change its grants. On an artifact owned by an agent, the user who delegated to the agent and anyone holding `project.manage` in its home project (the project owners and admins, and super-admins) may also add a review grant for a user who can already read it, and nothing else; they cannot list the grants. Not available in agent mode, and the Hub refuses agents. See [Grants](/scion/reference/artifacts/#grants).
+    - Flags: `--add <subject>` with `--permission read|review|write|admin` (subjects `user:<id>`, `agent:<id>` or `project:<id>`; review is for users only; a subject that already has a grant gets the new permission), `--remove <grant-id>`.
 - `scion artifact delete <ref>`: Delete an artifact after confirming (`--yes` skips the prompt; required when stdin is not a terminal). Its grants and share links end with it and its files are removed after the hub's grace period; there is no undelete. The artifact's owner, a user with an admin grant on it, or an admin of its home project can delete it; not available in agent mode, and the Hub refuses agents. See [Deletion](/scion/reference/artifacts/#deletion).
 
 ## Notification Management

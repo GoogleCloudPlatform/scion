@@ -34,13 +34,14 @@ import (
 
 // TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden pins
 // buildActorTemplate's output with EgressTrustBundle unset (the default)
-// against the exact template shape the function produced before
-// egress_trust_bundle existed: no system-info volume, no /run/ate mount,
-// Env nil. This is the "off means exact current behaviour" golden test —
-// want is hand-built to mirror the pre-change source, before
-// egress_trust_bundle existed, not derived from the function under test, so
-// a regression that silently changes the unset-case shape is caught here
-// rather than compared against itself.
+// against the template shape the function produced before
+// egress_trust_bundle existed (no system-info volume, no /run/ate mount,
+// Env nil), plus the container's wakeup probe on the serve healthz, which
+// every template carries since it was added. This is the "off means exact
+// current behaviour" golden test — want is hand-built, with literal values,
+// not derived from the function under test, so a regression that silently
+// changes the unset-case shape is caught here rather than compared against
+// itself.
 func TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("c", 64)
 	sc := config.V1SubstrateConfig{
@@ -71,6 +72,10 @@ func TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden(t *tes
 					{Name: "cpu", Quantity: "2"},
 					{Name: "memory", Quantity: "4Gi"},
 				}},
+				WakeupProbe: &ateapipb.ContainerWakeupProbe{
+					HttpGet:        &ateapipb.HTTPGetAction{Path: "/scion/v1/healthz", Port: 80},
+					TimeoutSeconds: 120,
+				},
 			},
 		},
 		Volumes: []*ateapipb.Volume{
@@ -192,11 +197,10 @@ func TestBuildActorTemplate_EnvNamesMatchSharedTrustBundleVarNames(t *testing.T)
 // substrateTemplateNameFixture is one row of the table-driven
 // substrateTemplateName tests below: an image/config/resources input, and
 // the literal name substrateTemplateName produces for it with
-// EgressTrustBundle unset, computed once (before egress_trust_bundle
-// existed as a hash input in the "base" case, and from the current,
-// already-shipped hash formula for the others, since they were added after
-// the field existed and so cannot pin a "pre-change" value — see each row's
-// comment).
+// EgressTrustBundle unset. Both rows were re-pinned when the container's
+// wakeup probe joined the hash input (see substrateWakeupProbeCacheKey):
+// that change deliberately gives every template a new name so existing
+// goldens, built without the probe, are rebuilt rather than reused.
 type substrateTemplateNameFixture struct {
 	name      string
 	image     string
@@ -208,12 +212,11 @@ type substrateTemplateNameFixture struct {
 func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
 	return []substrateTemplateNameFixture{
 		{
-			// The original fixture: pins the literal computed before
-			// egress_trust_bundle existed as a hash input at all, against
-			// the exact image/sandbox/config-name/snapshot-storage/
-			// resources shape substrateTemplateName has always hashed. A
+			// The original fixture: pins the literal for the exact
+			// image/sandbox/config-name/snapshot-storage/resources shape
+			// substrateTemplateName has always hashed. A
 			// regression that starts hashing EgressTrustBundle
-			// unconditionally (e.g. always as a 10th "%s" field, "" when
+			// unconditionally (e.g. always as an extra "%s" field, "" when
 			// unset) would change this literal even though the setting is
 			// off — exactly the silent golden-template reuse break this
 			// pin exists to catch.
@@ -225,7 +228,7 @@ func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
 				SnapshotStorage:   "gs://bucket/prefix/",
 			},
 			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "2", Memory: "4Gi"}},
-			wantUnset: "scion-c31a0b3817b7",
+			wantUnset: "scion-799faf9df0d7",
 		},
 		{
 			// Worker selector set, resources nil (so buildActorTemplate's
@@ -241,7 +244,7 @@ func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
 				SnapshotStorage:   "gs://bucket/prefix/",
 			},
 			resources: nil,
-			wantUnset: "scion-780d9b998ec6",
+			wantUnset: "scion-078dcfd90843",
 		},
 	}
 }
