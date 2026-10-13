@@ -2231,6 +2231,53 @@ func resolveSessionSecret() string {
 	return secret
 }
 
+// hubObservabilityExport decides at startup whether the hub's own metrics
+// and trace exporters run, and their export project (ptone/scion#4914).
+// See decideHubObservabilityExport for the inputs.
+func hubObservabilityExport(cfg *config.GlobalConfig, hubSrv *hub.Server) hubexport.Status {
+	return decideHubObservabilityExport(cfg, hubSrv.GetOperationalSettings(), hubObservabilityInputs{
+		getenv: os.Getenv,
+		// Relies on the earlier Policy Troubleshooter probe in
+		// initHubServer (ResolveGCPProjectID) for caching: the metadata
+		// client caches OnGCE and a resolved project ID.
+		metadata:   func() (string, error) { return hub.ResolveGCPProjectID("") },
+		tracingEnv: parseBoolEnv(hubexport.TracingEnv),
+	})
+}
+
+// hubObservabilityInputs are the process inputs of
+// decideHubObservabilityExport, passed in so the selection is testable.
+type hubObservabilityInputs struct {
+	getenv     func(string) string
+	metadata   func() (string, error)
+	tracingEnv bool
+}
+
+// decideHubObservabilityExport selects the inputs of the export decision.
+// The switches come from the Layer-1 snapshot, where a managed DB row wins
+// over the settings file and the environment; a hub without the
+// operational settings service (ops nil) reads them from the loaded
+// config. The export project is server.hub.gcp_project_id, else the
+// metadata-server project, resolved as for service-account minting
+// (ResolveGCPProjectID, which skips the lookup off GCP).
+func decideHubObservabilityExport(cfg *config.GlobalConfig, ops *hub.OperationalSettings, in hubObservabilityInputs) hubexport.Status {
+	metrics, tracing := cfg.Hub.Observability.MetricsEnabled, cfg.Hub.Observability.TracingEnabled
+	if ops != nil {
+		snap := ops.Snapshot()
+		metrics, tracing = snap.HubMetricsEnabled, snap.HubTracingEnabled
+	}
+	project := hubexport.ResolveProject(hubexport.ProjectInputs{
+		Configured: cfg.Hub.GCPProjectID,
+		EnvValue:   in.getenv(hubexport.ProjectIDEnv),
+		Metadata:   in.metadata,
+	})
+	return hubexport.Status{
+		Project: project,
+		Metrics: hubexport.DecideMetrics(metrics, project),
+		Tracing: hubexport.DecideTracing(tracing, in.tracingEnv, project),
+	}
+}
+
 // parseBoolEnv reports whether the named environment variable is set to a
 // truthy value, using util.LookupBoolEnv for the accepted spellings
 // (whitespace-trimmed, case-insensitive strconv.ParseBool plus yes/y/on and
@@ -2240,32 +2287,6 @@ func resolveSessionSecret() string {
 //
 // The warning uses the stdlib logger because parseBoolEnv runs during
 // initServerLogging, before the slog loggers are wired.
-// hubObservabilityExport decides at startup whether the hub's own metrics
-// and trace exporters run, and their export project (ptone/scion#4914).
-// The switches come from the Layer-1 snapshot, where a managed DB row wins
-// over the settings file and the environment; a hub without the
-// operational settings service reads them from the loaded config. The
-// export project is server.hub.gcp_project_id, else the metadata-server
-// project, resolved as for service-account minting (ResolveGCPProjectID,
-// which skips the lookup off GCP).
-func hubObservabilityExport(cfg *config.GlobalConfig, hubSrv *hub.Server) hubexport.Status {
-	metrics, tracing := cfg.Hub.Observability.MetricsEnabled, cfg.Hub.Observability.TracingEnabled
-	if ops := hubSrv.GetOperationalSettings(); ops != nil {
-		snap := ops.Snapshot()
-		metrics, tracing = snap.HubMetricsEnabled, snap.HubTracingEnabled
-	}
-	project := hubexport.ResolveProject(hubexport.ProjectInputs{
-		Configured: cfg.Hub.GCPProjectID,
-		EnvValue:   os.Getenv(hubexport.ProjectIDEnv),
-		Metadata:   func() (string, error) { return hub.ResolveGCPProjectID("") },
-	})
-	return hubexport.Status{
-		Project: project,
-		Metrics: hubexport.DecideMetrics(metrics, project),
-		Tracing: hubexport.DecideTracing(tracing, parseBoolEnv(hubexport.TracingEnv), project),
-	}
-}
-
 func parseBoolEnv(key string) bool {
 	if v, ok := util.LookupBoolEnv(key); ok {
 		return v
