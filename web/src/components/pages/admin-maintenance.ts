@@ -156,6 +156,13 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private runInProgress = false;
 
+  /**
+   * Open state of the completed-migrations group. Kept on the component so it
+   * survives reloads that swap the page content for the loading spinner.
+   */
+  @state()
+  private completedMigrationsOpen = false;
+
   /** Polling timer for running operations/migrations. */
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -333,6 +340,27 @@ export class ScionPageAdminMaintenance extends LitElement {
       display: flex;
       flex-direction: column;
       gap: 1rem;
+    }
+
+    .card-list + .completed-migrations {
+      display: block;
+      margin-top: 1rem;
+    }
+
+    .completed-migrations::part(base) {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+    }
+
+    .completed-migrations::part(header) {
+      font-size: 0.9375rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      padding: 0.875rem 1rem;
+    }
+
+    .completed-migrations::part(content) {
+      padding: 0 1rem 1rem 1rem;
     }
 
     .card {
@@ -1390,6 +1418,8 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   private renderMigrations() {
+    const completed = this.migrations.filter((m) => m.status === 'completed');
+    const active = this.migrations.filter((m) => m.status !== 'completed');
     return html`
       <div class="section">
         <h2 class="section-title">Migrations</h2>
@@ -1400,12 +1430,42 @@ export class ScionPageAdminMaintenance extends LitElement {
         ${this.migrations.length === 0
           ? html`<div class="empty-inline">No migrations registered.</div>`
           : html`
-              <div class="card-list">
-                ${this.migrations.map((m) => this.renderMigrationCard(m))}
-              </div>
+              ${active.length > 0
+                ? html`
+                    <div class="card-list">${active.map((m) => this.renderMigrationCard(m))}</div>
+                  `
+                : nothing}
+              ${this.renderCompletedMigrations(completed)}
             `}
       </div>
     `;
+  }
+
+  /**
+   * Completed migrations are grouped in one collapsible element, collapsed by
+   * default. Its open state is tracked in completedMigrationsOpen from
+   * sl-show/sl-hide and bound back, so it is kept across poll refreshes and
+   * across reloads that re-create the element.
+   */
+  private renderCompletedMigrations(completed: MaintenanceOperation[]) {
+    if (completed.length === 0) return nothing;
+    return html`
+      <sl-details
+        class="completed-migrations"
+        summary="Completed migrations (${completed.length})"
+        ?open=${this.completedMigrationsOpen}
+        @sl-show=${(e: Event) => this.onCompletedMigrationsToggle(e, true)}
+        @sl-hide=${(e: Event) => this.onCompletedMigrationsToggle(e, false)}
+      >
+        <div class="card-list">${completed.map((m) => this.renderMigrationCard(m))}</div>
+      </sl-details>
+    `;
+  }
+
+  private onCompletedMigrationsToggle(e: Event, open: boolean): void {
+    // Ignore sl-show/sl-hide bubbling up from elements inside the cards.
+    if (e.target !== e.currentTarget) return;
+    this.completedMigrationsOpen = open;
   }
 
   private renderMigrationCard(m: MaintenanceOperation) {
