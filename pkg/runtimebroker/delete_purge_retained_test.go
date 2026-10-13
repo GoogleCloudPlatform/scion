@@ -264,6 +264,36 @@ func TestDeleteAgent_PurgeRetained_RejectsLocalOnly(t *testing.T) {
 	}
 }
 
+// A purge with no projectId is refused before anything is resolved: the
+// guard and the start registries are keyed by project, so an unscoped purge
+// could miss a start of the agent scoped to its project.
+func TestDeleteAgent_PurgeRetained_RequiresProjectID(t *testing.T) {
+	var entries []api.AgentInfo
+	srv := newRealManagerScopeServer(t, &entries)
+	root := makeLinkedGitProject(t, scopeProjB, "dev")
+	agentDir, info := writeLinkedAgentFiles(t, resolvedScionDir(t, root), "dev")
+	markSoftDeleted(t, info)
+
+	q := api.PurgeRetainedQueryParam + "=true&projectPath=" + url.QueryEscape(root)
+	rec := doDelete(t, srv, "dev", q)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.Error.Code != ErrCodeValidationError || !strings.Contains(resp.Error.Message, "projectId") {
+		t.Errorf("got code %q message %q, want %q naming projectId", resp.Error.Code, resp.Error.Message, ErrCodeValidationError)
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, "workspace", "work.txt")); err != nil {
+		t.Fatalf("files were removed by a rejected request: %v", err)
+	}
+	if len(srv.retainedPurges.purges) != 0 {
+		t.Errorf("a rejected purge left a guard registration: %v", srv.retainedPurges.purges)
+	}
+}
+
 // retainedPurgeRefusal maps each refusal of checkRetainedAgentFiles to a
 // reason that names no host path, and allows only a clean check.
 func TestRetainedPurgeRefusal(t *testing.T) {

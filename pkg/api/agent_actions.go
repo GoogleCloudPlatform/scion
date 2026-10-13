@@ -115,7 +115,9 @@ const AgentIDQueryParam = "agentId"
 // with BrokerErrCodeRetainedFilesRefused and removes nothing (it does not
 // cancel an in-flight start either). While the removal runs, the broker
 // refuses a start, restart or create of the agent with a retryable 409,
-// BrokerErrCodeRetainedPurgeInProgress.
+// BrokerErrCodeRetainedPurgeInProgress. The delete must carry the agent's
+// projectId (the broker answers 400 otherwise), and cannot be combined with
+// localOnly.
 //
 // Caller contract (defence in depth beside the broker's own checks): a hub
 // restore does not clear the broker's soft-delete mark (only a later start
