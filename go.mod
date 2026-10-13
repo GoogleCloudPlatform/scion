@@ -39,7 +39,6 @@ require (
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/providers/rawbytes v1.0.0
 	github.com/knadh/koanf/v2 v2.3.0
-	github.com/mattn/go-sqlite3 v1.14.17
 	github.com/pkg/sftp v1.13.11
 	github.com/rclone/rclone v1.75.1
 	github.com/robfig/cron/v3 v3.0.1
