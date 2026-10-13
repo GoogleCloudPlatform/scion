@@ -394,6 +394,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 10b. Initialize plugin manager
 	pluginMgr := initPluginManager(ctx, secretBackend, s)
 	defer pluginMgr.Shutdown()
+	// From the shutdown signal on, plugin process exits are expected: the
+	// service manager's SIGTERM can reach the plugins before Shutdown
+	// above runs (ptone/scion#4869).
+	stopPluginShutdownMark := context.AfterFunc(ctx, pluginMgr.BeginShutdown)
+	defer stopPluginShutdownMark()
 
 	// 11. Start Hub
 	var hubSrv *hub.Server
