@@ -43,6 +43,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -688,6 +689,60 @@ func TestPlacementGuard_ConduitGrantRefusedAfterAuthorization(t *testing.T) {
 		assert.Equal(t, http.StatusConflict, conduitTunnelFailures[te.failure].status)
 		assert.Equal(t, code, conduitTunnelFailures[te.failure].code)
 	}
+}
+
+// A store failure during the placement check is a temporary routing
+// failure on the conduit paths (503 registry_unavailable), never a 500 or
+// a grant-key fault.
+func TestPlacementGuard_ConduitStoreFaultIsRegistryUnavailable(t *testing.T) {
+	boom := errors.New("injected broker read failure")
+
+	t.Run("PTY", func(t *testing.T) {
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		a := f.pinnedAgent(t, "pty-fault", string(state.PhaseRunning))
+		f.srv.store = &brokerReadErrStore{Store: f.s, err: boom}
+		t.Cleanup(func() { f.srv.store = f.s })
+		d := f.srv.resolvePTYPath(context.Background(), nil, a)
+		assert.Equal(t, ptyPathNone, d.Path)
+		assert.Equal(t, http.StatusServiceUnavailable, d.Status)
+		assert.Equal(t, ErrCodeUnavailable, d.Code)
+		assert.Equal(t, ptyReasonRegistryUnavailable, d.Reason)
+	})
+
+	t.Run("conduit grant", func(t *testing.T) {
+		cf := newConduitFixture(t)
+		ctx := context.Background()
+		flat := &store.RuntimeBroker{ID: tid("conduit-fault-flat"), Name: "conduit-fault-flat", Slug: "conduit-fault-flat", Status: store.BrokerStatusOnline,
+			RuntimeTarget: &api.RuntimeTargetDescriptor{ID: tid("conduit-fault-target"), Type: "docker"}}
+		require.NoError(t, cf.store.CreateRuntimeBroker(ctx, flat))
+		a := *cf.agent
+		a.RuntimeBrokerID = flat.ID
+		a.PinnedRuntimeBrokerID = flat.ID
+		a.PinnedRuntimeTargetID = flat.RuntimeTarget.ID
+		a.PinnedRuntimeTargetType = "docker"
+		cf.srv.store = &brokerReadErrStore{Store: cf.store, err: boom}
+		t.Cleanup(func() { cf.srv.store = cf.store })
+
+		_, _, err := cf.srv.mintConduitGrant(ctx, conduitGrantRequest{Identity: cf.owner, Agent: &a, Stream: tcpHeader("3000"),
+			Target: grant.Target{Kind: grant.TargetKindAgent, ID: a.ID, EndpointIncarnation: "inc-1", SessionID: "sess-1", ConnectionEpoch: 3}})
+		require.ErrorIs(t, err, router.ErrRegistryUnavailable)
+		require.ErrorIs(t, err, boom)
+		_, refused := placementRefusalOf(err)
+		assert.False(t, refused)
+
+		// The tunnel keeps it as registry unavailable, not grant keys.
+		assert.True(t, conduitTunnelMintErrPassesThrough(err))
+		var te *conduitTunnelError
+		require.True(t, errors.As(conduitTunnelOpenError(err), &te))
+		assert.Equal(t, tunnelRegistryUnavailable, te.failure)
+		assert.Equal(t, http.StatusServiceUnavailable, conduitTunnelFailures[te.failure].status)
+		assert.Equal(t, ptyReasonRegistryUnavailable, conduitTunnelFailures[te.failure].reason)
+
+		// The port proxy answers its routing-unavailable 503.
+		rec := httptest.NewRecorder()
+		writeConduitProxyError(rec, httptest.NewRequest(http.MethodGet, "/", nil), a.ID, err)
+		requireAPIError(t, rec, http.StatusServiceUnavailable, ErrCodeUnavailable)
+	})
 }
 
 func TestPlacementGuard_WorkspaceTunnelRefusedBeforeSend(t *testing.T) {

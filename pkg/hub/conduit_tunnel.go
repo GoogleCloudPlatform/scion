@@ -630,8 +630,7 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 			ViaTunnel: true,
 		})
 		if err != nil {
-			var placement *PlacementConflictError
-			if errors.Is(err, errConduitForbidden) || errors.Is(err, errConduitInvalid) || errors.Is(err, errConduitDisabled) || errors.As(err, &placement) {
+			if conduitTunnelMintErrPassesThrough(err) {
 				return err
 			}
 			// Authorization passed; the signing key set failed.
@@ -648,6 +647,17 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 		return nil, conduitTunnelOpenError(err)
 	}
 	return st, nil
+}
+
+// conduitTunnelMintErrPassesThrough reports whether a mintConduitGrant
+// error keeps its own refusal: an authorization, request or experiment
+// refusal, a placement refusal (409), or a placement check that could not
+// read the store (registry unavailable). Any other mint error is the
+// signing key set failing.
+func conduitTunnelMintErrPassesThrough(err error) bool {
+	var placement *PlacementConflictError
+	return errors.Is(err, errConduitForbidden) || errors.Is(err, errConduitInvalid) || errors.Is(err, errConduitDisabled) ||
+		errors.As(err, &placement) || errors.Is(err, router.ErrRegistryUnavailable)
 }
 
 // errConduitTunnelGrantKeys marks a grant that could not be signed.

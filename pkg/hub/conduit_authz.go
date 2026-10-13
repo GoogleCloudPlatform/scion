@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -309,7 +310,13 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	// covered: it only queues a credential refresh on the agent's own
 	// session (Hub-internal credential upkeep).
 	if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
-		return nil, nil, err
+		if _, refused := placementRefusalOf(err); refused {
+			return nil, nil, err
+		}
+		// The check itself could not read the agent's Runtime Broker:
+		// a temporary failure, answered as routing unavailable (503
+		// registry_unavailable), not as a grant-key fault.
+		return nil, nil, fmt.Errorf("%w: agent placement check: %w", router.ErrRegistryUnavailable, err)
 	}
 
 	params, err := conduitStreamParams(req)

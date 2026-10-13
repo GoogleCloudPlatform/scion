@@ -154,8 +154,11 @@ func (s *Server) resolvePTYPath(ctx context.Context, identity Identity, agent *s
 		if errors.As(err, &refusal) {
 			return ptyRefusal(refusal.Status, refusal.Code, refusal.Message, "")
 		}
-		slog.Error("PTY: agent placement check failed", "agent_id", agent.ID, "error", err)
-		return ptyRefusal(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", "")
+		// The check could not read the agent's Runtime Broker: a temporary
+		// failure, so retryable (503 registry_unavailable), not a 500.
+		slog.Warn("PTY: agent placement check failed", "agent_id", agent.ID, "error", err)
+		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"Conduit routing is unavailable", ptyReasonRegistryUnavailable)
 	}
 	if agent.RuntimeBrokerID == "" {
 		return ptyRefusal(http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker,
