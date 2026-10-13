@@ -55,7 +55,7 @@ type projectHasAgentsDeleteError struct {
 	truncated bool
 }
 
-const projectHasAgentsDeleteMessage = "cannot delete a project whose agents' runtime deletion is not confirmed: delete the agents first, or retry with force=true to remove their records anyway"
+const projectHasAgentsDeleteMessage = "cannot delete a project while it has agents that are not deleted: delete the agents first (the CLI and API offer a force option that removes their records anyway)"
 
 func (e *projectHasAgentsDeleteError) Error() string {
 	return projectHasAgentsDeleteMessage
@@ -80,25 +80,18 @@ func (e *projectHasAgentsDeleteError) decision() *ProjectDeleteDecision {
 // the project has an agent that is not soft-deleted. It runs inside the
 // delete transaction, after the project's agent rows are locked.
 func checkProjectAgentsDeletedTx(ctx context.Context, tx store.Store, projectID string) error {
-	limit := projectDeleteBlockingAgentsLimit
 	page, err := tx.ListAgents(ctx, store.AgentFilter{ProjectID: projectID},
-		store.ListOptions{Limit: limit + 1, SkipTotalCount: true})
+		store.ListOptions{Limit: projectDeleteBlockingAgentsLimit, SkipTotalCount: true})
 	if err != nil {
 		return fmt.Errorf("list project agents for deletion: %w", err)
 	}
 	if page == nil || len(page.Items) == 0 {
 		return nil
 	}
-	e := &projectHasAgentsDeleteError{}
+	// A further page means more agents block than are listed.
+	e := &projectHasAgentsDeleteError{truncated: page.NextCursor != ""}
 	for _, a := range page.Items {
-		if len(e.agents) == limit {
-			e.truncated = true
-			break
-		}
 		e.agents = append(e.agents, projectAgentRef{ID: a.ID, Slug: a.Slug, DeletionState: a.DeletionState})
-	}
-	if page.NextCursor != "" {
-		e.truncated = true
 	}
 	return e
 }

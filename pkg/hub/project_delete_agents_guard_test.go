@@ -67,7 +67,8 @@ func TestProjectDelete_LiveAgentRefused(t *testing.T) {
 	assert.Equal(t, agent.Slug, body.Error.Details.Agents[0].Slug)
 	assert.Empty(t, body.Error.Details.Agents[0].DeletionState)
 	assert.False(t, body.Error.Details.Truncated)
-	assert.Contains(t, body.Error.Message, "force")
+	assert.Contains(t, body.Error.Message, "delete the agents first")
+	assert.NotContains(t, body.Error.Message, "force=true", "the message does not tell web users to retry with a query parameter")
 
 	_, err := s.GetProject(ctx, project.ID)
 	require.NoError(t, err, "the project is kept")
