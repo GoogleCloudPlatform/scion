@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -108,7 +109,7 @@ func TestRunHubLink_RelinkWithLinkedGlobalKeepsProjectHubID(t *testing.T) {
 	assert.Empty(t, merged.GetHubProjectID(), "after unlink the global hub project ID does not leak in")
 
 	runHubLinkQuiet(t)
-	assert.True(t, *alreadyLinked, "the re-link takes the already-linked path")
+	assert.True(t, alreadyLinked.Load(), "the re-link takes the already-linked path")
 	assertOwnHubID("re-link")
 }
 
@@ -219,12 +220,13 @@ func TestRunHubLink_RefusesGlobalFallbackInGitRepo(t *testing.T) {
 // nameKeepingHub is a local workstation hub that remembers the ID and name
 // of the project registered on it and answers lookups of that ID with that
 // name, so a second 'scion hub link' takes the already-linked path. The
-// returned flag reports that a lookup found the registered project.
-func nameKeepingHub(t *testing.T) (*httptest.Server, *bool) {
+// returned flag reports that a lookup found the registered project; it is
+// set by the handler goroutine, so it is atomic.
+func nameKeepingHub(t *testing.T) (*httptest.Server, *atomic.Bool) {
 	t.Helper()
 	var mu sync.Mutex
 	var id, name string
-	found := new(bool)
+	found := new(atomic.Bool)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -243,7 +245,7 @@ func nameKeepingHub(t *testing.T) (*httptest.Server, *bool) {
 				"created": created,
 			})
 		case id != "" && r.URL.Path == "/api/v1/projects/"+id && r.Method == http.MethodGet:
-			*found = true
+			found.Store(true)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": id, "name": name, "slug": name})
 		case r.URL.Path == "/api/v1/projects" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"projects": []interface{}{}})
