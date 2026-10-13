@@ -626,19 +626,19 @@ func TestVisitorAgents_MessageableFilter(t *testing.T) {
 var errVisitorMessageableFault = errors.New("injected role binding load fault")
 
 // visitorMessageableFaultStore fails every role binding load once an
-// agent list has been read while armOnList is set, so the request's
-// admission succeeds and only the per-agent messaging decisions after
-// the list read see the fault.
+// agent list has been read while its fault switch is armed, so the
+// request's admission succeeds and only the per-agent messaging decisions
+// after the list read see the fault.
 type visitorMessageableFaultStore struct {
 	store.Store
-	armOnList atomic.Bool
-	failing   atomic.Bool
-	failed    atomic.Int32
+	fault   *storeFaultSwitch
+	failing atomic.Bool
+	failed  atomic.Int32
 }
 
 func (s *visitorMessageableFaultStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
 	res, err := s.Store.ListAgents(ctx, filter, opts)
-	if s.armOnList.Load() {
+	if s.fault.Active() {
 		s.failing.Store(true)
 	}
 	return res, err
@@ -668,14 +668,14 @@ func TestVisitorAgents_MessageableFilterDeniesOnError(t *testing.T) {
 	_, alice := f.visitor(t, "sub-alice", "alice@corp.example")
 	list := f.projectAgentsPath(f.projectID)
 
-	origStore, origAuthzStore := f.srv.store, f.srv.authzService.store
-	faulty := &visitorMessageableFaultStore{Store: origStore}
-	f.srv.store = faulty
-	f.srv.authzService.store = faulty
-	t.Cleanup(func() {
-		f.srv.store = origStore
-		f.srv.authzService.store = origAuthzStore
+	faulty, fault := installStoreFault(t, f.srv, func(inner store.Store, fault *storeFaultSwitch) *visitorMessageableFaultStore {
+		return &visitorMessageableFaultStore{Store: inner, fault: fault}
 	})
+	// The messaging decision reads role bindings through the authorization
+	// service's store as well.
+	origAuthzStore := f.srv.authzService.store
+	f.srv.authzService.store = faulty
+	t.Cleanup(func() { f.srv.authzService.store = origAuthzStore })
 
 	get := func(path string) ListVisitorAgentsResponse {
 		t.Helper()
@@ -691,7 +691,7 @@ func TestVisitorAgents_MessageableFilterDeniesOnError(t *testing.T) {
 	require.Len(t, clean.Agents, 1, "without the fault the messageable agent is listed")
 	assert.Equal(t, f.agent.Slug, clean.Agents[0].Slug)
 
-	faulty.armOnList.Store(true)
+	fault.Arm()
 	faulted := get(list + "?messageable=true")
 	assert.Positive(t, faulty.failed.Load(), "the messaging decision observed the fault")
 	assert.Empty(t, faulted.Agents, "an agent whose messaging decision errored is left out")
