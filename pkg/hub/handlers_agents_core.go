@@ -5551,8 +5551,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		slog.Error("Token refresh: token not issued", "agent_id", id, "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"failed to generate refreshed token", nil)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, agentTokenRecordFailedMessage, nil)
 		return
 	}
 

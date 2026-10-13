@@ -479,11 +479,12 @@ func (f *failingCredentialCreateStore) CreateAgentCredential(ctx context.Context
 }
 
 // TestAgentTokenRefreshRecordFailureIsGeneric500: when the refreshed
-// token's credential cannot be recorded, refresh answers the same generic
-// 500 in every mode, without the cause.
+// token's credential cannot be recorded, refresh answers the 500 every
+// other issuing path answers (writeAgentTokenRecordError) in every mode,
+// without the cause.
 func TestAgentTokenRefreshRecordFailureIsGeneric500(t *testing.T) {
 	want := httptest.NewRecorder()
-	writeError(want, http.StatusInternalServerError, ErrCodeInternalError, "failed to generate refreshed token", nil)
+	require.True(t, writeAgentTokenRecordError(want, errAgentTokenRecord))
 
 	for _, mode := range []agentRunScopeMode{agentRunScopeOff, agentRunScopeObserve, agentRunScopeEnforce} {
 		t.Run(mode.String(), func(t *testing.T) {
