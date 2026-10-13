@@ -400,10 +400,11 @@ func (nd *NotificationDispatcher) storeAndDispatchForAgent(ctx context.Context, 
 			nd.createInboxMessage(ctx, sub, notif, agent)
 		}
 
-		// Channel registry is a fallback for deployments without a broker.
-		// With a broker configured the plugins already received the card
-		// above; dispatching here too delivered it twice (ptone/scion#2752).
-		// Matches the outbound-message path (deliveryUserDirect).
+		// With a broker configured, user delivery goes through the broker
+		// only (plugin spokes plus deliverToUser), matching the outbound
+		// path (deliveryUserBroker); the registry is not a second path
+		// (ptone/scion#2752). The channel registry is the fallback for
+		// deployments without a broker.
 		if nd.brokerProxy == nil {
 			nd.dispatchToChannels(ctx, sub, notif, agent.ID, agent.Slug)
 		}
