@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -127,7 +128,9 @@ func stagedInputsDir(agentHome string) string {
 // snapshotControlPlaneInputs records the inputs ProvisionAgent has just
 // staged (after resetStagedProvisioning cleared the bundle, so the control
 // plane is their only writer) into agentDir/harness-inputs, replacing any
-// earlier copy. Only regular files are copied.
+// earlier copy. Only regular files are copied: the top-level files of
+// inputs/, plus the staged Agent Plugins tree inputs/plugins/ (copied with
+// agentplugin.CopyTree, which never follows a symlink).
 func snapshotControlPlaneInputs(agentDir, agentHome string) error {
 	dst := filepath.Join(agentDir, controlPlaneInputsDirName)
 	if err := os.RemoveAll(dst); err != nil {
@@ -138,7 +141,43 @@ func snapshotControlPlaneInputs(agentDir, agentHome string) error {
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return fmt.Errorf("create control-plane inputs record: %w", err)
 	}
-	return copyRegularFiles(stagedInputsDir(agentHome), dst)
+	if err := copyRegularFiles(stagedInputsDir(agentHome), dst); err != nil {
+		return err
+	}
+	stagedPlugins := filepath.Join(agentplugin.InputsRel, agentplugin.PluginsDirName)
+	return copyPluginsTree(agentHome, stagedPlugins, dst, agentplugin.PluginsDirName)
+}
+
+// copyPluginsTree copies the directory srcRel under srcDir to dstRel under
+// dstDir with agentplugin.CopyTree. A missing source, or one that is not a
+// real directory, copies nothing.
+func copyPluginsTree(srcDir, srcRel, dstDir, dstRel string) error {
+	srcRoot, err := os.OpenRoot(srcDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = srcRoot.Close() }()
+	if ok, err := realDirChain(srcRoot, filepath.Clean(srcRel), true); err != nil || !ok {
+		return err
+	}
+	dstRoot, err := os.OpenRoot(dstDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dstRoot.Close() }()
+	if err := dstRoot.RemoveAll(dstRel); err != nil {
+		return err
+	}
+	if err := dstRoot.MkdirAll(filepath.Dir(dstRel), 0o755); err != nil {
+		return err
+	}
+	if _, err := agentplugin.CopyTree(srcRoot, srcRel, dstRoot, dstRel, agentplugin.DefaultLimits); err != nil {
+		return fmt.Errorf("copy agent plugins: %w", err)
+	}
+	return nil
 }
 
 // legacyInputNames are the control-plane inputs seedControlPlaneInputsIfAbsent
@@ -228,7 +267,12 @@ func resetControlPlaneInputsRecord(agentDir string) error {
 // control-plane content. Inputs written per launch (auth candidates,
 // telemetry, MCP servers) are staged later in Start. With no recorded copy,
 // inputs/ stays empty.
-func restoreControlPlaneInputs(agentDir, agentHome string) error {
+//
+// includePlugins (hub.agent_plugins on for this start) also restores the
+// recorded Agent Plugins tree inputs/plugins/. Without it plugins.json is
+// removed too, so the container sees no desired plugins and provision.py
+// removes the plugins Scion installed earlier.
+func restoreControlPlaneInputs(agentDir, agentHome string, includePlugins bool) error {
 	dst := stagedInputsDir(agentHome)
 	if err := os.RemoveAll(dst); err != nil {
 		return fmt.Errorf("clear staged inputs: %w", err)
@@ -237,7 +281,26 @@ func restoreControlPlaneInputs(agentDir, agentHome string) error {
 	if _, err := os.Stat(src); os.IsNotExist(err) {
 		return nil
 	}
-	return copyRegularFiles(src, dst)
+	if err := copyRegularFiles(src, dst); err != nil {
+		return err
+	}
+	if !includePlugins {
+		if err := os.Remove(filepath.Join(dst, agentplugin.IndexFileName)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		return nil
+	}
+	return copyPluginsTree(src, agentplugin.PluginsDirName, agentHome, filepath.Join(agentplugin.InputsRel, agentplugin.PluginsDirName))
+}
+
+// recordHasAgentPlugins reports whether the control-plane inputs record
+// holds a staged plugin index.
+func recordHasAgentPlugins(agentDir string) bool {
+	fi, err := os.Lstat(filepath.Join(agentDir, controlPlaneInputsDirName, agentplugin.IndexFileName))
+	return err == nil && fi.Mode().IsRegular()
 }
 
 // copyRegularFiles copies the regular files directly in src into dst

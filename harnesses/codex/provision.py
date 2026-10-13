@@ -533,6 +533,129 @@ def _read_file_secret(ctx: scion_harness.ProvisionContext, name: str) -> str:
         return ""
 
 
+# --- Agent Plugins (hub.agent_plugins) ---------------------------------------
+#
+# Route: a Scion-owned local marketplace at ~/.scion/agent-plugins
+# (.agents/plugins/marketplace.json listing ./bundles/<name>) registered once
+# with `codex plugin marketplace add`, then `codex plugin add/remove
+# <name>@scion-agent-plugins`. A local marketplace source is recorded in
+# config.toml without a copy or a clone; `plugin add` copies the bundle into
+# Codex's plugin cache and enables it.
+
+CODEX_PLUGIN_MARKETPLACE = "scion-agent-plugins"
+CODEX_PLUGINS_MIN_VERSION = (0, 147, 0)  # root plugin.json 0.146, mcp.json 0.147
+
+
+def _find_key(obj: Any, keys: tuple[str, ...]) -> Any:
+    """The first value under any of keys, searching nested dicts/lists."""
+    if isinstance(obj, dict):
+        for k in keys:
+            if k in obj:
+                return obj[k]
+        for v in obj.values():
+            found = _find_key(v, keys)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = _find_key(v, keys)
+            if found is not None:
+                return found
+    return None
+
+
+class CodexPluginInstaller(scion_harness.PluginInstaller):
+    harness = "codex"
+    cli = "codex"
+    min_version = CODEX_PLUGINS_MIN_VERSION
+
+    def __init__(self, ctx: scion_harness.ProvisionContext):
+        self.ctx = ctx
+        self.codex_home = os.path.join(ctx.home, ".codex")
+        self.root = scion_harness.agent_plugins_dir()
+
+    def _env(self) -> dict[str, str]:
+        return {**os.environ, "CODEX_HOME": self.codex_home}
+
+    def _run(self, *args: str, timeout: float = scion_harness.AGENT_PLUGIN_CLI_TIMEOUT):
+        return scion_harness.run_cli(["codex", *args], timeout=timeout, env=self._env())
+
+    @staticmethod
+    def key(name: str) -> str:
+        return f"{name}@{CODEX_PLUGIN_MARKETPLACE}"
+
+    def detect_version(self) -> tuple[int, int, int] | None:
+        proc = self._run("--version", timeout=scion_harness.AGENT_PLUGIN_VERSION_TIMEOUT)
+        if proc.returncode != 0:
+            return None
+        return scion_harness.parse_semver(proc.stdout or proc.stderr or "")
+
+    def marketplace_path(self) -> str:
+        return os.path.join(self.root, ".agents", "plugins", "marketplace.json")
+
+    def write_marketplace(self, names: list[str]) -> None:
+        scion_harness.atomic_write_json(self.marketplace_path(), {
+            "name": CODEX_PLUGIN_MARKETPLACE,
+            "plugins": [
+                {"name": n, "source": {"source": "local", "path": f"./bundles/{n}"}}
+                for n in sorted(names)
+            ],
+        })
+
+    def marketplace_registered(self) -> bool:
+        path = os.path.join(self.codex_home, "config.toml")
+        try:
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            return False
+        markets = data.get("marketplaces")
+        return isinstance(markets, dict) and CODEX_PLUGIN_MARKETPLACE in markets
+
+    def prepare(self, desired: list[scion_harness.AgentPlugin]) -> None:
+        self.write_marketplace([p.name for p in desired])
+        if not desired or self.marketplace_registered():
+            return
+        proc = self._run("plugin", "marketplace", "add", self.root)
+        if proc.returncode != 0 and "already" not in f"{proc.stdout}{proc.stderr}".lower():
+            raise scion_harness.cli_failure("codex plugin marketplace add", proc)
+
+    def install(self, plugin: scion_harness.AgentPlugin, bundle_dir: str) -> dict[str, Any]:
+        sse = sorted(
+            n for n, spec in (plugin.mcp_servers or {}).items()
+            if isinstance(spec, dict) and spec.get("type") == "sse"
+        )
+        if sse:
+            self.ctx.warn(f"agent plugin {plugin.name}: codex skips sse server(s): {', '.join(sse)}")
+        key = self.key(plugin.name)
+        proc = self._run("plugin", "add", key, "--json")
+        if proc.returncode != 0:
+            raise scion_harness.cli_failure("codex plugin add", proc)
+        installed = None
+        try:
+            installed = _find_key(json.loads(proc.stdout or "null"), ("installedPath", "installed_path"))
+        except json.JSONDecodeError:
+            installed = None
+        if not isinstance(installed, str) or not installed:
+            guess = os.path.join(self.codex_home, "plugins", "cache", CODEX_PLUGIN_MARKETPLACE, plugin.name)
+            installed = guess if os.path.isdir(guess) else ""
+        return {"key": key, "installed_path": installed}
+
+    def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
+        key = str(native_ref.get("key") or self.key(name))
+        proc = self._run("plugin", "remove", key, "--json")
+        if proc.returncode == 0:
+            return
+        out = f"{proc.stdout}{proc.stderr}".lower()
+        if any(s in out for s in ("unknown plugin", "not installed", "not found")):
+            return
+        raise scion_harness.cli_failure("codex plugin remove", proc)
+
+    def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
+        path = native_ref.get("installed_path")
+        return isinstance(path, str) and bool(path) and os.path.isdir(path)
+
+
 def provision(ctx: scion_harness.ProvisionContext) -> None:
     resolved = ctx.select_auth(AUTH)
 
@@ -591,6 +714,10 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     )
 
     ctx.info(f"method={resolved.method}")
+
+    # Last: the codex CLI rewrites config.toml (marketplace source, plugin
+    # enablement), so it must be the final writer this start.
+    scion_harness.reconcile_agent_plugins(ctx, CodexPluginInstaller(ctx))
 
 
 if __name__ == "__main__":

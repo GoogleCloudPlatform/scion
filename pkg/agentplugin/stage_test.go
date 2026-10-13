@@ -254,3 +254,34 @@ func TestStageSymlinkInsideBundleWarns(t *testing.T) {
 		t.Error("unexpected skills_dir_conflict")
 	}
 }
+
+// The committed smoke fixture (harnesses/testdata/agent-plugins/scion-smoke)
+// stages with no diagnostics: both MCP servers valid, one skill.
+func TestStageSmokeFixture(t *testing.T) {
+	home := t.TempDir()
+	res, err := Stage(context.Background(), StageRequest{
+		Chain: []TemplateSource{{
+			Name: "smoke-tpl",
+			Dir:  filepath.Join("..", "..", "harnesses", "testdata", "agent-plugins"),
+			Refs: []api.AgentPluginReference{{Path: "scion-smoke"}},
+		}},
+		AgentHome: home,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Diagnostics) != 0 {
+		t.Fatalf("diagnostics = %v", res.Diagnostics)
+	}
+	p := res.Index.Plugins[0]
+	if p.Name != "scion-smoke" || len(p.Skills) != 1 || p.Skills[0] != "smoke-hello" {
+		t.Fatalf("entry = %+v", p)
+	}
+	if p.MCP == nil || len(p.MCP.Valid) != 2 || len(p.MCP.Invalid) != 0 {
+		t.Fatalf("mcp = %+v", p.MCP)
+	}
+	fi, err := os.Stat(filepath.Join(home, InputsRel, PluginsDirName, "scion-smoke", "bin", "stdio-mcp"))
+	if err != nil || fi.Mode().Perm() != 0o755 {
+		t.Fatalf("stdio-mcp staged as %v (err %v)", fi, err)
+	}
+}

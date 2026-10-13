@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import importlib.util
 import re
@@ -1580,6 +1581,196 @@ class CodexShippedHookConfigTest(unittest.TestCase):
                     data = tomllib.load(f)
         self.assertEqual(data["hooks"], self._load_config()["hooks"])
 
+
+class _FakeCodexCLI:
+    """Stands in for scion_harness.run_cli: records argv and CODEX_HOME and
+    simulates the codex plugin CLI against a temp CODEX_HOME."""
+
+    def __init__(self, version: str = "codex-cli 0.162.1"):
+        self.version = version
+        self.calls: list[list[str]] = []
+        self.codex_homes: list[str] = []
+        self.fail_add = False
+
+    def _append_config(self, codex_home: str, text: str) -> None:
+        os.makedirs(codex_home, exist_ok=True)
+        with open(os.path.join(codex_home, "config.toml"), "a", encoding="utf-8") as f:
+            f.write(text)
+
+    def __call__(self, argv, *, timeout=None, env=None):
+        import subprocess
+        self.calls.append(list(argv))
+        codex_home = (env or {}).get("CODEX_HOME", "")
+        self.codex_homes.append(codex_home)
+        args = argv[1:]
+        if args == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, self.version + "\n", "")
+        if args[:3] == ["plugin", "marketplace", "add"]:
+            self._append_config(codex_home, f'\n[marketplaces.scion-agent-plugins]\nsource_type = "local"\nsource = "{args[3]}"\n')
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if args[:2] == ["plugin", "add"]:
+            if self.fail_add:
+                return subprocess.CompletedProcess(argv, 1, "", "error: marketplace unavailable")
+            name = args[2].split("@")[0]
+            path = os.path.join(codex_home, "plugins", "cache", "scion-agent-plugins", name, "local")
+            os.makedirs(path, exist_ok=True)
+            self._append_config(codex_home, f'\n[plugins."{args[2]}"]\nenabled = true\n')
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"plugin": args[2], "installedPath": path}), "")
+        if args[:2] == ["plugin", "remove"]:
+            name = args[2].split("@")[0]
+            import shutil
+            shutil.rmtree(os.path.join(codex_home, "plugins", "cache", "scion-agent-plugins", name), ignore_errors=True)
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+        return subprocess.CompletedProcess(argv, 2, "", "unexpected")
+
+
+class TestCodexAgentPlugins(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory(prefix="codex-plugins-test-")
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.home = os.path.join(self.tmp, "home")
+        self.bundle = os.path.join(self.home, ".scion", "harness")
+        self.inputs = os.path.join(self.bundle, "inputs")
+        os.makedirs(self.inputs)
+        patcher = mock.patch.dict(os.environ, {"HOME": self.home})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.cli = _FakeCodexCLI()
+        p = mock.patch.object(scion_harness, "run_cli", self.cli)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def stage(self, names: dict[str, str], sse: bool = False) -> None:
+        import shutil
+        shutil.rmtree(os.path.join(self.inputs, "plugins"), ignore_errors=True)
+        entries = []
+        for name, digest in names.items():
+            d = os.path.join(self.inputs, "plugins", name)
+            os.makedirs(os.path.join(d, "skills", "hello"))
+            with open(os.path.join(d, "plugin.json"), "w") as f:
+                json.dump({"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": name}, f)
+            servers = {"old": {"type": "sse", "url": "https://x.example/sse"}} if sse else {}
+            entries.append({"name": name, "version": "0.1.0", "dir": f"plugins/{name}", "digest": digest,
+                            "skills": ["hello"], "skills_dir_conflict": False,
+                            "mcp": {"servers": servers} if sse else None})
+        with open(os.path.join(self.inputs, "plugins.json"), "w") as f:
+            json.dump({"schema_version": 1, "spec_version": "1.0.0", "plugins": entries}, f)
+
+    def ctx(self, warnings: list[str] | None = None) -> "scion_harness.ProvisionContext":
+        ctx = scion_harness.ProvisionContext("codex", {
+            "harness_bundle_dir": self.bundle,
+            "harness_config": _DEFAULT_HARNESS_CONFIG,
+            "agent_workspace": os.path.join(self.tmp, "workspace"),
+        })
+        ctx.select_auth = lambda _: scion_harness.ResolvedAuth("none")
+        if warnings is not None:
+            ctx.warn = warnings.append  # type: ignore[method-assign]
+        return ctx
+
+    def config(self) -> dict[str, Any]:
+        with open(os.path.join(self.home, ".codex", "config.toml"), "rb") as f:
+            return tomllib.load(f)
+
+    def marketplace(self) -> dict[str, Any]:
+        path = os.path.join(self.home, ".scion", "agent-plugins", ".agents", "plugins", "marketplace.json")
+        with open(path) as f:
+            return json.load(f)
+
+    def test_install_writes_marketplace_and_runs_cli(self) -> None:
+        self.stage({"scion-smoke": "sha256:1", "acme.tools": "sha256:2"})
+        warnings: list[str] = []
+        scion_harness.reconcile_agent_plugins(self.ctx(warnings), provision.CodexPluginInstaller(self.ctx()))
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.marketplace(), {
+            "name": "scion-agent-plugins",
+            "plugins": [
+                {"name": "acme.tools", "source": {"source": "local", "path": "./bundles/acme.tools"}},
+                {"name": "scion-smoke", "source": {"source": "local", "path": "./bundles/scion-smoke"}},
+            ],
+        })
+        root = os.path.join(self.home, ".scion", "agent-plugins")
+        self.assertEqual(self.cli.calls, [
+            ["codex", "--version"],
+            ["codex", "plugin", "marketplace", "add", root],
+            ["codex", "plugin", "add", "scion-smoke@scion-agent-plugins", "--json"],
+            ["codex", "plugin", "add", "acme.tools@scion-agent-plugins", "--json"],
+        ])
+        self.assertEqual(set(self.cli.codex_homes), {os.path.join(self.home, ".codex")})
+        self.assertTrue(os.path.isfile(os.path.join(root, "bundles", "scion-smoke", "plugin.json")))
+        with open(os.path.join(root, "state-codex.json")) as f:
+            state = json.load(f)["plugins"]
+        self.assertEqual(state["scion-smoke"]["native_ref"]["key"], "scion-smoke@scion-agent-plugins")
+        self.assertTrue(os.path.isdir(state["scion-smoke"]["native_ref"]["installed_path"]))
+
+        # Steady state: no CLI call at all.
+        self.cli.calls.clear()
+        scion_harness.reconcile_agent_plugins(self.ctx(), provision.CodexPluginInstaller(self.ctx()))
+        self.assertEqual(self.cli.calls, [])
+
+    def test_marketplace_add_only_when_not_registered(self) -> None:
+        os.makedirs(os.path.join(self.home, ".codex"))
+        with open(os.path.join(self.home, ".codex", "config.toml"), "w") as f:
+            f.write('[marketplaces.scion-agent-plugins]\nsource_type = "local"\nsource = "/x"\n')
+        self.stage({"p": "d1"})
+        scion_harness.reconcile_agent_plugins(self.ctx(), provision.CodexPluginInstaller(self.ctx()))
+        self.assertNotIn("marketplace", [c[2] for c in self.cli.calls if len(c) > 2])
+
+    def test_remove_and_digest_change(self) -> None:
+        self.stage({"a": "d1", "b": "d1"})
+        scion_harness.reconcile_agent_plugins(self.ctx(), provision.CodexPluginInstaller(self.ctx()))
+        self.stage({"b": "d2"})
+        self.cli.calls.clear()
+        scion_harness.reconcile_agent_plugins(self.ctx(), provision.CodexPluginInstaller(self.ctx()))
+        self.assertEqual(self.cli.calls, [
+            ["codex", "--version"],
+            ["codex", "plugin", "remove", "a@scion-agent-plugins", "--json"],
+            ["codex", "plugin", "remove", "b@scion-agent-plugins", "--json"],
+            ["codex", "plugin", "add", "b@scion-agent-plugins", "--json"],
+        ])
+        self.assertEqual([p["name"] for p in self.marketplace()["plugins"]], ["b"])
+
+    def test_install_failure_warns_with_stderr(self) -> None:
+        self.stage({"a": "d1"})
+        self.cli.fail_add = True
+        warnings: list[str] = []
+        scion_harness.reconcile_agent_plugins(self.ctx(warnings), provision.CodexPluginInstaller(self.ctx()))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("agent plugin a: install failed (codex plugin add exit 1: error: marketplace unavailable); will retry next start", warnings[0])
+
+    def test_old_codex_skips(self) -> None:
+        self.cli.version = "codex-cli 0.146.9"
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        scion_harness.reconcile_agent_plugins(self.ctx(warnings), provision.CodexPluginInstaller(self.ctx()))
+        self.assertEqual(self.cli.calls, [["codex", "--version"]])
+        self.assertIn("codex 0.146.9 is older than 0.147.0", warnings[0])
+
+    def test_sse_servers_reported(self) -> None:
+        self.stage({"a": "d1"}, sse=True)
+        warnings: list[str] = []
+        ctx = self.ctx(warnings)
+        scion_harness.reconcile_agent_plugins(ctx, provision.CodexPluginInstaller(ctx))
+        self.assertIn("agent plugin a: codex skips sse server(s): old", warnings)
+
+    def test_provision_reconciles_after_mcp_write(self) -> None:
+        with open(os.path.join(self.inputs, "mcp-servers.json"), "w") as f:
+            json.dump({"mcp_servers": {"srv": {"transport": "stdio", "command": "echo"}}}, f)
+        self.stage({"scion-smoke": "d1"})
+        provision.provision(self.ctx())
+        data = self.config()
+        self.assertIn("srv", data.get("mcp_servers", {}))
+        self.assertIn("scion-agent-plugins", data.get("marketplaces", {}))
+        self.assertTrue(data["plugins"]["scion-smoke@scion-agent-plugins"]["enabled"])
+
+        # A second start (fast path) keeps the CLI-written tables.
+        self.cli.calls.clear()
+        provision.provision(self.ctx())
+        self.assertEqual([c for c in self.cli.calls if c[1] == "plugin"], [])
+        data = self.config()
+        self.assertIn("scion-agent-plugins", data.get("marketplaces", {}))
+        self.assertTrue(data["plugins"]["scion-smoke@scion-agent-plugins"]["enabled"])
+        self.assertIn("srv", data.get("mcp_servers", {}))
 
 if __name__ == "__main__":
     unittest.main()
