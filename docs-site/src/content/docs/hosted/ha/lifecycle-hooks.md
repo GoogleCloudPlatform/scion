@@ -45,6 +45,7 @@ A hook fires on exactly one of these authoritative phase transitions:
 | `suspended` | Agent transitions to the suspended phase  |
 | `stopped`   | Agent transitions to the stopped phase    |
 | `error`     | Agent transitions to the error phase      |
+| `halted`    | The platform halts the agent (see below)  |
 
 Only *transitions* fire hooks. Repeated publications of the same phase (for
 example, heartbeats) are de-duplicated and do not re-fire.
@@ -52,6 +53,19 @@ example, heartbeats) are de-duplicated and do not re-fire.
 A failed delete can also fire `stopped`, because when the agent's launch or start
 ended while the delete was in progress, the failed delete restores the agent as
 stopped (a real transition) rather than to its earlier phase.
+
+### The `halted` trigger
+
+An agent is [halted](/scion/concepts/#halted-phase-the-platform-ended-the-run)
+when the platform ends a run that should still be running (for example a
+preempted or evicted pod, or an OOM kill). A halt fires the `halted` hooks
+once. When the halt replaces a write that would have stored `stopped` or
+`error`, the hooks for that trigger fire too, exactly as they would have
+without the halt. So existing `stopped` and `error` hooks, such as registry
+deregistration, keep firing for halted agents. When the agent was already
+`stopped` or `error` and a later report shows why it ended (for example an
+OOM kill reported after the crash), only the `halted` hooks fire: the
+`stopped` or `error` hooks already fired for that run.
 
 ## Admin CRUD API
 
@@ -522,6 +536,6 @@ Deleting or updating a hook only affects **future** agents. Agents already creat
 The following are intentionally **not** part of the first release:
 
 - `script` action types for **Hub-side lifecycle hooks** (only `http` and `webhook` are supported for Hub-side hooks; use **In-Container Pre-Start Customization Hooks** for in-container scripting).
-- Activity-change triggers for Hub-side hooks (only the four authoritative phase transitions fire hooks).
+- Activity-change triggers for Hub-side hooks (only the five authoritative phase transitions fire hooks).
 - Project-scoped Hub-side lifecycle hooks (`scopeType` is `hub` in v1; `project` is reserved for a future release — use the project-id selector to target specific projects instead).
 - Agent-label selectors (selectors match on `projectId` and `template` only).

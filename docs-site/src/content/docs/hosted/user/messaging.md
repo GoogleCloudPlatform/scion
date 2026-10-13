@@ -508,6 +508,24 @@ When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user
 * **Parent Agent Role**: If you are the parent agent that created the waiting agent, you may be the intended respondent. Use `scion message @<name>` to reply with the answer.
 * **Peer Agent Rule**: Unrelated peer agents should **NOT** reply to waiting-for-input notifications. Answering a peer's input prompt wastes context tokens, causes false loop signals, and violates project-scoped boundaries. To request a peer's input, always send it an explicit message instead.
 
+#### Halted Agent Notifications
+
+When the platform [halts](/scion/concepts/#halted-phase-the-platform-ended-the-run) an agent (for example its Kubernetes pod was preempted or evicted, or it was killed for running out of memory), Scion sends one `HALTED` notification for that halt, with text such as:
+
+```
+worker-1 was halted by the platform (preempted). Workspace kept. Resume: scion start worker-1.
+```
+
+The workspace part says what `scion start` does with the workspace: `Workspace kept`, `Workspace re-cloned` (a workspace on the pod's own storage), or `Workspace may be re-cloned` (where it lives is not known).
+
+Who receives it:
+
+* **The agent's creator**, always: the user who created the agent, or the agent that created it (while that agent still exists in the same project), even without a subscription.
+* **Subscribers with the `HALTED` trigger.** `HALTED` is one of the default triggers of the subscription recorded when an agent is created with notify on, and one of the Web Dashboard's default and selectable triggers. The default triggers of `scion notifications subscribe` do not include it; add it with `--triggers`.
+* **Subscribers with only the `ERROR` trigger**, when the halt replaced what would have been an `error` (for example a preempted pod whose workspace did not survive). They receive it with status `ERROR`, as they would have without the halt.
+
+Each subscriber, including the creator, receives one notification per halt.
+
 :::tip[Project-Scoped Message Isolation]
 When using slug-based query paths or addressing agents via `agent:<name>` (e.g., `scion message agent:<name>`), Scion strictly scopes all message queries and deliveries by the active `ProjectID`. This ensures that even if different projects contain agents with identical names or slugs, messages are completely isolated within each project and never leak across project boundaries.
 :::

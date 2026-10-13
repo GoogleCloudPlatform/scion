@@ -67,7 +67,7 @@ Agent state uses a **layered model** with three dimensions:
 
 - **Phase** — The lifecycle stage of the agent container:
   `created` → `provisioning` → `cloning` → `starting` → `running` → `stopping` → `stopped`
-  with two off-the-happy-path destinations: `suspended` (paused for later resume) and `error` (the agent crashed).
+  with three off-the-happy-path destinations: `suspended` (paused for later resume), `error` (the agent crashed), and `halted` (the platform ended a run that should still be running).
 
 - **Activity** — What the agent is doing within the `running` phase:
   `initializing` (shown as "starting"), `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`
@@ -94,6 +94,27 @@ A crash can be set from two places: `sciontool` reports it from the recovered ex
 The `error` phase is not limited to runtime crashes — it also covers **setup failures** that happen before an agent ever reaches `running`, such as a failed git clone or a provisioning error. In all cases the phase is restartable.
 
 The `error` phase is **restartable**: running `scion start` clears the error and launches a fresh session. See [Crash Recovery](/scion/local/agent-lifecycle/#crash-recovery-the-error-phase).
+
+#### Halted phase (the platform ended the run)
+
+`halted` means the platform, not you and not the agent, ended a run that was meant to keep running. The agent's **exit reason** says why:
+
+| Exit reason | What happened |
+|---|---|
+| `preempted` | The Kubernetes scheduler evicted the pod to make room for a higher-priority one. |
+| `evicted` | The pod was removed by another disruption, such as node-pressure eviction or a node drain. |
+| `oom_killed` | The container was killed for exceeding its memory limit. |
+| `container_missing` | The agent runtime kept reporting a complete inventory without the agent's container. |
+
+An agent is halted only when all of these hold: it was meant to be running (it was started and not stopped since), no start, restart or stop of it is in progress, it did not stop on a configured limit, and its agent runtime is Docker, Podman, Apple container, or Kubernetes. Otherwise the same run ends `stopped` or `error`, as before. A clean exit (code 0) is never upgraded to `halted`.
+
+`halted` is terminal, like `stopped`: the agent has no container and does not count toward the agent quota. It stays `halted` until you act on it. Status reports from the old run do not move it.
+
+To continue, run `scion start <agent>`. It starts the agent the way a start from `stopped` does. Whether the workspace survives depends on where it lives: a workspace on the agent's own pod storage (a Kubernetes EmptyDir) is re-cloned, and other workspaces are kept. `scion stop` on a halted agent records it as `stopped`.
+
+`scion list` shows the reason next to the phase, for example `halted (preempted)`. In Hosted mode, the agent's creator is notified once per halt, and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
+
+Local mode never records `halted`.
 
 #### Stalled, offline, and auto-suspend
 
