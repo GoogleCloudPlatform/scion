@@ -352,6 +352,26 @@ var catalogResourceOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
 	{
+		ID:          "template.user.reimport",
+		Domain:      "template",
+		Description: "Reimport one of the caller's own user-scope templates from its source. The read gate needs template:read and the reimport needs template:update on the record, on a hub boundary for a user access token",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/reimport", Method: "POST", Variant: "scope=user"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		BasePermission:   "template.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestTemplateUserReimport_RequiresUpdateAction"},
+		},
+		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
+	},
+	{
 		ID:          "skill.user.create",
 		Domain:      "skill",
 		Description: "Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary",

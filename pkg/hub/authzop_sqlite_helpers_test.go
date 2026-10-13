@@ -626,6 +626,7 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"template.user.delete", "/api/v1/users/me/templates/{id}"}:               {"id": f.userTemplateDel},
 		{"template.user.delete", "/api/v1/templates/{id}"}:                        {"id": f.userScopeTemplateDel},
 		{"template.user.clone", "/api/v1/templates/{id}/clone"}:                   {"id": f.template},
+		{"template.user.reimport", "/api/v1/templates/{id}/reimport"}:             {"id": f.userTemplate},
 		{"harnessconfig.user.clone", "/api/v1/harness-configs/{id}/clone"}:        {"id": f.harnessConfig},
 		{"harnessconfig.user.delete", "/api/v1/harness-configs/{id}"}:             {"id": f.userHarnessConfigDel},
 		{"harnessconfig.user.reimport", "/api/v1/harness-configs/{id}/reimport"}:  {"id": f.userHarnessConfig},

@@ -228,7 +228,7 @@ The same per-request checks apply, with these limits:
 - **Your own user scope.** Templates, skills and harness configurations in your own user scope
   admit only a hub token carrying the selector of the action. Your templates need
   `template:read` to list, read or download, `template:create` to create or to clone into your
-  scope, `template:update` to update, upload or finalize, and `template:delete` to delete. A
+  scope, `template:update` to update, upload, finalize or reimport, and `template:delete` to delete. A
   user-scope skill needs `skill:create`. Your harness configurations need `harness_config:create`
   to clone into your scope, `harness_config:update` to reimport, and `harness_config:delete` to
   delete, together with `harness_config:read`. Importing or discovering templates or harness

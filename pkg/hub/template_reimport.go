@@ -79,7 +79,8 @@ func resolveTemplateReimportSource(stored, override string) (*templateGitHubSour
 //
 // Authorization mirrors template import: the caller must be able to read the
 // template (an unreadable template reads as not found) and to create
-// templates in the template's owning scope.
+// templates in the template's owning scope. A user-scope template needs
+// update on the record itself, after the owner check.
 func (s *Server) handleTemplateReimport(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -134,6 +135,12 @@ func (s *Server) handleTemplateReimport(w http.ResponseWriter, r *http.Request, 
 		}
 		if tmpl.OwnerID != userIdent.ID() {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to reimport another user's template", nil)
+			return
+		}
+		// Reimport overwrites the template's content, so it needs
+		// template:update on the record, not only the read gate above.
+		if !s.authzService.CheckAccess(ctx, userIdent, templateResource(tmpl), ActionUpdate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to reimport templates in your user scope", nil)
 			return
 		}
 	default:

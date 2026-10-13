@@ -404,8 +404,9 @@ func TestHarnessUserScopeCreate_OwnerIsCaller(t *testing.T) {
 // discovering templates or harness configs for the caller's user scope
 // needs the create selector of the kind (template:create or
 // harness_config:create) on a hub boundary. Refused requests stop before
-// any fetch; the admitting decision is checked directly, so the test makes
-// no network request.
+// any fetch. An admitted token and a session pass the check and stop at
+// the source type, which needs no network request: the source URL is
+// neither a GitHub folder nor an archive.
 func TestUserScopeImport_RequiresCreateSelector(t *testing.T) {
 	srv, _, project, alice, _ := setupInjectedSkillsTest(t)
 	srv.SetStorage(newMockStorage("us-storage"))
@@ -424,6 +425,14 @@ func TestUserScopeImport_RequiresCreateSelector(t *testing.T) {
 				rec := callWithKey(t, srv, key, http.MethodPost, path, body)
 				assert.Equal(t, http.StatusForbidden, rec.Code, "%s kind %s: %s", path, k.kind, rec.Body.String())
 			}
+		}
+
+		admittedKey := mintHubConfigToken(t, srv, alice.ID, hubBoundary(), k.selector)
+		for _, path := range []string{"/api/v1/resources/import", "/api/v1/resources/discover"} {
+			rec := callWithKey(t, srv, admittedKey, http.MethodPost, path, body)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "%s kind %s with %s stops after the check: %s", path, k.kind, k.selector, rec.Body.String())
+			rec = doRequestAsUser(t, srv, alice, http.MethodPost, path, body)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "%s kind %s as a session stops after the check: %s", path, k.kind, rec.Body.String())
 		}
 
 		ctx := context.Background()
@@ -459,4 +468,33 @@ func TestUserScopeVariants_GlobalBranchRefusesTokens(t *testing.T) {
 			assert.Equal(t, http.StatusForbidden, rec.Code, "%s kind %s: %s", path, k.kind, rec.Body.String())
 		}
 	}
+}
+
+// TestTemplateUserReimport_RequiresUpdateAction pins that reimporting one
+// of the caller's own user-scope templates needs template:update on a hub
+// boundary, besides the read gate's template:read: a token with only the
+// read selector is refused on its own record, a project-boundary token is
+// refused, and a hub token with both selectors and a session pass
+// authorization (the test server then stops at its missing storage, before
+// any fetch).
+func TestTemplateUserReimport_RequiresUpdateAction(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	tmpl := usTemplate(t, s, alice.ID, "us-tmpl-reimport")
+	path := "/api/v1/templates/" + tmpl.ID + "/reimport"
+	body := map[string]string{"sourceUrl": "https://github.com/example/us-reimport"}
+
+	readOnly := mintHubConfigToken(t, srv, alice.ID, hubBoundary(), "template:read")
+	rec := callWithKey(t, srv, readOnly, http.MethodPost, path, body)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "the read selector alone on the owner's record: %s", rec.Body.String())
+
+	projectToken := mintHubConfigToken(t, srv, alice.ID, projectBoundary(project.ID), "template:read", "template:update")
+	rec = callWithKey(t, srv, projectToken, http.MethodPost, path, body)
+	usRefused(t, rec.Code, "a project-boundary token: %s", rec.Body.String())
+
+	both := mintHubConfigToken(t, srv, alice.ID, hubBoundary(), "template:read", "template:update")
+	rec = callWithKey(t, srv, both, http.MethodPost, path, body)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+
+	rec = doRequestAsUser(t, srv, alice, http.MethodPost, path, body)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "session: %s", rec.Body.String())
 }

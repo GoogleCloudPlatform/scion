@@ -115,6 +115,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the user-scope branch is selected by scope=user in the request body; the source also needs template:read",
 		Pin:    "TestCloneToUserScope_RequiresCreateOnDestination",
 	},
+	{OperationID: "template.user.reimport", Method: "POST", Pattern: "/api/v1/templates/{id}/reimport"}: {
+		Reason: "the user-scope branch needs a user-scope template owned by the token holder and a source URL, and the read gate also needs template:read",
+		Pin:    "TestTemplateUserReimport_RequiresUpdateAction",
+	},
 	{OperationID: "skill.user.create", Method: "POST", Pattern: "/api/v1/skills"}: {
 		Reason: "the user-scope branch is selected by scope=user in the request body",
 		Pin:    "TestUserScopeSkillCreate_RequiresSkillCreate",
