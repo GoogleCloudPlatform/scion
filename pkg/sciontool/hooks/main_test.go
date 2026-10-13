@@ -23,6 +23,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
+// testLogPath is the sciontool log file for this package's tests; see
+// TestMain.
+var testLogPath string
+
 // TestMain points the sciontool log at a temp file for the whole package and
 // removes it afterwards, so no test appends to a real agent log.
 func TestMain(m *testing.M) {
@@ -31,7 +35,8 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "hooks tests: creating log dir:", err)
 		os.Exit(1)
 	}
-	log.SetLogPath(filepath.Join(dir, "agent.log"))
+	testLogPath = filepath.Join(dir, "agent.log")
+	log.SetLogPath(testLogPath)
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

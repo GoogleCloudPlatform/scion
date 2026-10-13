@@ -224,10 +224,10 @@ func TestWatchHarnessReady_Settle(t *testing.T) {
 // hook spec's post-marker settle.
 func TestWatchHarnessReady_NoNonceSettles(t *testing.T) {
 	f := newReadyWatchFixture(t)
-	cfg := f.cfg("", state.ReadyModeHook, time.Now())
+	start := time.Now()
+	cfg := f.cfg("", state.ReadyModeHook, start)
 	cfg.Settle = 0
 	cfg.FallbackSettle = 120 * time.Millisecond
-	start := time.Now()
 	if got := watchHarnessReady(context.Background(), cfg); got != readyOutcomeSettled {
 		t.Fatalf("outcome = %s, want settled", got)
 	}
@@ -371,12 +371,17 @@ func TestWatchHarnessReady_HookFutureMarkerMtimeClamped(t *testing.T) {
 	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
 	cfg.Settle = 200 * time.Millisecond
 	cfg.Deadline = 10 * time.Second
+	// The callback runs on the watcher's goroutine, so it must not call
+	// t.Fatal; it records its error for the test goroutine instead.
 	var seenAt time.Time
+	var writeErr error
 	afterFirstPoll(t, &cfg, func() {
-		writeMarker(t, nonce)
+		if writeErr = os.WriteFile(harnessReadyFilePath, []byte(state.FormatReadyMarker(nonce)), 0o644); writeErr != nil {
+			return
+		}
 		future := time.Now().Add(time.Minute)
-		if err := os.Chtimes(harnessReadyFilePath, future, future); err != nil {
-			t.Fatal(err)
+		if writeErr = os.Chtimes(harnessReadyFilePath, future, future); writeErr != nil {
+			return
 		}
 		seenAt = time.Now()
 	})
@@ -384,6 +389,9 @@ func TestWatchHarnessReady_HookFutureMarkerMtimeClamped(t *testing.T) {
 	go func() { done <- watchHarnessReady(context.Background(), cfg) }()
 	select {
 	case got := <-done:
+		if writeErr != nil {
+			t.Fatalf("writing the future-dated marker: %v", writeErr)
+		}
 		if got != readyOutcomeHookMarker {
 			t.Fatalf("outcome = %s, want %s", got, readyOutcomeHookMarker)
 		}
@@ -401,10 +409,10 @@ func TestWatchHarnessReady_HookFutureMarkerMtimeClamped(t *testing.T) {
 // Hook mode: the deadline comes from the spec, not state.ReadyDeadline.
 func TestWatchHarnessReady_SpecDeadline(t *testing.T) {
 	f := newReadyWatchFixture(t)
-	cfg := f.cfg("abc123", state.ReadyModeHook, time.Now())
+	start := time.Now()
+	cfg := f.cfg("abc123", state.ReadyModeHook, start)
 	cfg.Settle = 0
 	cfg.Deadline = 200 * time.Millisecond
-	start := time.Now()
 	if got := watchHarnessReady(context.Background(), cfg); got != readyOutcomeDeadline {
 		t.Fatalf("outcome = %s, want deadline", got)
 	}

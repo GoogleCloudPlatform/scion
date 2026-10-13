@@ -15,6 +15,8 @@
 package hooks
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,11 +97,42 @@ func TestLoadReadySpec_MissingEnvDefaultsDelay(t *testing.T) {
 		"settle over max":      {state.HarnessReadyEnv: `{"strategy":"delay","settle_ms":61000}`},
 		"negative settle":      {state.HarnessReadyEnv: `{"strategy":"delay","settle_ms":-1}`},
 	} {
+		before := logSize(t)
 		got := LoadReadySpec(func(k string) string { return env[k] })
 		if got != want {
 			t.Errorf("%s: LoadReadySpec = %+v, want %+v", name, got, want)
 		}
+		// The fallback is logged at Info (sign-off D3), naming the variable.
+		if logged := logSince(t, before); !strings.Contains(logged, "[INFO]") || !strings.Contains(logged, state.HarnessReadyEnv) {
+			t.Errorf("%s: fallback log = %q, want an [INFO] line naming %s", name, logged, state.HarnessReadyEnv)
+		}
 	}
+}
+
+// logSize returns the current size of the package's test log.
+func logSize(t *testing.T) int64 {
+	t.Helper()
+	fi, err := os.Stat(testLogPath)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Size()
+}
+
+// logSince returns what the package's test log gained after offset.
+func logSince(t *testing.T, offset int64) string {
+	t.Helper()
+	data, err := os.ReadFile(testLogPath)
+	if err != nil {
+		t.Fatalf("reading test log: %v", err)
+	}
+	if int64(len(data)) < offset {
+		return ""
+	}
+	return string(data[offset:])
 }
 
 func TestLoadReadySpec_ValidEnv(t *testing.T) {
