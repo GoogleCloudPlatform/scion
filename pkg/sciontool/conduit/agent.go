@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -155,6 +156,10 @@ type Options struct {
 	// §3.8). When nil the agent neither advertises nor serves the ssh
 	// kind. New validates it.
 	SSH *sshd.Config
+	// Policy is the operator's restriction of stream destinations
+	// (localpolicy.EnvPolicy). With SSHDisabled, SSH is ignored. SSH
+	// forwarding applies SSH.Policy, which the caller sets.
+	Policy localpolicy.Policy
 	// OnSession is called after each admitted session's grant keys are
 	// installed. Optional.
 	OnSession func(*conduitv1.Welcome)
@@ -229,6 +234,9 @@ func New(opts Options) (*Agent, error) {
 	if opts.DialLocal == nil {
 		d := &net.Dialer{Timeout: localDialTimeout}
 		opts.DialLocal = d.DialContext
+	}
+	if opts.Policy.SSHDisabled {
+		opts.SSH = nil
 	}
 	if opts.SSH != nil {
 		if err := opts.SSH.Validate(); err != nil {

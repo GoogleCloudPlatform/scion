@@ -24,6 +24,7 @@ import (
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/hostkey"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -83,8 +84,9 @@ func (p portForwarding) run(ctx context.Context) {
 // newPortForwarding wires portForwarding to the hub client; getenv reads
 // the agent environment (os.Getenv outside tests). ptyUser is the agent
 // user that PTY streams' tmux clients run as; ssh is the conduit SSH
-// server (prepareConduitSSH), nil when there is none.
-func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, ssh *sshd.Config, getenv func(string) string) portForwarding {
+// server (prepareConduitSSH), nil when there is none; policy is the
+// operator's conduit policy (conduitPolicy).
+func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, ssh *sshd.Config, policy localpolicy.Policy, getenv func(string) string) portForwarding {
 	return portForwarding{
 		getenv:         getenv,
 		disableConduit: disableConduit,
@@ -103,6 +105,7 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 				HTTPClient:            c.HTTPClient(),
 				PTYUser:               ptyUser,
 				SSH:                   ssh,
+				Policy:                policy,
 				// After a 4401 the reconnect waits for the refresh loop's
 				// next result instead of refreshing itself, so refreshes
 				// stay single-flight; the redial then presents the token
@@ -217,13 +220,18 @@ var conduitSSHFirstReportWait = 5 * time.Second
 // prepareConduitSSH builds the conduit SSH server's configuration and
 // makes the first attempt to report its host key, before the harness
 // starts. It returns nil, building and reporting nothing, unless enabled
-// (conduit not disabled) and the hub serves conduit; the caller checks
+// (conduit not disabled), the hub serves conduit and policy allows ssh;
+// the server applies policy to forwarding. The caller checks
 // that a hub client is configured and port forwarding is not disabled.
 // A first report that does not succeed within conduitSSHFirstReportWait
 // continues in the background (reportSSHHostKey). The first host key
 // reported for a run is kept; a repeat of the same key succeeds.
-func prepareConduitSSH(r sshHostKeyReporter, enabled bool, ptyUser conduit.PTYUser, env func() ([]string, error), getenv func(string) string) *sshd.Config {
+func prepareConduitSSH(r sshHostKeyReporter, enabled bool, policy localpolicy.Policy, ptyUser conduit.PTYUser, env func() ([]string, error), getenv func(string) string) *sshd.Config {
 	if !enabled || !conduit.HubServesConduit(getenv) {
+		return nil
+	}
+	if policy.SSHDisabled {
+		log.Info("Conduit: SSH server disabled by the hub's conduit policy")
 		return nil
 	}
 	ssh, err := newConduitSSH(ptyUser, env, getenv)
@@ -231,6 +239,7 @@ func prepareConduitSSH(r sshHostKeyReporter, enabled bool, ptyUser conduit.PTYUs
 		log.Error("Conduit: SSH server unavailable (%v); not offering ssh streams", err)
 		return nil
 	}
+	ssh.Policy = policy
 	key := sshd.AuthorizedKey(ssh.HostKey)
 	ctx, cancel := context.WithTimeout(context.Background(), conduitSSHFirstReportWait)
 	err = r.ReportSSHHostKey(ctx, key)
@@ -275,4 +284,15 @@ func sshMaxChannels(getenv func(string) string) int {
 		return sshd.DefaultMaxChannels
 	}
 	return n
+}
+
+// conduitPolicy reads the operator's conduit policy that the hub sent in
+// localpolicy.EnvPolicy. A value it cannot understand disables ssh and
+// every port and socket destination (localpolicy.ParsePolicy).
+func conduitPolicy(getenv func(string) string) localpolicy.Policy {
+	p, err := localpolicy.ParsePolicy(getenv(localpolicy.EnvPolicy))
+	if err != nil {
+		log.Error("Conduit: %v; refusing ssh, port and socket streams", err)
+	}
+	return p
 }

@@ -102,14 +102,17 @@ func (a *Agent) verifyGrant(ctx context.Context, open *conduitv1.StreamOpen) (*g
 }
 
 // handleTCP serves a TCP stream. The order is fixed: verify the grant
-// against this session's Welcome, check the target against the local
-// policy, dial loopback, and only then accept.
+// against this session's Welcome, check the target against the reserved
+// ports and the operator policy, dial loopback, and only then accept.
 func (a *Agent) handleTCP(ctx context.Context, open *conduitv1.StreamOpen, ps core.PendingStream) error {
 	if _, reason, err := a.verifyGrant(ctx, open); err != nil {
 		log.Warn("Conduit: refused TCP stream %d: grant: %v", ps.ID(), err)
 		return ps.Reject(core.CloseForbidden, reason)
 	}
 	port, err := TCPTarget(open.GetParams())
+	if err == nil && a.opts.Policy.PortDenied(port) {
+		err = fmt.Errorf("tcp port %d is denied by the operator policy", port)
+	}
 	if err != nil {
 		log.Warn("Conduit: refused TCP stream %d: %v", ps.ID(), err)
 		return ps.Reject(core.CloseForbidden, reasonForbidden)

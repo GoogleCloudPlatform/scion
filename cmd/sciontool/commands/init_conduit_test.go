@@ -28,6 +28,7 @@ import (
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -188,7 +189,7 @@ func TestPortForwardingConduitGate(t *testing.T) {
 				envProjectID:              "project-1",
 				conduit.EnvLaunchID:       "launch-1",
 			}
-			p := newPortForwarding(client, tt.disableConduit, conduit.PTYUser{}, nil, func(k string) string { return env[k] })
+			p := newPortForwarding(client, tt.disableConduit, conduit.PTYUser{}, nil, localpolicy.Policy{}, func(k string) string { return env[k] })
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
 			go func() { p.run(ctx); close(done) }()
@@ -229,7 +230,7 @@ func TestPortForwardingConduitControl(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	refreshDone := client.StartTokenRefresh(ctx, &hub.TokenRefreshConfig{RefreshAt: time.Now().Add(5 * time.Hour)})
-	p := newPortForwarding(client, false, conduit.PTYUser{}, nil, func(k string) string { return env[k] })
+	p := newPortForwarding(client, false, conduit.PTYUser{}, nil, localpolicy.Policy{}, func(k string) string { return env[k] })
 	done := make(chan struct{})
 	go func() { p.run(ctx); close(done) }()
 	t.Cleanup(func() {
@@ -294,7 +295,7 @@ func TestPortForwardingConduitAuthRefresh(t *testing.T) {
 		RefreshAt:      time.Now().Add(5 * time.Hour),
 		RetryBaseDelay: time.Hour, // a failure backs off past the test
 	})
-	p := newPortForwarding(client, false, conduit.PTYUser{}, nil, func(k string) string { return env[k] })
+	p := newPortForwarding(client, false, conduit.PTYUser{}, nil, localpolicy.Policy{}, func(k string) string { return env[k] })
 	done := make(chan struct{})
 	go func() { p.run(ctx); close(done) }()
 	t.Cleanup(func() {
@@ -375,7 +376,7 @@ func TestPortForwardingConduit4401WaitsForRefreshLoop(t *testing.T) {
 		conduit.EnvLaunchID:       "launch-1",
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	p := newPortForwarding(client, false, conduit.PTYUser{}, nil, func(k string) string { return env[k] })
+	p := newPortForwarding(client, false, conduit.PTYUser{}, nil, localpolicy.Policy{}, func(k string) string { return env[k] })
 	done := make(chan struct{})
 	go func() { p.run(ctx); close(done) }()
 	refreshDone := make(chan (<-chan struct{}), 1)

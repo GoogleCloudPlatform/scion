@@ -115,6 +115,9 @@ func (c *Config) handleDirectTCPIP(ctx context.Context, nc ssh.NewChannel) {
 		return
 	}
 	dests, err := TCPDestination(m.Host, m.Port)
+	if err == nil && c.Policy.PortDenied(int(m.Port)) {
+		err = fmt.Errorf("port %d is denied by the operator policy", m.Port)
+	}
 	if err != nil {
 		log.Debug("Conduit SSH: refused direct-tcpip to %s: %v", net.JoinHostPort(m.Host, strconv.Itoa(int(m.Port))), err)
 		_ = nc.Reject(ssh.Prohibited, err.Error())
@@ -193,7 +196,11 @@ func (c *Config) handleStreamlocal(ctx context.Context, nc ssh.NewChannel) {
 		_ = nc.Reject(ssh.ConnectionFailed, "malformed direct-streamlocal request")
 		return
 	}
-	if err := SocketPathAllowed(m.SocketPath); err != nil {
+	err := SocketPathAllowed(m.SocketPath)
+	if err == nil {
+		err = c.socketPolicy(m.SocketPath)
+	}
+	if err != nil {
 		log.Debug("Conduit SSH: refused direct-streamlocal: %v", err)
 		_ = nc.Reject(ssh.Prohibited, err.Error())
 		return
@@ -217,4 +224,17 @@ func (c *Config) handleStreamlocal(ctx context.Context, nc ssh.NewChannel) {
 	}
 	go ssh.DiscardRequests(reqs)
 	splice(ctx, ch, conn)
+}
+
+// socketPolicy applies the operator's socket deny-list to path and, when
+// it resolves, to the path its symbolic links lead to, so a link to a
+// denied socket is refused too.
+func (c *Config) socketPolicy(path string) error {
+	if c.Policy.SocketDenied(path) {
+		return fmt.Errorf("socket %s is denied by the operator policy", path)
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path && c.Policy.SocketDenied(resolved) {
+		return fmt.Errorf("socket %s is denied by the operator policy", path)
+	}
+	return nil
 }

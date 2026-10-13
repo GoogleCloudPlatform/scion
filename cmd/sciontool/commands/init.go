@@ -1019,8 +1019,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// The conduit SSH server and its host key are prepared, and the first
 	// host key report attempted (bounded), before the harness starts.
 	var conduitSSH *sshd.Config
+	conduitLocalPolicy := conduitPolicy(os.Getenv)
 	if hubClient != nil && hubClient.IsConfigured() && !opts.DisablePortForwarding {
-		conduitSSH = prepareConduitSSH(hubClient, !opts.DisableConduit,
+		conduitSSH = prepareConduitSSH(hubClient, !opts.DisableConduit, conduitLocalPolicy,
 			conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
 			sshSessionEnv(config), os.Getenv)
 	}
@@ -1161,7 +1162,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			} else {
 				go newPortForwarding(hubClient, opts.DisableConduit,
 					conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
-					conduitSSH, os.Getenv).run(ctx)
+					conduitSSH, conduitLocalPolicy, os.Getenv).run(ctx)
 
 				// Auto-expose: detect and register listening ports
 				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
