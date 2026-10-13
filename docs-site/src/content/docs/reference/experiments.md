@@ -40,8 +40,10 @@ Retiring an experiment is either a **graduation** (the feature becomes permanent
 - Delete the registry entry, add the name to `compiledRetired`, and remove it from `DEFAULT_ON_FLAGS` if it was there.
 - Delete the code that only ran in the other state: the flag-off path for a graduation, the feature itself for an abandonment.
 - Stored overrides for a retired name need no migration: they are ignored on read and pruned on the next admin write. Retired names are never reused.
-- The only references to the name left in the tree are its `compiledRetired` entry and one web test asserting that the name resolves OFF.
+- In code and tests, the only references to the name left are its `compiledRetired` entry and one web test asserting that the name resolves OFF.
 - Put a release note in the PR description.
+
+Follow the full [experiment-removal checklist](/scion/contributing/removing-an-experiment/).
 
 ## Precedence and localStorage
 
