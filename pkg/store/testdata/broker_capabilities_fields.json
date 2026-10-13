@@ -1,0 +1,14 @@
+{
+  "fields": [
+    "agentMove",
+    "asyncLaunch",
+    "attach",
+    "emptyPerAgentWorkspace",
+    "reprovision",
+    "reprovisionEmptyPerAgent",
+    "startsInFlight",
+    "sync",
+    "templateTiers",
+    "webPty"
+  ]
+}
