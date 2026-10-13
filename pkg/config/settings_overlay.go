@@ -44,12 +44,19 @@ type SettingsOverlay struct {
 	imageRegistry  string
 	active         bool // true when any field has been set
 
-	// fallbackLogMu guards fallbackLogged, the last (active_profile,
-	// chosen profile) pair logged by logSingleProfileFallback. It is
-	// separate from mu because Apply holds mu only for reading.
+	// fallbackLogMu guards fallbackLogged, the (active_profile, chosen
+	// profile) pairs logSingleProfileFallback has logged since the last
+	// Apply that resolved without the fallback (at most
+	// maxFallbackLogKeys). It is separate from mu because Apply holds mu
+	// only for reading.
 	fallbackLogMu  sync.Mutex
-	fallbackLogged string
+	fallbackLogged map[string]struct{}
 }
+
+// maxFallbackLogKeys caps the set of logged single-stored-profile fallback
+// pairs; when it is full the set is cleared, so memory stays bounded and a
+// pair is at worst logged again.
+const maxFallbackLogKeys = 16
 
 // globalOverlay is the process-wide settings overlay. It is nil by default;
 // SetGlobalSettingsOverlay installs it. Only the hub server should call
@@ -120,6 +127,8 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 		vs.Profiles = cloneProfiles(o.profiles)
 		if configured, chosen := resolveOverlaidActiveProfile(vs); chosen != "" {
 			o.logSingleProfileFallback(configured, chosen)
+		} else {
+			o.resetSingleProfileFallbackLog()
 		}
 	}
 	if o.harnessConfigs != nil {
@@ -204,11 +213,13 @@ func resolveOverlaidActiveProfile(vs *VersionedSettings) (configured, chosen str
 	sort.Strings(available)
 	vs.storedProfileNames = available
 	vs.activeProfileErr = nil
+	vs.activeProfileFallbackFrom = nil
 	if _, ok := vs.Profiles[vs.ActiveProfile]; ok {
 		return "", ""
 	}
 	if len(available) == 1 {
 		configured = vs.ActiveProfile
+		vs.activeProfileFallbackFrom = &configured
 		vs.ActiveProfile = available[0]
 		return configured, available[0]
 	}
@@ -216,23 +227,53 @@ func resolveOverlaidActiveProfile(vs *VersionedSettings) (configured, chosen str
 	return "", ""
 }
 
+// ConfiguredActiveProfile returns active_profile as the settings files
+// configure it: ActiveProfile, except when the hub settings overlay's
+// single-stored-profile fallback (see resolveOverlaidActiveProfile)
+// replaced it, in which case the value it replaced. Callers that act on the
+// configured selection rather than on dispatch resolution (the Hub's
+// system-runtime endpoint) use this, so the fallback never redirects them.
+func (vs *VersionedSettings) ConfiguredActiveProfile() string {
+	if vs == nil {
+		return ""
+	}
+	if vs.activeProfileFallbackFrom != nil {
+		return *vs.activeProfileFallbackFrom
+	}
+	return vs.ActiveProfile
+}
+
 // logSingleProfileFallback logs that the only stored profile is used as the
 // default profile because active_profile does not name a stored profile.
-// Apply runs on every settings load, so the line is written only when the
-// (configured, chosen) pair differs from the one last logged.
+// Apply runs on every settings load, so each (configured, chosen) pair is
+// logged once until an Apply resolves without the fallback
+// (resetSingleProfileFallbackLog), after which it is logged again.
 func (o *SettingsOverlay) logSingleProfileFallback(configured, chosen string) {
 	key := configured + "\x00" + chosen
 	o.fallbackLogMu.Lock()
 	defer o.fallbackLogMu.Unlock()
-	if o.fallbackLogged == key {
+	if _, ok := o.fallbackLogged[key]; ok {
 		return
 	}
-	o.fallbackLogged = key
+	if o.fallbackLogged == nil || len(o.fallbackLogged) >= maxFallbackLogKeys {
+		o.fallbackLogged = make(map[string]struct{})
+	}
+	o.fallbackLogged[key] = struct{}{}
 	if configured == "" {
 		configured = "(unset)"
 	}
 	slog.Info("Default profile set to the only stored profile: active_profile does not name one of the hub's stored profiles",
 		"profile", chosen, "active_profile", configured)
+}
+
+// resetSingleProfileFallbackLog forgets the logged fallback pairs once an
+// Apply resolves without the fallback, so a later fallback is logged again.
+func (o *SettingsOverlay) resetSingleProfileFallbackLog() {
+	o.fallbackLogMu.Lock()
+	defer o.fallbackLogMu.Unlock()
+	if len(o.fallbackLogged) > 0 {
+		o.fallbackLogged = nil
+	}
 }
 
 // Profiles returns a deep copy of the overlay's profiles map. Returns nil if

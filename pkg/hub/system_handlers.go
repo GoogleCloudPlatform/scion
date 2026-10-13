@@ -270,10 +270,15 @@ func (s *Server) applyRuntimeChange() {
 }
 
 // activeProfileName returns the profile the server resolves at startup:
-// the effective settings' active profile, or "default".
+// the effective settings' configured active profile, or "default". It reads
+// ConfiguredActiveProfile, not ActiveProfile, so the settings overlay's
+// single-stored-profile fallback never redirects the system-runtime GET or
+// PUT onto the only stored profile.
 func activeProfileName() string {
-	if effective, _, err := config.LoadEffectiveSettings(""); err == nil && effective != nil && effective.ActiveProfile != "" {
-		return effective.ActiveProfile
+	if effective, _, err := config.LoadEffectiveSettings(""); err == nil && effective != nil {
+		if active := effective.ConfiguredActiveProfile(); active != "" {
+			return active
+		}
 	}
 	return "default"
 }

@@ -150,35 +150,86 @@ func TestOverlayProfiles_SavedProfileWinsOverUnresolvableDefault(t *testing.T) {
 	}
 }
 
+// storedProfileShapes are the stored-profile overlays the missing-profile
+// refusal tests run under: exactly one stored profile (the shape where the
+// single-stored-profile default applies, as on a one-profile Kubernetes
+// deployment) and two. A missing saved or named profile is refused under
+// both; the single-profile default never applies to a named profile.
+func storedProfileShapes() []struct {
+	name     string
+	install  func(t *testing.T)
+	wantList string
+} {
+	return []struct {
+		name     string
+		install  func(t *testing.T)
+		wantList string
+	}{
+		{name: "one stored profile", install: func(t *testing.T) {
+			installOverlayProfiles(t, map[string]config.V1ProfileConfig{lifecycleK8sProfile: {Runtime: "kubernetes"}})
+		}, wantList: lifecycleK8sProfile},
+		{name: "two stored profiles", install: installStoredProfilesOverlay, wantList: storedProfilesList},
+	}
+}
+
 // A saved profile the stored profiles lack fails start, restart and resume
 // with the saved-profile error, and never falls back to the default profile
-// or the default runtime, including when agent-info.json records that the
-// agent last ran on the default runtime (ptone/scion#3907).
+// (including the only stored profile) or the default runtime, including
+// when agent-info.json records that the agent last ran on the default
+// runtime (ptone/scion#3907).
 func TestOverlayProfiles_MissingSavedProfileFailsWithoutFallback(t *testing.T) {
-	for _, recorded := range []string{"", "docker"} {
-		label := recorded
-		if label == "" {
-			label = "none"
-		}
-		for _, op := range overlayDispatches() {
-			t.Run("recorded="+label+"/"+op.name, func(t *testing.T) {
-				f := newLifecycleFixture(t)
-				installStoredProfilesOverlay(t)
-				const name = "vanished-profile-agent"
-				writeSavedAgentInfo(t, f.projectPath, name, "vanished", recorded)
-				f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
+	for _, shape := range storedProfileShapes() {
+		for _, recorded := range []string{"", "docker"} {
+			label := recorded
+			if label == "" {
+				label = "none"
+			}
+			for _, op := range overlayDispatches() {
+				t.Run(shape.name+"/recorded="+label+"/"+op.name, func(t *testing.T) {
+					f := newLifecycleFixture(t)
+					shape.install(t)
+					const name = "vanished-profile-agent"
+					writeSavedAgentInfo(t, f.projectPath, name, "vanished", recorded)
+					f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
 
-				w := op.run(t, f, name)
-				assertDispatchRefused(t, w, "saved runtime profile cannot be resolved", `profile "vanished" not found`,
-					"available profiles: "+storedProfilesList, "retry once its profile is configured")
-				if f.defaultMgr.StartCalls() != 0 || f.defaultMgr.stopCalls != 0 {
-					t.Errorf("default runtime used: start=%d stop=%d", f.defaultMgr.StartCalls(), f.defaultMgr.stopCalls)
-				}
-				if runs, _ := f.k8sRun(); runs != 0 {
-					t.Errorf("kubernetes runtime runs = %d, want 0", runs)
-				}
-			})
+					w := op.run(t, f, name)
+					assertDispatchRefused(t, w, "saved runtime profile cannot be resolved", `profile "vanished" not found`,
+						"available profiles: "+shape.wantList, "retry once its profile is configured")
+					if f.defaultMgr.StartCalls() != 0 || f.defaultMgr.stopCalls != 0 {
+						t.Errorf("default runtime used: start=%d stop=%d", f.defaultMgr.StartCalls(), f.defaultMgr.stopCalls)
+					}
+					if runs, _ := f.k8sRun(); runs != 0 {
+						t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+					}
+				})
+			}
 		}
+	}
+}
+
+// A create naming a profile the stored profiles lack is refused under
+// either shape; with one stored profile it is not redirected onto it.
+func TestOverlayProfiles_MissingNamedProfileRefusedUnderEveryShape(t *testing.T) {
+	for _, shape := range storedProfileShapes() {
+		t.Run(shape.name, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			shape.install(t)
+			w := lifecyclePost(t, f.srv, "/api/v1/agents", map[string]any{
+				"name":        "missing-profile-agent",
+				"slug":        "missing-profile-agent",
+				"id":          "agent-uuid-missing",
+				"projectPath": f.projectPath,
+				"config":      map[string]any{"template": "claude", "profile": "vanished"},
+			})
+			assertDispatchRefused(t, w, "requested runtime profile cannot be resolved", `profile "vanished" not found`,
+				"available profiles: "+shape.wantList)
+			if f.defaultMgr.StartCalls() != 0 || f.defaultMgr.stopCalls != 0 {
+				t.Errorf("default runtime used: start=%d stop=%d", f.defaultMgr.StartCalls(), f.defaultMgr.stopCalls)
+			}
+			if runs, _ := f.k8sRun(); runs != 0 {
+				t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+			}
+		})
 	}
 }
 

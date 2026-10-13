@@ -1214,6 +1214,11 @@ type VersionedSettings struct {
 	// one stored profile to use instead (see resolveOverlaidActiveProfile).
 	// It is not serialized.
 	activeProfileErr *ActiveProfileError
+	// activeProfileFallbackFrom is the configured ActiveProfile the hub
+	// settings overlay replaced with the only stored profile (see
+	// resolveOverlaidActiveProfile); nil when no fallback applied. It is not
+	// serialized; ConfiguredActiveProfile reads it.
+	activeProfileFallbackFrom *string
 	// storedProfileNames is the sorted list of profile names when the hub
 	// settings overlay replaced Profiles (non-nil exactly then); nil
 	// otherwise. It is not serialized.

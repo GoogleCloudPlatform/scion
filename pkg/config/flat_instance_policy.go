@@ -86,6 +86,7 @@ func (vs *VersionedSettings) ForFlatInstance(p *FlatInstancePolicy) *VersionedSe
 	// unresolvable active_profile belongs to the profile tier too.
 	view.activeProfileErr = nil
 	view.storedProfileNames = nil
+	view.activeProfileFallbackFrom = nil
 	view.flat = p
 	return &view
 }

@@ -17,6 +17,7 @@ package config
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -187,7 +188,9 @@ func TestSettingsOverlay_RequestedProfileMissingUnchangedWithoutOverlaidProfiles
 	}
 }
 
-// captureSlog routes the default slog logger into a buffer for the test.
+// captureSlog routes the process-wide default slog logger into a buffer for
+// the test. It swaps global state, so a test that calls it must not use
+// t.Parallel(), and no parallel test in this package may log while it runs.
 func captureSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -223,6 +226,19 @@ func TestSettingsOverlay_ActiveProfile_SingleStoredProfileUsed(t *testing.T) {
 				if rtType != "kubernetes" {
 					t.Errorf("runtime type = %q, want kubernetes", rtType)
 				}
+				if got := vs.ConfiguredActiveProfile(); got != active {
+					t.Errorf("ConfiguredActiveProfile() = %q, want the file value %q", got, active)
+				}
+				// The fallback is only for the default profile: a named
+				// profile the stored profiles lack is still refused.
+				_, _, err = vs.ResolveRuntime("vanished")
+				var spe *StoredProfileNotFoundError
+				if !errors.As(err, &spe) {
+					t.Fatalf("ResolveRuntime(vanished) error = %v, want *StoredProfileNotFoundError", err)
+				}
+				if !strings.Contains(err.Error(), `profile "vanished" not found`) || !strings.Contains(err.Error(), "available profiles: cluster") {
+					t.Errorf("error %q should name vanished and the one stored profile", err)
+				}
 			}
 
 			out := logs.String()
@@ -239,6 +255,50 @@ func TestSettingsOverlay_ActiveProfile_SingleStoredProfileUsed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The fallback line is logged again after an Apply that resolves without
+// the fallback, and loads alternating between two unresolvable
+// active_profile values log each pair once instead of on every load.
+func TestSettingsOverlay_ActiveProfile_FallbackLogDedup(t *testing.T) {
+	logs := captureSlog(t)
+	o := NewSettingsOverlay()
+	o.Update(
+		map[string]V1RuntimeConfig{"k8s": {Type: "kubernetes"}},
+		map[string]V1ProfileConfig{"cluster": {Runtime: "k8s"}},
+		nil, "")
+	count := func() int { return strings.Count(logs.String(), "Default profile set to the only stored profile") }
+
+	for i := 0; i < 4; i++ {
+		o.Apply(overlayActiveProfileFixture("gone"))
+		o.Apply(overlayActiveProfileFixture("other"))
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("alternating loads logged %d times, want 2 (one per pair):\n%s", n, logs.String())
+	}
+
+	// A load whose active_profile resolves resets the set; the next
+	// fallback is logged again.
+	o.Apply(overlayActiveProfileFixture("cluster"))
+	o.Apply(overlayActiveProfileFixture("gone"))
+	if n := count(); n != 3 {
+		t.Fatalf("after recovery logged %d times in total, want 3:\n%s", n, logs.String())
+	}
+
+	// The set is capped: more distinct pairs than the cap still log each
+	// new pair and keep the set bounded.
+	for i := 0; i < maxFallbackLogKeys+4; i++ {
+		o.Apply(overlayActiveProfileFixture(fmt.Sprintf("p%d", i)))
+	}
+	o.fallbackLogMu.Lock()
+	size := len(o.fallbackLogged)
+	o.fallbackLogMu.Unlock()
+	if size > maxFallbackLogKeys {
+		t.Errorf("logged set size = %d, want <= %d", size, maxFallbackLogKeys)
+	}
+	if n := count(); n != 3+maxFallbackLogKeys+4 {
+		t.Errorf("distinct pairs logged %d times in total, want %d", n, 3+maxFallbackLogKeys+4)
 	}
 }
 
@@ -312,8 +372,8 @@ func TestSettingsOverlay_FlatInstanceViewIsolatedFromOverlay(t *testing.T) {
 			view := vs.ForFlatInstance(policy)
 
 			// (a) No profile tier reaches the flat view.
-			if view.ActiveProfile != "" || view.Profiles != nil {
-				t.Fatalf("flat view has a profile tier: active=%q profiles=%v", view.ActiveProfile, view.Profiles)
+			if view.ActiveProfile != "" || view.Profiles != nil || view.ConfiguredActiveProfile() != "" {
+				t.Fatalf("flat view has a profile tier: active=%q configured=%q profiles=%v", view.ActiveProfile, view.ConfiguredActiveProfile(), view.Profiles)
 			}
 			_, _, err := view.ResolveRuntime("")
 			var ape *ActiveProfileError
