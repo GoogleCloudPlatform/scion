@@ -264,7 +264,15 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 	}
 	res := testModeResolution{
 		EnableTestIdentities: true,
-		TestMode:             hub.TestModeConfig{Level: level, Preconditions: preconditions},
+		TestMode: hub.TestModeConfig{
+			Level:          level,
+			Preconditions:  preconditions,
+			HubID:          in.BindingHubID,
+			HubClass:       in.HubClass,
+			MarkerHubID:    marker.HubID,
+			MarkerClass:    marker.Class,
+			ProductionFlag: in.ProductionFlagExplicit,
+		},
 	}
 	if level.IsAdminLevel() {
 		res.TestAdminGate = hub.TestAdminGateConfig{

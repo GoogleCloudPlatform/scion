@@ -108,6 +108,13 @@ const (
 	// (.design/agent-delegation.md §18.5).
 	ActionDelegationCreate   = "delegation_create"
 	ActionDelegationExchange = "delegation_exchange"
+	// ActionDelegationRevoke, ActionDelegationCredentialRevoke,
+	// ActionDelegationList and ActionDelegationRead are the agent delegation
+	// grant management actions (.design/agent-delegation.md §7, §18.5).
+	ActionDelegationRevoke           = "delegation_revoke"
+	ActionDelegationCredentialRevoke = "delegation_credential_revoke"
+	ActionDelegationList             = "delegation_list"
+	ActionDelegationRead             = "delegation_read"
 
 	// PermissionGCPServiceAccountUse is the gcp_service_account.use
 	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
@@ -205,6 +212,10 @@ var Registry = []Permission{
 	{ID: "agent.grant_hub_mode", Resource: ResourceAgent, Action: "grant_hub_mode", CapabilityKind: CapabilityResource, Description: "Grant hub message mode (requires full role + hub mode for agent callers)", Enforcement: []string{"pkg/hub/authorize_message_mode_grant.go"}},
 	{ID: "agent.delegation.create", Resource: ResourceAgent, Action: ActionDelegationCreate, Description: "Issue an agent delegation grant to an agent the issuer controls", Enforcement: []string{"pkg/hub/handlers_agent_delegation.go:handleCreateAgentDelegation"}},
 	{ID: "agent.delegation.exchange", Resource: ResourceAgent, Action: ActionDelegationExchange, Description: "Exchange an agent delegation grant for a delegated credential (the bound agent, with its own agent token; no role binding is consulted)", Enforcement: []string{"pkg/hub/handlers_agent_delegation.go:handleExchangeAgentDelegation"}},
+	{ID: "agent.delegation.revoke", Resource: ResourceAgent, Action: ActionDelegationRevoke, Description: "Revoke an agent delegation grant: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
+	{ID: "agent.delegation.credential.revoke", Resource: ResourceAgent, Action: ActionDelegationCredentialRevoke, Description: "Revoke one delegated credential of an agent delegation grant: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
+	{ID: "agent.delegation.list", Resource: ResourceAgent, Action: ActionDelegationList, Description: "List agent delegation grants: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
+	{ID: "agent.delegation.read", Resource: ResourceAgent, Action: ActionDelegationRead, Description: "Read an agent delegation grant: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
 
 	{ID: "project.create", Resource: ResourceProject, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.read", Resource: ResourceProject, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "project:read", AgentScopes: []string{"project:read"}, Description: "Read project metadata", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},

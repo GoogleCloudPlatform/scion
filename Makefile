@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-hub-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -163,6 +163,10 @@ test-cmd-sqlite:
 hubshard-parity:
 	@go run ./hack/hubshard -parity
 
+## testpart-selftest: Test hack/testpart.sh, which splits the T1 entadapter Postgres tests over CI jobs (bash only)
+testpart-selftest:
+	@./hack/test-testpart.sh
+
 ## test-hub-shard: Run pkg/hub test shard SHARD=K (NOSQLITE=1: with -tags no_sqlite; RACE=1: with -race)
 # Generates the shard overlay in a temp dir (the tree is not modified),
 # compiles the shard, checks its test list against hubshard -list, then
@@ -203,7 +207,7 @@ test-fixture-coverage:
 
 # TEST_IDENTITY_POSTGRES_TESTS are the pkg/hub test identity purge
 # concurrency tests (ptone/scion#4240, Phase 3b) run by
-# test-launch-store-postgres (pkg/hub shard jobs in CI).
+# test-launch-store-postgres (pkg/hub shard Postgres (integration) jobs in CI).
 TEST_IDENTITY_POSTGRES_TESTS := TestFixturePurge_ConcurrentCoOwner_Postgres
 
 # MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
@@ -352,13 +356,35 @@ MEMBERSHIP_LOSS_POSTGRES_TESTS := TestMembershipLossProcessor_vs_ProjectDelete_P
 #
 # test-store-postgres is the part without the pkg/hub package itself
 # (CI's T1 job runs it); test-launch-store-postgres adds the pkg/hub
-# Postgres tests, which CI runs in the pkg/hub shard jobs.
+# Postgres tests, which CI runs in the pkg/hub shard Postgres jobs.
+#
+# CI splits this target over several T1 jobs (see the T1 jobs in
+# .github/workflows/ci.yml): test-store-postgres-entadapter with
+# ENTADAPTER_PART=K ENTADAPTER_PARTS=N runs part K of the entadapter tests,
+# and test-store-postgres-others runs the rest. Locally,
+# make test-store-postgres runs it all, in the order below. The umbrella
+# targets run their parts one after another through sub-makes (not as
+# prerequisites), so make -j never runs them at once: they share one
+# Postgres server, and the cmd run is a large compile.
 test-store-postgres:
-	@echo "Running launch store tests against Postgres..."
+	@$(MAKE) --no-print-directory test-store-postgres-integrationtest
+	@$(MAKE) --no-print-directory test-store-postgres-entadapter
+	@$(MAKE) --no-print-directory test-store-postgres-tail
+
+## test-store-postgres-others: test-store-postgres without pkg/store/entadapter (CI runs entadapter in its own jobs)
+test-store-postgres-others:
+	@$(MAKE) --no-print-directory test-store-postgres-integrationtest
+	@$(MAKE) --no-print-directory test-store-postgres-tail
+
+# test-store-postgres-env-check fails if SCION_TEST_POSTGRES_URL is unset.
+test-store-postgres-env-check:
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \
 		echo "ERROR: SCION_TEST_POSTGRES_URL is not set -- the Postgres-only cases would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
+
+test-store-postgres-integrationtest: test-store-postgres-env-check
+	@echo "Running launch store tests against Postgres..."
 	@go test -tags integration -count=1 -timeout 20m -v \
 		./pkg/store/integrationtest/... > /tmp/test-launch-store-postgres-integrationtest.log 2>&1; \
 	status=$$?; \
@@ -369,7 +395,46 @@ test-store-postgres:
 		echo "ERROR: one or more Postgres-only integration tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@go test -tags integration -count=1 -timeout 60m -v \
+
+# ENTADAPTER_PARTS splits the pkg/store/entadapter Postgres tests into that
+# many parts and ENTADAPTER_PART (1..ENTADAPTER_PARTS) selects the one
+# test-store-postgres-entadapter runs. The default, 1 of 1, runs the whole
+# package without -run, as before the split. CI runs every part in its own
+# job (the T1 entadapter jobs in .github/workflows/ci.yml).
+ENTADAPTER_PART ?= 1
+ENTADAPTER_PARTS ?= 1
+
+## test-store-postgres-entadapter: The pkg/store/entadapter part of test-store-postgres (ENTADAPTER_PART=K ENTADAPTER_PARTS=N: part K of N)
+# With ENTADAPTER_PARTS > 1 the target lists the package's top-level tests
+# (go test -list, which runs TestMain and so needs the Postgres server),
+# checks with hack/testpart.sh parity that the N parts together hold every
+# listed test exactly once, and runs part K with -run '^(A|B|...)$'
+# (round-robin over the sorted names; subtests of a selected test run with
+# it). After the usual checks, every test of the part must print its own
+# top-level PASS or SKIP line, so a test that the pattern misses fails the
+# target instead of silently not running.
+test-store-postgres-entadapter: test-store-postgres-env-check
+	@part='$(ENTADAPTER_PART)'; parts='$(ENTADAPTER_PARTS)'; \
+	set --; \
+	if [ "$$parts" = 1 ] && [ "$$part" != 1 ]; then \
+		echo "ERROR: ENTADAPTER_PART must be 1 when ENTADAPTER_PARTS is 1 (got $$part)." >&2; \
+		exit 1; \
+	fi; \
+	if [ "$$parts" != 1 ]; then \
+		if ! go test -tags integration -count=1 -list '.*' \
+			./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.list 2>&1; then \
+			cat /tmp/test-launch-store-postgres.list; \
+			echo "ERROR: could not list the entadapter tests." >&2; \
+			exit 1; \
+		fi; \
+		./hack/testpart.sh parity "$$parts" < /tmp/test-launch-store-postgres.list || exit 1; \
+		./hack/testpart.sh list "$$part" "$$parts" < /tmp/test-launch-store-postgres.list \
+			> /tmp/test-launch-store-postgres.part || exit 1; \
+		regex=$$(./hack/testpart.sh regex "$$part" "$$parts" < /tmp/test-launch-store-postgres.list) || exit 1; \
+		echo "Running part $$part of $$parts of the entadapter Postgres tests ($$(wc -l < /tmp/test-launch-store-postgres.part | tr -d ' ') top-level tests)..."; \
+		set -- -run "$$regex"; \
+	fi; \
+	go test -tags integration -count=1 -timeout 60m -v "$$@" \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
@@ -383,7 +448,21 @@ test-store-postgres:
 		echo "ERROR: these entadapter tests were skipped on Postgres without enttest.SkipOnPostgres:" >&2; \
 		echo "$$unexpected" >&2; \
 		exit 1; \
+	fi; \
+	if [ "$$parts" != 1 ]; then \
+		sed -nE 's/^--- (PASS|SKIP): ([^ ]+).*/\2/p' /tmp/test-launch-store-postgres.log | LC_ALL=C sort -u \
+			> /tmp/test-launch-store-postgres.ran; \
+		missing=$$(LC_ALL=C comm -23 /tmp/test-launch-store-postgres.part /tmp/test-launch-store-postgres.ran); \
+		if [ -n "$$missing" ]; then \
+			echo "ERROR: these entadapter tests of part $$part of $$parts printed no top-level PASS or SKIP line:" >&2; \
+			echo "$$missing" >&2; \
+			exit 1; \
+		fi; \
 	fi
+
+# test-store-postgres-tail: the storetest, pkg/ent/entc and cmd runs of
+# test-store-postgres (after entadapter).
+test-store-postgres-tail: test-store-postgres-env-check
 	@go test -tags integration -count=1 -timeout 10m -v \
 		-run '^TestCompositeStore_CRUDParity$$/^group$$/^MembershipCleanup$$' \
 		./pkg/store/storetest/... > /tmp/test-launch-store-postgres-storetest.log 2>&1; \
@@ -435,10 +514,10 @@ test-store-postgres:
 	fi
 
 ## test-launch-store-postgres: test-store-postgres plus the pkg/hub Postgres tests in HUB_INTEGRATION_POSTGRES_TESTS (every shard holding one)
-# CI runs the two halves in different jobs: test-store-postgres in T1
-# Launch Store PostgreSQL Tests, and the pkg/hub tests in each pkg/hub
-# shard job (test-hub-postgres SHARD=K), where the shard is compiled
-# anyway.
+# CI runs the two halves in different jobs: test-store-postgres in the T1
+# Launch Store PostgreSQL Tests jobs, and the pkg/hub tests in the pkg/hub
+# shard Postgres (integration) jobs (test-hub-postgres-integration
+# SHARD=K).
 test-launch-store-postgres: test-store-postgres
 	@./hack/hubshard/shard.sh postgres all integration $(HUB_INTEGRATION_POSTGRES_TESTS)
 
@@ -458,15 +537,38 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 # WEBCHAT_POSTGRES_TESTS and CONDUIT_AUTHZ_POSTGRES_TESTS (default tags)
 # and HUB_INTEGRATION_POSTGRES_TESTS (-tags integration) that live in the
 # shard; hack/hubshard -locate fails if a listed test no longer exists.
-# CI runs this in each pkg/hub shard job, after the shard's SQLite run, so
-# the default-tag build comes from the cache.
+# CI runs the two halves in different jobs. test-hub-postgres-default runs
+# in each pkg/hub shard job, after the shard's SQLite run, so the
+# default-tag build comes from the cache. test-hub-postgres-integration
+# needs its own pkg/hub compile (-tags integration: a different TestMain
+# and extra test files), so it runs in its own job, in parallel with the
+# shard jobs, for each shard hub-postgres-integration-shards prints.
+# The two halves run one after another through sub-makes (not as
+# prerequisites), so make -j never runs two pkg/hub compiles at once.
 test-hub-postgres:
+	@$(MAKE) --no-print-directory test-hub-postgres-default
+	@$(MAKE) --no-print-directory test-hub-postgres-integration
+
+# test-hub-postgres-env-check fails unless both Postgres variables are set.
+test-hub-postgres-env-check:
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ] || [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
 		echo "ERROR: SCION_TEST_POSTGRES_URL and SCION_TEST_POSTGRES_DSN must be set -- the Postgres tests would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
+
+## test-hub-postgres-default: The default-tag half of test-hub-postgres (WEBCHAT_POSTGRES_TESTS, CONDUIT_AUTHZ_POSTGRES_TESTS) for SHARD=K
+test-hub-postgres-default: test-hub-postgres-env-check
 	@./hack/hubshard/shard.sh postgres $(SHARD) "" $(WEBCHAT_POSTGRES_TESTS) $(CONDUIT_AUTHZ_POSTGRES_TESTS)
+
+## test-hub-postgres-integration: The -tags integration half of test-hub-postgres (HUB_INTEGRATION_POSTGRES_TESTS) for SHARD=K
+test-hub-postgres-integration: test-hub-postgres-env-check
 	@./hack/hubshard/shard.sh postgres $(SHARD) integration $(HUB_INTEGRATION_POSTGRES_TESTS)
+
+## hub-postgres-integration-shards: Print the pkg/hub shards that hold a HUB_INTEGRATION_POSTGRES_TESTS test, one per line (CI's shard plan)
+# Fails if a listed test is in no test file (hubshard -locate).
+hub-postgres-integration-shards:
+	@located=$$(go run ./hack/hubshard -tags integration -locate $(HUB_INTEGRATION_POSTGRES_TESTS)) || exit 1; \
+	echo "$$located" | awk '{print $$2}' | sort -nu
 
 ## test-webchat-postgres: Run the pkg/hub web chat store Postgres tests against a real server
 # Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). The selected
@@ -474,7 +576,7 @@ test-hub-postgres:
 # if any selected test skips, or if any test listed in
 # WEBCHAT_POSTGRES_TESTS reports no PASS line. Each test runs in its
 # pkg/hub shard (hack/hubshard/shard.sh postgres); CI runs them in the
-# pkg/hub shard jobs (test-hub-postgres). The tests drop and recreate the
+# pkg/hub shard jobs (test-hub-postgres-default). The tests drop and recreate the
 # webchat_* tables, so point the DSN at a scratch database. go test output
 # is streamed with tee (shard.sh runs under bash pipefail) so a step killed
 # mid-run still shows what ran (ptone/scion#4083).
@@ -522,7 +624,7 @@ test-conduit-authz-postgres:
 # subtest; the Postgres subtests are added only when the DSN is set, so the
 # target fails if the variable is unset, if any test skips, or if no
 # /postgres subtest passed. Each test works in its own throwaway schema.
-# CI runs this in the T1 Launch Store PostgreSQL Tests job.
+# CI runs this in the T1 Launch Store PostgreSQL Tests (other packages) job.
 test-artifacts-postgres:
 	@echo "Running pkg/artifacts tests (store tests on SQLite and Postgres)..."
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
@@ -693,7 +795,7 @@ check-debug-defaults:
 	@./hack/check-debug-defaults.sh
 
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: hubshard-parity compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults
+check-custom: hubshard-parity testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults
 	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)

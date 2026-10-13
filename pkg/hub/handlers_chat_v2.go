@@ -1607,7 +1607,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// denied send does no artifact lookups.
 	var artifactRefs []artifacts.MessageRef
 	var artifactWarning string
-	msg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, msg.Metadata)
+	msg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, msg.Metadata, directAgentRecipient(primaryAgent, ""))
 	msg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 	// Phase gate (nc-delivery-unreachable): a primary that is soft-deleted or

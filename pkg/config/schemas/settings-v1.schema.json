@@ -1555,9 +1555,8 @@
         "cors": { "$ref": "#/$defs/corsConfig" },
         "instances": {
           "type": ["array", "null"],
-          "maxItems": 1,
           "items": { "$ref": "#/$defs/runtimeBrokerInstance" },
-          "description": "Flat (single-target) Runtime Broker instances hosted by this process. Empty or absent means legacy hosting. This release accepts one docker entry and requires the Hub in the same process. Read from the global settings file only."
+          "description": "Flat (single-target) Runtime Broker instances hosted by this process, each with a unique key. Empty or absent means legacy hosting. This release accepts docker entries. Read from the global settings file only."
         }
       }
     },
@@ -1583,19 +1582,45 @@
           "properties": {
             "type": {
               "type": "string",
-              "enum": ["docker"],
-              "description": "Runtime target type. Only docker is supported in this release (kubernetes is defined but not implemented)."
+              "enum": ["docker", "kubernetes"],
+              "description": "Runtime target type: docker or kubernetes."
             },
             "display_name": { "type": "string", "description": "Non-sensitive display name shown in the UI; defaults to the type." },
-            "context": { "type": "string", "description": "Kubernetes only (not implemented)." },
-            "namespace": { "type": "string", "description": "Kubernetes only (not implemented)." }
+            "context": { "type": "string", "description": "Kubernetes only: the context to use in the loaded kubeconfig (default: its current context)." },
+            "namespace": { "type": "string", "description": "Kubernetes only: the namespace for agents (default: SCION_K8S_NAMESPACE, POD_NAMESPACE, the service-account namespace, else default)." },
+            "kubeconfig": {
+              "type": "string",
+              "pattern": "^(|/[^:]*[^:/][^:]*)$",
+              "description": "Kubernetes only: absolute path of this instance's own kubeconfig file, the only source loaded when set (no ~, environment variables or path list). Empty uses the process's normal kubeconfig loading. Stays local; never sent to the Hub."
+            },
+            "kubernetes_block_service_account": {
+              "type": "string",
+              "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+              "maxLength": 253,
+              "description": "Kubernetes only. The Kubernetes ServiceAccount this instance's pods run as when their GCP identity mode resolves to 'block'; a dedicated zero-privilege KSA the operator provisions. Empty or unset means the namespace's default ServiceAccount. Block pods also get automountServiceAccountToken false and a node selector for Workload Identity nodes. Local operator policy: not part of the runtime target identity and never sent to the Hub."
+            },
+            "kubernetes_service_account_mappings": {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?@([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+gserviceaccount\\.com$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+                "maxLength": 253
+              },
+              "description": "Kubernetes only. Maps a lowercase GCP service account email to the Kubernetes ServiceAccount (KSA) bound to it via Workload Identity, for GCP identity mode 'assign' on this instance. Scion does not create, annotate or bind the KSA. Local operator policy: not part of the runtime target identity and never sent to the Hub."
+            }
           },
           "if": { "properties": { "type": { "const": "docker" } } },
           "then": {
             "not": {
               "anyOf": [
                 { "required": ["context"], "properties": { "context": { "minLength": 1 } } },
-                { "required": ["namespace"], "properties": { "namespace": { "minLength": 1 } } }
+                { "required": ["namespace"], "properties": { "namespace": { "minLength": 1 } } },
+                { "required": ["kubeconfig"], "properties": { "kubeconfig": { "minLength": 1 } } },
+                { "required": ["kubernetes_block_service_account"], "properties": { "kubernetes_block_service_account": { "minLength": 1 } } },
+                { "required": ["kubernetes_service_account_mappings"], "properties": { "kubernetes_service_account_mappings": { "minProperties": 1 } } }
               ]
             }
           }

@@ -20,9 +20,13 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegatedcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -313,4 +317,175 @@ func (s *AgentDelegationStore) UpdateAgentDelegatedCredentialLastSeen(ctx contex
 		return mapError(err)
 	}
 	return nil
+}
+
+// agentDelegationGrantFilterPredicates turns filter into query predicates.
+// An empty filter is refused, so a caller can never list every grant by
+// accident.
+func agentDelegationGrantFilterPredicates(filter store.AgentDelegationGrantFilter) ([]predicate.AgentDelegationGrant, error) {
+	var preds []predicate.AgentDelegationGrant
+	if filter.AgentID != "" {
+		preds = append(preds, agentdelegationgrant.AgentIDEQ(filter.AgentID))
+	}
+	if filter.IssuerUserID != "" {
+		preds = append(preds, agentdelegationgrant.IssuerUserIDEQ(filter.IssuerUserID))
+	}
+	if len(preds) == 0 {
+		return nil, fmt.Errorf("%w: agent delegation grant filter names no agent and no issuer", store.ErrInvalidInput)
+	}
+	return preds, nil
+}
+
+// ListAgentDelegationGrants returns the grants that match filter, newest
+// first.
+func (s *AgentDelegationStore) ListAgentDelegationGrants(ctx context.Context, filter store.AgentDelegationGrantFilter) ([]*store.AgentDelegationGrant, error) {
+	preds, err := agentDelegationGrantFilterPredicates(filter)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.client.AgentDelegationGrant.Query().
+		Where(preds...).
+		Order(ent.Desc(agentdelegationgrant.FieldCreated), ent.Desc(agentdelegationgrant.FieldID)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.AgentDelegationGrant, 0, len(rows))
+	for _, g := range rows {
+		out = append(out, entAgentDelegationGrantToStore(g))
+	}
+	return out, nil
+}
+
+// CountActiveAgentDelegationGrants counts the unrevoked grants that match
+// filter and expire after now.
+func (s *AgentDelegationStore) CountActiveAgentDelegationGrants(ctx context.Context, filter store.AgentDelegationGrantFilter, now time.Time) (int, error) {
+	preds, err := agentDelegationGrantFilterPredicates(filter)
+	if err != nil {
+		return 0, err
+	}
+	preds = append(preds, agentdelegationgrant.RevokedAtIsNil(), agentdelegationgrant.ExpiresAtGT(now))
+	n, err := s.client.AgentDelegationGrant.Query().Where(preds...).Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// LockAgentDelegationIssuer locks the issuer's user row (SELECT ... FOR
+// UPDATE on PostgreSQL; SQLite already serializes writes, so a plain
+// existence check gives the same ordering there).
+func (s *AgentDelegationStore) LockAgentDelegationIssuer(ctx context.Context, userID string) error {
+	uid, err := parseGetID(userID)
+	if err != nil {
+		return err
+	}
+	q := s.client.User.Query().Where(user.IDEQ(uid))
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	exists, err := q.Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("lock agent delegation issuer: %w", mapError(err))
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// LockAgentDelegationGrant locks the grant row the same way and returns the
+// grant as read under the lock.
+func (s *AgentDelegationStore) LockAgentDelegationGrant(ctx context.Context, id string) (*store.AgentDelegationGrant, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return nil, err
+	}
+	q := s.client.AgentDelegationGrant.Query().Where(agentdelegationgrant.IDEQ(uid))
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	g, err := q.Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entAgentDelegationGrantToStore(g), nil
+}
+
+// GetAgentDelegatedCredential returns the delegated credential with id.
+func (s *AgentDelegationStore) GetAgentDelegatedCredential(ctx context.Context, id string) (*store.AgentDelegatedCredential, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return nil, err
+	}
+	c, err := s.client.AgentDelegatedCredential.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entAgentDelegatedCredentialToStore(c), nil
+}
+
+// ListActiveAgentDelegatedCredentials returns the unrevoked credentials of
+// grantIDs that expire after now, oldest first.
+func (s *AgentDelegationStore) ListActiveAgentDelegatedCredentials(ctx context.Context, grantIDs []string, now time.Time) ([]*store.AgentDelegatedCredential, error) {
+	if len(grantIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.client.AgentDelegatedCredential.Query().
+		Where(
+			agentdelegatedcredential.GrantIDIn(grantIDs...),
+			agentdelegatedcredential.RevokedAtIsNil(),
+			agentdelegatedcredential.ExpiresAtGT(now),
+		).
+		Order(ent.Asc(agentdelegatedcredential.FieldIssuedAt), ent.Asc(agentdelegatedcredential.FieldID)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.AgentDelegatedCredential, 0, len(rows))
+	for _, c := range rows {
+		out = append(out, entAgentDelegatedCredentialToStore(c))
+	}
+	return out, nil
+}
+
+// RevokeAgentDelegatedCredential revokes the credential with id. The update
+// is conditional on revoked_at being NULL, so of two concurrent revocations
+// exactly one reports revoked=true.
+func (s *AgentDelegationStore) RevokeAgentDelegatedCredential(ctx context.Context, id, reason string, at time.Time) (bool, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return false, err
+	}
+	n, err := s.client.AgentDelegatedCredential.Update().
+		Where(agentdelegatedcredential.IDEQ(uid), agentdelegatedcredential.RevokedAtIsNil()).
+		SetRevokedAt(at).
+		SetRevokeReason(reason).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if n > 0 {
+		return true, nil
+	}
+	exists, err := s.client.AgentDelegatedCredential.Query().Where(agentdelegatedcredential.IDEQ(uid)).Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if !exists {
+		return false, store.ErrNotFound
+	}
+	return false, nil
+}
+
+// PurgeAgentDelegatedCredentials deletes every delegated credential whose
+// expiry is before expiredBefore.
+func (s *AgentDelegationStore) PurgeAgentDelegatedCredentials(ctx context.Context, expiredBefore time.Time) (int, error) {
+	n, err := s.client.AgentDelegatedCredential.Delete().
+		Where(agentdelegatedcredential.ExpiresAtLT(expiredBefore)).
+		Exec(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
 }

@@ -1106,6 +1106,22 @@ func TestGlobalDefaultsReserved(t *testing.T) {
 
 // --- DetectDeprecatedServerEnv tests ---
 
+// TestDetectDeprecatedServerEnv_PublicURLIsPin checks that
+// SCION_SERVER_HUB_ENDPOINT, which pins server.hub.public_url on a node, is
+// not reported as a deprecated seed input (ptone/scion#3905).
+func TestDetectDeprecatedServerEnv_PublicURLIsPin(t *testing.T) {
+	envK := koanf.New(".")
+	_ = envK.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.public_url":   "https://hub.example.com",
+		"server.hub.admin_emails": []string{"admin@test.com"},
+	}, "."), nil)
+
+	deprecated := DetectDeprecatedServerEnv(envK)
+	if len(deprecated) != 1 || deprecated[0].KoanfKey != "server.hub.admin_emails" {
+		t.Fatalf("DetectDeprecatedServerEnv = %+v, want only server.hub.admin_emails", deprecated)
+	}
+}
+
 func TestDetectDeprecatedServerEnv_Layer1Keys(t *testing.T) {
 	envK := koanf.New(".")
 	_ = envK.Load(confmap.Provider(map[string]interface{}{
@@ -1703,7 +1719,7 @@ func TestKoanfKeyToEnvSuffix(t *testing.T) {
 		// server. prefix is stripped — it maps to the SCION_SERVER_ env prefix
 		{"server.hub.admin_emails", "HUB_ADMINEMAILS"},
 		{"server.auth.user_access_mode", "AUTH_USERACCESSMODE"},
-		{"server.hub.public_url", "HUB_PUBLICURL"},
+		{"server.hub.public_url", "HUB_ENDPOINT"},
 		// non-server keys are unchanged
 		{"telemetry.enabled", "TELEMETRY_ENABLED"},
 		{"default_max_turns", "DEFAULTMAXTURNS"},

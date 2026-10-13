@@ -31,10 +31,10 @@ import (
 // The only writer is the offline host command
 // `scion server test-infra mark` (cmd/server_test_infra.go, through
 // pkg/testinfra). No hub route and no store.Store method writes it; the hub
-// only reads it once, at startup: the test admin gate reads it when
-// --test-mode is admin or above, and the test-identity web session key is
-// read from it when --test-mode is member or above. There is exactly
-// one row, id "test-infra-marker".
+// only reads it once, at startup: every --test-mode level other than off
+// requires it (the --test-mode gate reads it), and the test-identity web
+// session key is read from it at those levels. There is exactly one row, id
+// "test-infra-marker".
 //
 // Every field is immutable: re-designating a database is a deliberate
 // operator act (delete the row on the host, then mark again), never an

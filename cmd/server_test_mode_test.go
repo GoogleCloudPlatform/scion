@@ -140,6 +140,12 @@ func TestTestMode_ProductionRefusedAtEveryNonOffLevel(t *testing.T) {
 	for _, level := range []hub.TestMode{hub.TestModeMember, hub.TestModeAdmin, hub.TestModeSuperAdmin} {
 		err := validateTestModeFlagsEarly(tiaStartCmd(t, "--production", "--test-mode="+string(level)+":"+tiaCmdHubID))
 		require.Error(t, err, level)
+		if level == hub.TestModeSuperAdmin {
+			// G3 runs first: super-admin is refused whatever else is set.
+			assert.ErrorIs(t, err, hub.ErrTestSuperAdminRequiresPolicyRegistry, level)
+		} else {
+			assert.ErrorIs(t, err, hub.ErrTestAdminProductionFlag, level)
+		}
 		in := tiaValidInputs()
 		in.Level = level
 		in.ProductionFlagExplicit = true
@@ -250,17 +256,48 @@ func TestTestMode_CapabilityEquivalenceWithOldFlags(t *testing.T) {
 			assert.Equal(t, tc.old.testIdentities, res.EnableTestIdentities)
 			assert.Equal(t, tc.old.admin, res.TestAdminGate.HubAdmin)
 			assert.Equal(t, tc.old.superAdmin, res.TestAdminGate.SuperAdmin)
-			// And hub.New accepts it as consistent.
-			got := hub.TestModeCapabilities{
-				TestIdentities: res.EnableTestIdentities,
-				HubAdmin:       res.TestAdminGate.HubAdmin,
-				SuperAdmin:     res.TestAdminGate.SuperAdmin,
-			}
-			lvl := res.TestMode.Level
-			if lvl == "" {
-				lvl = hub.TestModeOff
-			}
-			assert.Equal(t, lvl.Capabilities(), got)
+			// And the hub's own construction check (the one hub.New runs)
+			// accepts the resolved configuration.
+			assert.NoError(t, hub.ValidateTestModeConfig(hub.ServerConfig{
+				HubID:                in.ResolvedHubID,
+				EnableTestIdentities: res.EnableTestIdentities,
+				TestAdminGate:        res.TestAdminGate,
+				TestMode:             res.TestMode,
+			}))
 		})
+	}
+}
+
+// The daemon parent runs the same flag checks before re-exec:
+// resolveDaemonServerMode refuses removed flags, unrecognised values,
+// super-admin and --production with a level, so none reaches the child.
+func TestTestMode_DaemonParentRefuses(t *testing.T) {
+	savedHosted, savedEndpoints := hostedMode, enableDebugEndpoints
+	t.Cleanup(func() {
+		hostedMode, enableDebugEndpoints = savedHosted, savedEndpoints
+		resetTestModeFlags()
+	})
+	t.Setenv("SCION_SERVER_MODE", "")
+	writeServerSettings(t, "server:\n  mode: workstation\n")
+	cases := []struct {
+		args []string
+		want error
+	}{
+		{[]string{"--enable-test-identities"}, hub.ErrTestModeRemovedFlag},
+		{[]string{"--enable-test-admin-identities=" + tiaCmdHubID}, hub.ErrTestModeRemovedFlag},
+		{[]string{"--test-mode=memebr:" + tiaCmdHubID}, hub.ErrTestModeUnrecognized},
+		{[]string{"--test-mode=super-admin:" + tiaCmdHubID}, hub.ErrTestSuperAdminRequiresPolicyRegistry},
+		{[]string{"--production", "--test-mode=member:" + tiaCmdHubID}, hub.ErrTestAdminProductionFlag},
+		{[]string{"--hosted", "--test-mode=member:" + tiaCmdHubID}, nil},
+		{nil, nil},
+	}
+	for _, tc := range cases {
+		hostedMode, enableDebugEndpoints = false, false
+		err := resolveDaemonServerMode(tiaStartCmd(t, tc.args...))
+		if tc.want == nil {
+			assert.NoError(t, err, tc.args)
+			continue
+		}
+		assert.ErrorIs(t, err, tc.want, tc.args)
 	}
 }

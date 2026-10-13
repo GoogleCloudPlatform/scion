@@ -1743,8 +1743,9 @@ func TestConstraintAdminLockout_InactiveSameScopeAdminNotCounted(t *testing.T) {
 // Only a binding active at the check time makes another user a remaining
 // admin, through a user binding or a group binding at the scope. The
 // check time is whole seconds so stored times compare exactly; the
-// window bounds follow isBindingActive (NotBefore and ExpiresAt both
-// count as inside the window).
+// window bounds follow isBindingActive (NotBefore is inclusive and
+// ExpiresAt is exclusive, so a binding that expires at the check time
+// is no longer active).
 func TestConstraintAdminLockout_InactiveOtherAdminNotCounted(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	at := func(d time.Duration) *time.Time {
@@ -1762,7 +1763,7 @@ func TestConstraintAdminLockout_InactiveOtherAdminNotCounted(t *testing.T) {
 		{name: "starts-in-1s", notBefore: at(time.Second), refused: true},
 		{name: "starts-now", notBefore: at(0)},
 		{name: "expires-in-1s", expiresAt: at(time.Second)},
-		{name: "expires-now", expiresAt: at(0)},
+		{name: "expires-now", expiresAt: at(0), refused: true},
 		{name: "expired-1s-ago", expiresAt: at(-time.Second), refused: true},
 		{name: "expired", expiresAt: at(-time.Hour), refused: true},
 	}

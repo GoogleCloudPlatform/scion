@@ -84,7 +84,8 @@ func TestValidateTestAdminIdentities_OffWithoutFlags(t *testing.T) {
 // named error. (Before --test-mode, "G1 test identities off" was a case
 // here: --test-mode=admin now always turns test identities on, so that
 // combination can no longer be expressed. hub.New still refuses it, see
-// pkg/hub TestNew_TestAdminGateRefusals.)
+// pkg/hub TestTestAdminGate_NewRefusesEachConditionWithNamedError, case
+// "G1 test identities off".)
 func TestValidateTestAdminIdentities_EachConditionRefused(t *testing.T) {
 	cases := []struct {
 		name   string

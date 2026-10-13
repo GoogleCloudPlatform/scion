@@ -465,6 +465,14 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 		snap.HubName = o.bootstrapKoanf.String("server.hub.hub_name")
 	}
 
+	// public_url keeps its bootstrap value the same way: a managed endpoints
+	// row carries it only after an admin sets it, and with none stored the
+	// hub resolves its endpoint from the bootstrap material at startup
+	// (StoredPublicURL), so that is the value in effect (ptone/scion#3905).
+	if snap.PublicURL == "" && o.bootstrapKoanf != nil {
+		snap.PublicURL = o.bootstrapKoanf.String(config.PublicURLKey)
+	}
+
 	// Map-of-objects sections (runtimes, profiles, harness_configs): extract
 	// directly from DB docs or bootstrap koanf rather than going through the
 	// merged koanf. The koanf round-trip loses empty-map semantics ({} → no
