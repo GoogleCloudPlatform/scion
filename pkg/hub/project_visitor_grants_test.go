@@ -168,7 +168,7 @@ func (f *visitorGrantFixture) list(t *testing.T) []ProjectVisitor {
 	return resp.Visitors
 }
 
-// token signs a user token of issuer for subject and email; verified is
+// token signs an issuer token for a user of issuer for subject and email; verified is
 // the email_verified claim (nil leaves it out).
 func (f *visitorGrantFixture) token(t *testing.T, issuer, subject, email string, verified *bool) string {
 	t.Helper()

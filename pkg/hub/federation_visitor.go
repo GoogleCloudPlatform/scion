@@ -102,7 +102,7 @@ func (s *Server) resolveFederatedVisitor(ctx context.Context, identity Federated
 	return NewVisitorIdentity(u.ID, fu.IssuerURL(), fu.Subject(), email, fu.DisplayName()), nil
 }
 
-// linkPendingVisitor is first contact: a verified user token whose
+// linkPendingVisitor is first contact: a verified issuer token for a user whose
 // (issuer, subject) is not linked yet is linked to the pending federated
 // account granted to its email, which becomes active. It links only when
 // all of these hold:
