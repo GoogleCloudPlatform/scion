@@ -15,8 +15,10 @@
 package runtime
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
@@ -26,7 +28,7 @@ func TestBuildCommonRunArgs_BareReservedEnvNameIsNotEmitted(t *testing.T) {
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
-		Env:          []string{"SCION_SERVER_SESSION_SECRET", "SESSION_SECRET", "ORDINARY_BARE", "WITH_VALUE=v"},
+		Env:          []string{"SCION_SERVER_SESSION_SECRET", "SESSION_SECRET", "SCION_DEV_TOKEN", "SCION_AUTH_TOKEN", "ORDINARY_BARE", "WITH_VALUE=v"},
 	}
 
 	args, err := buildCommonRunArgs(config)
@@ -40,7 +42,7 @@ func TestBuildCommonRunArgs_BareReservedEnvNameIsNotEmitted(t *testing.T) {
 			emitted[args[i+1]] = true
 		}
 	}
-	for _, name := range []string{"SCION_SERVER_SESSION_SECRET", "SESSION_SECRET"} {
+	for _, name := range []string{"SCION_SERVER_SESSION_SECRET", "SESSION_SECRET", "SCION_DEV_TOKEN", "SCION_AUTH_TOKEN"} {
 		if emitted[name] {
 			t.Errorf("bare -e %s emitted; the container CLI would copy the value from this process", name)
 		}
@@ -49,5 +51,37 @@ func TestBuildCommonRunArgs_BareReservedEnvNameIsNotEmitted(t *testing.T) {
 		if !emitted[want] {
 			t.Errorf("-e %s not emitted", want)
 		}
+	}
+}
+
+func TestBuildCommonRunArgs_VolumePathsDoNotExpandRefusedHostEnv(t *testing.T) {
+	const sentinel = "refused-host-value"
+	for _, name := range []string{"SCION_SERVER_SESSION_SECRET", "SESSION_SECRET", "SCION_DEV_TOKEN", "SCION_AUTH_TOKEN"} {
+		t.Setenv(name, sentinel)
+	}
+	t.Setenv("ORDINARY_VOL_ROOT", "/ordinary")
+
+	config := RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		Volumes: []api.VolumeMount{
+			{Source: "/src/${SCION_SERVER_SESSION_SECRET}", Target: "/dst/${SESSION_SECRET}"},
+			{Source: "/src2/$SCION_DEV_TOKEN", Target: "/dst2/$SCION_AUTH_TOKEN"},
+			{Source: "${ORDINARY_VOL_ROOT}/pkg", Target: "/container/pkg"},
+		},
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, sentinel) {
+		t.Error("run args carry a refused host value in a mount path")
+	}
+	if !strings.Contains(joined, "-v /ordinary/pkg:/container/pkg") {
+		t.Errorf("ordinary volume expansion missing from args: %s", joined)
 	}
 }

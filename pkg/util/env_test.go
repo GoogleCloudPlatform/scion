@@ -224,3 +224,27 @@ func TestExpandEnvRefusing(t *testing.T) {
 		t.Errorf("ExpandEnvRefusing with nil predicate = %q, %v; want the env value and no refusals", got, refused)
 	}
 }
+
+func TestIsAgentRefusedHostEnvName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"SCION_SERVER_SESSION_SECRET": true,
+		"SESSION_SECRET":              true,
+		"SCION_DEV_TOKEN":             true,
+		"SCION_AUTH_TOKEN":            true,
+		"SCION_DEV_TOKEN_FILE":        false,
+		"SCION_HUB_ENDPOINT":          false,
+		"HOME":                        false,
+	} {
+		if got := IsAgentRefusedHostEnvName(name); got != want {
+			t.Errorf("IsAgentRefusedHostEnvName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestEnvWithoutAgentRefusedNames(t *testing.T) {
+	in := []string{"HOME=/h", "SCION_SERVER_SESSION_SECRET=x", "SESSION_SECRET=x", "SCION_DEV_TOKEN=x", "SCION_AUTH_TOKEN=x", "PATH=/bin", "NOVALUE"}
+	got := EnvWithoutAgentRefusedNames(in)
+	if strings.Join(got, ",") != "HOME=/h,PATH=/bin,NOVALUE" {
+		t.Errorf("EnvWithoutAgentRefusedNames = %v", got)
+	}
+}

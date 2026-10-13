@@ -3108,22 +3108,13 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 	return agentEnv, warnings, missingKeys, dropped
 }
 
-// hostCredentialEnvNames are host env names holding this process's own hub
-// credentials. An agent receives its own token through opts.Env and the token
-// file, never through host passthrough.
-var hostCredentialEnvNames = map[string]bool{
-	"SCION_DEV_TOKEN":  true,
-	"SCION_AUTH_TOKEN": true,
-}
-
 // refuseHostEnvForAgent reports whether the host env value of name must never
 // be copied into an agent's env, whether by an empty-value passthrough or by
-// ${VAR} expansion. It covers every name reserved for the server process (see
-// util.IsServerSecretEnvName) and hostCredentialEnvNames. Values set
+// ${VAR} expansion (see util.IsAgentRefusedHostEnvName). Values set
 // explicitly by the caller (opts.Env) are not host passthrough and are
 // unaffected.
 func refuseHostEnvForAgent(name string) bool {
-	return util.IsServerSecretEnvName(name) || hostCredentialEnvNames[name]
+	return util.IsAgentRefusedHostEnvName(name)
 }
 
 // expandConfigHubEndpoint returns the SCION_HUB_ENDPOINT value from a scion

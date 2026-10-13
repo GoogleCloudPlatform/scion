@@ -21,7 +21,7 @@ import (
 )
 
 func TestGatherAuthWithEnv_ReservedHostEnvIsNotGathered(t *testing.T) {
-	reserved := []string{"SCION_SERVER_SESSION_SECRET", "SESSION_SECRET", "SCION_SERVER_HUB_CONDUIT_PEERSECRET"}
+	reserved := []string{"SCION_SERVER_SESSION_SECRET", "SESSION_SECRET", "SCION_SERVER_HUB_CONDUIT_PEERSECRET", "SCION_DEV_TOKEN", "SCION_AUTH_TOKEN"}
 	for _, name := range reserved {
 		t.Setenv(name, "reserved-host-value")
 	}

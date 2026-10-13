@@ -46,6 +46,37 @@ func IsServerSecretEnvName(name string) bool {
 	return strings.HasPrefix(name, serverEnvPrefix) || legacyServerSecretEnvNames[name]
 }
 
+// hostCredentialEnvNames are env names holding this process's own hub
+// credentials. An agent receives its own token through its start options and
+// token file, never from this process's env.
+var hostCredentialEnvNames = map[string]bool{
+	"SCION_DEV_TOKEN":  true,
+	"SCION_AUTH_TOKEN": true,
+}
+
+// IsAgentRefusedHostEnvName reports whether the host env value of name must
+// never reach anything an agent can see (its env, its mount paths): every
+// server-reserved name (IsServerSecretEnvName) and this process's own hub
+// credentials. It is the single predicate for every host-to-agent path.
+func IsAgentRefusedHostEnvName(name string) bool {
+	return IsServerSecretEnvName(name) || hostCredentialEnvNames[name]
+}
+
+// EnvWithoutAgentRefusedNames returns env (KEY=VALUE entries, as from
+// os.Environ) without the entries whose name IsAgentRefusedHostEnvName
+// refuses, for a child process that must not inherit them.
+func EnvWithoutAgentRefusedNames(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if IsAgentRefusedHostEnvName(name) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // ExpandEnvRefusing is ExpandEnv, except that every variable for which refuse
 // reports true expands to the empty string without reading the environment.
 // Refused names are returned (deduplicated, in first-seen order) so callers

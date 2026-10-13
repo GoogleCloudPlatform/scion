@@ -23,6 +23,8 @@ func TestExpandDirEnvEntry_ReservedHostEnvIsNotResolved(t *testing.T) {
 	const sentinel = "reserved-host-value"
 	t.Setenv("SCION_SERVER_SESSION_SECRET", sentinel)
 	t.Setenv("SESSION_SECRET", sentinel)
+	t.Setenv("SCION_DEV_TOKEN", sentinel)
+	t.Setenv("SCION_AUTH_TOKEN", sentinel)
 	t.Setenv("ORDINARY_VAR", "ordinary")
 
 	for _, tc := range []struct{ key, value string }{
@@ -31,6 +33,9 @@ func TestExpandDirEnvEntry_ReservedHostEnvIsNotResolved(t *testing.T) {
 		{"A", "${SESSION_SECRET}"},
 		{"B", "$SCION_SERVER_SESSION_SECRET"},
 		{"${SESSION_SECRET}", "v"},
+		{"SCION_DEV_TOKEN", ""},
+		{"SCION_AUTH_TOKEN", ""},
+		{"D", "${SCION_AUTH_TOKEN}"},
 	} {
 		k, v, ok := expandDirEnvEntry(tc.key, tc.value)
 		if ok || strings.Contains(k, sentinel) || strings.Contains(v, sentinel) {
@@ -43,5 +48,24 @@ func TestExpandDirEnvEntry_ReservedHostEnvIsNotResolved(t *testing.T) {
 	}
 	if _, v, ok := expandDirEnvEntry("C", "x-${SESSION_SECRET}-${ORDINARY_VAR}"); !ok || v != "x--ordinary" {
 		t.Errorf("mixed expansion = (%q, %v); want %q", v, ok, "x--ordinary")
+	}
+}
+
+func TestAltEnvKeySatisfied_RefusedHostEnvDoesNotSatisfy(t *testing.T) {
+	for _, name := range []string{"SCION_SERVER_SESSION_SECRET", "SESSION_SECRET", "SCION_DEV_TOKEN", "SCION_AUTH_TOKEN"} {
+		t.Setenv(name, "refused-host-value")
+		if altEnvKeySatisfied(nil, []string{name}) {
+			t.Errorf("%s in this process's env satisfied an auth requirement", name)
+		}
+		if !altEnvKeySatisfied(map[string]string{name: "resolved"}, []string{name}) {
+			t.Errorf("%s in the resolved env did not satisfy an auth requirement", name)
+		}
+	}
+	t.Setenv("ORDINARY_CREDENTIAL_PATH", "/path")
+	if !altEnvKeySatisfied(nil, []string{"MISSING_VAR", "ORDINARY_CREDENTIAL_PATH"}) {
+		t.Error("an ordinary host env var did not satisfy an auth requirement")
+	}
+	if altEnvKeySatisfied(nil, []string{"MISSING_VAR"}) {
+		t.Error("an unset var satisfied an auth requirement")
 	}
 }
