@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import sys
 from typing import Any
 
@@ -580,7 +581,11 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
 #     under the top-level installedPlugins list in ~/.copilot/config.json;
 #   - installing over an installed (even disabled) plugin replaces and
 #     re-enables it;
-#   - uninstall of a plugin that is not installed exits 1.
+#   - uninstall of a plugin that is not installed exits 1;
+#   - `copilot plugin uninstall <name>` is ambiguous: with a same-named
+#     marketplace plugin it acts on that one (a local marketplace plugin is
+#     disabled, the direct install stays). `<name>@` (empty marketplace)
+#     targets only the direct install and leaves marketplace plugins alone.
 # config.json is also copilot's sign-in file and an auth-file provision
 # replaces it with the staged secret, so registration is read back from
 # config.json rather than inferred from the cache dir.
@@ -635,10 +640,35 @@ class CopilotPluginInstaller(scion_harness.PluginInstaller):
                 return entry
         return None
 
+    @staticmethod
+    def enabled(entry: dict[str, Any] | None) -> bool:
+        """The one "registered and enabled" predicate install and is_present
+        share. Strict: copilot 1.0.97 always writes enabled: true; an entry
+        without it fails the install loudly rather than reinstalling
+        silently every start."""
+        return isinstance(entry, dict) and entry.get("enabled") is True
+
+    def direct_root(self) -> str:
+        return os.path.join(self.copilot_home, "installed-plugins", "_direct")
+
+    def _remove_direct_dir(self, name: str, path: Any) -> None:
+        """Remove a leftover install dir, only when it is strictly inside
+        installed-plugins/_direct (never the root, never outside it)."""
+        if not isinstance(path, str) or not path or not os.path.lexists(path):
+            return
+        root = os.path.realpath(self.direct_root())
+        real = os.path.realpath(path)
+        if os.path.dirname(real) != root or os.path.islink(path):
+            self.ctx.info(f"agent plugin {name}: not removing {path}: not a dir directly under {root}")
+            return
+        shutil.rmtree(real, ignore_errors=True)
+        if os.path.lexists(real):
+            raise scion_harness.PluginInstallError(f"cannot remove leftover install dir {real}")
+
     def _find_direct_dir(self, name: str) -> str:
         """Scan installed-plugins/_direct for a dir whose plugin.json names
         the plugin; "" when none does."""
-        root = os.path.join(self.copilot_home, "installed-plugins", "_direct")
+        root = self.direct_root()
         try:
             entries = sorted(os.listdir(root))
         except OSError:
@@ -658,20 +688,30 @@ class CopilotPluginInstaller(scion_harness.PluginInstaller):
         if proc.returncode != 0:
             raise scion_harness.cli_failure("copilot plugin install", proc)
         entry = self.registration(plugin.name)
-        if entry is None or entry.get("enabled") is False:
+        if not self.enabled(entry):
             raise scion_harness.PluginInstallError(
                 f"copilot plugin install exit 0 but {plugin.name} is not registered "
                 "as enabled in ~/.copilot/config.json")
         path = entry.get("cache_path")
-        if not isinstance(path, str) or not os.path.isdir(path):
+        if not isinstance(path, str) or not path or not os.path.isdir(path):
             path = self._find_direct_dir(plugin.name)
+        if not path:
+            # Recording it would report "installed" while is_present stays
+            # false, a silent reinstall every start.
+            raise scion_harness.PluginInstallError(
+                f"copilot plugin install registered {plugin.name} but no install dir was found "
+                "(no cache_path, nothing under installed-plugins/_direct)")
         return {"name": plugin.name, "path": path}
 
     def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
-        """copilot plugin uninstall. Success is judged by the result: the
-        plugin must no longer be registered in config.json (copilot 1.0.97
-        exits 1 for a plugin that is not installed)."""
-        proc = self._run("plugin", "uninstall", name)
+        """copilot plugin uninstall <name>@ (the direct install only, never a
+        user's same-named marketplace plugin). Success is judged by the
+        result: the plugin must no longer be registered in config.json
+        (copilot 1.0.97 exits 1 for a plugin that is not installed). A
+        leftover install dir is then removed: when the registration was
+        already gone (an auth-file start rewrites config.json), the CLI
+        removes nothing."""
+        proc = self._run("plugin", "uninstall", f"{name}@")
         if self.registration(name) is not None:
             if proc.returncode != 0:
                 raise scion_harness.cli_failure("copilot plugin uninstall", proc)
@@ -681,6 +721,7 @@ class CopilotPluginInstaller(scion_harness.PluginInstaller):
             self.ctx.info(
                 f"agent plugin {name}: copilot plugin uninstall exit {proc.returncode}, "
                 "plugin no longer registered")
+        self._remove_direct_dir(name, native_ref.get("path"))
 
     def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
         """The install still exists and copilot still lists it as enabled.
@@ -688,7 +729,7 @@ class CopilotPluginInstaller(scion_harness.PluginInstaller):
         (an auth-file provision writes the staged config.json, a re-provision
         can reset the home); the plugin is then reinstalled. No CLI call."""
         entry = self.registration(name)
-        if entry is None or entry.get("enabled") is not True:
+        if not self.enabled(entry):
             return False
         path = entry.get("cache_path") or native_ref.get("path")
         return isinstance(path, str) and bool(path) and os.path.isdir(path)

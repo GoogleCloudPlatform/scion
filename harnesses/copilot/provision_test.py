@@ -877,6 +877,13 @@ class _FakeCopilotCLI:
         self.fail_install = False
         self.install_registers = True
         self.omit_cache_path = False
+        self.omit_enabled = False
+        self.no_cache_dir = False
+        # A user's same-named plugin from a local marketplace ("live", not
+        # in installedPlugins); a bare-name uninstall disables it instead
+        # of touching the direct install (copilot 1.0.97).
+        self.user_marketplace_plugin: str | None = None
+        self.user_marketplace_disabled = False
         self.uninstall_keeps_entry = False
         self.uninstall_rc = 0
 
@@ -917,7 +924,8 @@ class _FakeCopilotCLI:
             # <id> is the source dir's basename, not the plugin name.
             cache = os.path.join(home, "installed-plugins", "_direct", os.path.basename(src))
             shutil.rmtree(cache, ignore_errors=True)
-            shutil.copytree(src, cache)
+            if not self.no_cache_dir:
+                shutil.copytree(src, cache)
             if self.install_registers:
                 data = self._load(home)
                 plugins = [e for e in data.get("installedPlugins", []) if e.get("name") != name]
@@ -926,6 +934,8 @@ class _FakeCopilotCLI:
                          "enabled": True, "source": {"source": "local", "path": src}}
                 if self.omit_cache_path:
                     entry.pop("cache_path")
+                if self.omit_enabled:
+                    entry.pop("enabled")
                 plugins.append(entry)
                 data["installedPlugins"] = plugins
                 self._save(home, data)
@@ -934,20 +944,25 @@ class _FakeCopilotCLI:
                 "\nWarning: Direct plugin installs (repos, URLs, local paths) are deprecated. "
                 "Only plugin@marketplace installs will be supported in a future release.\n")
         if args[:2] == ["plugin", "uninstall"]:
-            name = args[2]
+            arg = args[2]
+            if not arg.endswith("@") and arg == self.user_marketplace_plugin:
+                self.user_marketplace_disabled = True
+                return subprocess.CompletedProcess(
+                    argv, 0, f'Plugin "{arg}@usermkt" disabled. It is still on disk at /mkt — nothing was removed.\n', "")
+            name = arg[:-1] if arg.endswith("@") else arg
             data = self._load(home)
             plugins = data.get("installedPlugins", [])
-            entry = next((e for e in plugins if e.get("name") == name), None)
+            entry = next((e for e in plugins if e.get("name") == name and not e.get("marketplace")), None)
             if self.uninstall_keeps_entry:
                 return subprocess.CompletedProcess(argv, self.uninstall_rc, "", "error: busy")
             if entry is None:
                 return subprocess.CompletedProcess(
                     argv, 1, "", f'Failed to uninstall plugin: Error: Request plugins.uninstall failed '
-                    f'with message: Plugin "{name}" is not installed\n')
+                    f'with message: Plugin "{arg}" is not installed\n')
             shutil.rmtree(entry.get("cache_path", ""), ignore_errors=True)
             data["installedPlugins"] = [e for e in plugins if e is not entry]
             self._save(home, data)
-            return subprocess.CompletedProcess(argv, 0, f'Plugin "{name}" uninstalled successfully.\n', "")
+            return subprocess.CompletedProcess(argv, 0, f'Plugin "{arg}" uninstalled successfully.\n', "")
         return subprocess.CompletedProcess(argv, 2, "", "unexpected")
 
 
@@ -1075,8 +1090,8 @@ class CopilotAgentPluginsTest(BaseTelemetryTest):
         self.reconcile()
         self.assertEqual(self.cli.calls, [
             ["copilot", "--version"],
-            ["copilot", "plugin", "uninstall", "a"],
-            ["copilot", "plugin", "uninstall", "b"],
+            ["copilot", "plugin", "uninstall", "a@"],
+            ["copilot", "plugin", "uninstall", "b@"],
             ["copilot", "plugin", "install", self.bundle_dir("b")],
         ])
         self.assertEqual([e["name"] for e in self.config()["installedPlugins"]], ["b"])
@@ -1153,6 +1168,80 @@ class CopilotAgentPluginsTest(BaseTelemetryTest):
         ref = inst.install(p, renamed)
         self.assertEqual(ref, {"name": "a", "path": self.direct_dir("src-x")})
         self.assertTrue(inst.is_present("a", ref))
+
+    def test_uninstall_targets_direct_install_only(self) -> None:
+        # copilot 1.0.97: a bare-name uninstall acts on a same-named
+        # marketplace plugin (the user's); "<name>@" targets the direct one.
+        self.stage({"a": "d1"})
+        self.reconcile()
+        self.cli.user_marketplace_plugin = "a"
+        self.stage({})
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls[-1], ["copilot", "plugin", "uninstall", "a@"])
+        self.assertFalse(self.cli.user_marketplace_disabled)
+        self.assertEqual(self.config()["installedPlugins"], [])
+        self.assertEqual(self.status()["removed"], ["a"])
+
+    def test_removal_after_registration_lost_removes_cache_dir(self) -> None:
+        # Auth-file agents: config.json is rewritten from the secret every
+        # start, so at removal time the registration is already gone and the
+        # CLI (exit 1, not installed) removes nothing. The _direct dir must
+        # not be orphaned.
+        self.stage({"a": "d1"})
+        self.reconcile()
+        self.assertTrue(os.path.isdir(self.direct_dir("a")))
+        with open(self.config_path, "w") as f:
+            json.dump({"copilot_tokens": {"https://github.com:octo": "placeholder-token"}}, f)
+        self.stage({})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.cli.calls[-1], ["copilot", "plugin", "uninstall", "a@"])
+        self.assertFalse(os.path.exists(self.direct_dir("a")))
+        self.assertTrue(os.path.isdir(os.path.join(self.copilot_home, "installed-plugins", "_direct")))
+        self.assertEqual(self.status()["removed"], ["a"])
+        self.assertEqual(self.state(), {})
+
+    def test_leftover_dir_removal_is_confined_to_direct(self) -> None:
+        inst = provision.CopilotPluginInstaller(self.ctx(infos=[]))
+        outside = os.path.join(self.tmp, "outside")
+        os.makedirs(outside)
+        root = os.path.join(self.copilot_home, "installed-plugins", "_direct")
+        nested = os.path.join(root, "x", "y")
+        os.makedirs(nested)
+        link = os.path.join(root, "link")
+        os.symlink(outside, link)
+        for path in (outside, root, nested, link, os.path.join(root, "..", "..")):
+            inst.uninstall("gone", {"path": path})
+        self.assertTrue(os.path.isdir(outside))
+        self.assertTrue(os.path.isdir(nested))
+        self.assertTrue(os.path.islink(link))
+        inst.uninstall("gone", {"path": os.path.join(root, "x")})
+        self.assertFalse(os.path.exists(os.path.join(root, "x")))
+
+    def test_install_without_enabled_flag_fails_loudly(self) -> None:
+        # One predicate for install and is_present: an entry without
+        # enabled: true is not recorded (a warning, retried next start)
+        # rather than recorded and silently reinstalled every start.
+        self.cli.omit_enabled = True
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("is not registered as enabled", warnings[0])
+        self.assertEqual(self.state(), {})
+
+    def test_install_without_install_dir_fails_loudly(self) -> None:
+        self.cli.omit_cache_path = True
+        self.cli.no_cache_dir = True
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("registered a but no install dir was found", warnings[0])
+        self.assertEqual(self.state(), {})
+        self.assertEqual(self.status()["installed"], [])
 
     def test_is_present_requires_enabled_registration(self) -> None:
         self.stage({"a": "d1"})
