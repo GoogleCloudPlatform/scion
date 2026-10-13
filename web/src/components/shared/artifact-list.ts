@@ -213,6 +213,8 @@ export class ScionArtifactList extends LitElement {
       this.loadingMore = true;
     } else {
       this.loading = true;
+      // Until this list answers, New artifact follows no earlier answer.
+      this.canCreate = false;
     }
     this.error = null;
     try {

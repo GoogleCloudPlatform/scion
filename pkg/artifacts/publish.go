@@ -59,9 +59,10 @@ func BlobPath(hubID, digest string) string {
 
 // canCreateIn reports whether the caller may publish artifacts in scope:
 // its credential permits artifact.create there and the host authorizes it.
-// It is the decision the create routes make before answering 403
-// (handlePublish, handleCreate), which split it only to explain a missing
-// credential scope; the list reports it as canCreate.
+// It is the create decision: handlePublish and handleCreate refuse with 403
+// when it is false (explaining a missing credential scope first), a move
+// refuses a target project it is false for, and the list reports it as
+// canCreate.
 func canCreateIn(ctx context.Context, host Host, scope string) bool {
 	return host.Permits(ctx, scope, PermissionCreate) && host.Authorize(ctx, scope, PermissionCreate)
 }
@@ -120,11 +121,12 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "scope is required")
 		return
 	}
-	permitted := s.host.Permits(ctx, scope, PermissionCreate)
-	if !permitted && s.writeMissingScope(w, r) {
-		return
-	}
-	if !permitted || !s.host.Authorize(ctx, scope, PermissionCreate) {
+	if !canCreateIn(ctx, s.host, scope) {
+		// A credential that does not permit artifact.create may be
+		// explained; the decision itself is canCreateIn's.
+		if !s.host.Permits(ctx, scope, PermissionCreate) && s.writeMissingScope(w, r) {
+			return
+		}
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish artifacts in this scope")
 		return
 	}

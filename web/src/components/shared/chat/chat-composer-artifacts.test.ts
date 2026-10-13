@@ -480,4 +480,36 @@ describe('scion-artifact-picker', () => {
     ]);
     expect(el.shadowRoot.querySelector('.new-artifact')).toBeNull();
   });
+
+  it('does not ask whether the caller may publish while the list has artifacts', async () => {
+    apiFetch.mockImplementation(() => Promise.resolve(listResponse([item(A, 'One')])));
+    const el = await openPicker();
+    await settle(el);
+    expect(titles(el)).toEqual(['One']);
+    const scoped = apiFetch.mock.calls
+      .map((c) => c[0] as string)
+      .filter((u) => u.includes('scope='));
+    expect(scoped).toEqual([]);
+  });
+
+  it('shows New artifact only once the scoped read says yes', async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const yes = JSON.stringify({ artifacts: [], canCreate: true });
+    apiFetch.mockImplementation((url: string) =>
+      url.includes('scope=')
+        ? held.then(() => new Response(yes, { status: 200 }))
+        : Promise.resolve(listResponse([]))
+    );
+    const el = await openPicker();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.placeholder.empty')).toBeTruthy();
+    expect(el.shadowRoot.querySelector('.new-artifact')).toBeNull();
+    release();
+    await settle(el);
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.new-artifact')).not.toBeNull();
+  });
 });

@@ -220,7 +220,7 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 	// for only the shared ones gives an empty list.
 	scopeShares := p.scope != "" && host.Authorize(ctx, p.scope, PermissionRead)
 	if p.scope != "" && p.sharedOnly && !scopeShares {
-		writeJSON(w, http.StatusOK, ArtifactListResponse{Artifacts: []ArtifactListItem{}})
+		writeJSON(w, http.StatusOK, ArtifactListResponse{Artifacts: []ArtifactListItem{}, CanCreate: canCreateIn(ctx, host, p.scope)})
 		return
 	}
 	items, next, err := s.collect(ctx, host, b, CandidateQuery{

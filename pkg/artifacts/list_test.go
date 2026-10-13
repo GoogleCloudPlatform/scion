@@ -935,6 +935,18 @@ func TestListCanCreate(t *testing.T) {
 		}
 	}
 
+	// A caller that may publish in a project but not read in it gets the
+	// same answer with shared=1, where the list itself is empty.
+	f.host.allow(outside, "project-3", PermissionCreate)
+	for _, q := range []string{"", "&shared=1"} {
+		if !f.list(&outside, listPath+"&scope=project-3"+q).CanCreate {
+			t.Errorf("create without read, query %q: canCreate false", q)
+		}
+	}
+	if !canPublish(outside, "project-3") {
+		t.Error("create without read: publish refused")
+	}
+
 	// The credential half: Authorize allows but Permits refuses.
 	f.svc.host = permitsOffHost{f.host}
 	if f.list(&agentA, listPath+"&scope=project-1").CanCreate {
