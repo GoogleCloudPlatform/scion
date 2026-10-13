@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/backoff"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
@@ -80,7 +81,8 @@ func (a *Agent) applyWelcomeKeys(w *conduitv1.Welcome) {
 // waiting a full interval.
 func (a *Agent) refreshKeysLoop(ctx context.Context) {
 	interval := a.opts.KeyRefreshInterval
-	wait, retry := interval, min(keyRetryMin, interval)
+	retry := newKeyRetryBackoff(interval)
+	wait := interval
 	for {
 		ch, stop := clock.After(a.clk, wait)
 		select {
@@ -91,12 +93,20 @@ func (a *Agent) refreshKeysLoop(ctx context.Context) {
 		}
 		err := a.RefreshKeys(ctx)
 		if err == nil || ctx.Err() != nil {
-			wait, retry = interval, min(keyRetryMin, interval)
+			wait = interval
+			retry.Reset()
 			continue
 		}
-		wait, retry = retry, min(retry*2, keyRetryMax, interval)
+		wait = retry.Failure()
 		log.Warn("Conduit: grant key refresh failed, retrying in %v: %v", wait, err)
 	}
+}
+
+// newKeyRetryBackoff returns the grant-key retry policy for a refresh
+// interval: keyRetryMin doubling to keyRetryMax, both bounded by the
+// interval, without jitter.
+func newKeyRetryBackoff(interval time.Duration) *backoff.Backoff {
+	return &backoff.Backoff{Base: min(keyRetryMin, interval), Max: min(keyRetryMax, interval)}
 }
 
 // errKeyRedirect refuses a redirect on the grant-key route.

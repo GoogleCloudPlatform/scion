@@ -178,19 +178,20 @@ func TestBuildDaemonStartArgsForwardsExplicitFlags(t *testing.T) {
 }
 
 // TestBuildDaemonStartArgsForwardsEnableTestIdentities checks that an
-// explicit --enable-test-identities reaches the --foreground child, and that
-// it is not forwarded when unset (the hub default stays off).
+// explicit --test-mode=member (which replaced --enable-test-identities)
+// reaches the --foreground child, and that it is not forwarded when unset
+// (the hub default stays off).
 func TestBuildDaemonStartArgsForwardsEnableTestIdentities(t *testing.T) {
 	resetServerFlags()
-	enableTestIdentities = false
+	testModeValue = ""
 	defer func() {
 		resetServerFlags()
-		enableTestIdentities = false
+		testModeValue = ""
 	}()
 
 	newCmd := func(args ...string) *cobra.Command {
 		c := &cobra.Command{Use: "start", RunE: func(*cobra.Command, []string) error { return nil }}
-		c.Flags().BoolVar(&enableTestIdentities, "enable-test-identities", false, "")
+		registerTestModeFlags(c)
 		c.SetArgs(args)
 		if err := c.Execute(); err != nil {
 			t.Fatalf("parse: %v", err)
@@ -198,10 +199,11 @@ func TestBuildDaemonStartArgsForwardsEnableTestIdentities(t *testing.T) {
 		return c
 	}
 
-	assert.Contains(t, buildDaemonStartArgs(newCmd("--enable-test-identities")), "--enable-test-identities=true")
-	enableTestIdentities = false
+	assert.Contains(t, buildDaemonStartArgs(newCmd("--test-mode=member:hub-1")), "--test-mode=member:hub-1")
+	testModeValue = ""
 	for _, a := range buildDaemonStartArgs(newCmd()) {
-		assert.False(t, strings.HasPrefix(a, "--enable-test-identities"), "unset flag must not be forwarded: %s", a)
+		assert.False(t, strings.HasPrefix(a, "--test-mode"), "unset flag must not be forwarded: %s", a)
+		assert.False(t, strings.HasPrefix(a, "--enable-test-identities"), "removed flag must not be forwarded: %s", a)
 	}
 }
 

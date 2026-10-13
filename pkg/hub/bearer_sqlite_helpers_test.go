@@ -269,6 +269,11 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 			"projectId": f.project, "scope": "project", "triggerActivities": []string{"COMPLETED"},
 		},
 		{"inbox.notification.subscription.write", "/api/v1/notifications/subscriptions/{id}"}: {"triggerActivities": []string{"FAILED"}},
+		// Thread group create names the fixture project; adding a thread
+		// files the fixture group conversation (removed again by the
+		// following DELETE .../threads/{conversationId} row).
+		{"inbox.threadgroup.create", "/api/v1/thread-groups"}:              {"name": f.inbox.createConversations + "-thread-group", "projectId": f.project},
+		{"inbox.threadgroup.update", "/api/v1/thread-groups/{id}/threads"}: {"conversationId": f.inbox.groupConversation},
 		{"inbox.notification.template.create", "/api/v1/notifications/templates"}: {
 			"name": f.inbox.createConversations + "-template", "triggerActivities": []string{"COMPLETED"}, "projectId": f.project,
 		},

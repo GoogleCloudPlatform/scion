@@ -230,6 +230,9 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"inbox.conversation.resolve":             {"project:read"},
 	"inbox.notification.subscription.create": {"project:read"},
 	"inbox.notification.template.create":     {"project:read"},
+	"inbox.threadgroup.create":               {"project:read"},
+	"inbox.threadgroup.update":               {"project:read"},
+	"inbox.threadgroup.delete":               {"project:read"},
 }
 
 // TestBearerDispositionMatrix_CatalogEntryPoints drives real tokens through

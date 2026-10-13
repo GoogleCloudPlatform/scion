@@ -586,6 +586,30 @@ func TestConduitTunnel_RevokedUserClosed4401(t *testing.T) {
 	require.Eventually(t, func() bool { return a.Len() == 0 }, 10*time.Second, 20*time.Millisecond)
 }
 
+// TestConduitTunnel_TrackedStreamMarked: the tunnel open path tracks its
+// stream with the tunnel marker, so its re-checks also require
+// ActionTunnel.
+func TestConduitTunnel_TrackedStreamMarked(t *testing.T) {
+	tf := newTunnelFixture(t)
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	c := tf.ownerClient(t)
+	st := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	roundTrip(t, st, "tracked")
+
+	a := tf.srv.conduitAuthz.Load()
+	require.NotNil(t, a)
+	a.mu.Lock()
+	var tracked []*conduitUserStream
+	for s := range a.streams {
+		tracked = append(tracked, s)
+	}
+	a.mu.Unlock()
+	require.Len(t, tracked, 1)
+	assert.Equal(t, grant.StreamKindTCP, tracked[0].Kind)
+	assert.Equal(t, 3000, tracked[0].Port)
+	assert.True(t, tracked[0].ViaTunnel)
+}
+
 // TestConduitTunnel_SharedSession: two tunnels to two agents share one
 // user session; revoking one leaves the other open and the session up.
 func TestConduitTunnel_SharedSession(t *testing.T) {

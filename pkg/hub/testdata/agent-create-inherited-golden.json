@@ -1,28 +1,41 @@
 {
-  "description": "Inherited create-time values, one case per tier. sources is the input, written by hand: what the web reads from existing APIs, in their response shapes (template: a template list item; projectSettings: GET /api/v1/projects/{id}/settings; hubSettings: GET /api/v1/settings/public). dispatched is generated from the hub's actual dispatch by go test ./pkg/hub -run TestCreateAgent_InheritedValuesGolden -update, by the web form's field key, for an agent created with no config keys. The web's inherited-placeholder test checks its placeholders against dispatched.",
+  "description": "Inherited create-time values, one case per tier. sources is the input, written by hand: what the web reads from existing APIs, in their response shapes (template: a template list item, whose agentConfig is the template's own scion-agent.yaml snapshot; the hub reads job keys (model, message_mode) from it and ignores the row's config and any environment key (image, telemetry, reserved env) a template sets, ptone/scion#4222; projectSettings: GET /api/v1/projects/{id}/settings; hubSettings: GET /api/v1/settings/public). dispatched is generated from the hub's actual dispatch by go test ./pkg/hub -run TestCreateAgent_InheritedValuesGolden -update, by the web form's field key, for an agent created with no config keys. The web's inherited-placeholder test checks its placeholders against dispatched.",
   "cases": [
     {
       "tier": "template",
       "sources": {
         "template": {
+          "image": "row-top-image:v1",
           "config": {
-            "model": "template-model",
-            "messageMode": "lineage",
+            "model": "row-model",
+            "messageMode": "branch",
             "telemetry": {
               "enabled": true
             },
             "env": {
               "SCION_AUTO_EXPOSE_PORTS": "true"
-            }
+            },
+            "image": "row-image:v1"
+          },
+          "agentConfig": {
+            "model": "template-model",
+            "message_mode": "lineage",
+            "telemetry": {
+              "enabled": false
+            },
+            "env": {
+              "SCION_AUTO_EXPOSE_PORTS": "false"
+            },
+            "image": "snap-image:v1"
           }
         },
         "projectSettings": {},
-        "hubSettings": {}
+        "hubSettings": {
+          "defaultModel": "hub-model"
+        }
       },
       "dispatched": {
-        "autoExpose": "true",
         "config.model": "template-model",
-        "config.telemetry": "true",
         "messageMode": "lineage"
       }
     },
@@ -38,6 +51,9 @@
             "env": {
               "SCION_AUTO_EXPOSE_PORTS": "true"
             }
+          },
+          "agentConfig": {
+            "model": "template-model"
           }
         },
         "projectSettings": {

@@ -229,9 +229,7 @@ func TestCloudRunSandboxWatch_LogsStderrOnAbnormalExit(t *testing.T) {
 	}
 
 	var logs bytes.Buffer
-	prevLog := runtimeLog
-	runtimeLog = slog.New(slog.NewTextHandler(&logs, nil))
-	t.Cleanup(func() { runtimeLog = prevLog })
+	setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
 
 	rt := &CloudRunSandboxRuntime{
 		bin:          writeDyingSandbox(t, tmpDir, logPath),
@@ -245,7 +243,7 @@ func TestCloudRunSandboxWatch_LogsStderrOnAbnormalExit(t *testing.T) {
 		EntrypointLogOffset: int64(len(priorRunOutput)),
 	})
 
-	rt.watchSandbox(context.Background(), "dead-agent")
+	rt.watchSandbox(context.Background(), "dead-agent", rt.observe("dead-agent").nonce)
 
 	entry := rt.state.get("dead-agent")
 	if entry == nil || !entry.Stopped || entry.ExitCode == nil || *entry.ExitCode != 3 {
@@ -275,9 +273,7 @@ func TestCloudRunSandboxWatch_UnknownExitIsWarnNotError(t *testing.T) {
 	}
 
 	var logs bytes.Buffer
-	prevLog := runtimeLog
-	runtimeLog = slog.New(slog.NewTextHandler(&logs, nil))
-	t.Cleanup(func() { runtimeLog = prevLog })
+	setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
 
 	rt := &CloudRunSandboxRuntime{
 		// wait succeeds with non-numeric output: the exit code is unknown.
@@ -287,7 +283,7 @@ func TestCloudRunSandboxWatch_UnknownExitIsWarnNotError(t *testing.T) {
 	}
 	rt.state.add(&sandboxStateEntry{SandboxName: "agent", AgentID: "agent", AgentHome: agentHome})
 
-	rt.watchSandbox(context.Background(), "agent")
+	rt.watchSandbox(context.Background(), "agent", rt.observe("agent").nonce)
 
 	entry := rt.state.get("agent")
 	if entry == nil || !entry.Stopped || entry.ExitCode != nil {

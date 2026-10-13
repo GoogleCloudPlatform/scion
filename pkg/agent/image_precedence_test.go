@@ -514,12 +514,28 @@ func TestStart_TemplateSnapshotUsesTemplatesOwnRecordedImage(t *testing.T) {
 	if run.Image != "settings-pinned:v1" {
 		t.Fatalf("first start: image = %q, want the settings image", run.Image)
 	}
-	merged, err := os.ReadFile(filepath.Join(projectScionDir, "agents", "test-agent", "scion-agent.json"))
+	// Provision no longer persists the settings image (ptone/scion#4561).
+	// Write it into scion-agent.json to stand for an agent provisioned
+	// before that change, whose merged record still carries it.
+	cfgPath := filepath.Join(projectScionDir, "agents", "test-agent", "scion-agent.json")
+	merged, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(merged), "settings-pinned:v1") {
-		t.Fatalf("precondition: the merged scion-agent.json should carry the settings image, got %s", merged)
+	if strings.Contains(string(merged), "settings-pinned:v1") {
+		t.Fatalf("scion-agent.json carries the settings image; provision must not persist it: %s", merged)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(merged, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy["image"] = "settings-pinned:v1"
+	legacyData, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, legacyData, 0644); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := os.RemoveAll(tplDir); err != nil {
