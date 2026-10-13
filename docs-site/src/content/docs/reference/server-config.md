@@ -52,7 +52,7 @@ Controls the central Hub API server.
 | :--- | :--- | :--- | :--- |
 | `port` | int | `9810` | HTTP port to listen on (standalone mode). In combined mode (`--enable-web`), the Hub API is served on the web port instead and this setting is ignored. |
 | `host` | string | `"0.0.0.0"` | Network interface to bind to. |
-| `public_url` | string | | The externally accessible URL of the Hub (used for callbacks). |
+| `public_url` | string | | The externally accessible URL of the Hub (used for callbacks). Also editable in the admin UI; resolved at startup with operator settings first (`SCION_SERVER_HUB_ENDPOINT`, `SCION_SERVER_BASE_URL`, `--base-url`), then a value saved in the database, then this file. See [`server.hub.public_url`: environment first](/scion/reference/admin-settings/#serverhubpublic_url-environment-first). |
 | `agent_endpoint` | string | | Optional override of `public_url` used **only** for the Hub URL injected into agents (`SCION_HUB_ENDPOINT`). Use when agents reach the Hub on a different address than users — e.g. an internal VPC URL — while invite links, chat-bridge links, the OIDC issuer default, and the `cloudrun_invoker` audience default keep using `public_url`. Must be `scheme://host[:port]` only: `http` or `https`, an IP literal or a hostname of letters, digits, `_`, `-`, and `.`, no path, query, fragment, or credentials (a trailing `/` is stripped); the Hub fails to start otherwise. When unset, agents receive the Hub's regular endpoint (`public_url`, or the endpoint the Hub resolves when `public_url` is unset). **Scope:** injected into agents on every broker attached to this Hub, including remote brokers — see [Splitting the agent endpoint from the public URL](#splitting-the-agent-endpoint-from-the-public-url). **Security:** an `http://` value sends agent bearer tokens and fetched secrets unencrypted; prefer `https://` unless the network is trusted and isolated. |
 | `monitoring_dashboard_url` | string | | Optional link to an external monitoring dashboard for this Hub, such as a Cloud Monitoring or Grafana dashboard. Must be an absolute `http` or `https` URL with a host, at most 2048 characters, with no user credentials, a port (if any) from 1 to 65535, and no whitespace (including Unicode spaces such as U+00A0), control characters (C0, DEL or C1), bidirectional formatting characters, invisible format characters (U+00AD, U+180E, U+200B to U+200D, U+2060, U+FEFF) or U+FFFD; a path, query and fragment are allowed. Any other value is rejected with `422` when saved through the admin API. When set, the Health page header shows **Open monitoring dashboard**, which opens the URL in a new tab; when unset, no link is shown. Editable in **Server Config** and applied without a restart. Only callers with `hub.health.read` receive it (as `links.monitoring_dashboard` in the health summary); it is not part of `/api/v1/settings/public`. Env: `SCION_SERVER_HUB_MONITORINGDASHBOARDURL` (seed: `SCION_SEED_SERVER_HUB_MONITORINGDASHBOARDURL`). |
 | `gcp_project_id` | string | | GCP project ID used for minting GCP Service Accounts. Auto-detected if running on GCE/Cloud Run. |
@@ -151,6 +151,12 @@ server:
 ```
 
 Both keys are read only at Hub startup; restart the Hub after changing them. They cannot be set through the admin server-config API (see [Layer 0](#layer-0--bootstrap-file--env-only)).
+
+**Brokers on a Cloud Run service.** An asynchronous launch keeps running in the Runtime Broker after the create response. A broker hosted on a Cloud Run service therefore needs CPU allocated outside requests: deploy the service with `--no-cpu-throttling`, and keep its minimum instances above zero.
+
+- **Symptoms.** If the service allocates CPU only during requests (the Cloud Run default), the launch stalls after the create response. The broker stops reporting, so the Hub ends the launch and sets the agent to `error` with launch error `broker_lost` (or `launch_timeout`). With minimum instances at zero, idle scale-in can also end a broker mid-launch, with the same result.
+- **Startup warning.** The server cannot see the service's CPU setting. When the Runtime Broker is enabled and the process runs on a Cloud Run service (`K_SERVICE` set, `CLOUD_RUN_INSTANCE` unset), it logs this warning once at startup: "If this Cloud Run service allocates CPU only during requests, async agent launches will stall after the create response and be reaped. Deploy with --no-cpu-throttling and set SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true to silence this."
+- **Silencing it.** Set the environment variable `SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true` on a service deployed with `--no-cpu-throttling`. It is an assertion, not a check: remove it if you redeploy with CPU throttling. The Cloud Run deploy script (`scripts/cloudrun/deploy.sh`) sets both.
 
 #### Request performance tracing
 
@@ -965,6 +971,8 @@ For server and infrastructure configurations, Scion parses several boolean envir
 | `SCION_REQUIRE_STABLE_SIGNING_KEY` | Demands a persistent session/JWT signing key. When enabled, startup aborts (fail-closed) if no stable key/secret can be resolved in hosted mode, preventing JWT signature mismatches across replica restarts. | `false` |
 
 ### Hub Endpoint Resolution
+
+The operator-configured Hub endpoint is resolved from the environment, flags and `settings.yaml`. When no operator setting pins it (`SCION_SERVER_HUB_ENDPOINT`, `SCION_SERVER_BASE_URL` or `--base-url`), a `server.hub.public_url` saved in the database through the admin API replaces it at startup; see [`server.hub.public_url`: environment first](/scion/reference/admin-settings/#serverhubpublic_url-environment-first).
 
 When `server.hub.public_url` is not explicitly set, the Hub endpoint injected into agents is resolved in this order:
 

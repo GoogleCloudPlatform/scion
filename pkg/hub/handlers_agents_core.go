@@ -4671,7 +4671,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		ResolvedTimezone: tz.TZ,
 		TimezoneSource:   tz.Source,
 		Warnings:         warnings,
-		Disposition:      agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged),
+		Disposition:      agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil),
 	})
 }
 
@@ -4832,15 +4832,20 @@ func agentPatchSnapshotOf(agent *store.Agent) agentPatchSnapshot {
 
 // agentUpdateDisposition builds the PATCH response's disposition: the wire
 // keys whose value the request changed, listed by when the edit takes
-// effect. A key sent with its current value is in no list. Metadata, the
+// effect. A key sent with its current value is in no list, except
+// gcp_identity when the PATCH records a service-account assignment for it
+// (see saAssignmentRecorded below). Metadata, the
 // GCP identity (writable only before the first start) and the timezone
 // pin are applied; the config keys are split by configEditDisposition.
 // held is reserved for config edits held while a container is live and is
 // always empty, because such edits are refused; a timezone pin edited on a
 // live agent is applied, with a warning only when the zone its next start
 // gets changes. before is the agent as it stood before the writes, after
-// the agent as written.
-func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged bool) AgentUpdateDisposition {
+// the agent as written. saAssignmentRecorded reports that the PATCH wrote
+// a service-account assignment row; gcp_identity is then listed under
+// applied even when the request names the current account, because the
+// row records this caller as its source.
+func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged, saAssignmentRecorded bool) AgentUpdateDisposition {
 	applied := append([]string{}, configApplied...)
 	if after.Name != before.name {
 		applied = append(applied, "name")
@@ -4858,7 +4863,7 @@ func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, confi
 	if after.AppliedConfig != nil {
 		gcpAfter = after.AppliedConfig.GCPIdentity
 	}
-	if !reflect.DeepEqual(gcpAfter, before.gcpIdentity) {
+	if saAssignmentRecorded || !reflect.DeepEqual(gcpAfter, before.gcpIdentity) {
 		applied = append(applied, "gcp_identity")
 	}
 	if timezoneChanged {

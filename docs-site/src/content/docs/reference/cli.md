@@ -14,6 +14,7 @@ These flags are available on all commands:
 - `--format <string>`: Output format (`json` or `plain`).
 - `--hub <url>`: Hub API endpoint URL (overrides `SCION_HUB_ENDPOINT`).
 - `--no-hub`: Disable Hub integration for this invocation (local-only mode).
+- `--hub-profile <name>`: Use a target-hub profile (overrides `SCION_HUB_PROFILE`). See `scion hub profile` and [Test identities on another test hub](/scion/hosted/user/test-identity-target-hubs/).
 - `-y, --yes`: Answer Yes to every confirmation prompt, including destructive ones whose interactive default is No. Required to confirm when stdin is not a terminal.
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, so it also answers Yes to every confirmation; errors on ambiguous prompts).
 - `--debug`: Enable verbose debug output for this command. Agents it starts are not affected; use `--agent-log-level` on `scion start` or `scion resume` to debug an agent.
@@ -806,7 +807,9 @@ Manages the Scion workspace (Project).
         - `--image-registry <string>`: Configure the container image registry path (e.g., `ghcr.io/myorg`).
     - **Note:** If you are in a git repository, add `.scion/agents` to your `.gitignore` to avoid issues with nested git worktrees: `echo ".scion/agents" >> .gitignore`
     - **Hub Integration:** If a Hub endpoint is configured, `init` will prompt to register the new project with the Hub.
-- `scion project list` (alias `ls`): List all projects known to Scion on this machine, including their type, agent count, status, and workspace path.
+- `scion project list` (alias `ls`): List the projects on all registered hubs, each with its hub, merged with the project directories on this machine (a linked directory shows its local path; an unlinked one shows hub `-`). Offline unless `--refresh` is given.
+    - Flags: `--hub <hub>` (only that hub's projects; a nickname or URL), `--refresh` (fetch the project list of each logged-in hub, or of `--hub`, first), `--local` (list the project directories on this machine instead, with their type, agent count, status and workspace path).
+    - Scripts that parse `scion project list` should use `scion project list --local`, which keeps the earlier output, JSON included.
 - `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned projects before cleaning up.
 - `scion project status [project]` (alias `health`): Show agent status for a project from the Hub: counts per lifecycle phase and per activity, a per-agent table (template, harness, phase, activity), and troubleshooting hints for blocked, stalled, or errored agents. Uses the current project when no name is given.
     - Flags: `--all` (report across all projects on the Hub), `--json` (JSON output).
@@ -1043,7 +1046,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `list`: List your access tokens.
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
     - `delete <token-id>`: Permanently delete a token.
-- `scion hub status`: Show the current Hub connection status.
+- `scion hub status`: Show the current Hub connection status, including where the bearer comes from (`Source`: `OAuth`, `agent-token`, `env`, `dev`, `transport` or `none`; `bearerSource` in `--json`). With a hub profile selected it shows the profile instead: endpoint, bearer source (`profile:issuer` or `profile:<alias>`), the identity (email, kind, tier, expiry) and the transport principal and audience, all decoded locally (no token is printed). It probes the target with the profile credential and exits non-zero when the request sent did not carry the profile's bearer (or carried another credential), when the transport principal is not the profile's IAP service account, or when the target refuses the credential. In agent mode it runs only with a target-hub profile.
 - `scion hub notifications`: **Deprecated**. This command has been moved to the top-level `scion notifications` command group.
 - `scion hub link`: Link the current local project to the Hub. The project is created on the Hub if it does not exist, or, after a prompt, linked to an existing project with the same name (the repository name from the git remote, or the directory name). With no Hub endpoint configured, the command fails with one line: start the local Hub with `scion server start` (the first run opens setup), or set a remote Hub with `scion config set hub.endpoint <url>`. On the local workstation Hub the link confirmation is skipped; a remote Hub still asks (or needs `--yes`). The prompt to pick among matching projects and the offer to sync local agents after linking appear on both.
 - `scion hub unlink`: Unlink the current project from the Hub locally. It marks the project unlinked (`hub.linked: false`) and clears its Hub project ID; it does not turn Hub mode off (`hub.enabled` is left as it is) and does not remove the project or its agents from the Hub. Agent commands in an unlinked project refuse with a pointer to `scion hub link`.
@@ -1068,20 +1071,30 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub users`: Administer hub users. Not available in agent mode.
     - `provision <email>`: Pre-register a user (status `invited`, the same record an admin invite creates). The person still signs in through a configured sign-in provider; the role is assigned at first sign-in. Running it again with the same details is safe and reports that the user is already pre-registered. Requires the `user.invite` permission (hub admins hold it) and an interactive sign-in; it is not available on a Hub running with dev auth. See `POST /api/v1/users` in the [API reference](/scion/reference/api/).
         - Flags: `--display-name <string>`, `--note <string>`, `--json`.
-- `scion hub test-identity`: Manage hub test identities: short-lived synthetic member or viewer users for testing on a test hub. Not available in agent mode. The Hub must run with `--enable-test-identities` (otherwise every subcommand gets `404`), and you need the `test_identity.issue` permission: an admin sign-in, or a hub-bound access token carrying the `test_identity:issue` scope (set it in `SCION_HUB_TOKEN` for CI). A test identity's access token is written **only** to the file named by `--out`: the path must not exist yet (an existing file or a symlink, even a dangling one, is refused before any request is sent), and the file is created with mode `0600`. The token is never printed; standard output and standard error carry only the identity's ID, email, role, expiry and the token file path. See `/api/v1/test-identities` in the [API reference](/scion/reference/api/).
-    - `issue --out <file>`: Issue a new test identity and write its token to `<file>`.
+- `scion hub profile`: Manage target-hub profiles: named, non-secret descriptions of another test hub, stored in `~/.scion/hub-profiles/<name>.yaml` (mode `0600`). Select one with `--hub-profile <name>` or `SCION_HUB_PROFILE`. With a profile selected, the bearer comes only from the profile, never from a login, `~/.scion/scion-token`, `SCION_AUTH_TOKEN` or `SCION_HUB_TOKEN`; a command with no applicable profile credential fails. Only these commands run with a profile: `hub status`, `hub profile`, `hub test-identity` (except `delegate` and `web-code`), `hub projects` (list, `info`, `create`, `delete`; name the project explicitly) and `artifact publish`, `get`, `versions` and `delete` (`publish` needs `--project <name or id>` on the target). Every other command is refused, and `--hub`/`--no-hub` cannot be combined with a profile. A profile whose endpoint names this agent's own hub (`SCION_HUB_ENDPOINT` or `SCION_HUB_URL`) is refused; when either is set but is not an absolute URL, every profile is refused. The check compares parsed host names and ports (lowercase, without a trailing dot, IP literals in canonical form, loopback and container bridge host names treated as one host; paths ignored). It does not resolve DNS aliases, so a profile naming another name of the same hub is not detected; the target hub's own delegation remains the boundary. In agent mode, `profile add`, `show` and `remove` apply the same check. `--as <alias>` and `--run <label>` (or `SCION_HUB_RUN`) are flags of the `hub` and `artifact` commands that apply only with a profile. See [Test identities on another test hub](/scion/hosted/user/test-identity-target-hubs/).
+    - `add <name>`: Add a profile. Flags: `--endpoint <url>` (required; https, or http on a loopback host), `--transport <iap|none>` (default `iap`), `--iap-audience <client-id>` and `--uat-sa <email>` (the target's IAP service account; both required for `iap`), `--issuer-sa <email>` (the target's issuer service account), `--issuer-delegation member=<id>` (only the member tier), `--replace`.
+    - `list`, `show <name>`: List profiles; show one and its cached runs. Flag: `--json`.
+    - `remove <name>`: Remove a profile. Refused while it has cached runs, unless `--remove-cache`.
+- `scion hub test-identity`: Manage hub test identities: short-lived synthetic member or viewer users for testing on a test hub. Without a hub profile it uses your usual Hub credential and is not available in agent mode. With a hub profile it acts as the profile's issuer delegation, keeps issued identities in the run cache (`~/.scion/hub-profiles/<profile>/run-<label>/<alias>.json`, mode `0600`, created exclusively, symlinks refused), and also runs in agent mode (`issue`, `token`, `list`, `delete`, `teardown`; not `web-code` or `delegate`), but only against a profile for another hub. The Hub must run with `--enable-test-identities` (otherwise every subcommand gets `404`), and you need the `test_identity.issue` permission: an admin sign-in, or a hub-bound access token carrying the `test_identity:issue` scope (set it in `SCION_HUB_TOKEN` for CI). Without a hub profile, a test identity's access token is written **only** to the file named by `--out`: the path must not exist yet (an existing file or a symlink, even a dangling one, is refused before any request is sent), and the file is created with mode `0600`. The token is never printed; standard output and standard error carry only the identity's ID, email, role, expiry and the token file path. See `/api/v1/test-identities` in the [API reference](/scion/reference/api/).
+    - `issue --out <file>`: Issue a new test identity and write its token to `<file>`. With a hub profile, `issue --as <alias> --run <label>` stores it in the run cache instead (no `--out`); the alias must not exist in the run yet.
         - Flags:
-            - `--out <file>`: File to write the token to (required).
+            - `--out <file>`: File to write the token to (required without a hub profile).
             - `--role <member|viewer>`: Role of the identity (default `member`). There is no admin role.
             - `--ttl <duration>`: Token lifetime, in whole seconds or more (for example `30m`). Default: the Hub's, `30m`. The token never outlives the identity.
             - `--lifetime <duration>`: Identity lifetime (for example `2h`). Default: the Hub's, `1h`; the Hub refuses more than `8h`. After it, the identity's tokens stop working.
             - `--purpose <text>`: Short label recorded on the identity and in the audit log (at most 200 characters).
             - `--json`: Print `identity`, `tokenFile` and `tokenExpiresAt` as JSON (never the token).
-    - `token <id> --out <file>`: Issue a new token for a live test identity you issued (an admin sign-in may do it for any), for runs longer than one token. Flags: `--out <file>` (required), `--ttl <duration>`, `--json`.
-    - `web-code <id> --out <file>`: Mint a single-use web-login code for a live test identity you issued, for a browser session as the identity (see [Browser Sessions as Test Identities](/scion/contributing/test-identity-browser-sessions/)). The code is valid for 5 minutes and can be redeemed once at `POST /auth/test-identity/redeem`; a new code replaces an unredeemed earlier one. The Hub must run with `--enable-test-identities` and carry the test infrastructure marker (`scion server test-infra mark`); otherwise the Hub answers `404`. `--out` must not exist yet: an existing file, a symlink, or a path under a symlinked directory is refused before any request is sent. The file is created with mode `0600` and holds only the code, which is never printed. Flags: `--out <file>` (required), `--json` (prints `identityId`, `codeId`, `expiresAt` and `codeFile`, never the code).
+    - `token <id> --out <file>`: Issue a new token for a live test identity you issued (an admin sign-in may do it for any), for runs longer than one token. Flags: `--out <file>` (required), `--ttl <duration>`, `--json`. With a hub profile, `token --as <alias> --run <label>` re-issues the cached identity's token into the cache. Member-tier tokens are also re-issued automatically when a command uses `--as` within 5 minutes of the token's expiry; an expired identity is refused ("issue a new one").
+    - `web-code <id> --out <file>`: Mint a single-use web-login code for a live test identity you issued, for a browser session as the identity (see [Browser Sessions as Test Identities](/scion/contributing/test-identity-browser-sessions/)). The code is valid for 5 minutes and can be redeemed once at `POST /auth/test-identity/redeem`; a new code replaces an unredeemed earlier one. The Hub must run with `--enable-test-identities` and carry the test infrastructure marker (`scion server test-infra mark`); otherwise the Hub answers `404`. `--out` must not exist yet: an existing file, a symlink, or a path under a symlinked directory is refused before any request is sent. The file is created with mode `0600` and holds only the code, which is never printed. Flags: `--out <file>` (required), `--json` (prints `identityId`, `codeId`, `expiresAt` and `codeFile`, never the code). Not available with a hub profile or in agent mode.
     - `list`: List the test identities you issued (every identity for an admin sign-in). Only live identities are listed unless `--include-expired` is set. Flags: `--limit <n>` (default: the Hub's, 100; at most 500), `--include-expired`, `--json`.
     - `delete <id>`: Delete a test identity. Its role bindings and group memberships go with it, and its tokens stop working at once. The delete is refused while the identity still owns agents, or is the last owner of a project; the command lists them, and you delete them first. Deleting an identity that does not exist (for example, deleted already) succeeds with a notice on standard error, so a teardown step can run twice.
+        - With a hub profile, `delete --as <alias> --run <label>` deletes the cached identity and removes it from the cache.
         - `--purge`: Also remove what the identity created: its agents (with their files on the broker), schedules, groups and projects. Only resources the Hub recorded as created under the identity are removed. A project that has another owner, or resources someone else created, is kept, and the identity's access to it is removed. Agents the identity owns without that record are listed as unproven and never removed. The command prints what it removed and kept. If the purge cannot finish (for example a broker is offline) it lists what is left and exits non-zero; run it again to finish.
+    - `teardown --run <label>`: With a hub profile only. Delete every test identity of the run (each cached alias, and any identity the profile's delegation lists whose purpose names the run), then remove the run's cache. An identity already gone counts as done; if anything is left, the command lists it and exits non-zero (run it again). Flags: `--purge` (purge each identity instead of deleting it), `--json`.
+    - `delegate`: Manage workload issuer delegations on a test hub: the human consent step that lets the target's issuer service account issue member and viewer identities within your own live `test_identity.issue` authority. Takes your interactive sign-in on that Hub; never an access token, an agent token or a hub profile. Not available in agent mode.
+        - `create --workload-sub <unique id>`: Create a member-tier delegation pinned to the numeric unique id of the target's issuer service account (it must be in the Hub's startup allowlist `server.hub.test_identities.workload_issuers`). Flags: `--ttl <duration>` (default 8h, at most 7 days), `--member-cap <1-5>`, `--label <text>`, `--json`. The printed delegation id is not a secret; give it to the runner's profile with `--issuer-delegation member=<id>`.
+        - `list`: List your delegations. Flag: `--json`.
+        - `revoke <id>`: Revoke a delegation; issuance through it stops at once.
 
 ```bash
 # CI: issue a member identity, run tests with its token, then tear it down
@@ -1171,7 +1184,7 @@ Publishes files as artifacts and fetches them by reference (`scion://artifact/<i
     - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
 - `scion artifact get <ref>`: Write an artifact's entry file to stdout, or with `--out` the file or the whole bundle.
     - Flags: `--out`, `-o <path>` (a file, an existing directory for a single file, or the directory a bundle is written into), `--force` (replace files that already exist under `--out`).
-- `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`.
+- `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`. Discarded versions (a rejected or stale review, or an upload not finished in time) are listed among them by number with their reason, so gaps in the numbering are explained.
 - `scion artifact share <ref>`: Create a share link and print it, with its expiry and the command that revokes it. The link is shown only once. Only the artifact's owner or a user with an admin grant can share it; not available in agent mode, and the Hub refuses agents. See [Share links](/scion/reference/artifacts/#share-links).
     - Flags: `--ttl <n>h|<n>d` (link lifetime; default: the Hub's, 7 days unless changed; a lifetime above the Hub's maximum, 30 days unless changed, is rejected, not shortened), `--list` (list the active links instead), `--revoke <link-id>` (revoke one instead).
 - `scion artifact delete <ref>`: Delete an artifact after confirming (`--yes` skips the prompt; required when stdin is not a terminal). Its grants and share links end with it and its files are removed after the hub's grace period; there is no undelete. The artifact's owner, a user with an admin grant on it, or an admin of its home project can delete it; not available in agent mode, and the Hub refuses agents. See [Deletion](/scion/reference/artifacts/#deletion).
@@ -1325,11 +1338,86 @@ This command modifies the database directly. Use it only when normal admin acces
 
 ### `scion doctor`
 
-Runs host-side diagnostics: checks Git, tmux, the active container runtime, and runtime-specific
-health (Docker/Podman daemon, or Kubernetes cluster/namespace/RBAC/CSI access). Supports
-`--format json`.
+Checks this machine and, when a Hub is configured, the Hub and the platform it manages. It is for
+people checking that Scion is set up and healthy, or troubleshooting agents, from their own
+machine. It is not a self-check for ordinary agents (see `sciontool doctor` below), and it is not
+available inside agent containers.
 
 **Usage:** `scion doctor [flags]`
+
+**Flags:**
+
+- `--verbose`: Add the per-runtime-broker and per-Hub-instance tables, agent counts by phase,
+  and integration details to the Platform Health section. Text output only: JSON output carries
+  the full summary under `healthSummary` instead.
+- `--format json`: Print one JSON object and nothing else on stdout (see below).
+
+**Sections:**
+
+- **General**: Git and tmux on this machine.
+- **Hub Health**: Hub reachability (`/healthz`), authentication, unmapped GCP service accounts of
+  the linked project, and checks of this machine's settings (NFS mounts, Kubernetes profiles,
+  the deprecated server hub endpoint source on hosts configured as a server, telemetry, container
+  images, broker credentials).
+- **Platform Health**: The Hub's health summary (`GET /api/v1/admin/health/summary`), the same
+  data as the [health dashboard](/scion/workstation/dashboard/). It shows the overall status, then
+  every "Needs attention" item in the Hub's order (critical items as failures, warnings as
+  warnings), then one line each for the Hub fleet, runtime brokers, agents, dispatch and
+  integrations, the service account check when it cannot run, and the test identity settings when
+  any is on. Doctor shows the summary as the Hub computed it and does not recompute the status.
+  - Reading the summary needs the `hub.health.read` permission (hub admins). Without it, the
+    section shows `requires hub.health.read`, and Hub Health checks runtime brokers and agents
+    from the lists you can see instead. That agent check uses the same rule as the dashboard:
+    agents in error, crashed or offline count (stopped agents are ignored), and stalled agents do
+    not.
+  - The summary is read whenever the Hub answers, even if its `/healthz` reports it unhealthy.
+    Text that comes from the Hub, such as runtime broker names and integration reasons, is shown
+    with control characters removed.
+  - If the Hub instance cannot read its database, the section shows "Health data not available
+    (database unreachable from this hub instance)" and the list-based checks run.
+- **Runtime**: The active container runtime: the Docker or Podman daemon, the Apple container CLI,
+  or for Kubernetes and Cloud Run the runtime's own diagnostics (cluster connectivity, namespace
+  access, RBAC permissions, CSI drivers).
+
+**Exit status:** doctor reports check results and does not turn them into an exit status. It
+exits zero whenever it ran, including when the Hub is unreachable or `/healthz` reports it
+unhealthy, when the health summary status is `unhealthy`, or when a runtime diagnostic check
+fails; read the results from the text output or from `status` in the JSON output. It exits
+non-zero only when the command itself fails, for example on an invalid flag or when it cannot
+write its output.
+
+**JSON output:** `--format json` prints a single object for every runtime:
+
+```json
+{
+  "status": "warn",
+  "general": [{"name": "git", "status": "pass", "message": "git version 2.43.0"}],
+  "hubChecks": [{"name": "hub-connectivity", "status": "pass", "message": "..."}],
+  "platformHealth": [{"name": "health-summary", "status": "warn", "message": "Platform is degraded (1 item(s) need attention)"}],
+  "healthSummary": {"status": "degraded", "attention": [], "...": "..."},
+  "runtime": "docker",
+  "checks": [{"name": "runtime", "status": "pass", "message": "Active runtime: docker"}]
+}
+```
+
+`status` is `fail` when any check failed, `warn` when any check warned, and `pass` otherwise. It
+does not affect the exit status. `healthSummary` is the Hub's summary response unchanged, and is
+omitted when it could not be read. `runtime` is omitted when no project was found.
+
+**Platform Health for an assistant agent:** an assistant agent that a hub admin has authorized
+to monitor the platform runs `scion doctor` from an environment a person owns, not from inside an
+agent container (agent containers do not offer the command, and the Hub accepts the health
+summary only from user credentials). A hub admin mints a hub-boundary token and the environment
+uses it with no stored login:
+
+```bash
+scion hub token create --boundary hub --name health-check \
+  --scopes hub_health:read,broker:read,agent:list --expires 30d
+SCION_HUB_TOKEN=scion_pat_... scion doctor --format json
+```
+
+`broker:read` and `agent:list` are for the list-based checks; add `hub_integrations:read` to see
+integration names.
 
 :::note[In-container diagnostics]
 A separate **`sciontool doctor`** command runs *inside* an agent container and diagnoses the
