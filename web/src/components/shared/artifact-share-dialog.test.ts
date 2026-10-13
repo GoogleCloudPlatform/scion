@@ -525,6 +525,60 @@ describe('share dialog', () => {
     expect($$(el, '.grant')).toHaveLength(1);
   });
 
+  it('offers read or write, never admin, on the home project grant, and raises it to write', async () => {
+    const s = mockServer({ grants: [HOME, PRIYA] });
+    const el = await mount();
+    const home = $$(el, '.grant')[0];
+    const select = home.querySelector('sl-select') as (HTMLElement & { value: string }) | null;
+    expect(select).not.toBeNull();
+    expect(select!.value).toBe('read');
+    expect(Array.from(select!.querySelectorAll('sl-option')).map((o) => o.getAttribute('value'))).toEqual(
+      ['read', 'write']
+    );
+    expect(home.querySelector('sl-button')).toBeNull();
+    choose(select!, 'write');
+    await settle(el);
+    const post = s.calls.find((c) => c.method === 'POST' && c.url === `${BASE}/grants`)!;
+    expect(post.body).toEqual({ subjectKind: 'scope', subjectRef: 'proj-1', permission: 'write' });
+  });
+
+  it('locks a grant to another project while cross-project sharing is off, keeping Remove', async () => {
+    const platform: ArtifactGrant = {
+      id: 'g-platform',
+      subjectKind: 'scope',
+      subjectRef: 'proj-2',
+      permission: 'read',
+      createdAt: '2026-10-03T12:00:00Z',
+    };
+    const s = mockServer({ cross: false, grants: [HOME, platform] });
+    const el = await mount();
+    const row = $$(el, '.grant')[1];
+    expect(row.querySelector('sl-select')!.hasAttribute('disabled')).toBe(true);
+    expect(row.textContent).toContain('Cross-project sharing is off: this grant can be removed but not changed');
+    const remove = button(el, 'Remove', row);
+    expect(remove.hasAttribute('disabled')).toBe(false);
+    remove.click();
+    await settle(el);
+    expect(s.calls.some((c) => c.method === 'DELETE' && c.url === `${BASE}/grants/g-platform`)).toBe(
+      true
+    );
+  });
+
+  it('lets a grant to another project change while cross-project sharing is on', async () => {
+    const platform: ArtifactGrant = {
+      id: 'g-platform',
+      subjectKind: 'scope',
+      subjectRef: 'proj-2',
+      permission: 'read',
+      createdAt: '2026-10-03T12:00:00Z',
+    };
+    mockServer({ cross: true, grants: [HOME, platform] });
+    const el = await mount();
+    const row = $$(el, '.grant')[1];
+    expect(row.querySelector('sl-select')!.hasAttribute('disabled')).toBe(false);
+    expect(row.textContent).not.toContain('can be removed but not changed');
+  });
+
   it('warns what a shorter expiry cuts and saves it', async () => {
     const s = mockServer({ links: [link('l-1', 7), link('l-2', 2)], grants: [HOME, PRIYA] });
     const el = await mount();

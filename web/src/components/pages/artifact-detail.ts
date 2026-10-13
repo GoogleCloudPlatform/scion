@@ -90,6 +90,7 @@ import type { CriticCounts, CriticTool } from '../../utils/critic.js';
 import '../shared/artifact-markdown-frame.js';
 import '../shared/detail-header.js';
 import '../shared/artifact-publish-dialog.js';
+import '../shared/artifact-move-dialog.js';
 import '../shared/artifact-share-dialog.js';
 import '../shared/code-editor.js';
 import './not-found.js';
@@ -194,6 +195,8 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private editError: string | null = null;
   @state() private publishOpen = false;
   @state() private shareOpen = false;
+  /** The Move dialog is open (ptone/scion#4583). */
+  @state() private moveOpen = false;
   /** The version a failed Edit publish left pending; the next attempt resumes it. */
   private editPending: PendingPublish | null = null;
   @state() private reviewing = false;
@@ -1068,7 +1071,23 @@ export class ScionPageArtifactDetail extends LitElement {
             }}
           ></scion-artifact-share-dialog>`
         : nothing}
+      ${this.data?.canManage
+        ? html`<scion-artifact-move-dialog
+            .artifact=${this.data.artifact}
+            ?open=${this.moveOpen}
+            @artifact-moved=${(e: CustomEvent<Artifact>): void => this.onMoved(e.detail)}
+            @artifact-move-closed=${(): void => {
+              this.moveOpen = false;
+            }}
+          ></scion-artifact-move-dialog>`
+        : nothing}
     `;
+  }
+
+  /** After a move the artifact lives under its new home project: open it there. */
+  private onMoved(moved: Artifact): void {
+    this.moveOpen = false;
+    navigateTo(artifactPagePath(moved));
   }
 
   private versionLabel(v: ArtifactVersion | undefined): string {
@@ -1175,6 +1194,17 @@ export class ScionPageArtifactDetail extends LitElement {
                         Grant review access
                       </sl-button>`
                     : nothing}
+                ${this.data!.canManage
+                  ? html`<sl-button
+                      size="small"
+                      @click=${(): void => {
+                        this.moveOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="folder-symlink"></sl-icon>
+                      Move…
+                    </sl-button>`
+                  : nothing}
                 ${v && f && ownFiles.length === 1
                   ? html`<sl-button
                       size="small"

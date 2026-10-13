@@ -252,6 +252,51 @@ describe('artifact page', () => {
     expect(open.getAttribute('rel')).toBe('noopener noreferrer');
   });
 
+  it('offers Move… to a caller who manages the artifact, and opens it at its new home after a move', async () => {
+    const moveButton = (el: ScionPageArtifactDetail): HTMLElement | undefined =>
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
+        b.textContent!.includes('Move…')
+      ) as HTMLElement | undefined;
+
+    mockFetch(artifact('notes.md', 'text/markdown'));
+    let el = await mount(true);
+    expect(moveButton(el)).toBeUndefined();
+    expect(el.shadowRoot!.querySelector('scion-artifact-move-dialog')).toBeNull();
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+
+    mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true });
+    el = await mount(true);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-move-dialog') as HTMLElement & {
+      open: boolean;
+      homeDeleted: boolean;
+      artifact: { id: string };
+    };
+    expect(dialog.open).toBe(false);
+    expect(dialog.homeDeleted).toBe(false);
+    expect(dialog.artifact.id).toBe(ID);
+    moveButton(el)!.click();
+    await el.updateComplete;
+    expect(dialog.open).toBe(true);
+
+    const paths: string[] = [];
+    const onNav = (e: Event): void => {
+      paths.push((e as CustomEvent<{ path: string }>).detail.path);
+    };
+    document.addEventListener('nav-click', onNav);
+    try {
+      const moved = { ...artifact('notes.md', 'text/markdown').artifact, scopeRef: 'p-2' };
+      dialog.dispatchEvent(
+        new CustomEvent('artifact-moved', { detail: moved, bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+    } finally {
+      document.removeEventListener('nav-click', onNav);
+    }
+    expect(paths).toEqual([`/projects/p-2/artifacts/${ID}`]);
+    expect(dialog.open).toBe(false);
+  });
+
   it('shows 404 when the hub answers 404', async () => {
     mockFetch(null);
     const el = await mount(true);
