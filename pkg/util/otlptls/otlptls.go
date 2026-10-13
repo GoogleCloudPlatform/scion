@@ -104,19 +104,24 @@ func (p *clientKeyPair) load() (tls.Certificate, error) {
 func (p *clientKeyPair) get(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 	cert, err := p.load()
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if err != nil {
-		// Warn once per failure streak: the server log bridge exports
-		// slog records, so a warning per handshake would feed itself.
-		if !p.failing {
-			slog.Warn("OTLP client certificate reload failed; using the last loaded certificate", "error", err)
-		}
-		p.failing = true
-		return p.last, nil
+	if err == nil {
+		p.failing = false
+		p.last = &cert
+		p.mu.Unlock()
+		return &cert, nil
 	}
-	p.failing = false
-	p.last = &cert
-	return p.last, nil
+	// Warn once per failure streak: the server log bridge exports slog
+	// records, so a warning per handshake would feed itself. The decision
+	// is made under the lock; the warning is logged after unlocking, so the
+	// lock never depends on the installed slog handler.
+	warn := !p.failing
+	p.failing = true
+	last := p.last
+	p.mu.Unlock()
+	if warn {
+		slog.Warn("OTLP client certificate reload failed; using the last loaded certificate", "error", err)
+	}
+	return last, nil
 }
 
 // ParseHeaders decodes the OTLP headers setting, a JSON object of header
