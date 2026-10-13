@@ -58,6 +58,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -1919,6 +1920,10 @@ type Server struct {
 	// check call succeeds or the check stops being enforced. Updated only
 	// by NoteSAAssignCheckCall. Shown on the admin health summary.
 	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
+	// observabilityExport is the startup state of the hub's own metrics
+	// and trace exporters (SetObservabilityExportStatus); nil until set.
+	// Shown read-only in the admin settings view.
+	observabilityExport atomic.Pointer[hubexport.Status]
 	// gcpIAMStartup is the deploy-time pair of GCP permission-check
 	// settings, resolved once in New. A stored value that is absent or
 	// cannot be used resolves to it (resolveGCPIAMSettings).

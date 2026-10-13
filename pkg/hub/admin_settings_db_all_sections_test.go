@@ -100,6 +100,9 @@ var layer1RoundTripSamples = map[string]string{
 	"auto_expose_ports.enabled":     `true`,
 	"quotas.enforce_broker_quotas":  `false`,
 	"agent_secrets.user_scope_only": `true`,
+	// hub_observability
+	"server.hub.observability.metrics_enabled": `true`,
+	"server.hub.observability.tracing_enabled": `false`,
 	// agent_defaults
 	"default_template":                        `"tmpl-a"`,
 	"default_harness_config":                  `"hc-a"`,
@@ -451,6 +454,7 @@ func TestPutServerConfigDB_MergedSections_ConcurrentWrite409(t *testing.T) {
 		{"auto_expose_ports", `{"enabled":true}`, `{"enabled":false}`, `{"auto_expose_ports": {"enabled": null}}`},
 		{"quotas", `{"enforce_broker_quotas":true}`, `{"enforce_broker_quotas":false}`, `{"quotas": {"enforce_broker_quotas": null}}`},
 		{"agent_secrets", `{"user_scope_only":true}`, `{"user_scope_only":false}`, `{"agent_secrets": {"user_scope_only": null}}`},
+		{"hub_observability", `{"metrics_enabled":true}`, `{"metrics_enabled":false}`, `{"server": {"hub": {"observability": {"metrics_enabled": null}}}}`},
 		{"notifications", `{"notification_channels":[{"type":"slack","params":{"channel":"#a"}}]}`, `{"notification_channels":[{"type":"slack","params":{"channel":"#b"}}]}`, `{"server": {"notification_channels": []}}`},
 		{"project_defaults", `{"default_scratchpad":true}`, `{"default_scratchpad":false}`, `{"default_scratchpad": null}`},
 	} {

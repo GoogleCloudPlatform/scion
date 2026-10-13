@@ -135,6 +135,12 @@ type Layer1Snapshot struct {
 	// Quotas
 	EnforceBrokerQuotas *bool
 
+	// Hub observability export switches (hub_observability section); nil
+	// when unset. Read once at startup: the exporters are created then,
+	// so ApplySnapshot does not apply them (restart_required).
+	HubMetricsEnabled *bool
+	HubTracingEnabled *bool
+
 	// Agent secrets
 	AgentSecretsUserScopeOnly *bool
 
@@ -962,6 +968,16 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.EnforceBrokerQuotas = &v
 	}
 
+	// Hub observability export switches
+	if k.Exists(config.HubMetricsEnabledKey) {
+		v := k.Bool(config.HubMetricsEnabledKey)
+		snap.HubMetricsEnabled = &v
+	}
+	if k.Exists(config.HubTracingEnabledKey) {
+		v := k.Bool(config.HubTracingEnabledKey)
+		snap.HubTracingEnabled = &v
+	}
+
 	// Agent secrets
 	if k.Exists("agent_secrets.user_scope_only") {
 		v := k.Bool("agent_secrets.user_scope_only")
@@ -1155,6 +1171,10 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Agent secrets — read from settings.yaml top-level agent_secrets
 	// section, so a file-mode admin save takes effect without a restart.
 	snap.AgentSecretsUserScopeOnly = gc.AgentSecretsUserScopeOnly
+
+	// Hub observability export switches — read at startup only.
+	snap.HubMetricsEnabled = gc.Hub.Observability.MetricsEnabled
+	snap.HubTracingEnabled = gc.Hub.Observability.TracingEnabled
 
 	// Agent defaults — read from settings.yaml top-level keys
 	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
