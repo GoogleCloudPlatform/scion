@@ -217,6 +217,16 @@ type HTTPAgentDispatcher struct {
 	// tests) and the wire field is omitted.
 	hubAgentDefaultsProvider func() opsettings.AgentDefaultsSettings
 
+	// hubTelemetryProvider returns the hub's settings telemetry config at
+	// dispatch time (see dispatchTelemetry). Nil = no hub telemetry default.
+	hubTelemetryProvider func() *api.TelemetryConfig
+
+	// templateJobConfigProvider returns a Hub template's job config: its
+	// AgentConfig snapshot (derived once and persisted when the row has
+	// none) with environment keys stripped (Server.templateJobConfigByID).
+	// Nil = read the row's stored snapshot only (store-only unit tests).
+	templateJobConfigProvider func(ctx context.Context, templateID string) *api.ScionConfig
+
 	// asyncLaunchSettings returns the async agent launch settings. Nil =
 	// every create is synchronous (tests, local dispatcher).
 	asyncLaunchSettings func() AsyncLaunchSettings
@@ -411,6 +421,19 @@ func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Conte
 // without a restart. Mirrors SetHarnessConfigRepairer.
 func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.AgentDefaultsSettings) {
 	d.hubAgentDefaultsProvider = fn
+}
+
+// SetHubTelemetryProvider registers the accessor for the hub's settings
+// telemetry config, read on every create, start and restart dispatch.
+func (d *HTTPAgentDispatcher) SetHubTelemetryProvider(fn func() *api.TelemetryConfig) {
+	d.hubTelemetryProvider = fn
+}
+
+// SetTemplateJobConfigProvider registers the accessor for a Hub template's
+// job config (its stripped AgentConfig snapshot), read for the template's
+// required secrets at create and provision dispatch.
+func (d *HTTPAgentDispatcher) SetTemplateJobConfigProvider(fn func(ctx context.Context, templateID string) *api.ScionConfig) {
+	d.templateJobConfigProvider = fn
 }
 
 // SetAutoExposePortsDefaultProvider registers the accessor for the hub's
@@ -828,6 +851,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// Read once, so the broker and the agent see the same set.
 	experiments := d.dispatchExperiments()
 
+	// Telemetry for this dispatch: separate tiers for a templateTiers
+	// broker, the legacy inline merge otherwise (see dispatch_telemetry.go).
+	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+
 	// Add configuration if available
 	if agent.AppliedConfig != nil {
 		// effectiveDispatchWorkspace applies the "a linked local provider
@@ -887,7 +914,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// or InlineConfig.Env, both of which outrank template and
 		// harness-config env at the broker) and lands at buildAgentEnv's
 		// lowest tier.
-		req.Config.HubAgentDefaults = remoteHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), experiments)
+		req.Config.HubAgentDefaults = remoteHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), experiments, tel.wireTelemetry())
+		req.Config.TelemetryPolicy = tel.telemetryPolicy()
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
 		// Classify config-level env vars as plain. Env-type secrets that
@@ -895,8 +923,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// secret-fetchable when resolveSecrets injects them below.
 		classifyEnvKeys(&req.EnvClassifications, agent.AppliedConfig.Env, api.EnvKindPlain)
 
-		// Thread through the full inline ScionConfig for broker-side provisioning
-		req.InlineConfig = agent.AppliedConfig.InlineConfig
+		// Thread through the full inline ScionConfig for broker-side
+		// provisioning, with its telemetry rebuilt for this broker (a copy;
+		// the agent record is not modified).
+		req.InlineConfig = tel.inlineConfig(agent.AppliedConfig.InlineConfig)
 
 		if d.debug {
 			d.log.Debug("buildCreateRequest: config sent to broker",
@@ -920,6 +950,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	if req.ResolvedEnv == nil {
 		req.ResolvedEnv = make(map[string]string)
 	}
+	tel.injectRequesterEnabled(req.ResolvedEnv, &req.EnvClassifications)
 	injectModelEnv(req.ResolvedEnv, agent.AppliedConfig)
 	if _, ok := req.ResolvedEnv["SCION_MODEL"]; ok {
 		classifyEnv(&req.EnvClassifications, "SCION_MODEL", api.EnvKindPlain)
@@ -981,12 +1012,13 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		}
 	}
 
-	// Include template secrets declarations for broker env-gather
+	// Include the template's secret declarations for broker env-gather,
+	// from the template's job config (its stripped AgentConfig snapshot,
+	// ptone/scion#4222), not the row's API-written Config.
 	if agent.AppliedConfig != nil && agent.AppliedConfig.TemplateID != "" {
-		tmpl, err := d.store.GetTemplate(ctx, agent.AppliedConfig.TemplateID)
-		if err == nil && tmpl != nil && tmpl.Config != nil && len(tmpl.Config.Secrets) > 0 {
-			req.RequiredSecrets = make([]api.RequiredSecret, len(tmpl.Config.Secrets))
-			for i, s := range tmpl.Config.Secrets {
+		if jc := d.templateJobConfig(ctx, agent.AppliedConfig.TemplateID); jc != nil && len(jc.Secrets) > 0 {
+			req.RequiredSecrets = make([]api.RequiredSecret, len(jc.Secrets))
+			for i, s := range jc.Secrets {
 				req.RequiredSecrets[i] = api.RequiredSecret{
 					Key:         s.Key,
 					Description: s.Description,
@@ -1317,6 +1349,9 @@ type projectDispatchInfo struct {
 	// sharedWorkspaceClone is a shared-plain git project's workspace clone
 	// settings (sharedWorkspaceCloneConfig); nil for every other project.
 	sharedWorkspaceClone *api.GitCloneConfig
+	// telemetryPolicy is the project's projectSettingTelemetryEnabled policy
+	// (projectTelemetryPolicy); nil when unset or unparsable.
+	telemetryPolicy *bool
 }
 
 // resolveDispatchProjectInfo resolves the project facts a dispatch carries.
@@ -1350,6 +1385,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	info.sharedWorkspace = project.IsSharedWorkspace()
 	info.workspaceMode = dispatchWorkspaceMode(project)
 	info.sharedWorkspaceClone = sharedWorkspaceCloneConfig(project)
+	info.telemetryPolicy = projectTelemetryPolicy(project)
 
 	// First check if the broker has a registered local path for this project.
 	if agent.RuntimeBrokerID != "" {
@@ -3547,11 +3583,19 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		harnessConfigHash = agent.AppliedConfig.HarnessConfigHash
 	}
 
+	// Telemetry for this start (see dispatch_telemetry.go). The inline
+	// telemetry is rebuilt from the requester's CreateInputs, never resent
+	// from the stored InlineConfig: an agent created by an older hub has a
+	// hub-default copy there, and resending it would keep that default at
+	// the top tier (ptone/scion#4222).
+	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
+
 	// Thread through updated InlineConfig so the broker can apply config
 	// changes (e.g. max_turns) made after initial provisioning.
 	var inlineConfig *api.ScionConfig
 	if agent.AppliedConfig != nil {
-		inlineConfig = agent.AppliedConfig.InlineConfig
+		inlineConfig = tel.inlineConfig(agent.AppliedConfig.InlineConfig)
 	}
 
 	// TODO(#1350): Thread envClassifications to broker via client.StartAgent.
@@ -3579,7 +3623,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments),
+		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
+		TelemetryPolicy:      tel.telemetryPolicy(),
 		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
 		TemplateName:         agent.Template,
 	}
@@ -3760,12 +3805,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// would. A resolution error is handled there as on start: it is logged
 	// and the restart proceeds without injected secrets.
 	projectInfo := startEnv.projectInfo
+	// Telemetry tiers for a templateTiers broker (see dispatch_telemetry.go).
+	// A restart sends no inline config, so a legacy broker keeps the
+	// telemetry its stored agent config already has.
+	tel := d.dispatchTelemetry(ctx, agent, projectInfo.telemetryPolicy)
+	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
 	extras := StartExtras{
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments),
+		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
+		TelemetryPolicy:      tel.telemetryPolicy(),
 		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
 		SharedWorkspace:      projectInfo.sharedWorkspace,
 		TemplateName:         agent.Template,

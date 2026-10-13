@@ -163,6 +163,10 @@ func (t *Template) LoadConfig() (*api.ScionConfig, error) {
 		return nil, fmt.Errorf("invalid config in %s: %w", configPath, err)
 	}
 
+	if err := api.ValidateMessageMode(cfg.MessageMode); err != nil {
+		return nil, fmt.Errorf("invalid config in %s: %w", configPath, err)
+	}
+
 	return &cfg, nil
 }
 
@@ -907,6 +911,9 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	}
 	if override.Model != "" {
 		result.Model = override.Model
+	}
+	if override.MessageMode != "" {
+		result.MessageMode = override.MessageMode
 	}
 	// ThinkingLevel is a *int: nil means "unset", so a nil override never
 	// clobbers a base value. Copy the pointee rather than the pointer — the
