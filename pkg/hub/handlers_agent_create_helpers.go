@@ -190,6 +190,10 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 	ac.NoAuth = req.NoAuth
 
 	if req.Config != nil {
+		// cleared_fields is hub bookkeeping for clears made after creation
+		// (nextClearedFields); a new agent starts with none, whatever the
+		// request carries (ptone/scion#3906).
+		req.Config.ClearedFields = nil
 		ac.Image = req.Config.Image
 		// Env gets its own map, never req.Config.Env itself: ac.InlineConfig
 		// below IS req.Config, so sharing the map would let every later

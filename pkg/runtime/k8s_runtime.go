@@ -32,6 +32,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -2803,6 +2804,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Env:             initEnv,
 			VolumeMounts:    initVolumeMounts,
 			SecurityContext: initSecurityContext,
+			// As on the home init containers: when provisioning fails
+			// without writing a termination message, the kubelet uses the
+			// tail of the container log, so the create error can say why.
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		}
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
 	}
@@ -3081,6 +3086,27 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 // keeps the autoscaler from removing the node while the pod runs and, on GKE
 // Autopilot, requests extended run duration for the pod.
 const annotationSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+
+// maxInitTerminationMessage bounds how much of an init container's
+// termination message goes into a launch error.
+const maxInitTerminationMessage = 1024
+
+// boundedTerminationMessage returns msg trimmed of surrounding whitespace
+// and, when longer than maxInitTerminationMessage bytes, only its tail,
+// cut at a rune boundary and marked with a leading "...". With
+// FallbackToLogsOnError the message can be the container's log tail, and
+// the last lines carry the error.
+func boundedTerminationMessage(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if len(msg) <= maxInitTerminationMessage {
+		return msg
+	}
+	tail := msg[len(msg)-maxInitTerminationMessage:]
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return "..." + strings.TrimSpace(tail)
+}
 
 // classifyTerminalWaitingReason turns a terminal (non-retryable)
 // ContainerStateWaiting reason into an error, or returns nil if reason is
@@ -3406,7 +3432,8 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 						"message", ics.State.Terminated.Message, "phase", "init-container")
 					return newLaunchFailure(api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, ics.State.Terminated.Reason,
 						fmt.Errorf("init container %q failed in pod %q: exit code %d (%s): %s",
-							ics.Name, podName, ics.State.Terminated.ExitCode, ics.State.Terminated.Reason, ics.State.Terminated.Message))
+							ics.Name, podName, ics.State.Terminated.ExitCode, ics.State.Terminated.Reason,
+							boundedTerminationMessage(ics.State.Terminated.Message)))
 				}
 				if ics.State.Waiting != nil {
 					if err := classifyTerminalWaitingReason(podName, ics.Name, ics.State.Waiting.Reason, ics.State.Waiting.Message); err != nil {

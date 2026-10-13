@@ -156,17 +156,23 @@ and its status is not readable with this credential's scope, and exits 0 like a
 timeout (1 with `--attach`); the launch continues on the Hub. When the Hub has
 already finished the start and you wait with `--attach`, there is no retry: an
 agent launcher's 404 gives the same not-readable report at once, and exits 1.
-The agent is reported as deleted only on a 404 after its status was read that
-persists through a 5-second retry (or until the wait ends, if that is sooner),
-or, for a user's login, on a 404 before that: after the 5-second retry while
-the Hub is still launching the agent, and at once otherwise. If the agent's
-create did not complete (for example the image could not be pulled), the error
-shows the stored template and task. Delete the agent and create it again
+An agent launcher's 404 after the status was read is retried for 5 seconds (or
+until the wait ends, if that is sooner). If it lasts, `start` reports that the
+status is no longer readable and that the agent may have been deleted or the
+Hub refused the read: the Hub answers an agent with 404 both for an agent that
+is gone and for a read it refuses, so a launcher cannot tell the two apart.
+This exits 0 when the Hub accepted the launch, and 1 with `--attach` or when
+it did not. The agent is reported as deleted only for a user's login: on a 404
+after its status was read that persists through the 5-second retry (or until
+the wait ends, if that is sooner), or on a 404 before that, after the 5-second
+retry while the Hub is still launching the agent, and at once otherwise. If the
+agent's create did not complete (for example the image could not be pulled), the
+error shows the stored template and task. Delete the agent and create it again
 (`scion delete <agent-name>`, then `scion start` with the same template and
 task). If soft-delete retention is enabled on the Hub, the name stays reserved
 until the agent is deleted with force=true or purged; until then, use a new
-name. With `--format json`, `--attach` after a workspace upload attaches
-without printing the JSON result.
+name. With `--format json`, `--attach` after a workspace upload attaches without
+printing the JSON result.
 
 #### Long tasks and task files
 
@@ -344,7 +350,7 @@ Sends a message to a running agent or user.
     - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
         - **Constraints:** Cannot be combined with `--in` or `--at`.
         - **Requirements:** Requires Hub mode (`scion hub enable`). If run in local mode, the command will fail with an error suggesting you include file contents directly in the message text. If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
-        - **Undelivered attachments:** If the Hub cannot read an attached file (for example, it was staged on a different Runtime Broker's host than the Hub's), the message is still delivered without it, and the command prints `Warning: attachment <path> was not delivered: <reason>` on stderr for each such file. With `--format json`, the warnings are in the result's `attachment_warnings` field instead.
+        - **Undelivered attachments:** When an agent sends the message and the Hub cannot read an attached file (for example, it was staged on a different Runtime Broker's host than the Hub's), the message is still delivered without it, and the command prints `Warning: attachment <path> was not delivered: <reason>` on stderr for each such file. With `--format json`, the warnings are in the result's `attachment_warnings` field instead. Messages sent by a human from the CLI do not report undelivered attachments yet.
     - `--artifact <ref>`: Reference a published artifact, `scion://artifact/<id>` or `scion://artifact/<id>@<seq>` (repeatable, at most 10). The reference is added to the message text, and an agent recipient's message ends with one line per artifact showing how to fetch it (`Artifact: v2 - scion artifact get <ref>`, or `current` for an unpinned reference). The Hub attaches only artifacts the sender can read and prints a warning for the rest; a recipient still needs its own access to read an artifact. See [Artifacts](/scion/reference/artifacts/#artifacts-in-messages).
         - **Constraints:** Cannot be combined with `--in` or `--at`, or used with `group[...]` recipients.
         - **Requirements:** Requires Hub mode with the `hub.artifacts` experiment on.
@@ -516,6 +522,7 @@ Conversations are referenced using one of three forms:
     - `join <conversation-ref> <principal-kind> <principal-id>`: Add a participant to a conversation.
     - `leave <conversation-ref>`: Leave a conversation.
     - `catch-up <conversation-ref>`: Show recent messages in a conversation.
+    - `group <command>`: Manage the project's thread groups. See [`scion conversation group`](#scion-conversation-group) below.
 - **Flags (on `list`):**
     - `--kind <string>`: Filter by kind (`direct`, `group`).
     - `--surface <string>`: Filter by surface (`native`, `discord`, `slack`, etc.).
@@ -529,12 +536,38 @@ Conversations are referenced using one of three forms:
     - `--json`: Output in JSON format.
 - **Flags (on `create`):**
     - `--project <string>`: Project ID. Defaults to the Hub-linked project, then the local project. If no project resolves, the Hub falls back to the calling agent's project; a user caller with no project gets `400 projectId is required`.
+    - `--group <group>`: File the new conversation into a thread group of the same project: a group ID, or a group name resolved within the project as `scion conversation group` resolves it. The group is checked before the conversation is created, so an unknown or ambiguous group creates nothing. Requires the `hub.chat_thread_groups` experiment.
     - `--json`: Output in JSON format.
 - **Flags (on `catch-up`):**
     - `--since <duration>`: Show messages from this duration ago, e.g. `30m`, `2h` (default `1h`).
     - `--json`: Output in JSON format.
 - **Flags (on `get-message`):**
     - `--json`: Output in JSON format.
+
+### `scion conversation group`
+
+Manages a project's **thread groups**: named sets of the project's group conversations (threads), shared by every member of the project, user or agent. A thread is in at most one group, so adding it to another group moves it. Requires Hub mode and the `hub.chat_thread_groups` [experiment](/scion/reference/experiments/) (default off). On a Hub with the experiment off, every subcommand fails with `thread groups are not enabled on this hub (experiment hub.chat_thread_groups)`.
+
+A `<group>` argument is a group ID, or a group name resolved within the project (`--project <id>`, defaulting to the current project) through the project's group list. Names are compared as the Hub compares them: trimmed and case-insensitive. A name that matches no group is an error. A name that matches more than one group (including an ID that is also another group's name) is an error that lists each match by name and ID; use the group ID then. An ID that is not in the project's list is looked up directly, and the Hub decides whether you can read it. A `<conversation-ref>` takes the same forms as the other `scion conversation` commands.
+
+**Usage:** `scion conversation group [command] [flags]`
+
+- **Commands:**
+    - `list`: List the project's thread groups, sorted by name. Text output has the columns `NAME`, `THREADS` (the number of member threads) and `ID`.
+    - `get <group>`: Show a thread group and its member threads (name, conversation ID and when it was added).
+    - `create <name>`: Create a thread group. A name is 1 to 100 characters after trimming, with no control characters. A name already used in the project, compared case-insensitively, returns `409`. A project can have at most 100 groups (`422`).
+    - `rename <group> <new-name>`: Rename a thread group. The name rules of `create` apply.
+    - `delete <group>`: Delete a thread group. Its threads become ungrouped; no thread or message is deleted. Asks for confirmation; without a terminal it needs `--yes`. Only users may delete a thread group: the command is not available in agent mode, and the Hub answers `403` to an agent.
+    - `add <group> <conversation-ref>`: Add a thread to a thread group, moving it out of any other group of the project. Adding a thread that is already in the group changes nothing. The thread must be a group conversation of the group's project; direct conversations and the project's `#general` thread are refused. A group holds at most 500 threads (`422`).
+    - `remove <group> <conversation-ref>`: Remove a thread from a thread group. The thread is not deleted. Removing a thread that is not in the group changes nothing.
+- **Flags (on every subcommand):**
+    - `--project <string>`: Project ID: the project to list or create groups in, and the project a `<group>` name is resolved in. Defaults to the Hub-linked project, then the local project, as for `scion conversation create`. If no project resolves, the Hub falls back to the calling agent's project; a user caller with no project gets `400 projectId is required`. As on `scion conversation create`, this local flag takes a project ID and replaces the global `-g/--project` for these commands.
+- **Flags (on `list`, `get` and `create`):**
+    - `--json`: Output in JSON format. `list` prints `{"threadGroups": [...]}`, the Hub's list body; `get` and `create` print one thread group: `id`, `projectId`, `name`, `createdBy`, `createdByKind` (`user` or `agent`), `createdAt`, `updatedAt` and `threads`, where each thread has `conversationId`, `threadId` (the web chat thread ID, empty for a conversation with no web thread), `name`, `addedBy` and `addedAt`. `threads` is always a list, never `null`.
+- **Flags (on `delete`):**
+    - `-y, --yes`: Answer Yes to the confirmation prompt.
+
+In agent mode (inside agent containers), every subcommand except `delete` is available.
 
 ### `scion logs`
 
@@ -1144,8 +1177,10 @@ Open a tunnel from your machine to a port inside an agent, or to the agent's SSH
     - `--local-port <int>`: Local port to listen on. Default: a random free port.
     - `--ssh`: Reach the agent's SSH service instead of a port.
     - `--stdio`: Carry the tunnel on stdin and stdout instead of a local listener, for use as an ssh `ProxyCommand`.
+    - `--known-hosts <path>`: With `--ssh`, the absolute path of the known-hosts file holding the agent's pinned host key, for the host-key hint only. Requires `--host-key-alias`. Written into Host blocks by `scion vscode`.
+    - `--host-key-alias <host>`: With `--ssh`, the name of the pin in `--known-hosts` (the Host block's `HostKeyAlias`). Requires `--known-hosts`.
 
-By default the tunnel listens on `127.0.0.1` and prints the address it forwards to stderr. `--hub` and `--project` make the command independent of the working directory. The command never prompts. Exit codes: `0` success, `1` other error, `2` usage error, `3` no usable credential or identity changed, `4` agent not found, `5` not permitted, `6` Hub unreachable or unavailable, `7` tunnel closed by policy, `8` tunnel limit reached, `9` agent not running, `10` agent unreachable, `11` Hub does not support tunnels, `130` interrupted, `143` terminated.
+By default the tunnel listens on `127.0.0.1` and prints the address it forwards to stderr. `--hub` and `--project` make the command independent of the working directory. The command never prompts. Exit codes: `0` success, `1` other error, `2` usage error, `3` no usable credential or identity changed, `4` agent not found, `5` not permitted, `6` Hub unreachable or unavailable, `7` tunnel closed by policy, `8` tunnel limit reached, `9` agent not running, `10` agent unreachable, `11` Hub does not support tunnels, `130` interrupted, `143` terminated. With `--ssh`, the command prints a one-line hint when the agent's host key no longer matches its pin. Without `--known-hosts` it reads the `scion ssh-config` pins. The hint never changes host-key verification: ssh's `StrictHostKeyChecking` and the Host block's `UserKnownHostsFile` remain the only check.
 
 ```bash
 scion tunnel my-agent --port 5173
@@ -1154,6 +1189,25 @@ scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my
 ```
 
 - `scion tunnel status [--json]`: Show the open tunnels of your running `scion tunnel` processes: the Hub endpoint, the credential identity (kind, subject and scope, never the secret), the session IDs and the open tunnels. With `--hub`, only tunnels to that Hub are shown. Reads local state only and never prompts.
+
+### `scion vscode`
+
+Open VS Code Remote-SSH on an agent's `/workspace` through the Hub, without editing `~/.ssh/config`. It sits alongside `scion ssh-config` and does not replace it. Requires the `hub.conduit` [experiment](/scion/reference/experiments/) on the Hub. Not available in agent mode.
+
+**Usage:** `scion vscode <agent> [--path <dir>] [--prune]`
+
+- **Flags:**
+    - `--path <dir>`: Remote folder to open. Default: `/workspace`.
+    - `--prune`: Also remove the Host blocks and pins of this Hub's agents that no longer exist, from a complete listing only. The agent named is still written and opened; with an incomplete listing nothing is changed and VS Code is not started.
+
+The Hub and project are resolved as for `scion tunnel`, including the project selected with `scion use`. Each run writes the agent's Host block and pinned host key into `~/.scion/vscode/ssh_config` and `~/.scion/vscode/known_hosts` and keeps every other agent's entries. Its ProxyCommand passes `--known-hosts` and `--host-key-alias`, so a recreated agent is reported with the command that refreshes it: `scion vscode --hub <endpoint> --project <project> <agent>`. It checks the agent with one SSH tunnel, then runs `code --user-data-dir ~/.scion/vscode/user-data --remote ssh-remote+scion.<hub-label>.<project>.<agent> <path>`, where `<hub-label>` is the label a `scion ssh-config` include file already records for this Hub, or else one derived from the Hub's host name that no other Hub's entries use. That user data directory's `settings.json` sets `remote.SSH.configFile`, which is application-scoped and cannot be set per profile; your own VS Code settings are never changed, and extensions are shared. The command never prompts. Exit codes are those of `scion tunnel`; `1` when `code` is missing or fails to start, or when the user data `settings.json` has comments and does not already hold the managed values (the error names the file).
+
+Terminals in these windows open in the agent's tmux session: the default `Scion agent` profile joins it with the `agent` window selected, `Scion shell` selects the `shell` window, and `Container shell` is a plain login shell; VS Code's auto-detected `tmux`, `bash`, `zsh` and `sh` profiles are hidden. Switch windows with `Ctrl-b n`. Closing a terminal leaves no extra tmux session behind, and switching windows does not move the web terminal. If the agent has no tmux session, the Scion profiles open a login shell instead. The scion profiles in that `settings.json` are reset on every run; a default terminal or keybinding choice you make there is kept.
+
+```bash
+scion vscode my-agent
+scion vscode my-project/my-agent --path /workspace/web
+```
 
 ### `scion expose` / `scion unexpose`
 
@@ -1178,7 +1232,7 @@ scion unexpose 8080
 
 ### `scion artifact`
 
-Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode, except `share` and `delete`. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
+Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode, except `share`, `grants` and `delete`. An unknown subcommand is an error, also with `--help`: `scion artifact nosuch --help` exits non-zero with `unknown command`, as do `scion hub nosuch --help` and `scion config nosuch --help`. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
 
 - `scion artifact publish <file|folder>`: Publish a file or folder in the current project; prints its reference, version and web page URL.
     - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
@@ -1186,8 +1240,14 @@ Publishes files as artifacts and fetches them by reference (`scion://artifact/<i
 - `scion artifact get <ref>`: Write an artifact's entry file to stdout, or with `--out` the file or the whole bundle.
     - Flags: `--out`, `-o <path>` (a file, an existing directory for a single file, or the directory a bundle is written into), `--force` (replace files that already exist under `--out`).
 - `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`. Discarded versions (a rejected or stale review, or an upload not finished in time) are listed among them by number with their reason, so gaps in the numbering are explained.
+- `scion artifact list`: List the artifacts you can read, newest first: those you own, those shared with you, and those homed in projects whose artifacts you may read. Each line shows the reference, title, current version, why you see it (`owned`, `project` or `shared`) and when it last changed; one page is printed unless `--all` is given.
+    - Flags: `--mine` (only artifacts you own), `--project-id <id>` (only artifacts homed in, or shared with, that project), `--shared` (only those shared with you, or with `--project-id` with that project, from elsewhere), `--review-pending`, `--query <text>` (title or key), `--limit <n>` (page size), `--all` (follow every page), `--cursor <c>` (start at the page a previous `--format json` list returned as `nextCursor`).
+- `scion artifact view <ref>`: Print a short-lived link that shows a version whose entry is HTML, the way the web UI shows it, and when it expires (30 minutes unless the Hub says otherwise). It never opens a browser. A version whose entry is not HTML has no view. In agent mode it prints the version and the expiry but not the link; `--show-link` prints the link too. In human mode the link is always printed.
+    - Flags: `--show-link` (print the link in agent mode too), `--check` (also read the version's HTML files and report every `href` or `src` that names no file of the version, including links that start with `/` or climb above the bundle's top folder, and exit non-zero if there is one; links with a scheme, to another host or to a fragment of the same page are not checked, and a link that cannot be parsed is reported; a `<base href>` is not taken into account).
 - `scion artifact share <ref>`: Create a share link and print it, with its expiry and the command that revokes it. The link is shown only once. Only the artifact's owner or a user with an admin grant can share it; not available in agent mode, and the Hub refuses agents. See [Share links](/scion/reference/artifacts/#share-links).
     - Flags: `--ttl <n>h|<n>d` (link lifetime; default: the Hub's, 7 days unless changed; a lifetime above the Hub's maximum, 30 days unless changed, is rejected, not shortened), `--list` (list the active links instead), `--revoke <link-id>` (revoke one instead).
+- `scion artifact grants <ref>`: List an artifact's grants (id, subject, permission, created), or add, change or remove one. Only the artifact's owner or a user with an admin grant can see or change its grants. On an artifact owned by an agent, the user who delegated to the agent and anyone holding `project.manage` in its home project (the project owners and admins, and super-admins) may also add a review grant for a user who can already read it, and nothing else; they cannot list the grants. Not available in agent mode, and the Hub refuses agents. See [Grants](/scion/reference/artifacts/#grants).
+    - Flags: `--add <subject>` with `--permission read|review|write|admin` (subjects `user:<id>`, `agent:<id>` or `project:<id>`; review is for users only; a subject that already has a grant gets the new permission), `--remove <grant-id>`.
 - `scion artifact delete <ref>`: Delete an artifact after confirming (`--yes` skips the prompt; required when stdin is not a terminal). Its grants and share links end with it and its files are removed after the hub's grace period; there is no undelete. The artifact's owner, a user with an admin grant on it, or an admin of its home project can delete it; not available in agent mode, and the Hub refuses agents. See [Deletion](/scion/reference/artifacts/#deletion).
 
 ## Notification Management
