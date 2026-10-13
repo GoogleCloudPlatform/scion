@@ -395,6 +395,10 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"handlers_test_admin_identities.go:canIssueTestAdmin":                  {Policy: testAdminPolicyDeny, Reason: "test identities never issue (design 3.6.1: test_identity.issue* are deny); also refused by kind in testAdminIssuer"},
 	"handlers_test_admin_identities.go:handleRevokeAllTestAdminIdentities": {Policy: testAdminPolicyDeny, Reason: "revoke-all is for human super-admins only (design 3.3); also refused by kind first"},
 	"handlers_test_identities.go:testIdentityCallerSeesAll":                {Policy: testAdminPolicyDeny, Reason: "issuance and list visibility of every test identity (test_identity.issue routes are deny)"},
+	// The role-claim fast path itself, moved to pkg/hub/internal/principal
+	// (ptone/scion#3316) and scanned there since ptone/scion#3472. It is
+	// not a gate of its own: every caller above is classified separately.
+	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin": {Policy: testAdminPolicyAllow, Reason: "definition of the role-claim admin fast path; each caller is its own classified gate, and a test identity's stored role is never admin"},
 }
 
 // testAdminSettingsSectionPolicy classifies every operational settings
