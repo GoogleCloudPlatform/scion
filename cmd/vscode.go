@@ -285,7 +285,8 @@ func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) 
 	}
 	if existing, ok := blocks[u.host]; ok {
 		if ep := vscodeBlockHub(existing); ep != "" && ep != u.endpoint {
-			return false, fmt.Errorf("host %s in %s belongs to hub %s; run scion vscode again", u.host, p.sshConfig(), ep)
+			// ep is normalized: scheme, host and path only.
+			return false, fmt.Errorf("host %s in %s is pinned to hub %s; remove that block from %s to use this name", u.host, p.sshConfig(), ep, p.sshConfig())
 		}
 	}
 	old, hadPin := keys[u.host]
@@ -366,7 +367,11 @@ func vscodeHubLabel(p vscodePaths, hub *sshHubTarget) (string, error) {
 	}
 	label, err := resolveSSHHubLabel(hub.endpoint, u, files)
 	if err != nil {
-		return "", tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+		// Both candidates are held by other hubs, in include files or in
+		// the vscode file; name both places.
+		preferred, fallback := sshHubLabelCandidates(u)
+		return "", tunnelclient.Errorf(tunnelclient.ExitError, "hub labels %q and %q are both used by other hubs in %s or %s; remove the other hub's entries to use this hub",
+			preferred, fallback, sshPaths{home: p.home}.includeDir(), p.sshConfig())
 	}
 	return label, nil
 }

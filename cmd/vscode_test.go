@@ -441,6 +441,27 @@ func TestVSCodeHubLabel_SharedFirstDNSLabel(t *testing.T) {
 	assert.Equal(t, labelA, again, "the label a block records for its own hub is reused")
 }
 
+// When vscode blocks of other hubs hold both label candidates, the error
+// names the vscode file, not an include directory.
+func TestVSCodeHubLabel_BothCandidatesHeldInVSCodeFile(t *testing.T) {
+	p := vscodePaths{home: t.TempDir()}
+	for _, h := range []struct{ endpoint, label, agent string }{
+		{"http://hub.example", "hub", "a"},
+		{"https://hub.example:8443", "hub-example", "b"},
+	} {
+		block, err := renderSSHHostBlockKnown(sshTestExe, h.endpoint, h.label, "p", h.agent, vscodeKnownHostsRef)
+		require.NoError(t, err)
+		_, err = updateVSCodeFiles(p, vscodeUpdate{host: sshHostName(h.label, "p", h.agent), block: block, key: mustNormKey(t, testSSHPublicKey(t)), endpoint: tunnelclient.NormalizeEndpoint(h.endpoint)})
+		require.NoError(t, err)
+	}
+	_, err := vscodeHubLabel(p, &sshHubTarget{endpoint: tunnelclient.NormalizeEndpoint("https://hub.example")})
+	require.Error(t, err)
+	assert.Equal(t, tunnelclient.ExitError, tunnelclient.CodeOf(err))
+	assert.Contains(t, err.Error(), p.sshConfig())
+	assert.Contains(t, err.Error(), `"hub" and "hub-example"`)
+	assert.NotContains(t, err.Error(), "include files in .")
+}
+
 // Pruning selects blocks by the hub their ProxyCommand pins, so another
 // hub's blocks and pins survive even under the same label; a host held by
 // another hub is never overwritten.
@@ -469,7 +490,7 @@ func TestUpdateVSCodeFiles_PruneAndOwnershipByPinnedHub(t *testing.T) {
 	before := sshFilesSnapshot(t, p.dir())
 	err := put(a, "b1", nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "belongs to hub "+b)
+	assert.Equal(t, "host scion.x.p.b1 in "+p.sshConfig()+" is pinned to hub "+b+"; remove that block from "+p.sshConfig()+" to use this name", err.Error())
 	assert.Equal(t, before, sshFilesSnapshot(t, p.dir()), "nothing is written")
 }
 
