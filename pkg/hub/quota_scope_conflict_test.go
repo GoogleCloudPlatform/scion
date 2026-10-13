@@ -59,7 +59,7 @@ func scopeConflictCounter(t *testing.T, qs *QuotaService) func(site string) int6
 		var total int64
 		for _, sm := range rm.ScopeMetrics {
 			for _, m := range sm.Metrics {
-				if m.Name != "scion.hub.quota.reservation_scope_conflicts" {
+				if m.Name != "scion.hub.quota.reservation_scope_conflict" {
 					continue
 				}
 				sum, ok := m.Data.(metricdata.Sum[int64])
@@ -633,7 +633,7 @@ func TestQuotaScopeConflictMetrics_CountsOncePerConflictWithSite(t *testing.T) {
 		out := map[string]int64{}
 		for _, sm := range rm.ScopeMetrics {
 			for _, m := range sm.Metrics {
-				if m.Name != "scion.hub.quota.reservation_scope_conflicts" {
+				if m.Name != "scion.hub.quota.reservation_scope_conflict" {
 					continue
 				}
 				assert.Equal(t, "{conflict}", m.Unit)
@@ -673,4 +673,113 @@ func TestQuotaScopeConflictMetrics_CountsOncePerConflictWithSite(t *testing.T) {
 	_, err = srv.checkAndReserveBrokerQuota(context.Background(), ok)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]int64{scopeConflictSiteReserve: 1, scopeConflictSiteReassert: 1}, collect())
+}
+
+// lockingPassthroughStore forwards the advisory locks of the wrapped store,
+// which store.Store does not carry, so a wrapper can stand in as a
+// QuotaService store.
+type lockingPassthroughStore struct{ store.Store }
+
+func (p lockingPassthroughStore) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
+	return p.Store.(store.AdvisoryLocker).TryAdvisoryLock(ctx, key)
+}
+
+func (p lockingPassthroughStore) TryAdvisoryLockObject(ctx context.Context, class store.AdvisoryLockKey, obj int32) (bool, func() error, error) {
+	return p.Store.(store.AdvisoryLocker).TryAdvisoryLockObject(ctx, class, obj)
+}
+
+// releaseFailingStore fails every ReleaseReservation, as a best-effort
+// release that only logs.
+type releaseFailingStore struct{ lockingPassthroughStore }
+
+func (releaseFailingStore) ReleaseReservation(context.Context, string, string) error {
+	return errors.New("release failed")
+}
+
+// A move whose source release fails is refused with the scope conflict and
+// leaves the slot on the source; nothing is reserved on the target.
+func TestMoveBrokerQuota_FailedSourceReleaseFailsTheMove(t *testing.T) {
+	srv, s := testServer(t)
+	srv.quotaService.store = releaseFailingStore{lockingPassthroughStore{srv.quotaService.store}}
+	brokerA, projectA := newQuotaTestBrokerAndProject(t, s, "move-a")
+	brokerB, _ := newQuotaTestBrokerAndProject(t, s, "move-b")
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	agent := newQuotaTestAgent(t, s, brokerA, projectA, "move-x", state.PhaseStopped)
+	row := seedBrokerRow(t, s, def.ID, brokerA.ID, agent.ID, time.Time{})
+
+	err = srv.moveBrokerQuota(context.Background(), agent, &reincarnationMove{SourceBrokerID: brokerA.ID, TargetBrokerID: brokerB.ID})
+	requireScopeConflict(t, err, agent.ID, brokerA.ID, brokerB.ID)
+	got := activeReservation(t, s, def.ID, agent.ID)
+	require.NotNil(t, got)
+	assert.Equal(t, row.ID, got.ID, "the slot stays on the source")
+	assert.Zero(t, brokerReservationCount(t, s, brokerB.ID), "nothing on the target")
+}
+
+// racingRowStore makes the next CreateUsageReservation lose to a row it
+// first writes itself on winnerScope, as a racing writer would.
+type racingRowStore struct {
+	store.Store
+	winnerScope string
+}
+
+func (r *racingRowStore) CreateUsageReservation(ctx context.Context, res *store.UsageReservation) (*store.UsageReservation, error) {
+	if r.winnerScope == "" {
+		return r.Store.CreateUsageReservation(ctx, res)
+	}
+	winner := *res
+	winner.SubjectID, winner.ScopeID = r.winnerScope, r.winnerScope
+	r.winnerScope = ""
+	if _, err := r.Store.CreateUsageReservation(ctx, &winner); err != nil {
+		return nil, err
+	}
+	return nil, store.ErrActiveReservationExists
+}
+
+func TestRecordBrokerReservationUnchecked_RacingWinnerClassified(t *testing.T) {
+	srv, s := testServer(t)
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	rs := &racingRowStore{Store: s}
+	srv.store = rs
+
+	rs.winnerScope = "broker-a"
+	created, err := srv.recordBrokerReservationUnchecked(context.Background(), def.ID, "broker-a", "agent-same")
+	require.NoError(t, err, "a racing winner on the same broker is a retry")
+	assert.False(t, created)
+	held := activeReservation(t, s, def.ID, "agent-same")
+	require.NotNil(t, held)
+	assert.Equal(t, "broker-a", held.ScopeID)
+
+	rs.winnerScope = "broker-other"
+	created, err = srv.recordBrokerReservationUnchecked(context.Background(), def.ID, "broker-a", "agent-other")
+	requireScopeConflict(t, err, "agent-other", "broker-other", "broker-a")
+	assert.False(t, created)
+	held = activeReservation(t, s, def.ID, "agent-other")
+	require.NotNil(t, held)
+	assert.Equal(t, "broker-other", held.ScopeID, "the winner's row is left as it is")
+}
+
+// An unpinned running agent on B whose row is on listed broker A keeps the
+// row (it holds capacity); the backfill on B is refused by the typed
+// conflict and reported on every pass, and writes nothing.
+func TestSweep_UnpinnedCountedAgentBackfillConflictReported(t *testing.T) {
+	srv, s := testServer(t)
+	conflicts := scopeConflictCounter(t, srv.quotaService)
+	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "unpinned-a")
+	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "unpinned-b")
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	agent := newQuotaTestAgent(t, s, brokerB, projectB, "unpinned-running", state.PhaseRunning)
+	row := seedBrokerRow(t, s, def.ID, brokerA.ID, agent.ID, time.Now().Add(-2*reconcileMinReservationAge))
+
+	for pass := 1; pass <= 2; pass++ {
+		srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+		got := activeReservation(t, s, def.ID, agent.ID)
+		require.NotNil(t, got, "pass %d", pass)
+		assert.Equal(t, row.ID, got.ID, "pass %d: kept, not replaced", pass)
+		assert.Zero(t, brokerReservationCount(t, s, brokerB.ID), "pass %d: nothing on B", pass)
+		assert.EqualValues(t, pass, conflicts(scopeConflictSiteBackfill), "pass %d", pass)
+		assert.Zero(t, conflicts(scopeConflictSiteSweep), "pass %d: unpinned rows are not a sweep conflict", pass)
+	}
 }

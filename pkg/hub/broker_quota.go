@@ -132,7 +132,7 @@ func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Age
 	held, err := s.store.GetActiveReservation(ctx, def.ID, agent.ID)
 	switch {
 	case err == nil:
-		if held.ScopeID != agent.RuntimeBrokerID {
+		if held.ScopeType != store.QuotaScopeBroker || held.ScopeID != agent.RuntimeBrokerID {
 			s.reportBrokerScopeConflict(scopeConflictSiteReassert, agent, held.ScopeID)
 		}
 		return false
@@ -270,7 +270,10 @@ func (s *Server) reconcileBrokerQuotaOnPhaseChange(ctx context.Context, agent *s
 //   - Scope conflicts: a pinned agent whose active reservation is on a broker
 //     other than its Runtime Broker is neither released, moved nor
 //     backfilled; it is reported (log and metric, sites "sweep" and
-//     "backfill") and shown with scopeConflict on the admin usage view. An
+//     "backfill") in each pass that reads it, and shown with scopeConflict
+//     on the admin usage view. A pass that cannot load a listed broker's
+//     agents skips that broker, so its conflicts are reported on a later
+//     pass. An
 //     unpinned agent's row on another broker is released by the phase rule
 //     above as before, and its backfill is refused and reported the same way.
 //

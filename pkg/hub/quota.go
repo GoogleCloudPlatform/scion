@@ -57,7 +57,7 @@ type QuotaService struct {
 }
 
 // Sites of a reservation scope conflict, the site attribute of
-// scion.hub.quota.reservation_scope_conflicts.
+// scion.hub.quota.reservation_scope_conflict.
 const (
 	// scopeConflictSiteReserve: Reserve refused a request (HTTP 409).
 	scopeConflictSiteReserve = "reserve"
@@ -75,7 +75,7 @@ const (
 // OTelQuotaScopeConflictMetrics counts reservation scope conflicts (an
 // agent's active max_agents_per_broker reservation on a broker other than
 // the one it is admitted on or assigned to) as
-// scion.hub.quota.reservation_scope_conflicts, with attribute site
+// scion.hub.quota.reservation_scope_conflict, with attribute site
 // (reserve, reassert, backfill or sweep). The reconcile sites count a
 // conflict that persists once per pass.
 type OTelQuotaScopeConflictMetrics struct {
@@ -87,7 +87,7 @@ func NewOTelQuotaScopeConflictMetrics(mp metric.MeterProvider) (*OTelQuotaScopeC
 	if mp == nil {
 		return nil, errors.New("otel quota scope conflict metrics: nil MeterProvider")
 	}
-	c, err := mp.Meter(instrumentationScope).Int64Counter("scion.hub.quota.reservation_scope_conflicts",
+	c, err := mp.Meter(instrumentationScope).Int64Counter("scion.hub.quota.reservation_scope_conflict",
 		metric.WithUnit("{conflict}"))
 	if err != nil {
 		return nil, err
@@ -101,7 +101,7 @@ func (m *OTelQuotaScopeConflictMetrics) RecordScopeConflict(site string) {
 }
 
 // SetQuotaScopeConflictMetrics wires the
-// scion.hub.quota.reservation_scope_conflicts counter. Until it is set,
+// scion.hub.quota.reservation_scope_conflict counter. Until it is set,
 // conflicts are logged but not counted.
 func (s *Server) SetQuotaScopeConflictMetrics(m *OTelQuotaScopeConflictMetrics) {
 	if s.quotaService != nil {
