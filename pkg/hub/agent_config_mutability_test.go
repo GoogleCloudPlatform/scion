@@ -61,6 +61,7 @@ var wantEditTier = map[string]EditTier{
 	"config.system_prompt":      EditTierProvision,
 	"config.agent_instructions": EditTierProvision,
 	"config.skills":             EditTierProvision,
+	"config.agent_plugins":      EditTierProvision,
 	"config.services":           EditTierProvision,
 	"config.secrets":            EditTierProvision,
 

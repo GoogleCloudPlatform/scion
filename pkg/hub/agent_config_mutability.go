@@ -161,6 +161,7 @@ var agentEditFields = []agentEditField{
 	{Key: "config.system_prompt", Tier: EditTierProvision},
 	{Key: "config.agent_instructions", Tier: EditTierProvision},
 	{Key: "config.skills", Tier: EditTierProvision},
+	{Key: "config.agent_plugins", Tier: EditTierProvision},
 	{Key: "config.services", Tier: EditTierProvision},
 	{Key: "config.secrets", Tier: EditTierProvision},
 
