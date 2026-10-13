@@ -376,6 +376,8 @@ func writeWorkspaceIdentityNoFollow(ident *config.WorkspaceIdentity, slug, proje
 	var dirRel, targetRel string
 	var data []byte
 	if ident.Marker == nil {
+		// Relink never passes a directory identity since the git gate in
+		// relinkSharedProjectIdentity; this branch is kept as defence in depth.
 		dirRel = filepath.Join(base, filepath.Base(ident.ScionPath))
 		targetRel = filepath.Join(dirRel, projectkeys.ProjectIDFile)
 		data = []byte(projectID + "\n")
