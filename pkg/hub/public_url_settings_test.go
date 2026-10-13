@@ -112,8 +112,9 @@ func newBootstrapPublicURLServer(t *testing.T, fileURL string, seeded bool) (*Se
 // TestPutServerConfigDB_BootstrapPublicURLNotStored checks that a settings
 // save never stores the bootstrap public URL as a saved value: not when it
 // saves another endpoints field, and not when it echoes the public URL the
-// GET view shows. A later settings.yaml change then still takes effect at
-// startup (ptone/scion#3905).
+// GET view shows, either on the first save or on a second save once the
+// endpoints row is managed. A later settings.yaml change then still takes
+// effect at startup (ptone/scion#3905, ptone/scion#4707).
 func TestPutServerConfigDB_BootstrapPublicURLNotStored(t *testing.T) {
 	const fileURL = "http://hub.internal:8080" // a file value the database rule would reject
 	for _, seeded := range []bool{true, false} {
@@ -134,6 +135,22 @@ func TestPutServerConfigDB_BootstrapPublicURLNotStored(t *testing.T) {
 				assert.Empty(t, audits.records(), "no public URL change is recorded")
 				report := saveReport(t, rr)
 				assert.NotContains(t, report.PendingRestart, config.PublicURLKey, "the value in effect does not change, so it is not reported")
+				assert.NotContains(t, report.AppliedKeys, config.PublicURLKey)
+				_, err = ops.Refresh(context.Background())
+				require.NoError(t, err)
+				assert.Equal(t, fileURL, getPublicURL(t, srv, ops), "GET keeps showing the value in effect")
+
+				// A second save, now on the managed endpoints row, echoes the
+				// public URL GET shows. It is still an echo, not a saved value.
+				rr = putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"`+fileURL+`"}}}`)
+				require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+				row, err = fake.GetHubSetting(context.Background(), "endpoints")
+				require.NoError(t, err)
+				assert.Equal(t, "managed", row.Origin)
+				assert.Empty(t, publicURLFromSectionDoc(row.Value), "the echo on the managed row is not stored")
+				assert.Empty(t, audits.records(), "no public URL change is recorded for the echo")
+				report = saveReport(t, rr)
+				assert.NotContains(t, report.PendingRestart, config.PublicURLKey, "the echo changes nothing in effect")
 				assert.NotContains(t, report.AppliedKeys, config.PublicURLKey)
 				_, err = ops.Refresh(context.Background())
 				require.NoError(t, err)
@@ -222,6 +239,36 @@ func TestGetServerConfigDB_PinnedPublicURLNotSuperseded(t *testing.T) {
 	srv, ops = newManagedPublicURLServer(t, bootURL, savedURL, "")
 	assert.True(t, publicURLSuperseded(getServerConfigDB(t, srv, ops)),
 		"without a pin the saved value supersedes the bootstrap value")
+}
+
+// TestGetServerConfigDB_PinnedPublicURLKeepsSiblingsSuperseded checks that a
+// pin drops only the public URL from the superseded endpoints keys: another
+// endpoints key the database value supersedes is still listed. The hub owns
+// this filter; the admin page shows the list as it is sent
+// (ptone/scion#4707).
+func TestGetServerConfigDB_PinnedPublicURLKeepsSiblingsSuperseded(t *testing.T) {
+	const bootURL = "https://env.example.com"
+	t.Setenv("HOME", t.TempDir())
+	fake := newFakeHubSettingStore()
+	fake.seedWithOrigin("endpoints",
+		json.RawMessage(`{"public_url":"https://saved.example.com","image_registry":"saved.example.com"}`), "managed")
+	ops := NewOperationalSettings(fake, newFileKoanf(t, map[string]any{
+		config.PublicURLKey: bootURL,
+		"image_registry":    "file.example.com",
+	}), emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, ""), store: &settingsAuditStore{}}
+	srv.config.HubEndpoints = &HubEndpoints{Operator: bootURL, OperatorSource: "env", Pin: "SCION_SERVER_HUB_ENDPOINT", Public: bootURL, PublicSource: "env"}
+	srv.SetOperationalSettings(ops)
+
+	resp := getServerConfigDB(t, srv, ops)
+	assert.False(t, publicURLSuperseded(resp), "a pinned public URL is not superseded")
+	var keys []string
+	for _, sk := range resp.SupersededKeys["endpoints"] {
+		keys = append(keys, sk.Key)
+	}
+	assert.Equal(t, []string{"image_registry"}, keys, "the other superseded endpoints key is still listed")
 }
 
 // TestPutServerConfigDB_ClearedPublicURLNotSuperseded checks that clearing
