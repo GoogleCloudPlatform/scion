@@ -39,9 +39,9 @@ var heartbeatOnlyCapabilities = map[string]bool{}
 // TestCapabilities_RegistrationMatchesHeartbeat: what a broker registers
 // (the embedded registrations' stored capabilities and the capability names
 // a remote registration sends) agrees with the static set the heartbeat
-// builds on, for every stored capability. The one capability the heartbeat
-// adds to that set, TemplateTiers, is registered false and becomes true at
-// the first heartbeat.
+// builds on, for every stored capability. The capabilities the heartbeat
+// adds to that set (TemplateTiers, and StartsInFlight when it reports starts
+// in flight) are registered false and become true at the first heartbeat.
 // Heartbeat-only capabilities are absent from the static set, the
 // registration names and the stored capabilities.
 func TestCapabilities_RegistrationMatchesHeartbeat(t *testing.T) {
