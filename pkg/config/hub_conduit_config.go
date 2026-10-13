@@ -167,7 +167,10 @@ type HubConduitConfig struct {
 	// HMAC key of every relay-peer call is derived from it wherever a
 	// separate relay runs. It is required in external mode and on
 	// --role relay, independent of the session secret, and never logged,
-	// stored in the database or returned by any API ("" = unset).
+	// stored in the database or returned by any API ("" = unset). Every
+	// use of the secret, key derivation included, goes through
+	// PeerSecretValue() (one trailing newline removed), never this raw
+	// field; only IsZero looks at the raw value.
 	PeerSecret string `json:"peerSecret,omitempty" yaml:"peerSecret,omitempty" koanf:"peerSecret"`
 }
 

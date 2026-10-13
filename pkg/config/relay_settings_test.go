@@ -272,6 +272,12 @@ func TestRelayServerConfigValidateHidesCredentials(t *testing.T) {
 	err = RelayServerConfig{HubInternalURL: "http://u:pw-secret@[::1"}.Validate()
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "pw-secret")
+	const withQuery = "https://relay.example.com/path?token=q-secret#frag-secret"
+	err = RelayServerConfig{PublicURL: withQuery}.Validate()
+	require.Error(t, err)
+	for _, part := range []string{withQuery, "relay.example.com", "q-secret", "frag-secret"} {
+		assert.NotContains(t, err.Error(), part)
+	}
 }
 
 // TestValidatePeerSecretOctets (design §3.9, lead ruling): peer_secret is
@@ -351,10 +357,17 @@ func TestPeerSecretOnlyNewlineIsUnset(t *testing.T) {
 	assert.NoError(t, gc.Hub.Conduit.Validate())
 
 	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\n"), 0o600))
-	t.Setenv("SCION_SERVER_HUB_CONDUIT_PEERSECRET", "\n")
-	gc, err = LoadGlobalConfig(path)
-	require.NoError(t, err)
-	assert.Equal(t, "\n", gc.Hub.Conduit.PeerSecret, "env")
-	assert.Empty(t, gc.Hub.Conduit.PeerSecretValue(), "env")
-	assert.NoError(t, gc.Hub.Conduit.Validate())
+	for _, env := range []string{"SCION_SERVER_HUB_CONDUIT_PEERSECRET", "SCION_SERVER_HUB_CONDUIT_PEER_SECRET"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv(env, "\n")
+			gc, err := LoadGlobalConfig(path)
+			require.NoError(t, err)
+			assert.Equal(t, "\n", gc.Hub.Conduit.PeerSecret)
+			assert.Empty(t, gc.Hub.Conduit.PeerSecretValue())
+			assert.NoError(t, gc.Hub.Conduit.Validate())
+			vs, err := LoadVersionedSettings("")
+			require.NoError(t, err)
+			assert.Empty(t, NormalizePeerSecret(vsConduit(vs).PeerSecret), "VersionedSettings")
+		})
+	}
 }

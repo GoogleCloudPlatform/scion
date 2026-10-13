@@ -65,7 +65,8 @@ type ConduitPeerAuthOptions struct {
 	SharedSecret string
 	// PeerSecret is the dedicated relay-peer secret
 	// (server.hub.conduit.peer_secret). When set, the HMAC key is derived
-	// from it, under its own label, and SharedSecret is not used. External
+	// from its normalized value (config.NormalizePeerSecret), under its own
+	// label, and SharedSecret is not used. External
 	// relay mode and --role relay require it (design §3.9).
 	PeerSecret string
 	// Audience is the OIDC audience ("" = DefaultConduitPeerAudience).
@@ -108,12 +109,13 @@ func NewConduitPeerAuth(o ConduitPeerAuthOptions) (relay.PeerAuth, string, error
 		return nil, "", err
 	}
 	var signer *relay.HMACPeerAuth
+	peerSecret := config.NormalizePeerSecret(o.PeerSecret)
 	switch {
-	case o.PeerSecret != "":
-		if o.SharedSecret != "" && o.SharedSecret == o.PeerSecret {
+	case peerSecret != "":
+		if o.SharedSecret != "" && o.SharedSecret == peerSecret {
 			return nil, mode, fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret must differ from the session secret", mode)
 		}
-		signer, err = relay.NewHMACPeerAuthFromPeerSecret(relay.HMACPeerAuthConfig{Secret: []byte(o.PeerSecret), SelfID: o.SelfID})
+		signer, err = relay.NewHMACPeerAuthFromPeerSecret(relay.HMACPeerAuthConfig{Secret: []byte(peerSecret), SelfID: o.SelfID})
 		if err != nil {
 			return nil, mode, fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret: %w", mode, err)
 		}
