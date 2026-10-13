@@ -220,7 +220,12 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
     urlPath: string,
     data?: unknown,
     rec?: RowRecord
-  ): Promise<{ status: number; code: string | null; body: unknown; headers: Record<string, string> }> {
+  ): Promise<{
+    status: number;
+    code: string | null;
+    body: unknown;
+    headers: Record<string, string>;
+  }> {
     const res = await who(key).context.request.fetch(urlPath, {
       method,
       ...(data !== undefined ? { data } : {}),

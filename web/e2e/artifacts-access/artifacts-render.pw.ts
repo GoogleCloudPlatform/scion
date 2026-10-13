@@ -161,7 +161,11 @@ const ROWS: Record<string, RowSpec> = {
   'R2-16': { role: 'member', title: 'reader: markdown renders and stays inert' },
   'R2-17': { role: 'outsider', title: 'outsider: 404 page and no view' },
   'R2-17a': { role: 'anonymous', title: 'a held view URL works without a session' },
-  'R2-17b': { role: 'anonymous', title: 'a held view URL is refused after it expires', where: 'skip' },
+  'R2-17b': {
+    role: 'anonymous',
+    title: 'a held view URL is refused after it expires',
+    where: 'skip',
+  },
   'R2-20': { role: 'member', title: 'markdown in the chat preview' },
   'R2-20x': {
     role: 'owner -> member',
@@ -268,7 +272,9 @@ function viewInfo(
 ): { viewSeq: number | null; viewIdMatches: boolean; entry: string | null } {
   if (!url) return { viewSeq: null, viewIdMatches: false, entry: null };
   const pathname = new URL(url, 'http://x').pathname;
-  if (!pathname.startsWith(VIEW_PREFIX)) return { viewSeq: null, viewIdMatches: false, entry: null };
+  if (!pathname.startsWith(VIEW_PREFIX)) {
+    return { viewSeq: null, viewIdMatches: false, entry: null };
+  }
   const [cap, ...rest] = pathname.slice(VIEW_PREFIX.length).split('/');
   const parts = (cap ?? '').split('.');
   return {
@@ -707,7 +713,10 @@ async function markdownFacts(
           }
         : null,
       notesHref: notes?.getAttribute('href') ?? null,
-      notesTarget: notes?.getAttribute('target') ?? doc?.querySelector('base')?.getAttribute('target') ?? null,
+      notesTarget:
+        notes?.getAttribute('target') ??
+        doc?.querySelector('base')?.getAttribute('target') ??
+        null,
       scripts: doc?.querySelectorAll('script').length ?? -1,
       onAttrs,
       jsHrefs: Array.from(doc?.querySelectorAll('a[href]') ?? []).filter((a) =>
@@ -1126,7 +1135,9 @@ async function runMain(browser: Browser): Promise<void> {
       r.ui.subresources = { css: css?.status ?? null, png: png?.status ?? null };
       expect.soft(css?.status, 'css 200 under the view').toBe(200);
       expect.soft(png?.status, 'png 200 under the view').toBe(200);
-      expect.soft(css?.path.startsWith(`${VIEW_PREFIX}<redacted>/`), 'css under the view').toBe(true);
+      expect
+        .soft(css?.path.startsWith(`${VIEW_PREFIX}<redacted>/`), 'css under the view')
+        .toBe(true);
       const remoteRequests = j
         .who('owner')
         .requests.filter((q) => q.path.includes(REMOTE_IMAGE_HOST)).length;
@@ -1164,9 +1175,9 @@ async function runMain(browser: Browser): Promise<void> {
         entry: info.entry,
         viewSeq: info.viewSeq,
       };
-      expect.soft((r.ui.page2 as { sameCapability: boolean }).sameCapability, 'same capability').toBe(
-        true
-      );
+      expect
+        .soft((r.ui.page2 as { sameCapability: boolean }).sameCapability, 'same capability')
+        .toBe(true);
       expect.soft(info.entry, 'page2 under the view').toBe('page2.html');
       await htmlFrame(page).locator('#back').click();
       await expect(htmlFrame(page).locator('#ver')).toHaveText('R2 bundle v1');
@@ -1489,7 +1500,9 @@ async function runMain(browser: Browser): Promise<void> {
         const create = j
           .who('owner')
           .requests.slice(since)
-          .find((q) => q.method === 'POST' && q.path === `/api/v1/artifacts/${bundleId()}/versions`);
+          .find(
+            (q) => q.method === 'POST' && q.path === `/api/v1/artifacts/${bundleId()}/versions`
+          );
         const finalize = calls.find((c) => c.path.endsWith('/finalize'));
         r2.publishes.push({
           artifact: 'bundle',
@@ -1511,11 +1524,12 @@ async function runMain(browser: Browser): Promise<void> {
 
   // ---- R2-10: history in order with the publisher ------------------------
   r2.step = 'R2-10';
-  const expectedHistory = (publisher: string) => [
-    { seq: 'v3', current: true, kind: 'publish', publishedBy: publisher, note: 'r2 v3', files: '5', view: false },
-    { seq: 'v2', current: false, kind: 'publish', publishedBy: publisher, note: 'r2 v2', files: '4', view: true },
-    { seq: 'v1', current: false, kind: 'publish', publishedBy: publisher, note: 'r2 v1', files: '4', view: true },
-  ];
+  const expectedHistory = (publisher: string): Array<Record<string, unknown>> =>
+    [
+      { seq: 'v3', current: true, note: 'r2 v3', files: '5', view: false },
+      { seq: 'v2', current: false, note: 'r2 v2', files: '4', view: true },
+      { seq: 'v1', current: false, note: 'r2 v1', files: '4', view: true },
+    ].map((x) => ({ ...x, kind: 'publish', publishedBy: publisher }));
   await j.row(
     'R2-10',
     async (r) => {
@@ -1539,7 +1553,13 @@ async function runMain(browser: Browser): Promise<void> {
         'v1',
       ]);
       expect.soft(menu[1] ?? '', 'menu v2 note').toContain('r2 v2');
-      const versions = await j.api('owner', 'GET', `/api/v1/artifacts/${bundleId()}/versions`, undefined, r);
+      const versions = await j.api(
+        'owner',
+        'GET',
+        `/api/v1/artifacts/${bundleId()}/versions`,
+        undefined,
+        r
+      );
       const body = (versions.body ?? {}) as {
         versions?: Array<{ seq: number; createdByRef?: string }>;
         discarded?: unknown[];
@@ -1626,8 +1646,9 @@ async function runMain(browser: Browser): Promise<void> {
       await htmlFrame(page).locator('#to-page2').click();
       await expect(htmlFrame(page).locator('#page2')).toHaveText('R2 page two v3');
       const v3Files = await filesRows(page);
-      r.ui.v3 = { heading: 'R2 bundle v3', page2: 'R2 page two v3', files: v3Files.rows.map((x) => x.path) };
-      expect.soft(v3Files.rows.map((x) => x.path), 'v3 lists notes/v3.txt').toContain('notes/v3.txt');
+      const v3Paths = v3Files.rows.map((x) => x.path);
+      r.ui.v3 = { heading: 'R2 bundle v3', page2: 'R2 page two v3', files: v3Paths };
+      expect.soft(v3Paths, 'v3 lists notes/v3.txt').toContain('notes/v3.txt');
       for (const seq of [2, 1]) {
         const res = await j.api(
           'owner',
@@ -1674,12 +1695,14 @@ async function runMain(browser: Browser): Promise<void> {
     const dl = await downloadFile(page, 'img/chart.png');
     await settle(page);
     const want = `/api/v1/artifacts/${bundleId()}/versions/3/files/img/chart.png`;
-    dl.requestStatus = [...j.who(key).requests].reverse().find((q) => q.path === want)?.status ?? null;
+    const dlRequest = [...j.who(key).requests].reverse().find((q) => q.path === want);
+    dl.requestStatus = dlRequest?.status ?? null;
     r.ui.download = dl;
     expect.soft(dl.filename, 'download filename').toBe('chart.png');
     expect.soft(dl.bytes, 'download size').toBe(r2.fileSizes['img/chart.png']);
     const res = await j.api(key, 'GET', want, undefined, r);
-    r.ui.fileGet = { status: res.status, contentLength: Number(res.headers['content-length'] ?? -1) };
+    const contentLength = Number(res.headers['content-length'] ?? -1);
+    r.ui.fileGet = { status: res.status, contentLength };
     expect.soft(res.status, 'file GET').toBe(200);
     expect
       .soft(Number(res.headers['content-length'] ?? -1), 'Content-Length')
@@ -1697,7 +1720,8 @@ async function runMain(browser: Browser): Promise<void> {
         undefined,
         r
       );
-      r.ui.indexHtml = { status: html.status, contentDisposition: html.headers['content-disposition'] ?? '' };
+      const disposition = html.headers['content-disposition'] ?? '';
+      r.ui.indexHtml = { status: html.status, contentDisposition: disposition };
       expect.soft(html.status, 'index.html GET').toBe(200);
       expect
         .soft(html.headers['content-disposition'] ?? '', 'index.html served as attachment')
@@ -1745,7 +1769,11 @@ async function runMain(browser: Browser): Promise<void> {
           step: 'R2-13',
           owner,
           bar,
-          frame: { sandboxTokens: tokens(attrs.sandbox), referrerpolicy: attrs.referrerpolicy, ...info },
+          frame: {
+            sandboxTokens: tokens(attrs.sandbox),
+            referrerpolicy: attrs.referrerpolicy,
+            ...info,
+          },
           heading,
           chartNaturalWidth: chart,
           probe: result,
@@ -1756,7 +1784,9 @@ async function runMain(browser: Browser): Promise<void> {
         r.ui.reader = rec;
         const labels = ownerLabels();
         iso(owner !== 'Owner: You' && labels.some((l) => owner === `Owner: ${l}`));
-        iso(labels.some((l) => bar === `Content published by ${l} · runs sandboxed, isolated from Scion`));
+        const barText = (l: string): string =>
+          `Content published by ${l} · runs sandboxed, isolated from Scion`;
+        iso(labels.some((l) => bar === barText(l)));
         iso(JSON.stringify(rec.frame.sandboxTokens) === JSON.stringify(['allow-scripts']));
         iso(attrs.referrerpolicy === 'no-referrer');
         iso(info.viewSeq === 3 && info.viewIdMatches && info.entry === 'index.html');
@@ -1795,14 +1825,24 @@ async function runMain(browser: Browser): Promise<void> {
       await htmlFrame(page).locator('#to-page2').click();
       await expect(htmlFrame(page).locator('#page2')).toHaveText('R2 page two v1');
       r.ui.v1Page2 = 'R2 page two v1';
-      const versions = await j.api('member', 'GET', `/api/v1/artifacts/${bundleId()}/versions`, undefined, r);
-      const body = (versions.body ?? {}) as { versions?: Array<{ seq: number; createdByRef?: string }> };
+      const versions = await j.api(
+        'member',
+        'GET',
+        `/api/v1/artifacts/${bundleId()}/versions`,
+        undefined,
+        r
+      );
+      const body = (versions.body ?? {}) as {
+        versions?: Array<{ seq: number; createdByRef?: string }>;
+      };
       const apiSeqs = (body.versions ?? []).map((v) => v.seq);
       const apiCreatedBy = (body.versions ?? []).map((v) => v.createdByRef ?? null);
       r2.history.member = { rows, apiSeqs, apiCreatedBy };
       expect.soft(versions.status, 'versions 200').toBe(200);
       expect.soft(apiSeqs, 'same seqs as the owner').toEqual([3, 2, 1]);
-      expect.soft(apiCreatedBy, 'same publisher as the owner saw').toEqual(Array(3).fill(j.who('owner').id));
+      expect
+        .soft(apiCreatedBy, 'same publisher as the owner saw')
+        .toEqual(Array(3).fill(j.who('owner').id));
     },
     { requires: ['R2-09'] }
   );
@@ -1862,7 +1902,13 @@ async function runMain(browser: Browser): Promise<void> {
       r.ui.frames = await page.locator(RENDER_SELECTORS.htmlFrame).count();
       expect.soft(r.ui.rendered404, 'outsider: 404 page').toBe(true);
       expect.soft(r.ui.frames, 'outsider: no frame').toBe(0);
-      const real = await j.api('outsider', 'POST', `/api/v1/artifacts/${bundleId()}/versions/1/view`, undefined, r);
+      const real = await j.api(
+        'outsider',
+        'POST',
+        `/api/v1/artifacts/${bundleId()}/versions/1/view`,
+        undefined,
+        r
+      );
       const random = await j.api(
         'outsider',
         'POST',
@@ -1871,7 +1917,9 @@ async function runMain(browser: Browser): Promise<void> {
         r
       );
       expect.soft(real.status, 'mint view for a non-reader').toBe(404);
-      expect.soft([real.status, real.code], 'same as for a random id').toEqual([random.status, random.code]);
+      expect
+        .soft([real.status, real.code], 'same as for a random id')
+        .toEqual([random.status, random.code]);
     },
     { requires: ['R2-01'] }
   );
@@ -1990,7 +2038,9 @@ async function chatRow(r: RowRecord): Promise<void> {
 
   const page = await j.pageOf('member');
   await page.goto(`/chat/space/${projectId}/thread/${topicId}`, { waitUntil: 'domcontentloaded' });
-  const link = page.locator(`${RENDER_SELECTORS.chatArtifactLink}[data-artifact-id="${markdownId()}"]`);
+  const link = page.locator(
+    `${RENDER_SELECTORS.chatArtifactLink}[data-artifact-id="${markdownId()}"]`
+  );
   await expect(link, 'reference shown as a link').toBeVisible({ timeout: 30_000 });
   r.ui.chips = await page.locator(RENDER_SELECTORS.chatArtifactChip).count();
   await link.click();
@@ -2032,7 +2082,9 @@ async function chatRow(r: RowRecord): Promise<void> {
   expect.soft(String(r.ui.label), 'preview names the artifact').toContain(r2.markdown!.title);
   expectMarkdownRendered(facts, 1);
   expectMarkdownInert(facts, flags);
-  expect.soft((r.ui.openInViewer as { visible: boolean }).visible, 'Open in artifact viewer').toBe(true);
+  expect
+    .soft((r.ui.openInViewer as { visible: boolean }).visible, 'Open in artifact viewer')
+    .toBe(true);
   expect
     .soft((r.ui.openInViewer as { href: string | null }).href, 'viewer link')
     .toBe(`/projects/${projectId}/artifacts/${markdownId()}`);
@@ -2136,7 +2188,8 @@ async function runCleanup(testInfo: {
       const listed = ((list.body ?? {}) as { artifacts?: Array<{ id: string }> }).artifacts?.some(
         (x) => x.id === a.id
       );
-      states[`${name} (owner list)`] = list.status === 200 && !listed ? 'absent' : 'present_in_list';
+      states[`${name} (owner list)`] =
+        list.status === 200 && !listed ? 'absent' : 'present_in_list';
       if (j.state.ids.member) {
         const m = await j.api('member', 'GET', `/api/v1/artifacts/${a.id}`);
         states[`${name} (member read)`] = classifyRead(m.status, m.body, 'artifact');
@@ -2303,10 +2356,11 @@ async function cleanupChat(
   if (!topicId || !j.state.ids.owner) return null;
   const out: Record<string, unknown> = {};
   try {
-    const del = await j.api('owner', 'DELETE', `/api/v1/chat/topics/${encodeURIComponent(topicId)}`);
+    const topicPath = `/api/v1/chat/topics/${encodeURIComponent(topicId)}`;
+    const del = await j.api('owner', 'DELETE', topicPath);
     out.threadDelete = del.status;
     if (del.status >= 300 && del.status !== 404) residue.push(`chat thread: DELETE ${del.status}`);
-    const get = await j.api('owner', 'GET', `/api/v1/chat/topics/${encodeURIComponent(topicId)}`);
+    const get = await j.api('owner', 'GET', topicPath);
     out.threadReadAfter = get.status;
     const deletedAt = (get.body as { deletedAt?: string } | null)?.deletedAt;
     states['chat thread'] = get.status === 404 || !!deletedAt ? 'absent' : `status ${get.status}`;
