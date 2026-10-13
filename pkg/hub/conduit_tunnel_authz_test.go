@@ -423,6 +423,53 @@ func TestConduitTunnelAuthz_IntervalRenewsThenCloses4401(t *testing.T) {
 	}
 }
 
+// TestConduitTunnelAuthz_IntervalRenewalNoticeDelivered (tcp and ssh
+// tunnels): the agent's session is held by this node, so the tunnel is
+// tracked with the shared renewal sender (conduitStreamRenewal). At its
+// deadline the hub sends AuthRefresh{stream_id} on the agent's session
+// without error, the renewal is logged with notice=local (never
+// not_delivered), and the tunnel keeps carrying data.
+func TestConduitTunnelAuthz_IntervalRenewalNoticeDelivered(t *testing.T) {
+	for _, kind := range tunnelAuthzKinds {
+		t.Run(kind, func(t *testing.T) {
+			f := newTunnelAuthzFixture(t, tunnelAuthzStreamMax)
+			interval := f.authz.cfg.UserStreamAuthzMax
+			require.Less(t, interval, f.authz.cfg.RecheckInterval, "no sweep runs in this test")
+			c := f.userClient(t)
+			tu := f.openTunnel(t, c, f.launched.ID, kind)
+			tu.tunnelEcho(t, "before")
+			st := f.tracked(t, c, tu.st.ID())
+			require.NotNil(t, st.Renew, "the agent's session is local: a notice sender is set")
+			calls := watchStream(st)
+
+			f.relayClock.Advance(interval)
+			f.metrics.wait(t, conduitAuthzTriggerInterval+"/"+conduitAuthzOutcomeRenewed+"/"+kind, 1)
+			closes, renews := calls.snapshot()
+			assert.Empty(t, closes)
+			require.Len(t, renews, 1, "one renewal notice")
+			assert.NoError(t, renews[0], "the notice was sent on the agent's session")
+
+			streamAttr := "stream_id=" + strconv.FormatUint(uint64(tu.st.ID()), 10) + " "
+			var line string
+			require.Eventually(t, func() bool {
+				for _, l := range strings.Split(f.logs.String(), "\n") {
+					if strings.Contains(l, "msg=conduit_stream_authz") && strings.Contains(l, "outcome=renewed") && strings.Contains(l, streamAttr) {
+						line = l
+						return true
+					}
+				}
+				return false
+			}, recheckWait, 20*time.Millisecond, "the renewal is logged")
+			assert.Contains(t, line, "notice=local")
+			assert.NotContains(t, line, "notice=not_delivered")
+
+			// The notice is queued as a control frame ahead of this data.
+			tu.tunnelEcho(t, "after renewal")
+			assert.Nil(t, c.ls.Err(), "the session stays up")
+		})
+	}
+}
+
 // TestConduitTunnelAuthz_DialerAuthRefreshRefused4400 (C16b, tcp and ssh
 // tunnels): an AuthRefresh{stream_id} sent by the user session that holds
 // the tunnel is refused with 4400 bad_frame and logged, and it moves no

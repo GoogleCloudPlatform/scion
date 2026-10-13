@@ -405,7 +405,7 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 		return nil, errors.New("stream re-check is not running")
 	}
 
-	target, err := ts.openTarget(ctx, rt.router, agent, kind, params)
+	target, renew, err := ts.openTarget(ctx, rt.router, agent, kind, params)
 	if err != nil {
 		if te := (*conduitTunnelError)(nil); errors.As(err, &te) {
 			log.Info("Conduit tunnel refused", "cause", te.message, "error", err)
@@ -434,6 +434,7 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 		SessionID: info.SessionID,
 		StreamID:  user.ID(),
 		Close:     t.closeBoth,
+		Renew:     renew,
 	}
 	t.untrack = s.trackConduitUserStream(tracked)
 	t.tracked.Store(tracked)
@@ -588,9 +589,14 @@ func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Ag
 
 // openTarget resolves the agent's session that serves kind, mints a grant
 // for exactly that session and opens the target stream with the same
-// params, as the agent PTY path does.
-func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Router, agent *store.Agent, kind string, params map[string]string) (conduit.Stream, error) {
-	var st conduit.Stream
+// params, as the agent PTY path does. It also returns the stream's
+// renewal notice sender (conduitStreamRenewal: nil when this node does not
+// hold the target's session).
+func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Router, agent *store.Agent, kind string, params map[string]string) (conduit.Stream, func() error, error) {
+	var (
+		st    conduit.Stream
+		renew func() error
+	)
 	req := router.Request{
 		Op:    router.OpStream,
 		Kind:  registry.PrincipalAgent,
@@ -624,12 +630,16 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 			Params: params,
 			Grant:  tok,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		renew = conduitStreamRenewal(res, st.ID())
+		return nil
 	})
 	if err != nil {
-		return nil, conduitTunnelOpenError(err)
+		return nil, nil, conduitTunnelOpenError(err)
 	}
-	return st, nil
+	return st, renew, nil
 }
 
 // errConduitTunnelGrantKeys marks a grant that could not be signed.
