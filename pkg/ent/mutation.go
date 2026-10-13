@@ -59308,23 +59308,26 @@ func (m *NonceCacheMutation) ResetEdge(name string) error {
 // NotificationMutation represents an operation that mutates the Notification nodes in the graph.
 type NotificationMutation struct {
 	config
-	op              Op
-	typ             string
-	id              *uuid.UUID
-	subscription_id *uuid.UUID
-	agent_id        *uuid.UUID
-	project_id      *uuid.UUID
-	subscriber_type *string
-	subscriber_id   *string
-	status          *string
-	message         *string
-	dispatched      *bool
-	acknowledged    *bool
-	created         *time.Time
-	clearedFields   map[string]struct{}
-	done            bool
-	oldValue        func(context.Context) (*Notification, error)
-	predicates      []predicate.Notification
+	op                   Op
+	typ                  string
+	id                   *uuid.UUID
+	subscription_id      *uuid.UUID
+	agent_id             *uuid.UUID
+	project_id           *uuid.UUID
+	subscriber_type      *string
+	subscriber_id        *string
+	status               *string
+	message              *string
+	dispatched           *bool
+	acknowledged         *bool
+	dispatch_attempts    *int
+	adddispatch_attempts *int
+	dispatch_outcome     *string
+	created              *time.Time
+	clearedFields        map[string]struct{}
+	done                 bool
+	oldValue             func(context.Context) (*Notification, error)
+	predicates           []predicate.Notification
 }
 
 var _ ent.Mutation = (*NotificationMutation)(nil)
@@ -59755,6 +59758,98 @@ func (m *NotificationMutation) ResetAcknowledged() {
 	m.acknowledged = nil
 }
 
+// SetDispatchAttempts sets the "dispatch_attempts" field.
+func (m *NotificationMutation) SetDispatchAttempts(i int) {
+	m.dispatch_attempts = &i
+	m.adddispatch_attempts = nil
+}
+
+// DispatchAttempts returns the value of the "dispatch_attempts" field in the mutation.
+func (m *NotificationMutation) DispatchAttempts() (r int, exists bool) {
+	v := m.dispatch_attempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDispatchAttempts returns the old "dispatch_attempts" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldDispatchAttempts(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDispatchAttempts is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDispatchAttempts requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDispatchAttempts: %w", err)
+	}
+	return oldValue.DispatchAttempts, nil
+}
+
+// AddDispatchAttempts adds i to the "dispatch_attempts" field.
+func (m *NotificationMutation) AddDispatchAttempts(i int) {
+	if m.adddispatch_attempts != nil {
+		*m.adddispatch_attempts += i
+	} else {
+		m.adddispatch_attempts = &i
+	}
+}
+
+// AddedDispatchAttempts returns the value that was added to the "dispatch_attempts" field in this mutation.
+func (m *NotificationMutation) AddedDispatchAttempts() (r int, exists bool) {
+	v := m.adddispatch_attempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetDispatchAttempts resets all changes to the "dispatch_attempts" field.
+func (m *NotificationMutation) ResetDispatchAttempts() {
+	m.dispatch_attempts = nil
+	m.adddispatch_attempts = nil
+}
+
+// SetDispatchOutcome sets the "dispatch_outcome" field.
+func (m *NotificationMutation) SetDispatchOutcome(s string) {
+	m.dispatch_outcome = &s
+}
+
+// DispatchOutcome returns the value of the "dispatch_outcome" field in the mutation.
+func (m *NotificationMutation) DispatchOutcome() (r string, exists bool) {
+	v := m.dispatch_outcome
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDispatchOutcome returns the old "dispatch_outcome" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldDispatchOutcome(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDispatchOutcome is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDispatchOutcome requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDispatchOutcome: %w", err)
+	}
+	return oldValue.DispatchOutcome, nil
+}
+
+// ResetDispatchOutcome resets all changes to the "dispatch_outcome" field.
+func (m *NotificationMutation) ResetDispatchOutcome() {
+	m.dispatch_outcome = nil
+}
+
 // SetCreated sets the "created" field.
 func (m *NotificationMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -59825,7 +59920,7 @@ func (m *NotificationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *NotificationMutation) Fields() []string {
-	fields := make([]string, 0, 10)
+	fields := make([]string, 0, 12)
 	if m.subscription_id != nil {
 		fields = append(fields, notification.FieldSubscriptionID)
 	}
@@ -59852,6 +59947,12 @@ func (m *NotificationMutation) Fields() []string {
 	}
 	if m.acknowledged != nil {
 		fields = append(fields, notification.FieldAcknowledged)
+	}
+	if m.dispatch_attempts != nil {
+		fields = append(fields, notification.FieldDispatchAttempts)
+	}
+	if m.dispatch_outcome != nil {
+		fields = append(fields, notification.FieldDispatchOutcome)
 	}
 	if m.created != nil {
 		fields = append(fields, notification.FieldCreated)
@@ -59882,6 +59983,10 @@ func (m *NotificationMutation) Field(name string) (ent.Value, bool) {
 		return m.Dispatched()
 	case notification.FieldAcknowledged:
 		return m.Acknowledged()
+	case notification.FieldDispatchAttempts:
+		return m.DispatchAttempts()
+	case notification.FieldDispatchOutcome:
+		return m.DispatchOutcome()
 	case notification.FieldCreated:
 		return m.Created()
 	}
@@ -59911,6 +60016,10 @@ func (m *NotificationMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldDispatched(ctx)
 	case notification.FieldAcknowledged:
 		return m.OldAcknowledged(ctx)
+	case notification.FieldDispatchAttempts:
+		return m.OldDispatchAttempts(ctx)
+	case notification.FieldDispatchOutcome:
+		return m.OldDispatchOutcome(ctx)
 	case notification.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -59985,6 +60094,20 @@ func (m *NotificationMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetAcknowledged(v)
 		return nil
+	case notification.FieldDispatchAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDispatchAttempts(v)
+		return nil
+	case notification.FieldDispatchOutcome:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDispatchOutcome(v)
+		return nil
 	case notification.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -59999,13 +60122,21 @@ func (m *NotificationMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *NotificationMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.adddispatch_attempts != nil {
+		fields = append(fields, notification.FieldDispatchAttempts)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *NotificationMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case notification.FieldDispatchAttempts:
+		return m.AddedDispatchAttempts()
+	}
 	return nil, false
 }
 
@@ -60014,6 +60145,13 @@ func (m *NotificationMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *NotificationMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case notification.FieldDispatchAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddDispatchAttempts(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Notification numeric field %s", name)
 }
@@ -60067,6 +60205,12 @@ func (m *NotificationMutation) ResetField(name string) error {
 		return nil
 	case notification.FieldAcknowledged:
 		m.ResetAcknowledged()
+		return nil
+	case notification.FieldDispatchAttempts:
+		m.ResetDispatchAttempts()
+		return nil
+	case notification.FieldDispatchOutcome:
+		m.ResetDispatchOutcome()
 		return nil
 	case notification.FieldCreated:
 		m.ResetCreated()
