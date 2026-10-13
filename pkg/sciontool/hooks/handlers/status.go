@@ -177,6 +177,8 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 			// parent's session, not a status the parent set. Record it as
 			// notification-set and owned by the sub-agent, so the
 			// sub-agent's own tool-end (the user answered) clears it.
+			// blocked, completed, limits_exceeded and crashed are kept,
+			// with no owner recorded (see setWaitingFromNotificationFor).
 			if isSubagentEvent(event) {
 				return h.setWaitingFromNotificationFor(subagentID(event))
 			}
@@ -220,11 +222,17 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 // Notification event and, when owner (a sub-agent's agent_id) is not empty,
 // adds owner to the wait's owner list. A waiting_for_input the agent set
 // itself is left unchanged: a harness prompt must not turn it into a
-// notification-set wait that the prompt's answer would then clear. The
-// owner list change is part of the same locked update.
+// notification-set wait that the prompt's answer would then clear. A
+// sub-agent's question (owner not empty) also leaves blocked, completed,
+// limits_exceeded and crashed unchanged and records no owner (see
+// isHeldNonWaitingActivity). The owner list change is part of the same
+// locked update.
 func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 	return h.update(func(info map[string]interface{}) bool {
 		if isAgentSetWaiting(info) {
+			return false
+		}
+		if current, _ := info["activity"].(string); owner != "" && isHeldNonWaitingActivity(current) {
 			return false
 		}
 
@@ -261,6 +269,14 @@ func (h *StatusHandler) releaseNotificationWaitOwner(owner string) error {
 		setNotificationWaitOwners(info, remaining)
 		return true
 	})
+}
+
+// isHeldNonWaitingActivity reports whether activity is a held status other
+// than waiting_for_input: blocked, completed, limits_exceeded or crashed. A
+// sub-agent's question must not replace it, the same statuses a parent
+// tool-start keeps.
+func isHeldNonWaitingActivity(activity string) bool {
+	return isStickyActivity(activity) && activity != string(state.ActivityWaitingForInput)
 }
 
 // isNotificationWaiting reports whether info holds a waiting_for_input that a
@@ -635,7 +651,8 @@ func isClaudeUserWaitTool(event *hooks.Event) bool {
 // tool-start event that must not clear a status the parent agent holds. A
 // sub-agent's ExitPlanMode or AskUserQuestion tool-start is excluded: the
 // user is being asked, so it still sets waiting_for_input (recorded as
-// notification-set, see Handle).
+// notification-set, see Handle), unless the agent holds blocked, completed,
+// limits_exceeded or crashed (see setWaitingFromNotificationFor).
 func isHeldSubagentEvent(event *hooks.Event) bool {
 	if !isSubagentEvent(event) || isClaudeUserWaitTool(event) {
 		return false

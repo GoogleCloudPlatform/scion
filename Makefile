@@ -460,8 +460,11 @@ test-store-postgres-entadapter: test-store-postgres-env-check
 		fi; \
 	fi
 
-# test-store-postgres-tail: the storetest, pkg/ent/entc and cmd runs of
-# test-store-postgres (after entadapter).
+# test-store-postgres-tail: the storetest, pkg/store/enttest, pkg/ent/entc
+# and cmd runs of test-store-postgres (after entadapter). The enttest run
+# includes TestSchemaSnapshot_MatchesAutoMigrate, which checks that the
+# schema snapshot the harness provisions test schemas from matches
+# entc.AutoMigrate.
 test-store-postgres-tail: test-store-postgres-env-check
 	@go test -tags integration -count=1 -timeout 10m -v \
 		-run '^TestCompositeStore_CRUDParity$$/^group$$/^MembershipCleanup$$' \
@@ -475,6 +478,19 @@ test-store-postgres-tail: test-store-postgres-env-check
 	fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-storetest.log; then \
 		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		./pkg/store/enttest/ > /tmp/test-launch-store-postgres-enttest.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-enttest.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-enttest.log; then \
+		echo "ERROR: one or more pkg/store/enttest Postgres tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestSchemaSnapshot_MatchesAutoMigrate ' /tmp/test-launch-store-postgres-enttest.log; then \
+		echo "ERROR: the schema snapshot equivalence test did not run." >&2; \
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
