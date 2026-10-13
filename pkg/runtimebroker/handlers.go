@@ -1400,8 +1400,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			s.agentLifecycleLog.Warn("async launch requested for a runtime that does not support async launch; falling back to synchronous create",
 				"agent_id", req.ID, "name", req.Name, "runtime", sc.RuntimeType)
 		default:
-			ownedHandoff = true // runLaunch completes the ownership mirror
-			s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, attempt, markAttemptFailed, span, createStart)
+			// runLaunch completes the ownership mirror only for an accepted
+			// launch; a refused one leaves it to the deferred release.
+			ownedHandoff = s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, sc.ownedStart, attempt, markAttemptFailed, span, createStart)
 			return
 		}
 	}
@@ -2996,12 +2997,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 
 	// A flat instance's ownership mirror installed by buildStartContext is
-	// released when this request ends unless Start consumed it or the async
-	// launch took it over (ptone/scion#3274).
+	// released when this request ends unless Start consumed it
+	// (ptone/scion#3274).
 	var sc *startContext
-	ownedHandoff := false
 	defer func() {
-		if sc != nil && !ownedHandoff {
+		if sc != nil {
 			s.releaseOwnedStart(sc.Opts.RunID)
 		}
 	}()
@@ -4057,12 +4057,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	}
 
 	// A flat instance's ownership mirror installed by buildStartContext is
-	// released when this request ends unless Start consumed it or the async
-	// launch took it over (ptone/scion#3274).
+	// released when this request ends unless Start consumed it
+	// (ptone/scion#3274).
 	var sc *startContext
-	ownedHandoff := false
 	defer func() {
-		if sc != nil && !ownedHandoff {
+		if sc != nil {
 			s.releaseOwnedStart(sc.Opts.RunID)
 		}
 	}()
