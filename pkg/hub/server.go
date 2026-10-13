@@ -184,8 +184,15 @@ type ServerConfig struct {
 	AgentRunScope AgentRunScope
 	// BrokerAuthConfig holds configuration for Runtime Broker HMAC authentication.
 	BrokerAuthConfig BrokerAuthConfig
-	// HubEndpoint is the public endpoint URL for this Hub (used in broker join responses).
+	// HubEndpoint is the operator endpoint URL for this Hub: resolved at
+	// startup from the environment, startup flags and settings.yaml, never
+	// from the settings database.
 	HubEndpoint string
+	// HubEndpoints, when set, holds the operator and public endpoints the
+	// caller resolved at startup (ResolveHubEndpoints), including a
+	// server.hub.public_url saved in the settings database. When nil, both
+	// are HubEndpoint. hubEndpointUses decides which one each use gets.
+	HubEndpoints *HubEndpoints
 	// AgentEndpoint optionally overrides HubEndpoint for the sole purpose of
 	// the SCION_HUB_ENDPOINT value injected into dispatched agents (see
 	// HTTPAgentDispatcher.SetAgentEndpoint). Every other use of HubEndpoint
@@ -362,11 +369,12 @@ type ServerConfig struct {
 	// create or authenticate user accounts for this identity. Empty when no
 	// transport service account is configured.
 	PlatformAuthSA string
-	// EnableTestIdentities turns on hub-issued test identities
-	// (--enable-test-identities): POST/GET /api/v1/test-identities and POST
-	// /api/v1/test-identities/{id}/token. Off by default. While it is off
-	// those routes return 404 and every test-fixture user is refused at
-	// authentication. It is a startup-only switch, never a runtime setting.
+	// EnableTestIdentities turns on hub-issued test identities: POST/GET
+	// /api/v1/test-identities and POST /api/v1/test-identities/{id}/token.
+	// cmd sets it from the resolved --test-mode level (true for member and
+	// above; see TestMode). Off by default. While it is off those routes
+	// return 404 and every test-fixture user is refused at authentication.
+	// It is a startup-only switch, never a runtime setting.
 	EnableTestIdentities bool
 	// TestIdentityWebSessionKey is the hub-local test identity web session
 	// key cmd read from the test infrastructure marker at startup (WS1,
@@ -385,12 +393,17 @@ type ServerConfig struct {
 	// TestIdentityWorkloadValidator verifies workload Google ID tokens.
 	// Nil means the production Google validator; tests set a fake.
 	TestIdentityWorkloadValidator GoogleCredentialValidator
-	// TestAdminGate is the validated test admin tier gate
-	// (--enable-test-admin-identities, ptone/scion#4240 phase A0). cmd's
-	// validateTestAdminIdentities builds it; New re-checks it, verifies
-	// every signing-key class is hub-local, and captures it into an
-	// immutable value. The zero value leaves the tier off.
+	// TestAdminGate is the validated test admin tier gate (--test-mode=admin,
+	// ptone/scion#4240 phase A0). cmd's resolveTestMode builds it; New
+	// re-checks it, verifies every signing-key class is hub-local, and
+	// captures it into an immutable value. The zero value leaves the tier
+	// off.
 	TestAdminGate TestAdminGateConfig
+	// TestMode is the resolved --test-mode level and the preconditions
+	// that admitted it (test_mode.go). New refuses a configuration whose
+	// EnableTestIdentities and TestAdminGate differ from what the level
+	// grants. The zero value is off.
+	TestMode TestModeConfig
 	// WebSessionKeySource is the signingKeySource label of the web session
 	// cookie key, set by cmd from the same session secret it passes to
 	// NewWebServer: "generated" (no shared secret: a random per-process
@@ -1803,6 +1816,10 @@ type Server struct {
 	// only this value.
 	testAdminGate testAdminGate
 
+	// testMode is the immutable resolved --test-mode level captured by New
+	// (test_mode.go).
+	testMode testModeState
+
 	// testAdminIssuance is the state of admin-kind test identity issuance
 	// (handlers_test_admin_identities.go).
 	testAdminIssuance testAdminIssuanceState
@@ -2149,11 +2166,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// The test-identity expiry and feature checks run in the auth
 	// middleware's per-request user-row block, which needs a user store.
 	if cfg.EnableTestIdentities && s == nil {
-		return nil, fmt.Errorf("--enable-test-identities requires a user store; none is configured")
+		return nil, fmt.Errorf("--test-mode requires a user store; none is configured")
 	}
 	// The test admin tier gate is re-checked here (cmd validated it first)
 	// so a Server can never be built with an inconsistent gate.
 	if err := validateTestAdminGateConfig(cfg, s != nil); err != nil {
+		return nil, err
+	}
+	// The switches must be exactly what the resolved --test-mode grants,
+	// and the member preconditions it carries must hold.
+	if err := ValidateTestModeConfig(cfg); err != nil {
 		return nil, err
 	}
 	// Workload issuer allowlist and issuer audience (X2): refuse a
@@ -2466,7 +2488,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if cfg.OIDCConfig.Enabled {
 		oidcIssuerURL := cfg.OIDCConfig.IssuerURL
 		if oidcIssuerURL == "" {
-			oidcIssuerURL = cfg.HubEndpoint
+			oidcIssuerURL = hubEndpointsFromConfig(cfg).For(HubEndpointForOIDCIssuer)
 		}
 		if oidcIssuerURL == "" {
 			return nil, fmt.Errorf("OIDC is enabled but no issuer URL configured (set oidc.issuer_url or hub.endpoint)")
@@ -2523,8 +2545,22 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 	srv.testAdminAudit = newTestAdminAuditSink(testAdminAuditOutput)
 	srv.testAdminGate = newTestAdminGate(cfg.TestAdminGate)
-	if srv.testAdminGate.on() {
+	testModeCfg := cfg.TestMode
+	if cfg.TestAdminGate.requested() {
+		// verifyTestAdminSigningKeys passed above.
+		testModeCfg.Preconditions = append(append([]string(nil), testModeCfg.Preconditions...), TestModePreconditionSigningKeysHubLocal)
+	}
+	srv.testMode = newTestModeState(testModeCfg)
+	// One startup line through the test admin audit sink for any level but
+	// off: the gate-start banner for the admin levels (it carries the level
+	// and preconditions too), the test-mode line for member.
+	switch {
+	case srv.testAdminGate.on():
 		if err := srv.emitTestAdminGateStart(); err != nil {
+			return nil, err
+		}
+	case srv.testMode.level != TestModeOff:
+		if err := srv.emitTestModeStart(); err != nil {
 			return nil, err
 		}
 	}
@@ -2833,6 +2869,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// hub.agent_delegation is off.
 		DelegatedAgentAuth: srv.authenticateDelegatedAgentCredential,
 
+		// Federated visitors: a verified user token linked to an active
+		// federated account; off while federation.project_visitors is off.
+		ResolveFederatedVisitor: srv.resolveFederatedVisitor,
 		// Workload-bound issuer delegations (test identities phase X2).
 		WorkloadIssuer: srv.workloadIssuer,
 	}
@@ -4474,10 +4513,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	}
 
 	// Set Hub endpoint if configured
-	if s.config.HubEndpoint != "" {
-		dispatcher.SetHubEndpoint(s.config.HubEndpoint)
+	if agentHubEndpoint := s.HubEndpointFor(HubEndpointForAgents); agentHubEndpoint != "" {
+		dispatcher.SetHubEndpoint(agentHubEndpoint)
 		if s.config.Debug {
-			slog.Debug("Dispatcher hub endpoint configured", "endpoint", s.config.HubEndpoint)
+			slog.Debug("Dispatcher hub endpoint configured", "endpoint", agentHubEndpoint)
 		}
 	} else if s.config.Debug {
 		slog.Warn("No hub.endpoint configured - agents won't know how to reach Hub")
@@ -4493,7 +4532,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	if s.config.AgentEndpoint != "" {
 		dispatcher.SetAgentEndpoint(s.config.AgentEndpoint)
 		slog.Info("server.hub.agent_endpoint is set: agents on every broker attached to this Hub, including remote brokers, will report to this URL instead of the hub's regular endpoint",
-			"agent_endpoint", s.config.AgentEndpoint, "hub_endpoint", s.config.HubEndpoint)
+			"agent_endpoint", s.config.AgentEndpoint, "hub_endpoint", s.HubEndpointFor(HubEndpointForAgents))
 	}
 
 	// Set Hub name so agent log entries carry the hub label.
@@ -5959,7 +5998,7 @@ func (s *Server) registerSchedulerHandlers() {
 	s.registerMembershipStandingReconciler()
 
 	// Test identity expiry reaper (ptone/scion#4240): only with
-	// --enable-test-identities.
+	// --test-mode=member or above.
 	s.registerTestIdentityReaper()
 
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
@@ -6834,7 +6873,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/github-app/sync-permissions", s.guarded("POST /api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions))
 
 	// Hub test identities (ptone/scion#4240). Always registered; each
-	// handler returns 404 unless --enable-test-identities is set.
+	// handler returns 404 unless --test-mode is member or above.
 	// The gate runs before the route guard, so a hub without the flag
 	// answers 404 to every caller, whatever its permissions.
 	s.mux.HandleFunc("POST /api/v1/test-identities", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities", s.handleCreateTestIdentity)))

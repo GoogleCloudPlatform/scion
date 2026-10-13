@@ -94,7 +94,39 @@ export interface ArtifactResponse {
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
 export interface VersionListResponse {
   versions: ArtifactVersion[];
+  /**
+   * Versions of the same page that stopped being pending without becoming
+   * ready (ptone/scion#4577): only their number, state, reason code and the
+   * time their number was taken.
+   */
+  discarded?: DiscardedVersion[];
   nextBefore?: number;
+}
+
+/** A discarded version as GET .../versions lists it. */
+export interface DiscardedVersion {
+  seq: number;
+  state: string;
+  /** unmarked_changes, stale_review, newer_publish_pending, expired or discarded. */
+  reason: string;
+  /** When the version number was taken. */
+  createdAt: string;
+}
+
+/** Describes a discarded version's reason code for people. */
+export function discardReasonText(reason: string): string {
+  switch (reason) {
+    case 'unmarked_changes':
+      return 'the review changed text outside its marks';
+    case 'stale_review':
+      return 'the review was of an older version';
+    case 'newer_publish_pending':
+      return 'a newer version was being published';
+    case 'expired':
+      return 'the upload was not finished in time';
+    default:
+      return 'no reason recorded';
+  }
 }
 
 /** POST /api/v1/artifacts/{id}/versions/{seq}/view. */

@@ -42,6 +42,9 @@ type quickstartProbeRecorder struct {
 // allowed"; tests that check opening set quickstartBrowserAllowed.
 func stubQuickstartProbes(t *testing.T, ready bool, status onboardingStatusResult, statusErr error) *quickstartProbeRecorder {
 	t.Helper()
+	// printWorkstationQuickstart registers the local hub in
+	// ~/.scion/context.yaml: keep it out of the real HOME.
+	t.Setenv("HOME", t.TempDir())
 	rec := &quickstartProbeRecorder{}
 	origWait, origTimeout, origStatus := quickstartWaitReady, quickstartReadyTimeout, quickstartOnboardingStatus
 	origAllowed, origOpen := quickstartBrowserAllowed, quickstartOpenBrowser

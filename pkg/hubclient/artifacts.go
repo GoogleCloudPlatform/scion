@@ -65,6 +65,11 @@ type ArtifactService interface {
 	// first, without their files.
 	ListVersions(ctx context.Context, id string) ([]ArtifactVersion, error)
 
+	// ListVersionHistory returns the ready versions of an artifact, as
+	// ListVersions does, and the discarded ones (versions that stopped
+	// being pending without becoming ready), both newest first.
+	ListVersionHistory(ctx context.Context, id string) ([]ArtifactVersion, []ArtifactDiscardedVersion, error)
+
 	// GetVersion returns an artifact with version seq and its files.
 	GetVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error)
 
@@ -214,6 +219,16 @@ type ArtifactVersion struct {
 	CreatedAt     time.Time      `json:"createdAt"`
 	State         string         `json:"state"`
 	Files         []ArtifactFile `json:"files"`
+}
+
+// ArtifactDiscardedVersion is a discarded version as the versions list
+// shows it: its number, state, reason code and the time its number was
+// taken (ptone/scion#4577).
+type ArtifactDiscardedVersion struct {
+	Seq       int       `json:"seq"`
+	State     string    `json:"state"`
+	Reason    string    `json:"reason"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // ArtifactFile describes one file of a version.
@@ -436,7 +451,14 @@ func (s *artifactService) FinalizeReview(ctx context.Context, id string, seq, ba
 
 // ListVersions implements ArtifactService.
 func (s *artifactService) ListVersions(ctx context.Context, id string) ([]ArtifactVersion, error) {
+	versions, _, err := s.ListVersionHistory(ctx, id)
+	return versions, err
+}
+
+// ListVersionHistory implements ArtifactService.
+func (s *artifactService) ListVersionHistory(ctx context.Context, id string) ([]ArtifactVersion, []ArtifactDiscardedVersion, error) {
 	var all []ArtifactVersion
+	var discarded []ArtifactDiscardedVersion
 	before := 0
 	for {
 		p := artifactPath(id) + "/versions"
@@ -445,18 +467,20 @@ func (s *artifactService) ListVersions(ctx context.Context, id string) ([]Artifa
 		}
 		resp, err := s.c.get(ctx, p, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		page, err := apiclient.DecodeRequired[struct {
-			Versions   []ArtifactVersion `json:"versions"`
-			NextBefore int               `json:"nextBefore"`
+			Versions   []ArtifactVersion          `json:"versions"`
+			Discarded  []ArtifactDiscardedVersion `json:"discarded"`
+			NextBefore int                        `json:"nextBefore"`
 		}](resp)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		all = append(all, page.Versions...)
+		discarded = append(discarded, page.Discarded...)
 		if page.NextBefore <= 0 || (before > 0 && page.NextBefore >= before) {
-			return all, nil
+			return all, discarded, nil
 		}
 		before = page.NextBefore
 	}
