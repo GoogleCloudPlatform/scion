@@ -456,12 +456,6 @@ func isLocalhostEndpoint(endpoint string) bool {
 // Returns empty string if the file doesn't exist (e.g. not running in a
 // container) or is refused. It is the shared reader in pkg/hubsync, so the
 // CLI and hubsync read the file the same way.
-//
-// Trusts HOME as set by the launching environment (the user on a host,
-// the launcher in an agent). The directories above HOME must not be
-// writable by this user or any less-trusted user, so HOME itself cannot be
-// replaced; HOME may be writable. Entries below HOME are opened without
-// following links.
 func readAgentTokenFile() string {
 	return hubsync.ReadAgentTokenFile()
 }
