@@ -105,7 +105,7 @@ HUB_PKG := github.com/GoogleCloudPlatform/scion/pkg/hub
 non_hub_pkgs = go list -tags '$(1)' ./... | grep -vx '$(HUB_PKG)'
 
 # SHARD selects the pkg/hub test shard (1..N, N from
-# go run ./hack/hubshard -shards) for test-hub-shard, build-hub-shard,
+# hack/hubshard/hubshard.sh -shards) for test-hub-shard, build-hub-shard,
 # vet-hub-shard and test-hub-postgres.
 SHARD ?= 1
 
@@ -158,10 +158,11 @@ test-cmd-sqlite:
 ## hubshard-parity: Check the pkg/hub test shards: every test runs in exactly one shard, every shard compiles (parse only)
 # Also fails if a hubshard tag or a generated imports file is committed:
 # the tags exist only in the overlay hack/hubshard writes on every run.
-# go run ./hack/hubshard prints the shard sizes; -untag strips tags an
-# older generator committed. See hack/hubshard/README.md.
+# hubshard prints the shard sizes; -untag strips tags an older generator
+# committed. hack/hubshard/hubshard.sh builds the tool into a temp dir and
+# runs it (as go run would). See hack/hubshard/README.md.
 hubshard-parity:
-	@go run ./hack/hubshard -parity
+	@./hack/hubshard/hubshard.sh -parity
 
 ## testpart-selftest: Test hack/testpart.sh, which splits the T1 entadapter Postgres tests over CI jobs (bash only)
 testpart-selftest:
@@ -175,10 +176,10 @@ test-hub-shard:
 	@./hack/hubshard/shard.sh test $(SHARD) $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race)
 
 ## test-hub-shards: Run every pkg/hub test shard in turn (NOSQLITE=1, RACE=1 as for test-hub-shard)
-# The shard list comes from go run ./hack/hubshard -shards. Every shard
+# The shard list comes from hack/hubshard/hubshard.sh -shards. Every shard
 # runs even when an earlier one fails; the target fails if any did.
 test-hub-shards:
-	@shards=$$(go run ./hack/hubshard -shards) || exit 1; \
+	@shards=$$(./hack/hubshard/hubshard.sh -shards) || exit 1; \
 	failed=; \
 	for k in $$shards; do \
 		./hack/hubshard/shard.sh test $$k $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race) || failed="$$failed $$k"; \
@@ -583,7 +584,7 @@ test-hub-postgres-integration: test-hub-postgres-env-check
 ## hub-postgres-integration-shards: Print the pkg/hub shards that hold a HUB_INTEGRATION_POSTGRES_TESTS test, one per line (CI's shard plan)
 # Fails if a listed test is in no test file (hubshard -locate).
 hub-postgres-integration-shards:
-	@located=$$(go run ./hack/hubshard -tags integration -locate $(HUB_INTEGRATION_POSTGRES_TESTS)) || exit 1; \
+	@located=$$(./hack/hubshard/hubshard.sh -tags integration -locate $(HUB_INTEGRATION_POSTGRES_TESTS)) || exit 1; \
 	echo "$$located" | awk '{print $$2}' | sort -nu
 
 ## test-webchat-postgres: Run the pkg/hub web chat store Postgres tests against a real server
