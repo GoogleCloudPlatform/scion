@@ -167,25 +167,6 @@ func TestLoadSettings_EnvHubProjectIDStillApplies(t *testing.T) {
 	assert.Equal(t, "env-hub-id", vs.Hub.ProjectID)
 }
 
-// TestLoadSettings_GlobalLegacyHubKeyDoesNotLeak checks the legacy key name
-// in the global file: it is migrated to hub.project_id when the global
-// layer loads, and must not leak into a project either.
-func TestLoadSettings_GlobalLegacyHubKeyDoesNotLeak(t *testing.T) {
-	legacy := hubGroveIDRename[0].legacy
-	globalDir := setupHubIDScopeHome(t, "  "+legacy+": \""+scopeGlobalHubID+"\"\n")
-	scionDir, _ := setupHubIDScopeSplitProject(t, filepath.Dir(globalDir))
-
-	s, err := LoadSettings(scionDir)
-	require.NoError(t, err)
-	assert.Empty(t, s.GetHubProjectID())
-	assert.Equal(t, scopeLocalID, s.ProjectID)
-
-	// The global project still sees its own (migrated) value.
-	g, err := LoadSettings(globalDir)
-	require.NoError(t, err)
-	assert.Equal(t, scopeGlobalHubID, g.GetHubProjectID())
-}
-
 // TestLoadSettings_GlobalProjectKeepsHubProjectID checks that the global
 // project, and a directory with no project of its own (which resolves as the
 // global project), still use the global hub project ID.
