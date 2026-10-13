@@ -103,6 +103,9 @@ type HealthSummaryHub struct {
 	// LiveTestAdminIdentities is nil when the count could not be read.
 	LiveTestAdminIdentities        *int `json:"live_test_admin_identities"`
 	TestIdentityWebSessionsEnabled bool `json:"test_identity_web_sessions_enabled"`
+	// TestIdentityWebSessionsUnavailableReason names why test identity web
+	// sessions are unavailable while the member tier is on, or "".
+	TestIdentityWebSessionsUnavailableReason string `json:"test_identity_web_sessions_unavailable_reason"`
 }
 
 // HealthSummaryHubFleet counts the live hub instances by status.

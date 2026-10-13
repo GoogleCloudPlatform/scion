@@ -247,6 +247,19 @@ func TestRenderDoctorHealthSummary_TestIdentityLineOnlyWhenEnabled(t *testing.T)
 	assert.Equal(t, "Enabled on this Hub: test identities, test admin identities (2 live admin test identities)", line.Message)
 }
 
+func TestRenderDoctorHealthSummary_TestIdentityWebSessionsUnavailableReason(t *testing.T) {
+	s := degradedSummary()
+	s.Hub.TestIdentitiesEnabled = true
+	s.Hub.TestIdentityWebSessionsUnavailableReason = "proxy_auth_without_driver_principals"
+	line := findCheck(t, renderDoctorHealthSummary(&s, false), "test-identities")
+	assert.Equal(t, "Enabled on this Hub: test identities; test identity web sessions unavailable: proxy_auth_without_driver_principals", line.Message)
+
+	s.Hub.TestIdentityWebSessionsEnabled = true
+	s.Hub.TestIdentityWebSessionsUnavailableReason = ""
+	line = findCheck(t, renderDoctorHealthSummary(&s, false), "test-identities")
+	assert.Equal(t, "Enabled on this Hub: test identities, test identity web sessions", line.Message)
+}
+
 func TestRenderDoctorHealthSummary_ServiceAccountCheck(t *testing.T) {
 	s := degradedSummary()
 	s.ServiceAccountCheck = &hubclient.HealthSummarySACheck{
