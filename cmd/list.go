@@ -790,12 +790,22 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 
 // displayAgents displays agents in the requested format
 // hubMode indicates if the listing is from Hub (shows BROKER column)
-// filterRunningAgents returns only agents whose phase is not stopped or error.
+// haltedPhaseLabel shows why a halted agent was halted next to its phase,
+// e.g. "halted (preempted)"; any other phase is returned unchanged.
+func haltedPhaseLabel(phase, exitReason string) string {
+	if phase == string(state.PhaseHalted) && exitReason != "" {
+		return phase + " (" + exitReason + ")"
+	}
+	return phase
+}
+
+// filterRunningAgents returns only agents whose phase is not stopped, error
+// or halted.
 func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
 		p := state.Phase(a.Phase)
-		if p == state.PhaseStopped || p == state.PhaseError {
+		if p == state.PhaseStopped || p == state.PhaseError || p == state.PhaseHalted {
 			continue
 		}
 		filtered = append(filtered, a)
@@ -964,6 +974,7 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		if phase == string(state.PhaseStopped) && state.Activity(a.Activity).IsTerminal() {
 			phase = a.Activity
 		}
+		phase = haltedPhaseLabel(phase, a.ExitReason)
 		phase = provisionedPhaseLabel(phase, a.ProvisionedOnly)
 		containerStatus := a.ContainerStatus
 		if containerStatus == "created" && a.ID == "" {

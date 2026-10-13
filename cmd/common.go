@@ -783,7 +783,7 @@ func localResumeDecision(savedPhase string, resume, force bool, agentName string
 		return true, !resume, false, nil
 	case resume && force && savedPhase == string(state.PhaseError):
 		return true, false, true, nil
-	case resume && savedPhase == string(state.PhaseStopped):
+	case resume && (savedPhase == string(state.PhaseStopped) || savedPhase == string(state.PhaseHalted)):
 		return false, false, false, nil
 	}
 	return resume, false, false, nil
@@ -1241,7 +1241,7 @@ func hubCloneTransportNote(cloneURL string) string {
 // included: the hub only restarts them in place with --force
 // (resumeInPlaceDecision), so `start` on them still reports a conflict.
 func hubStartImpliesResume(phase string) bool {
-	return phase == string(state.PhaseSuspended) || phase == string(state.PhaseStopped)
+	return phase == string(state.PhaseSuspended) || phase == string(state.PhaseStopped) || phase == string(state.PhaseHalted)
 }
 
 // hubCreateReusesExistingAgent mirrors the hub's handleExistingAgent decision
@@ -1254,7 +1254,7 @@ func hubCreateReusesExistingAgent(phase string, resume, force bool) bool {
 	switch phase {
 	case string(state.PhaseSuspended), string(state.PhaseCreated):
 		return true
-	case string(state.PhaseStopped):
+	case string(state.PhaseStopped), string(state.PhaseHalted):
 		return resume
 	case string(state.PhaseError):
 		return resume && force
@@ -1269,8 +1269,9 @@ func hubCreateReusesExistingAgent(phase string, resume, force bool) bool {
 // reflects what the hub will actually do with an agent in the given phase.
 func hubStartActionWord(phase string, resume, force bool) string {
 	switch {
-	case phase == string(state.PhaseStopped) && resume:
-		// The hub restarts a stopped agent with a fresh harness session.
+	case (phase == string(state.PhaseStopped) || phase == string(state.PhaseHalted)) && resume:
+		// The hub restarts a stopped or halted agent with a fresh harness
+		// session.
 		return "Restarting"
 	case resume && force:
 		return "Force-resuming"

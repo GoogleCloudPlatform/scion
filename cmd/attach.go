@@ -296,7 +296,7 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 // with scion resume (scion start would create a new agent run instead).
 func notRunningAttachHint(phase, agentName string) string {
 	switch state.Phase(phase) {
-	case state.PhaseStopped, state.PhaseSuspended:
+	case state.PhaseStopped, state.PhaseHalted, state.PhaseSuspended:
 		return fmt.Sprintf("Resume it and attach with: scion resume %s --attach", agentName)
 	case state.PhaseStopping:
 		return fmt.Sprintf("Wait for it to stop, then resume it with: scion resume %s --attach", agentName)

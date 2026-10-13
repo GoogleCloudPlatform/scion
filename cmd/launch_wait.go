@@ -285,13 +285,13 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 }
 
 // launchOutcome maps an agent to the end of the wait: running is success;
-// error and stopped are failures; every other phase keeps waiting.
+// error, stopped and halted are failures; every other phase keeps waiting.
 func launchOutcome(name string, a *hubclient.Agent) (bool, error) {
 	phase, _ := hubAgentPhaseActivity(a.Phase, a.Activity, a.Status)
 	switch phase {
 	case string(state.PhaseRunning):
 		return true, nil
-	case string(state.PhaseError), string(state.PhaseStopped):
+	case string(state.PhaseError), string(state.PhaseStopped), string(state.PhaseHalted):
 		return true, newLaunchFailedError(name, a)
 	}
 	return false, nil

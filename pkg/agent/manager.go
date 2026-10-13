@@ -636,7 +636,7 @@ func (m *AgentManager) checkDeliveryTarget(ctx context.Context, agentID, project
 			continue
 		}
 		switch state.Phase(a.Phase) {
-		case state.PhaseStopped, state.PhaseError:
+		case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
 			// Keep looking: another matching container may be running.
 		default:
 			return nil

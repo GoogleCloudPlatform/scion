@@ -125,7 +125,7 @@ func waitForAgentAcceptsInput(ctx context.Context, opts waitReadyOptions) (ready
 				return p, nil
 			}
 			switch as.Phase {
-			case state.PhaseStopping, state.PhaseStopped, state.PhaseError, state.PhaseSuspended:
+			case state.PhaseStopping, state.PhaseStopped, state.PhaseError, state.PhaseHalted, state.PhaseSuspended:
 				return p, fmt.Errorf("agent '%s' entered phase %s while waiting for it to accept input", opts.AgentName, p.Phase)
 			}
 			if !announced && opts.Progress != nil {

@@ -2589,7 +2589,7 @@ authDone:
 			}
 			if matched {
 				// Check if the container has already exited
-				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
+				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted) {
 					// Try to get logs for diagnosis
 					logs, _ := m.Runtime.GetLogs(ctx, id)
 					_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})

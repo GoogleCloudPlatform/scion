@@ -208,7 +208,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				// UI doesn't show a stale "cloning" or "starting" phase.
 				agents[i].Phase = string(state.PhaseError)
 				agents[i].Activity = ""
-			case state.PhaseError, state.PhaseStopped:
+			case state.PhaseError, state.PhaseStopped, state.PhaseHalted:
 				// Already terminal — preserve as-is
 			}
 		}
@@ -391,7 +391,7 @@ func lazyHubProjectID(projectDir string) func() string {
 
 func terminalRuntimePhase(agent api.AgentInfo) string {
 	switch state.Phase(agent.Phase) {
-	case state.PhaseStopped, state.PhaseError:
+	case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
 		return agent.Phase
 	case state.PhaseCreated, state.PhaseProvisioning, state.PhaseCloning,
 		state.PhaseStarting, state.PhaseRunning, state.PhaseStopping:

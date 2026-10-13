@@ -923,7 +923,7 @@ func checkDoctorAgentHealth(hubEP string, hubConnected bool, client hubclient.Cl
 	// activity crashed is in both groups).
 	considered, errored, crashed, offline := 0, 0, 0, 0
 	for _, agent := range resp.Agents {
-		if agent.Phase == string(state.PhaseStopped) {
+		if agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseHalted) {
 			continue
 		}
 		considered++
