@@ -18,6 +18,7 @@ package relay_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -100,5 +101,30 @@ func TestSetAdmitting_Concurrent(t *testing.T) {
 		if got, want := relayRow(t, p.w, "relay-a").Draining, !r.Admitting(); got != want {
 			t.Fatalf("iteration %d: row draining %v, relay admitting %v", iter, got, r.Admitting())
 		}
+	}
+}
+
+// TestSetAdmitting_RetriesFailedDrainingWrite: a failed draining flag write
+// is retried by the next SetAdmitting, even with no admission change.
+func TestSetAdmitting_RetriesFailedDrainingWrite(t *testing.T) {
+	p := newPair(t, echoConfig())
+	r := p.a.Relay
+	p.w.SetFault(func(op string) error {
+		if op == registry.OpSetRelayDraining {
+			return errors.New("registry unavailable")
+		}
+		return nil
+	})
+	r.SetAdmitting(false)
+	if r.Admitting() {
+		t.Fatal("admission still on")
+	}
+	if relayRow(t, p.w, "relay-a").Draining {
+		t.Fatal("the failed write marked the row draining")
+	}
+	p.w.SetFault(nil)
+	r.SetAdmitting(false)
+	if !relayRow(t, p.w, "relay-a").Draining {
+		t.Fatal("the draining flag was not written again")
 	}
 }

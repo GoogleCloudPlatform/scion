@@ -82,6 +82,14 @@ func (db *DB) Events() relayrole.Events {
 	return db.events
 }
 
+// StartEvents starts the LISTEN source, if any. Call it after every
+// subscription and listen hook is registered.
+func (db *DB) StartEvents() {
+	if db.events != nil {
+		db.events.Start()
+	}
+}
+
 // Close releases the database and stops the LISTEN source.
 func (db *DB) Close() { db.close() }
 
@@ -117,7 +125,7 @@ func Open(ctx context.Context, o Options) (*DB, error) {
 		close:    func() { _ = client.Close() },
 	}
 	if strings.EqualFold(o.Driver, "postgres") && len(o.EventSubjects) > 0 {
-		l, err := StartListener(ctx, o.DSN, o.EventSubjects, o.Logger.With("subsystem", "relay.events"))
+		l, err := NewListener(o.DSN, o.EventSubjects, o.Logger.With("subsystem", "relay.events"))
 		if err != nil {
 			db.close()
 			return nil, err

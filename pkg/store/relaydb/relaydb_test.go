@@ -19,6 +19,7 @@ package relaydb
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -128,4 +129,28 @@ func TestListenerDeliversOnlyItsSubjects(t *testing.T) {
 		t.Fatalf("delivered %q outside the subscriber's subjects", got)
 	default:
 	}
+}
+
+// TestListenHooksRunOffTheReadLoop: a listen hook that blocks does not hold
+// up the caller (the read loop).
+func TestListenHooksRunOffTheReadLoop(t *testing.T) {
+	l := &Listener{subs: map[*subscription]struct{}{}, onListen: map[int]func(){}}
+	release, ran := make(chan struct{}), make(chan struct{})
+	l.AddOnListen(func() {
+		<-release
+		close(ran)
+	})
+	l.fireOnListen() // returns while the hook blocks
+	close(release)
+	<-ran
+}
+
+// TestListenerNotStartedUntilStart: NewListener does not connect, and a
+// listener that was never started closes at once.
+func TestListenerNotStartedUntilStart(t *testing.T) {
+	l, err := NewListener("postgres://relay@127.0.0.1:1/scion", []string{"agent.*.deleted"}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
 }

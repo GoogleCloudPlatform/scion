@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay/relaytest"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relayrole"
@@ -94,7 +96,8 @@ func testConfig(t *testing.T, w *relaytest.World, exp ExperimentSource) Config {
 		Experiment:           exp,
 		ExperimentPollPeriod: time.Hour, // reads in these tests are explicit
 		StartupDeadline:      time.Second,
-		StartupRetry:         10 * time.Millisecond,
+		StartupRetry:         100 * time.Millisecond,
+		Clock:                clock.NewFake(time.Now()),
 	}
 }
 
@@ -144,30 +147,190 @@ func TestStartRequiresExperiment(t *testing.T) {
 	}
 }
 
+// startAsync runs Start in a goroutine and returns its result channel.
+func startAsync(cfg Config) <-chan startResult {
+	ch := make(chan startResult, 1)
+	go func() {
+		s, err := Start(context.Background(), cfg)
+		ch <- startResult{s, err}
+	}()
+	return ch
+}
+
+type startResult struct {
+	s   *Server
+	err error
+}
+
+// advanceRetry waits for the startup retry timer, then fires it.
+func advanceRetry(t *testing.T, clk *clock.Fake, retry time.Duration) {
+	t.Helper()
+	if !clk.WaitForTimer(10*time.Second, clk.Now().Add(retry)) {
+		t.Fatal("no startup retry timer armed")
+	}
+	clk.Advance(retry)
+}
+
 // TestStartRetriesUnreadableExperiment: an unreadable hub.conduit is
-// retried at startup; the relay starts once it reads on, and fails when
-// the deadline passes first.
+// retried at startup on the relay's clock; the relay starts once it reads
+// on, and fails when the deadline passes first.
 func TestStartRetriesUnreadableExperiment(t *testing.T) {
 	t.Run("readable before the deadline", func(t *testing.T) {
 		w := relaytest.NewWorld(t)
 		exp := newFakeExperiment(expAnswer{err: errUnreadable}, expAnswer{err: errUnreadable}, expAnswer{on: true})
-		s := startServer(t, testConfig(t, w, exp))
+		cfg := testConfig(t, w, exp)
+		clk := cfg.Clock.(*clock.Fake)
+		res := startAsync(cfg)
+		advanceRetry(t, clk, cfg.StartupRetry)
+		advanceRetry(t, clk, cfg.StartupRetry)
+		r := <-res
+		if r.err != nil {
+			t.Fatalf("start: %v", r.err)
+		}
+		t.Cleanup(func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = r.s.Shutdown(sctx, true, time.Second)
+		})
 		if n := exp.count(); n != 3 {
 			t.Fatalf("%d reads, want 3", n)
 		}
-		if !s.Relay.Admitting() {
+		if !r.s.Relay.Admitting() {
 			t.Fatal("not admitting")
 		}
 	})
 	t.Run("deadline passes", func(t *testing.T) {
 		w := relaytest.NewWorld(t)
-		cfg := testConfig(t, w, newFakeExperiment(expAnswer{err: errUnreadable}))
-		cfg.StartupDeadline = 100 * time.Millisecond
-		_, err := Start(context.Background(), cfg)
-		if err == nil || !errors.Is(err, errUnreadable) || !strings.Contains(err.Error(), "startup deadline") {
-			t.Fatalf("start: %v", err)
+		exp := newFakeExperiment(expAnswer{err: errUnreadable})
+		cfg := testConfig(t, w, exp)
+		cfg.StartupDeadline = 3 * cfg.StartupRetry
+		clk := cfg.Clock.(*clock.Fake)
+		res := startAsync(cfg)
+		for i := 0; i < 3; i++ {
+			advanceRetry(t, clk, cfg.StartupRetry)
+		}
+		r := <-res
+		if r.err == nil || !errors.Is(r.err, errUnreadable) || !strings.Contains(r.err.Error(), "startup deadline") {
+			t.Fatalf("start: %v", r.err)
+		}
+		if n := exp.count(); n != 4 {
+			t.Fatalf("%d reads, want 4 (one per retry, and the first)", n)
 		}
 	})
+}
+
+// TestExperimentPolledOnTheClock: hub.conduit is re-read every
+// ExperimentPollPeriod on the relay's clock.
+func TestExperimentPolledOnTheClock(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	exp := newFakeExperiment(expAnswer{on: true})
+	cfg := testConfig(t, w, exp)
+	cfg.ExperimentPollPeriod = 15 * time.Second
+	clk := cfg.Clock.(*clock.Fake)
+	s := startServer(t, cfg)
+	for len(exp.reads) > 0 {
+		<-exp.reads
+	}
+	exp.set(expAnswer{on: false})
+	if !clk.WaitForTimer(10*time.Second, clk.Now().Add(cfg.ExperimentPollPeriod)) {
+		t.Fatal("no poll timer armed")
+	}
+	clk.Advance(cfg.ExperimentPollPeriod)
+	<-exp.reads
+	// The next poll timer is armed after the read is applied.
+	if !clk.WaitForTimer(10*time.Second, clk.Now().Add(cfg.ExperimentPollPeriod)) {
+		t.Fatal("no next poll timer armed")
+	}
+	if s.Relay.Admitting() {
+		t.Fatal("still admitting after the poll read off")
+	}
+}
+
+// TestApplyExperimentRetriesFailedDrainingWrite: a draining flag write that
+// failed is written again by the next ApplyExperiment.
+func TestApplyExperimentRetriesFailedDrainingWrite(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	exp := newFakeExperiment(expAnswer{on: true})
+	s := startServer(t, testConfig(t, w, exp))
+	w.SetFault(func(op string) error {
+		if op == registry.OpSetRelayDraining {
+			return errUnreadable
+		}
+		return nil
+	})
+	exp.set(expAnswer{on: false})
+	s.ApplyExperiment(context.Background())
+	if s.Relay.Admitting() || relayDraining(t, w) {
+		t.Fatal("want admission off with the draining write failed")
+	}
+	w.SetFault(nil)
+	s.ApplyExperiment(context.Background())
+	if !relayDraining(t, w) {
+		t.Fatal("the draining flag was not written again")
+	}
+}
+
+// orderedEvents records whether Start registered its subscriptions and
+// listen hooks before starting the events.
+type orderedEvents struct {
+	mu         sync.Mutex
+	subscribed []string
+	hooks      int
+	started    bool
+	early      []string
+}
+
+func (e *orderedEvents) Subscribe(subjects ...string) (<-chan string, func()) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.started {
+		e.early = append(e.early, "subscribe after start")
+	}
+	e.subscribed = append(e.subscribed, subjects...)
+	return make(chan string), func() {}
+}
+
+func (e *orderedEvents) AddOnListen(func()) func() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.started {
+		e.early = append(e.early, "listen hook after start")
+	}
+	e.hooks++
+	return func() {}
+}
+
+func (e *orderedEvents) start() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.started = true
+}
+
+// TestEventsStartAfterRegistration: the events start only once the
+// revocation and settings subscriptions and the listen hook are registered.
+func TestEventsStartAfterRegistration(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	cfg := testConfig(t, w, newFakeExperiment(expAnswer{on: true}))
+	ev := &orderedEvents{}
+	cfg.Events, cfg.StartEvents = ev, ev.start
+	startServer(t, cfg)
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	if !ev.started {
+		t.Fatal("events never started")
+	}
+	if len(ev.early) != 0 {
+		t.Fatalf("registered after the events started: %v", ev.early)
+	}
+	if ev.hooks == 0 {
+		t.Fatal("no listen hook registered")
+	}
+	joined := strings.Join(ev.subscribed, " ")
+	for _, want := range append(append([]string(nil), RevocationSubjects...), SettingsUpdatedSubject) {
+		if !strings.Contains(joined, want) {
+			t.Errorf("no subscription to %s", want)
+		}
+	}
 }
 
 // TestApplyExperimentFollowsSetting: at run time, off stops admission and

@@ -244,7 +244,11 @@ type Relay struct {
 	state relayState
 	// paused refuses new admissions while the relay keeps running
 	// (SetAdmitting).
-	paused   bool
+	paused bool
+	// drainingStale is set while the relay row's draining flag may not
+	// match paused (its last write failed); SetAdmitting rewrites it.
+	drainingStale bool
+
 	gen      int64
 	endpoint string // registered internal endpoint ("" if unaddressable)
 	sessions map[string]*entry
@@ -1251,11 +1255,18 @@ func (r *Relay) Admitting() bool {
 // refuses new sessions (4503 draining), marks the relay row draining so no
 // hub picks this relay, and drains every open session with GoAway; the
 // sessions end by their drain deadline. Resuming admits again and clears
-// the row's draining flag. It is a no-op when nothing changes.
+// the row's draining flag. It is a no-op when nothing changes, unless the
+// last draining flag write failed: then the flag is written again.
 func (r *Relay) SetAdmitting(admitting bool) {
 	r.admitMu.Lock()
 	r.mu.Lock()
-	if r.paused == !admitting || r.state != stateServing || r.killed {
+	if r.state != stateServing || r.killed {
+		r.mu.Unlock()
+		r.admitMu.Unlock()
+		return
+	}
+	changed := r.paused != !admitting
+	if !changed && !r.drainingStale {
 		r.mu.Unlock()
 		r.admitMu.Unlock()
 		return
@@ -1263,17 +1274,25 @@ func (r *Relay) SetAdmitting(admitting bool) {
 	r.paused = !admitting
 	gen := r.gen
 	var entries []*entry
-	if !admitting {
+	if changed && !admitting {
 		entries = r.snapshotLocked()
 	}
 	r.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), deleteTimeout)
-	if err := r.cfg.Registry.SetRelayDraining(ctx, r.cfg.InstanceID, gen, !admitting); err != nil {
-		r.log.Warn("Conduit: updating the relay row's draining flag failed", "admitting", admitting, "error", err)
-	}
+	err := r.cfg.Registry.SetRelayDraining(ctx, r.cfg.InstanceID, gen, !admitting)
 	cancel()
+	r.mu.Lock()
+	// A failed write is retried by the next call, changed or not.
+	r.drainingStale = err != nil
+	r.mu.Unlock()
+	if err != nil {
+		r.log.Warn("Conduit: updating the relay row's draining flag failed; retried on the next admission update", "admitting", admitting, "error", err)
+	}
 	r.admitMu.Unlock()
+	if !changed {
+		return
+	}
 	if admitting {
 		r.log.Info("Conduit relay admission resumed")
 		return

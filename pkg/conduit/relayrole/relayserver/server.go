@@ -80,6 +80,9 @@ type Config struct {
 	// (host:port) of the public and internal listeners.
 	PublicListen   string
 	InternalListen string
+	// PublicListener, when set, is the public listener, already bound
+	// (PublicListen is then unused).
+	PublicListener net.Listener
 	// Advertise returns the internal endpoint other nodes reach this relay
 	// at, given the internal listener's bound address (nil:
 	// http://<bound address>).
@@ -96,6 +99,10 @@ type Config struct {
 	// Events, when set, delivers the hub's events: RevocationSubjects
 	// trigger re-checks, SettingsUpdatedSubject a re-read of hub.conduit.
 	Events relayrole.Events
+	// StartEvents, when set, starts Events. Start calls it once every
+	// subscription and listen hook is registered, so the first
+	// (re)connect's re-check is not missed.
+	StartEvents func()
 	// RecheckInterval, ReconnectWindow and LifetimeCap are the conduit
 	// settings of the same names (0: the defaults).
 	RecheckInterval time.Duration
@@ -112,7 +119,8 @@ type Config struct {
 	// DefaultStartupRetry).
 	StartupDeadline time.Duration
 	StartupRetry    time.Duration
-	// Clock drives the relay's timers (nil: real time).
+	// Clock drives the relay's timers, the startup retries and the
+	// hub.conduit polling (nil: real time).
 	Clock clock.Clock
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
@@ -171,10 +179,10 @@ type Server struct {
 }
 
 // waitExperiment checks hub.conduit at startup: off refuses to start; an
-// unreadable setting is retried until the deadline, then fails.
+// unreadable setting is retried every StartupRetry until StartupDeadline
+// has passed on cfg.Clock, then fails.
 func waitExperiment(ctx context.Context, cfg *Config) error {
-	ctx, cancel := context.WithTimeout(ctx, cfg.StartupDeadline)
-	defer cancel()
+	deadline := cfg.Clock.Now().Add(cfg.StartupDeadline)
 	for {
 		on, err := cfg.Experiment.ConduitEnabled(ctx)
 		switch {
@@ -183,13 +191,17 @@ func waitExperiment(ctx context.Context, cfg *Config) error {
 		case err == nil:
 			return ErrExperimentOff
 		}
+		left := deadline.Sub(cfg.Clock.Now())
+		if left <= 0 {
+			return fmt.Errorf("conduit relay: hub.conduit could not be read before the startup deadline: %w", err)
+		}
 		cfg.Logger.Warn("Conduit relay: reading hub.conduit failed; retrying", "error", err)
-		t := time.NewTimer(cfg.StartupRetry)
+		next, stop := clock.After(cfg.Clock, min(cfg.StartupRetry, left))
 		select {
 		case <-ctx.Done():
-			t.Stop()
-			return fmt.Errorf("conduit relay: hub.conduit could not be read before the startup deadline: %w", err)
-		case <-t.C:
+			stop()
+			return ctx.Err()
+		case <-next:
 		}
 	}
 }
@@ -270,12 +282,24 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	s.Relay = r
 	role.Bind(r)
 	role.Start(ctx)
+	// Subscribed before the events start, like the role's hooks.
+	var changed <-chan string
+	unsubscribe := func() {}
+	if cfg.Events != nil {
+		changed, unsubscribe = cfg.Events.Subscribe(SettingsUpdatedSubject)
+	}
+	if cfg.StartEvents != nil {
+		cfg.StartEvents()
+	}
 
-	publicLn, err := net.Listen("tcp", cfg.PublicListen)
-	if err != nil {
-		r.Kill()
-		_ = s.internal.Close()
-		return nil, fmt.Errorf("relay public listener %s: %w", cfg.PublicListen, err)
+	publicLn := cfg.PublicListener
+	if publicLn == nil {
+		publicLn, err = net.Listen("tcp", cfg.PublicListen)
+		if err != nil {
+			r.Kill()
+			_ = s.internal.Close()
+			return nil, fmt.Errorf("relay public listener %s: %w", cfg.PublicListen, err)
+		}
 	}
 	s.PublicAddr = publicLn.Addr()
 	mux := http.NewServeMux()
@@ -284,7 +308,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	s.public = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go s.serve(s.public, publicLn, "relay public listener")
 
-	go s.followExperiment(ctx)
+	go s.followExperiment(ctx, changed, unsubscribe)
 	log.Info("Conduit relay role started", "instance_id", cfg.InstanceID, "internal_endpoint", endpoint,
 		"public_url", cfg.PublicURL, "hub_internal_url", cfg.HubInternalURL, "public_addr", s.PublicAddr.String())
 	return s, nil
@@ -301,7 +325,8 @@ func (s *Server) serve(srv *http.Server, ln net.Listener, name string) {
 
 // ApplyExperiment re-reads hub.conduit: off stops admission and drains the
 // open sessions (the process keeps running), on resumes admission, and a
-// failed read changes nothing.
+// failed read changes nothing. Every successful read is applied, so a
+// draining flag write that failed earlier is retried.
 func (s *Server) ApplyExperiment(ctx context.Context) {
 	on, err := s.cfg.Experiment.ConduitEnabled(ctx)
 	if err != nil {
@@ -311,23 +336,19 @@ func (s *Server) ApplyExperiment(ctx context.Context) {
 	s.Relay.SetAdmitting(on)
 }
 
-// followExperiment re-reads hub.conduit every ExperimentPollPeriod and on
-// every settings change event.
-func (s *Server) followExperiment(ctx context.Context) {
-	var changed <-chan string
-	if s.cfg.Events != nil {
-		ch, unsubscribe := s.cfg.Events.Subscribe(SettingsUpdatedSubject)
-		defer unsubscribe()
-		changed = ch
-	}
-	t := time.NewTicker(s.cfg.ExperimentPollPeriod)
-	defer t.Stop()
+// followExperiment re-reads hub.conduit every ExperimentPollPeriod on
+// cfg.Clock and on every settings change event.
+func (s *Server) followExperiment(ctx context.Context, changed <-chan string, unsubscribe func()) {
+	defer unsubscribe()
 	for {
+		tick, stop := clock.After(s.cfg.Clock, s.cfg.ExperimentPollPeriod)
 		select {
 		case <-ctx.Done():
+			stop()
 			return
-		case <-t.C:
+		case <-tick:
 		case _, ok := <-changed:
+			stop()
 			if !ok {
 				changed = nil
 				continue

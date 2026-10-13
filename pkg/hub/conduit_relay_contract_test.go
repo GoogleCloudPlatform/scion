@@ -66,7 +66,7 @@ func TestSeparateRelayListenerReceivesHubEvents(t *testing.T) {
 	t.Cleanup(pub.Close)
 
 	subjects := append(append([]string(nil), relayserver.RevocationSubjects...), relayserver.SettingsUpdatedSubject)
-	l, err := relaydb.StartListener(ctx, dsn, subjects, slog.Default())
+	l, err := relaydb.NewListener(dsn, subjects, slog.Default())
 	require.NoError(t, err)
 	t.Cleanup(l.Close)
 	listening := make(chan struct{}, 1)
@@ -78,6 +78,7 @@ func TestSeparateRelayListenerReceivesHubEvents(t *testing.T) {
 	})
 	events, unsubscribe := l.Subscribe(subjects...)
 	defer unsubscribe()
+	l.Start()
 	select {
 	case <-listening:
 	case <-ctx.Done():
@@ -89,7 +90,7 @@ func TestSeparateRelayListenerReceivesHubEvents(t *testing.T) {
 	conn, err := pgx.Connect(ctx, dsn)
 	require.NoError(t, err)
 	defer func() { _ = conn.Close(context.Background()) }()
-	_, err = conn.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE 'LISTEN%scion_ev_conduit%' AND pid <> pg_backend_pid()`)
+	_, err = conn.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1 AND pid <> pg_backend_pid()`, relaydb.ListenerApplicationName)
 	require.NoError(t, err)
 	select {
 	case <-listening:

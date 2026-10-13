@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
+	"github.com/spf13/pflag"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relayrole/relayserver"
@@ -92,6 +93,20 @@ func logRelayStartup(log *slog.Logger, cfg *config.GlobalConfig, configPath stri
 	log.Info("Conduit relay role starting", "config_files", config.ServerConfigFiles(configPath), "database_driver", cfg.Database.Driver)
 }
 
+// relayRoleExcludedFlags are the server components --role relay never runs.
+var relayRoleExcludedFlags = []string{"enable-hub", "enable-runtime-broker", "enable-web"}
+
+// validateRelayRoleFlags refuses --role relay together with a flag that
+// enables another server component.
+func validateRelayRoleFlags(flags *pflag.FlagSet) error {
+	for _, name := range relayRoleExcludedFlags {
+		if f := flags.Lookup(name); f != nil && f.Changed && f.Value.String() == "true" {
+			return fmt.Errorf("--role relay runs only the conduit relay; remove --%s", name)
+		}
+	}
+	return nil
+}
+
 // relayDatabaseOptions is the relay's database connection input.
 func relayDatabaseOptions(cfg *config.GlobalConfig) relaydb.Options {
 	return relaydb.Options{
@@ -147,6 +162,7 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 		Registry:         db.Registry,
 		Experiment:       db.Settings,
 		Events:           db.Events(),
+		StartEvents:      db.StartEvents,
 		RecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
 		ReconnectWindow:  conduitReconnectWindowSetting(cfg),
 		LifetimeCap:      conduitLifetimeCapSetting(cfg),

@@ -34,6 +34,9 @@ import (
 // it equal to the hub's.
 const ConduitChannel = "scion_ev_conduit"
 
+// ListenerApplicationName is the application_name of the LISTEN connection.
+const ListenerApplicationName = "scion-conduit-relay-events"
+
 // Listener is a LISTEN source for a fixed set of hub event subjects. It
 // reads only the subject of each notification, never its data, and
 // delivers nothing outside its subjects.
@@ -44,6 +47,9 @@ type Listener struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	done     chan struct{}
+
+	startOnce sync.Once
+	started   bool // set inside startOnce
 
 	mu       sync.Mutex
 	subs     map[*subscription]struct{}
@@ -61,27 +67,38 @@ type envelope struct {
 	Subject string `json:"subject"`
 }
 
-// StartListener connects and LISTENs on ConduitChannel, delivering the
-// events whose subject matches one of patterns. It reconnects on its own
-// after a connection loss.
-func StartListener(ctx context.Context, dsn string, patterns []string, log *slog.Logger) (*Listener, error) {
+// NewListener returns a listener for the events whose subject matches one
+// of patterns. It does not connect until Start, so subscriptions and
+// listen hooks registered before Start see the first connection.
+func NewListener(dsn string, patterns []string, log *slog.Logger) (*Listener, error) {
 	if _, err := pgx.ParseConfig(dsn); err != nil {
 		return nil, fmt.Errorf("conduit relay events: %w", err)
 	}
-	lctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	l := &Listener{
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Listener{
 		dsn: dsn, patterns: append([]string(nil), patterns...), log: log,
-		ctx: lctx, cancel: cancel, done: make(chan struct{}),
+		ctx: ctx, cancel: cancel, done: make(chan struct{}),
 		subs: map[*subscription]struct{}{}, onListen: map[int]func(){},
-	}
-	go l.run()
-	return l, nil
+	}, nil
+}
+
+// Start connects and LISTENs on ConduitChannel; the listener reconnects on
+// its own after a connection loss. Start runs once; later calls do
+// nothing.
+func (l *Listener) Start() {
+	l.startOnce.Do(func() {
+		l.started = true
+		go l.run()
+	})
 }
 
 // Close stops the listener.
 func (l *Listener) Close() {
 	l.cancel()
-	<-l.done
+	l.startOnce.Do(func() {}) // a listener never started has nothing to wait for
+	if l.started {
+		<-l.done
+	}
 }
 
 // Subscribe returns the subjects of delivered events matching subjects
@@ -146,6 +163,7 @@ func (l *Listener) listenOnce() error {
 	// Keepalives and a connect timeout, so a silently dropped peer is
 	// detected instead of blocking forever.
 	cc.DialFunc = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	cc.RuntimeParams["application_name"] = ListenerApplicationName
 	conn, err := pgx.ConnectConfig(l.ctx, cc)
 	if err != nil {
 		return err
@@ -154,15 +172,7 @@ func (l *Listener) listenOnce() error {
 	if _, err := conn.Exec(l.ctx, "LISTEN "+pgx.Identifier{ConduitChannel}.Sanitize()); err != nil {
 		return fmt.Errorf("LISTEN %s: %w", ConduitChannel, err)
 	}
-	l.mu.Lock()
-	fns := make([]func(), 0, len(l.onListen))
-	for _, fn := range l.onListen {
-		fns = append(fns, fn)
-	}
-	l.mu.Unlock()
-	for _, fn := range fns {
-		fn()
-	}
+	l.fireOnListen()
 	for {
 		wctx, cancel := context.WithTimeout(l.ctx, 30*time.Second)
 		n, err := conn.WaitForNotification(wctx)
@@ -185,6 +195,22 @@ func (l *Listener) listenOnce() error {
 		}
 		l.deliver(env.Subject)
 	}
+}
+
+// fireOnListen runs the listen hooks. They re-check over the network, so
+// they run off the read loop and notifications keep flowing meanwhile.
+func (l *Listener) fireOnListen() {
+	l.mu.Lock()
+	fns := make([]func(), 0, len(l.onListen))
+	for _, fn := range l.onListen {
+		fns = append(fns, fn)
+	}
+	l.mu.Unlock()
+	go func() {
+		for _, fn := range fns {
+			fn()
+		}
+	}()
 }
 
 // deliver hands subject to every subscriber whose patterns match it, if it

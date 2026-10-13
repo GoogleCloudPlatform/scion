@@ -162,6 +162,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 	if serverRole == serverRoleRelay {
 		// A separate conduit relay: no hub, Runtime Broker or web.
+		if err := validateRelayRoleFlags(cmd.Flags()); err != nil {
+			return err
+		}
 		applyServerLogLevelSetting(cfg.LogLevel)
 		ctx := cmd.Context()
 		if ctx == nil {
