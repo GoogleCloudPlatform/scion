@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -147,9 +148,134 @@ type sandboxStateEntry struct {
 	// EntrypointLogOffset is the entrypoint log size when this run started,
 	// so the exit watcher reports this run's output only.
 	EntrypointLogOffset int64 `json:"entrypoint_log_offset,omitempty"`
+	// Nonce is regenerated on every write of this entry; every write
+	// compares it against the nonce its caller observed (compare-and-set).
+	// Entries written before nonces existed load with "".
+	Nonce string `json:"nonce,omitempty"`
 }
 
-// sandboxStateStore is a thread-safe, JSON-backed store of sandbox entries.
+// sandboxNonce is the nonce a caller observed for a state key: either a
+// present entry's Nonce (possibly the legacy "") or nonceAbsent, a missing
+// key. nonceAbsent never equals a present entry, legacy or not.
+type sandboxNonce struct {
+	value   string
+	present bool
+}
+
+// nonceAbsent is the observed nonce of a key with no entry.
+var nonceAbsent = sandboxNonce{}
+
+// nonceOf returns the observed nonce of e (nonceAbsent for nil).
+func nonceOf(e *sandboxStateEntry) sandboxNonce {
+	if e == nil {
+		return nonceAbsent
+	}
+	return sandboxNonce{value: e.Nonce, present: true}
+}
+
+func (n sandboxNonce) String() string {
+	if !n.present {
+		return "<absent>"
+	}
+	return strconv.Quote(n.value)
+}
+
+// errStateChanged is returned by a compare-and-set state write whose key
+// no longer holds the nonce the caller observed. Nothing was written.
+var errStateChanged = errors.New("sandbox state entry changed")
+
+// sandboxStateFileLocks serializes the read-compare-write of each state
+// file within this process, across every sandboxStateStore (the factory
+// builds a runtime, and so a store, per lookup). Keyed by path; entries
+// are a few bytes each and there is one per state path ever used (one in
+// production), so the map is not pruned. Another process on the same host
+// is not fenced (ptone/scion#3951).
+var sandboxStateFileLocks sync.Map // state path -> *sync.Mutex
+
+// logUnreadableSandboxState logs, at ERROR, a state file that cannot be
+// read. Every Run and Delete fails closed until it is fixed by hand.
+func logUnreadableSandboxState(path string, err error) {
+	runtimeLog().Error("sandbox state file is unreadable; every cloudrun-sandbox start and delete fails until it is fixed: "+
+		"inspect it, then move it aside (its entries are then forgotten)",
+		"path", path, "error", err)
+}
+
+// lockStateFile takes the file mutex for path and returns its unlock.
+func lockStateFile(path string) func() {
+	v, _ := sandboxStateFileLocks.LoadOrStore(path, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// readSandboxStateFile reads the state file at path. A missing file is an
+// empty map; any other read or parse error is returned, so that a caller
+// about to write fails closed rather than overwriting a file it could not
+// read.
+func readSandboxStateFile(path string) (map[string]*sandboxStateEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return make(map[string]*sandboxStateEntry), nil
+		}
+		return nil, fmt.Errorf("read sandbox state %s: %w", path, err)
+	}
+	var entries map[string]*sandboxStateEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("parse sandbox state %s: %w", path, err)
+	}
+	if entries == nil {
+		entries = make(map[string]*sandboxStateEntry)
+	}
+	return entries, nil
+}
+
+// writeSandboxStateFile atomically replaces the state file at path: it
+// writes a unique temporary file in the same directory (0600, audit M1)
+// and renames it over path (audit M2). There is no fsync, as before (the
+// default path is under /tmp). A crash between the create and the rename
+// leaves a "<name>.tmp-*" file behind; it is never read.
+func writeSandboxStateFile(path string, entries map[string]*sandboxStateEntry) error {
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal sandbox state: %w", err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create sandbox state dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create sandbox state temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write sandbox state temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close sandbox state temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename sandbox state temp file: %w", err)
+	}
+	return nil
+}
+
+// sandboxStateStore is a JSON-backed store of sandbox entries.
+//
+// The file is authoritative. Every write is a compare-and-set of one key
+// against the nonce its caller observed (casPut, casRemove,
+// casMarkStopped), made under the process-wide file mutex for the path;
+// entries is this instance's cache of the file, refreshed per key on each
+// of its own writes, and serves get and list only.
+//
+// Lock order: a sandbox name lock (lockSandboxNameCtx), then the file
+// mutex (lockStateFile), then mu. Store methods never take a name lock,
+// and mu is never held while the file mutex is taken.
 type sandboxStateStore struct {
 	mu      sync.Mutex
 	path    string
@@ -165,30 +291,120 @@ func newSandboxStateStore(path string) *sandboxStateStore {
 	return ss
 }
 
-// add inserts or replaces an entry and persists the store.
-func (s *sandboxStateStore) add(entry *sandboxStateEntry) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.entries[entry.SandboxName] = entry
-	s.save()
+// diskEntry returns a copy of the file's entry for name (nil if none) and
+// its observed nonce. A read or parse error other than a missing file is
+// returned.
+func (s *sandboxStateStore) diskEntry(name string) (*sandboxStateEntry, sandboxNonce, error) {
+	unlock := lockStateFile(s.path)
+	entries, err := readSandboxStateFile(s.path)
+	unlock()
+	if err != nil {
+		return nil, nonceAbsent, err
+	}
+	e := entries[name]
+	if e == nil {
+		return nil, nonceAbsent, nil
+	}
+	cp := *e
+	return &cp, nonceOf(&cp), nil
 }
 
-// remove deletes an entry by sandbox name and persists the store.
-func (s *sandboxStateStore) remove(name string) {
+// casUpdate is the one write path of the store. Under the file mutex it
+// loads the file (failing closed on any error but a missing file), checks
+// that name's nonce equals expect (errStateChanged otherwise, writing
+// nothing), and replaces the key with next(current); a nil result removes
+// it. The file is written only when it changes, and this instance's cache
+// is updated for that key only after the file write succeeds. It returns
+// a copy of the key's new entry (nil if removed).
+func (s *sandboxStateStore) casUpdate(name string, expect sandboxNonce,
+	next func(cur *sandboxStateEntry) (*sandboxStateEntry, error)) (*sandboxStateEntry, error) {
+	unlock := lockStateFile(s.path)
+	defer unlock()
+
+	entries, err := readSandboxStateFile(s.path)
+	if err != nil {
+		return nil, err
+	}
+	cur := entries[name]
+	if got := nonceOf(cur); got != expect {
+		return nil, fmt.Errorf("%w: %s: nonce %s, expected %s", errStateChanged, name, got, expect)
+	}
+	updated, err := next(cur)
+	if err != nil {
+		return nil, err
+	}
+	if updated != nil || cur != nil {
+		if updated == nil {
+			delete(entries, name)
+		} else {
+			entries[name] = updated
+		}
+		if err := writeSandboxStateFile(s.path, entries); err != nil {
+			return nil, err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.entries, name)
-	s.save()
+	if updated == nil {
+		delete(s.entries, name)
+		return nil, nil
+	}
+	cached := *updated
+	s.entries[name] = &cached
+	out := *updated
+	return &out, nil
 }
 
-// get returns an entry by sandbox name, or nil if not found.
+// casPut writes entry under name with a fresh nonce if name's nonce equals
+// expect, and returns the new nonce.
+func (s *sandboxStateStore) casPut(name string, expect sandboxNonce, entry *sandboxStateEntry) (sandboxNonce, error) {
+	written, err := s.casUpdate(name, expect, func(*sandboxStateEntry) (*sandboxStateEntry, error) {
+		e := *entry
+		e.SandboxName = name
+		e.Nonce = rand.Text()
+		return &e, nil
+	})
+	if err != nil {
+		return nonceAbsent, err
+	}
+	return nonceOf(written), nil
+}
+
+// casRemove removes name if its nonce equals expect. Removing an absent
+// key with expect nonceAbsent succeeds and writes nothing.
+func (s *sandboxStateStore) casRemove(name string, expect sandboxNonce) error {
+	_, err := s.casUpdate(name, expect, func(*sandboxStateEntry) (*sandboxStateEntry, error) {
+		return nil, nil
+	})
+	return err
+}
+
+// casMarkStopped records that the sandbox exited, with a fresh nonce, if
+// name's nonce equals expect, and returns a copy of the marked entry.
+func (s *sandboxStateStore) casMarkStopped(name string, expect sandboxNonce, exitCode *int, stoppedAt *time.Time) (*sandboxStateEntry, error) {
+	return s.casUpdate(name, expect, func(cur *sandboxStateEntry) (*sandboxStateEntry, error) {
+		if cur == nil {
+			return nil, fmt.Errorf("%w: %s: no entry to mark stopped", errStateChanged, name)
+		}
+		e := *cur
+		e.Stopped = true
+		e.ExitCode = exitCode
+		e.StoppedAt = stoppedAt
+		e.Nonce = rand.Text()
+		return &e, nil
+	})
+}
+
+// get returns an entry by sandbox name from this instance's cache, or nil
+// if not found.
 func (s *sandboxStateStore) get(name string) *sandboxStateEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.entries[name]
 }
 
-// list returns a snapshot of all entries.
+// list returns a snapshot of all cached entries.
 func (s *sandboxStateStore) list() []*sandboxStateEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -200,57 +416,19 @@ func (s *sandboxStateStore) list() []*sandboxStateEntry {
 	return result
 }
 
-// markStopped records that a sandbox has exited.
-func (s *sandboxStateStore) markStopped(name string, exitCode *int, stoppedAt *time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if e, ok := s.entries[name]; ok {
-		e.Stopped = true
-		e.ExitCode = exitCode
-		e.StoppedAt = stoppedAt
-		s.save()
-	}
-}
-
-// save persists the store to disk. Caller must hold mu.
-func (s *sandboxStateStore) save() {
-	data, err := json.MarshalIndent(s.entries, "", "  ")
-	if err != nil {
-		runtimeLog().Warn("sandbox state store: failed to marshal", "error", err)
-		return
-	}
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		runtimeLog().Warn("sandbox state store: failed to create dir", "error", err)
-		return
-	}
-	// Atomic write: write to temp file then rename. Prevents corruption
-	// from crashes during write (audit M2). 0600 permissions (audit M1).
-	tmpPath := s.path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		runtimeLog().Warn("sandbox state store: failed to write temp", "path", tmpPath, "error", err)
-		return
-	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		runtimeLog().Warn("sandbox state store: failed to rename", "from", tmpPath, "to", s.path, "error", err)
-	}
-}
-
-// load reads the store from disk. Caller must hold mu (or be in init).
+// load fills the cache from the file. An unreadable file leaves the cache
+// empty (and is never written over: every write re-reads the file).
 func (s *sandboxStateStore) load() {
-	data, err := os.ReadFile(s.path)
+	unlock := lockStateFile(s.path)
+	entries, err := readSandboxStateFile(s.path)
+	unlock()
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			runtimeLog().Warn("sandbox state store: failed to read", "path", s.path, "error", err)
-		}
+		logUnreadableSandboxState(s.path, err)
 		return
 	}
-	var entries map[string]*sandboxStateEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		runtimeLog().Warn("sandbox state store: failed to unmarshal", "path", s.path, "error", err)
-		return
-	}
+	s.mu.Lock()
 	s.entries = entries
+	s.mu.Unlock()
 }
 
 // sandboxReconcileProbeTimeout bounds each start-up liveness probe. A
@@ -391,6 +569,11 @@ func readSandboxDeleteOutput(f *os.File) string {
 	return strings.TrimSpace(string(b))
 }
 
+// sandboxReconcileBeforeRemoveHook, if set, runs in reconcile after an
+// entry's probe and before its compare-and-set removal. Nil in
+// production; tests use it to model a concurrent write in that window.
+var sandboxReconcileBeforeRemoveHook func(name string)
+
 // reconcile checks each entry for liveness and removes entries whose
 // sandbox is confirmed gone. Called once at startup. Stopped entries are
 // removed. A running entry is removed only when its probe gives a
@@ -399,45 +582,58 @@ func readSandboxDeleteOutput(f *os.File) string {
 // the state and the sandbox CLI has no list command, so dropping the entry
 // of a slow but live sandbox would leave it running with no way to stop or
 // delete it through scion (ptone/scion#3738).
+//
+// The entries and their nonces are snapshotted under mu, which is then
+// released; the probes run with no lock held, and each removal is a
+// compare-and-set against the snapshot's nonce, so an entry rewritten
+// since the snapshot (a newer run on the same name) is left alone. A
+// removal must not be made while mu is held: casRemove takes the file
+// mutex and then mu, which is not re-entrant.
 func (s *sandboxStateStore) reconcile(bin string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if len(s.entries) == 0 {
-		return
+	snapshot := make([]*sandboxStateEntry, 0, len(s.entries))
+	for name, e := range s.entries {
+		cp := *e
+		cp.SandboxName = name
+		snapshot = append(snapshot, &cp)
 	}
+	s.mu.Unlock()
 
-	var toRemove []string
-	for name, entry := range s.entries {
-		if entry.Stopped {
-			toRemove = append(toRemove, name)
-			continue
+	for _, entry := range snapshot {
+		name := entry.SandboxName
+		if !entry.Stopped {
+			// Probe liveness: try to exec 'true' in the sandbox.
+			// R1: absolute path required — the sandbox launcher resolves argv[0]
+			// before the sandbox environment (including PATH) is in effect.
+			ctx, cancel := context.WithTimeout(context.Background(), sandboxReconcileProbeTimeout)
+			out, err := runSimpleCommand(ctx, bin, "exec", name, "--", "/bin/true")
+			gone := sandboxProbeSaysGone(ctx, out, err)
+			cancel()
+			switch {
+			case err == nil:
+				continue
+			case gone:
+				runtimeLog().Info("sandbox state reconcile: sandbox not found, removing",
+					"name", name, "agentID", entry.AgentID)
+			default:
+				runtimeLog().Warn("sandbox state reconcile: liveness probe failed without a not-found answer; keeping the entry",
+					"name", name, "agentID", entry.AgentID, "error", err)
+				continue
+			}
 		}
-		// Probe liveness: try to exec 'true' in the sandbox.
-		// R1: absolute path required — the sandbox launcher resolves argv[0]
-		// before the sandbox environment (including PATH) is in effect.
-		ctx, cancel := context.WithTimeout(context.Background(), sandboxReconcileProbeTimeout)
-		out, err := runSimpleCommand(ctx, bin, "exec", name, "--", "/bin/true")
-		gone := sandboxProbeSaysGone(ctx, out, err)
-		cancel()
-		switch {
-		case err == nil:
-		case gone:
-			runtimeLog().Info("sandbox state reconcile: sandbox not found, removing",
-				"name", name, "agentID", entry.AgentID)
-			toRemove = append(toRemove, name)
-		default:
-			runtimeLog().Warn("sandbox state reconcile: liveness probe failed without a not-found answer; keeping the entry",
-				"name", name, "agentID", entry.AgentID, "error", err)
+
+		if sandboxReconcileBeforeRemoveHook != nil {
+			sandboxReconcileBeforeRemoveHook(name)
 		}
-	}
-
-	for _, name := range toRemove {
-		delete(s.entries, name)
-	}
-
-	if len(toRemove) > 0 {
-		s.save()
+		if err := s.casRemove(name, nonceOf(entry)); err != nil {
+			if errors.Is(err, errStateChanged) {
+				runtimeLog().Info("sandbox state reconcile: entry changed since the snapshot; keeping it",
+					"name", name, "error", err)
+			} else {
+				runtimeLog().Warn("sandbox state reconcile: failed to remove entry",
+					"name", name, "error", err)
+			}
+		}
 	}
 }
 
@@ -1012,40 +1208,57 @@ func applySecretEnvOverrides(env map[string]string, cfgEnv []string, secretKeys 
 	}
 }
 
-// sandboxNameLocks serializes Run per sandbox name (ptone/scion#3738). The
-// sandbox name is derived from the agent name and reused across runs, and
-// the sandbox CLI keeps no labels, so two overlapping Runs of one agent
-// could otherwise interleave: an older Run's dead-on-arrival cleanup
-// deleting the newer Run's sandbox by name, or an older Run's probe passing
-// on the newer sandbox and recording it as its own. Holding the name's lock
-// from the launch through the probe and the state record or cleanup closes
-// that window.
+// sandboxNameLocks serializes Run, Stop and Delete per sandbox name
+// (ptone/scion#3738). The sandbox name is derived from the agent name and
+// reused across runs, and the sandbox CLI keeps no labels, so overlapping
+// operations on one name could otherwise interleave: an older Run's
+// dead-on-arrival cleanup deleting the newer Run's sandbox by name, an
+// older Run's probe passing on the newer sandbox and recording it as its
+// own, or a Delete acting between a Run's check and its record. Run holds
+// the name's lock from before its first check through the launch, the
+// probe and the state record or cleanup; Delete holds it from its state
+// read through the delete and the entry's removal.
 //
-// The lock is package-level, so same-name Runs are serialized within one
-// process across every CloudRunSandboxRuntime (the factory builds one per
-// call). A second process on the same host is NOT fenced: neither this lock
-// nor the per-instance state Run reads covers it (ptone/scion#3951).
-var sandboxNameLocks sync.Map // sandbox name -> *sync.Mutex
+// Each lock is a channel semaphore, so a waiter gives up when its ctx
+// ends (lockSandboxNameCtx). The locks are package-level, so same-name
+// operations are serialized within one process across every
+// CloudRunSandboxRuntime (the factory builds one per call). A second
+// process on the same host is NOT fenced (ptone/scion#3951). Entries are
+// never pruned: each is an empty-struct channel, one per sandbox name
+// this process has started, stopped or deleted, which is bounded by the
+// broker's agents.
+var sandboxNameLocks sync.Map // sandbox name -> chan struct{} (capacity 1)
 
-// lockSandboxName takes the Run lock for a sandbox name and returns its
-// unlock.
-func lockSandboxName(name string) func() {
-	v, _ := sandboxNameLocks.LoadOrStore(name, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+// lockSandboxNameCtx takes the lock for a sandbox name and returns its
+// unlock. If ctx ends first (or has already ended) it returns ctx's error
+// without the lock.
+func lockSandboxNameCtx(ctx context.Context, name string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	v, _ := sandboxNameLocks.LoadOrStore(name, make(chan struct{}, 1))
+	sem := v.(chan struct{})
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	// select picks at random when both cases are ready: do not go ahead on
+	// an already-ended ctx.
+	if err := ctx.Err(); err != nil {
+		<-sem
+		return nil, err
+	}
+	return func() { <-sem }, nil
 }
 
-// sandboxHeldByOtherRun returns the run ID of a live (not stopped) state
-// entry for name that belongs to a run other than runID, or "" if there is
-// none. An entry with no run label, or a Run with no run ID, never
-// conflicts (the legacy rule sandboxRunCheck applies).
-func (r *CloudRunSandboxRuntime) sandboxHeldByOtherRun(name, runID string) string {
-	if runID == "" {
-		return ""
-	}
-	entry := r.state.get(name)
-	if entry == nil || entry.Stopped {
+// sandboxHeldByOtherRun returns the run ID of entry, the state file's
+// entry for the sandbox name, if it is live (not stopped) and belongs to a
+// run other than runID, or "" otherwise. An entry with no run label, or a
+// Run with no run ID, never conflicts (the legacy rule sandboxRunCheck
+// applies).
+func sandboxHeldByOtherRun(entry *sandboxStateEntry, runID string) string {
+	if runID == "" || entry == nil || entry.Stopped {
 		return ""
 	}
 	if run := entry.Labels[api.LabelRunID]; run != "" && run != runID {
@@ -1054,12 +1267,118 @@ func (r *CloudRunSandboxRuntime) sandboxHeldByOtherRun(name, runID string) strin
 	return ""
 }
 
+// recordRun records a launched and probed sandbox: a compare-and-set put
+// of entry against observed, the nonce Run read under the name lock. It
+// returns the new nonce, for the exit watcher.
+//
+// A refinement of the design's strict compare-and-set (CR-0, ptone/scion#4755):
+// the key can still change under the name lock, since exit watchers and
+// reconcile of any runtime instance write without it (an old watcher
+// marking the prior entry stopped, or a reconcile removing a stopped
+// entry). Failing then would fail a start whose sandbox is already live,
+// so on errStateChanged the file is re-read once and the held check
+// re-applied: if the key is now held by another run's live entry, recordRun
+// returns ErrRunConflict and never deletes by name; otherwise it retries
+// the put once against the re-read nonce.
+//
+// A sandbox with no state entry is untracked: reconcile, List and a
+// run-scoped Delete all work from entries, and the CLI has no list, so
+// only a by-name delete removes it. When the state cannot be read or
+// written at all (not a nonce mismatch), the held check already passed
+// under the name lock, so the sandbox named slug is the one this Run
+// launched: it is deleted by name, best effort, as the dead-on-arrival
+// cleanup does. After ErrRunConflict or a second mismatch the key holds
+// an entry this Run did not write, so nothing is deleted and the sandbox
+// is left untracked (logged at WARN).
+func (r *CloudRunSandboxRuntime) recordRun(slug, runID string, observed sandboxNonce, entry *sandboxStateEntry) (sandboxNonce, error) {
+	nonce, err := r.state.casPut(slug, observed, entry)
+	if err == nil {
+		return nonce, nil
+	}
+	if !errors.Is(err, errStateChanged) {
+		return nonceAbsent, r.cleanupUnrecordedRun(slug, runID, err)
+	}
+	if sandboxRecordRunHook != nil {
+		sandboxRecordRunHook(slug, "reread")
+	}
+	cur, curNonce, readErr := r.state.diskEntry(slug)
+	if readErr != nil {
+		return nonceAbsent, r.cleanupUnrecordedRun(slug, runID, readErr)
+	}
+	if other := sandboxHeldByOtherRun(cur, runID); other != "" {
+		runtimeLog().Warn("cloudrun-sandbox: another run's sandbox took the name during this start; "+
+			"this start's sandbox is live but untracked (no state entry): remove it with a by-name delete (sandbox delete --force <name>)",
+			"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
+		return nonceAbsent, fmt.Errorf("cloudrun-sandbox: sandbox %s belongs to run %q, not %q: %w", slug, other, runID, ErrRunConflict)
+	}
+	if sandboxRecordRunHook != nil {
+		sandboxRecordRunHook(slug, "retry")
+	}
+	nonce, err = r.state.casPut(slug, curNonce, entry)
+	switch {
+	case err == nil:
+		return nonce, nil
+	case errors.Is(err, errStateChanged):
+		runtimeLog().Warn("cloudrun-sandbox: the sandbox's state entry changed again during this start; "+
+			"this start's sandbox is live but untracked (no state entry): remove it with a by-name delete (sandbox delete --force <name>)",
+			"sandbox", slug, "run_id", runID, "error", err)
+		return nonceAbsent, fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, err)
+	default:
+		return nonceAbsent, r.cleanupUnrecordedRun(slug, runID, err)
+	}
+}
+
+// cleanupUnrecordedRun handles a launched sandbox whose state entry could
+// not be read or written (cause): it deletes the sandbox by name, best
+// effort, with a fresh 10 s context, and returns the record error. The
+// caller holds the name lock and has passed the held check, so the
+// sandbox named slug is the one its Run launched. On the re-read-failure
+// path (after a nonce mismatch, so another writer touched the key) this
+// is safe only because the name lock is process-global and recordRun is
+// the only writer of a live entry, under that lock: no other writer in
+// this process can have put another run's sandbox under the name. Another
+// process on the same host is unfenced, so there it is ambiguous
+// (ptone/scion#3951).
+func (r *CloudRunSandboxRuntime) cleanupUnrecordedRun(slug, runID string, cause error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	out, err := runSimpleCommand(cleanupCtx, r.bin, "delete", "--force", slug)
+	cancel()
+	if err != nil {
+		runtimeLog().Warn("cloudrun-sandbox: could not record the started sandbox, and deleting it failed; "+
+			"it is live but untracked (no state entry): remove it with a by-name delete (sandbox delete --force <name>)",
+			"sandbox", slug, "run_id", runID, "error", cause, "delete_error", err,
+			"delete_output", sandboxDeleteOutputForLog(out))
+	} else {
+		runtimeLog().Warn("cloudrun-sandbox: could not record the started sandbox; deleted it",
+			"sandbox", slug, "run_id", runID, "error", cause)
+	}
+	return fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, cause)
+}
+
+// sandboxRecordRunHook, if set, runs in recordRun after a nonce mismatch:
+// with stage "reread" before the file is re-read, and with stage "retry"
+// before the retried put. Nil in production; tests use it to change the
+// state file in those windows.
+var sandboxRecordRunHook func(name, stage string)
+
 // sandboxAfterLaunchHook, if set, runs after `sandbox run` returns and
 // before the liveness probe. Nil in production; tests use it to model a
 // concurrent start inside that window.
 var sandboxAfterLaunchHook func(name string)
 
 func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
+	slug := sanitizeSandboxName(cfg.Name)
+	runID := cfg.Labels[api.LabelRunID]
+
+	// Serialize same-name Runs, Stops and Deletes, from before the held
+	// check to the state record or cleanup (sandboxNameLocks). Taken before
+	// anything else; a cancelled wait returns the ctx error.
+	unlock, err := lockSandboxNameCtx(ctx, slug)
+	if err != nil {
+		return "", fmt.Errorf("cloudrun-sandbox: wait for sandbox name %s: %w", slug, err)
+	}
+	defer unlock()
+
 	// Fold resolved secrets into cfg.Env before anything is created and
 	// before envFor reads it, so they reach the sandbox as --env values and
 	// are covered by the error-output redaction (externalEnvValues reads
@@ -1069,25 +1388,22 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		return "", fmt.Errorf("cloudrun-sandbox: %w", err)
 	}
 
-	slug := sanitizeSandboxName(cfg.Name)
-	runID := cfg.Labels[api.LabelRunID]
-
-	// Serialize same-name Runs from launch to state record or cleanup
-	// (sandboxNameLocks).
-	unlock := lockSandboxName(slug)
-	defer unlock()
+	// The state file, not this instance's cache, is authoritative: the
+	// factory builds an instance per lookup, so the cache can predate
+	// another Run's record. An unreadable file fails closed, before
+	// anything is created.
+	current, observed, err := r.state.diskEntry(slug)
+	if err != nil {
+		logUnreadableSandboxState(r.state.path, err)
+		return "", fmt.Errorf("cloudrun-sandbox: %w", err)
+	}
 
 	// The sandbox name is held by a live sandbox of another run: reusing
 	// the name would take that sandbox over (its probe passes and this
 	// run's entry replaces the other's), so refuse, as the Cloud Run and
 	// Kubernetes runtimes do. Start's pre-clean normally removes it
-	// first; this is reached after a failed listing. It only sees an
-	// entry already in this instance's state when the check runs: r.state
-	// is loaded from disk when the instance is built (one per factory
-	// call), so a Run whose instance predates another Run's record misses
-	// that entry. Re-loading the state under the lock is left for
-	// ptone/scion#3951.
-	if other := r.sandboxHeldByOtherRun(slug, runID); other != "" {
+	// first; this is reached after a failed listing.
+	if other := sandboxHeldByOtherRun(current, runID); other != "" {
 		runtimeLog().Info("Sandbox of another run holds the agent's sandbox name; not reusing it",
 			"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
 		return "", fmt.Errorf("cloudrun-sandbox: sandbox %s belongs to run %q, not %q: %w", slug, other, runID, ErrRunConflict)
@@ -1335,7 +1651,10 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 
 		EntrypointLogOffset: entrypointLogOffset,
 	}
-	r.state.add(entry)
+	nonce, err := r.recordRun(slug, runID, observed, entry)
+	if err != nil {
+		return "", err
+	}
 
 	// Start a watcher goroutine that blocks on `sandbox wait` and records
 	// the exit in the state store when the sandbox terminates.
@@ -1345,7 +1664,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	r.watchMu.Lock()
 	r.watchCancels[slug] = watchCancel
 	r.watchMu.Unlock()
-	go r.watchSandbox(watchCtx, slug)
+	go r.watchSandbox(watchCtx, slug, nonce)
 	go r.tailEntrypointLog(watchCtx, slug, cfg.Name, cfg.Project, paths, entrypointLogOffset)
 
 	return slug, nil
@@ -1359,13 +1678,28 @@ func (r *CloudRunSandboxRuntime) Stop(ctx context.Context, ref RunRef) error {
 	return r.Delete(ctx, ref)
 }
 
-// Delete removes the sandbox ref.ID. The sandbox name is reused across
-// runs, so when ref.RunID is set the state entry is checked first
+// Delete removes the sandbox ref.ID. It holds the sandbox name lock
+// (lockSandboxNameCtx) from its state read through the delete and the
+// entry's removal, so it waits for a same-name Run in progress; a
+// cancelled wait returns the ctx error. The sandbox name is reused across
+// runs, so when ref.RunID is set the state file's entry is checked first
 // (sandboxRunCheck) and a sandbox of another run is left untouched
 // (ptone/scion#2550).
 func (r *CloudRunSandboxRuntime) Delete(ctx context.Context, ref RunRef) error {
 	id := ref.ID
-	if proceed, err := r.sandboxRunCheck(ref); !proceed {
+	unlock, err := lockSandboxNameCtx(ctx, id)
+	if err != nil {
+		return fmt.Errorf("cloudrun-sandbox: wait for sandbox name %s: %w", id, err)
+	}
+	defer unlock()
+
+	// The state file, not this instance's cache, is authoritative.
+	entry, nonce, err := r.state.diskEntry(id)
+	if err != nil {
+		logUnreadableSandboxState(r.state.path, err)
+		return fmt.Errorf("cloudrun-sandbox: %w", err)
+	}
+	if proceed, err := sandboxRunCheck(ref, entry); !proceed {
 		return err
 	}
 	// Always use --force: sandbox delete without it silently fails for
@@ -1374,12 +1708,12 @@ func (r *CloudRunSandboxRuntime) Delete(ctx context.Context, ref RunRef) error {
 	// runsc-gofer/runsc-sandbox processes behind a CLI that reports "not
 	// running". This is the more dangerous defect. See
 	// defect-sandbox-delete-hang.md.
-	return r.deleteOrWorkaround(ctx, id)
+	return r.deleteOrWorkaround(ctx, id, sandboxObserved{entry: entry, nonce: nonce})
 }
 
-// sandboxRunCheck enforces ref.RunID before a Stop or Delete, from the
-// state store (the only record of sandboxes: the CLI has no list). It
-// reports whether the delete may proceed:
+// sandboxRunCheck enforces ref.RunID before a Stop or Delete, from entry,
+// the state file's entry for ref.ID (the only record of sandboxes: the CLI
+// has no list). It reports whether the delete may proceed:
 //   - no run ID: proceed by name, as before run IDs existed;
 //   - an entry of ref.RunID, or a legacy entry with no run label (the rule
 //     k8s and the broker apply): proceed;
@@ -1388,11 +1722,10 @@ func (r *CloudRunSandboxRuntime) Delete(ctx context.Context, ref RunRef) error {
 //     (deleted, or pruned by reconcile), as k8s treats a missing pod, and a
 //     sandbox of a newer run still starting (run, before its entry is
 //     recorded) is not deleted by name.
-func (r *CloudRunSandboxRuntime) sandboxRunCheck(ref RunRef) (bool, error) {
+func sandboxRunCheck(ref RunRef, entry *sandboxStateEntry) (bool, error) {
 	if ref.RunID == "" {
 		return true, nil
 	}
-	entry := r.state.get(ref.ID)
 	if entry == nil {
 		runtimeLog().Info("Run-scoped sandbox delete: no state entry; treating the run's sandbox as gone",
 			"sandbox", ref.ID, "run_id", ref.RunID)
@@ -1406,11 +1739,19 @@ func (r *CloudRunSandboxRuntime) sandboxRunCheck(ref RunRef) (bool, error) {
 	return true, nil
 }
 
+// sandboxObserved is the state entry a delete read under the name lock
+// (nil if none) and its nonce; the delete's removal compares against it.
+type sandboxObserved struct {
+	entry *sandboxStateEntry
+	nonce sandboxNonce
+}
+
 // deleteOrWorkaround dispatches to the workaround or the plain path based
 // on the SCION_CLOUDRUN_DELETE_WORKAROUND kill switch. The watcher cancel
 // is performed here so neither downstream path needs it -- and removing
-// the workaround file does not lose the watcher cancel logic.
-func (r *CloudRunSandboxRuntime) deleteOrWorkaround(ctx context.Context, id string) error {
+// the workaround file does not lose the watcher cancel logic. The caller
+// holds the name lock; obs is what it read under it.
+func (r *CloudRunSandboxRuntime) deleteOrWorkaround(ctx context.Context, id string, obs sandboxObserved) error {
 	// Cancel the watcher goroutine so `sandbox wait` doesn't hang after
 	// the sandbox is deleted.
 	r.watchMu.Lock()
@@ -1421,9 +1762,65 @@ func (r *CloudRunSandboxRuntime) deleteOrWorkaround(ctx context.Context, id stri
 	r.watchMu.Unlock()
 
 	if deleteWorkaroundEnabled {
-		return r.deleteWithTimeout(ctx, id)
+		return r.deleteWithTimeout(ctx, id, obs)
 	}
-	return r.deletePlain(ctx, id)
+	return r.deletePlain(ctx, id, obs)
+}
+
+// removeAfterDelete removes the entry of a deleted sandbox: a
+// compare-and-set removal against obs, the entry the delete read under the
+// name lock.
+//
+// A refinement of the design's strict compare-and-set (CR-0,
+// ptone/scion#4755): the exit watcher of the deleted sandbox usually runs
+// in another runtime instance (the factory builds one per lookup), which
+// the delete cannot cancel. When the delete ends, that watcher's `sandbox
+// wait` returns and it may mark the entry stopped first, changing its
+// nonce. So on errStateChanged the file is re-read once, and the entry is
+// removed against the re-read nonce only if it is the same run's entry
+// (same run label and CreatedAt) now marked stopped; anything else is left
+// alone and logged.
+func (r *CloudRunSandboxRuntime) removeAfterDelete(id string, obs sandboxObserved) {
+	err := r.state.casRemove(id, obs.nonce)
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, errStateChanged) {
+		runtimeLog().Warn("cloudrun-sandbox: failed to remove the deleted sandbox's state entry",
+			"sandbox", id, "error", err)
+		return
+	}
+	cur, curNonce, readErr := r.state.diskEntry(id)
+	if readErr != nil {
+		runtimeLog().Warn("cloudrun-sandbox: failed to remove the deleted sandbox's state entry",
+			"sandbox", id, "error", readErr)
+		return
+	}
+	if !sameRunMarkedStopped(obs.entry, cur) {
+		runtimeLog().Info("cloudrun-sandbox: state entry changed during the delete; leaving it",
+			"sandbox", id, "error", err)
+		return
+	}
+	if err := r.state.casRemove(id, curNonce); err != nil {
+		if errors.Is(err, errStateChanged) {
+			// Benign: e.g. another instance's reconcile removed it first.
+			runtimeLog().Info("cloudrun-sandbox: state entry changed again during the delete; leaving it",
+				"sandbox", id, "error", err)
+			return
+		}
+		runtimeLog().Warn("cloudrun-sandbox: failed to remove the deleted sandbox's state entry",
+			"sandbox", id, "error", err)
+	}
+}
+
+// sameRunMarkedStopped reports whether cur is observed's entry (same run
+// label and CreatedAt) marked stopped since.
+func sameRunMarkedStopped(observed, cur *sandboxStateEntry) bool {
+	if observed == nil || cur == nil || !cur.Stopped {
+		return false
+	}
+	return cur.Labels[api.LabelRunID] == observed.Labels[api.LabelRunID] &&
+		cur.CreatedAt.Equal(observed.CreatedAt)
 }
 
 // deletePlain is the non-workaround path: plain `sandbox delete --force`.
@@ -1431,7 +1828,7 @@ func (r *CloudRunSandboxRuntime) deleteOrWorkaround(ctx context.Context, id stri
 //
 // A sandbox that is already gone (sandboxDeleteGone) counts as deleted:
 // the entry is removed and nil returned. Any failure keeps the entry.
-func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string) error {
+func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string, obs sandboxObserved) error {
 	cmd := exec.CommandContext(ctx, r.bin, "delete", "--force", id)
 	outFile := newSandboxDeleteOutput()
 	if outFile != nil {
@@ -1451,7 +1848,7 @@ func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string) err
 			"sandbox", id, "result", result.String(), "error", err, "output", sandboxDeleteOutputForLog(out))
 		return fmt.Errorf("cloudrun-sandbox: delete --force failed: %w", err)
 	}
-	r.state.remove(id)
+	r.removeAfterDelete(id, obs)
 	return nil
 }
 
@@ -1673,8 +2070,11 @@ func (r *CloudRunSandboxRuntime) GetWorkspacePath(ctx context.Context, id string
 
 // watchSandbox blocks on `sandbox wait <name>` and updates the state
 // store when the sandbox exits. The context allows deleteOrWorkaround to
-// cancel the watcher when the sandbox is force-deleted.
-func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) {
+// cancel the watcher when the sandbox is force-deleted. nonce is the
+// nonce of the entry this watcher watches: the exit is recorded only if
+// the key still holds that entry, so a late watcher never marks a newer
+// run's entry stopped.
+func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string, nonce sandboxNonce) {
 	// sandbox wait blocks until the sandbox exits.
 	cmd := exec.CommandContext(ctx, r.bin, "wait", name)
 	out, err := cmd.CombinedOutput()
@@ -1709,14 +2109,22 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) 
 
 	// Log at info level — sandbox exit is normal (C5).
 	runtimeLog().Info("sandbox exited", "name", name, "exitCode", exitCode)
-	r.state.markStopped(name, exitCode, &now)
+	entry, markErr := r.state.casMarkStopped(name, nonce, exitCode, &now)
+	switch {
+	case errors.Is(markErr, errStateChanged):
+		runtimeLog().Debug("sandbox state entry changed since the watcher started; not marking it stopped",
+			"name", name, "error", markErr)
+	case markErr != nil:
+		runtimeLog().Warn("failed to record sandbox exit in the state store", "name", name, "error", markErr)
+	}
 
 	// A non-zero or unknown exit (e.g. death during provisioning) is logged
 	// with this run's entrypoint output: once Delete drops the state entry,
 	// GetLogs can no longer reach it. A non-zero code is an error; an
 	// unknown code (nil) is treated as normal (C5) and logged at warn.
+	// Only the entry this watcher marked is used.
 	if exitCode == nil || *exitCode != 0 {
-		if entry := r.state.get(name); entry != nil && entry.AgentHome != "" {
+		if entry != nil && entry.AgentHome != "" {
 			logPath := filepath.Join(entry.AgentHome, entrypointLogFile)
 			logFn, msg := runtimeLog().Error, "sandbox exited abnormally"
 			if exitCode == nil {
@@ -1729,10 +2137,14 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) 
 		}
 	}
 
-	// Clean up the cancel function from the map.
-	r.watchMu.Lock()
-	delete(r.watchCancels, name)
-	r.watchMu.Unlock()
+	// Clean up the cancel function from the map, unless the entry changed
+	// since this watcher started: the map may then hold a newer run's
+	// cancel for the name, which must stay.
+	if !errors.Is(markErr, errStateChanged) {
+		r.watchMu.Lock()
+		delete(r.watchCancels, name)
+		r.watchMu.Unlock()
+	}
 }
 
 // -----------------------------------------------------------------------
