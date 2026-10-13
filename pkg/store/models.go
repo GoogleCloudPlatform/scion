@@ -317,7 +317,7 @@ func (a *Agent) IsIncompleteCreate() bool {
 		return false
 	}
 	switch a.Phase {
-	case "suspended", "stopping", "stopped", "error":
+	case "suspended", "stopping", "stopped", "error", "halted":
 	default:
 		return false
 	}

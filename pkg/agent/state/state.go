@@ -159,6 +159,12 @@ const (
 	PhaseStopping     Phase = "stopping"
 	PhaseStopped      Phase = "stopped"
 	PhaseError        Phase = "error"
+	// PhaseHalted is terminal: the platform ended a run that should still
+	// be running (preempted, evicted, OOM-killed, or its container went
+	// missing). The detail is the agent's exit reason. Unlike stopped it is
+	// never a run the user or the agent ended, and unlike error it is not a
+	// harness crash. A start resumes it like a start from stopped.
+	PhaseHalted Phase = "halted"
 )
 
 // allPhases is the internal list; Phases() returns a copy.
@@ -172,6 +178,7 @@ var allPhases = []Phase{
 	PhaseStopping,
 	PhaseStopped,
 	PhaseError,
+	PhaseHalted,
 }
 
 // Phases returns a copy of all valid Phase values.
@@ -183,7 +190,8 @@ func Phases() []Phase {
 
 // Ordinal returns the forward-progress ordering of a phase.
 // Higher values represent later lifecycle stages.
-// Returns 0 for terminal or special phases (stopped, error, suspended, stopping)
+// Returns 0 for terminal or special phases (stopped, error, halted, suspended,
+// stopping)
 // where regression checks do not apply.
 func (p Phase) Ordinal() int {
 	switch p {

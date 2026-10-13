@@ -259,7 +259,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		}
 		return store.LaunchReportAnswer{Result: store.LaunchReportResultCompleted, Changed: true}, updated, nil
 
-	case state.PhaseStopped, state.PhaseStopping, state.PhaseSuspended:
+	case state.PhaseStopped, state.PhaseStopping, state.PhaseSuspended, state.PhaseHalted:
 		upd := ltx.client.Agent.UpdateOneID(current.ID).
 			SetLaunchLastReportAt(now).
 			SetLaunchState(store.LaunchStateEnded).

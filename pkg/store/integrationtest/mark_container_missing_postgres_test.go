@@ -64,7 +64,7 @@ func TestMarkAgentContainerMissing_Phases_Postgres(t *testing.T) {
 	} {
 		t.Run(tc.slug, func(t *testing.T) {
 			id := create(tc.slug, tc.phase, tc.reason)
-			got, err := cs.MarkAgentContainerMissing(ctx, id, "broker-1", cutoff, "gone")
+			got, err := cs.MarkAgentContainerMissing(ctx, id, "broker-1", cutoff, "", "gone")
 			require.NoError(t, err)
 			stored, err := cs.GetAgent(ctx, id)
 			require.NoError(t, err)
