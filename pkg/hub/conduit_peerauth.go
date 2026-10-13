@@ -61,8 +61,13 @@ type ConduitPeerAuthOptions struct {
 	// SelfID is this relay's instance id (HMAC caller identity).
 	SelfID string
 	// SharedSecret is the hub's shared signing secret, from which the HMAC
-	// key is derived. Required in every mode.
+	// key is derived when PeerSecret is unset (in-process profiles).
 	SharedSecret string
+	// PeerSecret is the dedicated relay-peer secret
+	// (server.hub.conduit.peer_secret). When set, the HMAC key is derived
+	// from it, under its own label, and SharedSecret is not used. External
+	// relay mode and --role relay require it (design §3.9).
+	PeerSecret string
 	// Audience is the OIDC audience ("" = DefaultConduitPeerAudience).
 	Audience string
 	// ServiceAccounts is the OIDC caller allow-list. Empty: OwnServiceAccount.
@@ -102,12 +107,23 @@ func NewConduitPeerAuth(o ConduitPeerAuthOptions) (relay.PeerAuth, string, error
 	if err != nil {
 		return nil, "", err
 	}
-	if o.SharedSecret == "" {
+	var signer *relay.HMACPeerAuth
+	switch {
+	case o.PeerSecret != "":
+		if o.SharedSecret != "" && o.SharedSecret == o.PeerSecret {
+			return nil, mode, fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret must differ from the session secret", mode)
+		}
+		signer, err = relay.NewHMACPeerAuthFromPeerSecret(relay.HMACPeerAuthConfig{Secret: []byte(o.PeerSecret), SelfID: o.SelfID})
+		if err != nil {
+			return nil, mode, fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret: %w", mode, err)
+		}
+	case o.SharedSecret != "":
+		signer, err = relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: []byte(o.SharedSecret), SelfID: o.SelfID})
+		if err != nil {
+			return nil, mode, fmt.Errorf("conduit peer auth (%s): %w", mode, err)
+		}
+	default:
 		return nil, mode, fmt.Errorf("conduit peer auth (%s): no shared signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET on every hub node", mode)
-	}
-	signer, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: []byte(o.SharedSecret), SelfID: o.SelfID})
-	if err != nil {
-		return nil, mode, fmt.Errorf("conduit peer auth (%s): %w", mode, err)
 	}
 	if mode == config.ConduitPeerAuthHMAC {
 		return signer, mode, nil
