@@ -264,7 +264,8 @@ multi-key interrupt, `interrupt_signal: sequence` +
 Two optional blocks describe when the tool is ready for a pasted message and
 how a pasted message is submitted. Durations are Go duration strings
 (`300ms`, `1.5s`, `1m30s`). Durations need a unit, so write zero as `0s`:
-the schema rejects a bare `0`.
+the schema rejects a bare `0`. Only the units `ns`, `us`, `ms`, `s`, `m`
+and `h` are accepted (not `µs`).
 
 ```yaml
 ready:
