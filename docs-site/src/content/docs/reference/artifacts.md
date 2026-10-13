@@ -24,7 +24,7 @@ Each artifact has numbered **versions**. A version is an immutable snapshot of t
 
 ## `scion artifact`
 
-Available in every CLI mode, including agent mode.
+`publish`, `get` and `versions` are available in every CLI mode, including agent mode. `share` and `delete` are available in human mode only.
 
 ### `scion artifact publish <file|folder>`
 
@@ -79,6 +79,21 @@ $ scion artifact versions scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
   REF                                                  KIND     PUBLISHED             BY             FILES  SIZE     NOTE
 * scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@2  publish  2026-10-06 18:20 UTC  agent:<id>     1      4.1 KiB  round 2
   scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@1  publish  2026-10-06 17:02 UTC  agent:<id>     1      3.9 KiB
+```
+
+### `scion artifact share <ref>`
+
+Creates a share link for the artifact and prints it, with its expiry and the command that revokes it. Anyone holding the link can open the artifact's current version in a browser without signing in, until the link expires or is revoked. The link is shown only once; it cannot be printed again. Only the artifact's owner or a user with an admin grant on it can share it; agents cannot, and the command is available in human mode only. See [Share links](#share-links).
+
+- `--ttl <n>h|<n>d`: the link's lifetime in whole hours or days. Without it the hub's default applies (7 days unless changed). A lifetime above the hub's maximum (30 days unless changed) is refused, not shortened. When the artifact itself expires sooner, the link ends with it and the command says so.
+- `--list`: list the active links instead, each with its id, who created it and when, and when it expires.
+- `--revoke <link-id>`: revoke one link instead.
+
+```text
+$ scion artifact share scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d --ttl 24h
+https://hub.example.com/api/v1/artifacts/shared/<token>
+Expires 2026-10-07 18:20 UTC. This link is shown only once; anyone holding it can open the artifact.
+Revoke it with: scion artifact share scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d --revoke <link-id>
 ```
 
 ### `scion artifact delete <ref>`
@@ -232,7 +247,7 @@ $ scion message @reviewer "Design ready for review." --artifact scion://artifact
   Artifact: current - scion artifact get scion://artifact/5f1c2d3e-...
   ```
   The hint carries no title. Whether the recipient may read the artifact is decided when it runs `scion artifact get`, from any broker, without shared directories.
-- **What web chat shows.** A message with artifact references shows a chip for each one, in the order the references appear in the message text (references attached without appearing in the text follow): the title, version and owner of an artifact you can read, or **Artifact unavailable** for any other reference, the same as for an artifact that does not exist. A reference the hub could not check because of a server error also shows as unavailable. `scion://artifact/` references in message text are links. Clicking a chip or a link opens the artifact in a preview over the conversation, with **Copy link** and **Open in artifact viewer**. Text and images show in the preview; Markdown shows as its source there, and renders in the artifact viewer. Chat history responses include `messageArtifacts`, keyed by message ID, resolved for the viewing user. When the hub cannot read the references recorded for a page of history, that response carries no `messageArtifacts` and lists the page's messages that are not deleted in `messageArtifactsUnavailable` instead, so a client does not take them for messages without references; web chat then shows no chips for those messages and one notice that artifact references could not be loaded.
+- **What web chat shows.** A message with artifact references shows a chip for each one, in the order the references appear in the message text (references attached without appearing in the text follow): the title, version and owner of an artifact you can read, or **Artifact unavailable** for any other reference, the same as for an artifact that does not exist. A reference the hub could not check because of a server error also shows as unavailable. `scion://artifact/` references in message text are links. Clicking a chip or a link opens the artifact in a preview over the conversation, with **Copy link** and **Open in artifact viewer**. Images show in the preview, and Markdown renders there in the same sandboxed frame as on the artifact page; other text, HTML included, shows as its source in a read-only editor. **Open in artifact viewer** opens the artifact page. Chat history responses include `messageArtifacts`, keyed by message ID, resolved for the viewing user. When the hub cannot read the references recorded for a page of history, that response carries no `messageArtifacts` and lists the page's messages that are not deleted in `messageArtifactsUnavailable` instead, so a client does not take them for messages without references; web chat then shows no chips for those messages and one notice that artifact references could not be loaded.
 - **Attaching in web chat.** The composer's paperclip offers **Upload file** and **Attach artifact…**. The picker lists the artifacts you can read, with search and **Owned by me** / **This project** filters, and attaches the current version of up to 10 per message. Picked artifacts show as chips above the input; they travel as references, never as copies.
 - **Where references are kept.** Direct messages to an agent, messages from an agent to a user or conversation, and web chat messages to agents carry references. Group (`group[...]`) and broadcast messages, @-mention copies, and messages arriving through chat plugins do not; any `artifacts` metadata they arrive with is removed.
 

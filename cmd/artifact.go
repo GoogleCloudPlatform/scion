@@ -104,6 +104,13 @@ folders, whose names start with ".", are left out; symbolic links inside
 the folder are refused). Its entry file, the one the web UI opens, is --entry, or else
 index.html, index.md or README.md at the top of the folder.
 
+An HTML entry file is shown in a sandboxed frame. The page's scripts run in
+an isolated origin; they cannot reach the hub page around the frame, your
+session or the hub's API. Relative links (img/chart.png, css/site.css) load
+the bundle's own files. Remote images are not loaded, so include them in
+the bundle; publishing warns when an HTML entry references them. See "HTML
+artifacts" in the artifacts reference.
+
 With --key, publishing again under the same key adds a new version to the
 same artifact instead of creating another one. Files unchanged since the
 current version are not uploaded again. --note describes the version.
