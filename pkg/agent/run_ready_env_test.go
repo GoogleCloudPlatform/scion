@@ -16,7 +16,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,24 +29,33 @@ import (
 
 // TestRunAgent_SetsHarnessReadyEnv starts an agent from a declarative
 // harness-config (it has a command, so it resolves to the config's own
-// harness rather than Generic) and checks the container gets SCION_HARNESS_READY with the config's resolved
-// ready spec, overwriting a value the caller (a template) supplied, on the
-// first start and on a resume.
+// harness rather than Generic) and checks the container gets
+// SCION_HARNESS_READY with the config's resolved ready spec, on the first
+// start and on a resume. The broker's value overwrites one in the template's
+// env (first start) and one in the caller-supplied env, StartOptions.Env
+// (resume).
 func TestRunAgent_SetsHarnessReadyEnv(t *testing.T) {
 	for _, tt := range []struct {
-		name  string
-		ready string
-		want  api.ReadySpec
+		name    string
+		harness string
+		ready   string
+		want    api.ReadySpec
 	}{
 		{
-			name:  "hook block",
-			ready: "ready:\n  strategy: hook\n  settle: 2s\n  timeout: 30s\n",
-			want:  api.ReadySpec{Strategy: state.ReadyStrategyHook, Settle: 2 * time.Second, Timeout: 30 * time.Second},
+			name:    "hook block",
+			harness: "custom-tool",
+			ready:   "ready:\n  strategy: hook\n  settle: 2s\n  timeout: 30s\n",
+			want:    api.ReadySpec{Strategy: state.ReadyStrategyHook, Settle: 2 * time.Second, Timeout: 30 * time.Second},
 		},
 		{
-			name:  "no block uses the delay defaults",
-			ready: "",
-			want:  state.DefaultReadySpec(state.ReadyStrategyDelay),
+			name:    "custom harness without a block uses the delay defaults",
+			harness: "custom-tool",
+			want:    state.DefaultReadySpec(state.ReadyStrategyDelay),
+		},
+		{
+			name:    "built-in harness without a block uses its bundle's block",
+			harness: "claude",
+			want:    state.DefaultReadySpec(state.ReadyStrategyHook),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -57,14 +65,17 @@ func TestRunAgent_SetsHarnessReadyEnv(t *testing.T) {
 			t.Cleanup(func() { _ = os.Chdir(oldWd) })
 			t.Setenv("HOME", tmpDir)
 
+			const staleValue = `{"strategy":"delay","settle_ms":2}`
 			globalScionDir := filepath.Join(tmpDir, ".scion")
 			hcDir := filepath.Join(globalScionDir, "harness-configs", "ready-hc")
 			_ = os.MkdirAll(filepath.Join(hcDir, "home"), 0o755)
 			_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"),
-				[]byte("harness: claude\nuser: scion\nimage: scion-claude:latest\ncommand:\n  base: [claude]\n"+tt.ready), 0o644)
+				[]byte("harness: "+tt.harness+"\nuser: scion\nimage: scion-claude:latest\ncommand:\n  base: [tool]\n"+tt.ready), 0o644)
 			tplDir := filepath.Join(globalScionDir, "templates", "default")
 			_ = os.MkdirAll(tplDir, 0o755)
-			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"ready-hc"}`), 0o644)
+			tplEnv := strings.ReplaceAll(staleValue, `"`, `\"`)
+			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"),
+				[]byte(`{"default_harness_config":"ready-hc","env":{"`+state.HarnessReadyEnv+`":"`+tplEnv+`"}}`), 0o644)
 			_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
@@ -95,32 +106,30 @@ profiles:
 				if len(values) != 1 {
 					t.Fatalf("%s: %s values = %q, want exactly one", step, state.HarnessReadyEnv, values)
 				}
-				var got api.ReadySpec
-				if err := json.Unmarshal([]byte(values[0]), &got); err != nil {
-					t.Fatalf("%s: %s = %q is not JSON: %v", step, state.HarnessReadyEnv, values[0], err)
+				got, err := state.ParseReadySpecEnv(values[0])
+				if err != nil {
+					t.Fatalf("%s: %s = %q does not parse: %v", step, state.HarnessReadyEnv, values[0], err)
 				}
 				if got != tt.want {
 					t.Errorf("%s: %s = %+v, want %+v", step, state.HarnessReadyEnv, got, tt.want)
 				}
 			}
 
-			templateValue := map[string]string{state.HarnessReadyEnv: `{"Strategy":"delay","Settle":1}`}
 			if _, err := mgr.Start(context.Background(), api.StartOptions{
-				Name: "ready-agent", Template: tplDir, ProjectPath: projectScionDir,
-				NoAuth: true, Env: templateValue,
+				Name: "ready-agent", Template: tplDir, ProjectPath: projectScionDir, NoAuth: true,
 			}); err != nil {
 				t.Fatalf("create Start: %v", err)
 			}
-			check("create")
+			check("create (template env)")
 
 			captured = runtime.RunConfig{}
 			if _, err := mgr.Start(context.Background(), api.StartOptions{
 				Name: "ready-agent", ProjectPath: projectScionDir, Resume: true,
-				NoAuth: true, Env: map[string]string{state.HarnessReadyEnv: `{"Strategy":"delay","Settle":1}`},
+				NoAuth: true, Env: map[string]string{state.HarnessReadyEnv: staleValue},
 			}); err != nil {
 				t.Fatalf("resume Start: %v", err)
 			}
-			check("resume")
+			check("resume (caller env)")
 		})
 	}
 }

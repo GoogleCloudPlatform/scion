@@ -294,7 +294,8 @@ and the broker's wait before it pastes a held message. A session-start from
 `/clear` or `/compact` never counts as the hook signal. The built-in bundles
 use `hook` for claude, gemini-cli, copilot and grok-build, and `delay` 8s for
 every other harness; change a value only with evidence that the tool reads
-its input by then.
+its input by then. A harness-config with no `ready` block gets the block of
+the built-in bundle for its `harness` type, or `delay` 8s if there is none.
 
 **`delivery`.** A message is loaded into a tmux buffer and pasted with
 bracketed paste. Then each key in `submit_keys` is sent with its own

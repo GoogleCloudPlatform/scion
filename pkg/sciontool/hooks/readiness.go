@@ -15,7 +15,6 @@
 package hooks
 
 import (
-	"encoding/json"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -33,11 +32,12 @@ import (
 // harness reports readiness through hooks is its config's ready.strategy.
 
 // LoadReadySpec returns the ready spec the broker passed in
-// state.HarnessReadyEnv (JSON of api.ReadySpec), read with getenv. When the
-// variable is missing (a broker older than the ready spec) or is not a valid
-// spec, it logs at Info and returns the default delay spec, which is safe for
-// every harness: hook harnesses then wait the delay settle instead of their
-// ready marker until the broker is upgraded. Unknown JSON fields are ignored.
+// state.HarnessReadyEnv (see state.ParseReadySpecEnv), read with getenv. When
+// the variable is missing (a broker older than the ready spec) or is not a
+// valid spec, it logs at Info and returns the default delay spec, which is
+// safe for every harness: hook harnesses then wait the delay settle instead
+// of their ready marker until the broker is upgraded. Unknown JSON fields are
+// ignored.
 func LoadReadySpec(getenv func(string) string) api.ReadySpec {
 	fallback := state.DefaultReadySpec(state.ReadyStrategyDelay)
 	raw := getenv(state.HarnessReadyEnv)
@@ -46,13 +46,8 @@ func LoadReadySpec(getenv func(string) string) api.ReadySpec {
 			state.HarnessReadyEnv, fallback.Strategy, fallback.Settle)
 		return fallback
 	}
-	var spec api.ReadySpec
-	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
-		log.Info("Harness readiness: %s is not valid JSON (%v); using strategy %s with settle %s",
-			state.HarnessReadyEnv, err, fallback.Strategy, fallback.Settle)
-		return fallback
-	}
-	if err := state.CheckReadySpec(spec); err != nil {
+	spec, err := state.ParseReadySpecEnv(raw)
+	if err != nil {
 		log.Info("Harness readiness: %s is not a valid ready spec (%v); using strategy %s with settle %s",
 			state.HarnessReadyEnv, err, fallback.Strategy, fallback.Settle)
 		return fallback

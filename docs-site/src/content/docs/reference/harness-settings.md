@@ -387,11 +387,13 @@ keys are allowed.
 and Hub overrides (an override replaces the whole `ready` block), and passes the resolved spec to
 the container in `SCION_HARNESS_READY`. `sciontool init` records it in the container's readiness
 file, and both readers use those values: `sciontool init`, which reports the agent as working
-when it is ready, and the broker, which waits before pasting a held message. A `ready` value
-from a template's `env` cannot override it.
+when it is ready, and the broker, which waits before pasting a held message. A
+`SCION_HARNESS_READY` value in a template's or caller's `env` cannot override it.
 
 The built-in bundles use `hook` (settle 1.5s, timeout 90s) for claude, gemini-cli, copilot and
-grok-build, and `delay` 8s for every other harness. A harness-config without the block uses
+grok-build, and `delay` 8s for every other harness. A harness-config without the block (for
+example one installed before the block existed) uses the block of the built-in bundle for its
+`harness` type, so an older claude config keeps `hook`; a harness with no built-in bundle uses
 `delay` 8s.
 
 **Version skew.**

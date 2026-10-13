@@ -18,6 +18,7 @@
 package state
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -96,7 +97,8 @@ const (
 )
 
 // HarnessReadyEnv names the environment variable that carries the resolved
-// ready spec (JSON of api.ReadySpec) from the broker to `sciontool init`.
+// ready spec from the broker to `sciontool init`, in the JSON form written by
+// FormatReadySpecEnv.
 const HarnessReadyEnv = "SCION_HARNESS_READY"
 
 // DefaultReadySpec returns the ready spec used for strategy when no value is
@@ -144,6 +146,50 @@ func CheckReadySpec(spec api.ReadySpec) error {
 // including the trailing newline.
 func FormatInitRun(nonce, mode string) string {
 	return "nonce=" + nonce + " mode=" + mode + "\n"
+}
+
+// readySpecWire is the JSON form of a ready spec in HarnessReadyEnv. The
+// broker and the image are different binaries that can be of different
+// versions, so the names and units are fixed here rather than taken from the
+// Go type: whole milliseconds, as in the init-run file's line 2.
+type readySpecWire struct {
+	Strategy  string `json:"strategy"`
+	SettleMs  int64  `json:"settle_ms"`
+	TimeoutMs int64  `json:"timeout_ms"`
+}
+
+// FormatReadySpecEnv renders spec as the HarnessReadyEnv value, for example
+// {"strategy":"hook","settle_ms":1500,"timeout_ms":90000}.
+func FormatReadySpecEnv(spec api.ReadySpec) string {
+	b, _ := json.Marshal(readySpecWire{
+		Strategy:  spec.Strategy,
+		SettleMs:  spec.Settle.Milliseconds(),
+		TimeoutMs: spec.Timeout.Milliseconds(),
+	})
+	return string(b)
+}
+
+// ParseReadySpecEnv parses a HarnessReadyEnv value and checks it with
+// CheckReadySpec. Unknown fields are ignored, so a newer broker can add
+// fields; a missing field reads as zero.
+func ParseReadySpecEnv(raw string) (api.ReadySpec, error) {
+	var w readySpecWire
+	if err := json.Unmarshal([]byte(raw), &w); err != nil {
+		return api.ReadySpec{}, fmt.Errorf("%s is not valid JSON: %w", HarnessReadyEnv, err)
+	}
+	maxMs := MaxReadyTimeout.Milliseconds()
+	if w.SettleMs < 0 || w.SettleMs > maxMs || w.TimeoutMs < 0 || w.TimeoutMs > maxMs {
+		return api.ReadySpec{}, fmt.Errorf("%s values out of range: settle_ms=%d timeout_ms=%d", HarnessReadyEnv, w.SettleMs, w.TimeoutMs)
+	}
+	spec := api.ReadySpec{
+		Strategy: w.Strategy,
+		Settle:   time.Duration(w.SettleMs) * time.Millisecond,
+		Timeout:  time.Duration(w.TimeoutMs) * time.Millisecond,
+	}
+	if err := CheckReadySpec(spec); err != nil {
+		return api.ReadySpec{}, err
+	}
+	return spec, nil
 }
 
 // FormatInitRunSpec renders the two-line HarnessInitRunFile content for

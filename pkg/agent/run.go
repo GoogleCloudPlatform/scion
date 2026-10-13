@@ -1326,9 +1326,7 @@ authDone:
 	// resolved harness config is the source of truth, and a template value
 	// must not override it.
 	if h != nil {
-		if spec, err := json.Marshal(h.ReadySpec()); err == nil {
-			opts.Env[state.HarnessReadyEnv] = string(spec)
-		}
+		opts.Env[state.HarnessReadyEnv] = state.FormatReadySpecEnv(h.ReadySpec())
 	}
 	if _, ok := opts.Env["SCION_MODEL"]; !ok && finalScionCfg != nil && finalScionCfg.Model != "" {
 		opts.Env["SCION_MODEL"] = finalScionCfg.Model

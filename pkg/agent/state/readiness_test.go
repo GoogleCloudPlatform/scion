@@ -238,3 +238,49 @@ func TestCheckReadySpec(t *testing.T) {
 		}
 	}
 }
+
+// TestReadySpecEnv_Golden pins the SCION_HARNESS_READY wire format, which a
+// broker and an image of different versions must agree on.
+func TestReadySpecEnv_Golden(t *testing.T) {
+	for spec, want := range map[api.ReadySpec]string{
+		DefaultReadySpec(ReadyStrategyHook):                                 `{"strategy":"hook","settle_ms":1500,"timeout_ms":90000}`,
+		DefaultReadySpec(ReadyStrategyDelay):                                `{"strategy":"delay","settle_ms":8000,"timeout_ms":0}`,
+		{Strategy: ReadyStrategyHook, Settle: 0, Timeout: 10 * time.Minute}: `{"strategy":"hook","settle_ms":0,"timeout_ms":600000}`,
+	} {
+		if got := FormatReadySpecEnv(spec); got != want {
+			t.Errorf("FormatReadySpecEnv(%+v) = %s, want %s", spec, got, want)
+		}
+		got, err := ParseReadySpecEnv(want)
+		if err != nil || got != spec {
+			t.Errorf("ParseReadySpecEnv(%s) = %+v, %v; want %+v", want, got, err, spec)
+		}
+	}
+}
+
+func TestParseReadySpecEnv_Rejects(t *testing.T) {
+	for _, raw := range []string{
+		"",
+		"null",
+		"{}",
+		"[]",
+		`{"Strategy":"hook","Settle":1500000000,"Timeout":90000000000}`,
+		`{"strategy":"hook","settle_ms":1500}`,
+		`{"strategy":"delay","settle_ms":8000,"timeout_ms":30000}`,
+		`{"strategy":"pane","settle_ms":500,"timeout_ms":30000}`,
+		`{"strategy":"delay","settle_ms":-1}`,
+		`{"strategy":"delay","settle_ms":60001}`,
+		`{"strategy":"hook","settle_ms":0,"timeout_ms":9999}`,
+		`{"strategy":"hook","settle_ms":0,"timeout_ms":9223372036854775807}`,
+		`{"strategy":"delay","settle_ms":9223372036854775807}`,
+		`{"strategy":"delay","settle_ms":"8000"}`,
+	} {
+		if spec, err := ParseReadySpecEnv(raw); err == nil {
+			t.Errorf("ParseReadySpecEnv(%s) accepted: %+v", raw, spec)
+		}
+	}
+	// Unknown fields are ignored.
+	got, err := ParseReadySpecEnv(`{"strategy":"delay","settle_ms":3000,"timeout_ms":0,"pane_regex":"x"}`)
+	if err != nil || got != (api.ReadySpec{Strategy: ReadyStrategyDelay, Settle: 3 * time.Second}) {
+		t.Errorf("unknown field: got %+v, %v", got, err)
+	}
+}

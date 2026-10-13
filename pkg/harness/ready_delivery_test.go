@@ -15,6 +15,8 @@
 package harness
 
 import (
+	"context"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -82,3 +84,67 @@ func TestHarnessDeliverySpec_Implementations(t *testing.T) {
 }
 
 func intPtr(n int) *int { return &n }
+
+// TestResolve_ConfigWithoutReadyGetsBundleReady covers harness-configs
+// written before the ready block existed: one for a built-in harness type
+// resolves to that bundle's ready block (hook for claude), one for a harness
+// with no built-in bundle keeps the delay default, and an explicit block
+// always wins.
+func TestResolve_ConfigWithoutReadyGetsBundleReady(t *testing.T) {
+	for _, tc := range []struct {
+		name, config string
+		want         api.ReadySpec
+	}{
+		{"built-in harness, no block", "harness: claude\n",
+			api.ReadySpec{Strategy: "hook", Settle: 1500 * time.Millisecond, Timeout: 90 * time.Second}},
+		{"custom harness, no block", "harness: some-custom\n",
+			api.ReadySpec{Strategy: "delay", Settle: 8 * time.Second}},
+		{"built-in harness, explicit block wins", "harness: claude\nready:\n  strategy: delay\n  settle: 3s\n",
+			api.ReadySpec{Strategy: "delay", Settle: 3 * time.Second}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			hcDir := filepath.Join(home, ".scion", "harness-configs", "hc")
+			writeFile(t, filepath.Join(hcDir, "config.yaml"), tc.config+"image: img:test\ncommand:\n  base: [tool]\n")
+
+			resolved, err := Resolve(context.Background(), ResolveOptions{Name: "hc"})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if resolved.ConfigDir == nil || resolved.ConfigDir.Path != hcDir {
+				t.Fatalf("resolved config dir = %+v, want %s", resolved.ConfigDir, hcDir)
+			}
+			if got := resolved.Harness.ReadySpec(); got != tc.want {
+				t.Errorf("ReadySpec() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEffectiveConfig_ReadyFromBundleMatchesLegacyTable: with no
+// harness-config dir, every built-in harness type gets its bundle's ready
+// block, which reproduces the legacy name-keyed table.
+func TestEffectiveConfig_ReadyFromBundleMatchesLegacyTable(t *testing.T) {
+	legacyHook := map[string]bool{"claude": true, "gemini-cli": true, "copilot": true, "grok-build": true}
+	for _, name := range AllHarnessNames() {
+		entry := EffectiveConfig(name, nil, nil, "")
+		if entry.Ready == nil {
+			t.Errorf("%s: no ready block", name)
+			continue
+		}
+		want := config.DefaultReadySpec(config.ReadyStrategyDelay)
+		if legacyHook[name] {
+			want = config.DefaultReadySpec(config.ReadyStrategyHook)
+		}
+		if got := entry.ResolvedReady(); got != want {
+			t.Errorf("%s: ResolvedReady() = %+v, want %+v", name, got, want)
+		}
+	}
+	// The block is a copy: changing it does not change the bundle's.
+	first := EffectiveConfig("claude", nil, nil, "")
+	first.Ready.Strategy = "delay"
+	if again := EffectiveConfig("claude", nil, nil, ""); again.Ready.Strategy != "hook" {
+		t.Errorf("bundle block mutated through a returned entry: %+v", again.Ready)
+	}
+}

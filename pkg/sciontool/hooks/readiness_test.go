@@ -15,14 +15,11 @@
 package hooks
 
 import (
-	"encoding/json"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
 func TestIsReadinessEvent(t *testing.T) {
@@ -59,7 +56,6 @@ func TestIsReadinessEvent(t *testing.T) {
 // TestClassifySessionStart covers every source in the design's table, plus
 // case and space handling and unknown values.
 func TestClassifySessionStart(t *testing.T) {
-	logToTemp(t)
 	tests := []struct {
 		source string
 		want   SessionStartKind
@@ -86,18 +82,18 @@ func TestClassifySessionStart(t *testing.T) {
 }
 
 func TestLoadReadySpec_MissingEnvDefaultsDelay(t *testing.T) {
-	logToTemp(t)
 	want := api.ReadySpec{Strategy: state.ReadyStrategyDelay, Settle: 8 * time.Second}
 	for name, env := range map[string]map[string]string{
 		"missing":              {},
 		"empty":                {state.HarnessReadyEnv: ""},
 		"not JSON":             {state.HarnessReadyEnv: "strategy=hook"},
 		"JSON null":            {state.HarnessReadyEnv: "null"},
-		"unknown strategy":     {state.HarnessReadyEnv: `{"Strategy":"pane","Settle":500000000,"Timeout":30000000000}`},
-		"hook without timeout": {state.HarnessReadyEnv: `{"Strategy":"hook","Settle":1500000000}`},
-		"delay with timeout":   {state.HarnessReadyEnv: `{"Strategy":"delay","Settle":8000000000,"Timeout":30000000000}`},
-		"settle over max":      {state.HarnessReadyEnv: `{"Strategy":"delay","Settle":61000000000}`},
-		"negative settle":      {state.HarnessReadyEnv: `{"Strategy":"delay","Settle":-1}`},
+		"Go field names":       {state.HarnessReadyEnv: `{"Strategy":"hook","Settle":1500000000,"Timeout":90000000000}`},
+		"unknown strategy":     {state.HarnessReadyEnv: `{"strategy":"pane","settle_ms":500,"timeout_ms":30000}`},
+		"hook without timeout": {state.HarnessReadyEnv: `{"strategy":"hook","settle_ms":1500}`},
+		"delay with timeout":   {state.HarnessReadyEnv: `{"strategy":"delay","settle_ms":8000,"timeout_ms":30000}`},
+		"settle over max":      {state.HarnessReadyEnv: `{"strategy":"delay","settle_ms":61000}`},
+		"negative settle":      {state.HarnessReadyEnv: `{"strategy":"delay","settle_ms":-1}`},
 	} {
 		got := LoadReadySpec(func(k string) string { return env[k] })
 		if got != want {
@@ -107,19 +103,15 @@ func TestLoadReadySpec_MissingEnvDefaultsDelay(t *testing.T) {
 }
 
 func TestLoadReadySpec_ValidEnv(t *testing.T) {
-	logToTemp(t)
 	for _, spec := range []api.ReadySpec{
 		{Strategy: state.ReadyStrategyHook, Settle: 1500 * time.Millisecond, Timeout: 90 * time.Second},
 		{Strategy: state.ReadyStrategyHook, Settle: 0, Timeout: 10 * time.Second},
 		{Strategy: state.ReadyStrategyDelay, Settle: 3 * time.Second},
 	} {
-		raw, err := json.Marshal(spec)
-		if err != nil {
-			t.Fatal(err)
-		}
+		raw := state.FormatReadySpecEnv(spec)
 		got := LoadReadySpec(func(k string) string {
 			if k == state.HarnessReadyEnv {
-				return string(raw)
+				return raw
 			}
 			return ""
 		})
@@ -129,16 +121,9 @@ func TestLoadReadySpec_ValidEnv(t *testing.T) {
 	}
 	// Unknown fields from a newer broker are ignored.
 	got := LoadReadySpec(func(string) string {
-		return `{"Strategy":"hook","Settle":2000000000,"Timeout":30000000000,"PaneRegex":"x"}`
+		return `{"strategy":"hook","settle_ms":2000,"timeout_ms":30000,"pane_regex":"x"}`
 	})
 	if want := (api.ReadySpec{Strategy: "hook", Settle: 2 * time.Second, Timeout: 30 * time.Second}); got != want {
 		t.Errorf("unknown field: got %+v, want %+v", got, want)
 	}
-}
-
-// logToTemp points the sciontool log at a temp file, so tests never append
-// to a real agent log.
-func logToTemp(t *testing.T) {
-	t.Helper()
-	log.SetLogPath(filepath.Join(t.TempDir(), "agent.log"))
 }

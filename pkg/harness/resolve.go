@@ -168,6 +168,15 @@ func EffectiveConfig(name string, hcDir *config.HarnessConfigDir, settings *conf
 	if entry.Harness == "" {
 		entry.Harness = name
 	}
+
+	// A harness-config written before the ready block existed has none.
+	// Take the built-in bundle's block for the same harness, so the config
+	// keeps the readiness it had when readiness was keyed on the harness
+	// name. An explicit block, from the dir or an overlay, always wins; a
+	// harness with no built-in bundle keeps the delay default.
+	if entry.Ready == nil {
+		entry.Ready = embeddedReadyConfig(entry.Harness)
+	}
 	return entry
 }
 
