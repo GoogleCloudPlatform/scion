@@ -12,102 +12,160 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/require"
 )
+
+// seedSystemSettingsHome points HOME at a fresh directory holding a minimal
+// global settings.yaml and returns that file's path.
+func seedSystemSettingsHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	path := filepath.Join(dir, "settings.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("version: \"1\"\n"), 0o644))
+	return path
+}
+
+// doLoopbackSystemRequest sends a request from a loopback address through the
+// full server handler (authentication middleware, route guard, handler).
+// headers carries the credential; none means an unauthenticated request.
+func doLoopbackSystemRequest(srv *Server, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, bytes.NewReader([]byte(body)))
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
 
 // The mutating workstation routes gate on hub.config.update (super-admin
 // bypass preserved) in addition to workstation mode and loopback origin, so a
 // non-admin or non-user loopback caller cannot rebind the hub's identity or
 // rewrite its settings even though it reaches the loopback hub.
 func TestSystemMutatingRoutesRequireHubAdmin(t *testing.T) {
-	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux(),
-		workstation: true, authzService: NewAuthzService(nil, nil)}
-	srv.registerRoutes()
+	srv, s := testWorkstationServer(t)
+	ctx := context.Background()
+	_, _, member, project := setupCredentialTestServerOn(t, srv, s)
+
+	memberToken, _, _, err := srv.userTokenService.GenerateTokenPair(
+		member.ID, member.Email, member.DisplayName, member.Role, ClientTypeWeb)
+	require.NoError(t, err)
+
+	agent := createCredTestAgent(t, s, tid("agent-system-routes"), project.ID, member.ID)
+	agentToken, err := srv.GenerateAgentToken(agent.ID, project.ID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+
+	devBefore, err := s.GetUser(ctx, DevUserID)
+	require.NoError(t, err)
 
 	routes := []struct {
-		method, path string
+		method, path, body string
 	}{
-		{http.MethodPut, "/api/v1/system/identity"},
-		{http.MethodPatch, "/api/v1/system/workstation-settings"},
+		{http.MethodPut, "/api/v1/system/identity", `{"displayName":"Taken Over","email":"attacker@example.com"}`},
+		{http.MethodPatch, "/api/v1/system/workstation-settings", `{"auto_inject_gcloud_adc":true}`},
 	}
-	// A plain member and a non-user identity must both be refused by the guard
-	// before the handler runs. A nil-store authz service grants neither the
-	// permission nor a super-admin bypass.
-	identities := map[string]Identity{
-		"member user": NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "api"),
-		"agent":       newAgentIdentityFromStore(&store.Agent{ID: "agent-1", ProjectID: "project-1"}),
+	refused := []struct {
+		who     string
+		headers map[string]string
+		want    int
+	}{
+		{"member user", map[string]string{"Authorization": "Bearer " + memberToken}, http.StatusForbidden},
+		{"agent", map[string]string{"X-Scion-Agent-Token": agentToken}, http.StatusForbidden},
+		{"unauthenticated", nil, http.StatusUnauthorized},
 	}
 	for _, rt := range routes {
-		for who, id := range identities {
-			t.Run(rt.path+"/"+who, func(t *testing.T) {
-				ctx, cancel := context.WithTimeout(contextWithIdentity(context.Background(), id), time.Second)
-				defer cancel()
-				req := httptest.NewRequest(rt.method, rt.path, nil).WithContext(ctx)
-				req.RemoteAddr = "127.0.0.1:1234"
-				rr := httptest.NewRecorder()
-				srv.mux.ServeHTTP(rr, req)
-				if rr.Code != http.StatusForbidden {
-					t.Fatalf("%s %s as %s = %d, want 403: %s", rt.method, rt.path, who, rr.Code, rr.Body.String())
-				}
+		for _, c := range refused {
+			t.Run(rt.path+"/"+c.who, func(t *testing.T) {
+				settingsPath := seedSystemSettingsHome(t)
+				rec := doLoopbackSystemRequest(srv, rt.method, rt.path, rt.body, c.headers)
+				require.Equal(t, c.want, rec.Code, "%s %s as %s: %s", rt.method, rt.path, c.who, rec.Body.String())
+
+				// The guard refused before the handler ran: neither the
+				// settings file nor the dev user row changed.
+				data, err := os.ReadFile(settingsPath)
+				require.NoError(t, err)
+				require.Equal(t, "version: \"1\"\n", string(data))
+				dev, err := s.GetUser(ctx, DevUserID)
+				require.NoError(t, err)
+				require.Equal(t, devBefore.Email, dev.Email)
+				require.Equal(t, devBefore.DisplayName, dev.DisplayName)
 			})
 		}
-		// No identity at all → 401, never through to the handler.
-		t.Run(rt.path+"/unauthenticated", func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			req := httptest.NewRequest(rt.method, rt.path, nil).WithContext(ctx)
-			req.RemoteAddr = "127.0.0.1:1234"
-			rr := httptest.NewRecorder()
-			srv.mux.ServeHTTP(rr, req)
-			if rr.Code != http.StatusUnauthorized {
-				t.Fatalf("%s %s unauthenticated = %d, want 401: %s", rt.method, rt.path, rr.Code, rr.Body.String())
-			}
-		})
 	}
+
+	// The dev user is the workstation's super-admin and passes both routes.
+	dev := map[string]string{"Authorization": "Bearer " + testDevToken}
+	t.Run("/api/v1/system/identity/dev super-admin", func(t *testing.T) {
+		settingsPath := seedSystemSettingsHome(t)
+		rec := doLoopbackSystemRequest(srv, http.MethodPut, "/api/v1/system/identity",
+			`{"displayName":"Desk Owner","email":"owner@example.com"}`, dev)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		data, err := os.ReadFile(settingsPath)
+		require.NoError(t, err)
+		require.Contains(t, string(data), "owner@example.com")
+	})
+	t.Run("/api/v1/system/workstation-settings/dev super-admin", func(t *testing.T) {
+		settingsPath := seedSystemSettingsHome(t)
+		rec := doLoopbackSystemRequest(srv, http.MethodPatch, "/api/v1/system/workstation-settings",
+			`{"auto_inject_gcloud_adc":true}`, dev)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		data, err := os.ReadFile(settingsPath)
+		require.NoError(t, err)
+		require.Contains(t, string(data), "auto_inject_gcloud_adc: true")
+	})
 }
 
 // The read-only workstation routes keep workstation-only access: no admin
 // permission is required, so a non-admin loopback caller still reads status.
 func TestSystemReadRoutesStayWorkstationOnly(t *testing.T) {
-	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux(),
-		workstation: true, authzService: NewAuthzService(nil, nil)}
-	srv.registerRoutes()
+	srv, s := testWorkstationServer(t)
+	_, _, member, _ := setupCredentialTestServerOn(t, srv, s)
+	memberToken, _, _, err := srv.userTokenService.GenerateTokenPair(
+		member.ID, member.Email, member.DisplayName, member.Role, ClientTypeWeb)
+	require.NoError(t, err)
 
-	id := NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "api")
-	ctx, cancel := context.WithTimeout(contextWithIdentity(context.Background(), id), time.Second)
-	defer cancel()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/system/status", nil).WithContext(ctx)
-	req.RemoteAddr = "127.0.0.1:1234"
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-	if rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized {
-		t.Fatalf("GET /api/v1/system/status as a member = %d, want it not gated on admin", rr.Code)
-	}
+	rec := doLoopbackSystemRequest(srv, http.MethodGet, "/api/v1/system/status", "",
+		map[string]string{"Authorization": "Bearer " + memberToken})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// With workstation mode off the routes 404 as before, whatever the caller.
+// With workstation mode off the routes 404 as before, even for the
+// super-admin.
 func TestSystemIdentityIs404OutsideWorkstation(t *testing.T) {
-	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux(),
-		workstation: false, authzService: NewAuthzService(nil, nil)}
-	srv.registerRoutes()
+	srv, _ := testServer(t)
+	require.False(t, srv.workstation)
+	settingsPath := seedSystemSettingsHome(t)
 
-	id := NewAuthenticatedUser("admin-1", "admin@example.com", "Admin", "admin", "api")
-	ctx, cancel := context.WithTimeout(contextWithIdentity(context.Background(), id), time.Second)
-	defer cancel()
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/system/identity", nil).WithContext(ctx)
-	req.RemoteAddr = "127.0.0.1:1234"
-	rr := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("PUT /api/v1/system/identity outside workstation = %d, want 404", rr.Code)
+	dev := map[string]string{"Authorization": "Bearer " + testDevToken}
+	for _, rt := range []struct{ method, path, body string }{
+		{http.MethodPut, "/api/v1/system/identity", `{"displayName":"Desk Owner","email":"owner@example.com"}`},
+		{http.MethodPatch, "/api/v1/system/workstation-settings", `{"auto_inject_gcloud_adc":true}`},
+		{http.MethodGet, "/api/v1/system/status", ""},
+	} {
+		rec := doLoopbackSystemRequest(srv, rt.method, rt.path, rt.body, dev)
+		require.Equal(t, http.StatusNotFound, rec.Code, "%s %s: %s", rt.method, rt.path, rec.Body.String())
 	}
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	require.Equal(t, "version: \"1\"\n", string(data))
 }
