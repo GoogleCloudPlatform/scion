@@ -49,7 +49,9 @@ type keepCredentialOnUnknownKey struct{}
 // the dispatcher then keeps the credential it minted on such an outcome,
 // since the broker may be starting the agent with it. Every other caller
 // keeps the dispatcher's contract of revoking on any error return, so a
-// caller that rolls the create back never leaves a live credential.
+// caller that rolls the create back never leaves a live credential. The
+// node owning the broker connection marks a cross-node create or finalize
+// too, since the requesting node keeps the agent when its wait expires.
 func withKeepCredentialOnUnknownOutcome(ctx context.Context) context.Context {
 	return context.WithValue(ctx, keepCredentialOnUnknownKey{}, true)
 }
@@ -81,7 +83,11 @@ func keepCredentialOnDispatchError(ctx context.Context, err error) bool {
 //     connection closing after the request was sent
 //     (errBrokerResponseTimeout, errBrokerConnectionLost);
 //   - the cross-node wait expiring (ErrDispatchFailed): the intent is still
-//     open, and the node holding the broker connection may still send it;
+//     open, and the node holding the broker connection may still send it.
+//     That node runs the dispatch with the keep flag too
+//     (execDispatchCreate, execDispatchFinalizeEnv), so it keeps the
+//     credential on its own unknown outcome; on a definite failure it
+//     revokes, and so does this node's dispatch (revoke by agent);
 //   - a network timeout from the direct HTTP transport (net.Error with
 //     Timeout), other than a dial failure.
 //

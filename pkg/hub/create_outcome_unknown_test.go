@@ -105,11 +105,37 @@ func TestKeepCredentialOnDispatchError(t *testing.T) {
 	assert.False(t, keepCredentialOnDispatchError(withKeepCredentialOnUnknownOutcome(context.Background()), errors.New("refused")), "a definite failure revokes")
 }
 
+// keepRecordingCreateDispatcher is failingCreateDispatcher that records
+// whether the create's dispatch ctx keeps the credential on its error
+// (keepCredentialOnDispatchError): the handler's keep-flag wiring, through
+// the start claim's run ctx and syncDispatch.
+type keepRecordingCreateDispatcher struct {
+	failingCreateDispatcher
+	keepsCredential bool
+}
+
+func (d *keepRecordingCreateDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	d.keepsCredential = keepCredentialOnDispatchError(ctx, d.createErr)
+	return d.failingCreateDispatcher.DispatchAgentCreateWithGather(ctx, agent)
+}
+
+// keepRecordingFinalizeDispatcher is finalizeEnvErrDispatcher that records
+// the same for the env finalize.
+type keepRecordingFinalizeDispatcher struct {
+	finalizeEnvErrDispatcher
+	keepsCredential bool
+}
+
+func (d *keepRecordingFinalizeDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	d.keepsCredential = keepCredentialOnDispatchError(ctx, d.err)
+	return d.finalizeEnvErrDispatcher.DispatchFinalizeEnv(ctx, agent, env)
+}
+
 // createUnknownOutcome runs a create whose dispatch fails with err and
 // returns the response, the store and the dispatcher.
-func createUnknownOutcome(t *testing.T, err error, gather bool) (*Server, store.Store, *failingCreateDispatcher, *httptest.ResponseRecorder) {
+func createUnknownOutcome(t *testing.T, err error, gather bool) (*Server, store.Store, *keepRecordingCreateDispatcher, *httptest.ResponseRecorder) {
 	t.Helper()
-	disp := &failingCreateDispatcher{createErr: err}
+	disp := &keepRecordingCreateDispatcher{failingCreateDispatcher: failingCreateDispatcher{createErr: err}}
 	srv, s, project := setupCreateAgentServer(t, disp)
 	srv.startClaimsOn = true
 	srv.events = &createdCountingPublisher{EventPublisher: srv.events}
@@ -123,9 +149,10 @@ func createUnknownOutcome(t *testing.T, err error, gather bool) (*Server, store.
 	return srv, s, disp, rec
 }
 
-func assertKeptUnknownOutcome(t *testing.T, s store.Store, disp *failingCreateDispatcher, rec *httptest.ResponseRecorder) {
+func assertKeptUnknownOutcome(t *testing.T, s store.Store, disp *keepRecordingCreateDispatcher, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	ctx := context.Background()
+	assert.True(t, disp.keepsCredential, "the create's dispatch keeps the credential it mints on an unknown outcome")
 	require.Equal(t, http.StatusGatewayTimeout, rec.Code, rec.Body.String())
 	var errResp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
@@ -242,6 +269,7 @@ func seedLiveCredential(t *testing.T, s store.Store, a *store.Agent, jti string)
 func TestCreateAgent_DefiniteDispatchFailure_StillRollsBack(t *testing.T) {
 	_, s, disp, rec := createUnknownOutcome(t, errors.New("auth resolution failed"), true)
 	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	assert.False(t, disp.keepsCredential, "a definite failure revokes")
 	assert.True(t, disp.deleteCalled)
 	_, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
@@ -378,6 +406,14 @@ func TestRevokeUnconfirmedCreateCredential_StaleClaim(t *testing.T) {
 
 	f.srv.revokeUnconfirmedCreateCredential(ctx, getAgent(t, f.s, a.ID))
 	assert.NotNil(t, getTestAgentCredential(t, f.s, "stale-claim-jti").RevokedAt, "the held claim revokes")
+
+	// A live (not unconfirmed) claim with the listed ID does not revoke.
+	live := f.addAgent("live-claim", "created", "")
+	seedLiveCredential(t, f.s, live, "live-claim-jti")
+	_, err := f.s.ClaimAgentStart(ctx, live.ID, "hub-x", store.StartClaimCreate, "", time.Minute)
+	require.NoError(t, err)
+	f.srv.revokeUnconfirmedCreateCredential(ctx, getAgent(t, f.s, live.ID))
+	assert.Nil(t, getTestAgentCredential(t, f.s, "live-claim-jti").RevokedAt, "a live claim (the start is still running) does not revoke")
 }
 
 // A kept create whose start is still in flight is not stopped within the
@@ -403,6 +439,7 @@ func TestStartClaimReaper_UnknownCreateInFlightStoppedOnlyPastHold(t *testing.T)
 	f.srv.reapStartClaims(ctx)
 	require.Eventually(t, func() bool { return d.stops.Load() == 1 }, 5*time.Second, 10*time.Millisecond,
 		"the create past its hold is stopped")
+	f.srv.reapStartClaims(ctx)
 	time.Sleep(100 * time.Millisecond)
 	assert.Equal(t, int32(1), d.stops.Load(), "the create within its hold is not stopped")
 	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, slow.ID).StartClaimState)
@@ -427,7 +464,8 @@ func TestTunnelRequest_TimeoutIsUnknownOutcome(t *testing.T) {
 // start_outcome_unknown and keeps the agent (the finalize never deletes)
 // under an unconfirmed create claim, with the unknown outcome recorded.
 func TestSubmitAgentEnv_DispatchDeadline_StartOutcomeUnknown(t *testing.T) {
-	srv, s, project := setupCreateAgentServer(t, &finalizeEnvErrDispatcher{err: fmt.Errorf("finalize: %w", context.DeadlineExceeded)})
+	disp := &keepRecordingFinalizeDispatcher{finalizeEnvErrDispatcher: finalizeEnvErrDispatcher{err: fmt.Errorf("finalize: %w", context.DeadlineExceeded)}}
+	srv, s, project := setupCreateAgentServer(t, disp)
 	srv.startClaimsOn = true
 	ctx := context.Background()
 	agent := &store.Agent{
@@ -445,6 +483,7 @@ func TestSubmitAgentEnv_DispatchDeadline_StartOutcomeUnknown(t *testing.T) {
 	assert.Contains(t, got.Message, "start outcome unknown")
 	assert.Equal(t, store.StartClaimUnconfirmed, got.StartClaimState, "the start-claim reaper settles it")
 	assert.Equal(t, store.StartClaimCreate, got.StartClaimKind)
+	assert.True(t, disp.keepsCredential, "the finalize's dispatch keeps the credential it mints on an unknown outcome")
 }
 
 // The control channel's connection closing while a request waits is an
@@ -471,4 +510,77 @@ func TestTunnelRequest_ConnectionLostIsUnknownOutcome(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("TunnelRequest did not return after the connection closed")
 	}
+}
+
+// crossNodeFixture is a server whose HTTP dispatcher reaches a broker
+// through mockClient, recording the credentials it mints, with an agent to
+// dispatch, as the node owning the broker connection runs a cross-node
+// dispatch (execDispatchCreate, execDispatchFinalizeEnv).
+func crossNodeFixture(t *testing.T, name string, client *mockRuntimeBrokerClient) (*Server, store.Store, *fakeMintingTokenGenerator, *store.Agent) {
+	t.Helper()
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project := &store.Project{ID: tid(name + "-project"), Name: name, Slug: name}
+	require.NoError(t, s.CreateProject(ctx, project))
+	broker := newTestBrokerForRevoke(t, s, name+"-host")
+	agent := &store.Agent{ID: tid(name + "-agent"), Name: name, Slug: name, ProjectID: project.ID, RuntimeBrokerID: broker.ID, Phase: string(state.PhaseProvisioning)}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	dispatcher := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
+	gen := &fakeMintingTokenGenerator{store: s}
+	dispatcher.SetTokenGenerator(gen)
+	srv.SetDispatcher(dispatcher)
+	return srv, s, gen, agent
+}
+
+// The owning node keeps the credential on an unknown outcome, as the
+// requesting node keeps the agent when its wait expires (ErrDispatchFailed),
+// and revokes it on a definite failure.
+func TestExecDispatchCreate_UnknownOutcomeKeepsCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		revoke bool
+	}{
+		{"unknown outcome keeps", &brokerTransportError{msg: "request timeout after 2m0s", sentinel: errBrokerResponseTimeout}, false},
+		{"definite failure revokes", errors.New("broker unavailable"), true},
+	} {
+		for _, op := range []string{"create", "finalize_env"} {
+			t.Run(op+"/"+tc.name, func(t *testing.T) {
+				failErr := tc.err
+				client := &mockRuntimeBrokerClient{createWithGatherFunc: func(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+					return nil, nil, failErr
+				}}
+				srv, s, gen, agent := crossNodeFixture(t, "owner-"+op, client)
+				d := store.BrokerDispatch{AgentID: agent.ID, Op: op}
+				var err error
+				if op == "create" {
+					_, err = srv.execDispatchCreate(context.Background(), d)
+				} else {
+					_, err = srv.execDispatchFinalizeEnv(context.Background(), d)
+				}
+				require.Error(t, err)
+				require.Len(t, gen.jtis, 1)
+				assert.Equal(t, tc.revoke, getTestAgentCredential(t, s, gen.lastJTI()).RevokedAt != nil)
+			})
+		}
+	}
+}
+
+// The requesting node revokes every credential of the agent, including one
+// the owning node kept, when the cross-node create ends with a definite
+// failure: its dispatch's own revoke covers the agent, before the create
+// handler rolls the agent back.
+func TestHTTPAgentDispatcher_DeferredDefiniteFailureRevokesAll(t *testing.T) {
+	client := &mockRuntimeBrokerClient{createWithGatherFunc: func(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		return nil, nil, ErrLifecycleDeferred
+	}}
+	memStore, dispatcher, gen, agent := newCredentialDispatcher(t, "deferred-definite", client)
+	seedLiveCredential(t, memStore, agent, "owner-kept-jti")
+
+	_, err := dispatcher.DispatchAgentCreateWithGather(withKeepCredentialOnUnknownOutcome(context.Background()), agent)
+	require.Error(t, err)
+	require.False(t, isUnknownDispatchOutcome(err), "the deferred failure is definite: %v", err)
+	require.Len(t, gen.jtis, 1)
+	assert.NotNil(t, getTestAgentCredential(t, memStore, gen.lastJTI()).RevokedAt, "the requester's own credential is revoked")
+	assert.NotNil(t, getTestAgentCredential(t, memStore, "owner-kept-jti").RevokedAt, "the credential the owning node kept is revoked too")
 }
