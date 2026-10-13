@@ -41,6 +41,17 @@ const (
 // wraps ErrInvalidInput.
 var ErrFederatedAccountRefused = fmt.Errorf("%w: federated accounts are managed only by the federated account path", ErrInvalidInput)
 
+// ErrNonMembershipRoleRefused is returned when the general role binding
+// path is asked to bind a role that does not confer membership (the
+// project-visitor role). Such a role is bound only by
+// CreateVisitorRoleBinding. It wraps ErrInvalidInput.
+var ErrNonMembershipRoleRefused = fmt.Errorf("%w: this role is bound only through the visitor grant path", ErrInvalidInput)
+
+// ErrVisitorBindingRefused is returned by CreateVisitorRoleBinding when the
+// binding is not the project-visitor role, at project scope, on a
+// federated account. It wraps ErrInvalidInput.
+var ErrVisitorBindingRefused = fmt.Errorf("%w: a visitor grant binds only the project-visitor role, at project scope, to a federated account", ErrInvalidInput)
+
 // NormalizeFederatedIssuer returns issuer with surrounding white space and
 // trailing slashes removed, the form federated accounts and their identity
 // bindings store (it matches the federation authenticator's normalization).

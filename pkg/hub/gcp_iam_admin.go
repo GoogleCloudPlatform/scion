@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -173,11 +174,18 @@ func isEventualConsistencyError(err error) bool {
 		strings.Contains(errStr, "400")
 }
 
-// ResolveGCPProjectID returns the project ID from config or auto-detects it
-// from the GCE metadata server.
+// onGCE is metadata.OnGCE; a variable so tests can replace it.
+var onGCE = metadata.OnGCE
+
+// ResolveGCPProjectID returns the project ID from config or, on GCP, auto-detects
+// it from the metadata server. Off GCP the lookup would retry dial timeouts for
+// about 13s, so it is skipped.
 func ResolveGCPProjectID(configured string) (string, error) {
 	if configured != "" {
 		return configured, nil
+	}
+	if !onGCE() {
+		return "", errors.New("not running on GCP; set server.hub.gcp_project_id to use a GCP project")
 	}
 	projectID, err := metadata.ProjectIDWithContext(context.Background())
 	if err != nil {
