@@ -32,10 +32,6 @@ import (
 // and fixed message, keyed on the broker's status and code rather than on
 // Docker's wording, which the broker never sends (ptone/scion#3501).
 
-// The broker answers create, start and restart for an agent name still held
-// by a stopped container with 409 conflict and the fixed text of
-// agent.ErrContainerNameInUse.
-
 // nameInUseMessage is the broker's fixed text for the conflict.
 var nameInUseMessage = agent.ErrContainerNameInUse.Error()
 
