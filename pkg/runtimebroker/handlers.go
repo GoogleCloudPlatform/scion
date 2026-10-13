@@ -2397,6 +2397,21 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	if localOnly {
 		removeBranch = false
 	}
+	// purgeRetained removes the retained files of a soft-deleted agent once
+	// the soft-delete retention window has passed (ptone/scion#4744). It is
+	// a files delete, never a soft one, and it removes nothing unless the
+	// files are still those of a soft-deleted agent (see
+	// retainedPurgeRefusal below).
+	purgeRetained := query.Get(api.PurgeRetainedQueryParam) == "true"
+	if purgeRetained {
+		if localOnly {
+			span.SetStatus(codes.Error, "purgeRetained with localOnly")
+			ValidationError(w, "purgeRetained cannot be combined with localOnly", nil)
+			return
+		}
+		deleteFiles = true
+		softDelete = false
+	}
 
 	// Resolve the exact entry to delete, scoped to the requested project,
 	// across the default and every auxiliary runtime (ptone/scion#1819).
@@ -2647,6 +2662,22 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		}
 	}
 
+	// A purge of retained files removes them only while they are still the
+	// retained files of a soft-deleted agent: no runtime entry holds the
+	// agent, its agent-info.json carries the soft-delete mark and none of
+	// its directories is a symlink. The agent-files lock is held, so the
+	// check stays true until the removal below.
+	if purgeRetained {
+		if reason := retainedPurgeRefusal(target, projectPath); reason != "" {
+			span.SetStatus(codes.Error, "retained files refused")
+			s.agentLifecycleLog.Info("Agent retained files purge refused; nothing removed",
+				"agent_id", id, "project_id", agentProjectID, "run_id", runID,
+				"container_id", target.containerID, "reason", reason)
+			RetainedFilesRefused(w, "Retained files not removed: "+reason)
+			return
+		}
+	}
+
 	// Move what this delete acts on to deleting before anything is removed:
 	// a delete fenced to a run never transitions the record, another run,
 	// or the slug while another run is live, nor when the files are another
@@ -2776,11 +2807,16 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	}
 	s.finishOwnedDelete(ctx, target.mgr, ownedDel)
 
-	if softDelete {
+	switch {
+	case purgeRetained:
+		s.agentLifecycleLog.Info("Agent retained files removed after the soft-delete retention window",
+			"agent_id", id, "project_id", agentProjectID, "run_id", runID,
+			"remove_branch", removeBranch)
+	case softDelete:
 		s.agentLifecycleLog.Info("Agent soft-deleted",
 			"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 			"delete_files", deleteFiles, "remove_branch", removeBranch)
-	} else {
+	default:
 		s.agentLifecycleLog.Info("Agent deleted",
 			"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 			"delete_files", deleteFiles, "remove_branch", removeBranch)
@@ -7210,6 +7246,37 @@ func otherRunContainerID(cands []agentCandidate, runID string) string {
 // variable so tests can observe the write. Tests that
 // replace it must not call t.Parallel, since every Server shares it.
 var markAgentSoftDeleted = agent.MarkAgentSoftDeleted
+
+// checkRetainedAgentFiles checks that an agent's files are still the
+// retained files of a soft-deleted agent; a variable so tests can count the
+// calls.
+var checkRetainedAgentFiles = agent.CheckRetainedAgentFiles
+
+// retainedPurgeRefusal returns why a purge of retained files must remove
+// nothing for target (ptone/scion#4744), or "" when the files may be
+// removed: a runtime entry still holds the agent (a live agent, or one this
+// broker cannot tell is gone), the agent's project directory is unknown, or
+// checkRetainedAgentFiles refuses the files (no soft-delete mark, or a
+// symlinked agent directory). The reasons name no host path.
+func retainedPurgeRefusal(target *deleteTarget, projectPath string) string {
+	switch {
+	case target.containerID != "":
+		return "a runtime entry still holds the agent"
+	case projectPath == "":
+		return "the agent's project directory could not be resolved"
+	}
+	err := checkRetainedAgentFiles(target.name, projectPath)
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, agent.ErrRetainedFilesSymlink):
+		return "an agent directory is a symlink"
+	case errors.Is(err, agent.ErrRetainedFilesNotMarked):
+		return "the agent's files carry no soft-delete mark"
+	default:
+		return "the agent's files could not be checked"
+	}
+}
 
 // deleteRunRef is the RunRef a resolved delete passes to the runtime: the
 // entry's own run label, or, for a legacy entry with no run label, the run
