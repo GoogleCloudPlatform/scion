@@ -255,7 +255,7 @@ func TestEnvGatherCleanupGuard(t *testing.T) {
 
 	c2 := newEnvGatherCleanup(del)
 	assert.True(t, c2.cleanupIfUnsubmitted())
-	assert.False(t, c2.markSubmitted(), "no submit once the delete began")
+	require.False(t, c2.markSubmitted(), "no submit once the delete began")
 	assert.False(t, c2.cleanupAfterFailure(errors.New("local failure")), "a second delete must not run")
 	assert.Equal(t, int32(1), deletes.Load())
 
