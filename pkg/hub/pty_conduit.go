@@ -476,13 +476,14 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		}
 		u.st = st
 		u.sessionID = res.Record.SessionID
+		target := conduitTargetOf(res, st)
 		u.untrack = u.s.trackConduitUserStream(&conduitUserStream{
 			Kind:      grant.StreamKindPTY,
 			Identity:  u.identity,
 			AgentID:   u.agent.ID,
 			ProjectID: u.agent.ProjectID,
-			SessionID: res.Record.SessionID,
-			StreamID:  st.ID(),
+			SessionID: target.SessionID,
+			StreamID:  target.StreamID,
 			Close:     u.closeWithCode,
 		})
 		return nil

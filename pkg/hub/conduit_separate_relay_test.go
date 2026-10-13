@@ -1,0 +1,215 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relayrole/relayserver"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+)
+
+// conduitAlwaysOn is a relay's hub.conduit reader that reads on.
+type conduitAlwaysOn struct{}
+
+func (conduitAlwaysOn) ConduitEnabled(context.Context) (bool, error) { return true, nil }
+
+// separateRelayWorld is two hubs in external relay mode over one store and
+// one conduit registry, and a separate relay process (relayserver)
+// admitting through hub A. The launched agent's sciontool dials the relay
+// directly: that direct dial is test-only (how agents are pointed at a
+// relay is outside this test).
+type separateRelayWorld struct {
+	*conduitProxyFixture // hub A, the launched agent and its app
+	hubB                 *Server
+	publicB              *httptest.Server
+	userTokenB           string
+	relay                *relayserver.Server
+	release              chan struct{} // feeds the app's event stream
+}
+
+func freeLocalAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	return addr
+}
+
+func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
+	t.Helper()
+	cf := newConduitFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w := &separateRelayWorld{release: make(chan struct{})}
+
+	// The app inside the agent: /events holds an event stream open until
+	// the test feeds it; everything else answers hello.
+	events := sseApp(w.release, 0, 1)
+	app := newProxyApp(t, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/events" {
+			events.ServeHTTP(rw, r)
+			return
+		}
+		_, _ = io.WriteString(rw, "hello "+r.URL.Path)
+	}))
+	launched := &store.Agent{
+		ID: tid("relay-launched"), Slug: "relay-launched", Name: "Launched",
+		ProjectID: cf.agent.ProjectID, OwnerID: cf.agent.OwnerID, Ancestry: cf.agent.Ancestry,
+		RuntimeBrokerID: "broker-1", Phase: string(state.PhaseCreated),
+	}
+	require.NoError(t, cf.store.CreateAgent(ctx, launched))
+	_, err := cf.store.SetAgentRunID(ctx, launched.ID, uuid.NewString(), nil)
+	require.NoError(t, err)
+	require.NoError(t, cf.store.UpdateAgentExposedPorts(ctx, launched.ID, []store.ExposedPort{{Port: app.port, Host: conduitProxyHost, Mode: "rw"}}))
+	launched, err = cf.store.GetAgent(ctx, launched.ID)
+	require.NoError(t, err)
+
+	// Hub B shares the store, the grant key ring and the session secret.
+	w.hubB, err = newTestHubServer(t, testServerConfig(), cf.store)
+	require.NoError(t, err)
+	w.hubB.SetHubID("test-hub-id")
+	setConduitExperiment(t, w.hubB, true)
+	keys := &memoryConduitGrantKeyStore{}
+	cf.srv.conduitGrants = newConduitGrantKeys(keys, cf.clock.Now)
+	w.hubB.conduitGrants = newConduitGrantKeys(keys, cf.clock.Now)
+
+	regStore := entadapter.NewConduitRegistryStore(enttest.NewClient(t))
+	for id, srv := range map[string]*Server{"hub-a": cf.srv, "hub-b": w.hubB} {
+		srv.config.SharedSigningSecret = testRelaySessionSecret
+		require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{
+			InstanceID: id, PeerAuth: externalRelayAuth(t, id), Store: regStore,
+			Registry: registry.New(regStore, registry.Config{}), Clock: clock.NewFake(time.Now()),
+		}))
+	}
+	internalA := httptest.NewServer(cf.srv.ConduitInternalHandler())
+	t.Cleanup(internalA.Close)
+
+	addr := freeLocalAddr(t)
+	w.relay, err = relayserver.Start(ctx, relayserver.Config{
+		InstanceID: "relay-0", PublicURL: "http://" + addr, HubInternalURL: internalA.URL,
+		PublicListen: addr, InternalListen: "127.0.0.1:0",
+		PeerAuth: externalRelayAuth(t, "relay-0"), Registry: regStore, Experiment: conduitAlwaysOn{},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer scancel()
+		_ = w.relay.Shutdown(sctx, true, time.Second)
+	})
+
+	w.conduitProxyFixture = &conduitProxyFixture{
+		relayFixture: &relayFixture{conduitFixture: cf, regStore: regStore, launched: launched},
+		app:          app,
+		base:         "http://" + addr,
+	}
+	w.startAgent(t)
+
+	w.publicB = httptest.NewServer(w.hubB.Handler())
+	t.Cleanup(w.publicB.Close)
+	w.userTokenB, _, _, err = w.hubB.userTokenService.GenerateTokenPair(
+		launched.OwnerID, "owner@conduit.test", "Owner", store.UserRoleMember, ClientTypeWeb)
+	require.NoError(t, err)
+	return w
+}
+
+// getB sends a request through hub B's port proxy route.
+func (w *separateRelayWorld) getB(t *testing.T, path string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet,
+		w.publicB.URL+"/api/v1/agents/"+w.launched.ID+"/ports/"+strconv.Itoa(w.app.port)+"/proxy"+path, nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+w.userTokenB)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp
+}
+
+// trackedOnB returns the user streams hub B re-checks.
+func (w *separateRelayWorld) trackedOnB(t *testing.T) []conduitUserStream {
+	t.Helper()
+	a := w.hubB.conduitAuthz.Load()
+	require.NotNil(t, a, "hub B runs no stream re-check")
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]conduitUserStream, 0, len(a.streams))
+	for st := range a.streams {
+		out = append(out, conduitUserStream{AgentID: st.AgentID, SessionID: st.SessionID, StreamID: st.StreamID})
+	}
+	return out
+}
+
+// TestSeparateRelay_AgentReachedThroughAnotherHub (design §3.9): an agent
+// whose session a separate relay holds is reached through hub B, which
+// neither admitted it nor shares a process with the relay. Hub B records
+// the stream's ids on the agent's own session (from the hop's accept, not
+// the hop's own stream id) and closes its leaf when the agent is deleted.
+func TestSeparateRelay_AgentReachedThroughAnotherHub(t *testing.T) {
+	w := newSeparateRelayWorld(t)
+	sessions := w.agentSessions(t)
+	require.Len(t, sessions, 1)
+	require.Equal(t, "relay-0", sessions[0].RelayInstanceID, "the agent's session is on the separate relay")
+
+	resp := w.getB(t, "/hello")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+	assert.Equal(t, "hello /hello", string(body))
+
+	// An open stream: hub B tracks its leaf with the target-side ids.
+	events := w.getB(t, "/events")
+	require.Equal(t, http.StatusOK, events.StatusCode)
+	tracked := w.trackedOnB(t)
+	require.Len(t, tracked, 1)
+	assert.Equal(t, w.launched.ID, tracked[0].AgentID)
+	assert.Equal(t, sessions[0].SessionID, tracked[0].SessionID, "the agent's own session id")
+	assert.NotZero(t, tracked[0].StreamID)
+	assert.NotEqual(t, uint32(1), tracked[0].StreamID, "the agent-side stream id, not the hop's")
+
+	// The agent is deleted: hub B's re-check closes the leaf it holds.
+	ended := make(chan error, 1)
+	go func() {
+		_, err := io.ReadAll(events.Body)
+		ended <- err
+	}()
+	require.NoError(t, w.store.DeleteAgent(context.Background(), w.launched.ID))
+	w.hubB.conduitAuthz.Load().Recheck(context.Background(), "notify", conduitAuthzMatch{})
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("hub B's leaf stayed open after the agent was deleted")
+	}
+	assert.Empty(t, w.trackedOnB(t))
+}
