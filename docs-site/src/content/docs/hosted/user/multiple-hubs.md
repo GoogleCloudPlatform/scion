@@ -112,6 +112,8 @@ project 'web' exists on several hubs; choose one with --hub:
   scion use web --hub staging   (https://staging.example.com, id 77ab0c3e-5d2a-4a8e-9b61-0c1f2e3d4a5b)
 ```
 
+When the matches are several projects on one hub, the error asks you to choose by slug instead: `project '<ref>' matches several projects on the hub at <url>; choose one by slug:`, followed by one `scion use <slug>   (id <id>)` line per project.
+
 `--yes` does not pick a candidate for you. With `--format json` the error is `{"error": "ambiguous", "candidates": [{"hub", "endpoint", "id", "slug"}, ...]}`.
 
 **When no hub has the project**, the error names the hubs that were searched:
@@ -128,7 +130,9 @@ project 'foo' not found on the hubs searched (local, prod); it may be on the hub
 Log in with: scion hub auth login --hub staging
 ```
 
-When the only hub that could not be searched is one you are not logged in to, an interactive run offers to log you in (`Log in to staging now?`) and then searches that hub again. `--yes` does not start a login.
+If no hub could be searched at all, the error is `project '<ref>' could not be looked up (<hub>: <reason>; ...)`, followed by the same login lines.
+
+When no hub has the project and exactly one hub was skipped because you are not logged in to it, an interactive run offers to log you in (`Log in to staging now?`) and then searches that hub again. `--yes` does not start a login.
 
 When the project is found but some hubs were skipped, the selection still succeeds and a `Warning: skipped hubs: ...` line names them.
 
@@ -182,7 +186,7 @@ CURRENT  HUB      PROJECT  NAME          LOCAL PATH  LAST USED
 `scion project list` (or `scion projects list`) shows one row per project: the projects known on your hubs, merged with the project directories on this machine. A directory linked to a hub project shows its local path in that project's row. A directory that is not linked to a hub shows hub `-`. `CURRENT` marks the saved current project. Without `--refresh`, the command makes no network calls.
 
 - `--refresh` first fetches the project list of each hub you are logged in to (or only the `--hub` hub). A hub that is not logged in or does not answer keeps its cached rows, and one `Warning: not refreshed: ...` line names it.
-- `--hub <hub>` shows only the projects on that hub (a nickname or a URL).
+- `--hub <hub>` shows only the projects on that hub (a nickname or a URL). With `--refresh`, the hub must be in the hub list; otherwise the command fails and tells you to add it with `scion hub add`.
 - `--local` lists the project directories on this machine instead, with their type, agent count, status and workspace. It cannot be combined with `--hub` or `--refresh`.
 
 Scripts that parse `scion project list` should use `scion project list --local`, which keeps the output format, JSON included, that the command had before it listed projects across hubs.
@@ -229,7 +233,7 @@ Warning: this directory is linked to hub 'local' (http://127.0.0.1:8080), but --
 The warning applies to project commands only. Commands that need no project, such as `scion hub status`, and commands given `--project` or `--global` do not print it.
 :::
 
-**Environment variables.** `SCION_HUB_ENDPOINT` and `SCION_HUB_URL` override the current hub in that shell and are never saved. Bare `scion use` and `scion use --hub` print `Note: SCION_HUB_ENDPOINT is set and overrides the current hub in this shell.` when the variable names another hub. `SCION_HUB_TOKEN` is not tied to a hub. When it is set and the hub came from the current context, `scion use` warns: `Warning: SCION_HUB_TOKEN is set and will be sent to hub '<name>'`.
+**Environment variables.** `SCION_HUB_ENDPOINT` and `SCION_HUB_URL` override the current hub in that shell and are never saved. Bare `scion use` and `scion use --hub` print `Note: SCION_HUB_ENDPOINT is set and overrides the current hub in this shell.` (or `SCION_HUB_URL`, whichever is set) when the variable names another hub. `SCION_HUB_TOKEN` is not tied to a hub. When it is set and the hub came from the current context, `scion use` warns: `Warning: SCION_HUB_TOKEN is set and will be sent to hub '<name>'`.
 
 **`scion server` and `scion runtime-broker`** do not use the current context at all; see [The server's own hub endpoint](#the-servers-own-hub-endpoint).
 
@@ -258,7 +262,7 @@ Agents never use the hub list or the current context. The CLI ignores `~/.scion/
 'scion hub shadow' was removed; run 'scion use <project>' to work with a hub project from any directory
 ```
 
-Directories created by `scion hub shadow` still work: commands run in them still target their hub project. Each command run in such a directory prints a notice on stderr, for example:
+Directories created by `scion hub shadow` still work: commands run in them still target their hub project. Commands run in such a directory without `--project` print a notice on stderr (`help` and shell completion do not), for example:
 
 ```text
 This directory is a shadow of hub project 'Web frontend'; 'scion hub shadow' was removed. Delete ./.scion and run 'scion use web' (works from any directory). 'scion project prune' then cleans up its settings.

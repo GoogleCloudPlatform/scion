@@ -12,12 +12,12 @@ description: Connecting your CLI to a Scion Hub to dispatch agents, share projec
 Add the Hub to your hub list under a short nickname, log in, and make it your current Hub:
 
 ```bash
-scion hub add team https://scion.yourcompany.com
+scion hub add team https://hub.example.com
 scion hub auth login --hub team
 scion use --hub team
 ```
 
-`scion hub auth login --hub-url https://scion.yourcompany.com` also adds a Hub URL that is not in the list yet, with a nickname derived from its host. Commands run outside a project directory now target the current Hub. To pick a project on it as well, run `scion use <project>`; then commands such as `scion list` and `scion start` work from any directory without `--project`. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/) for the hub list, `scion use`, and how the CLI chooses a Hub and project.
+`scion hub auth login --hub-url https://hub.example.com` also adds a Hub URL that is not in the list yet, with a nickname derived from its host. Commands run outside a project directory now target the current Hub. To pick a project on it as well, run `scion use <project>`; then commands such as `scion list` and `scion start` work from any directory without `--project`. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/) for the hub list, `scion use`, and how the CLI chooses a Hub and project.
 
 **Note:** In workstation mode, `scion server start` adds the local Hub as `local` for you. Authentication is not required there: the CLI uses a machine-specific developer token, and the Hub listens only on localhost.
 
