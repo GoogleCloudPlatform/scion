@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -489,6 +490,13 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 	}
 	if err := ensureProjectSettingsFile(externalConfigDir, opt); err != nil {
 		return err
+	}
+	// Record the repo root and project type, so that project discovery can
+	// tell this config from an orphaned one. Bookkeeping only: a failure is
+	// logged, not fatal (the CLI records it again when it resolves the
+	// project).
+	if err := RecordGitWorkspace(projectDir); err != nil {
+		slog.Warn("failed to record the workspace path of the project", "project", projectDir, "error", err)
 	}
 
 	// Create external agents directory for agent homes
