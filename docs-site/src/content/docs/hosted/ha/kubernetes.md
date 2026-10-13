@@ -306,6 +306,8 @@ When either signal is observed, the agent leaves `running` at once, and its stat
 
 The home backend does not change this: with a pod-local home the harness session is not kept across any Kubernetes restart. A `scion stop` that races a preemption stays `stopped`.
 
+**Resume without a saved session.** When you resume or wake an agent whose home is pod-local, the harness has no saved session to continue. If the resume attempt exits with an error within 30 seconds, the agent prints `scion: no resumable session; starting fresh` and starts the harness fresh instead of exiting. With the `nfs` home backend the session survives, so a failed resume is reported as an error and is not retried fresh.
+
 If the pod disappears between polls before either signal is observed, the Runtime Broker reads the pod's Kubernetes Events and classifies a preemption or eviction recorded there the same way. Only when the Events show neither does the agent fall back to the missing-container reconcile: after `missing_agent_grace` it moves to `error` with exit reason `container_missing` (see [server configuration](/scion/reference/server-config/)). One known gap: an agent preempted within about two broker heartbeats of its start, before the Hub has confirmed which runtime target lists it, is not covered by that fallback.
 
 #### Out-of-memory kills
