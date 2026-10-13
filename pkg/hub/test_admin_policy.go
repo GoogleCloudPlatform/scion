@@ -442,6 +442,8 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"telemetry.cloud.tls.enabled":              testAdminPolicyDeny,
 	"telemetry.cloud.tls.insecure_skip_verify": testAdminPolicyDeny,
 	"telemetry.cloud.tls.ca_file":              testAdminPolicyDeny,
+	"telemetry.cloud.tls.cert_file":            testAdminPolicyDeny,
+	"telemetry.cloud.tls.key_file":             testAdminPolicyDeny,
 	"telemetry.cloud.batch":                    testAdminPolicyDeny,
 	"telemetry.cloud.batch.max_size":           testAdminPolicyDeny,
 	"telemetry.cloud.batch.timeout":            testAdminPolicyDeny,
