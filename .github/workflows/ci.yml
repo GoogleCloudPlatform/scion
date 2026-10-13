@@ -720,7 +720,7 @@ jobs:
       - name: List the pkg/hub shards
         id: plan
         run: |
-          shards=$(go run ./hack/hubshard -shards)
+          shards=$(./hack/hubshard/hubshard.sh -shards)
           echo "shards=$(echo "$shards" | jq -cs .)" >> "$GITHUB_OUTPUT"
           echo "count=$(echo "$shards" | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
           echo "pkg/hub shards: $(echo "$shards" | tr '\n' ' ')"
