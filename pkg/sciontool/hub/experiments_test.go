@@ -63,3 +63,28 @@ func TestGetExperiments(t *testing.T) {
 	_, err = NewClientWithConfig("", "", "").GetExperiments(context.Background())
 	assert.ErrorContains(t, err, "not configured")
 }
+
+// TestGetExperimentsReadError: a response body that ends early is an
+// error, not an empty or partial experiment list.
+func TestGetExperimentsReadError(t *testing.T) {
+	scrubHubEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("response writer cannot be hijacked")
+			return
+		}
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		// Promise 100 bytes, send fewer, and close the connection.
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"experimen")
+		_ = buf.Flush()
+		_ = conn.Close()
+	}))
+	t.Cleanup(srv.Close)
+	_, err := NewClientWithConfig(srv.URL, "agent-token", "agent-1").GetExperiments(context.Background())
+	assert.ErrorContains(t, err, "failed to read response")
+}
