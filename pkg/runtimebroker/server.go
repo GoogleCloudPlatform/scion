@@ -129,6 +129,11 @@ type ServerConfig struct {
 	// use_host_credentials setting, re-read per start
 	// (colocatedHostCredentials).
 	HostCredentials bool
+	// WorkstationMode is set when this broker runs inside a workstation-mode
+	// server (not hosted mode). Only then may a worktree-per-agent dispatch
+	// for a linked checkout use a local worktree of that checkout
+	// (resolveLinkedCheckout).
+	WorkstationMode bool
 
 	// Template cache settings
 	// TemplateCacheDir is the directory for caching templates fetched from the Hub.

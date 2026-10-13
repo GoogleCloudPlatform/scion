@@ -61,6 +61,7 @@ import (
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	cloudrunruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/secretmigration"
@@ -577,6 +578,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 13. Start Broker
+	// On a Cloud Run service host, warn once that async launches need CPU
+	// allocated outside requests (ptone/scion#4763). No-op elsewhere.
+	cloudrunruntime.WarnCPUAllocationIfNeeded(slog.Default(), os.Getenv, cfg.RuntimeBroker.Enabled)
 	if cfg.RuntimeBroker.Enabled {
 		if err := requireImageRegistryForBroker(); err != nil {
 			return err
@@ -3777,6 +3781,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		HubEnabled:           hubEndpointForRH != "",
 		HubToken:             devAuthToken,
 		HostCredentials:      config.HostCredentialsEligible(hostedMode, devAuthToken != ""),
+		WorkstationMode:      !hostedMode,
 		TemplateCacheDir:     templateCacheDir,
 		TemplateCacheMaxSize: templateCacheMax,
 
