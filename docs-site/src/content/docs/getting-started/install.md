@@ -75,7 +75,7 @@ skip this if you installed with `brew`.
 ### 2. Container Runtime
 Scion requires a container runtime to manage agents. You can use Docker, Podman, or the Apple Virtualization Framework (experimental).
 
-When no runtime is configured, Scion picks one automatically. On macOS it prefers Podman (also found in its standard install locations when it is not on your `PATH`), then Docker, then Apple `container`. On Linux it prefers Podman, then Docker. To use another installed runtime, select it in the onboarding wizard or in your profile's `runtime` setting.
+When no runtime is configured, Scion picks one automatically. On macOS it prefers Podman, then Docker, then Apple `container`. When an agent starts, Podman is also found in its standard install locations if it is not on your `PATH`; the onboarding wizard's detection looks only on your `PATH` and checks that each runtime runs. On Linux it prefers Podman, then Docker. To use another installed runtime, select it in the onboarding wizard or in your profile's `runtime` setting.
 
 #### Docker (Linux/Windows)
 - Install [Docker Desktop](https://www.docker.com/products/docker-desktop) or [Docker Engine](https://docs.docker.com/engine/install/).

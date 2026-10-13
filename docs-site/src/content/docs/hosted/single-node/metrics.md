@@ -24,8 +24,9 @@ Telemetry settings resolve across scopes using **last-write-wins** semantics:
 
 1.  **Global settings** (`~/.scion/settings.yaml`) — Organization-wide defaults.
 2.  **Project settings** (`.scion/settings.yaml`) — Project-level overrides.
-3.  **Agent config** (`scion-agent.yaml` in agent home) — Per-agent overrides.
-4.  **Environment variables** (`SCION_TELEMETRY_*`, `SCION_OTEL_*`) — Highest priority.
+3.  **Hub default telemetry** (for Hub-dispatched agents) — The Hub's agent defaults.
+4.  **Agent config** (`scion-agent.yaml` in agent home) — Per-agent overrides.
+5.  **Environment variables** (`SCION_TELEMETRY_*`, `SCION_OTEL_*`) — Highest priority.
 
 At each scope, only the fields you specify are overridden; unset fields inherit from the previous scope.
 
