@@ -1428,13 +1428,10 @@ authDone:
 	// final priority. This allows templates to specify a container-
 	// accessible endpoint (e.g. http://host.docker.internal:8080)
 	// that differs from the host-level hub endpoint.
-	if !hubDisabled && finalScionCfg != nil && finalScionCfg.Env != nil {
-		if ep, ok := finalScionCfg.Env["SCION_HUB_ENDPOINT"]; ok && ep != "" {
-			expandedEp, _ := util.ExpandEnv(ep)
-			if expandedEp != "" {
-				opts.Env["SCION_HUB_ENDPOINT"] = expandedEp
-				opts.Env["SCION_HUB_URL"] = expandedEp
-			}
+	if !hubDisabled && finalScionCfg != nil {
+		if expandedEp := expandConfigHubEndpoint(opts.Name, finalScionCfg.Env); expandedEp != "" {
+			opts.Env["SCION_HUB_ENDPOINT"] = expandedEp
+			opts.Env["SCION_HUB_URL"] = expandedEp
 		}
 	}
 
@@ -3044,9 +3041,13 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 
 	if scionCfg != nil && scionCfg.Env != nil {
 		for k, v := range scionCfg.Env {
-			// Support variable substitution in keys and values
-			expandedKey, _ := util.ExpandEnv(k)
-			expandedValue, warned := util.ExpandEnv(v)
+			// Support variable substitution in keys and values. Names
+			// reserved for the server process expand to empty.
+			expandedKey, _, refusedInKey := util.ExpandEnvRefusing(k, refuseHostEnvForAgent)
+			expandedValue, warned, refusedInValue := util.ExpandEnvRefusing(v, refuseHostEnvForAgent)
+			for _, name := range append(refusedInKey, refusedInValue...) {
+				warnings = append(warnings, refusedHostEnvWarning(name))
+			}
 
 			if expandedKey == "" {
 				continue
@@ -3058,14 +3059,21 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 				continue
 			}
 			// If the value is empty and we warned about a missing variable,
-			// skip adding it to combined to avoid a redundant warning later.
-			if expandedValue == "" && warned {
+			// or the value referenced only refused names (already warned
+			// above), skip adding it to combined to avoid a redundant warning
+			// later.
+			if expandedValue == "" && (warned || len(refusedInValue) > 0) {
 				continue
 			}
 			// If the value is empty (no variable reference was used),
 			// treat the key as an implicit host env passthrough: look up
-			// the environment variable of the same name on the host.
+			// the environment variable of the same name on the host. A
+			// name reserved for the server is omitted with a warning.
 			if expandedValue == "" {
+				if refuseHostEnvForAgent(expandedKey) {
+					warnings = append(warnings, refusedHostEnvWarning(expandedKey))
+					continue
+				}
 				if hostVal, ok := os.LookupEnv(expandedKey); ok && hostVal != "" {
 					expandedValue = hostVal
 				}
@@ -3098,6 +3106,46 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 	}
 	sortDroppedBrokerEnv(dropped)
 	return agentEnv, warnings, missingKeys, dropped
+}
+
+// hostCredentialEnvNames are host env names holding this process's own hub
+// credentials. An agent receives its own token through opts.Env and the token
+// file, never through host passthrough.
+var hostCredentialEnvNames = map[string]bool{
+	"SCION_DEV_TOKEN":  true,
+	"SCION_AUTH_TOKEN": true,
+}
+
+// refuseHostEnvForAgent reports whether the host env value of name must never
+// be copied into an agent's env, whether by an empty-value passthrough or by
+// ${VAR} expansion. It covers every name reserved for the server process (see
+// util.IsServerSecretEnvName) and hostCredentialEnvNames. Values set
+// explicitly by the caller (opts.Env) are not host passthrough and are
+// unaffected.
+func refuseHostEnvForAgent(name string) bool {
+	return util.IsServerSecretEnvName(name) || hostCredentialEnvNames[name]
+}
+
+// expandConfigHubEndpoint returns the SCION_HUB_ENDPOINT value from a scion
+// config env section with ${VAR} references expanded from the host env, or ""
+// when it is unset. Names refused by refuseHostEnvForAgent expand to empty
+// and are logged by name.
+func expandConfigHubEndpoint(agentName string, cfgEnv map[string]string) string {
+	ep := cfgEnv["SCION_HUB_ENDPOINT"]
+	if ep == "" {
+		return ""
+	}
+	expanded, _, refused := util.ExpandEnvRefusing(ep, refuseHostEnvForAgent)
+	for _, name := range refused {
+		slog.Warn("Start: host environment variable is reserved for the server and is not passed to agents", "agent", agentName, "variable", name)
+	}
+	return expanded
+}
+
+// refusedHostEnvWarning is the warning for a refused host env name. It names
+// the variable only, never its value.
+func refusedHostEnvWarning(name string) string {
+	return fmt.Sprintf("Warning: host environment variable '%s' is reserved for the server and is not passed to agents.", name)
 }
 
 // envLaunchID is the container env variable carrying the run ID, which

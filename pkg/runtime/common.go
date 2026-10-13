@@ -611,7 +611,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 		if len(parts) == 2 {
 			addArg("-e", fmt.Sprintf("%s=%s", parts[0], parts[1]))
-		} else {
+		} else if !util.IsServerSecretEnvName(e) {
+			// A bare name makes the container CLI copy the value from
+			// this process's env; names reserved for the server never
+			// are.
 			addArg("-e", e)
 		}
 	}

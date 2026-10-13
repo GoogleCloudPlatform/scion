@@ -384,3 +384,53 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestStartDoesNotPassHostCredentialEnvToAgent covers config env entries that
+// name this process's own hub credentials: neither the empty-value passthrough
+// nor ${VAR} expansion copies the host value into the container, while the
+// token supplied in opts.Env still reaches the token file.
+func TestStartDoesNotPassHostCredentialEnvToAgent(t *testing.T) {
+	fx := newTokenFileFixture(t)
+
+	const hostSentinel = "HOST-CREDENTIAL-SENTINEL-not-for-agents"
+	t.Setenv("SCION_DEV_TOKEN", hostSentinel)
+	t.Setenv("SCION_AUTH_TOKEN", hostSentinel)
+	t.Setenv("ORDINARY_HOST_VAR", "ordinary-value")
+
+	hcConfig := filepath.Join(os.Getenv("HOME"), ".scion", "harness-configs", "test-harness", "config.yaml")
+	writeFile(t, hcConfig, "harness: gemini\nuser: scion\nimage: test-image:latest\n"+
+		"env:\n"+
+		"  SCION_AUTH_TOKEN: \"\"\n"+
+		"  SCION_DEV_TOKEN: \"\"\n"+
+		"  FROM_AUTH: \"${SCION_AUTH_TOKEN}\"\n"+
+		"  FROM_DEV: \"$SCION_DEV_TOKEN\"\n"+
+		"  ORDINARY_HOST_VAR: \"\"\n")
+
+	if _, err := fx.start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	if !fx.runCalled {
+		t.Fatal("the runtime was not invoked")
+	}
+
+	sawOrdinary := false
+	for _, e := range fx.captured.Env {
+		if strings.Contains(e, hostSentinel) {
+			t.Errorf("container env carries a host credential value under %q", strings.SplitN(e, "=", 2)[0])
+		}
+		if e == "ORDINARY_HOST_VAR=ordinary-value" {
+			sawOrdinary = true
+		}
+	}
+	if !sawOrdinary {
+		t.Error("ORDINARY_HOST_VAR did not pass through; the harness-config env did not reach the agent env")
+	}
+
+	data, err := os.ReadFile(filepath.Join(fx.captured.HomeDir, ".scion", "scion-token"))
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if string(data) != tokenFileSentinel {
+		t.Error("token file does not hold the token supplied in opts.Env")
+	}
+}

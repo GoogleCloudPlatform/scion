@@ -53,7 +53,9 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 		if v, ok := env[key]; ok && v != "" {
 			return v
 		}
-		if localSources {
+		// Names reserved for the server process are never read from the
+		// host env.
+		if localSources && !util.IsServerSecretEnvName(key) {
 			return os.Getenv(key)
 		}
 		return ""

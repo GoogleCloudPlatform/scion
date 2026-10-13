@@ -165,3 +165,62 @@ func TestLookupBoolEnv(t *testing.T) {
 		t.Errorf("garbage: got (%v, %v), want (false, false)", v, ok)
 	}
 }
+
+func TestIsServerSecretEnvName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"SCION_SERVER_SESSION_SECRET":          true,
+		"SCION_SERVER_HUB_CONDUIT_PEERSECRET":  true,
+		"SCION_SERVER_HUB_CONDUIT_PEER_SECRET": true,
+		"SCION_SERVER_DATABASE_URL":            true,
+		"SESSION_SECRET":                       true,
+		"SCION_HUB_ENDPOINT":                   false,
+		"SCION_SERVER":                         false,
+		"session_secret":                       false,
+		"MY_SESSION_SECRET":                    false,
+		"HOME":                                 false,
+		"":                                     false,
+	} {
+		if got := IsServerSecretEnvName(name); got != want {
+			t.Errorf("IsServerSecretEnvName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestExpandEnvRefusing(t *testing.T) {
+	const sentinel = "sentinel-value-must-not-appear"
+	t.Setenv("SCION_SERVER_SESSION_SECRET", sentinel)
+	t.Setenv("SESSION_SECRET", sentinel)
+	t.Setenv("PLAIN_VAR", "plain")
+
+	tests := []struct {
+		input       string
+		want        string
+		wantRefused []string
+	}{
+		{"${SCION_SERVER_SESSION_SECRET}", "", []string{"SCION_SERVER_SESSION_SECRET"}},
+		{"$SCION_SERVER_SESSION_SECRET", "", []string{"SCION_SERVER_SESSION_SECRET"}},
+		{"${SESSION_SECRET}", "", []string{"SESSION_SECRET"}},
+		{"x-$SESSION_SECRET-${SESSION_SECRET}-${PLAIN_VAR}", "x---plain", []string{"SESSION_SECRET"}},
+		{"${PLAIN_VAR}", "plain", nil},
+	}
+	for _, tt := range tests {
+		got, warned, refused := ExpandEnvRefusing(tt.input, IsServerSecretEnvName)
+		if got != tt.want {
+			t.Errorf("ExpandEnvRefusing(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+		if strings.Contains(got, sentinel) {
+			t.Errorf("ExpandEnvRefusing(%q) returned a refused value", tt.input)
+		}
+		if warned {
+			t.Errorf("ExpandEnvRefusing(%q) warned for a set or refused variable", tt.input)
+		}
+		if strings.Join(refused, ",") != strings.Join(tt.wantRefused, ",") {
+			t.Errorf("ExpandEnvRefusing(%q) refused = %v, want %v", tt.input, refused, tt.wantRefused)
+		}
+	}
+
+	// A nil predicate behaves like ExpandEnv.
+	if got, _, refused := ExpandEnvRefusing("${SESSION_SECRET}", nil); got != sentinel || refused != nil {
+		t.Errorf("ExpandEnvRefusing with nil predicate = %q, %v; want the env value and no refusals", got, refused)
+	}
+}

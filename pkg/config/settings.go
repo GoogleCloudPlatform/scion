@@ -17,6 +17,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -293,11 +294,16 @@ func expandEnvMap(m map[string]string) map[string]string {
 	}
 	expanded := make(map[string]string)
 	for k, v := range m {
-		ek, _ := util.ExpandEnv(k)
+		// These maps become agent env, so names reserved for the server
+		// process expand to empty.
+		ek, _, refusedInKey := util.ExpandEnvRefusing(k, util.IsServerSecretEnvName)
+		val, _, refusedInValue := util.ExpandEnvRefusing(v, util.IsServerSecretEnvName)
+		for _, name := range append(refusedInKey, refusedInValue...) {
+			slog.Warn("settings env: host environment variable is reserved for the server and is not expanded", "variable", name)
+		}
 		if ek == "" {
 			continue
 		}
-		val, _ := util.ExpandEnv(v)
 		expanded[ek] = val
 	}
 	return expanded
