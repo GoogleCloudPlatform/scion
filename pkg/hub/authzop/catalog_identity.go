@@ -783,8 +783,8 @@ var identityOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
-		ID:          "access.constraint.audit",
-		Domain:      "access.constraint",
+		ID:          "hub.audit.constraint",
+		Domain:      "hub",
 		Description: "Read one access constraint's audit history. hub.audit.read is a hub-level permission: a token needs hub_audit:read on a hub boundary and is checked against the hub-level constraint record; a denied caller gets the same not-found answer as for a missing constraint",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/access-constraints/{id}/audit", Method: "GET"},
@@ -918,11 +918,11 @@ var identityOperations = []OperationSpec{
 	},
 
 	// =====================================================================
-	// Domain: authz — hub audit reads and authorization explain
+	// Domain: hub — hub audit reads; user — the caller's own explain
 	// =====================================================================
 	{
-		ID:          "authz.effectiveaccess.read",
-		Domain:      "authz",
+		ID:          "hub.audit.effectiveaccess",
+		Domain:      "hub",
 		Description: "Read any principal's effective access composition at the system scope. A token needs hub_audit:read on a hub boundary; HEAD answers whether the caller may read it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/effective-access", Method: "GET"},
@@ -942,8 +942,8 @@ var identityOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
-		ID:          "authz.explain.crossprincipal",
-		Domain:      "authz",
+		ID:          "hub.audit.explain",
+		Domain:      "hub",
 		Description: "Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/authz/explain", Method: "POST", Variant: "cross_principal"},
@@ -962,8 +962,8 @@ var identityOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
-		ID:          "authz.explain.self",
-		Domain:      "authz",
+		ID:          "user.self.explain",
+		Domain:      "user",
 		Description: "Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/authz/explain", Method: "POST", Variant: "self"},

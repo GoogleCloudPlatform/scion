@@ -273,10 +273,10 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		},
 		// Explain names a fixture project target; the cross-principal
 		// variant explains for the fixture user.
-		{"authz.explain.self", "/api/v1/authz/explain"}: {
+		{"user.self.explain", "/api/v1/authz/explain"}: {
 			"resource": map[string]interface{}{"type": "project", "id": f.project}, "action": "read",
 		},
-		{"authz.explain.crossprincipal", "/api/v1/authz/explain"}: {
+		{"hub.audit.explain", "/api/v1/authz/explain"}: {
 			"resource": map[string]interface{}{"type": "project", "id": f.project}, "action": "read", "principalId": f.user,
 		},
 	}
