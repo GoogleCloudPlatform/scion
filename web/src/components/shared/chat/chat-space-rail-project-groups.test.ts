@@ -1103,7 +1103,7 @@ describe('project thread groups — flag on', () => {
 
   it('a thread filed from the menu joins after the members the group has when the hub answers', async () => {
     hub.groups = [hubGroup('srv-1', 'Shared', ['t2'])];
-    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-1', 't2', 't3', 't4'] });
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t4', 't1', 'srv-1', 't2', 't3'] });
     const el = await mountAs('user-a');
 
     hub.holdNext = { method: 'POST', prefix: '/api/v1/thread-groups/srv-1/threads' };
