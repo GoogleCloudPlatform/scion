@@ -734,7 +734,7 @@ HOST_FIXTURES = os.path.join(REPO_ROOT, "pkg", "harness", "testdata", "copilot_c
 # Floors pinned so that a moved, emptied or refactored host file cannot make
 # the cross-checks below pass vacuously. Raise them when the host lists grow.
 MIN_HOST_FIXTURES = 34
-HOST_SETTINGS_KEY_COUNT = 12
+HOST_SETTINGS_KEY_COUNT = 13
 HOST_CREDENTIAL_KEY_COUNT = 3
 
 
@@ -854,6 +854,402 @@ class CommentLineHostParityTest(unittest.TestCase):
         self.assertIn('strings.Split(string(data), "\\n")', m.group(1))
         self.assertIn('strings.HasPrefix(strings.TrimSpace(ln), "//")', m.group(1))
 
+
+# ---------------------------------------------------------------------------
+# Agent Plugins
+# ---------------------------------------------------------------------------
+
+# The config.json header copilot 1.0.97 writes when it rewrites the file.
+_COPILOT_CONFIG_HEADER = "// User settings belong in settings.json.\n// This file is managed automatically.\n"
+
+
+class _FakeCopilotCLI:
+    """Stands in for scion_harness.run_cli: records argv and COPILOT_HOME and
+    simulates the copilot 1.0.97 plugin CLI (shapes observed in the smoke run,
+    smoke/copilot.md) against a temp COPILOT_HOME."""
+
+    def __init__(self, version: str = "GitHub Copilot CLI 1.0.97.\nRun 'copilot update' to check for updates.\n"):
+        self.version = version
+        self.calls: list[list[str]] = []
+        self.homes: list[str] = []
+        self.envs: list[dict[str, str]] = []
+        self.timeouts: list[float | None] = []
+        self.fail_install = False
+        self.install_registers = True
+        self.omit_cache_path = False
+        self.uninstall_keeps_entry = False
+        self.uninstall_rc = 0
+
+    def _config_path(self, home: str) -> str:
+        return os.path.join(home, "config.json")
+
+    def _load(self, home: str) -> dict:
+        try:
+            with open(self._config_path(home), encoding="utf-8") as f:
+                text = "".join(ln for ln in f if not ln.lstrip().startswith("//"))
+        except FileNotFoundError:
+            return {}
+        return json.loads(text) if text.strip() else {}
+
+    def _save(self, home: str, data: dict) -> None:
+        os.makedirs(home, exist_ok=True)
+        with open(self._config_path(home), "w", encoding="utf-8") as f:
+            f.write(_COPILOT_CONFIG_HEADER + json.dumps(data, indent=2) + "\n")
+
+    def __call__(self, argv, *, timeout=None, env=None):
+        import shutil
+        import subprocess
+        self.calls.append(list(argv))
+        env = env or {}
+        home = env.get("COPILOT_HOME", "")
+        self.homes.append(home)
+        self.envs.append(env)
+        self.timeouts.append(timeout)
+        args = argv[1:]
+        if args == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, self.version, "")
+        if args[:2] == ["plugin", "install"]:
+            if self.fail_install:
+                return subprocess.CompletedProcess(argv, 1, "", "Failed to install plugin: boom")
+            src = args[2]
+            with open(os.path.join(src, "plugin.json"), encoding="utf-8") as f:
+                name = json.load(f)["name"]
+            # <id> is the source dir's basename, not the plugin name.
+            cache = os.path.join(home, "installed-plugins", "_direct", os.path.basename(src))
+            shutil.rmtree(cache, ignore_errors=True)
+            shutil.copytree(src, cache)
+            if self.install_registers:
+                data = self._load(home)
+                plugins = [e for e in data.get("installedPlugins", []) if e.get("name") != name]
+                entry = {"name": name, "marketplace": "", "version": "0.1.0",
+                         "installed_at": "2026-10-13T21:58:10.207811723Z", "cache_path": cache,
+                         "enabled": True, "source": {"source": "local", "path": src}}
+                if self.omit_cache_path:
+                    entry.pop("cache_path")
+                plugins.append(entry)
+                data["installedPlugins"] = plugins
+                self._save(home, data)
+            return subprocess.CompletedProcess(
+                argv, 0, f'Plugin "{name}" installed successfully. Installed 1 skill.\n',
+                "\nWarning: Direct plugin installs (repos, URLs, local paths) are deprecated. "
+                "Only plugin@marketplace installs will be supported in a future release.\n")
+        if args[:2] == ["plugin", "uninstall"]:
+            name = args[2]
+            data = self._load(home)
+            plugins = data.get("installedPlugins", [])
+            entry = next((e for e in plugins if e.get("name") == name), None)
+            if self.uninstall_keeps_entry:
+                return subprocess.CompletedProcess(argv, self.uninstall_rc, "", "error: busy")
+            if entry is None:
+                return subprocess.CompletedProcess(
+                    argv, 1, "", f'Failed to uninstall plugin: Error: Request plugins.uninstall failed '
+                    f'with message: Plugin "{name}" is not installed\n')
+            shutil.rmtree(entry.get("cache_path", ""), ignore_errors=True)
+            data["installedPlugins"] = [e for e in plugins if e is not entry]
+            self._save(home, data)
+            return subprocess.CompletedProcess(argv, 0, f'Plugin "{name}" uninstalled successfully.\n', "")
+        return subprocess.CompletedProcess(argv, 2, "", "unexpected")
+
+
+class CopilotAgentPluginsTest(BaseTelemetryTest):
+    def setUp(self) -> None:
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory(prefix="copilot-plugins-test-")
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.home = os.path.join(self.tmp, "home")
+        self.bundle = os.path.join(self.home, ".scion", "harness")
+        self.inputs = os.path.join(self.bundle, "inputs")
+        os.makedirs(self.inputs)
+        self.copilot_home = os.path.join(self.home, ".copilot")
+        self.config_path = os.path.join(self.copilot_home, "config.json")
+        home_ctx = temporary_home(self.home)
+        home_ctx.__enter__()
+        self.addCleanup(home_ctx.__exit__, None, None, None)
+        saved = {k: os.environ.pop(k) for k in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "COPILOT_HOME")
+                 if k in os.environ}
+        self.addCleanup(os.environ.update, saved)
+        self.cli = _FakeCopilotCLI()
+        original = scion_harness.run_cli
+        scion_harness.run_cli = self.cli
+        self.addCleanup(setattr, scion_harness, "run_cli", original)
+
+    def stage(self, names: dict[str, str]) -> None:
+        import shutil
+        shutil.rmtree(os.path.join(self.inputs, "plugins"), ignore_errors=True)
+        entries = []
+        for name, digest in names.items():
+            d = os.path.join(self.inputs, "plugins", name)
+            os.makedirs(os.path.join(d, "skills", "hello"))
+            with open(os.path.join(d, "plugin.json"), "w") as f:
+                json.dump({"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                           "name": name, "version": "0.1.0"}, f)
+            with open(os.path.join(d, "skills", "hello", "SKILL.md"), "w") as f:
+                f.write(f"---\nname: hello\ndescription: d\n---\n{digest}\n")
+            entries.append({"name": name, "version": "0.1.0", "dir": f"plugins/{name}", "digest": digest,
+                            "skills": ["hello"], "skills_dir_conflict": False, "mcp": None})
+        with open(os.path.join(self.inputs, "plugins.json"), "w") as f:
+            json.dump({"schema_version": 1, "spec_version": "1.0.0", "plugins": entries}, f)
+
+    def ctx(self, warnings: list[str] | None = None, infos: list[str] | None = None):
+        ctx = scion_harness.ProvisionContext("copilot", {
+            "harness_bundle_dir": self.bundle,
+            "agent_workspace": os.path.join(self.tmp, "workspace"),
+            "harness_config": {"no_auth": {"behavior": "drop-to-shell", "command": "copilot login"}},
+        })
+        if warnings is not None:
+            ctx.warn = warnings.append  # type: ignore[method-assign]
+        if infos is not None:
+            ctx.info = infos.append  # type: ignore[method-assign]
+        return ctx
+
+    def reconcile(self, warnings: list[str] | None = None, **kw) -> None:
+        ctx = self.ctx(warnings)
+        scion_harness.reconcile_agent_plugins(ctx, provision.CopilotPluginInstaller(ctx), **kw)
+
+    def state(self) -> dict:
+        path = os.path.join(self.home, ".scion", "agent-plugins", "state-copilot.json")
+        if not os.path.exists(path):
+            return {}  # nothing was ever recorded
+        with open(path) as f:
+            return json.load(f)["plugins"]
+
+    def status(self) -> dict:
+        with open(os.path.join(self.home, ".scion", "agent-plugins", "status-copilot.json")) as f:
+            return json.load(f)
+
+    def config(self) -> dict:
+        return self.cli._load(self.copilot_home)
+
+    def bundle_dir(self, name: str) -> str:
+        return os.path.join(self.home, ".scion", "agent-plugins", "bundles", name)
+
+    def direct_dir(self, name: str) -> str:
+        return os.path.join(self.copilot_home, "installed-plugins", "_direct", name)
+
+    def test_install_argv_env_and_native_ref(self) -> None:
+        self.stage({"scion-smoke": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.cli.calls, [
+            ["copilot", "--version"],
+            ["copilot", "plugin", "install", self.bundle_dir("scion-smoke")],
+        ])
+        self.assertEqual(set(self.cli.homes), {self.copilot_home})
+        self.assertTrue(all(e.get("COPILOT_AUTO_UPDATE") == "false" for e in self.cli.envs))
+        self.assertEqual(self.state()["scion-smoke"]["native_ref"],
+                         {"name": "scion-smoke", "path": self.direct_dir("scion-smoke")})
+        self.assertEqual(self.status()["installed"], ["scion-smoke"])
+        self.assertEqual(self.status()["cli_version"], "1.0.97")
+
+    def test_restart_is_fast_path(self) -> None:
+        self.stage({"scion-smoke": "d1"})
+        self.reconcile()
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [])
+
+    def test_dotted_name(self) -> None:
+        self.stage({"scion.smoke": "d1"})
+        self.reconcile()
+        self.assertEqual(self.state()["scion.smoke"]["native_ref"]["path"], self.direct_dir("scion.smoke"))
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [])
+
+    def test_old_cli_skips_without_changes(self) -> None:
+        self.cli.version = "GitHub Copilot CLI 1.0.73.\n"
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(self.cli.calls, [["copilot", "--version"]])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("copilot 1.0.73 is older than 1.0.74", warnings[0])
+
+    def test_removal_and_digest_change(self) -> None:
+        self.stage({"a": "d1", "b": "d1"})
+        self.reconcile()
+        self.stage({"b": "d2"})
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [
+            ["copilot", "--version"],
+            ["copilot", "plugin", "uninstall", "a"],
+            ["copilot", "plugin", "uninstall", "b"],
+            ["copilot", "plugin", "install", self.bundle_dir("b")],
+        ])
+        self.assertEqual([e["name"] for e in self.config()["installedPlugins"]], ["b"])
+        with open(os.path.join(self.direct_dir("b"), "skills", "hello", "SKILL.md")) as f:
+            self.assertIn("d2", f.read())
+        self.assertEqual(self.status()["removed"], ["a"])
+        self.assertEqual(sorted(self.state()), ["b"])
+
+    def test_uninstall_not_installed_counts_as_removed(self) -> None:
+        self.stage({"a": "d1"})
+        self.reconcile()
+        # The registration is gone already (e.g. the user uninstalled it);
+        # copilot exits 1 for "not installed", which is still a removal.
+        with open(self.config_path, "w") as f:
+            json.dump({"trustedFolders": ["/workspace"]}, f)
+        self.stage({})
+        infos: list[str] = []
+        inst = provision.CopilotPluginInstaller(self.ctx(infos=infos))
+        inst.uninstall("a", {})
+        self.assertIn("agent plugin a: copilot plugin uninstall exit 1, plugin no longer registered", infos)
+
+    def test_uninstall_still_registered_fails(self) -> None:
+        self.stage({"a": "d1"})
+        self.reconcile()
+        inst = provision.CopilotPluginInstaller(self.ctx())
+        self.cli.uninstall_keeps_entry = True
+        self.cli.uninstall_rc = 1
+        with self.assertRaisesRegex(scion_harness.PluginInstallError, "copilot plugin uninstall exit 1"):
+            inst.uninstall("a", {})
+        self.cli.uninstall_rc = 0
+        with self.assertRaisesRegex(scion_harness.PluginInstallError, "still registered"):
+            inst.uninstall("a", {})
+        # Kept in state for a retry at the next start.
+        self.stage({})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertIn("a", self.state())
+        self.assertTrue(any("removal failed" in w for w in warnings))
+
+    def test_install_failure_not_recorded(self) -> None:
+        self.cli.fail_install = True
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [
+            "agent plugin a: install failed (copilot plugin install exit 1: Failed to install plugin: boom); "
+            "will retry next start"])
+        self.assertEqual(self.state(), {})
+
+    def test_install_exit_zero_without_registration_fails(self) -> None:
+        self.cli.install_registers = False
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("is not registered as enabled", warnings[0])
+        self.assertEqual(self.state(), {})
+
+    def test_direct_dir_discovery_without_cache_path(self) -> None:
+        # No cache_path in the registration: scan _direct/ for a dir whose
+        # plugin.json names the plugin (the dir name need not match).
+        self.cli.omit_cache_path = True
+        self.stage({"a": "d1"})
+        other = os.path.join(self.copilot_home, "installed-plugins", "_direct", "0-other")
+        os.makedirs(other)
+        with open(os.path.join(other, "plugin.json"), "w") as f:
+            json.dump({"name": "other"}, f)
+        ctx = self.ctx()
+        inst = provision.CopilotPluginInstaller(ctx)
+        [p] = scion_harness.read_agent_plugins(ctx)
+        bundle = scion_harness.mirror_bundle(p)
+        renamed = os.path.join(self.tmp, "src-x")
+        os.rename(bundle, renamed)
+        ref = inst.install(p, renamed)
+        self.assertEqual(ref, {"name": "a", "path": self.direct_dir("src-x")})
+        self.assertTrue(inst.is_present("a", ref))
+
+    def test_is_present_requires_enabled_registration(self) -> None:
+        self.stage({"a": "d1"})
+        self.reconcile()
+        inst = provision.CopilotPluginInstaller(self.ctx())
+        ref = self.state()["a"]["native_ref"]
+        self.assertTrue(inst.is_present("a", ref))
+        data = self.config()
+        data["installedPlugins"][0]["enabled"] = False
+        self.cli._save(self.copilot_home, data)
+        self.assertFalse(inst.is_present("a", ref))
+        data["installedPlugins"][0]["enabled"] = True
+        data["installedPlugins"][0]["marketplace"] = "awesome-copilot"
+        self.cli._save(self.copilot_home, data)
+        self.assertFalse(inst.is_present("a", ref), "a marketplace plugin of the same name is not ours")
+        data["installedPlugins"][0]["marketplace"] = ""
+        self.cli._save(self.copilot_home, data)
+        self.assertTrue(inst.is_present("a", ref))
+        import shutil
+        shutil.rmtree(self.direct_dir("a"))
+        self.assertFalse(inst.is_present("a", ref))
+
+    def test_reset_config_reinstalls(self) -> None:
+        # Regression: the image ships config.json as {"trustedFolders":
+        # [...]} (Dockerfile) and a re-provision can reset the home, which
+        # drops installedPlugins while the _direct cache and Scion's state
+        # survive. The next start must reinstall, not take the fast path.
+        self.stage({"scion-smoke": "d1"})
+        provision.provision(self.ctx())
+        self.assertTrue(os.path.isdir(self.direct_dir("scion-smoke")))
+        with open(self.config_path, "w") as f:
+            f.write('{\n  "trustedFolders": ["/workspace"]\n}\n')
+        self.cli.calls.clear()
+        provision.provision(self.ctx())
+        self.assertEqual(self.cli.calls, [
+            ["copilot", "--version"],
+            ["copilot", "plugin", "install", self.bundle_dir("scion-smoke")],
+        ])
+        self.assertEqual([e["name"] for e in self.config()["installedPlugins"]], ["scion-smoke"])
+        self.cli.calls.clear()
+        provision.provision(self.ctx())
+        self.assertEqual(self.cli.calls, [])
+
+    def test_auth_file_config_rewrite_reinstalls(self) -> None:
+        # An auth-file provision writes the staged COPILOT_CONFIG over
+        # config.json on every start, dropping installedPlugins.
+        secret = os.path.join(self.bundle, "secrets", "COPILOT_CONFIG")
+        os.makedirs(os.path.dirname(secret))
+        with open(secret, "w", encoding="utf-8") as f:
+            json.dump({"copilot_tokens": {"https://github.com:octo": "placeholder-token"}}, f)
+        with open(os.path.join(self.inputs, "auth-candidates.json"), "w") as f:
+            json.dump({"schema_version": 1, "file_secret_files": {
+                "COPILOT_CONFIG": "$HOME/.scion/harness/secrets/COPILOT_CONFIG"}}, f)
+        self.stage({"a": "d1"})
+        provision.provision(self.ctx())
+        self.assertIn("installedPlugins", self.config())
+        self.assertIn("copilot_tokens", self.config())
+        self.cli.calls.clear()
+        provision.provision(self.ctx())
+        self.assertEqual(self.cli.calls[-1], ["copilot", "plugin", "install", self.bundle_dir("a")])
+        self.assertIn("copilot_tokens", self.config())
+
+    def test_provision_reconciles_after_ensure_settings(self) -> None:
+        self.stage({"a": "d1"})
+        provision.provision(self.ctx())
+        with open(self.config_path) as f:
+            raw = f.read()
+        # The CLI wrote last (its header survives), and it kept the
+        # trustedFolders entry _ensure_settings wrote before it.
+        self.assertTrue(raw.startswith(_COPILOT_CONFIG_HEADER))
+        data = self.config()
+        self.assertEqual(data["trustedFolders"], [os.path.join(self.tmp, "workspace")])
+        self.assertEqual([e["name"] for e in data["installedPlugins"]], ["a"])
+
+    def test_plugin_registry_is_not_sign_in(self) -> None:
+        # Regression: installedPlugins is a settings key. Without it in
+        # _COPILOT_SETTINGS_KEYS, a restart after any plugin install would
+        # look signed in (auth-file) with no credential.
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        provision.provision(self.ctx(warnings))
+        self.assertFalse(provision._config_file_may_hold_credential(self.config_path))
+        provision.provision(self.ctx())
+        with open(os.path.join(self.bundle, "outputs", "resolved-auth.json")) as f:
+            self.assertEqual(json.load(f)["method"], "none")
+        # Also after the last plugin is removed (installedPlugins: []).
+        self.stage({})
+        provision.provision(self.ctx())
+        self.assertEqual(self.config()["installedPlugins"], [])
+        self.assertFalse(provision._config_file_may_hold_credential(self.config_path))
+
+    def test_cli_timeouts_capped_by_budget(self) -> None:
+        self.stage({"a": "d1"})
+        ticks = iter([0.0] + [17.0] * 50)
+        self.reconcile(budget_s=20.0, clock=lambda: next(ticks))
+        # --version 10s default and install 15s default, both capped to 3s.
+        self.assertEqual(self.cli.timeouts, [3.0, 3.0])
 
 if __name__ == "__main__":
     unittest.main()
