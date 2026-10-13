@@ -148,6 +148,19 @@ func writeOwnerFile(t *testing.T, path, content string) {
 	}
 }
 
+// symlinkDirInPlace moves the directory dir aside and puts a symlink to
+// it in its place.
+func symlinkDirInPlace(t *testing.T, dir string) {
+	t.Helper()
+	moved := dir + "-real"
+	if err := os.Rename(dir, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // realProject creates <parent>/<name>/.scion as a directory with the agent
 // dir, and returns the project root.
 func (l ownerLayout) realProject(t *testing.T, parent, name string) string {
@@ -245,6 +258,85 @@ func TestHostStateRootFor_Layouts(t *testing.T) {
 			p := l.markerProject(t, filepath.Join(l.global, "projects"), "myproj", ownerOtherID, "myproj")
 			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID}, ""
 		}},
+		{"global project", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
+			mkdirOwnerDirs(t, filepath.Join(l.global, "agents", ownerAgent))
+			return RunOwnerTarget{ProjectPath: "global", AgentName: ownerAgent, HubProjectID: ownerHubID}, l.home
+		}},
+		{"global project, symlinked home, shared workspace", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
+			// $HOME is a symlink: the slug is still "global", as config
+			// names the global project from the unresolved global dir.
+			linkHome := filepath.Join(filepath.Dir(l.home), "link-home")
+			if err := os.Symlink(l.home, linkHome); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", linkHome)
+			ext := filepath.Join(linkHome, config.GlobalDir, config.ProjectConfigsDir,
+				config.ProjectMarker{ProjectID: ownerHubID, ProjectSlug: "global"}.DirName())
+			mkdirOwnerDirs(t, filepath.Join(ext, config.DotScion, "agents", ownerAgent))
+			return RunOwnerTarget{ProjectPath: "global", AgentName: ownerAgent, HubProjectID: ownerHubID, SharedWorkspace: true}, ext
+		}},
+		{"shared workspace, project dir name with __", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
+			// config names the project from the part before "__" and
+			// slugifies it.
+			p := l.realProject(t, l.src, "My__x")
+			ext := l.external("my", ownerHubID)
+			mkdirOwnerDirs(t, filepath.Join(ext, config.DotScion, "agents", ownerAgent))
+			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID, SharedWorkspace: true}, ext
+		}},
+		{"refused: marker, external dir is a symlink", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
+			p := l.markerProject(t, filepath.Join(l.global, "projects"), "myproj", ownerHubID, "myproj")
+			symlinkDirInPlace(t, l.external("myproj", ownerHubID))
+			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID}, ""
+		}},
+		{"refused: marker, external .scion is a symlink", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
+			p := l.markerProject(t, filepath.Join(l.global, "projects"), "myproj", ownerHubID, "myproj")
+			symlinkDirInPlace(t, filepath.Join(l.external("myproj", ownerHubID), config.DotScion))
+			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID}, ""
+		}},
+		{"refused: marker, hub project ID outside the dir-name grammar", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
+			p := filepath.Join(l.src, "plain")
+			mkdirOwnerDirs(t, p)
+			writeOwnerFile(t, filepath.Join(p, config.DotScion), "project-id: bad id!\nproject-slug: plain\n")
+			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: "bad id!"}, ""
+		}},
+		{"refused: shared workspace, external dir is a symlink", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
+			p := l.realProject(t, l.src, "shared")
+			ext := l.external("shared", ownerHubID)
+			mkdirOwnerDirs(t, filepath.Join(ext, config.DotScion, "agents", ownerAgent))
+			symlinkDirInPlace(t, ext)
+			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID, SharedWorkspace: true}, ""
+		}},
+		{"refused: shared workspace, external dir missing", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
+			p := l.realProject(t, l.src, "shared")
+			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID, SharedWorkspace: true}, ""
+		}},
+		{"refused: shared workspace, slug outside the dir-name grammar", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
+			// The name slugifies to "". The dir that name would give
+			// exists, so only the grammar check refuses it.
+			p := l.realProject(t, l.src, "日本")
+			mkdirOwnerDirs(t, filepath.Join(l.global, config.ProjectConfigsDir,
+				config.ProjectMarker{ProjectID: ownerHubID, ProjectSlug: ""}.DirName(), config.DotScion, "agents", ownerAgent))
+			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID, SharedWorkspace: true}, ""
+		}},
+		{"refused: shared workspace, hub project ID outside the dir-name grammar", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
+			// The dir that ID would give exists, so only the grammar
+			// check refuses it.
+			p := l.realProject(t, l.src, "shared")
+			mkdirOwnerDirs(t, filepath.Join(l.global, config.ProjectConfigsDir,
+				config.ProjectMarker{ProjectID: "bad id!", ProjectSlug: "shared"}.DirName(), config.DotScion, "agents", ownerAgent))
+			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: "bad id!", SharedWorkspace: true}, ""
+		}},
+		{"shared workspace found from a symlinked external scion-agent.json", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
+			// Stat, as effectiveSharedWorkspace checks it.
+			p := l.realProject(t, l.src, "shared")
+			ext := l.external("shared", ownerHubID)
+			agentDir := filepath.Join(ext, config.DotScion, "agents", ownerAgent)
+			writeOwnerFile(t, filepath.Join(agentDir, "scion-agent.real.json"), "{}")
+			if err := os.Symlink("scion-agent.real.json", filepath.Join(agentDir, "scion-agent.json")); err != nil {
+				t.Fatal(err)
+			}
+			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID}, ext
+		}},
 		{"refused: no .scion", func(t *testing.T, l ownerLayout) (RunOwnerTarget, string) {
 			p := filepath.Join(l.src, "empty")
 			mkdirOwnerDirs(t, p)
@@ -275,7 +367,7 @@ func TestHostStateRootFor_Layouts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if wantDir := filepath.Join(got, config.DotScion, "agents", ownerAgent); agentDir != wantDir {
+			if wantDir := filepath.Join(got, config.DotScion, "agents", ownerAgent); !sameDir(agentDir, wantDir) {
 				t.Errorf("agentStateDir = %s, want the record's dir %s", agentDir, wantDir)
 			}
 		})
@@ -389,6 +481,18 @@ func TestRecordRunOwner_RefusedRootWritesNothing(t *testing.T) {
 			p := l.markerProject(t, filepath.Join(l.global, "projects"), "myproj", ownerOtherID, "myproj")
 			mkdirOwnerDirs(t, filepath.Join(l.external("myproj", ownerHubID), config.DotScion, "agents", ownerAgent))
 			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID}
+		}},
+		{"marker, external dir is a symlink", func(t *testing.T, l ownerLayout) RunOwnerTarget {
+			p := l.markerProject(t, filepath.Join(l.global, "projects"), "myproj", ownerHubID, "myproj")
+			symlinkDirInPlace(t, l.external("myproj", ownerHubID))
+			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID}
+		}},
+		{"shared workspace, external dir is a symlink", func(t *testing.T, l ownerLayout) RunOwnerTarget {
+			p := l.realProject(t, l.src, "shared")
+			ext := l.external("shared", ownerHubID)
+			mkdirOwnerDirs(t, filepath.Join(ext, config.DotScion, "agents", ownerAgent))
+			symlinkDirInPlace(t, ext)
+			return RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID, SharedWorkspace: true}
 		}},
 		{"marker without hub identity", func(t *testing.T, l ownerLayout) RunOwnerTarget {
 			p := l.markerProject(t, l.src, "plain", ownerHubID, "plain")
@@ -567,5 +671,77 @@ func TestUpdateSavedAgentInfo_DropsLegacyRunID(t *testing.T) {
 	}
 	if got := agentInfoRunID(t, info); got != "" {
 		t.Errorf("agent-info.json runId = %q after an update, want it dropped", got)
+	}
+}
+
+// An empty project path is the nearest directory above the working
+// directory with a .scion entry, not followed, and the global project when
+// there is none. A marker found there that does not agree is refused, not
+// skipped.
+func TestHostStateRootFor_EmptyProjectPath(t *testing.T) {
+	t.Run("working project", func(t *testing.T) {
+		l := newOwnerLayout(t)
+		p := l.realProject(t, l.src, "repo")
+		sub := filepath.Join(p, "sub", "dir")
+		mkdirOwnerDirs(t, sub)
+		t.Chdir(sub)
+		if got, err := HostStateRootFor(RunOwnerTarget{AgentName: ownerAgent}); err != nil || got != p {
+			t.Fatalf("root = %s, %v; want %s", got, err, p)
+		}
+	})
+	t.Run("no project above: the global project", func(t *testing.T) {
+		l := newOwnerLayout(t)
+		mkdirOwnerDirs(t, filepath.Join(l.global, "agents", ownerAgent))
+		for dir := l.src; ; dir = filepath.Dir(dir) {
+			if _, err := os.Lstat(filepath.Join(dir, config.DotScion)); err == nil {
+				t.Skipf("a .scion entry above the temp dir (%s) would be the working project", dir)
+			}
+			if filepath.Dir(dir) == dir {
+				break
+			}
+		}
+		t.Chdir(l.src)
+		if got, err := HostStateRootFor(RunOwnerTarget{AgentName: ownerAgent}); err != nil || got != l.home {
+			t.Fatalf("root = %s, %v; want the global project's %s", got, err, l.home)
+		}
+	})
+	t.Run("marker above that does not agree", func(t *testing.T) {
+		l := newOwnerLayout(t)
+		p := l.markerProject(t, l.src, "plain", ownerHubID, "plain")
+		t.Chdir(p)
+		if got, err := HostStateRootFor(RunOwnerTarget{AgentName: ownerAgent}); !errors.Is(err, errHostStateRootRefused) {
+			t.Fatalf("root = %s, %v; want a refusal (no hub identity for a marker)", got, err)
+		}
+	})
+}
+
+// The writer used by callers that hold the agent's dir (Provision,
+// ProvisionAgent) writes only when the record's dir is that agent dir: a
+// different dir, or a missing one, is an error and nothing is written.
+func TestRecordRunOwnerInAgentDir(t *testing.T) {
+	l := newOwnerLayout(t)
+	p := l.realProject(t, l.src, "repo")
+	target := RunOwnerTarget{ProjectPath: p, AgentName: ownerAgent, HubProjectID: ownerHubID}
+	agentDir := filepath.Join(p, config.DotScion, "agents", ownerAgent)
+
+	other := filepath.Join(l.external("repo", ownerHubID), config.DotScion, "agents", ownerAgent)
+	mkdirOwnerDirs(t, other)
+	if err := recordRunOwnerInAgentDir(target, other, "run-1"); !errors.Is(err, errRunOwnerDirMismatch) {
+		t.Fatalf("record for another agent dir = %v, want errRunOwnerDirMismatch", err)
+	}
+	if files := hostStateFilesUnder(t, filepath.Dir(l.home)); len(files) != 0 {
+		t.Fatalf("host state files written on a dir mismatch: %v", files)
+	}
+
+	if err := recordRunOwnerInAgentDir(target, agentDir, "run-1"); err != nil {
+		t.Fatalf("record for the agent dir: %v", err)
+	}
+	if got := hostStateRunFor(t, target); got != "run-1" {
+		t.Fatalf("recorded run = %q, want run-1", got)
+	}
+
+	missing := RunOwnerTarget{ProjectPath: p, AgentName: "gone"}
+	if err := recordRunOwnerInAgentDir(missing, filepath.Join(p, config.DotScion, "agents", "gone"), "run-1"); err == nil {
+		t.Fatal("record for a missing agent dir succeeded; want an error the caller logs")
 	}
 }

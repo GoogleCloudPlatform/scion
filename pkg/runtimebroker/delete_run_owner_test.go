@@ -66,6 +66,11 @@ func plantHostState(t *testing.T, scionDir, name, content string) {
 // A stale record naming the deleting run does not by itself allow the
 // delete: with a newer run's container, or a newer run's start in flight,
 // no file is deleted.
+//
+// The "newer run's container" case is decided by resolveDeleteTarget's
+// run filter before the record is read (the record plays no part); the
+// in-flight cases reach the files-owner check, where the record names the
+// deleting run (no other owner) and the in-flight start keeps the files.
 func TestDeleteAgent_StaleOwnerWithNewerRun_DeletesNoFiles(t *testing.T) {
 	t.Run("newer run's container", func(t *testing.T) {
 		mgr := &filteringMockManager{}
@@ -100,6 +105,28 @@ func TestDeleteAgent_StaleOwnerWithNewerRun_DeletesNoFiles(t *testing.T) {
 			t.Errorf("expected no DeleteTarget call, got %d", mgr.DeleteCalls())
 		}
 		assertCleanupCalls(t, mgr.cleanupCalls())
+		assertUntouched(t, scionB, "dev", infoB)
+	})
+	t.Run("deleting run's container and a newer run's start in flight", func(t *testing.T) {
+		mgr := &filteringMockManager{}
+		srv, home := newScopeTestServer(t, mgr)
+		scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+		infoB := recordRun(t, scionB, "dev", "run-old")
+		mgr.agents = []api.AgentInfo{withRun(labelled("dev", "cid-old", scopeProjB, scionB), "run-old")}
+		lr := newLaunchRecord("sync-1", "dev", "create", "", time.Time{}, func() {})
+		lr.RunID = "run-new"
+		srv.launchRegistry.Begin(launchKey{ProjectID: scopeProjB, Slug: "dev"}, lr)
+
+		rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old"+allDeleteParams)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if mgr.DeleteCalls() != 1 || mgr.LastDeleteContainerID() != "cid-old" {
+			t.Fatalf("got %d deletes, last %q; want the requested run's cid-old", mgr.DeleteCalls(), mgr.LastDeleteContainerID())
+		}
+		if mgr.LastDeleteFiles() {
+			t.Error("the delete removed files while a newer run's start is in flight")
+		}
 		assertUntouched(t, scionB, "dev", infoB)
 	})
 }

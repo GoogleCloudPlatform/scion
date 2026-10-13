@@ -83,7 +83,7 @@ An **Agent** is an isolated container running an LLM harness. Each agent has:
 | :--- | :--- |
 | **Home directory** | Mounted at `/home/<user>` inside the container. Contains harness config, credentials, and a per-agent `agent-info.json`. |
 | **Workspace** | Mounted at `/workspace`. Typically a dedicated git worktree to prevent merge conflicts between concurrent agents. |
-| **Host state** | `agents/<name>/host-state.json` in the agent directory, outside the home and workspace mounts. Holds state only the host needs, such as the run that owns the agent's files (used by run-scoped deletes and failure cleanups), so the host and the container need not share a writable home. |
+| **Host state** | `agents/<name>/host-state.json` in the agent directory, outside the home and workspace mounts. Holds state only the host needs, such as the run that owns the agent's files (used by run-scoped deletes and failure cleanups), so the host and the container need not share a writable home. A project layout with no trusted location for it (a symlinked `.scion`, or a `.scion` marker that does not match the hub project) records no run, and run-scoped deletes and failure cleanups then keep the agent's files. |
 | **Template** | The blueprint that seeded the agent's home directory and configuration. |
 | **Harness** | The LLM-specific adapter (Claude, Gemini, OpenCode, Codex, or Generic). |
 

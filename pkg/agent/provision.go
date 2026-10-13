@@ -913,10 +913,11 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	// it is started, and its first start records its run in place of this.
 	// If a runtime entry for the name still exists in this project (or the
 	// runtime cannot be listed), the files stay that entry's run's.
-	// The owner is recorded in the host-owned HostStateFile
-	// (RecordRunOwner); a failure is logged and the provision carries on.
+	// The owner is recorded in the host-owned HostStateFile in agentDir
+	// (recordRunOwnerInAgentDir); a failure, including a record that would
+	// not land in agentDir, is logged and the provision carries on.
 	if opts.FreshProvision && opts.RunID == "" && !m.hasRuntimeEntry(ctx, opts) {
-		if err := RecordRunOwner(RunOwnerTargetFor(opts), ProvisionOwnerPrefix+uuid.NewString()); err != nil {
+		if err := recordRunOwnerInAgentDir(RunOwnerTargetFor(opts), agentDir, ProvisionOwnerPrefix+uuid.NewString()); err != nil {
 			slog.Warn("Provision: failed to record the provision owner in the host state file",
 				"agent", opts.Name, "error", err)
 		}
@@ -2416,16 +2417,17 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// (ptone/scion#4771): a delete naming a different run then leaves them
 	// alone. A provision with no run (provision-only, reprovision) leaves
 	// the record as it is, since the files still belong to that run's
-	// runtime entry. A failure is logged and the provision carries on, as
-	// for the agent-info.json write below.
+	// runtime entry. A failure (including a record that would not land in
+	// agentDir) is logged and the provision carries on, as for the
+	// agent-info.json write below.
 	if runID := api.RunIDFromContext(ctx); runID != "" {
 		target := RunOwnerTarget{
 			ProjectPath:     projectPath,
 			AgentName:       agentName,
 			HubProjectID:    api.HubProjectIDFromContext(ctx),
-			SharedWorkspace: api.IsSharedWorkspaceFromContext(ctx),
+			SharedWorkspace: sharedWorkspace,
 		}
-		if err := RecordRunOwner(target, runID); err != nil {
+		if err := recordRunOwnerInAgentDir(target, agentDir, runID); err != nil {
 			slog.Warn("Provision: failed to record the run in the host state file; a delete for this run may leave the agent's files behind",
 				"agent", agentName, "run_id", runID, "error", err)
 		}

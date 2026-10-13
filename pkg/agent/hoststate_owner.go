@@ -22,7 +22,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -46,8 +45,11 @@ type RunOwnerTarget struct {
 	// ProjectPath is the project path the broker holds for the agent: a
 	// hub-managed ~/.scion/projects/<slug>, a linked project's registered
 	// path, or either one's .scion entry. "global" or "home" names the
-	// global project, and "" the broker's working project (as
-	// DeleteAgentFiles resolves it).
+	// global project. "" names the nearest directory above the working
+	// directory with a .scion entry (not followed), or the global project
+	// when there is none; unlike config.FindProjectRoot it does not skip a
+	// marker that does not resolve, which is then refused (see
+	// runOwnerProjectRoot).
 	ProjectPath string
 	// AgentName comes from the request or dispatch.
 	AgentName string
@@ -78,34 +80,41 @@ var (
 	// errInvalidRecordedRunID is returned for a run ID that is not a
 	// valid run ID (see runtime.ValidateRunID).
 	errInvalidRecordedRunID = errors.New("invalid recorded run ID")
+	// errRunOwnerDirMismatch is returned by recordRunOwnerInAgentDir when
+	// the record's dir is not the agent dir the caller holds.
+	errRunOwnerDirMismatch = errors.New("host state root does not address the agent's dir")
 )
-
-// hostStateSlugPattern is the grammar api.Slugify produces (the same as
-// runtimebroker's hubProjectSlugPattern). Only a slug matching it names an
-// external project-config dir.
-var hostStateSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
-
-// hostStateShortIDPattern is the grammar of config.ProjectMarker.ShortUUID
-// for a valid project ID.
-var hostStateShortIDPattern = regexp.MustCompile(`^[A-Za-z0-9]{1,8}$`)
 
 func refuseHostStateRoot(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errHostStateRootRefused, fmt.Sprintf(format, args...))
 }
 
 // runOwnerProjectRoot returns the absolute project root (the directory
-// holding .scion) for projectPath, with symlinks resolved, as
-// config.ResolveProjectPath addresses the project.
-func runOwnerProjectRoot(projectPath string) (string, error) {
-	var root string
+// holding .scion) for projectPath, with symlinks resolved, and the project
+// dir config.ResolveProjectPath gives for it when its .scion is a
+// directory (the input config.GetProjectName names the project from):
+//
+//   - "global" or "home": the parent of the global dir, and the global
+//     dir as config gives it (not resolved);
+//   - "": the nearest directory above the working directory that has a
+//     .scion entry, which is not followed (a marker found there is
+//     checked like any other, so one that does not resolve is refused
+//     rather than skipped as config.FindProjectRoot skips it); with no
+//     .scion entry above, the global project as for "global";
+//   - otherwise the path, or its parent when its base name is .scion.
+func runOwnerProjectRoot(projectPath string) (root, configDir string, err error) {
+	global := func() (string, string, error) {
+		globalDir, err := config.GetGlobalDir()
+		if err != nil {
+			return "", "", refuseHostStateRoot("global project: %v", err)
+		}
+		return filepath.Dir(globalDir), globalDir, nil
+	}
 	switch projectPath {
 	case "":
-		// The nearest directory above the working directory with a .scion
-		// entry, as config.FindProjectRoot finds it, but without following
-		// the entry: HostStateRootFor checks it.
 		wd, err := os.Getwd()
 		if err != nil {
-			return "", refuseHostStateRoot("working directory: %v", err)
+			return "", "", refuseHostStateRoot("working directory: %v", err)
 		}
 		for dir := wd; ; dir = filepath.Dir(dir) {
 			if _, err := os.Lstat(filepath.Join(dir, config.DotScion)); err == nil {
@@ -113,19 +122,22 @@ func runOwnerProjectRoot(projectPath string) (string, error) {
 				break
 			}
 			if filepath.Dir(dir) == dir {
-				return "", refuseHostStateRoot("no working project")
+				break
+			}
+		}
+		if root == "" {
+			if root, configDir, err = global(); err != nil {
+				return "", "", err
 			}
 		}
 	case "global", "home":
-		globalDir, err := config.GetGlobalDir()
-		if err != nil {
-			return "", refuseHostStateRoot("global project: %v", err)
+		if root, configDir, err = global(); err != nil {
+			return "", "", err
 		}
-		root = filepath.Dir(globalDir)
 	default:
 		abs, err := filepath.Abs(projectPath)
 		if err != nil {
-			return "", refuseHostStateRoot("project path: %v", err)
+			return "", "", refuseHostStateRoot("project path: %v", err)
 		}
 		if filepath.Base(abs) == config.DotScion {
 			abs = filepath.Dir(abs)
@@ -134,28 +146,14 @@ func runOwnerProjectRoot(projectPath string) (string, error) {
 	}
 	resolved, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return "", refuseHostStateRoot("project root: %v", err)
+		return "", "", refuseHostStateRoot("project root: %v", err)
 	}
-	return resolved, nil
-}
-
-// externalHostStateRoot returns
-// <globalDir>/project-configs/<slug>__<short hubProjectID>, the directory
-// config.ProjectMarker.DirName names for the project, or "" when slug or
-// the short project ID is outside its grammar.
-func externalHostStateRoot(slug, hubProjectID string) (string, error) {
-	if !hostStateSlugPattern.MatchString(slug) {
-		return "", nil
+	if configDir == "" {
+		// config resolves a .scion directory with EvalSymlinks; .scion
+		// itself is refused below when it is a symlink.
+		configDir = filepath.Join(resolved, config.DotScion)
 	}
-	marker := config.ProjectMarker{ProjectID: hubProjectID, ProjectSlug: slug}
-	if !hostStateShortIDPattern.MatchString(marker.ShortUUID()) {
-		return "", nil
-	}
-	globalDir, err := config.GetGlobalDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(globalDir, config.ProjectConfigsDir, marker.DirName()), nil
+	return resolved, configDir, nil
 }
 
 // isRealDir reports whether path is a directory and not a symlink.
@@ -168,23 +166,26 @@ func isRealDir(path string) bool {
 // HostStateFile holding t's files-owner run, or an error wrapping
 // errHostStateRootRefused when there is none. The root is derived from
 // t only; the project tree contributes one Lstat of <root>/.scion, and a
-// .scion marker file is read only to check that it agrees:
+// .scion marker file is read only to check that it agrees.
+//
+// The project's slug is api.Slugify(config.GetProjectName(dir)) for the
+// project dir config resolves (see runOwnerProjectRoot), as
+// config.AgentsRootForProject derives it, and the external dir is
+// E = ~/.scion/project-configs/<slug>__<short HubProjectID>; with no
+// HubProjectID, or a slug or ID outside the dir-name grammar
+// (config.ProjectMarker.HasCanonicalDirName), there is no E.
 //
 //   - <root>/.scion is a symlink, missing, or not a file or directory:
 //     refused.
 //   - <root>/.scion is a marker file (a hub-managed or non-git project):
-//     the root is the external dir E =
-//     ~/.scion/project-configs/<slug>__<short HubProjectID>, where slug is
-//     the project's name as config derives it from the project path. The
-//     marker's project ID must equal HubProjectID, its slug must equal
-//     slug, and the path it resolves to must be E/.scion; E and E/.scion
-//     must be real directories. Anything else, or no HubProjectID, is
-//     refused.
+//     the root is E. The marker's project ID must equal HubProjectID and
+//     its slug must equal the slug; E and E/.scion must be real
+//     directories. No E, or anything else, is refused.
 //   - <root>/.scion is a directory and the agent is a shared-workspace
-//     agent (t.SharedWorkspace, or E/.scion/agents/<name> holds a regular
-//     scion-agent.json): the root is E, never the project's own
-//     .scion/agents. No HubProjectID, or an E that is not a real
-//     directory, is refused.
+//     agent (t.SharedWorkspace, or E/.scion/agents/<name>/scion-agent.json
+//     is a regular file, checked with Stat as effectiveSharedWorkspace
+//     does): the root is E, never the project's own .scion/agents. No E,
+//     or an E that is not a real directory, is refused.
 //   - <root>/.scion is a directory otherwise: the root is the project
 //     root. A project-id file inside .scion is not read.
 //
@@ -196,7 +197,7 @@ func HostStateRootFor(t RunOwnerTarget) (string, error) {
 	if err := validateHostStateAgentName(t.AgentName); err != nil {
 		return "", err
 	}
-	root, err := runOwnerProjectRoot(t.ProjectPath)
+	root, configDir, err := runOwnerProjectRoot(t.ProjectPath)
 	if err != nil {
 		return "", err
 	}
@@ -212,18 +213,27 @@ func HostStateRootFor(t RunOwnerTarget) (string, error) {
 		return "", refuseHostStateRoot("%s is not a file or directory", scionPath)
 	}
 
-	slug := config.GetProjectName(scionPath)
-	ext := ""
-	if t.HubProjectID != "" {
-		ext, err = externalHostStateRoot(slug, t.HubProjectID)
+	slug := api.Slugify(config.GetProjectName(configDir))
+	ext, extMissing := "", ""
+	switch {
+	case t.HubProjectID == "":
+		extMissing = "the request has no hub project ID"
+	default:
+		m := config.ProjectMarker{ProjectID: t.HubProjectID, ProjectSlug: slug}
+		if !m.HasCanonicalDirName() {
+			extMissing = fmt.Sprintf("slug %q or hub project ID %q is outside the project-config dir-name grammar", slug, t.HubProjectID)
+			break
+		}
+		globalDir, err := config.GetGlobalDir()
 		if err != nil {
 			return "", refuseHostStateRoot("external root: %v", err)
 		}
+		ext = filepath.Join(globalDir, config.ProjectConfigsDir, m.DirName())
 	}
 
 	if fi.Mode().IsRegular() {
 		if ext == "" {
-			return "", refuseHostStateRoot("%s is a marker and the project has no hub identity", scionPath)
+			return "", refuseHostStateRoot("%s is a marker and %s", scionPath, extMissing)
 		}
 		marker, err := config.ReadProjectMarker(scionPath)
 		if err != nil {
@@ -235,24 +245,27 @@ func HostStateRootFor(t RunOwnerTarget) (string, error) {
 		if marker.ProjectSlug != slug {
 			return "", refuseHostStateRoot("%s names slug %q, want %q", scionPath, marker.ProjectSlug, slug)
 		}
+		// Defense in depth: with the ID and slug equal this cannot differ
+		// today (both paths are built from them); it keeps the marker's
+		// own resolution tied to ext if either derivation changes.
 		resolved, err := marker.ExternalProjectPath()
 		if err != nil || filepath.Clean(resolved) != filepath.Join(ext, config.DotScion) {
 			return "", refuseHostStateRoot("%s does not resolve to %s", scionPath, ext)
 		}
 		if !isRealDir(ext) || !isRealDir(filepath.Join(ext, config.DotScion)) {
-			return "", refuseHostStateRoot("%s is not a real directory", ext)
+			return "", refuseHostStateRoot("%s or its .scion is not a real directory", ext)
 		}
 		return ext, nil
 	}
 
 	shared := t.SharedWorkspace
 	if !shared && ext != "" {
-		sf, err := os.Lstat(filepath.Join(ext, config.DotScion, "agents", t.AgentName, "scion-agent.json"))
+		sf, err := os.Stat(filepath.Join(ext, config.DotScion, "agents", t.AgentName, "scion-agent.json"))
 		shared = err == nil && sf.Mode().IsRegular()
 	}
 	if shared {
 		if ext == "" {
-			return "", refuseHostStateRoot("shared-workspace agent %q has no hub identity", t.AgentName)
+			return "", refuseHostStateRoot("shared-workspace agent %q: %s", t.AgentName, extMissing)
 		}
 		if !isRealDir(ext) {
 			return "", refuseHostStateRoot("%s is not a real directory", ext)
@@ -265,29 +278,58 @@ func HostStateRootFor(t RunOwnerTarget) (string, error) {
 // RecordRunOwner records runID as the run that owns t's files, in
 // HostStateFile. It writes nothing when runID is not a valid run ID or no
 // trusted root can be derived (both return an error), and it is a no-op
-// when the agent's directory does not exist yet (a later provision records
-// the run itself). It never writes agent-info.json.
+// when the agent's directory does not exist yet (Start records before a
+// fresh provision creates it; the provision then records the run itself).
+// It never writes agent-info.json.
 //
 // Callers log a failure and carry on, as they did for the agent-info.json
 // record: the files are then recorded as before (or not at all), and the
 // broker's readers treat a record they cannot read as unknown, keeping the
 // files.
 func RecordRunOwner(t RunOwnerTarget, runID string) error {
-	if runID == "" || runtime.ValidateRunID(runID) != nil {
-		return errInvalidRecordedRunID
-	}
-	root, err := HostStateRootFor(t)
+	root, err := runOwnerRoot(t, runID)
 	if err != nil {
 		return err
 	}
-	err = UpdateHostState(root, t.AgentName, func(hs *HostState) error {
-		hs.RunID = runID
-		return nil
-	})
+	err = writeRunOwner(root, t.AgentName, runID)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	return err
+}
+
+// recordRunOwnerInAgentDir is RecordRunOwner for a caller that holds the
+// agent's dir (Provision, ProvisionAgent): the record must land in
+// agentDir. A root whose agent dir is not agentDir (or a missing agent
+// dir) returns errRunOwnerDirMismatch and writes nothing, so a divergence
+// between HostStateRootFor and the agent-dir resolution is logged by the
+// caller instead of being lost silently.
+func recordRunOwnerInAgentDir(t RunOwnerTarget, agentDir, runID string) error {
+	root, err := runOwnerRoot(t, runID)
+	if err != nil {
+		return err
+	}
+	recordDir := filepath.Join(root, config.DotScion, "agents", t.AgentName)
+	if !sameDir(recordDir, agentDir) {
+		return fmt.Errorf("%w: %s, agent dir %s", errRunOwnerDirMismatch, recordDir, agentDir)
+	}
+	return writeRunOwner(root, t.AgentName, runID)
+}
+
+// runOwnerRoot checks runID and returns t's trusted root.
+func runOwnerRoot(t RunOwnerTarget, runID string) (string, error) {
+	if runID == "" || runtime.ValidateRunID(runID) != nil {
+		return "", errInvalidRecordedRunID
+	}
+	return HostStateRootFor(t)
+}
+
+// writeRunOwner sets HostState.RunID below root.
+func writeRunOwner(root, agentName, runID string) error {
+	return UpdateHostState(root, agentName, func(hs *HostState) error {
+		hs.RunID = runID
+		return nil
+	})
 }
 
 // RecordedRunOwner returns the run recorded as the owner of t's files, or

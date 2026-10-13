@@ -586,8 +586,9 @@ func TestCleanupAbortedLaunch_KeepsFilesOfOtherRun(t *testing.T) {
 	}
 }
 
-// An empty project path resolves the way DeleteAgentFiles resolves it (the
-// broker's working project), so the run check is not skipped for it.
+// An empty project path resolves to the broker's working project (the
+// nearest .scion above the working directory), so the run check is not
+// skipped for it.
 func TestAgentFilesRunOwner_EmptyProjectPathResolvesLikeDelete(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
