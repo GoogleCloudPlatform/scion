@@ -106,7 +106,7 @@ func TestTunnelCLI_PinFlagsDoNotChangeOutcome(t *testing.T) {
 // The flags steer only the hint also when it fires: for an existing agent
 // whose pin differs, the hint is printed with the flags, and the tunnel
 // then fails the same way with and without them (the fake hub has no
-// conduit route, a terminal exit 11 with no retry). The pin file is never
+// tunnel route, a terminal exit 11 with no retry). The pin file is never
 // written.
 func TestTunnelCLI_PinMismatchDoesNotChangeOutcome(t *testing.T) {
 	hub := twoProjectHub(t, "tok")
