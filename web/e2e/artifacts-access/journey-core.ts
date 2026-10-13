@@ -120,6 +120,16 @@ export function errorCode(body: unknown): string | null {
   return typeof b.code === 'string' ? b.code : null;
 }
 
+/** Longest error message kept in a row's evidence. */
+const MAX_ERROR_CHARS = 2000;
+
+/** An error message for the evidence: colour codes removed, length capped. */
+export function fullMessage(message: string): string {
+  // eslint-disable-next-line no-control-regex -- strips terminal colour codes
+  const plain = message.replace(/\u001b\[[0-9;]*m/g, '');
+  return plain.length > MAX_ERROR_CHARS ? `${plain.slice(0, MAX_ERROR_CHARS)}…` : plain;
+}
+
 /** Visible and present: a hidden check must follow a positive anchor. */
 export async function isShown(locator: ReturnType<Page['locator']>): Promise<boolean> {
   return (await locator.count()) > 0 && (await locator.first().isVisible());
@@ -363,13 +373,16 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
       threw = err;
     }
     const generic = spec?.genericError;
+    // A row with a generic error keeps only that text; any other row keeps
+    // each error's full message (Expected/Received, strict-mode notes) for
+    // diagnosis, without terminal colour codes and capped in length.
     const softErrors = info.errors
       .slice(before)
-      .map((e) => (generic ? generic : firstLine(e.message ?? '')));
+      .map((e) => (generic ? generic : fullMessage(e.message ?? '')));
     r.errors.push(...softErrors);
     if (threw) {
       const msg = generic ?? firstLine(threw);
-      r.errors.push(msg);
+      r.errors.push(generic ?? fullMessage(threw instanceof Error ? threw.message : String(threw)));
       if (r.graded) state.hardFailures.push(`${id}: ${msg}`);
     }
     if (threw || softErrors.length > 0) {

@@ -629,6 +629,72 @@ async function readProbe(target: Frame | Page): Promise<Record<string, unknown>>
   throw new Error('probe not done');
 }
 
+/**
+ * Diagnostics of the bundle frame at one leg of a row: how many frame
+ * elements match, the seq the frame's src names against the one expected,
+ * and the text the frame shows for the checked element. Recorded only; it
+ * never decides anything.
+ */
+async function frameDiag(
+  page: Page,
+  selector: string,
+  expectedSeq: number
+): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = {
+    expectedSeq,
+    pagePath: redactPath(new URL(page.url()).pathname),
+  };
+  try {
+    // Every frame element the test's locator matches: the seq its src names.
+    const elements = page.locator(RENDER_SELECTORS.htmlFrame);
+    const count = await elements.count();
+    const srcSeqs: Array<number | null> = [];
+    for (let i = 0; i < count; i++) {
+      const src = await elements.nth(i).getAttribute('src', { timeout: 2_000 });
+      srcSeqs.push(viewInfo(src, bundleId()).viewSeq);
+    }
+    out.matchingFrames = count;
+    out.srcSeqs = srcSeqs;
+    // Every frame on the page showing a view: the seq its URL names and the
+    // text of the checked element in it.
+    const views = page.frames().filter((f) => f.url().includes(VIEW_PREFIX));
+    const frames: Array<Record<string, unknown>> = [];
+    for (const f of views) {
+      const seen = await f
+        .evaluate((sel) => document.querySelector(sel)?.textContent?.trim() ?? null, selector)
+        .catch(() => 'unreadable');
+      const info = viewInfo(f.url(), bundleId());
+      frames.push({ urlSeq: info.viewSeq, entry: info.entry, seen });
+    }
+    out.viewFrames = frames;
+  } catch (err) {
+    out.diagError = firstLine(err);
+  }
+  return out;
+}
+
+/**
+ * The same text check as before (expect toHaveText, default timeout), with
+ * the frame diagnostics recorded for the leg either way.
+ */
+async function expectFrameText(
+  page: Page,
+  r: RowRecord,
+  leg: string,
+  selector: string,
+  want: string,
+  expectedSeq: number
+): Promise<void> {
+  const diags = (r.ui.frameDiag ??= []) as Array<Record<string, unknown>>;
+  try {
+    await expect(htmlFrame(page).locator(selector)).toHaveText(want);
+    diags.push({ leg, want, ok: true, ...(await frameDiag(page, selector, expectedSeq)) });
+  } catch (err) {
+    diags.push({ leg, want, ok: false, ...(await frameDiag(page, selector, expectedSeq)) });
+    throw err;
+  }
+}
+
 /** The current heading of the bundle frame. */
 async function frameHeading(page: Page): Promise<string> {
   return textOf(htmlFrame(page).locator('#ver'));
@@ -1971,7 +2037,7 @@ async function runMain(browser: Browser): Promise<void> {
       await versionMenuItem(page, 2).click();
       await expect(page).toHaveURL(new RegExp(`/artifacts/${bundleId()}/v/2$`));
       await expect(page.locator(SELECTORS.versionMenu)).toContainText('Version v2');
-      await expect(htmlFrame(page).locator('#ver')).toHaveText('R2 bundle v2');
+      await expectFrameText(page, r, 'v2 heading', '#ver', 'R2 bundle v2', 2);
       const v2Label = await textOf(page.locator(SELECTORS.versionMenu));
       const v2Mint = await latestMint('owner', 2, mintsBeforeV2);
       const v2View = viewInfo((await htmlFrameAttributes(page)).src, bundleId());
@@ -1992,12 +2058,12 @@ async function runMain(browser: Browser): Promise<void> {
       await historyViewButton(page, 1).click();
       await expect(page).toHaveURL(new RegExp(`/artifacts/${bundleId()}/v/1$`));
       await tab(page, 'preview').click();
-      await expect(htmlFrame(page).locator('#ver')).toHaveText('R2 bundle v1');
+      await expectFrameText(page, r, 'v1 heading', '#ver', 'R2 bundle v1', 1);
       const v1Label = await textOf(page.locator(SELECTORS.versionMenu));
       const historyAtV1 = await historyRows(page);
       await tab(page, 'preview').click();
       await htmlFrame(page).locator('#to-page2').click();
-      await expect(htmlFrame(page).locator('#page2')).toHaveText('R2 page two v1');
+      await expectFrameText(page, r, 'v1 page2', '#page2', 'R2 page two v1', 1);
       const v1Frame = await bundleFrame(page);
       const v1View = viewInfo(v1Frame.url(), bundleId());
       const v1Files = await filesRows(page);
@@ -2031,9 +2097,9 @@ async function runMain(browser: Browser): Promise<void> {
       await page.locator(SELECTORS.versionMenu).click();
       await versionMenuItem(page, 3).click();
       await expect(page).toHaveURL(new RegExp(`/artifacts/${bundleId()}$`));
-      await expect(htmlFrame(page).locator('#ver')).toHaveText('R2 bundle v3');
+      await expectFrameText(page, r, 'v3 heading', '#ver', 'R2 bundle v3', 3);
       await htmlFrame(page).locator('#to-page2').click();
-      await expect(htmlFrame(page).locator('#page2')).toHaveText('R2 page two v3');
+      await expectFrameText(page, r, 'v3 page2', '#page2', 'R2 page two v3', 3);
       const v3Files = await filesRows(page);
       const v3Paths = v3Files.rows.map((x) => x.path);
       r.ui.v3 = { heading: 'R2 bundle v3', page2: 'R2 page two v3', files: v3Paths };
@@ -2222,11 +2288,11 @@ async function runMain(browser: Browser): Promise<void> {
       await historyViewButton(page, 1).click();
       await expect(page).toHaveURL(new RegExp(`/artifacts/${bundleId()}/v/1$`));
       await tab(page, 'preview').click();
-      await expect(htmlFrame(page).locator('#ver')).toHaveText('R2 bundle v1');
+      await expectFrameText(page, r, 'v1 heading', '#ver', 'R2 bundle v1', 1);
       r.ui.v1Label = await textOf(page.locator(SELECTORS.versionMenu));
       expect.soft(String(r.ui.v1Label), 'v1 label').toContain('Version v1');
       await htmlFrame(page).locator('#to-page2').click();
-      await expect(htmlFrame(page).locator('#page2')).toHaveText('R2 page two v1');
+      await expectFrameText(page, r, 'v1 page2', '#page2', 'R2 page two v1', 1);
       r.ui.v1Page2 = 'R2 page two v1';
       const versions = await j.api(
         'member',
