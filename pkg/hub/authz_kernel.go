@@ -71,6 +71,12 @@ type RolePermissions struct {
 
 	// Permissions is the set of canonical permission IDs this role grants.
 	Permissions map[string]struct{}
+
+	// ConfersMembership reports whether a project-scoped binding of this
+	// role makes its principal a project member
+	// (store.RoleDefinition.ConfersProjectMembership). It does not affect
+	// which permissions the role grants.
+	ConfersMembership bool
 }
 
 // HasPermission returns true if the role contains the given permission ID.
@@ -82,17 +88,19 @@ func (rp *RolePermissions) HasPermission(permissionID string) bool {
 	return ok
 }
 
-// NewRolePermissions constructs a RolePermissions from a list of permission IDs.
+// NewRolePermissions constructs a RolePermissions from a list of permission
+// IDs. ConfersMembership is true, the role definition default.
 func NewRolePermissions(roleID, roleName, scopeType string, perms []string) *RolePermissions {
 	m := make(map[string]struct{}, len(perms))
 	for _, p := range perms {
 		m[p] = struct{}{}
 	}
 	return &RolePermissions{
-		RoleID:      roleID,
-		RoleName:    roleName,
-		ScopeType:   scopeType,
-		Permissions: m,
+		RoleID:            roleID,
+		RoleName:          roleName,
+		ScopeType:         scopeType,
+		Permissions:       m,
+		ConfersMembership: true,
 	}
 }
 
