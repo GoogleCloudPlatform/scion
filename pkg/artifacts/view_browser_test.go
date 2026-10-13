@@ -88,8 +88,8 @@ const (
 	browserDialTimeout  = 20 * time.Second
 	browserStartTimeout = browserWSURLTimeout + browserDialTimeout
 	// browserAttemptTimeout bounds one attempt: a browser start, then the
-	// page (whose probe reports within probeReportDeadline).
-	browserAttemptTimeout = 100 * time.Second
+	// page, whose probe reports within probeReportDeadline, with a margin.
+	browserAttemptTimeout = browserStartTimeout + probeReportDeadline + 10*time.Second
 	// browserProbeTimeout is the overall limit for one page load. It fits a
 	// failed start plus a full retry attempt.
 	browserProbeTimeout = browserStartTimeout + browserAttemptTimeout
@@ -103,7 +103,7 @@ func isBrowserStartError(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "websocket url timeout reached") ||
-		strings.HasPrefix(msg, "could not dial ")
+		strings.Contains(msg, "could not dial ")
 }
 
 // browserDOM runs run with a deadline of attempt, and runs it once more,
@@ -238,15 +238,12 @@ func TestBrowserDOMNoRetryAfterOverallDeadline(t *testing.T) {
 	}
 }
 
-// TestBrowserProbeTimeoutFitsRetry: the overall limit covers a failed start
-// followed by a full retry attempt, and an attempt leaves the page time to
-// report after a slow start.
+// TestBrowserProbeTimeoutFitsRetry: an attempt leaves the page time to
+// report after the slowest start that still succeeds.
 func TestBrowserProbeTimeoutFitsRetry(t *testing.T) {
-	if browserProbeTimeout < browserStartTimeout+browserAttemptTimeout {
-		t.Errorf("overall %v < start %v + attempt %v", browserProbeTimeout, browserStartTimeout, browserAttemptTimeout)
-	}
-	if browserAttemptTimeout <= browserStartTimeout {
-		t.Errorf("attempt %v leaves no time after a start of %v", browserAttemptTimeout, browserStartTimeout)
+	if browserAttemptTimeout < browserStartTimeout+probeReportDeadline {
+		t.Errorf("attempt %v < start %v + probe report deadline %v",
+			browserAttemptTimeout, browserStartTimeout, probeReportDeadline)
 	}
 }
 
