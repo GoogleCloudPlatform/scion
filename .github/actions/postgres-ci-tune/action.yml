@@ -1,0 +1,64 @@
+# Turns off Postgres durability in a CI service container: fsync,
+# synchronous_commit and full_page_writes (ptone/scion#4251, option D).
+# The service's data directory is also on tmpfs (see the service options in
+# each job). CI databases are thrown away with the job, so crash safety buys
+# nothing there, and the test workload is DDL-heavy (a schema is created,
+# migrated and dropped per test), so commit and checkpoint fsyncs are a real
+# share of its time. Query results and transaction semantics do not change:
+# these settings only decide when data reaches the disk.
+#
+# GitHub Actions services cannot take a container command (so no
+# `postgres -c fsync=off`). All three settings are reloadable without a
+# restart, so they are set with ALTER SYSTEM and pg_reload_conf(), then
+# checked; the step fails if they did not take effect.
+#
+# Use it as the first step after checkout, before any test touches the
+# database:
+#   - uses: ./.github/actions/postgres-ci-tune
+#     with:
+#       container: ${{ job.services.postgres.id }}
+name: Tune CI Postgres
+description: Turn off fsync, synchronous_commit and full_page_writes in a throwaway CI Postgres service container.
+inputs:
+  container:
+    description: The Postgres service container ID (job.services.<name>.id).
+    required: true
+  user:
+    description: A superuser of the service (its POSTGRES_USER).
+    required: false
+    default: postgres
+  database:
+    description: A database to connect to (its POSTGRES_DB).
+    required: false
+    default: postgres
+runs:
+  using: composite
+  steps:
+    - name: Turn off Postgres durability (CI only)
+      shell: bash
+      env:
+        PG_CONTAINER: ${{ inputs.container }}
+        PG_USER: ${{ inputs.user }}
+        PG_DB: ${{ inputs.database }}
+      run: |
+        set -euo pipefail
+        psql() { docker exec "$PG_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U "$PG_USER" -d "$PG_DB" "$@"; }
+        # ALTER SYSTEM cannot run in a transaction block; psql runs each -c
+        # on its own.
+        psql -c "ALTER SYSTEM SET fsync = off" \
+          -c "ALTER SYSTEM SET synchronous_commit = off" \
+          -c "ALTER SYSTEM SET full_page_writes = off" \
+          -c "SELECT pg_reload_conf()"
+        # pg_reload_conf() only signals the server; wait for the reload.
+        query="SELECT count(*) FROM pg_settings WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes') AND setting = 'off'"
+        for _ in $(seq 1 20); do
+          if [ "$(psql -Atc "$query")" = 3 ]; then
+            psql -Atc "SELECT name || ' = ' || setting FROM pg_settings WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes') ORDER BY name"
+            docker exec "$PG_CONTAINER" sh -c 'df -h "$PGDATA"'
+            exit 0
+          fi
+          sleep 0.5
+        done
+        echo "::error title=Tune CI Postgres::fsync, synchronous_commit and full_page_writes are not all off after pg_reload_conf()"
+        psql -Atc "SELECT name || ' = ' || setting FROM pg_settings WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes') ORDER BY name"
+        exit 1
