@@ -2452,7 +2452,9 @@ type NotificationStore interface {
 
 	// RecordNotificationDispatchAttempt atomically increments a
 	// notification's DispatchAttempts by one. Callers record an attempt just
-	// before each delivery attempt to a subscriber agent.
+	// before each delivery attempt to a subscriber agent; one attempt is one
+	// dispatchWithBrokerRetry call in pkg/hub, whose internal deferred-retry
+	// loop is not counted separately.
 	// Returns ErrNotFound if the notification doesn't exist.
 	RecordNotificationDispatchAttempt(ctx context.Context, id string) error
 

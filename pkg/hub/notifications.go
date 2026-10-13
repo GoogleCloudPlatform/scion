@@ -496,6 +496,8 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 		nd.messageLog.Debug("notification message dispatched", logAttrs...)
 	}
 
+	// setOutcome also sets dispatched=true; MarkNotificationDispatched is kept
+	// because it is what broadcasts the dispatched event to other replicas.
 	if err := nd.store.MarkNotificationDispatched(ctx, notif.ID); err != nil {
 		nd.log.Error("Failed to mark notification dispatched", "notificationID", notif.ID, "error", err)
 	}

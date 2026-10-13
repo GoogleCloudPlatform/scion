@@ -112,6 +112,11 @@ func TestRetryDispatch_AlreadyClaimed(t *testing.T) {
 
 	// No dispatch call should have been made
 	assert.Empty(t, env.dispatcher.getCalls())
+	// The lost claim attempted nothing, so nothing is counted, and the other
+	// caller's claim is left alone (ptone/scion#4800).
+	n := getNotification(t, env, notifs[0].ID)
+	assert.Zero(t, n.DispatchAttempts, "a retry that loses the claim must not count an attempt")
+	assert.Empty(t, n.DispatchOutcome)
 }
 
 func TestRetryDispatch_NoBroker_Reverts(t *testing.T) {
@@ -920,4 +925,55 @@ func TestSweepHandler_CountsAttemptsUntilDelivered(t *testing.T) {
 	assert.True(t, n.Dispatched)
 	assert.Equal(t, store.NotificationOutcomeDelivered, n.DispatchOutcome)
 	assert.Equal(t, 2, n.DispatchAttempts)
+}
+
+// A notification whose subscription is gone is given up and stored as failed,
+// with no attempt counted (ptone/scion#4800).
+func TestRetryDispatch_SubscriptionDeleted_RecordsFailedOutcome(t *testing.T) {
+	env := setupRetryTest(t)
+	ctx := context.Background()
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	require.NoError(t, env.store.DeleteNotificationSubscription(ctx, env.sub.ID))
+
+	env.nd.RetryDispatch(ctx, &notifs[0])
+
+	assert.Empty(t, env.dispatcher.getCalls())
+	n := getNotification(t, env, notifs[0].ID)
+	assert.True(t, n.Dispatched, "a notification whose subscription is gone stays claimed")
+	assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome)
+	assert.Zero(t, n.DispatchAttempts, "no delivery was attempted")
+}
+
+// The failed outcome of an exhausted notification is still recorded when the
+// caller's deadline ends the attempt: the outcome write does not run on the
+// expired caller context (ptone/scion#4800).
+func TestRetryDispatch_ExhaustedOutcomeSurvivesExpiredParentContext(t *testing.T) {
+	setRetryAttemptTimeout(t, 5*time.Second)
+
+	env := setupNotificationTest(t)
+	env.dispatcher.setReturnErr(ErrMessageDeferred)
+	notifID := createUndispatchedNotification(t, env, env.sub, notificationRetryMaxAge+time.Hour)
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(context.Background(), "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+	require.Equal(t, notifID, notifs[0].ID)
+
+	// The parent deadline (well before the 5s attempt timeout) ends the
+	// attempt, so the outcome write runs after the parent context expired.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	env.nd.RetryDispatch(ctx, &notifs[0])
+	require.Error(t, ctx.Err(), "the parent context must have expired during the attempt")
+
+	require.NotEmpty(t, env.dispatcher.getCalls())
+	n := getNotification(t, env, notifID)
+	assert.True(t, n.Dispatched, "a given-up notification stays claimed")
+	assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome,
+		"the failed outcome must be recorded even after the caller's deadline")
+	assert.Equal(t, 1, n.DispatchAttempts)
 }
