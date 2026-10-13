@@ -56,6 +56,7 @@ import {
   formatBytes,
   isInlineType,
   isRemoteFile,
+  listGrants,
   listVersions,
   mintView,
   parseArtifactPagePath,
@@ -197,6 +198,12 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private shareOpen = false;
   /** The Move dialog is open (ptone/scion#4583). */
   @state() private moveOpen = false;
+  /**
+   * The hub's cross-project sharing setting, from the grants response (read
+   * only for a caller who manages the artifact). The hub refuses every move
+   * while it is off, so Move… is offered only while it is on.
+   */
+  @state() private crossProjectSharing = false;
   /** The version a failed Edit publish left pending; the next attempt resumes it. */
   private editPending: PendingPublish | null = null;
   @state() private reviewing = false;
@@ -531,6 +538,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.view = null;
     this.viewError = null;
     this.viewExpired = false;
+    this.crossProjectSharing = false;
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
     try {
@@ -551,6 +559,7 @@ export class ScionPageArtifactDetail extends LitElement {
       this.entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
       this.resolveNames();
       void this.loadVersions(0, gen);
+      if (data.canManage) void this.loadCrossProjectSharing(gen);
       const kind = this.entry ? rendererFor(this.entry.mediaType) : 'download';
       if ((kind === 'markdown' || kind === 'text') && this.entry) {
         if (this.entry.size <= MAX_INLINE_TEXT_BYTES) {
@@ -1084,6 +1093,16 @@ export class ScionPageArtifactDetail extends LitElement {
     `;
   }
 
+  /** Reads whether cross-project sharing is on; any failure leaves it off. */
+  private async loadCrossProjectSharing(gen: number): Promise<void> {
+    try {
+      const { crossProjectSharing } = await listGrants(this.artifactId);
+      if (gen === this.loadGen) this.crossProjectSharing = crossProjectSharing;
+    } catch {
+      // Move… stays hidden; the Share dialog reports its own load errors.
+    }
+  }
+
   /** After a move the artifact lives under its new home project: open it there. */
   private onMoved(moved: Artifact): void {
     this.moveOpen = false;
@@ -1194,7 +1213,7 @@ export class ScionPageArtifactDetail extends LitElement {
                         Grant review access
                       </sl-button>`
                     : nothing}
-                ${this.data!.canManage
+                ${this.data!.canManage && this.crossProjectSharing
                   ? html`<sl-button
                       size="small"
                       @click=${(): void => {

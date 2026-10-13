@@ -914,7 +914,7 @@ export class ScionArtifactShareDialog extends LitElement {
           ? html`<small>Cross-project sharing is on for this hub</small>`
           : nothing}
         ${locked
-          ? html`<small class="locked-hint"
+          ? html`<small
               >Cross-project sharing is off: this grant can be removed but not changed</small
             >`
           : nothing}

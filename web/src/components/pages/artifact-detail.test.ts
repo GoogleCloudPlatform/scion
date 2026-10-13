@@ -69,6 +69,8 @@ interface MockOptions {
   agentStatus?: number;
   /** Versions listed by GET .../versions (default: meta's version). */
   versions?: ArtifactVersion[];
+  /** crossProjectSharing in GET .../grants (default: off). */
+  crossProjectSharing?: boolean;
   /** Discarded versions listed by GET .../versions (default: none). */
   discarded?: DiscardedVersion[];
   /**
@@ -108,6 +110,10 @@ function mockFetch(
         return Promise.resolve(
           opts.write ? opts.write(method, url) : new Response(null, { status: 500 })
         );
+      }
+      if (url.endsWith('/grants')) {
+        const grants = { grants: [], crossProjectSharing: !!opts.crossProjectSharing };
+        return Promise.resolve(new Response(JSON.stringify(grants), { status: 200 }));
       }
       if (url.startsWith('/api/v1/agents/')) {
         const status = opts.agentStatus ?? 404;
@@ -252,7 +258,7 @@ describe('artifact page', () => {
     expect(open.getAttribute('rel')).toBe('noopener noreferrer');
   });
 
-  it('offers Move… to a caller who manages the artifact, and opens it at its new home after a move', async () => {
+  it('offers Move… only while cross-project sharing is on, and opens the moved artifact', async () => {
     const moveButton = (el: ScionPageArtifactDetail): HTMLElement | undefined =>
       Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
         b.textContent!.includes('Move…')
@@ -265,7 +271,16 @@ describe('artifact page', () => {
     document.body.innerHTML = '';
     vi.unstubAllGlobals();
 
+    // The hub refuses every move while cross-project sharing is off.
     mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true });
+    el = await mount(true);
+    expect(moveButton(el)).toBeUndefined();
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+
+    mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true }, '# Hello', {
+      crossProjectSharing: true,
+    });
     el = await mount(true);
     const dialog = el.shadowRoot!.querySelector('scion-artifact-move-dialog') as HTMLElement & {
       open: boolean;
