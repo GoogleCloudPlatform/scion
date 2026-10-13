@@ -250,7 +250,7 @@ func TestFederationPeerUserToken_RefusedWithoutAcceptUserTokens(t *testing.T) {
 	assertPeerTokRefused(t, f, token)
 }
 
-// A user-kind token carrying any agent claim claims both kinds and is
+// A user-kind credential carrying any agent claim claims both kinds and is
 // refused.
 func TestFederationPeerUserToken_AgentClaimsRefused(t *testing.T) {
 	f := newPeerTokFixture(t, nil)
@@ -317,7 +317,7 @@ func TestFederationPeerUserToken_AllowedEmailsAndDomains(t *testing.T) {
 		assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-in", "in@corp.com")), "sub-in", "in@corp.com")
 		assertPeerTokRefused(t, f, f.signAsPeer(t, peerUserClaims("sub-out", "out@other.example")))
 	})
-	t.Run("agent constraints do not apply to user tokens", func(t *testing.T) {
+	t.Run("agent constraints do not apply to user access credentials", func(t *testing.T) {
 		f := newPeerTokFixture(t, func(c *config.TrustedIssuerConfig) {
 			c.AllowedProjects = []string{"project-alpha"}
 			c.AllowedRootUsers = []string{"user:alice"}

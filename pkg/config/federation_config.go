@@ -292,7 +292,7 @@ func (c *FederationConfig) Validate() []error {
 			}
 		}
 
-		// Rule 12: AcceptUserTokens selects how a hub issuer's tokens are
+		// Rule 12: AcceptUserTokens selects how a hub issuer's credentials are
 		// read (pkg/hub/federation_auth.go); no other issuer type reads it,
 		// so setting it there is rejected rather than silently ignored.
 		if isNonHub && issuer.AcceptUserTokens {

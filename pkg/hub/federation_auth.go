@@ -84,7 +84,7 @@ type federationClaims struct {
 type FederationAuthOptions struct {
 	// AcceptHubUserTokens is true when this hub accepts user access
 	// credentials from peer hubs at all (the federation.project_visitors
-	// experiment). When false, a hub issuer's user-kind token is refused
+	// experiment). When false, a hub issuer's user-kind credential is refused
 	// whatever the issuer's accept_user_tokens says.
 	AcceptHubUserTokens bool
 }
@@ -251,7 +251,7 @@ func (a *FederationAuthenticator) IssuerConfig(issuerURL string) (config.Trusted
 }
 
 // Authenticate validates a federation OIDC identity token and returns the
-// authenticated FederatedIdentity on success. It refuses user-kind tokens
+// authenticated FederatedIdentity on success. It refuses user-kind credentials
 // from hub issuers; AuthenticateWithOptions can accept them.
 func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIdentity, error) {
 	return a.AuthenticateWithOptions(tokenString, FederationAuthOptions{})
@@ -429,7 +429,7 @@ func extractHubTokenIdentity(claims *federationClaims, issuerCfg config.TrustedI
 		return extractHubClaims(claims, issuerCfg, scopes)
 	case tokenKindUser:
 		if !opts.AcceptHubUserTokens {
-			return nil, fmt.Errorf("federation: user tokens from hub issuers are not accepted")
+			return nil, fmt.Errorf("federation: user access credentials from hub issuers are not accepted")
 		}
 		if !issuerCfg.AcceptUserTokens {
 			return nil, fmt.Errorf("federation: issuer %q does not have accept_user_tokens", claims.Issuer)
@@ -455,16 +455,16 @@ func hasHubAgentClaims(claims *federationClaims) bool {
 // "viewer", as for a user issuer without a default_role.
 func extractHubUserClaims(claims *federationClaims, issuerCfg config.TrustedIssuerConfig) (FederatedIdentity, error) {
 	if hasHubAgentClaims(claims) {
-		return nil, fmt.Errorf("federation: user token carries agent claims")
+		return nil, fmt.Errorf("federation: user access credential carries agent claims")
 	}
 	if claims.Subject == "" {
-		return nil, fmt.Errorf("federation: user token missing sub claim")
+		return nil, fmt.Errorf("federation: user access credential missing sub claim")
 	}
 	if claims.Email == "" {
-		return nil, fmt.Errorf("federation: user token missing email claim")
+		return nil, fmt.Errorf("federation: user access credential missing email claim")
 	}
 	if !claims.EmailVerified {
-		return nil, fmt.Errorf("federation: user token email is not verified")
+		return nil, fmt.Errorf("federation: user access credential email is not verified")
 	}
 	if len(issuerCfg.AllowedEmails) > 0 && !matchesAllowedEmails(issuerCfg.AllowedEmails, claims.Email) {
 		return nil, fmt.Errorf("federation: email %q not in allowed_emails", claims.Email)
