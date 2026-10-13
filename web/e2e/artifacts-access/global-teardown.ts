@@ -17,7 +17,7 @@
 import { stopHub } from '../harness/hub.js';
 import { isRemoteTarget, removeStateDir, stateFile } from './state.js';
 
-async function globalTeardown(): Promise<void> {
+function globalTeardown(): void {
   if (isRemoteTarget()) return;
   stopHub(stateFile());
   removeStateDir();

@@ -231,6 +231,16 @@ function resolveTarget(): JourneyTarget {
   return { mode: 'local', baseURL: hub.baseURL, hub };
 }
 
+/** A response body as JSON, or null when it is empty or not JSON. */
+function parseJson(text: string): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 function errorCode(body: unknown): string | null {
   const b = (body ?? {}) as { error?: { code?: unknown } | string; code?: unknown };
   if (b.error && typeof b.error === 'object' && typeof b.error.code === 'string') {
@@ -252,13 +262,7 @@ async function api(
     ...(data !== undefined ? { data } : {}),
     maxRedirects: 0,
   });
-  const text = await res.text();
-  let body: unknown = null;
-  try {
-    body = text ? JSON.parse(text) : null;
-  } catch {
-    body = null;
-  }
+  const body = parseJson(await res.text());
   await res.dispose();
   const out = { status: res.status(), code: errorCode(body), body };
   rec?.api.push({
@@ -293,13 +297,7 @@ async function adminRequest(
     },
     ...(data !== undefined ? { body: JSON.stringify(data) } : {}),
   });
-  const text = await res.text();
-  let body: unknown = null;
-  try {
-    body = text ? JSON.parse(text) : null;
-  } catch {
-    body = null;
-  }
+  const body = parseJson(await res.text());
   return { status: res.status, body };
 }
 
@@ -359,7 +357,7 @@ async function row(
   id: string,
   role: string,
   title: string,
-  fn: (r: RowRecord) => Promise<void>,
+  fn: (r: RowRecord) => Promise<void> | void,
   opts: { requires?: string[]; graded?: boolean } = {}
 ): Promise<boolean> {
   const r = rowRecord(id, role, title, opts.graded ?? true);
@@ -817,7 +815,7 @@ test.describe.serial('artifact access per role (R1)', () => {
       if (!cliHub) {
         notRun([offRows[2]], 'remote target: no local CLI');
       } else {
-        await row(offRows[2][0], offRows[2][1], offRows[2][2], async (r) => {
+        await row(offRows[2][0], offRows[2][1], offRows[2][2], (r) => {
           const hub = cliHub;
           let exit: string;
           let hint = '';
@@ -1161,15 +1159,13 @@ test.describe.serial('artifact access per role (R1)', () => {
         const outsider = who('outsider');
         const res = await searchPeople(outsider.email);
         const inAnswer = res.ids.includes(outsider.id);
-        let suggested = false;
-        if (inAnswer) {
-          suggested = await shareSuggestion(ownerPage, outsider.email)
-            .waitFor({ state: 'visible', timeout: 5_000 })
-            .then(() => true)
-            .catch(() => false);
-        } else {
-          suggested = (await shareSuggestion(ownerPage, outsider.email).count()) > 0;
-        }
+        // In the answer: wait for the suggestion to render; otherwise read it once.
+        const suggested = inAnswer
+          ? await shareSuggestion(ownerPage, outsider.email)
+              .waitFor({ state: 'visible', timeout: 5_000 })
+              .then(() => true)
+              .catch(() => false)
+          : (await shareSuggestion(ownerPage, outsider.email).count()) > 0;
         const observation = {
           searchStatus: res.status,
           outsiderInAnswer: inAnswer,
