@@ -18,6 +18,10 @@ package hub
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
 	"net/http"
 	"strings"
 	"testing"
@@ -133,45 +137,6 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "inbox.conversation.create", Method: "POST", Pattern: "/api/v1/conversations/"}:                                "the pattern ends in a slash, so the suffixed path has an empty segment (\"//\"), which the server mux answers with a 307 redirect to the cleaned path before any handler runs",
 	{OperationID: "inbox.conversation.direct.read", Method: "GET", Pattern: "/api/v1/conversations/{id}/messages"}:               "a suffix on the messages collection is the messages/{messageId} route; handleGetConversationMessage checks the direct conversation's key before it looks the message up, and the dev caller is not named in the key, so it answers 403 on any message ID",
 	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                                  "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
-	{OperationID: "user.read", Method: "GET", Pattern: "/api/v1/users/{id}"}:                                                     "handleUserByID (handlers_users_core.go) only special-cases the \"revoke-sessions\" suffix; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
-	{OperationID: "user.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                                 "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
-	{OperationID: "user.admin.delete", Method: "DELETE", Pattern: "/api/v1/users/{id}"}:                                          "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
-	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets/{key}"}:                                                "handleSecretByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' after the prefix and discards the suffix, so the request proceeds on the bare key; with no secret backend configured in testServer, getSecret then panics on a nil backend, recovered as a 500 — not a 404/405, but unrelated to the suffix, which the truncation already removed",
-	{OperationID: "secret.write", Method: "PUT", Pattern: "/api/v1/secrets/{key}"}:                                               "extractID truncates the suffix the same way as secret.read above, but setSecret checks the request body's value field before ever touching the secret backend; this test's generic empty PUT body always fails that check with 400 \"value is required\", the same 400 the bare path gets",
-	{OperationID: "secret.write", Method: "DELETE", Pattern: "/api/v1/secrets/{key}"}:                                            "extractID truncates the suffix the same way as secret.read above; deleteSecret then panics on a nil secret backend the same way getSecret does, recovered as a 500",
-	{OperationID: "hub.githubapp.update", Method: "PUT", Pattern: "/api/v1/github-app/installations/{id}"}:                       "parseInstallationIDFromPath (handlers_github_app.go) runs strconv.ParseInt on the entire remainder of the path, not just a leading segment, so a suffix makes parsing fail; the handler answers 400 \"invalid installation ID\", rejecting the suffix rather than ignoring it",
-	{OperationID: "hub.githubapp.update", Method: "DELETE", Pattern: "/api/v1/github-app/installations/{id}"}:                    "same as the PUT installations/{id} entry above",
-	{OperationID: "hub.githubapp.read", Method: "GET", Pattern: "/api/v1/github-app/installations/{id}"}:                         "same as the PUT installations/{id} entry above",
-	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/entitlements/{id}"}:                                       "handleAdminEntitlementByID (handlers_quota.go) extracts the ID with extractID, which truncates at the first '/' after the prefix and discards the suffix, so the request proceeds on the real, un-suffixed ID and returns the entitlement (200) exactly as if the suffix were absent",
-	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/entitlements/{id}"}:                                     "same truncation as the GET entitlements/{id} entry above; this test's generic empty PUT body then fails updateEntitlement's validation with 400 before the (correctly extracted) ID is used for anything — the same 400 the bare path gets",
-	{OperationID: "quota.delete", Method: "DELETE", Pattern: "/api/v1/admin/entitlements/{id}"}:                                  "same truncation as the GET entitlements/{id} entry above; deleteEntitlement then deletes the real, un-suffixed entitlement (204) exactly as if the suffix were absent",
-	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/limits/{id}"}:                                             "handleAdminLimitByID (handlers_quota.go) splits on the first '/' and only special-cases a second segment of exactly \"entitlements\"; any other suffix is silently discarded, and the request proceeds on the real, un-suffixed ID",
-	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/limits/{id}"}:                                           "handleAdminLimitByID discards the suffix the same way as quota.read above; with a valid update body (see bodyOverrides) updateLimitDefinition succeeds on the real, un-suffixed ID and returns 200 exactly as if the suffix were absent",
-	{OperationID: "quota.delete", Method: "DELETE", Pattern: "/api/v1/admin/limits/{id}"}:                                        "handleAdminLimitByID discards the suffix the same way as quota.read above; deleteLimitDefinition then fails deleting a limit this test's fixture entitlement still references, mapped to 400 — the same 400 happens on the bare path, independent of the suffix",
-	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets"}:                                                      "the by-key route \"/api/v1/secrets/\" registers as a prefix, so a suffix on this bare collection route falls through to handleSecretByKey with the suffix as the key; getSecret then panics on a nil secret backend, recovered as a 500",
-	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks"}:                            "the by-ID route \"/api/v1/admin/lifecycle-hooks/\" registers as a prefix, so a suffix on this bare collection route falls through to handleAdminLifecycleHookByID with the suffix as the ID; getLifecycleHook then 400s failing to parse it as a UUID",
-	{OperationID: "hub.githubapp.read", Method: "GET", Pattern: "/api/v1/github-app/installations"}:                              "the by-ID route \"/api/v1/github-app/installations/\" registers as a prefix, so a suffix on this bare collection route falls through to handleGitHubAppInstallationByIDRead with the suffix as the ID; parseInstallationIDFromPath then 400s \"invalid installation ID\" failing to parse it as an integer",
-	{OperationID: "agent.stopall", Method: "POST", Pattern: "/api/v1/agents/stop-all"}:                                           "handleAgentByID checks id == \"stop-all\" before it looks at anything after that segment, so a suffix is silently ignored and stop-all runs exactly as it would on the bare path",
-	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/usage/{limit}"}:                                           "handleAdminUsageByLimit (handlers_quota.go) extracts limitID with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches the lookup",
-	{OperationID: "role.binding.read", Method: "GET", Pattern: "/api/v1/admin/role-bindings/user/{userId}"}:                      "handleAdminRoleBindingByID's \"user/\" branch (handlers_roles.go) takes the entire remaining path as the user ID with no further splitting; a nonexistent literal ID, suffixed or not, just returns an empty binding list (200), never a 404",
-	{OperationID: "env.read", Method: "GET", Pattern: "/api/v1/env/{key}"}:                                                       "handleEnvVarByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches the lookup",
-	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                       "handleAdminLifecycleHookByID (handlers_lifecycle_hooks.go) extracts the ID with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches getLifecycleHook's lookup",
-	{OperationID: "group.member.remove", Method: "DELETE", Pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}"}:       "handleGroupMemberByID (handlers_groups.go) splits memberPath into at most two parts, so a trailing suffix is appended onto memberID as one string rather than forming a separate segment; the resulting lookup fails with 400, not a routing 404",
-	{OperationID: "hub.config.update", Method: "DELETE", Pattern: "/api/v1/admin/server-config/sections/{id}"}:                   "handleAdminServerConfigSectionReset (admin_settings.go) requires OperationalSettings and 400s \"Section reset requires DB-backed operational settings\" before it ever parses the section name from the path; testServer wires no OperationalSettings, so the same 400 happens on the bare path, independent of the suffix",
-	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/operations/{id}/run"}:           "handleAdminMaintenanceOps (admin_maintenance.go) splits the sub-path into at most three parts, so a fourth segment is absorbed into the \"run\" branch's own remainder rather than changing dispatch; combined with this entry's deliberate cross-category key (see patternOverrides), the resulting 400 is the same category-mismatch rejection as the bare path",
-	{OperationID: "hub.metrics.read", Method: "GET", Pattern: "/api/v1/metrics/{name}"}:                                          "the metrics dashboard is not configured in testServer (no telemetry project ID); the resulting pre-dispatch 503 fires before path structure is examined, the same limitation the positive check documents in the test's doc comment",
-	{OperationID: "chat.access", Method: "GET", Pattern: "/api/v1/chat/attachments/{id}"}:                                        "handleAttachmentDownload needs an attachment storage backend testServer does not configure; the resulting pre-dispatch 503 fires regardless of the suffix",
-	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                          "proxyAgentPort forwards the entire remaining path as part of the proxied request, with no path-based routing at all — the same design already excluded from the control check above",
-	{OperationID: "agent.portaccess", Method: "POST", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                         "same as the GET .../proxy suffix entry above",
-	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                          "same as the GET .../proxy suffix entry above",
-	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                       "same as the GET .../proxy suffix entry above",
-	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:                "same as the GET .../proxy suffix entry above",
-	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets"}:                                 "handleAgentSecrets (handlers_env_secrets.go) answers 501 when no secrets backend is configured, before it looks at the key; testServer configures no secrets backend, so a suffixed path gets the same 501 as the bare one",
-	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                           "same as the GET .../secrets suffix entry above",
-	{OperationID: "agent.secrets.access", Method: "PUT", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                           "same as the GET .../secrets suffix entry above",
-	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies"}:                                            "the by-ID route \"/api/v1/policies/\" registers as a prefix, so a suffix on this bare collection route reaches handlePolicyRoutes, which answers 410 Gone for every sub-path by design",
-	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies/{id}"}:                                       "handlePolicyRoutes (handlers_policies.go) answers 410 Gone for every sub-path by design, so a suffixed path gets the same 410 as the bare one",
-	{OperationID: "user.admin.invite", Method: "GET", Pattern: "/api/v1/admin/invites/{id}"}:                                     "handleAdminInviteByID (admin_invites.go:65-96) special-cases only a second segment of \"revoke\"; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
 	{OperationID: "project.workspace.read", Method: "GET", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                          "the WebDAV handler takes the whole remaining path as the workspace resource path, so a trailing segment names a deeper resource rather than an undeclared route",
 	{OperationID: "project.workspace.read", Method: "HEAD", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                         "same as the WebDAV GET suffix entry above",
 	{OperationID: "project.workspace.read", Method: "OPTIONS", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                      "same as the WebDAV GET suffix entry above",
@@ -199,9 +164,6 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "project.secret.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/secrets/{key}"}:                      "same as the secrets GET by-key suffix entry above: the nil secret backend panics, recovered as a 500",
 	{OperationID: "project.metrics.read", Method: "GET", Pattern: "/api/v1/projects/{id}/metrics/summary"}:                       "a suffix on metrics/summary falls through to the metrics dashboard branch, which accepts any metrics/... path and answers 503 because testServer configures no telemetry project",
 	{OperationID: "project.metrics.read", Method: "GET", Pattern: "/api/v1/projects/{id}/metrics"}:                               "handleProjectMetricsDashboard accepts any metrics/... path and answers 503 because testServer configures no telemetry project, before path structure is examined",
-	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                                  "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
-	{OperationID: "hub.lifecyclehooks.update", Method: "PUT", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                     "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so the update runs on the real ID; its result (409 for the empty body's version check) is the same as on the bare path",
-	{OperationID: "hub.lifecyclehooks.update", Method: "DELETE", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                  "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so a suffixed DELETE would delete the real hook (204) exactly as the bare path does, and leave the positive check nothing to delete",
 	{OperationID: "hub.integrations.read", Method: "GET", Pattern: "/api/v1/admin/integrations/{name}/health"}:                   "handleAdminIntegrationByName (handlers_integrations.go) splits the sub-path into at most three parts and the health branch ignores the third, so a suffix reaches the same health check as the bare path",
 	{OperationID: "hub.integrations.read", Method: "GET", Pattern: "/api/v1/admin/integrations/{name}/update/{id}"}:              "handleAdminIntegrationByName splits the sub-path into at most three parts, so the suffix joins the update ID as one string and the status lookup answers for that ID instead of a routing 404",
 	{OperationID: "hub.integrations.update", Method: "PUT", Pattern: "/api/v1/admin/integrations/{name}/config"}:                 "handleAdminIntegrationByName splits the sub-path into at most three parts and the config branch ignores the third, so a suffix reaches the same config update as the bare path",
@@ -442,6 +404,65 @@ func TestLiveInventoryExclusionsNotStale(t *testing.T) {
 		if !live[key] {
 			t.Errorf("stale suffix-check exclusion: operation %q method %q pattern %q does not match any current catalog HTTP entry point",
 				key.OperationID, key.Method, key.Pattern)
+		}
+	}
+}
+
+// TestLiveInventoryExclusionsNoRepeatedKeys parses this file,
+// authzop_catalog_method_inventory_test.go, and fails if a key appears more
+// than once in the composite literal of positiveCheckExclusions,
+// controlCheckExclusions or suffixCheckExclusions, or if one of those
+// variables is not found. Go accepts a repeated struct key in a map
+// literal (the later entry wins), so the maps themselves cannot report
+// one.
+func TestLiveInventoryExclusionsNoRepeatedKeys(t *testing.T) {
+	const file = "authzop_catalog_method_inventory_test.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	names := []string{"positiveCheckExclusions", "controlCheckExclusions", "suffixCheckExclusions"}
+	literals := make(map[string]*ast.CompositeLit)
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+				continue
+			}
+			if lit, ok := vs.Values[0].(*ast.CompositeLit); ok {
+				literals[vs.Names[0].Name] = lit
+			}
+		}
+	}
+	for _, name := range names {
+		lit, ok := literals[name]
+		if !ok {
+			t.Errorf("%s: no composite-literal declaration of %s found", file, name)
+			continue
+		}
+		seen := make(map[string]token.Position)
+		for _, elt := range lit.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				t.Errorf("%s: %s: element at %s is not a key-value pair", file, name, fset.Position(elt.Pos()))
+				continue
+			}
+			var b strings.Builder
+			if err := printer.Fprint(&b, fset, kv.Key); err != nil {
+				t.Fatalf("%s: %s: print key at %s: %v", file, name, fset.Position(kv.Key.Pos()), err)
+			}
+			key := b.String()
+			pos := fset.Position(kv.Key.Pos())
+			if first, dup := seen[key]; dup {
+				t.Errorf("%s: %s: key %s at line %d repeats the key at line %d", file, name, key, pos.Line, first.Line)
+				continue
+			}
+			seen[key] = pos
 		}
 	}
 }
