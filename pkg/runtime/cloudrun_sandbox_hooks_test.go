@@ -42,9 +42,9 @@ import (
 // errTestAbort is what a recorder's checkpoint returns at its abort step.
 var errTestAbort = errors.New("launch aborted by the test")
 
-// hookRecorder records an async launch's checkpoints and handles, and
+// sandboxHookRecorder records an async launch's checkpoints and handles, and
 // aborts at abortAt (if set).
-type hookRecorder struct {
+type sandboxHookRecorder struct {
 	abortAt string
 
 	mu      sync.Mutex
@@ -53,7 +53,7 @@ type hookRecorder struct {
 }
 
 // install sets cfg's async hooks to the recorder.
-func (h *hookRecorder) install(cfg *RunConfig) {
+func (h *sandboxHookRecorder) install(cfg *RunConfig) {
 	cfg.Checkpoint = func(_ context.Context, step string) error {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -70,20 +70,20 @@ func (h *hookRecorder) install(cfg *RunConfig) {
 	}
 }
 
-func (h *hookRecorder) gotSteps() []string {
+func (h *sandboxHookRecorder) gotSteps() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.steps...)
 }
 
-func (h *hookRecorder) gotHandles() []api.ResourceHandle {
+func (h *sandboxHookRecorder) gotHandles() []api.ResourceHandle {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]api.ResourceHandle(nil), h.handles...)
 }
 
 // hooksCfg is startingCfg for runID with rec's hooks installed.
-func hooksCfg(t *testing.T, runID string, rec *hookRecorder) RunConfig {
+func hooksCfg(t *testing.T, runID string, rec *sandboxHookRecorder) RunConfig {
 	t.Helper()
 	cfg := startingCfg(t, runID)
 	rec.install(&cfg)
@@ -97,7 +97,7 @@ func sandboxHandle(runID string) api.ResourceHandle {
 
 // wantOneHandle fails the test unless rec holds exactly the handle of
 // runID.
-func wantOneHandle(t *testing.T, rec *hookRecorder, runID string) {
+func wantOneHandle(t *testing.T, rec *sandboxHookRecorder, runID string) {
 	t.Helper()
 	if got, want := rec.gotHandles(), []api.ResourceHandle{sandboxHandle(runID)}; !reflect.DeepEqual(got, want) {
 		t.Errorf("handles = %+v, want %+v", got, want)
@@ -157,7 +157,7 @@ func TestCloudRunSandboxHooks_CheckpointAbort(t *testing.T) {
 	} {
 		t.Run(tc.step, func(t *testing.T) {
 			rt, env := newStartingRuntime(t, startScripts{})
-			rec := &hookRecorder{abortAt: tc.step}
+			rec := &sandboxHookRecorder{abortAt: tc.step}
 			_, err := rt.Run(context.Background(), hooksCfg(t, "run-a", rec))
 			if !errors.Is(err, errTestAbort) {
 				t.Fatalf("Run = %v, want the checkpoint's error", err)
@@ -188,7 +188,7 @@ func TestCloudRunSandboxHooks_CheckpointAbort(t *testing.T) {
 // reports exactly one sandbox handle (UID = run ID) and deletes nothing.
 func TestCloudRunSandboxHooks_SuccessReportsOneHandle(t *testing.T) {
 	rt, env := newStartingRuntime(t, startScripts{})
-	rec := &hookRecorder{}
+	rec := &sandboxHookRecorder{}
 	if _, err := rt.Run(context.Background(), hooksCfg(t, "run-a", rec)); err != nil {
 		t.Fatalf("Run = %v, want success", err)
 	}
@@ -204,31 +204,42 @@ func TestCloudRunSandboxHooks_SuccessReportsOneHandle(t *testing.T) {
 }
 
 // Fault check S3: the handle is reported after `sandbox run` returns.
-// A blocking `run` killed by ctx with the hooks active: the handle
-// {sandbox, dev, run-a} is already recorded when `run` is invoked, exactly
-// one is recorded, Run deletes nothing and the entry stays; the cleanup,
-// through another runtime instance (as the broker's), then issues
-// `delete --force dev` and removes the entry.
+// With the hooks active, a blocking `run` killed by ctx, or a blocking
+// probe cancelled by ctx: the handle {sandbox, dev, run-a} is already
+// recorded when `run` is invoked (run killed) and exactly one is recorded;
+// Run deletes nothing and the entry stays; the cleanup, through another
+// runtime instance (as the broker's), then issues `delete --force dev`
+// and removes the entry.
 func TestCloudRunSandboxHooks_KilledRunHandleAndCleanup(t *testing.T) {
-	rt, env := newStartingRuntime(t, startScripts{run: blockUntilKilled})
-	rec := &hookRecorder{}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	errc := runSandboxAsync(ctx, rt, hooksCfg(t, "run-a", rec))
-	waitForFile(t, env.mark)
-	if h := rec.gotHandles(); len(h) != 1 {
-		t.Errorf("handles while `run` is running = %+v, want the one handle reported before it", h)
+	for _, tc := range []struct {
+		name string
+		sc   startScripts
+	}{
+		{"run killed", startScripts{run: blockUntilKilled}},
+		{"probe cancelled", startScripts{exec: blockUntilKilled}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, env := newStartingRuntime(t, tc.sc)
+			rec := &sandboxHookRecorder{}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errc := runSandboxAsync(ctx, rt, hooksCfg(t, "run-a", rec))
+			waitForFile(t, env.mark)
+			if h := rec.gotHandles(); len(h) != 1 {
+				t.Errorf("handles while %s blocks = %+v, want the one handle reported before `run`", tc.name, h)
+			}
+			cancel()
+			if err := recvErr(t, errc, "Run"); err == nil {
+				t.Fatal("Run succeeded, want the cancelled start's error")
+			}
+			wantOneHandle(t, rec, "run-a")
+			wantDeletes(t, env.log, 0)
+			if e := wantEntryOf(t, env.state, "run-a"); !e.Starting {
+				t.Errorf("entry = %+v, want this start's Starting entry kept", e)
+			}
+			cleanupDeletes(t, siblingRuntime(t, rt, ""), env, "run-a")
+		})
 	}
-	cancel()
-	if err := recvErr(t, errc, "Run"); err == nil {
-		t.Fatal("Run succeeded, want the killed run's error")
-	}
-	wantOneHandle(t, rec, "run-a")
-	wantDeletes(t, env.log, 0)
-	if e := wantEntryOf(t, env.state, "run-a"); !e.Starting {
-		t.Errorf("entry = %+v, want this start's Starting entry kept", e)
-	}
-	cleanupDeletes(t, siblingRuntime(t, rt, ""), env, "run-a")
 }
 
 // Fault check S7: the dead-on-arrival delete still runs with the hooks
@@ -237,7 +248,7 @@ func TestCloudRunSandboxHooks_KilledRunHandleAndCleanup(t *testing.T) {
 // sandbox and removes the entry.
 func TestCloudRunSandboxHooks_DeadOnArrivalNoDelete(t *testing.T) {
 	rt, env := newStartingRuntime(t, startScripts{exec: `echo "control server unavailable" >&2; exit 1`})
-	rec := &hookRecorder{}
+	rec := &sandboxHookRecorder{}
 	_, err := rt.Run(context.Background(), hooksCfg(t, "run-a", rec))
 	if err == nil || !strings.Contains(err.Error(), "dead on arrival") {
 		t.Fatalf("Run = %v, want the dead-on-arrival error", err)
@@ -246,6 +257,25 @@ func TestCloudRunSandboxHooks_DeadOnArrivalNoDelete(t *testing.T) {
 	wantDeletes(t, env.log, 0)
 	wantEntryOf(t, env.state, "run-a")
 	cleanupDeletes(t, rt, env, "run-a")
+}
+
+// Fault check S7b (review F3): the promote step's failStart ignores the
+// hooks. With the hooks active, the probe passes and the state file is
+// then made unreadable, so the promote write fails: Run returns an error
+// and deletes nothing (without the hooks, failStart would delete by name).
+func TestCloudRunSandboxHooks_PromoteFailureNoDelete(t *testing.T) {
+	rt, env := newStartingRuntime(t, startScripts{})
+	setHook(t, &sandboxAfterLaunchHook, func(string) {
+		if err := os.WriteFile(env.state, []byte(`{"dev": `), 0600); err != nil {
+			t.Errorf("corrupt the state file: %v", err)
+		}
+	})
+	rec := &sandboxHookRecorder{}
+	if _, err := rt.Run(context.Background(), hooksCfg(t, "run-a", rec)); err == nil {
+		t.Fatal("Run succeeded, want the promote write's error")
+	}
+	wantOneHandle(t, rec, "run-a")
+	wantDeletes(t, env.log, 0)
 }
 
 // -----------------------------------------------------------------------
@@ -257,7 +287,7 @@ func TestCloudRunSandboxHooks_DeadOnArrivalNoDelete(t *testing.T) {
 // the cleanup returns nil with no delete.
 func TestCloudRunSandboxHooks_SelfFailedNoDelete(t *testing.T) {
 	rt, env := newStartingRuntime(t, startScripts{run: `echo "sandbox dev already exists" >&2; exit 1`})
-	rec := &hookRecorder{}
+	rec := &sandboxHookRecorder{}
 	if _, err := rt.Run(context.Background(), hooksCfg(t, "run-a", rec)); err == nil {
 		t.Fatal("Run succeeded, want the self-failed run's error")
 	}
@@ -274,7 +304,7 @@ func TestCloudRunSandboxHooks_SelfFailedNoDelete(t *testing.T) {
 // delete, no entry; the cleanup returns nil with no delete.
 func TestCloudRunSandboxHooks_SelfExitThenCancel(t *testing.T) {
 	rt, env := newStartingRuntime(t, startScripts{run: `echo "boom" >&2; exit 1`})
-	rec := &hookRecorder{}
+	rec := &sandboxHookRecorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	setHook(t, &sandboxLaunchReturnedHook, func(string) { cancel() })
@@ -296,7 +326,7 @@ func TestCloudRunSandboxHooks_RestoredEntryCleanedUp(t *testing.T) {
 	rt, env := newStartingRuntime(t, startScripts{run: `echo "boom" >&2; exit 1`})
 	rt.state.add(runEntry("dev", "run-a"))
 	before := fileEntry(t, env.state)
-	rec := &hookRecorder{}
+	rec := &sandboxHookRecorder{}
 	if _, err := rt.Run(context.Background(), hooksCfg(t, "run-a", rec)); err == nil {
 		t.Fatal("Run succeeded, want the self-failed run's error")
 	}
@@ -325,7 +355,7 @@ func TestCloudRunSandboxHooks_NeverStartedNoDelete(t *testing.T) {
 			t.Errorf("install the binary: %v", err)
 		}
 	})
-	rec := &hookRecorder{}
+	rec := &sandboxHookRecorder{}
 	if _, err := rt.Run(context.Background(), hooksCfg(t, "run-a", rec)); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Run = %v, want the run-failed error wrapping not-exist", err)
 	}
@@ -349,7 +379,7 @@ func TestCloudRunSandboxHooks_InFlightReconcileThenCleanup(t *testing.T) {
 	setDuration(t, &asyncCleanupSlack, time.Millisecond)
 
 	rt, env := newStartingRuntime(t, startScripts{run: blockUntilKilled})
-	rec := &hookRecorder{}
+	rec := &sandboxHookRecorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errc := runSandboxAsync(ctx, rt, hooksCfg(t, "run-a", rec))

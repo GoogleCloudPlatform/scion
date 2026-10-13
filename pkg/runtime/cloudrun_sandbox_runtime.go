@@ -1740,7 +1740,7 @@ func (r *CloudRunSandboxRuntime) deleteForCleanup(ctx context.Context, name stri
 // can retry. An empty h.UID is refused (errNoUID).
 func (r *CloudRunSandboxRuntime) DeleteResource(ctx context.Context, h api.ResourceHandle) error {
 	if h.Kind != api.ResourceKindSandbox {
-		return fmt.Errorf("unsupported resource kind %q for the cloudrun-sandbox runtime", h.Kind)
+		return fmt.Errorf("cloudrun-sandbox: unsupported resource kind %q", h.Kind)
 	}
 	if h.UID == "" {
 		return errNoUID(h)
