@@ -284,6 +284,9 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Every settings query is filtered to the experiments section: as
+		// many SectionEQ(experimentsSection) filters as HubSetting uses.
+		settingUses, sectionFilters := 0, 0
 		names := map[string]string{} // local name -> module-relative path
 		for _, im := range f.Imports {
 			p, _ := strconv.Unquote(im.Path.Value)
@@ -302,7 +305,27 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
+			case *ast.CallExpr:
+				// The settings query names only the experiments section.
+				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SectionEQ" {
+					sectionFilters++
+					if len(n.Args) != 1 || !isIdent(n.Args[0], "experimentsSection") {
+						bad = append(bad, fmt.Sprintf("%s queries a settings section other than experimentsSection", e.Name()))
+					}
+				}
+			case *ast.ValueSpec:
+				for i, name := range n.Names {
+					if name.Name == "experimentsSection" && (i >= len(n.Values) || !isString(n.Values[i], "experiments")) {
+						bad = append(bad, fmt.Sprintf("%s: experimentsSection is not \"experiments\"", e.Name()))
+					}
+				}
 			case *ast.SelectorExpr:
+				if n.Sel.Name == "HubSetting" {
+					settingUses++
+				}
+				if inner, ok := n.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "HubSetting" && n.Sel.Name != "Query" {
+					bad = append(bad, fmt.Sprintf("%s calls HubSetting.%s (only Query)", e.Name(), n.Sel.Name))
+				}
 				id, ok := n.X.(*ast.Ident)
 				if !ok {
 					// client.HubSetting is the only entity client used.
@@ -329,8 +352,25 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 			}
 			return true
 		})
+		if settingUses != sectionFilters {
+			bad = append(bad, fmt.Sprintf("%s: %d settings queries, %d filtered to the experiments section", e.Name(), settingUses, sectionFilters))
+		}
 	}
 	return bad
+}
+
+func isIdent(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+func isString(e ast.Expr, want string) bool {
+	lit, ok := e.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return false
+	}
+	v, err := strconv.Unquote(lit.Value)
+	return err == nil && v == want
 }
 
 // moduleRoot finds the module root above the test's directory.
@@ -457,6 +497,22 @@ func TestRelayImportCheckCatchesViolations(t *testing.T) {
 		},
 		"relaydb imports a token entity": {
 			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nimport _ \"example.com/m/pkg/ent/useraccesstoken\"\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb reads another settings section": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nimport \"example.com/m/pkg/ent/hubsetting\"\nfunc g() { _ = hubsetting.SectionEQ(\"server\") }\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb reads every settings section": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nfunc g(r *x) { _, _ = r.client.HubSetting.Query().All(nil) }\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb writes a setting": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nfunc g(r *x) { _ = r.client.HubSetting.Create() }\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb redefines the experiments section": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nconst experimentsSection = \"server\"\n"},
 			check: func(s *importScan) []string { return s.relayDBViolations(t) },
 		},
 		"relaydb names a secret": {
