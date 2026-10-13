@@ -266,9 +266,12 @@ func TestConversationGroupCommandTree(t *testing.T) {
 
 	flagsOf := map[*cobra.Command][]string{
 		conversationGroupListCmd:   {"project", "json"},
-		conversationGroupGetCmd:    {"json"},
+		conversationGroupGetCmd:    {"project", "json"},
 		conversationGroupCreateCmd: {"project", "json"},
-		conversationGroupDeleteCmd: {"yes"},
+		conversationGroupRenameCmd: {"project"},
+		conversationGroupDeleteCmd: {"project", "yes"},
+		conversationGroupAddCmd:    {"project"},
+		conversationGroupRemoveCmd: {"project"},
 		conversationCreateCmd:      {"group"},
 	}
 	for c, flags := range flagsOf {
@@ -471,6 +474,58 @@ func TestConversationGroupCreate_NoProject(t *testing.T) {
 	m := hub.mutations()
 	require.Len(t, m, 1)
 	assert.Equal(t, map[string]any{"name": "Ops"}, m[0].Body, "an unresolved project is omitted, not fabricated")
+}
+
+// The "projectId is required" answer to the name-resolving list call gets
+// the local resolve hint too, for the item subcommands and for
+// conversation create --group <name>, and nothing is mutated.
+func TestConversationGroup_ResolveProjectHint(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fn   func(*cobra.Command, []string) error
+		args []string
+	}{
+		{"get", runConversationGroupGet, []string{"Release"}},
+		{"add", runConversationGroupAdd, []string{"Release", "#standup"}},
+		{"conversation create --group", runConversationCreate, []string{"new-thread"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := setupThreadGroupTest(t, "")
+			convCreateGroup = "Release"
+			_, err := runTG(t, tc.fn, tc.args...)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "projectId is required")
+			assert.Contains(t, err.Error(), "Use --project flag")
+			assert.Empty(t, hub.mutations())
+		})
+	}
+}
+
+// --project <id> on an item subcommand selects the project its group name
+// resolves in, the same as on list and create.
+func TestConversationGroup_ProjectFlagOnItemCommands(t *testing.T) {
+	const otherProject = "11111111-0000-0000-0000-000000000009"
+	const otherGroup = "22222222-0000-0000-0000-000000000009"
+	hub := setupThreadGroupTest(t, tgProject)
+	hub.groups = append(hub.groups, hubclient.ThreadGroup{ID: otherGroup, ProjectID: otherProject, Name: "Release",
+		Threads: []hubclient.ThreadGroupThread{}})
+
+	convGroupProject = otherProject
+	out, err := runTG(t, runConversationGroupGet, "release")
+	require.NoError(t, err)
+	assert.Contains(t, out, "ID:          "+otherGroup, "the name resolves in the --project project, not the hub-linked one")
+	assert.Equal(t, "projectId="+otherProject, hub.calls[0].Query)
+
+	_, err = runTG(t, runConversationGroupRename, "Release", "Shipped")
+	require.NoError(t, err)
+	m := hub.mutations()
+	require.Len(t, m, 1)
+	assert.Equal(t, "/api/v1/thread-groups/"+otherGroup, m[0].Path)
+
+	convGroupProject = "11111111-0000-0000-0000-00000000000a"
+	_, err = runTG(t, runConversationGroupGet, "Release")
+	require.Error(t, err)
+	assert.Equal(t, `no thread group named "Release" in project 11111111-0000-0000-0000-00000000000a`, err.Error())
 }
 
 func TestConversationGroupRename(t *testing.T) {

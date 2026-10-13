@@ -137,8 +137,8 @@ func IsThreadGroupsNotEnabled(err error) bool {
 	return errors.As(err, &target)
 }
 
-// isNotFound reports whether err is a hub 404.
-func isNotFound(err error) bool {
+// isAPINotFound reports whether err is a hub 404.
+func isAPINotFound(err error) bool {
 	var apiErr *apiclient.APIError
 	return errors.As(err, &apiErr) && apiErr.IsNotFound()
 }
@@ -149,7 +149,7 @@ func isNotFound(err error) bool {
 // so a 404 there can only come from the experiment gate or a hub without
 // the route.
 func collectionErr(err error) error {
-	if isNotFound(err) {
+	if isAPINotFound(err) {
 		return &ThreadGroupsNotEnabledError{Err: err}
 	}
 	return err
@@ -164,14 +164,14 @@ func collectionErr(err error) error {
 // Any probe answer other than 404, including a transport failure, keeps
 // the original error.
 func (s *threadGroupService) itemErr(ctx context.Context, err error) error {
-	if !isNotFound(err) {
+	if !isAPINotFound(err) {
 		return err
 	}
 	resp, probeErr := s.c.get(ctx, threadGroupsPath, nil)
 	if probeErr != nil {
 		return err
 	}
-	if checkErr := apiclient.CheckResponse(resp); isNotFound(checkErr) {
+	if checkErr := apiclient.CheckResponse(resp); isAPINotFound(checkErr) {
 		return &ThreadGroupsNotEnabledError{Err: err}
 	}
 	return err

@@ -50,8 +50,10 @@ var (
 
 // threadGroupRefHelp describes the <group> argument.
 const threadGroupRefHelp = `A <group> is a thread group ID, or a group name resolved within the
-current project (names are compared case-insensitively, as the hub
-compares them). An unknown or ambiguous name is an error.`
+project (--project <id>, defaulting to the current project). Names are
+compared case-insensitively, as the hub compares them. An unknown or
+ambiguous name is an error; an ID outside the project is looked up
+directly.`
 
 // conversationGroupCmd is the parent of the thread group subcommands.
 var conversationGroupCmd = &cobra.Command{
@@ -201,6 +203,15 @@ func init() {
 	conversationGroupListCmd.Flags().BoolVar(&convGroupListJSON, "json", false, "Output in JSON format")
 
 	conversationGroupGetCmd.Flags().BoolVar(&convGroupGetJSON, "json", false, "Output in JSON format")
+
+	// Every group subcommand takes the same local --project <id>, so the
+	// flag means a project ID throughout the group (as on conversation
+	// create); on the item subcommands it selects the project names are
+	// resolved in.
+	for _, c := range []*cobra.Command{conversationGroupGetCmd, conversationGroupRenameCmd,
+		conversationGroupDeleteCmd, conversationGroupAddCmd, conversationGroupRemoveCmd} {
+		c.Flags().StringVar(&convGroupProject, "project", "", "Project ID to resolve a group name in (defaults to current project)")
+	}
 
 	conversationGroupCreateCmd.Flags().StringVar(&convGroupProject, "project", "", "Project ID (defaults to current project)")
 	conversationGroupCreateCmd.Flags().BoolVar(&convGroupCreateJSON, "json", false, "Output in JSON format")
@@ -358,7 +369,7 @@ func runConversationGroupGet(cmd *cobra.Command, args []string) error {
 	if convGroupGetJSON {
 		outputFormat = "json"
 	}
-	tg, err := newThreadGroupCommand("")
+	tg, err := newThreadGroupCommand(convGroupProject)
 	if err != nil {
 		return err
 	}
@@ -433,7 +444,7 @@ func runConversationGroupCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runConversationGroupRename(cmd *cobra.Command, args []string) error {
-	tg, err := newThreadGroupCommand("")
+	tg, err := newThreadGroupCommand(convGroupProject)
 	if err != nil {
 		return err
 	}
@@ -453,7 +464,7 @@ func runConversationGroupRename(cmd *cobra.Command, args []string) error {
 }
 
 func runConversationGroupDelete(cmd *cobra.Command, args []string) error {
-	tg, err := newThreadGroupCommand("")
+	tg, err := newThreadGroupCommand(convGroupProject)
 	if err != nil {
 		return err
 	}
@@ -476,7 +487,7 @@ func runConversationGroupDelete(cmd *cobra.Command, args []string) error {
 }
 
 func runConversationGroupAdd(cmd *cobra.Command, args []string) error {
-	tg, err := newThreadGroupCommand("")
+	tg, err := newThreadGroupCommand(convGroupProject)
 	if err != nil {
 		return err
 	}
@@ -501,7 +512,7 @@ func runConversationGroupAdd(cmd *cobra.Command, args []string) error {
 }
 
 func runConversationGroupRemove(cmd *cobra.Command, args []string) error {
-	tg, err := newThreadGroupCommand("")
+	tg, err := newThreadGroupCommand(convGroupProject)
 	if err != nil {
 		return err
 	}
