@@ -727,6 +727,10 @@ type StartExtras struct {
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
+	// TelemetryPolicy is the project's enforced telemetry on/off, set only
+	// for a broker that reports TemplateTiers (wire key telemetryPolicy;
+	// see RemoteAgentConfig.TelemetryPolicy). Nil = none.
+	TelemetryPolicy *bool
 	// Image is the user's explicit image (explicitDispatchImage), already
 	// registry-rewritten; empty when the user chose none. The broker applies
 	// it as the top-tier image (opts.Image), the same as create's
@@ -802,6 +806,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.HubAgentDefaults != nil {
 		payload["hubAgentDefaults"] = extras.HubAgentDefaults
+	}
+	if extras.TelemetryPolicy != nil {
+		payload["telemetryPolicy"] = *extras.TelemetryPolicy
 	}
 	if extras.Image != "" {
 		payload["image"] = extras.Image
@@ -1442,6 +1449,13 @@ type RemoteAgentConfig struct {
 	// application at the broker's LOW-precedence defaults tier — deliberately
 	// not folded into InlineConfig, which is a top-of-chain slot.
 	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+
+	// TelemetryPolicy is the project's enforced telemetry on/off
+	// (scion.io/telemetry-enabled), sent only to a broker that reports
+	// TemplateTiers. The broker applies it last, above the agent's config
+	// and the requester's SCION_TELEMETRY_ENABLED flag (ptone/scion#4218).
+	// Nil = no policy.
+	TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
 }
 
 // RemoteHubAgentDefaults carries the four limit/resource operational
@@ -1468,6 +1482,12 @@ type RemoteHubAgentDefaults struct {
 	Resources       *api.ResourceSpec `json:"resources,omitempty"`
 	AutoExposePorts *bool             `json:"autoExposePorts,omitempty"`
 	Experiments     []string          `json:"experiments,omitempty"`
+	// Telemetry is the hub's telemetry default (settings telemetry), sent
+	// only to a broker that reports TemplateTiers. The broker applies it per
+	// start below the agent's own config telemetry and never persists it
+	// (ptone/scion#4218). A legacy broker gets it inline instead
+	// (dispatchTelemetry, ptone/scion#4222).
+	Telemetry *api.TelemetryConfig `json:"telemetry,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
@@ -2020,8 +2040,15 @@ type Server struct {
 	projectsLog       *slog.Logger
 	resourceLog       *slog.Logger
 	templateLog       *slog.Logger
-	workspaceLog      *slog.Logger
-	agentMetricsLog   *slog.Logger
+	// templateAgentConfigMisses records template rows, keyed by ID and
+	// content hash, whose agent config file does not parse or is missing
+	// from storage when deriving a missing snapshot
+	// (ensureTemplateAgentConfig), so a broken file is read once per
+	// content, not on every create and dispatch. Transient read failures
+	// are not recorded. A new commit changes the content hash and retries.
+	templateAgentConfigMisses sync.Map
+	workspaceLog              *slog.Logger
+	agentMetricsLog           *slog.Logger
 	// perfTraceLog receives the per-request perf_trace lines. Set only when
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
@@ -4637,6 +4664,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// takes s.mu; it returns the zero value in file mode, where the wire field
 	// is then omitted and broker behaviour is unchanged.
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
+
+	// Hub telemetry default and template job config (ptone/scion#4222).
+	dispatcher.SetHubTelemetryProvider(s.hubTelemetryDefault)
+	dispatcher.SetTemplateJobConfigProvider(s.templateJobConfigByID)
 
 	// Wire the async agent launch settings. They are static after startup;
 	// the accessor reads them under s.mu.

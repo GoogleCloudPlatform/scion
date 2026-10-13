@@ -1650,6 +1650,15 @@ type TemplateStore interface {
 	// but no longer matches, and ErrNotFound when it does not exist.
 	UpdateTemplateContent(ctx context.Context, template *Template, expected TemplateContentPrecondition) error
 
+	// SetTemplateAgentConfig writes only the AgentConfig snapshot of
+	// template id, and only while the stored row has no snapshot and still
+	// matches expected (one conditional UPDATE). No other column changes,
+	// Updated included. It reports whether a row was written: false with a
+	// nil error means the row already has a snapshot, its content or layout
+	// changed, or it no longer exists. A nil cfg writes nothing. Used to
+	// backfill rows committed before the snapshot existed (ptone/scion#4222).
+	SetTemplateAgentConfig(ctx context.Context, id string, cfg *api.ScionConfig, expected TemplateContentPrecondition) (bool, error)
+
 	// DeleteTemplate removes a template by ID.
 	// Returns ErrNotFound if the template doesn't exist.
 	DeleteTemplate(ctx context.Context, id string) error
