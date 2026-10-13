@@ -1379,6 +1379,12 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 		if meta.RouteID != "" {
 			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
 		}
+		// A visitor (a federated account, VisitorIdentity) is refused on
+		// every route, whatever its classification, until per-route
+		// visitor admission replaces this check.
+		if refuseVisitorRequest(w, r) {
+			return
+		}
 		// An agent delegated credential is admitted only on the routes in
 		// agentDelegationAdmittedRoutes, whatever the route's
 		// classification (.design/agent-delegation.md §11.1).
