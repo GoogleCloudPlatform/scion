@@ -348,6 +348,10 @@ type Server struct {
 	// synchronous create handlers (start_tracker.go). The heartbeat reports
 	// them, stop waits for its agent's, and Shutdown waits for all.
 	startsInFlight *startTracker
+	// retainedPurges keeps a purge of an agent's retained files and a
+	// start, restart or create of the same agent from overlapping
+	// (retained_purge_guard.go, ptone/scion#4744).
+	retainedPurges *retainedPurgeGuard
 	// launchInstanceID identifies this broker process as a launch owner
 	// (design §3.2's LaunchInstanceID / launch_owner), generated once here at
 	// startup.
@@ -536,6 +540,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		resolveAuxiliaryRuntime: agent.ResolveRuntime,
 		launchRegistry:          newLaunchRegistry(),
 		startsInFlight:          newStartTracker(),
+		retainedPurges:          newRetainedPurgeGuard(),
 		launchInstanceID:        uuid.NewString(),
 
 		// Subsystem loggers

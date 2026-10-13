@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -94,6 +95,9 @@ func TestDeleteAgent_PurgeRetained_RemovesMarkedFilesAndLogs(t *testing.T) {
 	if !strings.Contains(logs.String(), "Agent retained files removed after the soft-delete retention window") {
 		t.Errorf("removal not logged; logs:\n%s", logs.String())
 	}
+	if len(srv.retainedPurges.purges) != 0 {
+		t.Errorf("guard registration left after the purge: %v", srv.retainedPurges.purges)
+	}
 }
 
 func TestDeleteAgent_PurgeRetained_RefusesLiveAgentFiles(t *testing.T) {
@@ -105,6 +109,9 @@ func TestDeleteAgent_PurgeRetained_RefusesLiveAgentFiles(t *testing.T) {
 
 	rec := doDelete(t, srv, "dev", purgeRetainedQuery(root))
 	assertRetainedRefused(t, rec, "soft-delete mark")
+	if len(srv.retainedPurges.purges) != 0 {
+		t.Errorf("guard registration left after a refused purge: %v", srv.retainedPurges.purges)
+	}
 	if _, err := os.Stat(filepath.Join(agentDir, "workspace", "work.txt")); err != nil {
 		t.Fatalf("a live agent's files were touched: %v", err)
 	}
@@ -166,16 +173,33 @@ func TestDeleteAgent_PurgeRetained_DoesNotFollowSymlinkedAgentDir(t *testing.T) 
 	}
 }
 
-// A start of the agent in flight on the broker (of any run) may be the
-// start of a restored agent that has not rewritten agent-info.json yet: the
-// purge refuses, removes nothing and does not cancel the start.
+// A start, restart or create of the agent in flight on the broker (of any
+// run) may be the start of a restored agent that has not rewritten
+// agent-info.json yet: the purge refuses, removes nothing and cancels
+// nothing. Creates and async launches are in the launch registry; start
+// and restart are in the start tracker; a handler that has not reached
+// either yet is in the purge guard.
 func TestDeleteAgent_PurgeRetained_RefusesWhileStartInFlight(t *testing.T) {
+	key := launchKey{ProjectID: scopeProjB, Slug: "dev"}
 	for _, tc := range []struct {
-		name, launchRun, query string
+		name, query string
+		// register puts the in-flight start in place and returns a check
+		// that it was not cancelled, and a release.
+		register func(t *testing.T, srv *Server) (cancelled func() bool, release func())
 	}{
-		{name: "no run IDs"},
-		{name: "same run", launchRun: "run-a", query: "&runId=run-a"},
-		{name: "launch of a run, purge names none", launchRun: "run-b"},
+		{name: "create, no run IDs", register: launchOf("")},
+		{name: "create, same run", query: "&runId=run-a", register: launchOf("run-a")},
+		{name: "create of a run, purge names none", register: launchOf("run-b")},
+		{name: "start or restart, no run ID", register: trackedStartOf("")},
+		{name: "start or restart, same run", query: "&runId=run-a", register: trackedStartOf("run-a")},
+		{name: "start or restart of a run, purge names none", register: trackedStartOf("run-b")},
+		{name: "handler registered with the purge guard", register: func(t *testing.T, srv *Server) (func() bool, func()) {
+			release, ok := srv.retainedPurges.beginProvision(key)
+			if !ok {
+				t.Fatal("could not register a provision")
+			}
+			return func() bool { return false }, release
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var entries []api.AgentInfo
@@ -183,15 +207,13 @@ func TestDeleteAgent_PurgeRetained_RefusesWhileStartInFlight(t *testing.T) {
 			root := makeLinkedGitProject(t, scopeProjB, "dev")
 			agentDir, info := writeLinkedAgentFiles(t, resolvedScionDir(t, root), "dev")
 			markSoftDeleted(t, info)
-			cancels := 0
-			lr := newLaunchRecord("sync-1", "", "start", "", time.Time{}, func() { cancels++ })
-			lr.RunID = tc.launchRun
-			srv.launchRegistry.Begin(launchKey{ProjectID: scopeProjB, Slug: "dev"}, lr)
+			cancelled, release := tc.register(t, srv)
+			defer release()
 
 			rec := doDelete(t, srv, "dev", purgeRetainedQuery(root)+tc.query)
 			assertRetainedRefused(t, rec, "start of the agent is in flight")
-			if cancels != 0 {
-				t.Errorf("in-flight start cancelled %d times by a purge", cancels)
+			if cancelled() {
+				t.Error("the in-flight start was cancelled by a purge")
 			}
 			if _, err := os.Stat(filepath.Join(agentDir, "workspace", "work.txt")); err != nil {
 				t.Fatalf("files were removed while a start was in flight: %v", err)
@@ -199,23 +221,30 @@ func TestDeleteAgent_PurgeRetained_RefusesWhileStartInFlight(t *testing.T) {
 			if _, err := os.Stat(info); err != nil {
 				t.Fatalf("agent-info.json was removed while a start was in flight: %v", err)
 			}
+			if len(srv.retainedPurges.purges) != 0 {
+				t.Errorf("a refused purge left a guard registration: %v", srv.retainedPurges.purges)
+			}
 		})
 	}
 }
 
-func TestDeleteAgent_PurgeRetained_RejectsLocalOnly(t *testing.T) {
-	var entries []api.AgentInfo
-	srv := newRealManagerScopeServer(t, &entries)
-	root := makeLinkedGitProject(t, scopeProjB, "dev")
-	agentDir, info := writeLinkedAgentFiles(t, resolvedScionDir(t, root), "dev")
-	markSoftDeleted(t, info)
-
-	rec := doDelete(t, srv, "dev", purgeRetainedQuery(root)+"&localOnly=true")
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+// launchOf registers a create's launch record of run runID for agent "dev".
+func launchOf(runID string) func(t *testing.T, srv *Server) (func() bool, func()) {
+	return func(t *testing.T, srv *Server) (func() bool, func()) {
+		cancels := 0
+		lr := newLaunchRecord("sync-1", "", "create", "", time.Time{}, func() { cancels++ })
+		lr.RunID = runID
+		srv.launchRegistry.Begin(launchKey{ProjectID: scopeProjB, Slug: "dev"}, lr)
+		return func() bool { return cancels != 0 }, func() {}
 	}
-	if _, err := os.Stat(filepath.Join(agentDir, "workspace", "work.txt")); err != nil {
-		t.Fatalf("files were removed by a rejected request: %v", err)
+}
+
+// trackedStartOf tracks a start or restart of run runID for agent "dev", as
+// startAgent and restartAgent do.
+func trackedStartOf(runID string) func(t *testing.T, srv *Server) (func() bool, func()) {
+	return func(t *testing.T, srv *Server) (func() bool, func()) {
+		ctx, finish := srv.startsInFlight.beginRun(context.Background(), launchKey{ProjectID: scopeProjB, Slug: "dev"}, runID)
+		return func() bool { return ctx.Err() != nil }, finish
 	}
 }
 

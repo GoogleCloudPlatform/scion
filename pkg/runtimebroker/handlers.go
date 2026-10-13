@@ -1280,6 +1280,25 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// skill resolution) and failing minutes later. A synchronous start takes
 	// the name's launch marker further down (takeName); an async create
 	// hands the registration over to its launch (beginAsyncLaunch).
+	// A create, ProvisionOnly included, is refused while a purge of the
+	// agent's retained files runs here (ptone/scion#4744), and registered
+	// against one until this handler returns; work handed over to an async
+	// launch stays visible to a purge through the launch registry.
+	purgeKeySlug := req.Slug
+	if purgeKeySlug == "" {
+		purgeKeySlug = req.Name
+	}
+	releaseProvision, provisionOK := s.retainedPurges.beginProvision(launchKey{ProjectID: req.ProjectID, Slug: purgeKeySlug})
+	if !provisionOK {
+		s.agentLifecycleLog.Info("Agent create refused: a removal of the agent's retained files is in progress",
+			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", req.RunID, "slug", purgeKeySlug)
+		markAttemptFailed(http.StatusConflict, api.BrokerErrCodeRetainedPurgeInProgress)
+		span.SetStatus(codes.Error, "retained purge in progress")
+		RetainedPurgeInProgress(w, "create")
+		return
+	}
+	defer releaseProvision()
+
 	var ss *syncStart
 	var unbindStart, finishTracked func()
 	if !req.ProvisionOnly {
@@ -2671,15 +2690,27 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 
 	// A purge of retained files removes them only while they are still the
 	// retained files of a soft-deleted agent: no runtime entry holds the
-	// agent, no start of it is in flight here (of any run or agent ID: a
-	// start still provisioning has no runtime entry yet and has not
-	// rewritten agent-info.json), its agent-info.json carries the
-	// soft-delete mark and none of its directories is a symlink. The
-	// agent-files lock is held, so a start that registers after this check
-	// waits for the removal before it provisions.
+	// agent, no start, restart or create of it is in flight here (of any
+	// run or agent ID: a start still provisioning has no runtime entry yet
+	// and has not rewritten agent-info.json), its agent-info.json carries
+	// the soft-delete mark and none of its directories is a symlink.
+	//
+	// No start path takes the agent-files lock held here, so the purge
+	// registers with retainedPurges first, under both keys, until it
+	// returns: a start, restart or create of the agent entered after that
+	// is refused with a retryable 409 (retained_purge_in_progress). One
+	// entered before it is seen here: beginPurge fails while such a
+	// handler runs, and the start tracker and launch registry, which hold
+	// those starts and any async launch a create handed over, are checked
+	// after it.
 	if purgeRetained {
-		inFlight := s.launchRegistry.anyInFlight(launchKey{ProjectID: projectID, Slug: id}) ||
-			s.launchRegistry.anyInFlight(launchKey{ProjectID: agentProjectID, Slug: target.name})
+		purgeKeys := []launchKey{{ProjectID: projectID, Slug: id}, {ProjectID: agentProjectID, Slug: target.name}}
+		releasePurge, registered := s.retainedPurges.beginPurge(purgeKeys...)
+		defer releasePurge()
+		inFlight := !registered
+		for _, k := range purgeKeys {
+			inFlight = inFlight || s.launchRegistry.anyInFlight(k) || s.startsInFlight.anyFor(k)
+		}
 		if reason := retainedPurgeRefusal(target, projectPath, inFlight); reason != "" {
 			span.SetStatus(codes.Error, "retained files refused")
 			s.agentLifecycleLog.Info("Agent retained files purge refused; nothing removed",
@@ -2714,10 +2745,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// (agent.ErrAgentFilesDelete, returned only after a successful runtime
 	// delete). Any other error (the runtime delete failed, found another
 	// run, or anything else) writes no mark, and neither do files that are
-	// another run's. The agent-files lock
-	// taken above (lockAgentFiles, also taken by start) is held from before
-	// DeleteTarget through this write, so no start of the agent can come in
-	// between and have its files marked.
+	// another run's. The agent-files lock taken above (lockAgentFiles) is
+	// held from before DeleteTarget through this write, so another delete,
+	// or a start's failure cleanup (which takes the same lock), cannot come
+	// in between. A start itself does not take that lock.
 	runtimeDeleted := err == nil || errors.Is(err, agent.ErrAgentFilesDelete)
 	if runtimeDeleted && softDelete && projectPath != "" && !filesOfOtherRun {
 		// Phase and deletedAt are written in one locked update (#4681).
@@ -2882,6 +2913,16 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	queryRunID := r.URL.Query().Get("runId")
 	ctx, finishTracked := s.startsInFlight.beginRun(r.Context(), launchKey{ProjectID: projectID, Slug: id}, queryRunID)
 	defer finishTracked()
+	// Refused while a purge of the agent's retained files runs here
+	// (ptone/scion#4744); registered until this handler returns.
+	releaseProvision, provisionOK := s.retainedPurges.beginProvision(launchKey{ProjectID: projectID, Slug: id})
+	if !provisionOK {
+		s.agentLifecycleLog.Info("Agent start refused: a removal of the agent's retained files is in progress",
+			"agent_id", id, "project_id", projectID, "run_id", queryRunID)
+		RetainedPurgeInProgress(w, "start")
+		return
+	}
+	defer releaseProvision()
 
 	// ProjectID reaches filesystem paths further on (the project-marker
 	// block in buildStartContext, and worktree provisioning); an empty
@@ -3982,6 +4023,16 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	queryRunID := r.URL.Query().Get("runId")
 	ctx, finishTracked := s.startsInFlight.beginRun(r.Context(), launchKey{ProjectID: projectID, Slug: id}, queryRunID)
 	defer finishTracked()
+	// Refused while a purge of the agent's retained files runs here
+	// (ptone/scion#4744); registered until this handler returns.
+	releaseProvision, provisionOK := s.retainedPurges.beginProvision(launchKey{ProjectID: projectID, Slug: id})
+	if !provisionOK {
+		s.agentLifecycleLog.Info("Agent restart refused: a removal of the agent's retained files is in progress",
+			"agent_id", id, "project_id", projectID, "run_id", queryRunID)
+		RetainedPurgeInProgress(w, "restart")
+		return
+	}
+	defer releaseProvision()
 
 	// Read optional resolvedEnv from request body (hub sends fresh auth token)
 	var restartReq struct {

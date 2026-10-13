@@ -78,12 +78,19 @@ const (
 	// is in BrokerErrDetailReason. A retry gets the same answer while that
 	// state lasts.
 	BrokerErrCodeRetainedFilesRefused = "retained_files_refused"
+
+	// BrokerErrCodeRetainedPurgeInProgress marks a start, restart or create
+	// the broker refused because a removal of the agent's retained files
+	// (PurgeRetainedQueryParam) is running there (409, with Retry-After).
+	// Nothing was started or written. Retry after the removal ends.
+	BrokerErrCodeRetainedPurgeInProgress = "retained_purge_in_progress"
 )
 
 // BrokerErrDetailReason is the details key of a
 // BrokerErrCodeLocalWorktreeRefused error (the client-facing message, with
 // any remote shown without credentials) and of a
-// BrokerErrCodeRetainedFilesRefused error (the cause, naming no host path).
+// BrokerErrCodeRetainedFilesRefused or BrokerErrCodeRetainedPurgeInProgress
+// error (the cause, naming no host path).
 const BrokerErrDetailReason = "reason"
 
 // Values of details.cause on a broker runtime_error answer to a create
