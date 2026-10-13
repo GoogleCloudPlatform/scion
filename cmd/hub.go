@@ -1561,7 +1561,7 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show confirmation prompt
-	if !hubsync.ShowProjectDeletePrompt(project.Name, project.AgentCount, providersResp, autoConfirm) {
+	if !hubsync.ShowProjectDeletePrompt(project.Name, project.AgentCount, providersResp, hubProjectsDeleteForce, autoConfirm) {
 		return fmt.Errorf("deletion cancelled")
 	}
 

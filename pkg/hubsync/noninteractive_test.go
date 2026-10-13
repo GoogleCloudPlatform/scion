@@ -121,7 +121,7 @@ func TestPrompts_AutoConfirmWritesNothingToStdout(t *testing.T) {
 	errOut := withPromptIO(t, strings.NewReader(""), false)
 	ShowSyncPlan(&SyncResult{ToRegister: []string{"a1"}}, true)
 	ShowLinkPrompt("widgets", true)
-	ShowProjectDeletePrompt("widgets", 2, nil, true)
+	ShowProjectDeletePrompt("widgets", 2, nil, false, true)
 	_, _, _ = ShowMatchingProjectsPrompt("widgets", []ProjectMatch{{ID: "id-1", Name: "widgets"}}, "", true, false)
 	ShowProjectLinkOrDisablePrompt("widgets", true)
 
@@ -204,6 +204,38 @@ func TestShowMatchingProjectsPrompt_NoMatchesRegistersNew(t *testing.T) {
 			}
 			if choice != ProjectChoiceRegisterNew || id != "" {
 				t.Errorf("got (%v, %q), want (ProjectChoiceRegisterNew, \"\")", choice, id)
+			}
+		})
+	}
+}
+
+// TestShowProjectDeletePrompt_AgentWording checks the agent line follows
+// the hub's project delete rule (ptone/scion#4811): without force the
+// delete is refused while agents remain, with force they are removed
+// best-effort.
+func TestShowProjectDeletePrompt_AgentWording(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		agents  int
+		force   bool
+		want    string
+		notWant string
+	}{
+		{name: "no agents", agents: 0, want: "  - 0 agents\n"},
+		{name: "agents without force", agents: 2, want: "2 agent(s): the Hub refuses the delete while agents remain; delete them first, or use --force", notWant: "best-effort"},
+		{name: "agents with force", agents: 2, force: true, want: "2 agent(s) (--force: records removed, runtime deletes are best-effort)", notWant: "refuses"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := withPromptIO(t, strings.NewReader(""), false)
+			ShowProjectDeletePrompt("widgets", tc.agents, nil, tc.force, true)
+			if !strings.Contains(out.String(), tc.want) {
+				t.Errorf("prompt output missing %q:\n%s", tc.want, out.String())
+			}
+			if tc.notWant != "" && strings.Contains(out.String(), tc.notWant) {
+				t.Errorf("prompt output has %q:\n%s", tc.notWant, out.String())
+			}
+			if strings.Contains(out.String(), "will be stopped and deleted") {
+				t.Errorf("prompt output keeps the old wording:\n%s", out.String())
 			}
 		})
 	}

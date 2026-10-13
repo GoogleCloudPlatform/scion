@@ -545,16 +545,22 @@ type ProjectProviders interface {
 }
 
 // ShowProjectDeletePrompt displays the project deletion confirmation.
-// Returns true if the user confirms, false otherwise.
-func ShowProjectDeletePrompt(projectName string, agentCount int, providers ProjectProviders, autoConfirm bool) bool {
+// force reports whether the delete is forced: without it the Hub refuses
+// while agents remain, with it their records are removed and their runtime
+// deletes are best-effort. Returns true if the user confirms, false
+// otherwise.
+func ShowProjectDeletePrompt(projectName string, agentCount int, providers ProjectProviders, force, autoConfirm bool) bool {
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintf(promptOut, "This will permanently delete project '%s' from the Hub.\n", projectName)
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintln(promptOut, "The following will be removed:")
-	if agentCount > 0 {
-		_, _ = fmt.Fprintf(promptOut, "  - %d agent(s) (will be stopped and deleted)\n", agentCount)
-	} else {
+	switch {
+	case agentCount == 0:
 		_, _ = fmt.Fprintln(promptOut, "  - 0 agents")
+	case force:
+		_, _ = fmt.Fprintf(promptOut, "  - %d agent(s) (--force: records removed, runtime deletes are best-effort)\n", agentCount)
+	default:
+		_, _ = fmt.Fprintf(promptOut, "  - %d agent(s): the Hub refuses the delete while agents remain; delete them first, or use --force\n", agentCount)
 	}
 	if providers != nil && providers.ProviderCount() > 0 {
 		_, _ = fmt.Fprintf(promptOut, "  - %d broker provider association(s):\n", providers.ProviderCount())
