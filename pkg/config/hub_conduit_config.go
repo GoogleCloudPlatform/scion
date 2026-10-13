@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -89,6 +90,17 @@ type HubConduitConfig struct {
 	// grant may target besides the agent's exposed ports. The reserved
 	// ports (9810, 18380) are always refused. Empty: exposed ports only.
 	TCPAllowedPorts []int `json:"tcpAllowedPorts,omitempty" yaml:"tcpAllowedPorts,omitempty" koanf:"tcpAllowedPorts"`
+	// DisableSSH turns off the agents' embedded SSH server (shell, exec,
+	// sftp and SSH forwarding) while the rest of conduit keeps working.
+	// The hub refuses ssh streams and tells agents not to serve them.
+	DisableSSH bool `json:"disableSsh,omitempty" yaml:"disableSsh,omitempty" koanf:"disableSsh"`
+	// DenyPorts lists agent-local ports no conduit stream may reach: TCP
+	// streams and SSH direct-tcpip. It wins over exposed ports and
+	// TCPAllowedPorts.
+	DenyPorts []int `json:"denyPorts,omitempty" yaml:"denyPorts,omitempty" koanf:"denyPorts"`
+	// DenySockets lists agent-local Unix socket paths, or directories
+	// whose sockets, SSH direct-streamlocal must not reach.
+	DenySockets []string `json:"denySockets,omitempty" yaml:"denySockets,omitempty" koanf:"denySockets"`
 	// InternalListen is the host:port of the internal relay API listener
 	// ("" = none). It must be reachable only inside the cluster/VPC; TLS
 	// on the internal hop is recommended (http:// is accepted).
@@ -163,7 +175,8 @@ type ConduitStreamAuthzMax struct {
 
 // IsZero reports whether nothing is configured.
 func (c HubConduitConfig) IsZero() bool {
-	return c.GrantKeyActivation == "" && len(c.TCPAllowedPorts) == 0 && c.InternalListen == "" &&
+	return c.GrantKeyActivation == "" && len(c.TCPAllowedPorts) == 0 && !c.DisableSSH &&
+		len(c.DenyPorts) == 0 && len(c.DenySockets) == 0 && c.InternalListen == "" &&
 		c.InternalAdvertise == "" && c.PeerAuth == "" && len(c.PeerServiceAccounts) == 0 && c.PeerAudience == "" &&
 		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == "" && c.LifetimeCap == "" &&
 		c.ShutdownGrace == "" && c.ProxySessionMaxAge == "" && c.StreamAuthzMax.IsZero()
@@ -313,6 +326,14 @@ func (c HubConduitConfig) PeerAuthMode() string {
 	return strings.ToLower(c.PeerAuth)
 }
 
+// ConduitSocketPathValid reports whether p is usable as a deny_sockets
+// entry. Commas are refused because the env var form of the setting is
+// comma-separated.
+func ConduitSocketPathValid(p string) bool {
+	return p != "" && path.IsAbs(p) && path.Clean(p) == p &&
+		!strings.ContainsAny(p, ",\x00")
+}
+
 // Validate checks every conduit setting and returns all problems found.
 func (c HubConduitConfig) Validate() error {
 	var errs []error
@@ -346,6 +367,26 @@ func (c HubConduitConfig) Validate() error {
 			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.tcp_allowed_ports: port %d is listed twice", p))
 		}
 		seen[p] = true
+	}
+	seen = map[int]bool{}
+	for _, p := range c.DenyPorts {
+		switch {
+		case p < 1 || p > 65535:
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.deny_ports: port %d is outside 1-65535", p))
+		case seen[p]:
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.deny_ports: port %d is listed twice", p))
+		}
+		seen[p] = true
+	}
+	seenPath := map[string]bool{}
+	for _, p := range c.DenySockets {
+		switch {
+		case !ConduitSocketPathValid(p):
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.deny_sockets entry %q: want a clean absolute path without commas", p))
+		case seenPath[p]:
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.deny_sockets: %s is listed twice", p))
+		}
+		seenPath[p] = true
 	}
 	if c.InternalListen != "" {
 		_, port, err := net.SplitHostPort(c.InternalListen)
