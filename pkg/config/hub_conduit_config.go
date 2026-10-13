@@ -22,7 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // Conduit relay-peer authentication modes (server.hub.conduit.peer_auth).
@@ -87,8 +86,13 @@ const (
 )
 
 // ConduitPeerSecretMinBytes is the shortest accepted
-// server.hub.conduit.peer_secret, in bytes (design §3.9).
-const ConduitPeerSecretMinBytes = 32
+// server.hub.conduit.peer_secret, in octets after NormalizePeerSecret
+// (design §3.9), and ConduitPeerSecretMinDistinct the fewest distinct
+// octets it may hold.
+const (
+	ConduitPeerSecretMinBytes    = 32
+	ConduitPeerSecretMinDistinct = 16
+)
 
 // ConduitPeerSecretKey is the settings key of the relay-peer secret. No
 // settings API reads or writes it.
@@ -213,19 +217,41 @@ func (c HubConduitConfig) ExternalRelay() bool {
 	return c.RelayModeValue() == ConduitRelayModeExternal
 }
 
-// ValidatePeerSecret checks a relay-peer secret's strength. It names the
-// setting and never the value. An empty secret is unset and passes here;
-// the modes that require it check for it separately.
+// NormalizePeerSecret returns the relay-peer secret as used: its raw
+// octets, with exactly one trailing newline removed (a secret file written
+// by openssl or echo ends in one); nothing else is trimmed or decoded.
+func NormalizePeerSecret(secret string) string {
+	return strings.TrimSuffix(secret, "\n")
+}
+
+// PeerSecretValue returns PeerSecret normalized (NormalizePeerSecret).
+func (c HubConduitConfig) PeerSecretValue() string {
+	return NormalizePeerSecret(c.PeerSecret)
+}
+
+// ValidatePeerSecret checks a relay-peer secret's strength on its
+// normalized octets: at least ConduitPeerSecretMinBytes of them, and at
+// least ConduitPeerSecretMinDistinct distinct ones. It names the setting
+// and never the value. An empty secret is unset and passes here; the modes
+// that require it check for it separately.
 func ValidatePeerSecret(secret string) error {
 	if secret == "" {
 		return nil
 	}
-	if len(secret) < ConduitPeerSecretMinBytes {
-		return fmt.Errorf("invalid server.hub.conduit.peer_secret: shorter than %d bytes", ConduitPeerSecretMinBytes)
+	v := NormalizePeerSecret(secret)
+	if len(v) < ConduitPeerSecretMinBytes {
+		return fmt.Errorf("invalid server.hub.conduit.peer_secret: shorter than %d octets", ConduitPeerSecretMinBytes)
 	}
-	first, _ := utf8.DecodeRuneInString(secret)
-	if strings.IndexFunc(secret, func(r rune) bool { return r != first }) < 0 {
-		return errors.New("invalid server.hub.conduit.peer_secret: one repeated character")
+	var seen [256]bool
+	distinct := 0
+	for i := 0; i < len(v); i++ {
+		if !seen[v[i]] {
+			seen[v[i]] = true
+			distinct++
+		}
+	}
+	if distinct < ConduitPeerSecretMinDistinct {
+		return fmt.Errorf("invalid server.hub.conduit.peer_secret: fewer than %d distinct octets", ConduitPeerSecretMinDistinct)
 	}
 	return nil
 }

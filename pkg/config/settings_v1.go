@@ -1703,7 +1703,8 @@ type V1ServerHubConduitConfig struct {
 	// scion server --role relay, hold the conduit sessions). Read at
 	// startup.
 	RelayMode string `json:"relay_mode,omitempty" yaml:"relay_mode,omitempty" koanf:"relay_mode"`
-	// PeerSecret is the dedicated relay-peer secret, at least 32 bytes:
+	// PeerSecret is the dedicated relay-peer secret: raw octets (one
+	// trailing newline removed), at least 32 of them, 16 distinct:
 	// the HMAC key of every relay-peer call is derived from it wherever a
 	// separate relay runs. Required in external mode and on --role relay;
 	// it must differ from the session secret. Never stored in the

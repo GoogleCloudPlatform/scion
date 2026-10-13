@@ -214,7 +214,7 @@ func TestHubConduitRelayModeAndPeerSecret(t *testing.T) {
 
 	for name, secret := range map[string]string{
 		"short":    "too-short-secret",
-		"31 bytes": strings.Repeat("ab", 15) + "c",
+		"31 bytes": testPeerSecret[:31],
 		"repeated": strings.Repeat("x", 40),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -224,7 +224,7 @@ func TestHubConduitRelayModeAndPeerSecret(t *testing.T) {
 			assert.NotContains(t, err.Error(), secret, "the error must not carry the value")
 		})
 	}
-	assert.NoError(t, ValidatePeerSecret(strings.Repeat("ab", 16)), "32 bytes is the minimum")
+	assert.NoError(t, ValidatePeerSecret(testPeerSecret[:32]), "32 octets is the minimum")
 	assert.NoError(t, ValidatePeerSecret(""), "unset passes here; required modes check it")
 	assert.False(t, HubConduitConfig{PeerSecret: testPeerSecret}.IsZero())
 	assert.False(t, HubConduitConfig{RelayMode: "external"}.IsZero())
@@ -274,11 +274,43 @@ func TestRelayServerConfigValidateHidesCredentials(t *testing.T) {
 	assert.NotContains(t, err.Error(), "pw-secret")
 }
 
-// TestValidatePeerSecretRepeatedRune: the repeated-character check
-// compares characters, not bytes.
-func TestValidatePeerSecretRepeatedRune(t *testing.T) {
-	assert.Error(t, ValidatePeerSecret(strings.Repeat("é", 20)), "one repeated two-byte character")
-	assert.NoError(t, ValidatePeerSecret(strings.Repeat("éa", 16)))
+// TestValidatePeerSecretOctets (design §3.9, lead ruling): peer_secret is
+// raw octets. At least 32 of them after removing exactly one trailing
+// newline, counted as octets (not characters), and at least 16 distinct.
+func TestValidatePeerSecretOctets(t *testing.T) {
+	sixteen := "0123456789abcdef" // 16 distinct octets
+	for _, tc := range []struct {
+		name   string
+		secret string
+		ok     bool
+	}{
+		{"31 octets", testPeerSecret[:31], false},
+		{"32 octets", testPeerSecret[:32], true},
+		{"32 octets plus one trailing newline", testPeerSecret[:32] + "\n", true},
+		{"31 octets plus one trailing newline", testPeerSecret[:31] + "\n", false},
+		{"31 octets plus two trailing newlines: only one is trimmed", testPeerSecret[:31] + "\n\n", true},
+		{"only a newline", "\n", false},
+		{"a trailing CRLF counts the CR", testPeerSecret[:31] + "\r\n", true},
+		{"multi-byte characters count as octets", strings.Repeat("é", 8) + sixteen, true}, // 16 + 16 octets
+		{"15 distinct octets", strings.Repeat(sixteen[:15], 3), false},
+		{"16 distinct octets", strings.Repeat(sixteen, 2), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidatePeerSecret(tc.secret)
+			if tc.ok {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "server.hub.conduit.peer_secret")
+			if strings.TrimSpace(tc.secret) != "" {
+				assert.NotContains(t, err.Error(), strings.TrimSpace(tc.secret))
+			}
+		})
+	}
+	assert.Equal(t, "abc", NormalizePeerSecret("abc\n"))
+	assert.Equal(t, "abc\n", NormalizePeerSecret("abc\n\n"))
+	assert.Equal(t, "abc", HubConduitConfig{PeerSecret: "abc\n"}.PeerSecretValue())
 }
 
 // TestPeerSecretFileValueSurvivesEmptyEnv: an exported but empty env

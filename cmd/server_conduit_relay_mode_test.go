@@ -51,6 +51,8 @@ func TestValidateConduitPeerSecret(t *testing.T) {
 		{name: "relay role with peer secret", conduit: withSecret(config.HubConduitConfig{}, relayModeTestPeerSecret), relayRole: true},
 		{name: "equal to the session secret", conduit: withSecret(external, relayModeTestSessionSecret), session: relayModeTestSessionSecret, wantErr: "must differ from the session secret"},
 		{name: "equal to the session secret, in-process", conduit: withSecret(config.HubConduitConfig{}, relayModeTestSessionSecret), session: relayModeTestSessionSecret, wantErr: "must differ from the session secret"},
+		{name: "equal to the session secret after the trailing newline is trimmed", conduit: withSecret(external, relayModeTestSessionSecret+"\n"), session: relayModeTestSessionSecret, wantErr: "must differ from the session secret"},
+		{name: "a second trailing newline is part of the secret", conduit: withSecret(external, relayModeTestSessionSecret+"\n\n"), session: relayModeTestSessionSecret},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateConduitPeerSecret(tc.conduit, tc.relayRole, tc.session)

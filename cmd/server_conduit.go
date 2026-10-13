@@ -283,7 +283,7 @@ func validateConduitPeerSecret(c config.HubConduitConfig, relayRole bool, sessio
 		return errors.New("server.hub.conduit.peer_secret is required on --role relay")
 	case c.PeerSecret == "" && c.ExternalRelay():
 		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
-	case c.PeerSecret != "" && sessionSecret != "" && c.PeerSecret == sessionSecret:
+	case c.PeerSecret != "" && sessionSecret != "" && c.PeerSecretValue() == sessionSecret:
 		return errors.New("server.hub.conduit.peer_secret must differ from the session secret")
 	}
 	return nil

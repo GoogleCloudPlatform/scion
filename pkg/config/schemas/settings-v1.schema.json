@@ -1537,7 +1537,7 @@
             },
             "peer_secret": {
               "type": "string",
-              "description": "Dedicated relay-peer secret, at least 32 bytes: the HMAC key of every relay-peer call is derived from it wherever a separate relay runs. Required in external relay mode and on --role relay, and must differ from the session secret. Never stored in the database, returned by the server-config API or logged; prefer a file-mounted settings.yaml over the environment. Read at startup.",
+              "description": "Dedicated relay-peer secret, raw octets (no decoding; one trailing newline is removed), at least 32 octets with at least 16 distinct (generate with 'openssl rand -base64 32'): the HMAC key of every relay-peer call is derived from it wherever a separate relay runs. Required in external relay mode and on --role relay, and must differ from the session secret. Never stored in the database, returned by the server-config API or logged; prefer a file-mounted settings.yaml over the environment. Read at startup.",
               "x-sensitive": true,
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERSECRET",
               "x-since": "1"
