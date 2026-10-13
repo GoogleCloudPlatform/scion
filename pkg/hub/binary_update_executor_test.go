@@ -467,9 +467,9 @@ func TestBinaryUpdateExecutor_PreflightValidation(t *testing.T) {
 		// If no download URL and no update available, executor should
 		// return nil (no error, just "no update available").
 		// We test this by providing a dev version that skips the check.
-		executor := &BinaryUpdateExecutor{
-			serviceName: "test-hub",
-		}
+		executor := NewBinaryUpdateExecutor(BinaryUpdateOptions{
+			ServiceName: "test-hub",
+		})
 
 		var logBuf bytes.Buffer
 		params := map[string]string{

@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -2577,12 +2576,14 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 
 	// For linked projects (local directory) on the embedded broker, initialize
 	// the .scion directory so agents and templates directories exist before
-	// the first agent starts. Other brokers manage their own filesystem.
+	// the first agent starts. Other brokers manage their own filesystem, and
+	// the broker's global directory is left to global init.
 	if cleanPath != "" && embedded {
-		scionDir := filepath.Join(cleanPath, ".scion")
-		if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
-			slog.Warn("failed to initialize .scion in linked project",
-				"project_id", projectID, "localPath", cleanPath, "error", err.Error())
+		if scionDir, ok := linkedProjectInitDir(cleanPath); ok {
+			if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+				slog.Warn("failed to initialize .scion in linked project",
+					"project_id", projectID, "localPath", cleanPath, "error", err.Error())
+			}
 		}
 	}
 

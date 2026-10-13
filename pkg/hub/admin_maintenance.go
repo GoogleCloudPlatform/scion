@@ -332,10 +332,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		if backend == nil {
 			return nil, fmt.Errorf("no secret backend configured; cannot run secret migration")
 		}
-		return &SecretMigrationExecutor{
-			store:         s.store,
-			secretBackend: backend,
-		}, nil
+		return NewSecretMigrationExecutor(s.store, backend), nil
 	case "applied-config-env-cleanup":
 		return &AppliedConfigEnvCleanupExecutor{
 			Store:         s.store,
@@ -354,54 +351,52 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry,
 			"tag", mc.ImageTag, "harnesses", fmt.Sprint(mc.Harnesses))
-		return &PullImagesExecutor{
-			runtimeBin: mc.RuntimeBin,
-			registry:   mc.ImageRegistry,
-			tag:        mc.ImageTag,
-			harnesses:  mc.Harnesses,
-		}, nil
+		return NewPullImagesExecutor(PullImagesOptions{
+			RuntimeBin: mc.RuntimeBin,
+			Registry:   mc.ImageRegistry,
+			Tag:        mc.ImageTag,
+			Harnesses:  mc.Harnesses,
+		}), nil
 	case "rebuild-server":
 		log.Debug("Resolved rebuild-server executor",
 			"repo_path", mc.RepoPath, "branch", mc.RepoBranch,
 			"binary_dest", mc.BinaryDest, "service_name", mc.ServiceName)
-		return &RebuildServerExecutor{
-			repoPath:    mc.RepoPath,
-			repoBranch:  mc.RepoBranch,
-			binaryDest:  mc.BinaryDest,
-			serviceName: mc.ServiceName,
-		}, nil
+		return NewRebuildServerExecutor(RebuildServerOptions{
+			RepoPath:    mc.RepoPath,
+			RepoBranch:  mc.RepoBranch,
+			BinaryDest:  mc.BinaryDest,
+			ServiceName: mc.ServiceName,
+		}), nil
 	case "rebuild-web":
 		log.Debug("Resolved rebuild-web executor", "repo_path", mc.RepoPath, "branch", mc.RepoBranch)
-		return &RebuildWebExecutor{
-			repoPath:   mc.RepoPath,
-			repoBranch: mc.RepoBranch,
-		}, nil
+		return NewRebuildWebExecutor(RebuildWebOptions{
+			RepoPath:   mc.RepoPath,
+			RepoBranch: mc.RepoBranch,
+		}), nil
 	case "rebuild-container-binaries":
 		log.Debug("Resolved rebuild-container-binaries executor", "repo_path", mc.RepoPath)
-		return &RebuildContainerBinariesExecutor{
-			repoPath: mc.RepoPath,
-		}, nil
+		return NewRebuildContainerBinariesExecutor(mc.RepoPath), nil
 	case "build-harness-config-image":
 		log.Debug("Resolved build-harness-config-image executor",
 			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry, "tag", mc.ImageTag)
-		return &BuildHarnessConfigImageExecutor{
-			store:      s.store,
-			storage:    s.GetStorage(),
-			runtimeBin: mc.RuntimeBin,
-			registry:   mc.ImageRegistry,
-			tag:        mc.ImageTag,
-			gcpProject: s.config.GCPProjectID,
-		}, nil
+		return NewBuildHarnessConfigImageExecutor(BuildHarnessConfigImageOptions{
+			Store:      s.store,
+			Storage:    s.GetStorage(),
+			RuntimeBin: mc.RuntimeBin,
+			Registry:   mc.ImageRegistry,
+			Tag:        mc.ImageTag,
+			GCPProject: s.config.GCPProjectID,
+		}), nil
 	case "update-binary":
 		log.Debug("Resolved update-binary executor",
 			"service_name", mc.ServiceName, "github_repo", mc.GitHubRepo,
 			"release_channel", mc.ReleaseChannel)
-		return &BinaryUpdateExecutor{
-			serviceName: mc.ServiceName,
-			githubRepo:  mc.GitHubRepo,
-			channel:     mc.ReleaseChannel,
-			store:       s.store,
-		}, nil
+		return NewBinaryUpdateExecutor(BinaryUpdateOptions{
+			ServiceName: mc.ServiceName,
+			GitHubRepo:  mc.GitHubRepo,
+			Channel:     mc.ReleaseChannel,
+			Store:       s.store,
+		}), nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
 	}

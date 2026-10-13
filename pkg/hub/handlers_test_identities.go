@@ -212,13 +212,15 @@ func isReservedTestIdentityEmail(email string) bool {
 // by email must refuse it. Such a path does not go through the hub-issued
 // JWT and its per-request row block (testFixtureRejection), so it cannot
 // apply a test identity's expiry or the feature switch; it refuses test
-// identities outright instead, whether or not the feature is enabled. Call
+// identities outright instead, whether or not the feature is enabled. It
+// refuses a federated account the same way (a non-human row, or an address
+// of the federated synthetic shape), which never authenticates by email. Call
 // it with u == nil on the presented email before the lookup, and again
 // with the resolved row. Callers today: broker on-behalf-of
 // (resolveOnBehalfOf) and the broker inbound message paths
 // (handleBrokerInbound, handleBrokerInboundRouted).
 func emailResolvedPrincipalRefused(email string, u *store.User) bool {
-	if isReservedTestIdentityEmail(email) {
+	if isReservedTestIdentityEmail(email) || store.IsFederatedSyntheticEmail(email) {
 		return true
 	}
 	return u != nil && (!u.IsHumanKind() || isReservedTestIdentityEmail(u.Email))

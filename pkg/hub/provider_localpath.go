@@ -31,6 +31,39 @@ import (
 // directories.
 var initLinkedProjectDir = config.InitProject
 
+// linkedProjectScionDir returns the .scion directory to initialize for a
+// provider local path. Clients send either the project's .scion directory
+// (for example "<repo>/.scion") or the project root; a path whose last
+// element is already .scion is used as is, and any other path gets .scion
+// appended. isBrokerGlobalDirPath accepts the same two shapes.
+func linkedProjectScionDir(localPath string) string {
+	clean := filepath.Clean(localPath)
+	if filepath.Base(clean) == config.DotScion {
+		return clean
+	}
+	return filepath.Join(clean, config.DotScion)
+}
+
+// linkedProjectInitDir returns the .scion directory the hub initializes for
+// an embedded broker's provider local path, and false when the path must not
+// be initialized: the machine's global scion directory, or a home directory
+// whose .scion is that directory, is set up by global init, not by
+// linked-project init. It skips paths isBrokerGlobalDirPath matches. Because
+// the embedded broker shares the hub's filesystem, it also skips this
+// process's own global directory and the home directory that contains it
+// (config.IsGlobalProjectDir, resolving symbolic links). This covers homes
+// outside the shapes that check recognizes.
+func linkedProjectInitDir(localPath string) (string, bool) {
+	if isBrokerGlobalDirPath(localPath) {
+		return "", false
+	}
+	scionDir := linkedProjectScionDir(localPath)
+	if config.IsGlobalProjectDir(scionDir) {
+		return "", false
+	}
+	return scionDir, true
+}
+
 // globalProjectSlug is the slug of a broker's global project: the CLI
 // registers it under the name "global", and the combined hub and broker
 // server creates it with this slug. Project slugs are unique on the hub.

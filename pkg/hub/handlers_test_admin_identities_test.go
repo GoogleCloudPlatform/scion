@@ -53,8 +53,7 @@ const taHubID = "ti-a1-hub"
 
 // taEnableGate turns the hub-admin kind of the test admin gate on for a
 // server built without it. Test-only: production code assigns the gate
-// once, in New. (This file keeps its own helpers so it compiles in its own
-// hubshard shard.)
+// once, in New.
 func taEnableGate(srv *Server) {
 	srv.testAdminGate = testAdminGate{hubAdmin: true, hubID: taHubID, hubClass: config.HubClassTest}
 }
@@ -1532,7 +1531,7 @@ func TestTestAdmin_MemberGranteeRefusalWithoutAuthz(t *testing.T) {
 // resolveConstraintAdminUsers or by checkUserRemovalAdminLockout, so the
 // lockout behaves as if it held no admin binding. (In this file rather
 // than handlers_test_identities_governance_test.go: it needs this file's
-// shard-local helpers.)
+// helpers.)
 func TestTestAdmin_NotAConstraintAdminForRemovalLockout(t *testing.T) {
 	srv, s, _ := taServer(t)
 	ctx := context.Background()

@@ -14,10 +14,11 @@
 
 package api
 
-// Runtime broker error codes the hub matches on to relay a specific broker
-// refusal instead of folding it into a generic dispatch failure. They live
-// here so the broker (which writes them) and the hub (which reads them)
-// share one definition without the hub importing pkg/runtimebroker.
+// Runtime broker error codes the hub or CLI matches on, to relay or show a
+// specific broker refusal instead of folding it into a generic dispatch
+// failure. They live here so the broker (which writes them) and the hub
+// and CLI (which read them) share one definition without importing
+// pkg/runtimebroker.
 const (
 	// BrokerErrCodeSkillResolution marks a create whose required skills
 	// could not be resolved.
@@ -47,7 +48,32 @@ const (
 	// one mapped to its GCP service account (400). The details also name
 	// the requested and mapped Kubernetes ServiceAccounts.
 	BrokerErrCodeIdentityKSAMismatch = "identity_ksa_mismatch"
+
+	// BrokerErrCodePriorStartInProgress marks a create refused because an
+	// earlier start of the same agent name on the broker was still
+	// finishing its failure cleanup when the broker's supersede wait ended
+	// (503, with Retry-After). Retrying the same create shortly is expected
+	// to succeed (ptone/scion#2632).
+	BrokerErrCodePriorStartInProgress = "prior_start_in_progress"
+
+	// BrokerErrCodeStartCancelled marks a create whose start was cancelled
+	// on the broker before it took the agent name: a stop or delete of the
+	// agent, or a newer start of the same name, reached the broker first
+	// (409). Retry only if the create is still wanted (ptone/scion#2632).
+	BrokerErrCodeStartCancelled = "start_cancelled"
+
+	// BrokerErrCodeLocalWorktreeRefused marks a worktree-per-agent dispatch
+	// for a linked checkout that the co-located broker refused because the
+	// checkout failed verification (409). Nothing was created. The hub
+	// relays it like any other broker failure; the CLI reads
+	// BrokerErrDetailReason from its details to show the cause and the fix.
+	BrokerErrCodeLocalWorktreeRefused = "local_worktree_refused"
 )
+
+// BrokerErrDetailReason is the details key of a
+// BrokerErrCodeLocalWorktreeRefused error: the client-facing message, with
+// any remote shown without credentials.
+const BrokerErrDetailReason = "reason"
 
 // Values of details.cause on a broker runtime_error answer to a create
 // whose runtime start failed with a Kubernetes API status the operator can

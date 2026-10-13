@@ -148,9 +148,15 @@ func (s *rsWebChatStore) GetUserPrefs(context.Context, string) (*WebChatUserPref
 	return nil, nil
 }
 func (s *rsWebChatStore) SetUserPrefs(context.Context, string, WebChatUserPrefs) error { return nil }
-func (s *rsWebChatStore) UpsertDM(context.Context, WebChatDM) error                    { return nil }
-func (s *rsWebChatStore) ListDMs(context.Context, string) ([]WebChatDM, error)         { return nil, nil }
-func (s *rsWebChatStore) TouchDMActivity(context.Context, string, string) error        { return nil }
+func (s *rsWebChatStore) ListUserPrefsPendingThreadGroupMigration(context.Context) ([]WebChatUserPrefs, error) {
+	return nil, nil
+}
+func (s *rsWebChatStore) MarkUserPrefsThreadGroupsMigrated(context.Context, string, string, string, string) (bool, error) {
+	return false, nil
+}
+func (s *rsWebChatStore) UpsertDM(context.Context, WebChatDM) error             { return nil }
+func (s *rsWebChatStore) ListDMs(context.Context, string) ([]WebChatDM, error)  { return nil, nil }
+func (s *rsWebChatStore) TouchDMActivity(context.Context, string, string) error { return nil }
 func (s *rsWebChatStore) SearchChatMessages(context.Context, ChatSearchFilter) ([]ChatSearchResult, string, error) {
 	return nil, "", nil
 }

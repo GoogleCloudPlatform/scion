@@ -115,8 +115,8 @@ func TestReviewGrantAllowed(t *testing.T) {
 }
 
 // TestReviewGrantDenied: every other caller or request gets exactly the
-// 403 a non-administrator got before review grants existed, and nothing
-// is written.
+// 403 a non-administrator of its kind gets (an agent gets the agent text,
+// ptone/scion#4576), and nothing is written.
 func TestReviewGrantDenied(t *testing.T) {
 	ok := reviewBody(SubjectPrincipal, reviewerID, GrantReview)
 	for _, tc := range []struct {
@@ -151,8 +151,13 @@ func TestReviewGrantDenied(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, id := newReviewGrantFixture(t)
-			// The baseline: a reader that is not an administrator.
-			want := response(f.postGrantBody(member, id, "junk"))
+			// The baseline: a reader of the caller's kind that is not an
+			// administrator. agentB is one before any setup.
+			baseline := member
+			if tc.caller.kind == PrincipalKindAgent {
+				baseline = agentB
+			}
+			want := response(f.postGrantBody(baseline, id, "junk"))
 			if tc.setup != nil {
 				tc.setup(f, id)
 			}

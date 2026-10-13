@@ -107,6 +107,11 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 	if _, ok := actor.(*DelegatedAgentIdentity); ok {
 		return Decision{Allowed: false, Reason: "delegated credential cannot delegate"}
 	}
+	// A visitor (a federated account) manages no resource, so it
+	// delegates nothing.
+	if isVisitorIdentity(actor) {
+		return Decision{Allowed: false, Reason: "visitor cannot delegate"}
+	}
 
 	// An admin-kind test identity holds exactly its issuance binding: no
 	// actor, not even a super-admin, adds authority to it afterwards. The
@@ -325,6 +330,7 @@ func (a *AuthzService) grantPermissionSet(ctx context.Context, grant GrantDescri
 const (
 	testAdminGranteeReasonRefused    = "an admin-kind test identity cannot receive grants"
 	testAdminGranteeReasonUnverified = "cannot verify the grantee's kind"
+	federatedGranteeReasonRefused    = "a federated account cannot receive grants through this path"
 )
 
 // testAdminGranteeRefusal is the one admin-kind grantee check behind
@@ -333,7 +339,10 @@ const (
 // grantee is an admin-kind test identity: a user email in an admin kind's
 // reserved domain, or a user ID whose stored kind
 // (kindForPrincipalVia through users, with cache when non-nil) is an admin
-// kind. It fails closed: a kind read error or an unrecognized kind refuses.
+// kind. It refuses a federated account the same way: a user ID whose
+// stored kind is federated, or an address of the federated synthetic shape
+// (the visitor grant path, not this one, gives such an account access). It
+// fails closed: a kind read error or an unrecognized kind refuses.
 // Non-user grantees and an empty ID pass.
 func testAdminGranteeRefusal(ctx context.Context, users store.UserStore, cache *testFixtureClampCache, principalType, principalID string) string {
 	if principalType != store.RoleBindingPrincipalUser || principalID == "" {
@@ -341,6 +350,9 @@ func testAdminGranteeRefusal(ctx context.Context, users store.UserStore, cache *
 	}
 	if store.IsTestAdminKind(store.TestIdentityEmailKind(principalID)) {
 		return testAdminGranteeReasonRefused
+	}
+	if store.IsFederatedSyntheticEmail(principalID) {
+		return federatedGranteeReasonRefused
 	}
 	if users == nil {
 		return testAdminGranteeReasonUnverified
@@ -351,6 +363,9 @@ func testAdminGranteeRefusal(ctx context.Context, users store.UserStore, cache *
 	}
 	if k.isTestAdmin() {
 		return testAdminGranteeReasonRefused
+	}
+	if k.isFederated() {
+		return federatedGranteeReasonRefused
 	}
 	return ""
 }

@@ -56,12 +56,14 @@ import (
 //     does not override this.
 //   - Otherwise, the key is kept only if its persisted value equals what a
 //     currently resolvable plain source would produce for that same key
-//     today: the agent's applied template's default env, its InlineConfig
-//     (explicit config-time env), or a Secret==false EnvVar in a reachable
-//     scope. This is an allowlist, not a denylist -- a key with no matching
-//     live source (for example, one whose originating secret has since been
-//     deleted) is stripped along with the rest, since this job cannot tell
-//     that case apart from a value that predates the write-path fix.
+//     today: its InlineConfig (explicit config-time env) or a Secret==false
+//     EnvVar in a reachable scope. The template's env is not a source: the
+//     hub no longer copies it into AppliedConfig.Env (ptone/scion#4222), so
+//     a template value found there is residue and is stripped too. This is
+//     an allowlist, not a denylist -- a key with no matching live source
+//     (for example, one whose originating secret has since been deleted) is
+//     stripped along with the rest, since this job cannot tell that case
+//     apart from a value that predates the write-path fix.
 //
 // The auto-expose keys in autoExposeAllowlistExemptKeys are exempt from this
 // allowlist (the secret checks still apply): the hub derives
@@ -85,7 +87,7 @@ import (
 // records whose agent has since been deleted, and applies these rules to both
 // config snapshots (previous_applied_config and new_applied_config). A
 // snapshot's Env gets the AppliedConfig.Env rule, evaluated against the
-// owning agent's scopes and the snapshot's own template and InlineConfig;
+// owning agent's scopes and the snapshot's own InlineConfig;
 // its InlineConfig.Env and CreateInputs.InlineConfig.Env get the narrow
 // rule. When the owning agent row no longer exists there are no agent scopes
 // to evaluate against, so Env falls back to the narrow rule too (hub-scope
@@ -314,12 +316,13 @@ func (e *AppliedConfigEnvCleanupExecutor) keysToStrip(ctx context.Context, agent
 
 // resolvablePlainValues returns, for every key, the set of values a
 // currently live, non-secret source would produce for that key today: the
-// agent's applied template's default env, its InlineConfig (explicit
-// config-time env), and any reachable Secret==false EnvVar. A key/value pair
-// present here is provably still an intentional plain declaration as of this
-// run, not a residual value from before the write-path fix. This mirrors the
-// persistence allowlist in shouldPersistResolvedEnvKey (httpdispatcher.go),
-// applied after the fact to rows that were already written.
+// agent's InlineConfig (explicit config-time env) and any reachable
+// Secret==false EnvVar. The template's env is not one (ptone/scion#4222). A
+// key/value pair present here is provably still an intentional plain
+// declaration as of this run, not a residual value from before the
+// write-path fix. This mirrors the persistence allowlist in
+// shouldPersistResolvedEnvKey (httpdispatcher.go), applied after the fact to
+// rows that were already written.
 func (e *AppliedConfigEnvCleanupExecutor) resolvablePlainValues(ctx context.Context, cfg *store.AgentAppliedConfig, envVarsByKey map[string]store.EnvVar) map[string]map[string]bool {
 	values := make(map[string]map[string]bool)
 	add := func(k, v string) {
@@ -332,13 +335,9 @@ func (e *AppliedConfigEnvCleanupExecutor) resolvablePlainValues(ctx context.Cont
 	}
 
 	if cfg != nil {
-		if cfg.TemplateID != "" {
-			if tmpl, err := e.Store.GetTemplate(ctx, cfg.TemplateID); err == nil && tmpl != nil && tmpl.Config != nil {
-				for k, v := range tmpl.Config.Env {
-					add(k, v)
-				}
-			}
-		}
+		// The template's env is not a source: the hub no longer copies it
+		// into AppliedConfig.Env (ptone/scion#4222), so a template value
+		// found there is residue of an older hub.
 		if cfg.InlineConfig != nil {
 			for k, v := range cfg.InlineConfig.Env {
 				add(k, v)
