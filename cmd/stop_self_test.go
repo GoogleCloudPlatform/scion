@@ -264,7 +264,8 @@ func TestStopAllViaHub_RmSkipsCurrentAgent(t *testing.T) {
 	assert.Contains(t, stderr, "add --self")
 }
 
-// The current agent is skipped when it matches by agent ID only.
+// The current agent is skipped when it matches by agent ID only, and it is
+// reported by its name, not its ID.
 func TestStopAllViaHub_RmSkipsCurrentAgentByID(t *testing.T) {
 	agents := []stopSelfHubAgent{{ID: "id-other", Name: "other-agent"}, {ID: selfAgentID, Name: "renamed-agent"}}
 	run := runStopAllViaHub(t, selfAgentName, selfAgentID, agents, true, false, false)
@@ -272,6 +273,14 @@ func TestStopAllViaHub_RmSkipsCurrentAgentByID(t *testing.T) {
 	require.NoError(t, run.err)
 	assert.NotContains(t, events, "stop:renamed-agent", "the agent with the current agent's ID must be skipped")
 	assert.ElementsMatch(t, []string{"stop:other-agent", "delete:other-agent"}, events)
+	assert.Contains(t, run.stderr, "Skipping agent 'renamed-agent'", "the skipped agent must be reported by name")
+	assert.NotContains(t, run.stderr, selfAgentID)
+
+	run = runStopAllViaHub(t, selfAgentName, selfAgentID, agents, true, false, true)
+	require.NoError(t, run.err)
+	doc := stopAllJSON(t, run.stdout)
+	assert.Equal(t, []interface{}{"renamed-agent"}, doc["skipped"], "the JSON skipped field must list the name, not the ID")
+	assert.NotContains(t, run.stdout, selfAgentID)
 }
 
 // stop --all --rm --self includes the current agent.

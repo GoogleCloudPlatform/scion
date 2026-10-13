@@ -78,15 +78,17 @@ func refuseCurrentAgentTarget(targets []string, targetProjectID string, allowSel
 
 // withoutCurrentAgent returns items without the current agent, for a
 // command that acts on many agents and skips the current one (stop --all
-// --rm). refs returns the references of an item (name, slug, ID; the name
-// first, so it is the one reported) that are matched as in
-// currentAgentTarget. skipped holds the matched reference of each item left
-// out.
+// --rm). refs returns the references of an item (name, slug, ID), which
+// are matched as in currentAgentTarget; the first must be the name to show.
+// skipped holds that first reference (the name) of each item left out,
+// whichever reference matched, so an agent matched only by its ID is still
+// reported by name.
 func withoutCurrentAgent[T any](items []T, targetProjectID string, refs func(T) []string) (kept []T, skipped []string) {
 	kept = make([]T, 0, len(items))
 	for _, item := range items {
-		if name := currentAgentTarget(refs(item), targetProjectID); name != "" {
-			skipped = append(skipped, name)
+		itemRefs := refs(item)
+		if currentAgentTarget(itemRefs, targetProjectID) != "" {
+			skipped = append(skipped, itemRefs[0])
 			continue
 		}
 		kept = append(kept, item)
