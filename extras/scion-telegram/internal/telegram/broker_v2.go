@@ -657,11 +657,15 @@ var openSQLiteStore = NewSQLiteStore
 // it to supply a token source.
 var resolveBrokerTransport = transportauth.ResolveBrokerTransport
 
+// callbackHandleTimeout bounds the handling of one callback query, received
+// by webhook or by long polling.
+const callbackHandleTimeout = 10 * time.Second
+
 // handleWebhookUpdate dispatches an update received by the webhook server.
 func (b *TelegramBrokerV2) handleWebhookUpdate(update Update) {
 	defer b.acquireGen()()
 	if update.CallbackQuery != nil {
-		cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cbCtx, cbCancel := context.WithTimeout(context.Background(), callbackHandleTimeout)
 		defer cbCancel()
 		b.handleCallbackQuery(cbCtx, update.CallbackQuery)
 	}
@@ -2059,25 +2063,30 @@ func (b *TelegramBrokerV2) pollLoop(ctx context.Context, api *TelegramAPIClient,
 		}
 
 		// Stop between updates once cancelled: the next loop fetches the
-		// rest of the batch again, as lastOffset has not passed them. A
-		// handler gets a context the cancel does not reach, so an update
-		// being handled when the loop is stopped (for example by a
-		// reconfigure) still finishes.
+		// rest of the batch again, as lastOffset has not passed them. An
+		// update being handled when the loop is stopped (for example by a
+		// reconfigure) still finishes; see handlePolledUpdate.
 		for _, update := range updates {
 			if ctx.Err() != nil {
 				return
 			}
 			b.lastOffset = update.UpdateID
-			b.handlePolledUpdate(context.WithoutCancel(ctx), update)
+			b.handlePolledUpdate(ctx, update)
 		}
 	}
 }
 
-// handlePolledUpdate dispatches an update received by long polling.
+// handlePolledUpdate dispatches an update received by long polling. ctx is
+// the poll loop's context. A callback is handled with a context that
+// stopping the loop does not cancel, so it finishes, but that is bounded by
+// callbackHandleTimeout like the webhook path, so Close and a switch to
+// webhook mode, which wait for the loop, stay bounded.
 func (b *TelegramBrokerV2) handlePolledUpdate(ctx context.Context, update Update) {
 	defer b.acquireGen()()
 	if update.CallbackQuery != nil {
-		b.handleCallbackQuery(ctx, update.CallbackQuery)
+		cbCtx, cbCancel := context.WithTimeout(context.WithoutCancel(ctx), callbackHandleTimeout)
+		defer cbCancel()
+		b.handleCallbackQuery(cbCtx, update.CallbackQuery)
 	}
 	if update.Message != nil {
 		b.handleIncomingMessageV2(update.Message)
