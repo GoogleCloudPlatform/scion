@@ -182,13 +182,13 @@ func validateTestAdminGateConfig(cfg ServerConfig, hasStore bool) error {
 	return nil
 }
 
-// testAdminKind names an admin test-identity kind. The kinds themselves
-// (user rows, issuance) arrive in phase A1; A0 only gates them.
+// testAdminKind names an admin test-identity kind; the values are the
+// stored user kinds.
 type testAdminKind string
 
 const (
-	testAdminKindHubAdmin   testAdminKind = "test_hub_admin"
-	testAdminKindSuperAdmin testAdminKind = "test_super_admin"
+	testAdminKindHubAdmin   testAdminKind = store.UserKindTestHubAdmin
+	testAdminKindSuperAdmin testAdminKind = store.UserKindTestSuperAdmin
 )
 
 // testAdminGate is the immutable gate value captured by New. Its fields are
@@ -245,10 +245,13 @@ func (s *Server) TestAdminTierOn() bool {
 }
 
 // liveTestAdminIdentityCount is the number of live admin-kind test
-// identities. Phase A0 has no admin kinds, so it is always 0; phase A1
-// replaces the body with a store count.
-func (s *Server) liveTestAdminIdentityCount(_ context.Context) (int, error) {
-	return 0, nil
+// identities (test_hub_admin and test_super_admin whose expiry is after
+// the test identity clock), as reported by the health summary.
+func (s *Server) liveTestAdminIdentityCount(ctx context.Context) (int, error) {
+	if s.store == nil {
+		return 0, nil
+	}
+	return s.store.CountLiveTestAdminUsers(ctx, "", "", s.testIdentities.clock())
 }
 
 // Signing-key source labels (signingKeySource). Labels only: no key
@@ -409,16 +412,18 @@ func (s *Server) RegisterInProcessPluginBroker(id string) {
 	s.inProcessPluginBrokers[id] = true
 }
 
-// testAdminAdmittedBroker reports whether brokerID is the co-located broker
-// or a plugin record this process provisioned. Both are in-memory facts set
-// by this process; no stored attribute is consulted.
+// testAdminAdmittedBroker reports whether brokerID is a co-located broker
+// (the embedded broker, or an activated co-located flat Runtime Broker
+// instance, as isEmbeddedBroker) or a plugin record this process
+// provisioned. All are in-memory facts set by this process; no stored
+// attribute is consulted.
 func (s *Server) testAdminAdmittedBroker(brokerID string) bool {
 	if brokerID == "" {
 		return false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return brokerID == s.embeddedBrokerID || s.inProcessPluginBrokers[brokerID]
+	return brokerID == s.embeddedBrokerID || s.embeddedFlatIDs[brokerID] || s.inProcessPluginBrokers[brokerID]
 }
 
 // testAdminBrokerAdmission is BrokerAuthService.brokerAdmission. While the
@@ -510,11 +515,20 @@ func (s *Server) VerifyTestAdminBrokerSet(ctx context.Context) error {
 	for id := range s.inProcessPluginBrokers {
 		plugins = append(plugins, id)
 	}
+	// The co-located flat Runtime Broker instances admitted with the
+	// embedded broker (testAdminAdmittedBroker); with several there is no
+	// single embedded broker ID, so the line names them here.
+	flat := make([]string, 0, len(s.embeddedFlatIDs))
+	for id := range s.embeddedFlatIDs {
+		flat = append(flat, id)
+	}
 	s.mu.RUnlock()
 	sort.Strings(plugins)
+	sort.Strings(flat)
 	if err := s.testAdminAudit.emit(testAdminAuditEventBrokerSet, map[string]any{
 		"level":              "WARN",
 		"embedded_broker_id": embedded.id,
+		"flat_broker_ids":    flat,
 		"plugin_broker_ids":  plugins,
 	}); err != nil {
 		return fmt.Errorf("test admin tier: broker check line could not be written: %w", err)

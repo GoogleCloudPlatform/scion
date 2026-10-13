@@ -50,12 +50,11 @@ type TemplateConfigFinding struct {
 }
 
 // templateEnvironmentKeyFinding returns the environment_keys finding for t,
-// or nil when its snapshot sets none. The harness-config's credential env
-// keys are not known to the hub here, so only the fixed reserved env keys
-// (SCION_*, OTEL_*, hub-only) are checked; agents also ignore the
-// credential keys of the harness-config they resolve.
+// or nil when its snapshot sets none: the six environment keys and any
+// reserved SCION_* env key. Other env keys are a lowest-precedence fill for
+// the job's tools, not findings.
 func templateEnvironmentKeyFinding(t *store.Template) *TemplateConfigFinding {
-	keys := config.TemplateEnvironmentKeys(t.AgentConfig, nil)
+	keys := config.TemplateEnvironmentKeys(t.AgentConfig)
 	if len(keys) == 0 {
 		return nil
 	}

@@ -28,12 +28,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
@@ -229,6 +231,76 @@ type EnsureHubReadyOptions struct {
 	// directory it resolved itself is not an explicit target and keeps
 	// SCION_PROJECT_ID in a hub-connected container (ptone/scion#3123).
 	ExplicitProject bool
+	// ExplicitHub reports that the user chose the hub explicitly for this
+	// invocation: the project came from the CLI's current context ('scion
+	// use'), which names a project on a specific hub. A hub project
+	// reference then resolves on that hub without the hub.enabled gate.
+	ExplicitHub bool
+	// HubFromContext reports that the endpoint (EndpointOverride) is the hub
+	// selected with 'scion use', not one given with --hub or found in
+	// settings. For a project already linked to a hub (hub.projectId set)
+	// but not known to this hub, EnsureHubReady then does not link or
+	// register it: it returns the "project must be linked" error, so the
+	// context's hub never rewrites the project's link.
+	HubFromContext bool
+	// RecordLink, when set, is called after EnsureHubReady registered or
+	// linked the project at projectPath on the hub at endpoint, with the
+	// ID the hub knows the project by. The CLI uses it to record the link
+	// in its hub list when the hub came from its current context, so the
+	// project keeps resolving to that hub after a hub switch.
+	RecordLink func(endpoint, hubProjectID, projectPath string, isGlobal bool)
+}
+
+// ErrProjectUnlinked is returned by EnsureHubReady for a project whose
+// settings say it was unlinked from the hub (hub.linked=false, written by
+// 'scion hub unlink').
+var ErrProjectUnlinked = errors.New("this project was unlinked from the Hub; run 'scion hub link' to re-link it, or manage its agents on the hub with --project <hub-slug>")
+
+// ProjectLinkedSetting returns the hub.linked value from the project's own
+// settings, or nil when it is unset. It reads the location
+// config.UpdateSetting writes ('scion hub link' and 'scion hub unlink' use
+// it): the global directory for the global project, and for any other
+// project the in-repo .scion directory and then config.GetProjectConfigDir,
+// which is the external project-configs directory of a git project with
+// split storage. A value in the external directory overrides the in-repo
+// one. A settings file that cannot be read is skipped; the normal settings
+// load reports such errors. The global settings are not merged in, so the
+// global project's value does not leak into other projects.
+func ProjectLinkedSetting(projectPath string, isGlobal bool) *bool {
+	dirs := []string{projectPath}
+	if !isGlobal {
+		if ext := config.GetProjectConfigDir(projectPath); ext != "" && ext != projectPath {
+			dirs = append(dirs, ext)
+		}
+	}
+	var linked *bool
+	for _, dir := range dirs {
+		own, err := config.LoadSettingsFromDir(dir)
+		if err != nil || own == nil || own.Hub == nil || own.Hub.Linked == nil {
+			continue
+		}
+		linked = own.Hub.Linked
+	}
+	return linked
+}
+
+// projectExplicitlyUnlinked reports whether the project's own settings set
+// hub.linked to false (see ProjectLinkedSetting). An unset value (never
+// linked) is not unlinked.
+func projectExplicitlyUnlinked(projectPath string, isGlobal bool) bool {
+	linked := ProjectLinkedSetting(projectPath, isGlobal)
+	return linked != nil && !*linked
+}
+
+// errProjectMustBeLinked is the error for a project that has to be linked to
+// the hub before the operation.
+func errProjectMustBeLinked() error {
+	msg := "project must be linked to Hub to perform this operation\n\n" +
+		"Link this project: scion hub link"
+	if !config.IsHubManagedAgent() {
+		msg += "\nOr use local-only mode: scion --no-hub <command>"
+	}
+	return errors.New(msg)
 }
 
 // EnsureHubReady performs all Hub pre-flight checks before agent operations.
@@ -307,6 +379,18 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		return nil, nil
 	}
 
+	// A project the user unlinked with 'scion hub unlink' stays unlinked:
+	// agent commands refuse instead of using the hub, and the auto-link
+	// below must not silently link it again. Only 'scion hub link' clears
+	// this. The check reads the project's own settings where 'scion hub
+	// unlink' writes them (including the external directory of a git project
+	// with split storage), so a global project that was unlinked does not
+	// mark other projects unlinked through the settings merge. It runs
+	// before any hub call.
+	if !hubContext && projectExplicitlyUnlinked(resolvedPath, isGlobal) {
+		return nil, ErrProjectUnlinked
+	}
+
 	// When running inside a hub-connected container, always skip sync checks —
 	// containers cannot register projects or reconcile agents.
 	if hubContext {
@@ -328,7 +412,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		}
 	}
 	if endpoint == "" {
-		return nil, wrapHubError(fmt.Errorf("hub is enabled but no endpoint configured; configure via: scion config set hub.endpoint <url>"))
+		return nil, wrapHubError(endpoint, fmt.Errorf("hub is enabled but no endpoint configured; configure via: scion config set hub.endpoint <url>"))
 	}
 
 	// Ensure project_id exists.
@@ -367,7 +451,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// Create Hub client
 	client, credentialKind, err := createHubClient(settings, endpoint)
 	if err != nil {
-		return nil, wrapHubError(fmt.Errorf("failed to create Hub client: %w", err))
+		return nil, wrapHubError(endpoint, fmt.Errorf("failed to create Hub client: %w", err))
 	}
 
 	// Check health
@@ -375,7 +459,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	defer cancel()
 
 	if _, err := client.Health(ctx); err != nil {
-		return nil, wrapHubError(fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
+		return nil, wrapHubError(endpoint, fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
 	}
 
 	// An explicit global target (-g global, -g home, --global) inside a
@@ -428,7 +512,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// Check project registration
 	registered, err := isProjectRegistered(ctx, hubCtx)
 	if err != nil {
-		return nil, wrapHubError(err)
+		return nil, wrapHubError(hubCtx.Endpoint, err)
 	}
 
 	if !registered {
@@ -438,6 +522,13 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		// offering to link or register (ptone/scion#3319).
 		if UsesUserAccessToken(credentialKind) {
 			return nil, ScopedTokenProjectNotFoundError(effectiveProjectID)
+		}
+
+		// A project linked to a hub must not be linked again, or registered,
+		// on the hub selected with 'scion use': nothing below runs (no ID or
+		// name match, no auto-link, no prompt, no registration).
+		if opts.HubFromContext && settings.GetHubProjectID() != "" {
+			return nil, errProjectMustBeLinked()
 		}
 
 		// Get project name for the prompt
@@ -507,19 +598,14 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				if opts.AutoLinkLocal && IsLocalWorkstationEndpoint(endpoint) {
 					_, _ = fmt.Fprintf(promptOut, "Linking project '%s' to the local hub at %s\n", projectName, endpoint)
 				} else if !ShowLinkPrompt(projectName, opts.AutoConfirm) {
-					msg := "project must be linked to Hub to perform this operation\n\n" +
-						"Link this project: scion hub link"
-					if !config.IsHubManagedAgent() {
-						msg += "\nOr use local-only mode: scion --no-hub <command>"
-					}
-					return nil, errors.New(msg)
+					return nil, errProjectMustBeLinked()
 				}
 			}
 		}
 
 		// Register the project
 		if err := registerProject(context.Background(), hubCtx, projectName, isGlobal); err != nil {
-			return nil, wrapHubError(fmt.Errorf("failed to register project: %w", err))
+			return nil, wrapHubError(endpoint, fmt.Errorf("failed to register project: %w", err))
 		}
 		// Reload settings to get updated broker ID and hub.projectId
 		settings, err = config.LoadSettings(resolvedPath)
@@ -535,6 +621,9 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		}
 		if settings.Hub != nil {
 			hubCtx.BrokerID = settings.Hub.BrokerID
+		}
+		if opts.RecordLink != nil && hubCtx.ProjectID != "" {
+			opts.RecordLink(endpoint, hubCtx.ProjectID, resolvedPath, isGlobal)
 		}
 	}
 
@@ -555,7 +644,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// Compare and sync agents
 	syncResult, err := CompareAgents(context.Background(), hubCtx)
 	if err != nil {
-		return nil, wrapHubError(fmt.Errorf("failed to compare agents: %w", err))
+		return nil, wrapHubError(endpoint, fmt.Errorf("failed to compare agents: %w", err))
 	}
 
 	// If we're operating on a specific agent, exclude it from sync requirements.
@@ -601,7 +690,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 
 		if ShowSyncPlan(effectiveSyncResult, opts.AutoConfirm) {
 			if err := ExecuteSync(context.Background(), hubCtx, effectiveSyncResult, opts.AutoConfirm); err != nil {
-				return nil, wrapHubError(fmt.Errorf("failed to sync agents: %w", err))
+				return nil, wrapHubError(endpoint, fmt.Errorf("failed to sync agents: %w", err))
 			}
 		} else {
 			msg := "agents must be synchronized with Hub to perform this operation\n\n" +
@@ -927,12 +1016,37 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	// Register local agents on Hub
 	// Note: We don't specify a runtime broker ID - the hub will resolve it based on
 	// available project providers (single provider = auto-select, multiple = error)
+	// Only an agent whose container is running is created and started (the
+	// broker adopts the running container). Any other agent is provisioned
+	// without starting, so the import does not start dormant agents or
+	// re-send their task. The project's containers are listed once.
+	var containers *importContainers
+	if len(result.ToRegister) > 0 {
+		containers = listImportContainers(ctxTimeout, hubCtx.ProjectPath)
+		if containers.err != nil {
+			warnf("could not check which agents are running (%v); importing agents without starting them", containers.err)
+		}
+	}
 	for _, name := range result.ToRegister {
-		_, _ = fmt.Fprintf(promptOut, "Registering agent '%s' on Hub...\n", name)
-		debugf("Creating agent: name=%s, projectID=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID)
+		cstate := containers.state(name)
+		outcome := cstate.importOutcome()
+		if cstate == containerExited {
+			// An exited leftover container (a local suspend or stop) would
+			// make the hub mark the provisioned agent as error from the
+			// container's exit code, and then start and resume refuse it.
+			// Remove it first, so the agent is imported with no container.
+			// The home and workspace are mounted directories and stay.
+			if err := containers.removeExited(ctxTimeout, name); err != nil {
+				warnf("could not remove the exited container of agent '%s' (%v); run 'scion stop %s' before 'scion start %s'", name, err, name, name)
+			} else {
+				outcome = "imported as stopped; its exited container was removed"
+			}
+		}
+		debugf("Creating agent: name=%s, projectID=%s, container=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID, cstate)
 		req := &hubclient.CreateAgentRequest{
-			Name:      name,
-			ProjectID: hubCtx.ProjectID,
+			Name:          name,
+			ProjectID:     hubCtx.ProjectID,
+			ProvisionOnly: cstate != containerRunning,
 		}
 
 		// Read local agent info to populate template and harness
@@ -950,6 +1064,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 			resp, err := hubCtx.Client.ProjectAgents(hubCtx.ProjectID).Create(ctxTimeout, req)
 			if err == nil {
 				debugf("Agent '%s' created with ID: %s", name, resp.Agent.ID)
+				_, _ = fmt.Fprintf(promptOut, "+ %s (%s)\n", name, outcome)
 				break
 			}
 
@@ -1061,6 +1176,177 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	UpdateSyncedAgents(hubCtx.ProjectPath, collectSyncedAgentNames(result))
 
 	return nil
+}
+
+// containerState is what the import knows about an agent's local container.
+type containerState int
+
+const (
+	// containerUnknown means the runtime could not be queried.
+	containerUnknown containerState = iota
+	// containerAbsent means no container exists for the agent.
+	containerAbsent
+	// containerExited means a container exists but is not running.
+	containerExited
+	// containerRunning means the agent's container is running.
+	containerRunning
+)
+
+func (c containerState) String() string {
+	switch c {
+	case containerAbsent:
+		return "absent"
+	case containerExited:
+		return "exited"
+	case containerRunning:
+		return "running"
+	default:
+		return "unknown"
+	}
+}
+
+// importOutcome is the per-agent line the import prints for this state.
+func (c containerState) importOutcome() string {
+	switch c {
+	case containerRunning:
+		return "running, adopted"
+	case containerExited:
+		return "imported as stopped"
+	case containerAbsent:
+		return "imported as created"
+	default:
+		return "imported, not started"
+	}
+}
+
+// importRuntime returns the runtime that the import queries for local
+// containers. Tests replace it.
+var importRuntime = func(projectPath string) runtime.Runtime {
+	return runtime.GetRuntime(projectPath, "")
+}
+
+// importContainers is the import's view of the local scion containers that
+// belong to one project, indexed by agent name.
+type importContainers struct {
+	byName     map[string][]api.AgentInfo
+	err        error // the runtime could not be listed; every state is unknown
+	rt         runtime.Runtime
+	projectDir string
+}
+
+// listImportContainers lists the scion containers once (label
+// scion.agent=true) and keeps those that belong to the project at
+// projectPath (see containerInProject). It asks the runtime directly rather
+// than reading agent-info.json, whose phase can be stale (a suspended agent
+// reports "stopped").
+func listImportContainers(ctx context.Context, projectPath string) *importContainers {
+	ic := &importContainers{byName: map[string][]api.AgentInfo{}}
+	rt := importRuntime(projectPath)
+	if rt == nil {
+		ic.err = errors.New("no container runtime available")
+		return ic
+	}
+	agents, err := rt.List(ctx, map[string]string{"scion.agent": "true"})
+	if err != nil {
+		ic.err = err
+		return ic
+	}
+	projectDir := projectPath
+	if pd, err := config.GetResolvedProjectDir(projectPath); err == nil && pd != "" {
+		projectDir = pd
+	}
+	ic.rt, ic.projectDir = rt, projectDir
+	projectName := config.GetProjectName(projectDir)
+	for _, a := range agents {
+		if !containerInProject(a, projectDir, projectName) {
+			continue
+		}
+		name := a.Labels["scion.name"]
+		if name == "" {
+			name = strings.TrimPrefix(a.Name, "/")
+		}
+		ic.byName[name] = append(ic.byName[name], a)
+	}
+	return ic
+}
+
+// containerInProject reports whether container a belongs to the project in
+// projectDir. The project path label is authoritative when present (two
+// clones can share a project name); otherwise the project name label must
+// match. A container with neither label is not counted: treating a stranger
+// as this project's running agent would start a dormant agent, the failure
+// the import must avoid. The project ID label is not used, because the local
+// project_id can differ from the ID the hub knows the project by.
+func containerInProject(a api.AgentInfo, projectDir, projectName string) bool {
+	path := a.ProjectPath
+	if path == "" {
+		path = projectkeys.ProjectPathFromLabels(a.Labels)
+	}
+	if path != "" {
+		return filepath.Clean(path) == filepath.Clean(projectDir)
+	}
+	name := a.Project
+	if name == "" {
+		name = projectkeys.ProjectNameFromLabels(a.Labels)
+	}
+	return name != "" && name == projectName
+}
+
+// removeExited removes agent name's exited containers. It only removes a
+// container whose phase is stopped (exited), that carries this agent's name
+// label and this project's path label. It never removes a running
+// container, a container in any other state (created, restarting or dead,
+// which a concurrent start can produce), or one whose project is known only
+// by name. It returns an error when such a container cannot be removed or
+// no container qualifies.
+func (ic *importContainers) removeExited(ctx context.Context, name string) error {
+	if ic == nil || ic.err != nil || ic.rt == nil {
+		return errors.New("container runtime not available")
+	}
+	removed := 0
+	for _, a := range ic.byName[name] {
+		if !strings.EqualFold(a.Phase, string(state.PhaseStopped)) {
+			continue
+		}
+		if a.Labels["scion.name"] != name {
+			continue
+		}
+		path := projectkeys.ProjectPathFromLabels(a.Labels)
+		if path == "" {
+			path = a.ProjectPath
+		}
+		if path == "" || filepath.Clean(path) != filepath.Clean(ic.projectDir) {
+			continue
+		}
+		if a.ContainerID == "" {
+			return fmt.Errorf("container of agent '%s' has no ID", name)
+		}
+		if err := ic.rt.Delete(ctx, runtime.RunRef{ID: a.ContainerID, RunID: a.RunID}); err != nil {
+			return err
+		}
+		removed++
+	}
+	if removed == 0 {
+		return errors.New("no exited container with this agent's name and project path labels")
+	}
+	return nil
+}
+
+// state returns what the import knows about agent name's container.
+func (ic *importContainers) state(name string) containerState {
+	if ic == nil || ic.err != nil {
+		return containerUnknown
+	}
+	list := ic.byName[name]
+	if len(list) == 0 {
+		return containerAbsent
+	}
+	for _, a := range list {
+		if strings.EqualFold(a.Phase, string(state.PhaseRunning)) {
+			return containerRunning
+		}
+	}
+	return containerExited
 }
 
 // collectSyncedAgentNames returns the names of all agents that should be
@@ -1404,6 +1690,13 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 			hubCtx.ProjectID = resp.Project.ID
 		}
 	}
+	// Record the link the way 'scion hub link' does, so every path that
+	// links a project (the local auto-link, the link prompt, a matching
+	// project) can be unlinked with 'scion hub unlink'. Registration only
+	// runs after the unlinked check, so this never overrides an unlink.
+	if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.linked", "true", isGlobal); err != nil {
+		_, _ = fmt.Fprintf(promptOut, "Warning: failed to save linked state: %v\n", err)
+	}
 	if resp.Broker != nil {
 		_, _ = fmt.Fprintf(promptOut, "Broker registered: %s (ID: %s)\n", resp.Broker.Name, resp.Broker.ID)
 	}
@@ -1561,22 +1854,26 @@ func isLocalhostEndpoint(endpoint string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-// emptyResponseNote replaces the local-only hint when the hub answered a call
+// emptyResponseNote replaces the hub-check hint when the hub answered a call
 // that needs a body with an empty response (apiclient.ErrNoContent). The hub
-// was reachable, so suggesting local-only mode would be misleading. The
+// was reachable, so telling the user to check it would be misleading. The
 // wording matches the note used by the CLI command paths in cmd.
 const emptyResponseNote = "\n\nThe hub returned an empty response where a result was expected."
 
 // wrapHubError wraps a Hub error with guidance for the user:
 //   - An empty response from a call that needs a body (an error wrapping
-//     apiclient.ErrNoContent) gets a note saying so and no local-only hint,
+//     apiclient.ErrNoContent) gets a note saying so and no hub-check hint,
 //     since the hub was reachable.
 //   - A 401 asks the user to log in again, or, inside a hub-managed agent,
 //     says the hub rejected the agent's credentials.
-//   - Any other error gets guidance to disable Hub integration. When running
-//     inside a hub-managed agent, the local-only mode hint is suppressed
-//     because disabling the Hub would break orchestration connectivity.
-func wrapHubError(err error) error {
+//   - Any other error gets the HubCheckHint for endpoint (check the local
+//     server, or 'scion hub status' for any other hub). Inside a hub-managed
+//     agent no hint is added: the agent cannot run those commands. With no
+//     endpoint no hint is added either.
+func wrapHubError(endpoint string, err error) error {
+	if err == nil {
+		return nil
+	}
 	if errors.Is(err, apiclient.ErrNoContent) {
 		return fmt.Errorf("%w%s", err, emptyResponseNote)
 	}
@@ -1589,10 +1886,22 @@ func wrapHubError(err error) error {
 		}
 		return fmt.Errorf("authentication failed, login to hub with 'scion hub auth login'")
 	}
-	if config.IsHubManagedAgent() {
+	// No hint without an endpoint: the error already says how to configure
+	// one, and there is no hub to check.
+	if config.IsHubManagedAgent() || endpoint == "" {
 		return err
 	}
-	return fmt.Errorf("%w\n\nTo use local-only mode, use: scion --no-hub <command>", err)
+	return fmt.Errorf("%w\n\n%s", err, HubCheckHint(endpoint))
+}
+
+// HubCheckHint is the remedy shown with a hub error when the hub may be
+// down or failing. For the local workstation endpoint it points at the
+// local server; for any other endpoint it points at 'scion hub status'.
+func HubCheckHint(endpoint string) string {
+	if IsLocalWorkstationEndpoint(endpoint) {
+		return "Is the local server running? Check with 'scion server status'; start it with 'scion server start'."
+	}
+	return "Check the hub with 'scion hub status'."
 }
 
 // cleanupProjectBrokerCredentials removes stale broker credentials from project settings.
@@ -1724,7 +2033,7 @@ const hubGlobalProjectSlug = "global"
 func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, endpoint string) (string, error) {
 	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: hubGlobalProjectSlug})
 	if err != nil {
-		return "", wrapHubError(fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
+		return "", wrapHubError(endpoint, fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
 	}
 	if len(resp.Projects) == 0 {
 		return "", fmt.Errorf("no project with slug %q was found on hub %s, or you do not have access to it.\n\n"+

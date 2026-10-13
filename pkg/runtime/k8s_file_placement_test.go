@@ -822,9 +822,7 @@ func TestRun_PlacesHomeFilesAfterSyncBeforeStartupGate(t *testing.T) {
 			}
 
 			logs := &lockedBuffer{}
-			prevLog := runtimeLog
-			runtimeLog = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-			t.Cleanup(func() { runtimeLog = prevLog })
+			setRuntimeLogHandler(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 			const adcContent = "adc-file-content-5d1e"
 			adc := filepath.Join(t.TempDir(), "adc.json")

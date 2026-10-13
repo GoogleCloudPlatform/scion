@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -218,8 +218,9 @@ func TestResolveAutoExposeEnv(t *testing.T) {
 // TestDispatch_AutoExposeDefault_OnCreateStartAndRestart pins the hub default's
 // transport: it rides HubAgentDefaults on create, start and restart, so a
 // change to it reaches an agent at its next start (AC5). Start and restart
-// carry the auto-expose default only: the hub limit/resource defaults stay
-// create/provision-only, so start behaviour for limits is unchanged.
+// also carry the hub resources, which the broker applies per start
+// (ptone/scion#4561); the hub limits stay create/provision-only, so start
+// behaviour for limits is unchanged.
 func TestDispatch_AutoExposeDefault_OnCreateStartAndRestart(t *testing.T) {
 	ctx := context.Background()
 	d, client, ag := autoExposeDispatchFixture(t)
@@ -245,7 +246,7 @@ func TestDispatch_AutoExposeDefault_OnCreateStartAndRestart(t *testing.T) {
 	assert.Equal(t, "1h", hd.MaxDuration)
 	assert.NotNil(t, hd.Resources)
 
-	assertAutoExposeOnly := func(label string, hd *RemoteHubAgentDefaults, want bool) {
+	assertStartWire := func(label string, hd *RemoteHubAgentDefaults, want bool) {
 		t.Helper()
 		require.NotNil(t, hd, "%s must carry the hub auto-expose default", label)
 		require.NotNil(t, hd.AutoExposePorts, label)
@@ -253,16 +254,17 @@ func TestDispatch_AutoExposeDefault_OnCreateStartAndRestart(t *testing.T) {
 		assert.Zero(t, hd.MaxTurns, "%s must not carry hub limits", label)
 		assert.Zero(t, hd.MaxModelCalls, "%s must not carry hub limits", label)
 		assert.Empty(t, hd.MaxDuration, "%s must not carry hub limits", label)
-		assert.Nil(t, hd.Resources, "%s must not carry hub resources", label)
+		require.NotNil(t, hd.Resources, "%s must carry the hub resources", label)
+		assert.Equal(t, "2", hd.Resources.Limits.CPU, label)
 	}
 
 	require.NoError(t, d.DispatchAgentStart(ctx, ag, "", false))
-	assertAutoExposeOnly("start", client.lastStartExtras.HubAgentDefaults, true)
+	assertStartWire("start", client.lastStartExtras.HubAgentDefaults, true)
 
 	// A changed hub default reaches the next restart.
 	hubDefault = ptrBool(false)
 	require.NoError(t, d.DispatchAgentRestart(ctx, ag))
-	assertAutoExposeOnly("restart", client.lastRestartExtras.HubAgentDefaults, false)
+	assertStartWire("restart", client.lastRestartExtras.HubAgentDefaults, false)
 }
 
 func TestDispatch_AutoExposeDefault_UnsetSendsNothingOnStart(t *testing.T) {
@@ -280,7 +282,7 @@ func TestApplyStartExtras_HubAgentDefaults(t *testing.T) {
 	_, ok := payload["hubAgentDefaults"]
 	assert.False(t, ok, "no hubAgentDefaults key without a value")
 
-	applyStartExtras(payload, StartExtras{HubAgentDefaults: startHubAgentDefaults(ptrBool(false), nil)})
+	applyStartExtras(payload, StartExtras{HubAgentDefaults: startHubAgentDefaults(opsettings.AgentDefaultsSettings{}, ptrBool(false), nil, nil)})
 	blob, err := json.Marshal(payload)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"hubAgentDefaults":{"autoExposePorts":false}}`, string(blob))

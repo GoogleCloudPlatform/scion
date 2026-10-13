@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_4
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -314,7 +312,16 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 			t.Run(koanf, func(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
 				f := layer1FieldFor(t, sec.Name, koanf)
-				srv, fake, ops := newTestDBServer(t)
+				// Clearing a saved public URL is recorded before it is
+				// written, and not made without the record
+				// (ptone/scion#3905), so that save needs an audit store.
+				var audit *settingsAuditStore
+				var st store.Store
+				if koanf == config.PublicURLKey {
+					audit = &settingsAuditStore{}
+					st = audit
+				}
+				srv, fake, ops := newTestDBServerWithStore(t, st)
 
 				seed := sample
 				if f.docPath != nil {
@@ -348,6 +355,12 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 				}
 				_, ok = valueAtPath(doc, f.docPath)
 				assert.False(t, ok, "an explicit null must clear %s; row %s", koanf, row.Value)
+				if audit != nil {
+					recs := audit.records()
+					require.Len(t, recs, 1, "only the clear changes the stored public URL")
+					assert.Equal(t, want, recs[0].BeforeSummary)
+					assert.Empty(t, recs[0].AfterSummary)
+				}
 			})
 		}
 	}
@@ -615,7 +628,7 @@ func TestPutServerConfigDB_AccessNoRowBaseFromSnapshot(t *testing.T) {
 		"image_registry":                "file.example.com",
 	})
 	ops := NewOperationalSettings(fake, fileK, emptyKoanf())
-	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, ""), store: &settingsAuditStore{}}
 	srv.SetOperationalSettings(ops)
 
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"invite"},"hub":{"public_url":"https://hub.example.com"}}}`)
@@ -1136,7 +1149,7 @@ func TestSystemRegistry_UnchangedManagedRowNotRewritten(t *testing.T) {
 // env value into the written row.
 func TestPutServerConfigDB_EndpointsSeededRowEnvPinnedMonitoringURLNotCarried(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	srv, fake, ops := newTestDBServer(t)
+	srv, fake, ops := newTestDBServerWithStore(t, &settingsAuditStore{})
 	ops.envOverrides = map[string]bool{config.MonitoringDashboardURLKey: true}
 	fake.seedWithOrigin("endpoints", json.RawMessage(`{"public_url":"https://old.example.com","monitoring_dashboard_url":"https://env.example.com/d"}`), "seeded")
 	_, err := ops.Refresh(context.Background())

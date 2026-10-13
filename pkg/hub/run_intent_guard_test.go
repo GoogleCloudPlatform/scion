@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_4
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -143,10 +141,12 @@ func parseHubFuncs(t *testing.T) map[string]map[string]int {
 	t.Helper()
 	fset := token.NewFileSet()
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards DispatchAgent lifecycle callers, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards DispatchAgent lifecycle callers.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards DispatchAgent lifecycle callers, which identity.go and identity_credential.go do not contain.
-	files, err := filepath.Glob("*.go")
+	// scanned through guardScanSubdirs; guards DispatchAgent lifecycle callers.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards DispatchAgent lifecycle callers.
+	files, err := globGuardScanDirs(".", "*.go")
 	if err != nil {
 		t.Fatalf("list package files: %v", err)
 	}
@@ -159,15 +159,23 @@ func parseHubFuncs(t *testing.T) map[string]map[string]int {
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
-		if f.Name.Name != "hub" {
+		rel := filepath.Dir(name)
+		if f.Name.Name != guardScanPackage(rel) {
 			continue
+		}
+		// Functions of a guardScanSubdirs package are keyed by its slash
+		// path ("maintenance/Name"), so they cannot shadow a pkg/hub
+		// function of the same name.
+		prefix := ""
+		if rel != "." {
+			prefix = filepath.ToSlash(rel) + "/"
 		}
 		for _, decl := range f.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
-			funcs[funcDeclKey(fd)] = selectorCallNames(fd)
+			funcs[prefix+funcDeclKey(fd)] = selectorCallNames(fd)
 		}
 	}
 	if len(funcs) == 0 {

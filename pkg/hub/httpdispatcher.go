@@ -913,11 +913,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// or InlineConfig.Env, both of which outrank template and
 		// harness-config env at the broker) and lands at buildAgentEnv's
 		// lowest tier.
-		var hubDefaults opsettings.AgentDefaultsSettings
-		if d.hubAgentDefaultsProvider != nil {
-			hubDefaults = d.hubAgentDefaultsProvider()
-		}
-		req.Config.HubAgentDefaults = tel.hubAgentDefaults(remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault(), experiments))
+		req.Config.HubAgentDefaults = remoteHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), experiments, tel.wireTelemetry())
 		req.Config.TelemetryPolicy = tel.telemetryPolicy()
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
@@ -3625,7 +3621,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     tel.hubAgentDefaults(startHubAgentDefaults(d.autoExposePortsDefault(), startEnv.experiments)),
+		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
 		TelemetryPolicy:      tel.telemetryPolicy(),
 		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
 		TemplateName:         agent.Template,
@@ -3816,7 +3812,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     tel.hubAgentDefaults(startHubAgentDefaults(d.autoExposePortsDefault(), startEnv.experiments)),
+		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
 		TelemetryPolicy:      tel.telemetryPolicy(),
 		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
 		SharedWorkspace:      projectInfo.sharedWorkspace,

@@ -72,6 +72,10 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 	if err != nil {
 		return nil, fmt.Errorf("list direct bindings: %w", err)
 	}
+	// Unclamped reads: apply the test identity clamps (fail closed).
+	if direct, err = clampBindingsForUser(ctx, s.store, s.authzService, userID, direct); err != nil {
+		return nil, fmt.Errorf("test identity clamp: %w", err)
+	}
 	for _, rb := range direct {
 		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" || !isBindingActive(rb, now) {
 			continue
@@ -99,6 +103,9 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 		bindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, []string{store.RoleScopeProject}, nil)
 		if err != nil {
 			return nil, fmt.Errorf("list group bindings: %w", err)
+		}
+		if bindings, err = clampBindingsForUser(ctx, s.store, s.authzService, userID, bindings); err != nil {
+			return nil, fmt.Errorf("test identity clamp: %w", err)
 		}
 		for _, rb := range bindings {
 			if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" || !isBindingActive(rb, now) {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -22,15 +22,14 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 )
 
 func setupTestNonceCacheStore(t *testing.T) *NonceCacheStore {
 	t.Helper()
-	client, err := ent.Open("sqlite3", "file:"+t.Name()+"?mode=memory&cache=shared&_fk=1")
+	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 

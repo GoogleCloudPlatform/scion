@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard hubshard-check build-hub-shard test-hub-shard vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -72,28 +72,58 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
-# HUB_TEST_GOGC is prefixed to the go test commands that build the pkg/hub
-# test package: the test-hub-sqlite prebuild (go test -c, build only) and
-# the T1 Postgres targets below. In the T1 targets the go test command both
-# builds and runs the tests, so GOGC=25 also applies to the test process
-# there (those selected tests are short). With the default GOGC the pkg/hub
-# test-package compile peaks at about 15 GB RSS
-# (15.4 GB with -tags integration) on a 16 GB GitHub-hosted runner, fills its
-# 3 GB swap, and the runner is shut down mid-step (exit 143,
-# ptone/scion#4083). GOGC=25 cut the peak to about 12 GB with no swap, for
-# about 5% more compile time (3:59 to 4:12 in one measurement). A non-empty
-# GOGC in the environment wins.
+## test-fast-ci: test-fast without the pkg/hub package itself (CI runs it as no_sqlite shards: test-hub-shard NOSQLITE=1)
+test-fast-ci:
+	@echo "Running tests (no SQLite, pkg/hub itself excluded)..."
+	@pkgs=$$($(call non_hub_pkgs,no_sqlite)) || exit 1; \
+	go test -tags no_sqlite $$pkgs
+
+# HUB_TEST_GOGC is prefixed to go test commands that compile large test
+# packages: the test-sqlite-nonhub prebuild (go test -c, build only) and the
+# cmd run in test-store-postgres (there the go test command also runs the
+# tests, so GOGC=25 applies to them too; they are short). The pkg/hub
+# package itself compiles only in shards, through hack/hubshard/shard.sh,
+# which applies the same default (GOGC=25 for its compiles, unless GOGC is
+# set). History: with the default GOGC the whole pkg/hub test-package
+# compile peaked at about 15 GB RSS (15.4 GB with -tags integration) on a
+# 16 GB GitHub-hosted runner, filled its 3 GB swap, and the runner was shut
+# down mid-step (exit 143, ptone/scion#4083); GOGC=25 cut that to about
+# 12 GB for about 5% more compile time. A non-empty GOGC in the environment
+# wins.
 HUB_TEST_GOGC = GOGC=$${GOGC:-25}
 
-## test-hub-sqlite: Run pkg/hub, perf/bench/seed, pkg/conduit, pkg/store/entadapter and pkg/artifacts tests with SQLite
+# HUB_PKG is the pkg/hub package itself. Its tests are split into build-tag
+# shards (hack/hubshard/README.md), so a shard's test binary compiles with
+# about half the memory of the whole package's; CI never compiles the whole
+# pkg/hub test package. Its subpackages are ordinary packages.
+HUB_PKG := github.com/GoogleCloudPlatform/scion/pkg/hub
+
+# non_hub_pkgs is a shell command that lists every package except HUB_PKG
+# under build tags $(1), as ./... would match them for go test or go vet
+# with those tags. It runs in the recipe, so other make invocations do not
+# run go list.
+non_hub_pkgs = go list -tags '$(1)' ./... | grep -vx '$(HUB_PKG)'
+
+# SHARD selects the pkg/hub test shard (1..N, N from
+# go run ./hack/hubshard -shards) for test-hub-shard, build-hub-shard,
+# vet-hub-shard and test-hub-postgres.
+SHARD ?= 1
+
+## test-hub-sqlite: Run pkg/hub (every shard), perf/bench/seed, pkg/conduit, pkg/store/entadapter and pkg/artifacts tests with SQLite
 # enabled (no build tag). This is the ~67% of pkg/hub's test files that
-# "make test-fast" never compiles (see ptone/scion#1118), plus
-# perf/bench/seed's and pkg/store/entadapter's own SQLite-backed tests,
-# which carry the same `//go:build !no_sqlite` constraint for the same
-# reason (ptone/scion#2393, ptone/scion#2851), and pkg/conduit's
-# relay/router tests, which run against the SQLite-backed conduit
-# registry store, and pkg/artifacts, whose store and service tests run on
-# SQLite.
+# "make test-fast" never compiles (see ptone/scion#1118), plus the
+# non-hub SQLite packages (test-sqlite-nonhub). pkg/hub runs shard by
+# shard (test-hub-shard), never as one test binary. CI runs the same
+# pieces in parallel jobs: SQLite Tests (non-hub) and pkg/hub shard K/N.
+test-hub-sqlite: test-sqlite-nonhub test-hub-shards
+
+## test-sqlite-nonhub: Run the pkg/hub subpackages, perf/bench/seed, pkg/conduit, pkg/store/entadapter and pkg/artifacts tests with SQLite
+# perf/bench/seed's and pkg/store/entadapter's own SQLite-backed tests carry
+# a `//go:build !no_sqlite` constraint (ptone/scion#2393,
+# ptone/scion#2851), pkg/conduit's relay/router tests run against the
+# SQLite-backed conduit registry store, and pkg/artifacts' store and
+# service tests run on SQLite. The pkg/hub package itself is left out: it
+# runs in shards (test-hub-shard).
 #
 # The test binaries are first compiled with HUB_TEST_GOGC (go test -c into a
 # scratch directory, then deleted). The go test run that follows reuses the
@@ -103,57 +133,81 @@ HUB_TEST_GOGC = GOGC=$${GOGC:-25}
 # 1.21+). There are no duplicates among the test packages today; if one
 # appears, prebuild with $(HUB_TEST_GOGC) go test -count=1 -run '^$'
 # instead, which compiles every package and runs no test functions.
-HUB_SQLITE_PKGS := ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/... ./pkg/artifacts/...
+SQLITE_NONHUB_PKGS_CMD = go list ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/... ./pkg/artifacts/... | grep -vx '$(HUB_PKG)'
 
-test-hub-sqlite:
-	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/store/entadapter + pkg/artifacts tests (SQLite-enabled)..."
-	@dir=$$(mktemp -d) || exit 1; \
-	$(HUB_TEST_GOGC) go test -c -o "$$dir/" $(HUB_SQLITE_PKGS); \
+test-sqlite-nonhub:
+	@echo "Running pkg/hub subpackages + perf/bench/seed + pkg/conduit + pkg/store/entadapter + pkg/artifacts tests (SQLite-enabled)..."
+	@pkgs=$$($(SQLITE_NONHUB_PKGS_CMD)) || exit 1; \
+	dir=$$(mktemp -d) || exit 1; \
+	$(HUB_TEST_GOGC) go test -c -o "$$dir/" $$pkgs; \
 	status=$$?; \
 	if [ -n "$$dir" ]; then rm -rf "$$dir"; fi; \
-	if [ $$status -ne 0 ]; then exit $$status; fi
-	@go test -count=1 -timeout 60m $(HUB_SQLITE_PKGS)
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	go test -count=1 -timeout 60m $$pkgs
 
-## hubshard: (Re)apply the pkg/hub test shard build tags (see hack/hubshard/README.md; ARGS=-rebalance etc.)
-# The default build (no tags) still compiles every test file. With
-# -tags hubshard,hubshard_K only the common test files plus shard K's
-# files compile, which lowers the pkg/hub test-compile peak per shard.
-hubshard:
-	@go run ./hack/hubshard $(ARGS)
+## test-cmd-sqlite: Run the cmd package tests with SQLite enabled (no build tag)
+# 41 cmd test files carry `//go:build !no_sqlite`, so "make test-fast"
+# (-tags no_sqlite) never compiles them (ptone/scion#1088). This runs the
+# whole cmd package untagged: those files plus the untagged ones, which
+# test-fast also runs (about 30s). CI runs it in the SQLite Tests
+# (non-hub) job.
+test-cmd-sqlite:
+	@echo "Running cmd tests (SQLite-enabled)..."
+	@go test -count=1 -timeout 20m ./cmd
 
-## hubshard-check: Fail if a pkg/hub test shard build would break (ARGS=-strict: also fail on unbalanced new files)
-# A new untagged test file that uses only untagged files passes (it
-# compiles in every shard until "make hubshard" assigns it), unless it
-# blank-imports a package, or a build condition, not yet in the generated
-# imports files (then run make hubshard).
-hubshard-check:
-	@go run ./hack/hubshard -check $(ARGS)
+## hubshard-parity: Check the pkg/hub test shards: every test runs in exactly one shard, every shard compiles (parse only)
+# Also fails if a hubshard tag or a generated imports file is committed:
+# the tags exist only in the overlay hack/hubshard writes on every run.
+# go run ./hack/hubshard prints the shard sizes; -untag strips tags an
+# older generator committed. See hack/hubshard/README.md.
+hubshard-parity:
+	@go run ./hack/hubshard -parity
 
-# SHARD selects the pkg/hub test shard for build-hub-shard / test-hub-shard.
-SHARD ?= 1
+## testpart-selftest: Test hack/testpart.sh, which splits the T1 entadapter Postgres tests over CI jobs (bash only)
+testpart-selftest:
+	@./hack/test-testpart.sh
 
-## build-hub-shard: Compile (go test -c, discarded) pkg/hub test shard SHARD=K
-build-hub-shard:
-	@dir=$$(mktemp -d) || exit 1; \
-	$(HUB_TEST_GOGC) go test -c -tags hubshard,hubshard_$(SHARD) -o "$$dir/" ./pkg/hub; \
-	status=$$?; rm -rf "$$dir"; exit $$status
-
-## test-hub-shard: Run pkg/hub test shard SHARD=K (common test files plus shard K)
+## test-hub-shard: Run pkg/hub test shard SHARD=K (NOSQLITE=1: with -tags no_sqlite; RACE=1: with -race)
+# Generates the shard overlay in a temp dir (the tree is not modified),
+# compiles the shard, checks its test list against hubshard -list, then
+# runs it. The common files' tests run only in shard 1.
 test-hub-shard:
-	@go test -count=1 -timeout 60m -tags hubshard,hubshard_$(SHARD) ./pkg/hub
+	@./hack/hubshard/shard.sh test $(SHARD) $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race)
+
+## test-hub-shards: Run every pkg/hub test shard in turn (NOSQLITE=1, RACE=1 as for test-hub-shard)
+# The shard list comes from go run ./hack/hubshard -shards. Every shard
+# runs even when an earlier one fails; the target fails if any did.
+test-hub-shards:
+	@shards=$$(go run ./hack/hubshard -shards) || exit 1; \
+	failed=; \
+	for k in $$shards; do \
+		./hack/hubshard/shard.sh test $$k $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race) || failed="$$failed $$k"; \
+	done; \
+	if [ -n "$$failed" ]; then echo "ERROR: pkg/hub shard(s) failed:$$failed" >&2; exit 1; fi
+
+## build-hub-shard: Compile (go test -c, discarded) pkg/hub test shard SHARD=K (NOSQLITE=1: with -tags no_sqlite)
+build-hub-shard:
+	@./hack/hubshard/shard.sh build $(SHARD) $(if $(NOSQLITE),--nosqlite)
+
+## vet-hub-shard: go vet pkg/hub test shard SHARD=K with -tags no_sqlite and -tags 'integration volume_test tzcontract'
+# The shards' vets together cover every pkg/hub file that make lint and
+# make vet-integration cover (hubshard-parity checks it). CI vets pkg/hub
+# this way (lint-ci and vet-integration-ci leave the package out).
+vet-hub-shard:
+	@./hack/hubshard/shard.sh vet $(SHARD)
 
 ## test-fixture-coverage: Run the hub fixture coverage gate (TestFixtureCoverage) with SQLite
 # internal/fixturegen's tests carry `//go:build !no_sqlite`, so
 # "make test-fast" never compiles them and a schema change that skips the
 # fixture went red only in the non-blocking full suite (ptone/scion#625,
-# ptone/scion#1931). CI runs this in the pkg/hub SQLite Tests job.
+# ptone/scion#1931). CI runs this in the SQLite Tests (non-hub) job.
 test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
 	@go test -count=1 ./internal/fixturegen/...
 
 # TEST_IDENTITY_POSTGRES_TESTS are the pkg/hub test identity purge
 # concurrency tests (ptone/scion#4240, Phase 3b) run by
-# test-launch-store-postgres.
+# test-launch-store-postgres (pkg/hub shard Postgres (integration) jobs in CI).
 TEST_IDENTITY_POSTGRES_TESTS := TestFixturePurge_ConcurrentCoOwner_Postgres
 
 # MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
@@ -166,10 +220,8 @@ MEMBERSHIP_LOSS_POSTGRES_TESTS := TestMembershipLossProcessor_vs_ProjectDelete_P
 	TestMembershipLossProcessor_TwoInstances_Postgres \
 	TestMembershipLossProcessor_vs_UserDelete_Postgres \
 	TestMembershipReconciler_LocksCoexist_Postgres
-empty :=
-space := $(empty) $(empty)
 
-## test-launch-store-postgres: Run the T1 async-create launch store/reaper
+## test-store-postgres: Run the T1 async-create launch store/reaper
 # suite against a real Postgres server (design t1-async-create-v11.md §6,
 # "Postgres in CI"). Requires -tags integration and SCION_TEST_POSTGRES_URL;
 # see pkg/store/enttest's package doc for the connection string format.
@@ -300,13 +352,39 @@ space := $(empty) $(empty)
 # ~774s and ~1259s, but GoogleCloudPlatform/scion#2855 hit the old 40m
 # (2400s) limit on a runner 2-3x slower than usual, with no failing or hung
 # test (ptone/scion#3945). A timeout there also stops the storetest and
-# pkg/hub runs below, so the headroom is kept generous.
-test-launch-store-postgres:
-	@echo "Running launch store tests against Postgres..."
+# later runs below, so the headroom is kept generous.
+#
+# test-store-postgres is the part without the pkg/hub package itself
+# (CI's T1 job runs it); test-launch-store-postgres adds the pkg/hub
+# Postgres tests, which CI runs in the pkg/hub shard Postgres jobs.
+#
+# CI splits this target over several T1 jobs (see the T1 jobs in
+# .github/workflows/ci.yml): test-store-postgres-entadapter with
+# ENTADAPTER_PART=K ENTADAPTER_PARTS=N runs part K of the entadapter tests,
+# and test-store-postgres-others runs the rest. Locally,
+# make test-store-postgres runs it all, in the order below. The umbrella
+# targets run their parts one after another through sub-makes (not as
+# prerequisites), so make -j never runs them at once: they share one
+# Postgres server, and the cmd run is a large compile.
+test-store-postgres:
+	@$(MAKE) --no-print-directory test-store-postgres-integrationtest
+	@$(MAKE) --no-print-directory test-store-postgres-entadapter
+	@$(MAKE) --no-print-directory test-store-postgres-tail
+
+## test-store-postgres-others: test-store-postgres without pkg/store/entadapter (CI runs entadapter in its own jobs)
+test-store-postgres-others:
+	@$(MAKE) --no-print-directory test-store-postgres-integrationtest
+	@$(MAKE) --no-print-directory test-store-postgres-tail
+
+# test-store-postgres-env-check fails if SCION_TEST_POSTGRES_URL is unset.
+test-store-postgres-env-check:
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \
 		echo "ERROR: SCION_TEST_POSTGRES_URL is not set -- the Postgres-only cases would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
+
+test-store-postgres-integrationtest: test-store-postgres-env-check
+	@echo "Running launch store tests against Postgres..."
 	@go test -tags integration -count=1 -timeout 20m -v \
 		./pkg/store/integrationtest/... > /tmp/test-launch-store-postgres-integrationtest.log 2>&1; \
 	status=$$?; \
@@ -317,7 +395,46 @@ test-launch-store-postgres:
 		echo "ERROR: one or more Postgres-only integration tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@go test -tags integration -count=1 -timeout 60m -v \
+
+# ENTADAPTER_PARTS splits the pkg/store/entadapter Postgres tests into that
+# many parts and ENTADAPTER_PART (1..ENTADAPTER_PARTS) selects the one
+# test-store-postgres-entadapter runs. The default, 1 of 1, runs the whole
+# package without -run, as before the split. CI runs every part in its own
+# job (the T1 entadapter jobs in .github/workflows/ci.yml).
+ENTADAPTER_PART ?= 1
+ENTADAPTER_PARTS ?= 1
+
+## test-store-postgres-entadapter: The pkg/store/entadapter part of test-store-postgres (ENTADAPTER_PART=K ENTADAPTER_PARTS=N: part K of N)
+# With ENTADAPTER_PARTS > 1 the target lists the package's top-level tests
+# (go test -list, which runs TestMain and so needs the Postgres server),
+# checks with hack/testpart.sh parity that the N parts together hold every
+# listed test exactly once, and runs part K with -run '^(A|B|...)$'
+# (round-robin over the sorted names; subtests of a selected test run with
+# it). After the usual checks, every test of the part must print its own
+# top-level PASS or SKIP line, so a test that the pattern misses fails the
+# target instead of silently not running.
+test-store-postgres-entadapter: test-store-postgres-env-check
+	@part='$(ENTADAPTER_PART)'; parts='$(ENTADAPTER_PARTS)'; \
+	set --; \
+	if [ "$$parts" = 1 ] && [ "$$part" != 1 ]; then \
+		echo "ERROR: ENTADAPTER_PART must be 1 when ENTADAPTER_PARTS is 1 (got $$part)." >&2; \
+		exit 1; \
+	fi; \
+	if [ "$$parts" != 1 ]; then \
+		if ! go test -tags integration -count=1 -list '.*' \
+			./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.list 2>&1; then \
+			cat /tmp/test-launch-store-postgres.list; \
+			echo "ERROR: could not list the entadapter tests." >&2; \
+			exit 1; \
+		fi; \
+		./hack/testpart.sh parity "$$parts" < /tmp/test-launch-store-postgres.list || exit 1; \
+		./hack/testpart.sh list "$$part" "$$parts" < /tmp/test-launch-store-postgres.list \
+			> /tmp/test-launch-store-postgres.part || exit 1; \
+		regex=$$(./hack/testpart.sh regex "$$part" "$$parts" < /tmp/test-launch-store-postgres.list) || exit 1; \
+		echo "Running part $$part of $$parts of the entadapter Postgres tests ($$(wc -l < /tmp/test-launch-store-postgres.part | tr -d ' ') top-level tests)..."; \
+		set -- -run "$$regex"; \
+	fi; \
+	go test -tags integration -count=1 -timeout 60m -v "$$@" \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
@@ -331,7 +448,24 @@ test-launch-store-postgres:
 		echo "ERROR: these entadapter tests were skipped on Postgres without enttest.SkipOnPostgres:" >&2; \
 		echo "$$unexpected" >&2; \
 		exit 1; \
+	fi; \
+	if [ "$$parts" != 1 ]; then \
+		sed -nE 's/^--- (PASS|SKIP): ([^ ]+).*/\2/p' /tmp/test-launch-store-postgres.log | LC_ALL=C sort -u \
+			> /tmp/test-launch-store-postgres.ran; \
+		missing=$$(LC_ALL=C comm -23 /tmp/test-launch-store-postgres.part /tmp/test-launch-store-postgres.ran); \
+		if [ -n "$$missing" ]; then \
+			echo "ERROR: these entadapter tests of part $$part of $$parts printed no top-level PASS or SKIP line:" >&2; \
+			echo "$$missing" >&2; \
+			exit 1; \
+		fi; \
 	fi
+
+# test-store-postgres-tail: the storetest, pkg/store/enttest, pkg/ent/entc
+# and cmd runs of test-store-postgres (after entadapter). The enttest run
+# includes TestSchemaSnapshot_MatchesAutoMigrate, which checks that the
+# schema snapshot the harness provisions test schemas from matches
+# entc.AutoMigrate.
+test-store-postgres-tail: test-store-postgres-env-check
 	@go test -tags integration -count=1 -timeout 10m -v \
 		-run '^TestCompositeStore_CRUDParity$$/^group$$/^MembershipCleanup$$' \
 		./pkg/store/storetest/... > /tmp/test-launch-store-postgres-storetest.log 2>&1; \
@@ -344,6 +478,19 @@ test-launch-store-postgres:
 	fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-storetest.log; then \
 		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		./pkg/store/enttest/ > /tmp/test-launch-store-postgres-enttest.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-enttest.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-enttest.log; then \
+		echo "ERROR: one or more pkg/store/enttest Postgres tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestSchemaSnapshot_MatchesAutoMigrate ' /tmp/test-launch-store-postgres-enttest.log; then \
+		echo "ERROR: the schema snapshot equivalence test did not run." >&2; \
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
@@ -381,50 +528,74 @@ test-launch-store-postgres:
 		echo "ERROR: the maintenance-command search_path guard Postgres test did not run." >&2; \
 		exit 1; \
 	fi
-	@st=$$(mktemp) || exit 1; \
-	{ $(HUB_TEST_GOGC) go test -tags integration -count=1 -timeout 20m -v \
-		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS) $(TEST_IDENTITY_POSTGRES_TESTS))))$$' \
-		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
-		| tee /tmp/test-launch-store-postgres-hub.log; \
-	status=$$(cat "$$st" 2>/dev/null); \
-	rm -f "$$st"; \
-	case "$$status" in ''|*[!0-9]*) status=1;; esac; \
-	if [ $$status -ne 0 ]; then exit $$status; fi; \
-	if ! grep -qE '^[[:space:]]*--- PASS: TestProjectDeletionService_LockOrderNoDeadlock' /tmp/test-launch-store-postgres-hub.log; then \
-		echo "ERROR: the pkg/hub project-delete lock-order test did not run." >&2; \
-		exit 1; \
-	fi; \
-	if ! grep -qE '^[[:space:]]*--- PASS: TestScheduledSend_TwoHubReplicasPostgres_OneDelivery' /tmp/test-launch-store-postgres-hub.log; then \
-		echo "ERROR: the pkg/hub two-replica scheduled send test did not run." >&2; \
-		exit 1; \
-	fi; \
-	for t in $(MEMBERSHIP_LOSS_POSTGRES_TESTS); do \
-		if ! grep -qE "^[[:space:]]*--- PASS: $$t\b" /tmp/test-launch-store-postgres-hub.log; then \
-			echo "ERROR: the pkg/hub membership loss Postgres test $$t did not pass." >&2; \
-			exit 1; \
-		fi; \
-	done; \
-	for t in $(TEST_IDENTITY_POSTGRES_TESTS); do \
-		if ! grep -qE "^[[:space:]]*--- PASS: $$t\b" /tmp/test-launch-store-postgres-hub.log; then \
-			echo "ERROR: the pkg/hub test identity Postgres test $$t did not pass." >&2; \
-			exit 1; \
-		fi; \
-	done; \
-	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-hub.log; then \
-		echo "ERROR: one or more pkg/hub Postgres tests were skipped -- see '--- SKIP' lines above." >&2; \
+
+## test-launch-store-postgres: test-store-postgres plus the pkg/hub Postgres tests in HUB_INTEGRATION_POSTGRES_TESTS (every shard holding one)
+# CI runs the two halves in different jobs: test-store-postgres in the T1
+# Launch Store PostgreSQL Tests jobs, and the pkg/hub tests in the pkg/hub
+# shard Postgres (integration) jobs (test-hub-postgres-integration
+# SHARD=K).
+test-launch-store-postgres: test-store-postgres
+	@./hack/hubshard/shard.sh postgres all integration $(HUB_INTEGRATION_POSTGRES_TESTS)
+
+# HUB_INTEGRATION_POSTGRES_TESTS are the pkg/hub Postgres tests that need
+# -tags integration (the integration TestMain sets up the ent test
+# database): the project-delete lock-order test, the two-replica scheduled
+# send test, and the membership loss and test identity concurrency tests.
+# Each must print a PASS line, and any skip fails (shard.sh postgres).
+HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
+	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
+	$(MEMBERSHIP_LOSS_POSTGRES_TESTS) \
+	$(TEST_IDENTITY_POSTGRES_TESTS)
+
+## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
+# Requires SCION_TEST_POSTGRES_URL (integration tests) and
+# SCION_TEST_POSTGRES_DSN (web chat and conduit tests). Runs
+# WEBCHAT_POSTGRES_TESTS and CONDUIT_AUTHZ_POSTGRES_TESTS (default tags)
+# and HUB_INTEGRATION_POSTGRES_TESTS (-tags integration) that live in the
+# shard; hack/hubshard -locate fails if a listed test no longer exists.
+# CI runs the two halves in different jobs. test-hub-postgres-default runs
+# in each pkg/hub shard job, after the shard's SQLite run, so the
+# default-tag build comes from the cache. test-hub-postgres-integration
+# needs its own pkg/hub compile (-tags integration: a different TestMain
+# and extra test files), so it runs in its own job, in parallel with the
+# shard jobs, for each shard hub-postgres-integration-shards prints.
+# The two halves run one after another through sub-makes (not as
+# prerequisites), so make -j never runs two pkg/hub compiles at once.
+test-hub-postgres:
+	@$(MAKE) --no-print-directory test-hub-postgres-default
+	@$(MAKE) --no-print-directory test-hub-postgres-integration
+
+# test-hub-postgres-env-check fails unless both Postgres variables are set.
+test-hub-postgres-env-check:
+	@if [ -z "$$SCION_TEST_POSTGRES_URL" ] || [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
+		echo "ERROR: SCION_TEST_POSTGRES_URL and SCION_TEST_POSTGRES_DSN must be set -- the Postgres tests would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
+
+## test-hub-postgres-default: The default-tag half of test-hub-postgres (WEBCHAT_POSTGRES_TESTS, CONDUIT_AUTHZ_POSTGRES_TESTS) for SHARD=K
+test-hub-postgres-default: test-hub-postgres-env-check
+	@./hack/hubshard/shard.sh postgres $(SHARD) "" $(WEBCHAT_POSTGRES_TESTS) $(CONDUIT_AUTHZ_POSTGRES_TESTS)
+
+## test-hub-postgres-integration: The -tags integration half of test-hub-postgres (HUB_INTEGRATION_POSTGRES_TESTS) for SHARD=K
+test-hub-postgres-integration: test-hub-postgres-env-check
+	@./hack/hubshard/shard.sh postgres $(SHARD) integration $(HUB_INTEGRATION_POSTGRES_TESTS)
+
+## hub-postgres-integration-shards: Print the pkg/hub shards that hold a HUB_INTEGRATION_POSTGRES_TESTS test, one per line (CI's shard plan)
+# Fails if a listed test is in no test file (hubshard -locate).
+hub-postgres-integration-shards:
+	@located=$$(go run ./hack/hubshard -tags integration -locate $(HUB_INTEGRATION_POSTGRES_TESTS)) || exit 1; \
+	echo "$$located" | awk '{print $$2}' | sort -nu
 
 ## test-webchat-postgres: Run the pkg/hub web chat store Postgres tests against a real server
 # Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). The selected
 # tests self-skip without it, so the target fails if the variable is unset,
 # if any selected test skips, or if any test listed in
-# WEBCHAT_POSTGRES_TESTS reports no PASS line. CI runs this in
-# the T1 Launch Store PostgreSQL Tests job. The tests drop and recreate the
+# WEBCHAT_POSTGRES_TESTS reports no PASS line. Each test runs in its
+# pkg/hub shard (hack/hubshard/shard.sh postgres); CI runs them in the
+# pkg/hub shard jobs (test-hub-postgres-default). The tests drop and recreate the
 # webchat_* tables, so point the DSN at a scratch database. go test output
-# is streamed with tee (exit status kept in a per-run mktemp file, since
-# make's /bin/sh has no pipefail) so a step killed mid-run still shows what ran
-# (ptone/scion#4083).
+# is streamed with tee (shard.sh runs under bash pipefail) so a step killed
+# mid-run still shows what ran (ptone/scion#4083).
 WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_FreshDB \
 	TestC4Fix_Postgres_PreExistingDB \
@@ -437,30 +608,11 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestWebChatStore_Postgres_ThreadMigrationsRunOnce
 
 test-webchat-postgres:
-	@echo "Running web chat store tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
-	@st=$$(mktemp) || exit 1; \
-	{ $(HUB_TEST_GOGC) go test -count=1 -timeout 10m -v \
-		-run '^($(subst $(eval) ,|,$(strip $(WEBCHAT_POSTGRES_TESTS))))$$' \
-		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
-		| tee /tmp/test-webchat-postgres.log; \
-	status=$$(cat "$$st" 2>/dev/null); \
-	rm -f "$$st"; \
-	case "$$status" in ''|*[!0-9]*) status=1;; esac; \
-	if [ $$status -ne 0 ]; then exit $$status; fi; \
-	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-webchat-postgres.log; then \
-		echo "ERROR: a web chat Postgres test was skipped -- see '--- SKIP' lines above." >&2; \
-		exit 1; \
-	fi; \
-	for t in $(WEBCHAT_POSTGRES_TESTS); do \
-		if ! grep -qE "^--- PASS: $$t " /tmp/test-webchat-postgres.log; then \
-			echo "ERROR: $$t did not pass." >&2; \
-			exit 1; \
-		fi; \
-	done
+	@./hack/hubshard/shard.sh postgres all "" $(WEBCHAT_POSTGRES_TESTS)
 
 ## test-conduit-authz-postgres: Run the conduit user-stream re-check tests (criterion 16b, P tier) against a real Postgres server
 # Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). Two hub nodes
@@ -474,30 +626,11 @@ CONDUIT_AUTHZ_POSTGRES_TESTS := TestConduitAuthzPostgres_NotifyAcrossNodes \
 	TestConduitAuthzPostgres_BulkRevocation
 
 test-conduit-authz-postgres:
-	@echo "Running conduit stream re-check tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
-	@st=$$(mktemp) || exit 1; \
-	{ $(HUB_TEST_GOGC) go test -count=1 -timeout 10m -v \
-		-run '^($(subst $(eval) ,|,$(strip $(CONDUIT_AUTHZ_POSTGRES_TESTS))))$$' \
-		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
-		| tee /tmp/test-conduit-authz-postgres.log; \
-	status=$$(cat "$$st" 2>/dev/null); \
-	rm -f "$$st"; \
-	case "$$status" in ''|*[!0-9]*) status=1;; esac; \
-	if [ $$status -ne 0 ]; then exit $$status; fi; \
-	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-conduit-authz-postgres.log; then \
-		echo "ERROR: a conduit re-check Postgres test was skipped -- see '--- SKIP' lines above." >&2; \
-		exit 1; \
-	fi; \
-	for t in $(CONDUIT_AUTHZ_POSTGRES_TESTS); do \
-		if ! grep -qE "^--- PASS: $$t " /tmp/test-conduit-authz-postgres.log; then \
-			echo "ERROR: $$t did not pass." >&2; \
-			exit 1; \
-		fi; \
-	done
+	@./hack/hubshard/shard.sh postgres all "" $(CONDUIT_AUTHZ_POSTGRES_TESTS)
 
 ## test-artifacts-postgres: Run the pkg/artifacts tests: store tests on SQLite and a real Postgres (service tests on SQLite)
 # Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). The artifact
@@ -507,7 +640,7 @@ test-conduit-authz-postgres:
 # subtest; the Postgres subtests are added only when the DSN is set, so the
 # target fails if the variable is unset, if any test skips, or if no
 # /postgres subtest passed. Each test works in its own throwaway schema.
-# CI runs this in the T1 Launch Store PostgreSQL Tests job.
+# CI runs this in the T1 Launch Store PostgreSQL Tests (other packages) job.
 test-artifacts-postgres:
 	@echo "Running pkg/artifacts tests (store tests on SQLite and Postgres)..."
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
@@ -558,6 +691,16 @@ lint:
 # targets skip (ptone/scion#2348).
 vet-integration:
 	@go vet -tags 'integration volume_test tzcontract' ./...
+
+## lint-ci: lint without the pkg/hub package itself (CI vets it per shard: vet-hub-shard)
+lint-ci:
+	@pkgs=$$($(call non_hub_pkgs,no_sqlite)) || exit 1; \
+	go vet -tags no_sqlite $$pkgs
+
+## vet-integration-ci: vet-integration without the pkg/hub package itself (CI vets it per shard: vet-hub-shard)
+vet-integration-ci:
+	@pkgs=$$($(call non_hub_pkgs,integration volume_test tzcontract)) || exit 1; \
+	go vet -tags 'integration volume_test tzcontract' $$pkgs
 
 ## vet-integration-extras: Compile-check integration-tagged code in every extras/ module that has it
 # vet-integration only covers the root module's ./... tree; extras/*
@@ -668,7 +811,7 @@ check-debug-defaults:
 	@./hack/check-debug-defaults.sh
 
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: hubshard-check compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults
+check-custom: hubshard-parity testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults
 	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)

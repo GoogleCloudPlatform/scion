@@ -1865,12 +1865,55 @@ def atomic_write_text(path: str, content: str, *, mode: int | None = None) -> No
 # ---------------------------------------------------------------------------
 
 
+# The characters the host's comment-line rule trims (Go's strings.TrimSpace,
+# that is unicode.IsSpace). Python's str.strip() also removes U+001C..U+001F,
+# and str.splitlines() also splits on \r, \v, \f, U+001C..U+001E, U+0085,
+# U+2028 and U+2029, so neither is used for comment lines: the host splits
+# on "\n" only and trims only these characters.
+HOST_SPACE = (
+    "\t\n\v\f\r \x85\xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+def drop_json_comment_lines(text: str) -> str:
+    """Drop the lines of text that start with "//" after leading whitespace.
+
+    Lines are split on "\n" only and leading whitespace is HOST_SPACE, the
+    host's rule, so the result matches what the host parses.
+    """
+    return "\n".join(
+        ln for ln in text.split("\n") if not ln.lstrip(HOST_SPACE).startswith("//")
+    )
+
+
 def read_json_skipping_comment_lines(path: str) -> Any:
-    """Read a JSON file, stripping lines starting with // before parsing."""
-    with open(path, "r", encoding="utf-8") as f:
+    """Read a JSON file, dropping lines that start with // before parsing.
+
+    Comment lines follow the host's rule (drop_json_comment_lines); the file
+    is read as bytes, so a lone \r is not a line break. Content that is not
+    UTF-8, not JSON, holds an integer too long to convert, or is nested too
+    deeply raises ProvisionError naming the file. The message never includes
+    file content. OSError (for example, a missing file) is raised unchanged.
+    """
+    with open(path, "rb") as f:
         raw = f.read()
-    lines = [ln for ln in raw.splitlines() if not ln.strip().startswith("//")]
-    return json.loads("\n".join(lines))
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ProvisionError(f"{path} is not valid UTF-8") from None
+    try:
+        return json.loads(drop_json_comment_lines(text))
+    except json.JSONDecodeError as exc:
+        raise ProvisionError(
+            f"{path} is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})"
+        ) from None
+    except ValueError:
+        # An integer literal beyond Python's int conversion limit.
+        raise ProvisionError(f"{path} holds a number that cannot be converted") from None
+    except RecursionError:
+        raise ProvisionError(f"{path} is nested too deeply to read") from None
 
 
 # ---------------------------------------------------------------------------

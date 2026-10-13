@@ -304,6 +304,9 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"create", "delete",
 		"harness-config", "harness-config.install", "harness-config.list",
 		"help",
+		// hub and hub status stay for target-hub profiles (ptone/scion#4240); the
+		// command refuses at run time without a target profile.
+		"hub", "hub.status",
 		"list", "logs", "look",
 		"message",
 		"notifications",
@@ -338,7 +341,7 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 	// These should be removed
 	absent := []string{
 		"attach", "broadcast", "broker", "cdw", "clean", "completion", "config", "doctor",
-		"hub",
+		"hub.enable", "hub.disable", "hub.link", "hub.unlink", "hub.auth", "hub.token", "hub.brokers",
 		"init", "messages", "restore", "server", "sync",
 		// "project" itself remains (see expected list above), and of
 		// project service-accounts only show is agent-allowed.
@@ -432,6 +435,12 @@ func TestAgentAllowedList(t *testing.T) {
 		"create", "delete", "list", "start", "stop", "suspend", "look", "logs",
 		"message", "keys",
 		"resume", "version",
+		// Target-hub profiles and test identities (ptone/scion#4240): allowed, but
+		// they refuse at run time without a target profile.
+		"hub", "hub.status", "hub.profile", "hub.profile.add", "hub.profile.list",
+		"hub.profile.show", "hub.profile.remove", "hub.test-identity",
+		"hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list",
+		"hub.test-identity.delete", "hub.test-identity.teardown",
 		"notifications",
 		"schedule", "schedule.list", "schedule.get", "schedule.cancel", "schedule.history",
 		"schedule.create", "schedule.create-recurring", "schedule.pause", "schedule.resume", "schedule.delete",
@@ -452,13 +461,14 @@ func TestAgentAllowedList(t *testing.T) {
 
 	notAllowed := []string{
 		"attach", "broadcast", "restore", "sync", "clean", "cdw", "init",
-		"completion", "config", "doctor", "hub", "messages",
+		"completion", "config", "doctor", "messages",
 		"server", "broker",
 		"config.set", "config.validate", "config.migrate",
 		"config.list", "config.get", "config.dir", "config.schema",
 		"hub.enable", "hub.disable", "hub.link", "hub.unlink",
 		"hub.auth", "hub.token", "hub.token.scopes", "hub.brokers",
-		"hub.env", "hub.secret", "hub.status", "hub.notifications",
+		"hub.env", "hub.secret", "hub.notifications", "hub.projects",
+		"hub.test-identity.delegate", "hub.test-identity.web-code", "hub.users", "hub.allow-list",
 		"messages.read",
 		"shared-dir.create", "shared-dir.remove",
 	}
@@ -469,8 +479,8 @@ func TestAgentAllowedList(t *testing.T) {
 
 // TestHubSecretMigrateNamesCmd_DeniedInAgentMode pins the CLI mode for the
 // ptone/scion#2152 rename/migration command: human mode only. Agent mode
-// denies it because the entire "hub" subtree is absent from agentAllowed
-// (an allow-list).
+// denies it because hub.secret is absent from agentAllowed (only the
+// target-hub profile commands of the hub subtree are allowed; an allow-list).
 func TestHubSecretMigrateNamesCmd_DeniedInAgentMode(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
@@ -634,6 +644,30 @@ func TestAgentModeAllowsKeys(t *testing.T) {
 
 	assert.Equal(t, []string{"keys"}, collectCommandNames(root),
 		"agent mode must keep the keys command")
+}
+
+// TestSSHCommands_HumanOnly pins that ssh and ssh-config are absent in agent
+// mode: they are not in agentAllowed and are removed from the real tree.
+func TestSSHCommands_HumanOnly(t *testing.T) {
+	for _, name := range []string{"ssh", "ssh-config"} {
+		t.Run(name, func(t *testing.T) {
+			assert.False(t, agentAllowed[name], "agentAllowed must not contain %s", name)
+			real := resolveCommandPath(rootCmd, name)
+			require.NotNil(t, real, "%s must exist in the real command tree", name)
+
+			root := &cobra.Command{Use: "scion"}
+			root.AddCommand(cloneCommandShape(real))
+			t.Setenv("SCION_CLI_MODE", "agent")
+			applyModeRestrictions(root, resolveMode())
+			assert.Nil(t, resolveCommandPath(root, name), "%s must be removed in agent mode", name)
+
+			root = &cobra.Command{Use: "scion"}
+			root.AddCommand(cloneCommandShape(real))
+			t.Setenv("SCION_CLI_MODE", "human")
+			applyModeRestrictions(root, resolveMode())
+			assert.NotNil(t, resolveCommandPath(root, name), "%s stays in human mode", name)
+		})
+	}
 }
 
 // The tunnel commands are human-only: they are not in agentAllowed, and

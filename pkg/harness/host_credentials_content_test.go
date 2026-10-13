@@ -15,45 +15,51 @@
 package harness
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// copilotConfigFixtures is the shared fixture set for what counts as sign-in
-// in copilot's config.json. All values are synthetic placeholders.
-var copilotConfigFixtures = []struct {
-	name   string
-	data   string
-	signIn bool
-}{
-	{"settings only", `{"trusted_folders": ["/src"], "banner": "never", "theme": "dark", "model": "m"}`, false},
-	{"keychain user", `{"trusted_folders": ["/src"], "logged_in_users": [{"host": "https://github.com", "login": "octo"}], "last_logged_in_user": {"host": "https://github.com", "login": "octo"}, "banner": "never"}`, false},
-	{"scion-written trustedFolders only", `{"trustedFolders": ["/workspace"]}`, false},
-	{"empty object", `{}`, false},
-	{"tokens", `{"logged_in_users": [{"host": "https://github.com", "login": "octo"}], "copilot_tokens": {"https://github.com:octo": "placeholder-token"}}`, true},
-	{"copilot hmac key", `{"copilot_hmac_key": "placeholder-hmac"}`, true},
-	{"capi hmac key", `{"capi_hmac_key": "placeholder-hmac", "theme": "dark"}`, true},
-	{"empty tokens map", `{"trusted_folders": ["/src"], "copilot_tokens": {}}`, false},
-	{"whitespace-only token value", `{"copilot_tokens": {"https://github.com:octo": "  "}}`, false},
-	{"empty token value and empty hmac", `{"copilot_tokens": {"https://github.com:octo": ""}, "copilot_hmac_key": ""}`, false},
-	{"unknown key", `{"trusted_folders": ["/src"], "some_future_key": "x"}`, true},
-	{"uppercase keys", `{"COPILOT_TOKENS": {"https://github.com:octo": "placeholder-token"}}`, true},
-	{"uppercase settings keys", `{"Trusted_Folders": ["/src"], "BANNER": "never"}`, false},
-	{"comment lines", "// User settings belong in settings.json.\n// This file is managed automatically.\n{\n  \"copilot_tokens\": {\"https://github.com:octo\": \"placeholder-token\"}\n}\n", true},
-	{"comment lines settings only", "// managed automatically\n{\"trusted_folders\": [\"/src\"]}\n", false},
-	{"unparseable", `{"copilot_tokens": `, false},
-	{"not an object", `["copilot_tokens"]`, false},
-	{"null", `null`, false},
-	{"empty file", ``, false},
+// copilotConfigFixturesFile is the shared fixture set for what counts as
+// sign-in in copilot's config.json. The copilot provisioner's tests
+// (harnesses/copilot/provision_test.py) run the in-container check over the
+// same file, so the host and the container stay on one rule. All values are
+// synthetic placeholders.
+const copilotConfigFixturesFile = "testdata/copilot_config_signin.json"
+
+// minCopilotConfigFixtures is a floor on the fixture count, so a truncated or
+// emptied fixture file cannot pass silently.
+const minCopilotConfigFixtures = 34
+
+type copilotConfigFixture struct {
+	Name   string `json:"name"`
+	Data   string `json:"data"`
+	SignIn bool   `json:"signIn"`
+}
+
+func loadCopilotConfigFixtures(t *testing.T) []copilotConfigFixture {
+	t.Helper()
+	raw, err := os.ReadFile(copilotConfigFixturesFile)
+	if err != nil {
+		t.Fatalf("read %s: %v", copilotConfigFixturesFile, err)
+	}
+	var fixtures []copilotConfigFixture
+	if err := json.Unmarshal(raw, &fixtures); err != nil {
+		t.Fatalf("parse %s: %v", copilotConfigFixturesFile, err)
+	}
+	if len(fixtures) < minCopilotConfigFixtures {
+		t.Fatalf("%s has %d cases, want at least %d", copilotConfigFixturesFile, len(fixtures), minCopilotConfigFixtures)
+	}
+	return fixtures
 }
 
 func TestCopilotConfigHoldsSignIn(t *testing.T) {
-	for _, tc := range copilotConfigFixtures {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := copilotConfigHoldsSignIn([]byte(tc.data)); got != tc.signIn {
-				t.Fatalf("copilotConfigHoldsSignIn(%s) = %v, want %v", tc.data, got, tc.signIn)
+	for _, tc := range loadCopilotConfigFixtures(t) {
+		t.Run(tc.Name, func(t *testing.T) {
+			if got := copilotConfigHoldsSignIn([]byte(tc.Data)); got != tc.SignIn {
+				t.Fatalf("copilotConfigHoldsSignIn(%q) = %v, want %v", tc.Data, got, tc.SignIn)
 			}
 		})
 	}

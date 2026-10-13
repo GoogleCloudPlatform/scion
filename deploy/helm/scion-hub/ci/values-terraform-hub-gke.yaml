@@ -44,6 +44,10 @@ hub:
   adminEmails:
     - admin@example.com
   webPort: 8080
+  # Also the workspace share's uid/gid (workspaceStorage.nfs).
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
   podAnnotations:
     scion.dev/db-password-rotation: "2026-10-06"
 
@@ -57,6 +61,7 @@ rbac:
 
 runtime:
   namespace: tfha-gke-h3
+  gke: true
 
 agents:
   imageRegistry: us-central1-docker.pkg.dev/example-project/example-repo
@@ -71,6 +76,7 @@ database:
 cloudsql:
   enabled: true
   instanceConnectionName: example-project:us-central1:tfha-pg
+  privateIp: true
 
 storage:
   provider: gcs
@@ -95,3 +101,16 @@ auth:
   # Terraform creates this Secret (kubernetes_secret_v1.session) in the
   # release namespace; the chart only references it.
   existingSecret: tfha-gke-h3-session
+
+# One value renders settings.yaml server.workspace_storage and mounts the
+# export in the hub pod at <mountRoot>/<shareId>. Placeholder server and
+# export; shareId is the hub name.
+workspaceStorage:
+  nfs:
+    enabled: true
+    server: nfs.example.com
+    export: /example-export/tfha-gke-h3
+    mountRoot: /mnt/scion-nfs
+    shareId: tfha-gke-h3
+    pvName: tfha-gke-h3-nfs
+    subpathRoot: projects

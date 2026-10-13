@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_2
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -61,7 +59,7 @@ func TestReportSavedKeys_GitHubAppFieldsNeedAppID(t *testing.T) {
 // those sections; unchanged sections are in unchanged_revisions
 // (ptone/scion#3904, ptone/scion#4453).
 func TestPutServerConfigDB_ConflictReportsWrittenKeysOnly(t *testing.T) {
-	srv, fakeStore, ops := newTestDBServer(t)
+	srv, fakeStore, ops := newTestDBServerWithStore(t, &settingsAuditStore{})
 
 	// First save: writes the access section as a managed row.
 	rr := putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"admin_emails":["a@example.com"]}}}`)

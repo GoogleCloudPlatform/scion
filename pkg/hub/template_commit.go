@@ -392,7 +392,7 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 	// A template that sets environment keys is committed as is (the
 	// AgentConfig snapshot stays a faithful parse), but agents ignore those
 	// keys (ptone/scion#4524), so say so.
-	if keys := config.TemplateEnvironmentKeys(tmpl.AgentConfig, nil); len(keys) > 0 {
+	if keys := config.TemplateEnvironmentKeys(tmpl.AgentConfig); len(keys) > 0 {
 		slog.Warn("template commit: template sets environment keys; agents ignore them (environment comes from settings)",
 			"template", tmpl.Name, "template_id", tmpl.ID, "scope", tmpl.Scope, "keys", keys)
 	}
@@ -503,9 +503,8 @@ func removeTemplateFile(files []store.TemplateFile, p string) []store.TemplateFi
 // from its AgentConfig snapshot, never from the template's storage files at
 // dispatch and never from the row's API-written Config. Every such read goes
 // through templateJobConfig, which passes the snapshot through
-// config.StripTemplateEnvironmentKeys with no harness credentials: on the
-// hub that strips the fixed reserved keys, and the broker strips again with
-// the harness credentials. The snapshot itself stays a faithful parse.
+// config.StripTemplateEnvironmentKeys, which strips the template's
+// environment keys. The snapshot itself stays a faithful parse.
 //
 // A row committed before the snapshot existed has none. The first read
 // derives it from the row's agent config file and persists it
@@ -520,7 +519,7 @@ func (s *Server) templateJobConfig(ctx context.Context, tmpl *store.Template) *a
 	if tmpl == nil {
 		return nil
 	}
-	cfg, _ := config.StripTemplateEnvironmentKeys(s.ensureTemplateAgentConfig(ctx, tmpl), nil)
+	cfg, _ := config.StripTemplateEnvironmentKeys(s.ensureTemplateAgentConfig(ctx, tmpl))
 	return cfg
 }
 
@@ -701,6 +700,6 @@ func (d *HTTPAgentDispatcher) templateJobConfig(ctx context.Context, templateID 
 	if err != nil || tmpl == nil {
 		return nil
 	}
-	cfg, _ := config.StripTemplateEnvironmentKeys(tmpl.AgentConfig, nil)
+	cfg, _ := config.StripTemplateEnvironmentKeys(tmpl.AgentConfig)
 	return cfg
 }

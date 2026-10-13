@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -52,8 +52,8 @@ func assertListMessageIDsForAttachment(t *testing.T, wcs WebChatStore) {
 }
 
 func TestListMessageIDsForAttachment_SQLite(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	assertListMessageIDsForAttachment(t, wcs)
 	assert.True(t, sqliteIndexExists(db, "idx_webchat_message_attachment_attachment"))
@@ -100,8 +100,8 @@ func assertTopicLookupInProject(t *testing.T, wcs WebChatStore) {
 
 func TestTopicConversationLookupInProject_OtherProjectNotFound(t *testing.T) {
 	t.Run("sqlite", func(t *testing.T) {
-		db := openTestMemorySQLite(t, "sqlite3")
-		wcs := NewWebChatStore(db, "sqlite3")
+		db := openTestMemorySQLite(t, "sqlite")
+		wcs := NewWebChatStore(db, "sqlite")
 		require.NoError(t, wcs.Init())
 		assertTopicLookupInProject(t, wcs)
 	})

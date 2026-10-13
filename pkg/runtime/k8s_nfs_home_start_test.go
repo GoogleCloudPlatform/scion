@@ -29,14 +29,15 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/homeprep"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 func TestNFSHomeSubPaths(t *testing.T) {
@@ -581,6 +582,39 @@ func TestCleanupStalePod_RefusesWhenUnconfirmed(t *testing.T) {
 	}
 }
 
+// TestCleanupStalePod_ForbiddenCauseReachable: an NFS-home start whose
+// read or delete of the previous pod is refused keeps the Kubernetes error
+// reachable through errors.Is/As (ptone/scion#4555), with the outcome and
+// the error text unchanged.
+func TestCleanupStalePod_ForbiddenCauseReachable(t *testing.T) {
+	forbidden := k8serrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "a", errors.New("permission denied"))
+	for _, verb := range []string{"get", "delete"} {
+		t.Run(verb, func(t *testing.T) {
+			rt, cs, _ := newTestK8sRuntime()
+			if _, err := cs.CoreV1().Pods("default").Create(context.Background(), runningNFSHomePod("a"), metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			cs.PrependReactor(verb, "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+				return true, nil, forbidden
+			})
+			err := rt.cleanupStalePod(context.Background(), "default", "a", true, nil)
+			if !errors.Is(err, errPreviousPodUnconfirmed) {
+				t.Fatalf("err = %v, want previous_pod_unconfirmed", err)
+			}
+			if !k8serrors.IsForbidden(err) {
+				t.Errorf("k8serrors.IsForbidden(%v) = false, want the Forbidden cause reachable", err)
+			}
+			want := "previous_pod_unconfirmed: cannot read the previous pod a: " + forbidden.Error()
+			if verb == "delete" {
+				want = "previous_pod_unconfirmed: failed to delete the previous pod a: " + forbidden.Error()
+			}
+			if err.Error() != want {
+				t.Errorf("error text = %q, want %q", err, want)
+			}
+		})
+	}
+}
+
 func TestCleanupStalePod_NodeLostRefusedAtOnce(t *testing.T) {
 	rt, cs, _ := newTestK8sRuntime()
 	p := runningNFSHomePod("a")
@@ -668,42 +702,6 @@ func TestCleanupStartResources_GracefulForNFSHomePods(t *testing.T) {
 	rt.cleanupStartResources(context.Background(), "default", "a", "s1", true)
 	if len(*deletes) != 1 || (*deletes)[0].GracePeriodSeconds != nil || (*deletes)[0].Preconditions == nil {
 		t.Errorf("deletes = %+v, want one graceful delete with a UID precondition", *deletes)
-	}
-}
-
-// A second start of the same NFS-home agent while one holds the lock is
-// refused with a retryable error before anything is deleted or created.
-func TestRun_NFSHomeStartLock(t *testing.T) {
-	rt, cs, _ := newTestK8sRuntime()
-	cfg := nfsHomeTestConfig(true)
-	cfg.Name = "a"
-	cfg.Locker = &alwaysLoseLocker{}
-	deletes := keepPodsOnDelete(cs)
-	_, err := rt.Run(context.Background(), cfg)
-	if !errors.Is(err, errAgentStartInProgress) {
-		t.Fatalf("err = %v, want agent_start_in_progress", err)
-	}
-	if len(*deletes) != 0 {
-		t.Error("a refused start deleted a pod")
-	}
-	if pods, _ := cs.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{}); len(pods.Items) != 0 {
-		t.Error("a refused start created a pod")
-	}
-
-	l := newTestLocker()
-	release, err := acquireHomeStartLock(context.Background(), RunConfig{Name: "a", Locker: l, HomeStorage: cfg.HomeStorage})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := acquireHomeStartLock(context.Background(), RunConfig{Name: "a", Locker: l, HomeStorage: cfg.HomeStorage}); !errors.Is(err, errAgentStartInProgress) {
-		t.Errorf("second acquire: %v", err)
-	}
-	release()
-	again, err := acquireHomeStartLock(context.Background(), RunConfig{Name: "a", Locker: l, HomeStorage: cfg.HomeStorage})
-	if err != nil {
-		t.Errorf("after release: %v", err)
-	} else {
-		again()
 	}
 }
 
@@ -1001,110 +999,6 @@ func TestRun_NFSHomeSecretsCleanedAfterPreviousPod(t *testing.T) {
 			t.Errorf("secrets touched (%s) before the previous pod was confirmed stopped", a.GetVerb())
 		}
 	}
-}
-
-// countingLocker records acquires and releases.
-type countingLocker struct {
-	mu                 sync.Mutex
-	acquires, releases int
-	acquire            bool
-}
-
-func (l *countingLocker) TryAdvisoryLock(context.Context, store.AdvisoryLockKey) (bool, func() error, error) {
-	return false, func() error { return nil }, nil
-}
-
-func (l *countingLocker) TryAdvisoryLockObject(context.Context, store.AdvisoryLockKey, int32) (bool, func() error, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !l.acquire {
-		return false, func() error { return nil }, nil
-	}
-	l.acquires++
-	return true, func() error {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		l.releases++
-		return nil
-	}, nil
-}
-
-// The per-agent start lock, when a locker is supplied, is released exactly
-// once: on a refusal after it was taken, on a pod build failure, and after
-// the pod is created.
-func TestRun_NFSHomeStartLockReleasedOnce(t *testing.T) {
-	t.Run("previous pod unconfirmed", func(t *testing.T) {
-		rt, cs, _ := newTestK8sRuntime()
-		cfg := nfsHomeTestConfig(true)
-		cfg.Name = "a"
-		l := &countingLocker{acquire: true}
-		cfg.Locker = l
-		if _, err := cs.CoreV1().Pods("default").Create(context.Background(), runningNFSHomePod("a"), metav1.CreateOptions{}); err != nil {
-			t.Fatal(err)
-		}
-		keepPodsOnDelete(cs)
-		rt.execReadyClock = (&fakeTerminationClock{now: time.Unix(1000, 0)}).clock()
-		if _, err := rt.Run(context.Background(), cfg); !errors.Is(err, errPreviousPodUnconfirmed) {
-			t.Fatalf("err = %v", err)
-		}
-		if l.acquires != 1 || l.releases != 1 {
-			t.Errorf("acquires %d, releases %d; want 1 and 1", l.acquires, l.releases)
-		}
-	})
-	t.Run("pod build failure", func(t *testing.T) {
-		rt, _, _ := newTestK8sRuntime()
-		cfg := nfsHomeTestConfig(true)
-		cfg.Name = "a"
-		cfg.HomeStorage.Leaf = "unknown"
-		l := &countingLocker{acquire: true}
-		cfg.Locker = l
-		if _, err := rt.Run(context.Background(), cfg); err == nil {
-			t.Fatal("expected a pod build failure")
-		}
-		if l.acquires != 1 || l.releases != 1 {
-			t.Errorf("acquires %d, releases %d; want 1 and 1", l.acquires, l.releases)
-		}
-	})
-	t.Run("pod created", func(t *testing.T) {
-		rt, clientset, _ := newTestK8sRuntime()
-		rt.execProbe = func(context.Context, string, string) error { return nil }
-		l := &countingLocker{acquire: true}
-		rt.podExec = func(_ context.Context, _, _ string, cmd []string) (string, error) {
-			if strings.Join(cmd, " ") == "cat "+k8sHomeModeFile {
-				l.mu.Lock()
-				released := l.releases
-				l.mu.Unlock()
-				if released != 1 {
-					t.Errorf("lock not released once the pod exists (releases %d)", released)
-				}
-				pod, err := clientset.CoreV1().Pods("default").Get(context.Background(), "nfs-agent", metav1.GetOptions{})
-				if err != nil {
-					return "", err
-				}
-				return `{"mode":"seed-over","start_id":"` + pod.Labels[labelStartID] + `"}`, nil
-			}
-			return "", nil
-		}
-		rt.homeSync = func(context.Context, string, string, string, string, []string) error { return nil }
-		adc := filepath.Join(t.TempDir(), "adc.json")
-		if err := os.WriteFile(adc, []byte("{}"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		cfg := nfsHomeTestConfig(true)
-		cfg.Name = "nfs-agent"
-		cfg.HomeStorage.AgentSlug = "nfs-agent"
-		cfg.Labels = nil
-		cfg.Harness = &MockHarness{}
-		cfg.ResolvedAuth.Files[0].SourcePath = adc
-		cfg.HomeDir = t.TempDir()
-		cfg.Locker = l
-		if err := startFakeK8sPod(t, rt, clientset, cfg); err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-		if l.acquires != 1 || l.releases != 1 {
-			t.Errorf("acquires %d, releases %d; want 1 and 1", l.acquires, l.releases)
-		}
-	})
 }
 
 // Sync of an NFS-home agent copies the workspace only, in both directions,
@@ -1477,44 +1371,4 @@ func TestRun_NFSHomeStartUnreadablePodRefusedWithoutRealization(t *testing.T) {
 	if len(*deletes) != 0 {
 		t.Errorf("deletes = %+v, want none", *deletes)
 	}
-}
-
-// testLocker is a mock AdvisoryLocker: a key is held from a successful
-// acquire until its release.
-type testLocker struct {
-	mu   sync.Mutex
-	held map[lockKey]bool
-}
-
-type lockKey struct {
-	classID int64
-	objID   int32
-	single  bool
-}
-
-func newTestLocker() *testLocker {
-	return &testLocker{held: make(map[lockKey]bool)}
-}
-
-func (l *testLocker) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
-	return l.try(lockKey{classID: int64(key), single: true})
-}
-
-func (l *testLocker) TryAdvisoryLockObject(ctx context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
-	return l.try(lockKey{classID: int64(classID), objID: objID})
-}
-
-func (l *testLocker) try(k lockKey) (bool, func() error, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.held[k] {
-		return false, func() error { return nil }, nil
-	}
-	l.held[k] = true
-	return true, func() error {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		delete(l.held, k)
-		return nil
-	}, nil
 }

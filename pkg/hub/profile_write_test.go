@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -73,8 +73,8 @@ func newProfileWriteFixture(t *testing.T) *profileWriteFixture {
 	srv.SetStorage(newMockStorage("test-bucket"))
 	backend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(backend)
-	chatDB := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(chatDB, "sqlite3")
+	chatDB := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(chatDB, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	as, err := NewLocalDiskAttachmentStore(t.TempDir())

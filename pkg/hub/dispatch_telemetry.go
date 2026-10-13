@@ -43,7 +43,8 @@ import (
 // are dropped with a create warning (warnRequesterTelemetryDropped). Only the
 // delivery channel depends on the broker's templateTiers capability:
 //
-//   - capable broker: the hub default in HubAgentDefaults.Telemetry, the
+//   - capable broker: the hub default in HubAgentDefaults.Telemetry (added
+//     by the hub-defaults builder, see wireTelemetry), the
 //     policy in TelemetryPolicy, and the requester's on/off as
 //     SCION_TELEMETRY_ENABLED (the requester flag tier, below policy).
 //     InlineConfig.Telemetry is not sent. The ladder is broker settings <
@@ -209,18 +210,16 @@ func (t telemetryDispatch) inlineConfig(stored *api.ScionConfig) *api.ScionConfi
 	return out
 }
 
-// hubAgentDefaults adds the hub telemetry default to h for a templateTiers
-// broker, allocating h when needed. A legacy broker's h is returned as is.
-func (t telemetryDispatch) hubAgentDefaults(h *RemoteHubAgentDefaults) *RemoteHubAgentDefaults {
+// wireTelemetry is the hub telemetry default the hub-defaults builder
+// (remoteHubAgentDefaults / startHubAgentDefaults) puts in
+// HubAgentDefaults.Telemetry: a copy for a templateTiers broker, nil for a
+// legacy broker, which gets it inline (inlineTelemetry).
+func (t telemetryDispatch) wireTelemetry() *api.TelemetryConfig {
 	if !t.templateTiers || t.hubDefault == nil {
-		return h
-	}
-	if h == nil {
-		h = &RemoteHubAgentDefaults{}
+		return nil
 	}
 	c := *t.hubDefault
-	h.Telemetry = &c
-	return h
+	return &c
 }
 
 // telemetryPolicy is the TelemetryPolicy wire value: the project policy for

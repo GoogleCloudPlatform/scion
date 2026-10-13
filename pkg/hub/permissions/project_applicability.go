@@ -44,6 +44,9 @@ var ProjectTargetApplicability = map[string]bool{
 	// agent.delegation.* — issuance and exchange target an existing agent
 	// in its project (.design/agent-delegation.md §18.5).
 	"agent.delegation.create": true, "agent.delegation.exchange": true,
+	// Grant management is held on a project for grants bounded to it.
+	"agent.delegation.revoke": true, "agent.delegation.credential.revoke": true,
+	"agent.delegation.list": true, "agent.delegation.read": true,
 
 	// project.* — read/update/delete/manage/set_messaging_policy target an
 	// existing project; create/register/clone/list are hub-level collection
@@ -140,7 +143,8 @@ var ProjectTargetApplicability = map[string]bool{
 	"hub.env_vars.read": false,
 
 	// test_identity.issue — the hub-level test identity collection.
-	"test_identity.issue": false,
+	"test_identity.issue":       false,
+	"test_identity.issue_admin": false, "test_identity.issue_super_admin": false,
 
 	// quota.* — every live route (handlers_quota.go) authorizes against
 	// Resource{Type:"quota", ID:"hub"}, matching this family's own
@@ -262,7 +266,8 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// itself, so their selectors are hub-only.
 	"hub.scheduler.read": {BoundaryKindHub}, "hub.health.read": {BoundaryKindHub},
 	"hub.validate.execute": {BoundaryKindHub}, "hub.metrics.read": {BoundaryKindHub},
-	"test_identity.issue":   {BoundaryKindHub},
+	"test_identity.issue":       {BoundaryKindHub},
+	"test_identity.issue_admin": {BoundaryKindHub}, "test_identity.issue_super_admin": {BoundaryKindHub},
 	"hub.integrations.read": {BoundaryKindHub}, "hub.integrations.update": {BoundaryKindHub},
 	"hub.teams_manifest.read": {BoundaryKindHub}, "hub.diagnostics.read": {BoundaryKindHub},
 	"hub.github_app.read": {BoundaryKindHub}, "hub.github_app.update": {BoundaryKindHub},
@@ -440,7 +445,8 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// instance.
 	"hub.scheduler.read": {TargetClassKindHubResource}, "hub.health.read": {TargetClassKindHubResource},
 	"hub.validate.execute": {TargetClassKindHubResource}, "hub.metrics.read": {TargetClassKindHubResource},
-	"test_identity.issue":   {TargetClassKindHubResource},
+	"test_identity.issue":       {TargetClassKindHubResource},
+	"test_identity.issue_admin": {TargetClassKindHubResource}, "test_identity.issue_super_admin": {TargetClassKindHubResource},
 	"hub.integrations.read": {TargetClassKindHubResource}, "hub.integrations.update": {TargetClassKindHubResource},
 	"hub.teams_manifest.read": {TargetClassKindHubResource}, "hub.diagnostics.read": {TargetClassKindHubResource},
 	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},

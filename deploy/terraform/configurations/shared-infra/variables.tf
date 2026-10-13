@@ -94,3 +94,10 @@ variable "deletion_protection" {
   type        = bool
   default     = true
 }
+
+variable "iamcredentials_data_access_logs" {
+  description = "Opt-in. Enables DATA_READ audit logs for iamcredentials.googleapis.com on the project, so every ID or access token minted by impersonation is logged. Required before any hub enables test_runner (modules/hub-test-runner). Project-level, so owned once here, not per hub."
+  type        = bool
+  default     = false
+  nullable    = false
+}

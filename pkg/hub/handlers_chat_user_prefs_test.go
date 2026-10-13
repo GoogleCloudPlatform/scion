@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -29,8 +29,8 @@ import (
 func TestChatV2_UserPrefs_ResponseUsesRequestFieldNames(t *testing.T) {
 	srv, _ := testServer(t)
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

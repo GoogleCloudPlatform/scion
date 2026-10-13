@@ -696,7 +696,7 @@ func TestTelemetryDispatch_Units(t *testing.T) {
 	assert.False(t, *tel.Enabled)
 	assert.True(t, *hub.Enabled, "the hub default is never modified")
 	assert.Nil(t, legacy.telemetryPolicy())
-	assert.Nil(t, legacy.hubAgentDefaults(nil))
+	assert.Nil(t, legacy.wireTelemetry())
 
 	legacyReq := telemetryDispatch{hubDefault: hub, requester: &api.TelemetryConfig{Enabled: &off, Cloud: &api.TelemetryCloudConfig{Endpoint: tiersReqEndpoint}}}
 	tel = legacyReq.inlineTelemetry()
@@ -715,9 +715,19 @@ func TestTelemetryDispatch_Units(t *testing.T) {
 	assert.Nil(t, out.Telemetry)
 	assert.Equal(t, "m", out.Model)
 	assert.Same(t, requester, stored.Telemetry, "the stored config is never modified")
-	h := capable.hubAgentDefaults(nil)
+	wt := capable.wireTelemetry()
+	require.NotNil(t, wt)
+	assert.Equal(t, tiersHubEndpoint, wt.Cloud.Endpoint)
+	assert.NotSame(t, hub, wt, "the wire value is a copy")
+	// The builder sends the telemetry default even when nothing else is set,
+	// on create and on start/restart.
+	h := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil, wt)
 	require.NotNil(t, h)
 	assert.Equal(t, tiersHubEndpoint, h.Telemetry.Cloud.Endpoint)
+	sh := startHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil, wt)
+	require.NotNil(t, sh)
+	assert.Equal(t, tiersHubEndpoint, sh.Telemetry.Cloud.Endpoint)
+	assert.Nil(t, startHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil, nil))
 	require.NotNil(t, capable.telemetryPolicy())
 	assert.False(t, *capable.telemetryPolicy())
 

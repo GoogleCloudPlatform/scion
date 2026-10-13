@@ -72,10 +72,25 @@ type ArtifactResponse struct {
 	// true when the caller may share and change it (see canAdminister).
 	CanManage bool `json:"canManage,omitempty"`
 	// CanPublish, on a GET of the artifact or of one of its versions, is
-	// true when the caller may publish new versions of it (edit, upload or
-	// review; see canWriteErr): the decision POST /{id}/versions makes for the
-	// same request.
+	// true when the caller may publish new versions of it of any kind
+	// (edit, upload or review; see canWriteErr): the decision POST
+	// /{id}/versions makes for the same request.
 	CanPublish bool `json:"canPublish,omitempty"`
+	// CanReview, on a GET of the artifact or of one of its versions, is
+	// true when the caller may append versions of kind review only, through
+	// a review grant (ptone/scion#4538). It is false whenever CanPublish is
+	// true, since a publisher may review too.
+	CanReview bool `json:"canReview,omitempty"`
+	// CanGrantReview, on a GET of the artifact or of one of its versions,
+	// is true when the caller may not manage the artifact but may give a
+	// user review access to it (a review grant; design D24,
+	// ptone/scion#4014): the delegating user of the agent that owns it, the
+	// project owners and admins of its home project, and super-admins. It
+	// is false whenever CanManage is true, since a manager grants through
+	// the full sharing routes. It is advisory: the grant itself is decided
+	// under the artifact's lock and can still be refused, for example for an
+	// existing admin grant or a concurrent move.
+	CanGrantReview bool `json:"canGrantReview,omitempty"`
 }
 
 // CreateVersionRequest is the body of POST /api/v1/artifacts (create an
@@ -133,8 +148,30 @@ type UploadInfo struct {
 // the ready versions, newest first, without their files.
 type VersionListResponse struct {
 	Versions []VersionInfo `json:"versions"`
-	// NextBefore, when set, is the before= value of the next page.
+	// Discarded lists the versions in the same page that stopped being
+	// pending without becoming ready (ptone/scion#4577), so gaps in the
+	// numbering are explained. Each carries only DiscardedVersionInfo's
+	// fields.
+	Discarded []DiscardedVersionInfo `json:"discarded"`
+	// NextBefore, when set, is the before= value of the next page. A page
+	// covers ready and discarded versions together, so it can hold fewer
+	// than limit ready versions; clients follow NextBefore.
 	NextBefore int `json:"nextBefore,omitempty"`
+}
+
+// DiscardedVersionInfo is a discarded version as the versions list shows
+// it: only its number, state, reason and the time its number was taken.
+// It never names who submitted it, its note, kind or files, which stay as
+// hidden as before.
+type DiscardedVersionInfo struct {
+	Seq int `json:"seq"`
+	// State is VersionStateFailed.
+	State string `json:"state"`
+	// Reason is one of the FailReason codes; FailReasonDiscarded for a
+	// version discarded before reasons were recorded.
+	Reason string `json:"reason"`
+	// CreatedAt is when the version number was taken.
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // ArtifactInfo describes an artifact.
@@ -153,6 +190,10 @@ type ArtifactInfo struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 	CreatedAt time.Time  `json:"createdAt"`
 	UpdatedAt time.Time  `json:"updatedAt"`
+	// OwnerDeleted is true when the hub found the artifact's owner gone
+	// (a deleted agent or user; see the owner liveness reconciler). The
+	// artifact is otherwise unchanged.
+	OwnerDeleted bool `json:"ownerDeleted,omitempty"`
 }
 
 // VersionInfo describes one version and its files.
@@ -190,6 +231,7 @@ func artifactInfo(a *Artifact) ArtifactInfo {
 		ID: a.ID, Ref: FormatRef(a.ID, 0), ScopeKind: a.ScopeKind, ScopeRef: a.ScopeRef,
 		OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef, Key: a.Key, Title: a.Title,
 		CurrentSeq: a.CurrentSeq, ExpiresAt: a.ExpiresAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
+		OwnerDeleted: a.OrphanedAt != nil,
 	}
 }
 

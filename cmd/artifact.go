@@ -72,7 +72,8 @@ Commands:
   scion artifact publish <file|dir> --review <ref> [--note]
   scion artifact get <ref> [--out <path>] [--clean|--accept] [--kind publish]
   scion artifact versions <ref>                List an artifact's versions
-  scion artifact share <ref> [--ttl 7d]        Create a share link (users only)`,
+  scion artifact share <ref> [--ttl 7d]        Create a share link (users only)
+  scion artifact delete <ref> [--yes]          Delete an artifact (users only)`,
 	// Args/Run make this command Runnable so cobra validates subcommand
 	// names, as for "scion hub": an unrecognized subcommand, including one
 	// the CLI mode removed (such as share in agent mode), returns an
@@ -147,7 +148,9 @@ Examples:
 // none: the hub homes the artifact in the agent's own project. A user names
 // the hub project of the current checkout, never a local-only project id.
 func artifactPublishScope(settings *config.Settings) string {
-	if config.IsHubManagedAgent() {
+	// With a hub profile the agent is not an agent on the target hub: the
+	// project is the one named with --project (requireArtifactHubClient).
+	if config.IsHubManagedAgent() && !hubProfileSelected() {
 		return ""
 	}
 	return settings.GetHubProjectID()
@@ -156,6 +159,9 @@ func artifactPublishScope(settings *config.Settings) string {
 // checkArtifactPublishScope fails a user's publish early, before any
 // upload, when the checkout names no hub project to publish into.
 func checkArtifactPublishScope(settings *config.Settings) error {
+	if hubProfileSelected() && artifactPublishScope(settings) == "" {
+		return errors.New("with a hub profile, name the project on the target hub to publish into with --project <name or id>")
+	}
 	if !config.IsHubManagedAgent() && artifactPublishScope(settings) == "" {
 		return errors.New("this checkout is not linked to a hub project; link it first (scion hub link) to publish artifacts")
 	}
@@ -285,6 +291,9 @@ func init() {
 // requireArtifactHubClient loads settings and a hub client, failing with an
 // artifact-specific message outside Hub mode.
 func requireArtifactHubClient() (*config.Settings, hubclient.Client, error) {
+	if hubProfileSelected() {
+		return requireArtifactProfileClient()
+	}
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
@@ -575,4 +584,30 @@ func copyVerified(dst io.Writer, src io.Reader, wantDigest string, size int64) e
 		return errors.New("artifact content does not match its recorded sha256")
 	}
 	return nil
+}
+
+// requireArtifactProfileClient is requireArtifactHubClient with a hub
+// profile: the client acts as the --as identity on the target hub, no local
+// settings are read, and --project names a project on the target (resolved
+// there by name or id) for publish.
+func requireArtifactProfileClient() (*config.Settings, hubclient.Client, error) {
+	s, err := openHubProfileSession(true)
+	if err != nil {
+		return nil, nil, err
+	}
+	client, err := s.Client()
+	if err != nil {
+		return nil, nil, err
+	}
+	settings := &config.Settings{Hub: &config.HubClientConfig{Endpoint: s.Endpoint()}}
+	if projectPath != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		project, err := resolveProjectNameOrID(ctx, client, projectPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		settings.Hub.ProjectID = project.ID
+	}
+	return settings, client, nil
 }

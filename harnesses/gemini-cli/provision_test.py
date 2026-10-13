@@ -172,5 +172,62 @@ class GeminiModelTest(unittest.TestCase):
         self.assertIs(settings["model"]["skipNextSpeakerCheck"], True)
 
 
+def _select_vertex(env_vars: list[str]):
+    with tempfile.TemporaryDirectory() as tmp:
+        bundle = os.path.join(tmp, ".scion", "harness")
+        os.makedirs(os.path.join(bundle, "inputs"))
+        with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w", encoding="utf-8") as f:
+            json.dump({"explicit_type": "vertex-ai", "env_vars": env_vars}, f)
+        manifest = {"harness_bundle_dir": bundle, "harness_config": {}}
+        ctx = scion_harness.ProvisionContext("gemini-cli", manifest)
+        ctx.info = lambda *a, **k: None
+        return ctx.select_auth(provision.AUTH)
+
+
+class VertexAuthSelectionTest(unittest.TestCase):
+    # config.yaml's vertex-ai requires a project and a region group; the
+    # provisioner must agree (ptone/scion#4623).
+    def test_project_and_each_region_key_select_vertex_ai(self) -> None:
+        for region in ("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION"):
+            with self.subTest(region=region):
+                resolved = _select_vertex(["GOOGLE_CLOUD_PROJECT", region])
+                self.assertEqual(resolved.method, "vertex-ai")
+
+    def test_project_without_region_is_rejected(self) -> None:
+        with self.assertRaises(scion_harness.ProvisionError):
+            _select_vertex(["GOOGLE_CLOUD_PROJECT"])
+
+
+class VertexEnvOverlayTest(unittest.TestCase):
+    # Gemini reads only GOOGLE_CLOUD_LOCATION, so every accepted region key
+    # must reach it (ptone/scion#4672).
+    def _location(self, env: dict[str, str]) -> str:
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            return provision._build_env_overlay("vertex-ai", "")["GOOGLE_CLOUD_LOCATION"]
+
+    def test_cloud_ml_region_alone_sets_location(self) -> None:
+        self.assertEqual(
+            self._location({"GOOGLE_CLOUD_PROJECT": "p", "CLOUD_ML_REGION": "europe-west4"}),
+            "europe-west4",
+        )
+
+    def test_no_region_gives_empty_location(self) -> None:
+        self.assertEqual(self._location({"GOOGLE_CLOUD_PROJECT": "p"}), "")
+
+    def test_location_and_region_keep_precedence_over_cloud_ml_region(self) -> None:
+        self.assertEqual(
+            self._location({
+                "GOOGLE_CLOUD_LOCATION": "us-east5",
+                "GOOGLE_CLOUD_REGION": "us-central1",
+                "CLOUD_ML_REGION": "europe-west4",
+            }),
+            "us-east5",
+        )
+        self.assertEqual(
+            self._location({"GOOGLE_CLOUD_REGION": "us-central1", "CLOUD_ML_REGION": "europe-west4"}),
+            "us-central1",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
@@ -230,6 +231,48 @@ func (_c *UserCreate) SetNillablePurpose(v *string) *UserCreate {
 	return _c
 }
 
+// SetIssuanceID sets the "issuance_id" field.
+func (_c *UserCreate) SetIssuanceID(v string) *UserCreate {
+	_c.mutation.SetIssuanceID(v)
+	return _c
+}
+
+// SetNillableIssuanceID sets the "issuance_id" field if the given value is not nil.
+func (_c *UserCreate) SetNillableIssuanceID(v *string) *UserCreate {
+	if v != nil {
+		_c.SetIssuanceID(*v)
+	}
+	return _c
+}
+
+// SetIssuerCredentialID sets the "issuer_credential_id" field.
+func (_c *UserCreate) SetIssuerCredentialID(v string) *UserCreate {
+	_c.mutation.SetIssuerCredentialID(v)
+	return _c
+}
+
+// SetNillableIssuerCredentialID sets the "issuer_credential_id" field if the given value is not nil.
+func (_c *UserCreate) SetNillableIssuerCredentialID(v *string) *UserCreate {
+	if v != nil {
+		_c.SetIssuerCredentialID(*v)
+	}
+	return _c
+}
+
+// SetIssuerDelegationID sets the "issuer_delegation_id" field.
+func (_c *UserCreate) SetIssuerDelegationID(v string) *UserCreate {
+	_c.mutation.SetIssuerDelegationID(v)
+	return _c
+}
+
+// SetNillableIssuerDelegationID sets the "issuer_delegation_id" field if the given value is not nil.
+func (_c *UserCreate) SetNillableIssuerDelegationID(v *string) *UserCreate {
+	if v != nil {
+		_c.SetIssuerDelegationID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *UserCreate) SetID(v uuid.UUID) *UserCreate {
 	_c.mutation.SetID(v)
@@ -321,6 +364,25 @@ func (_c *UserCreate) SetNillableTerminalWorkspaceID(id *uuid.UUID) *UserCreate 
 // SetTerminalWorkspace sets the "terminal_workspace" edge to the UserTerminalWorkspace entity.
 func (_c *UserCreate) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserCreate {
 	return _c.SetTerminalWorkspaceID(v.ID)
+}
+
+// SetTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID.
+func (_c *UserCreate) SetTestIdentityLoginCodeID(id uuid.UUID) *UserCreate {
+	_c.mutation.SetTestIdentityLoginCodeID(id)
+	return _c
+}
+
+// SetNillableTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID if the given value is not nil.
+func (_c *UserCreate) SetNillableTestIdentityLoginCodeID(id *uuid.UUID) *UserCreate {
+	if id != nil {
+		_c = _c.SetTestIdentityLoginCodeID(*id)
+	}
+	return _c
+}
+
+// SetTestIdentityLoginCode sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity.
+func (_c *UserCreate) SetTestIdentityLoginCode(v *TestIdentityLoginCode) *UserCreate {
+	return _c.SetTestIdentityLoginCodeID(v.ID)
 }
 
 // Mutation returns the UserMutation object of the builder.
@@ -527,6 +589,18 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 		_spec.SetField(user.FieldPurpose, field.TypeString, value)
 		_node.Purpose = &value
 	}
+	if value, ok := _c.mutation.IssuanceID(); ok {
+		_spec.SetField(user.FieldIssuanceID, field.TypeString, value)
+		_node.IssuanceID = &value
+	}
+	if value, ok := _c.mutation.IssuerCredentialID(); ok {
+		_spec.SetField(user.FieldIssuerCredentialID, field.TypeString, value)
+		_node.IssuerCredentialID = &value
+	}
+	if value, ok := _c.mutation.IssuerDelegationID(); ok {
+		_spec.SetField(user.FieldIssuerDelegationID, field.TypeString, value)
+		_node.IssuerDelegationID = &value
+	}
 	if nodes := _c.mutation.OwnedGroupsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
@@ -600,6 +674,22 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.TestIdentityLoginCodeIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TestIdentityLoginCodeTable,
+			Columns: []string{user.TestIdentityLoginCodeColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(testidentitylogincode.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -864,6 +954,15 @@ func (u *UserUpsertOne) UpdateNewValues() *UserUpsertOne {
 		}
 		if _, exists := u.create.mutation.Purpose(); exists {
 			s.SetIgnore(user.FieldPurpose)
+		}
+		if _, exists := u.create.mutation.IssuanceID(); exists {
+			s.SetIgnore(user.FieldIssuanceID)
+		}
+		if _, exists := u.create.mutation.IssuerCredentialID(); exists {
+			s.SetIgnore(user.FieldIssuerCredentialID)
+		}
+		if _, exists := u.create.mutation.IssuerDelegationID(); exists {
+			s.SetIgnore(user.FieldIssuerDelegationID)
 		}
 	}))
 	return u
@@ -1296,6 +1395,15 @@ func (u *UserUpsertBulk) UpdateNewValues() *UserUpsertBulk {
 			}
 			if _, exists := b.mutation.Purpose(); exists {
 				s.SetIgnore(user.FieldPurpose)
+			}
+			if _, exists := b.mutation.IssuanceID(); exists {
+				s.SetIgnore(user.FieldIssuanceID)
+			}
+			if _, exists := b.mutation.IssuerCredentialID(); exists {
+				s.SetIgnore(user.FieldIssuerCredentialID)
+			}
+			if _, exists := b.mutation.IssuerDelegationID(); exists {
+				s.SetIgnore(user.FieldIssuerDelegationID)
 			}
 		}
 	}))
