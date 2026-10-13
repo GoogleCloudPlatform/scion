@@ -71,8 +71,8 @@ var serverTestInfraMarkCmd = &cobra.Command{
 	Long: `Write the test infrastructure marker into the configured hub database.
 
 The marker records that an operator deliberately designated this database as
-the test database of one hub. --enable-test-admin-identities refuses to start
-unless the marker is present and names the hub's own hub id.
+the test database of one hub. Every --test-mode level other than off refuses
+to start unless the marker is present and names the hub's own hub id.
 
 The command:
   - opens the configured database directly (no running server is needed)
@@ -307,7 +307,7 @@ func markTestInfra(ctx context.Context, client *ent.Client, cfg *config.GlobalCo
 	_, _ = fmt.Fprintf(out, "Test infrastructure marker written: hub_id=%s class=%s created_at=%s host=%s\n",
 		m.HubID, m.Class, m.CreatedAt.UTC().Format(time.RFC3339), m.CreatedByHost)
 	_, _ = fmt.Fprintln(out, "A new test-identity web session key was generated and stored with the marker (not shown).")
-	_, _ = fmt.Fprintln(out, "If this hub predates hub-id signing-key scoping, delete or rotate its hub signing keys before the first start with --enable-test-admin-identities.")
+	_, _ = fmt.Fprintln(out, "If this hub predates hub-id signing-key scoping, delete or rotate its hub signing keys before the first start with --test-mode=admin.")
 	return nil
 }
 

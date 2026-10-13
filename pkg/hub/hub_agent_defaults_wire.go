@@ -17,6 +17,7 @@ package hub
 import (
 	"slices"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 )
 
@@ -48,9 +49,15 @@ import (
 // experiments lists the enabled dispatch experiments (see
 // HTTPAgentDispatcher.dispatchExperiments); like the auto-expose default it is
 // sent in every mode, since the hub is the only place it is decided.
-func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool, experiments []string) *RemoteHubAgentDefaults {
+//
+// telemetry is the hub telemetry default for a broker that reports
+// templateTiers (telemetryDispatch.wireTelemetry), nil otherwise; a legacy
+// broker gets it inline instead (ptone/scion#4222). It is not a file-mode
+// limit, so it is sent whenever it is set, even when nothing else is.
+func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool, experiments []string, telemetry *api.TelemetryConfig) *RemoteHubAgentDefaults {
 	if d.DefaultMaxTurns == 0 && d.DefaultMaxModelCalls == 0 &&
-		d.DefaultMaxDuration == "" && d.DefaultResources == nil && autoExposePorts == nil && len(experiments) == 0 {
+		d.DefaultMaxDuration == "" && d.DefaultResources == nil && autoExposePorts == nil && len(experiments) == 0 &&
+		telemetry == nil {
 		return nil
 	}
 	out := &RemoteHubAgentDefaults{
@@ -59,6 +66,10 @@ func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts 
 		MaxDuration:     d.DefaultMaxDuration,
 		AutoExposePorts: copyBoolPtr(autoExposePorts),
 		Experiments:     slices.Clone(experiments),
+	}
+	if telemetry != nil {
+		c := *telemetry
+		out.Telemetry = &c
 	}
 	if d.DefaultResources != nil {
 		// Copy the pointee: hubAgentDefaults() already returns a deep copy, but
@@ -75,16 +86,18 @@ func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts 
 // cannot drift. Which hub defaults ride each wire is listed here:
 //
 //   - create: the limits (max turns, model calls, duration), resources,
-//     the auto-expose default and the dispatch experiments.
-//   - start/restart: resources, the auto-expose default and the dispatch
-//     experiments. The broker no longer persists hub resources into the
-//     agent config (ptone/scion#4561) and applies them per start, so they
-//     are sent on every start. The limits stay create-only: Start does not
-//     read them from the request.
+//     the auto-expose default, the dispatch experiments, and the hub
+//     telemetry default for a templateTiers broker.
+//   - start/restart: resources, the auto-expose default, the dispatch
+//     experiments, and the hub telemetry default for a templateTiers broker.
+//     The broker no longer persists hub resources into the agent config
+//     (ptone/scion#4561) and applies them and the telemetry default per
+//     start, so they are sent on every start. The limits stay create-only:
+//     Start does not read them from the request.
 //
 // It returns nil when there is nothing to send.
-func startHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool, experiments []string) *RemoteHubAgentDefaults {
-	return remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{DefaultResources: d.DefaultResources}, autoExposePorts, experiments)
+func startHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool, experiments []string, telemetry *api.TelemetryConfig) *RemoteHubAgentDefaults {
+	return remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{DefaultResources: d.DefaultResources}, autoExposePorts, experiments, telemetry)
 }
 
 // hubAgentDefaults returns the hub's operational agent_defaults, or the zero

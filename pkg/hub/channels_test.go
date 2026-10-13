@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -33,9 +34,8 @@ import (
 func TestChannelRegistry_Dispatch(t *testing.T) {
 	ch := &recordingChannel{name: "test"}
 	registry := &ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test"}}},
+		log:     slog.Default(),
 	}
 
 	msg := messages.NewNotification("agent:worker", "user:alice", "task completed", messages.TypeStateChange)
@@ -50,10 +50,12 @@ func TestChannelRegistry_Dispatch(t *testing.T) {
 func TestChannelRegistry_FilterTypes(t *testing.T) {
 	ch := &recordingChannel{name: "test"}
 	registry := &ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs: []ChannelConfig{{
-			Type:        "test",
-			FilterTypes: []string{"input-needed"},
+		entries: []channelEntry{{
+			channel: ch,
+			config: ChannelConfig{
+				Type:        "test",
+				FilterTypes: []string{"input-needed"},
+			},
 		}},
 		log: slog.Default(),
 	}
@@ -72,10 +74,12 @@ func TestChannelRegistry_FilterTypes(t *testing.T) {
 func TestChannelRegistry_FilterUrgentOnly(t *testing.T) {
 	ch := &recordingChannel{name: "test"}
 	registry := &ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs: []ChannelConfig{{
-			Type:             "test",
-			FilterUrgentOnly: true,
+		entries: []channelEntry{{
+			channel: ch,
+			config: ChannelConfig{
+				Type:             "test",
+				FilterUrgentOnly: true,
+			},
 		}},
 		log: slog.Default(),
 	}
@@ -95,9 +99,8 @@ func TestChannelRegistry_FilterUrgentOnly(t *testing.T) {
 func TestChannelRegistry_DeliveryError(t *testing.T) {
 	ch := &recordingChannel{name: "failing", returnErr: fmt.Errorf("connection refused")}
 	registry := &ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "failing"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "failing"}}},
+		log:     slog.Default(),
 	}
 
 	// Should not panic — errors are logged, not propagated
@@ -112,9 +115,11 @@ func TestChannelRegistry_MultipleChannels(t *testing.T) {
 	ch1 := &recordingChannel{name: "ch1"}
 	ch2 := &recordingChannel{name: "ch2"}
 	registry := &ChannelRegistry{
-		channels: []NotificationChannel{ch1, ch2},
-		configs:  []ChannelConfig{{Type: "ch1"}, {Type: "ch2"}},
-		log:      slog.Default(),
+		entries: []channelEntry{
+			{channel: ch1, config: ChannelConfig{Type: "ch1"}},
+			{channel: ch2, config: ChannelConfig{Type: "ch2"}},
+		},
+		log: slog.Default(),
 	}
 
 	msg := messages.NewNotification("agent:worker", "user:alice", "completed", messages.TypeStateChange)
@@ -165,6 +170,45 @@ func TestNewChannelRegistry_MixedValid(t *testing.T) {
 	}
 	registry := NewChannelRegistry(configs, slog.Default())
 	assert.Equal(t, 2, registry.Len())
+}
+
+// A channel skipped as invalid while the registry is built must not shift
+// the filter config used for the channels after it (ptone/scion#4456).
+func TestNewChannelRegistry_SkippedChannelKeepsFilterPairing(t *testing.T) {
+	var mu sync.Mutex
+	var receivedTypes []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { _ = r.Body.Close() }()
+		var got messages.StructuredMessage
+		if err := json.NewDecoder(r.Body).Decode(&got); err == nil {
+			mu.Lock()
+			receivedTypes = append(receivedTypes, got.Type)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	configs := []ChannelConfig{
+		{Type: "nonexistent"}, // invalid, no filter - skipped
+		{
+			Type:        "webhook",
+			Params:      map[string]string{"url": server.URL},
+			FilterTypes: []string{messages.TypeInputNeeded},
+		},
+	}
+	registry := NewChannelRegistry(configs, slog.Default())
+	require.Equal(t, 1, registry.Len())
+
+	registry.Dispatch(context.Background(),
+		messages.NewNotification("agent:worker", "user:alice", "completed", messages.TypeStateChange))
+	registry.Dispatch(context.Background(),
+		messages.NewNotification("agent:worker", "user:alice", "need help", messages.TypeInputNeeded))
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{messages.TypeInputNeeded}, receivedTypes,
+		"the webhook's own filter must apply, not the skipped channel's config")
 }
 
 func TestWebhookChannel_Deliver(t *testing.T) {
