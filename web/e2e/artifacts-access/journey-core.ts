@@ -399,9 +399,7 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
   }
 
   /** Issues the identities (local) or reads them from the environment, and redeems each. */
-  async function setUpIdentities(
-    browserNewContext: () => Promise<BrowserContext>
-  ): Promise<void> {
+  async function setUpIdentities(browserNewContext: () => Promise<BrowserContext>): Promise<void> {
     const t = target();
     for (const key of opts.keys) {
       let codeFile: string;
@@ -527,7 +525,7 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
     }
     const authMe: Record<string, number> = {};
     const deleted: Record<string, string> = {};
-    for (const identity of Object.values(state.ids) as Array<Identity<K> | undefined>) {
+    for (const identity of Object.values<Identity<K> | undefined>(state.ids)) {
       if (!identity) continue;
       try {
         runScionCLI(hub, ['hub', 'test-identity', 'delete', identity.id]);
@@ -555,7 +553,7 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
         '--include-expired',
         '--json',
       ]);
-      for (const identity of Object.values(state.ids) as Array<Identity<K> | undefined>) {
+      for (const identity of Object.values<Identity<K> | undefined>(state.ids)) {
         if (!identity) continue;
         states[`identity ${identity.key}`] = listed.includes(identity.id) ? 'present' : 'absent';
       }

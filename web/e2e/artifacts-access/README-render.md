@@ -19,11 +19,11 @@ through the admin experiments API only if it is off, and resets the override in 
 
 Three member test identities each act in their own browser context:
 
-| Key        | Role                                                                         |
-| ---------- | ---------------------------------------------------------------------------- |
-| `owner`    | publishes both artifacts and all three bundle versions; owns the project     |
-| `member`   | the reader: a member of the project, no grant                                |
-| `outsider` | in no project                                                                |
+| Key        | Role                                                                     |
+| ---------- | ------------------------------------------------------------------------ |
+| `owner`    | publishes both artifacts and all three bundle versions; owns the project |
+| `member`   | the reader: a member of the project, no grant                            |
+| `outsider` | in no project                                                            |
 
 Existing non-IAP hub: set `E2E_TARGET_URL`, and for each key `E2E_R2_<KEY>_CODE_FILE` and `E2E_R2_<KEY>_EMAIL`
 (OWNER, MEMBER, OUTSIDER). The experiment toggle works as in the access journey (`E2E_ARTIFACTS_TOGGLE_EXPERIMENT=1`

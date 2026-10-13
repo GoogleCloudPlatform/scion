@@ -124,8 +124,7 @@ const ISOLATION_FAIL = 'R2 isolation row failed; see restricted evidence';
 const R2_17B_REASON =
   'NOT RUN: the view TTL is a fixed 30-minute constant (pkg/artifacts/view.go:52) with no ' +
   'supported setting to lower it; the run does not wait 30 minutes';
-const R2_21_REASON =
-  'NOT RUN: chat HTML preview not merged (upstream ptone/scion#4580)';
+const R2_21_REASON = 'NOT RUN: chat HTML preview not merged (upstream ptone/scion#4580)';
 
 const VIEW_PREFIX = '/api/v1/artifacts/view/';
 
@@ -358,7 +357,7 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
     if (!/^https?:/.test(req.url())) return;
     if (new URL(req.url()).hostname === REMOTE_IMAGE_HOST) r2.remoteHostHits++;
     if (!isBundleRequest(req)) return;
-    let topLevelDocument = false;
+    let topLevelDocument: boolean;
     let frameUnavailable = false;
     try {
       topLevelDocument = req.isNavigationRequest() && req.frame().parentFrame() === null;
@@ -806,9 +805,7 @@ async function markdownFacts(
         : null,
       notesHref: notes?.getAttribute('href') ?? null,
       notesTarget:
-        notes?.getAttribute('target') ??
-        doc?.querySelector('base')?.getAttribute('target') ??
-        null,
+        notes?.getAttribute('target') ?? doc?.querySelector('base')?.getAttribute('target') ?? null,
       scripts: doc?.querySelectorAll('script').length ?? -1,
       onAttrs,
       jsHrefs: Array.from(doc?.querySelectorAll('a[href]') ?? []).filter((a) =>
@@ -817,8 +814,7 @@ async function markdownFacts(
       embeds: doc?.querySelectorAll('iframe, object, embed').length ?? -1,
       forms: doc?.querySelectorAll('form').length ?? -1,
       styleKept: (doc?.querySelectorAll('body style').length ?? 0) > 0,
-      frameFlag:
-        (iframe.contentWindow as unknown as { __r2md?: unknown } | null)?.__r2md ?? null,
+      frameFlag: (iframe.contentWindow as unknown as { __r2md?: unknown } | null)?.__r2md ?? null,
     };
   });
 }
@@ -870,7 +866,7 @@ function expectMarkdownRendered(facts: Record<string, unknown>, seq: number): vo
   expect.soft(facts.referrerpolicy, 'markdown referrerpolicy').toBe('no-referrer');
   expect.soft(facts.hasSrcAttr, 'markdown frame has no src').toBe(false);
   expect.soft(facts.srcdocSet, 'markdown frame uses srcdoc').toBe(true);
-  const csp = String(facts.metaCsp ?? '');
+  const csp = typeof facts.metaCsp === 'string' ? facts.metaCsp : '';
   expect.soft(csp, "meta CSP default-src 'none'").toContain("default-src 'none'");
   expect.soft(csp, "meta CSP img-src 'self' data:").toContain("img-src 'self' data:");
   expect.soft(csp, 'meta CSP has no script-src').not.toContain('script-src');
@@ -952,7 +948,7 @@ function preHeld(): string | undefined {
 
 const TITLE_MAIN = 'R2: artifact page view and render, graded at the UI';
 const TITLE_CLEANUP = 'R2-18/R2-19: cleanup by absence, then the evidence';
-const skipTitle = (id: string): string => `${id}: ${ROWS[id]!.title}`;
+const skipTitle = (id: string): string => `${id}: ${ROWS[id].title}`;
 const SKIPPED: Record<string, string> = { 'R2-17b': R2_17B_REASON, 'R2-21': R2_21_REASON };
 
 const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = Object.fromEntries(
@@ -1003,11 +999,11 @@ test.describe('render rows not run at this build', () => {
   test.skip(!UNDER_RENDER_CONFIG, WRONG_CONFIG);
   for (const id of Object.keys(SKIPPED)) {
     test(skipTitle(id), () => {
-      const reason = SKIPPED[id]!;
+      const reason = SKIPPED[id];
       j.notRun([id], reason);
       test.info().annotations.push({
         type: 'NOT RUN',
-        description: `${id} (${ROWS[id]!.role}): ${ROWS[id]!.title}`,
+        description: `${id} (${ROWS[id].role}): ${ROWS[id].title}`,
       });
       const results = (j.state.evidence.results ??= {}) as Record<string, unknown>;
       results[skipTitle(id)] = {
@@ -1060,7 +1056,7 @@ test.describe.serial('artifact page view and render (R2)', () => {
       }
       r2.dirs.markdown = writeFolder(j.state.tmpDir, 'r2-md', markdownFiles());
       r2.fileSizes = {
-        'img/chart.png': bundleFiles(3)['img/chart.png']!.length,
+        'img/chart.png': bundleFiles(3)['img/chart.png'].length,
       };
 
       await j.setUpIdentities(async () => {
@@ -1139,7 +1135,7 @@ async function runMain(browser: Browser): Promise<void> {
     await expect(newButton, 'New artifact visible').toBeVisible();
     await newButton.click();
     const title = `R2 bundle ${suffix()}`;
-    const pub = await publishThroughDialog(page, r2.dirs['bundle-v1']!, {
+    const pub = await publishThroughDialog(page, r2.dirs['bundle-v1'], {
       title,
       note: 'r2 v1',
       createPath: /^\/api\/v1\/artifacts$/,
@@ -1222,9 +1218,9 @@ async function runMain(browser: Browser): Promise<void> {
       };
       r2.frames.push(frameRec);
       r.ui.frame = frameRec;
-      expect.soft(frameRec.sandboxTokens, 'sandbox is exactly allow-scripts').toEqual([
-        'allow-scripts',
-      ]);
+      expect
+        .soft(frameRec.sandboxTokens, 'sandbox is exactly allow-scripts')
+        .toEqual(['allow-scripts']);
       for (const f of SANDBOX_FORBIDDEN_HTML) {
         expect.soft(frameRec.sandboxTokens, `sandbox has no ${f}`).not.toContain(f);
       }
@@ -1563,80 +1559,75 @@ async function runMain(browser: Browser): Promise<void> {
 
   // ---- R2-07: markdown bundle renders ------------------------------------
   r2.step = 'R2-07';
-  await j.row(
-    'R2-07',
-    async (r) => {
-      const page = await j.pageOf('owner');
-      const since = j.who('owner').requests.length;
-      await page.goto(`/projects/${j.state.projectId}`, { waitUntil: 'domcontentloaded' });
-      await revealFiles(page);
-      await page.locator(SELECTORS.filesSegmentArtifacts).click();
-      await expect(page.locator(SELECTORS.artifactList)).toBeAttached();
-      await newArtifactButton(page).click();
-      const title = `R2 markdown ${suffix()}`;
-      const pub = await publishThroughDialog(page, r2.dirs.markdown!, {
-        title,
-        note: 'r2 md',
-        createPath: /^\/api\/v1\/artifacts$/,
-      });
-      r.ui.entryShown = pub.entry;
-      // A refused publish makes the markdown rows "not run" with the cause (oracle rule 3).
-      const refuse = (cause: string): void => {
-        r2.markdownRefused = `markdown publish refused (${cause})`;
-        r.legNotRun = r2.markdownRefused;
-      };
-      if (pub.createStatus !== 201) {
-        refuse(`create ${pub.createStatus} ${String(pub.createCode)}`);
-        return;
-      }
-      // Known from the create on, so the cleanup deletes it even if finalize is refused.
-      r2.markdownCreatedId = pub.createdId ?? undefined;
-      const landed = await expect(page)
-        .toHaveURL(new RegExp(`/projects/${j.state.projectId}/artifacts/[0-9a-f-]+$`))
-        .then(() => true)
-        .catch(() => false);
-      await settle(page);
-      const calls = publishCalls('owner', since, 1);
-      r.api.push(...calls.map((c) => ({ as: 'owner', ...c, status: c.status ?? 0, code: null })));
-      r2.publishes.push({ artifact: 'markdown', seq: 1, calls, asked: pub.asked });
-      const finalize = calls.find((c) => c.path.endsWith('/finalize'));
-      const finalizeOk = !!finalize?.status && finalize.status >= 200 && finalize.status < 300;
-      if (!finalizeOk) {
-        refuse(`finalize ${String(finalize?.status ?? 'missing')}`);
-        return;
-      }
-      // Published (create 201, finalize 2xx): the markdown rows may run.
-      if (pub.createdId) r2.markdown = { id: pub.createdId, title };
-      expect(landed, 'lands on the markdown artifact').toBe(true);
-      const landedId = new URL(page.url()).pathname.split('/').pop()!;
-      expect.soft(landedId, 'landed on the created markdown').toBe(pub.createdId);
-      r2.markdown = { id: pub.createdId ?? landedId, title };
-      if (pub.createdId && landedId !== pub.createdId) r2.extraArtifactIds.push(landedId);
-      expect.soft(pub.entry, 'entry defaults to index.md').toBe('index.md');
-
-      const md = await openMarkdown('owner');
-      r.ui.entryBar = await textOf(md.locator(RENDER_SELECTORS.htmlBar));
-      expect
-        .soft(String(r.ui.entryBar), 'entry bar: index.md · <size>')
-        .toMatch(/^index\.md · \S+/);
-      r.ui.openRaw = await isShown(previewBarButton(md, 'Open raw'));
-      expect.soft(r.ui.openRaw, 'Open raw visible').toBe(true);
-      const facts = await markdownFacts(md);
-      r2.frames.push({ who: 'owner', step: 'R2-07', kind: 'markdown', ...facts });
-      r.ui.facts = facts;
-      expectMarkdownRendered(facts, 1);
-      for (const p of ['index.md', 'img/dot.png']) {
-        const res = await j.api(
-          'owner',
-          'GET',
-          `/api/v1/artifacts/${markdownId()}/versions/1/files/${p}?stream=1`,
-          undefined,
-          r
-        );
-        expect.soft(res.status, `GET ${p}`).toBe(200);
-      }
+  await j.row('R2-07', async (r) => {
+    const page = await j.pageOf('owner');
+    const since = j.who('owner').requests.length;
+    await page.goto(`/projects/${j.state.projectId}`, { waitUntil: 'domcontentloaded' });
+    await revealFiles(page);
+    await page.locator(SELECTORS.filesSegmentArtifacts).click();
+    await expect(page.locator(SELECTORS.artifactList)).toBeAttached();
+    await newArtifactButton(page).click();
+    const title = `R2 markdown ${suffix()}`;
+    const pub = await publishThroughDialog(page, r2.dirs.markdown, {
+      title,
+      note: 'r2 md',
+      createPath: /^\/api\/v1\/artifacts$/,
+    });
+    r.ui.entryShown = pub.entry;
+    // A refused publish makes the markdown rows "not run" with the cause (oracle rule 3).
+    const refuse = (cause: string): void => {
+      r2.markdownRefused = `markdown publish refused (${cause})`;
+      r.legNotRun = r2.markdownRefused;
+    };
+    if (pub.createStatus !== 201) {
+      refuse(`create ${pub.createStatus} ${String(pub.createCode)}`);
+      return;
     }
-  );
+    // Known from the create on, so the cleanup deletes it even if finalize is refused.
+    r2.markdownCreatedId = pub.createdId ?? undefined;
+    const landed = await expect(page)
+      .toHaveURL(new RegExp(`/projects/${j.state.projectId}/artifacts/[0-9a-f-]+$`))
+      .then(() => true)
+      .catch(() => false);
+    await settle(page);
+    const calls = publishCalls('owner', since, 1);
+    r.api.push(...calls.map((c) => ({ as: 'owner', ...c, status: c.status ?? 0, code: null })));
+    r2.publishes.push({ artifact: 'markdown', seq: 1, calls, asked: pub.asked });
+    const finalize = calls.find((c) => c.path.endsWith('/finalize'));
+    const finalizeOk = !!finalize?.status && finalize.status >= 200 && finalize.status < 300;
+    if (!finalizeOk) {
+      refuse(`finalize ${String(finalize?.status ?? 'missing')}`);
+      return;
+    }
+    // Published (create 201, finalize 2xx): the markdown rows may run.
+    if (pub.createdId) r2.markdown = { id: pub.createdId, title };
+    expect(landed, 'lands on the markdown artifact').toBe(true);
+    const landedId = new URL(page.url()).pathname.split('/').pop()!;
+    expect.soft(landedId, 'landed on the created markdown').toBe(pub.createdId);
+    r2.markdown = { id: pub.createdId ?? landedId, title };
+    if (pub.createdId && landedId !== pub.createdId) r2.extraArtifactIds.push(landedId);
+    expect.soft(pub.entry, 'entry defaults to index.md').toBe('index.md');
+
+    const md = await openMarkdown('owner');
+    r.ui.entryBar = await textOf(md.locator(RENDER_SELECTORS.htmlBar));
+    expect.soft(String(r.ui.entryBar), 'entry bar: index.md · <size>').toMatch(/^index\.md · \S+/);
+    r.ui.openRaw = await isShown(previewBarButton(md, 'Open raw'));
+    expect.soft(r.ui.openRaw, 'Open raw visible').toBe(true);
+    const facts = await markdownFacts(md);
+    r2.frames.push({ who: 'owner', step: 'R2-07', kind: 'markdown', ...facts });
+    r.ui.facts = facts;
+    expectMarkdownRendered(facts, 1);
+    for (const p of ['index.md', 'img/dot.png']) {
+      const res = await j.api(
+        'owner',
+        'GET',
+        `/api/v1/artifacts/${markdownId()}/versions/1/files/${p}?stream=1`,
+        undefined,
+        r
+      );
+      expect.soft(res.status, `GET ${p}`).toBe(200);
+    }
+  });
 
   // ---- R2-07b: a clicked link opens a new tab; nothing opens by itself ---
   r2.step = 'R2-07b';
@@ -1674,9 +1665,7 @@ async function runMain(browser: Browser): Promise<void> {
       };
       expect.soft(popupRec.path, 'new tab opens the v1 notes.md').toBe(want);
       expect.soft(popupRec.status, 'new tab answered 200').toBe(200);
-      expect
-        .soft(popupRec.contentType ?? '', 'served as text/markdown')
-        .toMatch(/^text\/markdown/);
+      expect.soft(popupRec.contentType ?? '', 'served as text/markdown').toMatch(/^text\/markdown/);
       expect.soft(popupRec.contentDisposition ?? '', 'served inline').toMatch(/^inline/);
       await popup.close();
       // The same file through the API (recorded; must agree).
@@ -1754,7 +1743,7 @@ async function runMain(browser: Browser): Promise<void> {
         const upload = uploadVersionButton(page);
         await expect(upload, 'Upload new version visible').toBeVisible();
         await upload.click();
-        const pub = await publishThroughDialog(page, r2.dirs[`bundle-v${n}`]!, {
+        const pub = await publishThroughDialog(page, r2.dirs[`bundle-v${n}`], {
           note: `r2 v${n}`,
           createPath: new RegExp(`^/api/v1/artifacts/${bundleId()}/versions$`),
         });
@@ -1824,11 +1813,12 @@ async function runMain(browser: Browser): Promise<void> {
       r.ui.menu = menu;
       expect.soft(rows, 'history rows').toEqual(expectedHistory('You'));
       expect.soft(discarded, 'no discarded rows').toBe(0);
-      expect.soft(menu.map((m) => m.split(' · ')[0]), 'menu order').toEqual([
-        'v3 (current)',
-        'v2',
-        'v1',
-      ]);
+      expect
+        .soft(
+          menu.map((m) => m.split(' · ')[0]),
+          'menu order'
+        )
+        .toEqual(['v3 (current)', 'v2', 'v1']);
       expect.soft(menu[1] ?? '', 'menu v2 note').toContain('r2 v2');
       const versions = await j.api(
         'owner',
@@ -1906,13 +1896,19 @@ async function runMain(browser: Browser): Promise<void> {
       };
       expect.soft(v1Label, 'v1 label').toContain('Version v1');
       expect.soft(v1Label, 'v1 label has no (current)').not.toContain('(current)');
-      expect.soft(historyAtV1.filter((x) => x.current).map((x) => x.seq), 'current badge').toEqual([
-        'v3',
-      ]);
+      expect
+        .soft(
+          historyAtV1.filter((x) => x.current).map((x) => x.seq),
+          'current badge'
+        )
+        .toEqual(['v3']);
       expect.soft(v1View.viewSeq, 'v1 page link stays on seq 1').toBe(1);
       expect.soft(v1Files.summary, 'v1 Files summary').toMatch(/^4 files · .* · version 1$/);
       expect
-        .soft(v1Files.rows.map((x) => x.path), 'v1 has no notes/v3.txt')
+        .soft(
+          v1Files.rows.map((x) => x.path),
+          'v1 has no notes/v3.txt'
+        )
         .not.toContain('notes/v3.txt');
       const v1Mint = await latestMint('owner', 1, mintsBeforeV1);
       expect.soft(v1Mint.status, 'mint v1').toBe(200);
