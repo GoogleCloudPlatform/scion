@@ -271,6 +271,11 @@ type AgentTokenGrant struct {
 	ProjectID string
 	Scopes    []AgentTokenScope
 	Ancestry  []string
+	// DroppedScopes are the ceiling-optional role scopes (the artifact
+	// scopes) the agent's role carries that the chain ceiling left out of
+	// Scopes. They are not part of the token; create and start report them
+	// as a warning (ptone/scion#4569).
+	DroppedScopes []AgentTokenScope
 }
 
 // SignAgentToken signs a token for grant, bound to runID, and returns it

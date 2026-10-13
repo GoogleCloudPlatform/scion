@@ -359,9 +359,9 @@ type Server struct {
 	// newLaunchSender). Nil in production; only tests set it.
 	launchTimingOverride *launchTimings
 
-	// syncStartSupersedeWait overrides defaultSyncStartSupersedeWait when
-	// positive (see beginSyncStart). Zero in production.
-	syncStartSupersedeWait time.Duration
+	// createSupersedeWait overrides defaultCreateSupersedeWait when
+	// positive (see beginCreateRegistration). Zero in production.
+	createSupersedeWait time.Duration
 
 	stateDir string
 
@@ -451,6 +451,11 @@ type Server struct {
 	// flatK8sIdentity is a flat instance's own Kubernetes GCP identity
 	// policy, snapshotted when the server is built (flat_k8s_identity.go).
 	flatK8sIdentity flatKubernetesIdentityPolicy
+
+	// flatPolicy is a flat instance's settings policy (its runtime_target
+	// defaults), snapshotted when the server is built and attached to
+	// every request it serves (flat_instance.go).
+	flatPolicy *config.FlatInstancePolicy
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
@@ -562,6 +567,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(fi)
+		srv.flatPolicy = config.NewFlatInstancePolicy(fi.Instance)
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		// Fail closed: without an exact absence check a deleted agent's

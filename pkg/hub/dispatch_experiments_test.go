@@ -80,7 +80,7 @@ func TestDispatch_Experiments_OnWire(t *testing.T) {
 		!slices.Equal(req.Config.HubAgentDefaults.Experiments, []string{experiments.K8sNFSHome}) {
 		t.Fatalf("create dispatch: want experiments [%s], got %+v", experiments.K8sNFSHome, req.Config)
 	}
-	start := startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), d.dispatchExperiments())
+	start := startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), d.dispatchExperiments(), nil)
 	if start == nil || !slices.Equal(start.Experiments, []string{experiments.K8sNFSHome}) {
 		t.Fatalf("start dispatch: want experiments [%s], got %+v", experiments.K8sNFSHome, start)
 	}
@@ -103,7 +103,7 @@ func TestDispatch_Experiments_OnWire(t *testing.T) {
 	if got := d.dispatchExperiments(); got != nil {
 		t.Errorf("off by default: want no experiments, got %v", got)
 	}
-	if got := startHubAgentDefaults(d.hubAgentDefaults(), nil, d.dispatchExperiments()); got != nil {
+	if got := startHubAgentDefaults(d.hubAgentDefaults(), nil, d.dispatchExperiments(), nil); got != nil {
 		t.Errorf("off: start dispatch must omit the defaults, got %+v", got)
 	}
 }

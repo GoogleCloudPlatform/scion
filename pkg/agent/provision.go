@@ -3136,6 +3136,10 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 //     worktreeMayHoldWork; only worktrees that belong to the project
 //     repository are inspected, and anything else that may hold data, or
 //     cannot be checked, is kept.
+//   - A dir kept for its workspace records when and why in a marker file;
+//     once the soft-delete retention window has passed, it is removed
+//     without inspecting the workspace (ptone/scion#4742, see
+//     kept_agent_dir.go).
 //   - Any other dir with no home state is stale: it is removed, and
 //     worktrees are pruned, so the caller re-provisions it.
 func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace string) error {
@@ -3180,10 +3184,22 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), data, 0644); err != nil {
 			return fmt.Errorf("failed to write agent config: %w", err)
 		}
+		// The dir is live again: a marker from an earlier keep no longer
+		// applies (ptone/scion#4742).
+		clearKeptAgentDirMarker(agentName, agentDir)
 		slog.Info("GetAgent: agent directory had no config file; wrote a minimal scion-agent.json from agent-info.json and kept the home",
 			"agent", agentName, "agent_dir", agentDir, "home", populatedHome,
 			"template", info.Template, "harness_config", info.HarnessConfig)
 		return nil
+	}
+
+	// A directory kept earlier (see recordKeptAgentDir) whose soft-delete
+	// retention window has passed is removed without inspecting its
+	// workspace, and the caller re-provisions it (ptone/scion#4742).
+	if hasKeptAgentDirMarker(agentDir) {
+		if retention := keptAgentDirRetention(); retention > 0 && purgeExpiredKeptAgentDir(agentName, agentDir, agentHome, retention) {
+			return nil
+		}
 	}
 
 	// No home state, but the in-dir workspace may still hold work
@@ -3208,11 +3224,13 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		if err != nil {
 			slog.Warn("GetAgent: agent workspace could not be checked for uncommitted work; keeping the agent directory",
 				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace, "error", err)
+			recordKeptAgentDir(agentName, agentDir, keptReasonWorkspaceCheckFailed)
 			return fmt.Errorf("%w: agent %q state directory kept: could not check the agent's workspace for uncommitted work; check its ownership and permissions, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if hasWork {
 			slog.Warn("GetAgent: agent directory has no config file but its workspace may hold work; keeping it",
 				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace)
+			recordKeptAgentDir(agentName, agentDir, keptReasonWorkspaceMayHoldWork)
 			return fmt.Errorf("%w: agent %q state directory kept: its workspace may hold work (files, uncommitted changes, a standalone clone, or commits on no branch); save it, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if prunePath == "" && inspected {
@@ -3766,8 +3784,13 @@ func worktreeGitEnv() []string {
 // which is unrelated to the agent (ptone/scion#4511).
 func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool) {
 	// chmod to ensure we can remove root-owned files left by containers.
+	// Links are skipped, so their targets are left unchanged; RemoveAll
+	// removes the link itself.
 	_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 		_ = os.Chmod(path, 0755)
@@ -3885,6 +3908,12 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if !sharedWorkspace {
 		agentWorkspace = filepath.Join(agentDir, "workspace")
 	}
+
+	// Remove other agents' kept directories in the same agents root whose
+	// soft-delete retention window has passed (ptone/scion#4742).
+	sweepExpiredKeptAgentDirs(filepath.Dir(agentDir), agentName, func(name string) string {
+		return config.GetAgentHomePath(projectDir, name)
+	})
 
 	// Handle an agent directory that exists but has no config file. See
 	// handleAgentDirWithoutConfig: a populated home is kept (adopted from
