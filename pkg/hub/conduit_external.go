@@ -111,7 +111,7 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	}
 	// Every relay-to-hub call records its nonce in the shared replay store;
 	// without one the hub internal API would refuse every call.
-	if opts.replayStore == nil && s.relayPeerReplayStoreFor(&conduitExternalRuntime{}) == nil {
+	if opts.replayStore == nil && !s.hasRelayPeerReplayStore() {
 		return errors.New("conduit external relay mode: no shared relay-peer replay store (no database client)")
 	}
 	st := opts.Store

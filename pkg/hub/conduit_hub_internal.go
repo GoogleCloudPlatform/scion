@@ -77,6 +77,15 @@ func relayPeerReplayKey(peer, nonce string) string {
 	return "relay-peer:" + hex.EncodeToString(sum[:])
 }
 
+// hasRelayPeerReplayStore reports whether a shared replay store can be had
+// without an override: the hub's nonce cache store, or a database client
+// to build one from (what relayPeerReplayStoreFor uses).
+func (s *Server) hasRelayPeerReplayStore() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nonceCacheStore != nil || s.entClient != nil
+}
+
 // replayStoreFor returns the shared replay store (nil when none can be
 // built: no database).
 func (s *Server) relayPeerReplayStoreFor(rt *conduitExternalRuntime) relayPeerReplayStore {
