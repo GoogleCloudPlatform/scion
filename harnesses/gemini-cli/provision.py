@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any
+from typing import Any, Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -79,8 +79,10 @@ AUTH = scion_harness.AuthSpec(
         ),
         scion_harness.env_method(
             "vertex-ai",
-            any_of=["GOOGLE_CLOUD_PROJECT"],
-            hint="set GOOGLE_CLOUD_PROJECT (with ADC or GCP service account) for Vertex AI",
+            all_of=["GOOGLE_CLOUD_PROJECT"],
+            any_of=list(scion_harness.vertex_location_keys()),
+            hint="set GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION/GOOGLE_CLOUD_REGION/CLOUD_ML_REGION "
+                 "(with ADC or GCP service account) for Vertex AI",
         ),
     ],
 )
@@ -120,7 +122,9 @@ def _update_gemini_settings(settings_path: str, gemini_auth_type: str) -> None:
     scion_harness.atomic_write_json(expanded, settings)
 
 
-def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
+def _build_env_overlay(
+    method: str, env_key: str, warn_fn: Callable[[str], None] | None = None,
+) -> dict[str, str]:
     """Build the env vars overlay for outputs/env.json."""
     if method == "api-key" and env_key:
         return {env_key: os.environ.get(env_key, "")}
@@ -131,11 +135,21 @@ def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
             overlay["GOOGLE_CLOUD_PROJECT"] = project
         return overlay
     if method == "vertex-ai":
-        return {
-            "GOOGLE_CLOUD_PROJECT": os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
-            "GOOGLE_CLOUD_REGION": os.environ.get("GOOGLE_CLOUD_REGION", ""),
-            "GOOGLE_CLOUD_LOCATION": os.environ.get("GOOGLE_CLOUD_LOCATION") or os.environ.get("GOOGLE_CLOUD_REGION", ""),
-        }
+        # Gemini reads only GOOGLE_CLOUD_LOCATION. Fill it from any accepted
+        # location key in the shared precedence order (LOCATION > REGION >
+        # CLOUD_ML_REGION). Empty keys are left out, as in auth-file.
+        _, location = scion_harness.resolve_vertex_location(
+            lambda k: os.environ.get(k, ""), warn_fn=warn_fn,
+        )
+        overlay: dict[str, str] = {}
+        for key, value in (
+            ("GOOGLE_CLOUD_PROJECT", os.environ.get("GOOGLE_CLOUD_PROJECT", "")),
+            ("GOOGLE_CLOUD_REGION", os.environ.get("GOOGLE_CLOUD_REGION", "")),
+            ("GOOGLE_CLOUD_LOCATION", location),
+        ):
+            if value:
+                overlay[key] = value
+        return overlay
     return {}
 
 
@@ -252,7 +266,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     gemini_auth_type = _GEMINI_AUTH_TYPE_MAP.get(resolved.method, "")
     _update_gemini_settings(GEMINI_SETTINGS_FILE, gemini_auth_type)
 
-    env = _build_env_overlay(resolved.method, resolved.env_key)
+    env = _build_env_overlay(resolved.method, resolved.env_key, ctx.warn)
     telemetry = ctx.telemetry
     config = telemetry.get("telemetry") if isinstance(telemetry, dict) else None
     enabled = isinstance(config, dict) and config.get("enabled", True)

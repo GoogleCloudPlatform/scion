@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -469,7 +470,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()
 
-	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
+	if err := dispatchWithBrokerRetry(retryCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
 		nd.log.Error("Failed to dispatch notification to agent",
 			"subscriberID", sub.SubscriberID, "error", err)
 	} else {
@@ -482,8 +483,10 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 				"agent_name", subscriber.Name,
 				"project_id", subscriber.ProjectID,
 				"notification_id", notif.ID,
+				// The record was written before dispatch; this outcome
+				// line carries no record fields or content.
+				logging.AttrLogKind, logging.LogKindEvent,
 			}
-			logAttrs = append(logAttrs, structuredMsg.LogAttrs()...)
 			nd.messageLog.Debug("notification message dispatched", logAttrs...)
 		}
 	}

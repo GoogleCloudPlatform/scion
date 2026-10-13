@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_1
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -46,6 +44,7 @@ func TestAncestryIsHubAttested_EquivalenceTable(t *testing.T) {
 	localUser := NewAuthenticatedUser(tid("attest-user"), "u@example.com", "U", "member", "cli")
 	devUser := NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev", Email: "dev@localhost"})
 	federatedUser := NewFederatedUserIdentity("https://issuer.example", "sub", "fu@example.com", "FU", "member", nil)
+	visitor := NewVisitorIdentity(tid("attest-visitor"), "https://issuer.example", "sub", "v@example.com", "V")
 	scoped := func(user UserIdentity) *ScopedUserIdentity {
 		return NewScopedUserIdentity(user, tid("attest-project"), []string{"agent:read"})
 	}
@@ -94,6 +93,9 @@ func TestAncestryIsHubAttested_EquivalenceTable(t *testing.T) {
 		{"typed-nil *brokerIdentityImpl", (*brokerIdentityImpl)(nil), false},
 		{"*FederatedUserIdentity", federatedUser, false},
 		{"typed-nil *FederatedUserIdentity", (*FederatedUserIdentity)(nil), false},
+		{"*VisitorIdentity", visitor, false},
+		{"typed-nil *VisitorIdentity", (*VisitorIdentity)(nil), false},
+		{"*ScopedUserIdentity wrapping *VisitorIdentity", scoped(visitor), false},
 		{"*FederatedAgentIdentity", NewFederatedAgentIdentity("https://issuer.example", "remote-agent", "remote-project", "Remote Agent", tid("attest-user"), []string{tid("attest-user")}, nil), false},
 		{"typed-nil *FederatedAgentIdentity", (*FederatedAgentIdentity)(nil), false},
 		{"*FederatedServiceIdentity", NewFederatedServiceIdentity("https://issuer.example", "sub", "sa@example.com", nil), false},

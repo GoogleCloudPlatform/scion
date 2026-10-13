@@ -18,31 +18,81 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
+
+var doctorVerbose bool
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
-	Short: "Check system prerequisites and runtime configuration",
-	Long: `Run diagnostic checks to verify that your system is properly configured
-for running scion agents. Checks include runtime availability, connectivity,
-permissions, and required dependencies.
+	Short: "Check system prerequisites, runtime configuration and platform health",
+	Long: `Run diagnostic checks on this machine and, when a Hub is configured, on the
+Hub and the platform it manages.
 
-For Kubernetes runtimes, this includes cluster connectivity, namespace access,
-RBAC permissions, and CSI driver availability.`,
+Who it is for: people checking that Scion is set up and healthy, or
+troubleshooting agents, from their own machine. A highly authorized
+assistant agent can run it from an environment a person owns (not from
+inside an agent container) with a hub-boundary access token; see
+"Platform Health" below. It is not a self-check for ordinary agents:
+inside an agent container, use "sciontool doctor".
+
+Sections:
+  General          git and tmux on this machine.
+  Hub Health       Hub reachability (/healthz), authentication, linked
+                   project service accounts, and local settings checks
+                   (NFS mounts, Kubernetes profiles, the server hub
+                   endpoint on server hosts, telemetry, images, broker
+                   credentials).
+  Platform Health  The Hub's health summary, the same data as the web
+                   health dashboard: the overall status, every item that
+                   needs attention (problems first), and a line each for
+                   the Hub fleet, runtime brokers, agents, dispatch and
+                   integrations. --verbose adds per-broker and per-Hub-
+                   instance tables. Reading it needs the hub.health.read
+                   permission (hub admins). Without it the section shows
+                   "requires hub.health.read" and the Hub Health section
+                   checks brokers and agents from the lists you can see.
+  Runtime          The active container runtime. For Kubernetes runtimes
+                   this includes cluster connectivity, namespace access,
+                   RBAC permissions and CSI driver availability.
+
+To run Platform Health without an interactive login, a hub admin can mint
+a hub-boundary token and use it with no stored login (see "scion hub token
+--help"):
+
+  scion hub token create --boundary hub --name health-check \
+    --scopes hub_health:read,broker:read,agent:list --expires 30d
+  SCION_HUB_TOKEN=scion_pat_... scion doctor --format json
+
+Exit status: doctor reports check results and does not turn them into an
+exit status. It exits zero whenever it ran, even when the Hub is
+unreachable, the platform health summary is unhealthy or a runtime
+diagnostic check fails; read the results from the output. It exits
+non-zero only when the command itself fails, for example on an invalid
+flag or when it cannot write its output.
+
+--format json prints one JSON object and nothing else on stdout. Its
+"status" is fail when any check failed, warn when any check warned, and
+pass otherwise. The raw health summary is under "healthSummary" when it
+was readable.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDoctor()
 	},
@@ -50,19 +100,154 @@ RBAC permissions, and CSI driver availability.`,
 
 func init() {
 	rootCmd.AddCommand(doctorCmd)
+	doctorCmd.Flags().BoolVar(&doctorVerbose, "verbose", false, "Show the full runtime broker and Hub instance tables in Platform Health")
+}
+
+// doctorReport collects every check doctor runs, by section, and prints
+// each one as it is added unless the output is JSON. Under --format json
+// nothing is written to stdout until finish writes the single JSON object.
+type doctorReport struct {
+	// stdout receives the text lines, or the JSON object.
+	stdout io.Writer
+	// color keeps ANSI colour codes in text output.
+	color bool
+	// json selects JSON output.
+	json    bool
+	verbose bool
+
+	General        []scionruntime.CheckResult
+	HubChecks      []scionruntime.CheckResult
+	PlatformHealth []scionruntime.CheckResult
+	// HealthSummary is the raw health summary, when it was readable.
+	HealthSummary json.RawMessage
+	// Runtime is the active runtime name; empty when no project resolved.
+	Runtime string
+	// Checks are the runtime checks.
+	Checks []scionruntime.CheckResult
+}
+
+// doctorJSON is the --format json document.
+type doctorJSON struct {
+	// Status is fail when any check failed, else warn when any check
+	// warned, else pass. It does not affect the exit status.
+	Status         string                     `json:"status"`
+	General        []scionruntime.CheckResult `json:"general"`
+	HubChecks      []scionruntime.CheckResult `json:"hubChecks"`
+	PlatformHealth []scionruntime.CheckResult `json:"platformHealth"`
+	HealthSummary  json.RawMessage            `json:"healthSummary,omitempty"`
+	Runtime        string                     `json:"runtime,omitempty"`
+	Checks         []scionruntime.CheckResult `json:"checks"`
+}
+
+func newDoctorReport() *doctorReport {
+	return &doctorReport{
+		stdout:  os.Stdout,
+		color:   util.ColorEnabled(os.Stdout),
+		json:    outputFormat == "json",
+		verbose: doctorVerbose,
+	}
+}
+
+// text writes s (which may carry colour codes) in text mode only.
+func (r *doctorReport) text(s string) {
+	if r.json {
+		return
+	}
+	if !r.color {
+		s = util.StripANSI(s)
+	}
+	_, _ = io.WriteString(r.stdout, s)
+}
+
+// heading prints a section heading in text mode.
+func (r *doctorReport) heading(title string) {
+	r.text(fmt.Sprintf("\n%s%s%s\n", util.Bold, title, util.Reset))
+}
+
+// add records c in *section and prints it in text mode.
+func (r *doctorReport) add(section *[]scionruntime.CheckResult, c scionruntime.CheckResult) {
+	// Messages can carry text from the Hub, brokers and integrations
+	// (names, reasons); never let it drive the terminal.
+	c.Message = stripControlChars(c.Message)
+	c.Remediation = stripControlChars(c.Remediation)
+	*section = append(*section, c)
+	var icon string
+	switch c.Status {
+	case "pass":
+		icon = fmt.Sprintf("%s✓%s", util.Green, util.Reset)
+	case "warn":
+		icon = fmt.Sprintf("%s!%s", util.Yellow, util.Reset)
+	case "fail":
+		icon = fmt.Sprintf("%s✗%s", util.Red, util.Reset)
+	case "skip":
+		icon = fmt.Sprintf("%s-%s", util.Gray, util.Reset)
+	case "info":
+		icon = fmt.Sprintf("%si%s", util.Gray, util.Reset)
+	}
+	r.text(fmt.Sprintf("  %s %s: %s\n", icon, c.Name, c.Message))
+	if c.Remediation != "" && c.Status != "pass" {
+		r.text(fmt.Sprintf("    → %s\n", c.Remediation))
+	}
+}
+
+// finish writes the JSON document in JSON mode. Check results never make
+// it return an error: the only errors are failures to produce the output
+// itself.
+func (r *doctorReport) finish() error {
+	if !r.json {
+		return nil
+	}
+	doc := doctorJSON{
+		Status:         r.overallStatus(),
+		General:        nonNilChecks(r.General),
+		HubChecks:      nonNilChecks(r.HubChecks),
+		PlatformHealth: nonNilChecks(r.PlatformHealth),
+		HealthSummary:  r.HealthSummary,
+		Runtime:        r.Runtime,
+		Checks:         nonNilChecks(r.Checks),
+	}
+	data, mErr := json.MarshalIndent(doc, "", "  ")
+	if mErr != nil {
+		return mErr
+	}
+	if _, wErr := fmt.Fprintln(r.stdout, string(data)); wErr != nil {
+		return wErr
+	}
+	return nil
+}
+
+// overallStatus is fail when any check failed, warn when any check warned,
+// and pass otherwise.
+func (r *doctorReport) overallStatus() string {
+	status := "pass"
+	for _, section := range [][]scionruntime.CheckResult{r.General, r.HubChecks, r.PlatformHealth, r.Checks} {
+		for _, c := range section {
+			switch c.Status {
+			case "fail":
+				return "fail"
+			case "warn":
+				status = "warn"
+			}
+		}
+	}
+	return status
+}
+
+func nonNilChecks(c []scionruntime.CheckResult) []scionruntime.CheckResult {
+	if c == nil {
+		return []scionruntime.CheckResult{}
+	}
+	return c
 }
 
 func runDoctor() error {
-	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%sScion Doctor%s\n\n", util.Bold, util.Reset)))
+	r := newDoctorReport()
+	r.text(fmt.Sprintf("%sScion Doctor%s\n\n", util.Bold, util.Reset))
 
 	// General checks
-	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%sGeneral%s\n", util.Bold, util.Reset)))
-	checkGit()
-	checkTmux()
-
-	// Hub Health checks
-	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sHub Health%s\n", util.Bold, util.Reset)))
-	var hubChecks []scionruntime.CheckResult
+	r.text(fmt.Sprintf("%sGeneral%s\n", util.Bold, util.Reset))
+	r.add(&r.General, checkGit())
+	r.add(&r.General, checkTmux())
 
 	// Resolve settings and hub endpoint
 	gp := projectPath
@@ -80,46 +265,106 @@ func runDoctor() error {
 
 	hubEP := GetHubEndpoint(settings)
 
-	// Create authenticated client for D1-D5 if Hub endpoint is configured
+	// Create the authenticated client for the Hub checks if a Hub endpoint
+	// is configured.
 	var hubClient hubclient.Client
 	if hubEP != "" {
 		if c, err := getHubClient(settings); err == nil {
 			hubClient = c
 		}
 	}
-
-	// D1: Hub Connectivity
-	d1 := checkDoctorHubConnectivity(hubEP, hubClient)
-	hubChecks = append(hubChecks, d1)
-	printCheck(d1.Name, d1.Status, d1.Message, d1.Remediation)
-
-	hubConnected := d1.Status == "pass" || d1.Status == "warn"
-
-	// D2: Hub Authentication
-	d2 := checkDoctorHubAuth(hubEP, hubConnected, hubClient)
-	hubChecks = append(hubChecks, d2)
-	printCheck(d2.Name, d2.Status, d2.Message, d2.Remediation)
-
-	// D3: Broker Connectivity
-	d3 := checkDoctorBrokerConnectivity(hubEP, hubConnected, hubClient)
-	hubChecks = append(hubChecks, d3)
-	printCheck(d3.Name, d3.Status, d3.Message, d3.Remediation)
-
-	// D4: Agent Health Summary
-	d4 := checkDoctorAgentHealth(hubEP, hubConnected, hubClient)
-	hubChecks = append(hubChecks, d4)
-	printCheck(d4.Name, d4.Status, d4.Message, d4.Remediation)
-
-	// D9: GCP service account mappings (warning only): registered GSAs of
-	// the linked project that no Kubernetes broker profile maps.
 	var linkedProjectID string
 	if settings.Hub != nil {
 		linkedProjectID = settings.Hub.ProjectID
 	}
-	d9 := checkDoctorSAMappings(hubEP, hubConnected, hubClient, linkedProjectID)
-	hubChecks = append(hubChecks, d9)
-	printCheck(d9.Name, d9.Status, d9.Message, d9.Remediation)
 
+	r.heading("Hub Health")
+	ph := r.hubChecks(hubEP, hubClient, linkedProjectID)
+	// Checks of this machine's settings, reported with the Hub checks.
+	r.localSettingsChecks()
+
+	r.heading("Platform Health")
+	r.platformHealthSection(ph)
+
+	// Resolve the active runtime
+	r.heading("Runtime")
+	resolved, err := resolveActiveProjectPath()
+	if err != nil {
+		return r.noProject()
+	}
+
+	rt := scionruntime.GetRuntime(resolved, profile)
+	var diag scionruntime.Diagnosable
+	var opts scionruntime.DiagnosticOpts
+	if d, ok := rt.(scionruntime.Diagnosable); ok {
+		diag = d
+		projectDir, _ := config.GetResolvedProjectDir(resolved)
+		if vs, _, err := config.LoadEffectiveSettings(projectDir); err == nil && vs != nil {
+			if rtConfig, _, rtErr := vs.ResolveRuntime(profile); rtErr == nil {
+				opts.Namespace = rtConfig.Namespace
+				opts.GKEMode = rtConfig.GKE
+			}
+		}
+	}
+	r.runtimeSection(rt.Name(), diag, opts)
+	return r.finish()
+}
+
+// hubChecks runs the Hub checks (D1-D4, D9) and reads the health summary
+// for the Platform Health section. When the summary is readable it
+// replaces the list-based broker (D3) and agent (D4) checks; otherwise
+// those run as a fallback.
+func (r *doctorReport) hubChecks(hubEP string, client hubclient.Client, linkedProjectID string) doctorPlatformHealth {
+	// D1: Hub Connectivity
+	d1, hubAnswered := probeDoctorHubConnectivity(hubEP, client)
+	r.add(&r.HubChecks, d1)
+	hubConnected := d1.Status == "pass" || d1.Status == "warn"
+
+	// D2: Hub Authentication
+	r.add(&r.HubChecks, checkDoctorHubAuth(hubEP, hubConnected, client))
+
+	// The summary is read whenever the Hub answered, even if its /healthz
+	// reports unhealthy: the summary says why, and a Hub that cannot read
+	// its database answers 503, which has its own message.
+	ph := fetchDoctorPlatformHealth(hubEP, hubConnected || hubAnswered, client)
+	if ph.summary != nil {
+		r.add(&r.HubChecks, scionruntime.CheckResult{Name: "broker-connectivity", Status: "skip", Message: "Reported under Platform Health"})
+		r.add(&r.HubChecks, scionruntime.CheckResult{Name: "agent-health", Status: "skip", Message: "Reported under Platform Health"})
+	} else {
+		// D3: Broker Connectivity (fallback)
+		r.add(&r.HubChecks, checkDoctorBrokerConnectivity(hubEP, hubConnected, client))
+		// D4: Agent Health (fallback)
+		r.add(&r.HubChecks, checkDoctorAgentHealth(hubEP, hubConnected, client))
+	}
+
+	// D9: GCP service account mappings (warning only): registered GSAs of
+	// the linked project that no Kubernetes broker profile maps.
+	r.add(&r.HubChecks, checkDoctorSAMappings(hubEP, hubConnected, client, linkedProjectID))
+	return ph
+}
+
+// platformHealthSection reports the Platform Health lines and keeps the
+// raw summary for JSON output.
+func (r *doctorReport) platformHealthSection(ph doctorPlatformHealth) {
+	checks := ph.checks
+	if ph.summary != nil {
+		// The verbose tables are for people; JSON carries the raw summary.
+		checks = renderDoctorHealthSummary(ph.summary, r.verbose && !r.json)
+	}
+	for _, c := range checks {
+		r.add(&r.PlatformHealth, c)
+	}
+	if ph.summary != nil {
+		r.HealthSummary = ph.summary.Raw
+	}
+}
+
+// localSettingsChecks runs the checks that read only this machine: D5
+// NFS mounts, D10 Kubernetes block ServiceAccount, D11 server hub endpoint
+// deprecation (server hosts only), D6 telemetry, D7 container images and
+// D8 broker credentials. They are reported with the
+// Hub checks, as before.
+func (r *doctorReport) localSettingsChecks() {
 	// D5: NFS Mount Status (local check against this host's global
 	// settings and mount table; read-only)
 	nfsSettings, _, nfsErr := config.LoadGlobalSettings()
@@ -131,8 +376,7 @@ func runDoctor() error {
 	if nfsErr == nil {
 		d5 = checkDoctorNFSMounts(nfsSettings, defaultNFSDoctorProbe())
 	}
-	hubChecks = append(hubChecks, d5)
-	printCheck(d5.Name, d5.Status, d5.Message, d5.Remediation)
+	r.add(&r.HubChecks, d5)
 
 	// D10: Kubernetes block ServiceAccount (information only): Kubernetes
 	// profiles in this host's global settings with no
@@ -146,109 +390,96 @@ func runDoctor() error {
 	if nfsErr == nil {
 		d10 = checkDoctorKubernetesBlockServiceAccount(nfsSettings)
 	}
-	hubChecks = append(hubChecks, d10)
-	printCheck(d10.Name, d10.Status, d10.Message, d10.Remediation)
+	r.add(&r.HubChecks, d10)
+
+	// D11: Server hub endpoint deprecation (local check). Reported only on a
+	// host configured as a server; plain CLI hosts get no line.
+	if d11, ok := checkDoctorServerHubEndpointHere(); ok {
+		r.add(&r.HubChecks, d11)
+	}
 
 	// D6: Telemetry Pipeline (local check)
-	d6 := checkDoctorTelemetry()
-	hubChecks = append(hubChecks, d6)
-	printCheck(d6.Name, d6.Status, d6.Message, d6.Remediation)
-
+	r.add(&r.HubChecks, checkDoctorTelemetry())
 	// D7: Container Images (local check)
-	d7 := checkDoctorContainerImages()
-	hubChecks = append(hubChecks, d7)
-	printCheck(d7.Name, d7.Status, d7.Message, d7.Remediation)
-
+	r.add(&r.HubChecks, checkDoctorContainerImages())
 	// D8: Credential Validity (local check)
-	d8 := checkDoctorCredentialValidity()
-	hubChecks = append(hubChecks, d8)
-	printCheck(d8.Name, d8.Status, d8.Message, d8.Remediation)
+	r.add(&r.HubChecks, checkDoctorCredentialValidity())
+}
 
-	// Resolve the active runtime
-	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sRuntime%s\n", util.Bold, util.Reset)))
+// runtimeSection reports the active runtime and its checks: the runtime's
+// own diagnostics when it implements Diagnosable (diag non-nil), otherwise
+// basic checks for docker, podman and the Apple container CLI.
+func (r *doctorReport) runtimeSection(rtName string, diag scionruntime.Diagnosable, opts scionruntime.DiagnosticOpts) {
+	r.Runtime = rtName
+	r.add(&r.Checks, scionruntime.CheckResult{Name: "runtime", Status: "pass", Message: fmt.Sprintf("Active runtime: %s", rtName)})
 
-	resolved, err := resolveActiveProjectPath()
-	if err != nil {
-		printCheck("project", "warn", "No project found — skipping runtime checks", "Run 'scion init' to create a project.")
-		if outputFormat == "json" {
-			return outputDoctorJSON(nil, hubChecks)
-		}
-		return nil
-	}
-
-	rt := scionruntime.GetRuntime(resolved, profile)
-	rtName := rt.Name()
-	printCheck("runtime", "pass", fmt.Sprintf("Active runtime: %s", rtName), "")
-
-	// Runtime-specific diagnostics
-	if diag, ok := rt.(scionruntime.Diagnosable); ok {
-		// Load settings for runtime config
-		var namespace string
-		var gkeMode bool
-		projectDir, _ := config.GetResolvedProjectDir(resolved)
-		if vs, _, err := config.LoadEffectiveSettings(projectDir); err == nil && vs != nil {
-			rtConfig, _, rtErr := vs.ResolveRuntime(profile)
-			if rtErr == nil {
-				namespace = rtConfig.Namespace
-				gkeMode = rtConfig.GKE
-			}
-		}
-
-		opts := scionruntime.DiagnosticOpts{
-			Namespace: namespace,
-			GKEMode:   gkeMode,
-		}
-
-		fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sRuntime Diagnostics (%s)%s\n", util.Bold, rtName, util.Reset)))
-		report := diag.RunDiagnostics(opts)
-
-		if outputFormat == "json" {
-			return outputDoctorJSON(&report, hubChecks)
-		}
-
-		for _, check := range report.Checks {
-			printCheck(check.Name, check.Status, check.Message, check.Remediation)
-		}
-
-		// Summary
-		fmt.Println()
-		passes, warns, fails := 0, 0, 0
-		for _, c := range report.Checks {
-			switch c.Status {
-			case "pass":
-				passes++
-			case "warn":
-				warns++
-			case "fail":
-				fails++
-			}
-		}
-
-		if fails > 0 {
-			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed, %d warnings, %d failures%s\n",
-				util.Red, passes, warns, fails, util.Reset)))
-			return fmt.Errorf("%d diagnostic check(s) failed", fails)
-		}
-		if warns > 0 {
-			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed, %d warnings%s\n",
-				util.Yellow, passes, warns, util.Reset)))
-		} else {
-			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed%s\n",
-				util.Green, passes, util.Reset)))
-		}
-	} else {
-		// Non-diagnosable runtimes get basic checks
+	if diag == nil {
+		var checks []scionruntime.CheckResult
 		switch rtName {
-		case "docker":
-			checkDockerOrPodman("docker")
-		case "podman":
-			checkDockerOrPodman("podman")
+		case "docker", "podman":
+			checks = checkDockerOrPodman(rtName)
 		case "container":
-			checkContainerCLI()
+			checks = []scionruntime.CheckResult{checkContainerCLI()}
+		}
+		for _, c := range checks {
+			r.add(&r.Checks, c)
+		}
+		return
+	}
+
+	r.heading(fmt.Sprintf("Runtime Diagnostics (%s)", rtName))
+	report := diag.RunDiagnostics(opts)
+	passes, warns, fails := 0, 0, 0
+	for _, c := range report.Checks {
+		r.add(&r.Checks, c)
+		switch c.Status {
+		case "pass":
+			passes++
+		case "warn":
+			warns++
+		case "fail":
+			fails++
 		}
 	}
 
-	return nil
+	r.text("\n")
+	switch {
+	case fails > 0:
+		r.text(fmt.Sprintf("%s%d checks passed, %d warnings, %d failures%s\n", util.Red, passes, warns, fails, util.Reset))
+	case warns > 0:
+		r.text(fmt.Sprintf("%s%d checks passed, %d warnings%s\n", util.Yellow, passes, warns, util.Reset))
+	default:
+		r.text(fmt.Sprintf("%s%d checks passed%s\n", util.Green, passes, util.Reset))
+	}
+}
+
+// noProject reports that no project was found, so the runtime checks are
+// skipped, and finishes the report.
+func (r *doctorReport) noProject() error {
+	r.add(&r.Checks, scionruntime.CheckResult{
+		Name: "project", Status: "warn",
+		Message:     "No project found — skipping runtime checks",
+		Remediation: "Run 'scion init' to create a project.",
+	})
+	return r.finish()
+}
+
+// stripControlChars removes C0 and C1 control characters and DEL from s,
+// keeping newlines, so text from the Hub cannot carry terminal escape
+// sequences.
+func stripControlChars(s string) string {
+	clean := func(r rune) bool {
+		return r != '\n' && (r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f))
+	}
+	if strings.IndexFunc(s, clean) < 0 {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if clean(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func resolveActiveProjectPath() (string, error) {
@@ -262,121 +493,86 @@ func resolveActiveProjectPath() (string, error) {
 	return resolved, nil
 }
 
-func checkGit() {
+func checkGit() scionruntime.CheckResult {
 	path, err := exec.LookPath("git")
 	if err != nil {
-		printCheck("git", "fail", "git not found in PATH", "Install git: https://git-scm.com/downloads")
-		return
+		return scionruntime.CheckResult{Name: "git", Status: "fail", Message: "git not found in PATH", Remediation: "Install git: https://git-scm.com/downloads"}
 	}
 	out, err := exec.Command("git", "--version").Output()
 	if err != nil {
-		printCheck("git", "warn", fmt.Sprintf("git found at %s but version check failed", path), "")
-		return
+		return scionruntime.CheckResult{Name: "git", Status: "warn", Message: fmt.Sprintf("git found at %s but version check failed", path)}
 	}
-	printCheck("git", "pass", trimNewline(string(out)), "")
+	return scionruntime.CheckResult{Name: "git", Status: "pass", Message: trimNewline(string(out))}
 }
 
-func checkTmux() {
+func checkTmux() scionruntime.CheckResult {
 	_, err := exec.LookPath("tmux")
 	if err != nil {
 		if goruntime.GOOS == "darwin" || goruntime.GOOS == "linux" {
-			printCheck("tmux", "warn", "tmux not found locally (required inside agent containers)", "")
-		} else {
-			printCheck("tmux", "skip", "tmux check skipped on this platform", "")
+			return scionruntime.CheckResult{Name: "tmux", Status: "warn", Message: "tmux not found locally (required inside agent containers)"}
 		}
-		return
+		return scionruntime.CheckResult{Name: "tmux", Status: "skip", Message: "tmux check skipped on this platform"}
 	}
 	out, err := exec.Command("tmux", "-V").Output()
 	if err != nil {
-		printCheck("tmux", "pass", "tmux found", "")
-		return
+		return scionruntime.CheckResult{Name: "tmux", Status: "pass", Message: "tmux found"}
 	}
-	printCheck("tmux", "pass", trimNewline(string(out)), "")
+	return scionruntime.CheckResult{Name: "tmux", Status: "pass", Message: trimNewline(string(out))}
 }
 
-func checkDockerOrPodman(name string) {
+func checkDockerOrPodman(name string) []scionruntime.CheckResult {
 	_, err := exec.LookPath(name)
 	if err != nil {
-		printCheck(name, "fail", fmt.Sprintf("%s not found in PATH", name), fmt.Sprintf("Install %s", name))
-		return
+		return []scionruntime.CheckResult{{Name: name, Status: "fail", Message: fmt.Sprintf("%s not found in PATH", name), Remediation: fmt.Sprintf("Install %s", name)}}
 	}
 	out, err := exec.Command(name, "--version").Output()
 	if err != nil {
-		printCheck(name, "warn", fmt.Sprintf("%s found but version check failed", name), "")
-		return
+		return []scionruntime.CheckResult{{Name: name, Status: "warn", Message: fmt.Sprintf("%s found but version check failed", name)}}
 	}
-	printCheck(name, "pass", trimNewline(string(out)), "")
+	checks := []scionruntime.CheckResult{{Name: name, Status: "pass", Message: trimNewline(string(out))}}
 
 	// Check daemon connectivity
-	_, err = exec.Command(name, "info").Output()
-	if err != nil {
-		printCheck(name+"-daemon", "fail",
-			fmt.Sprintf("%s daemon is not running or not accessible", name),
-			fmt.Sprintf("Start the %s daemon and try again.", name))
-		return
+	if _, err = exec.Command(name, "info").Output(); err != nil {
+		return append(checks, scionruntime.CheckResult{
+			Name:        name + "-daemon",
+			Status:      "fail",
+			Message:     fmt.Sprintf("%s daemon is not running or not accessible", name),
+			Remediation: fmt.Sprintf("Start the %s daemon and try again.", name),
+		})
 	}
-	printCheck(name+"-daemon", "pass", fmt.Sprintf("%s daemon is running", name), "")
+	return append(checks, scionruntime.CheckResult{Name: name + "-daemon", Status: "pass", Message: fmt.Sprintf("%s daemon is running", name)})
 }
 
-func checkContainerCLI() {
+func checkContainerCLI() scionruntime.CheckResult {
 	if goruntime.GOOS != "darwin" {
-		printCheck("container", "skip", "Apple container CLI is only available on macOS", "")
-		return
+		return scionruntime.CheckResult{Name: "container", Status: "skip", Message: "Apple container CLI is only available on macOS"}
 	}
-	_, err := exec.LookPath("container")
-	if err != nil {
-		printCheck("container", "fail", "container CLI not found in PATH", "Install the container CLI for macOS")
-		return
+	if _, err := exec.LookPath("container"); err != nil {
+		return scionruntime.CheckResult{Name: "container", Status: "fail", Message: "container CLI not found in PATH", Remediation: "Install the container CLI for macOS"}
 	}
-	printCheck("container", "pass", "container CLI found", "")
-}
-
-func printCheck(name, status, message, remediation string) {
-	var icon string
-	switch status {
-	case "pass":
-		icon = fmt.Sprintf("%s✓%s", util.Green, util.Reset)
-	case "warn":
-		icon = fmt.Sprintf("%s!%s", util.Yellow, util.Reset)
-	case "fail":
-		icon = fmt.Sprintf("%s✗%s", util.Red, util.Reset)
-	case "skip":
-		icon = fmt.Sprintf("%s-%s", util.Gray, util.Reset)
-	case "info":
-		icon = fmt.Sprintf("%si%s", util.Gray, util.Reset)
-	}
-	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("  %s %s: %s\n", icon, name, message)))
-	if remediation != "" && status != "pass" {
-		fmt.Printf("    → %s\n", remediation)
-	}
-}
-
-func outputDoctorJSON(report *scionruntime.DiagnosticReport, hubChecks []scionruntime.CheckResult) error {
-	out := map[string]interface{}{}
-	if report != nil {
-		out["runtime"] = report.Runtime
-		out["checks"] = report.Checks
-	}
-	if len(hubChecks) > 0 {
-		out["hubChecks"] = hubChecks
-	}
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintln(os.Stdout, string(data))
-	return nil
+	return scionruntime.CheckResult{Name: "container", Status: "pass", Message: "container CLI found"}
 }
 
 // checkDoctorHubConnectivity performs D1: Hub connectivity check via /healthz.
+// Doctor itself calls probeDoctorHubConnectivity; this wrapper is kept as
+// the test seam for the D1 result alone.
 func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionruntime.CheckResult {
+	res, _ := probeDoctorHubConnectivity(hubEP, client)
+	return res
+}
+
+// probeDoctorHubConnectivity is checkDoctorHubConnectivity that also
+// reports whether the Hub answered at all. A Hub can answer and still fail
+// D1 (its /healthz reports unhealthy, or returns a non-200 status); it is
+// then reachable for other requests.
+func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scionruntime.CheckResult, answered bool) {
 	if hubEP == "" {
 		return scionruntime.CheckResult{
 			Name:        "hub-connectivity",
 			Status:      "skip",
 			Message:     "No Hub endpoint configured",
 			Remediation: "Set SCION_HUB_ENDPOINT or use --hub flag",
-		}
+		}, false
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -391,7 +587,7 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 				Status:      "fail",
 				Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", hubEP, hubclient.HintProxyError(err)),
 				Remediation: "Verify the Hub is running and the endpoint is correct",
-			}
+			}, false
 		}
 		probe := healthProbeResponse{Status: healthResp.Status, Checks: healthResp.Checks}
 		if len(healthResp.Hub) > 0 {
@@ -406,7 +602,7 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 				probe.Broker = &broker
 			}
 		}
-		return doctorHubHealthResult(hubEP, probe)
+		return doctorHubHealthResult(hubEP, probe), true
 	}
 
 	cleanEP := strings.TrimRight(hubEP, "/")
@@ -417,7 +613,7 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 			Status:      "fail",
 			Message:     fmt.Sprintf("Invalid Hub endpoint: %v", err),
 			Remediation: "Check the Hub endpoint URL",
-		}
+		}, false
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -427,7 +623,7 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 			Status:      "fail",
 			Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", hubEP, err),
 			Remediation: "Verify the Hub is running and the endpoint is correct",
-		}
+		}, false
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -437,7 +633,7 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 			Status:      "fail",
 			Message:     fmt.Sprintf("Hub returned HTTP %d", resp.StatusCode),
 			Remediation: "Check Hub server logs",
-		}
+		}, true
 	}
 
 	var healthResp healthProbeResponse
@@ -446,10 +642,10 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 			Name:    "hub-connectivity",
 			Status:  "warn",
 			Message: "Hub reachable but health response could not be parsed",
-		}
+		}, true
 	}
 
-	return doctorHubHealthResult(hubEP, healthResp)
+	return doctorHubHealthResult(hubEP, healthResp), true
 }
 
 // doctorHubHealthResult maps a parsed /healthz response to the D1 check
@@ -671,7 +867,9 @@ func checkDoctorKubernetesBlockServiceAccount(vs *config.VersionedSettings) scio
 	}
 }
 
-// checkDoctorAgentHealth performs D4: Agent health summary check.
+// checkDoctorAgentHealth performs D4, the agent check used when the health
+// summary cannot be read. It covers the agents the caller can list (one
+// page).
 func checkDoctorAgentHealth(hubEP string, hubConnected bool, client hubclient.Client) scionruntime.CheckResult {
 	if hubEP == "" {
 		return scionruntime.CheckResult{
@@ -717,41 +915,50 @@ func checkDoctorAgentHealth(hubEP string, hubConnected bool, client hubclient.Cl
 		}
 	}
 
-	stalled, crashed, errored := 0, 0, 0
+	// The same policy as the Hub's health summary: agents in phase stopped
+	// are not considered, and stalled agents are not a health signal. The
+	// counts here are exclusive: an agent counts once, as errored (phase
+	// error) before crashed before offline (activity). The summary's
+	// problem groups can overlap instead (an agent in phase error with
+	// activity crashed is in both groups).
+	considered, errored, crashed, offline := 0, 0, 0, 0
 	for _, agent := range resp.Agents {
+		if agent.Phase == string(state.PhaseStopped) {
+			continue
+		}
+		considered++
 		switch {
-		case agent.Activity == "stalled":
-			stalled++
-		case agent.Activity == "crashed":
-			crashed++
-		case agent.Phase == "error":
+		case agent.Phase == string(state.PhaseError):
 			errored++
+		case agent.Activity == string(state.ActivityCrashed):
+			crashed++
+		case agent.Activity == string(state.ActivityOffline):
+			offline++
 		}
 	}
 
-	unhealthy := stalled + crashed + errored
-	if unhealthy > 0 {
+	if unhealthy := errored + crashed + offline; unhealthy > 0 {
 		var parts []string
-		if stalled > 0 {
-			parts = append(parts, fmt.Sprintf("%d stalled", stalled))
+		if errored > 0 {
+			parts = append(parts, fmt.Sprintf("%d in error", errored))
 		}
 		if crashed > 0 {
 			parts = append(parts, fmt.Sprintf("%d crashed", crashed))
 		}
-		if errored > 0 {
-			parts = append(parts, fmt.Sprintf("%d in error", errored))
+		if offline > 0 {
+			parts = append(parts, fmt.Sprintf("%d offline", offline))
 		}
 		return scionruntime.CheckResult{
 			Name:    "agent-health",
 			Status:  "warn",
-			Message: fmt.Sprintf("%d/%d agent(s) unhealthy: %s", unhealthy, len(resp.Agents), strings.Join(parts, ", ")),
+			Message: fmt.Sprintf("%d of %d agent(s) not stopped need attention: %s", unhealthy, considered, strings.Join(parts, ", ")),
 		}
 	}
 
 	return scionruntime.CheckResult{
 		Name:    "agent-health",
 		Status:  "pass",
-		Message: fmt.Sprintf("All %d agent(s) healthy", len(resp.Agents)),
+		Message: fmt.Sprintf("No agent in error, crashed or offline (%d agent(s), %d not stopped)", len(resp.Agents), considered),
 	}
 }
 
@@ -899,4 +1106,121 @@ func trimNewline(s string) string {
 		return s[:len(s)-1]
 	}
 	return s
+}
+
+// doctorServerHost is what 'scion doctor' can tell about the server on
+// this host without the 'server start' flags.
+type doctorServerHost struct {
+	// configured: the global settings carry a server block, or a server or
+	// broker daemon is running.
+	configured bool
+	// brokerOnly: the running daemon is a standalone broker
+	// ('runtime-broker start') and no server daemon runs, so the hub is
+	// known to be disabled.
+	brokerOnly bool
+}
+
+// checkDoctorServerHubEndpointHere runs checkDoctorServerHubEndpoint
+// against this host's global server config and server settings.
+func checkDoctorServerHubEndpointHere() (scionruntime.CheckResult, bool) {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return scionruntime.CheckResult{}, false
+	}
+	host := detectDoctorServerHost(globalDir)
+	if !host.configured {
+		return scionruntime.CheckResult{}, false
+	}
+	cfg, err := config.LoadGlobalConfig("")
+	if err != nil {
+		return scionruntime.CheckResult{}, false
+	}
+	// The global settings only: the server daemon runs in the global
+	// directory, so the project settings of doctor's current directory are
+	// not the server's.
+	settings, err := config.LoadSettings(globalDir)
+	if err != nil {
+		return scionruntime.CheckResult{}, false
+	}
+	return checkDoctorServerHubEndpoint(cfg, settings, host, defaultServerWebPort())
+}
+
+// detectDoctorServerHost reports whether this host is configured as a
+// server: a server block in the global settings file, or a running server
+// or standalone broker daemon.
+func detectDoctorServerHost(globalDir string) doctorServerHost {
+	serverRunning, _, _ := daemon.StatusComponent(serverDaemonComponent, globalDir)
+	brokerRunning, _, _ := daemon.StatusComponent(brokerDaemonComponent, globalDir)
+	return doctorServerHost{
+		configured: serverRunning || brokerRunning || globalSettingsHaveServerBlock(globalDir),
+		brokerOnly: brokerRunning && !serverRunning,
+	}
+}
+
+// globalSettingsHaveServerBlock reports whether the settings file in
+// globalDir has a top-level server key. It only reads the file.
+func globalSettingsHaveServerBlock(globalDir string) bool {
+	path := config.GetSettingsPath(globalDir)
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	_, ok := raw["server"]
+	return ok
+}
+
+// defaultServerWebPort is the default of 'server start --web-port'.
+func defaultServerWebPort() int {
+	if f := serverStartCmd.Flags().Lookup("web-port"); f != nil {
+		if p, err := strconv.Atoi(f.DefValue); err == nil {
+			return p
+		}
+	}
+	return webPort
+}
+
+// checkDoctorServerHubEndpoint performs D11: it reports the server hub
+// endpoint deprecation with serverHubEndpointDeprecated, the check server
+// startup logs. Doctor does not see the server's flags, so unless the host
+// is known to run a standalone broker it evaluates every mode the server
+// could run in (workstation, hosted with and without the web frontend,
+// broker only, with default ports) and warns only when the server would be
+// affected in all of them: it never warns on a guess. For the same reason a
+// loopback legacy value is indeterminate unless the host runs a standalone
+// broker: a workstation on a port doctor cannot see may have written it as
+// its own endpoint. The bool is false when there is nothing to report.
+func checkDoctorServerHubEndpoint(cfg *config.GlobalConfig, settings *config.Settings, host doctorServerHost, defaultWebPort int) (scionruntime.CheckResult, bool) {
+	if !host.configured {
+		return scionruntime.CheckResult{}, false
+	}
+	brokerOnly := serverEndpointMode{brokerEnabled: true}
+	modes := []serverEndpointMode{brokerOnly}
+	if !host.brokerOnly {
+		modes = append(modes,
+			serverEndpointMode{hubEnabled: true, brokerEnabled: true, webEnabled: true, webPort: defaultWebPort},
+			serverEndpointMode{hubEnabled: true, brokerEnabled: true, webEnabled: true, webPort: defaultWebPort, hosted: true},
+			serverEndpointMode{hubEnabled: true, hosted: true},
+		)
+	}
+	legacy := settings.GetHubEndpoint()
+	if !host.brokerOnly && isLoopbackURL(legacy) {
+		return scionruntime.CheckResult{}, false
+	}
+	for _, m := range modes {
+		if !serverHubEndpointDeprecated(cfg, m, legacy) {
+			return scionruntime.CheckResult{}, false
+		}
+	}
+	return scionruntime.CheckResult{
+		Name:    "server-hub-endpoint",
+		Status:  "warn",
+		Message: serverHubEndpointDeprecationWarning,
+	}, true
 }

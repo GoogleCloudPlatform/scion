@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_3)
+//go:build !no_sqlite
 
 package hub
 
@@ -1041,6 +1041,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"agent.create", "agent.delete", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.port_access", "agent.read",
 				"agent.set_message_mode", "agent.stop_all", "agent.update",
+				"agent.delegation.credential.revoke", "agent.delegation.list",
+				"agent.delegation.read", "agent.delegation.revoke",
 				"gcp_service_account.assign",
 				"harness_config.create", "harness_config.delete",
 				"harness_config.list", "harness_config.read", "harness_config.update",
@@ -1062,6 +1064,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"agent.create", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.port_access", "agent.read",
 				"agent.stop_all", "agent.update",
+				"agent.delegation.credential.revoke", "agent.delegation.list",
+				"agent.delegation.read", "agent.delegation.revoke",
 				"gcp_service_account.assign",
 				"harness_config.create",
 				"harness_config.list", "harness_config.read", "harness_config.update",
@@ -1101,8 +1105,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:  7,
-		store.ProjectRoleAdmin:  6,
+		store.ProjectRoleOwner:  8,
+		store.ProjectRoleAdmin:  7,
 		store.ProjectRoleMember: 5,
 	}
 	for _, role := range BuiltInRoles() {
@@ -1126,8 +1130,8 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 7, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 6, projectAdminPermissionIDs},
+		{store.ProjectRoleOwner, 8, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 7, projectAdminPermissionIDs},
 		{store.ProjectRoleMember, 5, projectMemberCuratedPermissionIDs},
 	}
 

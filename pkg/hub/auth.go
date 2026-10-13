@@ -152,6 +152,19 @@ type AuthConfig struct {
 	// not be determined and any other error to refuse the credential. Nil
 	// refuses every delegated credential.
 	DelegatedAgentAuth func(ctx context.Context, token string) (*delegatedRequestState, error)
+	// ResolveFederatedVisitor maps a verified federated identity to the
+	// VisitorIdentity of its linked active federated account
+	// (Server.resolveFederatedVisitor). It returns (nil, nil) to keep the
+	// verified identity, which it does for every identity that is not a
+	// linked active account and whenever the federation.project_visitors
+	// experiment is off. An error answers 503. Nil keeps every verified
+	// identity.
+	ResolveFederatedVisitor func(ctx context.Context, identity FederatedIdentity) (*VisitorIdentity, error)
+	// WorkloadIssuer is the workload-bound issuer delegation arm's startup
+	// state (test_identity_workload_issuer.go). Nil when no workload issuer
+	// is configured: a request that names a delegation is then refused.
+	// The arm accepts a request only while TestIdentitiesEnabled is true.
+	WorkloadIssuer *workloadIssuerAuthenticator
 }
 
 // tokenType represents the type of authentication token.
@@ -292,6 +305,18 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Step 0: Workload-bound issuer delegation (test identities,
+			// ptone/scion#4240). A request that names a delegation, or whose
+			// bearer carries the hub's issuer audience, is handled only by
+			// this arm and never falls through: it runs before every other
+			// arm, so a workload token never reaches the agent, federation,
+			// external-bearer (serveExternalBearer) or proxy paths, and it is
+			// accepted only on the test identity issuance routes.
+			if isWorkloadDelegationRequest(r, cfg.WorkloadIssuer) {
+				serveWorkloadDelegation(w, r, next, cfg, log)
+				return
+			}
+
 			// Step 1: Try agent token (X-Scion-Agent-Token header or agent JWT)
 			if token := extractAgentToken(r); token != "" {
 				if cfg.AgentTokenSvc != nil {
@@ -346,6 +371,22 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid federation token", nil)
 					return
+				}
+				// A verified user token whose (issuer, subject) is linked
+				// to an active federated account becomes that account's
+				// VisitorIdentity; every other case keeps the verified
+				// identity unchanged.
+				if cfg.ResolveFederatedVisitor != nil {
+					visitor, vErr := cfg.ResolveFederatedVisitor(ctx, identity)
+					if vErr != nil {
+						log.Error("Federation visitor lookup failed", "issuer", identity.IssuerURL(), "error", vErr)
+						writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+							"unable to verify federated account", nil)
+						return
+					}
+					if visitor != nil {
+						identity = visitor
+					}
 				}
 				ctx = contextWithIdentity(ctx, identity)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
@@ -686,6 +727,16 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							"invalid access token: no user record for this token", nil)
 						return
 					}
+					// A federated account authenticates only with its
+					// issuer's token (the federated branch above), never
+					// with a hub-issued session or user token.
+					if u.IsFederated() {
+						log.Warn("JWT auth rejected: federated account",
+							"user_id", claims.UserID)
+						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
+							"invalid access token: no active user record for this token", nil)
+						return
+					}
 					// Test identities (ptone/scion#4240): the row is the
 					// revocation handle. A test-fixture row is refused while
 					// the feature is off, when its expiry is missing, and
@@ -767,6 +818,29 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
+}
+
+// serveWorkloadDelegation is UnifiedAuthMiddleware's workload-bound issuer
+// delegation arm (test_identity_workload_issuer.go, isWorkloadDelegationRequest).
+// It never falls through to another arm: a request it handles is served as
+// the delegation's grantor, within the delegation's scope, or refused.
+func serveWorkloadDelegation(w http.ResponseWriter, r *http.Request, next http.Handler, cfg AuthConfig, log *slog.Logger) {
+	ctx := r.Context()
+	auth, refusal := cfg.WorkloadIssuer.authenticate(ctx, r, cfg.TestIdentitiesEnabled)
+	if refusal != nil {
+		log.Warn("workload delegation refused",
+			slog.String("auth_type", AuthTypeWorkloadDelegation),
+			slog.String("reason", refusal.reason),
+			slog.Int("status", refusal.status))
+		writeWorkloadDelegationRefusal(w, refusal)
+		return
+	}
+	ctx = context.WithValue(ctx, userContextKey{}, auth.identity)
+	ctx = contextWithIdentity(ctx, auth.identity)
+	ctx = contextWithCredentialContext(ctx, auth.credential)
+	ctx = contextWithAuthType(ctx, AuthTypeWorkloadDelegation)
+	ctx = contextWithWorkloadDelegationState(ctx, auth.state)
+	serveAfterAuth(w, next, r.WithContext(ctx))
 }
 
 // logUATRejection logs a single "credential rejected" line for a UAT that
@@ -902,7 +976,7 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/api/v1/settings/public": // Public settings (no auth required)
 		return true
-	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (three bools)
+	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (four bools and the issuer audience)
 		return true
 	}
 	return false

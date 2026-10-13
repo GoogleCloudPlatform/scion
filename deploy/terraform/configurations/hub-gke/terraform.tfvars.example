@@ -35,3 +35,17 @@ hub_image_digest = "sha256:REPLACE_ME_WITH_64_LOWERCASE_HEX_CHARS"
 
 iap_members  = ["group:REPLACE_ME@example.com"]
 admin_emails = ["REPLACE_ME@example.com"]
+
+# Optional, test hubs only. Lets the hub issue test identities (the chart's
+# hub.testIdentities.enabled). Unrelated to test login.
+# test_identities_enabled = true
+
+# Optional, off by default: test-runner identities so an agent on another
+# hub can run tests against this one (modules/hub-test-runner). Needs
+# iamcredentials_data_access_logs = true applied in configurations/shared-infra
+# first. Impersonators must be dedicated serviceAccount: members.
+# test_runner = {
+#   enabled                     = true
+#   impersonators               = ["serviceAccount:REPLACE_ME@REPLACE_ME.iam.gserviceaccount.com"]
+#   alert_notification_channels = ["projects/REPLACE_ME/notificationChannels/REPLACE_ME"]
+# }

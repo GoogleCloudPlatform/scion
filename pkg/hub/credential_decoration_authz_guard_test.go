@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -383,6 +381,8 @@ func scanDirForDecorationReferences(dir string) ([]decorationHit, error) {
 	// recursive walk already includes pkg/hub/apierr.
 	// pkgmove:scan-covers pkg/hub/internal/principal
 	// recursive walk already includes pkg/hub/internal/principal; decorationGuardAllowed lists the carriage points at their new paths.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// recursive walk already includes pkg/hub/maintenance (skips only testdata and vendor).
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

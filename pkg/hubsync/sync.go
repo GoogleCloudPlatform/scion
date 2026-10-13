@@ -231,6 +231,24 @@ type EnsureHubReadyOptions struct {
 	// directory it resolved itself is not an explicit target and keeps
 	// SCION_PROJECT_ID in a hub-connected container (ptone/scion#3123).
 	ExplicitProject bool
+	// ExplicitHub reports that the user chose the hub explicitly for this
+	// invocation: the project came from the CLI's current context ('scion
+	// use'), which names a project on a specific hub. A hub project
+	// reference then resolves on that hub without the hub.enabled gate.
+	ExplicitHub bool
+	// HubFromContext reports that the endpoint (EndpointOverride) is the hub
+	// selected with 'scion use', not one given with --hub or found in
+	// settings. For a project already linked to a hub (hub.projectId set)
+	// but not known to this hub, EnsureHubReady then does not link or
+	// register it: it returns the "project must be linked" error, so the
+	// context's hub never rewrites the project's link.
+	HubFromContext bool
+	// RecordLink, when set, is called after EnsureHubReady registered or
+	// linked the project at projectPath on the hub at endpoint, with the
+	// ID the hub knows the project by. The CLI uses it to record the link
+	// in its hub list when the hub came from its current context, so the
+	// project keeps resolving to that hub after a hub switch.
+	RecordLink func(endpoint, hubProjectID, projectPath string, isGlobal bool)
 }
 
 // ErrProjectUnlinked is returned by EnsureHubReady for a project whose
@@ -272,6 +290,17 @@ func ProjectLinkedSetting(projectPath string, isGlobal bool) *bool {
 func projectExplicitlyUnlinked(projectPath string, isGlobal bool) bool {
 	linked := ProjectLinkedSetting(projectPath, isGlobal)
 	return linked != nil && !*linked
+}
+
+// errProjectMustBeLinked is the error for a project that has to be linked to
+// the hub before the operation.
+func errProjectMustBeLinked() error {
+	msg := "project must be linked to Hub to perform this operation\n\n" +
+		"Link this project: scion hub link"
+	if !config.IsHubManagedAgent() {
+		msg += "\nOr use local-only mode: scion --no-hub <command>"
+	}
+	return errors.New(msg)
 }
 
 // EnsureHubReady performs all Hub pre-flight checks before agent operations.
@@ -495,6 +524,13 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			return nil, ScopedTokenProjectNotFoundError(effectiveProjectID)
 		}
 
+		// A project linked to a hub must not be linked again, or registered,
+		// on the hub selected with 'scion use': nothing below runs (no ID or
+		// name match, no auto-link, no prompt, no registration).
+		if opts.HubFromContext && settings.GetHubProjectID() != "" {
+			return nil, errProjectMustBeLinked()
+		}
+
 		// Get project name for the prompt
 		projectName := getProjectName(resolvedPath, isGlobal)
 
@@ -562,12 +598,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				if opts.AutoLinkLocal && IsLocalWorkstationEndpoint(endpoint) {
 					_, _ = fmt.Fprintf(promptOut, "Linking project '%s' to the local hub at %s\n", projectName, endpoint)
 				} else if !ShowLinkPrompt(projectName, opts.AutoConfirm) {
-					msg := "project must be linked to Hub to perform this operation\n\n" +
-						"Link this project: scion hub link"
-					if !config.IsHubManagedAgent() {
-						msg += "\nOr use local-only mode: scion --no-hub <command>"
-					}
-					return nil, errors.New(msg)
+					return nil, errProjectMustBeLinked()
 				}
 			}
 		}
@@ -590,6 +621,9 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		}
 		if settings.Hub != nil {
 			hubCtx.BrokerID = settings.Hub.BrokerID
+		}
+		if opts.RecordLink != nil && hubCtx.ProjectID != "" {
+			opts.RecordLink(endpoint, hubCtx.ProjectID, resolvedPath, isGlobal)
 		}
 	}
 
@@ -1612,6 +1646,7 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 		Name:      projectName,
 		GitRemote: util.NormalizeGitRemote(gitRemote),
 		Path:      hubCtx.ProjectPath,
+		Labels:    LinkedProjectLabels(hubCtx.Endpoint, gitRemote),
 		Broker: &hubclient.BrokerInfo{
 			ID:   hubCtx.BrokerID,
 			Name: brokerName,
@@ -1762,6 +1797,23 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 
 	// 4. Fallback to auto dev auth
 	return hubclient.WithAutoDevAuth(), CredentialKindDevAuto
+}
+
+// LinkedProjectLabels returns the labels a CLI registration of a local
+// project directory sends to the hub. A git project registered on the local
+// workstation hub is labelled worktree-per-agent, so the co-located broker
+// gives each new agent a git worktree of the user's own checkout instead of
+// a clone. Any other registration (no git remote, or any other hub) sends
+// no labels and keeps the hub's default.
+//
+// The hub stores the label only when the registration creates the project;
+// it is ignored for a project that already exists, and it cannot be added
+// later.
+func LinkedProjectLabels(endpoint, gitRemote string) map[string]string {
+	if gitRemote == "" || !IsLocalWorkstationEndpoint(endpoint) {
+		return nil
+	}
+	return map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent}
 }
 
 // IsLocalWorkstationEndpoint reports whether endpoint is the local

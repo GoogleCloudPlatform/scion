@@ -1242,6 +1242,18 @@
           "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the test admin identity gate (--enable-test-admin-identities). Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
           "x-env-var": "SCION_SERVER_HUB_CLASS"
         },
+        "test_identities": {
+          "type": "object",
+          "description": "Startup-only settings of hub-issued test identities. Settable only in the settings file: the server-config API refuses this key, and every key under it, in every mode.",
+          "properties": {
+            "workload_issuers": {
+              "type": "array",
+              "description": "Workload subjects a human issuer may pin a test identity issuer delegation to. Each entry is a Google subject (a service account's unique id) and the highest tier a delegation to it may cover; only \"member\" is accepted in this release. Read once at startup.",
+              "items": { "$ref": "#/$defs/serverTestIdentityWorkloadIssuer" }
+            }
+          },
+          "additionalProperties": false
+        },
         "monitoring_dashboard_url": {
           "type": "string",
           "format": "uri",
@@ -1543,9 +1555,8 @@
         "cors": { "$ref": "#/$defs/corsConfig" },
         "instances": {
           "type": ["array", "null"],
-          "maxItems": 1,
           "items": { "$ref": "#/$defs/runtimeBrokerInstance" },
-          "description": "Flat (single-target) Runtime Broker instances hosted by this process. Empty or absent means legacy hosting. This release accepts one docker entry and requires the Hub in the same process. Read from the global settings file only."
+          "description": "Flat (single-target) Runtime Broker instances hosted by this process, each with a unique key. Empty or absent means legacy hosting. This release accepts docker entries. Read from the global settings file only."
         }
       }
     },
@@ -1571,19 +1582,45 @@
           "properties": {
             "type": {
               "type": "string",
-              "enum": ["docker"],
-              "description": "Runtime target type. Only docker is supported in this release (kubernetes is defined but not implemented)."
+              "enum": ["docker", "kubernetes"],
+              "description": "Runtime target type: docker or kubernetes."
             },
             "display_name": { "type": "string", "description": "Non-sensitive display name shown in the UI; defaults to the type." },
-            "context": { "type": "string", "description": "Kubernetes only (not implemented)." },
-            "namespace": { "type": "string", "description": "Kubernetes only (not implemented)." }
+            "context": { "type": "string", "description": "Kubernetes only: the context to use in the loaded kubeconfig (default: its current context)." },
+            "namespace": { "type": "string", "description": "Kubernetes only: the namespace for agents (default: SCION_K8S_NAMESPACE, POD_NAMESPACE, the service-account namespace, else default)." },
+            "kubeconfig": {
+              "type": "string",
+              "pattern": "^(|/[^:]*[^:/][^:]*)$",
+              "description": "Kubernetes only: absolute path of this instance's own kubeconfig file, the only source loaded when set (no ~, environment variables or path list). Empty uses the process's normal kubeconfig loading. Stays local; never sent to the Hub."
+            },
+            "kubernetes_block_service_account": {
+              "type": "string",
+              "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+              "maxLength": 253,
+              "description": "Kubernetes only. The Kubernetes ServiceAccount this instance's pods run as when their GCP identity mode resolves to 'block'; a dedicated zero-privilege KSA the operator provisions. Empty or unset means the namespace's default ServiceAccount. Block pods also get automountServiceAccountToken false and a node selector for Workload Identity nodes. Local operator policy: not part of the runtime target identity and never sent to the Hub."
+            },
+            "kubernetes_service_account_mappings": {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?@([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+gserviceaccount\\.com$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+                "maxLength": 253
+              },
+              "description": "Kubernetes only. Maps a lowercase GCP service account email to the Kubernetes ServiceAccount (KSA) bound to it via Workload Identity, for GCP identity mode 'assign' on this instance. Scion does not create, annotate or bind the KSA. Local operator policy: not part of the runtime target identity and never sent to the Hub."
+            }
           },
           "if": { "properties": { "type": { "const": "docker" } } },
           "then": {
             "not": {
               "anyOf": [
                 { "required": ["context"], "properties": { "context": { "minLength": 1 } } },
-                { "required": ["namespace"], "properties": { "namespace": { "minLength": 1 } } }
+                { "required": ["namespace"], "properties": { "namespace": { "minLength": 1 } } },
+                { "required": ["kubeconfig"], "properties": { "kubeconfig": { "minLength": 1 } } },
+                { "required": ["kubernetes_block_service_account"], "properties": { "kubernetes_block_service_account": { "minLength": 1 } } },
+                { "required": ["kubernetes_service_account_mappings"], "properties": { "kubernetes_service_account_mappings": { "minProperties": 1 } } }
               ]
             }
           }
@@ -2341,6 +2378,15 @@
           ],
           "description": "Go duration, e.g. \"30s\". Empty means the default. An unquoted 0 is accepted (it loads as \"0\")."
         }
+      },
+      "additionalProperties": false
+    },
+    "serverTestIdentityWorkloadIssuer": {
+      "type": "object",
+      "required": ["sub", "max_tier"],
+      "properties": {
+        "sub": { "type": "string", "pattern": "^[0-9]{1,64}$" },
+        "max_tier": { "type": "string", "enum": ["member", "admin"] }
       },
       "additionalProperties": false
     },

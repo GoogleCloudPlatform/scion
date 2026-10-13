@@ -28,13 +28,13 @@ Used inside agent containers. Agents can orchestrate sibling agents within their
 |---------|--------|
 | `server` (all subcommands) | Infrastructure administration — not relevant inside a container |
 | `broker` (all subcommands) | Runtime broker administration — not relevant inside a container |
-| `hub` (all subcommands) | Hub interaction — agents communicate via the messaging and notification systems, not direct Hub commands |
+| `hub` (all subcommands except the target-hub profile commands below) | Hub interaction — agents communicate via the messaging and notification systems, not direct Hub commands. Exception (ptone/scion#4240): `hub status`, `hub profile` and `hub test-identity` issue/token/list/delete/teardown are agent-allowed, and refuse at run time unless a target-hub profile names a hub other than the agent's own |
 | `init` | Grove initialization — infrastructure concern |
 | `grove` (all subcommands) | Grove administration — infrastructure concern |
 | `templates` (all subcommands) | Template management — managed by the operator |
 | `harness-config` (all subcommands) | Harness configuration — managed by the operator |
 | `config` (all subcommands) | Configuration inspection/mutation — managed by the operator |
-| `doctor` | Diagnostic tool — not relevant inside a running container |
+| `doctor` | Host and platform diagnostics for people checking health or troubleshooting agents; an agent checks itself with `sciontool doctor`. An authorized assistant agent runs `scion doctor` from a person-owned environment with a hub-boundary token (`hub_health:read`), since the Hub serves the health summary to user credentials only (ptone/scion#4727) |
 | `messages` (all subcommands) | Agents receive messages directly; inbox polling is unnecessary |
 | `completion` | Shell completion generation — not useful inside a container |
 | `shared-dir create/remove` | Shared directory lifecycle — managed by the operator |
@@ -173,7 +173,11 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `grove service-accounts` (all except `show`) | Y | - |
 | `project service-accounts show` | Y | Y |
 | `harness-config` (all) | Y | - |
-| `hub status` | Y | - |
+| `hub status` | Y | Y (runtime: only with a target-hub profile for another hub, ptone/scion#4240) |
+| `hub profile` (`add`, `list`, `show`, `remove`) | Y | Y (`add`/`show`/`remove` refuse a profile for the agent's own hub) |
+| `hub test-identity` `issue`, `token`, `list`, `delete`, `teardown` | Y | Y (runtime: only with a target-hub profile for another hub, ptone/scion#4240) |
+| `hub test-identity delegate` (all) | Y | - (human consent step) |
+| `hub test-identity web-code` | Y | - (human only; not with a profile) |
 | `hub groves` (all) | Y | - |
 | `hub brokers` (all) | Y | - |
 | `hub enable` | Y | - |
@@ -210,6 +214,8 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `shared-dir create` | Y | - |
 | `shared-dir remove` | Y | - |
 | `shared-dir info` | Y | Y |
+| `ssh` | Y | - |
+| `ssh-config` | Y | - |
 | `start` | Y | Y |
 | `stop` | Y | Y |
 | `sync` | Y | - |

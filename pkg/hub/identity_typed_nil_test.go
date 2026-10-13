@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -46,6 +44,7 @@ func TestIsUnscopedLocalPlatformAdmin_TypedNilTreatedAsMissing(t *testing.T) {
 		{"ScopedUserIdentity", (*ScopedUserIdentity)(nil)},
 		{"DevUser", (*DevUser)(nil)},
 		{"FederatedUserIdentity", (*FederatedUserIdentity)(nil)},
+		{"VisitorIdentity", (*VisitorIdentity)(nil)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// A plain Go interface comparison, not require.NotNil/assert.NotNil:
@@ -101,6 +100,8 @@ func TestGetIdentityFromContext_TypedNilTreatedAsMissing(t *testing.T) {
 				stored = (*FederatedAgentIdentity)(nil)
 			case "FederatedServiceIdentity":
 				stored = (*FederatedServiceIdentity)(nil)
+			case "VisitorIdentity":
+				stored = (*VisitorIdentity)(nil)
 			default:
 				t.Fatalf("no typed-nil case constructed for inventory type %q; add one here", name)
 			}
@@ -134,6 +135,7 @@ func TestGetUserIdentityFromContext_TypedNilTreatedAsMissing(t *testing.T) {
 		{"ScopedUserIdentity", (*ScopedUserIdentity)(nil)},
 		{"DevUser", (*DevUser)(nil)},
 		{"FederatedUserIdentity", (*FederatedUserIdentity)(nil)},
+		{"VisitorIdentity", (*VisitorIdentity)(nil)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.True(t, tc.user != nil, "the interface value under test must be typed-nil, not a nil interface")

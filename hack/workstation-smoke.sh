@@ -18,12 +18,18 @@
 # In a temporary HOME and a temporary git repo, with no hub configured:
 #   1. scion hub link              fails with the one-line "No hub configured"
 #                                  error and starts no server
-#   2. scion server start          starts the local workstation server and,
+#   2. scion server start          starts the local workstation server,
+#                                  registers it as the hub 'local' and,
 #                                  with onboarding not complete, prints the
 #                                  /onboarding URL (SCION_NO_BROWSER=1)
 #   3. scion hub link              links to the local hub without a prompt
 #   4. scion hub status            reports the project as linked
 #   5. scion list                  returns an empty list through the hub
+#  5b. scion use <slug>            from a directory outside any project
+#                                  selects the linked project (then again by
+#                                  its UUID); scion list
+#                                  then returns the empty list through the
+#                                  hub, and scion use shows source "context"
 #   6. scion server stop           stops the server
 #   7. no image registry           in a second fresh HOME with no
 #                                  image_registry anywhere, scion server start
@@ -53,6 +59,13 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 ISOLATED=0
 
 warn() { printf 'WARN: %s\n' "$*" >&2; }
+
+# web_endpoint prints the scheme, host and port of the "Web UI:" URL in a
+# 'scion server start' output file. In workstation mode the Hub API is
+# served on the web port, so that is the hub endpoint.
+web_endpoint() {
+  sed -n 's|^Web UI:  \(http://[^/ ]*\).*|\1|p' "$1" | head -n 1
+}
 
 # The server daemon's PID, from its PID file in the current (temporary)
 # HOME. Read it before 'scion server stop', which removes the file as soon
@@ -263,9 +276,10 @@ grep -Eq "^Web UI:  http://127\.0\.0\.1:[0-9]+/onboarding\$" "$WORK/start.out" |
 if grep -q "Runtime broker not started" "$WORK/start.out"; then
   fail "server start reported a skipped broker although an image registry is set"
 fi
-grep -q "Configured hub endpoint: http://127.0.0.1:" "$WORK/start.out" || {
-  cat "$WORK/start.out" >&2; fail "server start did not configure the hub endpoint"; }
-ENDPOINT="$(sed -n 's/^Configured hub endpoint: \(http:[^ ]*\).*/\1/p' "$WORK/start.out" | head -n 1)"
+grep -q "^Registered hub 'local' (http://127.0.0.1:" "$WORK/start.out" || {
+  cat "$WORK/start.out" >&2; fail "server start did not register the local hub"; }
+ENDPOINT="$(web_endpoint "$WORK/start.out")"
+[ -n "$ENDPOINT" ] || fail "server start did not print the Web UI URL"
 ready=0
 for ((i = 1; i <= 60; i++)); do
   if curl -fsS "$ENDPOINT/healthz" >/dev/null 2>&1; then ready=1; break; fi
@@ -304,6 +318,31 @@ grep -q "Using hub: http://127.0.0.1:" "$WORK/list.err" || {
 tr -d '[:space:]' <"$WORK/list.json" | grep -Eq '^(\[\]|null)$' || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list did not return an empty list"; }
 
+log "5b. outside any project, scion use selects the project and scion list targets it"
+HUB_PROJECT_ID="$(tr -d '\n' <"$WORK/status.json" | grep -o '"hubProjectId"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | head -n 1)"
+[ -n "$HUB_PROJECT_ID" ] || { cat "$WORK/status.json" >&2; fail "hub status did not report the hub project ID"; }
+"$SCION" ${TARGET[@]+"${TARGET[@]}"} hub projects info "$HUB_PROJECT_ID" --format json >"$WORK/project.json" 2>"$WORK/project.err" || {
+  cat "$WORK/project.json" "$WORK/project.err" >&2; fail "scion hub projects info"; }
+HUB_PROJECT_SLUG="$(sed -n 's/^  "slug": "\([^"]*\)".*/\1/p' "$WORK/project.json" | head -n 1)"
+[ -n "$HUB_PROJECT_SLUG" ] || { cat "$WORK/project.json" >&2; fail "hub projects info did not report the project slug"; }
+USE_DIR="$(mktemp -d "$WORK/use.XXXXXX")"
+# By slug (the usual path: slug, then name lookup), then by UUID.
+for ref in "$HUB_PROJECT_SLUG" "$HUB_PROJECT_ID"; do
+  (cd "$USE_DIR" && "$SCION" use "$ref") >"$WORK/use.out" 2>&1 || {
+    cat "$WORK/use.out" >&2; fail "scion use $ref"; }
+  cat "$WORK/use.out"
+  grep -q "^Now using project '.*' on hub 'local' (http://127.0.0.1:" "$WORK/use.out" || {
+    fail "scion use $ref did not select the project on the local hub"; }
+done
+(cd "$USE_DIR" && "$SCION" list --format json) >"$WORK/list-use.json" 2>"$WORK/list-use.err" || {
+  cat "$WORK/list-use.json" "$WORK/list-use.err" >&2; fail "scion list after scion use"; }
+tr -d '[:space:]' <"$WORK/list-use.json" | grep -Eq '^(\[\]|null)$' || {
+  cat "$WORK/list-use.json" "$WORK/list-use.err" >&2; fail "scion list after scion use did not return an empty list"; }
+(cd "$USE_DIR" && "$SCION" use --format json) >"$WORK/use.json" 2>"$WORK/use.err" || {
+  cat "$WORK/use.json" "$WORK/use.err" >&2; fail "scion use --format json"; }
+grep -Eq '"source"[[:space:]]*:[[:space:]]*"context"' "$WORK/use.json" || {
+  cat "$WORK/use.json" >&2; fail "scion use does not report the current context as the source"; }
+
 log "6. scion server stop"
 stop_server || { cat "$WORK/stop.out" >&2; fail "scion server stop"; }
 
@@ -334,8 +373,8 @@ grep -Eq "^Web UI:  http://127\.0\.0\.1:[0-9]+/onboarding\$" "$WORK/start-noreg.
 if ! { [ -f "$HOME/.scion/server.pid" ] && kill -0 "$(cat "$HOME/.scion/server.pid")" 2>/dev/null; }; then
   fail "the server is not running"
 fi
-ENDPOINT="$(sed -n 's/^Configured hub endpoint: \(http:[^ ]*\).*/\1/p' "$WORK/start-noreg.out" | head -n 1)"
-[ -n "$ENDPOINT" ] || fail "server start did not configure the hub endpoint"
+ENDPOINT="$(web_endpoint "$WORK/start-noreg.out")"
+[ -n "$ENDPOINT" ] || fail "server start did not print the Web UI URL"
 # The first "status" key is the composite (top-level) status.
 curl -fsS "$ENDPOINT/healthz" | tr -d '[:space:]' | grep -o '"status":"[a-z]*"' | sed -n 1p | grep -qx '"status":"healthy"' || {
   curl -sS "$ENDPOINT/healthz" >&2 || true; fail "/healthz is not healthy without the broker"; }

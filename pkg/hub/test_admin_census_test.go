@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !hubshard || hubshard_1
-
 package hub
 
 import (
@@ -21,7 +19,6 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -35,8 +32,9 @@ import (
 )
 
 // Admin tier A1 census guards (ptone/scion#4240). They walk every non-test
-// file of pkg/hub (this directory only: the census is pkg/hub-scoped; other
-// packages do not decide hub authority) with go/ast, like TestBypassCensus
+// file of pkg/hub and of the packages moved out of it (guardScanSubdirs:
+// code that decided hub authority before a move still does; other packages
+// do not decide hub authority) with go/ast, like TestBypassCensus
 // and TestSigningKeySource_EveryKeySourceClassified: every site that reads
 // authority outside the authorization service's clamped store must be
 // classified, decision sites must apply the test identity clamps and the
@@ -182,12 +180,12 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"authz.go:isCurrentHubMember:GetGroupMembership":                    "decision: hub-members membership (relationship grant); admin kinds count only while live and enabled (testAdminPrincipalLive)",
 
 	// Holder-counting guards: test identities never count.
-	"access_constraint_preview.go:resolveConstraintAdminUsers:GetEffectiveGroups":                censusExcludesTestIdentities,
-	"access_constraint_preview.go:resolveConstraintAdminUsers:GetGroupMembers":                   censusExcludesTestIdentities,
-	"access_constraint_preview.go:resolveConstraintAdminUsers:ListRoleBindingsForScope":          censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdmins:GetEffectiveGroups":                    censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdmins:GetGroupMembers":                       censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdmins:ListRoleBindingsForScope":              censusExcludesTestIdentities,
 	"handlers_users_core.go:checkLastSuperAdminTx:ListRoleBindingsForScope":                      censusExcludesTestIdentities,
 	"seed.go:ReconcileSuperAdminBindings:ListRoleBindingsForPrincipal":                           censusExcludesTestIdentities,
-	"access_constraint_governance.go:adminLosesAuthority:ListRoleBindingsForPrincipals":          "guard: counts survivors among resolveConstraintAdminUsers' admin set, which counts only positively human rows (IsHumanKind)",
+	"access_constraint_governance.go:checkConstraintAdminLockout:ListRoleBindingsForScope":       "guard: counts survivors among resolveConstraintAdmins' admin set, which counts only positively human rows (IsHumanKind); a scope binding keeps an admin only when active (isBindingActive) and it names that admin or one of its groups",
 	"access_constraint_governance.go:checkUserRemovalAdminLockout:GetEffectiveGroups":            "guard: scopes to lockout-check for a user removal; an extra scope only adds a check, never admits",
 	"access_constraint_governance.go:checkUserRemovalAdminLockout:ListRoleBindingsForPrincipals": "guard: scopes to lockout-check for a user removal (clamped, unwired: admin kinds never constraint admins); an extra, even expired, binding only adds a check, never admits",
 
@@ -295,8 +293,9 @@ var testAdminAdminEmailsCensus = map[string]string{
 }
 
 // The legacy admin fast path itself (IsUnscopedLocalPlatformAdmin) lives in
-// pkg/hub/internal/principal since ptone/scion#3316 (outside this
-// pkg/hub-scoped census); TestBypassCensus tracks its pkg/hub callers.
+// pkg/hub/internal/principal since ptone/scion#3316. The census scans that
+// directory too (guardScanSubdirs), so its role check is classified below;
+// TestBypassCensus tracks its pkg/hub callers.
 //
 // testAdminRoleAdminCensus classifies every function that compares a
 // user's role (stored or claim) with admin, keyed "file:function". A
@@ -326,6 +325,7 @@ var testAdminRoleAdminCensus = map[string]string{
 	"handlers_users_core.go:updateUser":                           "mutation: requested new role; test identity targets are refused",
 	"seed.go:ReconcileSuperAdminBindings":                         censusExcludesTestIdentities,
 	"seed.go:backfillUserRoleBindings":                            "startup: a super-admin backfill on an admin-kind row is refused by the store (system bindings on admin kinds are issuance-only)",
+	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin": "role gate: admin only (the legacy unscoped admin fast path); a test identity's stored role is never admin and the JWT row block refuses a mismatched role claim",
 }
 
 // censusFuncSite is one parsed function of pkg/hub.
@@ -368,11 +368,18 @@ func identCalls(fn *ast.FuncDecl) map[string]int {
 }
 
 // walkPkgHubFuncs calls visit for every function declaration in the
-// non-test files of pkg/hub (this directory only).
+// non-test files of pkg/hub and of its existing guardScanSubdirs (files there
+// are named by their relative path); other subdirectories are not walked.
 func walkPkgHubFuncs(t *testing.T, visit func(file string, fn *ast.FuncDecl, fset *token.FileSet)) {
 	t.Helper()
 	fset := token.NewFileSet()
-	entries, err := os.ReadDir(".")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards test-admin authority census sites.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards test-admin authority census sites.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards test-admin authority census sites.
+	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	for _, e := range entries {
 		name := e.Name()

@@ -85,7 +85,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -223,7 +227,11 @@ func checkColumn(t, c string) error {
 			skillversion.Table:                  skillversion.ValidColumn,
 			subscriptiontemplate.Table:          subscriptiontemplate.ValidColumn,
 			template.Table:                      template.ValidColumn,
+			testidentitydelegation.Table:        testidentitydelegation.ValidColumn,
+			testidentitylogincode.Table:         testidentitylogincode.ValidColumn,
 			testinframarker.Table:               testinframarker.ValidColumn,
+			threadgroup.Table:                   threadgroup.ValidColumn,
+			threadgroupmember.Table:             threadgroupmember.ValidColumn,
 			usagereservation.Table:              usagereservation.ValidColumn,
 			user.Table:                          user.ValidColumn,
 			useraccesstoken.Table:               useraccesstoken.ValidColumn,

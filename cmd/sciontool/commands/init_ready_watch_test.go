@@ -98,17 +98,41 @@ func equalActivities(a, b []state.Activity) bool {
 	return true
 }
 
+// afterFirstPoll wraps cfg.MarkerReady so that write runs once, right after
+// the watcher's first poll has found no marker. This places the hook event
+// after the watch began without a sleep: on every poll the watcher checks
+// the marker before the deadline, so any poll after the first sees it, even
+// if it runs after the deadline.
+func afterFirstPoll(t *testing.T, cfg *readyWatchConfig, write func()) {
+	t.Helper()
+	inner := cfg.MarkerReady
+	polled := false
+	cfg.MarkerReady = func(nonce string) bool {
+		ready := inner(nonce)
+		if !polled {
+			polled = true
+			if ready {
+				t.Errorf("marker present at the first poll; want it written after the watch started")
+			}
+			write()
+		}
+		return ready
+	}
+}
+
 // Hook mode: the hook fires after init's report. The hook's own handlers move
 // the activity off initializing, so the watcher reports nothing.
 func TestWatchHarnessReady_HookMarkerAfterStart(t *testing.T) {
 	f := newReadyWatchFixture(t)
 	nonce := "abc123"
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		_ = f.status.Handle(&hooks.Event{Name: hooks.EventSessionStart, Data: hooks.EventData{Source: "startup"}})
+	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
+	afterFirstPoll(t, &cfg, func() {
+		if err := f.status.Handle(&hooks.Event{Name: hooks.EventSessionStart, Data: hooks.EventData{Source: "startup"}}); err != nil {
+			t.Errorf("session-start hook: %v", err)
+		}
 		writeMarker(t, nonce)
-	}()
-	got := watchHarnessReady(context.Background(), f.cfg(nonce, state.ReadyModeHook, time.Now()))
+	})
+	got := watchHarnessReady(context.Background(), cfg)
 	if got != readyOutcomeHookMarker {
 		t.Fatalf("outcome = %s, want %s", got, readyOutcomeHookMarker)
 	}
@@ -125,11 +149,9 @@ func TestWatchHarnessReady_HookMarkerAfterStart(t *testing.T) {
 func TestWatchHarnessReady_HookMarkerLocalStillInitializing(t *testing.T) {
 	f := newReadyWatchFixture(t)
 	nonce := "abc123"
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		writeMarker(t, nonce)
-	}()
-	got := watchHarnessReady(context.Background(), f.cfg(nonce, state.ReadyModeHook, time.Now()))
+	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
+	afterFirstPoll(t, &cfg, func() { writeMarker(t, nonce) })
+	got := watchHarnessReady(context.Background(), cfg)
 	if got != readyOutcomeHookMarker {
 		t.Fatalf("outcome = %s", got)
 	}

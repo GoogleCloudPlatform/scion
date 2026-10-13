@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_6
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -2212,7 +2210,7 @@ func TestPutServerConfigDB_ExplicitEmptyNotificationChannels_ClearsField(t *test
 
 func TestPutServerConfigDB_ExplicitEmptyPublicURL_ClearsField(t *testing.T) {
 	// N6: Explicitly sending public_url as "" should clear it.
-	srv, fakeStore, ops := newTestDBServer(t)
+	srv, fakeStore, ops := newTestDBServerWithStore(t, &settingsAuditStore{})
 
 	fakeStore.seed("endpoints", json.RawMessage(`{"public_url":"https://old.url","image_registry":"registry.test"}`))
 	_, _ = ops.Refresh(context.Background())

@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
 // templateIdentityFixture is a project directory and the start options a
@@ -134,6 +135,102 @@ func TestApplyStartTemplateIdentity_NoIdentityKeepsPreviousBehaviour(t *testing.
 	})
 
 	require.NoError(t, f.apply(startContextInputs{}, conn, "web-dev"))
+	assert.Empty(t, f.opts.Template)
+}
+
+// ptone/scion#4524: on a start whose agent state survived, the agent's Hub
+// template is resolved for its env fallback only: TemplateEnvSource is set,
+// Template stays unset.
+func TestApplyStartTemplateEnvSource_SurvivingStateSetsEnvSourceOnly(t *testing.T) {
+	f := newTemplateIdentityFixture(t, "kept-agent", true)
+	conn, wantDir := templateConn(t, "web-dev", nil, nil)
+
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, &f.opts, conn, "web-dev")
+	assert.Equal(t, wantDir, f.opts.TemplateEnvSource)
+	assert.Empty(t, f.opts.Template, "the env source must never become the agent's template")
+}
+
+// A hydration failure never fails the start: the env source stays unset and
+// the agent manager warns that the env fallback is not applied.
+func TestApplyStartTemplateEnvSource_HydrationFailureIsNotFatal(t *testing.T) {
+	f := newTemplateIdentityFixture(t, "kept-agent", true)
+	conn, _ := templateConn(t, "web-dev", errors.New("hub unavailable"), nil)
+
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, &f.opts, conn, "web-dev")
+	assert.Empty(t, f.opts.TemplateEnvSource)
+	assert.Empty(t, f.opts.Template)
+}
+
+// recordTemplateHash writes broker-side image provenance recording hash as
+// the agent's template hash, as provisioning from a cached template does.
+func recordTemplateHash(t *testing.T, f *templateIdentityFixture, hash string) {
+	t.Helper()
+	agentDir := config.GetAgentDir(f.projectDir, f.opts.Name, false)
+	body := `{"version": 1, "template": "web-dev", "templateHash": "` + hash + `"}`
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, config.ImageProvenanceFileName), []byte(body), 0o600))
+}
+
+// Live semantics: the request's TemplateHash is the hash recorded at create,
+// so even when the broker's cache holds that (create-time) content, the env
+// source is resolved live through the Hub, as create resolves it; the cached
+// create-time copy is never used just because the hash matches.
+func TestApplyStartTemplateEnvSource_CacheHitStillResolvesLive(t *testing.T) {
+	f := newTemplateIdentityFixture(t, "kept-agent", true)
+	cache, err := templatecache.New(t.TempDir(), 0)
+	require.NoError(t, err)
+	const hash = "sha256-create-time-template"
+	cachedDir, err := cache.Put(hash, map[string][]byte{"scion-agent.json": []byte(`{}`)})
+	require.NoError(t, err)
+	f.srv.cache = cache
+	asked := 0
+	conn, liveDir := templateConn(t, "web-dev", nil, func() { asked++ })
+
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{TemplateID: "tpl-uuid", TemplateHash: hash}, &f.opts, conn, "web-dev")
+	assert.Equal(t, liveDir, f.opts.TemplateEnvSource, "the template must be resolved live")
+	assert.NotEqual(t, cachedDir, f.opts.TemplateEnvSource, "the create-time cached copy must not be used")
+	assert.Positive(t, asked, "the Hub must be asked for the current template")
+	assert.Empty(t, f.opts.Template)
+}
+
+// An older Hub sends no template identity: the template hash recorded at
+// provision is looked up in the broker's template cache, read-only. A hit
+// sets the env source without asking the Hub (no hydration).
+func TestApplyStartTemplateEnvSource_OlderHubCacheHitSetsEnvSource(t *testing.T) {
+	f := newTemplateIdentityFixture(t, "kept-agent", true)
+	cache, err := templatecache.New(t.TempDir(), 0)
+	require.NoError(t, err)
+	const hash = "sha256-older-hub-template"
+	cachedDir, err := cache.Put(hash, map[string][]byte{"scion-agent.json": []byte(`{"env": {"TPL": "x"}}`)})
+	require.NoError(t, err)
+	f.srv.cache = cache
+	recordTemplateHash(t, f, hash)
+	conn, _ := templateConn(t, "web-dev", nil, func() {
+		t.Error("an older Hub's start must not ask the Hub for a template")
+	})
+
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{}, &f.opts, conn, "web-dev")
+	assert.Equal(t, cachedDir, f.opts.TemplateEnvSource)
+	assert.Empty(t, f.opts.Template)
+}
+
+// A cache miss leaves the env source unset, silently: the agent manager
+// warns that the env fallback is not applied. A start with no recorded
+// template hash resolves nothing either.
+func TestApplyStartTemplateEnvSource_OlderHubCacheMissLeavesUnset(t *testing.T) {
+	f := newTemplateIdentityFixture(t, "kept-agent", true)
+	cache, err := templatecache.New(t.TempDir(), 0)
+	require.NoError(t, err)
+	f.srv.cache = cache
+	conn, _ := templateConn(t, "web-dev", nil, func() {
+		t.Error("an older Hub's start must not ask the Hub for a template")
+	})
+
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{}, &f.opts, conn, "web-dev")
+	assert.Empty(t, f.opts.TemplateEnvSource, "no recorded template hash: nothing to look up")
+
+	recordTemplateHash(t, f, "sha256-not-in-cache")
+	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{}, &f.opts, conn, "web-dev")
+	assert.Empty(t, f.opts.TemplateEnvSource, "cache miss: the env source stays unset")
 	assert.Empty(t, f.opts.Template)
 }
 

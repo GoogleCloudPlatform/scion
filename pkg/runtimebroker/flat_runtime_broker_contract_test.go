@@ -174,6 +174,31 @@ func newFlatInstanceTestServer(t *testing.T, opts flatInstanceOpts) *flatInstanc
 	return &flatInstanceFixture{srv: srv, mgr: mgr, identity: id, instances: instances, globalDir: globalDir}
 }
 
+// Flat ownership arrangement (an amendment to the frozen fixtures): the
+// real Hub dispatch carries the project ID (projectId) and the immutable
+// agent ID (create body id; start/restart resolved env SCION_AGENT_ID).
+const (
+	flatTestProjectID = "flat-project-id"
+	flatTestAgentID   = "0d2c8a6e-5f1b-4c3a-9e7d-6b2f1a4c8e01"
+	// flatStartQuery is the project scope a real start/restart carries.
+	flatStartQuery = "?projectId=" + flatTestProjectID
+	// flatAgentEnv is the resolved-env member a real start/restart carries.
+	flatAgentEnv = `"resolvedEnv":{"SCION_AGENT_ID":"` + flatTestAgentID + `"}`
+)
+
+// seedOwnedAgent records test-agent-1 as owned by the flat instance, as its
+// earlier create would have, through the production store API. Only the
+// existing-agent scenarios call it.
+func (f *flatInstanceFixture) seedOwnedAgent(t *testing.T) {
+	t.Helper()
+	if err := f.srv.ownership.BeginRun(flatTestProjectID, flatTestAgentID, "test-agent-1", "seed-run"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.srv.ownership.SetRunState(flatTestProjectID, flatTestAgentID, "seed-run", OwnershipStateCreated); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeFlatFixtureFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -191,7 +216,8 @@ func flatCreateBody(requestID, name string, extra map[string]interface{}) string
 		"requestId":   requestID,
 		"name":        name,
 		"slug":        name,
-		"projectId":   "flat-project-id",
+		"id":          "agent-id-" + name,
+		"projectId":   flatTestProjectID,
 		"projectSlug": "flat-project",
 		// An unambiguous workspace for the hub-managed project, so an
 		// accepted create gets past buildStartContext.
@@ -373,16 +399,17 @@ func TestFlatInstanceStart_ExpectedTargetMismatchRejected(t *testing.T) {
 
 func TestFlatInstanceStart_UndecodableBodyRejected(t *testing.T) {
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.seedOwnedAgent(t)
 	for _, body := range []string{`{"task": `, `{"expectedRuntimeTargetId": 42}`} {
-		w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start", body)
+		w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery, body)
 		expectFlatRefusal(t, w, http.StatusBadRequest, ErrCodeInvalidRequest)
 	}
 	if n := mgrStartCalls(f); n != 0 {
 		t.Fatalf("runtime started on an undecodable body: %d", n)
 	}
 	// Unknown keys stay ignored (start/restart version-skew contract).
-	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start",
-		`{"someFutureKey": true, "expectedRuntimeTargetId": "`+f.identity.RuntimeTarget.ID+`"}`)
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery,
+		`{"someFutureKey": true, "expectedRuntimeTargetId": "`+f.identity.RuntimeTarget.ID+`",`+flatAgentEnv+`}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("unknown keys must be accepted: %d %s", w.Code, w.Body.String())
 	}
@@ -392,7 +419,8 @@ func TestFlatInstanceStart_WithoutExpectedTargetUsesOnlyTarget(t *testing.T) {
 	// The settings active profile names a Kubernetes runtime; the start
 	// still runs on the single target's manager.
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true, activeProfile: "batch"})
-	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start", "")
+	f.seedOwnedAgent(t)
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery, `{`+flatAgentEnv+`}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body.String())
 	}
@@ -411,8 +439,9 @@ func TestFlatInstanceStart_IgnoresSavedProfile(t *testing.T) {
 	}
 	writeFlatFixtureFile(t, filepath.Join(config.GetAgentHomePath(projectDir, "test-agent-1"), "agent-info.json"),
 		`{"name":"test-agent-1","profile":"batch"}`)
-	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start",
-		`{"expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`"}`)
+	f.seedOwnedAgent(t)
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery,
+		`{"expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`",`+flatAgentEnv+`}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body.String())
 	}
@@ -425,15 +454,16 @@ func TestFlatInstanceStart_IgnoresSavedProfile(t *testing.T) {
 
 func TestFlatInstanceStart_MismatchKeepsRunIDFencing(t *testing.T) {
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
-	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start",
-		`{"runId":"run-refused","expectedRuntimeTargetId":"another-target"}`)
+	f.seedOwnedAgent(t)
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery,
+		`{"runId":"run-refused","expectedRuntimeTargetId":"another-target",`+flatAgentEnv+`}`)
 	expectFlatRefusal(t, w, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
 	if mgrStartCalls(f) != 0 {
 		t.Fatal("a refused start must not reach the runtime")
 	}
 	// An accepted start still carries the hub-minted run ID unchanged.
-	w = serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start",
-		`{"runId":"run-accepted","expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`"}`)
+	w = serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery,
+		`{"runId":"run-accepted","expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`",`+flatAgentEnv+`}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body.String())
 	}

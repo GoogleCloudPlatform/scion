@@ -26,6 +26,7 @@ modules/
   shared-lookup/ cloudsql-database/ hub-identity/ agent-runtime-k8s/
   hub-cloudrun/                # hub layer (Cloud Run hub)
   hub-lb/ hub-gke/             # hub layer (GKE hub: ALB + IAP front, Helm chart)
+  hub-test-runner/             # optional, GKE test hubs: test-runner identities
 configurations/
   shared-infra/   # apply once per project
   hub/            # apply once per Cloud Run hub
@@ -95,6 +96,13 @@ terraform -chdir=deploy/terraform/configurations/hub apply \
   -var-file=<hub_name>.tfvars
 ```
 
+The first shared-infra apply creates the GKE cluster only after the
+private-services connection, Filestore and Cloud SQL, so it takes roughly
+10–15 minutes longer than a fully parallel apply would. This ordering is
+deliberate: an Autopilot cluster created while those services were still
+attaching to the VPC has come up without ever provisioning nodes. See the
+`create_after` comment in `configurations/shared-infra/main.tf`.
+
 `state_prefix` must always be passed and must equal the `-backend-config
 prefix` used at `init` — Terraform cannot read its own backend config back,
 so this is enforced by a `hub_name` variable `validation` block in
@@ -116,9 +124,10 @@ scion hub env set --scope hub --always GOOGLE_CLOUD_PROJECT=<project>
 scion hub env set --scope hub --always GOOGLE_CLOUD_REGION=<region>
 ```
 
-(`GOOGLE_CLOUD_LOCATION` is accepted as an equivalent alternative to
-`GOOGLE_CLOUD_REGION`.) Without this, an agent using GCP-identity auth
-(Workload Identity or an assigned service account) fails to start with
+(`GOOGLE_CLOUD_LOCATION` is accepted as an alternative to
+`GOOGLE_CLOUD_REGION`; if both are set, `GOOGLE_CLOUD_LOCATION` wins.)
+Without this, an agent using GCP-identity auth (Workload Identity or an
+assigned service account) fails to start with
 `2 required environment variable(s) are missing: GOOGLE_CLOUD_PROJECT,
 GOOGLE_CLOUD_LOCATION` — the runtime broker's preflight check rejects the
 create before it ever reaches the pod.
@@ -290,6 +299,21 @@ modules, not yet implemented).
 
 Size Cloud SQL's `max_connections` for the sum across hubs — see "Scaling"
 below for the per-hub connection budget this module checks.
+
+## iamcredentials data-access logs (opt-in)
+
+`configurations/shared-infra` can enable `DATA_READ` audit logs for
+`iamcredentials.googleapis.com` with `iamcredentials_data_access_logs = true`
+(default false). It creates one `google_project_iam_audit_config`, so every
+token minted by impersonation in the project is logged. It is project-level,
+so shared-infra owns it once rather than each hub.
+
+A GKE hub's optional `test_runner` (`modules/hub-test-runner`) requires it:
+the hub plan fails until this audit config, or an `allServices` `DATA_READ`
+equivalent, is in place, and also fails if either config exempts an
+impersonator from `DATA_READ`. The resource is authoritative for that one service,
+so it replaces any iamcredentials audit config set outside Terraform.
+Data-access logs are billed as log volume.
 
 ## Health endpoints
 

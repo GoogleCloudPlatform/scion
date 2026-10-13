@@ -216,23 +216,23 @@ func (s *sandboxStateStore) markStopped(name string, exitCode *int, stoppedAt *t
 func (s *sandboxStateStore) save() {
 	data, err := json.MarshalIndent(s.entries, "", "  ")
 	if err != nil {
-		runtimeLog.Warn("sandbox state store: failed to marshal", "error", err)
+		runtimeLog().Warn("sandbox state store: failed to marshal", "error", err)
 		return
 	}
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		runtimeLog.Warn("sandbox state store: failed to create dir", "error", err)
+		runtimeLog().Warn("sandbox state store: failed to create dir", "error", err)
 		return
 	}
 	// Atomic write: write to temp file then rename. Prevents corruption
 	// from crashes during write (audit M2). 0600 permissions (audit M1).
 	tmpPath := s.path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		runtimeLog.Warn("sandbox state store: failed to write temp", "path", tmpPath, "error", err)
+		runtimeLog().Warn("sandbox state store: failed to write temp", "path", tmpPath, "error", err)
 		return
 	}
 	if err := os.Rename(tmpPath, s.path); err != nil {
-		runtimeLog.Warn("sandbox state store: failed to rename", "from", tmpPath, "to", s.path, "error", err)
+		runtimeLog().Warn("sandbox state store: failed to rename", "from", tmpPath, "to", s.path, "error", err)
 	}
 }
 
@@ -241,13 +241,13 @@ func (s *sandboxStateStore) load() {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			runtimeLog.Warn("sandbox state store: failed to read", "path", s.path, "error", err)
+			runtimeLog().Warn("sandbox state store: failed to read", "path", s.path, "error", err)
 		}
 		return
 	}
 	var entries map[string]*sandboxStateEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		runtimeLog.Warn("sandbox state store: failed to unmarshal", "path", s.path, "error", err)
+		runtimeLog().Warn("sandbox state store: failed to unmarshal", "path", s.path, "error", err)
 		return
 	}
 	s.entries = entries
@@ -277,6 +277,13 @@ func sandboxProbeSaysGone(probeCtx context.Context, out string, err error) bool 
 	if err == nil || probeCtx.Err() != nil {
 		return false
 	}
+	return exitedWithGoneOutput(out, err)
+}
+
+// exitedWithGoneOutput reports whether err is a non-zero exit of a CLI
+// that exited on its own (not killed by a signal) and whose output
+// contains one of sandboxGoneOutputs.
+func exitedWithGoneOutput(out string, err error) bool {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || !exitErr.Exited() {
 		return false
@@ -288,6 +295,100 @@ func sandboxProbeSaysGone(probeCtx context.Context, out string, err error) bool 
 		}
 	}
 	return false
+}
+
+// sandboxDeleteResult classifies the outcome of `sandbox delete --force`.
+type sandboxDeleteResult int
+
+const (
+	// sandboxDeleteDeleted: the CLI exited zero.
+	sandboxDeleteDeleted sandboxDeleteResult = iota
+	// sandboxDeleteGone: the CLI exited non-zero on its own with not-found
+	// output (sandboxGoneOutputs): the sandbox was already gone.
+	sandboxDeleteGone
+	// sandboxDeleteFailed: any other non-zero exit, a CLI that could not
+	// start or was killed, and ctx cancellation during the delete.
+	sandboxDeleteFailed
+	// sandboxDeleteTimedOut: the delete-hang workaround's timeout fired.
+	sandboxDeleteTimedOut
+)
+
+func (r sandboxDeleteResult) String() string {
+	switch r {
+	case sandboxDeleteDeleted:
+		return "deleted"
+	case sandboxDeleteGone:
+		return "gone"
+	case sandboxDeleteFailed:
+		return "failed"
+	case sandboxDeleteTimedOut:
+		return "timedOut"
+	}
+	return fmt.Sprintf("sandboxDeleteResult(%d)", int(r))
+}
+
+// classifySandboxDelete classifies a `sandbox delete --force` run under
+// ctx. out is the CLI's combined output, err its exec error, and timedOut
+// reports that the delete-hang workaround's timeout fired. A cancelled
+// ctx makes any unsuccessful delete "failed", even with not-found output:
+// a killed CLI's partial output is not a definitive answer.
+func classifySandboxDelete(ctx context.Context, out string, err error, timedOut bool) sandboxDeleteResult {
+	switch {
+	case timedOut:
+		return sandboxDeleteTimedOut
+	case err == nil:
+		return sandboxDeleteDeleted
+	case ctx.Err() != nil:
+		return sandboxDeleteFailed
+	case exitedWithGoneOutput(out, err):
+		return sandboxDeleteGone
+	default:
+		return sandboxDeleteFailed
+	}
+}
+
+// maxSandboxDeleteOutput bounds how much delete output is read back.
+const maxSandboxDeleteOutput = 64 << 10
+
+// maxSandboxDeleteOutputLog bounds the copy of delete output that is
+// logged; classification still sees up to maxSandboxDeleteOutput.
+const maxSandboxDeleteOutputLog = 4 << 10
+
+// sandboxDeleteOutputForLog returns out truncated to
+// maxSandboxDeleteOutputLog bytes for logging.
+func sandboxDeleteOutputForLog(out string) string {
+	if len(out) <= maxSandboxDeleteOutputLog {
+		return out
+	}
+	return out[:maxSandboxDeleteOutputLog] + "...(truncated)"
+}
+
+// newSandboxDeleteOutput returns an unlinked temporary file to use as a
+// delete command's stdout and stderr, so the output is captured without
+// a pipe. A pipe would make cmd.Wait block until every holder of its
+// write end exits, and the delete-hang defect leaves orphaned runsc
+// processes holding inherited fds (cloudrun_sandbox_delete_workaround.go).
+// The caller must Close the file. A nil file (on error) leaves the output
+// uncaptured, as before.
+func newSandboxDeleteOutput() *os.File {
+	f, err := os.CreateTemp("", "scion-sandbox-delete-*")
+	if err != nil {
+		runtimeLog().Warn("cloudrun-sandbox: cannot capture delete output", "error", err)
+		return nil
+	}
+	_ = os.Remove(f.Name())
+	return f
+}
+
+// readSandboxDeleteOutput returns what has been written to f so far,
+// bounded by maxSandboxDeleteOutput. Reading a regular file never blocks,
+// even while an orphaned process still writes to it.
+func readSandboxDeleteOutput(f *os.File) string {
+	if f == nil {
+		return ""
+	}
+	b, _ := io.ReadAll(io.NewSectionReader(f, 0, maxSandboxDeleteOutput))
+	return strings.TrimSpace(string(b))
 }
 
 // reconcile checks each entry for liveness and removes entries whose
@@ -322,11 +423,11 @@ func (s *sandboxStateStore) reconcile(bin string) {
 		switch {
 		case err == nil:
 		case gone:
-			runtimeLog.Info("sandbox state reconcile: sandbox not found, removing",
+			runtimeLog().Info("sandbox state reconcile: sandbox not found, removing",
 				"name", name, "agentID", entry.AgentID)
 			toRemove = append(toRemove, name)
 		default:
-			runtimeLog.Warn("sandbox state reconcile: liveness probe failed without a not-found answer; keeping the entry",
+			runtimeLog().Warn("sandbox state reconcile: liveness probe failed without a not-found answer; keeping the entry",
 				"name", name, "agentID", entry.AgentID, "error", err)
 		}
 	}
@@ -424,7 +525,7 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 		// outside /scion to relocate from.
 		if resolvedHomeDir != p.agentHome && resolvedHomeDir != rootDir && !strings.HasPrefix(resolvedHomeDir, rootDir+string(filepath.Separator)) {
 			if err := relocateToScion(cfg.HomeDir, p.agentHome); err != nil {
-				runtimeLog.Warn("could not relocate HomeDir to /scion; agent home writes may go to overlay",
+				runtimeLog().Warn("could not relocate HomeDir to /scion; agent home writes may go to overlay",
 					"homeDir", cfg.HomeDir, "scionHome", p.agentHome, "error", err)
 			}
 		}
@@ -448,7 +549,7 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 		}
 		if copyErr := copyDirContents(resolvedWorkspace, p.workspace); copyErr != nil {
 			// Non-fatal: agent can still read via rootfs; writes go to /scion.
-			runtimeLog.Debug("workspace content not copied to /scion",
+			runtimeLog().Debug("workspace content not copied to /scion",
 				"workspace", resolvedWorkspace, "scionWorkspace", p.workspace, "error", copyErr)
 		}
 	}
@@ -457,7 +558,7 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 	for _, sd := range cfg.SharedDirs {
 		sdPath := filepath.Join(rootDir, "shared", sd.Name)
 		if err := os.MkdirAll(sdPath, 0755); err != nil {
-			runtimeLog.Warn("failed to create shared dir in /scion layout",
+			runtimeLog().Warn("failed to create shared dir in /scion layout",
 				"name", sd.Name, "error", err)
 		}
 		// When InWorkspace is true, the mount destination is
@@ -468,7 +569,7 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 		if sd.InWorkspace {
 			iwPath := filepath.Join(p.workspace, ".scion-volumes", sd.Name)
 			if err := os.MkdirAll(iwPath, 0755); err != nil {
-				runtimeLog.Warn("failed to create in-workspace shared dir",
+				runtimeLog().Warn("failed to create in-workspace shared dir",
 					"name", sd.Name, "path", iwPath, "error", err)
 			}
 		}
@@ -493,7 +594,7 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 	if os.Getuid() == 0 && sandboxUID > 0 {
 		for _, d := range []string{p.agentHome, p.workspace} {
 			if chownErr := fsutil.ChownTree(context.Background(), d, sandboxUID, sandboxGID); chownErr != nil {
-				runtimeLog.Warn("failed to chown directory to sandbox user",
+				runtimeLog().Warn("failed to chown directory to sandbox user",
 					"dir", d, "uid", sandboxUID, "gid", sandboxGID, "error", chownErr)
 			}
 		}
@@ -530,7 +631,7 @@ func relocateToScion(src, dst string) error {
 		dstPath := filepath.Join(dst, entry.Name())
 		if err := os.Rename(srcPath, dstPath); err != nil {
 			// Cross-filesystem: fall back to not relocating this entry.
-			runtimeLog.Debug("could not rename to /scion, skipping",
+			runtimeLog().Debug("could not rename to /scion, skipping",
 				"src", srcPath, "dst", dstPath, "error", err)
 		}
 	}
@@ -740,7 +841,7 @@ func envArgs(env map[string]string) []string {
 //	    while tmux has-session -t scion 2>/dev/null; do sleep 2; done
 func buildEntrypoint(cfg RunConfig) ([]string, error) {
 	// Build the harness command line.
-	cmdLine, ok := harnessCmdLine(cfg)
+	cmdLine, ok := harnessCmdLine(cfg, harnessCmdLineOptions{})
 	if !ok {
 		return nil, fmt.Errorf("cloudrun-sandbox: no harness provided")
 	}
@@ -860,10 +961,10 @@ func waitForSandboxLiveness(ctx context.Context, delays []time.Duration, probe f
 		probeErr = probe(probeCtx)
 		probeCancel()
 		if probeErr == nil {
-			runtimeLog.Info("sandbox liveness probe passed", "name", name, "attempt", i+1)
+			runtimeLog().Info("sandbox liveness probe passed", "name", name, "attempt", i+1)
 			return nil
 		}
-		runtimeLog.Debug("sandbox liveness probe failed, retrying",
+		runtimeLog().Debug("sandbox liveness probe failed, retrying",
 			"name", name, "attempt", i+1, "delay", delay, "error", probeErr)
 	}
 	return probeErr
@@ -987,7 +1088,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// that entry. Re-loading the state under the lock is left for
 	// ptone/scion#3951.
 	if other := r.sandboxHeldByOtherRun(slug, runID); other != "" {
-		runtimeLog.Info("Sandbox of another run holds the agent's sandbox name; not reusing it",
+		runtimeLog().Info("Sandbox of another run holds the agent's sandbox name; not reusing it",
 			"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
 		return "", fmt.Errorf("cloudrun-sandbox: sandbox %s belongs to run %q, not %q: %w", slug, other, runID, ErrRunConflict)
 	}
@@ -1008,7 +1109,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	if cfg.ResolvedAuth != nil {
 		method := cfg.ResolvedAuth.Method
 		if method == "vertex-ai" || strings.Contains(strings.ToLower(method), "gcloud") {
-			runtimeLog.Info("cloudrun-sandbox: GCP auth mode in sandbox — "+
+			runtimeLog().Info("cloudrun-sandbox: GCP auth mode in sandbox — "+
 				"credentials provided via in-sandbox metadata emulator on loopback",
 				"method", method, "agent", cfg.Name)
 		}
@@ -1033,7 +1134,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		// Unexpected stat error (permission denied, I/O error). Proceed with
 		// offset 0 but warn — this may cause prior-run output to be re-shipped.
-		runtimeLog.Warn("entrypoint log stat failed unexpectedly; starting from offset 0",
+		runtimeLog().Warn("entrypoint log stat failed unexpectedly; starting from offset 0",
 			"path", entrypointLogPath, "error", err, "sandbox", slug)
 	}
 	// ENOENT is the normal case for first-ever run: offset stays 0.
@@ -1073,12 +1174,12 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 			}
 			dst := filepath.Join(paths.agentHome, relPath)
 			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-				runtimeLog.Warn("cloudrun-sandbox: failed to create directory for auth file",
+				runtimeLog().Warn("cloudrun-sandbox: failed to create directory for auth file",
 					"dst", dst, "error", err)
 				continue
 			}
 			if err := util.CopyFile(f.SourcePath, dst); err != nil {
-				runtimeLog.Warn("cloudrun-sandbox: failed to copy auth file",
+				runtimeLog().Warn("cloudrun-sandbox: failed to copy auth file",
 					"src", f.SourcePath, "dst", dst, "error", err)
 				continue
 			}
@@ -1110,6 +1211,17 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// Per-agent mounts -- each sandbox gets only its own paths (not /scion root).
 	for _, m := range mountsFor(paths, cfg.SharedDirs) {
 		args = append(args, "--mount", m)
+	}
+
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only keys no source above set, never a suppressed key.
+	emitted := make(map[string]bool, len(env))
+	for k := range env {
+		emitted[k] = true
+	}
+	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
+		k, v, _ := strings.Cut(e, "=")
+		env[k] = v
 	}
 
 	// Environment variables via --env flags (repeatable, confirmed by AC-0 retest).
@@ -1192,7 +1304,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 			diagInfo = fmt.Sprintf("\nno entrypoint output from this run (%s)", logPath)
 		}
 
-		runtimeLog.Error("sandbox dead on arrival: all liveness probes failed",
+		runtimeLog().Error("sandbox dead on arrival: all liveness probes failed",
 			"name", slug, "agentID", cfg.Name, "error", probeErr, "diagnostics", diagInfo)
 		// Attempt cleanup — sandbox may be in a broken state.
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1282,12 +1394,12 @@ func (r *CloudRunSandboxRuntime) sandboxRunCheck(ref RunRef) (bool, error) {
 	}
 	entry := r.state.get(ref.ID)
 	if entry == nil {
-		runtimeLog.Info("Run-scoped sandbox delete: no state entry; treating the run's sandbox as gone",
+		runtimeLog().Info("Run-scoped sandbox delete: no state entry; treating the run's sandbox as gone",
 			"sandbox", ref.ID, "run_id", ref.RunID)
 		return false, nil
 	}
 	if run := entry.Labels[api.LabelRunID]; run != "" && run != ref.RunID {
-		runtimeLog.Info("Left a sandbox of another run untouched",
+		runtimeLog().Info("Left a sandbox of another run untouched",
 			"sandbox", ref.ID, "run_id", ref.RunID, "sandbox_run_id", run)
 		return false, fmt.Errorf("sandbox %s belongs to run %q, not %q: %w", ref.ID, run, ref.RunID, ErrRunMismatch)
 	}
@@ -1316,9 +1428,27 @@ func (r *CloudRunSandboxRuntime) deleteOrWorkaround(ctx context.Context, id stri
 
 // deletePlain is the non-workaround path: plain `sandbox delete --force`.
 // Used when SCION_CLOUDRUN_DELETE_WORKAROUND=off.
+//
+// A sandbox that is already gone (sandboxDeleteGone) counts as deleted:
+// the entry is removed and nil returned. Any failure keeps the entry.
 func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string) error {
 	cmd := exec.CommandContext(ctx, r.bin, "delete", "--force", id)
-	if err := cmd.Run(); err != nil {
+	outFile := newSandboxDeleteOutput()
+	if outFile != nil {
+		defer func() { _ = outFile.Close() }()
+		cmd.Stdout = outFile
+		cmd.Stderr = outFile
+	}
+	err := cmd.Run()
+	out := readSandboxDeleteOutput(outFile)
+	switch result := classifySandboxDelete(ctx, out, err, false); result {
+	case sandboxDeleteDeleted:
+	case sandboxDeleteGone:
+		runtimeLog().Info("cloudrun-sandbox: delete --force found the sandbox already gone",
+			"sandbox", id, "output", sandboxDeleteOutputForLog(out))
+	default:
+		runtimeLog().Warn("cloudrun-sandbox: delete --force failed",
+			"sandbox", id, "result", result.String(), "error", err, "output", sandboxDeleteOutputForLog(out))
 		return fmt.Errorf("cloudrun-sandbox: delete --force failed: %w", err)
 	}
 	r.state.remove(id)
@@ -1411,7 +1541,7 @@ func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string
 		// Preserve the tmux failure for diagnostics. The operator gets
 		// the fallback content (better than empty), but the exec error
 		// is recorded so it can be found during debugging.
-		runtimeLog.Warn("tmux capture-pane failed, falling back to entrypoint log",
+		runtimeLog().Warn("tmux capture-pane failed, falling back to entrypoint log",
 			"agent_id", id, "error", err)
 		reason = "sandbox was not reachable via tmux"
 	} else {
@@ -1552,7 +1682,7 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) 
 	// If the context was cancelled (sandbox was force-deleted), don't
 	// update the state store — deleteOrWorkaround handles cleanup.
 	if ctx.Err() != nil {
-		runtimeLog.Debug("watcher cancelled for deleted sandbox", "name", name)
+		runtimeLog().Debug("watcher cancelled for deleted sandbox", "name", name)
 		return
 	}
 
@@ -1578,7 +1708,7 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) 
 	}
 
 	// Log at info level — sandbox exit is normal (C5).
-	runtimeLog.Info("sandbox exited", "name", name, "exitCode", exitCode)
+	runtimeLog().Info("sandbox exited", "name", name, "exitCode", exitCode)
 	r.state.markStopped(name, exitCode, &now)
 
 	// A non-zero or unknown exit (e.g. death during provisioning) is logged
@@ -1588,9 +1718,9 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) 
 	if exitCode == nil || *exitCode != 0 {
 		if entry := r.state.get(name); entry != nil && entry.AgentHome != "" {
 			logPath := filepath.Join(entry.AgentHome, entrypointLogFile)
-			logFn, msg := runtimeLog.Error, "sandbox exited abnormally"
+			logFn, msg := runtimeLog().Error, "sandbox exited abnormally"
 			if exitCode == nil {
-				logFn, msg = runtimeLog.Warn, "sandbox exited with unknown exit code"
+				logFn, msg = runtimeLog().Warn, "sandbox exited with unknown exit code"
 			}
 			logFn(msg,
 				"name", name, "agentID", entry.AgentID, "exitCode", exitCode,

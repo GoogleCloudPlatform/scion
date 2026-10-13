@@ -192,12 +192,48 @@ type Store interface {
 	// UserKindTestHubAdmin or UserKindTestSuperAdmin. It requires an admin
 	// Kind, the kind's role (TestAdminRole), an email in the kind's domain
 	// (TestAdminEmailDomain), a non-nil ExpiresAt, a non-empty IssuedBy and
-	// IssuanceID, and a system-scoped roleDefinitionID; it returns
-	// ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
+	// IssuanceID, and a system-scoped roleDefinitionID, and refuses a non-nil
+	// IssuerDelegationID (workload issuer delegations issue the member tier
+	// only); it returns ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
 	// to the identity's expiry and CreatedBy TestIdentityIssuanceCreatedBy,
 	// so it never outlives the identity. It is a Store method because it
 	// spans the user and role-binding sub-stores.
 	CreateTestAdminUser(ctx context.Context, user *User, roleDefinitionID string) (*RoleBinding, error)
+
+	// CreateFederatedUser creates a federated account: a local user row
+	// for a user of a trusted external issuer. It is the only store path
+	// that writes UserKindFederated. It requires Kind UserKindFederated,
+	// a non-empty HomeIssuer with a host and a FederatedEmail containing
+	// "@", Status UserStatusPending or UserStatusActive, an empty Email
+	// and an empty or viewer Role, and none of the test identity or
+	// invite fields; it returns ErrInvalidInput otherwise. It generates
+	// the ID when empty, normalizes HomeIssuer (NormalizeFederatedIssuer)
+	// and FederatedEmail (NormalizeFederatedEmail), sets Role to viewer
+	// and Email to FederatedSyntheticEmail, and writes them back to user.
+	// A second account for the same (HomeIssuer, FederatedEmail) returns
+	// ErrAlreadyExists.
+	CreateFederatedUser(ctx context.Context, user *User) error
+
+	// GetFederatedUserByEmail returns the federated account of
+	// (homeIssuer, federatedEmail), both normalized before the lookup,
+	// or ErrNotFound.
+	GetFederatedUserByEmail(ctx context.Context, homeIssuer, federatedEmail string) (*User, error)
+
+	// LinkFederatedIdentity records that the (issuer, subject) pair of
+	// the trusted issuer is the federated account userID: an
+	// ExternalIdentityBinding with Provider FederationIdentityProvider and
+	// the lower-cased email. The account must be UserKindFederated with
+	// HomeIssuer equal to the normalized issuer, and must not be linked
+	// already (ErrInvalidInput otherwise); a pair linked to any account
+	// returns ErrAlreadyExists, as does the later of two concurrent links
+	// of one account. It does not change the account's status.
+	LinkFederatedIdentity(ctx context.Context, userID, issuer, subject, email string) (*ExternalIdentityBinding, error)
+
+	// GetFederatedUserBySubject resolves the (issuer, subject) pair of a
+	// trusted issuer to its federated account through the binding
+	// LinkFederatedIdentity wrote. It returns ErrNotFound when the pair
+	// is not linked, or when the linked row is not UserKindFederated.
+	GetFederatedUserBySubject(ctx context.Context, issuer, subject string) (*User, error)
 
 	// ListFixtureRootedResources returns the agents (soft-deleted ones
 	// included), schedules, groups and projects whose creation-time
@@ -307,6 +343,10 @@ type Store interface {
 	// Conversation operations (Multi-Party Messaging)
 	ConversationStore
 
+	// Thread group operations (project-scoped chat thread groups,
+	// ptone/scion#4424)
+	ThreadGroupStore
+
 	// Role operations (Permissions Foundation Phase 1E)
 	RoleStore
 
@@ -349,6 +389,9 @@ type Store interface {
 
 	// Hub-instance registry operations (health dashboard F3)
 	HubInstanceStore
+
+	// Workload-bound issuer delegations (test identities, ptone/scion#4240)
+	TestIdentityDelegationStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -510,7 +553,8 @@ type AgentStore interface {
 
 	// AdoptAgentRunID is CompareAndSwapAgentRunID (expectedRunID to
 	// newRunID, clearing PreviousRunIDs) for the hub's heartbeat adoption
-	// of a stranded run (ptone/scion#3661). It swaps only while
+	// of a stranded run (ptone/scion#3661) and for the settle of a
+	// succeeded launch report (ptone/scion#2965). It swaps only while
 	// RunIDUpdatedAt is set and no later than unchangedSince, so a run_id
 	// that changed and changed back after the caller's read is not
 	// adopted. Like SetAgentRunID, it writes nothing while the row is
@@ -1710,7 +1754,10 @@ type UserStore interface {
 	// skipped. The returned map is keyed by user ID.
 	GetUsersByIDs(ctx context.Context, ids []string) (map[string]*User, error)
 
-	// GetUserByEmail retrieves a user by email.
+	// GetUserByEmail retrieves a user by email. It never returns a
+	// federated account (UserKindFederated), even for its synthetic
+	// address: those are found only by GetFederatedUserByEmail and
+	// GetFederatedUserBySubject.
 	// Returns ErrNotFound if the user doesn't exist.
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 
@@ -1739,12 +1786,14 @@ type UserStore interface {
 	// the user does not exist.
 	LockUserRow(ctx context.Context, id string, exclusive bool) error
 
-	// ListUsers returns users matching the filter criteria.
+	// ListUsers returns users matching the filter criteria. Federated
+	// accounts (UserKindFederated) are never listed.
 	ListUsers(ctx context.Context, filter UserFilter, opts ListOptions) (*ListResult[User], error)
 
 	// IsUserInvitedOrActive returns true if a User record exists with the
 	// given email and status in ("invited", "active"). Used by the
 	// invite_only authorization gate as a replacement for IsEmailAllowListed.
+	// A federated account never matches.
 	IsUserInvitedOrActive(ctx context.Context, email string) (bool, error)
 
 	// IncrementSessionGeneration atomically increments the user's
@@ -1755,7 +1804,8 @@ type UserStore interface {
 	// the only store path that writes Kind=UserKindTestFixture. It requires
 	// Kind=UserKindTestFixture, a non-nil ExpiresAt, a non-empty IssuedBy,
 	// an email in TestFixtureEmailDomain and the member or viewer role, and
-	// returns ErrInvalidInput otherwise. CreateUser refuses all of these
+	// returns ErrInvalidInput otherwise. A non-nil IssuerDelegationID must
+	// be non-empty and is written once. CreateUser refuses all of these
 	// rows, every admin kind and every email in a test identity domain
 	// (IsReservedTestIdentityEmail) with ErrTestFixtureKindRefused.
 	CreateTestFixtureUser(ctx context.Context, user *User) error
@@ -1786,6 +1836,25 @@ type UserStore interface {
 	// it is a no-op. Must be called inside WithTx.
 	LockTestFixtureIssuance(ctx context.Context) error
 
+	// ReplaceTestIdentityLoginCode stores code as the user's only
+	// web-login code: it deletes any code row the user already has
+	// (redeemed or not), then inserts code. It requires a non-empty
+	// UserID, CodeHash and IssuedBy and a non-zero ExpiresAt, and returns
+	// ErrInvalidInput otherwise. A concurrent replace for the same user
+	// can fail with ErrAlreadyExists. Call it inside WithTx together with
+	// the mint audit. It sets code.ID and code.Created when empty.
+	ReplaceTestIdentityLoginCode(ctx context.Context, code *TestIdentityLoginCode) error
+
+	// ConsumeTestIdentityLoginCode redeems the code with the given hash:
+	// in one conditional update it sets consumed_at = now where the hash
+	// matches, consumed_at is unset and expires_at is after now. It
+	// returns the redeemed row when exactly one row changed. Otherwise it
+	// returns ErrNotFound for an unknown hash,
+	// ErrTestIdentityLoginCodeConsumed for a code already redeemed and
+	// ErrTestIdentityLoginCodeExpired for an expired one. Of any number of
+	// concurrent calls for one code, at most one succeeds.
+	ConsumeTestIdentityLoginCode(ctx context.Context, codeHash string, now time.Time) (*TestIdentityLoginCode, error)
+
 	// CountLiveTestAdminUsers counts admin-kind test identities (the
 	// kinds UserKindTestHubAdmin and UserKindTestSuperAdmin) whose expiry
 	// is after now. A non-empty kind restricts the count to that admin
@@ -1796,6 +1865,44 @@ type UserStore interface {
 	// ListTestAdminUsers returns every admin-kind test identity, live or
 	// not, oldest first.
 	ListTestAdminUsers(ctx context.Context) ([]User, error)
+}
+
+// TestIdentityDelegationStore persists workload-bound issuer delegations
+// (TestIdentityDelegation) and answers the per-delegation questions the
+// issuance caps and management scope need. These are the only methods that
+// write the delegation table.
+type TestIdentityDelegationStore interface {
+	// CreateTestIdentityDelegation creates a delegation. It requires a
+	// grantor, a workload subject, exactly one scope, a positive member cap
+	// and an expiry after the creation time, and returns ErrInvalidInput
+	// otherwise. RevokedAt and RevokedBy must be unset. An empty ID is
+	// generated; Created defaults to now.
+	CreateTestIdentityDelegation(ctx context.Context, d *TestIdentityDelegation) error
+
+	// GetTestIdentityDelegation returns a delegation by ID, or ErrNotFound
+	// (also for an ID that is not a UUID).
+	GetTestIdentityDelegation(ctx context.Context, id string) (*TestIdentityDelegation, error)
+
+	// ListTestIdentityDelegations returns delegations, newest first. A
+	// non-empty grantorID restricts the list to that grantor. A positive
+	// limit caps the number returned.
+	ListTestIdentityDelegations(ctx context.Context, grantorID string, limit int) ([]TestIdentityDelegation, error)
+
+	// RevokeTestIdentityDelegation sets RevokedAt and RevokedBy on a
+	// delegation that is not yet revoked and reports changed=true. Revoking
+	// a revoked delegation changes nothing and reports changed=false with a
+	// nil error, so of two concurrent revocations exactly one reports a
+	// change. Returns ErrNotFound for an unknown ID.
+	RevokeTestIdentityDelegation(ctx context.Context, id, revokedBy string, at time.Time) (changed bool, err error)
+
+	// CountLiveTestFixtureUsersByDelegation counts test fixture users
+	// issued through delegationID whose expiry is after now.
+	CountLiveTestFixtureUsersByDelegation(ctx context.Context, delegationID string, now time.Time) (int, error)
+
+	// ListTestFixtureUsersByDelegation returns test fixture users issued
+	// through delegationID, newest first, with ListTestFixtureUsers'
+	// liveAt and limit semantics.
+	ListTestFixtureUsersByDelegation(ctx context.Context, delegationID string, liveAt time.Time, limit int) ([]User, error)
 }
 
 // UserFilter defines criteria for filtering users.
@@ -3053,6 +3160,68 @@ type ConversationStore interface {
 	UpdateDeliveryState(ctx context.Context, id string, state string, failureReason *string) error
 }
 
+// ThreadGroupStore manages project-scoped chat thread groups
+// (ptone/scion#4424). A thread group is a named folder of group
+// conversations; a conversation is in at most one thread group.
+//
+// The store does not check that a member conversation exists, is a group
+// conversation or is in the group's project; the hub validates that before
+// it files a thread. Reads skip members whose conversation is missing or
+// soft-deleted. Archived conversations keep their membership and are
+// returned. The limits in MaxThreadGroupsPerProject and
+// MaxThreadsPerThreadGroup are enforced by the hub API, not here.
+type ThreadGroupStore interface {
+	// CreateThreadGroup creates a thread group. ProjectID, Name and
+	// CreatedByKind (user or agent) are required. The name is validated
+	// with ValidateThreadGroupName and stored trimmed; NameKey is computed.
+	// An empty ID is generated. ID, Name, NameKey, CreatedAt and UpdatedAt
+	// are written back to g. Returns ErrAlreadyExists if the project already
+	// has a group with the same ThreadGroupNameKey (or the ID is taken), and
+	// ErrInvalidInput for an invalid field.
+	CreateThreadGroup(ctx context.Context, g *ThreadGroup) error
+
+	// GetThreadGroup returns a thread group with its members.
+	// Returns ErrNotFound if it does not exist.
+	GetThreadGroup(ctx context.Context, id string) (*ThreadGroup, error)
+
+	// ListThreadGroups returns a project's thread groups with their members,
+	// ordered by NameKey in byte order (the same on every dialect), each
+	// group's members ordered by AddedAt. A project
+	// with no groups returns an empty, non-nil slice.
+	ListThreadGroups(ctx context.Context, projectID string) ([]ThreadGroup, error)
+
+	// RenameThreadGroup renames a thread group and bumps UpdatedAt (last
+	// writer wins). Returns ErrNotFound if it does not exist,
+	// ErrAlreadyExists if another group in the project has the same name
+	// key, and ErrInvalidInput for an invalid name.
+	RenameThreadGroup(ctx context.Context, id, name string) error
+
+	// DeleteThreadGroup deletes a thread group and its member rows in one
+	// transaction. The member conversations are not touched.
+	// Returns ErrNotFound if it does not exist.
+	DeleteThreadGroup(ctx context.Context, id string) error
+
+	// SetThreadGroupMember files a conversation into a thread group. It is
+	// an upsert on the conversation: a conversation in another group is
+	// moved, atomically, and one already in this group is left unchanged.
+	// The group's existence is checked in the same transaction; a missing
+	// group returns ErrNotFound and writes nothing.
+	SetThreadGroupMember(ctx context.Context, groupID, conversationID, addedBy string) error
+
+	// RemoveThreadGroupMember takes a conversation out of a thread group. It
+	// is idempotent: a conversation that is not in that group, or a group ID
+	// that matches no group (including a malformed one), is not an error.
+	RemoveThreadGroupMember(ctx context.Context, groupID, conversationID string) error
+
+	// RemoveThreadGroupMembersForConversation removes a conversation from
+	// whatever thread group it is in. It is idempotent.
+	RemoveThreadGroupMembersForConversation(ctx context.Context, conversationID string) error
+
+	// DeleteThreadGroupsForProject deletes every thread group of a project
+	// and their member rows in one transaction. It is idempotent.
+	DeleteThreadGroupsForProject(ctx context.Context, projectID string) error
+}
+
 // =============================================================================
 // Role Definitions and Bindings (Permissions Foundation Phase 1E)
 // =============================================================================
@@ -3254,9 +3423,11 @@ type DelegationEdgeStore interface {
 	ListAllDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*DelegationEdge, error)
 
 	// DeactivateDelegationEdgeGuarded deactivates edgeID with cause and
-	// opID only when it is active and satisfies guard. It reports false,
-	// with no write, when the precondition does not hold; ErrNotFound when
-	// the edge does not exist.
+	// opID only when it is active and satisfies guard. guard.UpdatedAt is
+	// compared as an instant, and the write's WHERE holds the exact stored
+	// value just read, so a concurrent change refuses rather than being
+	// overwritten. It reports false, with no write, when the precondition
+	// does not hold; ErrNotFound when the edge does not exist.
 	DeactivateDelegationEdgeGuarded(ctx context.Context, edgeID string, guard DelegationEdgeDeactivateGuard, cause EdgeDeactivationCause, opID string) (bool, error)
 
 	// ReactivateDelegationEdge reactivates edgeID and clears its
@@ -3502,6 +3673,56 @@ type AgentDelegationStore interface {
 	// UpdateAgentDelegatedCredentialLastSeen sets the credential's
 	// last_seen_at. Callers treat a failure as best effort.
 	UpdateAgentDelegatedCredentialLastSeen(ctx context.Context, id string, at time.Time) error
+
+	// ListAgentDelegationGrants returns the grants that match filter,
+	// newest first. At least one of filter.AgentID and filter.IssuerUserID
+	// must be set; an empty filter returns ErrInvalidInput.
+	ListAgentDelegationGrants(ctx context.Context, filter AgentDelegationGrantFilter) ([]*AgentDelegationGrant, error)
+
+	// CountActiveAgentDelegationGrants counts the grants that match filter
+	// and are active at now: not revoked and expiring after now. The same
+	// filter rule as ListAgentDelegationGrants applies.
+	CountActiveAgentDelegationGrants(ctx context.Context, filter AgentDelegationGrantFilter, now time.Time) (int, error)
+
+	// LockAgentDelegationIssuer serializes grant issuance for one issuer.
+	// On PostgreSQL it runs SELECT ... FOR UPDATE on the user row; on
+	// SQLite, which serializes writes, it is a plain existence check. It
+	// must run inside WithTx, before the per-issuer grant count. Returns
+	// ErrNotFound if the user does not exist.
+	LockAgentDelegationIssuer(ctx context.Context, userID string) error
+
+	// LockAgentDelegationGrant serializes credential issuance and
+	// revocation for one grant, the same way, on the grant row, and
+	// returns the grant as read under the lock. Returns ErrNotFound if
+	// the grant does not exist.
+	LockAgentDelegationGrant(ctx context.Context, id string) (*AgentDelegationGrant, error)
+
+	// GetAgentDelegatedCredential returns the delegated credential with
+	// id, or ErrNotFound.
+	GetAgentDelegatedCredential(ctx context.Context, id string) (*AgentDelegatedCredential, error)
+
+	// ListActiveAgentDelegatedCredentials returns the credentials of the
+	// given grants that are active at now (not revoked and expiring after
+	// now), oldest first.
+	ListActiveAgentDelegatedCredentials(ctx context.Context, grantIDs []string, now time.Time) ([]*AgentDelegatedCredential, error)
+
+	// RevokeAgentDelegatedCredential revokes the credential with id, with
+	// reason. The update is conditional on revoked_at being NULL: a
+	// credential that is already revoked is left unchanged and reports
+	// revoked=false. Returns ErrNotFound if the credential does not exist.
+	RevokeAgentDelegatedCredential(ctx context.Context, id, reason string, at time.Time) (revoked bool, err error)
+
+	// PurgeAgentDelegatedCredentials deletes every delegated credential
+	// whose expiry is before expiredBefore, revoked or not, and returns
+	// the number deleted. Grants are never purged.
+	PurgeAgentDelegatedCredentials(ctx context.Context, expiredBefore time.Time) (int, error)
+}
+
+// AgentDelegationGrantFilter selects agent delegation grants by bound
+// agent, by issuer, or both.
+type AgentDelegationGrantFilter struct {
+	AgentID      string
+	IssuerUserID string
 }
 
 // =============================================================================

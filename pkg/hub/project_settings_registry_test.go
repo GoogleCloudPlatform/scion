@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_2
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -373,17 +371,22 @@ func TestScanForStrayProjectSettingConsts_SelectsFilesRegardlessOfBuildTags(t *t
 // inside the test.
 //
 // File selection reproduces what parser.ParseDir with a nil filter selected
-// before it was deprecated: every .go file directly in dir, subdirectories
-// excluded, test files INCLUDED. Test files are then exempted from the constant
+// before it was deprecated: every .go file directly in dir, other
+// subdirectories excluded, test files INCLUDED. The one extension is the
+// existing guardScanSubdirs directories under dir, whose files are added
+// under their relative path (readGuardScanDirs), so constants moved out of
+// package hub stay checked. Test files are then exempted from the constant
 // check by the _test.go skip below, which is where the exemption belongs —
 // filtering them out of the file set instead would look equivalent while
 // quietly changing which files the source-file and parse checks can see.
 func scanForStrayProjectSettingConsts(dir string) (strays []string, sourceFileConsts int, err error) {
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards projectSetting constants, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards projectSetting constants.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards projectSetting constants, which identity.go and identity_credential.go do not contain.
-	entries, err := os.ReadDir(dir)
+	// scanned through guardScanSubdirs; guards projectSetting constants.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards projectSetting constants.
+	entries, err := readGuardScanDirs(dir)
 	if err != nil {
 		return nil, 0, fmt.Errorf("reading %s: %w", dir, err)
 	}
