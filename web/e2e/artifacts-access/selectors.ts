@@ -46,7 +46,8 @@ export const SELECTORS = {
   versionMenu:
     'scion-page-artifact-detail scion-detail-header .header-actions sl-dropdown sl-button[slot="trigger"]',
   /** Markdown preview, rendered once the entry text loaded (artifact-detail.ts:1262). */
-  markdownFrame: 'scion-page-artifact-detail sl-tab-panel[name="preview"] scion-artifact-markdown-frame',
+  markdownFrame:
+    'scion-page-artifact-detail sl-tab-panel[name="preview"] scion-artifact-markdown-frame',
   historyPanel: 'scion-page-artifact-detail sl-tab-panel[name="history"]',
   /** Edit view (artifact-detail.ts:1819-1866). */
   editorContent: 'scion-page-artifact-detail scion-code-editor .cm-content',
@@ -88,7 +89,13 @@ export const SELECTORS = {
 } as const;
 
 /** Header actions graded per role (spec section 2). */
-export const HEADER_CONTROLS = ['Edit', 'Review', 'Share', 'Grant review access', 'Download'] as const;
+export const HEADER_CONTROLS = [
+  'Edit',
+  'Review',
+  'Share',
+  'Grant review access',
+  'Download',
+] as const;
 export type HeaderControl = (typeof HEADER_CONTROLS)[number];
 
 /** A header action button by its exact label (artifact-detail.ts:1146-1187). */
@@ -142,7 +149,10 @@ export function historyCurrentBadge(row: Locator): Locator {
 
 /** New artifact on the project page's Artifacts view. */
 export function newArtifactButton(page: Page): Locator {
-  return page.locator(SELECTORS.newArtifactButton).filter({ hasText: exact('New artifact') }).first();
+  return page
+    .locator(SELECTORS.newArtifactButton)
+    .filter({ hasText: exact('New artifact') })
+    .first();
 }
 
 /** The publish dialog's Publish button. */

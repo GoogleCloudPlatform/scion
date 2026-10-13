@@ -21,13 +21,13 @@ admin experiments API and resets the override during cleanup.
 
 Five member test identities each act in their own browser context:
 
-| Key | Role |
-| --- | --- |
-| `owner` | publishes the artifact through the web New artifact dialog; owns both fixture projects |
-| `member` | `project-member` of the artifact's home project |
-| `padmin` | `project-admin` of the home project |
-| `grantee` | member of a second fixture project (`side`) with the owner, not of the home project; gets Can edit through the Share dialog and publishes v2 |
-| `outsider` | in no project |
+| Key        | Role                                                                                                                                         |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`    | publishes the artifact through the web New artifact dialog; owns both fixture projects                                                       |
+| `member`   | `project-member` of the artifact's home project                                                                                              |
+| `padmin`   | `project-admin` of the home project                                                                                                          |
+| `grantee`  | member of a second fixture project (`side`) with the owner, not of the home project; gets Can edit through the Share dialog and publishes v2 |
+| `outsider` | in no project                                                                                                                                |
 
 Existing non-IAP hub: set `E2E_TARGET_URL`. For each identity key, also set
 `E2E_R1_<KEY>_CODE_FILE` and `E2E_R1_<KEY>_EMAIL` (OWNER, MEMBER, PADMIN,
