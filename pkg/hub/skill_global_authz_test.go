@@ -330,8 +330,9 @@ func TestSeedReconcile_OperatorOverrideRespected(t *testing.T) {
 		"reconciler should not downgrade operator-overridden revision")
 }
 
-// TestSkillCreateGlobal_PermissionRegistered verifies that skill.create_global
-// exists in the permissions registry with the correct fields.
+// TestSkillCreateGlobal_PermissionRegistered pins skill.create_global in the
+// permissions registry: its selector is skill:create_global, it stays out of
+// the skill:manage alias, and a token may carry it only on a hub boundary.
 func TestSkillCreateGlobal_PermissionRegistered(t *testing.T) {
 	found := false
 	for _, p := range permissions.Registry {
@@ -339,17 +340,16 @@ func TestSkillCreateGlobal_PermissionRegistered(t *testing.T) {
 			found = true
 			assert.Equal(t, permissions.ResourceSkill, p.Resource)
 			assert.Equal(t, permissions.ActionCreateGlobal, p.Action)
-			// UATScope intentionally empty: enforceUATConstraints denies every
-			// UAT on hub-level resources (authz.go:~1322), so a UAT scope for
-			// this permission would be a surface we advertise and cannot honour.
-			// Adding it back is gated on open question Q1. See design §3.2.
-			assert.Empty(t, p.UATScope,
-				"skill.create_global must not have a UATScope until Q1 resolves — "+
-					"it would silently widen skill:manage alias expansion and break PAT minting")
+			assert.Equal(t, "skill:create_global", p.UATScope)
+			assert.True(t, p.ExcludeFromManageAlias, "skill.create_global must stay out of the skill:manage alias")
 			break
 		}
 	}
 	assert.True(t, found, "skill.create_global should exist in the permissions registry")
+	assert.NotContains(t, permissions.UATManageScopesFor(permissions.ResourceSkill), "skill:create_global")
+	boundaries, reviewed := permissions.SelectorAllowedBoundaries("skill.create_global")
+	assert.True(t, reviewed)
+	assert.Equal(t, []permissions.BoundaryKind{permissions.BoundaryKindHub}, boundaries)
 }
 
 // TestActionCreateGlobal_ConstantsAgree guards the duplicated ActionCreateGlobal

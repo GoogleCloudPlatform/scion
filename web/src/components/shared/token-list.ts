@@ -629,6 +629,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'skill:create_global',
+    label: 'skill:create_global',
+    description: 'Create skills in the global (hub) catalog',
+    resource: 'skill',
+    isAlias: false,
+  },
+  {
     value: 'skill:delete',
     label: 'skill:delete',
     description: 'Delete skills',
