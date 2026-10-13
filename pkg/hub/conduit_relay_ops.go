@@ -131,6 +131,25 @@ func (s *Server) recheckRelayAdmission(ctx context.Context, c conduitAdmissionCl
 		case c.TokenRunEnforce && c.TokenRunID != a.RunID:
 			return deny(conduit.CloseUnauthenticated, "credential run superseded")
 		}
+		// The admitting agent token's current status and the agent's
+		// hold, as agent-token authentication checks them on every
+		// request.
+		if cs := s.authConfig.CredentialStore; cs != nil && c.CredentialID != "" {
+			if _, _, err := evaluateAgentCredentialStatus(ctx, cs, c.CredentialID); errors.Is(err, errAgentCredentialRevoked) {
+				return deny(conduit.CloseUnauthenticated, "agent credential revoked")
+			} else if err != nil {
+				return unavailable("agent credential lookup failed")
+			}
+		}
+		if hs := s.authConfig.HoldStore; hs != nil {
+			held, err := hs.HasActiveAgentHold(ctx, c.ID)
+			switch {
+			case err != nil:
+				return unavailable("agent hold lookup failed")
+			case held:
+				return deny(conduit.CloseUnauthenticated, "agent held")
+			}
+		}
 		return conduitRelayVerdict{verdict: conduitAuthzAllowed}
 	case registry.PrincipalBroker:
 		var fp conduitBrokerSecretFingerprint
@@ -363,7 +382,8 @@ func (s *Server) hubRelaySessionRecheck(w http.ResponseWriter, r *http.Request, 
 		switch v.verdict {
 		case conduitAuthzAllowed:
 			res.OK = true
-			if admissionHalfLifeLeft(c, now) {
+			// Re-issued only while the credential itself is valid.
+			if admissionHalfLifeLeft(c, now) && (c.CredentialExpiry == 0 || now.Unix() < c.CredentialExpiry) {
 				if tok, err := s.reissueAdmissionToken(c, time.Time{}, now); err == nil {
 					res.AdmissionToken = tok
 				}

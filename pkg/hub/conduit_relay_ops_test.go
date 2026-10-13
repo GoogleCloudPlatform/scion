@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -71,6 +72,7 @@ func startRelayOpsHub(t *testing.T, srv *Server, st store.Store) *relayOpsFixtur
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{InstanceID: "hub-ext", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now())}))
 	f.relayGen = f.registerRelay(t, "relay-0")
 	f.internal = httptest.NewServer(srv.ConduitInternalHandler())
@@ -530,25 +532,37 @@ func TestRelayAdmit_BrokerHMAC(t *testing.T) {
 }
 
 // TestRelayAdmissionToken_NotLogged (criterion 30): the admission token
-// never appears in the hub's logs.
+// never appears in the hub's logs (slog and the standard logger) on any
+// operation: Admit, RPC forward (accepted and refused), refresh, session
+// and stream re-checks.
 func TestRelayAdmissionToken_NotLogged(t *testing.T) {
 	var buf bytes.Buffer
 	var mu sync.Mutex
+	w := lockedWriter{w: &buf, mu: &mu}
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(w)
+	t.Cleanup(func() { slog.SetDefault(prev); log.SetOutput(prevOut); log.SetFlags(prevFlags) })
 
 	f, cf := newUserRelayOps(t)
-	adm := f.mustAdmit(t, bearer(ownerJWT(t, cf)), "s1")
-	_, _ = rpcCall(t, f.hub, "s1", adm.AdmissionToken, "/v1/unknown")
-	_, _ = rpcCall(t, f.hub, "s2", adm.AdmissionToken, "/v1/unknown")
-	_ = sessionRecheck(t, f.hub, relay.HubSessionRecheckItem{SessionID: "s1", AdmissionToken: adm.AdmissionToken})
+	user := f.mustAdmit(t, bearer(ownerJWT(t, cf)), "s1")
+	agentTok, err := cf.srv.GenerateAgentToken(cf.agent.ID, cf.agent.ProjectID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+	agent := f.mustAdmit(t, http.Header{"X-Scion-Agent-Token": {agentTok}}, "s-agent")
+	_, _ = rpcCall(t, f.hub, "s1", user.AdmissionToken, "/v1/unknown")
+	_, _ = rpcCall(t, f.hub, "s2", user.AdmissionToken, "/v1/unknown")
+	_ = f.hub.Call(context.Background(), relay.HubSessionPath("s-agent", "refresh"), relay.HubRefreshRequest{AdmissionToken: agent.AdmissionToken, Credential: []byte("bad")}, nil)
+	_ = sessionRecheck(t, f.hub, relay.HubSessionRecheckItem{SessionID: "s1", AdmissionToken: user.AdmissionToken},
+		relay.HubSessionRecheckItem{SessionID: "s-agent", AdmissionToken: agent.AdmissionToken})
+	_ = f.hub.Call(context.Background(), relay.HubStreamRecheckPath, relay.HubStreamRecheckRequest{Items: []relay.HubStreamRecheckItem{{UserSessionID: "s1", AdmissionToken: user.AdmissionToken}}}, nil)
 
 	mu.Lock()
 	defer mu.Unlock()
-	enc, mac, _ := strings.Cut(adm.AdmissionToken, ".")
-	assert.NotContains(t, buf.String(), enc, "token claims in the log")
-	assert.NotContains(t, buf.String(), mac, "token MAC in the log")
+	for _, tok := range []string{user.AdmissionToken, agent.AdmissionToken} {
+		assert.NotContains(t, buf.String(), tok, "a token in the log")
+		assert.NotContains(t, buf.String(), tok[:24], "a token prefix in the log")
+	}
 }
 
 // lockedWriter serializes writes from concurrent loggers.

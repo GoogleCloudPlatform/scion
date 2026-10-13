@@ -102,6 +102,10 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	if s.conduit.Load() != nil || s.conduitExternal.Load() != nil {
 		return errors.New("conduit already started")
 	}
+	// Admission tokens minted on one hub replica must open on every other.
+	if _, err := s.conduitAdmissionAEAD(); err != nil {
+		return fmt.Errorf("conduit external relay mode: %w", err)
+	}
 	if opts.PeerAuth == nil {
 		return errors.New("conduit external relay mode: no relay-peer authenticator configured")
 	}

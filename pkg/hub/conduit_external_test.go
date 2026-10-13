@@ -71,6 +71,7 @@ func newExternalFixture(t *testing.T) *externalFixture {
 	f.reg = registry.New(f.regStore, registry.Config{})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	f.srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.NoError(t, f.srv.StartConduitExternal(ctx, externalOptions(t, f)))
 	return f
 }
@@ -111,14 +112,18 @@ func TestConduitExternal_StartChecks(t *testing.T) {
 	t.Cleanup(cancel)
 
 	setConduitExperiment(t, f.srv, false)
+	f.srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.ErrorIs(t, f.srv.StartConduitExternal(ctx, externalOptions(t, f)), errConduitExternalDisabled)
 	setConduitExperiment(t, f.srv, true)
 
 	noAuth := externalOptions(t, f)
 	noAuth.PeerAuth = nil
+	f.srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.Error(t, f.srv.StartConduitExternal(ctx, noAuth))
 
+	f.srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.NoError(t, f.srv.StartConduitExternal(ctx, externalOptions(t, f)))
+	f.srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.Error(t, f.srv.StartConduitExternal(ctx, externalOptions(t, f)), "started twice")
 	require.Error(t, f.srv.StartConduitRelay(ctx, ConduitRelayOptions{PeerAuth: externalOptions(t, f).PeerAuth, Store: f.regStore, Registry: f.reg}),
 		"an in-process relay cannot start next to the external runtime")
@@ -269,6 +274,7 @@ func TestConduitExternal_DialReadsNoStore(t *testing.T) {
 	f.reg = registry.New(counting, registry.Config{})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	f.srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.NoError(t, f.srv.StartConduitExternal(ctx, externalOptions(t, f)))
 	before := reads.Load()
 	for i := 0; i < 3; i++ {
@@ -278,4 +284,21 @@ func TestConduitExternal_DialReadsNoStore(t *testing.T) {
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	}
 	assert.Equal(t, before, reads.Load(), "a dial reads no relay rows")
+}
+
+// testRelaySessionSecret is the shared session secret of the test hubs in
+// external relay mode (admission tokens are keyed from it).
+const testRelaySessionSecret = "relay-test-session-secret-0123456789abcdef"
+
+// TestConduitExternal_RequiresSessionSecret: external relay mode refuses to
+// start without the shared session secret, which keys admission tokens
+// every hub replica must open.
+func TestConduitExternal_RequiresSessionSecret(t *testing.T) {
+	f := &externalFixture{conduitFixture: newConduitFixture(t)}
+	f.regStore = entadapter.NewConduitRegistryStore(enttest.NewClient(t))
+	f.reg = registry.New(f.regStore, registry.Config{})
+	f.srv.config.SharedSigningSecret = ""
+	err := f.srv.StartConduitExternal(context.Background(), externalOptions(t, f))
+	require.ErrorIs(t, err, errConduitAdmissionNoKey)
+	assert.False(t, f.srv.ConduitExternal())
 }

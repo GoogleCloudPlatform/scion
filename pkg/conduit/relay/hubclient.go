@@ -213,15 +213,15 @@ func WelcomeGrantKeys(keys []HubGrantKey) []*conduitv1.GrantKey {
 	return out
 }
 
-// forwardedCredentialHeaders are the dialer headers a relay passes to Admit
-// (and the hub accepts from it): the credentials the hub's verifiers read,
-// and the run id an agent presents. Trusted-proxy identity headers are
-// never forwarded: they are trusted only from a proxy in front of the hub.
+// forwardedCredentialHeaders is the fixed allowlist of dialer headers that
+// cross from a relay to the hub's Admit (design §3.9 "Forwarded
+// headers"): the credentials the hub's verifiers read and the run id an
+// agent presents. Forwarding is default-deny: no other header crosses,
+// whatever the request lists. Both the relay and the hub apply this list.
 var forwardedCredentialHeaders = []string{
 	"Authorization",
 	"X-Scion-Agent-Token",
 	"X-Scion-Run-Id",
-	"X-Goog-IAP-JWT-Assertion",
 	"X-Api-Key",
 	"X-Scion-Broker-Id",
 	"X-Scion-Timestamp",
@@ -231,34 +231,52 @@ var forwardedCredentialHeaders = []string{
 	"X-Scion-On-Behalf-Of",
 }
 
-// hopByHopHeaders are never forwarded (RFC 9110 §7.6.1), nor is Host,
-// which travels as HubAdmitRequest.Host.
-var hopByHopHeaders = map[string]bool{
-	"Connection": true, "Keep-Alive": true, "Proxy-Authenticate": true, "Proxy-Authorization": true,
-	"Proxy-Connection": true, "Te": true, "Trailer": true, "Transfer-Encoding": true, "Upgrade": true, "Host": true,
+// brokerSignedHeaders are the extra headers a broker request may list in
+// X-Scion-Signed-Headers and have forwarded, so its signature verifies as
+// sent. A request without X-Scion-Broker-Id gets no expansion; a listed
+// name outside this set is not forwarded (the signature then fails).
+var brokerSignedHeaders = map[string]bool{"Content-Type": true}
+
+// neverForwardedHeader reports a header that never crosses to the hub
+// whatever list names it: proxy identity and addressing headers, cookies
+// and every X-Goog-* header.
+func neverForwardedHeader(k string) bool {
+	switch {
+	case strings.HasPrefix(k, "X-Forwarded-"), strings.HasPrefix(k, "X-Goog-"):
+		return true
+	}
+	switch k {
+	case "Forwarded", "X-Real-Ip", "Cookie", "Host", "Connection", "Keep-Alive", "Proxy-Authenticate",
+		"Proxy-Authorization", "Proxy-Connection", "Te", "Trailer", "Transfer-Encoding", "Upgrade":
+		return true
+	}
+	return false
 }
 
-// ForwardCredentialHeaders returns the headers of h a relay forwards to
-// Admit: the credential headers, plus any header a broker signature lists
-// in X-Scion-Signed-Headers, so the signature verifies as sent. Hop-by-hop
-// headers are dropped.
+// ForwardCredentialHeaders returns the headers of h that cross to the hub's
+// Admit: the allowlisted credential headers and, for a broker request
+// only, the broker-signable headers its X-Scion-Signed-Headers lists.
 func ForwardCredentialHeaders(h http.Header) map[string][]string {
 	out := map[string][]string{}
-	add := func(name string) {
-		k := http.CanonicalHeaderKey(strings.TrimSpace(name))
-		if k == "" || hopByHopHeaders[k] {
+	add := func(k string) {
+		if neverForwardedHeader(k) {
 			return
 		}
 		if v, ok := h[k]; ok && len(v) > 0 {
 			out[k] = append([]string(nil), v...)
 		}
 	}
-	for _, name := range forwardedCredentialHeaders {
-		add(name)
+	for _, k := range forwardedCredentialHeaders {
+		add(k)
+	}
+	if h.Get("X-Scion-Broker-Id") == "" {
+		return out
 	}
 	for _, list := range h.Values("X-Scion-Signed-Headers") {
-		for _, name := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == ';' || r == ' ' }) {
-			add(name)
+		for _, name := range strings.Split(list, ";") {
+			if k := http.CanonicalHeaderKey(strings.TrimSpace(name)); brokerSignedHeaders[k] {
+				add(k)
+			}
 		}
 	}
 	return out

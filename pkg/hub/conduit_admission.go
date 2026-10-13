@@ -15,15 +15,14 @@
 package hub
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hkdf"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"log/slog"
-	"strings"
 	"time"
 )
 
@@ -36,19 +35,29 @@ import (
 // status and the principal's current permissions on every operation. It
 // proves who was admitted, never what they may do now.
 //
-// The token is the base64url JSON claims, ".", and the base64url
-// HMAC-SHA256 of the encoded claims under a hub-only key derived by HKDF
-// from the session secret with its own label (independent of the
-// relay-peer secret, which relays hold). A session-secret rotation
-// invalidates every outstanding token: there is no overlap key. Neither
-// the token nor its MAC is ever logged or put in an error.
+// The token is the base64url encoding of a random 12-byte nonce and the
+// AES-256-GCM sealing of the JSON claims under a hub-only key derived by
+// HKDF from the session secret with its own label (independent of the
+// relay-peer secret, which relays hold). The claims are confidential to
+// the hub, and opening a token authenticates it: a token that does not
+// open, or was sealed under another key, is refused. A session-secret
+// rotation invalidates every outstanding token: there is no overlap key.
+// The token is never logged or put in an error.
 
 // conduitAdmissionKeyInfo is the HKDF label of the admission token key. It
-// differs from every other derivation of the session secret.
-const conduitAdmissionKeyInfo = "scion conduit relay admission token v1"
+// differs from every other derivation of the session secret and from the
+// relay-peer secret's.
+const conduitAdmissionKeyInfo = "scion conduit relay admission token aead v2"
+
+// conduitAdmissionAAD binds a sealed token to its use.
+const conduitAdmissionAAD = "scion conduit relay admission token"
 
 // conduitAdmissionTokenVersion is the claims format version.
-const conduitAdmissionTokenVersion = 1
+const conduitAdmissionTokenVersion = 2
+
+// errConduitAdmissionNoKey refuses admission tokens without a shared
+// session secret: tokens from one hub replica must open on every other.
+var errConduitAdmissionNoKey = errors.New("conduit admission tokens need the shared session secret (--session-secret or SCION_SERVER_SESSION_SECRET)")
 
 // conduitAdmissionMaxAge caps a token's lifetime after admission (or
 // re-issue): exp <= min(credential_expiry, issued + 1h).
@@ -89,8 +98,8 @@ type conduitAdmissionClaims struct {
 
 // Admission token verification failures. Each maps to one status.
 var (
-	// errAdmissionTokenInvalid: missing, malformed, wrong version or bad
-	// MAC (401).
+	// errAdmissionTokenInvalid: missing, malformed, wrong version, or it
+	// does not open under the hub's key (401).
 	errAdmissionTokenInvalid = errors.New("admission token invalid")
 	// errAdmissionTokenExpired: past exp where expiry applies (401).
 	errAdmissionTokenExpired = errors.New("admission token expired")
@@ -101,37 +110,28 @@ var (
 	errAdmissionTokenRelay = errors.New("admission token is for another relay")
 )
 
-// conduitAdmissionKey returns the admission token key, derived on first
-// use. Without a session secret each process holds a random key, so its
-// tokens verify on that process only (a single-node deployment).
-func (s *Server) conduitAdmissionKey() []byte {
+// conduitAdmissionAEAD returns the admission token cipher, derived on
+// first use from the shared session secret.
+func (s *Server) conduitAdmissionAEAD() (cipher.AEAD, error) {
 	s.conduitAdmissionKeyOnce.Do(func() {
 		secret := s.config.SharedSigningSecret
 		if secret == "" {
-			key := make([]byte, 32)
-			if _, err := rand.Read(key); err != nil {
-				panic(err)
-			}
-			slog.Warn("Conduit admission tokens use a per-process key: no shared session secret is set, so relays must call this hub replica only")
-			s.conduitAdmissionKeyBytes = key
+			s.conduitAdmissionKeyErr = errConduitAdmissionNoKey
 			return
 		}
 		key, err := hkdf.Key(sha256.New, []byte(secret), nil, conduitAdmissionKeyInfo, 32)
 		if err != nil {
-			panic(err)
+			s.conduitAdmissionKeyErr = err
+			return
 		}
-		s.conduitAdmissionKeyBytes = key
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			s.conduitAdmissionKeyErr = err
+			return
+		}
+		s.conduitAdmissionAEADv, s.conduitAdmissionKeyErr = cipher.NewGCM(block)
 	})
-	return s.conduitAdmissionKeyBytes
-}
-
-// newAdmissionNonce returns a random token nonce.
-func newAdmissionNonce() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b[:])
+	return s.conduitAdmissionAEADv, s.conduitAdmissionKeyErr
 }
 
 // setAdmissionLifetime sets IssuedAt and Expiry from now:
@@ -145,25 +145,54 @@ func setAdmissionLifetime(c *conduitAdmissionClaims, now time.Time) {
 	c.Expiry = exp
 }
 
-// mintAdmissionToken encodes and MACs c (with a fresh nonce).
+// mintAdmissionToken seals c.
 func (s *Server) mintAdmissionToken(c conduitAdmissionClaims) (string, error) {
+	aead, err := s.conduitAdmissionAEAD()
+	if err != nil {
+		return "", err
+	}
 	c.V = conduitAdmissionTokenVersion
 	c.Nonce = newAdmissionNonce()
 	payload, err := json.Marshal(c)
 	if err != nil {
 		return "", err
 	}
-	enc := base64.RawURLEncoding.EncodeToString(payload)
-	return enc + "." + base64.RawURLEncoding.EncodeToString(s.admissionMAC(enc)), nil
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	sealed := aead.Seal(nonce, nonce, payload, []byte(conduitAdmissionAAD))
+	return base64.RawURLEncoding.EncodeToString(sealed), nil
 }
 
-func (s *Server) admissionMAC(encoded string) []byte {
-	m := hmac.New(sha256.New, s.conduitAdmissionKey())
-	m.Write([]byte(encoded))
-	return m.Sum(nil)
+// openAdmissionToken authenticates and decrypts token (nil, false on any
+// failure).
+func (s *Server) openAdmissionToken(token string) ([]byte, bool) {
+	aead, err := s.conduitAdmissionAEAD()
+	if err != nil {
+		return nil, false
+	}
+	sealed, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(sealed) < aead.NonceSize()+aead.Overhead() {
+		return nil, false
+	}
+	payload, err := aead.Open(nil, sealed[:aead.NonceSize()], sealed[aead.NonceSize():], []byte(conduitAdmissionAAD))
+	if err != nil {
+		return nil, false
+	}
+	return payload, true
 }
 
-// admissionCheck is what an operation requires of a token beyond its MAC.
+// newAdmissionNonce returns a random claims nonce.
+func newAdmissionNonce() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:])
+}
+
+// admissionCheck is what an operation requires of a token beyond opening.
 type admissionCheck struct {
 	// sessionID is the session the operation is for.
 	sessionID string
@@ -176,21 +205,14 @@ type admissionCheck struct {
 	allowExpired bool
 }
 
-// verifyAdmissionToken checks token's MAC, version, session and relay
-// binding and (unless allowed) expiry, and returns its claims. The error
-// is one of the errAdmissionToken* values and never carries the token.
+// verifyAdmissionToken opens token (authenticating it), checks its
+// version, session and relay binding and (unless allowed) expiry, and
+// returns its claims. The error is one of the errAdmissionToken* values
+// and never carries the token.
 func (s *Server) verifyAdmissionToken(token string, want admissionCheck, now time.Time) (conduitAdmissionClaims, error) {
 	var c conduitAdmissionClaims
-	enc, macPart, ok := strings.Cut(token, ".")
-	if !ok || enc == "" || macPart == "" {
-		return c, errAdmissionTokenInvalid
-	}
-	mac, err := base64.RawURLEncoding.DecodeString(macPart)
-	if err != nil || !hmac.Equal(mac, s.admissionMAC(enc)) {
-		return c, errAdmissionTokenInvalid
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(enc)
-	if err != nil {
+	payload, ok := s.openAdmissionToken(token)
+	if !ok {
 		return c, errAdmissionTokenInvalid
 	}
 	if err := json.Unmarshal(payload, &c); err != nil || c.V != conduitAdmissionTokenVersion || c.SessionID == "" || c.Kind == "" || c.ID == "" {

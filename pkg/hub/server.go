@@ -17,6 +17,7 @@ package hub
 import (
 	"bufio"
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -1650,10 +1651,12 @@ type Server struct {
 	// conduitEligibleRelays is the number of eligible separate relays at
 	// the last check (-1: not checked yet), read by the readiness gauge.
 	conduitEligibleRelays atomic.Int64
-	// conduitAdmissionKeyBytes is the admission token key
-	// (conduit_admission.go), derived once.
-	conduitAdmissionKeyOnce  sync.Once
-	conduitAdmissionKeyBytes []byte
+	// conduitAdmissionAEADv is the admission token cipher
+	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
+	// it could not be.
+	conduitAdmissionKeyOnce sync.Once
+	conduitAdmissionAEADv   cipher.AEAD
+	conduitAdmissionKeyErr  error
 	// conduitRenewal verifies latest grants and mints renewal grants for
 	// relay stream re-checks (conduit_renewal.go); nil until set.
 	conduitRenewal atomic.Pointer[conduitRenewalGrants]

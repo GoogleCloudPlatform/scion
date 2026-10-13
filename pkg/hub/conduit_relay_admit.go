@@ -79,6 +79,15 @@ func (s *Server) hubAdmit(w http.ResponseWriter, r *http.Request, peer string, b
 		http.Error(w, "relay instance or generation is not registered", http.StatusConflict)
 		return
 	}
+	// A session id is admitted once.
+	if _, exists, err := rt.store.ListPrincipalSessionsBySession(r.Context(), req.SessionID); err != nil {
+		http.Error(w, "registry unavailable", http.StatusServiceUnavailable)
+		return
+	} else if exists {
+		w.Header().Set(relay.HeaderStaleReason, "session_exists")
+		http.Error(w, "session id already in use", http.StatusConflict)
+		return
+	}
 	// The dialer reached this relay at its registered public URL; a
 	// request naming another host is not one this relay received.
 	if !relayServesHost(row.PublicEndpoint, req.Host) {
@@ -106,8 +115,15 @@ func (s *Server) hubAdmit(w http.ResponseWriter, r *http.Request, peer string, b
 		}
 		s.writeRelayAdmission(w, fr, a, req, peer)
 	}
+	if h := conduitRelayAdmitObserve; h != nil {
+		h(fwd)
+	}
 	s.applyMiddleware(s.guarded("/api/v1/conduit", admit)).ServeHTTP(w, fwd)
 }
+
+// conduitRelayAdmitObserve, when set, sees each forwarded handshake request
+// before the middleware chain does (tests).
+var conduitRelayAdmitObserve func(*http.Request)
 
 // writeRelayAdmission answers an admitted dialer: its principal and the
 // admission token for the relay's session.
@@ -137,6 +153,12 @@ func (s *Server) writeRelayAdmission(w http.ResponseWriter, r *http.Request, a c
 		return
 	}
 	switch p.Kind {
+	case registry.PrincipalAgent:
+		// Every later operation re-checks this agent token's status and
+		// the agent's hold.
+		if claims := GetAgentFromContext(r.Context()); claims != nil {
+			c.CredentialID = claims.ID
+		}
 	case registry.PrincipalBroker:
 		c.CredentialID = hex.EncodeToString(a.brokerSecret[:])
 	case registry.PrincipalUser:

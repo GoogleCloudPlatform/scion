@@ -60,6 +60,7 @@ func newExternalHub(t *testing.T, replay relayPeerReplayStore) *httptest.Server 
 	opts.replayStore = replay
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	f.srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.NoError(t, f.srv.StartConduitExternal(ctx, opts))
 	srv := httptest.NewServer(f.srv.ConduitInternalHandler())
 	t.Cleanup(srv.Close)
@@ -195,6 +196,7 @@ func TestHubInternal_SettingsReloadKeepsPeerAuth(t *testing.T) {
 	f.reg = registry.New(f.regStore, registry.Config{})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	f.srv.config.SharedSigningSecret = testRelaySessionSecret
 	require.NoError(t, f.srv.StartConduitExternal(ctx, externalOptions(t, f)))
 	hub := httptest.NewServer(f.srv.ConduitInternalHandler())
 	t.Cleanup(hub.Close)
