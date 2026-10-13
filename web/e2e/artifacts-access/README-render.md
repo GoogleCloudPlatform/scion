@@ -50,7 +50,7 @@ anchor.
 - The isolation rows (R2-05, R2-06, R2-13) record named checks and assert nothing themselves. Each row is then decided
   by one generic assertion ("R2 isolation row failed; see restricted evidence") from a single call site, so the output
   does not tell which check failed, or how many. The checks and their inputs go in the restricted evidence only
-  (`rows[...].ui.checks`, `probes`, `frameRequests`, `sessionBearingFrameRequest`). The HTML reporter would also
+  (`rows[...].ui.checks`, `probes`, `frameRequests`, `frameSessionAll`, `frameSessionAlert`). The HTML reporter would also
   render each inner browser action and its error, so the render config uses only the list reporter (and github in
   CI).
 - A frame request whose Cookie header could not be read counts as unknown, which fails the session check. It never
@@ -61,8 +61,11 @@ anchor.
 - The journey refuses to run (before any identity exists) unless the resolved settings are the render config,
   reporters list, github or json only, and trace, video and screenshot off. So `--reporter=html`, `--trace`, `--ui`
   and `--debug` are refused for this suite: they would record each inner action of the isolation rows.
-- After the rows, a whole-run sweep checks every frame request of every identity for a Cookie header. It decides no
-  row; its result is restricted evidence (`frameSessionAll`).
+- Playwright's failure page snapshot (`error-context.md`) is turned off (`PLAYWRIGHT_NO_COPY_PROMPT`, set by the
+  render config) for the same reason as traces: it could capture frame content. The journey refuses to run without it.
+- In the cleanup (so also after a timeout), a whole-run sweep checks every frame request of every identity for a
+  Cookie header. It decides no row; its result is restricted evidence (`frameSessionAll`). `swept` other than `true`
+  means unknown, never clean, and raises the restricted `frameSessionAlert` like a session-bearing or unread request.
 - R2-17b (view expiry) and R2-21 (an HTML bundle in the chat preview) are declared and skipped with a `NOT RUN`
   annotation. The view lifetime is a fixed constant, and the chat HTML preview is not on this build.
 - R2-20x is recorded only (status `observed`).

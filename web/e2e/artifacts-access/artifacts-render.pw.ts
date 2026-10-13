@@ -257,10 +257,13 @@ const r2 = {
   markdownInert: [] as Array<Record<string, unknown>>,
   consoleBlocked: [] as Array<{ who: string; count: number }>,
   consoleCounts: {} as Record<string, number>,
-  /** Restricted: set when a frame request carried the viewer's session. */
-  sessionBearingFrameRequest: false,
-  /** Restricted: the whole-run frame session sweep. */
-  frameSessionAll: null as null | Record<string, number>,
+  /**
+   * Restricted: set when a frame request carried the viewer's session, or
+   * could not be shown not to carry it (an unread header, or no sweep).
+   */
+  frameSessionAlert: false,
+  /** Restricted: the whole-run frame session sweep; swept false means unknown. */
+  frameSessionAll: { swept: false } as Record<string, number | boolean>,
   chat: {} as Record<string, unknown>,
 };
 
@@ -384,6 +387,16 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
     if (rec) {
       rec.status = res.status();
       if (!rec.cookieHeader.read) readCookieHeader(res.request(), rec);
+      if (rec.frameUnavailable) {
+        // The frame exists by now: classify from it rather than the fallback.
+        try {
+          rec.topLevelDocument =
+            res.request().isNavigationRequest() && res.frame().parentFrame() === null;
+          delete rec.frameUnavailable;
+        } catch {
+          // Still unavailable: the fallback stands (counted in the sweep).
+        }
+      }
     }
     if (who === 'anonymous') return;
     const req = res.request();
@@ -954,9 +967,10 @@ const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = Object.fr
 
 /**
  * Why this run may not carry the isolation rows, or undefined when it may:
- * the render config, list/github reporters only, no trace, video or
- * screenshot, no debugger. Checked from the resolved run settings, so CLI
- * overrides (--reporter, --trace, --ui, --debug) cannot bypass it.
+ * the render config, reporters list, github or json only, no trace, video
+ * or screenshot, no debugger, and the failure page snapshot off. Checked
+ * from the resolved run settings, so CLI overrides (--reporter, --trace,
+ * --ui, --debug) cannot bypass it.
  */
 function runSettingsRefusal(): string | undefined {
   const info = test.info();
@@ -973,6 +987,8 @@ function runSettingsRefusal(): string | undefined {
   };
   if (!off(use.trace) || !off(use.video) || !off(use.screenshot)) return WRONG_CONFIG;
   if (process.env.PWDEBUG) return WRONG_CONFIG;
+  // Playwright's failure page snapshot (error-context.md) can hold frame content.
+  if (!process.env.PLAYWRIGHT_NO_COPY_PROMPT) return WRONG_CONFIG;
   return undefined;
 }
 
@@ -1417,7 +1433,7 @@ async function runMain(browser: Browser): Promise<void> {
         const session = await frameSessionFacts(
           requestsIn('owner', ['R2-01', 'R2-02', 'R2-03', 'R2-04', 'R2-05'])
         );
-        if (session.bearing > 0 || apiNavStatus === 200) r2.sessionBearingFrameRequest = true;
+        if (session.bearing > 0 || apiNavStatus === 200) r2.frameSessionAlert = true;
         if (apiNavStatus !== 200 && apiNavStatus !== 401) {
           // An ordinary finding, kept in the restricted evidence only (no
           // annotation, so no output tells which check it was); the status
@@ -1504,7 +1520,7 @@ async function runMain(browser: Browser): Promise<void> {
           // The popup's own sub-resources (and the app page's frame, if it reloads).
           const sub = requestsIn('owner', ['R2-06-popup']).filter((q) => !q.topLevelDocument);
           const session = await frameSessionFacts(sub);
-          if (session.bearing > 0) r2.sessionBearingFrameRequest = true;
+          if (session.bearing > 0) r2.frameSessionAlert = true;
           const headers = await viewHeaders('owner', frameSrc, r);
           phase = { samePath, rendered, result, doc, sub, session, headers };
         } finally {
@@ -1595,7 +1611,7 @@ async function runMain(browser: Browser): Promise<void> {
       const landedId = new URL(page.url()).pathname.split('/').pop()!;
       expect.soft(landedId, 'landed on the created markdown').toBe(pub.createdId);
       r2.markdown = { id: pub.createdId ?? landedId, title };
-      if (landedId !== pub.createdId) r2.extraArtifactIds.push(landedId);
+      if (pub.createdId && landedId !== pub.createdId) r2.extraArtifactIds.push(landedId);
       expect.soft(pub.entry, 'entry defaults to index.md').toBe('index.md');
 
       const md = await openMarkdown('owner');
@@ -2017,7 +2033,7 @@ async function runMain(browser: Browser): Promise<void> {
         const page2 = await textIs(htmlFrame(page).locator('#page2'), 'R2 page two v3');
         await settle(page);
         const session = await frameSessionFacts(requestsIn('member', ['R2-13']));
-        if (session.bearing > 0) r2.sessionBearingFrameRequest = true;
+        if (session.bearing > 0) r2.frameSessionAlert = true;
         const caps = await j.api('member', 'GET', `/api/v1/artifacts/${bundleId()}`, undefined, r);
         const mint = await latestMint('member', 3);
         r.api.push({
@@ -2230,14 +2246,10 @@ async function runMain(browser: Browser): Promise<void> {
   r2.step = 'R2-20';
   await runChatRow();
 
-  // Whole-run sweep: every frame request of every identity (restricted;
-  // decides no row). A session-bearing or unread one sets the restricted
-  // flag that the grader escalates by direct message.
-  const all = await frameSessionFacts(r2.frameRequests.filter((q) => q.who !== 'anonymous'));
-  r2.frameSessionAll = all;
-  if (all.bearing > 0 || all.unread > 0) {
-    r2.sessionBearingFrameRequest = true;
-    j.state.findings.push({ id: 'frame-session-sweep', text: ISOLATION_FAIL });
+  // No page stays open into the end of the test (defence in depth: nothing
+  // left for a failure-time page capture).
+  for (const key of KEYS) {
+    for (const p of j.state.ids[key]?.context.pages() ?? []) await p.close();
   }
 
   // Every identity still holds its own session after the rows.
@@ -2392,6 +2404,23 @@ async function runCleanup(testInfo: {
   const cleanup: Record<string, unknown> = {};
   const states: Record<string, string> = {};
   r2.step = 'cleanup';
+
+  // Whole-run sweep, here so it runs after a timeout too: every frame
+  // request of every identity (restricted; decides no row). A session-
+  // bearing or unread one, or a sweep that did not complete, raises the
+  // restricted alert that the grader escalates by direct message.
+  try {
+    const all = await frameSessionFacts(r2.frameRequests.filter((q) => q.who !== 'anonymous'));
+    const unavailable = r2.frameRequests.filter((q) => q.frameUnavailable).length;
+    r2.frameSessionAll = { swept: true, ...all, frameUnavailable: unavailable };
+    if (all.bearing > 0 || all.unread > 0) {
+      r2.frameSessionAlert = true;
+      j.state.findings.push({ id: 'frame-session-sweep', text: ISOLATION_FAIL });
+    }
+  } catch {
+    r2.frameSessionAll = { swept: false };
+  }
+  if (r2.frameSessionAll.swept !== true) r2.frameSessionAlert = true;
 
   for (const identity of Object.values(j.state.ids) as Array<Identity<Key> | undefined>) {
     for (const page of identity?.context.pages() ?? []) await page.close();
@@ -2571,7 +2600,7 @@ async function runCleanup(testInfo: {
   ev.files = r2.files;
   ev.publishes = r2.publishes;
   ev.chat = r2.chat;
-  ev.sessionBearingFrameRequest = r2.sessionBearingFrameRequest;
+  ev.frameSessionAlert = r2.frameSessionAlert;
   ev.frameSessionAll = r2.frameSessionAll;
   ev.rows = j.state.rows;
   ev.findings = j.state.findings;

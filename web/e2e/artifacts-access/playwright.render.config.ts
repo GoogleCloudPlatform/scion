@@ -21,14 +21,19 @@ const CI = !!process.env.CI;
 // throwaway member-level test hub with no broker, or E2E_TARGET_URL) and
 // output dir.
 //
-// It has its own config for one reason: the reporters. The isolation rows
-// must not reveal which check failed. Their verdict is one generic
-// assertion, but the HTML reporter also renders every inner browser action
-// and its error. So this config has no HTML reporter, only list (and
-// github in CI), which print the generic test errors alone. The journey
-// skips itself unless it runs under this config (E2E_R2_RENDER_CONFIG is
-// set here and inherited by the workers).
+// It has its own config for one reason: what a run may write. The
+// isolation rows must not reveal which check failed. Their verdict is one
+// generic assertion, but the HTML reporter, traces and Playwright's
+// failure page snapshot (error-context.md) would record each inner browser
+// action, its error or the page content. So this config has list (and
+// github in CI) reporters only, and turns the failure page snapshot off
+// (PLAYWRIGHT_NO_COPY_PROMPT). The journey refuses to run unless the
+// resolved settings match: this config file, reporters list, github or json
+// (the json report has no attachments then), no trace, video or
+// screenshot, no debugger, and the snapshot off. The variables set here
+// are inherited by the workers.
 process.env.E2E_R2_RENDER_CONFIG = '1';
+process.env.PLAYWRIGHT_NO_COPY_PROMPT = '1';
 
 // No traces, videos, screenshots or HARs: they would hold a test
 // identity's session cookie and the view capabilities, and would be
