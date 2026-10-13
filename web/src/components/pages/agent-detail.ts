@@ -1404,13 +1404,19 @@ export class ScionPageAgentDetail extends LitElement {
     }
     if (isAgentLaunching(agent)) {
       const step = agent.launch?.step;
+      const stepText = step ? `Step: ${launchStepLabel(step)}` : '';
+      const stepEl = step
+        ? html`<div class="launch-step" data-testid="launch-step">${stepText}</div>`
+        : nothing;
+      const messageEl = message
+        ? html`<div class="launch-message" data-testid="launch-message">${message}</div>`
+        : nothing;
       return html`
         <div class="agent-launch-banner" data-testid="agent-launch-banner">
           <sl-spinner></sl-spinner>
           <div class="launch-content">
             <div class="launch-title">Launching</div>
-            ${step ? html`<div class="launch-step">Step: ${launchStepLabel(step)}</div>` : nothing}
-            ${message ? html`<div class="launch-message">${message}</div>` : nothing}
+            ${stepEl} ${messageEl}
           </div>
         </div>
       `;
@@ -1440,6 +1446,13 @@ export class ScionPageAgentDetail extends LitElement {
     const reason = launch.state === 'active' ? 'stopping' : launchEndReasonLabel(launch.endReason);
     const task = agent.appliedConfig?.task;
     const canDelete = can(agent._capabilities, 'delete') && !this.deletionLease.isDeleting(agent);
+    const codeEl = code ? html`<span data-testid="launch-code">${code}</span>` : nothing;
+    const messageEl = message
+      ? html`<div class="error-message" data-testid="launch-error-message">${message}</div>`
+      : nothing;
+    const reasonEl = reason
+      ? html`<span data-testid="launch-end-reason">${reason}</span>`
+      : nothing;
     return html`
       <div class="agent-error-banner" data-testid="incomplete-create-banner">
         <sl-icon name="exclamation-octagon"></sl-icon>
@@ -1447,10 +1460,10 @@ export class ScionPageAgentDetail extends LitElement {
           <div class="error-title">Agent create did not complete</div>
           ${code || reason
             ? html`<div class="error-code" data-testid="launch-error-code">
-                ${code ?? ''}${code && reason ? ' — ' : ''}${reason ?? ''}
+                ${codeEl}${code && reason ? ' — ' : ''}${reasonEl}
               </div>`
             : nothing}
-          ${message ? html`<div class="error-message">${message}</div>` : nothing}
+          ${messageEl}
           <div class="error-hint">
             This agent cannot be started or resumed. Delete it and create it again.
           </div>
@@ -1459,11 +1472,11 @@ export class ScionPageAgentDetail extends LitElement {
                 <dl class="error-recreate">
                   ${agent.template
                     ? html`<dt>Template</dt>
-                        <dd>${agent.template}</dd>`
+                        <dd data-testid="incomplete-create-template">${agent.template}</dd>`
                     : nothing}
                   ${task
                     ? html`<dt>Task</dt>
-                        <dd>${task}</dd>`
+                        <dd data-testid="incomplete-create-task">${task}</dd>`
                     : nothing}
                 </dl>
               `
@@ -1474,6 +1487,7 @@ export class ScionPageAgentDetail extends LitElement {
                   <sl-button
                     variant="danger"
                     size="small"
+                    data-testid="incomplete-create-delete"
                     ?loading=${this.actionLoading['delete']}
                     ?disabled=${this.actionLoading['delete']}
                     @click=${(e: MouseEvent): void => void this.handleAction('delete', e)}
@@ -1486,6 +1500,7 @@ export class ScionPageAgentDetail extends LitElement {
             <a
               href="/agents/new?projectId=${encodeURIComponent(agent.projectId)}"
               style="text-decoration: none;"
+              data-testid="incomplete-create-recreate"
             >
               <sl-button variant="default" size="small">
                 <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -1804,6 +1819,7 @@ export class ScionPageAgentDetail extends LitElement {
                     <sl-button
                       variant="success"
                       size="small"
+                      data-testid="header-resume"
                       ?loading=${this.actionLoading['resume']}
                       ?disabled=${this.actionLoading['resume']}
                       @click=${() => this.handleAction('resume')}
@@ -1821,6 +1837,7 @@ export class ScionPageAgentDetail extends LitElement {
                             variant="default"
                             outline
                             size="small"
+                            data-testid="header-force-resume"
                             ?loading=${this.actionLoading['force-resume']}
                             ?disabled=${this.actionLoading['force-resume']}
                             @click=${() => this.handleAction('force-resume')}
@@ -1833,6 +1850,7 @@ export class ScionPageAgentDetail extends LitElement {
                     <sl-button
                       variant="success"
                       size="small"
+                      data-testid="header-start"
                       ?loading=${this.actionLoading['start']}
                       ?disabled=${this.actionLoading['start']}
                       @click=${() => this.handleAction('start')}
@@ -1933,6 +1951,7 @@ export class ScionPageAgentDetail extends LitElement {
                 status: agent.phase,
                 label: agent.phase,
                 size: 'small',
+                testId: 'agent-phase',
               })}
               <scion-deletion-badge
                 .deletion=${this.deletionLease.view(agent)}
