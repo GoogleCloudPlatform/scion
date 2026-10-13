@@ -20,7 +20,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -1037,41 +1036,9 @@ func Validate(section string, doc json.RawMessage) []config.ValidationError {
 // validateCrossField applies the rules a JSON schema cannot express, so a
 // write that would leave a section unusable is refused instead of stored.
 func validateCrossField(section string, doc json.RawMessage) []config.ValidationError {
-	switch section {
-	case "artifacts":
-		return validateArtifactsCrossField(doc)
-	case "telemetry":
-		return validateTelemetryCrossField(doc)
-	}
-	return nil
-}
-
-// validateTelemetryCrossField applies the telemetry.cloud.tls rules the
-// settings file loader applies (config.ValidateTelemetryTLS), so the hub
-// does not store a pair it would reject from settings.yaml. Readability
-// of cert_file and key_file is not checked: they are agent-container paths.
-func validateTelemetryCrossField(doc json.RawMessage) []config.ValidationError {
-	var ts TelemetrySettings
-	if err := json.Unmarshal(doc, &ts); err != nil {
-		return []config.ValidationError{{Message: err.Error()}}
-	}
-	if ts.Cloud == nil || ts.Cloud.TLS == nil {
+	if section != "artifacts" {
 		return nil
 	}
-	tls := ts.Cloud.TLS
-	if err := config.ValidateTelemetryTLS(&api.TelemetryTLS{
-		Enabled:            tls.Enabled,
-		InsecureSkipVerify: tls.InsecureSkipVerify,
-		CAFile:             tls.CAFile,
-		CertFile:           tls.CertFile,
-		KeyFile:            tls.KeyFile,
-	}); err != nil {
-		return []config.ValidationError{{Path: "cloud/tls", Message: err.Error()}}
-	}
-	return nil
-}
-
-func validateArtifactsCrossField(doc json.RawMessage) []config.ValidationError {
 	cfg, err := ParseArtifactsDoc(doc)
 	if err != nil {
 		return []config.ValidationError{{Message: err.Error()}}
