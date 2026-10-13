@@ -8,7 +8,7 @@ An **artifact** is a file or a folder that you or an agent publish to the Hub. I
 This guide walks through the common tasks. For every flag, limit, status code and API route, see the [Artifacts reference](/scion/reference/artifacts/).
 
 :::caution[Experimental]
-Artifacts are behind the `hub.artifacts` [experiment](/scion/reference/experiments/), which is off by default, and they need Hub mode. While the experiment is off, the web UI shows no artifact pages and every artifact command fails. See [The artifacts experiment is off](#the-artifacts-experiment-is-off).
+Artifacts are behind the `hub.artifacts` [experiment](/scion/reference/experiments/), which is off by default, and they need Hub mode. While the experiment is off, the web UI shows no artifact pages, every `scion artifact` command fails, and messages sent with `--artifact` lose their references. See [The artifacts experiment is off](#the-artifacts-experiment-is-off).
 :::
 
 ## Who does what
@@ -275,7 +275,7 @@ Agents use the same `scion artifact` command, but in agent mode:
 - **No deleting, expiry changes or moves.** `scion artifact delete` is not available to agents.
 - **Publishing needs the right agent role.** Agents started with `--role readonly` can read artifacts but not publish them; `baseline` and `full` agents can do both. An agent can publish new versions or reviews of someone else's artifact only with *Can edit* on it, granted to the agent or to its project.
 
-An artifact an agent owns has no user owner and no one with *Can manage*, so nobody can share it beyond its home project, and **Grant review access** reaches only people who can already read it. When the work needs readers or reviewers outside the project, the user who delegated to the agent can fetch it (`scion artifact get <ref> --out <folder>`) and publish it as their own artifact, which they can then share.
+An artifact an agent owns has no user owner and no one with *Can manage*, so nobody can share it beyond its home project, and **Grant review access** reaches only people who can already read it. When the work needs readers or reviewers outside the project, the user who delegated to the agent can fetch it (`scion artifact get <ref> --out <folder>`) and publish it as their own artifact, which they can then share. The copy is a new artifact with its own reference, and it starts without the original's history or reviews; versions the agent publishes later still go to the original. If a review is current, add `--kind publish` (or `--accept`) to `get`. To let the agent keep publishing to the copy, raise the home project's grant on the copy to *Can edit*.
 
 ## Troubleshooting
 
@@ -297,7 +297,7 @@ A `404` means that the artifact does not exist **or** that you cannot read it. T
 While `hub.artifacts` is off:
 
 - **Web:** there is no *Artifacts* item in the sidebar, artifact pages show "not found", the project Files area has no *Artifacts* view, and the chat paperclip offers only file upload.
-- **CLI:** every artifact request answers `404`. `scion artifact publish` adds a hint that the experiment may be off; `get` lists it among the possible causes.
+- **CLI:** every artifact request answers `404`. `scion artifact publish` adds a hint that the experiment may be off; `get` lists it among the possible causes. Messages sent with `--artifact` lose their references, with a warning.
 - **Check.** Inside an agent, `scion whoami --full` lists the experiments that are on now. A Hub admin turns the experiment on under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)).
 
 If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every `scion artifact` command, answers `404` (ptone/scion#4932). Messages sent with `--artifact` lose their references, with a warning. Ask a Hub admin to check the Hub's `artifacts` settings.
