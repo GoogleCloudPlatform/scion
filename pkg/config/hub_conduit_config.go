@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Conduit relay-peer authentication modes (server.hub.conduit.peer_auth).
@@ -222,7 +223,8 @@ func ValidatePeerSecret(secret string) error {
 	if len(secret) < ConduitPeerSecretMinBytes {
 		return fmt.Errorf("invalid server.hub.conduit.peer_secret: shorter than %d bytes", ConduitPeerSecretMinBytes)
 	}
-	if strings.Count(secret, secret[:1]) == len(secret) {
+	first, _ := utf8.DecodeRuneInString(secret)
+	if strings.IndexFunc(secret, func(r rune) bool { return r != first }) < 0 {
 		return errors.New("invalid server.hub.conduit.peer_secret: one repeated character")
 	}
 	return nil

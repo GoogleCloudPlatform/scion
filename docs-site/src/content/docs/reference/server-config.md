@@ -195,7 +195,7 @@ server:
 
 Settings of a separate relay process, `scion server --role relay` (external relay mode, `server.hub.conduit.relay_mode: external`). Settings the relay shares with the hub's relay, such as `internal_listen`, `peer_auth`, `peer_secret` and `lifetime_cap`, stay under [`server.hub.conduit`](#conduit-serverhubconduit). All of them are Layer 0 (bootstrap) and read at startup, so a change needs a restart.
 
-The separate relay requires targets on version X or later. Until the production gates of the separate relay are met, it runs on development and test hubs only.
+Until the production gates of the separate relay are met, it runs on development and test hubs only.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |

@@ -82,8 +82,9 @@ func TestRelaySettingCasesCoverAliases(t *testing.T) {
 
 // TestServerEnvPathAliasesBindBothSpellings: the canonical and the
 // underscored env spelling of each aliased key reach the same field in the
-// opsettings env layer, GlobalConfig and VersionedSettings. (The seed
-// consumer reads Layer-1 keys only; these keys are Layer 0.)
+// opsettings env layer, GlobalConfig and VersionedSettings. The seed
+// mapper is out of scope: it seeds Layer-1 keys only, and these keys are
+// Layer 0.
 func TestServerEnvPathAliasesBindBothSpellings(t *testing.T) {
 	for _, c := range relaySettingCases {
 		a, ok := lookupServerEnvPathAlias(strings.TrimPrefix(c.path, "server."))
@@ -259,4 +260,44 @@ func TestRelaySettingsRoundTrip(t *testing.T) {
 	assert.Equal(t, testPeerSecret, back.Hub.Conduit.PeerSecret)
 	assert.Equal(t, v1.Relay, back.Relay)
 	assert.Nil(t, ConvertGlobalToV1ServerConfig(&GlobalConfig{}).Relay, "an empty relay block is omitted")
+}
+
+// TestRelayServerConfigValidateHidesCredentials: a rejected URL carrying
+// credentials is reported without them.
+func TestRelayServerConfigValidateHidesCredentials(t *testing.T) {
+	err := RelayServerConfig{PublicURL: "https://relay-user:hunter2-pw@relay.example.com"}.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server.relay.public_url")
+	assert.NotContains(t, err.Error(), "hunter2-pw")
+	err = RelayServerConfig{HubInternalURL: "http://u:pw-secret@[::1"}.Validate()
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "pw-secret")
+}
+
+// TestValidatePeerSecretRepeatedRune: the repeated-character check
+// compares characters, not bytes.
+func TestValidatePeerSecretRepeatedRune(t *testing.T) {
+	assert.Error(t, ValidatePeerSecret(strings.Repeat("é", 20)), "one repeated two-byte character")
+	assert.NoError(t, ValidatePeerSecret(strings.Repeat("éa", 16)))
+}
+
+// TestPeerSecretFileValueSurvivesEmptyEnv: an exported but empty env
+// variable does not clear peer_secret set in settings.yaml.
+func TestPeerSecretFileValueSurvivesEmptyEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".scion", "settings.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\nserver:\n  hub:\n    conduit:\n      peer_secret: \""+testPeerSecret+"\"\n"), 0o600))
+	for _, env := range []string{"SCION_SERVER_HUB_CONDUIT_PEERSECRET", "SCION_SERVER_HUB_CONDUIT_PEER_SECRET"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv(env, "")
+			gc, err := LoadGlobalConfig(path)
+			require.NoError(t, err)
+			assert.Equal(t, testPeerSecret, gc.Hub.Conduit.PeerSecret, "GlobalConfig")
+			vs, err := LoadVersionedSettings("")
+			require.NoError(t, err)
+			assert.Equal(t, testPeerSecret, vsConduit(vs).PeerSecret, "VersionedSettings")
+		})
+	}
 }

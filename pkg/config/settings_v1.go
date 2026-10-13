@@ -3834,7 +3834,10 @@ func isSectionName(name string) bool {
 	switch name {
 	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
 		"web", "cli", "device", "google", "github", "proxy", "iap", "jwt", "claims",
-		"transport", "scheduler", "relay":
+		"transport", "scheduler",
+		// relay: server.relay keys that serverEnvPathAliases does not list
+		// (future ones) map generically, like the other sections.
+		"relay":
 		return true
 	}
 	return false

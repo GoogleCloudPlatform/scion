@@ -508,6 +508,8 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Gate-protected keys (server.hub.class always; federation while the
 	// test admin tier is on) are refused before anything is decoded.
+	// An empty relay-peer secret is ignored; any other value is refused.
+	rawBody = dropEmptyPeerSecret(rawBody)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}

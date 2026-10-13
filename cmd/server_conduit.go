@@ -271,6 +271,28 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 	return o
 }
 
+// validateConduitPeerSecret applies the startup rules of the relay-peer
+// secret (design §3.9): it is required in external relay mode and, with
+// relayRole, on --role relay; when set, a hub refuses one equal to its
+// session secret (a relay never resolves the session secret and passes
+// ""). Strength is checked by HubConduitConfig.Validate. Errors name the
+// setting, never the value.
+func validateConduitPeerSecret(c config.HubConduitConfig, relayRole bool, sessionSecret string) error {
+	switch {
+	case c.PeerSecret == "" && relayRole:
+		return errors.New("server.hub.conduit.peer_secret is required on --role relay")
+	case c.PeerSecret == "" && c.ExternalRelay():
+		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
+	case c.PeerSecret != "" && sessionSecret != "" && c.PeerSecret == sessionSecret:
+		return errors.New("server.hub.conduit.peer_secret must differ from the session secret")
+	}
+	return nil
+}
+
+// errConduitExternalNeedsExperiment refuses external relay mode on a hub
+// where hub.conduit is off (design §3.9 startup check).
+var errConduitExternalNeedsExperiment = errors.New("server.hub.conduit.relay_mode is external, which requires the hub.conduit experiment; turn it on or remove relay_mode")
+
 // startConduit opens the internal listener (if configured) and starts the
 // hub's conduit relay when hub.conduit is on; once the relay runs, SIGTERM
 // drains it before cancel stops the server. With the flag off it does
@@ -279,7 +301,13 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 // without a relay. A relay that stops on its own (superseded) reports on
 // errCh so the process exits and restarts.
 func startConduit(ctx context.Context, cancel context.CancelFunc, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error) error {
-	if hubSrv == nil || !hubSrv.ConduitEnabled() {
+	if hubSrv == nil {
+		return nil
+	}
+	if cfg.Hub.Conduit.ExternalRelay() && !hubSrv.ConduitEnabled() {
+		return errConduitExternalNeedsExperiment
+	}
+	if !hubSrv.ConduitEnabled() {
 		return nil
 	}
 	requireHA := hostedHAGuardsRequired(cfg)

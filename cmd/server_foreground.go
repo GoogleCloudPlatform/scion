@@ -1455,6 +1455,9 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Relay.Validate(); err != nil {
 		return err
 	}
+	if err := validateConduitPeerSecret(cfg.Hub.Conduit, false, sessionSecretValue()); err != nil {
+		return err
+	}
 	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {
 		return err
 	}
@@ -2210,17 +2213,24 @@ func resolveHubNameFromEnv() string {
 // web session cookie store and the hub JWT signing keys so that all replicas
 // behind the load balancer agree.
 func resolveSessionSecret() string {
-	secret := webSessionSecret
-	if secret == "" {
-		secret = os.Getenv("SCION_SERVER_SESSION_SECRET")
-	}
-	if secret == "" {
-		secret = os.Getenv("SESSION_SECRET")
-	}
+	secret := sessionSecretValue()
 	if secret == "" && hostedMode {
 		slog.Warn("No session secret configured in hosted mode! Replicas will not be able to share sessions or agree on JWT signing keys, leading to login loops.")
 	}
 	return secret
+}
+
+// sessionSecretValue is the configured session secret (flag, then
+// SCION_SERVER_SESSION_SECRET, then SESSION_SECRET), or "". It only reads;
+// resolveSessionSecret adds the hosted-mode warning.
+func sessionSecretValue() string {
+	if webSessionSecret != "" {
+		return webSessionSecret
+	}
+	if s := os.Getenv("SCION_SERVER_SESSION_SECRET"); s != "" {
+		return s
+	}
+	return os.Getenv("SESSION_SECRET")
 }
 
 // parseBoolEnv reports whether the named environment variable is set to a

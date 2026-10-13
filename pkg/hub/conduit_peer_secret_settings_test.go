@@ -30,7 +30,8 @@ import (
 
 // The relay-peer secret (server.hub.conduit.peer_secret, design §3.9) is
 // never stored in the database or returned by the API: every settings write
-// path refuses it in file, DB and workstation mode, and GET never shows it.
+// path refuses a non-empty value in file, DB and workstation mode, ignores
+// an empty one (nothing is written), and GET never shows it.
 
 const peerSecretSettingValue = "peer-secret-value-0123456789abcdefghij"
 
@@ -38,7 +39,7 @@ var peerSecretBodies = map[string]string{
 	"nested":      `{"server":{"hub":{"conduit":{"peer_secret":"` + peerSecretSettingValue + `"}}}}`,
 	"flat dotted": `{"server.hub.conduit.peer_secret":"` + peerSecretSettingValue + `"}`,
 	"case folded": `{"Server":{"Hub":{"Conduit":{"Peer_Secret":"` + peerSecretSettingValue + `"}}}}`,
-	"empty":       `{"server":{"hub":{"conduit":{"peer_secret":""}}}}`,
+	"short":       `{"server":{"hub":{"conduit":{"peer_secret":"x"}}}}`,
 	"with others": `{"default_model":"m1","server":{"hub":{"conduit":{"peer_secret":"` + peerSecretSettingValue + `","reconnect_window":"3s"}}}}`,
 }
 
@@ -110,4 +111,62 @@ func TestNeverAPIWritable_DBGetDoesNotShowPeerSecret(t *testing.T) {
 	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.NotContains(t, rr.Body.String(), peerSecretSettingValue)
+}
+
+// TestDropEmptyPeerSecret: empty or null peer_secret members, and the
+// objects their removal empties, are dropped; anything else is kept as
+// sent, numbers included.
+func TestDropEmptyPeerSecret(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"nested empty", `{"server":{"hub":{"conduit":{"peer_secret":""}}}}`, `{}`},
+		{"null", `{"server":{"hub":{"conduit":{"peer_secret":null}}}}`, `{}`},
+		{"dotted", `{"server.hub.conduit.peer_secret":"","default_model":"m1"}`, `{"default_model":"m1"}`},
+		{"partly dotted", `{"server.hub":{"conduit":{"Peer_Secret":"","reconnect_window":"3s"}}}`, `{"server.hub":{"conduit":{"reconnect_window":"3s"}}}`},
+		{"numbers kept", `{"max_turns":12345678901234567890,"server":{"hub":{"conduit":{"peer_secret":""}}}}`, `{"max_turns":12345678901234567890}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.JSONEq(t, tc.want, string(dropEmptyPeerSecret([]byte(tc.in))))
+		})
+	}
+	assert.Contains(t, string(dropEmptyPeerSecret([]byte(`{"max_turns":12345678901234567890,"server.hub.conduit.peer_secret":""}`))),
+		"12345678901234567890", "a number keeps its spelling")
+	for _, body := range []string{
+		`{"server":{"hub":{"conduit":{"peer_secret":"x"}}}}`,
+		`{"server":{"hub":{"conduit":{}}}}`,
+		`{"default_model":"m1"}`,
+		`not json`,
+	} {
+		assert.Equal(t, body, string(dropEmptyPeerSecret([]byte(body))), "unchanged: %s", body)
+	}
+}
+
+func TestNeverAPIWritable_EmptyPeerSecretIgnoredInFileMode(t *testing.T) {
+	settingsPath := writePeerSecretSettings(t)
+	srv := &Server{}
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"server":{"hub":{"conduit":{"peer_secret":"","reconnect_window":"3s"}}}}`))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), peerSecretSettingValue, "an empty value does not clear the stored secret")
+	assert.Contains(t, string(data), "reconnect_window")
+}
+
+func TestNeverAPIWritable_EmptyPeerSecretIgnoredInDBAndWorkstationMode(t *testing.T) {
+	for _, workstation := range []bool{false, true} {
+		t.Run(map[bool]string{false: "db", true: "workstation"}[workstation], func(t *testing.T) {
+			settingsPath := workstationHome(t)
+			srv, st, _ := newSQLiteHubInMode(t, workstation, nil)
+			before := hubSettingRevisions(t, st)
+			rr := putServerConfig(t, srv, `{"default_model":"m-empty-secret","server":{"hub":{"conduit":{"peer_secret":""}}}}`)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			data, err := os.ReadFile(settingsPath)
+			require.NoError(t, err)
+			assert.NotContains(t, string(data), "peer_secret")
+			if !workstation {
+				assert.NotEqual(t, before, hubSettingRevisions(t, st), "the other key is written")
+			}
+		})
+	}
 }

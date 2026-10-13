@@ -15,8 +15,10 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
@@ -109,6 +111,59 @@ func matchedSettingsKeys(paths [][]string, keys []string) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// dropEmptyPeerSecret returns rawBody without its
+// server.hub.conduit.peer_secret members whose value is "" or null, and
+// without the objects that removal leaves empty: an empty relay-peer secret
+// is treated as absent (ignored, nothing written), while any other value is
+// refused by rejectGateProtectedSettingsKeys. The body is returned unchanged
+// when it holds no such member or does not parse (the typed decode reports
+// that). Numbers keep their spelling. The body has already passed
+// rejectRepeatedJSONMembers.
+func dropEmptyPeerSecret(rawBody []byte) []byte {
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
+	dec.UseNumber()
+	var root any
+	if err := dec.Decode(&root); err != nil {
+		return rawBody
+	}
+	var want []string
+	for _, seg := range strings.Split(config.ConduitPeerSecretKey, ".") {
+		want = append(want, foldJSONMemberName(seg))
+	}
+	var walk func(prefix []string, obj map[string]any) bool
+	walk = func(prefix []string, obj map[string]any) (dropped bool) {
+		for name, child := range obj {
+			path := append([]string(nil), prefix...)
+			for _, seg := range strings.Split(name, ".") {
+				path = append(path, foldJSONMemberName(seg))
+			}
+			if slices.Equal(path, want) {
+				if s, isString := child.(string); child == nil || (isString && s == "") {
+					delete(obj, name)
+					dropped = true
+				}
+				continue
+			}
+			if sub, ok := child.(map[string]any); ok && len(sub) > 0 && walk(path, sub) {
+				dropped = true
+				if len(sub) == 0 {
+					delete(obj, name)
+				}
+			}
+		}
+		return dropped
+	}
+	obj, ok := root.(map[string]any)
+	if !ok || !walk(nil, obj) {
+		return rawBody
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return rawBody
+	}
 	return out
 }
 
