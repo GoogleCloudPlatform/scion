@@ -27,8 +27,8 @@ func gcpHubLabel(t *testing.T, startup string) string {
 	t.Helper()
 	var buf bytes.Buffer
 	h := NewGCPHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}, "test-component", startup)
-	// Derived handlers must follow the applied name too.
-	slog.New(h).With("k", "v").WithGroup("g").Info("m")
+	// A derived handler follows the applied name too (not WithGroup, which nests the labels).
+	slog.New(h).With("k", "v").Info("m")
 	var data map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &data); err != nil {
 		t.Fatalf("decode record: %v", err)
