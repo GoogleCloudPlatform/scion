@@ -614,6 +614,24 @@ func TestBuildHubServerConfig_ConduitTCPAllowedPorts(t *testing.T) {
 	}
 }
 
+// TestBuildHubServerConfig_ConduitPolicy: disable_ssh, deny_ports and
+// deny_sockets reach hub.ServerConfig unchanged; unset restricts nothing.
+func TestBuildHubServerConfig_ConduitPolicy(t *testing.T) {
+	cfg := config.DefaultGlobalConfig()
+	sc := buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
+	assert.False(t, sc.ConduitSSHDisabled)
+	assert.Empty(t, sc.ConduitDenyPorts)
+	assert.Empty(t, sc.ConduitDenySockets)
+
+	cfg.Hub.Conduit.DisableSSH = true
+	cfg.Hub.Conduit.DenyPorts = []int{8462}
+	cfg.Hub.Conduit.DenySockets = []string{"/run/x.sock"}
+	sc = buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
+	assert.True(t, sc.ConduitSSHDisabled)
+	assert.Equal(t, []int{8462}, sc.ConduitDenyPorts)
+	assert.Equal(t, []string{"/run/x.sock"}, sc.ConduitDenySockets)
+}
+
 // TestBuildHubServerConfig_ConduitUserStreamAuthzMax: the hub receives the
 // user stream interval, 8h when unset.
 func TestBuildHubServerConfig_ConduitUserStreamAuthzMax(t *testing.T) {

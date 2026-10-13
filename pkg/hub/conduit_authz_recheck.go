@@ -419,6 +419,9 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 			return conduitAuthzDenied, "permission no longer held", err
 		}
 	}
+	if err := s.authorizeConduitStreamKind(req.Kind); err != nil {
+		return conduitAuthzDenied, "stream kind disabled", err
+	}
 	if req.Kind == grant.StreamKindTCP {
 		if err := s.authorizeConduitTCPTarget(req.Agent, req.Port); err != nil {
 			return conduitAuthzDenied, "port no longer an authorized target", err

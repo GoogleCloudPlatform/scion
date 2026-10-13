@@ -16,12 +16,14 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strconv"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -136,6 +138,37 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 	return nil
 }
 
+// authorizeConduitStreamKind refuses a stream kind the operator turned
+// off: ssh with server.hub.conduit.disable_ssh. Agents refuse it too, but
+// one started before the setting changed may still serve it.
+func (s *Server) authorizeConduitStreamKind(kind string) error {
+	if kind == grant.StreamKindSSH && s.config.ConduitSSHDisabled {
+		return fmt.Errorf("%w: ssh is disabled by server.hub.conduit.disable_ssh", errConduitForbidden)
+	}
+	return nil
+}
+
+// conduitAgentPolicy returns the operator's conduit policy as agents
+// read it (localpolicy.EnvPolicy), or "" when it restricts nothing.
+// Agents enforce the socket deny-list and SSH forwarding, which the hub
+// cannot see inside an ssh stream.
+func (s *Server) conduitAgentPolicy() string {
+	doc := localpolicy.PolicyDoc{
+		DisableSSH:  s.config.ConduitSSHDisabled,
+		DenyPorts:   s.config.ConduitDenyPorts,
+		DenySockets: s.config.ConduitDenySockets,
+	}
+	if !doc.DisableSSH && len(doc.DenyPorts) == 0 && len(doc.DenySockets) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		// Marshalling these field types cannot fail.
+		panic(fmt.Sprintf("conduit agent policy: %v", err))
+	}
+	return string(b)
+}
+
 // conduitStreamParams builds the params signed into a grant: the caller's
 // params, restricted to the stream kind's allow-list, plus the params the hub
 // sets itself. tcp allows exactly host and port from the caller; pty allows
@@ -221,11 +254,14 @@ func conduitPTYTarget(params map[string]string) error {
 }
 
 // authorizeConduitTCPTarget checks that port is an authorized agent-local
-// target: never a reserved port, and either exposed by the agent or on the
-// operator allow-list.
+// target: never a reserved port or one on the operator deny-list, and
+// either exposed by the agent or on the operator allow-list.
 func (s *Server) authorizeConduitTCPTarget(agent *store.Agent, port int) error {
 	if reason := deniedExposedPorts[port]; reason != "" {
 		return fmt.Errorf("%w: port %d is reserved for %s", errConduitForbidden, port, reason)
+	}
+	if slices.Contains(s.config.ConduitDenyPorts, port) {
+		return fmt.Errorf("%w: port %d is denied by server.hub.conduit.deny_ports", errConduitForbidden, port)
 	}
 	if findExposedPort(agent.ExposedPorts, port) != nil || slices.Contains(s.config.ConduitTCPAllowedPorts, port) {
 		return nil
@@ -297,6 +333,10 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 		if err := s.authorizeConduitAction(ctx, req.Identity, agent, ActionTunnel); err != nil {
 			return nil, nil, err
 		}
+	}
+
+	if err := s.authorizeConduitStreamKind(req.Stream.Kind); err != nil {
+		return nil, nil, err
 	}
 
 	params, err := conduitStreamParams(req)
