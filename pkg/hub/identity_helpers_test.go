@@ -39,4 +39,5 @@ var identityInventoryExpectation = map[string]bool{
 	"FederatedServiceIdentity": false,
 	"hubDeliveryIdentity":      false,
 	"DelegatedAgentIdentity":   false,
+	"VisitorIdentity":          false,
 }

@@ -23,6 +23,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -69,7 +70,14 @@ var hubListCmd = &cobra.Command{
 	Long: `List the hubs in the hub list, marking the current hub.
 
 AUTH shows how the CLI would authenticate to each hub, from local state
-only. --check also checks whether each hub responds.`,
+only. The dev token belongs to the local workstation server, so it counts
+only for a hub on a loopback address.
+
+--check also checks whether each hub responds (REACHABLE) and whether it
+accepts the CLI's credential for it (VERIFIED: yes, no, or - when it was
+not checked). Each hub is sent only its own credential (its login, or the
+dev token for a loopback hub) and only the transport auth of its own entry.
+Tokens from the environment are never sent.`,
 	Args: cobra.NoArgs,
 	RunE: runHubList,
 }
@@ -97,7 +105,7 @@ without logging in; --logout removes it too.`,
 
 func init() {
 	hubAddCmd.Flags().BoolVar(&hubAddUse, "use", false, "Also make the hub the current hub")
-	hubListCmd.Flags().BoolVar(&hubListCheck, "check", false, "Check whether each hub responds")
+	hubListCmd.Flags().BoolVar(&hubListCheck, "check", false, "Check whether each hub responds and accepts the CLI's credential")
 	hubRemoveCmd.Flags().BoolVar(&hubRemoveLogout, "logout", false, "Also remove the stored login for the hub")
 	for _, c := range []*cobra.Command{hubAddCmd, hubRenameCmd, hubRemoveCmd} {
 		c.Flags().BoolVar(&hubRegistryForce, "force", false, "Replace an unreadable ~/.scion/context.yaml")
@@ -129,9 +137,20 @@ func updateHubRegistry(fn func(*config.CLIContext) error) error {
 }
 
 // hubResponds checks the health of the hub at endpoint within
-// hubHealthTimeout.
-var hubResponds = func(endpoint string) error {
-	client, err := hubclient.New(endpoint, hubclient.WithTimeout(hubHealthTimeout))
+// hubHealthTimeout. It sends no user credential. With fanOut (a check of
+// hubs the user did not name, such as 'hub list --check'), only the
+// transport of the hub's own entry applies, never the environment's (see
+// fanOutTransport).
+var hubResponds = func(endpoint string, fanOut bool) error {
+	opts := []hubclient.Option{hubclient.WithTimeout(hubHealthTimeout)}
+	if fanOut {
+		src, mode, err := fanOutTransport(endpoint)
+		if err != nil {
+			return err
+		}
+		opts = append(opts, hubclient.WithTransportAuth(src, mode))
+	}
+	client, err := hubclient.New(endpoint, opts...)
 	if err != nil {
 		return err
 	}
@@ -162,9 +181,55 @@ func hubAuthLabel(info authInfo) string {
 }
 
 // hubAuthFor computes, from local state only, how the CLI authenticates to
-// endpoint.
+// endpoint, with the dev token counting only for a loopback hub (see
+// scopeDevAuth).
 func hubAuthFor(endpoint string) authInfo {
-	return getAuthInfo(&config.Settings{}, endpoint)
+	return scopeDevAuth(getAuthInfo(&config.Settings{}, endpoint), endpoint)
+}
+
+// hubAuthToken returns the credential 'hub list --check' sends to the hub at
+// endpoint to verify info: the hub's own login, or the dev token for a
+// loopback hub. Any other token is not tied to a hub and is never sent, so
+// then it returns "".
+func hubAuthToken(endpoint string, info authInfo) string {
+	switch {
+	case info.MethodType == "oauth" && info.OAuthCreds != nil:
+		return info.OAuthCreds.AccessToken
+	case info.MethodType == "devauth" && isLocalhostEndpoint(endpoint):
+		return apiclient.ResolveDevToken()
+	}
+	return ""
+}
+
+// hubAccepts asks the hub at endpoint, with an authenticated identity call
+// within hubHealthTimeout, whether it accepts token. Like hubResponds, with
+// fanOut only the transport of the hub's own entry applies (see
+// fanOutTransport). ok reports whether the hub answered: a hub that rejects
+// the token (401) answers with accepted false, while any other failure is
+// not an answer.
+var hubAccepts = func(endpoint, token string, fanOut bool) (accepted, ok bool) {
+	opts := []hubclient.Option{hubclient.WithTimeout(hubHealthTimeout), hubclient.WithBearerToken(token)}
+	if fanOut {
+		src, mode, err := fanOutTransport(endpoint)
+		if err != nil {
+			return false, false
+		}
+		opts = append(opts, hubclient.WithTransportAuth(src, mode))
+	}
+	client, err := hubclient.New(endpoint, opts...)
+	if err != nil {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hubHealthTimeout)
+	defer cancel()
+	_, err = client.Auth().Me(ctx)
+	switch {
+	case err == nil:
+		return true, true
+	case apiclient.IsUnauthorizedError(err):
+		return false, true
+	}
+	return false, false
 }
 
 // hubAddJSON is the JSON result of 'hub add'.
@@ -201,7 +266,9 @@ func hubAdd(out, stderr io.Writer, name, url string, use bool) error {
 		return err
 	}
 
-	healthErr := hubResponds(endpoint)
+	// The hub the user named: as before, transport auth from the
+	// environment applies.
+	healthErr := hubResponds(endpoint, false)
 	info := hubAuthFor(endpoint)
 	if isJSONOutput() {
 		return outputJSON(hubAddJSON{
@@ -229,6 +296,9 @@ type hubListJSON struct {
 	Endpoint  string      `json:"endpoint"`
 	Auth      useAuthJSON `json:"auth"`
 	Reachable *bool       `json:"reachable,omitempty"`
+	// Verified is whether the hub accepted the CLI's credential; it is
+	// omitted when that was not checked.
+	Verified *bool `json:"verified,omitempty"`
 }
 
 func runHubList(cmd *cobra.Command, args []string) error {
@@ -241,17 +311,43 @@ func runHubList(cmd *cobra.Command, args []string) error {
 func hubList(out, stderr io.Writer, check bool) error {
 	c := loadUseContext(stderr)
 	names := c.HubNames()
+	// How the CLI authenticates to each hub, computed once from local state
+	// and used for the check, the AUTH column and the JSON.
+	infos := make([]authInfo, len(names))
+	for i, name := range names {
+		infos[i] = hubAuthFor(c.Hubs[name].Endpoint)
+	}
 
 	var reachable []bool
+	var verified []*bool
 	if check {
+		settings, err := config.LoadSettings(useSettingsPath())
+		if err != nil {
+			settings = &config.Settings{}
+		}
 		reachable = make([]bool, len(names))
+		verified = make([]*bool, len(names))
 		var wg sync.WaitGroup
 		for i, name := range names {
+			endpoint := c.Hubs[name].Endpoint
+			// Every hub but the effective one is checked with only its
+			// own entry's transport.
+			fanOut := !hubGetsFullChain(settings, endpoint, false)
 			wg.Add(1)
-			go func(i int, endpoint string) {
+			go func(i int, endpoint string, fanOut bool) {
 				defer wg.Done()
-				reachable[i] = hubResponds(endpoint) == nil
-			}(i, c.Hubs[name].Endpoint)
+				reachable[i] = hubResponds(endpoint, fanOut) == nil
+				if !reachable[i] {
+					return
+				}
+				token := hubAuthToken(endpoint, infos[i])
+				if token == "" {
+					return
+				}
+				if accepted, ok := hubAccepts(endpoint, token, fanOut); ok {
+					verified[i] = &accepted
+				}
+			}(i, endpoint, fanOut)
 		}
 		wg.Wait()
 	}
@@ -259,7 +355,7 @@ func hubList(out, stderr io.Writer, check bool) error {
 	rows := make([]hubListJSON, 0, len(names))
 	for i, name := range names {
 		h := c.Hubs[name]
-		info := hubAuthFor(h.Endpoint)
+		info := infos[i]
 		row := hubListJSON{
 			Current:  name == c.CurrentHub,
 			Name:     name,
@@ -269,6 +365,7 @@ func hubList(out, stderr io.Writer, check bool) error {
 		if check {
 			r := reachable[i]
 			row.Reachable = &r
+			row.Verified = verified[i]
 		}
 		rows = append(rows, row)
 	}
@@ -282,21 +379,30 @@ func hubList(out, stderr io.Writer, check bool) error {
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	header := "CURRENT\tNAME\tENDPOINT\tAUTH"
 	if check {
-		header += "\tREACHABLE"
+		header += "\tREACHABLE\tVERIFIED"
 	}
 	_, _ = fmt.Fprintln(w, header)
-	for _, row := range rows {
+	for i, row := range rows {
 		mark := ""
 		if row.Current {
 			mark = "*"
 		}
-		line := fmt.Sprintf("%s\t%s\t%s\t%s", mark, row.Name, row.Endpoint, hubAuthLabel(hubAuthFor(row.Endpoint)))
+		line := fmt.Sprintf("%s\t%s\t%s\t%s", mark, row.Name, row.Endpoint, hubAuthLabel(infos[i]))
 		if check {
-			line += "\t" + yesNo(*row.Reachable)
+			line += "\t" + yesNo(*row.Reachable) + "\t" + verifiedLabel(row.Verified)
 		}
 		_, _ = fmt.Fprintln(w, line)
 	}
 	return w.Flush()
+}
+
+// verifiedLabel is the VERIFIED column of 'hub list --check': "yes" or "no"
+// when the hub answered, "-" when the credential was not checked.
+func verifiedLabel(v *bool) string {
+	if v == nil {
+		return "-"
+	}
+	return yesNo(*v)
 }
 
 func yesNo(b bool) string {

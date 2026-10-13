@@ -142,6 +142,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/templates":        "authenticated", // User-scoped templates
 	"/api/v1/users/me/templates/":       "authenticated", // User-scoped template by ID
 
+	// ── Agent delegation grants the caller issued ──────────────────────
+	"/api/v1/users/me/delegations": "authenticated", // GET: caller's issued grants; session/dev credential only (requireSessionCredentialFor)
+
 	// ── User-scoped terminal workspace ─────────────────────────────────
 	"/api/v1/users/me/terminal-workspace": "authenticated", // GET/PUT: caller's own list; session/dev credential only (requireSessionCredentialFor)
 
@@ -233,6 +236,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/conversations":         "authenticated", // List/create conversations
 	"/api/v1/conversations/":        "authenticated", // Conversation routes
 	"/api/v1/conversations/resolve": "authenticated", // Resolve a conversation reference
+	"/api/v1/thread-groups":         "authenticated", // List/create thread groups (experiment hub.chat_thread_groups)
+	"/api/v1/thread-groups/":        "authenticated", // Thread group routes (experiment hub.chat_thread_groups)
 
 	// ── Cross-project messaging ────────────────────────────────────────
 	"/api/v1/messaging/capabilities":    "authenticated", // Messaging feature capabilities

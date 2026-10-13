@@ -163,6 +163,8 @@ var telemetryProbeDocs = map[string]string{
 	"telemetry.cloud.tls.enabled":              `{"cloud":{"tls":{"enabled":true}}}`,
 	"telemetry.cloud.tls.insecure_skip_verify": `{"cloud":{"tls":{"insecure_skip_verify":true}}}`,
 	"telemetry.cloud.tls.ca_file":              `{"cloud":{"tls":{"ca_file":"/etc/ca.pem"}}}`,
+	"telemetry.cloud.tls.cert_file":            `{"cloud":{"tls":{"cert_file":"/etc/client.pem"}}}`,
+	"telemetry.cloud.tls.key_file":             `{"cloud":{"tls":{"key_file":"/etc/client-key.pem"}}}`,
 	"telemetry.cloud.batch":                    `{"cloud":{"batch":{"max_size":10}}}`,
 	"telemetry.cloud.batch.max_size":           `{"cloud":{"batch":{"max_size":10}}}`,
 	"telemetry.cloud.batch.timeout":            `{"cloud":{"batch":{"timeout":"7s"}}}`,

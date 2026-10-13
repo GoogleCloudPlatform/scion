@@ -52,9 +52,11 @@ import {
   artifactFileUrl,
   artifactPagePath,
   baseName,
+  discardReasonText,
   formatBytes,
   isInlineType,
   isRemoteFile,
+  listGrants,
   listVersions,
   mintView,
   parseArtifactPagePath,
@@ -69,6 +71,7 @@ import type {
   ArtifactResponse,
   ArtifactRenderer,
   ArtifactVersion,
+  DiscardedVersion,
   PendingPublish,
   PublishFile,
   ViewResponse,
@@ -86,8 +89,13 @@ import {
 } from '../../utils/critic.js';
 import type { CriticCounts, CriticTool } from '../../utils/critic.js';
 import '../shared/artifact-markdown-frame.js';
+import {
+  renderUntrustedViewFrame,
+  untrustedViewFrameStyles,
+} from '../shared/untrusted-view-frame.js';
 import '../shared/detail-header.js';
 import '../shared/artifact-publish-dialog.js';
+import '../shared/artifact-move-dialog.js';
 import '../shared/artifact-share-dialog.js';
 import '../shared/code-editor.js';
 import './not-found.js';
@@ -138,6 +146,12 @@ export const REVIEW_PREVIEW_DELAY_MS = 250;
 /** Longest delay setTimeout honours. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
+/**
+ * The most extra version pages loadVersions reads in one go while the
+ * pages hold only discarded versions.
+ */
+const MAX_EXTRA_VERSION_PAGES = 5;
+
 @customElement('scion-page-artifact-detail')
 export class ScionPageArtifactDetail extends LitElement {
   @property({ type: Object })
@@ -158,7 +172,15 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private copied = false;
   @state() private tab: Tab = 'preview';
   @state() private versions: ArtifactVersion[] = [];
+  /** Discarded versions listed beside versions (ptone/scion#4577). */
+  @state() private discarded: DiscardedVersion[] = [];
+  /** Discarded-version groups shown expanded, by their newest seq. */
+  @state() private expandedGaps = new Set<number>();
   @state() private versionsNext = 0;
+  /** A loadVersions call is reading pages; Load more waits for it. */
+  @state() private versionsLoading = false;
+  /** The load generation of the loadVersions call in flight. */
+  private versionsLoadingGen = -1;
   @state() private versionsError: string | null = null;
   @state() private view: ViewResponse | null = null;
   @state() private viewError: string | null = null;
@@ -178,6 +200,14 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private editError: string | null = null;
   @state() private publishOpen = false;
   @state() private shareOpen = false;
+  /** The Move dialog is open (ptone/scion#4583). */
+  @state() private moveOpen = false;
+  /**
+   * The hub's cross-project sharing setting, from the grants response (read
+   * only for a caller who manages the artifact). The hub refuses every move
+   * while it is off, so Move… is offered only while it is on.
+   */
+  @state() private crossProjectSharing = false;
   /** The version a failed Edit publish left pending; the next attempt resumes it. */
   private editPending: PendingPublish | null = null;
   @state() private reviewing = false;
@@ -216,260 +246,234 @@ export class ScionPageArtifactDetail extends LitElement {
   @query('.untrusted') private untrustedFrame?: HTMLElement;
   @query('scion-code-editor.review-editor') private reviewEditor?: ScionCodeEditor;
 
-  static override styles = css`
-    :host {
-      display: block;
-      padding: 1.5rem;
-      max-width: 1200px;
-      margin: 0 auto;
-    }
-    .meta {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.5rem 1.25rem;
-      font-size: 0.8125rem;
-      color: var(--sl-color-neutral-600);
-    }
-    .meta code,
-    .ref code {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.75rem;
-    }
-    .ref {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-    }
-    .menu-note {
-      display: block;
-      font-size: 0.75rem;
-      color: var(--sl-color-neutral-500);
-      max-width: 22rem;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .entry-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 1rem;
-      margin-bottom: 0.5rem;
-      font-size: 0.8125rem;
-      color: var(--sl-color-neutral-600);
-    }
-    .entry-bar .buttons {
-      display: flex;
-      gap: 0.5rem;
-    }
-    .image-frame {
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      padding: 1rem;
-      background: var(--scion-surface, #ffffff);
-      text-align: center;
-    }
-    .image-frame img {
-      max-width: 100%;
-      height: auto;
-    }
-    .notice {
-      margin-bottom: 0.75rem;
-    }
-    .untrusted {
-      border: 2px solid var(--sl-color-warning-500, #f59e0b);
-      border-radius: var(--scion-radius, 0.5rem);
-      overflow: hidden;
-      background: var(--scion-surface, #ffffff);
-      display: flex;
-      flex-direction: column;
-    }
-    .untrusted-bar {
-      display: flex;
-      align-items: center;
-      gap: 0.4rem;
-      padding: 0.3rem 0.75rem;
-      font-size: 0.75rem;
-      color: var(--sl-color-warning-800, #92400e);
-      background: var(--sl-color-warning-50, #fffbeb);
-      border-bottom: 1px solid var(--sl-color-warning-300, #fcd34d);
-    }
-    .untrusted iframe {
-      display: block;
-      width: 100%;
-      height: 70vh;
-      border: none;
-      background: #ffffff;
-    }
-    .untrusted:fullscreen iframe {
-      height: 100%;
-      flex: 1;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.875rem;
-    }
-    th {
-      text-align: left;
-      font-weight: 600;
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      color: var(--sl-color-neutral-600);
-      padding: 0.5rem 0.75rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
-    td {
-      padding: 0.5rem 0.75rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      vertical-align: middle;
-    }
-    td.muted,
-    .muted {
-      color: var(--sl-color-neutral-600);
-    }
-    td.actions-cell {
-      text-align: right;
-      white-space: nowrap;
-    }
-    .file-path {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-      word-break: break-all;
-    }
-    .summary {
-      font-size: 0.8125rem;
-      color: var(--sl-color-neutral-600);
-      margin: 0.5rem 0;
-    }
-    .single-version {
-      text-align: center;
-      padding: 1.5rem;
-      color: var(--sl-color-neutral-600);
-    }
-    .single-version .buttons {
-      display: flex;
-      gap: 0.5rem;
-      justify-content: center;
-      margin-top: 0.5rem;
-    }
-    .more {
-      text-align: center;
-      margin-top: 0.75rem;
-    }
-    .edit-bar {
-      font-size: 0.8125rem;
-      color: var(--sl-color-neutral-600);
-      margin-bottom: 0.5rem;
-    }
-    .edit-footer {
-      display: flex;
-      gap: 0.5rem;
-      align-items: flex-end;
-      margin-top: 0.75rem;
-    }
-    .edit-footer sl-input {
-      flex: 1;
-    }
-    sl-tab-group {
-      margin-bottom: 0.5rem;
-    }
-    .review-banner::part(base) {
-      align-items: center;
-    }
-    .review-toolbar {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-      padding: 0.5rem 0;
-    }
-    .review-toolbar .counts {
-      font-size: 0.8125rem;
-      color: var(--sl-color-neutral-600);
-      margin-left: 0.25rem;
-    }
-    .review-toolbar .spacer {
-      flex: 1;
-    }
-    .review-toolbar .label {
-      font-size: 0.8125rem;
-      color: var(--sl-color-neutral-600);
-    }
-    .review-panes {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 0.75rem;
-      align-items: start;
-    }
-    @media (max-width: 900px) {
-      .review-panes {
-        grid-template-columns: minmax(0, 1fr);
+  static override styles = [
+    untrustedViewFrameStyles,
+    css`
+      :host {
+        display: block;
+        padding: 1.5rem;
+        max-width: 1200px;
+        margin: 0 auto;
       }
-    }
-    .discarded-review {
-      margin-bottom: 0.75rem;
-    }
-    .discarded-review pre {
-      max-height: 12rem;
-      overflow: auto;
-      white-space: pre-wrap;
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.75rem;
-      margin: 0 0 0.5rem;
-    }
-    .review-toolbar .hint {
-      color: var(--sl-color-warning-700, #b45309);
-    }
-    sl-badge.kind-review::part(base) {
-      background: #ede9fe;
-      color: #6d28d9;
-      border-color: #ddd6fe;
-    }
-    sl-badge.kind-publish::part(base) {
-      background: #e0f2fe;
-      color: #075985;
-      border-color: #bae6fd;
-    }
-    .history-note {
-      font-size: 0.8125rem;
-      color: var(--sl-color-neutral-600);
-      margin: 0.5rem 0;
-    }
-    .help-panel {
-      max-width: 24rem;
-      padding: 0.75rem 1rem;
-      font-size: 0.8125rem;
-      line-height: 1.5;
-      background: var(--sl-panel-background-color, #fff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      box-shadow: var(--sl-shadow-medium);
-    }
-    .help-panel code {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.75rem;
-      word-break: break-all;
-    }
-    sl-alert {
-      margin-bottom: 0.75rem;
-    }
-    .download-state,
-    .error-state,
-    .loading-state {
-      text-align: center;
-      padding: 3rem;
-      color: var(--sl-color-neutral-500);
-    }
-    .error-state sl-icon {
-      font-size: 2rem;
-      color: var(--sl-color-danger-500);
-      margin-bottom: 0.5rem;
-    }
-  `;
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem 1.25rem;
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+      }
+      .meta code,
+      .ref code {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.75rem;
+      }
+      .ref {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+      }
+      .menu-note {
+        display: block;
+        font-size: 0.75rem;
+        color: var(--sl-color-neutral-500);
+        max-width: 22rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .entry-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 0.5rem;
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+      }
+      .entry-bar .buttons {
+        display: flex;
+        gap: 0.5rem;
+      }
+      .image-frame {
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        padding: 1rem;
+        background: var(--scion-surface, #ffffff);
+        text-align: center;
+      }
+      .image-frame img {
+        max-width: 100%;
+        height: auto;
+      }
+      .notice {
+        margin-bottom: 0.75rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.875rem;
+      }
+      th {
+        text-align: left;
+        font-weight: 600;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--sl-color-neutral-600);
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+      td {
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        vertical-align: middle;
+      }
+      td.muted,
+      .muted {
+        color: var(--sl-color-neutral-600);
+      }
+      td.actions-cell {
+        text-align: right;
+        white-space: nowrap;
+      }
+      .file-path {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        word-break: break-all;
+      }
+      .summary {
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+        margin: 0.5rem 0;
+      }
+      .single-version {
+        text-align: center;
+        padding: 1.5rem;
+        color: var(--sl-color-neutral-600);
+      }
+      .single-version .buttons {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: center;
+        margin-top: 0.5rem;
+      }
+      .more {
+        text-align: center;
+        margin-top: 0.75rem;
+      }
+      .edit-bar {
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+        margin-bottom: 0.5rem;
+      }
+      .edit-footer {
+        display: flex;
+        gap: 0.5rem;
+        align-items: flex-end;
+        margin-top: 0.75rem;
+      }
+      .edit-footer sl-input {
+        flex: 1;
+      }
+      sl-tab-group {
+        margin-bottom: 0.5rem;
+      }
+      .review-banner::part(base) {
+        align-items: center;
+      }
+      .review-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        padding: 0.5rem 0;
+      }
+      .review-toolbar .counts {
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+        margin-left: 0.25rem;
+      }
+      .review-toolbar .spacer {
+        flex: 1;
+      }
+      .review-toolbar .label {
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+      }
+      .review-panes {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 0.75rem;
+        align-items: start;
+      }
+      @media (max-width: 900px) {
+        .review-panes {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .discarded-review {
+        margin-bottom: 0.75rem;
+      }
+      .discarded-review pre {
+        max-height: 12rem;
+        overflow: auto;
+        white-space: pre-wrap;
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.75rem;
+        margin: 0 0 0.5rem;
+      }
+      .review-toolbar .hint {
+        color: var(--sl-color-warning-700, #b45309);
+      }
+      sl-badge.kind-review::part(base) {
+        background: #ede9fe;
+        color: #6d28d9;
+        border-color: #ddd6fe;
+      }
+      sl-badge.kind-publish::part(base) {
+        background: #e0f2fe;
+        color: #075985;
+        border-color: #bae6fd;
+      }
+      .history-note {
+        font-size: 0.8125rem;
+        color: var(--sl-color-neutral-600);
+        margin: 0.5rem 0;
+      }
+      .help-panel {
+        max-width: 24rem;
+        padding: 0.75rem 1rem;
+        font-size: 0.8125rem;
+        line-height: 1.5;
+        background: var(--sl-panel-background-color, #fff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        box-shadow: var(--sl-shadow-medium);
+      }
+      .help-panel code {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.75rem;
+        word-break: break-all;
+      }
+      sl-alert {
+        margin-bottom: 0.75rem;
+      }
+      .download-state,
+      .error-state,
+      .loading-state {
+        text-align: center;
+        padding: 3rem;
+        color: var(--sl-color-neutral-500);
+      }
+      .error-state sl-icon {
+        font-size: 2rem;
+        color: var(--sl-color-danger-500);
+        margin-bottom: 0.5rem;
+      }
+    `,
+  ];
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -512,6 +516,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.view = null;
     this.viewError = null;
     this.viewExpired = false;
+    this.crossProjectSharing = false;
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
     try {
@@ -532,6 +537,7 @@ export class ScionPageArtifactDetail extends LitElement {
       this.entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
       this.resolveNames();
       void this.loadVersions(0, gen);
+      if (data.canManage) void this.loadCrossProjectSharing(gen);
       const kind = this.entry ? rendererFor(this.entry.mediaType) : 'download';
       if ((kind === 'markdown' || kind === 'text') && this.entry) {
         if (this.entry.size <= MAX_INLINE_TEXT_BYTES) {
@@ -602,16 +608,40 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   private async loadVersions(before = 0, gen = this.loadGen): Promise<void> {
+    // One call at a time per load: a Load more while pages are still being
+    // read would fetch and append the same pages twice.
+    if (this.versionsLoading && this.versionsLoadingGen === gen) return;
+    this.versionsLoading = true;
+    this.versionsLoadingGen = gen;
     try {
-      const page = await listVersions(this.artifactId, before);
-      if (gen !== this.loadGen) return;
-      this.versions = before > 0 ? [...this.versions, ...page.versions] : page.versions;
-      this.versionsNext = page.nextBefore ?? 0;
+      // A page walks ready and discarded versions together, so after a long
+      // run of discarded versions it can hold no ready one. Keep reading
+      // (a few pages at most) until one arrives, so the version picker and
+      // the review state see a ready version.
+      let next = before;
+      for (let extra = 0; ; extra++) {
+        const page = await listVersions(this.artifactId, next);
+        if (gen !== this.loadGen) return;
+        this.versions = next > 0 ? [...this.versions, ...page.versions] : page.versions;
+        const discarded = page.discarded ?? [];
+        this.discarded = next > 0 ? [...this.discarded, ...discarded] : discarded;
+        this.versionsNext = page.nextBefore ?? 0;
+        if (
+          page.versions.length > 0 ||
+          this.versionsNext <= 0 ||
+          extra >= MAX_EXTRA_VERSION_PAGES
+        ) {
+          break;
+        }
+        next = this.versionsNext;
+      }
       this.resolveNames();
       this.versionsError = null;
     } catch (err) {
       if (gen !== this.loadGen) return;
       this.versionsError = err instanceof Error ? err.message : 'Could not load versions';
+    } finally {
+      if (this.versionsLoadingGen === gen) this.versionsLoading = false;
     }
   }
 
@@ -834,6 +864,8 @@ export class ScionPageArtifactDetail extends LitElement {
   private async reloadForReview(discarded: string): Promise<void> {
     this.seq = 0;
     this.versions = [];
+    this.discarded = [];
+    this.expandedGaps = new Set();
     this.versionsNext = 0;
     this.clearPreviewTimer();
     await this.load();
@@ -973,6 +1005,8 @@ export class ScionPageArtifactDetail extends LitElement {
     this.seq = 0;
     this.tab = 'preview';
     this.versions = [];
+    this.discarded = [];
+    this.expandedGaps = new Set();
     this.versionsNext = 0;
     void this.load();
   }
@@ -1024,7 +1058,33 @@ export class ScionPageArtifactDetail extends LitElement {
             }}
           ></scion-artifact-share-dialog>`
         : nothing}
+      ${this.data?.canManage
+        ? html`<scion-artifact-move-dialog
+            .artifact=${this.data.artifact}
+            ?open=${this.moveOpen}
+            @artifact-moved=${(e: CustomEvent<Artifact>): void => this.onMoved(e.detail)}
+            @artifact-move-closed=${(): void => {
+              this.moveOpen = false;
+            }}
+          ></scion-artifact-move-dialog>`
+        : nothing}
     `;
+  }
+
+  /** Reads whether cross-project sharing is on; any failure leaves it off. */
+  private async loadCrossProjectSharing(gen: number): Promise<void> {
+    try {
+      const { crossProjectSharing } = await listGrants(this.artifactId);
+      if (gen === this.loadGen) this.crossProjectSharing = crossProjectSharing;
+    } catch {
+      // Move… stays hidden; the Share dialog reports its own load errors.
+    }
+  }
+
+  /** After a move the artifact lives under its new home project: open it there. */
+  private onMoved(moved: Artifact): void {
+    this.moveOpen = false;
+    navigateTo(artifactPagePath(moved));
   }
 
   private versionLabel(v: ArtifactVersion | undefined): string {
@@ -1131,6 +1191,17 @@ export class ScionPageArtifactDetail extends LitElement {
                         Grant review access
                       </sl-button>`
                     : nothing}
+                ${this.data!.canManage && this.crossProjectSharing
+                  ? html`<sl-button
+                      size="small"
+                      @click=${(): void => {
+                        this.moveOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="folder-symlink"></sl-icon>
+                      Move…
+                    </sl-button>`
+                  : nothing}
                 ${v && f && ownFiles.length === 1
                   ? html`<sl-button
                       size="small"
@@ -1299,18 +1370,7 @@ export class ScionPageArtifactDetail extends LitElement {
               </sl-button>
             </span>`}
       </div>
-      <div class="untrusted">
-        <div class="untrusted-bar">
-          <sl-icon name="shield-lock"></sl-icon>
-          Content published by ${owner} · runs sandboxed, isolated from Scion
-        </div>
-        <iframe
-          title=${`${this.data!.artifact.title} (sandboxed)`}
-          sandbox="allow-scripts"
-          referrerpolicy="no-referrer"
-          src=${this.view.url}
-        ></iframe>
-      </div>
+      ${renderUntrustedViewFrame({ url: this.view.url, title: this.data!.artifact.title, owner })}
     `;
   }
 
@@ -1390,6 +1450,108 @@ export class ScionPageArtifactDetail extends LitElement {
     return this.label(v.createdByKind, v.createdByRef ?? '');
   }
 
+  /**
+   * The History rows: the ready versions and, between them by number, the
+   * discarded ones (ptone/scion#4577). Consecutive discarded versions
+   * collapse into one muted row that expands to each one's reason and
+   * time; they have no actions.
+   */
+  private historyRows(shown: number | undefined): TemplateResult[] {
+    const rows: TemplateResult[] = [];
+    let d = 0;
+    const gapsAbove = (seq: number): void => {
+      const group: DiscardedVersion[] = [];
+      for (; d < this.discarded.length && this.discarded[d].seq > seq; d++) {
+        group.push(this.discarded[d]);
+      }
+      if (group.length > 0) rows.push(...this.renderDiscardedGroup(group));
+    };
+    for (const x of this.versions) {
+      gapsAbove(x.seq);
+      rows.push(this.renderVersionRow(x, shown));
+    }
+    gapsAbove(0);
+    return rows;
+  }
+
+  private renderDiscardedGroup(group: DiscardedVersion[]): TemplateResult[] {
+    const newest = group[0].seq;
+    const oldest = group[group.length - 1].seq;
+    const range = group.length === 1 ? `v${newest}` : `v${oldest}–v${newest}`;
+    const reasons = new Set(group.map((g) => g.reason));
+    const summary =
+      reasons.size === 1
+        ? `discarded: ${discardReasonText(group[0].reason)}`
+        : `${group.length} discarded`;
+    const open = this.expandedGaps.has(newest);
+    const toggle = (): void => {
+      const next = new Set(this.expandedGaps);
+      if (open) next.delete(newest);
+      else next.add(newest);
+      this.expandedGaps = next;
+    };
+    const rows = [
+      html`<tr class="discarded-group muted">
+        <td colspan="7">
+          <span class="discarded-range">${range}</span> · ${summary}
+          <sl-button size="small" variant="text" @click=${toggle}
+            >${open ? 'Hide' : 'Details'}</sl-button
+          >
+        </td>
+      </tr>`,
+    ];
+    if (open) {
+      for (const g of group) {
+        rows.push(
+          html`<tr class="discarded-version muted">
+            <td>v${g.seq}</td>
+            <td colspan="6">
+              discarded: ${discardReasonText(g.reason)} · ${formatInstant(g.createdAt)}
+            </td>
+          </tr>`
+        );
+      }
+    }
+    return rows;
+  }
+
+  private renderVersionRow(x: ArtifactVersion, shown: number | undefined): TemplateResult {
+    return html`
+      <tr>
+        <td>
+          <strong>v${x.seq}</strong>
+          ${x.seq === this.data!.artifact.currentSeq
+            ? html`<sl-badge pill variant="success">current</sl-badge>`
+            : nothing}
+        </td>
+        <td>
+          <sl-badge pill class=${`kind-${x.kind}`} variant="primary">${x.kind}</sl-badge>
+        </td>
+        <td>${this.createdBy(x)}</td>
+        <td class="muted">${formatInstant(x.createdAt)}</td>
+        <td>${x.note ?? ''}</td>
+        <td class="muted">${x.fileCount}</td>
+        <td class="actions-cell">
+          ${x.seq === shown
+            ? nothing
+            : html`<sl-icon-button
+                name="eye"
+                label=${`View v${x.seq}`}
+                @click=${(): void => this.goToVersion(x.seq)}
+              ></sl-icon-button>`}
+          ${x.fileCount === 1 && x.entryPath
+            ? html`<sl-icon-button
+                name="download"
+                label=${`Download v${x.seq}`}
+                href=${artifactFileUrl(this.artifactId, x.seq, x.entryPath)}
+                download=${baseName(x.entryPath)}
+              ></sl-icon-button>`
+            : nothing}
+        </td>
+      </tr>
+    `;
+  }
+
   private renderHistory(): TemplateResult {
     if (this.versionsError) {
       return html`<div class="error-state">
@@ -1413,42 +1575,7 @@ export class ScionPageArtifactDetail extends LitElement {
           </tr>
         </thead>
         <tbody>
-          ${this.versions.map(
-            (x) => html`
-              <tr>
-                <td>
-                  <strong>v${x.seq}</strong>
-                  ${x.seq === this.data!.artifact.currentSeq
-                    ? html`<sl-badge pill variant="success">current</sl-badge>`
-                    : nothing}
-                </td>
-                <td>
-                  <sl-badge pill class=${`kind-${x.kind}`} variant="primary">${x.kind}</sl-badge>
-                </td>
-                <td>${this.createdBy(x)}</td>
-                <td class="muted">${formatInstant(x.createdAt)}</td>
-                <td>${x.note ?? ''}</td>
-                <td class="muted">${x.fileCount}</td>
-                <td class="actions-cell">
-                  ${x.seq === shown
-                    ? nothing
-                    : html`<sl-icon-button
-                        name="eye"
-                        label=${`View v${x.seq}`}
-                        @click=${(): void => this.goToVersion(x.seq)}
-                      ></sl-icon-button>`}
-                  ${x.fileCount === 1 && x.entryPath
-                    ? html`<sl-icon-button
-                        name="download"
-                        label=${`Download v${x.seq}`}
-                        href=${artifactFileUrl(this.artifactId, x.seq, x.entryPath)}
-                        download=${baseName(x.entryPath)}
-                      ></sl-icon-button>`
-                    : nothing}
-                </td>
-              </tr>
-            `
-          )}
+          ${this.historyRows(shown)}
         </tbody>
       </table>
       ${this.versions.some((x) => x.kind === 'review')
@@ -1459,7 +1586,10 @@ export class ScionPageArtifactDetail extends LitElement {
         : nothing}
       ${this.versionsNext > 0
         ? html`<div class="more">
-            <sl-button size="small" @click=${(): void => void this.loadVersions(this.versionsNext)}
+            <sl-button
+              size="small"
+              ?disabled=${this.versionsLoading}
+              @click=${(): void => void this.loadVersions(this.versionsNext)}
               >Load more</sl-button
             >
           </div>`

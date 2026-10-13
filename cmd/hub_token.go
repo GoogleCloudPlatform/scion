@@ -42,8 +42,10 @@ var hubTokenCmd = &cobra.Command{
 	Long: `Manage user access tokens for CI/CD and automation.
 
 User access tokens (UATs) are scoped, revocable bearer tokens for
-non-interactive authentication. Each token is scoped to a single project
-and carries a set of action permissions.
+non-interactive authentication. Each token carries a set of action
+permissions and a boundary: a single project (the default), or the whole
+Hub (--boundary hub), for hub-level scopes such as hub_health:read and for
+one token that works across every project you can reach.
 
 Most CLI commands that work in a project first look the project up, which
 needs the project:read scope. Include it in tokens used with the CLI.
@@ -76,6 +78,13 @@ Examples:
     --scopes project:read,agent:create,agent:read,agent:list \
     --expires 90d
 
+  # Create a hub-boundary token for "scion doctor" Platform Health
+  # (needs a hub admin)
+  scion hub token create --boundary hub \
+    --name health-check \
+    --scopes hub_health:read,broker:read,agent:list \
+    --expires 30d
+
   # List your tokens
   scion hub token list
 
@@ -93,9 +102,19 @@ Examples:
 var hubTokenCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a new access token",
-	Long: fmt.Sprintf(`Create a new user access token scoped to a project.
+	Long: fmt.Sprintf(`Create a new user access token scoped to a project, or to the whole Hub.
 
 The token value is displayed only once on creation. Store it securely.
+
+Boundary (--boundary):
+  project  The default. The token works only in the project named by
+           --project (required).
+  hub      The token is not tied to a project (do not pass --project).
+           Hub-level scopes such as hub_health:read, broker:read and
+           broker:create are only selectable on a hub-boundary token, and
+           project scopes apply in every project you can reach. Each scope
+           is still checked against your current authority when the token
+           is created and on every request.
 
 Scopes are restrictions, not grants: selecting a scope limits what the
 token may ever do, but access to any specific target is still checked on
@@ -120,7 +139,8 @@ need.
 
 Examples:
   scion hub token create --project my-project --name ci-token --scopes project:read,agent:create,agent:read
-  scion hub token create --project my-project --name deploy --scopes project:read,agent:manage --expires 30d`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
+  scion hub token create --project my-project --name deploy --scopes project:read,agent:manage --expires 30d
+  scion hub token create --boundary hub --name health-check --scopes hub_health:read,broker:read,agent:list`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
 	Args: cobra.NoArgs,
 	RunE: runTokenCreate,
 }
@@ -182,14 +202,15 @@ Examples:
 }
 
 var (
-	tokenCreateName    string
-	tokenCreateProject string
-	tokenCreateScopes  []string
-	tokenCreateExpires string
-	tokenCreatePurpose string
-	tokenCreateLabels  []string
-	tokenListProject   string
-	tokenScopesProject string
+	tokenCreateName     string
+	tokenCreateProject  string
+	tokenCreateBoundary string
+	tokenCreateScopes   []string
+	tokenCreateExpires  string
+	tokenCreatePurpose  string
+	tokenCreateLabels   []string
+	tokenListProject    string
+	tokenScopesProject  string
 )
 
 func init() {
@@ -201,7 +222,8 @@ func init() {
 	hubTokenCmd.AddCommand(hubTokenScopesCmd)
 
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateName, "name", "", "Token name/label (required)")
-	hubTokenCreateCmd.Flags().StringVar(&tokenCreateProject, "project", "", "Project name or ID to scope the token to (required)")
+	hubTokenCreateCmd.Flags().StringVar(&tokenCreateProject, "project", "", "Project name or ID to scope the token to (required with --boundary project)")
+	hubTokenCreateCmd.Flags().StringVar(&tokenCreateBoundary, "boundary", tokenBoundaryProject, "Token boundary: project (default; needs --project) or hub (no --project)")
 
 	hubTokenCreateCmd.Flags().StringArrayVar(&tokenCreateScopes, "scopes", nil, "Scope to grant (required, repeatable; also accepts a comma-separated list)")
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry: "+expiryAcceptedForms+" (default: 90d)")
@@ -215,7 +237,6 @@ func init() {
 	hubTokenCreateCmd.Flags().StringArrayVar(&tokenCreateLabels, "label", nil, "Optional bounded label as key=value (repeatable)")
 
 	_ = hubTokenCreateCmd.MarkFlagRequired("name")
-	_ = hubTokenCreateCmd.MarkFlagRequired("project")
 	_ = hubTokenCreateCmd.MarkFlagRequired("scopes")
 
 	hubTokenListCmd.Flags().BoolVar(&tokenOutputJSON, "json", false, "Output in JSON format")
@@ -225,7 +246,36 @@ func init() {
 	hubTokenScopesCmd.Flags().BoolVar(&tokenOutputJSON, "json", false, "Output in JSON format")
 }
 
+// Token boundary kinds accepted by --boundary.
+const (
+	tokenBoundaryProject = "project"
+	tokenBoundaryHub     = "hub"
+)
+
+// validateTokenCreateBoundary checks --boundary against --project: a
+// project boundary needs a project, a hub boundary must not name one.
+func validateTokenCreateBoundary(boundary, project string) error {
+	switch boundary {
+	case "", tokenBoundaryProject:
+		if project == "" {
+			return newUsageError("--project is required (or use --boundary hub for a token not tied to a project)")
+		}
+	case tokenBoundaryHub:
+		if project != "" {
+			return newUsageError("--project cannot be used with --boundary hub")
+		}
+	default:
+		return newUsageError("invalid --boundary %q: use project or hub", boundary)
+	}
+	return nil
+}
+
 func runTokenCreate(cmd *cobra.Command, args []string) error {
+	if err := validateTokenCreateBoundary(tokenCreateBoundary, tokenCreateProject); err != nil {
+		return err
+	}
+	hubBoundary := tokenCreateBoundary == tokenBoundaryHub
+
 	_, client, err := loadHubClient()
 	if err != nil {
 		return err
@@ -235,9 +285,12 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	// Resolve project name/slug to ID
-	project, err := resolveProjectByNameOrID(ctx, client, tokenCreateProject)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project %q: %w", tokenCreateProject, err)
+	var project *hubclient.Project
+	if !hubBoundary {
+		project, err = resolveProjectByNameOrID(ctx, client, tokenCreateProject)
+		if err != nil {
+			return fmt.Errorf("failed to resolve project %q: %w", tokenCreateProject, err)
+		}
 	}
 
 	scopes := splitCommaList(tokenCreateScopes)
@@ -261,11 +314,15 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 
 	req := &hubclient.CreateTokenRequest{
 		Name:      tokenCreateName,
-		ProjectID: project.ID,
 		Scopes:    scopes,
 		ExpiresAt: expiresAt,
 		Purpose:   tokenCreatePurpose,
 		Labels:    labels,
+	}
+	if hubBoundary {
+		req.Boundary = &hubclient.TokenBoundary{Kind: tokenBoundaryHub}
+	} else {
+		req.ProjectID = project.ID
 	}
 
 	resp, err := client.Tokens().Create(ctx, req)
@@ -277,7 +334,11 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 			if selector != "" {
 				fmt.Fprintf(os.Stderr, "Denied scope %q (%s).\n", selector, reason)
 			}
-			fmt.Fprintf(os.Stderr, "Run `scion hub token scopes --project %s` to see which scopes you may currently select and why.\n", tokenCreateProject)
+			if hubBoundary {
+				fmt.Fprintln(os.Stderr, "Run `scion hub token scopes` to see every scope; hub-level scopes need the matching hub role.")
+			} else {
+				fmt.Fprintf(os.Stderr, "Run `scion hub token scopes --project %s` to see which scopes you may currently select and why.\n", tokenCreateProject)
+			}
 		}
 		return fmt.Errorf("failed to create token: %w", err)
 	}
@@ -290,7 +351,11 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Created access token: %s\n", resp.AccessToken.Name)
 	fmt.Printf("  ID:      %s\n", resp.AccessToken.ID)
-	fmt.Printf("  Project:   %s (%s)\n", project.Name, project.ID)
+	if hubBoundary {
+		fmt.Printf("  Boundary:  hub\n")
+	} else {
+		fmt.Printf("  Project:   %s (%s)\n", project.Name, project.ID)
+	}
 	fmt.Printf("  Scopes:  %s\n", strings.Join(resp.AccessToken.Scopes, ", "))
 	if resp.AccessToken.ExpiresAt != nil {
 		fmt.Printf("  Expires: %s\n", clitime.Format(*resp.AccessToken.ExpiresAt, clitime.Full))

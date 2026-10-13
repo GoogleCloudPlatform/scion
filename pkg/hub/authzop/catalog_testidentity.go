@@ -16,7 +16,7 @@ package authzop
 
 // testIdentityOperations are the hub test identity operations
 // (ptone/scion#4240). The routes answer 404 unless the hub runs with
-// --enable-test-identities. Each requires test_identity.issue at hub scope
+// --test-mode=member or above. Each requires test_identity.issue at hub scope
 // and admits a hub-boundary user access token carrying test_identity:issue,
 // and a workload-bound issuer delegation (phase X2), which acts for its
 // human grantor within its single scope and manages only the identities
@@ -108,31 +108,34 @@ var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.webcode.issue",
 		Domain:      "testidentity",
-		Description: "Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer or an unscoped platform admin session; only on hubs where test identity web sessions are available",
+		Description: "Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}/web-login-code", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialWorkloadDelegation},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "test_identity.issue",
 		Effects:          []SecurityEffect{EffectMintCredential},
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:        GovernanceIssuerCredential,
-			Description: "Only the identity's issuer (or an unscoped platform admin session) mints a code; at most one unredeemed code per identity, redeemable once, never past the identity's expiry",
+			Description: "Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; at most one unredeemed code per identity, redeemable once, never past the identity's expiry",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
 			EventType:     "test_identity_web_code_issue",
 			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
-			AfterFields:   []string{"user_id", "code_id", "code_expires_at", "issued_by"},
+			AfterFields:   []string{"user_id", "code_id", "code_expires_at", "issued_by", "workload_delegation"},
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialConflict},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestTestIdentityWeb_Mint"},
+			{Package: "pkg/hub", Function: "TestWorkloadDelegation_WebLoginCodeForOwnIdentity"},
+			{Package: "pkg/hub", Function: "TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities"},
+			{Package: "pkg/hub", Function: "TestWorkloadDelegation_RevokedAfterAuthMintsNothing"},
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},

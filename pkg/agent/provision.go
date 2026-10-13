@@ -26,11 +26,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -576,7 +579,13 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 	// reflects the override.
 	if opts.HarnessAuth != "" && cfg != nil {
 		cfg.AuthSelectedType = opts.HarnessAuth
-		cfgData, marshalErr := json.MarshalIndent(cfg, "", "  ")
+		// cfg carries the environment values ProvisionAgent merged in for
+		// its caller; the file keeps the agent's own (ptone/scion#4561).
+		persisted := cfg
+		if env, ok := readPersistedAgentEnvironment(agentDir); ok {
+			persisted = withEnvironment(cfg, env)
+		}
+		cfgData, marshalErr := json.MarshalIndent(persisted, "", "  ")
 		if marshalErr == nil {
 			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), cfgData, 0644)
 		}
@@ -591,7 +600,7 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 // A2). A List error is not treated as "not running" by the caller — see the
 // call site's comment.
 func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (bool, error) {
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": name})
+	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": name})
 	if err != nil {
 		return false, err
 	}
@@ -665,6 +674,7 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 //   - a sibling agent's directory (both branches resolve strictly this
 //     agent's own agentDir via checkAgentDirContained/CheckAgentDirContained).
 func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	ctx = m.withWorkspaceLock(ctx)
 	hasGitClone := opts.GitClone != nil
 	if !api.ReincarnateEligible(hasGitClone, opts.Workspace, opts.EmptyPerAgentWorkspace) {
 		return nil, fmt.Errorf("%w: agent %q is neither clone-per-agent, empty-per-agent, nor has an explicit workspace; reincarnate currently supports those workspace modes only", ErrReprovisionRefused, opts.Name)
@@ -879,6 +889,7 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	ctx = m.withWorkspaceLock(ctx)
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
 	if err != nil {
@@ -1005,6 +1016,11 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		return nil, fmt.Errorf("failed to load template: %w", err)
 	}
 
+	// Each template contributes its job keys only (ptone/scion#4524):
+	// templateJobConfig drops its environment keys (reported) and its env,
+	// which is the separate template env layer Start applies as a final
+	// fill. Template env is therefore never merged into the agent config or
+	// persisted in scion-agent.json.
 	finalScionCfg := &api.ScionConfig{}
 	for _, tpl := range chain {
 		// Load scion-agent config from this template and merge it
@@ -1018,7 +1034,7 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 			return nil, fmt.Errorf("template %s: %w", templateRef(tpl), err)
 		}
 
-		finalScionCfg = config.MergeScionConfig(finalScionCfg, tplCfg)
+		finalScionCfg = config.MergeScionConfig(finalScionCfg, templateJobConfig(ctx, tpl, tplCfg))
 	}
 
 	if inlineCfg != nil {
@@ -1102,7 +1118,9 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 		templateName = defaultTemplate
 	}
 
-	_, err = resolveTemplateAndHarnessConfig(ctx, templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
+	// The real provisioning repeats this resolution and reports any ignored
+	// template environment keys; stay quiet here so each is reported once.
+	_, err = resolveTemplateAndHarnessConfig(withQuietTemplateEnvWarnings(ctx), templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
 	return err
 }
 
@@ -1586,6 +1604,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	} else if isGit {
 		// Case 2: Git Repository (and no explicit workspace)
+		// A flat Runtime Broker instance serializes the repository's
+		// worktree and sharer changes with every instance of its host (the
+		// host's workspace lock), through the rest of provisioning.
+		if repoRoot, rootErr := util.RepoRootDir(projectDir); rootErr == nil && repoRoot != "" {
+			unlockRepo, lockErr := lockWorkspace(ctx, repoRoot)
+			if lockErr != nil {
+				return "", "", nil, fmt.Errorf("workspace lock: %w", lockErr)
+			}
+			defer unlockRepo()
+		}
 		targetBranch := branch
 		if targetBranch == "" {
 			// Use slugified agent name for valid git branch names
@@ -2169,7 +2197,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// 2e. Merge settings env, auth, and resources if available
+	// 2e. Merge settings env, volumes and auth if available. The volumes,
+	// like the harness-config image, pull policy and volumes above, are
+	// environment values: kept in the returned config, not persisted
+	// (ptone/scion#4561).
 	if settings != nil {
 		hConfig, err := settings.ResolveHarnessConfig(profileName, harnessConfigName)
 		if err == nil {
@@ -2205,27 +2236,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			// Pinned by TestBrokerMode_HarnessConfigEnvOutranksTemplateEnv.
 			finalScionCfg = config.MergeScionConfig(settingsCfg, finalScionCfg)
 		}
-
-		// Merge profile-level resources (lower priority than template/agent-level resources).
-		effectiveProfile := profileName
-		if effectiveProfile == "" {
-			effectiveProfile = settings.ActiveProfile
-		}
-		if p, ok := settings.Profiles[effectiveProfile]; ok && p.Resources != nil {
-			if finalScionCfg.Resources == nil {
-				cpy := *p.Resources
-				finalScionCfg.Resources = &cpy
-			}
-			merged := config.MergeResourceSpec(p.Resources, finalScionCfg.Resources)
-			finalScionCfg.Resources = merged
-		}
-
-		// Merge harness-override resources on top of everything.
-		if p, ok := settings.Profiles[effectiveProfile]; ok && p.HarnessOverrides != nil {
-			if ho, ok := p.HarnessOverrides[harnessConfigName]; ok && ho.Resources != nil {
-				finalScionCfg.Resources = config.MergeResourceSpec(finalScionCfg.Resources, ho.Resources)
-			}
-		}
 	}
 
 	// Hub operational agent_defaults: below the template and below inline
@@ -2247,15 +2257,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// the broker chain in file mode, just above broker settings in Postgres
 	// mode. That is deliberate; see design §3.2.4 and alternative A7.
 	//
-	// Note the asymmetry for Resources: "above this broker's own settings.yaml
-	// defaults" means default_resources ONLY. Broker profile resources and
-	// harness overrides live in that same file but are merged in step 2e ABOVE,
-	// so they win per-field over the hub default_resources applied here — while
-	// broker default_max_turns loses to hub default_max_turns. The hub tier
-	// therefore sits in a different place for Resources than for the three
-	// scalars. That falls out of the insertion point the design specifies and is
-	// the conservative direction (§3.2.4 explicitly does not want hub defaults
-	// silently overriding broker profile resources).
+	// Note the asymmetry for Resources: hub agent_defaults.resources ranks
+	// above default_resources ONLY. Broker profile resources and harness
+	// overrides win per-field over it, while broker default_max_turns loses
+	// to hub default_max_turns. That is the conservative direction (§3.2.4
+	// explicitly does not want hub defaults silently overriding broker
+	// profile resources). Resources are resolved by
+	// resolveEnvironmentResources below and again by Start, never persisted.
 	if hd := api.HubAgentDefaultsFromContext(ctx); hd != nil && finalScionCfg != nil {
 		if finalScionCfg.MaxTurns == 0 && hd.MaxTurns > 0 {
 			finalScionCfg.MaxTurns = hd.MaxTurns
@@ -2265,14 +2273,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 		if finalScionCfg.MaxDuration == "" && hd.MaxDuration != "" {
 			finalScionCfg.MaxDuration = hd.MaxDuration
-		}
-		if hd.Resources != nil {
-			// Hub defaults in BASE position: per-field merge with the
-			// agent/template value winning any field it sets. MergeResourceSpec
-			// returns base itself when override is nil, so copy first rather
-			// than aliasing the context's spec into the persisted config.
-			base := *hd.Resources
-			finalScionCfg.Resources = config.MergeResourceSpec(&base, finalScionCfg.Resources)
 		}
 	}
 
@@ -2288,44 +2288,32 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if finalScionCfg.MaxDuration == "" && settings.DefaultMaxDuration != "" {
 			finalScionCfg.MaxDuration = settings.DefaultMaxDuration
 		}
-		if settings.DefaultResources != nil {
-			if finalScionCfg.Resources == nil {
-				cpy := *settings.DefaultResources
-				finalScionCfg.Resources = &cpy
-			} else {
-				// Merge: settings defaults are lower priority, so use them as base
-				finalScionCfg.Resources = config.MergeResourceSpec(settings.DefaultResources, finalScionCfg.Resources)
-			}
-		}
 	}
 
-	// Apply built-in resource defaults as the LOWEST-priority tier, below the
-	// settings defaults above. Docker and Podman emit cgroup flags only for
-	// non-empty fields, so an agent that reaches this point with no CPU limit
-	// runs completely unconstrained and can saturate every core on the host.
+	// Resources: settings default_resources < hub agent_defaults.resources
+	// < profile resources < the agent's own < profile harness_overrides, then
+	// the built-in CPU default as the LOWEST-priority tier
+	// (applyEnvironmentResources). Docker and Podman emit cgroup flags only
+	// for non-empty fields, so an agent with no CPU limit runs completely
+	// unconstrained and can saturate every core on the host; only the CPU
+	// limit is filled in, and only when nothing else supplied one. Gated by
+	// runtime.enforce_resource_defaults (default true). The built-in limit
+	// also never conflicts with a larger CPU request (ptone/scion#3407).
 	//
-	// Only the CPU limit is filled in, and only when nothing else supplied one;
-	// MergeResourceSpec keeps every field that a higher tier already set, so an
-	// explicit memory-only configuration still gains a CPU limit here.
-	// Gated by runtime.enforce_resource_defaults (default true) so an operator
-	// can restore the previous unlimited behaviour without a rollback.
-	//
-	// ApplyBuiltinDefaultResources also keeps the built-in limit from
-	// conflicting with a larger CPU request (ptone/scion#3407): a larger
-	// resources.requests.cpu raises the built-in limit, and a larger
-	// kubernetes.resources.requests.cpu sets kubernetes.resources.limits.cpu,
-	// which only the Kubernetes runtime reads.
-	if finalScionCfg != nil && config.ShouldEnforceResourceDefaults(settings) {
-		applyBuiltinResourceDefaults(finalScionCfg)
-	}
+	// These are environment values: they are applied to the config returned
+	// here, but not persisted to scion-agent.json; Start applies them from
+	// current settings on every start (ptone/scion#4561).
+	applyEnvironmentResources(ctx, finalScionCfg, settings, profileName, harnessConfigName)
 
 	// Mount the resolved workspace if an external source was determined
+	var workspaceVolume *api.VolumeMount
 	if workspaceSource != "" {
-		finalScionCfg.Volumes = append(finalScionCfg.Volumes, api.VolumeMount{
+		workspaceVolume = &api.VolumeMount{
 			Source:   workspaceSource,
 			Target:   "/workspace",
 			ReadOnly: false,
-		})
+		}
+		finalScionCfg.Volumes = append(finalScionCfg.Volumes, *workspaceVolume)
 	}
 	if explicitWorkspace {
 		finalScionCfg.ExplicitWorkspace = true
@@ -2398,7 +2386,15 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// See persistProvisionedWorktreeRepoRootIfValid.
 	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource)
 
-	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
+	// scion-agent.json carries only the requester's own environment values
+	// (the inline image, kubernetes, resources and volumes) and the workspace
+	// mount resolved above. The harness-config file, settings, profile, hub
+	// default and built-in values merged into finalScionCfg are applied by
+	// Start from current settings on every start, so a later settings or
+	// profile change reaches the agent on its next start (ptone/scion#4561).
+	// The returned config keeps the merged values (see the reload below).
+	persistedCfg := withEnvironment(finalScionCfg, provisionedAgentEnvironment(inlineCfg, workspaceVolume))
+	agentCfgData, err := json.MarshalIndent(persistedCfg, "", "  ")
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to marshal agent config: %w", err)
 	}
@@ -2407,20 +2403,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	// Record each image input at its own tier (ptone/scion#1799), so Start
 	// never has to reuse the merged finalScionCfg.Image — which folds in
-	// the inline, settings and profile values of this moment — as if it
-	// were the template's. Image provenance is recorded in broker-side agent
+	// the inline, settings and profile values of this moment. No template
+	// image is recorded: a template's image is an ignored environment key
+	// (ptone/scion#4524). Image provenance is recorded in broker-side agent
 	// state (the agent dir), never in the agent home, which is inside a
 	// container mount.
-	tplImage, tplPullPolicy := templateChainImage(chain)
 	if err := writeImageProvenance(agentDir, imageProvenance{
-		RequestImage:            agentImage,
-		TemplateImage:           tplImage,
-		TemplateImagePullPolicy: tplPullPolicy,
-		InlineImage:             explicitImage,
-		InlineImagePullPolicy:   explicitPullPolicy,
-		Profile:                 profileName,
-		Template:                displayTemplateName,
-		TemplateHash:            templateHash,
+		RequestImage:          agentImage,
+		InlineImage:           explicitImage,
+		InlineImagePullPolicy: explicitPullPolicy,
+		Profile:               profileName,
+		Template:              displayTemplateName,
+		TemplateHash:          templateHash,
 	}); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write image provenance: %w", err)
 	}
@@ -2432,7 +2426,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if finalScionCfg.Info != nil {
 		infoData, err := json.MarshalIndent(finalScionCfg.Info, "", "  ")
 		if err == nil {
-			_ = os.WriteFile(filepath.Join(agentHome, "agent-info.json"), infoData, 0644)
+			// Temp file and rename, so a reader never sees a truncated
+			// file (#4681). No container runs during provisioning; the
+			// lock keeps the write ordered with any other host writer.
+			infoPath := filepath.Join(agentHome, "agent-info.json")
+			if err := agentinfolock.Update(infoPath, agentinfolock.Options{}, func() error {
+				return writeAgentInfoFile(infoPath, infoData, 0o644)
+			}); err != nil {
+				slog.Warn("Provision: failed to write agent-info.json",
+					"agent", agentName, "error", err)
+			}
 		}
 	}
 
@@ -2507,11 +2510,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Reload config to get harness updates (e.g. Env vars injected by harness)
+	// Reload config to get harness updates (e.g. Env vars injected by harness).
+	// The reloaded file holds only the agent's own environment values; the
+	// returned config carries the effective ones merged above (for the
+	// create response and other callers), which Start re-derives from
+	// current settings on every start (ptone/scion#4561).
+	effectiveEnv := environmentOf(finalScionCfg)
 	reloadTpl := &config.Template{Path: agentDir}
 	if updatedCfg, err := reloadTpl.LoadConfig(); err == nil {
 		updatedCfg.Info = finalScionCfg.Info // Re-attach info
-		finalScionCfg = updatedCfg
+		finalScionCfg = withEnvironment(updatedCfg, effectiveEnv)
 	} else {
 		fmt.Fprintf(os.Stderr, "Warning: failed to reload agent config after harness provisioning: %v\n", err)
 	}
@@ -2770,7 +2778,7 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 	if opts.Env != nil {
 		projectID = opts.Env["SCION_PROJECT_ID"]
 	}
-	entries, err := m.Runtime.List(ctx, map[string]string{"scion.name": api.Slugify(opts.Name)})
+	entries, err := m.listRuntime(ctx, map[string]string{"scion.name": api.Slugify(opts.Name)})
 	if err != nil {
 		return true
 	}
@@ -2863,33 +2871,55 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 
 	// If agent-info.json doesn't exist, we can't update it.
 	// This might happen if provisioning failed or hasn't finished.
-	mode := os.FileMode(0o644)
-	if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+	// Checked before the lock too, so no lock file is left in a home
+	// that has no agent-info.json.
+	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
 		return nil
-	} else if err == nil {
-		mode = fi.Mode().Perm()
 	}
 
-	data, err := os.ReadFile(agentInfoPath)
-	if err != nil {
-		return err
-	}
+	// The read, update and write run under the agent-info lock, so a
+	// concurrent writer in the container (sciontool) or another host
+	// process cannot lose this update or have its own lost (#4681).
+	return agentinfolock.Update(agentInfoPath, agentinfolock.Options{}, func() error {
+		mode := os.FileMode(0o644)
+		if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+			return nil
+		} else if err == nil {
+			mode = fi.Mode().Perm()
+		}
 
-	var info api.AgentInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return err
-	}
+		data, err := os.ReadFile(agentInfoPath)
+		if err != nil {
+			return err
+		}
 
-	update(&info)
+		var info api.AgentInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			return err
+		}
 
-	newData, err := marshalAgentInfoKeepUnknown(data, &info)
-	if err != nil {
-		return err
-	}
+		update(&info)
 
-	return writeAgentInfoFile(agentInfoPath, newData, mode)
+		newData, err := marshalAgentInfoKeepUnknown(data, &info)
+		if err != nil {
+			return err
+		}
+
+		return writeAgentInfoFile(agentInfoPath, newData, mode)
+	})
 }
 
+// ErrAgentInfoNotDurable marks a writeAgentInfoFile failure after the
+// rename: the new content is in place, but syncing the parent directory
+// failed, so the change may not survive a crash. Repeating the write is
+// safe.
+var ErrAgentInfoNotDurable = errors.New("agent file replaced but the change may not be durable")
+
+// writeAgentInfoFile replaces path with data through a temp file in the
+// same directory, syncing the contents before the rename and the parent
+// directory after it. An error wrapping ErrAgentInfoNotDurable means the
+// content was replaced but may not survive a crash; any other error means
+// path was left untouched.
 func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -2907,10 +2937,60 @@ func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
+	// Flush the contents before the rename, so a crash cannot leave a
+	// truncated file under the final name (#4821).
+	if err := agentInfoFileSync(tmp); err != nil {
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	// Sync the parent directory so the rename itself survives a crash.
+	dir := filepath.Dir(path)
+	if err := syncAgentInfoDir(dir); err != nil {
+		return fmt.Errorf("%w: sync directory %s: %w", ErrAgentInfoNotDurable, dir, err)
+	}
+	return nil
+}
+
+// Test seams for writeAgentInfoFile's disk syncs.
+var (
+	// agentInfoFileSync flushes the temp file's contents to disk.
+	agentInfoFileSync = func(f *os.File) error { return f.Sync() }
+	// agentInfoDirSync flushes the parent directory, opened by
+	// syncAgentInfoDir, after the rename.
+	agentInfoDirSync = func(d *os.File) error { return d.Sync() }
+	// agentInfoDirOpen opens the parent directory for that sync.
+	agentInfoDirOpen = openAgentInfoDir
+)
+
+// syncAgentInfoDir fsyncs dir, as pkg/config's syncDir does. Windows cannot
+// fsync a directory, so it is a no-op there. A directory that cannot be
+// opened, or whose filesystem reports directory fsync as unsupported
+// (EINVAL, ENOTSUP, errors.ErrUnsupported), is skipped: the new content is
+// already in place.
+func syncAgentInfoDir(dir string) error {
+	if goruntime.GOOS == "windows" {
+		return nil
+	}
+	d, err := agentInfoDirOpen(dir)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = d.Close() }()
+	if err := agentInfoDirSync(d); err != nil && !isDirSyncUnsupported(err) {
+		return err
+	}
+	return nil
+}
+
+// isDirSyncUnsupported reports whether err is a filesystem saying it does
+// not support fsync on a directory.
+func isDirSyncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, errors.ErrUnsupported)
 }
 
 // provisionedWorktreeStateFile is the broker-owned file that persists the
@@ -3018,34 +3098,15 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 	})
 }
 
-// AgentDeleteState is the part of agent-info.json a soft delete marks
-// (Phase and DeletedAt), captured so the mark can be undone.
-type AgentDeleteState struct {
-	Phase     string
-	DeletedAt time.Time
-}
-
-// GetAgentDeleteState reads the Phase and DeletedAt of agent-info.json.
-// ok is false when the file cannot be read.
-func GetAgentDeleteState(agentName string, projectPath string) (AgentDeleteState, bool) {
-	info := getSavedAgentInfo(agentName, projectPath)
-	if info == nil {
-		return AgentDeleteState{}, false
-	}
-	return AgentDeleteState{Phase: info.Phase, DeletedAt: info.DeletedAt}, true
-}
-
-// RestoreAgentDeleteState writes st's Phase and DeletedAt back to
-// agent-info.json, undoing a soft-delete mark. It changes nothing unless the
-// file still shows the mark (Phase "deleted"), so a phase a newer start has
-// written since the snapshot is kept.
-func RestoreAgentDeleteState(agentName string, projectPath string, st AgentDeleteState) error {
+// MarkAgentSoftDeleted sets Phase "deleted" and, when deletedAt is not
+// zero, DeletedAt in one locked update of agent-info.json, so a concurrent
+// writer never sees or keeps only half of the soft-delete mark.
+func MarkAgentSoftDeleted(agentName string, projectPath string, deletedAt time.Time) error {
 	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
-		if info.Phase != "deleted" {
-			return
+		info.Phase = "deleted"
+		if !deletedAt.IsZero() {
+			info.DeletedAt = deletedAt
 		}
-		info.Phase = st.Phase
-		info.DeletedAt = st.DeletedAt
 	})
 }
 
@@ -3075,6 +3136,10 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 //     worktreeMayHoldWork; only worktrees that belong to the project
 //     repository are inspected, and anything else that may hold data, or
 //     cannot be checked, is kept.
+//   - A dir kept for its workspace records when and why in a marker file;
+//     once the soft-delete retention window has passed, it is removed
+//     without inspecting the workspace (ptone/scion#4742, see
+//     kept_agent_dir.go).
 //   - Any other dir with no home state is stale: it is removed, and
 //     worktrees are pruned, so the caller re-provisions it.
 func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace string) error {
@@ -3119,10 +3184,22 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), data, 0644); err != nil {
 			return fmt.Errorf("failed to write agent config: %w", err)
 		}
+		// The dir is live again: a marker from an earlier keep no longer
+		// applies (ptone/scion#4742).
+		clearKeptAgentDirMarker(agentName, agentDir)
 		slog.Info("GetAgent: agent directory had no config file; wrote a minimal scion-agent.json from agent-info.json and kept the home",
 			"agent", agentName, "agent_dir", agentDir, "home", populatedHome,
 			"template", info.Template, "harness_config", info.HarnessConfig)
 		return nil
+	}
+
+	// A directory kept earlier (see recordKeptAgentDir) whose soft-delete
+	// retention window has passed is removed without inspecting its
+	// workspace, and the caller re-provisions it (ptone/scion#4742).
+	if hasKeptAgentDirMarker(agentDir) {
+		if retention := keptAgentDirRetention(); retention > 0 && purgeExpiredKeptAgentDir(agentName, agentDir, agentHome, retention) {
+			return nil
+		}
 	}
 
 	// No home state, but the in-dir workspace may still hold work
@@ -3147,11 +3224,13 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		if err != nil {
 			slog.Warn("GetAgent: agent workspace could not be checked for uncommitted work; keeping the agent directory",
 				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace, "error", err)
+			recordKeptAgentDir(agentName, agentDir, keptReasonWorkspaceCheckFailed)
 			return fmt.Errorf("%w: agent %q state directory kept: could not check the agent's workspace for uncommitted work; check its ownership and permissions, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if hasWork {
 			slog.Warn("GetAgent: agent directory has no config file but its workspace may hold work; keeping it",
 				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace)
+			recordKeptAgentDir(agentName, agentDir, keptReasonWorkspaceMayHoldWork)
 			return fmt.Errorf("%w: agent %q state directory kept: its workspace may hold work (files, uncommitted changes, a standalone clone, or commits on no branch); save it, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if prunePath == "" && inspected {
@@ -3705,8 +3784,13 @@ func worktreeGitEnv() []string {
 // which is unrelated to the agent (ptone/scion#4511).
 func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool) {
 	// chmod to ensure we can remove root-owned files left by containers.
+	// Links are skipped, so their targets are left unchanged; RemoveAll
+	// removes the link itself.
 	_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 		_ = os.Chmod(path, 0755)
@@ -3824,6 +3908,12 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if !sharedWorkspace {
 		agentWorkspace = filepath.Join(agentDir, "workspace")
 	}
+
+	// Remove other agents' kept directories in the same agents root whose
+	// soft-delete retention window has passed (ptone/scion#4742).
+	sweepExpiredKeptAgentDirs(filepath.Dir(agentDir), agentName, func(name string) string {
+		return config.GetAgentHomePath(projectDir, name)
+	})
 
 	// Handle an agent directory that exists but has no config file. See
 	// handleAgentDirWithoutConfig: a populated home is kept (adopted from
@@ -4003,6 +4093,10 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		return agentDir, agentHome, agentWorkspace, agentCfg, nil
 	}
 
+	// Each template contributes its job keys only (ptone/scion#4524):
+	// templateJobConfig drops its environment keys and its env, so a restart
+	// never reintroduces them under the stored config. Start applies the
+	// live template env as a final fill.
 	mergedCfg := &api.ScionConfig{}
 	for _, tpl := range chain {
 		tplCfg, err := tpl.LoadConfig()
@@ -4010,7 +4104,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 			fmt.Fprintf(os.Stderr, "Warning: failed to load config from template %s, skipping: %v\n", templateRef(tpl), err)
 			continue
 		}
-		mergedCfg = config.MergeScionConfig(mergedCfg, tplCfg)
+		mergedCfg = config.MergeScionConfig(mergedCfg, templateJobConfig(ctx, tpl, tplCfg))
 	}
 
 	finalCfg := config.MergeScionConfig(mergedCfg, agentCfg)

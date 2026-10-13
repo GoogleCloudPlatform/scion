@@ -114,6 +114,10 @@ type idFixtures struct {
 	// dev user's here, the matrix super-admin's in the bearer disposition
 	// matrix (seedUserSkillInjection).
 	userSkillInjection string
+	// delegation holds an agent delegation grant bound to agent, a
+	// disposable twin grant for the revoke entry, and an active delegated
+	// credential of the first grant (seedLiveInventoryDelegation).
+	delegation liveInventoryDelegation
 	// testIdentity is a live hub test identity (handlers_test_identities.go).
 	testIdentity string
 	// testIdentityDel is a disposable live test identity for the delete
@@ -196,6 +200,14 @@ func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, 
 	}
 	r.groupMessage = conversationMessage(r.groupConversation)
 	r.directMessage = conversationMessage(r.directConversation)
+
+	threadGroup := func(name string) string {
+		g := &store.ThreadGroup{ProjectID: projectID, Name: name, CreatedBy: userID, CreatedByKind: store.ThreadGroupCreatorUser}
+		require.NoError(t, s.CreateThreadGroup(ctx, g))
+		return g.ID
+	}
+	r.threadGroup = threadGroup("inbox-thread-group-" + r.template[:8])
+	r.threadGroupDel = threadGroup("inbox-thread-group-del-" + r.template[:8])
 	return r
 }
 
@@ -500,13 +512,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 
-	// hub.conduit and hub.agent_delegation on too, so their
-	// experiment-gated routes are live: the registry above with both also
-	// defaulting on (no operational
-	// settings, which the other entries rely on, are replaced).
+	// hub.conduit, hub.agent_delegation and hub.chat_thread_groups on
+	// too, so their experiment-gated routes are live: the registry above
+	// with all three also defaulting on (no operational settings, which
+	// the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -517,12 +529,14 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(conduitExperiment))
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
+	require.True(t, srv.experimentEnabled(experiments.ChatThreadGroups))
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
+	f.delegation = seedLiveInventoryDelegation(t, ctx, s, f.agent, f.project)
 
-	// Hub test identities: turn the feature on (--enable-test-identities)
+	// Hub test identities: turn the feature on (--test-mode=member)
 	// and seed one live identity. Its issuer is the bearer matrix's
 	// super-admin (newBearerMatrixFixture), so that user's hub token may
 	// re-issue for it; the dev user reaches it as an admin session.
@@ -589,6 +603,9 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
+		// Grant revoke and grant read share their pattern; revoke takes
+		// the disposable twin grant.
+		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
 
 		// Group and direct conversation reads share their patterns.
 		{"project.conversation.read", "/api/v1/conversations/{id}"}:                           {"id": f.inbox.groupConversation},
@@ -597,6 +614,9 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}"}:                      {"id": f.inbox.directConversation},
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages"}:             {"id": f.inbox.directConversation},
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages/{messageId}"}: {"id": f.inbox.directConversation, "messageId": f.inbox.directMessage},
+
+		// Thread group delete uses its disposable twin.
+		{"inbox.threadgroup.delete", "/api/v1/thread-groups/{id}"}: {"id": f.inbox.threadGroupDel},
 	}
 }
 
@@ -620,14 +640,16 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/test-identity-delegations/{id}":      {"id": f.testIdentityDelegation},
 
 		// --- agent family ---
-		"/api/v1/agents/{id}":                                       {"id": f.agent},
-		"/api/v1/agents/{id}/ports":                                 {"id": f.agent},
-		"/api/v1/agents/{id}/ports/{port}/proxy":                    {"id": f.agent, "port": f.agentPort},
-		"/api/v1/agents/{id}/ports/{port}/proxy/{subpath}":          {"id": f.agent, "port": f.agentPort, "subpath": "x"},
-		"/api/v1/agents/{id}/set_message_mode":                      {"id": f.agent},
-		"/api/v1/agents/{id}/delegations":                           {"id": f.agent},
-		"/api/v1/agents/{id}/delegations/{grantId}/exchange":        {"id": f.agent, "grantId": "live-inventory-grant"},
-		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode": {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}":                                                  {"id": f.agent},
+		"/api/v1/agents/{id}/ports":                                            {"id": f.agent},
+		"/api/v1/agents/{id}/ports/{port}/proxy":                               {"id": f.agent, "port": f.agentPort},
+		"/api/v1/agents/{id}/ports/{port}/proxy/{subpath}":                     {"id": f.agent, "port": f.agentPort, "subpath": "x"},
+		"/api/v1/agents/{id}/set_message_mode":                                 {"id": f.agent},
+		"/api/v1/agents/{id}/delegations":                                      {"id": f.agent},
+		"/api/v1/agents/{id}/delegations/{grantId}/exchange":                   {"id": f.agent, "grantId": f.delegation.grant},
+		"/api/v1/agents/{id}/delegations/{grantId}":                            {"id": f.agent, "grantId": f.delegation.grant},
+		"/api/v1/agents/{id}/delegations/{grantId}/credentials/{credentialId}": {"id": f.agent, "grantId": f.delegation.grant, "credentialId": f.delegation.credential},
+		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode":            {"projectId": f.project, "id": f.agent},
 
 		// --- agent self-access family (agent JWT routes) ---
 		"/api/v1/agents/{id}/token/refresh":                         {"id": f.agent},
@@ -818,6 +840,11 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/conversations/{id}/participants":  {"id": f.inbox.groupConversation},
 		"/api/v1/conversations/{id}/leave":         {"id": f.inbox.leaveConversation},
 
+		// --- chat thread group family ---
+		"/api/v1/thread-groups/{id}":                          {"id": f.inbox.threadGroup},
+		"/api/v1/thread-groups/{id}/threads":                  {"id": f.inbox.threadGroup},
+		"/api/v1/thread-groups/{id}/threads/{conversationId}": {"id": f.inbox.threadGroup, "conversationId": f.inbox.groupConversation},
+
 		// --- hub pre-start hooks family ---
 		"/api/v1/pre-start-hooks/{id}":          {"id": f.hubPreStartHook},
 		"/api/v1/pre-start-hooks/{id}/activate": {"id": f.hubPreStartHook},
@@ -836,6 +863,8 @@ func queryOverrides(f idFixtures) map[string]string {
 		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
 		// handleConversationResolve 400s without a reference.
 		"/api/v1/conversations/resolve": "reference=conv:" + f.inbox.groupConversation,
+		// handleListThreadGroups 400s without a project for a user.
+		"/api/v1/thread-groups": "projectId=" + f.project,
 	}
 }
 
@@ -846,6 +875,13 @@ func queryOverrides(f idFixtures) map[string]string {
 // behavior at all. An entry not listed here uses the empty object.
 func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 	return map[overrideKey]map[string]interface{}{
+		// Agent delegation issuance and exchange: valid bodies, so the
+		// probes reach the credential checks (the dev token is refused
+		// there with 403 credential_not_admitted) instead of a body 400.
+		{"agent.delegation.create", "/api/v1/agents/{id}/delegations"}: {
+			"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "live-inventory",
+		},
+		{"agent.delegation.exchange", "/api/v1/agents/{id}/delegations/{grantId}/exchange"}: {"audience": "scion-hub"},
 		// updateProjectMemberRole (handlers_project_members.go) 400s
 		// "roleDefinitionId is required" on an empty body before the
 		// binding ID is used for anything; with a real role ID, the
@@ -938,6 +974,8 @@ type inboxRecords struct {
 	directConversation  string
 	directMessage       string
 	createConversations string // display name prefix for conversations a test creates
+	threadGroup         string // a chat thread group in the project (ptone/scion#4424)
+	threadGroupDel      string // a disposable chat thread group for the delete probes
 }
 
 // seedLiveInventoryArtifact publishes a one-file artifact directly through
@@ -958,4 +996,41 @@ func seedLiveInventoryArtifact(t *testing.T, ctx context.Context, st artifacts.S
 	files := []artifacts.File{{VersionID: v.ID, Path: "live.md", Size: int64(len(content)), SHA256: digest, MediaType: "text/markdown"}}
 	require.NoError(t, st.CreatePublished(ctx, a, v, files, nil))
 	return a.ID
+}
+
+// liveInventoryDelegation is the agent delegation fixture of the live
+// method inventory: a grant bound to the fixture agent, a disposable twin
+// grant for the revoke entry, and an active credential of the first grant.
+type liveInventoryDelegation struct {
+	grant       string
+	grantRevoke string
+	credential  string
+}
+
+// seedLiveInventoryDelegation writes the live inventory's grants and
+// credential directly to the store. The dev user is the issuer; the dev
+// token reaches them as hub authority.
+func seedLiveInventoryDelegation(t *testing.T, ctx context.Context, s store.Store, agentID, projectID string) liveInventoryDelegation {
+	t.Helper()
+	grant := func(name string) string {
+		g := &store.AgentDelegationGrant{
+			AgentID: agentID, AgentProjectID: projectID, IssuerUserID: DevUserID,
+			BoundaryKind: "hub", CeilingVersion: 1, CeilingPermissionIDs: []string{"agent.read"},
+			Name: name, MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL,
+			ExpiresAt: time.Now().Add(time.Hour), IssuanceAuditID: uuid.New().String(),
+		}
+		require.NoError(t, s.CreateAgentDelegationGrant(ctx, g))
+		return g.ID
+	}
+	out := liveInventoryDelegation{grant: grant("li-grant"), grantRevoke: grant("li-grant-revoke")}
+	_, hash, err := newDelegatedCredentialToken()
+	require.NoError(t, err)
+	cred := &store.AgentDelegatedCredential{
+		GrantID: out.grant, AgentID: agentID, KeyHash: hash, Prefix: delegatedCredentialPrefix,
+		Audience: "scion-hub", CeilingPermissionIDs: []string{"agent.read"},
+		ExchangeAgentCredentialID: uuid.New().String(), ExpiresAt: time.Now().Add(30 * time.Minute),
+	}
+	require.NoError(t, s.CreateAgentDelegatedCredential(ctx, cred))
+	out.credential = cred.ID
+	return out
 }

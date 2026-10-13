@@ -273,6 +273,10 @@ type HubContext struct {
 	// (hubsync.CredentialKindUnknown) on any HubContext not built via
 	// CheckHubAvailability* (e.g. a test double).
 	CredentialKind hubsync.CredentialKind
+	// TargetProfile names the target-hub profile this context was built
+	// from (profileAgentHubContext), or is empty. A profile context has no
+	// local project: commands using it touch no local project state.
+	TargetProfile string
 }
 
 // getHubAccessToken returns an access token for authenticating to the Hub over
@@ -358,6 +362,11 @@ func CheckHubAvailabilityForAgent(projectPath, targetAgent string, skipSync bool
 // All target agents are excluded from sync requirements so batch operations are not blocked
 // by sync drift on the exact agents being modified.
 func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, skipSync bool) (*HubContext, error) {
+	// A target-hub profile names the hub and, with --project, the project
+	// on it: no hub sync and no local project (ptone/scion#4240).
+	if hubProfileSelected() {
+		return profileAgentHubContext()
+	}
 	targetAgent := ""
 	if len(excludedAgents) > 0 {
 		targetAgent = excludedAgents[0] // compatibility field for older internals
@@ -378,6 +387,12 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		// The hub selected with 'scion use' never links or registers a
 		// project that is already linked to a hub.
 		HubFromContext: hubSource == targetSourceContext,
+		// A project registered or linked on the hub selected with 'scion
+		// use' gets a link entry, so it stays on that hub after a hub
+		// switch. Both writers are stderr: this runs before commands that
+		// print JSON on stdout. (The context hub always has an entry, so
+		// no new-hub line is printed here.)
+		RecordLink: contextLinkRecorder(os.Stderr, os.Stderr),
 		// On the local workstation hub, link an unregistered project
 		// without prompting; a remote hub keeps the prompt.
 		AutoLinkLocal: true,
@@ -787,6 +802,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	agentName := api.Slugify(args[0])
 	task := strings.Join(args[1:], " ")
 
+	// A target-hub profile refuses the flags that need local state before
+	// anything else (ptone/scion#4240).
+	if err := checkProfileAgentFlags(cmd); err != nil {
+		return err
+	}
+
 	// Reject --format json with --attach (mutually exclusive)
 	if isJSONOutput() && attach {
 		return newUsageError("--format json and --attach are mutually exclusive")
@@ -834,9 +855,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return asUsageError(err)
 	}
 
-	// Pre-flight: verify .scion/agents/ is gitignored (once, before any provisioning).
-	if err := CheckAgentsGitignore(projectPath); err != nil {
-		return err
+	// Pre-flight: verify .scion/agents/ is gitignored (once, before any
+	// provisioning). A target-hub profile has no local project.
+	if !hubProfileSelected() {
+		if err := CheckAgentsGitignore(projectPath); err != nil {
+			return err
+		}
 	}
 
 	// Check if Hub should be used, excluding the target agent from sync requirements.
@@ -1198,6 +1222,11 @@ func printHubWorkspaceSource(project *hubclient.Project) {
 		fmt.Fprintf(os.Stderr, "  (agents mount the project's shared workspace on the runtime broker; no per-agent clone)\n")
 		return
 	}
+	if project.Labels[store.LabelWorkspaceMode] == store.WorkspaceModeWorktreePerAgent {
+		fmt.Fprintf(os.Stderr, "Using hub, git worktree per agent for repo %s\n", project.GitRemote)
+		fmt.Fprintf(os.Stderr, "  (for a checkout linked on this machine, each agent gets a worktree of it under .scion/agents/<name>/workspace; otherwise the runtime broker makes per-agent worktrees of its own clone)\n")
+		return
+	}
 	cloneURL := util.ResolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 	fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
 	fmt.Fprintf(os.Stderr, "  (%s; local worktrees are not used)\n", hubCloneTransportNote(cloneURL))
@@ -1393,6 +1422,13 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		// Opt in to a non-blocking launch; the CLI waits for it below. A
 		// Hub without async launch ignores this and answers synchronously.
 		AcceptAsyncLaunch: true,
+	}
+
+	// With a target-hub profile, nothing is gathered from the local
+	// environment for another hub: the env-gather flow is off
+	// (ptone/scion#4240).
+	if hubCtx.profileLocalOnly() {
+		req.GatherEnv = false
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
@@ -2114,6 +2150,12 @@ const (
 // gatherAndSubmitEnv handles the env-gather flow: checks the local environment
 // for missing keys and submits gathered values back to the Hub.
 func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, projectID string, resp *hubclient.CreateAgentResponse) (*hubclient.CreateAgentResponse, error) {
+	// With a target-hub profile the request asked for no env-gather; if
+	// the target asks anyway, nothing is gathered from the local
+	// environment.
+	if hubCtx.profileLocalOnly() {
+		return nil, fmt.Errorf("the target hub of profile %q asked for environment values (%s); with a hub profile nothing is gathered from the local environment: set them as secrets or env on the target hub", hubCtx.TargetProfile, strings.Join(resp.EnvGather.Needs, ", "))
+	}
 	gather := resp.EnvGather
 	agentID := gather.AgentID
 	if agentID == "" && resp.Agent != nil {

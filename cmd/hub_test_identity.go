@@ -32,16 +32,25 @@ import (
 )
 
 // scion hub test-identity (ptone/scion#4240): issue, re-issue tokens for,
-// mint web-login codes for, list and delete hub test identities. Available
-// in human mode only: the "hub" subtree is not in agentAllowed
-// (cli_mode.go), since issuance needs a user or issuer credential that
-// agents do not hold.
+// mint web-login codes for, list and delete hub test identities, tear down
+// a run, and (human only) manage workload issuer delegations.
 //
-// A token or web-login code is a secret. It is written only to the file
-// named by --out, created exclusively (never overwriting an existing path
-// or following a symlink) with mode 0600. Standard output and standard
-// error carry only non-secret facts: the identity's ID, email, role,
-// expiry, the code ID and the output file path.
+// Without a hub profile the commands use the CLI's usual hub credential
+// and are human only. With a target-hub profile (hub_profile.go) they act
+// as the profile's issuer delegation, keep issued identities in the run
+// cache, and also run in agent mode, but only against a target whose
+// endpoint is not the agent's own hub. delegate is the human consent step
+// on the target: human mode only, never with a profile. web-code with a
+// profile mints the code through the issuer delegation, for an identity
+// that delegation issued; in agent mode it runs only with such a profile.
+//
+// A token or web-login code is a secret. Without a profile it is written
+// only to the file named by --out, created exclusively (never overwriting
+// an existing path or following a symlink) with mode 0600; with a profile
+// a token goes only to the run cache (0600, exclusive, symlinks refused)
+// and a web-login code still only to --out.
+// Standard output and standard error carry only non-secret facts: the
+// identity's ID, email, role, expiry, the code ID and the output file path.
 
 var hubTestIdentityCmd = &cobra.Command{
 	Use:   "test-identity",
@@ -49,7 +58,7 @@ var hubTestIdentityCmd = &cobra.Command{
 	Long: `Manage hub test identities: short-lived synthetic member or viewer
 users for testing on a test hub.
 
-The hub must run with --enable-test-identities, and you need the
+The hub must run with --test-mode=member (or admin), and you need the
 test_identity.issue permission: an admin session, or a hub-bound access
 token carrying the test_identity:issue scope (the intended credential for
 CI and operators, set in SCION_HUB_TOKEN).
@@ -57,6 +66,14 @@ CI and operators, set in SCION_HUB_TOKEN).
 The access token of a test identity is written only to the file named by
 --out, which must not exist yet; it is created with mode 0600. The token is
 never printed.
+
+With a target-hub profile (see 'scion hub profile'), the commands act as the
+profile's issuer delegation on another test hub, issued identities go to the
+run cache (issue --as <alias> --run <label>), 'teardown --run <label>'
+removes a whole run, and the commands also run in agent mode, but only
+against a profile for another hub. 'web-code' with a profile mints the code
+through the issuer delegation, for an identity issued through it. 'delegate'
+is the human consent step on the target hub.
 
 Examples:
   # Issue a member identity; its token goes to ./fixture.token
@@ -72,7 +89,13 @@ Examples:
   scion hub test-identity web-code <id> --out ./code.txt
 
   # Delete a test identity when the run is done
-  scion hub test-identity delete <id>`,
+  scion hub test-identity delete <id>
+
+  # With a target-hub profile: issue into the run cache, mint a web-login
+  # code for the identity, then tear the run down
+  scion --hub-profile t1 hub test-identity issue --as owner --run r1
+  scion --hub-profile t1 hub test-identity web-code <id> --out ./code.txt
+  scion --hub-profile t1 hub test-identity teardown --run r1`,
 }
 
 var hubTestIdentityIssueCmd = &cobra.Command{
@@ -96,15 +119,20 @@ Examples:
 }
 
 var hubTestIdentityTokenCmd = &cobra.Command{
-	Use:   "token ID --out FILE",
+	Use:   "token [ID] [--out FILE]",
 	Short: "Issue a new token for a live test identity",
 	Long: `Issue a new access token for a live test identity you issued, and
 write it to --out (which must not exist; created with mode 0600).
 
+With a hub profile and --as <alias> (and --run), the token of that cached
+identity is re-issued through the profile's issuer delegation and stored in
+the run cache instead (no ID, no --out).
+
 Examples:
   scion hub test-identity token 6f1c... --out ./fixture-2.token
-  scion hub test-identity token 6f1c... --ttl 10m --out ./short.token`,
-	Args: cobra.ExactArgs(1),
+  scion hub test-identity token 6f1c... --ttl 10m --out ./short.token
+  scion --hub-profile t1 hub test-identity token --as owner --run r1`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runHubTestIdentityToken,
 }
 
@@ -123,7 +151,7 @@ Examples:
 }
 
 var hubTestIdentityDeleteCmd = &cobra.Command{
-	Use:   "delete ID",
+	Use:   "delete [ID]",
 	Short: "Delete a test identity",
 	Long: `Delete a test identity. Its role bindings and group memberships go
 with it and its tokens stop working at once.
@@ -141,10 +169,14 @@ the identity owns without that record are listed as unproven and never
 removed. When the purge cannot finish (for example a broker is offline) it
 lists what is left and exits non-zero; run it again to finish.
 
+With a hub profile and --as <alias> (and --run), the cached identity is
+deleted and removed from the run cache (no ID).
+
 Examples:
   scion hub test-identity delete 6f1c...
-  scion hub test-identity delete 6f1c... --purge`,
-	Args: cobra.ExactArgs(1),
+  scion hub test-identity delete 6f1c... --purge
+  scion --hub-profile t1 hub test-identity delete --as owner --run r1`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runHubTestIdentityDelete,
 }
 
@@ -168,9 +200,16 @@ symlink, or a path under a symlinked directory is refused. The file is
 created with mode 0600 and holds only the code. The code is never printed;
 only the identity ID, the code ID, the code expiry and the file path are.
 
+With a target-hub profile (--hub-profile or SCION_HUB_PROFILE), the code is
+minted on the target hub through the profile's issuer delegation, for a
+member identity issued through that delegation ('scion hub test-identity
+list' shows their IDs); --as does not apply. In agent mode web-code runs
+only with a profile for another hub, never this agent's own.
+
 Examples:
   scion hub test-identity web-code 6f1c... --out ./code.txt
-  scion hub test-identity web-code 6f1c... --out /tmp/run-42/code.txt --json`,
+  scion hub test-identity web-code 6f1c... --out /tmp/run-42/code.txt --json
+  scion --hub-profile t1 hub test-identity web-code 6f1c... --out ./code.txt`,
 	Args: cobra.ExactArgs(1),
 	RunE: runHubTestIdentityWebCode,
 }
@@ -201,14 +240,12 @@ func init() {
 	hubTestIdentityIssueCmd.Flags().DurationVar(&testIdentityTTL, "ttl", 0, "Token lifetime, e.g. 30m (default: the hub's, 30m)")
 	hubTestIdentityIssueCmd.Flags().DurationVar(&testIdentityLifetime, "lifetime", 0, "Identity lifetime, e.g. 2h (default: the hub's, 1h; at most 8h)")
 	hubTestIdentityIssueCmd.Flags().StringVar(&testIdentityPurpose, "purpose", "", "Short label recorded on the identity and in the audit log")
-	hubTestIdentityIssueCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the token to (required; must not exist; created 0600)")
+	hubTestIdentityIssueCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the token to (required without a hub profile; must not exist; created 0600)")
 	hubTestIdentityIssueCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Print the identity as JSON (never the token)")
-	_ = hubTestIdentityIssueCmd.MarkFlagRequired("out")
 
 	hubTestIdentityTokenCmd.Flags().DurationVar(&testIdentityTTL, "ttl", 0, "Token lifetime, e.g. 30m (default: the hub's, 30m)")
-	hubTestIdentityTokenCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the token to (required; must not exist; created 0600)")
+	hubTestIdentityTokenCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the token to (required unless --as names a cached identity; must not exist; created 0600)")
 	hubTestIdentityTokenCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Print the identity as JSON (never the token)")
-	_ = hubTestIdentityTokenCmd.MarkFlagRequired("out")
 
 	hubTestIdentityWebCodeCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the code to (required; must not exist; created 0600)")
 	hubTestIdentityWebCodeCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Print the code ID, expiry and file as JSON (never the code)")
@@ -245,6 +282,12 @@ type testIdentityTokenOptions struct {
 }
 
 func runHubTestIdentityIssue(cmd *cobra.Command, _ []string) error {
+	if hubProfileSelected() {
+		return runProfileTestIdentityIssue(cmd)
+	}
+	if testIdentityOut == "" {
+		return newUsageError("--out is required: the token is written only to a file")
+	}
 	_, client, err := loadHubClient()
 	if err != nil {
 		return err
@@ -258,7 +301,16 @@ func runHubTestIdentityIssue(cmd *cobra.Command, _ []string) error {
 }
 
 func runHubTestIdentityToken(cmd *cobra.Command, args []string) error {
-	_, client, err := loadHubClient()
+	if hubProfileSelected() && hubProfileAs != "" {
+		return runProfileTestIdentityReissue(cmd, args)
+	}
+	if len(args) != 1 {
+		return newUsageError("name the test identity: token ID --out FILE")
+	}
+	if testIdentityOut == "" {
+		return newUsageError("--out is required: the token is written only to a file")
+	}
+	client, err := testIdentityIssuerClient()
 	if err != nil {
 		return err
 	}
@@ -270,7 +322,9 @@ func runHubTestIdentityToken(cmd *cobra.Command, args []string) error {
 }
 
 func runHubTestIdentityWebCode(cmd *cobra.Command, args []string) error {
-	_, client, err := loadHubClient()
+	// With a profile: the issuer delegation on the target hub (--as is
+	// refused); without one: the CLI's usual hub client.
+	client, err := testIdentityIssuerClient()
 	if err != nil {
 		return err
 	}
@@ -281,8 +335,26 @@ func runHubTestIdentityWebCode(cmd *cobra.Command, args []string) error {
 	})
 }
 
-func runHubTestIdentityList(cmd *cobra.Command, _ []string) error {
+// testIdentityIssuerClient returns the client test identity commands act
+// with: the profile's issuer delegation when a profile is selected (and
+// --as is refused), the CLI's usual hub client otherwise.
+func testIdentityIssuerClient() (hubclient.Client, error) {
+	if hubProfileSelected() {
+		if hubProfileAs != "" {
+			return nil, errors.New("--as does not apply to this command: test identity commands act as the profile's issuer delegation")
+		}
+		s, err := openHubProfileSession(false)
+		if err != nil {
+			return nil, err
+		}
+		return s.IssuerClient()
+	}
 	_, client, err := loadHubClient()
+	return client, err
+}
+
+func runHubTestIdentityList(cmd *cobra.Command, _ []string) error {
+	client, err := testIdentityIssuerClient()
 	if err != nil {
 		return err
 	}
@@ -294,7 +366,13 @@ func runHubTestIdentityList(cmd *cobra.Command, _ []string) error {
 }
 
 func runHubTestIdentityDelete(cmd *cobra.Command, args []string) error {
-	_, client, err := loadHubClient()
+	if hubProfileSelected() && hubProfileAs != "" {
+		return runProfileTestIdentityDeleteAlias(cmd, args)
+	}
+	if len(args) != 1 {
+		return newUsageError("name the test identity: delete ID")
+	}
+	client, err := testIdentityIssuerClient()
 	if err != nil {
 		return err
 	}

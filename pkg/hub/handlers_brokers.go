@@ -171,7 +171,7 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	var resp *CreateBrokerRegistrationResponse
 	switch {
 	case req.RuntimeTarget != nil:
-		resp, err = s.createFlatBrokerRegistration(r.Context(), req, user.ID(), existingBroker)
+		resp, err = s.createFlatBrokerRegistration(r.Context(), req, user.ID(), existingBroker, autoProvideAuthorized)
 	case existingBroker != nil:
 		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedMatch(r.Context(), req, user.ID(), existingBroker.ID, autoProvideAuthorized)
 	default:
@@ -205,7 +205,10 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 // shared flat registration path (pinned to the row the caller was authorized
 // against) and issues its join token. The response echoes the stored runtime
 // target as the activation acknowledgement.
-func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker) (*CreateBrokerRegistrationResponse, error) {
+//
+// autoProvideAuthorized is the handler's broker.auto_provide decision; the
+// write is pinned to it as on the legacy path (flatRegistration.GateAutoProvide).
+func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
 	labels := registrationLabels(req.Labels)
 	saEmail := strings.ToLower(req.GCPHostServiceAccountEmail)
 	// PreserveSettings (GoogleCloudPlatform/scion#2702) applies as on the
@@ -219,6 +222,10 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 		Target:    *req.RuntimeTarget,
 		CreatedBy: createdBy,
 		Existing:  existing,
+		// PreserveSettings already forced AutoProvide off (handler).
+		GateAutoProvide:       true,
+		RequestedAutoProvide:  req.AutoProvide,
+		AutoProvideAuthorized: autoProvideAuthorized,
 		Apply: func(b *store.RuntimeBroker, created bool) {
 			if preserve && !created {
 				return
@@ -587,7 +594,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Determine hub endpoint
-	hubEndpoint := s.config.HubEndpoint
+	hubEndpoint := s.HubEndpointFor(HubEndpointForJoinResponse)
 	if hubEndpoint == "" {
 		// Fall back to constructing from request
 		scheme := "http"

@@ -1,0 +1,11 @@
+# The flat instance that replaces profile batch: the folded shared-dir size
+# (profile beats runtime entry) on the instance's runtime_target.
+server:
+  broker:
+    instances:
+      - key: k8s
+        name: k8s
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+          shared_dir_size: 40Gi

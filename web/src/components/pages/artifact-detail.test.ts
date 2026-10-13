@@ -22,7 +22,11 @@
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { ArtifactResponse, ArtifactVersion } from '../../client/artifacts.js';
+import type {
+  ArtifactResponse,
+  ArtifactVersion,
+  DiscardedVersion,
+} from '../../client/artifacts.js';
 import type { ScionPageArtifactDetail } from './artifact-detail.js';
 import { resetPrincipalNames } from '../../client/principal-names.js';
 import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
@@ -65,6 +69,20 @@ interface MockOptions {
   agentStatus?: number;
   /** Versions listed by GET .../versions (default: meta's version). */
   versions?: ArtifactVersion[];
+  /** crossProjectSharing in GET .../grants (default: off). */
+  crossProjectSharing?: boolean;
+  /** Discarded versions listed by GET .../versions (default: none). */
+  discarded?: DiscardedVersion[];
+  /**
+   * Version list pages by their before= value ('' for the first page);
+   * when set, it replaces versions and discarded.
+   */
+  versionPages?: Record<
+    string,
+    { versions: ArtifactVersion[]; discarded: DiscardedVersion[]; nextBefore?: number }
+  >;
+  /** Version list pages held back until their promise resolves, by before= value. */
+  versionPageGates?: Record<string, Promise<void>>;
   /** expiresAt of a minted view (default: far in the future). */
   viewExpiresAt?: string;
   /** Answers POST/PUT requests other than the view mint. */
@@ -93,6 +111,10 @@ function mockFetch(
           opts.write ? opts.write(method, url) : new Response(null, { status: 500 })
         );
       }
+      if (url.endsWith('/grants')) {
+        const grants = { grants: [], crossProjectSharing: !!opts.crossProjectSharing };
+        return Promise.resolve(new Response(JSON.stringify(grants), { status: 200 }));
+      }
       if (url.startsWith('/api/v1/agents/')) {
         const status = opts.agentStatus ?? 404;
         return Promise.resolve(
@@ -114,7 +136,16 @@ function mockFetch(
       }
       if (/\/versions(\?|$)/.test(url)) {
         const versions = opts.versions ?? (meta?.version ? [{ ...meta.version, files: [] }] : []);
-        return Promise.resolve(new Response(JSON.stringify({ versions }), { status: 200 }));
+        if (opts.versionPages) {
+          const before = /[?&]before=(\d+)/.exec(url)?.[1] ?? '';
+          const page = opts.versionPages[before] ?? { versions: [], discarded: [] };
+          const gate = opts.versionPageGates?.[before] ?? Promise.resolve();
+          return gate.then(() => new Response(JSON.stringify(page), { status: 200 }));
+        }
+        const discarded = opts.discarded ?? [];
+        return Promise.resolve(
+          new Response(JSON.stringify({ versions, discarded }), { status: 200 })
+        );
       }
       if (url.includes('/files/')) {
         const status = opts.fileStatus ?? 200;
@@ -225,6 +256,65 @@ describe('artifact page', () => {
     )!;
     expect(open.getAttribute('href')).toBe(VIEW_URL);
     expect(open.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('offers Move… only while cross-project sharing is on, and opens the moved artifact', async () => {
+    const moveButton = (el: ScionPageArtifactDetail): HTMLElement | undefined =>
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
+        b.textContent!.includes('Move…')
+      ) as HTMLElement | undefined;
+
+    // Without canManage: no Move…, and the grants are never requested, even
+    // while cross-project sharing is on.
+    const urls = mockFetch(artifact('notes.md', 'text/markdown'), '# Hello', {
+      crossProjectSharing: true,
+    });
+    let el = await mount(true);
+    expect(moveButton(el)).toBeUndefined();
+    expect(el.shadowRoot!.querySelector('scion-artifact-move-dialog')).toBeNull();
+    expect(urls.filter((u) => u.endsWith('/grants'))).toEqual([]);
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+
+    // The hub refuses every move while cross-project sharing is off.
+    mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true });
+    el = await mount(true);
+    expect(moveButton(el)).toBeUndefined();
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+
+    mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true }, '# Hello', {
+      crossProjectSharing: true,
+    });
+    el = await mount(true);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-move-dialog') as HTMLElement & {
+      open: boolean;
+      homeDeleted: boolean;
+      artifact: { id: string };
+    };
+    expect(dialog.open).toBe(false);
+    expect(dialog.homeDeleted).toBe(false);
+    expect(dialog.artifact.id).toBe(ID);
+    moveButton(el)!.click();
+    await el.updateComplete;
+    expect(dialog.open).toBe(true);
+
+    const paths: string[] = [];
+    const onNav = (e: Event): void => {
+      paths.push((e as CustomEvent<{ path: string }>).detail.path);
+    };
+    document.addEventListener('nav-click', onNav);
+    try {
+      const moved = { ...artifact('notes.md', 'text/markdown').artifact, scopeRef: 'p-2' };
+      dialog.dispatchEvent(
+        new CustomEvent('artifact-moved', { detail: moved, bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+    } finally {
+      document.removeEventListener('nav-click', onNav);
+    }
+    expect(paths).toEqual([`/projects/p-2/artifacts/${ID}`]);
+    expect(dialog.open).toBe(false);
   });
 
   it('shows 404 when the hub answers 404', async () => {
@@ -487,6 +577,282 @@ describe('artifact page', () => {
       document.body.innerHTML = '';
       vi.unstubAllGlobals();
     }
+  });
+
+  it('lists discarded versions between ready ones in History, collapsed, without actions', async () => {
+    const versions: ArtifactVersion[] = [4, 1].map((seq) => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    }));
+    const discarded: DiscardedVersion[] = [
+      { seq: 3, state: 'failed', reason: 'stale_review', createdAt: '2026-10-05T12:00:00Z' },
+      { seq: 2, state: 'failed', reason: 'unmarked_changes', createdAt: '2026-10-05T12:00:00Z' },
+    ];
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 4;
+    meta.version = { ...meta.version!, seq: 4, ref: `scion://artifact/${ID}@4` };
+    mockFetch(meta, '# Doc', { versions, discarded });
+    const el = await mount(true);
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    const rows = Array.from(panel.querySelectorAll('tbody tr'));
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain('v4');
+    expect(rows[1].classList.contains('discarded-group')).toBe(true);
+    expect((rows[1].textContent ?? '').replace(/\s+/g, ' ')).toContain('v2–v3 · 2 discarded');
+    expect(rows[1].querySelector('sl-icon-button')).toBeNull();
+    expect(rows[2].textContent).toContain('v1');
+
+    // Details expands the group to each version's reason; no actions.
+    (rows[1].querySelector('sl-button') as HTMLElement).click();
+    await el.updateComplete;
+    const expanded = Array.from(panel.querySelectorAll('tbody tr.discarded-version'));
+    expect(expanded).toHaveLength(2);
+    expect(expanded[0].textContent).toContain('v3');
+    expect(expanded[0].textContent).toContain('the review was of an older version');
+    expect(expanded[1].textContent).toContain('the review changed text outside its marks');
+    for (const r of expanded) expect(r.querySelector('sl-icon-button')).toBeNull();
+  });
+
+  it('keeps reading version pages until a ready version arrives', async () => {
+    const ready = (seq: number): ArtifactVersion => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    });
+    const gone = (seq: number): DiscardedVersion => ({
+      seq,
+      state: 'failed',
+      reason: 'unmarked_changes',
+      createdAt: '2026-10-05T12:00:00Z',
+    });
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 1;
+    const urls = mockFetch(meta, '# Doc', {
+      versionPages: {
+        '': { versions: [], discarded: [gone(5), gone(4)], nextBefore: 4 },
+        '4': { versions: [], discarded: [gone(3), gone(2)], nextBefore: 2 },
+        '2': { versions: [ready(1)], discarded: [], nextBefore: 0 },
+      },
+    });
+    const el = await mount(true);
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    expect(urls.filter((u) => /\/versions(\?|$)/.test(u))).toEqual([
+      `/api/v1/artifacts/${ID}/versions`,
+      `/api/v1/artifacts/${ID}/versions?before=4`,
+      `/api/v1/artifacts/${ID}/versions?before=2`,
+    ]);
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    const rows = Array.from(panel.querySelectorAll('tbody tr'));
+    expect(rows).toHaveLength(2);
+    expect((rows[0].textContent ?? '').replace(/\s+/g, ' ')).toContain('v2–v5 · discarded');
+    expect(rows[1].textContent).toContain('v1');
+  });
+
+  it('stops after a few extra pages of only discarded versions and keeps Load more', async () => {
+    const gone = (seq: number): DiscardedVersion => ({
+      seq,
+      state: 'failed',
+      reason: 'expired',
+      createdAt: '2026-10-05T12:00:00Z',
+    });
+    const pages: NonNullable<MockOptions['versionPages']> = {};
+    // Seven pages of two discarded versions each: 16-15, 14-13, ... 4-3.
+    for (let i = 0, top = 16; i < 7; i++, top -= 2) {
+      pages[i === 0 ? '' : String(top + 1)] = {
+        versions: [],
+        discarded: [gone(top), gone(top - 1)],
+        nextBefore: top - 1,
+      };
+    }
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 1;
+    const urls = mockFetch(meta, '# Doc', { versionPages: pages });
+    const el = await mount(true);
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    const listed = urls.filter((u) => /\/versions(\?|$)/.test(u));
+    expect(listed).toHaveLength(6);
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    expect(panel.querySelector('.more sl-button')?.textContent).toContain('Load more');
+  });
+
+  it('ignores Load more while version pages are still being read', async () => {
+    const ready = (seq: number): ArtifactVersion => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    });
+    const gone = (seq: number): DiscardedVersion => ({
+      seq,
+      state: 'failed',
+      reason: 'expired',
+      createdAt: '2026-10-05T12:00:00Z',
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 9;
+    meta.version = { ...meta.version!, seq: 9, ref: `scion://artifact/${ID}@9` };
+    const urls = mockFetch(meta, '# Doc', {
+      versionPages: {
+        '': { versions: [ready(9)], discarded: [], nextBefore: 9 },
+        '9': { versions: [], discarded: [gone(8), gone(7)], nextBefore: 7 },
+        '7': { versions: [ready(6)], discarded: [], nextBefore: 0 },
+      },
+      versionPageGates: { '7': held },
+    });
+    const el = await mount(true);
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    const more = (): HTMLElement => panel.querySelector('.more sl-button') as HTMLElement;
+    more().click();
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    // The second page held only discarded versions; the third is held back.
+    expect(more().hasAttribute('disabled')).toBe(true);
+    more().click();
+    more().click();
+    release();
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    expect(urls.filter((u) => /\/versions(\?|$)/.test(u))).toEqual([
+      `/api/v1/artifacts/${ID}/versions`,
+      `/api/v1/artifacts/${ID}/versions?before=9`,
+      `/api/v1/artifacts/${ID}/versions?before=7`,
+    ]);
+    const rows = Array.from(panel.querySelectorAll('tbody tr'));
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain('v9');
+    expect(rows[2].textContent).toContain('v6');
+  });
+
+  describe('expanded discarded-version groups', () => {
+    const gapVersions = (): ArtifactVersion[] =>
+      [4, 1].map((seq) => ({
+        seq,
+        ref: `scion://artifact/${ID}@${seq}`,
+        kind: 'publish',
+        entryPath: 'design.md',
+        totalBytes: 5,
+        fileCount: 1,
+        createdAt: '2026-10-05T12:00:00Z',
+        state: 'ready',
+        files: [],
+      }));
+    const gapDiscarded: DiscardedVersion[] = [
+      { seq: 3, state: 'failed', reason: 'stale_review', createdAt: '2026-10-05T12:00:00Z' },
+      { seq: 2, state: 'failed', reason: 'stale_review', createdAt: '2026-10-05T12:00:00Z' },
+    ];
+    const gapMeta = (): ArtifactResponse => {
+      const meta = artifact('design.md', 'text/markdown');
+      meta.artifact.currentSeq = 4;
+      meta.version = { ...meta.version!, seq: 4, ref: `scion://artifact/${ID}@4` };
+      return meta;
+    };
+    const settle = async (el: ScionPageArtifactDetail): Promise<void> => {
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+    };
+    const expanded = (el: ScionPageArtifactDetail): number =>
+      el.shadowRoot!.querySelectorAll('sl-tab-panel[name="history"] tr.discarded-version').length;
+    const expand = async (el: ScionPageArtifactDetail): Promise<void> => {
+      const group = el.shadowRoot!.querySelector(
+        'sl-tab-panel[name="history"] tr.discarded-group'
+      )!;
+      (group.querySelector('sl-button') as HTMLElement).click();
+      await el.updateComplete;
+    };
+
+    it('collapses them when the page reloads itself after a publish', async () => {
+      window.history.replaceState({}, '', `/projects/p-1/artifacts/${ID}`);
+      mockFetch(gapMeta(), '# Doc', { versions: gapVersions(), discarded: gapDiscarded });
+      const el = await mount(true);
+      await expand(el);
+      expect(expanded(el)).toBe(2);
+      (el as unknown as { showCurrentVersion(): void }).showCurrentVersion();
+      await settle(el);
+      expect(el.shadowRoot!.querySelector('tr.discarded-group')).not.toBeNull();
+      expect(expanded(el)).toBe(0);
+    });
+
+    it('collapses them when the page reloads for a stale review', async () => {
+      mockFetch(gapMeta(), '# Doc', { versions: gapVersions(), discarded: gapDiscarded });
+      const el = await mount(true);
+      await expand(el);
+      expect(expanded(el)).toBe(2);
+      await (el as unknown as { reloadForReview(t: string): Promise<void> }).reloadForReview('x');
+      await settle(el);
+      expect(el.shadowRoot!.querySelector('tr.discarded-group')).not.toBeNull();
+      expect(expanded(el)).toBe(0);
+    });
+
+    it('starts collapsed when the router mounts the page again for a navigation', async () => {
+      mockFetch(gapMeta(), '# Doc', { versions: gapVersions(), discarded: gapDiscarded });
+      const a = await mount(true);
+      await expand(a);
+      expect(expanded(a)).toBe(2);
+      document.body.innerHTML = '';
+      const b = await mount(true);
+      expect(b.shadowRoot!.querySelector('tr.discarded-group')).not.toBeNull();
+      expect(expanded(b)).toBe(0);
+    });
+  });
+
+  it('names the reason of a single discarded version in its row', async () => {
+    const versions: ArtifactVersion[] = [3, 1].map((seq) => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    }));
+    const discarded: DiscardedVersion[] = [
+      { seq: 2, state: 'failed', reason: 'expired', createdAt: '2026-10-05T12:00:00Z' },
+    ];
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 3;
+    meta.version = { ...meta.version!, seq: 3, ref: `scion://artifact/${ID}@3` };
+    mockFetch(meta, '# Doc', { versions, discarded });
+    const el = await mount(true);
+    const group = el.shadowRoot!.querySelector('sl-tab-panel[name="history"] tr.discarded-group')!;
+    expect((group.textContent ?? '').replace(/\s+/g, ' ')).toContain(
+      'v2 · discarded: the upload was not finished in time'
+    );
   });
 
   it('shows the new version in place after publishing an edit from the current URL', async () => {

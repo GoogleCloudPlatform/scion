@@ -10,7 +10,7 @@ tree and writes the tagged copies of the test files to a temporary
 directory, together with an `overlay.json` for `go build -overlay`:
 
 ```sh
-go run ./hack/hubshard -overlay /tmp/ov
+hack/hubshard/hubshard.sh -overlay /tmp/ov
 go test -overlay /tmp/ov/overlay.json -tags hubshard,hubshard_3 ./pkg/hub
 ```
 
@@ -38,17 +38,26 @@ make test-hub-shard SHARD=2 NOSQLITE=1 # the same with -tags no_sqlite (RACE=1 a
 make build-hub-shard SHARD=2           # compile only (binary discarded)
 make vet-hub-shard SHARD=2             # go vet the shard with both vet tag sets
 make test-hub-postgres SHARD=2         # the shard's Postgres tests (needs the Postgres env vars)
+make test-hub-postgres-default SHARD=2     # ... only the default-tag ones (CI: in the shard job)
+make test-hub-postgres-integration SHARD=2 # ... only the -tags integration ones (CI: own job)
+make hub-postgres-integration-shards   # the shards holding a -tags integration Postgres test
 make hubshard-parity                   # parse only: every test runs in exactly one shard
 make test-hub-shards                   # every shard in turn (NOSQLITE=1, RACE=1 as above)
 make test-hub-sqlite                   # every shard in turn, plus the non-hub SQLite packages
-go run ./hack/hubshard                 # print the shard sizes
-go run ./hack/hubshard -v              # ... and the common files (with the reason) and groups
+hack/hubshard/hubshard.sh              # print the shard sizes
+hack/hubshard/hubshard.sh -v           # ... and the common files (with the reason) and groups
 ```
 
-The make targets call [`shard.sh`](shard.sh), which writes the overlay to a
-temporary directory (removed on exit), so they never leave modified files
-behind. Other tags combine as usual: `shard.sh` passes `no_sqlite` or
-`integration` next to the shard tags.
+The make targets call [`shard.sh`](shard.sh), which builds the tool once
+and writes the overlay to a temporary directory (removed on exit), so they
+never leave modified files behind. [`hubshard.sh`](hubshard.sh) runs the
+tool the way `go run ./hack/hubshard` would, from a binary it builds into
+a temporary directory; the other make targets and CI call it. Both scripts
+build and run the tool with `GOGC=25` unless `GOGC` is set, and honour an
+optional `HUB_SHARD_DEADLINE` (a Unix time: every step runs under
+`timeout` until 60 seconds before it). `HUB_SHARD_RUN_GOGC` sets the
+`GOGC` of `shard.sh`'s test runs. Other tags combine as usual: `shard.sh`
+passes `no_sqlite` or `integration` next to the shard tags.
 
 Tool flags: `-n N` (shard count, default 6), `-shards` (print 1..N; the
 CI matrix and `make test-hub-shards` loop over it),
@@ -136,11 +145,12 @@ builds only.
 ## Blank imports (driver registration)
 
 A blank import is a dependency without a symbol: a file that blank-imports
-`github.com/mattn/go-sqlite3` registers the `sqlite3` `database/sql`
-driver, and another file that only calls `sql.Open("sqlite3", ...)` relies
-on it without referencing anything the first file declares. The use graph
-has no edge between them, so a shard without an importing file would
-compile and then fail at run time (`sql: unknown driver "sqlite3"`).
+a `database/sql` driver package (for example `modernc.org/sqlite`, which
+registers `sqlite`) registers the driver, and another file that only calls
+`sql.Open("sqlite", ...)` relies on it without referencing anything the
+first file declares. The use graph has no edge between them, so a shard
+without an importing file would compile and then fail at run time
+(`sql: unknown driver "sqlite"`).
 
 So the overlay also holds generated, untagged
 `pkg/hub/zz_hubshard_drivers*_test.go` files that blank-import every
@@ -208,7 +218,7 @@ tests, and each runs exactly once:
 Shards 2-6 compile the common files' 119 tests and skip them. The shard 1
 overlay compile measured 5.86 GiB peak RSS (same 16G form as below, warm
 dependency cache, 415 s at 2 CPUs).
-`go run ./hack/hubshard` and `make hubshard-parity` print the current
+`hack/hubshard/hubshard.sh` and `make hubshard-parity` print the current
 figures.
 
 Measured at N=6 with an earlier assignment (16G form: `ulimit -v 16000000`,
@@ -231,4 +241,4 @@ The peak grows by about 1.45 GiB per 100k test lines, so the present
 shards (about 145.6k lines each) project to about 6 GiB. When the shards
 drift well past that, raise `defaultShards` in `main.go`: the CI matrix, the
 make targets and the nightly loops all take the shard list from
-`go run ./hack/hubshard -shards`.
+`hack/hubshard/hubshard.sh -shards`.

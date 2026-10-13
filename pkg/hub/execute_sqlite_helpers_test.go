@@ -292,6 +292,9 @@ func (e *agentKeysEventSpy) PublishDispatchDone(_ context.Context, _ string) {
 func (e *agentKeysEventSpy) PublishChatTopicEvent(_ context.Context, _ string, _ string, _ WebChatTopic) {
 	e.record("PublishChatTopicEvent")
 }
+func (e *agentKeysEventSpy) PublishChatThreadGroupEvent(_ context.Context, _ string, _ string, _ ThreadGroupResponse) {
+	e.record("PublishChatThreadGroupEvent")
+}
 func (e *agentKeysEventSpy) PublishChatReadStateEvent(_ context.Context, _, _, _ string) {
 	e.record("PublishChatReadStateEvent")
 }

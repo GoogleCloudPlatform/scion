@@ -176,6 +176,13 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	// A visitor is not a member: bindings of a role that does not confer
+	// membership (project-visitor) are not listed.
+	bindings, err = withoutNonMembershipBindings(ctx, s.store, bindings)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
 	if bindings == nil {
 		bindings = []*store.RoleBinding{}
 	}
