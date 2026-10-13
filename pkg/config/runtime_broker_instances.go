@@ -402,22 +402,45 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 				return fmt.Errorf("%s.runtime_target must be a mapping", p)
 			}
 			if err := checkStrings(p+".runtime_target", tm, "type", "display_name", "context", "namespace",
+				"kubernetes_block_service_account",
 				"shared_dir_storage_class", "shared_dir_size", "priority_class_name",
 				"shared_dir_storage_backend", "home_storage_backend", "home_storage_leaf"); err != nil {
 				return err
 			}
 			// The YAML decoder would turn a string such as "yes" into a
-			// bool; only a YAML boolean (or null) is accepted.
-			for _, k := range []string{"gke", "safe_to_evict"} {
-				if v, present := tm[k]; present && v != nil {
-					if _, isBool := v.(bool); !isBool {
-						return fmt.Errorf("%s.runtime_target.%s must be true or false", p, k)
-					}
+			// bool, so only a YAML boolean is accepted, as in the schema:
+			// gke must be true or false; safe_to_evict may also be null
+			// (unset).
+			if v, present := tm["gke"]; present {
+				if _, isBool := v.(bool); !isBool {
+					return fmt.Errorf("%s.runtime_target.gke must be true or false", p)
+				}
+			}
+			if v, present := tm["safe_to_evict"]; present && v != nil {
+				if _, isBool := v.(bool); !isBool {
+					return fmt.Errorf("%s.runtime_target.safe_to_evict must be true, false or null", p)
+				}
+			}
+			// The decoder would also turn a number or bool into a string
+			// map value; the schema requires strings.
+			if m, ok := tm["kubernetes_service_account_mappings"].(map[string]interface{}); ok {
+				if err := checkStrings(p+".runtime_target.kubernetes_service_account_mappings", m, rawMapKeys(m)...); err != nil {
+					return err
 				}
 			}
 		}
 	}
 	return nil
+}
+
+// rawMapKeys returns the keys of m in sorted order.
+func rawMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // reservedInstanceKeys and reservedRuntimeTargetKeys are keys of the frozen

@@ -388,8 +388,9 @@ func TestValidateSharedDirStorageBackendValues(t *testing.T) {
 	assert.Equal(t, "runtimes.rt.shared_dir_storage_backend", errs[2].Path)
 }
 
-// The JSON schema repeats the shared dir name pattern as a literal; both
-// shared_dir_storage_backends entries must use SharedDirNamePattern.
+// The JSON schema repeats the shared dir name pattern as a literal; all three
+// shared_dir_storage_backends entries (runtime, profile and flat Runtime
+// Broker instance runtime_target) must use SharedDirNamePattern.
 func TestSettingsSchema_SharedDirStorageBackendsPatternMatchesConstant(t *testing.T) {
 	data, err := schemasFS.ReadFile(settingsSchemaFiles["1"])
 	require.NoError(t, err)
