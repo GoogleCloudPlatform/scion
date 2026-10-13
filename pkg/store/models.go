@@ -1588,8 +1588,8 @@ const (
 	// expiring system hub-admin binding (admin tier, ptone/scion#4240).
 	UserKindTestHubAdmin = "test_hub_admin"
 	// UserKindTestSuperAdmin is a hub-issued test identity holding a real,
-	// expiring system super-admin binding. Its issuance stays refused until
-	// the admin tier's policy phase ships.
+	// expiring system super-admin binding. It is issued only on a hub
+	// started with --test-mode=super-admin.
 	UserKindTestSuperAdmin = "test_super_admin"
 )
 

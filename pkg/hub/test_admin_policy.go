@@ -86,6 +86,16 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"agent.grant_hub_mode":      testAdminPolicyAllow,
 	"agent.delegation.create":   testAdminPolicyAllow,
 	"agent.delegation.exchange": testAdminPolicyAllow,
+	// Delegation-grant management (ptone/scion#2131) is deny, like
+	// delegation adoption: on the hub these read and revoke any user's
+	// grants. A test admin still reads and revokes the grants it issued
+	// and those on agents it owns: agentDelegationControlAllowed admits
+	// the issuer and the owner from the stored rows before it asks
+	// Decide.
+	"agent.delegation.revoke":            testAdminPolicyDeny,
+	"agent.delegation.credential.revoke": testAdminPolicyDeny,
+	"agent.delegation.list":              testAdminPolicyDeny,
+	"agent.delegation.read":              testAdminPolicyDeny,
 	// Agent-principal permissions: only agent credentials use them.
 	"agent.status_update":  testAdminPolicyAllow,
 	"agent.log_append":     testAdminPolicyAllow,

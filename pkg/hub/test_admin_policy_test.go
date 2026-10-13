@@ -1222,3 +1222,44 @@ func TestTestAdminPolicy_DispatchSecretsClamp(t *testing.T) {
 	assert.Equal(t, "v-TSA_HUB_ENV", env["TSA_HUB_ENV"], "a human root keeps hub env vars")
 	assert.Equal(t, "v-TSA_PROJECT_ENV", env["TSA_PROJECT_ENV"])
 }
+
+// Delegation-grant management (ptone/scion#2131) is deny for both admin
+// kinds, on the hub and on a project, like delegation adoption. The grants
+// a test admin issued itself stay reachable through the issuer rule, which
+// agentDelegationControlAllowed applies before it asks Decide.
+func TestTestAdminPolicy_DelegationGrantManagementDenied(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-dg-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "tsa-dg-iss2", store.SystemRoleSuperAdmin)
+	superKind := tsaIdentity(t, s, tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin).Identity.ID)
+	hubKind := tsaIdentity(t, s, tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin).Identity.ID)
+	human := tsaIdentity(t, s, taUser(t, s, "tsa-dg-human", store.SystemRoleSuperAdmin).ID)
+	ids := []string{agentDelegationRevokePermission, agentDelegationCredentialRevokePermission, agentDelegationListPermission, agentDelegationReadPermission}
+	for _, id := range ids {
+		assert.True(t, testAdminPermissionDenied(id), id)
+		for _, res := range []Resource{{Type: "hub", ID: "hub"}, {Type: "project", ID: "tsa-dg-project"}} {
+			for who, u := range map[string]UserIdentity{"test_super_admin": superKind, "test_hub_admin": hubKind} {
+				d := srv.authzService.Decide(ctx, AuthzRequest{
+					Principal: principalContextForIdentity(u), Credential: credentialContextForIdentity(u),
+					Resource: res, Action: Action(agentDelegationActionFor(id)), Permission: id,
+				})
+				assert.False(t, d.Allowed, "%s %s on %s", who, id, res.Type)
+				assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, "%s %s on %s: %s", who, id, res.Type, d.Reason)
+			}
+		}
+		d := srv.authzService.Decide(ctx, AuthzRequest{
+			Principal: principalContextForIdentity(human), Credential: credentialContextForIdentity(human),
+			Resource: Resource{Type: "hub", ID: "hub"}, Action: Action(agentDelegationActionFor(id)), Permission: id,
+		})
+		assert.True(t, d.Allowed, "human super-admin %s on the hub: %s", id, d.Reason)
+	}
+	for who, u := range map[string]UserIdentity{"test_super_admin": superKind, "test_hub_admin": hubKind} {
+		c := &agentDelegationCaller{user: u, decisions: map[string]bool{}}
+		own := &store.AgentDelegationGrant{AgentID: "tsa-dg-agent", IssuerUserID: u.ID(), BoundaryKind: string(permissions.BoundaryKindHub)}
+		other := &store.AgentDelegationGrant{AgentID: "tsa-dg-agent", IssuerUserID: issuer.ID, BoundaryKind: string(permissions.BoundaryKindHub)}
+		assert.True(t, srv.agentDelegationControlAllowed(ctx, c, own, nil, agentDelegationRevokePermission), "%s revokes a grant it issued", who)
+		assert.False(t, srv.agentDelegationControlAllowed(ctx, c, other, nil, agentDelegationRevokePermission), "%s cannot revoke another user's grant", who)
+		assert.False(t, srv.agentDelegationControlAllowed(ctx, c, other, nil, agentDelegationListPermission), "%s cannot list another user's grant", who)
+	}
+}

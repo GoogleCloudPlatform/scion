@@ -56,7 +56,7 @@ var hubTestIdentityCmd = &cobra.Command{
 	Long: `Manage hub test identities: short-lived synthetic member or viewer
 users for testing on a test hub.
 
-The hub must run with --test-mode=member (or admin), and you need the
+The hub must run with --test-mode=member or above, and you need the
 test_identity.issue permission: an admin session, or a hub-bound access
 token carrying the test_identity:issue scope (the intended credential for
 CI and operators, set in SCION_HUB_TOKEN).
