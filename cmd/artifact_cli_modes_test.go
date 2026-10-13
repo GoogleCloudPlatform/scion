@@ -54,7 +54,7 @@ func TestArtifactListViewGrantsModes(t *testing.T) {
 		assert.Contains(t, names, "artifact.view")
 		assert.Equal(t, wantGrants, containsLine(art.Long, "scion artifact grants <ref>"), "grants help line in %s mode", mode)
 		assert.True(t, containsLine(art.Long, "scion artifact list [--mine] [--all]"))
-		assert.True(t, containsLine(art.Long, "scion artifact view <ref> [--check]"))
+		assert.True(t, containsLine(art.Long, "scion artifact view <ref> [--check] [--show-link]"))
 	}
 }
 

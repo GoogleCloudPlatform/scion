@@ -180,3 +180,38 @@ func TestArtifactViewAgentModeJSONOmitsLink(t *testing.T) {
 	assert.NotEmpty(t, raw["expiresAt"], out.String())
 	assert.NotContains(t, out.String(), "/api/v1/artifacts/view/")
 }
+
+// TestArtifactViewCommandModes runs the view command itself against a
+// test hub: in agent mode it leaves the link out unless --show-link is
+// given, and in human mode it prints the link.
+func TestArtifactViewCommandModes(t *testing.T) {
+	svc := realArtifactHubWithViews(t)
+	ref := publishSite(t, svc, map[string]string{"index.html": "<p>hi</p>"})
+	prevClient, prevFormat := artifactViewClient, outputFormat
+	artifactViewClient = func() (string, hubclient.ArtifactService, error) { return "https://hub.example", svc, nil }
+	outputFormat = ""
+	t.Cleanup(func() {
+		artifactViewClient, outputFormat = prevClient, prevFormat
+		_ = artifactViewCmd.Flags().Set("show-link", "false")
+		artifactViewCmd.SetOut(nil)
+	})
+	for _, tc := range []struct {
+		mode     string
+		showLink string
+		wantLink bool
+	}{
+		{"agent", "false", false},
+		{"agent", "true", true},
+		{"human", "false", true},
+	} {
+		t.Setenv("SCION_CLI_MODE", tc.mode)
+		require.NoError(t, artifactViewCmd.Flags().Set("show-link", tc.showLink))
+		var out bytes.Buffer
+		artifactViewCmd.SetOut(&out)
+		artifactViewCmd.SetContext(context.Background())
+		require.NoError(t, artifactViewCmd.RunE(artifactViewCmd, []string{ref}))
+		got := out.String()
+		assert.Contains(t, got, "View of "+ref+"@1, valid until ", "mode=%s show-link=%s", tc.mode, tc.showLink)
+		assert.Equal(t, tc.wantLink, strings.Contains(got, "https://hub.example/api/v1/artifacts/view/"), "link printed: mode=%s show-link=%s\n%s", tc.mode, tc.showLink, got)
+	}
+}

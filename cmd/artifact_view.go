@@ -72,19 +72,30 @@ Examples:
   scion artifact view scion://artifact/5f1c2d3e-... --show-link`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		settings, client, err := requireArtifactHubClient()
+		hubEndpoint, svc, err := artifactViewClient()
 		if err != nil {
 			return err
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
 		defer cancel()
-		return viewArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), GetHubEndpoint(settings), args[0],
+		return viewArtifact(ctx, svc, cmd.OutOrStdout(), hubEndpoint, args[0],
 			viewOptions{
 				Check:    artifactViewCheck,
 				JSON:     isJSONOutput(),
 				HideLink: viewHidesLink(resolveMode(), artifactViewShowLink),
 			})
 	},
+}
+
+// artifactViewClient returns the hub endpoint and the artifact service
+// artifact view uses. Tests replace it to run the command against a test
+// hub.
+var artifactViewClient = func() (string, hubclient.ArtifactService, error) {
+	settings, client, err := requireArtifactHubClient()
+	if err != nil {
+		return "", nil, err
+	}
+	return GetHubEndpoint(settings), client.Artifacts(), nil
 }
 
 func init() {

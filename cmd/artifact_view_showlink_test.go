@@ -55,23 +55,25 @@ func TestPrintViewResultSanitizesLink(t *testing.T) {
 	var out bytes.Buffer
 	printViewResult(&out, viewResult{
 		Ref:       "scion://artifact/a@1",
-		URL:       "https://hub.example/view/x\x1b[2J‮/index.html",
+		URL:       "https://hub.example/view/x\x1b[2J\u202e/index.html",
 		ExpiresAt: time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC),
 	})
 	first := strings.SplitN(out.String(), "\n", 2)[0]
-	assert.Equal(t, "https://hub.example/view/x�[2J�/index.html", first)
+	assert.Equal(t, "https://hub.example/view/x\ufffd[2J\ufffd/index.html", first)
 }
 
 // TestPrintViewResultHiddenLink: with the link hidden, the output names
 // the version and the expiry, says how to print the link, and holds no
-// part of the link.
+// part of the link, even when the result still carries one.
 func TestPrintViewResultHiddenLink(t *testing.T) {
 	var out bytes.Buffer
 	printViewResult(&out, viewResult{
 		Ref:        "scion://artifact/a@1",
+		URL:        "https://hub.example/api/v1/artifacts/view/cap/index.html",
 		LinkHidden: true,
 		ExpiresAt:  time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC),
 	})
+	assert.NotContains(t, out.String(), "hub.example")
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if assert.Len(t, lines, 2, out.String()) {
 		assert.True(t, strings.HasPrefix(lines[0], "View of scion://artifact/a@1, valid until "), lines[0])
