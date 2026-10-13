@@ -141,7 +141,14 @@ func TestDevTokenStartupHint_ConfiguredToken(t *testing.T) {
 	hint := devTokenStartupHint(cfg, t.TempDir())
 	assert.NotContains(t, hint, "scion_dev_")
 	assert.Contains(t, hint, "server.auth.dev_token")
-	assert.NotContains(t, out.String(), "scion_dev_")
+
+	// The log says where the token is set, as a plain message: no command
+	// (there is no file to cat) and no value.
+	logged := out.String()
+	assert.Contains(t, logged, "Developer token: set in the server settings (server.auth.dev_token")
+	assert.NotContains(t, logged, "run:")
+	assert.NotContains(t, logged, "SCION_DEV_TOKEN=")
+	assert.NotContains(t, logged, "scion_dev_")
 }
 
 // TestLogWorkstationReadyBanner_DevTokenPath checks the workstation startup

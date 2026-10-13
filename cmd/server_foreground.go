@@ -1799,8 +1799,15 @@ func initDevAuth(cfg *config.GlobalConfig, globalDir string) (string, error) {
 	_ = os.Setenv("SCION_DEV_TOKEN", devAuthToken)
 	_ = os.Setenv("SCION_AUTH_TOKEN", devAuthToken)
 
-	log.Printf("To authenticate CLI commands, run:")
-	log.Printf("  %s", devTokenStartupHint(cfg, globalDir))
+	if cfg.Auth.Token != "" {
+		// A token set in the settings has no file, so there is no command
+		// to print: say where it is set, never its value.
+		log.Printf("Developer token: %s", devTokenStartupHint(cfg, globalDir))
+		log.Printf("To authenticate CLI commands, export that same value as SCION_DEV_TOKEN.")
+	} else {
+		log.Printf("To authenticate CLI commands, run:")
+		log.Printf("  %s", devTokenStartupHint(cfg, globalDir))
+	}
 
 	return devAuthToken, nil
 }
@@ -1824,10 +1831,11 @@ func logWorkstationReadyBanner(cfg *config.GlobalConfig, globalDir string, webEn
 // devTokenStartupHint returns what startup output shows for the dev token:
 // the command that loads it from its file, so the output prints the dev
 // token file path instead of its value. A token set directly in the server
-// settings has no file, so the hint names the setting instead.
+// settings has no file, so the hint is a plain message naming where it is
+// set (not a command).
 func devTokenStartupHint(cfg *config.GlobalConfig, globalDir string) string {
 	if cfg.Auth.Token != "" {
-		return "set by server.auth.dev_token in the server settings"
+		return "set in the server settings (server.auth.dev_token, or the SCION_SERVER_AUTH_DEVTOKEN environment variable); the value is not printed"
 	}
 	return devTokenExportHint(devTokenFilePath(cfg.Auth.TokenFile, globalDir))
 }
