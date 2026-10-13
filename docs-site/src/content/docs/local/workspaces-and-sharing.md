@@ -27,11 +27,11 @@ This is the default for **plain (non-git) projects**, where there is no git hist
 
 Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a **shared checkout**, isolating working trees while sharing one clone's history.
 
-Every agent operates on the same repository history but has an independent working directory (a worktree of the Runtime Broker's shared base clone, on a dedicated branch) mounted as `/workspace`. Agents cannot step on each other's uncommitted changes, and their work reaches the main branch by pushing the agent's branch and merging it.
+Every agent operates on the same repository history but has an independent working directory on a dedicated branch, mounted as `/workspace`. For a repository linked to the local workstation Hub it is a worktree of your own checkout (merge the agent's branch locally); for a Hub-managed project it is a worktree of the Runtime Broker's shared base clone (push the agent's branch, then merge). Agents cannot step on each other's uncommitted changes.
 
 - **Isolation:** per-agent working tree; shared history.
 - **Requires git:** yes.
-- **Availability:** supported on **Hub-managed git projects** created with workspace mode `worktree-per-agent` (requires git 2.48 or later on the broker). On Kubernetes it requires NFS workspace storage.
+- **Availability:** used automatically for **repositories linked to the local workstation Hub**, and for **Hub-managed git projects** created with workspace mode `worktree-per-agent` (requires git 2.48 or later on the broker; see [Linked git projects](/scion/local/workspace/#linked-git-projects)). On Kubernetes it requires NFS workspace storage.
 - **Best for:** local git projects where multiple agents work in parallel on the same repository.
 
 ### Clone-per-agent

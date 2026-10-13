@@ -5,7 +5,9 @@ Status: design with all decisions (D1-D7, D13) approved by the maintainer on 202
 - Amendment 2 (2026-10-10): phase-1 acceptance and fresh-install preconditions.
 - **Amendment 3 (2026-10-10): no auto-start; accepted, and it supersedes the auto-start parts of this document.**
 - Amendment 4 (2026-10-12): interaction with the CLI current-context design.
-- Amendment 5 (2026-10-12, open): new agents in a linked repository are cloned, not given a worktree; D4's premise corrected.
+- Amendment 5 (2026-10-12): new agents in a linked repository were cloned, not given a worktree; D4's premise corrected. Resolved by Amendment 6.
+- Amendment 6 (2026-10-12, accepted): phase 3a, local worktrees for linked repositories (variant L).
+- Amendment 7 (2026-10-12, accepted): phase 3b, hub project ID scoping and the link guard in a git repository without `.scion`.
 Base: main at ae24a3c. All file:line references are to that commit unless stated otherwise.
 Input: an inventory of local-only code paths, tests and docs (the "findings"; not published). This design does not repeat that inventory; it assigns it.
 
@@ -693,7 +695,7 @@ Source: the maintainer's direction that, after the current-context work (the sep
 - **Broker project-settings readers are not phase 3.** The broker-side readers of project settings (for example `hubEndpointFromProjectSettings`, pkg/runtimebroker/hubenv.go) are not in phase 3's scope. They go to phase 6 here, or to the flat-broker work, whichever lands first.
 - **Unchanged:** everything else in phase 3, including the `hub.enabled` deprecation and the `HasHubEndpoint` semantics, proceeds as designed. The context design's phase 7 replaces the settings-based hub config later. Settings stay compatible in between.
 
-### Amendment 5 (2026-10-12, OPEN, needs a maintainer decision): new agents in a linked repo are cloned, not worktreed; D4 premise corrected
+### Amendment 5 (2026-10-12; resolved by Amendment 6): new agents in a linked repo are cloned, not worktreed; D4 premise corrected
 
 Source: a review of the docs phase against main at d1bd2992.
 
@@ -707,7 +709,7 @@ Compared with local mode, a new agent in a linked repo:
 - needs a token for private repos;
 - does not see local unpushed commits or uncommitted state;
 - puts its branch in a clone rather than in the user's repo;
-- does not appear under `<repo>/.scion/agents/<agent>/workspace`, so `cdw` and local review of agent branches no longer work the same way.
+- gets a separate clone rather than a worktree of the user's checkout (the host directory `<repo>/.scion/agents/<agent>/workspace` still exists, but holds the clone), so `cdw` and local review of agent branches no longer work the same way.
 
 Neither the findings nor this design caught this. It materialises with phase 3, the flip.
 
@@ -724,3 +726,80 @@ Recommendation: (A), as a new phase before the phase-3 release. Phase 3 can merg
 - have the onboarding wizard run the apple-dns helper by default.
 
 Docs follow the code order meanwhile.
+
+### Amendment 6 (2026-10-12, ACCEPTED by maintainer 2026-10-12): phase 3a, local worktrees for linked repos (variant L)
+
+Source: a read-only investigation for phase 3a against main at 6dc5708. It verified option A′ from Amendment 5. **A′ as stated is unsafe and is withdrawn.** Using the user's checkout as the `ProvisionShared` base would, on first use:
+- detach the user's HEAD;
+- write `gc.auto` and `branch.autoSetupMerge` into their `.git/config`;
+- chown the repo's parent directory;
+- write a sentinel next to the repo;
+- create `<repo>/worktrees/<uuid>`.
+
+On docker, delete would also miss those worktrees (UUID vs slug keys). The "reuse the maintained ProvisionShared machinery" rationale in Amendment 5 does not hold.
+
+**Recommendation: variant L.**
+- **CLI:** auto-link, `hub link` and `runtime-broker register` label new git projects `worktree-per-agent`, but only when the hub is the local workstation hub.
+- **Broker:** a pure decision function (`resolveLinkedCheckout`, pkg/runtimebroker/start_context.go, ahead of the worktree-per-agent block) routes the case to the existing pkg/agent worktree engine when all of these hold:
+  - the project is labelled;
+  - the provider path is linked (not hub-native and not recovered from a container);
+  - the dispatch came over the co-located connection;
+  - the runtime is not Kubernetes.
+
+  It then leaves `GitClone` and `Workspace` empty, so `ProvisionAgent`'s worktree case creates `<repo>/.scion/agents/<slug>/workspace`.
+- That engine is the one local mode and the adopted agents already use (Phase V run 1). The result:
+  - branch in the user's repo, no clone, no token;
+  - unpushed commits visible. Uncommitted changes are **not** visible, because a new worktree starts from HEAD (corrected 2026-10-12 from the phase-3a validation run). The exception is the attach case, an agent named after the checked-out branch, which uses the user's own checkout;
+  - user's HEAD and config untouched;
+  - delete and cleanup already proven.
+- **No pkg/hub change.** The hub already sends the provider path (to the linked broker only), the label and `GitClone`.
+- **Size M:** about 5 production files.
+
+Variant M (A′ made safe: an "external base" mode in pkg/provision, a parameterised worktree dir, and fixes to every `<base>/worktrees` assumption and to delete keying) is size L, in safety-critical locking/JOIN/cleanup code. **Rejected:** its only gain is cross-process provisioning locks, which local mode never had. Git serialises `worktree add` itself.
+
+**The investigation's four decisions: all accepted as recommended.**
+1. **L vs M: L.**
+2. **Reincarnate for new linked-repo agents: accept the loss now; pkg/hub follow-up later.** The loss is not an artefact of the label. pkg/agent `Reprovision` refuses any agent with neither `GitClone` nor an explicit workspace (`api.ReincarnateEligible`, pkg/agent/provision.go ~669), so any local-worktree routing loses reincarnate, labelled or not. The label at least makes the hub refuse cleanly (400) instead of failing at the broker (409). This is no regression against local mode, which never had reincarnate; it is one only against today's hub-clone default for linked repos. A follow-up (pkg/hub plus pkg/agent reprovision for local worktrees) goes on the backlog.
+3. **Checkout check fails on a co-located broker for a labelled linked project: fail closed with an actionable error.** Causes: remote mismatch, path not a git repo, or git < 2.48. Do not fall through to today's worktree-per-agent path, which would make a full base clone inside `<repo>/.scion/workspace`. Do not silently fall back to clone-per-agent either: the agent would quietly lose local work. Error text per cause, e.g. "this project's checkout at <path> has origin <x> but the hub project is <y>" / "git 2.48 or newer is required for local worktrees (found <v>)". The fail-closed rule applies only when the routing preconditions hold (labelled, linked provider path, co-located). Every other case stays on today's path.
+4. **Already-linked projects (immutable label, so they keep cloning): document "re-link to get local worktrees"; the label upgrade is a backlog follow-up.** If 3a lands **before** phase 3, every former local-mode user registers fresh during the phase-3 migration and gets the label. The gap then only affects users who had already linked a repo to a workstation hub by hand.
+
+**Ordering.** 3a does not depend on phase 3, and it **should merge before phase 3**, so the migration links carry the label. Phase 3's merge therefore depends on 3a (which replaces option A as Amendment 5's fix), and phase 3 must avoid the CLI changes that 3a makes.
+
+**Consequences for other phases:**
+- **Phase 6** must keep `ProvisionAgent`'s legacy worktree case (pkg/agent/provision.go ~1587-1712) and the slug-keyed sharer/delete path. 3a makes them load-bearing for broker-mode agents, not just adopted ones. The `!BrokerMode` collapse must not remove them, and phase 6's acceptance gains a 3a regression check.
+- **Phase 5 docs:** the worktree layout is `<repo>/.scion/agents/<name>/workspace`. This design's earlier text "worktrees still at `../.scion_worktrees`" is wrong and is superseded here. Linked-repo agents have no reincarnate yet. Already-linked projects re-link to get worktrees.
+
+**To the backlog, raised separately and not in 3a:**
+- the docker delete bug for hub-native worktree-per-agent (UUID vs slug keys: worktree, marker and branch left behind; the test hides it with `AgentID == AgentName`);
+- the base clone inside `<repo>/.scion/workspace` on the existing worktree-per-agent path for linked paths;
+- reincarnate for local worktrees;
+- the label upgrade for already-linked projects;
+- stale `../.scion_worktrees` lookups and docs;
+- the stale comment at pkg/agent/run.go:1559-1560.
+
+### Amendment 7 (2026-10-12, ACCEPTED by maintainer 2026-10-12, both items; owner: phase 3b): two findings from the phase-3a validation run
+
+Source: the phase-3a validation run. The re-link check passed:
+- a plain unlink plus link re-attaches to the old, unlabelled project;
+- delete project, then link, re-creates it with the same ID and the label;
+- new agents then get `<repo>/.scion/agents/<name>/workspace`.
+
+Two findings need owners:
+
+1. **A hub project ID leaks from global settings into a project (pre-existing bug; correctness).** After `hub unlink` and `hub link`, the project's own settings hold `hub.enabled/linked` but no `hub.projectId`. Link writes it only when the hub ID differs from the local `project_id`. The merged settings then inherit a `hub.projectId` from the global file, if the global project was ever linked, and agents are created in the **Global** hub project without any warning. When nothing global is set, the local ID coincides with the hub ID and masks the bug.
+   - **Root fix:** for a non-global project, the hub project ID is resolved from that project's **own** settings file plus its local `project_id`, never inherited from the global file. Use the same own-file read as `ProjectLinkedSetting` (2a).
+   - **Belt and braces:** `hub link` and auto-link always write `hub.projectId` to the project's own settings, even when it equals the local ID.
+   - **Tests:**
+     - with the global settings linked to Global, unlink and link a repo, then `GetProjectID` returns the repo's hub ID;
+     - a project with no own `hub.projectId` does not pick up the global one.
+   - **Owner:** phase 3b, a standalone fix merged **before phase 3**, because phase 3's migration and the documented re-link procedure both run link. Implemented in the settings loader: for a non-global project, the global file layer's hub project ID is dropped (legacy alias included; env and flags still win).
+2. **`hub link` in a git clone with no `.scion`, under `$HOME`, links the Global project.** `$HOME/.scion` is a parent project, so resolution falls back to it. This also writes `hub.projectId` into the global settings, which is the trigger for finding 1.
+   - **Fix:** when the working directory is inside a git repository with no `.scion` of its own, and project resolution falls back to the global (home) project, `hub link` and auto-link refuse with: "this git repository is not a scion project yet; run 'scion init' here first (or pass --global to link the global project)". Explicit `--global` keeps working.
+   - This is a narrow correctness guard on the link path. It is not the general "outside a project" behaviour (Amendment 2, open item 8).
+   - **Owner:** phase 3b, together with finding 1.
+   - **Docs:** the re-link and first-link procedures say "run `scion init` in the repo first".
+
+Also from the run, docs only:
+- the command is `scion hub projects info <name>`, not `hub project show`;
+- labels are visible only with `--format json`;
+- `init` leaves an untracked `.gitignore` and `.scion/` in the checkout.

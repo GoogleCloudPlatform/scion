@@ -9,17 +9,17 @@ description: Set up a GitHub repository as a Hub-managed project and dispatch ag
 
 Every agent runs through a Hub, so every git project is a Hub project. The project's workspace sharing mode decides how agents get the code:
 
-| | Per-agent clone (default) | Worktree-per-agent (chosen at project creation) |
-| :--- | :--- | :--- |
-| **Where code lives** | Inside the agent container, cloned at startup | On the Runtime Broker's host, a worktree per agent over one shared base clone |
-| **Git credentials** | Requires a GitHub App or `GITHUB_TOKEN` (private repositories) | The broker fetches the base clone from the project's clone URL; see [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/) |
-| **Isolation** | Full clone per agent, completely independent | Worktree per agent, shared `.git` in the base clone |
-| **Merging work** | Agent pushes to remote; merge via Pull Request | Agent pushes to remote; merge via Pull Request |
-| **Applies to** | Projects created from a URL, and repositories linked from your machine | Projects created on the Hub with `--workspace-mode worktree-per-agent` (git 2.48+ on the broker) |
+| | Per-agent clone (default for Hub-managed projects) | Worktree of your checkout (repository linked to the local workstation Hub) | Worktree of the broker's clone (Hub-managed, chosen at creation) |
+| :--- | :--- | :--- | :--- |
+| **Where code lives** | Inside the agent container, cloned at startup | `.scion/agents/<name>/workspace` in your repository | On the Runtime Broker's host, a worktree per agent over one shared base clone |
+| **Git credentials** | Requires a GitHub App or `GITHUB_TOKEN` (private repositories) | None; nothing is fetched | The broker fetches the base clone from the project's clone URL; see [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/) |
+| **Isolation** | Full clone per agent, completely independent | Worktree per agent, shared `.git` in your repository | Worktree per agent, shared `.git` in the base clone |
+| **Merging work** | Agent pushes to remote; merge via Pull Request | Merge the agent's branch locally | Agent pushes to remote; merge via Pull Request |
+| **Applies to** | Projects created from a URL, repositories linked to a remote Hub, and repositories linked to a workstation Hub before local worktrees existed | New links to the local workstation Hub (git 2.48+) | Projects created on the Hub with `--workspace-mode worktree-per-agent` (git 2.48+ on the broker) |
 
-Neither mode makes a worktree of your own checkout. Agents imported from a release that ran them without a Hub are the exception; see [Linked git projects](/scion/local/workspace/#linked-git-projects).
+See [Linked git projects](/scion/local/workspace/#linked-git-projects) for the checks, cautions and how to re-link an older project.
 
-**Key takeaway**: When a project is managed by the Hub — whether created from a URL or linked from a local directory — agents use **HTTPS clone-based provisioning** by default. The Hub enforces a consistent workspace strategy across all brokers and users, rather than depending on what a given broker machine happens to have checked out. A project can instead select worktree-per-agent mode, which gives agents a git worktree each over a host-side shared clone (not your own checkout), gated on the broker's git version being 2.48 or later. On a workstation this also applies to the repository you work in; see [Linked git projects](/scion/local/workspace/#linked-git-projects).
+**Key takeaway**: A project created on the Hub from a URL, or a repository linked to a remote Hub, uses **HTTPS clone-based provisioning** by default; the Hub enforces one workspace strategy across all brokers and users. A project can instead select worktree-per-agent mode at creation, which gives agents a git worktree each over a host-side shared clone, gated on the broker's git version being 2.48 or later. A repository linked to the local workstation Hub gets worktrees of your own checkout; see [Linked git projects](/scion/local/workspace/#linked-git-projects).
 
 For the full technical details on workspace strategies, see [About Workspaces](/scion/local/workspace/).
 
@@ -234,13 +234,9 @@ Or create a Pull Request directly from the branch on GitHub.
 
 ## Linked Projects: When Local Becomes Remote
 
-If you already have a local checkout linked to the Hub via `scion hub link`, be aware that **the workspace strategy changes**. Once linked, even if the broker machine has the repository on disk, agents use clone-based provisioning by default, unless the project is configured for worktree-per-agent mode (requires git 2.48+ on the broker).
+If you link a local checkout to a **remote** Hub, the workspace strategy changes: even if the broker machine has the repository on disk, agents use clone-based provisioning, unless the project was created with worktree-per-agent mode (requires git 2.48+ on the broker). This means you need a `GITHUB_TOKEN` secret set on the project for private repositories, just like a project created from a URL.
 
-This means you need a `GITHUB_TOKEN` secret set on the project for clone-based provisioning, just like a project created from a URL.
-
-This applies to the repository you work on with the local workstation Hub too: new agents get a
-clone, not a worktree of your checkout. See [Linked git projects](/scion/local/workspace/#linked-git-projects)
-for what that means and the known gap.
+On the **local workstation** Hub, a newly linked repository keeps local worktrees of your checkout instead. A repository linked there before local worktrees existed keeps cloning until it is re-linked. See [Linked git projects](/scion/local/workspace/#linked-git-projects).
 
 ---
 

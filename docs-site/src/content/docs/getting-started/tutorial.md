@@ -60,7 +60,10 @@ Linking project 'my-repo' to the local hub at http://127.0.0.1:8080
 ```
 
 If the hub is not running, `init` still succeeds and prints a note; the project then links on its
-first `scion` command.
+first `scion` command. `init` leaves `.scion/` and a `.gitignore` in your checkout, untracked.
+
+Agents in this repository get a git worktree of your checkout, so git 2.48 or newer is required
+here; after the first agent, older git can no longer read this checkout.
 
 ## 3. Give agents model access
 
@@ -78,16 +81,6 @@ export ANTHROPIC_API_KEY="your-api-key"
 export GEMINI_API_KEY="your-api-key"
 ```
 
-If your repository is **private** on GitHub, agents also need a `GITHUB_TOKEN` with at least
-read access to its contents, because each agent clones the repository (next step). Export it the
-same way, or store it on the hub:
-
-```bash
-export GITHUB_TOKEN="ghp_..."
-# or
-scion hub secret set --project=my-repo GITHUB_TOKEN ghp_...
-```
-
 ## 4. Start an agent
 
 In the repository, give the agent a name and a task:
@@ -96,11 +89,14 @@ In the repository, give the agent a name and a task:
 scion start my-first-agent "Write a python script that prints Hello World"
 ```
 
-The agent runs in the background in its own container. In a git repository with a remote, it
-clones the repository inside its container and works on the branch `scion/my-first-agent`, so
-your working directory stays clean. It starts from what is pushed to the remote, not from your
-local changes. See [Linked git projects](/scion/local/workspace/#linked-git-projects) for
-how agents get their workspace.
+The agent runs in the background in its own container. It works in a git worktree of your
+checkout at `.scion/agents/my-first-agent/workspace`, on its own branch `my-first-agent`, so your
+working directory stays clean. It starts from your current commit: commits you have not pushed are
+there, uncommitted changes are not. See [Linked git projects](/scion/local/workspace/#linked-git-projects)
+for how agents get their workspace and what is checked first.
+
+Do not name an agent after the branch you have checked out: that agent would work directly in your
+own checkout.
 
 ## 5. List agents
 
@@ -137,16 +133,16 @@ scion start --attach my-other-agent
 
 ## 7. Clean up
 
-When the agent has finished, review its changes. Its work is on the branch
-`scion/my-first-agent` in its own clone: ask the agent to push the branch, then merge it or open a
-pull request. When you no longer need the agent, delete it:
+When the agent has finished, review its changes: its branch `my-first-agent` is in your
+repository, so you can inspect and merge it as usual (for example `git merge my-first-agent`).
+When you no longer need the agent, delete it:
 
 ```bash
 scion delete my-first-agent
 ```
 
-This stops the agent's container and removes its workspace, so push anything you want to keep
-first.
+This stops the agent's container and removes its worktree. It also deletes the branch, including
+commits you have not merged, so merge what you want to keep first, or pass `--preserve-branch`.
 
 ## Working from outside the repository
 

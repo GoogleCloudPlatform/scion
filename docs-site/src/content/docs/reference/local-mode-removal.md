@@ -27,12 +27,13 @@ imported, and how to roll back.
 
 ## What changed
 
-:::caution[New agents in a git repository get a clone, not a worktree]
-In a repository with a git remote, a new agent clones the remote inside its container instead of
-getting a git worktree of your checkout. A private repository needs a `GITHUB_TOKEN`, the agent
-does not see your unpushed changes, and its branch reaches you only after it pushes. This is a
-known gap; see [Linked git projects](/scion/local/workspace/#linked-git-projects). Imported
-agents keep their worktrees.
+:::note[Agents still get worktrees of your checkout]
+A repository that links to the local workstation Hub keeps the local-mode workspace: each new
+agent gets a git worktree of your checkout at `.scion/agents/<name>/workspace`, on its own branch,
+and imported agents keep theirs. Before each start the broker checks the checkout (git 2.48 or
+newer, the origin remote matches the hub project) and stops with the reason if a check fails. A
+repository that you had already linked to a workstation Hub by hand keeps cloning until you
+re-link it. See [Linked git projects](/scion/local/workspace/#linked-git-projects).
 :::
 
 | Removed | Replacement / action |
