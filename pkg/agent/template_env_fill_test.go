@@ -118,6 +118,15 @@ func writeTenvTemplate(t *testing.T, tplEnv map[string]string) {
 // template on create) and returns the container env and the start result.
 func startTemplateEnv(t *testing.T, ctx context.Context, projectScionDir, name string, mutate func(*api.StartOptions)) (map[string]string, *api.AgentInfo) {
 	t.Helper()
+	captured, info := startTemplateEnvRunConfig(t, ctx, projectScionDir, name, mutate)
+	return effectiveContainerEnv(t, captured), info
+}
+
+// startTemplateEnvRunConfig runs a broker-mode Start of agent name (from the
+// "tenv" template on create) and returns the RunConfig handed to the runtime
+// and the start result.
+func startTemplateEnvRunConfig(t *testing.T, ctx context.Context, projectScionDir, name string, mutate func(*api.StartOptions)) (runtime.RunConfig, *api.AgentInfo) {
+	t.Helper()
 	var captured runtime.RunConfig
 	mockRT := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
@@ -143,7 +152,7 @@ func startTemplateEnv(t *testing.T, ctx context.Context, projectScionDir, name s
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
-	return effectiveContainerEnv(t, captured), info
+	return captured, info
 }
 
 // effectiveContainerEnv returns the env a runtime gives the container from
@@ -461,21 +470,7 @@ func TestTemplateEnvFallback(t *testing.T) {
 // which the runtime applies last.
 func TestStart_TemplateEnvTravelsAsFallbackEnv(t *testing.T) {
 	project := templateEnvStart{tplEnv: map[string]string{"TPL_ONLY": "v"}}.fixture(t)
-	var captured runtime.RunConfig
-	mockRT := &runtime.MockRuntime{
-		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-			return []api.AgentInfo{}, nil
-		},
-		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
-			captured = cfg
-			return "mock-id", nil
-		},
-	}
-	if _, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
-		Name: "travel", Template: "tenv", ProjectPath: project, BrokerMode: true, NoAuth: true, Env: map[string]string{},
-	}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	captured, _ := startTemplateEnvRunConfig(t, context.Background(), project, "travel", nil)
 	for _, kv := range captured.Env {
 		if strings.HasPrefix(kv, "TPL_ONLY=") {
 			t.Errorf("template env rode RunConfig.Env: %s", kv)
@@ -509,22 +504,9 @@ func TestStart_TemplateEnvAuthCandidateKeysSuppressed(t *testing.T) {
 	if err := os.WriteFile(hcFile, append(data, []byte(auth)...), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	var captured runtime.RunConfig
-	mockRT := &runtime.MockRuntime{
-		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-			return []api.AgentInfo{}, nil
-		},
-		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
-			captured = cfg
-			return "mock-id", nil
-		},
-	}
-	if _, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
-		Name: "suppress", Template: "tenv", ProjectPath: project, BrokerMode: true, NoAuth: true,
-		HarnessAuth: "vertex-ai", Env: map[string]string{},
-	}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	captured, _ := startTemplateEnvRunConfig(t, context.Background(), project, "suppress", func(o *api.StartOptions) {
+		o.HarnessAuth = "vertex-ai"
+	})
 	suppressed := map[string]bool{}
 	for _, k := range captured.SuppressedFallbackKeys {
 		suppressed[k] = true
@@ -542,28 +524,6 @@ func TestStart_TemplateEnvAuthCandidateKeysSuppressed(t *testing.T) {
 		t.Errorf("template GOOGLE_CLOUD_PROJECT=%q (a credential key of the selected method) reached the container", v)
 	}
 	assertEnv(t, env, "TPL_TOOL", "ok")
-}
-
-// startCaptureRunConfig runs a broker-mode NoAuth Start of agent name from
-// the "tenv" template and returns the RunConfig handed to the runtime.
-func startCaptureRunConfig(t *testing.T, projectScionDir, name string) runtime.RunConfig {
-	t.Helper()
-	var captured runtime.RunConfig
-	mockRT := &runtime.MockRuntime{
-		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-			return []api.AgentInfo{}, nil
-		},
-		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
-			captured = cfg
-			return "mock-id", nil
-		},
-	}
-	if _, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
-		Name: name, Template: "tenv", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, Env: map[string]string{},
-	}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	return captured
 }
 
 // ptone/scion#4968: every env key the harness-config's auth metadata lists,
@@ -595,7 +555,7 @@ func TestStart_TemplateEnvClaudeAuthFileAltEnvKeySuppressed(t *testing.T) {
 		t.Fatalf("copy claude harness-config: %v", err)
 	}
 
-	captured := startCaptureRunConfig(t, project, "claude-alt-env")
+	captured, _ := startTemplateEnvRunConfig(t, context.Background(), project, "claude-alt-env", nil)
 	suppressed := map[string]bool{}
 	for _, k := range captured.SuppressedFallbackKeys {
 		suppressed[k] = true
@@ -610,6 +570,34 @@ func TestStart_TemplateEnvClaudeAuthFileAltEnvKeySuppressed(t *testing.T) {
 		if v, ok := env[k]; ok {
 			t.Errorf("template %s=%q reached the container", k, v)
 		}
+	}
+	assertEnv(t, env, "TPL_TOOL", "ok")
+}
+
+// ptone/scion#4968: a required_files alternative_env_keys key that no auth
+// type lists in required_env and autodetect does not list is suppressed
+// for the template env fallback too. (In the real claude harness-config
+// GOOGLE_APPLICATION_CREDENTIALS is also an autodetect key, so only this
+// synthetic case pins the alternative_env_keys source on its own.)
+func TestStart_TemplateEnvAltEnvKeyOnlySuppressed(t *testing.T) {
+	project := templateEnvStart{tplEnv: map[string]string{
+		"TPL_ALT_ENV_ONLY": "/template/creds.json",
+		"TPL_TOOL":         "ok",
+	}}.fixture(t)
+	hcFile := filepath.Join(os.Getenv("HOME"), ".scion", "harness-configs", "test-harness", "config.yaml")
+	auth := "auth:\n  default_type: api-key\n  types:\n    api-key:\n      required_env:\n        - any_of: [TPL_API_KEY]\n    file-auth:\n      required_files:\n        - name: tpl-creds\n          type: file\n          alternative_env_keys: [TPL_ALT_ENV_ONLY]\n"
+	data, err := os.ReadFile(hcFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hcFile, append(data, []byte(auth)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	captured, _ := startTemplateEnvRunConfig(t, context.Background(), project, "alt-env-only", nil)
+	env := effectiveContainerEnv(t, captured)
+	if v, ok := env["TPL_ALT_ENV_ONLY"]; ok {
+		t.Errorf("template alternative_env_keys key TPL_ALT_ENV_ONLY=%q reached the container (SuppressedFallbackKeys = %v)", v, captured.SuppressedFallbackKeys)
 	}
 	assertEnv(t, env, "TPL_TOOL", "ok")
 }
@@ -632,7 +620,7 @@ func TestStart_TemplateEnvAutodetectEnvKeySuppressed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	captured := startCaptureRunConfig(t, project, "autodetect")
+	captured, _ := startTemplateEnvRunConfig(t, context.Background(), project, "autodetect", nil)
 	env := effectiveContainerEnv(t, captured)
 	if v, ok := env["TPL_AUTODETECT_ONLY"]; ok {
 		t.Errorf("template autodetect key TPL_AUTODETECT_ONLY=%q reached the container (SuppressedFallbackKeys = %v)", v, captured.SuppressedFallbackKeys)
