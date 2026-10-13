@@ -58,7 +58,7 @@ const UnknownKidFetchInterval = 10 * time.Second
 
 // fetchForUnknownKid fetches the keys once because a grant named an
 // unknown kid, unless such a fetch already started within
-// UnknownKidFetchInterval (design v2.21.16 §3.5 "Target-side deadlines").
+// UnknownKidFetchInterval (design v2.21.17 §3.5 "Target-side deadlines").
 // Callers arriving during a fetch wait for it. Either way the caller
 // verifies once more and refuses if the kid is still unknown.
 func (a *Agent) fetchForUnknownKid(ctx context.Context) {
@@ -93,14 +93,23 @@ func (a *Agent) refreshKeysLoop(ctx context.Context) {
 	retry := newKeyRetryBackoff(interval)
 	wait := interval
 	for {
-		ch, stop := clock.After(a.clk, wait)
 		select {
-		case <-ctx.Done():
-			stop()
-			return
-		case <-ch:
 		case <-a.keyKick:
-			stop()
+			// A kick already pending (Run kicks before starting the
+			// loop) is served before any timer is armed.
+		default:
+			ch, stop := clock.After(a.clk, wait)
+			select {
+			case <-ctx.Done():
+				stop()
+				return
+			case <-ch:
+			case <-a.keyKick:
+				stop()
+			}
+		}
+		if ctx.Err() != nil {
+			return
 		}
 		err := a.RefreshKeys(ctx)
 		if err == nil || ctx.Err() != nil {

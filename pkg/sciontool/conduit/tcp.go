@@ -82,9 +82,9 @@ func (a *Agent) handleStream(ctx context.Context, open *conduitv1.StreamOpen, ps
 // verifyGrant verifies open's grant against this session's Welcome and
 // the keys fetched from the hub, and consumes its jti. A grant naming an
 // unknown kid gets one more try after fetchForUnknownKid. In enforce mode
-// a user stream's grant must carry an authorization deadline. It returns
-// the grant's claims, or a refusal reason (the caller rejects with 4403)
-// and the error to log.
+// a user stream's grant must carry an authorization deadline; that is
+// checked before the jti is consumed. It returns the grant's claims, or a
+// refusal reason (the caller rejects with 4403) and the error to log.
 func (a *Agent) verifyGrant(ctx context.Context, open *conduitv1.StreamOpen) (*grant.Claims, string, error) {
 	w := core.WelcomeFromContext(ctx)
 	if w == nil {
@@ -95,6 +95,8 @@ func (a *Agent) verifyGrant(ctx context.Context, open *conduitv1.StreamOpen) (*g
 		Keys:     &a.keys,
 		Replay:   a.replay,
 		Now:      a.clk.Now,
+
+		RequireDeadlineFor: a.requiredDeadlineSubjects(),
 	}
 	b := target.BindingFromWelcome(w)
 	claims, err := v.VerifyStreamOpen(ctx, b, open, target.Acting{})
@@ -103,9 +105,6 @@ func (a *Agent) verifyGrant(ctx context.Context, open *conduitv1.StreamOpen) (*g
 		claims, err = v.VerifyStreamOpen(ctx, b, open, target.Acting{})
 	}
 	if err != nil {
-		return nil, reasonGrantInvalid, err
-	}
-	if err := a.requireDeadline(claims); err != nil {
 		return nil, reasonGrantInvalid, err
 	}
 	return claims, "", nil

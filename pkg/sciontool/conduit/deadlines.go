@@ -17,7 +17,6 @@ package conduit
 import (
 	"context"
 	"errors"
-	"strings"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
@@ -25,22 +24,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
-// Stream authorization deadlines at the target (design v2.21.16 §3.5
+// Stream authorization deadlines at the target (design v2.21.17 §3.5
 // "Target-side deadlines"). A stream whose open grant carries authz_until
 // is closed with 4401 authz_expired at authz_until + 30s unless a renewal
 // grant from the hub moves the deadline first. In enforce mode (from the
 // grant-key fetch) a user stream's open grant must carry authz_until.
 
-// errNoDeadline refuses, in enforce mode, a user stream's open grant that
-// carries no authorization deadline.
-var errNoDeadline = errors.New("user stream grant without authz_until")
-
-// requireDeadline checks claims against the enforcement mode.
-func (a *Agent) requireDeadline(claims *grant.Claims) error {
-	if a.enforceDeadlines.Load() && strings.HasPrefix(claims.Subject, grant.SubjectUserPrefix) && claims.AuthzUntil.IsZero() {
-		return errNoDeadline
+// requiredDeadlineSubjects is the subject prefix whose grants must carry
+// authz_until: user streams in enforce mode, none otherwise.
+func (a *Agent) requiredDeadlineSubjects() string {
+	if a.enforceDeadlines.Load() {
+		return grant.SubjectUserPrefix
 	}
-	return nil
+	return ""
 }
 
 // trackDeadline enforces the deadline of the accepted stream st, opened
@@ -54,7 +50,9 @@ func (a *Agent) trackDeadline(ctx context.Context, st core.Stream, claims *grant
 	id := st.ID()
 	return a.deadlines.Track(target.BindingFromWelcome(w), id, claims, func(code uint32, reason string) {
 		log.Info("Conduit: stream %d reached its authorization deadline; closing", id)
-		_ = st.CloseWithCode(code, reason)
+		// CloseWithCode waits for the peer's close; the deadline timer
+		// does not wait with it.
+		go func() { _ = st.CloseWithCode(code, reason) }()
 	})
 }
 
@@ -90,13 +88,26 @@ func (a *Agent) handleRenewal(ctx context.Context, streamID uint32, credential [
 		p := pendingRenewal{ctx: ctx, binding: b, streamID: streamID, credential: append([]byte(nil), credential...)}
 		select {
 		case a.renewals <- p:
+			return
 		default:
-			log.Warn("Conduit: renewal for stream %d refused: too many renewals waiting for a key fetch", streamID)
+			err = errRenewalQueueFull
 		}
-		return
 	}
+	a.renewalDone(streamID, err)
+}
+
+// errRenewalQueueFull refuses a renewal that needs a key fetch while
+// renewalQueueSize others are already waiting for one.
+var errRenewalQueueFull = errors.New("too many renewals waiting for a key fetch")
+
+// renewalDone logs a refused renewal and reports the outcome to the test
+// hook.
+func (a *Agent) renewalDone(streamID uint32, err error) {
 	if err != nil {
 		log.Warn("Conduit: renewal for stream %d refused: %v", streamID, err)
+	}
+	if a.opts.onRenewal != nil {
+		a.opts.onRenewal(streamID, err)
 	}
 }
 
@@ -109,13 +120,13 @@ func (a *Agent) renewalWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case p := <-a.renewals:
-			if p.ctx.Err() != nil {
-				continue // the session ended
+			if err := p.ctx.Err(); err != nil {
+				a.renewalDone(p.streamID, err) // the session ended
+				continue
 			}
 			a.fetchForUnknownKid(p.ctx)
-			if _, err := a.deadlines.Renew(p.ctx, p.binding, p.streamID, p.credential); err != nil {
-				log.Warn("Conduit: renewal for stream %d refused: %v", p.streamID, err)
-			}
+			_, err := a.deadlines.Renew(p.ctx, p.binding, p.streamID, p.credential)
+			a.renewalDone(p.streamID, err)
 		}
 	}
 }

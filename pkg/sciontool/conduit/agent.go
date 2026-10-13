@@ -178,6 +178,9 @@ type Options struct {
 	ptyBeforeAccept func(ctx context.Context)
 	// deadlineGrace, when set, replaces target.DeadlineGrace (test hook).
 	deadlineGrace time.Duration
+	// onRenewal, when set, receives the outcome of every renewal grant
+	// once it has been applied or refused (test hook).
+	onRenewal func(streamID uint32, err error)
 }
 
 // Agent is the agent's conduit dialer and stream target (TCP, PTY).
