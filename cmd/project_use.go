@@ -720,7 +720,7 @@ func runUseSwitch(out, stderr io.Writer) error {
 	if err != nil {
 		settings = &config.Settings{}
 	}
-	if getAuthInfo(settings, endpoint).MethodType == "none" {
+	if scopeDevAuth(getAuthInfo(settings, endpoint), endpoint).MethodType == "none" {
 		_, _ = fmt.Fprintf(out, "Not logged in to hub '%s'. Run: scion hub auth login --hub %s\n", name, name)
 	}
 	if envHub, envName := envHubEndpoint(); envHub != "" && !sameHubURL(envHub, endpoint) {

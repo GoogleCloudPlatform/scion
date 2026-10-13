@@ -554,29 +554,37 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 		return info
 	}
 
-	// Proxy-auth mode: transport auth is active but no PAT/token configured.
-	// This checks only transport auth presence, not hub proxy mode, because:
-	// (a) getAuthInfo is informational — it doesn't enforce access control,
-	// (b) the client cannot know the hub's proxy-auth mode at this point,
-	// (c) the hub validates the IAP assertion server-side, which is the real guard.
-	if src, err := transportauth.FromEnv(); src != nil && err == nil {
-		info.Method = "Proxy-auth (transport)"
-		info.MethodType = "proxy-auth"
-		info.Source = "transport auth"
-		return info
-	}
+	return noCredentialAuthInfo()
+}
 
-	return info
+// noCredentialAuthInfo is the authInfo for a hub the CLI has no credential
+// for: proxy auth when transport auth is active, otherwise none.
+//
+// Proxy-auth mode: transport auth is active but no PAT/token configured.
+// This checks only transport auth presence, not hub proxy mode, because:
+// (a) getAuthInfo is informational — it doesn't enforce access control,
+// (b) the client cannot know the hub's proxy-auth mode at this point,
+// (c) the hub validates the IAP assertion server-side, which is the real guard.
+func noCredentialAuthInfo() authInfo {
+	if src, err := transportauth.FromEnv(); src != nil && err == nil {
+		return authInfo{
+			Method:     "Proxy-auth (transport)",
+			MethodType: "proxy-auth",
+			Source:     "transport auth",
+		}
+	}
+	return authInfo{Method: "none", MethodType: "none"}
 }
 
 // scopeDevAuth limits a dev token to the hubs that can accept it. A dev
 // token is valid only on the workstation server that wrote it, which
 // listens on a loopback address, so for any other hub info is replaced by
-// no credential. 'scion use', 'hub status' and 'hub list' report a hub's
-// credential with this rule.
+// what getAuthInfo gives without a dev token (noCredentialAuthInfo: proxy
+// auth when transport auth is active, otherwise none). 'scion use', 'hub
+// status' and 'hub list' report a hub's credential with this rule.
 func scopeDevAuth(info authInfo, endpoint string) authInfo {
 	if info.IsDevAuth && !isLocalhostEndpoint(endpoint) {
-		return authInfo{Method: "none", MethodType: "none"}
+		info = noCredentialAuthInfo()
 	}
 	return info
 }

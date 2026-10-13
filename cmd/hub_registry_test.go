@@ -1272,3 +1272,39 @@ func TestHubStatus_DevTokenScope(t *testing.T) {
 	_, verified := got["authVerified"]
 	assert.False(t, verified, "no credential, so nothing is verified")
 }
+
+// TestScopeDevAuth_KeepsTransportAuth: for a remote hub, a dev token is
+// replaced by what the CLI has without it: transport (proxy) auth when it
+// is active, otherwise no credential. A loopback hub keeps the dev token.
+func TestScopeDevAuth_KeepsTransportAuth(t *testing.T) {
+	setupContextTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	for _, name := range []string{"SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_TOKEN_FILE", "SCION_TRANSPORT_MODE", "SCION_TRANSPORT_AUDIENCE", "SCION_HUB_OIDC_AUDIENCE"} {
+		t.Setenv(name, "")
+	}
+	dev := authInfo{Method: "Dev auth", MethodType: "devauth", Source: "SCION_DEV_TOKEN env var", IsDevAuth: true}
+
+	assert.Equal(t, "none", scopeDevAuth(dev, "https://hub.example.com").MethodType, "no transport auth: no credential")
+	assert.Equal(t, dev, scopeDevAuth(dev, "http://127.0.0.1:8080"), "a loopback hub keeps the dev token")
+
+	t.Setenv("SCION_TRANSPORT_TOKEN", "env-transport-tok")
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", filepath.Join(t.TempDir(), "transport-token"))
+	got := scopeDevAuth(dev, "https://hub.example.com")
+	assert.Equal(t, "proxy-auth", got.MethodType, "a stale dev token does not hide transport auth")
+	assert.False(t, got.IsDevAuth)
+	assert.Equal(t, "devauth", getAuthInfo(&config.Settings{}, "https://hub.example.com").MethodType, "getAuthInfo checks the dev token before transport auth")
+}
+
+// TestUse_HubLoginHintDevTokenScope: 'scion use --hub' prints the login
+// hint for a remote hub with only a dev token, as 'hub add' does.
+func TestUse_HubLoginHintDevTokenScope(t *testing.T) {
+	setupRegistryTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("staging", "https://staging.example.com")
+	}))
+
+	stdout, _, err := runScion(t, "use", "--hub", "staging")
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "Not logged in to hub 'staging'. Run: scion hub auth login --hub staging\n", "remote hub, dev token only")
+}
