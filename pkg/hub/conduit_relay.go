@@ -581,15 +581,18 @@ func (s *Server) decideConduitAgent(w http.ResponseWriter, r *http.Request, iden
 }
 
 // serveConduitAdmitted upgrades the connection and serves the admitted
-// session until it ends.
+// session until it ends. An admission of any other principal kind is
+// refused before any upgrade.
 func (s *Server) serveConduitAdmitted(w http.ResponseWriter, r *http.Request, a conduitAdmission) {
 	switch a.principal.Kind {
+	case registry.PrincipalAgent:
+		s.serveConduitAgent(w, r, a)
 	case registry.PrincipalBroker:
 		s.serveConduitBroker(w, r, a)
 	case registry.PrincipalUser:
 		s.serveConduitUser(w, r, a)
 	default:
-		s.serveConduitAgent(w, r, a)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Conduit sessions are open to agent, broker and user principals only", nil)
 	}
 }
 
