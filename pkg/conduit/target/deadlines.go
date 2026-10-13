@@ -57,7 +57,8 @@ type Deadlines struct {
 	Keys grant.KeySet
 	// Replay consumes renewal jtis. Required.
 	Replay grant.ReplayCache
-	// Issuer, when non-empty, must equal each renewal's iss.
+	// Issuer, when non-empty, must equal each renewal's iss. When empty,
+	// a renewal's iss must equal the iss of the stream's open grant.
 	Issuer string
 	// ClockSkew is passed to renewal verification.
 	ClockSkew time.Duration
@@ -171,45 +172,41 @@ func (d *Deadlines) expire(k deadlineKey, e *deadlineEntry) {
 // unchanged.
 func (d *Deadlines) Renew(ctx context.Context, b Binding, streamID uint32, token []byte) (time.Time, error) {
 	k := deadlineKey{b.SessionID, b.ConnectionEpoch, streamID}
+	// The lock is held across verification, which is local (signature,
+	// claims and the in-memory jti consumption), so concurrent renewals of
+	// one stream are verified one at a time against the current deadline:
+	// a renewal that no longer extends it is refused without consuming its
+	// jti.
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	e := d.streams[k]
-	var open grant.Claims
-	var until time.Time
-	var interval time.Duration
-	if e != nil {
-		open, until, interval = e.open, e.until, e.interval
-	}
-	d.mu.Unlock()
 	if e == nil {
 		return time.Time{}, ErrUntracked
 	}
 	if d.Keys == nil {
 		return time.Time{}, ErrNoKeys
 	}
+	issuer := d.Issuer
+	if issuer == "" {
+		issuer = e.open.Issuer
+	}
 	now := d.clk().Now()
 	c, err := grant.VerifyRenewal(ctx, token, d.Keys, grant.RenewalExpectation{
-		Target:    open.Target,
-		ProjectID: open.ProjectID,
-		Subject:   open.Subject,
+		Target:    e.open.Target,
+		ProjectID: e.open.ProjectID,
+		Subject:   e.open.Subject,
 		StreamID:  streamID,
-		OpenJTI:   open.JTI,
-		Issuer:    d.Issuer,
-		After:     until,
-		NotAfter:  now.Add(interval + d.grace()),
+		OpenJTI:   e.open.JTI,
+		Issuer:    issuer,
+		After:     e.until,
+		NotAfter:  now.Add(e.interval + d.grace()),
 		ClockSkew: d.ClockSkew,
 	}, d.Replay, now)
 	if err != nil {
 		return time.Time{}, err
 	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.streams[k] != e {
-		return time.Time{}, ErrUntracked
-	}
-	if c.AuthzUntil.After(e.until) {
-		e.until = c.AuthzUntil
-		d.armLocked(k, e)
-	}
+	e.until = c.AuthzUntil
+	d.armLocked(k, e)
 	return e.until, nil
 }
 

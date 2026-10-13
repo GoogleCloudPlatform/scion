@@ -119,16 +119,19 @@ func TestVerifyRenewal_Refusals(t *testing.T) {
 			if !tt.at.IsZero() {
 				at = tt.at
 			}
+			// The refused token and the valid one that follows share a jti.
+			const jti = "renewal-jti-fixed"
+			c.JTI = jti
 			cache := newCache()
 			tok := f.mintRenewal(t, c)
 			if _, err := VerifyRenewal(context.Background(), tok, f.keys, e, cache, at); !errors.Is(err, tt.want) {
 				t.Fatalf("err = %v, want %v", err, tt.want)
 			}
 			// A refused renewal never consumes its jti.
-			if tt.want != ErrExpectation {
-				if _, err := VerifyRenewal(context.Background(), f.mintRenewal(t, baseRenewal()), f.keys, baseRenewalExpect(), cache, now); err != nil {
-					t.Fatalf("a valid renewal after the refusal: %v", err)
-				}
+			valid := baseRenewal()
+			valid.JTI = jti
+			if _, err := VerifyRenewal(context.Background(), f.mintRenewal(t, valid), f.keys, baseRenewalExpect(), cache, now); err != nil {
+				t.Fatalf("a valid renewal with the refused one's jti: %v", err)
 			}
 		})
 	}
@@ -164,7 +167,8 @@ func TestVerifyRenewal_ReplayRefused(t *testing.T) {
 }
 
 // TestVerifyRenewal_Keys: an unknown kid, a key past its not_after and a
-// signature by another key are refused.
+// signature by another key are refused, and none of them consumes the
+// jti: a valid renewal with the same jti is accepted afterwards.
 func TestVerifyRenewal_Keys(t *testing.T) {
 	f := newFixture(t)
 	now := t0.Add(time.Second)
@@ -172,30 +176,39 @@ func TestVerifyRenewal_Keys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := &Signer{KeyID: "cg-unknown", Key: otherPriv}
-	tok, err := MintRenewal(other, baseRenewal())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := VerifyRenewal(context.Background(), tok, f.keys, baseRenewalExpect(), newCache(), now); !errors.Is(err, ErrUnknownKey) {
-		t.Fatalf("unknown kid: err = %v, want ErrUnknownKey", err)
-	}
-	sameKid := &Signer{KeyID: f.signer.KeyID, Key: otherPriv}
-	tok, err = MintRenewal(sameKid, baseRenewal())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := VerifyRenewal(context.Background(), tok, f.keys, baseRenewalExpect(), newCache(), now); !errors.Is(err, ErrSignature) {
-		t.Fatalf("other key under a known kid: err = %v, want ErrSignature", err)
-	}
 	pub := f.ring.PublicKeys(t0)[0]
 	pub.NotAfter = now
 	retired, err := NewKeySet(pub)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyRenewal(context.Background(), f.mintRenewal(t, baseRenewal()), retired, baseRenewalExpect(), newCache(), now); !errors.Is(err, ErrKeyExpired) {
-		t.Fatalf("retired key: err = %v, want ErrKeyExpired", err)
+	const jti = "renewal-jti-fixed"
+	withJTI := baseRenewal()
+	withJTI.JTI = jti
+	tests := []struct {
+		name   string
+		signer *Signer
+		keys   KeySet
+		want   error
+	}{
+		{"unknown kid", &Signer{KeyID: "cg-unknown", Key: otherPriv}, f.keys, ErrUnknownKey},
+		{"other key under a known kid", &Signer{KeyID: f.signer.KeyID, Key: otherPriv}, f.keys, ErrSignature},
+		{"retired key", f.signer, retired, ErrKeyExpired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := newCache()
+			tok, err := MintRenewal(tt.signer, withJTI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := VerifyRenewal(context.Background(), tok, tt.keys, baseRenewalExpect(), cache, now); !errors.Is(err, tt.want) {
+				t.Fatalf("err = %v, want %v", err, tt.want)
+			}
+			if _, err := VerifyRenewal(context.Background(), f.mintRenewal(t, withJTI), f.keys, baseRenewalExpect(), cache, now); err != nil {
+				t.Fatalf("a valid renewal with the refused one's jti: %v", err)
+			}
+		})
 	}
 }
 

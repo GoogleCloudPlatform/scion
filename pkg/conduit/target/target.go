@@ -45,19 +45,6 @@ var ErrAgentMismatch = errors.New("conduit target: grant agent_id does not match
 // ErrNoKeys means the target has no grant keys from the hub yet.
 var ErrNoKeys = errors.New("conduit target: no grant keys")
 
-// KeysFromProto converts Welcome.grant_keys to grant public keys.
-func KeysFromProto(keys []*conduitv1.GrantKey) []grant.PublicKey {
-	out := make([]grant.PublicKey, 0, len(keys))
-	for _, k := range keys {
-		pk := grant.PublicKey{KeyID: k.GetKid(), Key: append([]byte(nil), k.GetPublicKey()...)}
-		if n := k.GetNotAfterUnix(); n != 0 {
-			pk.NotAfter = time.Unix(n, 0)
-		}
-		out = append(out, pk)
-	}
-	return out
-}
-
 // KeysToProto converts grant public keys to Welcome.grant_keys.
 func KeysToProto(keys []grant.PublicKey) []*conduitv1.GrantKey {
 	out := make([]*conduitv1.GrantKey, 0, len(keys))

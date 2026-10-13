@@ -300,3 +300,77 @@ func otherSigner(t *testing.T) *grant.Signer {
 	}
 	return s
 }
+
+// TestDeadlinesRenewalIssuerMustMatch: a renewal whose iss differs from
+// the open grant's (or from Deadlines.Issuer when set) changes nothing.
+func TestDeadlinesRenewalIssuerMustMatch(t *testing.T) {
+	t.Run("open grant issuer", func(t *testing.T) {
+		df := newDeadlineFixture(t)
+		before := df.deadline(t)
+		tok := df.renewal(t, df.clk.Now().Add(testInterval+10*time.Second), func(c *grant.RenewalClaims) { c.Issuer = "other-hub" })
+		if _, err := df.d.Renew(context.Background(), testBinding, 3, tok); !errors.Is(err, grant.ErrIssuer) {
+			t.Fatalf("err = %v, want ErrIssuer", err)
+		}
+		if got := df.deadline(t); !got.Equal(before) {
+			t.Fatalf("deadline moved to %v", got)
+		}
+	})
+	t.Run("configured issuer", func(t *testing.T) {
+		df := newDeadlineFixture(t)
+		df.d.Issuer = "configured-hub"
+		tok := df.renewal(t, df.clk.Now().Add(testInterval+10*time.Second), nil) // iss = the open grant's
+		if _, err := df.d.Renew(context.Background(), testBinding, 3, tok); !errors.Is(err, grant.ErrIssuer) {
+			t.Fatalf("err = %v, want ErrIssuer", err)
+		}
+	})
+}
+
+// TestDeadlinesConcurrentRenewalsOneWins: two renewals to the same
+// deadline arriving together: exactly one extends it, the other is
+// refused with ErrAuthzUntil, and its jti is still unused.
+func TestDeadlinesConcurrentRenewalsOneWins(t *testing.T) {
+	df := newDeadlineFixture(t)
+	until := df.clk.Now().Add(testInterval + 10*time.Second)
+	a := df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI = "renewal-a" })
+	b := df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI = "renewal-b" })
+	errs := make(chan error, 2)
+	start := make(chan struct{})
+	for _, tok := range [][]byte{a, b} {
+		go func(tok []byte) {
+			<-start
+			_, err := df.d.Renew(context.Background(), testBinding, 3, tok)
+			errs <- err
+		}(tok)
+	}
+	close(start)
+	var ok, refused int
+	for range 2 {
+		switch err := <-errs; {
+		case err == nil:
+			ok++
+		case errors.Is(err, grant.ErrAuthzUntil):
+			refused++
+		default:
+			t.Fatalf("unexpected err %v", err)
+		}
+	}
+	if ok != 1 || refused != 1 {
+		t.Fatalf("ok=%d refused=%d, want 1 and 1", ok, refused)
+	}
+	// Both jtis: one was consumed by the winner; the loser's is unused, so
+	// exactly one of them is accepted again with a later deadline.
+	later := until.Add(5 * time.Second)
+	var reused int
+	for _, jti := range []string{"renewal-a", "renewal-b"} {
+		tok := df.renewal(t, later, func(c *grant.RenewalClaims) { c.JTI = jti })
+		if _, err := df.d.Renew(context.Background(), testBinding, 3, tok); err == nil {
+			reused++
+			later = later.Add(5 * time.Second)
+		} else if !errors.Is(err, grant.ErrReplay) {
+			t.Fatalf("jti %s: err = %v, want nil or ErrReplay", jti, err)
+		}
+	}
+	if reused != 1 {
+		t.Fatalf("%d jtis reusable after the race, want 1 (the loser's)", reused)
+	}
+}
