@@ -122,6 +122,11 @@ const (
 	// request, is the reason.
 	ErrCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
 
+	// ErrCodeStatsNotImplemented marks an agent stats request: this broker
+	// does not collect per-agent resource usage, so the stats action answers
+	// 501 with this code instead of placeholder values.
+	ErrCodeStatsNotImplemented = "stats_not_implemented"
+
 	// ErrCodeRuntimeAttachUnsupported marks an attach request rejected
 	// before the WebSocket upgrade because the target runtime declines
 	// interactive attach outright (pkg/runtime.AttachCapableRuntime,
@@ -323,6 +328,12 @@ func AgentIdentityUnknown(w http.ResponseWriter, message string) {
 // meant to carry.
 func RuntimeLogsUnsupported(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeLogsUnsupported, message, nil)
+}
+
+// StatsNotImplemented writes a 501 Not Implemented response with the stable
+// ErrCodeStatsNotImplemented code for the agent stats action.
+func StatsNotImplemented(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeStatsNotImplemented, message, nil)
 }
 
 // RuntimeAttachUnsupported writes a 501 Not Implemented response with the

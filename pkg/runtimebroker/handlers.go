@@ -285,7 +285,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Name:     s.config.BrokerName,
 		Version:  s.version,
 		Capabilities: &BrokerCapabilities{
-			WebPTY: false, // TODO: Implement WebSocket PTY
+			// WebPTY, like Attach, reflects the default runtime: the
+			// same webPTYSupported answer the static registration
+			// capabilities carry.
+			WebPTY: webPTYSupported(rt),
 			Sync:   true,
 			// Attach reflects the default runtime's own capability
 			// (scionrt.HasAttachSupport) rather than a blanket true, so a
@@ -5121,13 +5124,12 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 	_, _ = w.Write([]byte(logs))
 }
 
+// getStats answers the agent stats action. No runtime reports resource
+// usage yet (the Runtime interface has no stats method), so it returns 501
+// with ErrCodeStatsNotImplemented rather than zero values a caller could
+// mistake for a real reading.
 func (s *Server) getStats(w http.ResponseWriter, r *http.Request, id, projectID string) {
-	// TODO: Implement real stats from runtime
-	// For now, return placeholder data
-	writeJSON(w, http.StatusOK, StatsResponse{
-		CPUUsagePercent:  0.0,
-		MemoryUsageBytes: 0,
-	})
+	StatsNotImplemented(w, "agent resource statistics are not implemented by this broker")
 }
 
 // HasPromptResponse is the response for the has-prompt action.

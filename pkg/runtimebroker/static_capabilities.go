@@ -30,7 +30,7 @@ import (
 // starts-in-flight list, so it is not part of this static set.
 func StaticCapabilities(rt scionrt.Runtime) *hubclient.BrokerCapabilities {
 	return &hubclient.BrokerCapabilities{
-		WebPTY:                 false,
+		WebPTY:                 webPTYSupported(rt),
 		Sync:                   true,
 		Attach:                 scionrt.HasAttachSupport(rt),
 		Reprovision:            true,
@@ -43,6 +43,33 @@ func StaticCapabilities(rt scionrt.Runtime) *hubclient.BrokerCapabilities {
 		// place (miller79/scion#167).
 		ReprovisionEmptyPerAgent: true,
 	}
+}
+
+// webPTYSupported reports whether this broker's web terminal (the WebSocket
+// PTY attach in pty_handlers.go, reached directly or over the control
+// channel) can open a session on agents of runtime rt. It is the single
+// source for the WebPTY capability, used by both StaticCapabilities and the
+// info handler.
+//
+// The PTY path picks its exec primitive from the runtime name: the client-go
+// SPDY exec for kubernetes, the sandbox binary for cloudrun-sandbox, and
+// "<name> exec -it" for every other runtime (docker, podman, the Apple
+// container CLI). So the answer is:
+//   - false when rt opts out of interactive attach (HasAttachSupport), as
+//     substrate does: both PTY handlers refuse it before the upgrade;
+//   - false for cloudrun, whose instances are reached through the Cloud Run
+//     exec connector rather than a local CLI, so the PTY path has no exec
+//     primitive for it;
+//   - true otherwise. A nil rt follows HasAttachSupport's default
+//     (missing capability means supported), matching Attach.
+func webPTYSupported(rt scionrt.Runtime) bool {
+	if !scionrt.HasAttachSupport(rt) {
+		return false
+	}
+	if rt != nil && rt.Name() == "cloudrun" {
+		return false
+	}
+	return true
 }
 
 // StaticCapabilityNames is StaticCapabilities as the capability names the

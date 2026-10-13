@@ -787,14 +787,14 @@ func TestRecordedRuntime_MismatchLoggedOncePerAgent(t *testing.T) {
 	}
 }
 
-// TestRecordedRuntime_StatsNotGated pins that the placeholder stats route,
-// which reads no runtime, does not run the recorded-runtime lookups.
+// TestRecordedRuntime_StatsNotGated pins that the stats route, which answers
+// 501 without reading any runtime, does not run the recorded-runtime lookups.
 func TestRecordedRuntime_StatsNotGated(t *testing.T) {
 	srv, defaultMgr, auxMgr := newRecordedRuntimeServer(t, true)
 
 	w := serveRR(srv, http.MethodGet, "/api/v1/agents/"+rrAgent+"/stats"+rrQuery("kubernetes"), "")
 
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d; body = %s", w.Code, w.Body.String())
 	}
 	if n := defaultMgr.lists.Load() + auxMgr.lists.Load(); n != 0 {

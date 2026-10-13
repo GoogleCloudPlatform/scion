@@ -252,7 +252,9 @@ func (s *agentService) GetLogs(ctx context.Context, agentID string, opts *GetLog
 	return result.Logs, nil
 }
 
-// GetStats retrieves agent resource statistics.
+// GetStats retrieves agent resource statistics. Current brokers do not
+// implement them and answer 501 (code "stats_not_implemented"), which this
+// returns as an error.
 func (s *agentService) GetStats(ctx context.Context, agentID string) (*runtimebroker.StatsResponse, error) {
 	resp, err := s.c.transport.Get(ctx, "/api/v1/agents/"+agentID+"/stats", nil)
 	if err != nil {
