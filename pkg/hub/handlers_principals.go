@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -46,7 +47,11 @@ type GroupsResponse struct {
 	Groups []store.Group `json:"groups"`
 }
 
-// handleMyGroups handles GET /api/v1/users/me/groups.
+// handleMyGroups handles GET /api/v1/users/me/groups. A project-boundary
+// user access token lists the caller's groups that belong to no project and
+// the groups of its boundary project, the latter only while the caller is a
+// current member of that project. An empty or unknown credential kind is
+// refused.
 func (s *Server) handleMyGroups(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -60,6 +65,11 @@ func (s *Server) handleMyGroups(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	token, ok := selfReadCredential(ctx, user)
+	if !ok {
+		refuseSelfReadCredential(w, r, user, "group")
+		return
+	}
 
 	groupIDs, err := s.store.GetEffectiveGroups(ctx, user.ID())
 	if err != nil {
@@ -73,11 +83,41 @@ func (s *Server) handleMyGroups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if token != nil && token.Boundary().Kind == BoundaryKindProject {
+		groups = s.boundaryProjectGroups(ctx, token, groups)
+	}
+
 	if groups == nil {
 		groups = []store.Group{}
 	}
 
 	writeJSON(w, http.StatusOK, GroupsResponse{Groups: groups})
+}
+
+// boundaryProjectGroups keeps the groups a project-boundary token may list:
+// groups that belong to no project, and groups of the token's boundary
+// project while its holder is a current member of that project.
+func (s *Server) boundaryProjectGroups(ctx context.Context, token *ScopedUserIdentity, groups []store.Group) []store.Group {
+	boundaryProject := token.Boundary().ProjectID
+	memberChecked, member := false, false
+	out := make([]store.Group, 0, len(groups))
+	for _, g := range groups {
+		if g.ProjectID == "" {
+			out = append(out, g)
+			continue
+		}
+		if g.ProjectID != boundaryProject {
+			continue
+		}
+		if !memberChecked {
+			member = s.tokenBoundaryProjectMember(ctx, token)
+			memberChecked = true
+		}
+		if member {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // handleAgentGroups handles GET /api/v1/agents/{id}/groups.

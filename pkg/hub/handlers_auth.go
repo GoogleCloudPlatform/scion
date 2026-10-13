@@ -731,8 +731,13 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, AuthLogoutResponse{Success: true})
 }
 
-// handleAuthMe handles GET /api/v1/auth/me.
+// handleAuthMe handles GET /api/v1/auth/me. Any token reads its holder's
+// own profile.
 func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
 	// Check for agent identity first — agent tokens don't implement UserIdentity
 	// but should still be recognized as authenticated callers.
 	if agentIdent := GetAgentIdentityFromContext(r.Context()); agentIdent != nil {
@@ -772,6 +777,10 @@ type AdminStatusResponse struct {
 // admins and super admins; a member holding system-scoped permissions through
 // another role gets isAdmin=false with those permissions listed. The frontend
 // decides which admin sections and routes to show from the permissions list.
+//
+// For a user access token the permissions list holds only the permissions
+// the token may use: those its ceiling allows that are eligible for its
+// boundary kind. An empty or unknown credential kind is refused.
 func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -781,6 +790,11 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Unauthorized(w)
+		return
+	}
+	token, ok := selfReadCredential(r.Context(), user)
+	if !ok {
+		refuseSelfReadCredential(w, r, user, "user")
 		return
 	}
 
@@ -810,6 +824,10 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 		perms = effective
 		isAdmin = s.authzService.IsSystemAdmin(r.Context(), user.ID()) ||
 			s.authzService.IsHubAdmin(r.Context(), user.ID())
+	}
+
+	if token != nil {
+		perms = filterPermissionsForToken(token, perms)
 	}
 
 	// Ensure JSON serializes as [] rather than null when there are no permissions.
@@ -1930,6 +1948,12 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	// Redeeming an invite joins the hub, which a federated caller does not.
 	if !requireProfileWriter(w, r) {
+		return
+	}
+	// Redeeming an invite binds the invitation to the caller's identity:
+	// session-only (IDENTITY_BINDING), so a token is refused before the
+	// body is read.
+	if !requireIdentityBindingCredential(w, r) {
 		return
 	}
 

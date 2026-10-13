@@ -816,11 +816,17 @@ func (s *Server) canReadConstraintAudit(r *http.Request, constraint *store.Acces
 		resource.ParentType = "project"
 		resource.ParentID = constraint.ScopeID
 	}
+	// hub.audit.read is a hub-level permission: a user access token reads
+	// any constraint's audit history only on a hub boundary, with the
+	// hub_audit:read selector, through the hub-level constraint record.
+	if IsScopedUserIdentity(user) {
+		resource = hubScopedResource("access_constraint", constraint.ID)
+	}
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
 		Resource:   resource,
-		Action:     ActionManage,
+		Action:     ActionRead,
 		Permission: "hub.audit.read",
 	})
 	return decision.Allowed

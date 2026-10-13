@@ -271,6 +271,14 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		{"inbox.notification.template.create", "/api/v1/notifications/templates"}: {
 			"name": f.inbox.createConversations + "-template", "triggerActivities": []string{"COMPLETED"}, "projectId": f.project,
 		},
+		// Explain names a fixture project target; the cross-principal
+		// variant explains for the fixture user.
+		{"authz.explain.self", "/api/v1/authz/explain"}: {
+			"resource": map[string]interface{}{"type": "project", "id": f.project}, "action": "read",
+		},
+		{"authz.explain.crossprincipal", "/api/v1/authz/explain"}: {
+			"resource": map[string]interface{}{"type": "project", "id": f.project}, "action": "read", "principalId": f.user,
+		},
 	}
 }
 

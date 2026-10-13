@@ -764,7 +764,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 
 		// --- access constraint family (read default; update/.delete are
 		// re-pointed at the disposable UD instance by opPatternOverrides) ---
-		"/api/v1/admin/access-constraints/{id}": {"id": f.accessConstraint},
+		"/api/v1/admin/access-constraints/{id}":                     {"id": f.accessConstraint},
+		"/api/v1/admin/access-constraints/{id}/affected-principals": {"id": f.accessConstraint},
+		"/api/v1/admin/access-constraints/{id}/audit":               {"id": f.accessConstraint},
 
 		// --- credential token family ---
 		"/api/v1/auth/tokens/{id}/revoke": {"id": f.uatRevokePost},
@@ -846,6 +848,8 @@ func queryOverrides(f idFixtures) map[string]string {
 		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
 		// handleConversationResolve 400s without a reference.
 		"/api/v1/conversations/resolve": "reference=conv:" + f.inbox.groupConversation,
+		// handleAdminEffectiveAccess 400s without a principal.
+		"/api/v1/admin/effective-access": "principalType=user&principalId=" + f.user,
 	}
 }
 

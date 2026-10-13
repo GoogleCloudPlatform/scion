@@ -76,6 +76,15 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	query := r.URL.Query()
 
+	// A user access token lists users only with user.list at the hub
+	// collection, and then sees only the users it may read: each row is
+	// checked as a hub-level user record, so the token also needs
+	// user.read.
+	_, isToken := GetIdentityFromContext(ctx).(*ScopedUserIdentity)
+	if isToken && !s.authorizeWithEvidence(w, r, Resource{Type: "user"}, ActionList, hubCollectionEvidence("user.list")) {
+		return
+	}
+
 	filter := store.UserFilter{
 		Role:   query.Get("role"),
 		Status: query.Get("status"),
@@ -98,6 +107,9 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		resources := make([]Resource, len(result.Items))
 		for i := range result.Items {
 			resources[i] = userResource(&result.Items[i])
+			if isToken {
+				resources[i] = hubScopedResource("user", result.Items[i].ID)
+			}
 		}
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "user")
 		for i := range result.Items {

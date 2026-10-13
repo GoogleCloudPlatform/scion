@@ -278,8 +278,9 @@ func (s *Server) handleAdminRoleByID(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAdminRoleBindings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		// Inline authorization: role_binding.read at hub scope.
-		if !s.authorize(w, r, Resource{Type: "role_binding", ID: "hub"}, ActionRead) {
+		// Inline authorization: role_binding.read on the hub-level role
+		// binding records.
+		if !s.authorize(w, r, hubScopedResource("role_binding", "hub"), ActionRead) {
 			return
 		}
 		s.listRoleBindings(w, r)
@@ -389,9 +390,10 @@ func (s *Server) handleAdminRoleBindingByID(w http.ResponseWriter, r *http.Reque
 			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
-		// Inline authorization: role_binding.read at hub scope.
-		// Structured denial with resource_type + denied_action.
-		if !s.authorize(w, r, Resource{Type: "role_binding", ID: "hub"}, ActionRead) {
+		// Inline authorization: role_binding.read on the hub-level role
+		// binding records. Structured denial with resource_type +
+		// denied_action.
+		if !s.authorize(w, r, hubScopedResource("role_binding", "hub"), ActionRead) {
 			return
 		}
 		s.listBindingsForUser(w, r, userID)
