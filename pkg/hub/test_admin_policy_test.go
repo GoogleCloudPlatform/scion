@@ -1427,6 +1427,10 @@ func TestTestAdminPolicy_ProjectRolesStayGrantable(t *testing.T) {
 		rec = doRequestWithToken(t, srv, humanTok, http.MethodPut, "/api/v1/projects/"+controlProject+"/members/principals/user/"+u.ID,
 			setMemberRolesRequestBody{RoleDefinitionIDs: []string{tc.rd}})
 		assert.Equal(t, http.StatusForbidden, rec.Code, "human hub-admin members PUT %s: %s", tc.role, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `"denied_action":"manage"`, "human hub-admin members PUT %s", tc.role)
+		roles, err := activeDirectProjectRoles(ctx, s, nil, false, u.ID, controlProject)
+		require.NoError(t, err)
+		assert.False(t, roles[tc.role], "human hub-admin created no %s binding", tc.role)
 	}
 }
 
