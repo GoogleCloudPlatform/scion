@@ -241,10 +241,15 @@ func TestAgentTokenRefusalCauseIsLogged(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			req, agentID := revokedRefreshRequest(t, srv, s, project, "cause-log-"+name, marker)
 			buf := captureSlogDefault(t)
+			before := len(logs.records(agentTokenRefusedLogMessage))
 			rec := httptest.NewRecorder()
 			srv.handleAgentTokenRefresh(rec, req, agentID)
 			assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
-			assertOneRefusalLogLine(t, buf.String(), "refresh_revoked")
+			// The refusal is logged on the auth logger, not the default one.
+			recs := logs.records(agentTokenRefusedLogMessage)
+			require.Len(t, recs, before+1)
+			assert.Equal(t, "refresh_revoked", recs[before].attrs["cause"])
+			assert.NotContains(t, buf.String(), agentTokenRefusedLogMessage)
 		})
 	}
 }

@@ -224,7 +224,7 @@ func (w *constraintAuditAuthFailureWriter) WriteHeader(statusCode int) {
 	switch statusCode {
 	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
 		w.normalized = true
-		h := w.ResponseWriter.Header()
+		h := w.Header()
 		clear(h)
 		for k, v := range w.header {
 			h[k] = v
