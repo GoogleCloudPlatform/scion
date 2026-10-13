@@ -476,6 +476,7 @@ export class ScionPageArtifacts extends LitElement {
       <scion-artifact-move-dialog
         .artifact=${this.moving}
         ?open=${!!this.moving}
+        homeDeleted
         @artifact-moved=${(e: CustomEvent<Artifact>): void => this.onMoved(e)}
         @artifact-move-closed=${(): void => {
           this.moving = null;

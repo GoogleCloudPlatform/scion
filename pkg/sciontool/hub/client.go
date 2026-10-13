@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,6 +39,7 @@ import (
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/backoff"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -1131,22 +1133,24 @@ const (
 
 // tokenRefreshBackoff returns the delay before the next refresh retry after the
 // given number of consecutive failures, using exponential backoff (starting at
-// base, doubling each attempt) capped at max.
-func tokenRefreshBackoff(consecutiveFailures int, base, max time.Duration) time.Duration {
-	if consecutiveFailures < 1 {
-		consecutiveFailures = 1
-	}
-	delay := base
+// base, doubling each attempt) capped at limit. It is the delay the refresh
+// loop gets from the shared backoff helper after that many failures. Unlike
+// the helper-free version it replaced, it returns base when limit < base and
+// starts from the helper's default base when base <= 0; the loop reaches
+// neither case (its base is always positive and its limit at least its base).
+func tokenRefreshBackoff(consecutiveFailures int, base, limit time.Duration) time.Duration {
+	b := newTokenRefreshBackoff(base, limit)
+	d := b.Failure()
 	for i := 1; i < consecutiveFailures; i++ {
-		delay *= 2
-		if delay >= max {
-			return max
-		}
+		d = b.Failure()
 	}
-	if delay > max {
-		delay = max
-	}
-	return delay
+	return d
+}
+
+// newTokenRefreshBackoff returns the refresh loop's retry policy: doubling
+// from base to limit, without jitter.
+func newTokenRefreshBackoff(base, limit time.Duration) *backoff.Backoff {
+	return &backoff.Backoff{Base: base, Max: limit}
 }
 
 // StartTokenRefresh starts a background goroutine that refreshes the agent token
@@ -1214,6 +1218,7 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 		// adjustRefreshForTransportTokens picks the earlier deadline.
 		refreshAt = c.adjustRefreshForTransportTokens(refreshAt)
 		consecutiveFailures := 0
+		retry := newTokenRefreshBackoff(retryBase, retryMax)
 		authLostNotified := false
 
 		for {
@@ -1273,13 +1278,14 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 				}
 
 				consecutiveFailures++
-				refreshAt = clk.Now().Add(tokenRefreshBackoff(consecutiveFailures, retryBase, retryMax))
+				refreshAt = clk.Now().Add(retry.Failure())
 				continue
 			}
 
 			// Successful refresh: reset failure tracking and clear any prior
 			// auth-lost state so a later loss is reported again.
 			consecutiveFailures = 0
+			retry.Reset()
 			authLostNotified = false
 			tokenExpiry = newExpiry
 
@@ -2518,6 +2524,59 @@ func (c *Client) GetSelf(ctx context.Context) (*AgentSelf, error) {
 	}
 
 	return &result, nil
+}
+
+// GetExperiments fetches the hub's experiment map, read live from GET
+// /api/v1/experiments: every registered web-layer experiment and whether it
+// is on now (this includes server-checked ones such as hub.artifacts). It
+// returns the enabled names, sorted. Unlike SCION_HUB_EXPERIMENTS, which is
+// fixed at start and lists only the experiments dispatched to the agent,
+// the answer is current (ptone/scion#4573).
+func (c *Client) GetExperiments(ctx context.Context) ([]string, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured")
+	}
+
+	endpoint := strings.TrimSuffix(c.hubURL, "/") + "/api/v1/experiments"
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	c.setAgentAuth(req.Header, currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Experiments map[string]bool `json:"experiments"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	enabled := []string{}
+	for name, on := range result.Experiments {
+		if on {
+			enabled = append(enabled, name)
+		}
+	}
+	sort.Strings(enabled)
+	return enabled, nil
 }
 
 // --- Agent secret fetch (P2d, #127) ---

@@ -2079,6 +2079,10 @@ declare -A PROBE_MUTATION=(
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
   [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
+  # hub.hubClass is an enum ("" or test). hub.testIdentities.enabled=true needs
+  # hub.hubClass: test to render at all (the render guard), so it carries it.
+  [hub.hubClass]='--set-string|hub.hubClass=test'
+  [hub.testIdentities.enabled]='--set-string|hub.hubClass=test|--set|hub.testIdentities.enabled=true'
   # gcpsm needs its project to render at all, and the project is refused under
   # local, so the three secrets leaves each carry the backend and project.
   [secrets.backend]='--set-string|secrets.gcpsm.projectId=probe-project|--set-string|secrets.backend=gcpsm'

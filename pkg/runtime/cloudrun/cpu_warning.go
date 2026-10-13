@@ -18,6 +18,7 @@ import (
 	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 // CPUAlwaysAllocatedEnv is the environment variable an operator sets to true
@@ -55,10 +56,10 @@ func cpuAllocationWarningWanted(getenv func(string) string, brokerEnabled bool) 
 	if !brokerEnabled {
 		return false
 	}
-	if getenv("K_SERVICE") == "" {
+	if !cloudrunenv.IsServiceFrom(getenv) {
 		return false
 	}
-	if getenv("CLOUD_RUN_INSTANCE") != "" {
+	if cloudrunenv.IsInstanceFrom(getenv) {
 		return false
 	}
 	// Same spellings as the server's other boolean env vars (util.ParseBool).

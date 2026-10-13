@@ -200,6 +200,10 @@ return an error instead of blocking.`,
 					autoConfirm = true
 				}
 			}
+
+			if projectPath == "" {
+				printShadowNotice(cmd)
+			}
 		}
 
 		// Agent mode implies non-interactive: prompts that require stdin

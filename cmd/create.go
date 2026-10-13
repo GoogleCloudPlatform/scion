@@ -51,6 +51,12 @@ The agent is provisioned but not started, even when a task is given. Run
 		agentName := api.Slugify(args[0])
 		task := strings.TrimSpace(strings.Join(args[1:], " "))
 
+		// A target-hub profile refuses the flags that need local state
+		// before anything else (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
+			return err
+		}
+
 		if err := validateHarnessAuthFlag(harnessAuthFlag); err != nil {
 			return asUsageError(err)
 		}

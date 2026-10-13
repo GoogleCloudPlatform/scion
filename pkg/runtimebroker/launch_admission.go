@@ -37,10 +37,12 @@ const minAsyncLaunchTimeoutSeconds = 20
 // beginAsyncLaunch implements design t1-async-create-v11.md §3.8.2 for a
 // createAgent request with AsyncLaunch set (and not ProvisionOnly or
 // Reprovision, which createAgent's caller has already excluded). Admission
-// up to here is identical to the synchronous path (buildStartContext,
+// up to here is identical to the synchronous path (the registration under
+// the agent's name and its supersede wait, buildStartContext,
 // attachSkillResolver, withHubAgentDefaults); this adds the one extra
-// admission step the async path needs, Manager.Preflight, then accepts the
-// launch and continues it in runLaunch.
+// admission step the async path needs, Manager.Preflight, then hands the
+// create's registration (ss) over to the launch, accepts it and continues
+// it in runLaunch.
 //
 // It reports whether it accepted the launch. Every refusal writes its error
 // response and returns false; only the path that starts runLaunch returns
@@ -54,7 +56,7 @@ const minAsyncLaunchTimeoutSeconds = 20
 // needs (the resolved hub connection name, opts, the request body already
 // decoded into req) is plain data copied out here, in this synchronous
 // handler goroutine, before go runLaunch starts (design §7 P1b-1 B-6).
-func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx context.Context, req CreateAgentRequest, opts api.StartOptions, mgr agent.Manager, owned *ownedStart, attempt *dispatchAttempt, markAttemptFailed func(int, string), span trace.Span, receivedAt time.Time) bool {
+func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx context.Context, req CreateAgentRequest, opts api.StartOptions, mgr agent.Manager, ss *syncStart, owned *ownedStart, attempt *dispatchAttempt, markAttemptFailed func(int, string), span trace.Span, receivedAt time.Time) bool {
 	// The GCS download itself runs in runLaunch (design §3.1), but its
 	// directory check only reads the filesystem, so an invalid workspace
 	// directory is answered here with the same 400 the synchronous path
@@ -110,11 +112,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		return false
 	}
 
-	slug := req.Slug
-	if slug == "" {
-		slug = req.Name
-	}
-	key := launchKey{ProjectID: req.ProjectID, Slug: slug}
+	key := ss.key
 
 	// design §3.8.2 step 4: the broker's deadline is 20s before the Hub's
 	// launch_deadline, measured from receivedAt so admission time counts
@@ -133,7 +131,17 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 
 	rec := newLaunchRecord(req.LaunchID, req.ID, store.LaunchKindCreate, s.resolveHubNameForLaunch(r), deadline, cancel)
 	rec.RunID = req.RunID
-	supersededDone := s.launchRegistry.Begin(key, rec)
+	// The create already registered under the name and waited for any
+	// earlier start of it before buildStartContext (createAgent,
+	// beginCreateRegistration), so the launch takes that registration over
+	// instead of beginning a new one: there is nothing left to wait for. If
+	// a stop, delete or newer start took the name in the meantime, refuse
+	// with the 409 the wait itself gives, before accepting anything.
+	if !ss.handOff(rec) {
+		cancel()
+		s.writeCreateRegistrationError(w, span, req, errCreateStartCancelled, markAttemptFailed)
+		return false
+	}
 
 	resp := CreateAgentResponse{
 		LaunchPending:    true,
@@ -156,7 +164,6 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		mgr:             mgr,
 		key:             key,
 		sharedWorkspace: opts.SharedWorkspace,
-		supersededDone:  supersededDone,
 		owned:           owned,
 	}
 	go s.runLaunch(runCtx, rec, lc)

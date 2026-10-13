@@ -374,7 +374,11 @@ Settings can be overridden using environment variables with the `SCION_` prefix.
 | `telemetry.cloud.enabled` | `SCION_TELEMETRY_CLOUD_ENABLED` |
 | `telemetry.cloud.endpoint` | `SCION_OTEL_ENDPOINT` |
 | `telemetry.cloud.protocol` | `SCION_OTEL_PROTOCOL` |
-| `telemetry.cloud.tls.insecure_skip_verify` | `SCION_OTEL_INSECURE` |
+| `telemetry.cloud.tls.enabled` (inverted) | `SCION_OTEL_INSECURE` |
+| `telemetry.cloud.tls.insecure_skip_verify` | `SCION_OTEL_SKIP_TLS_VERIFY` |
+| `telemetry.cloud.tls.ca_file` | `SCION_OTEL_CA_FILE` |
+| `telemetry.cloud.tls.cert_file` | `SCION_OTEL_CERT_FILE` |
+| `telemetry.cloud.tls.key_file` | `SCION_OTEL_KEY_FILE` |
 | `telemetry.hub.enabled` | `SCION_TELEMETRY_HUB_ENABLED` |
 
 See [Local Governance](/scion/local/local-governance/) for more on variable substitution.
