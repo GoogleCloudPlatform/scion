@@ -1349,7 +1349,7 @@ type projectDispatchInfo struct {
 	// sharedWorkspaceClone is a shared-plain git project's workspace clone
 	// settings (sharedWorkspaceCloneConfig); nil for every other project.
 	sharedWorkspaceClone *api.GitCloneConfig
-	// telemetryPolicy is the project's scion.io/telemetry-enabled policy
+	// telemetryPolicy is the project's projectSettingTelemetryEnabled policy
 	// (projectTelemetryPolicy); nil when unset or unparsable.
 	telemetryPolicy *bool
 }
