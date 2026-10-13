@@ -103,19 +103,16 @@ func testConfig(t *testing.T, w *relaytest.World, exp ExperimentSource) Config {
 
 func startServer(t *testing.T, cfg Config) *Server {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	s, err := Start(ctx, cfg)
-	if err != nil {
-		cancel()
-		t.Fatalf("start: %v", err)
+	r := awaitStart(t, startAsync(t, cfg))
+	if r.err != nil {
+		t.Fatalf("start: %v", r.err)
 	}
 	t.Cleanup(func() {
 		sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer scancel()
-		_ = s.Shutdown(sctx, true, time.Second)
-		cancel()
+		_ = r.s.Shutdown(sctx, true, time.Second)
 	})
-	return s
+	return r.s
 }
 
 func relayDraining(t *testing.T, w *relaytest.World) bool {
@@ -147,11 +144,16 @@ func TestStartRequiresExperiment(t *testing.T) {
 	}
 }
 
-// startAsync runs Start in a goroutine and returns its result channel.
-func startAsync(cfg Config) <-chan startResult {
+// startAsync runs Start in a goroutine and returns its result channel. The
+// context Start gets ends when the test ends, which stops the relay's
+// background work (the experiment follower among it).
+func startAsync(t *testing.T, cfg Config) <-chan startResult {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	ch := make(chan startResult, 1)
 	go func() {
-		s, err := Start(context.Background(), cfg)
+		s, err := Start(ctx, cfg)
 		ch <- startResult{s, err}
 	}()
 	return ch
@@ -160,6 +162,53 @@ func startAsync(cfg Config) <-chan startResult {
 type startResult struct {
 	s   *Server
 	err error
+}
+
+// awaitStart returns Start's result, failing the test if it does not come
+// within a bounded wait.
+func awaitStart(t *testing.T, res <-chan startResult) startResult {
+	t.Helper()
+	select {
+	case r := <-res:
+		return r
+	case <-time.After(30 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	return startResult{}
+}
+
+// awaitRead waits for one hub.conduit read, failing the test if none comes
+// within a bounded wait.
+func awaitRead(t *testing.T, exp *fakeExperiment, what string) {
+	t.Helper()
+	select {
+	case <-exp.reads:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("no %s", what)
+	}
+}
+
+// drainReads discards the hub.conduit reads signalled so far, without
+// waiting for more.
+func drainReads(exp *fakeExperiment) {
+	for {
+		select {
+		case <-exp.reads:
+		default:
+			return
+		}
+	}
+}
+
+// sendEvent delivers one settings event, failing the test if the follower
+// does not take it within a bounded wait.
+func sendEvent(t *testing.T, ev *fakeEvents, subject string) {
+	t.Helper()
+	select {
+	case ev.ch <- subject:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("settings event %s not taken", subject)
+	}
 }
 
 // advanceRetry waits for the startup retry timer, then fires it.
@@ -180,10 +229,10 @@ func TestStartRetriesUnreadableExperiment(t *testing.T) {
 		exp := newFakeExperiment(expAnswer{err: errUnreadable}, expAnswer{err: errUnreadable}, expAnswer{on: true})
 		cfg := testConfig(t, w, exp)
 		clk := cfg.Clock.(*clock.Fake)
-		res := startAsync(cfg)
+		res := startAsync(t, cfg)
 		advanceRetry(t, clk, cfg.StartupRetry)
 		advanceRetry(t, clk, cfg.StartupRetry)
-		r := <-res
+		r := awaitStart(t, res)
 		if r.err != nil {
 			t.Fatalf("start: %v", r.err)
 		}
@@ -205,11 +254,11 @@ func TestStartRetriesUnreadableExperiment(t *testing.T) {
 		cfg := testConfig(t, w, exp)
 		cfg.StartupDeadline = 3 * cfg.StartupRetry
 		clk := cfg.Clock.(*clock.Fake)
-		res := startAsync(cfg)
+		res := startAsync(t, cfg)
 		for i := 0; i < 3; i++ {
 			advanceRetry(t, clk, cfg.StartupRetry)
 		}
-		r := <-res
+		r := awaitStart(t, res)
 		if r.err == nil || !errors.Is(r.err, errUnreadable) || !strings.Contains(r.err.Error(), "startup deadline") {
 			t.Fatalf("start: %v", r.err)
 		}
@@ -225,18 +274,22 @@ func TestExperimentPolledOnTheClock(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	exp := newFakeExperiment(expAnswer{on: true})
 	cfg := testConfig(t, w, exp)
-	cfg.ExperimentPollPeriod = 15 * time.Second
+	// The relay's heartbeat timer runs on the same fake clock. The waits
+	// below target the poll timer by its own deadline, so that deadline
+	// must not coincide with a heartbeat deadline.
+	cfg.ExperimentPollPeriod = 7 * time.Second
+	if relay.DefaultHeartbeatInterval%cfg.ExperimentPollPeriod == 0 || cfg.ExperimentPollPeriod%relay.DefaultHeartbeatInterval == 0 {
+		t.Fatalf("poll period %v shares deadlines with the heartbeat interval %v", cfg.ExperimentPollPeriod, relay.DefaultHeartbeatInterval)
+	}
 	clk := cfg.Clock.(*clock.Fake)
 	s := startServer(t, cfg)
-	for len(exp.reads) > 0 {
-		<-exp.reads
-	}
+	drainReads(exp)
 	exp.set(expAnswer{on: false})
 	if !clk.WaitForTimer(10*time.Second, clk.Now().Add(cfg.ExperimentPollPeriod)) {
 		t.Fatal("no poll timer armed")
 	}
 	clk.Advance(cfg.ExperimentPollPeriod)
-	<-exp.reads
+	awaitRead(t, exp, "the poll read")
 	// The next poll timer is armed after the read is applied.
 	if !clk.WaitForTimer(10*time.Second, clk.Now().Add(cfg.ExperimentPollPeriod)) {
 		t.Fatal("no next poll timer armed")
@@ -392,24 +445,14 @@ func TestSettingsEventRereadsExperiment(t *testing.T) {
 	ev := &fakeEvents{ch: make(chan string, 1)}
 	cfg.Events = ev
 	s := startServer(t, cfg)
-	for len(exp.reads) > 0 {
-		<-exp.reads
-	}
+	drainReads(exp)
 	exp.set(expAnswer{on: false})
-	ev.ch <- SettingsUpdatedSubject
-	select {
-	case <-exp.reads:
-	case <-time.After(10 * time.Second):
-		t.Fatal("no re-read after a settings event")
-	}
+	sendEvent(t, ev, SettingsUpdatedSubject)
+	awaitRead(t, exp, "re-read after a settings event")
 	// The read and SetAdmitting run in one step of the follower; a second
 	// event is handled only after the first finished.
-	ev.ch <- SettingsUpdatedSubject
-	select {
-	case <-exp.reads:
-	case <-time.After(10 * time.Second):
-		t.Fatal("no re-read after the second settings event")
-	}
+	sendEvent(t, ev, SettingsUpdatedSubject)
+	awaitRead(t, exp, "re-read after the second settings event")
 	if s.Relay.Admitting() {
 		t.Fatal("still admitting after hub.conduit turned off")
 	}
