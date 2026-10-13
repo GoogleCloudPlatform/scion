@@ -12,7 +12,7 @@ A hosted template's agent config currently lives in two places: the template's f
 
 ## 2. Direction
 
-1. **A template describes the agent's job, not its operating environment.** A template sets what the agent does. Where and how it runs (telemetry, image, volumes, resources, hub access) comes from settings and policy only.
+1. **A template describes the agent's job, not its operating environment.** A template sets what the agent does. Where and how it runs (telemetry, image, volumes, resources, hub access) comes from settings, policy and the requester's own inline config; never a template.
 2. **A template's files are the single source of truth for its job config.** The hub row keeps only fields derived from those files.
 3. **The project is closer to the work than the template.** A project owner may run a template written by anyone, so project settings override the template for job keys.
 
@@ -45,7 +45,7 @@ built-in defaults
               < requester explicit CLI flags (--model, --harness-config, ...)
 ```
 
-### Environment keys (settings and policy only; ignored in a template)
+### Environment keys (settings, policy and the requester's own inline config; never a template)
 
 `telemetry`, `hub`, `image` (owned by the harness-config and settings/profiles), `resources`, `kubernetes`, `volumes`, and, within a template's `env:` block, the reserved `SCION_*` namespace.
 
