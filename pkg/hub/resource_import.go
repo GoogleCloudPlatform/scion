@@ -25,6 +25,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/templateimport"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -92,6 +93,10 @@ type ResourceImportEvent struct {
 	Name string `json:"name,omitempty"`
 	// Reason carries the failure/skip explanation on failed/skipped/error.
 	Reason string `json:"reason,omitempty"`
+	// Code is the machine-readable error code on an error event, when the
+	// failure has one: harness_config_unusable for a refused harness-config,
+	// matching the non-streaming import answer.
+	Code string `json:"code,omitempty"`
 	// Completed is the monotonic count of finished resources (any terminal
 	// status) at the time of the event; set on completed/failed.
 	Completed int `json:"completed,omitempty"`
@@ -179,6 +184,16 @@ func (s *Server) harnessConfigImportKind() resourceImportKind {
 // the filter are imported; all others are skipped. When nil or empty, all
 // discovered resources are imported (backward compatible).
 func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc, nameFilter []string) ([]string, error) {
+	return s.importFromRemoteSelected(ctx, projectID, sourceURL, scope, kind, progress,
+		func(dirs []resourceDir, skipped []skippedDir) ([]resourceDir, []skippedDir) {
+			return applyNameFilter(dirs, skipped, nameFilter)
+		}, fmt.Sprintf("no scion %s matched the requested names", kind.noun))
+}
+
+// importFromRemoteSelected is importFromRemote with a caller-supplied selection
+// of the discovered dirs; dirs it drops must be appended to skipped. noMatch is
+// the error message returned when the selection keeps no dirs.
+func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc, selectDirs func([]resourceDir, []skippedDir) ([]resourceDir, []skippedDir), noMatch string) ([]string, error) {
 	if !config.IsRemoteURI(sourceURL) {
 		return nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
 	}
@@ -200,9 +215,9 @@ func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, sco
 		return nil, fmt.Errorf("no scion %s found at %s", kind.noun, sourceURL)
 	}
 
-	dirs, skipped = applyNameFilter(dirs, skipped, nameFilter)
+	dirs, skipped = selectDirs(dirs, skipped)
 	if len(dirs) == 0 {
-		return nil, fmt.Errorf("no scion %s matched the requested names", kind.noun)
+		return nil, errors.New(noMatch)
 	}
 
 	if err := checkResourceDirsContent(dirs, kind); err != nil {
@@ -507,6 +522,21 @@ func applyNameFilter(dirs []resourceDir, skipped []skippedDir, filter []string) 
 			filtered = append(filtered, d)
 		} else {
 			skipped = append(skipped, skippedDir{d.name, "not in requested names"})
+		}
+	}
+	return filtered, skipped
+}
+
+// applySlugFilter restricts dirs to those whose names slugify to slug, the
+// key under which ResourceStore.Bootstrap persists them. Filtered-out dirs are
+// appended to skipped.
+func applySlugFilter(dirs []resourceDir, skipped []skippedDir, slug string) ([]resourceDir, []skippedDir) {
+	var filtered []resourceDir
+	for _, d := range dirs {
+		if api.Slugify(d.name) == slug {
+			filtered = append(filtered, d)
+		} else {
+			skipped = append(skipped, skippedDir{d.name, fmt.Sprintf("does not match slug %q", slug)})
 		}
 	}
 	return filtered, skipped

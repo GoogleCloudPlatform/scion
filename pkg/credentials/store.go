@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -90,7 +91,8 @@ func SetRefresher(fn TokenRefresher) {
 	refresher = fn
 }
 
-// Store saves credentials for a hub.
+// Store saves credentials for a hub, keyed by its normalised endpoint
+// (config.NormalizeEndpoint).
 func Store(hubURL string, token *TokenResponse) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -102,7 +104,15 @@ func Store(hubURL string, token *TokenResponse) error {
 		creds = &Credentials{Version: 1, Hubs: make(map[string]*HubCredentials)}
 	}
 
-	creds.Hubs[hubURL] = &HubCredentials{
+	// One login per hub: store under the normalised endpoint and drop
+	// other spellings of the same hub.
+	key := config.NormalizeEndpoint(hubURL)
+	for k := range creds.Hubs {
+		if k != key && config.NormalizeEndpoint(k) == key {
+			delete(creds.Hubs, k)
+		}
+	}
+	creds.Hubs[key] = &HubCredentials{
 		AccessToken:  token.AccessToken,
 		RefreshToken: token.RefreshToken,
 		ExpiresAt:    time.Now().Add(token.ExpiresIn),
@@ -112,7 +122,9 @@ func Store(hubURL string, token *TokenResponse) error {
 	return saveFile(path, creds)
 }
 
-// Load retrieves credentials for a hub, refreshing if necessary.
+// Load retrieves credentials for a hub, refreshing if necessary. The URL is
+// matched after normalisation, so a login stored under another spelling of
+// the same hub URL is found.
 func Load(hubURL string) (*HubCredentials, error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -123,8 +135,8 @@ func Load(hubURL string) (*HubCredentials, error) {
 		return nil, err
 	}
 
-	hubCreds, ok := creds.Hubs[hubURL]
-	if !ok {
+	hubCreds := lookupHub(creds, hubURL)
+	if hubCreds == nil {
 		return nil, ErrNotAuthenticated
 	}
 
@@ -163,7 +175,7 @@ func Load(hubURL string) (*HubCredentials, error) {
 	return hubCreds, nil
 }
 
-// Remove deletes credentials for a hub.
+// Remove deletes credentials for a hub, under every spelling of its URL.
 func Remove(hubURL string) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -177,7 +189,12 @@ func Remove(hubURL string) error {
 		return err
 	}
 
-	delete(creds.Hubs, hubURL)
+	key := config.NormalizeEndpoint(hubURL)
+	for k := range creds.Hubs {
+		if k == hubURL || config.NormalizeEndpoint(k) == key {
+			delete(creds.Hubs, k)
+		}
+	}
 
 	// If no more hubs, remove the file
 	if len(creds.Hubs) == 0 {
@@ -185,6 +202,31 @@ func Remove(hubURL string) error {
 	}
 
 	return saveFile(path, creds)
+}
+
+// lookupHub returns the credentials stored for hubURL: under the exact key,
+// else under its normalised form, else under any key that normalises to the
+// same endpoint (a login stored by an older version under another spelling
+// of the URL). It returns nil when there is none.
+func lookupHub(creds *Credentials, hubURL string) *HubCredentials {
+	if c, ok := creds.Hubs[hubURL]; ok {
+		return c
+	}
+	key := config.NormalizeEndpoint(hubURL)
+	if c, ok := creds.Hubs[key]; ok {
+		return c
+	}
+	keys := make([]string, 0, len(creds.Hubs))
+	for k := range creds.Hubs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if config.NormalizeEndpoint(k) == key {
+			return creds.Hubs[k]
+		}
+	}
+	return nil
 }
 
 // GetAccessToken returns just the access token for a hub, or empty string if not authenticated.

@@ -26,7 +26,6 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,6 +37,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -207,6 +207,10 @@ type WebServerConfig struct {
 	// the server proactively closes it so the client can reconnect cleanly.
 	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
 	SSEMaxConnectionAge time.Duration
+	// SSEHeartbeatInterval is how often the events stream sends a heartbeat
+	// event. Defaults to defaultSSEHeartbeatInterval (30s) when zero or
+	// negative.
+	SSEHeartbeatInterval time.Duration
 
 	// PerfTrace turns on performance tracing for the SSE endpoint
 	// (server.hub.perf_trace): connect-time wildcard expansion and subject
@@ -252,9 +256,6 @@ type WebServer struct {
 	// testIdentityRedeemLimiter rate-limits POST /auth/test-identity/redeem
 	// per source IP.
 	testIdentityRedeemLimiter *testLoginLimiter
-	// sseHeartbeat is the SSE heartbeat interval; zero means 30s. Each
-	// tick re-checks a test identity web session.
-	sseHeartbeat time.Duration
 	// testIdentityKinds caches, per user ID, whether the user's row is a
 	// test identity row (kind test_fixture or a reserved-domain email),
 	// for classifyTestIdentitySession's fast path; see the soundness note
@@ -572,13 +573,10 @@ func (ws *WebServer) logger() *slog.Logger {
 
 // IsLoopbackHost reports whether host is a loopback address (127.0.0.0/8,
 // ::1, or "localhost"). It returns false for non-loopback IPs (including
-// "0.0.0.0" and "::") and for unresolvable hostnames.
+// "0.0.0.0" and "::") and for unresolvable hostnames. It is
+// config.IsLoopbackHost, the rule the public URL check uses too.
 func IsLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return config.IsLoopbackHost(host)
 }
 
 // NewWebServer creates a new web frontend server.
@@ -1554,6 +1552,11 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 // clean EOF so it auto-reconnects per the SSE spec.
 const defaultSSEMaxConnectionAge = 3500 * time.Second
 
+// defaultSSEHeartbeatInterval is the default interval between events stream
+// heartbeats. Keep it well below the web client's stale-stream threshold
+// (75s).
+const defaultSSEHeartbeatInterval = 30 * time.Second
+
 // Route: GET /events?sub=<pattern>&sub=<pattern>...
 func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if ws.events == nil {
@@ -1687,9 +1690,10 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	viewer := ws.newSSEMessageViewer(r)
 
 	eventID := 0
-	heartbeatInterval := ws.sseHeartbeat
+	// Each tick also re-checks a test identity web session.
+	heartbeatInterval := ws.config.SSEHeartbeatInterval
 	if heartbeatInterval <= 0 {
-		heartbeatInterval = 30 * time.Second
+		heartbeatInterval = defaultSSEHeartbeatInterval
 	}
 	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
@@ -1733,7 +1737,10 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if tiSession && !ws.sseTestIdentitySessionStillValid(r) {
 				return
 			}
-			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
+			// A named event rather than an SSE comment: browsers never pass
+			// comments to page code, so the client could not observe them.
+			// No id line, so Last-Event-ID and update ids are unaffected.
+			_, _ = fmt.Fprintf(w, "event: heartbeat\ndata: %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
 		case <-tiDeadline:
 			return

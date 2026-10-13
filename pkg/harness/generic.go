@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 type Generic struct{}
@@ -91,6 +92,11 @@ func (g *Generic) GetInterruptKey() string {
 
 func (g *Generic) GetInterruptSequence() []string {
 	return nil
+}
+
+// DeliverySpec returns the default delivery spec; Generic has no config.
+func (g *Generic) DeliverySpec() api.DeliverySpec {
+	return config.DefaultDeliverySpec()
 }
 
 func (g *Generic) GetHarnessEmbedsFS() (embed.FS, string) {

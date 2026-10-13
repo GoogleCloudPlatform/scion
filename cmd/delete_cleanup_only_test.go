@@ -247,7 +247,7 @@ func TestDeleteCleanupOnly_HubUnreachable(t *testing.T) {
 		err := deleteAgentsCleanupOnly(nil, errHubNotConfigured, []string{"local"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "the Hub could not be checked")
-		assert.Contains(t, err.Error(), "No hub configured")
+		assert.Contains(t, err.Error(), "No hub selected")
 		assert.Contains(t, err.Error(), "--force")
 		assert.DirExists(t, agentDir)
 	})

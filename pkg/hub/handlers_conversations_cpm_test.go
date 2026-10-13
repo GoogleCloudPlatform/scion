@@ -28,7 +28,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 // ---------------------------------------------------------------------------

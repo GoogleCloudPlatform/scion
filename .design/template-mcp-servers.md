@@ -2,7 +2,7 @@
 
 ## Motivation
 
-Today, configuring MCP servers for a scion template requires duplicating harness-specific configuration across every harness-config variant. The `web-dev` template illustrates this clearly: to give agents access to a Chrome DevTools MCP server, the template author must:
+Today, configuring MCP servers for a scion template requires duplicating harness-specific configuration across every harness-config variant. Take a web development template, here called `my-web-template`, that gives agents access to a Chrome DevTools MCP server. The template author must:
 
 1. Define a `chromium` service in `scion-agent.yaml` (harness-agnostic)
 2. Add `mcpServers.chrome-devtools` to `harness-configs/claude-web/home/.claude.json` (Claude-specific JSON)
@@ -393,14 +393,14 @@ Provisioning implementation should be sequenced with the decoupled harness work:
 4. **Per-harness implementation:** As each harness's `provision.py` is written or updated (Claude, Gemini in Phase 6; community harnesses in Phase 7), add MCP server application using the helper. Update harness `config.yaml` with `capabilities.mcp` and `mcp` declarative mapping.
 5. **Template cleanup:** Remove inline `mcpServers` from harness-config home files in templates. Templates use `mcp_servers` in `scion-agent.yaml` exclusively.
 
-## Impact on Existing Templates
+## Impact on Templates
 
-### `web-dev` Template: Before and After
+### Example: `my-web-template` Before and After
 
 **Before** — MCP servers defined in each harness-config's home files:
 
 ```
-.scion/templates/web-dev/
+.scion/templates/my-web-template/
   scion-agent.yaml                        # services only
   harness-configs/
     claude-web/
@@ -414,7 +414,7 @@ Provisioning implementation should be sequenced with the decoupled harness work:
 **After** — MCP servers defined once in `scion-agent.yaml`:
 
 ```
-.scion/templates/web-dev/
+.scion/templates/my-web-template/
   scion-agent.yaml                        # services + mcp_servers
   harness-configs/
     claude-web/

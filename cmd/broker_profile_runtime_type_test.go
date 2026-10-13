@@ -255,17 +255,16 @@ func (h *profileTypeHub) storedProfile(t *testing.T, name string) store.BrokerPr
 	return storeProfileByName(t, b.Profiles, name)
 }
 
-// The project settings save check (projectIsKubernetesBound ->
-// brokerIsKubernetesOnly) refuses a "block" default for a project whose only
-// broker runs a kubernetes-typed entry under a custom key.
-func TestProfileRuntimeType_E2E_ProjectSettingsSeesCustomKeyAsKubernetes(t *testing.T) {
+// A project whose only broker runs a kubernetes-typed entry under a custom
+// key accepts a "block" default: the hub no longer refuses block on
+// Kubernetes-bound projects (ptone/scion#4067).
+func TestProfileRuntimeType_E2E_ProjectSettingsAcceptsBlockOnCustomKeyKubernetes(t *testing.T) {
 	h := newProfileTypeHub(t, "kubernetes", runtimeTypeLegacySettings("gke"), opsettings.AgentDefaultsSettings{})
 	assert.Equal(t, "kubernetes", h.storedProfile(t, "gke").Type)
 
 	rec := h.do(t, http.MethodPut, "/api/v1/projects/"+h.project.ID+"/settings",
 		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
-	assert.Equal(t, http.StatusBadRequest, rec.Code,
-		"key gke / type kubernetes must be seen as Kubernetes; body: %s", rec.Body.String())
+	assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 }
 
 // Key == type is unchanged: a key "kubernetes" entry is still Kubernetes,
@@ -276,7 +275,7 @@ func TestProfileRuntimeType_E2E_ProjectSettingsKeyEqualsTypeUnchanged(t *testing
 		assert.Equal(t, "kubernetes", h.storedProfile(t, "plain-k8s").Type)
 		rec := h.do(t, http.MethodPut, "/api/v1/projects/"+h.project.ID+"/settings",
 			hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
-		assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	})
 
 	t.Run("key docker", func(t *testing.T) {

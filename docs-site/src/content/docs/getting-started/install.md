@@ -196,15 +196,15 @@ Scion also supports Vertex AI (via Application Default Credentials) and OAuth to
 
 ### 4. Select Runtime
 Scion automatically selects the appropriate runtime based on your operating system:
-- **macOS**: Defaults to `container` (Apple Virtualization Framework).
+- **macOS**: Uses the first runtime it finds, in this order: `podman`, `docker`, then `container` (Apple Virtualization Framework).
 - **Linux/Windows**: Defaults to `docker` (or `podman` if Docker is missing).
 
-If you wish to change this (e.g., to use Podman on macOS), you can manually edit `.scion/settings.yaml`:
+If you wish to change this (e.g., to use Apple `container` on macOS when Podman or Docker is also installed), you can manually edit `.scion/settings.yaml`:
 
 ```yaml
 profiles:
   local:
-    runtime: podman
+    runtime: container
 ```
 
 Scion accepts settings in either YAML or JSON. `scion init` writes `settings.yaml`, and YAML is preferred when multiple files are present (the loader looks for `settings.yaml`, then `settings.yml`, then `settings.json`). If you prefer JSON, name the file `.scion/settings.json` and use valid JSON syntax:

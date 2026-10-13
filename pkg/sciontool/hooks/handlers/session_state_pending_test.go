@@ -99,6 +99,7 @@ func readStateFile(t *testing.T, store *FileSessionState) sessionStateFile {
 // reopen the session, and the next hook process sends the report exactly
 // once.
 func TestPendingReport_HookKilledBeforeReportSentLaterOnce(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
@@ -147,6 +148,7 @@ func TestPendingReport_HookKilledBeforeReportSentLaterOnce(t *testing.T) {
 // instead: it is returned once, and once confirmed it is gone for both the
 // next check and later hooks.
 func TestPendingReport_HookKilledBeforeReportSentAtShutdownOnce(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
@@ -182,6 +184,7 @@ func TestPendingReport_HookKilledBeforeReportSentAtShutdownOnce(t *testing.T) {
 // nor the shutdown check sends it too, and the sender's confirmation
 // removes it. Pending reports survive the other writers of the file.
 func TestPendingReport_LiveSenderNotDuplicated(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
@@ -232,6 +235,7 @@ func TestPendingReport_LiveSenderNotDuplicated(t *testing.T) {
 // the restart, so the startup clear releases it, and the first hook of the
 // new run sends the report once.
 func TestPendingReport_ShutdownReportKilledSentAfterRestart(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
@@ -270,6 +274,7 @@ func TestPendingReport_ShutdownReportKilledSentAfterRestart(t *testing.T) {
 // A stale claim (its PID reused by an unrelated live process) is not
 // honoured forever.
 func TestPendingReport_StaleClaimReclaimed(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
@@ -293,6 +298,7 @@ func TestPendingReport_StaleClaimReclaimed(t *testing.T) {
 // Without a pending report, today's behaviour holds: the session-end hook
 // reports once and leaves no state file.
 func TestPendingReport_NormalSessionEndLeavesNothing(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 	r := hookRunAll(t, store, sessionEvent(hooks.EventSessionEnd, "s1"))
@@ -310,6 +316,7 @@ func TestPendingReport_NormalSessionEndLeavesNothing(t *testing.T) {
 // check must return both segments' reports: B's must not have replaced A's,
 // and confirming one must not remove the other.
 func TestPendingReport_TwoSegmentsOfOneSessionBothSent(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store) // segment A of s1: 1 turn, Bash and Read
@@ -376,6 +383,7 @@ func TestPendingReport_TwoSegmentsOfOneSessionBothSent(t *testing.T) {
 // hook's confirmation must still match it (time.Equal, not ==), or the
 // report would stay pending and be sent a second time.
 func TestPendingReport_InMemoryStartTimeMatchesStoredReport(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	r := hookRunAll(t, store, sessionEvent(hooks.EventSessionEnd, "s1"))
 	if len(r) != 1 || r[0].SessionID != "s1" {
@@ -395,6 +403,7 @@ func TestPendingReport_InMemoryStartTimeMatchesStoredReport(t *testing.T) {
 // The init daemon confirms every report it sent in one call; each of them
 // must be cleared, not only the first.
 func TestPendingReport_CompleteReportsNoFollowClearsAll(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	store := NewFileSessionState(t.TempDir())
 	for i, id := range []string{"s1", "s2", "s3"} {

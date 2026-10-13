@@ -220,11 +220,12 @@ func TestReprovision_CloneMode_WorkspaceAndHomeSurvive(t *testing.T) {
 	}
 }
 
-// TestReprovision_HarnessConfigImageBumpReplacesFrozenImage pins the whole
-// reason reincarnate exists: a plain restart (Provision, via GetAgent) keeps
-// scion-agent.json frozen at whatever image generation N resolved, but
-// Reprovision replaces it with the current harness-config image.
-func TestReprovision_HarnessConfigImageBumpReplacesFrozenImage(t *testing.T) {
+// TestReprovision_HarnessConfigImageNotPersisted: the harness-config image
+// is an environment value, so neither provisioning nor reprovisioning
+// freezes it into scion-agent.json (ptone/scion#4561); Start resolves it
+// from the current harness-config on every start. Reprovision reports the
+// current (bumped) harness-config image.
+func TestReprovision_HarnessConfigImageNotPersisted(t *testing.T) {
 	scionDir, globalScionDir := reprovisionSetup(t)
 	agentName := "img-agent"
 	gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
@@ -242,8 +243,8 @@ func TestReprovision_HarnessConfigImageBumpReplacesFrozenImage(t *testing.T) {
 		_ = json.Unmarshal(b, &c)
 		return c.Image
 	}
-	if got := read(); got != "test-image:latest" {
-		t.Fatalf("gen N image = %q", got)
+	if got := read(); got != "" {
+		t.Fatalf("gen N persisted image = %q, want none", got)
 	}
 	_ = os.WriteFile(filepath.Join(globalScionDir, "harness-configs", "generic", "config.yaml"),
 		[]byte("harness: generic\nimage: test-image:v2\n"), 0644)
@@ -252,8 +253,8 @@ func TestReprovision_HarnessConfigImageBumpReplacesFrozenImage(t *testing.T) {
 	if _, err := mgr.Provision(context.Background(), api.StartOptions{Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc}); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-	if got := read(); got != "test-image:latest" {
-		t.Fatalf("plain Provision (restart) must keep the frozen image; got %q", got)
+	if got := read(); got != "" {
+		t.Fatalf("plain Provision (restart) persisted image = %q, want none", got)
 	}
 	// The restart above went through GetAgent, which clears and recreates an
 	// empty workspace dir for git-clone mode so sciontool performs a fresh
@@ -265,11 +266,15 @@ func TestReprovision_HarnessConfigImageBumpReplacesFrozenImage(t *testing.T) {
 	// only needs a real .git directory to be present.
 	_ = os.MkdirAll(filepath.Join(ws, ".git"), 0755)
 
-	if _, err := mgr.Reprovision(context.Background(), api.StartOptions{Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc}); err != nil {
+	reCfg, err := mgr.Reprovision(context.Background(), api.StartOptions{Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc})
+	if err != nil {
 		t.Fatalf("Reprovision: %v", err)
 	}
-	if got := read(); got != "test-image:v2" {
-		t.Fatalf("after Reprovision image = %q, want test-image:v2", got)
+	if reCfg == nil || reCfg.Image != "test-image:v2" {
+		t.Fatalf("Reprovision reported config = %+v, want image test-image:v2", reCfg)
+	}
+	if got := read(); got != "" {
+		t.Fatalf("after Reprovision persisted image = %q, want none", got)
 	}
 }
 
@@ -486,7 +491,7 @@ func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *t
 	}
 
 	// A real content change between provision and reprovision (R4): bump the
-	// harness-config image, as TestReprovision_HarnessConfigImageBumpReplacesFrozenImage
+	// harness-config image, as TestReprovision_HarnessConfigImageNotPersisted
 	// does, and delete home/agent-info.json so its re-appearance proves
 	// re-rendering rather than "it was already there from the initial
 	// provision".
@@ -507,10 +512,11 @@ func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *t
 	gitDirBefore := snapshotTree(t, filepath.Join(sharedCheckout, ".git"))
 
 	mgr := NewManager(&runtime.MockRuntime{})
-	if _, err := mgr.Reprovision(context.Background(), api.StartOptions{
+	reCfg, err := mgr.Reprovision(context.Background(), api.StartOptions{
 		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
 		Workspace: sharedCheckout, SharedWorkspace: true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Reprovision: %v", err)
 	}
 	checkoutAfter := snapshotTree(t, sharedCheckout)
@@ -532,8 +538,13 @@ func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *t
 	if err := json.Unmarshal(cfgData, &cfg); err != nil {
 		t.Fatalf("failed to parse scion-agent.json: %v", err)
 	}
-	if cfg.Image != "test-image:v2" {
-		t.Fatalf("expected the bumped harness-config image to be re-rendered into scion-agent.json, got %q", cfg.Image)
+	// The bumped harness-config image is re-resolved (and reported), but,
+	// as an environment value, not persisted (ptone/scion#4561).
+	if reCfg == nil || reCfg.Image != "test-image:v2" {
+		t.Fatalf("expected Reprovision to report the bumped harness-config image, got %+v", reCfg)
+	}
+	if cfg.Image != "" {
+		t.Fatalf("scion-agent.json persisted image %q, want none", cfg.Image)
 	}
 	if _, err := os.Stat(agentInfoPath); err != nil {
 		t.Fatalf("expected agent-info.json (deleted before Reprovision) to be re-rendered: %v", err)

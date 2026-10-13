@@ -316,7 +316,26 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		}
 	}
 
+	// Resetting the endpoints section clears a saved public URL: recorded
+	// before the reset like a GCP permission-check change, and the reset is
+	// not made if the record cannot be written. A seeded row holds no saved
+	// value, so resetting it records nothing.
+	publicURLBefore := ""
+	if sectionName == "endpoints" {
+		if publicURLBefore = storedManagedPublicURL(ops); publicURLBefore != "" {
+			if err := s.auditPublicURLChange(r.Context(), gcpIAMSurfaceReset, publicURLBefore, ""); err != nil {
+				slog.Error("Failed to record public URL change", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to reset section", nil)
+				return
+			}
+		}
+	}
+
 	err := ops.DeleteSection(r.Context(), sectionName)
+	if publicURLBefore != "" && err != nil {
+		s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceReset, publicURLBefore, "", err)
+	}
 	if gcpIAMChange {
 		// The approval covers only this reset's own self-apply.
 		s.clearGCPIAMApproval()
@@ -433,10 +452,12 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	if vs.Server != nil && vs.Server.Federation != nil {
 		resp.Federation = vs.Server.Federation
 	}
-	// server.hub.class is never API-writable, so it is not shown either:
-	// a client that echoes this body back must not send it.
+	// server.hub.class and server.hub.test_identities are never
+	// API-writable, so they are not shown either: a client that echoes
+	// this body back must not send them.
 	if resp.Server != nil && resp.Server.Hub != nil {
 		resp.Server.Hub.HubClass = ""
+		resp.Server.Hub.TestIdentities = nil
 	}
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can

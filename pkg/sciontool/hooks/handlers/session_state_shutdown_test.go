@@ -64,6 +64,7 @@ func closeOpen(t *testing.T, store *FileSessionState, errMsg string) (telemetry.
 // session-end hook still in flight both report nothing; the next session
 // starts clean.
 func TestCloseOpenSession_OpenSessionClosedOnce(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 
@@ -107,6 +108,7 @@ func TestCloseOpenSession_OpenSessionClosedOnce(t *testing.T) {
 // The tombstone keeps the state file's ownership and mode: it is written in
 // place, not replaced by a root-created file.
 func TestCloseOpenSession_TombstoneWrittenInPlace(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 	before, err := os.Stat(store.Path)
@@ -128,6 +130,7 @@ func TestCloseOpenSession_TombstoneWrittenInPlace(t *testing.T) {
 // A session-start with the closed session's ID (a resumed harness session)
 // starts a new segment rather than being ignored.
 func TestCloseOpenSession_SameIDSessionStartAfterCloseCountsAgain(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 	if _, ok := closeOpen(t, store, ""); !ok {
@@ -142,6 +145,7 @@ func TestCloseOpenSession_SameIDSessionStartAfterCloseCountsAgain(t *testing.T) 
 }
 
 func TestCloseOpenSession_ErrorStatus(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 	s, ok := closeOpen(t, store, "Agent crashed with exit code 2")
@@ -152,6 +156,7 @@ func TestCloseOpenSession_ErrorStatus(t *testing.T) {
 
 // A session the session-end hook already finalized is not returned.
 func TestCloseOpenSession_AlreadyReportedByHook(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 	if s := hookRun(t, store, sessionEvent(hooks.EventSessionEnd, "s1")); s == nil {
@@ -163,6 +168,7 @@ func TestCloseOpenSession_AlreadyReportedByHook(t *testing.T) {
 }
 
 func TestCloseOpenSession_NoState(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Run("no directory", func(t *testing.T) {
 		store := NewFileSessionState(filepath.Join(t.TempDir(), "missing"))
 		if _, ok := closeOpen(t, store, ""); ok {
@@ -203,6 +209,7 @@ func TestCloseOpenSession_NoState(t *testing.T) {
 // A symlink anywhere on the path is refused, never followed, and its target
 // is left untouched.
 func TestCloseOpenSession_SymlinksRefused(t *testing.T) {
+	scrubTelemetryEnv(t)
 	// targetState is a valid open-session file outside the agent's directory.
 	writeTarget := func(t *testing.T) (dir string, state string) {
 		t.Helper()
@@ -267,6 +274,7 @@ func TestCloseOpenSession_SymlinksRefused(t *testing.T) {
 
 // A FIFO or a hard link at the state path is refused without blocking.
 func TestCloseOpenSession_NonRegularRefused(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Run("fifo", func(t *testing.T) {
 		store := NewFileSessionState(t.TempDir())
 		mustMkdir(t, filepath.Dir(store.Path))
@@ -318,6 +326,7 @@ func (b *blockingStore) Update(agg *telemetry.Aggregator, event *hooks.Event, ap
 // check runs. The check waits for the lock, then finds the session already
 // finalized: exactly one report, from the hook.
 func TestCloseOpenSession_HookHoldingLockNoDoubleReport(t *testing.T) {
+	scrubTelemetryEnv(t)
 	dir := t.TempDir()
 	openSession(t, NewFileSessionState(dir))
 
@@ -364,6 +373,7 @@ func TestCloseOpenSession_HookHoldingLockNoDoubleReport(t *testing.T) {
 // A lock held past the wait bound makes the check give up without reading
 // or changing the state.
 func TestCloseOpenSession_LockTimeout(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 	store.lockTimeout = testLockTimeoutShort
@@ -408,6 +418,7 @@ func mustWrite(t *testing.T, path, content string) {
 // shutdown's tombstone at startup, the resumed segment is counted and
 // reported at the next shutdown, with only its own counts.
 func TestClearSessionTombstone_ResumeWithSameIDReportedAgain(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, toolEvent("c1", "Bash"))
 	hookRun(t, store, sessionEvent(hooks.EventAgentEnd, "c1"))
@@ -437,6 +448,7 @@ func TestClearSessionTombstone_ResumeWithSameIDReportedAgain(t *testing.T) {
 
 // ClearSessionTombstone touches only a tombstone.
 func TestClearSessionTombstone_LeavesOtherStateAlone(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Run("no state", func(t *testing.T) {
 		store := NewFileSessionState(filepath.Join(t.TempDir(), "missing"))
 		if cleared, err := store.ClearSessionTombstone(); cleared || err != nil {
@@ -505,6 +517,7 @@ func copyStateHome(t *testing.T, src *FileSessionState) *FileSessionState {
 // same non-empty ID. The backstop's tombstone carries it, so a late ID-less
 // event is ignored; the next session gets a different ID.
 func TestCloseOpenSession_EmptySessionIDUsesFallback(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_AGENT_ID", "agent-test-1")
 	hookStore := NewFileSessionState(t.TempDir())
 	for _, ev := range []*hooks.Event{
@@ -565,6 +578,7 @@ func TestCloseOpenSession_EmptySessionIDUsesFallback(t *testing.T) {
 // shutdown report cannot add to a report from a late hook; the state is
 // removed so a later check cannot return it either.
 func TestCloseOpenSession_TombstoneWriteFailureSkipsReport(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 

@@ -27,6 +27,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -104,6 +105,13 @@ folders, whose names start with ".", are left out; symbolic links inside
 the folder are refused). Its entry file, the one the web UI opens, is --entry, or else
 index.html, index.md or README.md at the top of the folder.
 
+An HTML entry file is shown in a sandboxed frame. The page's scripts run in
+an isolated origin; they cannot reach the hub page around the frame, your
+session or the hub's API. Relative links (img/chart.png, css/site.css) load
+the bundle's own files. Remote images are not loaded, so include them in
+the bundle; publishing warns when an HTML entry references them. See "HTML
+artifacts" in the artifacts reference.
+
 With --key, publishing again under the same key adds a new version to the
 same artifact instead of creating another one. Files unchanged since the
 current version are not uploaded again. --note describes the version.
@@ -148,7 +156,9 @@ Examples:
 // none: the hub homes the artifact in the agent's own project. A user names
 // the hub project of the current checkout, never a local-only project id.
 func artifactPublishScope(settings *config.Settings) string {
-	if config.IsHubManagedAgent() {
+	// With a hub profile the agent is not an agent on the target hub: the
+	// project is the one named with --project (requireArtifactHubClient).
+	if config.IsHubManagedAgent() && !hubProfileSelected() {
 		return ""
 	}
 	return settings.GetHubProjectID()
@@ -157,6 +167,9 @@ func artifactPublishScope(settings *config.Settings) string {
 // checkArtifactPublishScope fails a user's publish early, before any
 // upload, when the checkout names no hub project to publish into.
 func checkArtifactPublishScope(settings *config.Settings) error {
+	if hubProfileSelected() && artifactPublishScope(settings) == "" {
+		return errors.New("with a hub profile, name the project on the target hub to publish into with --project <name or id>")
+	}
 	if !config.IsHubManagedAgent() && artifactPublishScope(settings) == "" {
 		return errors.New("this checkout is not linked to a hub project; link it first (scion hub link) to publish artifacts")
 	}
@@ -286,6 +299,9 @@ func init() {
 // requireArtifactHubClient loads settings and a hub client, failing with the
 // not-configured error when no hub endpoint is configured.
 func requireArtifactHubClient() (*config.Settings, hubclient.Client, error) {
+	if hubProfileSelected() {
+		return requireArtifactProfileClient()
+	}
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
@@ -538,12 +554,7 @@ func artifactErrorHint(err error, publishing bool) string {
 	}
 	switch {
 	case apiErr.StatusCode == http.StatusForbidden && apiErr.Code == artifacts.CodeMissingScope:
-		scope := "a required"
-		if v, ok := apiErr.Details["scope"].(string); ok && v != "" {
-			scope = "the " + v
-		}
-		return "\nThis agent's credential does not carry " + scope + " scope, usually because the agent was created " +
-			"before artifacts were available to it. Recreate the agent so it is issued a current credential."
+		return missingScopeHint(apiErr.Details)
 	case apiErr.StatusCode == http.StatusUnauthorized:
 		return "\nThe hub did not accept the credential: sign in again; an agent token may be invalid or expired."
 	case apiErr.StatusCode == http.StatusNotFound && !publishing:
@@ -555,6 +566,44 @@ func artifactErrorHint(err error, publishing bool) string {
 		return "\nYou may not publish artifacts in this project, or may not add versions to this artifact."
 	}
 	return ""
+}
+
+// missingScopeHint is the hint for a 403 missing_scope (ptone/scion#4571).
+// It names every scope the hub reported: details.scopes, or the single
+// details.scope an older hub sends. The usual cause is the scope ceiling of
+// the agent's creator, so recreating the agent from the same parent does
+// not help; a scope re-issue does, once the creator holds the scopes, and
+// only a hub super-admin can run it.
+func missingScopeHint(details map[string]any) string {
+	var scopes []string
+	if list, ok := details["scopes"].([]any); ok {
+		for _, v := range list {
+			if s, ok := v.(string); ok && s != "" && !slices.Contains(scopes, s) {
+				scopes = append(scopes, s)
+			}
+		}
+	}
+	if len(scopes) == 0 {
+		if v, ok := details["scope"].(string); ok && v != "" {
+			scopes = []string{v}
+		}
+	}
+	what := "a required scope"
+	switch len(scopes) {
+	case 0:
+	case 1:
+		what = "the " + scopes[0] + " scope"
+	default:
+		what = "the " + strings.Join(scopes, " and ") + " scopes"
+	}
+	agent := os.Getenv("SCION_AGENT_SLUG")
+	if agent == "" {
+		agent = "<agent>"
+	}
+	return "\nThis agent's credential does not carry " + what + ". The usual cause is the scope ceiling of the " +
+		"agent's creator; recreating the agent from the same parent gives it the same scopes. Ask the agent's user " +
+		"to have a hub super-admin re-issue its scopes once its creator holds them: scion reset-auth " + agent +
+		" --reissue-scopes (parents before children)."
 }
 
 // copyVerified copies src to dst and fails unless the bytes are exactly
@@ -576,4 +625,30 @@ func copyVerified(dst io.Writer, src io.Reader, wantDigest string, size int64) e
 		return errors.New("artifact content does not match its recorded sha256")
 	}
 	return nil
+}
+
+// requireArtifactProfileClient is requireArtifactHubClient with a hub
+// profile: the client acts as the --as identity on the target hub, no local
+// settings are read, and --project names a project on the target (resolved
+// there by name or id) for publish.
+func requireArtifactProfileClient() (*config.Settings, hubclient.Client, error) {
+	s, err := openHubProfileSession(true)
+	if err != nil {
+		return nil, nil, err
+	}
+	client, err := s.Client()
+	if err != nil {
+		return nil, nil, err
+	}
+	settings := &config.Settings{Hub: &config.HubClientConfig{Endpoint: s.Endpoint()}}
+	if projectPath != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		project, err := resolveProjectNameOrID(ctx, client, projectPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		settings.Hub.ProjectID = project.ID
+	}
+	return settings, client, nil
 }

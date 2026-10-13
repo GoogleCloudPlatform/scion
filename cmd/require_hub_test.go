@@ -99,8 +99,8 @@ func TestRequireHub(t *testing.T) {
 			endpoint: func(t *testing.T) (string, *atomic.Int32) { return "", nil },
 			check: func(t *testing.T, ctx *HubContext, err error, _ *atomic.Int32) {
 				require.ErrorIs(t, err, errHubNotConfigured)
-				assert.Equal(t, "No hub configured. Start the local hub with 'scion server start' (first run opens setup), "+
-					"or set a remote one with 'scion config set hub.endpoint <url>'.", err.Error())
+				assert.Equal(t, "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', "+
+					"or pick one with 'scion use --hub <name>'.", err.Error())
 			},
 		},
 		{

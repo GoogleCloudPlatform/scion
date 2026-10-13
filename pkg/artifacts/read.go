@@ -134,11 +134,16 @@ func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]G
 	return grantAllows(ctx, host, a, gs, now, kind, ref, grantsForRead, PermissionRead, true)
 }
 
-// Permission sets a grant must carry for each kind of access.
+// Permission sets a grant must carry for each kind of access. A review
+// grant (ptone/scion#4538) is in none of the read sets: it never makes an
+// artifact readable. It lets a caller that can already read the artifact
+// another way append versions of kind review (grantsForReview; see
+// canWritePermittedErr), and only while that read lasts.
 var (
-	grantsForRead  = []string{GrantRead, GrantWrite, GrantAdmin}
-	grantsForWrite = []string{GrantWrite, GrantAdmin}
-	grantsForAdmin = []string{GrantAdmin}
+	grantsForRead   = []string{GrantRead, GrantWrite, GrantAdmin}
+	grantsForReview = []string{GrantReview}
+	grantsForWrite  = []string{GrantWrite, GrantAdmin}
+	grantsForAdmin  = []string{GrantAdmin}
 )
 
 // grantAllows reports whether one of grants, unexpired at now and carrying

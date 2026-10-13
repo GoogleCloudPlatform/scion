@@ -99,6 +99,7 @@ func stateFileGone(t *testing.T, store *FileSessionState) bool {
 // the init daemon's held-report check sends that single report once the
 // quiet period after the last usage has passed.
 func TestHeldReport_LateUsageIsInTheSingleReportSent(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	clock := useFakeClock(t)
 	store := newHoldingStore(t)
@@ -156,6 +157,7 @@ func TestHeldReport_LateUsageIsInTheSingleReportSent(t *testing.T) {
 // process must not claim it before HoldUntil. Once it is due, the first
 // hook process sends it, and only that one.
 func TestHeldReport_NotClaimableByHooksBeforeDue(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	clock := useFakeClock(t)
 	store := newHoldingStore(t)
@@ -196,6 +198,7 @@ func TestHeldReport_NotClaimableByHooksBeforeDue(t *testing.T) {
 // At shutdown the init daemon sends a held report at once, without waiting
 // for it to be due, and nobody sends it again.
 func TestHeldReport_ShutdownSendsAtOnce(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	clock := useFakeClock(t)
 	store := newHoldingStore(t)
@@ -225,6 +228,7 @@ func TestHeldReport_ShutdownSendsAtOnce(t *testing.T) {
 // arrives while it is open (the usage carries no session ID), the earlier
 // report stays held, and each segment is sent exactly once.
 func TestHeldReport_NewSessionDuringQuietPeriod(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	clock := useFakeClock(t)
 	store := newHoldingStore(t)
@@ -267,6 +271,7 @@ func TestHeldReport_NewSessionDuringQuietPeriod(t *testing.T) {
 // Usage is never added to a report that has been claimed: the report is
 // sent with exactly the content it had when it was claimed.
 func TestHeldReport_NoUsageAddedAfterClaim(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	clock := useFakeClock(t)
 	store := newHoldingStore(t)
@@ -287,6 +292,7 @@ func TestHeldReport_NoUsageAddedAfterClaim(t *testing.T) {
 
 // Late usage keeps moving HoldUntil, but never past HoldCap.
 func TestHeldReport_LateUsageCannotPostponePastCap(t *testing.T) {
+	scrubTelemetryEnv(t)
 	useFakeProcs(t)
 	clock := useFakeClock(t)
 	store := newHoldingStore(t)
@@ -316,6 +322,7 @@ func TestHeldReport_LateUsageCannotPostponePastCap(t *testing.T) {
 // is gone: the startup clear releases the hold, and the report is sent once,
 // without waiting.
 func TestHeldReport_RestartReleasesTheHold(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	useFakeClock(t)
 	store := newHoldingStore(t)
@@ -349,6 +356,7 @@ func TestHeldReport_RestartReleasesTheHold(t *testing.T) {
 // confirmed it: the report is sent once more, by the first hook after the
 // restart (a resend the Hub absorbs, as for any dead sender).
 func TestHeldReport_DaemonDiesAfterClaim(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	clock := useFakeClock(t)
 	store := newHoldingStore(t)
@@ -418,6 +426,7 @@ func assertLegacyBytes(t *testing.T, store *FileSessionState, step string) {
 // session-end is not added anywhere, nothing waits for a quiet period, and
 // every state file written is byte for byte the legacy encoding.
 func TestHeldReport_NonNativeUnchanged(t *testing.T) {
+	scrubTelemetryEnv(t)
 	for _, source := range []string{"", "hooks"} {
 		t.Run("source="+source, func(t *testing.T) {
 			procs := useFakeProcs(t)
@@ -504,6 +513,7 @@ func TestFileSessionState_UpdateHoldSentinel(t *testing.T) {
 // sends it once, late usage still goes into it without postponing it, and
 // only the process that claimed it can put it back.
 func TestHeldReport_FailedSendIsRetried(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	clock := useFakeClock(t)
 	store := newHoldingStore(t)
@@ -556,6 +566,7 @@ func TestHeldReport_FailedSendIsRetried(t *testing.T) {
 // session that ended last), moving only its HoldUntil; once that report is
 // claimed, late usage goes to the next newest held report.
 func TestHeldReport_LateUsageGoesToNewestHeld(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	clock := useFakeClock(t)
 	store := newHoldingStore(t)
@@ -603,6 +614,7 @@ func TestHeldReport_LateUsageGoesToNewestHeld(t *testing.T) {
 // process's backstop sends it, once, together with the session it closes,
 // which is also returned once.
 func TestHeldReport_ShutdownSendsReportLeftClaimedBySelf(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	clock := useFakeClock(t)
 	store := newHoldingStore(t)
@@ -656,6 +668,7 @@ func TestHeldReport_ShutdownSendsReportLeftClaimedBySelf(t *testing.T) {
 // report, the startup release of holds, a hook's send of the last report,
 // and the shutdown check's claim of a held report that is not due yet.
 func TestHeldReport_PathsKeepUnknownKeys(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	clock := useFakeClock(t)
 	store := newHoldingStore(t)

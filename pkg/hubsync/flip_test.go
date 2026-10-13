@@ -146,8 +146,8 @@ func closedLoopbackURL(t *testing.T) string {
 }
 
 func TestEnsureHubReady_NoEndpoint(t *testing.T) {
-	const plain = "No hub configured. Start the local hub with 'scion server start' (first run opens setup), " +
-		"or set a remote one with 'scion config set hub.endpoint <url>'."
+	const plain = "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', " +
+		"or pick one with 'scion use --hub <name>'."
 	tests := []struct {
 		name     string
 		settings string

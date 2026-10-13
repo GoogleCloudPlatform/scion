@@ -71,6 +71,11 @@ func System(v bool) predicate.RoleDefinition {
 	return predicate.RoleDefinition(sql.FieldEQ(FieldSystem, v))
 }
 
+// ConfersMembership applies equality check predicate on the "confers_membership" field. It's identical to ConfersMembershipEQ.
+func ConfersMembership(v bool) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldEQ(FieldConfersMembership, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.RoleDefinition {
 	return predicate.RoleDefinition(sql.FieldEQ(FieldCreated, v))
@@ -259,6 +264,16 @@ func SystemEQ(v bool) predicate.RoleDefinition {
 // SystemNEQ applies the NEQ predicate on the "system" field.
 func SystemNEQ(v bool) predicate.RoleDefinition {
 	return predicate.RoleDefinition(sql.FieldNEQ(FieldSystem, v))
+}
+
+// ConfersMembershipEQ applies the EQ predicate on the "confers_membership" field.
+func ConfersMembershipEQ(v bool) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldEQ(FieldConfersMembership, v))
+}
+
+// ConfersMembershipNEQ applies the NEQ predicate on the "confers_membership" field.
+func ConfersMembershipNEQ(v bool) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldNEQ(FieldConfersMembership, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

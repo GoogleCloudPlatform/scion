@@ -35,9 +35,9 @@ func agentAttachmentServer(t *testing.T) (*Server, store.Store, *store.Project, 
 
 	srv, s := testServer(t)
 
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	wcs := NewWebChatStore(db, "sqlite3")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -92,9 +92,9 @@ func attachmentTestServer(t *testing.T) (*Server, store.Store) {
 
 	srv, s := testServer(t)
 
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	wcs := NewWebChatStore(db, "sqlite3")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

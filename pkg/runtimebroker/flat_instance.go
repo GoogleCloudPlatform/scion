@@ -19,6 +19,7 @@ import (
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -36,9 +37,28 @@ type FlatInstanceConfig struct {
 	// Instance is the strictly loaded server.broker.instances entry.
 	Instance config.V1RuntimeBrokerInstanceConfig
 	// HubInProcess is exactly the predicate that admits the embedded
-	// registration (colocatedBrokerRegisters). P1 hosts a flat instance only
-	// co-located with its Hub; Start refuses otherwise.
+	// registration (colocatedBrokerRegisters). A co-located instance is
+	// served through the embedded registration's in-memory credentials.
 	HubInProcess bool
+	// RemoteCredentials are the instance-scoped Hub credentials
+	// (<global>/runtime-brokers/<key>/hub-credentials/*.json) that passed
+	// brokerregistration.ValidateActivation for this start (contract R10,
+	// P2.1 remote activation). Only the host sets them, and only after that
+	// validation. A flat instance with neither HubInProcess nor validated
+	// remote credentials is refused (flat_runtime_broker_remote_unsupported),
+	// so a server can never serve an unvalidated remote flat instance.
+	RemoteCredentials []brokercredentials.BrokerCredentials
+	// ConflictingOwnershipKeys are ownership keys (OwnershipAgentKey,
+	// OwnershipSlugKey) another configured instance of the host also
+	// claims. The instance refuses every operation on them; its other
+	// agents are unaffected.
+	ConflictingOwnershipKeys map[string]bool
+}
+
+// remoteActivated reports whether this flat instance is a validated remote
+// activation (RemoteCredentials set, Hub not in the process).
+func (fi *FlatInstanceConfig) remoteActivated() bool {
+	return fi != nil && !fi.HubInProcess && len(fi.RemoteCredentials) > 0
 }
 
 // flatRuntimeTargetRequiredMessage is the frozen 412 runtime_target_required
@@ -57,12 +77,13 @@ func (s *Server) flatInstance() *FlatInstanceConfig {
 // isFlat reports whether this server hosts a flat Runtime Broker instance.
 func (s *Server) isFlat() bool { return s.flatInstance() != nil }
 
-// flatHostingError is the P1 fail-closed gate for a flat instance: it refuses
-// a flat instance whose Hub is not in the same process. Nil for a legacy
-// server or a co-located flat instance.
+// flatHostingError is the fail-closed gate for a flat instance: it refuses
+// a flat instance whose Hub is not in the same process unless the host
+// validated its remote activation (RemoteCredentials). Nil for a legacy
+// server, a co-located flat instance or a validated remote one.
 func (s *Server) flatHostingError() error {
 	fi := s.flatInstance()
-	if fi == nil {
+	if fi == nil || fi.remoteActivated() {
 		return nil
 	}
 	err := config.CheckRuntimeBrokerInstanceHosting([]config.V1RuntimeBrokerInstanceConfig{fi.Instance}, fi.HubInProcess)
@@ -142,26 +163,40 @@ func (s *Server) createRuntimeTargetRefusal(req *CreateAgentRequest) *runtimeTar
 	return nil
 }
 
-// profileResolutionMiddleware tags every request a flat instance serves
-// (HTTP and control channel) with flat profile resolution, so agent
+// flatInstancePolicy returns the settings policy this server's flat instance
+// attaches to its requests: the snapshot taken when the server was built,
+// or, for a server whose flat instance was set after it was built, a fresh
+// copy of the instance's entry. A flat instance therefore never serves a
+// request with legacy (profile) resolution. Nil on a legacy Runtime Broker.
+func (s *Server) flatInstancePolicy() *config.FlatInstancePolicy {
+	fi := s.flatInstance()
+	if fi == nil {
+		return nil
+	}
+	if s.flatPolicy != nil {
+		return s.flatPolicy
+	}
+	return config.NewFlatInstancePolicy(fi.Instance)
+}
+
+// profileResolutionMiddleware attaches this flat instance's own settings
+// policy to every request it serves (HTTP and control channel), so agent
 // provisioning and start skip the Runtime Broker Profile tier, including the
-// settings active_profile fallback. A legacy Runtime Broker's requests keep
-// legacy resolution (no tag).
+// settings active_profile fallback, and read the instance's values in its
+// place. A legacy Runtime Broker's requests keep legacy resolution (no
+// policy).
 func (s *Server) profileResolutionMiddleware(next http.Handler) http.Handler {
 	if !s.isFlat() {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(config.WithProfileResolution(r.Context(), config.ProfileResolutionFlatInstance)))
+		next.ServeHTTP(w, r.WithContext(config.WithFlatInstancePolicy(r.Context(), s.flatInstancePolicy())))
 	})
 }
 
 // settingsView returns the settings view this server reads for its own
-// decisions: the flat profile-resolution view on a flat instance, vs itself
-// on a legacy Runtime Broker.
+// decisions: the flat instance view with its own policy on a flat instance,
+// vs itself on a legacy Runtime Broker.
 func (s *Server) settingsView(vs *config.VersionedSettings) *config.VersionedSettings {
-	if s.isFlat() {
-		return vs.ForProfileResolution(config.ProfileResolutionFlatInstance)
-	}
-	return vs
+	return vs.ForFlatInstance(s.flatInstancePolicy())
 }

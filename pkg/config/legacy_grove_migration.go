@@ -228,18 +228,6 @@ func currentProjectMigrationReporter() Reporter {
 // fixture to another uid (which requires root).
 var geteuid = os.Geteuid
 
-// chmodFile mimics (*os.File).Chmod for the legacy key migration's mode
-// fix-up. It is a test seam: a package var that a test may replace.
-var chmodFile = func(f *os.File, mode os.FileMode) error {
-	return f.Chmod(mode)
-}
-
-// syncFile mimics (*os.File).Sync for the legacy key migration. It is a
-// test seam: a package var that a test may replace.
-var syncFile = func(f *os.File) error {
-	return f.Sync()
-}
-
 // renameFile mimics os.Rename for algorithm C's commit-only rename (the tmp
 // file created by migrateLegacyYAMLKeysLocked onto the real path). Tests
 // override it to force a failure after a conflict backup has already been
@@ -260,10 +248,6 @@ var backupWriteFile = func(f *os.File, data []byte) (int, error) {
 var backupCloseFile = func(f *os.File) error {
 	return f.Close()
 }
-
-// checkGitTracked reports whether a migrated file is tracked by git. It is
-// a test seam: a package var that a test may replace.
-var checkGitTracked = gitTracked
 
 // projectMigrationDirState serialises and deduplicates the legacy key
 // migrations for one file: mu makes concurrent or repeated calls run the
@@ -939,13 +923,13 @@ func migrateLegacyYAMLKeysLocked(path string, renames []legacyYAMLKeyRename, rep
 	}
 	tmpPath := tmp.Name()
 	writeOK := func() bool {
-		if err := chmodFile(tmp, info.Mode().Perm()); err != nil {
+		if err := tmp.Chmod(info.Mode().Perm()); err != nil {
 			return false
 		}
 		if _, err := tmp.Write(newContent); err != nil {
 			return false
 		}
-		return syncFile(tmp) == nil
+		return tmp.Sync() == nil
 	}()
 	closeErr := tmp.Close()
 	if !writeOK || closeErr != nil {
@@ -988,7 +972,7 @@ func migrateLegacyYAMLKeysLocked(path string, renames []legacyYAMLKeyRename, rep
 		return overrides
 	}
 
-	tracked := checkGitTracked(path)
+	tracked := gitTracked(path)
 	for _, a := range actions {
 		key := joinKey(a.rename.parent, a.rename.legacy)
 		canonical := joinKey(a.rename.parent, a.rename.canonical)

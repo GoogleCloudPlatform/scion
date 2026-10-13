@@ -28,7 +28,7 @@ import (
 
 // TestIdentityService handles hub test identities (ptone/scion#4240): short
 // lived synthetic member or viewer users for testing. The hub must run with
-// --enable-test-identities, otherwise every call returns a 404 API error.
+// --test-mode=member or above, otherwise every call returns a 404 API error.
 // The caller needs the test_identity.issue permission.
 type TestIdentityService interface {
 	// Issue creates a test identity and returns one access token for it.
@@ -54,6 +54,14 @@ type TestIdentityService interface {
 	// TestIdentityPurgeIncomplete. An identity that is already gone, or one
 	// the caller may not purge, returns an empty report.
 	Purge(ctx context.Context, id string) (*TestIdentityPurgeReport, error)
+
+	// WebLoginCode mints a single-use web-login code for a live test
+	// identity (POST /api/v1/test-identities/{id}/web-login-code). The code
+	// is redeemed at POST /auth/test-identity/redeem for a browser session
+	// as the identity. It is valid for 5 minutes and a new code replaces
+	// any earlier unredeemed one. The hub answers 404 when web sessions are
+	// not available on it.
+	WebLoginCode(ctx context.Context, id string) (*TestIdentityWebLoginCode, error)
 }
 
 // TestIdentityPurgeCounts counts what a purge removed.
@@ -122,16 +130,19 @@ type TestIdentityTokenRequest struct {
 // TestIdentity is a test identity as the hub reports it. It never carries a
 // token.
 type TestIdentity struct {
-	ID          string    `json:"id"`
-	Email       string    `json:"email"`
-	DisplayName string    `json:"displayName"`
-	Role        string    `json:"role"`
-	Status      string    `json:"status"`
-	Purpose     string    `json:"purpose,omitempty"`
-	IssuedBy    string    `json:"issuedBy"`
-	ExpiresAt   time.Time `json:"expiresAt"`
-	Created     time.Time `json:"created"`
-	Live        bool      `json:"live"`
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Role        string `json:"role"`
+	Status      string `json:"status"`
+	Purpose     string `json:"purpose,omitempty"`
+	IssuedBy    string `json:"issuedBy"`
+	// IssuerDelegationID is the workload issuer delegation the identity
+	// was issued through; empty for session and PAT issuance.
+	IssuerDelegationID string    `json:"issuerDelegationId,omitempty"`
+	ExpiresAt          time.Time `json:"expiresAt"`
+	Created            time.Time `json:"created"`
+	Live               bool      `json:"live"`
 }
 
 // TestIdentityTokenResponse is the response of Issue and Token. AccessToken
@@ -143,6 +154,15 @@ type TestIdentityTokenResponse struct {
 	TokenType      string       `json:"tokenType"`
 	ExpiresIn      int64        `json:"expiresIn"`
 	TokenExpiresAt time.Time    `json:"tokenExpiresAt"`
+}
+
+// TestIdentityWebLoginCode is the response of WebLoginCode. Code is a
+// secret: callers write it only to a private file and never log or print
+// it.
+type TestIdentityWebLoginCode struct {
+	Code      string    `json:"code"`
+	CodeID    string    `json:"codeId"`
+	ExpiresAt time.Time `json:"expiresAt"`
 }
 
 // ListTestIdentitiesOptions are the query options of List.
@@ -188,6 +208,26 @@ func (s *testIdentityService) Token(ctx context.Context, id string, req *TestIde
 		return nil, err
 	}
 	return apiclient.DecodeRequired[TestIdentityTokenResponse](resp)
+}
+
+// WebLoginCode mints a web-login code. It is sent once, never retried,
+// since each mint replaces the previous code.
+func (s *testIdentityService) WebLoginCode(ctx context.Context, id string) (*TestIdentityWebLoginCode, error) {
+	if id == "" {
+		return nil, fmt.Errorf("test identity id is required")
+	}
+	resp, err := s.c.postNoRetry(ctx, "/api/v1/test-identities/"+url.PathEscape(id)+"/web-login-code", struct{}{}, nil)
+	if err != nil {
+		return nil, err
+	}
+	code, err := apiclient.DecodeRequired[TestIdentityWebLoginCode](resp)
+	if err != nil {
+		return nil, err
+	}
+	if code.Code == "" {
+		return nil, fmt.Errorf("hub returned no web-login code")
+	}
+	return code, nil
 }
 
 // List returns test identities.

@@ -129,6 +129,11 @@ func (c *ContainerScriptHarness) GetInterruptSequence() []string {
 	return nil
 }
 
+// DeliverySpec returns the config's delivery block with defaults applied.
+func (c *ContainerScriptHarness) DeliverySpec() api.DeliverySpec {
+	return c.entry.ResolvedDelivery()
+}
+
 // GetHarnessEmbedsFS returns an empty FS — container-script harnesses do not
 // own embedded files; their files live on disk in the harness-config dir.
 func (c *ContainerScriptHarness) GetHarnessEmbedsFS() (embed.FS, string) {

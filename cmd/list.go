@@ -96,7 +96,15 @@ var listCmd = &cobra.Command{
 		if err := validateListFlags(); err != nil {
 			return err
 		}
+		// A target-hub profile refuses the flags that need local state
+		// or this agent's own identity (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
+			return err
+		}
 
+		// No link prompt here: on the local hub the project is linked
+		// automatically, a remote hub asks in EnsureHubReady, and a
+		// target-hub profile never links a local project.
 		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
@@ -314,8 +322,11 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		agents[i] = hubAgentToAgentInfo(a)
 	}
 
-	// Update agent name cache for completion
-	updateAgentNameCache(resp.Agents)
+	// Update agent name cache for completion. A target-hub profile writes
+	// no local state, so its listing does not update the cache.
+	if !hubCtx.profileLocalOnly() {
+		updateAgentNameCache(resp.Agents)
+	}
 
 	// Client-side enrichment: fetch broker/project names if not provided by Hub
 	enrichAgentsClientSide(ctx, hubCtx.Client, agents)

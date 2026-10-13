@@ -27,7 +27,7 @@ import (
 // Test identity expiry reaper (ptone/scion#4240, Phase 3b).
 //
 // Every minute, on one replica (LockTestIdentityReaper), while the hub runs
-// with --enable-test-identities:
+// with --test-mode=member or above:
 //
 //  1. Each test identity that has expired and is still within its grace
 //     period gets a membership-loss check (trigger test_identity_expiry),

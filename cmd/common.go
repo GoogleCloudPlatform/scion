@@ -273,6 +273,10 @@ type HubContext struct {
 	// (hubsync.CredentialKindUnknown) on any HubContext not built via
 	// requireHub (e.g. a test double).
 	CredentialKind hubsync.CredentialKind
+	// TargetProfile names the target-hub profile this context was built
+	// from (profileAgentHubContext), or is empty. A profile context has no
+	// local project: commands using it touch no local project state.
+	TargetProfile string
 }
 
 // getHubAccessToken returns an access token for authenticating to the Hub over
@@ -330,18 +334,23 @@ func loadSettingsForTarget(resolvedPath string) (*config.Settings, error) {
 // requireHub returns a ready-to-use Hub context for projectPath. Every
 // agent operation goes through a hub, so it never returns a nil HubContext
 // without an error:
-//   - no endpoint configured: errHubNotConfigured ("No hub configured. Start
-//     the local hub with 'scion server start' ..."), or the local-only mode
-//     migration text for a project that still has local-mode agents;
+//   - no hub configured: errHubNotConfigured ("No hub selected. Add one with
+//     'scion hub add <name> <url>' ..."), or the local-only mode migration
+//     text for a project that still has local-mode agents;
 //   - the local workstation endpoint does not answer: "Local scion server
 //     is not running. Start it with 'scion server start'.";
 //   - a remote hub is unreachable: the error with the hub-check hint;
 //   - the project was unlinked (hub.linked=false): hubsync.ErrProjectUnlinked.
 //
+// A target-hub profile (--hub-profile) names the hub and, with --project,
+// the project on it: no hub sync and no local project (ptone/scion#4240).
 // On the local workstation hub an unregistered project is linked without a
 // prompt (see hubsync.EnsureHubReady). There is no per-command agent
 // reconcile.
 func requireHub(projectPath string) (*HubContext, error) {
+	if hubProfileSelected() {
+		return profileAgentHubContext()
+	}
 	opts := hubsync.EnsureHubReadyOptions{
 		AutoConfirm:      autoConfirm,
 		NonInteractive:   nonInteractive,
@@ -350,6 +359,12 @@ func requireHub(projectPath string) (*HubContext, error) {
 		// The hub selected with 'scion use' never links or registers a
 		// project that is already linked to a hub.
 		HubFromContext: hubSource == targetSourceContext,
+		// A project registered or linked on the hub selected with 'scion
+		// use' gets a link entry, so it stays on that hub after a hub
+		// switch. Both writers are stderr: this runs before commands that
+		// print JSON on stdout. (The context hub always has an entry, so
+		// no new-hub line is printed here.)
+		RecordLink: contextLinkRecorder(os.Stderr, os.Stderr),
 	}
 
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
@@ -371,7 +386,7 @@ func requireHub(projectPath string) (*HubContext, error) {
 }
 
 // errHubNotConfigured is returned by requireHub when no hub endpoint is
-// configured (flag, environment or settings). It matches every
+// configured (flag, environment, settings or the hub list). It matches every
 // hubsync.HubNotConfiguredError through errors.Is.
 var errHubNotConfigured = hubsync.ErrHubNotConfigured
 
@@ -714,6 +729,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	agentName := api.Slugify(args[0])
 	task := strings.Join(args[1:], " ")
 
+	// A target-hub profile refuses the flags that need local state before
+	// anything else (ptone/scion#4240).
+	if err := checkProfileAgentFlags(cmd); err != nil {
+		return err
+	}
+
 	// Reject --format json with --attach (mutually exclusive)
 	if isJSONOutput() && attach {
 		return newUsageError("--format json and --attach are mutually exclusive")
@@ -761,9 +782,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return asUsageError(err)
 	}
 
-	// Pre-flight: verify .scion/agents/ is gitignored (once, before any provisioning).
-	if err := CheckAgentsGitignore(projectPath); err != nil {
-		return err
+	// Pre-flight: verify .scion/agents/ is gitignored (once, before any
+	// provisioning). A target-hub profile has no local project.
+	if !hubProfileSelected() {
+		if err := CheckAgentsGitignore(projectPath); err != nil {
+			return err
+		}
 	}
 
 	// Check if Hub should be used, excluding the target agent from sync requirements.
@@ -1123,6 +1147,11 @@ func printHubWorkspaceSource(project *hubclient.Project) {
 		fmt.Fprintf(os.Stderr, "  (agents mount the project's shared workspace on the runtime broker; no per-agent clone)\n")
 		return
 	}
+	if project.Labels[store.LabelWorkspaceMode] == store.WorkspaceModeWorktreePerAgent {
+		fmt.Fprintf(os.Stderr, "Using hub, git worktree per agent for repo %s\n", project.GitRemote)
+		fmt.Fprintf(os.Stderr, "  (for a checkout linked on this machine, each agent gets a worktree of it under .scion/agents/<name>/workspace; otherwise the runtime broker makes per-agent worktrees of its own clone)\n")
+		return
+	}
 	cloneURL := util.ResolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 	fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
 	fmt.Fprintf(os.Stderr, "  (%s; local worktrees are not used)\n", hubCloneTransportNote(cloneURL))
@@ -1318,6 +1347,13 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		// Opt in to a non-blocking launch; the CLI waits for it below. A
 		// Hub without async launch ignores this and answers synchronously.
 		AcceptAsyncLaunch: true,
+	}
+
+	// With a target-hub profile, nothing is gathered from the local
+	// environment for another hub: the env-gather flow is off
+	// (ptone/scion#4240).
+	if hubCtx.profileLocalOnly() {
+		req.GatherEnv = false
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
@@ -2039,6 +2075,12 @@ const (
 // gatherAndSubmitEnv handles the env-gather flow: checks the local environment
 // for missing keys and submits gathered values back to the Hub.
 func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, projectID string, resp *hubclient.CreateAgentResponse) (*hubclient.CreateAgentResponse, error) {
+	// With a target-hub profile the request asked for no env-gather; if
+	// the target asks anyway, nothing is gathered from the local
+	// environment.
+	if hubCtx.profileLocalOnly() {
+		return nil, fmt.Errorf("the target hub of profile %q asked for environment values (%s); with a hub profile nothing is gathered from the local environment: set them as secrets or env on the target hub", hubCtx.TargetProfile, strings.Join(resp.EnvGather.Needs, ", "))
+	}
 	gather := resp.EnvGather
 	agentID := gather.AgentID
 	if agentID == "" && resp.Agent != nil {

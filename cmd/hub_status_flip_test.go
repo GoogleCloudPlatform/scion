@@ -49,7 +49,7 @@ func TestHubStatus_NoEndpoint(t *testing.T) {
 	out := runHubStatusForTest(t, "project_id: status-p\n", "")
 	assert.Contains(t, out, "Hub Status")
 	assert.Contains(t, out, "Endpoint:   (not configured)")
-	assert.Contains(t, out, "No hub configured. Start the local hub with 'scion server start'")
+	assert.Contains(t, out, "No hub selected. Add one with 'scion hub add <name> <url>'")
 	assert.NotContains(t, out, "Enabled:")
 	assert.NotContains(t, out, "Local workstation:")
 }

@@ -7,7 +7,8 @@ Table-driven tests covering:
   - Instruction projection (compose, strip, legacy markers, unclosed guard)
   - TOML helpers (escape, inline table, string array, strip sections)
   - Secret whitespace policy
-  - read_json_skipping_comment_lines
+  - read_json_skipping_comment_lines (errors name the file, no content)
+  - drop_json_comment_lines / HOST_SPACE parity with the host's rule
   - capture_auth_main
   - run() scaffold
   - Thinking level resolution (parse/map/resolve_thinking)
@@ -1683,6 +1684,110 @@ class TestReadJsonSkippingComments(unittest.TestCase):
         result = sh.read_json_skipping_comment_lines(path)
         self.assertEqual(result, {"key": "value"})
 
+    # --- malformed content becomes ProvisionError (ptone/scion#4665) -------
+
+    MARKER = "placeholder-marker-4665"
+
+    def _write_raw(self, raw: bytes) -> str:
+        path = os.path.join(tempfile.mkdtemp(), "config.json")
+        with open(path, "wb") as f:
+            f.write(raw)
+        return path
+
+    def _assert_provision_error(self, raw: bytes, kind: str) -> None:
+        path = self._write_raw(raw)
+        with self.assertRaises(sh.ProvisionError) as cm:
+            sh.read_json_skipping_comment_lines(path)
+        msg = str(cm.exception)
+        self.assertIn(path, msg)
+        self.assertIn(kind, msg)
+        self.assertNotIn(self.MARKER, msg)
+        self.assertIsNone(cm.exception.__cause__)
+        self.assertTrue(cm.exception.__suppress_context__)
+
+    def test_non_utf8_raises_provision_error(self):
+        raw = ('{"key": "' + self.MARKER + '"}').encode() + b"\xff\n"
+        self._assert_provision_error(raw, "not valid UTF-8")
+
+    def test_long_int_raises_provision_error(self):
+        raw = ('{"key": "' + self.MARKER + '", "n": ' + "1" * 5000 + "}").encode()
+        self._assert_provision_error(raw, "cannot be converted")
+
+    def test_invalid_json_raises_provision_error(self):
+        raw = ('{"key": "' + self.MARKER + '",}').encode()
+        self._assert_provision_error(raw, "not valid JSON")
+
+    def test_too_deep_raises_provision_error(self):
+        raw = ('{"key": "' + self.MARKER + '", "n": ' + "[" * 100000
+               + "]" * 100000 + "}").encode()
+        self._assert_provision_error(raw, "nested too deeply")
+
+    def test_missing_file_raises_os_error(self):
+        with self.assertRaises(FileNotFoundError):
+            sh.read_json_skipping_comment_lines(
+                os.path.join(tempfile.mkdtemp(), "missing.json"))
+
+
+# Characters on which Python's str.splitlines()/str.strip() and the host's
+# strings.Split(s, "\n")/strings.TrimSpace disagree (ptone/scion#4665).
+PARITY_CHARS = ("\v", "\f", "\x1c", "\x1d", "\x1e", "\x1f", "\x85", "\u2028", "\u2029")
+
+
+def parity_cases() -> list[tuple[str, str, Any]]:
+    """(name, content, expected) per character, by the host's rule; expected
+    is the parsed value, or None when the host cannot parse the content."""
+    cases: list[tuple[str, str, Any]] = []
+    for ch in PARITY_CHARS:
+        name = f"U+{ord(ch):04X}"
+        # Inside a string: JSON allows any character there except a control
+        # character (below U+0020).
+        cases.append((f"{name} in string", '{"k": "a' + ch + 'b"}',
+                      {"k": "a" + ch + "b"} if ord(ch) >= 0x20 else None))
+        # Leading a // line: trimmed, so the line is a comment, only if the
+        # host counts it as whitespace.
+        cases.append((f"{name} before comment line", '{"k": 1}\n' + ch + "// note\n",
+                      {"k": 1} if ch in sh.HOST_SPACE else None))
+        # Not a line break for the host, so "// note" is not a comment line.
+        cases.append((f"{name} as line break", '{"k": 1}' + ch + "// note\n", None))
+    return cases
+
+
+class TestJsonCommentLineHostParity(unittest.TestCase):
+    def test_host_space_is_go_unicode_is_space(self):
+        # Go's unicode.IsSpace is Python's str.isspace() minus U+001C..U+001F.
+        expected = {chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()}
+        expected -= {"\x1c", "\x1d", "\x1e", "\x1f"}
+        self.assertEqual(set(sh.HOST_SPACE), expected)
+        self.assertEqual(len(sh.HOST_SPACE), len(expected))
+
+    def test_read_json_skipping_comment_lines_matches_host(self):
+        d = tempfile.mkdtemp()
+        cases = parity_cases()
+        self.assertEqual(len(cases), 3 * len(PARITY_CHARS))
+        for i, (name, content, expected) in enumerate(cases):
+            with self.subTest(name):
+                path = os.path.join(d, f"config-{i}.json")
+                with open(path, "wb") as f:
+                    f.write(content.encode("utf-8"))
+                if expected is None:
+                    with self.assertRaises(sh.ProvisionError):
+                        sh.read_json_skipping_comment_lines(path)
+                else:
+                    self.assertEqual(sh.read_json_skipping_comment_lines(path), expected)
+
+    def test_lone_carriage_return_is_not_a_line_break(self):
+        path = os.path.join(tempfile.mkdtemp(), "config.json")
+        with open(path, "wb") as f:
+            f.write(b'{"k": 1}\r// note\n')
+        with self.assertRaises(sh.ProvisionError):
+            sh.read_json_skipping_comment_lines(path)
+
+    def test_crlf_comment_lines_are_dropped(self):
+        path = os.path.join(tempfile.mkdtemp(), "config.json")
+        with open(path, "wb") as f:
+            f.write(b'// note\r\n{"k": 1}\r\n  // more\r\n')
+        self.assertEqual(sh.read_json_skipping_comment_lines(path), {"k": 1})
+
 
 # ---------------------------------------------------------------------------
 # MCP translation helper
@@ -2339,6 +2444,85 @@ class TestAtomicWriteJsonSymlinkGuards(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(first.startswith(".out.json.tmp-"))
         self.assertTrue(second.startswith(".out.json.tmp-"))
+
+
+class VertexLocationPrecedenceTest(unittest.TestCase):
+    """GOOGLE_CLOUD_LOCATION > GOOGLE_CLOUD_REGION > CLOUD_ML_REGION (ptone/scion#4719)."""
+
+    def _resolve(self, env: dict[str, str], **kwargs: Any) -> tuple[tuple[str, str], list[str]]:
+        warnings: list[str] = []
+        got = sh.resolve_vertex_location(lambda k: env.get(k, ""), warn_fn=warnings.append, **kwargs)
+        return got, warnings
+
+    def test_key_order(self) -> None:
+        self.assertEqual(
+            sh.vertex_location_keys(),
+            ("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION"),
+        )
+        self.assertEqual(
+            sh.vertex_location_keys(preferred=("P",), include_ml_region=False, fallback=("F",)),
+            ("P", "GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "F"),
+        )
+
+    def test_only_region(self) -> None:
+        self.assertEqual(
+            self._resolve({"GOOGLE_CLOUD_REGION": "us-central1"}),
+            (("GOOGLE_CLOUD_REGION", "us-central1"), []),
+        )
+
+    def test_only_location(self) -> None:
+        self.assertEqual(
+            self._resolve({"GOOGLE_CLOUD_LOCATION": "us-east5"}),
+            (("GOOGLE_CLOUD_LOCATION", "us-east5"), []),
+        )
+
+    def test_both_equal(self) -> None:
+        self.assertEqual(
+            self._resolve({"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-east5"}),
+            (("GOOGLE_CLOUD_LOCATION", "us-east5"), []),
+        )
+
+    def test_both_differ_location_wins_with_one_warning(self) -> None:
+        got, warnings = self._resolve({"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-central1"})
+        self.assertEqual(got, ("GOOGLE_CLOUD_LOCATION", "us-east5"))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("GOOGLE_CLOUD_LOCATION='us-east5'", warnings[0])
+        self.assertIn("GOOGLE_CLOUD_REGION='us-central1'", warnings[0])
+
+    def test_conflict_compares_raw_values(self) -> None:
+        # Same rule as the Go resolver: values are compared untrimmed.
+        got, warnings = self._resolve({"GOOGLE_CLOUD_LOCATION": "us-east5 ", "GOOGLE_CLOUD_REGION": "us-east5"})
+        self.assertEqual(got, ("GOOGLE_CLOUD_LOCATION", "us-east5 "))
+        self.assertEqual(len(warnings), 1)
+
+    def test_neither(self) -> None:
+        self.assertEqual(self._resolve({}), (("", ""), []))
+
+    def test_cloud_ml_region_is_last_fallback(self) -> None:
+        self.assertEqual(
+            self._resolve({"CLOUD_ML_REGION": "europe-west4"}),
+            (("CLOUD_ML_REGION", "europe-west4"), []),
+        )
+        self.assertEqual(
+            self._resolve({"CLOUD_ML_REGION": "europe-west4"}, include_ml_region=False),
+            (("", ""), []),
+        )
+        self.assertEqual(
+            self._resolve({"GOOGLE_CLOUD_REGION": "us-central1", "CLOUD_ML_REGION": "europe-west4"})[0],
+            ("GOOGLE_CLOUD_REGION", "us-central1"),
+        )
+
+    def test_preferred_key_wins_without_warning(self) -> None:
+        got, warnings = self._resolve(
+            {"VERTEX_REGION": "asia-east1", "GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-central1"},
+            preferred=("VERTEX_REGION",),
+        )
+        self.assertEqual(got, ("VERTEX_REGION", "asia-east1"))
+        self.assertEqual(warnings, [])
+
+    def test_no_warn_fn_is_silent(self) -> None:
+        env = {"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-central1"}
+        self.assertEqual(sh.resolve_vertex_location(env.get), ("GOOGLE_CLOUD_LOCATION", "us-east5"))
 
 
 if __name__ == "__main__":

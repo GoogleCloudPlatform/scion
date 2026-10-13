@@ -328,9 +328,9 @@ THE IMAGE
 
   The chart sets runAsNonRoot on the pod and on the hub container and offers no
   way to turn it off, so a root image fails admission with a clear message
-  instead of running. That refusal applies now; the consequence it spares you -
-  root-owned files in a workspace share that agents cannot write - arrives with
-  the Filestore phase, which this release does not include.
+  instead of running. The consequence it spares you - root-owned files in a
+  workspace share that agents cannot write - applies once workspaceStorage.nfs
+  mounts the share{{ if (include "scion-hub.nfsWorkspace" .) }}, which this release does{{ else }}, which this release does not{{ end }}.
 {{ if not .Values.image.digest }}
   Pin the image by digest (image.digest) rather than by tag. A tag can be
   repointed underneath a running cluster; a digest cannot. This release uses a
@@ -505,9 +505,18 @@ WHAT THIS RELEASE DOES NOT YET DO
 
   The chart is being built incrementally. It renders the hub's settings.yaml and
   it wires Cloud SQL and the database URL, but it does not yet configure GCS
-  credentials beyond the bucket name, Filestore, Ingress or the IAP-enforcing
-  load balancer. The hub's own IAP and transport settings are rendered. Do not
+  credentials beyond the bucket name, Ingress or the IAP-enforcing load
+  balancer. The hub's own IAP and transport settings are rendered. Do not
   treat this as a production install.
+{{- if (include "scion-hub.nfsWorkspace" .) }}
+
+  workspaceStorage.nfs is enabled. The hub pod mounts the NFS export at
+    {{ (include "scion-hub.nfsWorkspace" . | fromYaml).mountPath }}
+  and settings.yaml carries server.workspace_storage. The chart does not create
+  the Filestore instance, set the export's ownership, or create the
+  PersistentVolumeClaim agent pods mount the share through:
+    {{ (include "scion-hub.nfsWorkspace" . | fromYaml).pvName }}
+{{- end }}
 
   The Cloud SQL wiring is RENDERED BUT UNRUN. No part of it has been applied to
   a cluster or dialled at a real instance: the deploying principal is refused by

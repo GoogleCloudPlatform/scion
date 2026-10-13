@@ -259,6 +259,61 @@ dependent vars); put the default in `provision.py` instead.
 multi-key interrupt, `interrupt_signal: sequence` +
 `interrupt_sequence: [Escape, C-c]` (each entry sent as a separate key).
 
+### Readiness and delivery
+
+Two optional blocks describe when the tool is ready for a pasted message and
+how a pasted message is submitted. Durations are Go duration strings
+(`300ms`, `1.5s`, `1m30s`). Durations need a unit, so write zero as `0s`:
+the schema rejects a bare `0`. Only the units `ns`, `us`, `ms`, `s`, `m`
+and `h` are accepted (not `µs`).
+
+```yaml
+ready:
+  strategy: hook      # hook | delay (default delay)
+  settle: 1.5s        # 0 to 60s; default 8s for delay, 1.5s for hook
+  timeout: 90s        # hook only, 10s to 10m; default 90s
+delivery:
+  submit_keys: [Enter]      # 1 to 4 tmux key names; default [Enter]
+  extra_submits: 2          # 0 to 5; default 2
+  extra_submit_delay: 300ms # 0 to 5s; default 300ms
+```
+
+**`ready`.** One rule: the tool is ready at *signal time + `settle`*.
+
+- `hook`: the signal is the ready marker that a session-start hook writes
+  for the current run. Use it only when the tool fires a session-start hook
+  at startup, before any user input. `timeout` is the deadline from launch:
+  when it passes, the message is pasted anyway.
+- `delay`: the signal is the creation of the tmux session. Use it when the
+  tool has no early hook. `timeout` is not allowed with `delay`.
+
+The `ready` block is validated at load, but the runtime does not read it
+yet: readiness still follows the built-in rule. Set the block to match that
+rule. `hook` applies to claude, gemini-cli, copilot and grok-build, and
+`delay` 8s to every other harness.
+
+**`delivery`.** A message is loaded into a tmux buffer and pasted with
+bracketed paste. Then each key in `submit_keys` is sent with its own
+`tmux send-keys` call. After that, the whole `submit_keys` list is sent
+`extra_submits` more times, with `extra_submit_delay` before each pass. An
+empty message (a bare confirmation) sends `submit_keys` once, with no extra
+passes. The defaults give paste, Enter, then two more Enters 300ms apart.
+
+Each key must be 1 to 32 bytes, with no whitespace or control characters,
+and must not start with `-` (tmux would read it as a `send-keys` option).
+It must not end with `;` either: tmux strips a trailing `;` from the
+argument and treats it as a command separator, so `Enter;` would arrive as
+`Enter` and `;` would send nothing, with no error.
+
+Message delivery reads the embedded bundle's `delivery` block, the same as
+the interrupt keys. Project, template and hub harness-config overrides do not
+change it yet.
+
+Write both blocks out in full, even where they equal the defaults, so the
+values are visible to authors. If a value fails validation and the config
+reaches the runtime by a path that skips load-time validation, the runtime
+uses the default for that field and logs a warning.
+
 ### Capabilities
 
 An honest support matrix consumed by templates, preflight checks, and UIs:
@@ -575,7 +630,8 @@ Key API surface:
   (warn-and-skip per server, demotes project scope to global).
 - **File helpers** — `atomic_write_json`, `atomic_write_text` (tmp +
   `os.replace`), `expand_path`, `load_json`,
-  `read_json_skipping_comment_lines`; TOML emit/reconcile helpers:
+  `read_json_skipping_comment_lines` and `drop_json_comment_lines` (the
+  host's `//` comment-line rule); TOML emit/reconcile helpers:
   `toml_escape`, `toml_inline_table`, `toml_string_array` (tomllib is
   read-only, so TOML editing is manual, line-oriented text surgery).
   `strip_toml_sections(content, header_predicate)` removes whole

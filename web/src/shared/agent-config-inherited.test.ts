@@ -79,9 +79,13 @@ describe('placeholder equals the dispatched value', () => {
     const c = goldenCase('template');
     expectMatchesDispatch(c);
     const p = resolveInheritedPlaceholders(c.sources);
+    // The template's agentConfig model beats the hub default (ptone/scion#4222).
     expect(p['config.model'].source).toBe(FROM_TEMPLATE);
-    expect(p['config.telemetry'].source).toBe(FROM_TEMPLATE);
     expect(p.messageMode.source).toBe(FROM_TEMPLATE);
+    // Template telemetry, env and image are environment keys: no placeholder.
+    expect(p['config.telemetry']).toBeUndefined();
+    expect(p.autoExpose).toBeUndefined();
+    expect(p['config.image']).toBeUndefined();
   });
 
   it('project tier', () => {
@@ -119,23 +123,36 @@ describe('resolveInheritedPlaceholders labels and gaps', () => {
 
   it('shows no value for fields the fetched sources do not determine', () => {
     const p = resolveInheritedPlaceholders({
-      template: { config: { harness: 'claude' } },
+      template: { agentConfig: {} },
       projectSettings: {},
       hubSettings: {},
     });
     expect(p).toEqual({});
   });
 
-  it('takes the template image, top-level or in config', () => {
-    expect(resolveInheritedPlaceholders({ template: { image: 'a:1' } })['config.image']).toEqual({
-      value: 'a:1',
-      source: FROM_TEMPLATE,
+  it('reads template job keys from agentConfig only, never the row config', () => {
+    const p = resolveInheritedPlaceholders({
+      template: {
+        config: { model: 'row-model', messageMode: 'branch', image: 'row:1' },
+      } as unknown as InheritedSources['template'],
     });
+    expect(p).toEqual({});
+  });
+
+  it('ranks the template model between the project and the hub', () => {
+    const template = { agentConfig: { model: 'template-model' } };
     expect(
-      resolveInheritedPlaceholders({ template: { image: 'a:1', config: { image: 'b:2' } } })[
-        'config.image'
-      ]?.value
-    ).toBe('b:2');
+      resolveInheritedPlaceholders({ template, hubSettings: { defaultModel: 'hub-model' } })[
+        'config.model'
+      ]
+    ).toEqual({ value: 'template-model', source: FROM_TEMPLATE });
+    expect(
+      resolveInheritedPlaceholders({
+        template,
+        projectSettings: { defaultModel: 'project-model' },
+        hubSettings: { defaultModel: 'hub-model' },
+      })['config.model']
+    ).toEqual({ value: 'project-model', source: FROM_PROJECT });
   });
 
   it('maps project resources per sub-field', () => {

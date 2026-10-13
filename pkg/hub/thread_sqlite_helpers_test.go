@@ -86,7 +86,7 @@ func setupSharedChatTest(t *testing.T) (*Server, store.Store, WebChatStore, *sto
 
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok, "store does not expose DB()")
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	return srv, s, wcs, proj

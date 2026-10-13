@@ -69,8 +69,8 @@ func TestRunHubLink_NoEndpoint(t *testing.T) {
 	err := runHubLink(hubLinkCmd, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, errHubLinkNoEndpoint), "error = %v", err)
-	assert.Equal(t, "No hub configured. Start the local hub with 'scion server start' (first run opens setup), "+
-		"or set a remote one with 'scion config set hub.endpoint <url>'.", err.Error())
+	assert.Equal(t, "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', "+
+		"or pick one with 'scion use --hub <name>'.", err.Error())
 	assert.NotContains(t, err.Error(), "\n", "the error is one line")
 	_, statErr := os.Stat(filepath.Join(globalDir, "server.pid"))
 	assert.True(t, os.IsNotExist(statErr), "no server is started")

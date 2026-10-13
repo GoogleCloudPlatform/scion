@@ -39,7 +39,7 @@ const (
 // look like a --hub or --project flag in the next.
 func resetContextTargets() {
 	hubEndpoint, projectPath = "", ""
-	hubSource, projectSource = "", ""
+	hubSource, projectSource, contextProjectSlug, hubFlagName = "", "", "", ""
 	contextWarned = false
 }
 
@@ -61,6 +61,10 @@ func setupContextTest(t *testing.T) string {
 	for _, name := range []string{
 		"SCION_AGENT_ID", "SCION_HUB_TOKEN", "SCION_AUTH_TOKEN",
 		"SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE",
+		// Transport auth from the runner's environment would turn a hub
+		// with no credential into proxy-auth.
+		"SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_TOKEN_FILE", "SCION_TRANSPORT_MODE",
+		"SCION_TRANSPORT_AUDIENCE", "SCION_HUB_OIDC_AUDIENCE",
 	} {
 		t.Setenv(name, "")
 	}
@@ -230,10 +234,6 @@ func TestResolveInvocationTarget(t *testing.T) {
 			cmd:  []string{"broker", "register"},
 		},
 		{
-			name: "hub shadow ignores the context",
-			cmd:  []string{"hub", "shadow"},
-		},
-		{
 			name: "hub auth login sees the context hub",
 			cmd:  []string{"hub", "auth", "login"},
 			want: hubOnly,
@@ -244,8 +244,35 @@ func TestResolveInvocationTarget(t *testing.T) {
 			want: hubOnly,
 		},
 		{
-			name: "hub-only command gets the hub but no project",
+			name: "tunnel gets the hub and the project",
 			cmd:  []string{"tunnel"},
+			want: filled,
+		},
+		{
+			name: "ssh gets the hub and the project",
+			cmd:  []string{"ssh"},
+			want: filled,
+		},
+		{
+			name: "ssh-config gets the hub and the project",
+			cmd:  []string{"ssh-config"},
+			want: filled,
+		},
+		{
+			name:  "tunnel in a directory project gets no context project",
+			setup: func(t *testing.T) { makeDirProject(t, "") },
+			cmd:   []string{"tunnel"},
+			want:  hubOnly,
+		},
+		{
+			name:  "ssh with --project keeps the flag",
+			setup: func(t *testing.T) { projectPath = "bar" },
+			cmd:   []string{"ssh"},
+			want:  want{hub: ctxTestHub, hubSource: targetSourceContext, project: "bar"},
+		},
+		{
+			name: "expose gets the hub but no project",
+			cmd:  []string{"expose"},
 			want: hubOnly,
 		},
 		{
@@ -284,7 +311,7 @@ func TestResolveInvocationTarget(t *testing.T) {
 			if mode == "" {
 				mode = ModeHuman
 			}
-			resolveInvocationTarget(findCommand(t, tt.cmd...), mode)
+			require.NoError(t, resolveInvocationTarget(findCommand(t, tt.cmd...), mode))
 			assert.Equal(t, want.hub, hubEndpoint, "hubEndpoint")
 			assert.Equal(t, want.hubSource, hubSource, "hubSource")
 			assert.Equal(t, want.project, projectPath, "projectPath")
@@ -302,7 +329,7 @@ func writeHomeGlobalSettings(t *testing.T, content string) {
 
 func TestResolveInvocationTarget_NoContextFile(t *testing.T) {
 	setupContextTest(t)
-	resolveInvocationTarget(findCommand(t, "list"), ModeHuman)
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	assert.Empty(t, hubEndpoint)
 	assert.Empty(t, projectPath)
 	assert.Empty(t, hubSource)
@@ -312,7 +339,7 @@ func TestResolveInvocationTarget_NoContextFile(t *testing.T) {
 func TestResolveInvocationTarget_HubWithoutProject(t *testing.T) {
 	setupContextTest(t)
 	saveTestContext(t, ctxTestHub, "")
-	resolveInvocationTarget(findCommand(t, "list"), ModeHuman)
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	assert.Equal(t, ctxTestHub, hubEndpoint)
 	assert.Empty(t, projectPath)
 }
@@ -322,7 +349,7 @@ func TestResolveInvocationTarget_CorruptContextIsAWarning(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "context.yaml"), []byte("version: [1\n"), 0o600))
 	stderr := captureStderr(t, func() {
-		resolveInvocationTarget(findCommand(t, "list"), ModeHuman)
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	})
 	assert.Contains(t, stderr, "Warning: ignoring the current context")
 	assert.Empty(t, hubEndpoint)
@@ -424,7 +451,7 @@ func TestResolveInvocationTarget_WarningToCommandErr(t *testing.T) {
 	list.SetErr(&errOut)
 	t.Cleanup(func() { list.SetErr(nil) })
 
-	stderr := captureStderr(t, func() { resolveInvocationTarget(list, ModeHuman) })
+	stderr := captureStderr(t, func() { require.NoError(t, resolveInvocationTarget(list, ModeHuman)) })
 	assert.Contains(t, errOut.String(), "Warning: ignoring the current context")
 	assert.Empty(t, stderr)
 }

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -62,7 +63,7 @@ func setupAntigravityHook(t *testing.T, grpcPort int) *bytes.Buffer {
 	t.Setenv("SCION_TELEMETRY_ENABLED", "true")
 	t.Setenv(telemetry.EnvGRPCPort, strconv.Itoa(grpcPort))
 
-	dialectYAML, err := os.ReadFile(filepath.Join("..", "..", "..", "harnesses", "antigravity", "dialect.yaml"))
+	dialectYAML, err := os.ReadFile(testutil.HarnessDialectPath(t, "antigravity"))
 	require.NoError(t, err)
 	bundleDir := filepath.Join(tmpDir, ".scion", "harness")
 	require.NoError(t, os.MkdirAll(bundleDir, 0755))

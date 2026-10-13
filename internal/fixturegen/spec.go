@@ -890,5 +890,23 @@ func Spec() []TableFixture {
 				"created_at":           baseTime,
 			},
 		}},
+
+		// ---- Workload-bound issuer delegations (test identities phase X2,
+		// ptone/scion#4240): one live row (NULL revoked_at/revoked_by) and
+		// one revoked row ----
+		{Table: "test_identity_delegations", Rows: []row{
+			{
+				"id": "d1000000-0000-0000-0000-000000000001", "grantor_id": userID,
+				"workload_sub": "100000000000000000001", "scope": "test_identity:issue",
+				"member_cap": 5, "label": "fixture-window", "created_at": baseTime,
+				"expires_at": baseTime.Add(8 * time.Hour), "revoked_at": nil, "revoked_by": nil,
+			},
+			{
+				"id": "d1000000-0000-0000-0000-000000000002", "grantor_id": userID,
+				"workload_sub": "100000000000000000001", "scope": "test_identity:issue",
+				"member_cap": 2, "label": "", "created_at": baseTime,
+				"expires_at": baseTime.Add(time.Hour), "revoked_at": baseTime.Add(time.Minute), "revoked_by": userID,
+			},
+		}},
 	}
 }

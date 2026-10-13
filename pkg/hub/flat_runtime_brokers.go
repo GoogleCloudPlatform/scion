@@ -82,6 +82,19 @@ func runtimeBrokerNameConflictRefusal(name, slug string) *RuntimeTargetRefusal {
 	}
 }
 
+// runtimeTargetInUseRefusal refuses a flat registration whose runtime
+// target ID another Runtime Broker row still holds. Like the name conflict,
+// it carries only what the caller sent, never the other row's ID.
+func runtimeTargetInUseRefusal(targetID string) *RuntimeTargetRefusal {
+	return &RuntimeTargetRefusal{
+		Code:   ErrCodeRuntimeTargetInUse,
+		Status: http.StatusConflict,
+		Message: fmt.Sprintf("runtime target %q already belongs to another Runtime Broker; a runtime target is registered by one Runtime Broker at a time (delete that Runtime Broker first, or register another target)",
+			targetID),
+		Details: map[string]interface{}{"runtimeTargetId": targetID},
+	}
+}
+
 func runtimeTargetMismatchRefusal(m *api.RuntimeTargetMismatch) *RuntimeTargetRefusal {
 	return &RuntimeTargetRefusal{
 		Code:    ErrCodeRuntimeTargetMismatch,
@@ -181,6 +194,32 @@ type flatRegistration struct {
 	// created or re-registered (auto-provide, labels, endpoint,
 	// capabilities). It never sets the target, name, slug or profiles.
 	Apply func(b *store.RuntimeBroker, created bool)
+	// GateAutoProvide applies the registration's auto-provide authorization
+	// at the write, as the legacy registration does: a request turning
+	// auto-provide on (RequestedAutoProvide) for a row that does not have
+	// it needs AutoProvideAuthorized (broker.auto_provide, checked by the
+	// caller); keeping it on, or turning it off, needs nothing extra. When
+	// the row's auto-provide changed since that check, the write is refused
+	// (ErrBrokerRegistrationAuthorizationStale) before anything is
+	// written. The embedded registration does not set it: its auto-provide
+	// comes from the co-located process's operator configuration.
+	GateAutoProvide       bool
+	RequestedAutoProvide  bool
+	AutoProvideAuthorized bool
+}
+
+// refuseRuntimeTargetInUse returns a runtime_target_in_use refusal when a
+// Runtime Broker row other than brokerID holds targetID, and nil otherwise.
+// A failed lookup is returned as an error.
+func (s *Server) refuseRuntimeTargetInUse(ctx context.Context, targetID, brokerID string) error {
+	holder, err := store.RuntimeTargetHolder(ctx, s.store, targetID, brokerID)
+	if err != nil {
+		return fmt.Errorf("failed to check runtime target %s: %w", targetID, err)
+	}
+	if holder != nil {
+		return runtimeTargetInUseRefusal(targetID)
+	}
+	return nil
 }
 
 // registerFlatRuntimeBroker is the single Hub implementation of flat
@@ -200,6 +239,9 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 	if (reg.Existing == nil) != (current == nil) || (current != nil && current.ID != reg.Existing.ID) {
 		return nil, false, ErrBrokerRegistrationAuthorizationStale
 	}
+	if reg.GateAutoProvide && reg.RequestedAutoProvide && !reg.AutoProvideAuthorized && (current == nil || !current.AutoProvide) {
+		return nil, false, ErrBrokerRegistrationAuthorizationStale
+	}
 
 	if current == nil {
 		// R1: a new flat registration needs the experiment.
@@ -216,6 +258,12 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		}
 		if conflict != nil {
 			return nil, false, runtimeBrokerNameConflictRefusal(reg.Name, slug)
+		}
+		// The target ID is unique across rows (the store's unique index):
+		// another live row that holds it gets a clean refusal, not a
+		// store error.
+		if err := s.refuseRuntimeTargetInUse(ctx, reg.Target.ID, reg.BrokerID); err != nil {
+			return nil, false, err
 		}
 		// R3: the target is written only here, at creation.
 		now := time.Now()
@@ -236,6 +284,11 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		b.ID, b.Name, b.Slug, b.RuntimeTarget = reg.BrokerID, reg.Name, slug, &target
 		b.Profiles, b.DefaultProfile = nil, ""
 		if err := s.store.CreateRuntimeBroker(ctx, b); err != nil {
+			// A row that took the target after the check above.
+			var refusal *RuntimeTargetRefusal
+			if errors.Is(err, store.ErrAlreadyExists) && errors.As(s.refuseRuntimeTargetInUse(ctx, reg.Target.ID, reg.BrokerID), &refusal) {
+				return nil, false, refusal
+			}
 			return nil, false, fmt.Errorf("failed to create flat Runtime Broker: %w", err)
 		}
 		stored, err := s.store.GetRuntimeBroker(ctx, reg.BrokerID)
@@ -316,10 +369,12 @@ const embeddedGlobalProjectSlug = "global"
 func (s *Server) RegisterEmbeddedFlatRuntimeBroker(ctx context.Context, id *brokeridentity.Identity, inst config.V1RuntimeBrokerInstanceConfig, opts ...EmbeddedFlatRegistrationOptions) (*store.RuntimeBroker, error) {
 	row, err := s.registerEmbeddedFlat(ctx, id, inst, opts...)
 	if err != nil {
-		s.EmbeddedBrokerRegistrationFailed(err)
+		s.EmbeddedFlatInstanceFailed(inst.Key, err)
 		return nil, err
 	}
-	s.SetEmbeddedBrokerID(row.ID)
+	s.mu.Lock()
+	s.recordEmbeddedFlatActivatedLocked(inst.Key, row.ID)
+	s.mu.Unlock()
 	return row, nil
 }
 

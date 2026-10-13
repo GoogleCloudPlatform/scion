@@ -26,11 +26,13 @@ import (
 // neverAPIWritableSettingsKeys are settings keys that no settings write path
 // accepts, in any mode (file, DB, and workstation, where other Layer-0 keys
 // are API-writable), for any caller. They are deploy-time inputs of the test
-// admin tier gate (ptone/scion#4240 phase A0); the gate must stay outside
-// the settings API's write surface. A key matches itself and every key
-// nested under it.
+// identity tiers (ptone/scion#4240): the hub class of the admin tier gate
+// (phase A0) and the workload issuer allowlist (phase X2, whose trust set
+// must not grow through the API). A key matches itself and every key nested
+// under it.
 var neverAPIWritableSettingsKeys = []string{
 	config.HubClassKey,
+	config.TestIdentitiesKey,
 }
 
 // testAdminTierRefusedSettingsKeys are settings keys refused by every

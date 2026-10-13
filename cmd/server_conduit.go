@@ -33,6 +33,7 @@ import (
 	"cloud.google.com/go/compute/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -301,7 +302,7 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 	if requireHA && !hubSrv.ConduitGrantRingShared() {
 		return hub.ErrConduitNoAtRestKey
 	}
-	if requireHA && os.Getenv("K_SERVICE") != "" {
+	if requireHA && cloudrunenv.IsService() {
 		return errConduitRelayOnCloudRun
 	}
 	// Hosted HA only: a single-node hub may advertise the same host as its

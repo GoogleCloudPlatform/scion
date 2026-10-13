@@ -18,10 +18,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -384,20 +386,53 @@ func completeJoinAndPersist(ctx context.Context, client hubclient.Client, p brok
 	}, nil
 }
 
-// persistBrokerHubSettings records the hub endpoint, the broker ID and the
-// hub connection entry in global settings. Failures are reported to w as
+// persistBrokerHubSettings records the broker ID, the broker's reporting
+// hub and the hub connection entry in global settings. The hub goes to the
+// server-scoped server.broker.hub_endpoint, and only when that is unset, so
+// the first registration names the hub the broker reports to and later ones
+// (extra hubs, kept in hub_connections and the credential store) do not move
+// it. It is not written on a host that runs a co-located workstation hub
+// (one with a dev token): there the key would take precedence over the
+// co-located localhost and move the local broker onto the registered hub.
+// The CLI's hub.endpoint is never written. Failures are reported to w as
 // warnings, as 'register' has always done.
 func persistBrokerHubSettings(w io.Writer, globalDir, endpoint, brokerID, hubName string) {
-	if endpoint != "" {
-		if err := config.UpdateSetting(globalDir, "hub.endpoint", endpoint, true); err != nil {
-			_, _ = fmt.Fprintf(w, "Warning: failed to save hub endpoint to global settings: %v\n", err)
-		}
-	}
+	// hub.brokerId first: on a legacy-format file this write migrates it to
+	// the v1 format the in-place edit below needs.
 	if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
 		_, _ = fmt.Fprintf(w, "Warning: failed to save broker ID: %v\n", err)
+	}
+	if endpoint != "" && apiclient.ResolveDevToken() != "" {
+		slog.Debug("Not saving server.broker.hub_endpoint: this host runs a co-located workstation hub", "endpoint", endpoint)
+	} else if endpoint != "" {
+		if err := saveBrokerHubEndpointIfUnset(globalDir, endpoint); err != nil {
+			_, _ = fmt.Fprintf(w, "Warning: failed to save hub endpoint to global settings: %v\n", err)
+		}
 	}
 	// Write hub_connections entry for this registration
 	if err := config.UpdateSetting(globalDir, "hub_connections."+hubName+".endpoint", endpoint, true); err != nil {
 		_, _ = fmt.Fprintf(w, "Warning: failed to save hub connection to settings: %v\n", err)
 	}
+}
+
+// brokerHubEndpointSettingPath is server.broker.hub_endpoint, the hub a
+// standalone broker reports to.
+var brokerHubEndpointSettingPath = []string{"server", "broker", "hub_endpoint"}
+
+// saveBrokerHubEndpointIfUnset sets server.broker.hub_endpoint to endpoint
+// in the settings file in dir, editing it in place, unless the file already
+// sets it.
+func saveBrokerHubEndpointIfUnset(dir, endpoint string) error {
+	unlock := config.LockSettingsFile()
+	defer unlock()
+
+	if vs, err := config.LoadSingleFileVersioned(dir); err == nil &&
+		vs.Server != nil && vs.Server.Broker != nil && vs.Server.Broker.HubEndpoint != "" {
+		return nil
+	}
+	staged, err := config.PrepareSettingsPathEdits(dir, []config.SettingsPathEdit{{Path: brokerHubEndpointSettingPath, Value: endpoint}})
+	if err != nil {
+		return err
+	}
+	return staged.Commit()
 }
