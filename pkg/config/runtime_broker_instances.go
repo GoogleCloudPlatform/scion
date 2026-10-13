@@ -16,6 +16,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -24,7 +25,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	yamlv3 "gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -89,6 +92,14 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 		if d := inst.AgentDefaults; d != nil {
 			if err := d.CloneDepth.Validate(); err != nil {
 				errs = append(errs, ValidationError{Path: p + ".agent_defaults.clone_depth", Message: err.Error()})
+			}
+			names := make([]string, 0, len(d.HarnessOverrides))
+			for name := range d.HarnessOverrides {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				errs = append(errs, validateHarnessOverride(p+".agent_defaults.harness_overrides."+name, d.HarnessOverrides[name])...)
 			}
 		}
 		t := inst.RuntimeTarget
@@ -447,6 +458,63 @@ func joinValidationErrors(errs []ValidationError) error {
 		all = append(all, e)
 	}
 	return errors.Join(all...)
+}
+
+var (
+	harnessOverrideSchemaOnce sync.Once
+	harnessOverrideSchema     *jsonschema.Schema
+	harnessOverrideSchemaErr  error
+)
+
+// validateHarnessOverride checks o against the settings schema's
+// $defs/harnessOverride, the validation a profile's harness override gets
+// (scion config validate): for example image_pull_policy and
+// auth_selected_type must be one of their allowed values. Each problem is
+// one ValidationError whose path is under path.
+func validateHarnessOverride(path string, o V1HarnessOverride) []ValidationError {
+	harnessOverrideSchemaOnce.Do(func() {
+		schemaPath := settingsSchemaFiles["1"]
+		data, err := schemasFS.ReadFile(schemaPath)
+		if err != nil {
+			harnessOverrideSchemaErr = err
+			return
+		}
+		var doc interface{}
+		if err := json.Unmarshal(data, &doc); err != nil {
+			harnessOverrideSchemaErr = err
+			return
+		}
+		compiler := jsonschema.NewCompiler()
+		if err := compiler.AddResource(schemaPath, doc); err != nil {
+			harnessOverrideSchemaErr = err
+			return
+		}
+		harnessOverrideSchema, harnessOverrideSchemaErr = compiler.Compile(schemaPath + "#/$defs/harnessOverride")
+	})
+	if harnessOverrideSchemaErr != nil {
+		return []ValidationError{{Path: path, Message: "cannot load the harness override schema: " + harnessOverrideSchemaErr.Error()}}
+	}
+	raw, err := json.Marshal(o)
+	if err != nil {
+		return []ValidationError{{Path: path, Message: err.Error()}}
+	}
+	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		return []ValidationError{{Path: path, Message: err.Error()}}
+	}
+	if err := harnessOverrideSchema.Validate(inst); err != nil {
+		var errs []ValidationError
+		for _, e := range extractValidationErrors(err) {
+			if e.Path != "" {
+				e.Path = path + "." + strings.ReplaceAll(e.Path, "/", ".")
+			} else {
+				e.Path = path
+			}
+			errs = append(errs, e)
+		}
+		return errs
+	}
+	return nil
 }
 
 // checkAgentDefaultsKeys refuses every unknown key of an instance's

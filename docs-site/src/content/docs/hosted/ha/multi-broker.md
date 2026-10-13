@@ -86,6 +86,8 @@ server:
 
 Only `docker` targets and a single entry are accepted in this release. A process with `server.broker.instances` hosts only the flat instance, not a regular Runtime Broker. Startup is refused if the Hub is not in the same process or if the entry does not validate. If the Hub refuses the registration, for example a first registration while the `hub.flat_runtime_brokers` experiment is off, the process still starts and logs that the instance was not activated. See [`server.broker`](/scion/reference/server-config/#broker-settings-serverbroker) for the fields.
 
+A flat Runtime Broker does not use Runtime Broker profiles. Instead, an entry may set `agent_defaults`: the image registry, default harness config, volumes, resources, harness overrides, required secrets and clone depth of the agents it runs. Each default sits where the matching profile setting sat, so templates, the agent's own configuration and the request keep winning where they won over a profile. See [flat instance agent defaults](/scion/reference/server-config/#flat-instance-agent-defaults-serverbrokerinstancesagent_defaults).
+
 ## Moving an Agent to Another Runtime Broker
 
 `scion reincarnate <agent> --broker <name|id>` moves an agent to another Runtime Broker, for example to drain a broker or to reach different hardware. The agent keeps its ID, slug, and generation chain, and its workspace, uncommitted and unpushed changes included. The move is a [reincarnation](/scion/reference/cli/#scion-reincarnate): the agent starts a new generation on the target with a Hub-built preamble and the handoff you provide.

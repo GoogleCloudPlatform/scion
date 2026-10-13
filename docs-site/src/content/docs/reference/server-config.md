@@ -204,7 +204,39 @@ Controls the Runtime Broker service.
 | `container_hub_endpoint` | string | | Overrides `hub_endpoint` when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. `http://host.containers.internal:8080` for local development). |
 | `broker_token` | string | | Authentication token for the Hub. |
 | `auto_provide` | bool | `false` | Automatically add as provider for new projects. |
-| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. This release accepts one entry, requires the Hub in the same process, and is only read from `settings.yaml` (not `server.yaml`). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` with `type: docker` and an optional `display_name`. |
+| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. This release accepts one entry, requires the Hub in the same process, and is only read from `settings.yaml` (not `server.yaml`). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` with `type: docker` and an optional `display_name`. An entry may also set `agent_defaults`, the workload defaults of the agents it runs (see below). |
+
+#### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
+
+An optional block of workload defaults for the agents a flat Runtime Broker instance runs. A flat instance does not use Runtime Broker profiles, so these take the place of the matching profile settings. Each value sits exactly where the profile value sat in its own precedence order: a template, the agent's own configuration or the request still wins wherever it won over a profile, and an unset value falls through to the same lower settings. The block is read from `settings.yaml` only and is never sent to the Hub. Unknown keys are refused at startup, naming the settings path.
+
+| Key | Type | Precedence |
+| :--- | :--- | :--- |
+| `default_harness_config` | string | Below the template's and the agent's stored harness config; above the top-level `default_harness_config`. |
+| `image_registry` | string | Above the top-level `image_registry`. |
+| `volumes` | list of volume mounts | Appended after the harness config's volumes. |
+| `resources` | resource spec | The agent's own resources win over it; it wins over the Hub `agent_defaults.resources` and `default_resources`. |
+| `harness_overrides.<harness-config>` | `image`, `image_pull_policy`, `user`, `auth_selected_type`, `env`, `volumes`, `resources` | Applied over `harness_configs.<harness-config>`, as a profile's harness override is. An explicit `image` outranks the template and inline images (only a request image beats it). Its `resources` rank above the agent's own. An empty `env` value in any override marks a key the user must supply. Validated like a profile's harness override. |
+| `secrets` | list of secret declarations (no values) | Required secrets, between the harness config's secrets and the template's. |
+| `clone_depth` | `"full"` or an integer from 1 | Below the template's or agent's `clone_depth`; unset keeps the default shallow clone. |
+
+```yaml
+server:
+  broker:
+    instances:
+      - key: docker-1
+        name: docker-1
+        runtime_target:
+          type: docker
+        agent_defaults:
+          image_registry: registry.example.com/team
+          resources:
+            requests:
+              memory: 2Gi
+          harness_overrides:
+            claude:
+              auth_selected_type: vertex-ai
+```
 
 ### Database (`server.database`)
 

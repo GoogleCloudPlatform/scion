@@ -547,3 +547,33 @@ func TestRuntimeBrokerInstances_AgentDefaultsStrictErrorsNamePath(t *testing.T) 
 		})
 	}
 }
+
+// agent_defaults harness overrides get the validation a profile's harness
+// override gets (the settings schema's $defs/harnessOverride): an
+// out-of-range image_pull_policy, auth_selected_type or volume type is
+// refused, naming its settings path; a valid override passes.
+func TestValidateRuntimeBrokerInstances_AgentDefaultsHarnessOverrides(t *testing.T) {
+	inst := V1RuntimeBrokerInstanceConfig{Key: "d", Name: "d", RuntimeTarget: &V1RuntimeTargetConfig{Type: "docker"},
+		AgentDefaults: fullAgentDefaults()}
+	if errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{inst}); len(errs) != 0 {
+		t.Fatalf("valid overrides refused: %v", errs)
+	}
+	inst.AgentDefaults.HarnessOverrides["claude"] = V1HarnessOverride{ImagePullPolicy: "Sometimes", AuthSelectedType: "magic",
+		Volumes: []api.VolumeMount{{Source: "/s", Target: "/t", Type: "floppy"}}}
+	errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{inst})
+	const p = "server.broker.instances[0].agent_defaults.harness_overrides.claude"
+	for _, want := range []string{p + ".image_pull_policy", p + ".auth_selected_type", p + ".volumes.0.type"} {
+		found := false
+		for _, e := range errs {
+			found = found || e.Path == want
+		}
+		if !found {
+			t.Errorf("no error at %s; got %v", want, errs)
+		}
+	}
+	for _, e := range errs {
+		if !strings.HasPrefix(e.Path, p) {
+			t.Errorf("unexpected error %v", e)
+		}
+	}
+}
