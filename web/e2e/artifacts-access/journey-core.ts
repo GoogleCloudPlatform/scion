@@ -330,14 +330,15 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
   /**
    * Runs one row as a test step. Its assertions are soft: a failed row is
    * recorded and the journey goes on. A throw fails the row and is
-   * collected for the final check. A row whose required rows did not pass,
-   * or that runs after a stop, is "not run". An ungraded row that ran is
+   * collected for the final check. A row whose precondition (a fact, such
+   * as "the bundle was published") does not hold, or that runs after a
+   * stop, is "not run" with the reason. An ungraded row that ran is
    * "observed", never "passed".
    */
   async function row(
     id: string,
     fn: (r: RowRecord) => Promise<void> | void,
-    rowOpts: { requires?: string[] } = {}
+    rowOpts: { pre?: () => string | undefined } = {}
   ): Promise<boolean> {
     const r = rowRecord(id);
     const spec = opts.rows[id];
@@ -346,10 +347,10 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
       r.reason = state.stopped;
       return false;
     }
-    const blocked = (rowOpts.requires ?? []).filter((x) => state.rows[x]?.status !== 'passed');
-    if (blocked.length > 0) {
+    const unmet = rowOpts.pre?.();
+    if (unmet) {
       r.status = 'not run';
-      r.reason = `needs ${blocked.join(', ')} to pass`;
+      r.reason = unmet;
       return false;
     }
     delete r.reason;

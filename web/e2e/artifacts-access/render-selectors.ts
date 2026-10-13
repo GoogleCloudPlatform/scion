@@ -33,7 +33,7 @@ const FILES = `${PAGE} sl-tab-panel[name="files"]`;
 const DIALOG = 'scion-artifact-publish-dialog';
 
 export const RENDER_SELECTORS = {
-  /** Publish dialog: mode Folder, folder input, entry, note (artifact-publish-dialog.ts:286-381). */
+  /** Publish dialog: Folder mode, folder input, entry, note (publish dialog :286-381). */
   publishModeFolder: `${DIALOG} sl-radio-button[value="folder"]`,
   publishFolderInput: `${DIALOG} #folder-input`,
   publishEntrySelect: `${DIALOG} sl-select[label="Entry file"]`,
@@ -51,12 +51,18 @@ export const RENDER_SELECTORS = {
   filesRow: `${FILES} tbody tr`,
   /** Version menu items (artifact-detail.ts:1084-1098). */
   versionMenuItem: `${SELECTORS.headerActions} sl-dropdown sl-menu-item`,
-  /** History rows of ready versions (artifact-detail.ts:1503-1535); discarded groups are tr.discarded-group. */
+  /**
+   * History rows of ready versions (artifact-detail.ts:1503-1535); discarded
+   * groups are tr.discarded-group.
+   */
   historyVersionRow: `${SELECTORS.historyPanel} tbody tr:has(strong)`,
   historyDiscardedRow: `${SELECTORS.historyPanel} tbody tr.discarded-group`,
   /** Chat: a linkified scion://artifact/ reference (utils/chat-file-links.ts:1176-1182). */
   chatArtifactLink: 'a.artifact-link',
-  /** Chat: an artifact chip, shown only for references the hub recorded (chat-message.ts:2672-2704). */
+  /**
+   * Chat: an artifact chip, shown only for references the hub recorded
+   * (chat-message.ts:2672-2704).
+   */
   chatArtifactChip: 'button.artifact-chip',
   /** Chat preview dialog and its markdown frame (chat-file-preview.ts:917-926, 1017-1054). */
   chatPreviewDialog: 'scion-chat-file-preview sl-dialog.file-preview-dialog[open]',
@@ -94,7 +100,10 @@ export function fileRow(page: Page, filePath: string): Locator {
     .filter({ has: page.locator('.file-path', { hasText: new RegExp(escapeRegExp(filePath)) }) });
 }
 
-/** A Files tab icon button by exact label (Open <path>, Download <path>, Not shown in the browser). */
+/**
+ * A Files tab icon button by exact label (Open <path>, Download <path>,
+ * Not shown in the browser).
+ */
 export function fileIconButton(row: Locator, label: string): Locator {
   return row.locator(`sl-icon-button[label="${label}"]`);
 }

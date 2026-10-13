@@ -1,8 +1,9 @@
 # Artifact page view and render journey (R2)
 
-A Playwright journey of the artifact page's view and render, graded at the UI. It runs in the same suite as the access
-journey (`README.md`) and shares its config, global setup and state file. See the header of `artifacts-render.pw.ts`
-for the rows.
+A Playwright journey of the artifact page's view and render, graded at the UI. It lives in the same suite directory as
+the access journey (`README.md`) and shares its global setup, state file and output dir. It has its own config,
+`playwright.render.config.ts`, which has no HTML reporter (see Grading), and it skips itself under any other config. See
+the header of `artifacts-render.pw.ts` for the rows.
 
 ## Run
 
@@ -10,7 +11,7 @@ Local throwaway hub (default). Builds the binary and web assets unless `E2E_PREB
 
 ```bash
 cd web
-npx playwright test -c e2e/artifacts-access/playwright.config.ts artifacts-render.pw.ts
+npx playwright test -c e2e/artifacts-access/playwright.render.config.ts
 ```
 
 No runtime broker, container runtime, credentials or external network is needed. The journey turns on `hub.artifacts`
@@ -46,8 +47,16 @@ As in the access journey: the UI observation decides each row, and the API statu
 Row assertions are soft, a row whose precondition failed is `not run`, and a "hidden" check follows a positive
 anchor.
 
-- The isolation rows (R2-05, R2-06, R2-13) report every failure with one generic message only. Their detail goes in
-  the structured evidence fields (`probes`, `frameRequests`, `sessionBearingFrameRequest`).
+- The isolation rows (R2-05, R2-06, R2-13) record named checks and assert nothing themselves. Each row is then decided
+  by one generic assertion ("R2 isolation row failed; see restricted evidence") from a single call site, so the output
+  does not tell which check failed, or how many. The checks and their inputs go in the restricted evidence only
+  (`rows[...].ui.checks`, `probes`, `frameRequests`, `sessionBearingFrameRequest`). The HTML reporter would also
+  render each inner browser action and its error, so the render config uses only the list reporter (and github in
+  CI).
+- A frame request whose Cookie header could not be read counts as unknown, which fails the session check. It never
+  counts as "no session".
+- Rows depend on facts, not on other rows passing: the bundle exists, the markdown was published, v3 exists. Only
+  the R2-01 smoke and a refused markdown publish make rows `not run`.
 - R2-17b (view expiry) and R2-21 (an HTML bundle in the chat preview) are declared and skipped with a `NOT RUN`
   annotation. The view lifetime is a fixed constant, and the chat HTML preview is not on this build.
 - R2-20x is recorded only (status `observed`).

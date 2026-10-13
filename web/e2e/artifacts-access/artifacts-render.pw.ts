@@ -125,7 +125,7 @@ const R2_17B_REASON =
   'NOT RUN: the view TTL is a fixed 30-minute constant (pkg/artifacts/view.go:52) with no ' +
   'supported setting to lower it; the run does not wait 30 minutes';
 const R2_21_REASON =
-  'NOT RUN: the chat HTML preview is not on this build (ptone/scion#4580); rows frozen';
+  'NOT RUN: chat HTML preview not merged (upstream ptone/scion#4580)';
 
 const VIEW_PREFIX = '/api/v1/artifacts/view/';
 
@@ -203,7 +203,12 @@ interface FrameRequest {
   failed?: boolean;
   /** The page's own top-level document (Open in new tab), not a frame request. */
   topLevelDocument: boolean;
-  cookieHeader: { present: boolean; names: string[] };
+  /**
+   * The Cookie header as sent: read is false until the browser's full
+   * request headers were read. An unread header is unknown, never "no
+   * session".
+   */
+  cookieHeader: { read: boolean; present: boolean | null; names: string[] };
 }
 
 /** A view mint seen by the browser: status, seq and the URL (in memory only). */
@@ -225,7 +230,19 @@ const r2 = {
   dirs: {} as Record<string, string>,
   fileSizes: {} as Record<string, number>,
   frameRequests: [] as FrameRequest[],
+  /** Header reads still in flight (awaited before any session check). */
+  pendingHeaderReads: [] as Array<Promise<void>>,
+  /** Requests from any page to the bundle's remote image host (host only kept). */
+  remoteHostHits: 0,
   mints: [] as Mint[],
+  /** Set when the markdown publish was refused: its rows are not run with this cause. */
+  markdownRefused: undefined as string | undefined,
+  /** The markdown artifact's id from its create (for the cleanup). */
+  markdownCreatedId: undefined as string | undefined,
+  /** v3 exists: its versions POST answered 201 and the page showed v3 (current). */
+  v3Published: false,
+  /** Saved download files (in memory), checked absent after delete and in the cleanup. */
+  downloads: [] as Array<{ who: Key; file: string }>,
   /** A view URL minted for the owner (in memory only), for R2-17a and R2-18. */
   heldViewUrl: undefined as string | undefined,
   frames: [] as Array<Record<string, unknown>>,
@@ -299,26 +316,39 @@ function cookieNames(header: string | undefined): string[] {
 
 /** True for a request made by an HTML bundle document (sandboxed frame or a top-level view). */
 function isBundleRequest(req: Request): boolean {
-  let frameUrl = '';
+  const reqPath = new URL(req.url()).pathname;
+  if (reqPath.startsWith(VIEW_PREFIX)) return true;
   try {
-    frameUrl = req.frame().url();
+    return req.frame().url().includes(VIEW_PREFIX);
   } catch {
-    // A service-worker or detached request: not a bundle request.
+    // A navigation issued before its frame exists: only its path can tell.
     return false;
   }
-  const reqPath = new URL(req.url()).pathname;
-  return frameUrl.includes(VIEW_PREFIX) || reqPath.startsWith(VIEW_PREFIX);
+}
+
+/** Reads the full request headers of a record once (cookie names only). */
+function readCookieHeader(req: Request, rec: FrameRequest): void {
+  const p = req
+    .allHeaders()
+    .then((h) => {
+      rec.cookieHeader = { read: true, present: !!h.cookie, names: cookieNames(h.cookie) };
+    })
+    .catch(() => undefined);
+  r2.pendingHeaderReads.push(p);
 }
 
 /**
- * Records the bundle requests of a context (path redacted, status, and
- * whether a Cookie header was sent, with cookie names only), and every view
- * mint answer (status, seq and the URL in memory).
+ * Records the bundle requests of a context (path redacted, status, and the
+ * Cookie header as sent, by cookie name only), any request to the remote
+ * image host, and every view mint answer (status, seq and the URL in
+ * memory).
  */
 function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
   const records = new Map<Request, FrameRequest>();
   context.on('request', (req) => {
-    if (!/^https?:/.test(req.url()) || !isBundleRequest(req)) return;
+    if (!/^https?:/.test(req.url())) return;
+    if (new URL(req.url()).hostname === REMOTE_IMAGE_HOST) r2.remoteHostHits++;
+    if (!isBundleRequest(req)) return;
     let topLevelDocument = false;
     try {
       topLevelDocument = req.isNavigationRequest() && req.frame().parentFrame() === null;
@@ -332,28 +362,17 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
       path: redactPath(new URL(req.url()).pathname),
       resourceType: req.resourceType(),
       topLevelDocument,
-      cookieHeader: { present: false, names: [] },
+      cookieHeader: { read: false, present: null, names: [] },
     };
     records.set(req, rec);
     r2.frameRequests.push(rec);
-    void req
-      .allHeaders()
-      .then((h) => {
-        rec.cookieHeader = { present: !!h.cookie, names: cookieNames(h.cookie) };
-      })
-      .catch(() => undefined);
+    readCookieHeader(req, rec);
   });
   context.on('response', (res) => {
     const rec = records.get(res.request());
     if (rec) {
       rec.status = res.status();
-      void res
-        .request()
-        .allHeaders()
-        .then((h) => {
-          rec.cookieHeader = { present: !!h.cookie, names: cookieNames(h.cookie) };
-        })
-        .catch(() => undefined);
+      if (!rec.cookieHeader.read) readCookieHeader(res.request(), rec);
     }
     if (who === 'anonymous') return;
     const req = res.request();
@@ -385,11 +404,30 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
   });
 }
 
-/** Cookie-bearing bundle requests other than a top-level document (restricted detail). */
-function sessionBearing(fromIndex: number): FrameRequest[] {
-  return r2.frameRequests
-    .slice(fromIndex)
-    .filter((q) => !q.topLevelDocument && q.cookieHeader.present);
+/**
+ * The session facts of frame requests (not a page's own top-level
+ * document), after every pending header read settled (bounded wait). An
+ * unread header counts as unknown, which fails a session check.
+ */
+async function frameSessionFacts(
+  records: FrameRequest[]
+): Promise<{ total: number; unread: number; bearing: number }> {
+  await Promise.race([
+    Promise.allSettled([...r2.pendingHeaderReads]),
+    new Promise((resolve) => setTimeout(resolve, 5_000)),
+  ]);
+  const frameOnly = records.filter((q) => !q.topLevelDocument);
+  return {
+    total: frameOnly.length,
+    unread: frameOnly.filter((q) => !q.cookieHeader.read).length,
+    bearing: frameOnly.filter((q) => q.cookieHeader.present === true).length,
+  };
+}
+
+/** Bundle requests of one identity in the given steps. */
+function requestsIn(who: Key | 'anonymous', steps: string[]): FrameRequest[] {
+  const set = new Set(steps);
+  return r2.frameRequests.filter((q) => q.who === who && set.has(q.step));
 }
 
 /** Lets the async header and body reads of the request listeners finish. */
@@ -458,11 +496,20 @@ async function htmlFrameAttributes(page: Page): Promise<{
   }));
 }
 
-/** The probe result of a bundle document (waits for done:true). */
-async function readProbe(frame: Frame | Page): Promise<Record<string, unknown>> {
-  const probe = frame.locator('#probe');
-  await expect(probe).toContainText('"done":true', { timeout: 10_000 });
-  return JSON.parse((await probe.textContent()) ?? '{}') as Record<string, unknown>;
+/**
+ * The probe result of a bundle document, polled until done:true. Its
+ * failure message carries no page content (it is used by isolation rows).
+ */
+async function readProbe(target: Frame | Page): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const text = await target
+      .evaluate(() => document.getElementById('probe')?.textContent ?? '')
+      .catch(() => '');
+    if (text.includes('"done":true')) return JSON.parse(text) as Record<string, unknown>;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error('probe not done');
 }
 
 /** The current heading of the bundle frame. */
@@ -488,22 +535,15 @@ function tokens(sandbox: string | null): string[] {
     .sort();
 }
 
-/** The response of the most recent document request for a view path's entry. */
-function lastViewDocument(who: Key | 'anonymous', entry: string): FrameRequest | undefined {
-  return [...r2.frameRequests]
-    .reverse()
-    .find((q) => q.who === who && q.resourceType === 'document' && q.path.endsWith(`/${entry}`));
-}
-
 /** Waits for the latest mint of seq by key and returns it (URL in memory). */
-async function latestMint(key: Key, seq: number): Promise<Mint> {
-  await expect
-    .poll(
-      () => [...r2.mints].reverse().find((m) => m.who === key && m.seq === seq && m.url !== null),
-      { message: `view minted for v${seq}` }
-    )
-    .toBeTruthy();
-  return [...r2.mints].reverse().find((m) => m.who === key && m.seq === seq && m.url !== null)!;
+async function latestMint(key: Key, seq: number, since = 0): Promise<Mint> {
+  const find = (): Mint | undefined =>
+    r2.mints
+      .slice(since)
+      .reverse()
+      .find((m) => m.who === key && m.seq === seq && m.url !== null);
+  await expect.poll(find, { message: `view minted for v${seq}` }).toBeTruthy();
+  return find()!;
 }
 
 /** Headers of a view response, fetched in key's session, with the capability redacted. */
@@ -556,10 +596,15 @@ function publishCalls(
  */
 async function publishThroughDialog(
   page: Page,
-  key: Key,
   dir: string,
   opts: { title?: string; note: string; createPath: RegExp }
-): Promise<{ createStatus: number; createCode: string | null; entry: string }> {
+): Promise<{
+  createStatus: number;
+  createCode: string | null;
+  entry: string;
+  asked: string[];
+  createdId: string | null;
+}> {
   await expect(page.locator(SELECTORS.publishDialog)).toBeVisible();
   await publishFolderMode(page).click();
   await page.locator(RENDER_SELECTORS.publishFolderInput).setInputFiles(dir);
@@ -581,10 +626,14 @@ async function publishThroughDialog(
   const body = (await created.json().catch(() => null)) as {
     error?: { code?: string };
     code?: string;
+    upload?: { required?: string[] };
+    artifact?: { id?: string };
   } | null;
   const code = body?.error?.code ?? body?.code ?? null;
-  void key;
-  return { createStatus: created.status(), createCode: code, entry };
+  // The files the hub asked to upload (the rest it already holds).
+  const asked = body?.upload?.required ?? [];
+  const createdId = created.status() === 201 ? (body?.artifact?.id ?? null) : null;
+  return { createStatus: created.status(), createCode: code, entry, asked, createdId };
 }
 
 /** Rows of the History tab in order. */
@@ -661,8 +710,14 @@ async function filesRows(page: Page): Promise<{
 /** Downloads a file from the Files tab and returns filename and byte size (file deleted). */
 async function downloadFile(
   page: Page,
+  who: Key,
   filePath: string
-): Promise<{ filename: string; bytes: number; requestStatus: number | null }> {
+): Promise<{
+  filename: string;
+  bytes: number;
+  requestStatus: number | null;
+  savedAbsentAfterDelete: boolean;
+}> {
   const row = fileRow(page, filePath);
   const button = fileIconButton(row, `Download ${filePath}`);
   await expect(button).toBeVisible();
@@ -671,7 +726,10 @@ async function downloadFile(
   const bytes = saved ? fs.statSync(saved).size : -1;
   const filename = download.suggestedFilename();
   await download.delete();
-  return { filename, bytes, requestStatus: null };
+  // The saved file is kept in memory by path only, and checked again in the cleanup.
+  if (saved) r2.downloads.push({ who, file: saved });
+  const savedAbsentAfterDelete = !!saved && !fs.existsSync(saved);
+  return { filename, bytes, requestStatus: null, savedAbsentAfterDelete };
 }
 
 /** Markdown frame facts, read through the parent page (the frame is same-origin by design). */
@@ -768,6 +826,10 @@ function expectMarkdownRendered(facts: Record<string, unknown>, seq: number): vo
     .toBe(`/api/v1/artifacts/${markdownId()}/versions/${seq}/files/notes.md`);
   const t = tokens(facts.sandbox as string | null);
   expect.soft(t, 'markdown frame: no allow-scripts').not.toContain('allow-scripts');
+  // The intended set (ruling D-1): same origin, and user-clicked links open a new tab.
+  expect
+    .soft(t, 'markdown sandbox tokens')
+    .toEqual(['allow-popups', 'allow-popups-to-escape-sandbox', 'allow-same-origin']);
   expect
     .soft(t.includes('allow-scripts') && t.includes('allow-same-origin'), 'never both')
     .toBe(false);
@@ -794,28 +856,64 @@ function expectMarkdownInert(facts: Record<string, unknown>, flags: { r2md: unkn
   expect.soft(flags.r2md, 'no fixture script ran (app page)').toBeNull();
 }
 
-/** One generic soft check of the isolation rows. */
-function iso(ok: boolean): void {
-  expect.soft(ok, ISOLATION_FAIL).toBe(true);
-}
+/** Named checks of one isolation row (restricted: evidence only). */
+type IsolationChecks = Record<string, boolean>;
 
 /**
- * Runs an isolation row body: any throw becomes the generic message, so no
- * detail reaches Playwright output; the detail stays in r2's fields.
+ * Runs an isolation row. The body records named checks and asserts
+ * nothing; anything it throws only marks the row incomplete. Then one
+ * generic assertion, from this single call site, decides the row: no
+ * Playwright output tells which check failed, or how many. The checks and
+ * their inputs go in the restricted evidence only.
  */
-async function isolated(fn: () => Promise<void>): Promise<void> {
+async function isolationRow(
+  r: RowRecord,
+  body: (checks: IsolationChecks) => Promise<void>
+): Promise<void> {
+  const checks: IsolationChecks = {};
+  let completed = true;
   try {
-    await fn();
+    await body(checks);
   } catch {
-    throw new Error(ISOLATION_FAIL);
+    completed = false;
   }
+  checks.completed = completed;
+  r.ui.checks = checks;
+  const held = Object.keys(checks).length > 1 && Object.values(checks).every(Boolean);
+  expect.soft(held, ISOLATION_FAIL).toBe(true);
 }
 
-/** Notes a session-bearing frame request: restricted detail stays in the evidence only. */
-function noteSessionBearing(found: FrameRequest[], rec: RowRecord): void {
-  if (found.length === 0) return;
-  r2.sessionBearingFrameRequest = true;
-  rec.ui.sessionBearingFrameRequests = found.length;
+/** Polls a locator's text until it equals want; false on timeout (never throws). */
+async function textIs(
+  locator: ReturnType<Page['locator']>,
+  want: string,
+  timeoutMs = 15_000
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const got = await locator
+      .first()
+      .textContent({ timeout: 1_000 })
+      .catch(() => null);
+    if ((got ?? '').replace(/\s+/g, ' ').trim() === want) return true;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return false;
+}
+
+/** Preconditions: facts, not row results (a soft failure never hides later rows). */
+function preBundle(): string | undefined {
+  return r2.bundle ? undefined : 'no bundle was published (R2-01)';
+}
+function preMarkdown(): string | undefined {
+  if (r2.markdown) return undefined;
+  return r2.markdownRefused ?? 'no markdown was published (R2-07)';
+}
+function preV3(): string | undefined {
+  return r2.v3Published ? undefined : 'v3 was not published (R2-09)';
+}
+function preHeld(): string | undefined {
+  return r2.heldViewUrl ? undefined : 'no view URL was minted for the owner (R2-02)';
 }
 
 const TITLE_MAIN = 'R2: artifact page view and render, graded at the UI';
@@ -833,8 +931,15 @@ const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = Object.fr
   })
 );
 
+/** Set by playwright.render.config.ts, the only config without an HTML reporter. */
+const UNDER_RENDER_CONFIG = process.env.E2E_R2_RENDER_CONFIG === '1';
+const WRONG_CONFIG =
+  'run with e2e/artifacts-access/playwright.render.config.ts ' +
+  '(no HTML reporter for the isolation rows)';
+
 // ---- NOT RUN by design: declared outside the serial group so each body runs.
 test.describe('render rows not run at this build', () => {
+  test.skip(!UNDER_RENDER_CONFIG, WRONG_CONFIG);
   for (const id of Object.keys(SKIPPED)) {
     test(skipTitle(id), () => {
       const reason = SKIPPED[id]!;
@@ -855,6 +960,7 @@ test.describe('render rows not run at this build', () => {
 });
 
 test.describe.serial('artifact page view and render (R2)', () => {
+  test.skip(!UNDER_RENDER_CONFIG, WRONG_CONFIG);
   // eslint-disable-next-line no-empty-pattern -- Playwright needs the fixtures argument
   test.afterEach(({}, testInfo) => {
     if (testInfo.title === TITLE_MAIN && testInfo.error?.message) {
@@ -966,7 +1072,7 @@ async function runMain(browser: Browser): Promise<void> {
     await expect(newButton, 'New artifact visible').toBeVisible();
     await newButton.click();
     const title = `R2 bundle ${suffix()}`;
-    const pub = await publishThroughDialog(page, 'owner', r2.dirs['bundle-v1']!, {
+    const pub = await publishThroughDialog(page, r2.dirs['bundle-v1']!, {
       title,
       note: 'r2 v1',
       createPath: /^\/api\/v1\/artifacts$/,
@@ -985,26 +1091,36 @@ async function runMain(browser: Browser): Promise<void> {
     }
     expect(pub.createStatus, 'publish create').toBe(201);
     smoke.stopped = false;
+    // Known from the create on, so the cleanup deletes it even if the publish stops.
+    if (pub.createdId) r2.bundle = { id: pub.createdId, title };
     expect.soft(pub.entry, 'entry defaults to index.html').toBe('index.html');
-    await expect(page).toHaveURL(
-      new RegExp(`/projects/${j.state.projectId}/artifacts/[0-9a-f-]+$`)
-    );
+    const landed = await expect(page)
+      .toHaveURL(new RegExp(`/projects/${j.state.projectId}/artifacts/[0-9a-f-]+$`))
+      .then(() => true)
+      .catch(() => false);
+    await settle(page);
+    const calls = publishCalls('owner', since, 1);
+    r.api.push(...calls.map((c) => ({ as: 'owner', ...c, status: c.status ?? 0, code: null })));
+    r2.publishes.push({ artifact: 'bundle', seq: 1, calls, asked: pub.asked });
+    const finalize = calls.find((c) => c.path.endsWith('/finalize'));
+    smoke.finalizeStatus = finalize?.status ?? null;
+    const finalizeOk = !!finalize?.status && finalize.status >= 200 && finalize.status < 300;
+    if (!finalizeOk) {
+      // A non-2xx or missing finalize is a STOP with a FINDING (no workaround).
+      const text = `publish finalize ${String(finalize?.status ?? 'missing')}; no workaround`;
+      smoke.stopped = true;
+      j.finding('R2-01', text);
+      j.state.stopped = `not run: smoke precondition failed (${text})`;
+      throw new Error(`STOP: ${text}`);
+    }
+    expect(landed, 'lands on the artifact').toBe(true);
     const id = new URL(page.url()).pathname.split('/').pop()!;
+    expect.soft(id, 'landed on the created artifact').toBe(pub.createdId);
     r2.bundle = { id, title };
     await expect(headerTitle(page)).toHaveText(title);
     await expect(page.locator(SELECTORS.versionMenu)).toContainText('v1 (current)');
     r.ui.landed = redactPath(new URL(page.url()).pathname);
     r.ui.versionLabel = await textOf(page.locator(SELECTORS.versionMenu));
-    const calls = publishCalls('owner', since, 1);
-    r.api.push(...calls.map((c) => ({ as: 'owner', ...c, status: c.status ?? 0, code: null })));
-    r2.publishes.push({ artifact: 'bundle', seq: 1, calls });
-    const finalize = calls.find((c) => c.path.endsWith('/finalize'));
-    smoke.finalizeStatus = finalize?.status ?? null;
-    if (finalize && (finalize.status === 401 || finalize.status === 403)) {
-      j.finding('R2-01', `member session cannot finalize a publish (${finalize.status})`);
-    }
-    expect.soft(finalize?.status ?? 0, 'finalize 2xx').toBeGreaterThanOrEqual(200);
-    expect.soft(finalize?.status ?? 0, 'finalize 2xx').toBeLessThan(300);
     for (const c of calls.filter((x) => x.method === 'PUT')) {
       expect.soft(c.status ?? 0, `upload ${c.path}`).toBeGreaterThanOrEqual(200);
       expect.soft(c.status ?? 0, `upload ${c.path}`).toBeLessThan(300);
@@ -1090,7 +1206,7 @@ async function runMain(browser: Browser): Promise<void> {
       expect.soft(headers.referrerPolicy, 'Referrer-Policy').toBe('no-referrer');
       expect.soft(headers.contentDisposition, 'Content-Disposition').toBe('inline');
     },
-    { requires: ['R2-01'] }
+    { pre: preBundle }
   );
 
   // ---- R2-03: renders with its own files ---------------------------------
@@ -1098,7 +1214,8 @@ async function runMain(browser: Browser): Promise<void> {
   await j.row(
     'R2-03',
     async (r) => {
-      const page = await j.pageOf('owner');
+      const page = await openArtifact('owner', artifactPage(bundleId()));
+      await page.locator(RENDER_SELECTORS.htmlFrame).waitFor({ state: 'attached' });
       const frame = await bundleFrame(page);
       await expect(htmlFrame(page).locator('#ver')).toHaveText('R2 bundle v1');
       await expect
@@ -1129,23 +1246,24 @@ async function runMain(browser: Browser): Promise<void> {
       expect.soft(facts.chartNaturalWidth, 'relative image loaded').toBe(CHART_SIZE.width);
       expect.soft(facts.remoteNaturalWidth, 'remote image not loaded').toBe(0);
       await settle(page);
-      const own = r2.frameRequests.filter((q) => q.who === 'owner' && q.step <= 'R2-03');
+      const own = requestsIn('owner', ['R2-03']);
       const css = own.find((q) => q.path.endsWith('/css/site.css'));
       const png = own.find((q) => q.path.endsWith('/img/chart.png'));
-      r.ui.subresources = { css: css?.status ?? null, png: png?.status ?? null };
-      expect.soft(css?.status, 'css 200 under the view').toBe(200);
-      expect.soft(png?.status, 'png 200 under the view').toBe(200);
-      expect
-        .soft(css?.path.startsWith(`${VIEW_PREFIX}<redacted>/`), 'css under the view')
-        .toBe(true);
-      const remoteRequests = j
-        .who('owner')
-        .requests.filter((q) => q.path.includes(REMOTE_IMAGE_HOST)).length;
-      const remoteAny = r2.frameRequests.filter((q) => q.path.includes(REMOTE_IMAGE_HOST)).length;
-      r.ui.remoteRequests = remoteRequests + remoteAny;
-      expect.soft(r.ui.remoteRequests, 'no request to the remote image host').toBe(0);
+      const underView = (q: FrameRequest | undefined): boolean =>
+        !!q && q.path.startsWith(`${VIEW_PREFIX}<redacted>/`);
+      r.ui.subresources = {
+        css: { status: css?.status ?? null, underView: underView(css) },
+        png: { status: png?.status ?? null, underView: underView(png) },
+      };
+      expect.soft(css?.status, 'css 200').toBe(200);
+      expect.soft(png?.status, 'png 200').toBe(200);
+      expect.soft(underView(css), 'css under the view path').toBe(true);
+      expect.soft(underView(png), 'png under the view path').toBe(true);
+      // Any request to the remote host, from any page of any identity (host only).
+      r.ui.remoteHostHits = r2.remoteHostHits;
+      expect.soft(r2.remoteHostHits, 'no request to the remote image host').toBe(0);
     },
-    { requires: ['R2-02'] }
+    { pre: preBundle }
   );
 
   // ---- R2-04: relative link stays on the version -------------------------
@@ -1153,9 +1271,11 @@ async function runMain(browser: Browser): Promise<void> {
   await j.row(
     'R2-04',
     async (r) => {
-      const page = await j.pageOf('owner');
+      const page = await openArtifact('owner', artifactPage(bundleId()));
+      await page.locator(RENDER_SELECTORS.htmlFrame).waitFor({ state: 'attached' });
       const appUrl = page.url();
       const frame = await bundleFrame(page);
+      await expect(htmlFrame(page).locator('#ver')).toHaveText('R2 bundle v1');
       const capBefore = capabilityOf(frame.url());
       await htmlFrame(page).locator('#to-page2').click();
       await expect(htmlFrame(page).locator('#page2')).toHaveText('R2 page two v1');
@@ -1197,17 +1317,16 @@ async function runMain(browser: Browser): Promise<void> {
       });
       expect.soft(p2?.status, 'page2 200').toBe(200);
     },
-    { requires: ['R2-02'] }
+    { pre: preBundle }
   );
 
-  // ---- R2-05: isolation negatives (generic failure text only) ------------
+  // ---- R2-05: isolation negatives (one generic verdict) ----------------
   r2.step = 'R2-05';
   await j.row(
     'R2-05',
     (r) =>
-      isolated(async () => {
+      isolationRow(r, async (checks) => {
         const page = await openArtifact('owner', artifactPage(bundleId()));
-        const startIndex = r2.frameRequests.length;
         const appUrl = page.url();
         const pagesBefore = j.who('owner').context.pages().length;
         await page.locator(RENDER_SELECTORS.htmlFrame).waitFor({ state: 'attached' });
@@ -1241,11 +1360,24 @@ async function runMain(browser: Browser): Promise<void> {
         await htmlFrame(page).locator('#api-nav').click();
         const apiNavStatus = (await apiNav).status();
         await settle(page);
-        const bearing = sessionBearing(startIndex).concat(
-          sessionBearing(0).filter((q) => q.who === 'owner' && q.step <= 'R2-04')
+        // Every frame request of the owner so far (R2-02..R2-05), by step.
+        const session = await frameSessionFacts(
+          requestsIn('owner', ['R2-01', 'R2-02', 'R2-03', 'R2-04', 'R2-05'])
         );
-        noteSessionBearing(bearing, r);
-        const probeRec = { who: 'owner', step: 'R2-05', ...result, parent, nav, apiNavStatus };
+        if (session.bearing > 0 || apiNavStatus === 200) r2.sessionBearingFrameRequest = true;
+        if (apiNavStatus !== 200 && apiNavStatus !== 401) {
+          // An ordinary finding; its status stays in the restricted probe record.
+          j.finding('R2-05', ISOLATION_FAIL);
+        }
+        const probeRec = {
+          who: 'owner',
+          step: 'R2-05',
+          ...result,
+          parent,
+          nav,
+          apiNavStatus,
+          session,
+        };
         r2.probes.push(probeRec);
         r.ui.probe = probeRec;
         r.api.push({
@@ -1256,83 +1388,92 @@ async function runMain(browser: Browser): Promise<void> {
           code: null,
         });
         // (a)
-        iso(result.frame === 'framed');
-        iso(result.origin === 'null');
-        iso(String(result.parentDom).startsWith('blocked:'));
-        iso(String(result.parentWrite).startsWith('blocked:'));
-        iso(parent.contentDocumentNull);
-        iso(parent.parentFlag === null);
+        checks.framed = result.frame === 'framed';
+        checks.opaqueOrigin = result.origin === 'null';
+        checks.parentDomBlocked = String(result.parentDom).startsWith('blocked:');
+        checks.parentWriteBlocked = String(result.parentWrite).startsWith('blocked:');
+        checks.appCannotReadFrame = parent.contentDocumentNull;
+        checks.appFlagUnset = parent.parentFlag === null;
         // (b)
-        iso(String(result.cookie).startsWith('blocked:'));
-        iso(String(result.storage).startsWith('blocked:'));
-        iso(String(result.fetch).startsWith('blocked:'));
-        iso(bearing.length === 0);
-        if (apiNavStatus === 200) r2.sessionBearingFrameRequest = true;
-        iso(apiNavStatus !== 200);
-        if (apiNavStatus !== 200 && apiNavStatus !== 401) {
-          j.finding('R2-05', `frame API navigation answered ${apiNavStatus}`, ISOLATION_FAIL);
-        }
-        iso(apiNavStatus === 401);
+        checks.cookieBlocked = String(result.cookie).startsWith('blocked:');
+        checks.storageBlocked = String(result.storage).startsWith('blocked:');
+        checks.fetchBlocked = String(result.fetch).startsWith('blocked:');
+        checks.frameRequestsSeen = session.total > 0;
+        checks.headersAllRead = session.unread === 0;
+        checks.noSessionBearing = session.bearing === 0;
+        checks.apiNavUnauthenticated = apiNavStatus === 401;
         // (c)
-        iso(String(result.popup).startsWith('blocked:'));
-        iso(nav.pageUrlUnchanged);
-        iso(nav.probePathRequests === 0);
-        iso(nav.newPages === 0);
+        checks.popupBlocked = String(result.popup).startsWith('blocked:');
+        checks.pageUrlUnchanged = nav.pageUrlUnchanged;
+        checks.noProbePathRequests = nav.probePathRequests === 0;
+        checks.noNewPages = nav.newPages === 0;
       }),
-    { requires: ['R2-02'] }
+    { pre: preBundle }
   );
 
-  // ---- R2-06: Open in new tab stays sandboxed ----------------------------
+  // ---- R2-06: Open in new tab stays sandboxed (one generic verdict) -----
   r2.step = 'R2-06';
   await j.row(
     'R2-06',
     (r) =>
-      isolated(async () => {
+      isolationRow(r, async (checks) => {
         const page = await openArtifact('owner', artifactPage(bundleId()));
         await page.locator(RENDER_SELECTORS.htmlFrame).waitFor({ state: 'attached' });
         const frameSrc = (await htmlFrameAttributes(page)).src ?? '';
-        const startIndex = r2.frameRequests.length;
+        r2.step = 'R2-06-popup';
         const [popup] = await Promise.all([
           j.who('owner').context.waitForEvent('page'),
           previewBarButton(page, 'Open in new tab').click(),
         ]);
         await popup.waitForLoadState('load');
-        const samePath = new URL(popup.url()).pathname === new URL(frameSrc, popup.url()).pathname;
-        await expect(popup.locator('#ver')).toHaveText('R2 bundle v1');
+        const samePath =
+          new URL(popup.url()).pathname === new URL(frameSrc, popup.url()).pathname;
+        const rendered = await textIs(popup.locator('#ver'), 'R2 bundle v1');
         const result = await readProbe(popup);
         await settle(popup);
-        const mine = r2.frameRequests.slice(startIndex).filter((q) => q.who === 'owner');
-        const doc = mine.find((q) => q.topLevelDocument);
-        const sub = mine.filter((q) => !q.topLevelDocument);
-        const bearing = sub.filter((q) => q.cookieHeader.present);
-        noteSessionBearing(bearing, r);
+        const mine = requestsIn('owner', ['R2-06-popup']).filter((q) => q.topLevelDocument);
+        const popupPath = new URL(popup.url()).pathname;
+        const doc = mine.find((q) => redactPath(popupPath) === q.path);
+        // The popup's own sub-resources: requests whose document is the popup.
+        const sub = r2.frameRequests.filter(
+          (q) => q.who === 'owner' && q.step === 'R2-06-popup' && !q.topLevelDocument
+        );
+        const session = await frameSessionFacts(sub);
+        if (session.bearing > 0) r2.sessionBearingFrameRequest = true;
         const headers = await viewHeaders('owner', frameSrc, r);
         await popup.close();
+        r2.step = 'R2-06';
         const rec = {
           who: 'owner',
           step: 'R2-06',
           ...result,
           samePath,
+          rendered,
           topLevelDocument: {
             status: doc?.status ?? null,
+            cookieHeaderRead: doc?.cookieHeader.read ?? null,
             cookieHeaderPresent: doc?.cookieHeader.present ?? null,
           },
           subresources: sub.map((q) => ({ path: q.path, status: q.status ?? null })),
+          session,
           csp: headers.csp,
         };
         r2.probes.push(rec);
         r.ui.popup = rec;
-        iso(samePath);
-        iso(result.frame === 'top-level');
-        iso(result.origin === 'null');
-        iso(String(result.cookie).startsWith('blocked:'));
-        iso(String(result.storage).startsWith('blocked:'));
-        iso(String(result.fetch).startsWith('blocked:'));
-        iso(bearing.length === 0);
-        iso(doc?.status === 200);
-        iso(String(headers.csp).includes('sandbox allow-scripts'));
+        checks.samePath = samePath;
+        checks.rendered = rendered;
+        checks.topLevel = result.frame === 'top-level';
+        checks.opaqueOrigin = result.origin === 'null';
+        checks.cookieBlocked = String(result.cookie).startsWith('blocked:');
+        checks.storageBlocked = String(result.storage).startsWith('blocked:');
+        checks.fetchBlocked = String(result.fetch).startsWith('blocked:');
+        checks.subresourcesSeen = session.total > 0;
+        checks.headersAllRead = session.unread === 0;
+        checks.noSessionBearing = session.bearing === 0;
+        checks.documentServed = doc?.status === 200;
+        checks.cspSandbox = String(headers.csp).includes('sandbox allow-scripts');
       }),
-    { requires: ['R2-02'] }
+    { pre: preBundle }
   );
 
   // ---- R2-07: markdown bundle renders ------------------------------------
@@ -1348,28 +1489,46 @@ async function runMain(browser: Browser): Promise<void> {
       await expect(page.locator(SELECTORS.artifactList)).toBeAttached();
       await newArtifactButton(page).click();
       const title = `R2 markdown ${suffix()}`;
-      const pub = await publishThroughDialog(page, 'owner', r2.dirs.markdown!, {
+      const pub = await publishThroughDialog(page, r2.dirs.markdown!, {
         title,
         note: 'r2 md',
         createPath: /^\/api\/v1\/artifacts$/,
       });
       r.ui.entryShown = pub.entry;
-      expect(pub.createStatus, 'markdown publish create').toBe(201);
-      expect.soft(pub.entry, 'entry defaults to index.md').toBe('index.md');
-      await expect(page).toHaveURL(
-        new RegExp(`/projects/${j.state.projectId}/artifacts/[0-9a-f-]+$`)
-      );
-      r2.markdown = { id: new URL(page.url()).pathname.split('/').pop()!, title };
+      // A refused publish makes the markdown rows "not run" with the cause (oracle rule 3).
+      const refuse = (cause: string): void => {
+        r2.markdownRefused = `markdown publish refused (${cause})`;
+        r.legNotRun = r2.markdownRefused;
+      };
+      if (pub.createStatus !== 201) {
+        refuse(`create ${pub.createStatus} ${String(pub.createCode)}`);
+        return;
+      }
+      // Known from the create on, so the cleanup deletes it even if finalize is refused.
+      r2.markdownCreatedId = pub.createdId ?? undefined;
+      const landed = await expect(page)
+        .toHaveURL(new RegExp(`/projects/${j.state.projectId}/artifacts/[0-9a-f-]+$`))
+        .then(() => true)
+        .catch(() => false);
+      await settle(page);
       const calls = publishCalls('owner', since, 1);
       r.api.push(...calls.map((c) => ({ as: 'owner', ...c, status: c.status ?? 0, code: null })));
-      r2.publishes.push({ artifact: 'markdown', seq: 1, calls });
+      r2.publishes.push({ artifact: 'markdown', seq: 1, calls, asked: pub.asked });
       const finalize = calls.find((c) => c.path.endsWith('/finalize'));
-      expect.soft(finalize?.status ?? 0, 'finalize 2xx').toBeGreaterThanOrEqual(200);
-      expect.soft(finalize?.status ?? 0, 'finalize 2xx').toBeLessThan(300);
+      const finalizeOk = !!finalize?.status && finalize.status >= 200 && finalize.status < 300;
+      if (!finalizeOk) {
+        refuse(`finalize ${String(finalize?.status ?? 'missing')}`);
+        return;
+      }
+      expect(landed, 'lands on the markdown artifact').toBe(true);
+      r2.markdown = { id: new URL(page.url()).pathname.split('/').pop()!, title };
+      expect.soft(pub.entry, 'entry defaults to index.md').toBe('index.md');
 
       const md = await openMarkdown('owner');
       r.ui.entryBar = await textOf(md.locator(RENDER_SELECTORS.htmlBar));
-      expect.soft(String(r.ui.entryBar), 'entry bar names index.md').toContain('index.md');
+      expect
+        .soft(String(r.ui.entryBar), 'entry bar: index.md · <size>')
+        .toMatch(/^index\.md · \S+/);
       r.ui.openRaw = await isShown(previewBarButton(md, 'Open raw'));
       expect.soft(r.ui.openRaw, 'Open raw visible').toBe(true);
       const facts = await markdownFacts(md);
@@ -1386,8 +1545,7 @@ async function runMain(browser: Browser): Promise<void> {
         );
         expect.soft(res.status, `GET ${p}`).toBe(200);
       }
-    },
-    { requires: ['R2-01'] }
+    }
   );
 
   // ---- R2-07b: a clicked link opens a new tab; nothing opens by itself ---
@@ -1402,28 +1560,54 @@ async function runMain(browser: Browser): Promise<void> {
       r.ui.pagesBeforeClick = context.pages().length - pagesBefore;
       expect.soft(r.ui.pagesBeforeClick, 'nothing opened before the click').toBe(0);
       const link = markdownFrame(page).locator('a', { hasText: /^\s*notes\s*$/ });
-      const [popup] = await Promise.all([context.waitForEvent('page'), link.click()]);
-      const response = await popup.waitForEvent('response').catch(() => null);
-      await popup.waitForLoadState('load');
       const want = `/api/v1/artifacts/${markdownId()}/versions/1/files/notes.md`;
-      r.ui.popupPath = new URL(popup.url()).pathname;
-      const status =
-        response?.status() ??
-        j.who('owner').requests.find((q) => q.path === want)?.status ??
-        null;
-      r.ui.popupStatus = status;
-      expect.soft(r.ui.popupPath, 'new tab opens the v1 notes.md').toBe(want);
-      expect.soft(status, 'new tab answered 200').toBe(200);
+      // Registered before the click, so the new tab's document answer is never missed.
+      const docResponse = context.waitForEvent('response', {
+        predicate: (res) => new URL(res.url()).pathname === want,
+        timeout: 15_000,
+      });
+      const [popup] = await Promise.all([context.waitForEvent('page'), link.click()]);
+      const response = await docResponse.catch(() => null);
+      await popup.waitForLoadState('load');
+      const popupHeaders = response ? await response.allHeaders() : {};
+      r.ui.popup = {
+        path: new URL(popup.url()).pathname,
+        status: response?.status() ?? null,
+        contentType: popupHeaders['content-type'] ?? null,
+        contentDisposition: popupHeaders['content-disposition'] ?? null,
+      };
+      const popupRec = r.ui.popup as {
+        path: string;
+        status: number | null;
+        contentType: string | null;
+        contentDisposition: string | null;
+      };
+      expect.soft(popupRec.path, 'new tab opens the v1 notes.md').toBe(want);
+      expect.soft(popupRec.status, 'new tab answered 200').toBe(200);
+      expect
+        .soft(popupRec.contentType ?? '', 'served as text/markdown')
+        .toMatch(/^text\/markdown/);
+      expect.soft(popupRec.contentDisposition ?? '', 'served inline').toMatch(/^inline/);
       await popup.close();
+      // The same file through the API (recorded; must agree).
+      const api = await j.api('owner', 'GET', want, undefined, r);
+      r.ui.apiFile = {
+        status: api.status,
+        contentType: api.headers['content-type'] ?? null,
+        contentDisposition: api.headers['content-disposition'] ?? null,
+      };
+      expect.soft(api.status, 'GET notes.md').toBe(200);
+      expect
+        .soft(api.headers['content-type'] ?? '', 'API text/markdown')
+        .toMatch(/^text\/markdown/);
+      expect.soft(api.headers['content-disposition'] ?? '', 'API inline').toMatch(/^inline/);
+      // No script ran, and the R2-08 counts still hold after the click.
       const facts = await markdownFacts(page);
       const flags = await parentFlags(page);
-      r.ui.afterClick = { scripts: facts.scripts, frameFlag: facts.frameFlag, appFlag: flags.r2md };
-      expect.soft(facts.scripts, 'no script elements').toBe(0);
-      expect.soft(facts.frameFlag, 'no script ran').toBeNull();
-      expect.soft(flags.r2md, 'no script ran (app page)').toBeNull();
-      r.api.push({ as: 'owner', method: 'GET', path: want, status: status ?? 0, code: null });
+      r.ui.afterClick = facts;
+      expectMarkdownInert(facts, flags);
     },
-    { requires: ['R2-07'] }
+    { pre: preMarkdown }
   );
 
   // ---- R2-08: raw HTML and script inert ----------------------------------
@@ -1464,7 +1648,7 @@ async function runMain(browser: Browser): Promise<void> {
       expectMarkdownInert(facts, flags);
       expect.soft(page.url(), 'app page stays on the artifact').toContain(markdownId());
     },
-    { requires: ['R2-07'] }
+    { pre: preMarkdown }
   );
 
   // ---- R2-09: v2 and v3 through Upload new version -----------------------
@@ -1480,7 +1664,7 @@ async function runMain(browser: Browser): Promise<void> {
         const upload = uploadVersionButton(page);
         await expect(upload, 'Upload new version visible').toBeVisible();
         await upload.click();
-        const pub = await publishThroughDialog(page, 'owner', r2.dirs[`bundle-v${n}`]!, {
+        const pub = await publishThroughDialog(page, r2.dirs[`bundle-v${n}`]!, {
           note: `r2 v${n}`,
           createPath: new RegExp(`^/api/v1/artifacts/${bundleId()}/versions$`),
         });
@@ -1494,6 +1678,8 @@ async function runMain(browser: Browser): Promise<void> {
           versionLabel: await textOf(page.locator(SELECTORS.versionMenu)),
           heading: await frameHeading(page),
         };
+        // v3 exists (the fact R2-10..R2-15 need): created and shown as current.
+        if (n === 3 && pub.createStatus === 201) r2.v3Published = true;
         await settle(page);
         const calls = publishCalls('owner', since, n);
         r.api.push(...calls.map((c) => ({ as: 'owner', ...c, status: c.status ?? 0, code: null })));
@@ -1508,6 +1694,7 @@ async function runMain(browser: Browser): Promise<void> {
           artifact: 'bundle',
           seq: n,
           create: create?.status ?? null,
+          asked: pub.asked,
           uploads: calls.filter((c) => c.method === 'PUT'),
           finalize: finalize?.status ?? null,
         });
@@ -1519,7 +1706,7 @@ async function runMain(browser: Browser): Promise<void> {
         }
       }
     },
-    { requires: ['R2-02'] }
+    { pre: preBundle }
   );
 
   // ---- R2-10: history in order with the publisher ------------------------
@@ -1575,7 +1762,7 @@ async function runMain(browser: Browser): Promise<void> {
       const currentSeq = (art.body as { artifact?: { currentSeq?: number } }).artifact?.currentSeq;
       expect.soft(currentSeq, 'currentSeq').toBe(3);
     },
-    { requires: ['R2-09'] }
+    { pre: preV3 }
   );
 
   // ---- R2-11: older versions show their own content ----------------------
@@ -1584,14 +1771,15 @@ async function runMain(browser: Browser): Promise<void> {
     'R2-11',
     async (r) => {
       const page = await openArtifact('owner', artifactPage(bundleId()));
-      // v2 through the Version menu.
+      // v2 through the Version menu (mints counted only from here).
+      const mintsBeforeV2 = r2.mints.length;
       await page.locator(SELECTORS.versionMenu).click();
       await versionMenuItem(page, 2).click();
       await expect(page).toHaveURL(new RegExp(`/artifacts/${bundleId()}/v/2$`));
       await expect(page.locator(SELECTORS.versionMenu)).toContainText('Version v2');
       await expect(htmlFrame(page).locator('#ver')).toHaveText('R2 bundle v2');
       const v2Label = await textOf(page.locator(SELECTORS.versionMenu));
-      const v2Mint = await latestMint('owner', 2);
+      const v2Mint = await latestMint('owner', 2, mintsBeforeV2);
       const v2View = viewInfo((await htmlFrameAttributes(page)).src, bundleId());
       r.ui.v2 = { label: v2Label, heading: await frameHeading(page), viewSeq: v2View.viewSeq };
       expect.soft(v2Label, 'v2 label has no (current)').not.toContain('(current)');
@@ -1606,6 +1794,7 @@ async function runMain(browser: Browser): Promise<void> {
       expect.soft(v2Mint.status, 'mint v2').toBe(200);
       // v1 through History's View v1.
       await tab(page, 'history').click();
+      const mintsBeforeV1 = r2.mints.length;
       await historyViewButton(page, 1).click();
       await expect(page).toHaveURL(new RegExp(`/artifacts/${bundleId()}/v/1$`));
       await tab(page, 'preview').click();
@@ -1635,7 +1824,7 @@ async function runMain(browser: Browser): Promise<void> {
       expect
         .soft(v1Files.rows.map((x) => x.path), 'v1 has no notes/v3.txt')
         .not.toContain('notes/v3.txt');
-      const v1Mint = await latestMint('owner', 1);
+      const v1Mint = await latestMint('owner', 1, mintsBeforeV1);
       expect.soft(v1Mint.status, 'mint v1').toBe(200);
       // Back to the current version.
       await tab(page, 'preview').click();
@@ -1662,7 +1851,7 @@ async function runMain(browser: Browser): Promise<void> {
         expect.soft(got, `version ${seq} seq`).toBe(seq);
       }
     },
-    { requires: ['R2-09'] }
+    { pre: preV3 }
   );
 
   // ---- R2-12: Files tab and Download -------------------------------------
@@ -1692,7 +1881,7 @@ async function runMain(browser: Browser): Promise<void> {
     expect
       .soft(files.rows.find((x) => x.path === 'index.html')?.openLabel, 'index.html not shown')
       .toBe('Not shown in the browser');
-    const dl = await downloadFile(page, 'img/chart.png');
+    const dl = await downloadFile(page, key, 'img/chart.png');
     await settle(page);
     const want = `/api/v1/artifacts/${bundleId()}/versions/3/files/img/chart.png`;
     const dlRequest = [...j.who(key).requests].reverse().find((q) => q.path === want);
@@ -1700,6 +1889,7 @@ async function runMain(browser: Browser): Promise<void> {
     r.ui.download = dl;
     expect.soft(dl.filename, 'download filename').toBe('chart.png');
     expect.soft(dl.bytes, 'download size').toBe(r2.fileSizes['img/chart.png']);
+    expect.soft(dl.savedAbsentAfterDelete, 'downloaded file removed').toBe(true);
     const res = await j.api(key, 'GET', want, undefined, r);
     const contentLength = Number(res.headers['content-length'] ?? -1);
     r.ui.fileGet = { status: res.status, contentLength };
@@ -1727,19 +1917,18 @@ async function runMain(browser: Browser): Promise<void> {
         .soft(html.headers['content-disposition'] ?? '', 'index.html served as attachment')
         .toMatch(/^attachment/);
     },
-    { requires: ['R2-09'] }
+    { pre: preV3 }
   );
 
-  // ---- R2-13: reader, bundle page and frame (generic failure text) -------
+  // ---- R2-13: reader, bundle page and frame (one generic verdict) ------
   r2.step = 'R2-13';
   await j.row(
     'R2-13',
     (r) =>
-      isolated(async () => {
-        const startIndex = r2.frameRequests.length;
+      isolationRow(r, async (checks) => {
         const page = await openArtifact('member', artifactPage(bundleId()));
-        await expect(headerTitle(page)).toHaveText(r2.bundle!.title);
         await page.locator(RENDER_SELECTORS.htmlFrame).waitFor({ state: 'attached' });
+        const title = await textOf(headerTitle(page));
         const owner = await textOf(ownerMeta(page));
         const bar = await textOf(page.locator(RENDER_SELECTORS.untrustedBar));
         const attrs = await htmlFrameAttributes(page);
@@ -1751,10 +1940,10 @@ async function runMain(browser: Browser): Promise<void> {
           () => (document.getElementById('chart') as HTMLImageElement | null)?.naturalWidth ?? -1
         );
         await htmlFrame(page).locator('#to-page2').click();
-        await expect(htmlFrame(page).locator('#page2')).toHaveText('R2 page two v3');
+        const page2 = await textIs(htmlFrame(page).locator('#page2'), 'R2 page two v3');
         await settle(page);
-        const bearing = sessionBearing(startIndex).filter((q) => q.who === 'member');
-        noteSessionBearing(bearing, r);
+        const session = await frameSessionFacts(requestsIn('member', ['R2-13']));
+        if (session.bearing > 0) r2.sessionBearingFrameRequest = true;
         const caps = await j.api('member', 'GET', `/api/v1/artifacts/${bundleId()}`, undefined, r);
         const mint = await latestMint('member', 3);
         r.api.push({
@@ -1767,6 +1956,7 @@ async function runMain(browser: Browser): Promise<void> {
         const rec = {
           who: 'member',
           step: 'R2-13',
+          title,
           owner,
           bar,
           frame: {
@@ -1776,31 +1966,37 @@ async function runMain(browser: Browser): Promise<void> {
           },
           heading,
           chartNaturalWidth: chart,
+          page2,
           probe: result,
+          session,
           canPublish: (caps.body as { canPublish?: boolean } | null)?.canPublish ?? null,
         };
-        r2.probes.push({ ...result, who: 'member', step: 'R2-13' });
+        r2.probes.push({ ...result, who: 'member', step: 'R2-13', session });
         r2.frames.push({ who: 'member', step: 'R2-13', kind: 'html', ...rec.frame });
         r.ui.reader = rec;
         const labels = ownerLabels();
-        iso(owner !== 'Owner: You' && labels.some((l) => owner === `Owner: ${l}`));
         const barText = (l: string): string =>
           `Content published by ${l} · runs sandboxed, isolated from Scion`;
-        iso(labels.some((l) => bar === barText(l)));
-        iso(JSON.stringify(rec.frame.sandboxTokens) === JSON.stringify(['allow-scripts']));
-        iso(attrs.referrerpolicy === 'no-referrer');
-        iso(info.viewSeq === 3 && info.viewIdMatches && info.entry === 'index.html');
-        iso(heading === 'R2 bundle v3');
-        iso(chart === CHART_SIZE.width);
-        iso(result.origin === 'null');
-        iso(String(result.parentDom).startsWith('blocked:'));
-        iso(String(result.cookie).startsWith('blocked:'));
-        iso(String(result.fetch).startsWith('blocked:'));
-        iso(bearing.length === 0);
-        iso(caps.status === 200 && rec.canPublish === false);
-        iso(mint.status === 200);
+        checks.title = title === r2.bundle!.title;
+        checks.ownerLabel = owner !== 'Owner: You' && labels.some((l) => owner === `Owner: ${l}`);
+        checks.untrustedBar = labels.some((l) => bar === barText(l));
+        checks.sandboxExact = JSON.stringify(rec.frame.sandboxTokens) === '["allow-scripts"]';
+        checks.referrerPolicy = attrs.referrerpolicy === 'no-referrer';
+        checks.viewSrc = info.viewSeq === 3 && info.viewIdMatches && info.entry === 'index.html';
+        checks.heading = heading === 'R2 bundle v3';
+        checks.image = chart === CHART_SIZE.width;
+        checks.relativeLink = page2;
+        checks.opaqueOrigin = result.origin === 'null';
+        checks.parentDomBlocked = String(result.parentDom).startsWith('blocked:');
+        checks.cookieBlocked = String(result.cookie).startsWith('blocked:');
+        checks.fetchBlocked = String(result.fetch).startsWith('blocked:');
+        checks.frameRequestsSeen = session.total > 0;
+        checks.headersAllRead = session.unread === 0;
+        checks.noSessionBearing = session.bearing === 0;
+        checks.readOnly = caps.status === 200 && rec.canPublish === false;
+        checks.minted = mint.status === 200;
       }),
-    { requires: ['R2-09'] }
+    { pre: preV3 }
   );
 
   // ---- R2-14: reader history ---------------------------------------------
@@ -1844,12 +2040,12 @@ async function runMain(browser: Browser): Promise<void> {
         .soft(apiCreatedBy, 'same publisher as the owner saw')
         .toEqual(Array(3).fill(j.who('owner').id));
     },
-    { requires: ['R2-09'] }
+    { pre: preV3 }
   );
 
   // ---- R2-15: reader Files and Download ----------------------------------
   r2.step = 'R2-15';
-  await j.row('R2-15', (r) => filesCheck('member', r), { requires: ['R2-09'] });
+  await j.row('R2-15', (r) => filesCheck('member', r), { pre: preV3 });
 
   // ---- R2-16: reader markdown --------------------------------------------
   r2.step = 'R2-16';
@@ -1889,7 +2085,7 @@ async function runMain(browser: Browser): Promise<void> {
         expect.soft(res.status, `GET ${p}`).toBe(200);
       }
     },
-    { requires: ['R2-07'] }
+    { pre: preMarkdown }
   );
 
   // ---- R2-17: outsider ---------------------------------------------------
@@ -1921,7 +2117,7 @@ async function runMain(browser: Browser): Promise<void> {
         .soft([real.status, real.code], 'same as for a random id')
         .toEqual([random.status, random.code]);
     },
-    { requires: ['R2-01'] }
+    { pre: preBundle }
   );
 
   // ---- R2-17a: a held view URL works without a session -------------------
@@ -1951,7 +2147,7 @@ async function runMain(browser: Browser): Promise<void> {
         await context.close();
       }
     },
-    { requires: ['R2-02'] }
+    { pre: preHeld }
   );
 
   // ---- R2-20: markdown in the chat preview -------------------------------
@@ -1969,7 +2165,7 @@ async function runMain(browser: Browser): Promise<void> {
 
 /** R2-20 is filled in by the chat fixture (see chatRow below). */
 async function runChatRow(): Promise<void> {
-  await j.row('R2-20', (r) => chatRow(r), { requires: ['R2-07'] });
+  await j.row('R2-20', (r) => chatRow(r), { pre: preMarkdown });
   const send = r2.chat.send as Record<string, unknown> | undefined;
   if (!send) {
     j.notRun(['R2-20x'], 'no chat message was sent (see R2-20)');
@@ -2092,6 +2288,15 @@ async function chatRow(r: RowRecord): Promise<void> {
   expect.soft(art.status, 'member reads the referenced artifact').toBe(200);
 }
 
+/** Every artifact this run created, as [name, id] (known from its create on). */
+function createdArtifacts(): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  if (r2.bundle) out.push(['bundle', r2.bundle.id]);
+  const md = r2.markdown?.id ?? r2.markdownCreatedId;
+  if (md) out.push(['markdown', md]);
+  return out;
+}
+
 async function runCleanup(testInfo: {
   annotations: ReadonlyArray<{ type: string; description?: string }>;
   project: { outputDir: string };
@@ -2107,13 +2312,10 @@ async function runCleanup(testInfo: {
 
   // Both artifacts, as the owner (soft delete).
   const artifactDeletes: Record<string, number | string> = {};
-  for (const [name, a] of [
-    ['bundle', r2.bundle],
-    ['markdown', r2.markdown],
-  ] as const) {
-    if (!a || !j.state.ids.owner) continue;
+  for (const [name, id] of createdArtifacts()) {
+    if (!j.state.ids.owner) continue;
     try {
-      const del = await j.api('owner', 'DELETE', `/api/v1/artifacts/${a.id}`);
+      const del = await j.api('owner', 'DELETE', `/api/v1/artifacts/${id}`);
       artifactDeletes[name] = del.status;
       if (del.status !== 204) residue.push(`${name} delete answered ${del.status}`);
     } catch (err) {
@@ -2133,6 +2335,10 @@ async function runCleanup(testInfo: {
       residue.push(`cleanup error (held view URL): ${firstLine(err)}`);
     }
   }
+
+  // The chat thread, while its project still exists (so a read proves the delete).
+  const chatCleanup = await cleanupChat(residue, states);
+  if (chatCleanup) cleanup.chat = chatCleanup;
 
   // The membership, then the project.
   const removals: Record<string, number | string> = {};
@@ -2172,26 +2378,20 @@ async function runCleanup(testInfo: {
       residue.push(`cleanup error (project): ${firstLine(err)}`);
     }
   }
-  const chatCleanup = await cleanupChat(residue, states);
-  if (chatCleanup) cleanup.chat = chatCleanup;
-
   // Final reads while the sessions still exist.
   try {
-    for (const [name, a] of [
-      ['bundle', r2.bundle],
-      ['markdown', r2.markdown],
-    ] as const) {
-      if (!a || !j.state.ids.owner) continue;
-      const own = await j.api('owner', 'GET', `/api/v1/artifacts/${a.id}`);
+    for (const [name, id] of createdArtifacts()) {
+      if (!j.state.ids.owner) continue;
+      const own = await j.api('owner', 'GET', `/api/v1/artifacts/${id}`);
       states[`${name} (owner read)`] = classifyRead(own.status, own.body, 'artifact');
       const list = await j.api('owner', 'GET', '/api/v1/artifacts?mine=1');
       const listed = ((list.body ?? {}) as { artifacts?: Array<{ id: string }> }).artifacts?.some(
-        (x) => x.id === a.id
+        (x) => x.id === id
       );
       states[`${name} (owner list)`] =
         list.status === 200 && !listed ? 'absent' : 'present_in_list';
       if (j.state.ids.member) {
-        const m = await j.api('member', 'GET', `/api/v1/artifacts/${a.id}`);
+        const m = await j.api('member', 'GET', `/api/v1/artifacts/${id}`);
         states[`${name} (member read)`] = classifyRead(m.status, m.body, 'artifact');
       }
     }
@@ -2229,6 +2429,9 @@ async function runCleanup(testInfo: {
   for (const identity of Object.values(j.state.ids) as Array<Identity<Key> | undefined>) {
     await identity?.context.close();
   }
+  r2.downloads.forEach((d, i) => {
+    states[`download ${d.who} #${i + 1}`] = fs.existsSync(d.file) ? 'present' : 'absent';
+  });
   if (j.state.tmpDir) {
     fs.rmSync(j.state.tmpDir, { recursive: true, force: true });
     states['fixture temp dir'] = fs.existsSync(j.state.tmpDir) ? 'present' : 'absent';
@@ -2319,7 +2522,18 @@ async function runCleanup(testInfo: {
     ...leaks.map((l) => `secret-like string at offset ${l}`),
     ...(capabilityLeaks > 0 ? [`${capabilityLeaks} view capability strings`] : []),
   ];
-  const body = JSON.stringify(ev, null, 2);
+  // The full body is written only if the check passed; otherwise a stub with the counts.
+  const breach = leaks.length > 0 || capabilityLeaks > 0;
+  const body = breach
+    ? JSON.stringify(
+        {
+          rows: { 'R2-19': r19 },
+          withheld: 'evidence not written: secret-like or capability strings found',
+        },
+        null,
+        2
+      )
+    : JSON.stringify(ev, null, 2);
   const evidenceFile = path.join(testInfo.project.outputDir, 'artifacts-render-evidence.json');
   fs.mkdirSync(path.dirname(evidenceFile), { recursive: true });
   fs.writeFileSync(evidenceFile, body, { mode: 0o600 });
@@ -2347,7 +2561,11 @@ function capabilityLike(text: string): number {
   return inPath + shape;
 }
 
-/** Deletes the chat thread, if one was created, and checks it is gone. */
+/**
+ * Deletes the chat thread, if one was created, as the owner, and proves it
+ * is gone while its project still exists: the DELETE must answer 2xx and a
+ * read must then answer 404 or show deletedAt.
+ */
 async function cleanupChat(
   residue: string[],
   states: Record<string, string>
@@ -2359,11 +2577,14 @@ async function cleanupChat(
     const topicPath = `/api/v1/chat/topics/${encodeURIComponent(topicId)}`;
     const del = await j.api('owner', 'DELETE', topicPath);
     out.threadDelete = del.status;
-    if (del.status >= 300 && del.status !== 404) residue.push(`chat thread: DELETE ${del.status}`);
+    const deleted = del.status >= 200 && del.status < 300;
+    if (!deleted) residue.push(`chat thread: DELETE ${del.status}`);
     const get = await j.api('owner', 'GET', topicPath);
     out.threadReadAfter = get.status;
     const deletedAt = (get.body as { deletedAt?: string } | null)?.deletedAt;
-    states['chat thread'] = get.status === 404 || !!deletedAt ? 'absent' : `status ${get.status}`;
+    out.deletedAtSet = !!deletedAt;
+    const gone = deleted && (get.status === 404 || !!deletedAt);
+    states['chat thread'] = gone ? 'absent' : `delete ${del.status}, read ${get.status}`;
   } catch (err) {
     residue.push(`cleanup error (chat thread): ${firstLine(err)}`);
   }
