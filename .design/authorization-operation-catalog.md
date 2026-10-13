@@ -1259,6 +1259,7 @@
 | ID | Kind | Description | Fail-Closed |
 |----|------|-------------|-------------|
 | target-exists | business | Project must exist and not be already deleted | Yes |
+| agents-runtime-deleted | business | Unless force=true, refused with 409 conflict while the project has an agent that is not soft-deleted (runtime deletion not confirmed); checked under the agent row lock, after authorization | Yes |
 
 ### Audit
 
@@ -1276,11 +1277,13 @@
 - **Retry:** no retry — cascading deletes are best-effort; DB cascade is authoritative
 - **Auth Before Emit:** Yes
 
-**Denial Codes:** `forbidden`, `user_suspended`, `credential_insufficient`, `not_found`
+**Denial Codes:** `forbidden`, `user_suspended`, `credential_insufficient`, `not_found`, `conflict`
 
 ### Tests
 
 - `pkg/hub:TestRS3_ProjectDeleteOwnerPositiveControl`
+- `pkg/hub:TestProjectDelete_LiveAgentRefused`
+- `pkg/hub:TestProjectDelete_GuardRunsAfterAuthorization`
 - `pkg/hub:TestRS3_ProjectDeleteGovernanceMatrix`
 - `pkg/hub:TestRS3_ProjectDeleteAtomicAudit`
 
