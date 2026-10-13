@@ -506,11 +506,15 @@ pin "(m) asymmetric class, ns=core-agents: truncated, so digested" \
 # --------------------------------------------------------------------------
 # (n) THE ORPHAN DISCLOSURE IN NOTES.txt.
 # --------------------------------------------------------------------------
-# The fix does not remediate anyone who already has the defect - it only stops
-# new ones - so an upgraded install keeps a live cluster-scoped object under the
-# OLD name. NOTES tells the operator, and that text is a deliverable of this fix
-# rather than a courtesy: it is the only thing standing between an operator and
-# a dangling cluster-wide secrets grant.
+# A release whose name the old code truncated gets a new cluster-scoped name.
+# What happens to the object under the OLD name depends on the install path. A
+# successful `helm upgrade` deletes it after creating the new pair, unless the
+# live object has helm.sh/resource-policy: keep or, on helm 3, the delete fails
+# and is only logged. `helm template | kubectl apply` leaves it in place, and
+# NOTES is not printed on that path, so the docs page carries the same steps.
+# NOTES names the old object and gives the steps for both paths. That text is a
+# deliverable of this fix rather than a courtesy. This arm is static: it checks
+# the names and the text, not what helm does on upgrade.
 #
 # `helm template` does not emit NOTES and `helm install --dry-run` needs a
 # cluster, so the text is rendered through the SAME template engine by wrapping

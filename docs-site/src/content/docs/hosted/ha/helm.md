@@ -459,6 +459,90 @@ When the chart truncates a cluster-scoped RBAC name to 63 characters, it appends
 a digest of the full release name and namespace, so two releases cannot end up
 with the same `ClusterRole` name.
 
+### Cluster-scoped RBAC objects under the previous name
+
+Earlier versions of the chart cut these names at 63 characters and added no
+digest. A release whose name was cut that way gets a new `ClusterRole` and
+`ClusterRoleBinding` name when it moves to the current chart. This happens only
+when `rbac.create` and `runtime.listAllNamespaces` are both `true`, and
+`<fullname>-<namespace>-agents` is longer than 63 characters. The default values
+leave `runtime.listAllNamespaces` off, so a default install renders no
+cluster-scoped objects and nothing is renamed.
+
+After `helm install` or `helm upgrade`, the chart's NOTES print the current name
+and the previous one. On the rendered-manifest path, take the previous name from
+the manifest you applied before.
+
+What happens to the previous pair depends on how you deploy the chart.
+
+#### `helm upgrade`
+
+A successful `helm upgrade` creates the new pair, then deletes the previous one,
+because the previous names are in the last release manifest and not in the new
+one. The same applies to Flux, whose helm-controller runs the Helm upgrade, and
+to the Terraform `helm_release` resource. The previous pair stays in place when:
+
+- the live object has the annotation `helm.sh/resource-policy: keep`, or
+- on Helm 3, Helm cannot read or delete the object, for example because the
+  identity running the upgrade cannot delete `ClusterRoleBindings`. Helm 3 logs
+  the failure and still reports the upgrade as successful. Helm 4 fails the
+  upgrade when the delete is refused.
+
+A failed upgrade stops before the delete step, and the next successful upgrade
+deletes the pair.
+
+Check that the previous binding is gone:
+
+```bash
+kubectl get clusterrolebinding <previous-name>
+```
+
+A `NotFound` error means Helm removed it. If the binding is still listed, follow
+the manual steps below.
+
+If another install also used the previous name, because it was adopted with
+`--take-ownership` or applied from rendered manifests, Helm deletes the object
+anyway. Upgrade that install to the current chart so that it gets its own name.
+
+#### Rendered manifests (`helm template | kubectl apply`)
+
+`kubectl apply` does not delete objects that are missing from the new manifest,
+so the previous pair remains after you apply the new render. Helm does not print
+NOTES on this path, so check for the previous name yourself.
+
+Argo CD renders the chart the way `helm template` does and applies the result.
+Automated sync has `prune` off by default, so the previous pair remains and
+Argo CD lists it as an object that requires pruning.
+
+On this path, remove the previous binding by hand:
+
+1. The previous name may belong to more than one release: every release of the
+   same name whose namespace was cut to the same text rendered the same object.
+   Nothing on the object records all of them, so work from your own list of
+   installs of this chart. A label selector does not help here, because those
+   releases carry identical labels.
+2. See which namespace applied the binding last:
+
+   ```bash
+   kubectl get clusterrolebinding <previous-name> \
+     -o jsonpath='{.subjects[0].namespace}'
+   ```
+
+   If the binding is not found, there is nothing to remove. The output shows
+   only the last install that applied it, not every install that uses it.
+3. Once every release that shared the name runs the current chart, delete the
+   binding:
+
+   ```bash
+   kubectl delete clusterrolebinding <previous-name>
+   ```
+
+Leave the `ClusterRole` of the same name in place. Once nothing binds it, it
+grants nothing. It has no subjects, so the object cannot show whether another
+install still binds it, and because a binding's `roleRef` cannot be changed, a
+binding whose `ClusterRole` was deleted can be fixed only by recreating the
+`ClusterRole` under the same name.
+
 `config.existingSecret` lets you supply the whole `settings.yaml` yourself. In
 that case the chart does not check the file's contents.
 
