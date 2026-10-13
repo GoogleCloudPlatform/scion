@@ -71,7 +71,7 @@ hub:
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `endpoint` | string | The Hub API endpoint URL. A configured endpoint is what makes the CLI use a Hub. Can be overridden per-agent in `scion-agent.yaml`. This is the current way to choose the CLI's Hub; a later release replaces it with a list of named hubs. Servers use `server.hub.public_url` and `server.broker.hub_endpoint` instead (see [Server Configuration](/scion/reference/server-config/)). |
+| `endpoint` | string | The Hub API endpoint URL. A configured endpoint is what makes the CLI use a Hub. Can be overridden per-agent in `scion-agent.yaml`. An existing value appears automatically as a named hub in the CLI's hub list; to add a hub, use `scion hub add <name> <url>`. Servers use `server.hub.public_url` and `server.broker.hub_endpoint` instead (see [Server Configuration](/scion/reference/server-config/)). |
 | `project_id` | string | The unique identifier for this project on the Hub. |
 | `linked` | bool | Written by the CLI: `true` once the project is linked, `false` after `scion hub unlink` (agent commands then refuse until `scion hub link`). Unset means never linked; the project links on its first command. |
 | `enabled`, `local_only` | bool | **Deprecated and ignored.** Accepted so existing settings files still validate. `scion hub status` notes it when they are set; see the [migration page](/scion/reference/local-mode-removal/). |

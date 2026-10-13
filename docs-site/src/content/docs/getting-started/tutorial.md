@@ -16,11 +16,11 @@ Before you start, [install Scion](/scion/getting-started/install/) and a contain
 scion server start
 ```
 
-The server starts in the background and prints its URL. It also saves the endpoint in your global
-settings, so later commands find the hub:
+The server starts in the background and prints its URL. On the first start it also adds itself to
+your list of hubs as `local`, so later commands find it:
 
 ```
-Configured hub endpoint: http://127.0.0.1:8080 (run 'scion hub status' to verify)
+Registered hub 'local' (http://127.0.0.1:8080); rename with 'scion hub rename'.
 ```
 
 On the first run your browser opens the [Onboarding Wizard](/scion/getting-started/onboarding/) at

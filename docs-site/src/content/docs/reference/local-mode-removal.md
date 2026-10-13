@@ -52,7 +52,7 @@ re-link it. See [Linked git projects](/scion/local/workspace/#linked-git-project
 With no hub configured, any command that needs one fails with:
 
 ```
-No hub configured. Start the local hub with 'scion server start' (first run opens setup), or set a remote one with 'scion config set hub.endpoint <url>'.
+No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'.
 ```
 
 When the configured hub is the local workstation server and it is not running:
@@ -61,9 +61,7 @@ When the configured hub is the local workstation server and it is not running:
 Local scion server is not running. Start it with 'scion server start'.
 ```
 
-`scion config set hub.endpoint <url>` is the current way to point the CLI at a remote hub. A later
-release replaces it with a list of named hubs; see [`scion use`](/scion/reference/cli/#scion-use)
-for the current-project selection that already exists.
+To use a remote hub: `scion hub add <name> <url>`, then `scion use --hub <name>`. An existing `hub.endpoint` setting appears automatically as a named hub.
 
 ## Your first command after upgrading
 

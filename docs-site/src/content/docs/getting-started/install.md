@@ -195,12 +195,12 @@ Agents run through a hub. Start the workstation server once:
 scion server start
 ```
 
-It runs in the background, saves its endpoint (`http://127.0.0.1:8080`) in your global settings,
+It runs in the background, adds itself to your list of hubs as `local` (`http://127.0.0.1:8080`),
 and on the first run opens the [Onboarding Wizard](/scion/getting-started/onboarding/). Without a
 running hub, agent commands fail with:
 
 ```
-No hub configured. Start the local hub with 'scion server start' (first run opens setup), or set a remote one with 'scion config set hub.endpoint <url>'.
+No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'.
 ```
 
 To use a shared hub instead, see [Connecting to a Hub](/scion/hosted/user/hosted-user/).
